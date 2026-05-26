@@ -47,7 +47,10 @@
 #ifdef WITH_CUDA
 
 #include <cstdint>
+#include <functional>
 #include <vector>
+
+#include <cuComplex.h>
 
 #include <ed/solvers/kpm_dos.h>  // KPMDOSParameters, KPMDOSResult
 
@@ -71,6 +74,25 @@ namespace ed::kpm_dos {
 /// @param params       Control parameters; reused from the CPU version.
 KPMDOSResult compute_kpm_dos_gpu(
     GPUOperator* gpu_op,
+    std::uint64_t dim,
+    const std::vector<double>& betas,
+    const std::vector<double>& dos_energies,
+    const KPMDOSParameters& params = {});
+
+/// Phase E1 of the "Backend x Symmetries x Workflows" plan (May 2026):
+/// matvec-callable variant of the GPU KPM driver. The callable must
+/// take device-resident pointers (``const cuDoubleComplex*`` source,
+/// ``cuDoubleComplex*`` destination) and implement ``y := H x`` in
+/// device memory. This is the entry point used by
+/// ``kpm_dos_kernel<CudaBackend>`` -- it lets us reuse the existing
+/// GPU Chebyshev/Hutchinson loop with any device matvec (including
+/// ``StreamingSymmetryOperator::bind_cuda_for_sector`` from Phase A),
+/// not just ``GPUOperator``-backed ones.
+using DeviceMatVec = std::function<void(const cuDoubleComplex*,
+                                         cuDoubleComplex*, int)>;
+
+KPMDOSResult compute_kpm_dos_gpu_with_matvec(
+    DeviceMatVec matvec,
     std::uint64_t dim,
     const std::vector<double>& betas,
     const std::vector<double>& dos_energies,

@@ -2,28 +2,28 @@
 orphan: true
 ---
 
-# Advanced Python usage (`qed` Phase 5)
+# Advanced Python usage
 
 This guide is the **catalogue of advanced patterns** the Python API
-supports as of `qed` 0.2.0 (Phase 5, Apr 2026). It complements the
-quickstart at [`python_quickstart.md`](python_quickstart.md) and the
-capability matrix at [`python_api_coverage.md`](python_api_coverage.md).
+supports. It complements the quickstart at
+[`python_quickstart.md`](python_quickstart.md), the one-call reference
+at [`one_call_api.md`](one_call_api.md), and the capability matrix at
+[`python_api_coverage.md`](python_api_coverage.md).
 
 If your task is straightforward (build a Hamiltonian, run Lanczos, look
 at a few thermodynamic curves), use the quickstart. If you need:
 
-* A **specific solver** other than Lanczos (BLOCK_LANCZOS, KRYLOV_SCHUR,
-  DAVIDSON, LOBPCG, ARPACK_*, IRL, TRL, Chebyshev-filtered, shift-invert,
-  TPQ, …)
-* The **GPU** path (`LANCZOS_GPU`, `FULL_GPU`, `mTPQ_GPU`, …)
-* **ScaLAPACK** for distributed full-dense ED
+* A **specific solver** other than Lanczos (`BLOCK_LANCZOS`,
+  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`, `FULL`)
+* The **GPU** path (`device='gpu'` — auto-selects the right GPU
+  kernel for the requested solver)
 * **Symmetry projection** in-process (without writing
   `automorphism_results/*.json` to disk first)
 * **Streaming-symmetry** ED for the largest tractable clusters
 * **MPI distributed** Lanczos / FTLM / TPQ runs from a Python script
 * The **full `./ED dssf`** continued-fraction spectral driver
-* To **introspect the build** (CUDA / MPI / ScaLAPACK present?) at
-  runtime so the same Python script works on a laptop and a cluster
+* To **introspect the build** (CUDA / MPI present?) at runtime so the
+  same Python script works on a laptop and a cluster
 
 …this is the right document. Every pattern below is exercised by
 `python/tests/test_dispatcher.py`.
@@ -32,102 +32,111 @@ at a few thermodynamic curves), use the quickstart. If you need:
 
 ## 0. Choosing the right entry point
 
-There are now **three** entry points into the dispatcher (Phase 7.1
-collapsed the symmetry zoo onto a single flag — see below); pick
-whichever matches your inputs.
+There are now **three Python entry points** — one for each kind of
+computation. Everything else is reachable via kwargs on these three
+verbs.
 
-| You have… | …call this | Lives in |
+| You want… | …call this | Lives in |
 |-----------|------------|----------|
-| an in-memory `Operator` (matrix-free) | `exact_diagonalization_core(op, method, params)` | `qed._core` |
-| an in-memory `FixedSzOperator` | `exact_diagonalization_core(fop, method, params)` (overload) | `qed._core` |
-| a directory of `.dat` files (any combination of axes) | `exact_diagonalization_from_directory(dir, method, params, ...)` — set `params.use_symmetry`, `params.use_fixed_sz`, `params.use_gpu`, `params.use_mpi` orthogonally | `qed._core` |
-| an MPI cluster + a directory | `qed.mpi.run_distributed(dir, method, n_ranks, ...)` | `qed.mpi` |
-| a directory + want S(Q,ω) / S(Q) | `qed.dssf.run_from_directory(dir, method, ...)` | `qed.dssf` |
+| eigenvalues / ground state / a few low-lying states | `qed.solve(H, ...)` | `qed.workflow` |
+| finite-temperature trajectories (mTPQ / cTPQ / FTLM / LTLM) | `qed.thermal(H, method=..., ...)` | `qed.thermal` |
+| structure factors S(Q, ω) / S(Q, T) / KPM-DOS | `qed.spectral(dir, T=..., omega=..., ...)` | `qed.dssf` |
+| MPI cluster + a directory | `qed.mpi.run_distributed(dir, method, n_ranks, ...)` | `qed.mpi` |
 
-The legacy entry points
-`exact_diagonalization_streaming_symmetry[_fixed_sz](...)` and
-`exact_diagonalization_*_symmetrized(...)` remain for back-compat but
-are no longer the recommended way to request symmetry projection.
-Phase 7.1 routes everything through `from_directory(...)` based on the
-`params.use_symmetry` flag — the explicit-block `_symmetrized`
-variants are now `[[deprecated]]` (slower, no GPU, materialises blocks
-on disk).
+The legacy `qed.exact_diagonalization_*` family was deleted in the
+May 2026 surface-unification collapse along with the C++
+`ed::exact_diagonalization_*` and `ed::auto_pilot::*` entry points.
+The Python wrappers now drop down to
+`qed._core.workflows_{solve,thermal,spectral}` directly (Pybind11
+bindings for `ed::workflows::*`), so the canonical Python and C++
+surfaces are identical up to kwargs vs structured options.
 
 ---
 
-## 1. The single-call CPU dispatcher
+## 1. `qed.solve` — the canonical eigenvalue / ground-state entry
 
 ```python
-import qed as qed
+import qed
 
 N = 12
 b = qed.input.HamiltonianBuilder(num_sites=N)
 b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
 op = b.to_operator()
 
-params = qed.EDParameters()
-params.num_eigenvalues = 4
-params.max_iterations = 400
-params.tolerance = 1e-12
-
-result = qed.exact_diagonalization_core(
+result = qed.solve(
     op,
-    qed.DiagonalizationMethod.KRYLOV_SCHUR,
-    params,
+    num_eigenvalues=4,
+    solver="KRYLOV_SCHUR",
+    tolerance=1e-12,
+    max_iterations=400,
 )
 print("E0..E3 =", sorted(result.eigenvalues)[:4])
 ```
 
-`DiagonalizationMethod` mirrors the C++ enum. Every one of these works
-with `exact_diagonalization_core` on an `Operator`:
+`solver=` accepts either a `DiagonalizationMethod` enum value or its
+string name (case-insensitive). Retained backends only:
 
 | Family | Methods |
 |--------|---------|
-| Lanczos | `LANCZOS`, `LANCZOS_SELECTIVE`, `LANCZOS_NO_ORTHO`, `BLOCK_LANCZOS`, `THICK_RESTART_LANCZOS`, `IMPLICIT_RESTART_LANCZOS` |
-| Krylov-Schur | `KRYLOV_SCHUR`, `BLOCK_KRYLOV_SCHUR` |
-| Davidson / LOBPCG | `DAVIDSON`, `LOBPCG` |
-| Filter / shift | `CHEBYSHEV_FILTERED`, `SHIFT_INVERT`, `SHIFT_INVERT_ROBUST` |
-| Iterative linear systems | `BICG` |
-| ARPACK | `ARPACK_SM`, `ARPACK_LM`, `ARPACK_SHIFT_INVERT`, `ARPACK_ADVANCED` |
-| Dense | `FULL`, `OSS` (and `SCALAPACK` / `SCALAPACK_MIXED` when `qed.has_scalapack_build()`) |
-| Thermal | `FTLM`, `LTLM`, `HYBRID`, `mTPQ`, `cTPQ` |
+| Lanczos | `LANCZOS`, `BLOCK_LANCZOS` |
+| Krylov-Schur | `KRYLOV_SCHUR` |
+| Dense | `FULL` |
+| Finite-temperature | `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS` (use via `qed.thermal` / `qed.spectral`) |
 
-`EDParameters` exposes every knob (block size, ARPACK NCV, FTLM Krylov
-dim, TPQ Taylor order, ScaLAPACK process grid, output directory…) as
-read/write Python attributes. `repr(params)` summarises the headline
-fields.
+The May 2026 minimalist-solver-matrix cleanup retired `ARPACK_*`,
+`LOBPCG`, `DAVIDSON`, `CHEBYSHEV_FILTERED`, `SHIFT_INVERT*`, `IRL`,
+`TRL`, `BICG`, `OSS`, `SCALAPACK*`, `HYBRID`, and every `_GPU` /
+`_MPI` enum suffix (those axes are now flags carried through the
+`device=` kwarg and the orchestrator's `BackendConstraints`).
+
+`extra_params={...}` is the escape hatch for any niche `EDParameters`
+field:
+
+```python
+result = qed.solve(
+    op,
+    solver="FTLM",
+    sz=N // 2,
+    extra_params={
+        "ftlm_krylov_dim": 80,
+        "ftlm_full_reorth": True,
+        "ftlm_seed": 1234,
+    },
+)
+```
+
+`repr(qed.EDParameters())` summarises the headline fields, and
+`qed.list_diag_parameters()` prints the full catalogue grouped by
+category.
 
 **Returns.** `EDResults` with `eigenvalues`, `eigenvectors_computed`,
 `eigenvectors_path`, `thermo_data` (a `ThermodynamicData` instance with
-`temperatures`, `energy`, `specific_heat`, `entropy`, `free_energy`).
-Call `.to_dict()` on either object for ergonomic JSON / pickle
+`temperatures`, `energy`, `specific_heat`, `entropy`, `free_energy`),
+and `ftlm_results`. Call `.to_dict()` for ergonomic JSON / pickle
 serialization.
 
-### 1.1 The `FixedSzOperator` overload
+### 1.1 Fixed-Sz sectors
 
-`FixedSzOperator` inherits from `Operator`, so `HamiltonianBuilder.emit_into`
-accepts it directly -- the terms land in the chosen Sz sector with no
-re-implementation:
+`qed.solve(..., sz=N//2)` auto-projects a Sz-conserving `Operator`
+onto the half-filled sector. With `auto_sz=True` (the default), this
+happens automatically when H conserves Sz and no explicit `sz=` is
+given.
+
+For full control, build the `FixedSzOperator` yourself:
 
 ```python
 N = 14
 b = qed.input.HamiltonianBuilder(num_sites=N)
 b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
 
-# Restrict to total Sz=0 sector.
 fop = qed.FixedSzOperator(num_sites=N, n_up=N // 2, spin=0.5)
 b.emit_into(fop)                     # populate the fixed-Sz operator
 
-params = qed.EDParameters()
-params.num_eigenvalues = 1
-result = qed.exact_diagonalization_core(
-    fop, qed.DiagonalizationMethod.LANCZOS, params,
-)
+result = qed.solve(fop, num_eigenvalues=1, solver="LANCZOS")
 ```
 
-If you prefer building term-by-term (the path
-`python/tests/test_dispatcher.py` exercises), `add_two_body` /
-`add_one_body` / `add_three_body` are inherited from `Operator`:
+If you prefer building term-by-term, `add_two_body` / `add_one_body` /
+`add_three_body` are inherited from `Operator`:
 
 ```python
 for i in range(N):
@@ -137,7 +146,7 @@ for i in range(N):
     fop.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS,  j, 0.5 + 0.0j)
 ```
 
-The dispatcher detects the `FixedSzOperator` subclass and routes
+The orchestrator detects the `FixedSzOperator` subclass and routes
 through the fixed-Sz code paths automatically.
 
 ---
@@ -169,11 +178,32 @@ info_back = op.get_symmetry_info_as_dict()
 assert info_back["num_generators"] == info["num_generators"]
 ```
 
-For an actual symmetry-projected solve, the streaming engine reads the
-directory deck and (when present) the `automorphism_results/*.json`
-tree that `edlib.automorphism_finder` writes -- this is still the
-canonical entry point because it survives across Python ↔ CLI
-boundaries:
+For an actual symmetry-projected solve, pass the `info` dict (or a
+`GeneratorSet`) as the `symmetry=` kwarg on `qed.solve`. The Python
+wrapper writes the operator and metadata to a temp directory and
+invokes `_core.workflows_solve_streaming_symmetry_directory`, which
+composes `ed::make_streaming_symmetry_operator(spec)` with a
+per-sector `ed::workflows::solve` loop in C++.
+
+```python
+result = qed.solve(
+    op,
+    num_eigenvalues=4,
+    symmetry=info,        # GeneratorSet or qed.symmetry.* dict
+)
+print("symmetry-projected E0..E3 =", sorted(result.eigenvalues)[:4])
+```
+
+Combine with `sz=` to request fixed-Sz × symmetry in one call:
+
+```python
+result = qed.solve(op, num_eigenvalues=2, sz=N//2, symmetry=info)
+```
+
+If you need to start from a directory deck (e.g. one written by
+`HamiltonianBuilder.write_directory` plus an `automorphism_results/`
+JSON tree from `edlib.automorphism_finder`), load it back into an
+`Operator` and dispatch through the same entry point:
 
 ```python
 b.write_directory("/tmp/heisenberg-6-chain", lattice=qed.input.lattice.chain(N))
@@ -185,128 +215,68 @@ subprocess.run([
     "--data_dir", "/tmp/heisenberg-6-chain",
 ], check=True)
 
-params = qed.EDParameters()
-params.num_sites = N
-params.num_eigenvalues = 4
-# Phase 7.1: symmetry projection is the 5th orthogonal axis. Setting
-# this flag is *the* way to request symmetry-projected ED -- the
-# dispatcher routes through the streaming kernel internally, which is
-# the only path that supports GPU per-sector dispatch and avoids
-# materialising the orbit basis on disk.
-params.use_symmetry = True
-
-result = qed.exact_diagonalization_from_directory(
-    "/tmp/heisenberg-6-chain",
-    qed.DiagonalizationMethod.LANCZOS,
-    params,
-)
-print("symmetry-projected E0..E3 =", sorted(result.eigenvalues)[:4])
+op = qed.input.load_from_directory("/tmp/heisenberg-6-chain")
+info = op.get_symmetry_info_as_dict()
+result = qed.solve(op, num_eigenvalues=4, symmetry=info)
 ```
-
-The legacy entry point `exact_diagonalization_streaming_symmetry(...)`
-still works and routes through the same kernel — but new code should
-prefer the orthogonal-flag form: it composes cleanly with
-`params.use_fixed_sz`, `params.use_gpu`, and `params.use_mpi` without
-needing a different function name per combination.
 
 ---
 
-## 3. GPU per-sector dispatch via streaming symmetry
+## 3. GPU dispatch
 
 When the project was built with `WITH_CUDA=ON` (check
-`qed.has_cuda_build()`), every GPU-flavoured `DiagonalizationMethod`
-value reaches the appropriate CUDA kernel through the
-streaming-symmetry or directory dispatcher:
+`qed.has_cuda_build()`), every retained solver reaches its CUDA
+kernel through the same `qed.solve` / `qed.thermal` / `qed.spectral`
+entry points by passing `device="gpu"`:
 
 ```python
-import qed as qed
+import qed
 
 if not qed.has_cuda_build():
-    print("This wheel was built without CUDA; GPU methods will run on CPU "
-          "with a runtime warning.")
+    print("This wheel was built without CUDA; GPU runs will fall back "
+          "to CPU with a runtime warning.")
 
-params = qed.EDParameters()
-params.num_sites = 24
-params.num_eigenvalues = 4
-params.tolerance = 1e-10
-
-# Phase 7.1 canonical form: pick the *algorithm* on `method`, then
-# turn on the orthogonal axes via flags. All four flags compose:
-params.use_symmetry  = True   # symmetry projection (streaming kernel)
-params.use_gpu       = True   # per-sector GPU dispatch
-params.use_fixed_sz  = False  # full Hilbert space (set True + n_up to restrict)
-params.use_mpi       = False  # single-process
-
-# Per-sector GPU Lanczos for a 24-site cluster with C2 + translations.
-result = qed.exact_diagonalization_from_directory(
-    directory="/scratch/runs/kagome-24",
-    method=qed.DiagonalizationMethod.LANCZOS,       # or BLOCK_LANCZOS,
-                                                    # KRYLOV_SCHUR,
-                                                    # BLOCK_KRYLOV_SCHUR,
-                                                    # DAVIDSON, LOBPCG
-    params=params,
+# Per-sector GPU Lanczos for a 24-site cluster with symmetry projection.
+result = qed.solve(
+    op,
+    num_eigenvalues=4,
+    tolerance=1e-10,
+    device="gpu",
+    symmetry=info,        # symmetry projection (streaming kernel)
 )
 print("GPU per-sector eigenvalues:", sorted(result.eigenvalues)[:4])
 ```
 
-Equivalently — and this is the only form pre-Phase-7 code knows about
-— pass the deprecated combined enum value and leave the flags
-default-false:
+Fixed-Sz × symmetry × GPU all compose orthogonally:
 
 ```python
-result = qed.exact_diagonalization_from_directory(
-    directory="/scratch/runs/kagome-24",
-    method=qed.DiagonalizationMethod.LANCZOS_GPU,   # legacy spelling
-    # canonicalize_method() collapses LANCZOS_GPU -> (LANCZOS, use_gpu=True);
-    # the symmetry flag still has to be set explicitly though.
-    params=qed.EDParameters(use_symmetry=True),
+result = qed.solve(
+    op,
+    num_eigenvalues=2,
+    sz=N // 2,
+    symmetry=info,
+    device="gpu",
 )
 ```
 
-The same dispatcher knows about the fixed-Sz × symmetry path —
-Phase 7.1 canonical form: turn on **three** orthogonal flags on top
-of plain `LANCZOS`:
+Finite-temperature trajectories (mTPQ / cTPQ / FTLM / LTLM) on the
+full Hilbert space go through `qed.thermal`:
 
 ```python
-params = qed.EDParameters()
-params.num_sites    = 24
-params.use_symmetry = True
-params.use_gpu      = True
-params.use_fixed_sz = True
-params.n_up         = 12
-
-result = qed.exact_diagonalization_from_directory(
-    directory="/scratch/runs/kagome-24",
-    method=qed.DiagonalizationMethod.LANCZOS,    # algorithm only
-    params=params,
+result = qed.thermal(
+    op,
+    method="mTPQ",
+    num_samples=8,
+    target_beta=20.0,
+    num_temp_points=200,
+    device="gpu",
 )
 ```
 
-The legacy `LANCZOS_GPU_FIXED_SZ` enum value still works (it gets
-canonicalized to `LANCZOS` + `use_gpu=True` + `use_fixed_sz=True` on
-entry) and the legacy
-`exact_diagonalization_streaming_symmetry_fixed_sz(...)` entry point
-still routes through the same kernel — but new code should prefer the
-orthogonal-flag form on the canonical `from_directory` dispatcher.
-
-For the **full-Hilbert-space** GPU methods (`mTPQ_GPU`, `cTPQ_GPU`,
-`FULL_GPU`, `FTLM_GPU`, `LANCZOS_GPU` with no symmetry projection)
-use the directory dispatcher:
-
-```python
-result = qed.exact_diagonalization_from_directory(
-    directory="/scratch/runs/heisenberg-20-chain",
-    method=qed.DiagonalizationMethod.mTPQ_GPU,
-    params=params,
-    interaction_filename="InterAll.dat",
-    single_site_filename="Trans.dat",
-)
-```
-
-The directory dispatcher constructs a `GPUOperator` from the .dat files
-and routes through `GPUEDWrapper::runGPULanczos` / `runGPUMicrocanonicalTPQ`
-/ `runGPUFullDiag` etc. — exactly the same kernels `./ED` would call
-with the same flags.
+The orchestrator constructs the appropriate `GPUOperator` /
+`StreamingSymmetryOperator` internally via `ed::make_operator(spec)`
+and dispatches to the right CUDA kernel — exactly the same code path
+`./ED --use-gpu` would take.
 
 ---
 
@@ -377,16 +347,15 @@ assembly + continued fractions + HDF5 output trees).
 ## 6. Build introspection
 
 ```python
-import qed as qed
+import qed
 
 print("CUDA build:    ", qed.has_cuda_build())
 print("MPI build:     ", qed.has_mpi_build())
 print("ScaLAPACK build:", qed.has_scalapack_build())
 
-if not qed.has_cuda_build():
-    method = qed.DiagonalizationMethod.LANCZOS
-else:
-    method = qed.DiagonalizationMethod.LANCZOS_GPU
+# Same script, two builds — pick the device kwarg at runtime.
+device = "gpu" if qed.has_cuda_build() else "cpu"
+result = qed.solve(op, num_eigenvalues=4, device=device)
 ```
 
 These three helpers report the compile-time state of the
@@ -401,7 +370,7 @@ build without if-else gymnastics around `import` failures.
 ## 7. Worked example: end-to-end on a 16-site Heisenberg chain
 
 ```python
-import qed as qed
+import qed
 
 N = 16
 b = qed.input.HamiltonianBuilder(num_sites=N)
@@ -409,58 +378,48 @@ b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
 
 # 1. CPU ground state via Krylov-Schur.
 op = b.to_operator()
-params = qed.EDParameters()
-params.num_eigenvalues = 6
-params.max_iterations = 500
-params.tolerance = 1e-12
-gs = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params,
+gs = qed.solve(
+    op,
+    num_eigenvalues=6,
+    solver="KRYLOV_SCHUR",
+    max_iterations=500,
+    tolerance=1e-12,
 )
 print("CPU low-energy spectrum:", sorted(gs.eigenvalues))
 
-# 2. FTLM thermodynamics (same dispatcher, just a different method).
-fparams = qed.EDParameters()
-fparams.num_samples = 32
-fparams.ftlm_krylov_dim = 80
-fparams.temp_min = 0.05
-fparams.temp_max = 5.0
-fparams.num_temp_bins = 80
-ftlm = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.FTLM, fparams,
+# 2. FTLM thermodynamics through the same surface — qed.thermal.
+ftlm = qed.thermal(
+    op,
+    method="FTLM",
+    num_samples=32,
+    temp_min=0.05, temp_max=5.0, num_temp_points=80,
+    extra_params={"ftlm_krylov_dim": 80},
 )
 T = ftlm.thermo_data.temperatures
 Cv = ftlm.thermo_data.specific_heat
 print("FTLM Cv at T=1:", Cv[len(T) // 2])
 
-# 3. Symmetry-projected: write a directory deck and call streaming.
-import tempfile, subprocess, sys
-tmp = tempfile.mkdtemp()
-b.write_directory(tmp, lattice=qed.input.lattice.chain(N))
+# 3. Symmetry-projected solve.
+g_t = qed.symmetry.translation(N, 1)
+info = qed.symmetry.group_from_generators(N, [g_t])
+op.set_symmetry_info_from_dict(info)
 
-# Materialise automorphism_results/ via the legacy finder (one-off).
-subprocess.run(
-    [sys.executable, "-m", "edlib.automorphism_finder", "--data_dir", tmp],
-    check=True,
-)
-
-sparams = qed.EDParameters()
-sparams.num_sites = N
-sparams.num_eigenvalues = 6
-proj = qed.exact_diagonalization_streaming_symmetry(
-    tmp, qed.DiagonalizationMethod.LANCZOS, sparams,
-)
+proj = qed.solve(op, num_eigenvalues=6, symmetry=info)
 print("symmetry-projected spectrum:", sorted(proj.eigenvalues))
 
-# 4. (Optional, requires WITH_MPI) MPI distributed Lanczos on the same deck.
+# 4. (Optional, requires WITH_MPI) MPI distributed Lanczos on a directory deck.
 if qed.has_mpi_build():
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    b.write_directory(tmp, lattice=qed.input.lattice.chain(N))
     qed.mpi.run_distributed(
         tmp, "lanczos", n_ranks=2,
         extra_args=("--max-iter", "200"),
         capture_output=True,
     )
 
-# 5. (Optional, requires built ./ED on PATH) DSSF static thermal sweep.
-qed.dssf.run_from_directory(tmp, "static_thermal", capture_output=True)
+    # 5. (Optional, requires built ./ED on PATH) DSSF static thermal sweep.
+    qed.spectral(tmp, T=[0.1, 0.3, 1.0], method="static_thermal")
 ```
 
 This covers the canonical "single-script, multi-backend" pattern:
@@ -473,42 +432,45 @@ the CLI directly.
 ## 8. Where to look for more
 
 * **Authoritative bindings:**
-  `python/qed/_bindings/dispatcher_bindings.cpp` (Phase 5),
-  `python/qed/_bindings/qed_bindings.cpp`
-  (legacy thin wrappers).
+  `python/qed/_bindings/workflow_bindings.cpp` (orchestrator —
+  `_core.workflows_{solve,thermal,spectral}`),
+  `python/qed/_bindings/qed_bindings.cpp` (`Operator` /
+  `FixedSzOperator` / `EDParameters` / `EDResults` / utility types).
 * **Capability matrix:** [`python_api_coverage.md`](python_api_coverage.md).
 * **CLI counterparts:** [`usage.md`](usage.md) §2 (single-process CLI),
   §3 (MPI launcher), §6 (`./ED dssf`).
-* **Tests:** `python/tests/test_dispatcher.py` exercises every entry
-  point listed in §0 above on a 6-site Heisenberg ring and checks
-  ground-state recovery to 1e-5.
+* **Tests:** `python/tests/test_workflow.py` exercises `qed.solve` /
+  `qed.thermal` end-to-end on a 6-site Heisenberg ring (full Hilbert,
+  fixed-Sz, symmetry, combined) and checks ground-state recovery to
+  1e-9.
 
 
 ---
 
-## See also — auto-pilot abstraction & 32-site recipes
+## See also — orchestrator abstraction & 32-site recipes
 
-The "common path" wrappers `qed.diag(...)` and `qed.dssf.compute(...)`
-sit on top of the dispatcher described in this document. They make the
-following auto-decisions for you (Sz projection + guard, solver
-selection by `(dim, num_eigenvalues)`, GPU promotion when
-`has_cuda_build()` and `dim ≥ 2¹⁷`, MPI shell-out, thermal output-dir
-bookkeeping, pre-flight planning) **without taking away** any of the
-control surface this page documents.
+`qed.solve` / `qed.thermal` / `qed.spectral` are the **canonical**
+three-verb surface; the page above documents their direct kwargs and
+the underlying `EDParameters` carrier. They make the following
+auto-decisions for you (Sz projection + guard, solver selection by
+`(dim, num_eigenvalues)`, GPU promotion when `has_cuda_build()` and
+`dim ≥ 2¹⁷`, MPI shell-out, thermal output-dir bookkeeping,
+pre-flight planning) without taking away any of the control surface.
 
 The escape hatches:
 
-* `qed.diag(H, …, extra_params={...})` — sets any of the ~70
-  `EDParameters` fields after the auto-pilot has populated them.
-* `qed.exact_diagonalization_core(H, method, params)` — full manual
-  control; bypass `qed.diag` entirely.
-* `qed.list_diag_parameters("arpack" / "tpq" / "ftlm" / "ltlm" /
-  "scalapack" / "hybrid" / "general")` — print the catalogue grouped
-  by family.
+* `qed.solve(H, …, extra_params={...})` — sets any niche
+  `EDParameters` field after the orchestrator has populated them.
+* `qed._core.workflows_{solve,thermal,spectral}(spec, opts)` — drop
+  down to the Pybind11 binding for `ed::workflows::*` and supply
+  `OperatorSpec` / `SolveOptions` / `ThermalOptions` /
+  `SpectralOptions` directly.
+* `qed.list_diag_parameters("tpq" / "ftlm" / "ltlm" / "kpm" /
+  "thermal" / "general")` — print the catalogue grouped by family.
 
 End-to-end **32-site** worked examples for ground state, FTLM, DSSF,
 and mTPQ live in
 [`workflow.md`](workflow.md#worked-examples-32-site-spin-ed). The
-abstraction layering (`qed.diag` decision tree → C++ `EDParameters`
+abstraction layering (`qed.solve` decision tree → C++ `EDParameters`
 fields) is documented in
-[`workflow.md`](workflow.md#how-qeddiag-abstracts-the-dispatcher).
+[`workflow.md`](workflow.md#how-qedsolve-abstracts-the-dispatcher).

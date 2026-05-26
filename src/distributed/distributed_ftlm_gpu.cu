@@ -11,6 +11,8 @@
 #ifdef ED_HAVE_NCCL
 
 #include <ed/distributed/distributed_ftlm_gpu.h>
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/backends/mpi_cuda_backend.cuh>
 #include <ed/distributed/distributed_gpu_operator.h>
 #include <ed/distributed/distributed_operator.h>
 #include <ed/distributed/distributed_symmetry_operator.h>
@@ -173,7 +175,15 @@ void scatter_initial_vector_host(const DistributedOperator& op,
 // ---------------------------------------------------------------------------
 // dist_norm_gpu / dist_zdotc_gpu : NCCL-allreduce wrappers around
 // cublasZdotc on device buffers (mirrors distributed_tpq_gpu.cu).
+//
+// Retained behind ED_FTLM_GPU_LEGACY_LANCZOS for parity benchmarking only;
+// the production per-sample Lanczos has migrated to
+// `ed::krylov::lanczos_kernel<MpiCudaBackend>` (Phase 3.4 of the
+// Krylov-unification refactor). When the legacy path is dead-code-eliminated
+// at the next major version bump these helpers and `lanczos_loop_gpu` below
+// will be removed wholesale.
 // ---------------------------------------------------------------------------
+#ifdef ED_FTLM_GPU_LEGACY_LANCZOS
 double dist_norm_gpu(cublasHandle_t handle,
                      const cuDoubleComplex* d_x,
                      std::uint64_t local_n,
@@ -226,6 +236,7 @@ cuDoubleComplex dist_zdotc_gpu(cublasHandle_t handle,
              "D2H dot scratch");
     return global;
 }
+#endif  // ED_FTLM_GPU_LEGACY_LANCZOS
 
 // ---------------------------------------------------------------------------
 // Tridiagonal eigenproblem with full eigenvectors (host-side, replicated
@@ -287,7 +298,11 @@ void solve_tridiag_with_eigenvectors_host(const std::vector<double>& alpha,
 //
 // Termination: beta_{j+1} < eps * (|alpha_j| + |beta_j|) -- happy
 // breakdown, return what we have.
+//
+// Retained behind ED_FTLM_GPU_LEGACY_LANCZOS only; superseded by
+// `ed::krylov::lanczos_kernel<MpiCudaBackend>` (Phase 3.4).
 // ---------------------------------------------------------------------------
+#ifdef ED_FTLM_GPU_LEGACY_LANCZOS
 template <typename GpuOp>
 std::size_t lanczos_loop_gpu(const GpuOp& gop,
                               const multi_gpu::MultiGpuCommunicator& gpu_comm,
@@ -435,6 +450,7 @@ std::size_t lanczos_loop_gpu(const GpuOp& gop,
     }
     return alpha.size();
 }
+#endif  // ED_FTLM_GPU_LEGACY_LANCZOS
 
 // ---------------------------------------------------------------------------
 // Symm-projected scatter (D5). Permutes from natural-orbit indexing
@@ -553,16 +569,16 @@ DistributedFtlmResult ftlm_gpu_impl(
     const std::uint64_t max_iter = std::max<std::uint64_t>(1, max_iter_in);
     const std::size_t vec_bytes = local_n * sizeof(cuDoubleComplex);
 
+    // d_basis is a contiguous (max_iter x local_n) slab into which we copy
+    // back the kernel's per-vector UniqueVec basis after each per-sample
+    // Lanczos build. Downstream post-cycle code (gop_O->apply on V_0, then
+    // batched dotc with V_0..V_{m-1}) consumes this slab directly.
     DeviceBuffer basis_buf(static_cast<std::size_t>(max_iter) * vec_bytes);
-    DeviceBuffer v_curr_buf(vec_bytes);
-    DeviceBuffer v_prev_buf(vec_bytes);
-    DeviceBuffer w_buf(vec_bytes);
+    DeviceBuffer v_seed_buf(vec_bytes);
     DeviceBuffer u_buf(vec_bytes);
     DeviceBuffer scratch_buf(sizeof(cuDoubleComplex));
     auto* d_basis  = static_cast<cuDoubleComplex*>(basis_buf.ptr);
-    auto* d_v_curr = static_cast<cuDoubleComplex*>(v_curr_buf.ptr);
-    auto* d_v_prev = static_cast<cuDoubleComplex*>(v_prev_buf.ptr);
-    auto* d_w      = static_cast<cuDoubleComplex*>(w_buf.ptr);
+    auto* d_v_seed = static_cast<cuDoubleComplex*>(v_seed_buf.ptr);
     auto* d_u      = static_cast<cuDoubleComplex*>(u_buf.ptr);
     auto* d_scratch_complex =
         static_cast<cuDoubleComplex*>(scratch_buf.ptr);
@@ -571,6 +587,10 @@ DistributedFtlmResult ftlm_gpu_impl(
     cublasHandle_t handle = handle_guard.h;
     check_cublas(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST),
                  "cublasSetPointerMode(HOST)");
+
+    // The entire TU is gated on ED_HAVE_NCCL (see the outer guard above the
+    // top of this file), so MpiCudaBackend's NCCL reductions are available.
+    ed::matvec::MpiCudaBackend backend(gpu_comm);
 
     std::vector<double> N_Z_local(betas.size(), 0.0);
     std::vector<double> N_O_local(betas.size(), 0.0);
@@ -599,18 +619,48 @@ DistributedFtlmResult ftlm_gpu_impl(
 
         scatter_fn(cpu_dop, seed, psi_host);
         if (local_n > 0) {
-            check_cu(cudaMemcpy(d_v_curr, psi_host.data(), vec_bytes,
+            check_cu(cudaMemcpy(d_v_seed, psi_host.data(), vec_bytes,
                                 cudaMemcpyHostToDevice),
-                     "H2D v_curr (init)");
+                     "H2D v_seed (init)");
         }
 
-        std::vector<double> alpha, beta;
-        const std::size_t m = lanczos_loop_gpu(
-            gop, gpu_comm, handle,
-            d_basis, d_v_curr, d_v_prev, d_w, d_scratch_complex,
-            local_n, max_iter, alpha, beta);
+        // Unified Lanczos via lanczos_kernel<MpiCudaBackend>: full CGS2
+        // re-orthogonalisation + batched NCCL reductions (matches the audit
+        // requirement for D2-correct re-orth on the distributed-GPU path).
+        // Note: the kernel applies one initial normalisation pass; the seed
+        // may be sub-unit-norm here, that is fine.
+        auto matvec = [&](const Complex* in, Complex* out) {
+            gop.apply(gpu_comm, in, out, /*stream=*/nullptr);
+        };
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter = max_iter;
+        kopts.reorth   = ed::krylov::ReorthPolicy::FullCGS2;
+        kopts.keep_basis = true;
+        kopts.dim_cap  = cpu_dop.global_dim();
+        kopts.breakdown_tol = 1e-14;
+        auto kres = ed::krylov::lanczos_kernel(
+            backend, matvec, static_cast<std::size_t>(local_n),
+            reinterpret_cast<Complex*>(d_v_seed), kopts);
 
+        std::vector<double>& alpha = kres.alpha;
+        std::vector<double>& beta  = kres.beta;
+        const std::size_t m = alpha.size();
         if (m == 0) continue;
+
+        // Copy the kernel's vector<UniqueVec> basis into the contiguous
+        // d_basis slab so downstream (gop_O apply + per-V_j dotc) works
+        // unchanged.
+        for (std::size_t j = 0; j < m && j < static_cast<std::size_t>(max_iter); ++j) {
+            if (local_n == 0) break;
+            check_cu(cudaMemcpyAsync(d_basis + j * local_n,
+                                     kres.basis[j].get(),
+                                     vec_bytes,
+                                     cudaMemcpyDeviceToDevice,
+                                     /*stream=*/0),
+                     "D2D basis slab copy (ftlm gpu)");
+        }
+        check_cu(cudaStreamSynchronize(0),
+                 "stream sync after basis slab copy");
 
         GPUSampleCache c;
         c.m = m;

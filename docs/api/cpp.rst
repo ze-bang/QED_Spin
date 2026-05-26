@@ -6,25 +6,54 @@ Doxygen + Breathe. Every public symbol in the listed namespaces is
 documented; if a symbol is missing, please add a Doxygen comment to the
 declaration in the corresponding header.
 
+For the post-collapse architectural picture, read
+``docs/architecture/ARCHITECTURE.md`` first; for the symmetry math,
+``docs/architecture/SYMMETRY.md``.
+
 .. contents::
    :local:
    :depth: 2
 
-ed::dssf -- Dynamical / static structure factor
------------------------------------------------
+The orchestrator: ``ed::workflows``
+-----------------------------------
 
-.. doxygenstruct:: ed::dssf::OperatorSpec
+The canonical user-facing surface is three orchestrator verbs declared
+in ``include/ed/orchestrator.h``. Every workflow goes through one of
+them.
+
+.. doxygenfunction:: ed::workflows::solve
+
+.. doxygenfunction:: ed::workflows::thermal
+
+.. doxygenfunction:: ed::workflows::spectral
+
+.. doxygenstruct:: ed::SolveOptions
    :members:
 
-.. doxygenstruct:: ed::dssf::ObservablePairs
+.. doxygenstruct:: ed::ThermalOptions
    :members:
 
-.. doxygenfunction:: ed::dssf::build_observable_pairs
+.. doxygenstruct:: ed::SpectralOptions
+   :members:
 
-.. doxygenfunction:: ed::dssf::compute_transverse_bases
-
-ed::core -- Hamiltonian construction & basis
+The operator factory: ``ed::make_operator``
 --------------------------------------------
+
+Operators are constructed by a single factory that consumes
+``OperatorSpec`` (a tagged union over ``InMemoryOperator`` /
+``FilePaths`` / ``DirectoryPath`` sources) and returns a
+``std::unique_ptr<LinearOperator>``.
+
+.. doxygenfunction:: ed::make_operator
+
+.. doxygenstruct:: ed::OperatorSpec
+   :members:
+
+.. doxygenclass:: ed::LinearOperator
+   :members:
+
+ed::core -- Hamiltonian + basis
+-------------------------------
 
 .. doxygenclass:: Operator
    :members:
@@ -46,26 +75,95 @@ ed::core -- HDF5 I/O
    :members:
    :no-link:
 
-ed::solvers -- CPU solvers
---------------------------
+ed::symmetry -- Subspace × ProjectorChain
+------------------------------------------
 
-The CPU solver entry points live in the following headers. Each one is
-indexed and cross-linked from the auto-generated symbol index; see the
-header source for full signatures and per-parameter documentation.
+The orthogonal symmetry composition introduced in May 2026. A sector
+is described by one :cpp:class:`ed::symmetry::Subspace` and one
+ordered :cpp:class:`ed::symmetry::ProjectorChain`. Future axes
+(spin-flip Z2, time reversal, SU(2) total-S) plug into the same
+duck-types without touching the operator hierarchy.
 
-- ``ed/solvers/lanczos.h`` -- Lanczos diagonalization (in-memory and
-  disk-streamed) plus the basis-vector helpers used by FTLM/LTLM.
-- ``ed/solvers/ftlm.h`` -- Finite-Temperature Lanczos Method
-  (thermodynamics + dynamical / static response).
-- ``ed/solvers/ltlm.h`` -- Low-Temperature Lanczos Method (energy /
-  observables in the low-T regime).
-- ``ed/solvers/observables.h`` -- spin / energy observables on
-  eigenstates and TPQ snapshots.
+.. doxygenclass:: ed::symmetry::FullSpaceSubspace
+   :members:
 
-ed::solvers -- GPU solvers (built only with WITH_CUDA=ON)
----------------------------------------------------------
+.. doxygenclass:: ed::symmetry::FixedSzSubspace
+   :members:
 
-GPU solvers mirror their CPU counterparts under ``include/ed/gpu/``:
-``gpu_ed_wrapper.h``, ``gpu_lanczos.cuh``, ``gpu_ftlm.cuh``,
-``gpu_tpq.cuh``, ``gpu_dynamics.cuh``, ``gpu_cg.cuh``,
-``gpu_operator.cuh``. They are only compiled when ``WITH_CUDA=ON``.
+.. doxygenclass:: ed::symmetry::SpatialProjector
+   :members:
+
+.. doxygenclass:: ed::symmetry::InternalZ2Projector
+   :members:
+
+.. doxygenclass:: ed::symmetry::AntiunitaryProjector
+   :members:
+
+.. doxygenclass:: ed::symmetry::ProjectorChain
+   :members:
+
+.. doxygenfunction:: ed::symmetry::compute_orbit_for_state
+
+ed::krylov / ed::thermal / ed::observables -- kernel headers
+-------------------------------------------------------------
+
+The CPU kernel entry points live in the following template headers.
+Each one is indexed and cross-linked from the auto-generated symbol
+index; see the header source for full signatures and per-parameter
+documentation.
+
+- ``include/ed/krylov/lanczos_kernel.h`` -- single-vector Lanczos
+  (CPU / MPI specialisations of the ``Backend`` template).
+- ``include/ed/krylov/block_lanczos_kernel.h`` -- block Lanczos.
+- ``include/ed/krylov/krylov_schur_kernel.h`` -- thick-restart
+  Krylov-Schur.
+- ``include/ed/thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}_kernel.h`` --
+  finite-temperature kernel facades.
+- ``include/ed/observables/{expectation,static_correlator,cf_dynamical,kpm_dynamical,time_evolution}.h``
+  -- correlator primitives (cf-spectral, KPM, time evolution).
+
+ed::dssf -- Dynamical / static structure factor
+-----------------------------------------------
+
+.. doxygenstruct:: ed::dssf::OperatorSpec
+   :members:
+
+.. doxygenstruct:: ed::dssf::ObservablePairs
+   :members:
+
+.. doxygenfunction:: ed::dssf::build_observable_pairs
+
+.. doxygenfunction:: ed::dssf::compute_transverse_bases
+
+ed::input -- Lattice + Hamiltonian builder
+-------------------------------------------
+
+The standalone ``ed_input`` library replaces the legacy ``edlib``
+helpers. It emits either an in-memory ``Operator`` or the
+``InterAll.dat`` / ``Trans.dat`` / ``positions.dat`` directory that
+``./ED`` consumes.
+
+.. doxygenclass:: ed::input::HamiltonianBuilder
+   :members:
+
+.. doxygennamespace:: ed::input::lattice
+
+ed::distributed -- MPI lane (built only with WITH_MPI=ON)
+----------------------------------------------------------
+
+The distributed operators and Lanczos / FTLM / TPQ drivers under
+``include/ed/distributed/`` are only compiled when ``WITH_MPI=ON``.
+
+- ``include/ed/distributed/distributed_operator.h``
+- ``include/ed/distributed/distributed_symmetry_operator.h``
+- ``include/ed/distributed/distributed_fixed_sz_operator.h``
+- ``include/ed/distributed/distributed_lanczos.h``
+- ``include/ed/distributed/distributed_lanczos_kernel.h``
+
+ed::gpu -- CUDA lane (built only with WITH_CUDA=ON)
+----------------------------------------------------
+
+GPU operators and solvers live under ``include/ed/gpu/`` and are only
+compiled when ``WITH_CUDA=ON``: ``gpu_operator.cuh``,
+``gpu_lanczos.cuh``, ``gpu_ftlm.cuh``, ``gpu_tpq.cuh``,
+``bit_operations.cuh``.

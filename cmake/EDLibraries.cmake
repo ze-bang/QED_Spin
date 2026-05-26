@@ -6,10 +6,10 @@
 #   ed_io           Pure I/O helpers (basis vector storage, lanczos basis
 #                   buffer). No solver dependencies.
 #   ed_core         Core types/config (ed_config.cpp). Depends on ed_io.
-#   ed_solvers_cpu  All CPU eigensolvers + thermal methods (Lanczos, ARPACK,
-#                   CG, dynamics, TPQ, FTLM, LTLM, hybrid, observables, and
-#                   optionally ScaLAPACK distributed diag). Depends on ed_core
-#                   and ed_io.
+#   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
+#                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
+#                   LTLM, KPM_DOS, observables, dynamics). Depends on
+#                   ed_core and ed_io.
 #   ed_solvers_gpu  All GPU/CUDA solvers (only built when WITH_CUDA). Depends
 #                   on ed_core, ed_io, and the CUDA runtime/cuBLAS/cuSPARSE/
 #                   cuRAND/cuSOLVER imported targets.
@@ -35,15 +35,11 @@
 # directory and we want the explicit one to win in RPATH search order.
 # -----------------------------------------------------------------------------
 set(ED_COMMON_LINK_LIBS "")
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    list(APPEND ED_COMMON_LINK_LIBS ${SCALAPACK_LIBRARIES})
-endif()
 list(APPEND ED_COMMON_LINK_LIBS
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
     ${LAPACKE_LIBRARIES}
     ${EXTRA_LINALG_LIBRARIES}
-    ${ARPACK_LIBRARY}
     ${HDF5_LIBRARIES}
 )
 if(WITH_MPI)
@@ -71,6 +67,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/distributed>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/matvec>"  # Matvec-unification revamp
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -138,6 +135,25 @@ set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_core STATIC
     ${CORE_DIR}/ed_config.cpp
+    # Wave 1 ("Unify all 16 matvec cells", May 2026) -- unified
+    # symmetric matvec entry points that dispatch through
+    # ``ed::matvec::kernel::apply_terms<SymmetryBasisPolicy>``. Lives in
+    # ed_core because ``streaming_symmetry.h`` (which declares the
+    # methods) is part of ed_core's public include surface; every
+    # consumer of the symmetric matvec already links ed_core
+    # transitively.
+    ${SRC_DIR}/symmetry/streaming_symmetry_unified.cpp
+    # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026)
+    # -- CPU-only stub for the lazy GPU sector mirror entry point.
+    # When WITH_CUDA is OFF this TU provides the throwing stub that
+    # makes SectorView::bind_cuda() fail loudly. When WITH_CUDA is ON
+    # the file is an empty translation unit and the strong definitions
+    # come from ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
+    # (added to ed_solvers_gpu below). Splitting the TU avoids
+    # contaminating ed_core with a CUDA include path and avoids the
+    # multiple-definition / undefined-reference traps of a single
+    # source compiled into both libraries.
+    ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
@@ -150,33 +166,66 @@ target_compile_options(ed_core PRIVATE
 set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
+# ed_matvec: unified matrix-vector multiplication layer (Phase 1 of the
+# matvec-unification revamp). Provides:
+#
+#   * MatVecOperator       polymorphic base for any operator that acts on
+#                          a vector (any backend, any basis, MPI or not)
+#   * Backend              host/cuda/mpi backends for the surrounding
+#                          level-1 BLAS (axpy/dot/norm/scale)
+#   * basis::*Policy       compile-time basis descriptions used by the
+#                          shared term kernel
+#   * kernel::apply_terms  the *single* matrix-free term-evaluation
+#                          implementation, parameterised on basis policy
+#                          and scalar type
+#   * OperatorAdapter /    legacy Operator / FixedSzOperator wrapped as
+#     FixedSzOperatorAdapter MatVecOperator instances (Phase 2 collapses
+#                          these so the Operator implementations call
+#                          directly into the shared kernel)
+#
+# Layered above ed_core (which owns Operator / FixedSzOperator term
+# storage); consumed by ed_solvers_cpu (and later ed_solvers_gpu /
+# ed_distributed).
+# -----------------------------------------------------------------------------
+add_library(ed_matvec STATIC
+    ${MATVEC_DIR}/sanity_check.cpp
+)
+target_include_directories(ed_matvec PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_matvec PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_matvec PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
+target_compile_options(ed_matvec PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_matvec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
 # -----------------------------------------------------------------------------
 set(ED_SOLVERS_CPU_SOURCES
-    ${SOLVERS_CPU_DIR}/arpack.cpp
     ${SOLVERS_CPU_DIR}/observables.cpp
     ${SOLVERS_CPU_DIR}/lanczos.cpp
-    ${SOLVERS_CPU_DIR}/CG.cpp
     ${SOLVERS_CPU_DIR}/dynamics.cpp
     ${SOLVERS_CPU_DIR}/TPQ.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_jp.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_ltlm_dyn.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_sssf.cpp
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/block_lanczos_dssf.cpp
     ${SOLVERS_CPU_DIR}/tpq_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
-    ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
+    ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
+    ${SRC_DIR}/orchestrator.cpp
 )
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    list(APPEND ED_SOLVERS_CPU_SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
-endif()
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_solvers_cpu PUBLIC ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+# Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+): suppress
+# the `[[deprecated]]` warning on `build_lanczos_tridiagonal_with_basis`
+# for our own legacy CPU callsites. The attribute remains active for every
+# external consumer of `<ed/solvers/lanczos.h>`.
+target_compile_definitions(ed_solvers_cpu PRIVATE ED_BUILDING_INTERNAL=1)
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -213,6 +262,10 @@ set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(WITH_MPI)
     add_library(ed_distributed STATIC
         ${DISTRIBUTED_DIR}/distributed_operator.cpp
+        # Wave 2 ("Unify all 16 matvec cells", May 2026) -- cell 2C
+        # (Distributed Fixed-Sz) as a native LinearOperator instead of
+        # the Phase G symmetry-with-trivial-group workaround.
+        ${DISTRIBUTED_DIR}/distributed_fixed_sz_operator.cpp
         ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
         ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
         ${DISTRIBUTED_DIR}/distributed_tpq.cpp
@@ -336,6 +389,7 @@ add_library(ed_dssf STATIC
     ${DSSF_DIR}/dssf_method.cpp
     ${DSSF_DIR}/dssf_io.cpp
     ${DSSF_DIR}/cross_sector_observable.cpp
+    ${DSSF_DIR}/cross_sector_orbit_observable.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_dssf PRIVATE ${HDF5_INCLUDE_DIRS})
@@ -512,7 +566,7 @@ set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # (`ED dssf` subcommand in P2.4) and by pybind11 bindings without also
 # pulling in the legacy `int main()` machinery.
 #
-# Depends on ed_solvers_cpu (Lanczos / FTLM / observables / ARPACK), ed_dssf
+# Depends on ed_solvers_cpu (Lanczos / FTLM / observables), ed_dssf
 # (build_observable_pairs), ed_io (HDF5IO via construct_ham), and
 # transitively on ed_core. When WITH_CUDA, also depends on ed_solvers_gpu
 # for the GPU dynamical/static-response code paths under the WITH_CUDA
@@ -527,6 +581,17 @@ target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
 if(WITH_CUDA)
     target_link_libraries(ed_cli PUBLIC ed_solvers_gpu)
 endif()
+# Wave C2 (Full Unified-Interface Collapse, May 2026): the CLI now
+# builds operators via the inline `ed::make_operator` factory, whose
+# body references `DistributedOperator` /
+# `DistributedSymmetryOperator` constructors under `WITH_MPI`. The
+# distributed lanes are never selected from the CLI (it always sets
+# `spec.distributed = false`), but the constructors still appear as
+# weak references in the emitted object file and need to resolve
+# transitively for any binary that links `ed_cli`.
+if(WITH_MPI AND TARGET ed_distributed)
+    target_link_libraries(ed_cli PUBLIC ed_distributed)
+endif()
 target_link_libraries(ed_cli PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -534,6 +599,11 @@ target_compile_options(ed_cli PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_cli PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
+# `build_lanczos_tridiagonal_with_basis` deprecation warning inside the
+# CLI workflows -- they still call the legacy function through
+# `<ed/core/ed_wrapper.h>`.
+target_compile_definitions(ed_cli PRIVATE ED_BUILDING_INTERNAL=1)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.
@@ -551,15 +621,20 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
-        ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
+        ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/gpu_tpq.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
-        ${SOLVERS_GPU_DIR}/gpu_cg.cu
-        ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
-        ${SOLVERS_GPU_DIR}/gpu_dynamics.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
+        # Phase A of the "Backend x Symmetries x Workflows" plan
+        # (May 2026) -- real lazy GPU sector mirror for
+        # StreamingSymmetryOperator + FixedSz variant. Lives here (and
+        # not in ed_core) because it pulls in <cuda_runtime.h> +
+        # thrust + the device basis policy headers. The ed_core .cpp
+        # twin is an empty TU when WITH_CUDA is ON, so there is no
+        # multiple-definition risk.
+        ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})
@@ -600,4 +675,9 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
+    # Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
+    # `build_lanczos_tridiagonal_with_basis` deprecation warning -- the GPU
+    # ed_wrapper still calls the CPU legacy function for the eigenvector
+    # reconstruction path.
+    target_compile_definitions(ed_solvers_gpu PRIVATE ED_BUILDING_INTERNAL=1)
 endif()

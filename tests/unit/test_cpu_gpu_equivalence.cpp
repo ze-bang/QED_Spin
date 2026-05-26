@@ -34,6 +34,8 @@
 
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_lanczos.cuh>
+#include <ed/gpu/gpu_solvers.h>      // Phase 4: MatVecOperator& GPU overloads
+#include <ed/matvec/matvec.h>
 #include <ed/solvers/lanczos.h>
 
 #include <cuda_runtime.h>
@@ -166,6 +168,100 @@ TEST_CASE("CPU/GPU equivalence: 8-site Heisenberg ground state eigenvalue "
          << "  E_gpu=" << gpu_eigs[0]
          << "  |Δ|="   << std::abs(cpu_eigs[0] - gpu_eigs[0]));
     REQUIRE(std::abs(cpu_eigs[0] - gpu_eigs[0]) < 1e-8);
+}
+
+// ============================================================================
+// Phase 4 (matvec-unification): the new ed::matvec::gpu::* MatVecOperator-
+// taking overloads. Validates that:
+//
+//   1. ed::matvec::gpu::lanczos(GPUOperator&, ...) -- the type-safe overload
+//      -- matches the legacy GPULanczos class output.
+//   2. ed::matvec::gpu::lanczos(MatVecOperator&, ...) -- the unified
+//      MatVecOperator& overload that dynamic_casts to GPUOperator -- also
+//      matches.
+//   3. The MatVecOperator& overload correctly rejects a non-GPU operator
+//      (a CPU `Operator` is a MatVecOperator with MemorySpace::Host).
+// ============================================================================
+
+TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(GPUOperator&) "
+          "matches the GPULanczos class on 8-site Heisenberg",
+          "[cpu_gpu_eq][matvec_phase4]") {
+    if (!gpu_available()) {
+        SKIP("No CUDA device available -- skipping Phase 4 GPU overload test.");
+    }
+
+    const int N = 8;
+    const uint64_t dim = 1ULL << N;
+    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
+
+    // Legacy class-based API (used as the reference)
+    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100, /*tolerance=*/1e-12);
+    std::vector<double> ref_eigs;
+    std::vector<std::vector<Complex>> ref_vecs;
+    gpu_lanczos.run(/*num_eigenvalues=*/1, ref_eigs, ref_vecs,
+                    /*compute_vectors=*/false);
+    REQUIRE(!ref_eigs.empty());
+
+    // Phase 4 type-safe overload
+    std::vector<double> typed_eigs;
+    ed::matvec::gpu::lanczos(*gpu_op, /*N=*/static_cast<int>(dim),
+                             /*max_iter=*/100, /*num_eigs=*/1, /*tol=*/1e-12,
+                             typed_eigs, /*dir=*/"", /*eigenvectors=*/false);
+    REQUIRE(!typed_eigs.empty());
+
+    INFO("E_ref="    << ref_eigs[0]
+         << "  E_typed=" << typed_eigs[0]
+         << "  |Δ|="     << std::abs(ref_eigs[0] - typed_eigs[0]));
+    REQUIRE(std::abs(ref_eigs[0] - typed_eigs[0]) < 1e-8);
+}
+
+TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(MatVecOperator&) "
+          "polymorphic overload matches the GPULanczos class",
+          "[cpu_gpu_eq][matvec_phase4]") {
+    if (!gpu_available()) {
+        SKIP("No CUDA device available -- skipping Phase 4 GPU overload test.");
+    }
+
+    const int N = 8;
+    const uint64_t dim = 1ULL << N;
+    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
+
+    // Reference
+    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100, /*tolerance=*/1e-12);
+    std::vector<double> ref_eigs;
+    std::vector<std::vector<Complex>> ref_vecs;
+    gpu_lanczos.run(1, ref_eigs, ref_vecs, false);
+    REQUIRE(!ref_eigs.empty());
+
+    // Phase 4 polymorphic overload -- pass through MatVecOperator&
+    const ed::matvec::MatVecOperator& as_mv = *gpu_op;
+    REQUIRE(as_mv.memory_space() == ed::matvec::MemorySpace::CudaDevice);
+    std::vector<double> poly_eigs;
+    ed::matvec::gpu::lanczos(as_mv, static_cast<int>(dim), 100, 1, 1e-12,
+                             poly_eigs);
+    REQUIRE(!poly_eigs.empty());
+
+    INFO("E_ref=" << ref_eigs[0] << "  E_poly=" << poly_eigs[0]
+         << "  |Δ|=" << std::abs(ref_eigs[0] - poly_eigs[0]));
+    REQUIRE(std::abs(ref_eigs[0] - poly_eigs[0]) < 1e-8);
+}
+
+TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(MatVecOperator&) rejects "
+          "a Host-memory operator",
+          "[cpu_gpu_eq][matvec_phase4]") {
+    // Does NOT need a GPU device -- this is purely a runtime type check.
+    const int N = 4;
+    const uint64_t dim = 1ULL << N;
+    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0,
+                                                   /*periodic=*/false);
+    const ed::matvec::MatVecOperator& as_mv = *cpu_op;
+    REQUIRE(as_mv.memory_space() == ed::matvec::MemorySpace::Host);
+
+    std::vector<double> eigs;
+    REQUIRE_THROWS_AS(
+        ed::matvec::gpu::lanczos(as_mv, static_cast<int>(dim), 50, 1, 1e-10,
+                                 eigs),
+        std::invalid_argument);
 }
 
 #else  // !WITH_CUDA

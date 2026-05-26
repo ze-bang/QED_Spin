@@ -2,7 +2,7 @@
 # python/tests/test_feasibility.py    (Phase 9 / Layer 6)
 #
 # Coverage for the pre-flight planner: HostResources, FeasibilityReport,
-# estimate_resources(), suggest_workflow(), and the qed.diag integration
+# estimate_resources(), suggest_workflow(), and the qed.solve integration
 # (dry_run / force / ResourceError).
 # =============================================================================
 
@@ -306,18 +306,18 @@ def test_suggest_workflow_call_signature_matches_kwargs(medium_chain):
     sug = qed.suggest_workflow(medium_chain, intent="ground_state")
     for c in sug.candidates:
         sig = c.call_signature()
-        assert sig.startswith("qed.diag(H,")
+        assert sig.startswith("qed.solve(H,")
         assert f"solver={c.solver!r}" in sig
         assert f"device={c.device!r}" in sig
 
 
 # ---------------------------------------------------------------------------
-# qed.diag integration: dry_run / force / ResourceError
+# qed.solve integration: dry_run / force / ResourceError
 # ---------------------------------------------------------------------------
 
 
 def test_diag_dry_run_returns_empty_results(medium_chain, capsys):
-    res = qed.diag(medium_chain, solver="LANCZOS", dry_run=True, verbose=False)
+    res = qed.solve(medium_chain, solver="LANCZOS", dry_run=True, verbose=False)
     out = capsys.readouterr().out
     assert "FEASIBLE" in out or "INFEASIBLE" in out
     # dry_run returns an empty EDResults (no eigenvalues computed).
@@ -338,7 +338,7 @@ def test_diag_planner_raises_resource_error_on_infeasible_memory(
     )
     # FULL on dim=4096 = 2*4096^2*16 B = 0.5 GB total => exceeds 0.1 GB host
     with pytest.raises(qed.ResourceError) as ei:
-        qed.diag(medium_chain, solver="FULL",
+        qed.solve(medium_chain, solver="FULL",
                  num_eigenvalues=1, verbose=False)
     assert ei.value.report.feasible is False
     assert ei.value.report.bottleneck == "memory"
@@ -359,7 +359,7 @@ def test_diag_force_bypasses_planner_failure(medium_chain, monkeypatch):
     # Lanczos with 4 vectors @ 12 sites = 4 * 4096 * 16 B = 256 KB; the
     # planner will say INFEASIBLE because the host has 0.001 GB, but
     # force=True should let it run anyway.
-    res = qed.diag(medium_chain, solver="LANCZOS",
+    res = qed.solve(medium_chain, solver="LANCZOS",
                     num_eigenvalues=1,
                     force=True, verbose=False)
     assert len(res.eigenvalues) >= 1
@@ -367,15 +367,15 @@ def test_diag_force_bypasses_planner_failure(medium_chain, monkeypatch):
 
 
 def test_diag_plan_false_skips_planner_entirely(medium_chain, capsys):
-    qed.diag(medium_chain, solver="LANCZOS",
+    qed.solve(medium_chain, solver="LANCZOS",
              num_eigenvalues=1,
              plan=False, verbose=False)
     out = capsys.readouterr().out
-    assert "[qed.diag.planner]" not in out
+    assert "[qed.solve.planner]" not in out
 
 
 def test_diag_planner_emits_summary_on_verbose(small_chain, capsys):
-    qed.diag(small_chain, solver="LANCZOS", num_eigenvalues=1, verbose=True)
+    qed.solve(small_chain, solver="LANCZOS", num_eigenvalues=1, verbose=True)
     out = capsys.readouterr().out
-    assert "[qed.diag.planner]" in out
+    assert "[qed.solve.planner]" in out
     assert "FEASIBLE" in out

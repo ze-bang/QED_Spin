@@ -10,8 +10,10 @@
 #include <complex>
 #include <functional>
 #include <memory>
+#include <ed/core/linear_operator.h>
 #include <ed/gpu/kernel_config.h>
 #include <ed/gpu/bit_operations.cuh>
+#include <ed/matvec/matvec.h>
 
 // Forward declare only - don't include construct_ham.h to avoid CUDA compilation issues
 // The CPU Operator class uses C++ features incompatible with NVCC
@@ -132,13 +134,80 @@ struct GPUThreeBodyTransformData {
  * 
  * OPTIMIZED: Uses Structure-of-Arrays to eliminate std::function overhead
  */
-class GPUOperator {
+class GPUOperator : public ed::LinearOperator {
 public:
     // Constructor
     GPUOperator(int n_sites, float spin_l = 0.5f);
     
     // Destructor - virtual for correct polymorphic deletion
-    virtual ~GPUOperator();
+    ~GPUOperator() override;
+
+    // -------------------------------------------------------------------
+    // MatVecOperator interface (Phase 2 of matvec-unification revamp).
+    // GPUOperator advertises CudaDevice memory space; `in` and `out`
+    // are treated as device pointers (cuDoubleComplex and
+    // std::complex<double> are layout-compatible). matVecGPU is
+    // already virtual, so this dispatches through to GPUFixedSz /
+    // GPUSymmetrized overrides without further intervention.
+    // -------------------------------------------------------------------
+    void apply(const std::complex<double>* in, std::complex<double>* out,
+               std::size_t size) const override {
+        const_cast<GPUOperator*>(this)->matVecGPU(
+            reinterpret_cast<const cuDoubleComplex*>(in),
+            reinterpret_cast<cuDoubleComplex*>(out),
+            static_cast<int>(size));
+    }
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(dimension_);
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::CudaDevice;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override {
+        return "GPUOperator(n_sites=" + std::to_string(n_sites_)
+            + ", dim=" + std::to_string(dimension_) + ")";
+    }
+
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // GPUOperator's `apply()` (defined above) takes device pointers and
+    // dispatches to `matVecGPU()` via the cuDoubleComplex reinterpret
+    // cast. The matching `bind_cuda` is the supported lane. Other
+    // backends are explicitly unsupported (a host-pointer caller
+    // through `bind_cpu` would crash on the implicit
+    // device-pointer cast inside `apply()`); throwing here is strictly
+    // safer than the silent base-class default.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            // apply() already does the device-pointer cast + matVecGPU
+            // dispatch (virtual through GPUFixedSz / GPUSymmetrized).
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_cpu() is not supported -- this operator "
+            "expects device pointers. Use bind<CudaBackend>() instead, "
+            "or pair the operator with a CudaBackend via "
+            "ed::select_backend().");
+    }
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_mpi() is not supported -- this is a "
+            "single-rank GPU operator. Use ed::distributed::"
+            "DistributedGPUOperator for the MPI+CUDA lane.");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_mpi_cuda() is not supported -- this is a "
+            "single-rank GPU operator. Use ed::distributed::"
+            "DistributedGPUOperator for the MPI+CUDA lane.");
+    }
     
     // OPTIMIZED: Direct data population (no std::function overhead)
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);
@@ -394,6 +463,18 @@ public:
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
     void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
 
+    // MatVecOperator overrides (Phase 2): dim() and description() reflect the
+    // projected sector. apply / memory_space / is_hermitian are inherited
+    // from GPUOperator and dispatch to GPUFixedSz::matVecGPU virtually.
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(fixed_sz_dim_);
+    }
+    [[nodiscard]] std::string description() const override {
+        return "GPUFixedSzOperator(n_sites=" + std::to_string(n_sites_)
+            + ", n_up=" + std::to_string(n_up_)
+            + ", dim=" + std::to_string(fixed_sz_dim_) + ")";
+    }
+
     // Fixed-Sz kernels use shared basis table and atomic accumulation,
     // so concurrent multi-stream execution is not safe.
     bool supportsAsyncMatVec() const override { return false; }
@@ -642,7 +723,16 @@ public:
     void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
     void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
-    
+
+    // MatVecOperator overrides (Phase 2): symmetrized sector dim + label.
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(sector_dim_);
+    }
+    [[nodiscard]] std::string description() const override {
+        return "GPUSymmetrizedOperator(n_sites=" + std::to_string(n_sites_)
+            + ", sector_dim=" + std::to_string(sector_dim_) + ")";
+    }
+
     // Fixed-Sz kernels use shared basis table and atomic accumulation
     bool supportsAsyncMatVec() const override { return false; }
     

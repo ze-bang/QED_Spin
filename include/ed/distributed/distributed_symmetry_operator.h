@@ -68,14 +68,17 @@
 #include <memory>
 #include <vector>
 
+#include <ed/core/linear_operator.h>
 #include <ed/distributed/orbit_halo_plan.h>
 #include <ed/distributed/orbit_partition.h>
+#include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
+#include <ed/matvec/memory_space.h>    // DistributedHost tag
 
 class Operator;
 
 namespace ed::distributed {
 
-class DistributedSymmetryOperator {
+class DistributedSymmetryOperator : public ed::LinearOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -144,11 +147,88 @@ public:
     void apply(const Complex* x_local, Complex* y_local) const;
 
     // -------------------------------------------------------------------------
-    // Geometry / diagnostics
+    // Matvec-unification Phase 2: MatVecOperator overrides.
+    //
+    // dim() reports the LOCAL orbit count (per-rank); the inherited
+    // virtual `global_dim()` reports the full # of nonzero-norm orbits
+    // (see the existing accessor below). Memory space is DistributedHost.
+    // The orbit-index vectors must use the MPI Backend for axpy/dot/norm
+    // so reductions cross-rank correctly.
     // -------------------------------------------------------------------------
-    std::uint64_t global_dim()   const noexcept;  // # nonzero-norm orbits
+    void apply(const ed::matvec::Complex* x_local,
+               ed::matvec::Complex* y_local,
+               std::size_t size) const override
+    {
+        check_size(size);
+        apply(reinterpret_cast<const Complex*>(x_local),
+              reinterpret_cast<Complex*>(y_local));
+    }
+    [[nodiscard]] std::size_t dim() const override;
+    [[nodiscard]] std::size_t global_dim() const override;
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::DistributedHost;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override;
+
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // Same policy as `DistributedOperator`: `bind_mpi` is the
+    // supported lane; `bind_cuda` / `bind_mpi_cuda` throw (no
+    // distributed-symmetry GPU operator exists yet), `bind_cpu`
+    // throws when the comm has more than one rank.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        if (comm_size() > 1) {
+            throw std::runtime_error(
+                "DistributedSymmetryOperator: bind_cpu() is not "
+                "supported on a multi-rank communicator. Use "
+                "bind<MpiBackend>() so reductions allreduce across "
+                "ranks.");
+        }
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        throw std::runtime_error(
+            "DistributedSymmetryOperator: bind_cuda() is not supported "
+            "-- this operator is host-resident.");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "DistributedSymmetryOperator: bind_mpi_cuda() is not "
+            "supported -- a distributed-symmetry GPU operator has not "
+            "been wired yet (see distributed_symmetry_operator_gpu.h "
+            "for the per-sector GPU primitive).");
+    }
+
+    // -------------------------------------------------------------------------
+    // Geometry / diagnostics (legacy uint64_t accessors retained for
+    // back-compat; the MatVecOperator overrides above forward to the
+    // same data through std::size_t).
+    // -------------------------------------------------------------------------
     std::uint64_t local_size()   const noexcept;  // # orbits on this rank
     std::uint64_t local_offset() const noexcept;  // rank-major prefix offset
+
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g;
+        g.local_dim    = static_cast<std::size_t>(local_size());
+        g.global_dim   = static_cast<std::uint64_t>(global_dim());
+        g.local_offset = local_offset();
+        g.memory_space = ed::matvec::MemorySpace::DistributedHost;
+        g.comm         = comm_;
+        return g;
+    }
     int           rank()         const noexcept { return rank_; }
     int           comm_size()    const noexcept { return size_; }
     MPI_Comm      comm()         const noexcept { return comm_; }

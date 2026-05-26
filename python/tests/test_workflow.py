@@ -5,14 +5,14 @@ Covers the public surface of :mod:`qed.workflow`:
 * :func:`qed.find_symmetries`           -- in-memory operator
   introspection produces correct U(1) Sz info and a non-trivial
   generator set for the periodic Heisenberg ring.
-* :func:`qed.diag` (no symmetry, no Sz) -- end-to-end "just call
+* :func:`qed.solve` (no symmetry, no Sz) -- end-to-end "just call
   it" path matching the Bethe-ansatz reference.
-* :func:`qed.diag` with ``sz``          -- automatic
+* :func:`qed.solve` with ``sz``          -- automatic
   ``FixedSzOperator`` construction, ground state in Sz=N/2 sector.
-* :func:`qed.diag` with ``symmetry``    -- streaming-symmetry
+* :func:`qed.solve` with ``symmetry``    -- streaming-symmetry
   kernel via temp-dir round-trip (covers the JSON schema fix that
   ``phase_factors`` is per-generator, not per-element).
-* :func:`qed.diag` with both at once    -- combined fixed-Sz +
+* :func:`qed.solve` with both at once    -- combined fixed-Sz +
   symmetry kernel.
 * Solver / device auto-selection                -- ``auto`` heuristics
   pick FULL for the tiny 6-site ring, GPU only when available, and MPI
@@ -47,6 +47,34 @@ def _heisenberg_ring(num_sites: int = N_SITES):
     bonds = [(i, (i + 1) % num_sites) for i in range(num_sites)]
     builder.heisenberg(bonds, J=1.0)
     return builder.to_operator()
+
+
+# ---------------------------------------------------------------------------
+# Surface-unification negative test: the legacy
+# ``exact_diagonalization_*`` Python forwarder family was deleted in
+# lockstep with the C++ ``ed::exact_diagonalization_*`` family. Callers
+# should use ``qed.solve`` / ``qed.thermal`` / ``qed.spectral`` (the
+# three-verb public surface) or, for the in-process orchestrator,
+# ``qed._core.workflows_solve`` / ``workflows_thermal`` /
+# ``workflows_spectral`` directly.
+# ---------------------------------------------------------------------------
+def test_legacy_exact_diagonalization_bindings_were_removed():
+    for legacy_name in (
+        "exact_diagonalization_core",
+        "exact_diagonalization_from_directory",
+        "exact_diagonalization_from_directory_symmetrized",
+        "exact_diagonalization_fixed_sz_symmetrized",
+        "exact_diagonalization_streaming_symmetry",
+        "exact_diagonalization_streaming_symmetry_fixed_sz",
+    ):
+        assert not hasattr(qed, legacy_name), (
+            f"Legacy binding `qed.{legacy_name}` should have been "
+            f"deleted by the surface-unification collapse."
+        )
+        assert not hasattr(qed._core, legacy_name), (
+            f"Legacy pybind forwarder `qed._core.{legacy_name}` should "
+            f"have been deleted by the surface-unification collapse."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -92,14 +120,14 @@ def test_find_symmetries_finds_full_automorphism_for_ring():
 
 def test_diag_full_hilbert_default_args():
     H = _heisenberg_ring()
-    res = qed.diag(H, verbose=False)
+    res = qed.solve(H, verbose=False)
     assert len(res.eigenvalues) >= 1
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
 def test_diag_full_hilbert_explicit_solver_and_device():
     H = _heisenberg_ring()
-    res = qed.diag(
+    res = qed.solve(
         H,
         num_eigenvalues=4,
         solver="LANCZOS",
@@ -122,7 +150,7 @@ def test_diag_full_hilbert_explicit_solver_and_device():
 def test_diag_sz_constructs_fixed_sz_operator_under_the_hood():
     H = _heisenberg_ring()
     # Ground state of AFM Heisenberg ring at N=6 lives in Sz=0 (n_up=3).
-    res = qed.diag(H, num_eigenvalues=2, sz=N_SITES // 2, verbose=False)
+    res = qed.solve(H, num_eigenvalues=2, sz=N_SITES // 2, verbose=False)
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
@@ -132,13 +160,13 @@ def test_diag_sz_rejects_when_operator_breaks_sz():
     op.add_one_body(qed.OP_SPLUS, 0, complex(1.0, 0.0))
     op.add_one_body(qed.OP_SMINUS, 0, complex(1.0, 0.0))
     with pytest.raises(ValueError, match="does not commute with total Sz"):
-        qed.diag(op, sz=2, verbose=False)
+        qed.solve(op, sz=2, verbose=False)
 
 
 def test_diag_sz_rejects_out_of_range():
     H = _heisenberg_ring()
     with pytest.raises(ValueError, match="out of range"):
-        qed.diag(H, sz=N_SITES + 1, verbose=False)
+        qed.solve(H, sz=N_SITES + 1, verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +187,7 @@ def test_diag_with_explicit_z6_translation_generator():
         orders=[6],
         group_size=6,
     )
-    res = qed.diag(H, num_eigenvalues=2, symmetry=z6, verbose=False)
+    res = qed.solve(H, num_eigenvalues=2, symmetry=z6, verbose=False)
     eigs = sorted(res.eigenvalues)
     # All 6 momentum sectors are diagonalised; merged spectrum should
     # contain the GS as the lowest entry.
@@ -169,7 +197,7 @@ def test_diag_with_explicit_z6_translation_generator():
 def test_diag_with_full_set_from_find_symmetries():
     H = _heisenberg_ring()
     report = qed.find_symmetries(H, verbose=False)
-    res = qed.diag(
+    res = qed.solve(
         H, num_eigenvalues=2, symmetry=report.full_set, verbose=False
     )
     eigs = sorted(res.eigenvalues)
@@ -186,7 +214,7 @@ def test_diag_with_symmetry_and_sz_simultaneously():
         orders=[6],
         group_size=6,
     )
-    res = qed.diag(
+    res = qed.solve(
         H,
         num_eigenvalues=2,
         symmetry=z6,
@@ -208,7 +236,7 @@ def test_diag_with_trivial_generator_set_falls_back_to_full_hilbert():
         orders=[],
         group_size=1,
     )
-    res = qed.diag(H, num_eigenvalues=1, symmetry=trivial, verbose=False)
+    res = qed.solve(H, num_eigenvalues=1, symmetry=trivial, verbose=False)
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
@@ -220,7 +248,7 @@ def test_diag_with_trivial_generator_set_falls_back_to_full_hilbert():
 def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
     """Phase 9 / Layer 4b: ``device='mpi'`` is no longer rejected.
 
-    The unified ``qed.diag`` writes the operator to a temp dir, spawns
+    The unified ``qed.solve`` writes the operator to a temp dir, spawns
     ``ed_distributed_main`` under ``mpiexec``, and reads the HDF5
     result file back. We don't actually launch mpiexec here; we
     monkeypatch ``qed.mpi.run_distributed`` to capture the
@@ -259,7 +287,7 @@ def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
     monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
     H = _heisenberg_ring()
-    res = qed.diag(
+    res = qed.solve(
         H, device="mpi", num_eigenvalues=2,
         mpi_n_ranks=2, verbose=False,
     )
@@ -295,7 +323,7 @@ def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
     monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
     H = _heisenberg_ring()
-    qed.diag(
+    qed.solve(
         H, device="mpi", solver="KRYLOV_SCHUR", num_eigenvalues=1,
         mpi_n_ranks=2, verbose=False,
     )
@@ -305,26 +333,24 @@ def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
 def test_diag_rejects_unknown_solver_name():
     H = _heisenberg_ring()
     with pytest.raises(ValueError, match="Unknown solver name"):
-        qed.diag(H, solver="MAGIC_NEW_SOLVER", verbose=False)
+        qed.solve(H, solver="MAGIC_NEW_SOLVER", verbose=False)
 
 
-def test_diag_results_match_explicit_dispatcher_call():
-    """Top-level ``qed.diag`` must agree with the low-level
-    ``exact_diagonalization_core`` it routes to (no off-by-one in
-    parameter setup)."""
+def test_diag_results_match_explicit_workflows_solve_call():
+    """Top-level ``qed.solve(auto_sz=False)`` must agree with the canonical
+    ``_core.workflows_solve`` it routes to (no off-by-one in parameter
+    setup). We pass ``auto_sz=False`` so the high-level call also runs
+    on the full Hilbert space; the May-2026 surface unification flipped
+    the default to ``auto_sz=True``."""
     H = _heisenberg_ring()
-    high = qed.diag(H, num_eigenvalues=4, verbose=False)
+    high = qed.solve(H, num_eigenvalues=4, auto_sz=False, verbose=False)
 
-    p = qed.EDParameters()
-    p.num_sites = N_SITES
-    p.num_eigenvalues = 4
-    p.tolerance = 1e-10
-    p.compute_eigenvectors = False
-    p.max_iterations = 200
-    p.max_subspace = 80
-    low = qed.exact_diagonalization_core(
-        H, qed.DiagonalizationMethod.FULL, p
-    )
+    opts = qed._core.SolveOptions()
+    opts.num_eigs   = 4
+    opts.tolerance  = 1e-10
+    opts.max_iter   = 200
+    opts.method     = qed._core.SolveMethod.FullDiag
+    low = qed._core.workflows_solve(H, opts)
     np.testing.assert_allclose(
         sorted(high.eigenvalues)[:4], sorted(low.eigenvalues)[:4], atol=1e-9
     )
@@ -413,7 +439,7 @@ def test_diag_with_single_generator_subgroup_matches_full_group():
     report = qed.find_symmetries(H, verbose=False)
     sub = report.full_set.subgroup([1])  # the order-3 rotation alone
 
-    res_sub = qed.diag(
+    res_sub = qed.solve(
         H, num_eigenvalues=2, symmetry=sub, verbose=False,
     )
     eigs = sorted(res_sub.eigenvalues)
@@ -427,12 +453,15 @@ def test_diag_with_single_generator_subgroup_matches_full_group():
 
 def test_list_diag_parameters_returns_dict_with_every_field():
     """return_dict=True must list every introspectable field on
-    EDParameters (currently 80+) bucketed by category."""
+    EDParameters bucketed by category. The May 2026 minimalist-
+    solver-matrix cleanup retired the ARPACK / ScaLAPACK / Davidson /
+    LOBPCG / Chebyshev families, so those categories are no longer
+    expected."""
     catalog = qed.list_diag_parameters(return_dict=True)
     assert isinstance(catalog, dict)
     assert "general" in catalog
-    assert "arpack" in catalog
     assert "ftlm" in catalog
+    assert "tpq" in catalog
 
     # Every name is unique across categories.
     seen: set[str] = set()
@@ -443,17 +472,17 @@ def test_list_diag_parameters_returns_dict_with_every_field():
     # Spot-check a handful of canonical fields are present somewhere.
     assert "num_eigenvalues" in seen
     assert "tolerance" in seen
-    assert "arpack_which" in seen
     assert "ftlm_seed" in seen
+    assert "tpq_taylor_order" in seen
 
 
 def test_list_diag_parameters_filters_by_category_substring():
     catalog = qed.list_diag_parameters(
-        category="arp", return_dict=True
+        category="ftl", return_dict=True
     )
-    assert list(catalog) == ["arpack"]
-    fields = {name for name, _ in catalog["arpack"]}
-    assert "arpack_which" in fields
+    assert list(catalog) == ["ftlm"]
+    fields = {name for name, _ in catalog["ftlm"]}
+    assert "ftlm_seed" in fields
 
 
 def test_list_diag_parameters_unknown_category_raises():
@@ -476,7 +505,7 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     list_diag_parameters() so users can discover the catalog."""
     H = _heisenberg_ring()
     with pytest.raises(AttributeError, match="list_diag_parameters"):
-        qed.diag(
+        qed.solve(
             H, verbose=False,
             extra_params={"definitely_not_a_real_field": 42},
         )
@@ -500,7 +529,6 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     ("CTPQ", "cTPQ"),
     ("FTLM", "FTLM"),
     ("ltlm", "LTLM"),
-    ("hybrid", "HYBRID"),
     ("FULL", "FULL"),
 ])
 def test_solver_name_lookup_is_case_insensitive(name, expected):
@@ -533,7 +561,7 @@ def test_eigenvalue_solver_matches_reference_across_paths(solver, label, kwargs)
     real_kwargs = dict(kwargs)
     if real_kwargs.pop("_symm", False):
         real_kwargs["symmetry"] = report.full_set
-    res = qed.diag(
+    res = qed.solve(
         H, num_eigenvalues=2, solver=solver, verbose=False, **real_kwargs
     )
     eigs = sorted(res.eigenvalues)
@@ -545,14 +573,16 @@ def test_eigenvalue_solver_matches_reference_across_paths(solver, label, kwargs)
 
 
 def test_mtpq_runs_on_full_hilbert(tmp_path):
-    """mTPQ should run end-to-end on the full Hilbert space, write the
-    SS_rand*.dat trajectory + post-processed thermal HDF5, and return
+    """mTPQ should run end-to-end on the full Hilbert space and return
     an EDResults whose .eigenvalues field has at least one entry (the
-    final-step energy / per-sample summary, depending on the dispatcher
-    branch -- both populate the vector with at least 1 value)."""
+    per-sample summary). After the surface-unification collapse the
+    trajectory dump under output_dir is no longer auto-emitted by the
+    orchestrator's ``mtpq_kernel`` -- callers wanting the SS_rand*.dat
+    files reach for the CLI binary ``./ED workflow thermal`` instead.
+    """
     H = _heisenberg_ring()
     out = str(tmp_path / "tpq_full")
-    res = qed.diag(
+    res = qed.solve(
         H, solver="mTPQ",
         target_beta=5.0,
         num_samples=1,
@@ -560,16 +590,16 @@ def test_mtpq_runs_on_full_hilbert(tmp_path):
         verbose=False,
     )
     assert len(list(res.eigenvalues)) >= 1
-    # The dispatcher should have written into our output_dir.
+    # The user-supplied output_dir must exist after the call (it is
+    # auto-created upstream of the orchestrator).
     import os
-    contents = os.listdir(out)
-    assert contents, f"output_dir {out!r} was not populated"
+    assert os.path.isdir(out), f"output_dir {out!r} should be created"
 
 
 def test_mtpq_runs_on_fixed_sz(tmp_path):
     H = _heisenberg_ring()
     out = str(tmp_path / "tpq_sz")
-    res = qed.diag(
+    res = qed.solve(
         H, solver="mTPQ",
         sz=N_SITES // 2,
         target_beta=5.0,
@@ -584,24 +614,29 @@ def test_mtpq_with_symmetry_is_rejected_with_actionable_error():
     H = _heisenberg_ring()
     report = qed.find_symmetries(H, verbose=False)
     with pytest.raises(ValueError, match="TPQ.*symmetry"):
-        qed.diag(
+        qed.solve(
             H, solver="mTPQ", symmetry=report.full_set,
             target_beta=5.0, num_samples=1, verbose=False,
         )
     with pytest.raises(ValueError, match="TPQ.*symmetry"):
-        qed.diag(
+        qed.solve(
             H, solver="mTPQ", symmetry=report.full_set, sz=N_SITES // 2,
             target_beta=5.0, num_samples=1, verbose=False,
         )
 
 
 def test_mtpq_auto_creates_output_dir_when_unspecified(tmp_path, monkeypatch):
-    """With no output_dir, the workflow should mint a fresh one and
-    surface the path. We chdir into a temp dir so we don't leave
-    qed_thermal_* dirs in the test-runner cwd."""
+    """With no output_dir, the workflow should mint a fresh
+    ``qed_thermal_mTPQ_<timestamp>`` directory and surface the path.
+    We chdir into a temp dir so we don't leave qed_thermal_* dirs in
+    the test-runner cwd. After the surface-unification collapse the
+    auto-minted directory is no longer populated by the orchestrator's
+    ``mtpq_kernel`` (the in-process kernel returns per-sample energies
+    only); the CLI binary continues to emit SS_rand*.dat trajectories.
+    """
     monkeypatch.chdir(tmp_path)
     H = _heisenberg_ring()
-    res = qed.diag(
+    res = qed.solve(
         H, solver="mTPQ",
         target_beta=5.0, num_samples=1, verbose=False,
     )
@@ -610,7 +645,6 @@ def test_mtpq_auto_creates_output_dir_when_unspecified(tmp_path, monkeypatch):
     assert len(minted) == 1, (
         f"expected exactly one qed_thermal_mTPQ_* dir, got {minted}"
     )
-    assert any(minted[0].iterdir()), "auto-minted dir is empty"
 
 
 def test_thermal_kwargs_populate_ed_parameters():
@@ -625,7 +659,6 @@ def test_thermal_kwargs_populate_ed_parameters():
         tolerance=1e-10,
         compute_eigenvectors=False,
         max_iterations=None,
-        max_subspace=None,
         block_size=None,
         sector_dim=64,
         method=method,
@@ -662,7 +695,6 @@ def test_eigenvalue_kwargs_ignore_thermal_only_kwargs():
         tolerance=1e-10,
         compute_eigenvectors=False,
         max_iterations=None,
-        max_subspace=None,
         block_size=None,
         sector_dim=64,
         method=method,
@@ -677,8 +709,6 @@ def test_eigenvalue_kwargs_ignore_thermal_only_kwargs():
     # max_iterations comes from the Lanczos branch:
     #   max(200, 8*4 + 80) = 200, capped by sector_dim - 1 = 63.
     assert params.max_iterations == 63
-    # max_subspace: max(80, 4*4 + 40) = 80, capped by 63.
-    assert params.max_subspace == 63
     # The thermal slots should retain their EDParameters defaults.
     assert params.num_samples == 1
     assert params.tpq_target_beta == 1000.0
@@ -695,7 +725,7 @@ class TestDeviceMatrix:
     The four device axes are ``cpu``, ``gpu``, ``mpi``, ``mpi_gpu``.
     On a build without WITH_CUDA / WITH_MPI we exercise:
 
-    * the CPU cells through ``qed.diag(device='cpu')`` end-to-end;
+    * the CPU cells through ``qed.solve(device='cpu')`` end-to-end;
     * the GPU cells through ``_resolve_device`` (the build-flag check
       raises a clean RuntimeError when CUDA is missing) and through
       monkeypatching ``has_cuda_build`` so the routing decision is
@@ -714,7 +744,7 @@ class TestDeviceMatrix:
     @pytest.mark.parametrize("solver", ["LANCZOS", "KRYLOV_SCHUR", "FULL"])
     def test_cpu_path_is_default(self, H, solver):
         """device='cpu' should round-trip via the in-process kernel."""
-        res = qed.diag(
+        res = qed.solve(
             H, solver=solver, device="cpu",
             num_eigenvalues=2, verbose=False,
         )
@@ -723,7 +753,7 @@ class TestDeviceMatrix:
 
     def test_cpu_mtpq_runs(self, H, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        res = qed.diag(
+        res = qed.solve(
             H, solver="mTPQ", device="cpu",
             target_beta=5.0, num_samples=1, verbose=False,
         )
@@ -736,55 +766,71 @@ class TestDeviceMatrix:
         if qed.has_cuda_build():
             pytest.skip("CUDA built in -- this branch only fires on CPU-only builds")
         with pytest.raises(RuntimeError, match="WITH_CUDA=ON"):
-            qed.diag(
+            qed.solve(
                 H, solver=solver, device="gpu",
                 target_beta=5.0, num_samples=1, verbose=False,
             )
 
-    def test_gpu_routes_through_directory_dispatcher(self, H, monkeypatch, tmp_path):
-        """When WITH_CUDA=ON, qed.diag must NOT call exact_diagonalization_core
-        for device='gpu' (it throws on GPU methods); it must take the
-        temp-dir + from_directory branch instead.
-
-        We monkeypatch has_cuda_build to True and intercept both
-        dispatchers; the temp-dir one MUST be the one that fires.
-        """
+    def test_gpu_routes_through_workflows_solve(self, H, monkeypatch, tmp_path):
+        """After the May-2026 surface unification, the GPU lane lands
+        on the unified ``_core.workflows_solve`` (it picks the GPU
+        lane via ``select_backend``). The legacy ``from_directory`` /
+        ``exact_diagonalization_core`` forwarders no longer exist on
+        the binding surface, so this test only needs to assert
+        ``workflows_solve`` is exercised once."""
         monkeypatch.chdir(tmp_path)
         from qed import workflow as wf
 
-        called = {"core": 0, "from_directory": 0}
+        called = {"workflows_solve": 0}
 
-        def fake_core(*a, **k):
-            called["core"] += 1
+        def fake_workflows_solve(*a, **k):
+            called["workflows_solve"] += 1
             class _R:
                 eigenvalues = [0.0]
-                eigenvector_paths = []
-                ground_state_filename = ""
-                thermodynamic_filename = ""
-                spectrum_filename = ""
-            return _R()
-
-        def fake_from_directory(directory, method, params):
-            called["from_directory"] += 1
-            class _R:
-                eigenvalues = [0.0]
-                eigenvector_paths = []
-                ground_state_filename = ""
-                thermodynamic_filename = ""
-                spectrum_filename = ""
+                eigenvectors = []
+                hdf5_path = ""
             return _R()
 
         monkeypatch.setattr(wf, "has_cuda_build", lambda: True)
-        monkeypatch.setattr(wf, "exact_diagonalization_core", fake_core)
-        monkeypatch.setattr(wf, "exact_diagonalization_from_directory", fake_from_directory)
+        from qed import _core as _qcore
+        monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
         # plan=False bypasses the pre-flight planner (which would correctly
         # refuse to dispatch to GPU on a no-GPU CI host); we're testing
         # dispatch routing here, not resource accounting.
-        qed.diag(H, solver="LANCZOS", device="gpu",
-                        num_eigenvalues=1, verbose=False, plan=False)
-        assert called == {"core": 0, "from_directory": 1}, (
-            f"GPU path hit the wrong dispatcher: {called}"
+        qed.solve(H, solver="LANCZOS", device="gpu",
+                        num_eigenvalues=1, auto_sz=False,
+                        verbose=False, plan=False)
+        assert called == {"workflows_solve": 1}, (
+            f"GPU path failed to hit `_core.workflows_solve`: {called}"
+        )
+
+    def test_cpu_path_lands_in_workflows_solve(self, H, monkeypatch):
+        """Surface unification acceptance (May 2026): the CPU+no-symmetry
+        default path of `qed.solve` for ground-state solvers (LANCZOS /
+        KRYLOV_SCHUR / FULL / BLOCK_LANCZOS) routes through
+        ``_core.workflows_solve``. The legacy ``exact_diagonalization_*``
+        forwarders were deleted in the same release, so there is no
+        legacy branch left to monkeypatch."""
+        from qed import _core as _qcore
+
+        called = {"workflows_solve": 0}
+
+        def fake_workflows_solve(*a, **k):
+            called["workflows_solve"] += 1
+            class _R:
+                eigenvalues = [0.0]
+                eigenvectors = []
+                hdf5_path = ""
+            return _R()
+
+        monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
+
+        qed.solve(H, solver="LANCZOS", num_eigenvalues=1,
+                 verbose=False, plan=False)
+        assert called == {"workflows_solve": 1}, (
+            f"CPU+no-symmetry path took the wrong dispatcher: {called}. "
+            "Expected the unified `workflows_solve` route."
         )
 
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
@@ -833,7 +879,7 @@ class TestDeviceMatrix:
 
         monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
-        qed.diag(
+        qed.solve(
             H, solver=solver, device=device,
             num_eigenvalues=1, target_beta=5.0,
             num_samples=1, mpi_n_ranks=2,
@@ -857,7 +903,7 @@ class TestDeviceMatrix:
 
     def test_unknown_device_rejects(self, H):
         with pytest.raises(ValueError, match="device="):
-            qed.diag(H, device="quantum-foam", verbose=False)
+            qed.solve(H, device="quantum-foam", verbose=False)
 
     @pytest.mark.parametrize("solver", ["FTLM", "mTPQ"])
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
@@ -941,7 +987,7 @@ class TestDeviceMatrix:
         monkeypatch.setattr(qed_mpi, "run_distributed",
                             fake_run_distributed)
 
-        res = qed.diag(
+        res = qed.solve(
             H, solver=solver, device=device,
             symmetry=symm,
             target_beta=2.0, num_samples=1, mpi_n_ranks=2,
@@ -1041,7 +1087,7 @@ class TestDeviceMatrix:
         monkeypatch.setattr(qed_mpi, "run_distributed",
                             fake_run_distributed)
 
-        res = qed.diag(
+        res = qed.solve(
             H, solver="FTLM", device=device,
             symmetry=symm, sector=[0],
             target_beta=2.0, num_samples=1, mpi_n_ranks=2,
@@ -1090,12 +1136,11 @@ class TestSolverDeviceSupport:
 
     def test_no_kernel_cells_say_so(self):
         m = qed.solver_device_support(return_dict=True)
-        # ARPACK has no GPU kernel (intentional).
-        assert m["ARPACK_*"]["gpu"]["kernel"] is False
-        assert m["ARPACK_*"]["gpu"]["available"] is False
-        # SCALAPACK is MPI-only (no CPU single-process kernel).
-        assert m["SCALAPACK"]["cpu"]["kernel"] is False
-        assert m["SCALAPACK"]["cpu"]["available"] is False
+        # KPM-DOS has no MPI kernel (the GPU lane is honoured but
+        # there's no distributed-Chebyshev implementation).
+        if "KPM_DOS" in m:
+            assert m["KPM_DOS"]["mpi"]["kernel"] is False
+            assert m["KPM_DOS"]["mpi"]["available"] is False
 
     def test_filter_by_solver(self):
         m = qed.solver_device_support(solver="lanczos", return_dict=True)
@@ -1120,7 +1165,7 @@ class TestSolverDeviceSupport:
 
 
 class TestRunDistributedAliases:
-    """run_distributed accepts qed.diag-style solver names + a use_gpu flag.
+    """run_distributed accepts qed.solve-style solver names + a use_gpu flag.
 
     These tests don't actually launch ``mpiexec`` -- we monkeypatch
     ``subprocess.run`` and ``shutil.which`` so we can assert on the

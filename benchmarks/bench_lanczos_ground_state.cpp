@@ -11,7 +11,6 @@
 #include <benchmark/benchmark.h>
 
 #include <ed/core/construct_ham.h>
-#include <ed/solvers/arpack.h>
 #include <ed/solvers/lanczos.h>
 
 #include <complex>
@@ -95,27 +94,33 @@ void BM_LanczosGroundState(benchmark::State& state) {
     state.counters["krylov_dim"] = static_cast<double>(kry);
 }
 
-// Same workload through the ARPACK (IRLM) wrapper. ARPACK is what
-// scipy.sparse.linalg.eigsh and QuSpin both wrap, so this is the
-// apples-to-apples comparison. Switch the default solver via
-// ED_USE_ARPACK_DEFAULT=1.
-void BM_ArpackGroundState(benchmark::State& state) {
+// Wave 1.4 of the SOTA Performance rollout (May 2026): a companion
+// benchmark that measures the SAME workload through the real-only
+// `lanczos_real` fast path. The Heisenberg ring built above is purely
+// real-Hermitian so this is the apples-to-apples comparison against
+// the Apr 25 baseline (`bench_vs_xdiag_*.json`) which used the
+// `qed.lanczos` Python entry that already dispatches to
+// `lanczos_real` for real H (see
+// `python/qed/_bindings/qed_bindings.cpp:422-427`).
+//
+// The complex bench above remains the conservative regression gate
+// for the unified `lanczos_kernel<CpuBackend>` lane.
+void BM_LanczosGroundState_Real(benchmark::State& state) {
     const auto N      = static_cast<uint64_t>(state.range(0));
     const auto kry    = static_cast<uint64_t>(state.range(1));
     const uint64_t dim = (1ULL << N);
 
     auto op = make_heisenberg_chain_pbc(N);
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        op->apply(in, out, static_cast<size_t>(n));
+    // Native double matvec -- avoids the complex<->real shuttle.
+    auto Hv_real = [&](const double* in, double* out, int n) {
+        op->apply_real(in, out, static_cast<std::size_t>(n));
     };
 
     CoutSilencer silence;
     for (auto _ : state) {
         std::vector<double> eigs;
-        // arpack_*'s save_eigs_to_dir treats empty dir as "skip save"
-        // (see arpack.cpp), so this avoids HDF5 I/O during timing.
-        arpack_ground_state(Hv, dim, /*max_iter=*/kry, /*exct=*/1, /*tol=*/1e-10,
-                            eigs, /*dir=*/"", /*eigenvectors=*/false);
+        lanczos_real(Hv_real, dim, /*max_iter=*/kry, /*exct=*/1,
+                     /*tol=*/1e-10, eigs);
         benchmark::DoNotOptimize(eigs.data());
         benchmark::ClobberMemory();
     }
@@ -123,6 +128,11 @@ void BM_ArpackGroundState(benchmark::State& state) {
     state.counters["N"]          = static_cast<double>(N);
     state.counters["krylov_dim"] = static_cast<double>(kry);
 }
+
+// ARPACK companion benchmark retired May 2026: the in-tree
+// `include/ed/solvers/arpack.h` wrapper was removed as part of the
+// solver-shell cleanup. ARPACK/IRLM comparison now lives in
+// `bench_vs_quspin.py` (scipy.sparse.linalg.eigsh, which wraps ARPACK).
 
 }  // namespace
 
@@ -141,7 +151,7 @@ BENCHMARK(BM_LanczosGroundState)
     ->Unit(benchmark::kMillisecond)
     ->MinTime(1.0);
 
-BENCHMARK(BM_ArpackGroundState)
+BENCHMARK(BM_LanczosGroundState_Real)
     ->Args({8,  50})
     ->Args({10, 50})
     ->Args({12, 50})

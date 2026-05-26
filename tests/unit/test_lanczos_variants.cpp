@@ -103,22 +103,6 @@ TEST_CASE("Lanczos-family solvers reproduce dense spectrum (N=8)",
                    });
     }
 
-    SECTION("lanczos_selective_reorth") {
-        run_solver("lanczos_selective_reorth", f, 1e-6, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       lanczos_selective_reorth(f.Hv, f.dim, max_iter, 3,
-                                                1e-12, e, dir, false);
-                   });
-    }
-
-    SECTION("lanczos_no_ortho") {
-        run_solver("lanczos_no_ortho", f, 1e-4, 1e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       lanczos_no_ortho(f.Hv, f.dim, max_iter, 1,
-                                        1e-12, e, dir, false);
-                   });
-    }
-
     SECTION("block_lanczos") {
         run_solver("block_lanczos", f, 1e-6, 5e-1,
                    [&](const std::string& dir, std::vector<double>& e) {
@@ -135,38 +119,45 @@ TEST_CASE("Lanczos-family solvers reproduce dense spectrum (N=8)",
                    });
     }
 
-    SECTION("implicitly_restarted_lanczos") {
-        run_solver("implicitly_restarted_lanczos", f, 1e-6, 5e-1,
+    // Retired in the minimalist-architecture rev (May 2026):
+    //   lanczos_selective_reorth, lanczos_no_ortho,
+    //   implicitly_restarted_lanczos, thick_restart_lanczos,
+    //   chebyshev_filtered_lanczos, shift_invert_lanczos.
+    // These variants are absorbed into the single lanczos kernel +
+    // LanczosKernelOptions.reorth/restart enum values (Phase 3).
+
+    // -------------------------------------------------------------------
+    // Phase 4 (matvec-unification): exercise the MatVecOperator-taking
+    // overloads. The Operator (built via build_heisenberg_chain) inherits
+    // from MatVecOperator after Phase 2, so we can pass `*f.op` directly
+    // and the new inline overload forwards through as_apply_function.
+    // The numerics had better agree with the std::function path; that
+    // path is exercised above.
+    // -------------------------------------------------------------------
+    SECTION("matvec-unification: lanczos(MatVecOperator&) "
+            "matches lanczos(std::function&)") {
+        run_solver("lanczos[MatVecOperator]", f, 1e-5, 5e-1,
                    [&](const std::string& dir, std::vector<double>& e) {
-                       implicitly_restarted_lanczos(f.Hv, f.dim, max_iter, 3,
-                                                    1e-12, e, dir, false);
+                       lanczos(*f.op, f.dim, max_iter, /*exct=*/1, 1e-10,
+                               e, dir, false);
                    });
     }
 
-    SECTION("thick_restart_lanczos") {
-        run_solver("thick_restart_lanczos", f, 1e-6, 5e-1,
+    SECTION("matvec-unification: block_lanczos(MatVecOperator&) "
+            "matches block_lanczos(std::function&)") {
+        run_solver("block_lanczos[MatVecOperator]", f, 1e-5, 5e-1,
                    [&](const std::string& dir, std::vector<double>& e) {
-                       thick_restart_lanczos(f.Hv, f.dim, max_iter, 3,
-                                             1e-12, e, dir, false);
+                       block_lanczos(*f.op, f.dim, max_iter, /*num_eigs=*/1,
+                                     /*block_size=*/2, 1e-10, e, dir, false);
                    });
     }
 
-    SECTION("chebyshev_filtered_lanczos") {
-        run_solver("chebyshev_filtered_lanczos", f, 5e-3, 5e-1,
+    SECTION("matvec-unification: krylov_schur(MatVecOperator&) "
+            "matches krylov_schur(std::function&)") {
+        run_solver("krylov_schur[MatVecOperator]", f, 1e-5, 5e-1,
                    [&](const std::string& dir, std::vector<double>& e) {
-                       chebyshev_filtered_lanczos(
-                           f.Hv, f.dim, /*max_iter=*/60, 1, 1e-8, e, dir, false,
-                           f.dense_eigs.front() - 2.0,
-                           f.dense_eigs.front() + 2.0);
-                   });
-    }
-
-    SECTION("shift_invert_lanczos") {
-        run_solver("shift_invert_lanczos", f, 1e-5, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       shift_invert_lanczos(f.Hv, f.dim, max_iter, 1,
-                                            f.dense_eigs.front() - 0.1,
-                                            1e-10, e, dir, false);
+                       krylov_schur(*f.op, f.dim, max_iter, /*num_eigs=*/1,
+                                    1e-10, e, dir, false);
                    });
     }
 }

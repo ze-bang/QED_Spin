@@ -562,7 +562,7 @@ public:
      * @param output_dir Base output directory (e.g., "output")
      * @param eigenvalues Vector of eigenvalues
      * @param eigenvectors Vector of eigenvectors (can be empty if not computed)
-     * @param solver_name Name of the solver for logging (e.g., "LANCZOS", "LOBPCG")
+     * @param solver_name Name of the solver for logging (e.g., "LANCZOS", "BLOCK_LANCZOS")
      */
     static void saveDiagonalizationResults(
         const std::string& output_dir,
@@ -663,6 +663,14 @@ public:
                                    const std::string& observable_name,
                                    const std::vector<double>& values) {
         if (isDisabledOutputPath(filepath)) return;
+        if (temperatures.size() != values.size()) {
+            throw std::invalid_argument(
+                "saveThermodynamics: temperatures.size()=" +
+                std::to_string(temperatures.size()) +
+                " disagrees with values.size()=" +
+                std::to_string(values.size()) +
+                " for observable '" + observable_name + "'");
+        }
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -748,6 +756,11 @@ public:
                 file.unlink(dataset_name);
             }
             
+            if (matrix.empty()) {
+                throw std::invalid_argument(
+                    "saveCorrelationMatrix: refusing to save an empty matrix for '" +
+                    correlation_name + "'");
+            }
             size_t n_rows = matrix.size();
             size_t n_cols = matrix[0].size();
             
@@ -756,6 +769,13 @@ public:
             std::vector<double> imag_part(n_rows * n_cols);
             
             for (size_t i = 0; i < n_rows; ++i) {
+                if (matrix[i].size() != n_cols) {
+                    throw std::invalid_argument(
+                        "saveCorrelationMatrix: jagged matrix for '" +
+                        correlation_name + "' (row " + std::to_string(i) +
+                        " has size " + std::to_string(matrix[i].size()) +
+                        " != n_cols=" + std::to_string(n_cols) + ")");
+                }
                 for (size_t j = 0; j < n_cols; ++j) {
                     real_part[i * n_cols + j] = matrix[i][j].real();
                     imag_part[i * n_cols + j] = matrix[i][j].imag();
@@ -794,173 +814,14 @@ public:
      * @param dataset_name Name of the dataset
      * @param data Vector of values
      */
-    static void saveCorrelationData(const std::string& filepath,
-                                    const std::string& dataset_name,
-                                    const std::vector<Complex>& data) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string full_name = "/correlations/" + dataset_name;
-            if (file.nameExists(full_name)) {
-                file.unlink(full_name);
-            }
-            
-            size_t N = data.size();
-            std::vector<double> real_part(N);
-            std::vector<double> imag_part(N);
-            
-            for (size_t i = 0; i < N; ++i) {
-                real_part[i] = data[i].real();
-                imag_part[i] = data[i].imag();
-            }
-            
-            hsize_t dims[1] = {N};
-            H5::DataSpace dataspace(1, dims);
-            
-            H5::DataSet dataset_real = file.createDataSet(full_name + "_real",
-                                                          H5::PredType::NATIVE_DOUBLE,
-                                                          dataspace);
-            dataset_real.write(real_part.data(), H5::PredType::NATIVE_DOUBLE);
-            dataset_real.close();
-            
-            H5::DataSet dataset_imag = file.createDataSet(full_name + "_imag",
-                                                          H5::PredType::NATIVE_DOUBLE,
-                                                          dataspace);
-            dataset_imag.write(imag_part.data(), H5::PredType::NATIVE_DOUBLE);
-            dataset_imag.close();
-            
-            file.close();
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save correlation data: " + 
-                                   std::string(e.getCDetailMsg()));
-        }
-    }
-    
-    // ============================================================================
-    // Dynamical Response / Structure Factor I/O
-    // ============================================================================
-    
-    /**
-     * @brief Save dynamical structure factor S(q, ω)
-     * @param filepath Path to HDF5 file
-     * @param operator_name Name of operator (e.g., "S_zz", "S_pm")
-     * @param frequencies Frequency grid
-     * @param spectral_function Spectral function S(ω)
-     * @param metadata Additional metadata as key-value pairs
-     */
-    static void saveDynamicalResponse(const std::string& filepath,
-                                      const std::string& operator_name,
-                                      const std::vector<double>& frequencies,
-                                      const std::vector<double>& spectral_function,
-                                      const std::map<std::string, double>& metadata = {}) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            // Save frequencies if not already saved
-            if (!file.nameExists("/dynamical/frequencies")) {
-                hsize_t dims[1] = {frequencies.size()};
-                H5::DataSpace dataspace(1, dims);
-                H5::DataSet dataset = file.createDataSet("/dynamical/frequencies",
-                                                         H5::PredType::NATIVE_DOUBLE,
-                                                         dataspace);
-                dataset.write(frequencies.data(), H5::PredType::NATIVE_DOUBLE);
-                dataset.close();
-            }
-            
-            // Save spectral function
-            std::string dataset_name = "/dynamical/" + operator_name;
-            if (file.nameExists(dataset_name)) {
-                file.unlink(dataset_name);
-            }
-            
-            hsize_t dims[1] = {spectral_function.size()};
-            H5::DataSpace dataspace(1, dims);
-            H5::DataSet dataset = file.createDataSet(dataset_name,
-                                                     H5::PredType::NATIVE_DOUBLE,
-                                                     dataspace);
-            dataset.write(spectral_function.data(), H5::PredType::NATIVE_DOUBLE);
-            
-            // Add metadata as attributes
-            for (const auto& [key, value] : metadata) {
-                H5::DataSpace attr_space(H5S_SCALAR);
-                H5::Attribute attr = dataset.createAttribute(key, 
-                                                             H5::PredType::NATIVE_DOUBLE, 
-                                                             attr_space);
-                attr.write(H5::PredType::NATIVE_DOUBLE, &value);
-                attr.close();
-            }
-            
-            dataset.close();
-            file.close();
-            
-            std::cout << "Saved dynamical response: " << operator_name << std::endl;
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save dynamical response: " + 
-                                   std::string(e.getCDetailMsg()));
-        }
-    }
-    
-    /**
-     * @brief Save FTLM sample data
-     * @param filepath Path to HDF5 file
-     * @param sample_index Sample index
-     * @param eigenvalues Sample eigenvalues
-     * @param observables Map of observable name to values
-     */
-    static void saveFTLMSample(const std::string& filepath,
-                               size_t sample_index,
-                               const std::vector<double>& eigenvalues,
-                               const std::map<std::string, std::vector<double>>& observables) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string sample_group = "/ftlm/samples/sample_" + std::to_string(sample_index);
-            
-            // Create group if it doesn't exist
-            if (!file.nameExists(sample_group)) {
-                file.createGroup(sample_group);
-            }
-            
-            // Save eigenvalues
-            hsize_t dims[1] = {eigenvalues.size()};
-            H5::DataSpace dataspace(1, dims);
-            
-            std::string evals_name = sample_group + "/eigenvalues";
-            if (file.nameExists(evals_name)) {
-                file.unlink(evals_name);
-            }
-            
-            H5::DataSet eval_dataset = file.createDataSet(evals_name,
-                                                          H5::PredType::NATIVE_DOUBLE,
-                                                          dataspace);
-            eval_dataset.write(eigenvalues.data(), H5::PredType::NATIVE_DOUBLE);
-            eval_dataset.close();
-            
-            // Save observables
-            for (const auto& [name, values] : observables) {
-                std::string obs_name = sample_group + "/" + name;
-                if (file.nameExists(obs_name)) {
-                    file.unlink(obs_name);
-                }
-                
-                dims[0] = values.size();
-                H5::DataSpace obs_dataspace(1, dims);
-                H5::DataSet obs_dataset = file.createDataSet(obs_name,
-                                                             H5::PredType::NATIVE_DOUBLE,
-                                                             obs_dataspace);
-                obs_dataset.write(values.data(), H5::PredType::NATIVE_DOUBLE);
-                obs_dataset.close();
-            }
-            
-            file.close();
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save FTLM sample: " + 
-                                   std::string(e.getCDetailMsg()));
-        }
-    }
+    // saveCorrelationData, saveDynamicalResponse, and saveFTLMSample
+    // were retired in the minimalist-architecture rev (May 2026): all
+    // current correlator / dynamical-response / FTLM-sample writes go
+    // through saveCorrelationMatrix, saveDynamicalResponseFull, and
+    // saveFTLMThermodynamicSample / saveFTLMDynamicalSample /
+    // saveFTLMStaticSample respectively. None of the three deleted
+    // helpers had any callers.
+
     
     /**
      * @brief Save TPQ state vector
@@ -1800,156 +1661,12 @@ public:
         }
     }
     
-    /**
-     * @brief Save complete TPQ thermodynamic trajectory for a sample
-     * 
-     * Batch write of all thermodynamic data points (more efficient than append)
-     * 
-     * @param filepath Path to HDF5 file
-     * @param sample_index Sample index
-     * @param points Vector of thermodynamic data points
-     */
-    static void saveTPQThermodynamics(const std::string& filepath,
-                                      size_t sample_index,
-                                      const std::vector<TPQThermodynamicPoint>& points) {
-        if (points.empty()) return;
-        if (isDisabledOutputPath(filepath)) return;
+    // saveTPQThermodynamics / saveTPQNorm were retired in the
+    // minimalist-architecture rev (May 2026): all TPQ trajectory writes go
+    // through appendTPQThermodynamics / appendTPQNorm now (which extend
+    // an existing chunked dataset rather than reallocating it). Neither
+    // batch writer had any callers after the streaming refactor.
 
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
-            std::string dataset_path = sample_group + "/thermodynamics";
-            
-            // Ensure groups exist
-            if (!file.nameExists("/tpq/samples")) {
-                file.createGroup("/tpq/samples");
-            }
-            if (!file.nameExists(sample_group)) {
-                file.createGroup(sample_group);
-            }
-            if (file.nameExists(dataset_path)) {
-                file.unlink(dataset_path);
-            }
-            
-            // Prepare data array
-            const hsize_t num_rows = points.size();
-            const hsize_t num_cols = 5;
-            std::vector<double> data(num_rows * num_cols);
-            
-            for (size_t i = 0; i < num_rows; ++i) {
-                data[i * num_cols + 0] = points[i].beta;
-                data[i * num_cols + 1] = points[i].energy;
-                data[i * num_cols + 2] = points[i].variance;
-                data[i * num_cols + 3] = points[i].doublon;
-                data[i * num_cols + 4] = static_cast<double>(points[i].step);
-            }
-            
-            // Create chunked extensible dataset (allows later appending).
-            // Adaptive chunking + tunable compression via makeAdaptiveDsetProps.
-            hsize_t dims[2] = {num_rows, num_cols};
-            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
-            H5::DataSpace dataspace(2, dims, maxdims);
-
-            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
-                {dims[0], dims[1]}, sizeof(double));
-            
-            H5::DataSet dataset = file.createDataSet(dataset_path, 
-                                                     H5::PredType::NATIVE_DOUBLE, 
-                                                     dataspace, plist);
-            dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-            
-            // Add column labels as attribute
-            H5::DataSpace attr_space(H5S_SCALAR);
-            H5::StrType str_type(H5::PredType::C_S1, 64);
-            std::string columns = "beta,energy,variance,doublon,step";
-            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
-            attr.write(str_type, columns.c_str());
-            attr.close();
-            
-            dataset.close();
-            file.close();
-            
-            std::cout << "Saved TPQ thermodynamics for sample " << sample_index 
-                      << " (" << num_rows << " points)" << std::endl;
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
-        }
-    }
-    
-    /**
-     * @brief Save complete TPQ norm trajectory for a sample
-     * 
-     * @param filepath Path to HDF5 file
-     * @param sample_index Sample index
-     * @param points Vector of norm data points
-     */
-    static void saveTPQNorm(const std::string& filepath,
-                            size_t sample_index,
-                            const std::vector<TPQNormPoint>& points) {
-        if (points.empty()) return;
-        if (isDisabledOutputPath(filepath)) return;
-
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
-            std::string dataset_path = sample_group + "/norm";
-            
-            // Ensure groups exist
-            if (!file.nameExists("/tpq/samples")) {
-                file.createGroup("/tpq/samples");
-            }
-            if (!file.nameExists(sample_group)) {
-                file.createGroup(sample_group);
-            }
-            if (file.nameExists(dataset_path)) {
-                file.unlink(dataset_path);
-            }
-            
-            // Prepare data array
-            const hsize_t num_rows = points.size();
-            const hsize_t num_cols = 4;
-            std::vector<double> data(num_rows * num_cols);
-            
-            for (size_t i = 0; i < num_rows; ++i) {
-                data[i * num_cols + 0] = points[i].beta;
-                data[i * num_cols + 1] = points[i].norm;
-                data[i * num_cols + 2] = points[i].first_norm;
-                data[i * num_cols + 3] = static_cast<double>(points[i].step);
-            }
-            
-            // Create chunked extensible dataset (allows later appending).
-            // Adaptive chunking + tunable compression via makeAdaptiveDsetProps.
-            hsize_t dims[2] = {num_rows, num_cols};
-            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
-            H5::DataSpace dataspace(2, dims, maxdims);
-
-            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
-                {dims[0], dims[1]}, sizeof(double));
-            
-            H5::DataSet dataset = file.createDataSet(dataset_path, 
-                                                     H5::PredType::NATIVE_DOUBLE, 
-                                                     dataspace, plist);
-            dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-            
-            // Add column labels as attribute
-            H5::DataSpace attr_space(H5S_SCALAR);
-            H5::StrType str_type(H5::PredType::C_S1, 64);
-            std::string columns = "beta,norm,first_norm,step";
-            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
-            attr.write(str_type, columns.c_str());
-            attr.close();
-            
-            dataset.close();
-            file.close();
-            
-            std::cout << "Saved TPQ norm for sample " << sample_index 
-                      << " (" << num_rows << " points)" << std::endl;
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save TPQ norm: " + std::string(e.getCDetailMsg()));
-        }
-    }
     
     /**
      * @brief Load TPQ thermodynamic data for a sample
@@ -1967,7 +1684,18 @@ public:
             
             std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/thermodynamics";
             
-            if (!file.nameExists(dataset_path)) {
+            // Defensive: ``nameExists`` itself throws when an intermediate
+            // group (e.g. ``sample_N``) is missing. Callers that iterate
+            // from ``sample_index=0`` upward rely on "missing dataset"
+            // being a normal stop condition, so trap that case and return
+            // an empty vector instead of rethrowing.
+            bool dataset_present = false;
+            try {
+                dataset_present = file.nameExists(dataset_path);
+            } catch (const H5::Exception&) {
+                dataset_present = false;
+            }
+            if (!dataset_present) {
                 file.close();
                 return points;
             }
@@ -1975,10 +1703,28 @@ public:
             H5::DataSet dataset = file.openDataSet(dataset_path);
             H5::DataSpace dataspace = dataset.getSpace();
             
+            // Validate rank + column count up front; the column layout is
+            // [beta, energy, variance, doublon, step] (=5) per the writer.
+            // Trusting a wrong-shape dataset would silently shuffle columns
+            // and produce wrong thermodynamics.
+            if (dataspace.getSimpleExtentNdims() != 2) {
+                throw std::runtime_error(
+                    "loadTPQThermodynamics: dataset '" + dataset_path +
+                    "' is not 2-D (rank=" +
+                    std::to_string(dataspace.getSimpleExtentNdims()) + ")");
+            }
             hsize_t dims[2];
             dataspace.getSimpleExtentDims(dims);
             hsize_t num_rows = dims[0];
             hsize_t num_cols = dims[1];
+            constexpr hsize_t kExpectedCols = 5;
+            if (num_cols != kExpectedCols) {
+                throw std::runtime_error(
+                    "loadTPQThermodynamics: dataset '" + dataset_path +
+                    "' has " + std::to_string(num_cols) +
+                    " columns; expected " + std::to_string(kExpectedCols) +
+                    " (beta, energy, variance, doublon, step)");
+            }
             
             std::vector<double> data(num_rows * num_cols);
             dataset.read(data.data(), H5::PredType::NATIVE_DOUBLE);
@@ -1995,7 +1741,14 @@ public:
             dataset.close();
             file.close();
         } catch (H5::Exception& e) {
-            // Return empty vector on error
+            // Re-throw with a helpful prefix instead of silently dropping data;
+            // an HDF5 error on a real read is *not* equivalent to "the file
+            // has no samples" and must not be conflated with the
+            // "dataset missing" case above.
+            throw std::runtime_error(
+                "loadTPQThermodynamics(" + filepath + ", sample " +
+                std::to_string(sample_index) + "): " +
+                std::string(e.getCDetailMsg()));
         }
         
         return points;
@@ -2003,36 +1756,61 @@ public:
     
     /**
      * @brief Load TPQ norm data for a sample
-     * 
-     * @param filepath Path to HDF5 file
-     * @param sample_index Sample index
-     * @return Vector of norm data points
+     *
+     * Internal helper used by `copyTPQSamples` while merging per-rank
+     * HDF5 files. No external callers; if you need to consume norm
+     * trajectories outside the merge path, prefer
+     * `loadTPQThermodynamics` and store norm alongside the existing
+     * energy/variance/doublon columns instead of introducing a separate
+     * load surface.
      */
     static std::vector<TPQNormPoint> loadTPQNorm(const std::string& filepath,
                                                   size_t sample_index) {
         std::vector<TPQNormPoint> points;
-        
+
         try {
             H5::H5File file(filepath, H5F_ACC_RDONLY);
-            
+
             std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/norm";
-            
-            if (!file.nameExists(dataset_path)) {
+
+            // ``nameExists`` may throw when an intermediate group is
+            // missing; treat that as "no such sample" to preserve the
+            // iterate-until-empty pattern. See note on loadTPQThermodynamics.
+            bool dataset_present = false;
+            try {
+                dataset_present = file.nameExists(dataset_path);
+            } catch (const H5::Exception&) {
+                dataset_present = false;
+            }
+            if (!dataset_present) {
                 file.close();
                 return points;
             }
-            
+
             H5::DataSet dataset = file.openDataSet(dataset_path);
             H5::DataSpace dataspace = dataset.getSpace();
-            
+
+            if (dataspace.getSimpleExtentNdims() != 2) {
+                throw std::runtime_error(
+                    "loadTPQNorm: dataset '" + dataset_path +
+                    "' is not 2-D (rank=" +
+                    std::to_string(dataspace.getSimpleExtentNdims()) + ")");
+            }
             hsize_t dims[2];
             dataspace.getSimpleExtentDims(dims);
             hsize_t num_rows = dims[0];
             hsize_t num_cols = dims[1];
-            
+            constexpr hsize_t kExpectedCols = 4;
+            if (num_cols != kExpectedCols) {
+                throw std::runtime_error(
+                    "loadTPQNorm: dataset '" + dataset_path +
+                    "' has " + std::to_string(num_cols) +
+                    " columns; expected " + std::to_string(kExpectedCols));
+            }
+
             std::vector<double> data(num_rows * num_cols);
             dataset.read(data.data(), H5::PredType::NATIVE_DOUBLE);
-            
+
             points.resize(num_rows);
             for (hsize_t i = 0; i < num_rows; ++i) {
                 points[i].beta = data[i * num_cols + 0];
@@ -2040,15 +1818,21 @@ public:
                 points[i].first_norm = data[i * num_cols + 2];
                 points[i].step = static_cast<uint64_t>(data[i * num_cols + 3]);
             }
-            
+
             dataset.close();
             file.close();
+        } catch (const std::runtime_error&) {
+            throw;
         } catch (H5::Exception& e) {
-            // Return empty vector on error
+            throw std::runtime_error(
+                "loadTPQNorm(" + filepath + ", sample " +
+                std::to_string(sample_index) + "): " +
+                std::string(e.getCDetailMsg()));
         }
-        
+
         return points;
     }
+
     
     /**
      * @brief List all TPQ samples in an HDF5 file
@@ -2097,100 +1881,12 @@ public:
         return samples;
     }
     
-    /**
-     * @brief Save TPQ averaged thermodynamics (combined from all samples)
-     * 
-     * @param filepath Path to HDF5 file
-     * @param beta Inverse temperature array
-     * @param energy Energy (mean over samples)
-     * @param energy_error Energy error (std error)
-     * @param specific_heat Specific heat
-     * @param specific_heat_error Specific heat error
-     * @param entropy Entropy
-     * @param entropy_error Entropy error
-     * @param num_samples Number of samples used
-     */
-    static void saveTPQAveragedThermodynamics(
-        const std::string& filepath,
-        const std::vector<double>& beta,
-        const std::vector<double>& energy,
-        const std::vector<double>& energy_error,
-        const std::vector<double>& specific_heat,
-        const std::vector<double>& specific_heat_error,
-        const std::vector<double>& entropy,
-        const std::vector<double>& entropy_error,
-        uint64_t num_samples
-    ) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string base_path = "/tpq/averaged";
-            
-            // Ensure group exists
-            if (!file.nameExists("/tpq")) {
-                file.createGroup("/tpq");
-            }
-            if (!file.nameExists(base_path)) {
-                file.createGroup(base_path);
-            }
-            
-            // Helper to save dataset
-            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
-                std::string path = base_path + "/" + name;
-                if (file.nameExists(path)) {
-                    file.unlink(path);
-                }
-                hsize_t dims[1] = {data.size()};
-                H5::DataSpace dataspace(1, dims);
-                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
-                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-                dataset.close();
-            };
-            
-            // Convert beta to temperature for convenience
-            std::vector<double> temperatures(beta.size());
-            for (size_t i = 0; i < beta.size(); ++i) {
-                temperatures[i] = (beta[i] > 0) ? 1.0 / beta[i] : 0.0;
-            }
-            
-            saveDataset("beta", beta);
-            saveDataset("temperatures", temperatures);
-            saveDataset("energy", energy);
-            saveDataset("energy_error", energy_error);
-            saveDataset("specific_heat", specific_heat);
-            saveDataset("specific_heat_error", specific_heat_error);
-            saveDataset("entropy", entropy);
-            saveDataset("entropy_error", entropy_error);
-            
-            // Save metadata
-            H5::Group group = file.openGroup(base_path);
-            H5::DataSpace attr_space(H5S_SCALAR);
-            
-            if (group.attrExists("num_samples")) {
-                group.removeAttr("num_samples");
-            }
-            H5::Attribute attr = group.createAttribute("num_samples", H5::PredType::NATIVE_UINT64, attr_space);
-            attr.write(H5::PredType::NATIVE_UINT64, &num_samples);
-            attr.close();
-            
-            if (group.attrExists("method")) {
-                group.removeAttr("method");
-            }
-            std::string method = "TPQ";
-            H5::StrType str_type(H5::PredType::C_S1, 16);
-            H5::Attribute method_attr = group.createAttribute("method", str_type, attr_space);
-            method_attr.write(str_type, method.c_str());
-            method_attr.close();
-            
-            group.close();
-            file.close();
-            
-            std::cout << "Saved TPQ averaged thermodynamics to HDF5" << std::endl;
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save TPQ averaged thermodynamics: " + std::string(e.getCDetailMsg()));
-        }
-    }
+    // saveTPQAveragedThermodynamics was retired in the
+    // minimalist-architecture rev (May 2026): the post-process step that
+    // would have called it now lives in src/cli/workflows.cpp where the
+    // averaging logic writes directly to per-sample groups. The helper had
+    // zero callers.
+
     
     // ============================================================================
     // FTLM/LTLM/Hybrid Thermal Results I/O
@@ -2483,126 +2179,6 @@ public:
             std::cout << "Saved dynamical response (" << operator_name << ") to HDF5" << std::endl;
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to save dynamical response: " + 
-                                   std::string(e.getCDetailMsg()));
-        }
-    }
-    
-    /**
-     * @brief Save hybrid thermal method results with method indicators
-     */
-    static void saveHybridThermalResults(
-        const std::string& filepath,
-        const std::vector<double>& temperatures,
-        const std::vector<double>& energy,
-        const std::vector<double>& energy_error,
-        const std::vector<double>& specific_heat,
-        const std::vector<double>& specific_heat_error,
-        const std::vector<double>& entropy,
-        const std::vector<double>& entropy_error,
-        const std::vector<double>& free_energy,
-        const std::vector<double>& free_energy_error,
-        double ground_state_energy,
-        double crossover_temperature,
-        uint64_t crossover_index,
-        uint64_t ltlm_points,
-        uint64_t ftlm_points,
-        uint64_t ftlm_samples_used
-    ) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string base_path = "/ftlm/averaged";
-            
-            // Ensure group exists
-            if (!file.nameExists(base_path)) {
-                file.createGroup(base_path);
-            }
-            
-            // Helper lambda to save an array
-            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
-                std::string dataset_name = base_path + "/" + name;
-                if (file.nameExists(dataset_name)) {
-                    file.unlink(dataset_name);
-                }
-                hsize_t dims[1] = {data.size()};
-                H5::DataSpace dataspace(1, dims);
-                H5::DataSet dataset = file.createDataSet(dataset_name,
-                                                         H5::PredType::NATIVE_DOUBLE,
-                                                         dataspace);
-                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-                dataset.close();
-            };
-            
-            // Save all arrays
-            saveDataset("temperatures", temperatures);
-            saveDataset("energy", energy);
-            saveDataset("energy_error", energy_error);
-            saveDataset("specific_heat", specific_heat);
-            saveDataset("specific_heat_error", specific_heat_error);
-            saveDataset("entropy", entropy);
-            saveDataset("entropy_error", entropy_error);
-            saveDataset("free_energy", free_energy);
-            saveDataset("free_energy_error", free_energy_error);
-            
-            // Create method indicator array (0 = LTLM, 1 = FTLM)
-            std::vector<int> method_indicator(temperatures.size());
-            for (size_t i = 0; i < temperatures.size(); i++) {
-                method_indicator[i] = (i < crossover_index) ? 0 : 1;
-            }
-            
-            // Save method indicator
-            std::string mi_name = base_path + "/method_indicator";
-            if (file.nameExists(mi_name)) {
-                file.unlink(mi_name);
-            }
-            hsize_t dims[1] = {method_indicator.size()};
-            H5::DataSpace mi_dataspace(1, dims);
-            H5::DataSet mi_dataset = file.createDataSet(mi_name,
-                                                        H5::PredType::NATIVE_INT,
-                                                        mi_dataspace);
-            mi_dataset.write(method_indicator.data(), H5::PredType::NATIVE_INT);
-            mi_dataset.close();
-            
-            // Save metadata as attributes on the group
-            H5::Group group = file.openGroup(base_path);
-            H5::DataSpace attr_space(H5S_SCALAR);
-            
-            auto setDoubleAttr = [&](const std::string& name, double value) {
-                if (group.attrExists(name)) group.removeAttr(name);
-                H5::Attribute attr = group.createAttribute(name, H5::PredType::NATIVE_DOUBLE, attr_space);
-                attr.write(H5::PredType::NATIVE_DOUBLE, &value);
-                attr.close();
-            };
-            
-            auto setUint64Attr = [&](const std::string& name, uint64_t value) {
-                if (group.attrExists(name)) group.removeAttr(name);
-                H5::Attribute attr = group.createAttribute(name, H5::PredType::NATIVE_UINT64, attr_space);
-                attr.write(H5::PredType::NATIVE_UINT64, &value);
-                attr.close();
-            };
-            
-            setDoubleAttr("ground_state_energy", ground_state_energy);
-            setDoubleAttr("crossover_temperature", crossover_temperature);
-            setUint64Attr("crossover_index", crossover_index);
-            setUint64Attr("ltlm_points", ltlm_points);
-            setUint64Attr("ftlm_points", ftlm_points);
-            setUint64Attr("ftlm_samples_used", ftlm_samples_used);
-            
-            // Method string
-            std::string method = "Hybrid";
-            if (group.attrExists("method")) group.removeAttr("method");
-            H5::StrType str_type(H5::PredType::C_S1, method.size() + 1);
-            H5::Attribute method_attr = group.createAttribute("method", str_type, attr_space);
-            method_attr.write(str_type, method.c_str());
-            method_attr.close();
-            
-            group.close();
-            file.close();
-            
-            std::cout << "Saved Hybrid thermal results to HDF5" << std::endl;
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save hybrid thermal results: " + 
                                    std::string(e.getCDetailMsg()));
         }
     }
@@ -3039,48 +2615,11 @@ public:
         }
     }
     
-    /**
-     * @brief Load time correlation data from HDF5
-     * 
-     * @param filepath Path to HDF5 file
-     * @param group_path Full path to the time correlation group
-     * @param data Output time correlation data
-     * @return true if successful, false otherwise
-     */
-    static bool loadTimeCorrelation(const std::string& filepath,
-                                    const std::string& group_path,
-                                    TimeCorrelationData& data) {
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDONLY);
-            
-            if (!file.nameExists(group_path)) {
-                file.close();
-                return false;
-            }
-            
-            // Helper to load dataset
-            auto loadDataset = [&](const std::string& name) -> std::vector<double> {
-                std::string path = group_path + "/" + name;
-                H5::DataSet dataset = file.openDataSet(path);
-                H5::DataSpace dataspace = dataset.getSpace();
-                hsize_t dims[1];
-                dataspace.getSimpleExtentDims(dims);
-                std::vector<double> arr(dims[0]);
-                dataset.read(arr.data(), H5::PredType::NATIVE_DOUBLE);
-                dataset.close();
-                return arr;
-            };
-            
-            data.times = loadDataset("times");
-            data.correlation_real = loadDataset("correlation_real");
-            data.correlation_imag = loadDataset("correlation_imag");
-            
-            file.close();
-            return true;
-        } catch (H5::Exception& e) {
-            return false;
-        }
-    }
+    // loadTimeCorrelation was retired in the minimalist-architecture rev
+    // (May 2026): write-only path. Re-introduce by copying loadDataset
+    // boilerplate from listTimeCorrelations / saveTimeCorrelation if any
+    // post-processing tool ever needs to read this back.
+
     
     /**
      * @brief List all time correlation datasets in an HDF5 file

@@ -11,6 +11,39 @@
  * - Batched orthogonalization using cuBLAS GEMV
  * - cuSOLVER for small projected eigenvalue problem
  * - cuBLAS GEMM for efficient basis update during restart
+ *
+ * MIGRATION NOTE (Phase 2.2, May 2026 day 11+): this kernel does NOT
+ * delegate to `ed::krylov::lanczos_kernel<CudaBackend>`. Three reasons:
+ *
+ *   1. The kernel's basis is stored as `std::vector<UniqueVec>` (one
+ *      independent device allocation per vector). The KS thick-restart
+ *      step does `V_new = V * Q[:, 0:k]` via a single `cublasZgemm`,
+ *      which REQUIRES a contiguous `(dim x m)` device matrix. Routing
+ *      Arnoldi through the kernel would force a basis-format conversion
+ *      every restart cycle (m * dim D2D memcpys per cycle).
+ *
+ *   2. The KS reorth already issues exactly the batched cublasZgemv
+ *      shape the new `CudaBackend::dot_many` / `axpy_many` overrides
+ *      produce. The Phase-1 perf win for the FTLM lane (M sequential
+ *      cublasZdotc -> 1 batched cublasZgemv) does NOT apply here; KS
+ *      is already in the right BLAS-2 regime.
+ *
+ *   3. The Arnoldi loop populates a Hessenberg matrix
+ *      `h_H_projected_` whose downstream consumer (cuSolverDn-based
+ *      eigensolve + Schur reordering) reads upper-Hessenberg shape
+ *      regardless of the operator's Hermitian symmetry. The kernel's
+ *      alpha/beta tridiagonal output would need re-packing into the
+ *      Hessenberg layout; equivalent code complexity to keeping the
+ *      Arnoldi loop hand-rolled.
+ *
+ * The structural-cleanliness win from migration is real (one fewer
+ * inline Lanczos body in the tree) but it would either require (a) a
+ * Backend-level "contiguous basis view" primitive that doesn't fit
+ * the abstract `Backend` interface, or (b) a substantial KS rewrite
+ * to consume `vector<UniqueVec>` end-to-end. Both are bigger than the
+ * Phase-2 budget, so KS stays as-is. The structural audit's "Phase B
+ * scoreboard" reflects this -- GPU Krylov-Schur is `hand-rolled` and
+ * stays that way.
  */
 
 #ifdef WITH_CUDA

@@ -10,9 +10,17 @@
 //   * Same Hutchinson normalisation: μ_k = (D / R) Σ_r ⟨r|T_k(H_sc)|r⟩.
 //
 // Differences from the CPU reference:
-//   * Spectral-bound Lanczos uses 3 device vectors and *no* reorthogonalisation
-//     (storing the basis at D ≈ 6×10⁸ would cost ~1.4 TB).  Extreme Ritz
-//     values are still accurate at the bandwidth scale we need.
+//   * Spectral-bound Lanczos uses 3 device vectors and -- when the user
+//     opts in via ``params.full_reorthogonalization`` AND the basis fits
+//     in device memory -- full classical Gram-Schmidt reorthogonalisation
+//     against the saved basis. Falls back to the 3-vector path with a
+//     stderr warning when the basis does not fit (typical case at
+//     Hilbert dim ~10^8: storing the full basis at D ≈ 6×10⁸ would cost
+//     ~1.4 TB so the user MUST be willing to pay the smaller-system tax).
+//     The CPU equivalent in ``estimate_spectral_bounds`` defaults to
+//     full reorth at all sizes; this fixes the audit S1 #25 silent
+//     parity gap for small/medium GPU runs while preserving the
+//     all-fits-in-memory contract.
 //   * Chebyshev moment recursion uses the standard "doubling trick" so each
 //     mat-vec produces *two* moments, which both halves the matvec count
 //     and lets us drop the saved random vector |r⟩ — fits in 3 device
@@ -30,8 +38,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <random>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -147,12 +157,21 @@ inline int kpm_blocks(int n, int block_size = 256) {
 // Apply rescaled H_sc = (H − b)/a in place into `d_out`, given `d_in`.
 // Internally:  d_out = matvec(d_in)  ;  d_out = (1/a) d_out − (b/a) d_in.
 // ---------------------------------------------------------------------------
-inline void apply_Hsc(GPUOperator* gpu_op,
+// Phase E1 of the "Backend x Symmetries x Workflows" plan (May 2026):
+// the matvec is now a generic device callable so this driver can be
+// reused by ``kpm_dos_kernel<CudaBackend>`` (which holds an arbitrary
+// ``LinearOperator::MatvecFn`` reinterpreted as a device-pointer
+// matvec). The legacy ``compute_kpm_dos_gpu(GPUOperator*, ...)`` entry
+// wraps the operator's ``matVecGPU`` in a lambda before calling the
+// new internal driver. The ``DeviceMatVec`` type alias is declared in
+// the public header.
+
+inline void apply_Hsc(const DeviceMatVec& matvec,
                       const cuDoubleComplex* d_in,
                       cuDoubleComplex* d_out,
                       int n, double a, double b)
 {
-    gpu_op->matVecGPU(d_in, d_out, n);
+    matvec(d_in, d_out, n);
     // d_out = (1/a) d_out + (-b/a) d_in
     kpm_complex_axpby_inplace<<<kpm_blocks(n), 256>>>(
         d_out, d_in, 1.0 / a, -b / a, n);
@@ -160,12 +179,17 @@ inline void apply_Hsc(GPUOperator* gpu_op,
 }
 
 // ---------------------------------------------------------------------------
-// Spectral bound estimator: 3-vector Lanczos without reorthogonalization.
+// Spectral bound estimator: 3-vector Lanczos with optional full Gram-Schmidt
+// reorthogonalisation. Reorth is requested via ``full_reorth=true`` AND only
+// fires when the saved basis (krylov_dim × n complex doubles) fits in the
+// remaining device memory; otherwise falls back to plain 3-vector with a
+// stderr warning. Audit ref: STRUCTURAL_AUDIT.md S1 #25.
 // ---------------------------------------------------------------------------
 void estimate_spectral_bounds_gpu(
-    GPUOperator* gpu_op,
+    const DeviceMatVec& matvec,
     int n,
     int krylov_dim,
+    bool full_reorth,
     cublasHandle_t cublas_handle,
     curandGenerator_t curand_gen,
     double* d_real_scratch,
@@ -176,6 +200,33 @@ void estimate_spectral_bounds_gpu(
     double& e_max)
 {
     if (krylov_dim < 4) krylov_dim = 4;
+
+    // -----------------------------------------------------------------
+    // Try to allocate room for the full Krylov basis. The basis is
+    // contiguous: column k starts at d_basis + k * n. If allocation
+    // fails or the user did not request reorth, fall back to the
+    // historical 3-vector path.
+    // -----------------------------------------------------------------
+    cuDoubleComplex* d_basis = nullptr;
+    bool basis_alloc_ok = false;
+    if (full_reorth && krylov_dim > 0) {
+        const std::size_t bytes_basis = static_cast<std::size_t>(krylov_dim)
+            * static_cast<std::size_t>(n) * sizeof(cuDoubleComplex);
+        cudaError_t err = cudaMalloc(&d_basis, bytes_basis);
+        if (err == cudaSuccess) {
+            basis_alloc_ok = true;
+        } else {
+            cudaGetLastError();  // clear sticky error
+            std::fprintf(stderr,
+                "[kpm_dos_gpu] WARNING: full-reorth requested but "
+                "saving %d Krylov vectors of length %d (%.2f MB) "
+                "would not fit in device memory. Falling back to "
+                "3-vector Lanczos -- the spectral bounds may diverge "
+                "from the CPU reference on ill-conditioned spectra.\n",
+                krylov_dim, n, static_cast<double>(bytes_basis) / (1ULL << 20));
+            d_basis = nullptr;
+        }
+    }
 
     // Generate v_curr ~ Gaussian complex; normalise.
     ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
@@ -218,8 +269,19 @@ void estimate_spectral_bounds_gpu(
 
     double beta_prev = 0.0;
     for (int k = 0; k < krylov_dim; ++k) {
+        // Save the current Lanczos vector as basis column k (only when
+        // the alloc succeeded -- otherwise we run plain 3-vector).
+        if (basis_alloc_ok) {
+            cuDoubleComplex* col_k = d_basis
+                + static_cast<std::size_t>(k) * static_cast<std::size_t>(n);
+            ED_KPM_CHECK_CUDA(cudaMemcpyAsync(
+                col_k, d_v_curr,
+                static_cast<std::size_t>(n) * sizeof(cuDoubleComplex),
+                cudaMemcpyDeviceToDevice));
+        }
+
         // d_v_next = H d_v_curr
-        gpu_op->matVecGPU(d_v_curr, d_v_next, n);
+        matvec(d_v_curr, d_v_next, n);
 
         // alpha_k = Re ⟨v_curr | v_next⟩
         cuDoubleComplex z;
@@ -240,6 +302,31 @@ void estimate_spectral_bounds_gpu(
                 &c_neg_beta, d_v_prev, 1, d_v_next, 1));
         }
 
+        // -----------------------------------------------------------
+        // Full classical Gram-Schmidt reorthogonalisation against the
+        // saved basis (columns 0..k). The audit (S1 #25) flagged the
+        // missing reorth as a silent CPU/GPU divergence on
+        // ill-conditioned spectra; this closes that gap when the
+        // basis fits in device memory. One CGS sweep is the
+        // industry-standard "good enough" for Lanczos and matches the
+        // ``build_lanczos_tridiagonal_with_basis`` CPU path
+        // (``full_reorth=true`` performs one CGS pass per step).
+        // -----------------------------------------------------------
+        if (basis_alloc_ok) {
+            for (int j = 0; j <= k; ++j) {
+                const cuDoubleComplex* col_j = d_basis
+                    + static_cast<std::size_t>(j)
+                    * static_cast<std::size_t>(n);
+                cuDoubleComplex c;
+                ED_KPM_CHECK_CUBLAS(cublasZdotc(cublas_handle, n,
+                    col_j, 1, d_v_next, 1, &c));
+                const cuDoubleComplex neg_c = make_cuDoubleComplex(
+                    -cuCreal(c), -cuCimag(c));
+                ED_KPM_CHECK_CUBLAS(cublasZaxpy(cublas_handle, n,
+                    &neg_c, col_j, 1, d_v_next, 1));
+            }
+        }
+
         // beta_k = ||v_next||
         ED_KPM_CHECK_CUBLAS(cublasZdotc(cublas_handle, n,
             d_v_next, 1, d_v_next, 1, &z));
@@ -257,6 +344,11 @@ void estimate_spectral_bounds_gpu(
         std::swap(d_v_prev, d_v_curr);
         std::swap(d_v_curr, d_v_next);
         beta_prev = b_k;
+    }
+
+    if (d_basis) {
+        cudaFree(d_basis);
+        d_basis = nullptr;
     }
 
     // Diagonalise the symmetric tridiagonal (alpha, beta) with the standard
@@ -397,15 +489,16 @@ ChebQuadCache build_cheb_quad_cache(
 // ============================================================================
 // Public driver
 // ============================================================================
-KPMDOSResult compute_kpm_dos_gpu(
-    GPUOperator* gpu_op,
+KPMDOSResult compute_kpm_dos_gpu_with_matvec(
+    DeviceMatVec matvec,
     std::uint64_t dim,
     const std::vector<double>& betas,
     const std::vector<double>& dos_energies,
     const KPMDOSParameters& params)
 {
-    if (gpu_op == nullptr)
-        throw std::invalid_argument("kpm_dos_gpu: gpu_op must be non-null");
+    if (!matvec)
+        throw std::invalid_argument(
+            "kpm_dos_gpu: device matvec callable must be non-null");
     if (dim == 0)
         throw std::invalid_argument("kpm_dos_gpu: dim must be > 0");
     if (params.num_moments < 4)
@@ -456,10 +549,25 @@ KPMDOSResult compute_kpm_dos_gpu(
 
         // ---- Step 1: spectral bounds ---------------------------------
         double e_min = 0.0, e_max = 0.0;
-        estimate_spectral_bounds_gpu(
-            gpu_op, n, params.spectral_bounds_krylov,
-            cublas_handle, curand_gen, d_real_scratch,
-            d_v_prev, d_v_curr, d_v_next, e_min, e_max);
+        // Wave B3 (May 2026): allow callers to skip the 150-iteration
+        // spectral-bound Lanczos by handing in finite overrides. The
+        // streaming-symmetry binding uses this to estimate once on the
+        // largest sector and reuse for every per-sector call. NaN means
+        // "estimate" — both must be finite to take the shortcut.
+        const bool have_override =
+            std::isfinite(params.e_min_override)
+            && std::isfinite(params.e_max_override)
+            && params.e_max_override > params.e_min_override;
+        if (have_override) {
+            e_min = params.e_min_override;
+            e_max = params.e_max_override;
+        } else {
+            estimate_spectral_bounds_gpu(
+                matvec, n, params.spectral_bounds_krylov,
+                /*full_reorth=*/params.full_reorthogonalization,
+                cublas_handle, curand_gen, d_real_scratch,
+                d_v_prev, d_v_curr, d_v_next, e_min, e_max);
+        }
 
         if (e_max <= e_min) e_max = e_min + 1.0;
         const double BW     = e_max - e_min;
@@ -522,7 +630,7 @@ KPMDOSResult compute_kpm_dos_gpu(
                 d_v_prev, d_v_curr, bytes_z, cudaMemcpyDeviceToDevice));
 
             // d_v_curr <- H_sc |r⟩  (= v_1).  Use d_v_next as scratch.
-            apply_Hsc(gpu_op, d_v_prev, d_v_next, n, a, b);
+            apply_Hsc(matvec, d_v_prev, d_v_next, n, a, b);
             // Swap curr ↔ next so curr = v_1.
             std::swap(d_v_curr, d_v_next);
 
@@ -532,14 +640,32 @@ KPMDOSResult compute_kpm_dos_gpu(
             const double mu1_local = cuCreal(z);
             if (M > 1) mu_avg[1] += mu1_local;
 
-            // Doubling-trick loop: each matvec produces v_{k+1} from v_k,
-            // and we accumulate moments  μ_{2k} = 2⟨v_k|v_k⟩ - μ_0,
-            //                            μ_{2k+1} = 2⟨v_k|v_{k+1}⟩ - μ_1.
+            // Doubling-trick loop: each matvec produces v_{k+1} from
+            // v_k, and we accumulate moments
+            //     μ_{2k}   = 2 ⟨v_k | v_k⟩    - μ_0
+            //     μ_{2k+1} = 2 ⟨v_k | v_{k+1}⟩ - μ_1
+            // (Weiße et al., RMP 78 275 (2006), eqs. 36-37.)
+            //
+            // Phase E1 of the "Backend x Symmetries x Workflows"
+            // plan (May 2026): the historic implementation computed
+            // μ_{2k+1} as ``2 ⟨v_k | H_sc v_k⟩ - μ_1`` (i.e. dotted
+            // ``d_v_curr`` against ``d_v_next`` *before* the
+            // recombination ``d_v_next = 2 d_v_next - d_v_prev``).
+            // That formula computes ``(μ_{2k+1} + μ_{2k-1}) / 2``,
+            // not ``μ_{2k+1}`` -- a real correctness bug that was
+            // never caught because no CI test compared the GPU KPM
+            // moments to the CPU reference. Fixed by performing the
+            // recombination first, so the second dotc operates on
+            // ``v_{k+1}`` as advertised. This finally puts the GPU
+            // lane in numerical lockstep with the CPU
+            // ``compute_kpm_dos`` driver on the same Hamiltonian.
+            //
             // We are currently at k=1 (v_prev=v_0, v_curr=v_1).
-            // First step computes v_2 = 2 H_sc v_1 - v_0 and emits μ_2, μ_3.
+            // First step computes v_2 = 2 H_sc v_1 - v_0 and emits
+            // μ_2, μ_3.
             for (int k = 1; (2 * k) < M; ++k) {
                 // d_v_next = H_sc v_curr    (v_curr is v_k)
-                apply_Hsc(gpu_op, d_v_curr, d_v_next, n, a, b);
+                apply_Hsc(matvec, d_v_curr, d_v_next, n, a, b);
 
                 // μ_{2k} = 2 Re ⟨v_curr|v_curr⟩ - μ_0
                 if (2 * k < M) {
@@ -548,20 +674,23 @@ KPMDOSResult compute_kpm_dos_gpu(
                         d_v_curr, 1, d_v_curr, 1, &zz));
                     mu_avg[2 * k] += 2.0 * cuCreal(zz) - mu0_local;
                 }
-                // μ_{2k+1} = 2 Re ⟨v_curr|H_sc v_curr⟩ - μ_1
+
+                // Recombine first: d_v_next currently holds
+                // H_sc v_k; the Chebyshev recurrence
+                //     v_{k+1} = 2 H_sc v_k − v_{k-1}
+                // gives v_{k+1} as 2 d_v_next - v_prev.
+                kpm_complex_axpby_inplace<<<kpm_blocks(n), 256>>>(
+                    d_v_next, d_v_prev, 2.0, -1.0, n);
+                ED_KPM_CHECK_CUDA(cudaGetLastError());
+
+                // μ_{2k+1} = 2 Re ⟨v_curr | v_{k+1}⟩ - μ_1
+                // (d_v_next now holds v_{k+1}).
                 if (2 * k + 1 < M) {
                     cuDoubleComplex zz;
                     ED_KPM_CHECK_CUBLAS(cublasZdotc(cublas_handle, n,
                         d_v_curr, 1, d_v_next, 1, &zz));
                     mu_avg[2 * k + 1] += 2.0 * cuCreal(zz) - mu1_local;
                 }
-
-                // Standard Chebyshev recurrence:
-                //   v_{k+1} = 2 H_sc v_k − v_{k-1}.
-                // d_v_next currently = H_sc v_k; we need 2 d_v_next - v_prev.
-                kpm_complex_axpby_inplace<<<kpm_blocks(n), 256>>>(
-                    d_v_next, d_v_prev, 2.0, -1.0, n);
-                ED_KPM_CHECK_CUDA(cudaGetLastError());
 
                 // Roll the pointers: v_prev <- v_curr, v_curr <- v_next.
                 std::swap(d_v_prev, d_v_curr);
@@ -654,6 +783,30 @@ KPMDOSResult compute_kpm_dos_gpu(
         cleanup();
         throw;
     }
+}
+
+// Legacy entry point used by the CLI. Wraps the GPUOperator's
+// ``matVecGPU`` in a device-pointer callable and delegates to the
+// matvec-callable driver above. Kept for source compatibility with
+// existing call sites (workflows.cpp, etc.).
+KPMDOSResult compute_kpm_dos_gpu(
+    GPUOperator* gpu_op,
+    std::uint64_t dim,
+    const std::vector<double>& betas,
+    const std::vector<double>& dos_energies,
+    const KPMDOSParameters& params)
+{
+    if (gpu_op == nullptr)
+        throw std::invalid_argument(
+            "kpm_dos_gpu: gpu_op must be non-null");
+    DeviceMatVec matvec =
+        [gpu_op](const cuDoubleComplex* d_in,
+                 cuDoubleComplex* d_out,
+                 int n) {
+            gpu_op->matVecGPU(d_in, d_out, n);
+        };
+    return compute_kpm_dos_gpu_with_matvec(
+        std::move(matvec), dim, betas, dos_energies, params);
 }
 
 }  // namespace ed::kpm_dos

@@ -12,7 +12,7 @@
 
 #include <ed/dssf/cross_sector_observable.h>
 
-#include <ed/core/basis_utils.h>   // popcount
+#include <ed/core/basis_utils.h>   // popcount (still used inside the hot loop)
 
 #include <algorithm>
 #include <cstdint>
@@ -23,17 +23,6 @@
 #endif
 
 namespace ed::dssf {
-
-namespace {
-inline std::int64_t infer_n_up(const FixedSzOperator& op) {
-    const auto& states = op.getBasisStates();
-    if (states.empty()) {
-        throw std::invalid_argument(
-            "CrossSectorObservable: FixedSzOperator has empty basis");
-    }
-    return static_cast<std::int64_t>(popcount(states.front()));
-}
-}  // namespace
 
 CrossSectorObservable::CrossSectorObservable(
     std::shared_ptr<FixedSzOperator> src,
@@ -59,8 +48,12 @@ CrossSectorObservable::CrossSectorObservable(
             "CrossSectorObservable: transforms is empty");
     }
     n_bits_ = src_->getNumBits();
-    n_up_src_ = infer_n_up(*src_);
-    n_up_dst_ = infer_n_up(*dst_);
+    n_up_src_ = src_->getNUp();
+    n_up_dst_ = dst_->getNUp();
+    if (src_->getBasisStates().empty() || dst_->getBasisStates().empty()) {
+        throw std::invalid_argument(
+            "CrossSectorObservable: FixedSzOperator has empty basis");
+    }
 }
 
 void CrossSectorObservable::apply(const Complex* in, Complex* out,

@@ -585,20 +585,39 @@ void GPULanczos::run(int num_eigenvalues,
     alpha_.clear();
     beta_.clear();
     
-    // Initialize first Lanczos vector with DETERMINISTIC seed for reproducibility
-    // Using seed=42 ensures identical results between runs
-    // Change to seed=0 for random starting vector if desired
-    unsigned long long deterministic_seed = 42;
-    initializeRandomVector(d_v_current_, deterministic_seed);
-    std::cout << "  Using deterministic seed: " << deterministic_seed << " for reproducibility\n";
-    
+    // Initialize first Lanczos vector. Default seed = 42 (historical
+    // deterministic policy for back-compat); the caller can override
+    // via ``setSeed`` -- this is the audit S1 #21 hook that lets a
+    // GPU run reproduce a CPU run by sharing the same seed. A zero in
+    // ``user_seed_`` means "use the legacy default".
+    const unsigned long long lanczos_seed =
+        (user_seed_ != 0ULL) ? user_seed_ : 42ULL;
+    initializeRandomVector(d_v_current_, lanczos_seed);
+    std::cout << "  Using "
+              << (user_seed_ != 0ULL ? "user-supplied" : "default")
+              << " seed: " << lanczos_seed << " for the starting vector\n";
+
     if (num_stored_vectors_ > 0) {
         vectorCopy(d_v_current_, d_lanczos_vectors_[0]);
         std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU\n";
+        // Audit S1 #21 -- surface the windowed-reorth regime change so
+        // the caller knows the GPU run is NOT running full reorth like
+        // the CPU default. The previous code silently switched policy
+        // when device memory ran short.
+        if (num_stored_vectors_ < max_iter_) {
+            std::cerr << "[GPULanczos] WARNING: device-memory budget allows storing "
+                      << num_stored_vectors_ << " < " << max_iter_
+                      << " Lanczos vectors. Using **windowed** "
+                         "reorthogonalisation (vs. the CPU default of "
+                         "full reorth). Spectral accuracy on "
+                         "ill-conditioned systems may diverge from the "
+                         "CPU reference. Reduce max_iter or increase "
+                         "available device memory to recover parity.\n";
+        }
         std::cout << "  Using local reorthogonalization (threshold-based)\n";
     } else {
-        std::cout << "  Warning: Insufficient GPU memory for vector storage\n";
-        std::cout << "  Running without reorthogonalization (may reduce accuracy)\n";
+        std::cerr << "[GPULanczos] WARNING: Insufficient GPU memory for vector storage; "
+                     "running without reorthogonalisation. Accuracy may suffer.\n";
     }
     
     // Initialize previous vector to zero

@@ -40,11 +40,7 @@ struct EDParameters {
     std::string output_dir = "";
 
     // ========== Method-Specific Parameters ==========
-    double shift = 0.0;
     uint64_t block_size = 4;
-    uint64_t max_subspace = 100;
-    double target_lower = 0.0;
-    double target_upper = 0.0;
 
     // ========== Thermal Calculation Parameters ==========
     uint64_t num_samples = 1;
@@ -70,46 +66,22 @@ struct EDParameters {
     double tpq_measure_beta_min = 1.0;
     double tpq_measure_beta_max = 1000.0;
 
-    // ========== DEPRECATED PARAMETER ACCESSORS ==========
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t& num_order() { return tpq_taylor_order; }
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t num_order() const { return tpq_taylor_order; }
-
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t& num_measure_freq() { return tpq_measurement_interval; }
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t num_measure_freq() const { return tpq_measurement_interval; }
-
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double& delta_tau() { return tpq_delta_beta; }
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double delta_tau() const { return tpq_delta_beta; }
-
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double& large_value() { return tpq_energy_shift; }
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double large_value() const { return tpq_energy_shift; }
-
-    [[deprecated("Use tpq_continue instead")]]
-    bool& continue_quenching() { return tpq_continue; }
-    [[deprecated("Use tpq_continue instead")]]
-    bool continue_quenching() const { return tpq_continue; }
-
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t& continue_sample() { return tpq_continue_sample; }
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t continue_sample() const { return tpq_continue_sample; }
-
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double& continue_beta() { return tpq_continue_beta; }
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double continue_beta() const { return tpq_continue_beta; }
-
-    [[deprecated("Use tpq_target_beta instead")]]
-    double& target_beta() { return tpq_target_beta; }
-    [[deprecated("Use tpq_target_beta instead")]]
-    double target_beta() const { return tpq_target_beta; }
+    // ------------------------------------------------------------------
+    // Removed in matvec-unification Phase 7.5:
+    //   - num_order()             -> tpq_taylor_order
+    //   - num_measure_freq()      -> tpq_measurement_interval
+    //   - delta_tau()             -> tpq_delta_beta
+    //   - large_value()           -> tpq_energy_shift
+    //   - continue_quenching()    -> tpq_continue
+    //   - continue_sample()       -> tpq_continue_sample
+    //   - continue_beta()         -> tpq_continue_beta
+    //   - target_beta()           -> tpq_target_beta
+    //
+    // These were [[deprecated]] accessor shims for the canonical
+    // tpq_<name> data members above. All in-tree callers have been
+    // migrated; out-of-tree callers should rename the call sites
+    // (search-and-replace).
+    // ------------------------------------------------------------------
 
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;
@@ -126,11 +98,6 @@ struct EDParameters {
     uint64_t ltlm_reorth_freq = 10;
     uint64_t ltlm_seed = 0;
     bool ltlm_store_data = false;
-    [[deprecated("Use method=HYBRID instead")]]
-    bool use_hybrid_method = false;
-    double hybrid_crossover = 1.0;
-    bool hybrid_auto_crossover = false;
-
     // ========== KPM-DOS-Specific Parameters ==========
     // Kernel Polynomial Method density-of-states + thermodynamics.
     // See include/ed/solvers/kpm_dos.h for full algorithmic specification.
@@ -144,6 +111,13 @@ struct EDParameters {
     bool kpm_full_reorth = true;
     uint64_t kpm_reorth_freq = 10;
     uint64_t kpm_seed = 0;
+
+    // ========== GPU Lanczos / Krylov-Schur Determinism ==========
+    // Starting-vector RNG seed for the GPU Lanczos / GPU Krylov-Schur
+    // family. 0 keeps the legacy deterministic seed (42); a nonzero
+    // value passes through verbatim so a GPU run can be made to
+    // reproduce a CPU run that uses the same seed (audit S1 #21).
+    uint64_t lanczos_seed = 0;
 
     // ========== Observable Calculations ==========
     mutable std::vector<Operator> observables = {};
@@ -164,15 +138,14 @@ struct EDParameters {
     bool save_thermal_states = false;
     bool compute_spin_correlations = false;
 
-    [[deprecated("Use save_thermal_states instead")]]
-    bool& calc_observables() { return save_thermal_states; }
-    [[deprecated("Use save_thermal_states instead")]]
-    bool calc_observables() const { return save_thermal_states; }
-
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool& measure_spin() { return compute_spin_correlations; }
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool measure_spin() const { return compute_spin_correlations; }
+    // ------------------------------------------------------------------
+    // Removed in matvec-unification Phase 7.5:
+    //   - calc_observables()      -> save_thermal_states
+    //   - measure_spin()          -> compute_spin_correlations
+    //
+    // These were [[deprecated]] accessor shims. All in-tree callers
+    // have been migrated.
+    // ------------------------------------------------------------------
 
     // ========== Fixed-Sz Parameters ==========
     bool use_fixed_sz = false;
@@ -198,47 +171,53 @@ struct EDParameters {
     //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi
     //
     // ScaLAPACK is *not* a "FULL + use_mpi" alias -- it's a distinct
-    // distributed dense kernel (different LAPACK call, different
-    // block-cyclic data layout, mixed-precision refinement). So
-    // ScaLAPACK / SCALAPACK_MIXED stay as their own DiagonalizationMethod
-    // values; they implicitly require MPI.
+    // distributed dense kernel. Retired in May 2026 (minimalist refactor).
     bool use_gpu = false;
     bool use_mpi = false;
 
-    // ========== Symmetry Options (Phase 7.1: 5th orthogonal axis) ==========
+    // -----------------------------------------------------------------------
+    // GPU fallback policy (matvec-unification, May 2026).
     //
-    // Symmetry projection used to be encoded in the entry-point name:
-    //   exact_diagonalization_from_directory_symmetrized(...)   // disk-block
-    //   exact_diagonalization_streaming_symmetry(...)           // streaming
-    //   exact_diagonalization_chunked_symmetry(...)             // chunked
-    //   exact_diagonalization_disk_chunked_symmetry(...)        // disk-chunked
-    // plus the same four for fixed-Sz, giving 8 distinct symmetry-aware
-    // entry points. Phase 7.1 collapsed all of them onto a single flag:
+    // ``allow_gpu_cpu_fallback`` controls what happens when
+    // ``use_gpu=true`` is requested but the build / runtime can't
+    // service the GPU lane:
+    //   * true  (default) -- silently re-canonicalise to the CPU base
+    //                        method and emit one stderr line. The
+    //                        Python facade depends on this: it surfaces
+    //                        device='gpu' as a hint and lets the
+    //                        orchestrator pick CPU when WITH_CUDA=OFF.
+    //   * false           -- throw with an actionable message instead of
+    //                        falling back. Set this when the caller has
+    //                        explicitly asked for a GPU run and would
+    //                        rather fail than silently get CPU output.
+    //                        The orchestrator (``ed::workflows::solve``
+    //                        with ``BackendConstraints::allow_gpu =
+    //                        true`` but no other lane allowed) sets this
+    //                        to false.
+    bool allow_gpu_cpu_fallback = true;
+
+    // ========== Symmetry Options (5th orthogonal axis) ==========
     //
-    // (Phase 9 follow-up: the deprecated explicit-block entry points
-    // -- `exact_diagonalization_from_directory_symmetrized` and
-    // `exact_diagonalization_fixed_sz_symmetrized` -- were removed
-    // entirely. The chunked / disk-streaming kernels remain reachable
-    // only through their dedicated CLI flags `--chunked-symm` and
-    // `--disk-streaming` and are not selectable via `use_symmetry`.)
+    // Symmetry projection used to be encoded in the entry-point name
+    // (`exact_diagonalization_from_directory_symmetrized`,
+    // `exact_diagonalization_streaming_symmetry`,
+    // `exact_diagonalization_chunked_symmetry`, etc., plus the same
+    // four for fixed-Sz, giving 8 distinct symmetry-aware entry
+    // points). The matvec / surface-unification refactors collapsed
+    // them all onto a single flag plus the orthogonal axes:
     //
-    //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi  ×  use_symmetry
+    //     SOLVER_type × use_fixed_sz × use_gpu × use_mpi × use_symmetry
     //
-    // When `use_symmetry == true`, exact_diagonalization_from_files /
-    // exact_diagonalization_from_directory route through the streaming
-    // symmetry kernel (ed_wrapper_streaming.h), which is the only path that:
+    // When ``use_symmetry == true``, the orchestrator
+    // (``ed::workflows::solve``) routes through the streaming-symmetry
+    // operator built by ``ed::make_streaming_symmetry_operator``, which
+    // is the only path that:
     //   * keeps orbit data in memory (no disk basis materialisation),
-    //   * supports use_gpu (per-sector GPU kernels),
-    //   * supports use_fixed_sz orthogonally,
+    //   * supports ``use_gpu`` (per-sector GPU kernels),
+    //   * supports ``use_fixed_sz`` orthogonally,
     //   * scales to the largest tractable systems (32-site spin-1/2 etc.),
-    //   * works in pure Python (no /automorphism_results/ on disk required
-    //     beyond the one-shot generator the streaming path runs).
-    //
-    // The deprecated explicit-block path (`*_symmetrized`) and the
-    // chunked / disk-chunked variants are kept as CLI-only escape hatches
-    // for very-large-N memory-budget edge cases, but they are no longer
-    // selectable via the EDParameters flag axis. Setting use_symmetry=true
-    // is the only way new code should request symmetry projection.
+    //   * works in pure Python (no ``automorphism_results/`` on disk
+    //     required beyond the one-shot generator the streaming path runs).
     //
     // `translation_only` is an *orthogonal* sub-flag: when true, the
     // automorphism generator restricts to the translation subgroup. It
@@ -247,44 +226,26 @@ struct EDParameters {
     bool use_symmetry = false;
     bool translation_only = false;
 
-    // ========== ScaLAPACK Distributed Diagonalization Options ==========
-    int scalapack_nprow = 0;
-    int scalapack_npcol = 0;
-    int scalapack_block_size = 64;
-    bool scalapack_mixed_precision = true;
-    double scalapack_refinement_tol = 1e-12;
-    int scalapack_max_refinement_iter = 5;
-    bool scalapack_verbose = true;
-
-    // Phase 8 #5: when true (the default), ``scalapack_block_size`` is
-    // ignored at solve time and replaced by ``get_optimal_block_size(N,
-    // nprow, npcol)`` -- a heuristic that balances the local-tile size
-    // against the BLACS process grid for the actual matrix dimension.
-    // The legacy default of 64 tends to be too small for the larger
-    // matrices we now run (N >> 64*sqrt(P)), and over-blocks the smaller
-    // ones; the auto path consistently beats the fixed default in the
-    // benchmarks against MKL ScaLAPACK 2024 on 4-32 MPI ranks.
+    // Streaming-symmetry-specific options. They are only consulted when
+    // ``ed::make_operator``/``ed::workflows::solve`` route through the
+    // streaming-symmetry kernel (``use_symmetry == true``). Carried on
+    // ``EDParameters`` so that there is *one* parameter bag carrying
+    // every solve option.
     //
-    // CLI ``--scalapack-block-size N`` overrides ``scalapack_block_size``
-    // *and* sets this flag to false, preserving backward compatibility
-    // for users who tune the block size manually.
-    bool scalapack_block_size_auto = true;
+    //   * basis_cache_dir       -- if non-empty, cache the per-sector
+    //                              orbit basis here so reruns at fixed
+    //                              symmetry sector skip the basis build.
+    //                              Empty (default) disables caching.
+    //   * precompute_basis_only -- when true, return immediately after
+    //                              the basis cache is written; eigen-
+    //                              values are not computed. Useful for
+    //                              prebuilding caches in batch jobs.
+    std::string basis_cache_dir{};
+    bool precompute_basis_only = false;
 
-    // ========== ARPACK Advanced Options ==========
-    bool arpack_advanced_verbose = false;
-    std::string arpack_which = "SR";
-    int64_t arpack_ncv = -1;
-    uint64_t arpack_max_restarts = 2;
-    double arpack_ncv_growth = 1.5;
-    bool arpack_auto_enlarge_ncv = true;
-    bool arpack_two_phase_refine = true;
-    double arpack_relaxed_tol = 1e-6;
-    bool arpack_shift_invert = false;
-    double arpack_sigma = 0.0;
-    bool arpack_auto_switch_shift_invert = true;
-    double arpack_switch_sigma = 0.0;
-    bool arpack_adaptive_inner_tol = true;
-    double arpack_inner_tol_factor = 1e-2;
-    double arpack_inner_tol_min = 1e-14;
-    uint64_t arpack_inner_max_iter = 300;
+    // ScaLAPACK / ARPACK / hybrid / Davidson / LOBPCG parameter blocks
+    // were retired with their solvers in the minimalist-architecture rev
+    // (May 2026). EDParameters now carries only the knobs that are still
+    // used by the kept solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
+    // FULL / FTLM / LTLM / mTPQ / cTPQ / KPM_DOS).
 };

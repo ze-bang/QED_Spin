@@ -13,10 +13,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <random>
 #include <stdexcept>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -61,44 +66,6 @@ std::vector<double> make_lorentz_kernel(int M, double lambda) {
         g[k] = std::sinh(x) / sh_lambda;
     }
     return g;
-}
-
-// ---------------------------------------------------------------------------
-// Spectral-bound estimator: a single high-quality Lanczos sweep gives both
-// extreme Ritz values to ~1e-10 relative accuracy with 100–200 iterations
-// (Kaniel-Paige; the extreme eigenvalues converge first).
-// ---------------------------------------------------------------------------
-void estimate_spectral_bounds(
-    MatVec H,
-    std::uint64_t dim,
-    int krylov_dim,
-    bool full_reorth,
-    int reorth_freq,
-    double tol,
-    std::mt19937& gen,
-    double& e_min,
-    double& e_max)
-{
-    ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
-
-    std::vector<double> alpha, beta;
-    const int M_lanc = build_lanczos_tridiagonal_with_basis(
-        H, v0, dim,
-        static_cast<std::uint64_t>(krylov_dim),
-        tol, full_reorth,
-        static_cast<std::uint64_t>(reorth_freq),
-        alpha, beta, /*basis_vectors=*/nullptr);
-
-    if (M_lanc == 0)
-        throw std::runtime_error("kpm_dos: spectral-bound Lanczos produced 0 iterations");
-
-    std::vector<double> ritz, weights;
-    diagonalize_tridiagonal_ritz(alpha, beta, ritz, weights, /*evecs=*/nullptr);
-    if (ritz.empty())
-        throw std::runtime_error("kpm_dos: spectral-bound Ritz returned 0 eigenpairs");
-
-    e_min = ritz.front();
-    e_max = ritz.back();
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +217,49 @@ ChebQuadCache build_cheb_quad_cache(
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// Spectral-bound estimator (public, Wave B3 May 2026)
+//
+// A single high-quality Lanczos sweep gives both extreme Ritz values
+// to ~1e-10 relative accuracy with 100-200 iterations (Kaniel-Paige;
+// the extreme eigenvalues converge first). Exposed so the streaming-
+// symmetry binding can estimate ONCE on the largest sector and reuse
+// the bounds for every per-sector kpm_dos call (the bounds are
+// global to H).
+// ---------------------------------------------------------------------------
+void estimate_spectral_bounds(
+    MatVec H,
+    std::uint64_t dim,
+    int krylov_dim,
+    bool full_reorth,
+    int reorth_freq,
+    double tol,
+    std::mt19937& gen,
+    double& e_min,
+    double& e_max)
+{
+    ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
+
+    std::vector<double> alpha, beta;
+    const int M_lanc = build_lanczos_tridiagonal_with_basis(
+        H, v0, dim,
+        static_cast<std::uint64_t>(krylov_dim),
+        tol, full_reorth,
+        static_cast<std::uint64_t>(reorth_freq),
+        alpha, beta, /*basis_vectors=*/nullptr);
+
+    if (M_lanc == 0)
+        throw std::runtime_error("kpm_dos: spectral-bound Lanczos produced 0 iterations");
+
+    std::vector<double> ritz, weights;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz, weights, /*evecs=*/nullptr);
+    if (ritz.empty())
+        throw std::runtime_error("kpm_dos: spectral-bound Ritz returned 0 eigenpairs");
+
+    e_min = ritz.front();
+    e_max = ritz.back();
+}
+
+// ---------------------------------------------------------------------------
 // Public driver
 // ---------------------------------------------------------------------------
 KPMDOSResult compute_kpm_dos(
@@ -273,12 +283,27 @@ KPMDOSResult compute_kpm_dos(
 
     // -----------------------------------------------------------------
     // Step 1: spectral-bound Lanczos to get (a, b).
+    //
+    // Wave B3 (May 2026): when the caller has already estimated the
+    // spectral bounds (e.g. the streaming-symmetry binding estimates
+    // once on the largest sector and reuses for every per-sector
+    // call), skip this 150-iteration Lanczos pass entirely. NaN means
+    // "estimate" -- both must be finite to take the shortcut.
     // -----------------------------------------------------------------
     double e_min = 0.0, e_max = 0.0;
-    estimate_spectral_bounds(
-        H, dim, params.spectral_bounds_krylov,
-        params.full_reorthogonalization, params.reorth_frequency,
-        params.tolerance, gen, e_min, e_max);
+    const bool have_override =
+        std::isfinite(params.e_min_override)
+        && std::isfinite(params.e_max_override)
+        && params.e_max_override > params.e_min_override;
+    if (have_override) {
+        e_min = params.e_min_override;
+        e_max = params.e_max_override;
+    } else {
+        estimate_spectral_bounds(
+            H, dim, params.spectral_bounds_krylov,
+            params.full_reorthogonalization, params.reorth_frequency,
+            params.tolerance, gen, e_min, e_max);
+    }
 
     if (e_max <= e_min) {
         // Degenerate spectrum (one point or numerical failure): nudge bounds.
@@ -308,21 +333,130 @@ KPMDOSResult compute_kpm_dos(
 
     std::vector<double> mu_avg(M, 0.0);   // running sum of ⟨r|T_k|r⟩
 
-    for (int r = 0; r < R; ++r) {
-        // Random complex Gaussian vector, normalised to unit norm.
-        ComplexVector r_vec = generateGaussianRandomVector(static_cast<int>(dim), gen);
-        const double norm = cblas_dznrm2(static_cast<int>(dim), r_vec.data(), 1);
-        if (norm <= 0.0) {
-            throw std::runtime_error("kpm_dos: random vector has zero norm");
+    // Wave 3.3 of the SOTA Performance rollout (May 2026): KPM
+    // Hutchinson samples are embarrassingly parallel -- each draws
+    // its own random vector, runs an independent Chebyshev moment
+    // sweep, and contributes additively to ``mu_avg``. Opt-in via
+    // ``ED_KPM_SAMPLE_THREADS`` (default 1 = legacy serial behaviour)
+    // because the per-sample seeding changes the Monte-Carlo
+    // realisation order and a few statistical-property tests (notably
+    // ``kpm_dos: increasing R reduces error``) are seed-pinned to the
+    // legacy realisation. Production users who care about wall time
+    // over a fixed seed should opt in.
+    //
+    // When the env is set, the per-sample mt19937 is seeded from
+    // ``gen`` via a single uint64 draw + seed_seq expansion, which
+    // (a) preserves the R-subset reproducibility invariant
+    // (``run(R=20)`` shares its first 20 seeds with ``run(R=200)``)
+    // and (b) decorrelates the initial state of each generator. The
+    // inner ``H.apply`` already runs an OMP team for SpMV, so the
+    // outer team is capped at ``max_threads / 2`` and nested
+    // parallelism is enabled.
+    int outer_threads = 1;
+    if (const char* env = std::getenv("ED_KPM_SAMPLE_THREADS")) {
+#ifdef _OPENMP
+        const int max_threads = omp_get_max_threads();
+#else
+        const int max_threads = 1;
+#endif
+        try {
+            const long t = std::stol(env);
+            if (t >= 1 && t <= max_threads) {
+                outer_threads = std::min(static_cast<int>(t), R);
+            }
+        } catch (...) {
+            // malformed env: keep default (serial).
         }
-        const Complex inv_norm(1.0 / norm, 0.0);
-        cblas_zscal(static_cast<int>(dim), &inv_norm, r_vec.data(), 1);
+    }
 
-        accumulate_dos_moments_one_vector(H, r_vec, dim, a, b, M, mu_avg);
+#ifdef _OPENMP
+    if (outer_threads > 1) {
+        omp_set_max_active_levels(2);
+    }
+#endif
 
-        if (kpm_dos_verbose() && (r % 5 == 0 || r == R - 1)) {
-            std::fprintf(stderr, "[kpm_dos] sample %d/%d  μ_0/r = %.6e\n",
-                         r + 1, R, mu_avg[0] / (r + 1));
+    if (outer_threads > 1) {
+        // Parallel path: per-sample seeds + thread-private accumulators.
+        std::vector<std::uint64_t> sample_seeds(R);
+        {
+            std::uniform_int_distribution<std::uint64_t> seed_dist;
+            for (int r = 0; r < R; ++r) {
+                sample_seeds[r] = seed_dist(gen);
+            }
+        }
+
+        std::vector<std::vector<double>> mu_per_thread(
+            outer_threads, std::vector<double>(M, 0.0));
+
+#pragma omp parallel num_threads(outer_threads)
+        {
+#ifdef _OPENMP
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+            std::vector<double>& mu_local = mu_per_thread[tid];
+
+#pragma omp for schedule(dynamic, 1)
+            for (int r = 0; r < R; ++r) {
+                std::seed_seq seq{
+                    static_cast<std::uint32_t>(
+                        sample_seeds[r] & 0xFFFFFFFFu),
+                    static_cast<std::uint32_t>(
+                        (sample_seeds[r] >> 32) & 0xFFFFFFFFu),
+                    static_cast<std::uint32_t>(r)};
+                std::mt19937 gen_r(seq);
+                ComplexVector r_vec = generateGaussianRandomVector(
+                    static_cast<int>(dim), gen_r);
+                const double norm = cblas_dznrm2(
+                    static_cast<int>(dim), r_vec.data(), 1);
+                if (norm <= 0.0) {
+                    throw std::runtime_error(
+                        "kpm_dos: random vector has zero norm");
+                }
+                const Complex inv_norm(1.0 / norm, 0.0);
+                cblas_zscal(static_cast<int>(dim), &inv_norm,
+                            r_vec.data(), 1);
+
+                accumulate_dos_moments_one_vector(H, r_vec, dim, a, b,
+                                                  M, mu_local);
+
+                if (kpm_dos_verbose() && (r % 5 == 0 || r == R - 1)) {
+#pragma omp critical
+                    std::fprintf(stderr,
+                                 "[kpm_dos] sample %d/%d (thr %d)\n",
+                                 r + 1, R, tid);
+                }
+            }
+        }
+
+        for (const auto& thr : mu_per_thread) {
+            for (int k = 0; k < M; ++k) mu_avg[k] += thr[k];
+        }
+    } else {
+        // Serial path (default): bit-identical to the pre-Wave-3.3
+        // realisation order so seed-pinned statistical-property tests
+        // continue to pass.
+        for (int r = 0; r < R; ++r) {
+            ComplexVector r_vec = generateGaussianRandomVector(
+                static_cast<int>(dim), gen);
+            const double norm = cblas_dznrm2(
+                static_cast<int>(dim), r_vec.data(), 1);
+            if (norm <= 0.0) {
+                throw std::runtime_error(
+                    "kpm_dos: random vector has zero norm");
+            }
+            const Complex inv_norm(1.0 / norm, 0.0);
+            cblas_zscal(static_cast<int>(dim), &inv_norm,
+                        r_vec.data(), 1);
+
+            accumulate_dos_moments_one_vector(H, r_vec, dim, a, b, M,
+                                              mu_avg);
+
+            if (kpm_dos_verbose() && (r % 5 == 0 || r == R - 1)) {
+                std::fprintf(stderr, "[kpm_dos] sample %d/%d  μ_0/r = %.6e\n",
+                             r + 1, R, mu_avg[0] / (r + 1));
+            }
         }
     }
 

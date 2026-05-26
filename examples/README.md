@@ -18,11 +18,15 @@ into your own working directory, and edit the constants at the top.
 | [`06_mpi_distributed_eigenvectors.cpp`](./06_mpi_distributed_eigenvectors.cpp) | Distributed Ritz vectors via `distributed_lanczos_eigenvectors`; assembles the global `\|psi_0>` and checks `\|H psi - E psi\|` | MPI |
 | [`07_mpi_distributed_ftlm.cpp`](./07_mpi_distributed_ftlm.cpp) | MPI-over-samples J&P FTLM: `Z(β)` and `<H>(β)` against exact thermal energy | MPI |
 | [`08_mpi_distributed_tpq.cpp`](./08_mpi_distributed_tpq.cpp) | Distributed canonical TPQ: Taylor-truncated imaginary-time evolution + `<H>(β)` measurement | MPI |
-| [`09_python_quickstart.py`](./09_python_quickstart.py) | The same 4-site Heisenberg ground state via the `qed` Python bindings | Python (CPU) |
-| [`10_python_dssf.py`](./10_python_dssf.py) | Dynamical structure factor `S(q,ω)` at T=0 on an 8-site chain | Python (CPU) |
+| [`09_python_quickstart.py`](./09_python_quickstart.py) | 4-site Heisenberg ground state via `qed.solve(H, num_eigenvalues=5)` | Python (CPU) |
+| [`10_python_dssf.py`](./10_python_dssf.py) | T=0 dynamical structure factor `S(q,ω)` on an 8-site chain via `qed.spectral(H, observables, ...)` | Python (CPU) |
 | [`11_cli_thermo.sh`](./11_cli_thermo.sh) | One-line CLI invocation of `./ED` for a 12-site Heisenberg thermodynamic sweep | CLI |
 | [`12_cli_dssf.sh`](./12_cli_dssf.sh) | One-line CLI invocation of `./ED dssf dynamical_thermal` for finite-T DSSF | CLI |
 | [`13_nlce_full_workflow.sh`](./13_nlce_full_workflow.sh) | Complete NLCE workflow on the pyrochlore lattice using `qed-nlce` (requires the separate [QED_NLCE](https://github.com/ze-bang/QED_NLCE) package) | Python orchestrator |
+| [`14_python_workflow.py`](./14_python_workflow.py) | Stress-free workflow (auto-symmetry, auto-Sz, mTPQ trajectory, pre-flight planner) via `qed.solve` | Python (CPU) |
+| [`15_python_unified_interface.py`](./15_python_unified_interface.py) | Comprehensive walkthrough of the three canonical Python verbs: `qed.solve` / `qed.thermal` / `qed.spectral`, kwargs-only, including auto-Sz, eigenvectors, method comparison, and device pinning | Python (CPU/GPU) |
+| [`00_unified_interface.cpp`](./00_unified_interface.cpp) | C++ mirror of (15): `OperatorSpec` -> `ed::make_operator` -> `ed::workflows::*` across InMemoryOperator / FilePaths / DirectoryPath sources, every method, thermal, spectral | CPU |
+| [`16_python_orthogonal_symmetry.py`](./16_python_orthogonal_symmetry.py) | Walks the four `(Subspace, ProjectorChain)` cells (`none` / `Sz` / `Symm` / `Sz+Symm`) on a Heisenberg ring via `qed.solve` + `qed.thermal`, confirms Bethe-ansatz E0, and points at the future-axis seams (spin-flip Z_2, time-reversal antiunitary, SU(2) total-S Casimir / coupled basis) | Python (CPU) |
 
 ## Prerequisites
 
@@ -31,7 +35,7 @@ into your own working directory, and edit the constants at the top.
    alongside the rest of the project via the parent CMake:
 
    ```bash
-   cd /path/to/exact_diagonalization_cpp
+   cd /path/to/QED
    cmake -B build \
          -DWITH_CUDA=ON -DWITH_MPI=ON \
          -DED_BUILD_BENCHMARKS=ON \
@@ -80,7 +84,7 @@ ED_BIN=./build/ED bash examples/11_cli_thermo.sh
 ## Where to go next
 
 * **Production CLI**: see the top-level [`README.md`](../README.md) and
-  [`docs/architecture/IMPLEMENTATION_REPORT.md`](../docs/architecture/IMPLEMENTATION_REPORT.md).
+  [`docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md).
 * **Pre-canned configs**: see [`../configs/`](../configs/) for 15+ worked
   config files covering every solver (`LANCZOS`, `FTLM`, `LTLM`, `mTPQ`,
   `cTPQ`, `OSS`, `DSSF`, ...).

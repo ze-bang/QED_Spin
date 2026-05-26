@@ -152,6 +152,46 @@ TEST_CASE("HDF5IO thermodynamics save/load",
     REQUIRE(Cv_back == Cv);
 }
 
+TEST_CASE("HDF5IO::saveThermodynamics rejects size mismatch",
+          "[hdf5_io][thermo][regression][s0]") {
+    // Regression test for the structural-audit follow-on:
+    // ``saveThermodynamics`` used to accept ``temperatures`` and
+    // ``values`` of disagreeing length and silently produce a
+    // misaligned thermodynamic table. The S0 fix is a hard up-front
+    // length check.
+    std::string dir = make_scratch_dir("hdf5_io", "thermo_size_check");
+    std::string path = HDF5IO::createOrOpenFile(dir);
+
+    std::vector<double> T  = {0.1, 0.2, 0.5, 1.0};
+    std::vector<double> E  = {-2.0, -1.9, -1.5};  // one short
+
+    REQUIRE_THROWS_AS(
+        HDF5IO::saveThermodynamics(path, T, "energy", E),
+        std::invalid_argument);
+}
+
+TEST_CASE("HDF5IO::saveCorrelationMatrix rejects empty input",
+          "[hdf5_io][correlations][regression][s0]") {
+    // Regression test: the previous code dereferenced ``matrix[0]``
+    // unconditionally so an empty matrix was UB. Now it throws.
+    std::string dir = make_scratch_dir("hdf5_io", "corr_empty");
+    std::string path = HDF5IO::createOrOpenFile(dir);
+
+    std::vector<std::vector<Complex>> empty;
+    REQUIRE_THROWS_AS(
+        HDF5IO::saveCorrelationMatrix(path, "S+S-", empty),
+        std::invalid_argument);
+
+    // Jagged input also caught (every row must have the same length).
+    std::vector<std::vector<Complex>> jagged = {
+        {Complex(1, 0), Complex(0, 0)},
+        {Complex(0, 0)},  // one short
+    };
+    REQUIRE_THROWS_AS(
+        HDF5IO::saveCorrelationMatrix(path, "S+S-jagged", jagged),
+        std::invalid_argument);
+}
+
 TEST_CASE("full_diagonalization writes valid HDF5",
           "[hdf5_io][full_diag]") {
     std::string dir = make_scratch_dir("hdf5_io", "full_diag");

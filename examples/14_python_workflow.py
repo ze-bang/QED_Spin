@@ -5,7 +5,7 @@ End-to-end demo of the Phase-9 stress-free workflow:
 
     1. Build a Hamiltonian via the fluent C++-backed builder.
     2. Discover symmetries (and U(1) Sz status) on the in-memory operator.
-    3. Diagonalise four ways with the unified ``qed.diag`` entry point:
+    3. Diagonalise four ways with the unified ``qed.solve`` entry point:
          a) full Hilbert space, default everything
          b) projected onto the Sz=N/2 sector
          c) projected onto the largest commuting automorphism subgroup
@@ -54,24 +54,24 @@ def main() -> int:
     # 3. Four diagonalisations, smart-defaulted.
     # ------------------------------------------------------------------
     print("--- (a) full Hilbert space ---")
-    res_full = qed.diag(H, num_eigenvalues=4, verbose=False)
+    res_full = qed.solve(H, num_eigenvalues=4, verbose=False)
     print(f"  E0 = {res_full.eigenvalues[0]:.10f}")
 
     if report.has_u1_sz:
         print(f"\n--- (b) fixed Sz sector, n_up={N // 2} ---")
-        res_sz = qed.diag(H, num_eigenvalues=4, sz=N // 2, verbose=False)
+        res_sz = qed.solve(H, num_eigenvalues=4, sz=N // 2, verbose=False)
         print(f"  E0 = {res_sz.eigenvalues[0]:.10f}")
 
     if report.full_set is not None:
         print(f"\n--- (c) symmetry projection ({report.full_set.name}, "
               f"|G|={report.full_set.group_size}) ---")
-        res_sym = qed.diag(H, num_eigenvalues=4,
+        res_sym = qed.solve(H, num_eigenvalues=4,
                            symmetry=report.full_set, verbose=False)
         print(f"  E0 = {res_sym.eigenvalues[0]:.10f}")
 
         if report.has_u1_sz:
             print(f"\n--- (d) symmetry + fixed Sz, n_up={N // 2} ---")
-            res_both = qed.diag(H, num_eigenvalues=4,
+            res_both = qed.solve(H, num_eigenvalues=4,
                                 symmetry=report.full_set,
                                 sz=N // 2, verbose=False)
             print(f"  E0 = {res_both.eigenvalues[0]:.10f}")
@@ -83,7 +83,7 @@ def main() -> int:
             print("\n--- (e) one-generator subgroup of full_set ---")
             sub = report.full_set[0]
             print(f"  picked: {sub}  (description: {sub.description})")
-            res_sub = qed.diag(H, num_eigenvalues=4,
+            res_sub = qed.solve(H, num_eigenvalues=4,
                                symmetry=sub, verbose=False)
             print(f"  E0 = {res_sub.eigenvalues[0]:.10f}")
             print("  -> equivalent: report.full_set.subgroup([0])")
@@ -95,7 +95,7 @@ def main() -> int:
     print("\n--- (f) overriding ARPACK parameters via extra_params ---")
     print("  Run qed.list_diag_parameters('arpack') to see every ARPACK")
     print("  knob; here we just override a couple for the demo.")
-    res_arp = qed.diag(
+    res_arp = qed.solve(
         H, num_eigenvalues=2,
         solver="ARPACK_ADVANCED", device="cpu",
         verbose=False,
@@ -108,17 +108,17 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     # 6. Thermal trajectory via mTPQ (case-insensitive solver name).
-    #     The same qed.diag(...) entry point handles thermal solvers;
+    #     The same qed.solve(...) entry point handles thermal solvers;
     #     just switch the solver kwarg. mTPQ writes raw imaginary-time
     #     trajectories to output_dir and post-processes to a unified
     #     thermodynamic curve.
     # ------------------------------------------------------------------
     import tempfile
     print("\n--- (g) thermal trajectory via mTPQ ---")
-    print("  Same qed.diag() call; case-insensitive 'mtpq' resolves to")
+    print("  Same qed.solve() call; case-insensitive 'mtpq' resolves to")
     print("  DiagonalizationMethod.mTPQ. Trajectories land in output_dir.")
     with tempfile.TemporaryDirectory(prefix="qed_demo_thermal_") as tmp:
-        res_thermal = qed.diag(
+        res_thermal = qed.solve(
             H,
             solver="mtpq",
             sz=N // 2 if report.has_u1_sz else None,
@@ -140,8 +140,8 @@ def main() -> int:
     qed.solver_device_support(solver="lanczos")
     print()
     print("  For the matrix-vector calls themselves:")
-    print("    qed.diag(H, device='cpu')      -- in-process CPU")
-    print("    qed.diag(H, device='gpu')      -- in-process single GPU")
+    print("    qed.solve(H, device='cpu')      -- in-process CPU")
+    print("    qed.solve(H, device='gpu')      -- in-process single GPU")
     print("                                       (auto temp-dir routing)")
     print("    qed.mpi.run_distributed('lanczos', n_ranks=N, ...)")
     print("                                   -- multi-rank CPU MPI")
@@ -152,7 +152,7 @@ def main() -> int:
     print("                                   -- distributed canonical TPQ")
 
     print("\n--- (i) pre-flight planner: 'will this fit on this host?' ---")
-    print("  qed.diag always asks the planner before dispatching; here")
+    print("  qed.solve always asks the planner before dispatching; here")
     print("  we call it directly so we can show the verdict.")
     rep = qed.estimate_resources(H, solver="LANCZOS", device="cpu",
                                   num_eigenvalues=2)
@@ -167,7 +167,7 @@ def main() -> int:
               .heisenberg([(i, (i + 1) % 28) for i in range(28)], J=1.0)
               .to_operator())
     print()
-    qed.diag(big, solver="FULL", dry_run=True, verbose=False)
+    qed.solve(big, solver="FULL", dry_run=True, verbose=False)
 
     print()
     print("  Goal-oriented planner: rank candidate workflows for a goal")

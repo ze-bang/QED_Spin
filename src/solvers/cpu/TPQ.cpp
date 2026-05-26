@@ -2,8 +2,12 @@
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
+#include <ed/parallel/fused_blas1.h>    // Wave 3.6: fused_mtpq_step_complex
 #include <algorithm>
+#include <array>     // compute_tpq_thermo_from_trajectories aggregator
 #include <cctype>
+#include <cmath>     // std::isfinite in trajectory aggregator
+#include <cstdint>
 #include <filesystem>
 #include <regex>
 #include <sstream>
@@ -21,448 +25,14 @@ bool save_tpq_state_hdf5(const ComplexVector& tpq_state, const std::string& dir,
                          size_t sample, double beta, FixedSzOperator* fixed_sz_op);
 
 // ============================================================================
-// TPQ-SPECIFIC WRAPPER FUNCTIONS
-// These provide backward compatibility while delegating to the dynamics module
+// Legacy TPQ-SPECIFIC WRAPPER FUNCTIONS retired in the minimalist-
+// architecture rev (May 2026). Every wrapper here was a one-line
+// thunk into the ``dynamics`` module (time_evolve_taylor /
+// time_evolve_krylov / time_evolve_chebyshev / time_evolve_rk4 /
+// time_evolve_adaptive); none had external callers. Call the dynamics
+// module directly.
 // ============================================================================
 
-/**
- * TPQ-specific wrapper for time evolution using Taylor method
- * Delegates to the general dynamics module
- */
-void time_evolve_tpq_state(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    uint64_t N,
-    double delta_t,
-    uint64_t n_max,
-    bool normalize
-) {
-    time_evolve_taylor(H, tpq_state, N, delta_t, n_max, normalize);
-}
-
-/**
- * TPQ-specific wrapper for Krylov time evolution
- * Delegates to the general dynamics module
- */
-void time_evolve_tpq_krylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    uint64_t N,
-    double delta_t,
-    uint64_t krylov_dim,
-    bool normalize
-) {
-    time_evolve_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
-}
-
-/**
- * TPQ-specific wrapper for Chebyshev time evolution
- * Delegates to the general dynamics module
- */
-void time_evolve_tpq_chebyshev(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    uint64_t N,
-    double delta_t,
-    double E_min,
-    double E_max,
-    uint64_t num_terms,
-    bool normalize
-) {
-    time_evolve_chebyshev(H, tpq_state, N, delta_t, E_min, E_max, num_terms, normalize);
-}
-
-/**
- * TPQ-specific wrapper for RK4 time evolution
- * Delegates to the general dynamics module
- */
-void time_evolve_tpq_rk4(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    uint64_t N,
-    double delta_t,
-    bool normalize
-) {
-    time_evolve_rk4(H, tpq_state, N, delta_t, normalize);
-}
-
-/**
- * TPQ-specific wrapper for adaptive time evolution
- * Delegates to the general dynamics module
- */
-void time_evolve_tpq_adaptive(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    uint64_t N,
-    double delta_t,
-    uint64_t accuracy_level,
-    bool normalize
-) {
-    time_evolve_adaptive(H, tpq_state, N, delta_t, accuracy_level, normalize);
-}
-
-/**
- * Compute dynamical correlations for TPQ using Krylov method
- * Uses the same output format as Taylor method for consistency
- */
-void computeDynamicCorrelationsKrylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& operators_1,
-    const std::vector<Operator>& operators_2,
-    const std::vector<std::string>& operator_names,
-    uint64_t N,
-    const std::string& dir,
-    uint64_t sample,
-    double inv_temp,
-    double t_end,
-    double dt,
-    uint64_t krylov_dim
-) {
-    std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << operators_1.size() << " observables" << std::endl;
-    
-    // Ensure Krylov dimension doesn't exceed system size
-    krylov_dim = std::min(krylov_dim, N/2);
-    
-    uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
-    
-    // Pre-allocate reusable buffers
-    ComplexVector evolved_psi(N);
-    ComplexVector evolved_O1_psi(N);
-    ComplexVector O2_psi(N);
-    ComplexVector O1_psi(N);
-    ComplexVector O2_evolved_psi(N);
-    
-    // Buffers for negative time evolution
-    ComplexVector evolved_psi_neg(N);
-    ComplexVector evolved_O1_psi_neg(N);
-    ComplexVector O2_evolved_psi_neg(N);
-    
-    // Process each operator pair
-    for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
-        std::string op_name = operator_names[op_idx];
-        
-        std::cout << "  Computing " << op_name << " correlations..." << std::endl;
-
-        // Apply O_1 to initial state: |φ⟩ = O_1|ψ⟩
-        operators_1[op_idx].apply(tpq_state.data(), O1_psi.data(), N);
-        
-        // Calculate initial correlation: C(0) = ⟨ψ|O_2†O_1|ψ⟩
-        operators_2[op_idx].apply(tpq_state.data(), O2_psi.data(), N);
-        
-        // Use BLAS for dot product
-        Complex initial_corr;
-        cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
-
-        std::cout << "    Initial correlation C(0) = " 
-                  << initial_corr.real() << " + i*" 
-                  << initial_corr.imag() << std::endl;
-        
-        // Storage for time correlation data
-        std::vector<std::tuple<double, double, double>> time_data; // (time, real, imag)
-        time_data.reserve(2 * num_steps - 1); // Reserve space for both positive and negative times
-        
-        // Add initial time point
-        time_data.push_back(std::make_tuple(0.0, initial_corr.real(), initial_corr.imag()));
-        
-        // ===== POSITIVE TIME EVOLUTION =====
-        std::cout << "    Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
-        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
-        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
-        
-        for (int step = 1; step < num_steps; step++) {
-            // Evolve states using Krylov method (forward in time)
-            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
-            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
-            
-            // Apply O_2 to evolved state
-            operators_2[op_idx].apply(evolved_psi.data(), O2_evolved_psi.data(), N);
-            
-            // Calculate correlation using BLAS
-            Complex corr_t;
-            cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
-            
-            double t = step * dt;
-            time_data.push_back(std::make_tuple(t, corr_t.real(), corr_t.imag()));
-            
-            if (step % 100 == 0) {
-                std::cout << "      Positive time step " << step << " / " << num_steps << std::endl;
-            }
-        }
-        
-        // ===== NEGATIVE TIME EVOLUTION =====
-        std::cout << "    Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
-        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi_neg.begin());
-        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi_neg.begin());
-        
-        for (int step = 1; step < num_steps; step++) {
-            // Evolve states backward in time (use -dt)
-            time_evolve_krylov(H, evolved_psi_neg, N, -dt, krylov_dim, true);
-            time_evolve_krylov(H, evolved_O1_psi_neg, N, -dt, krylov_dim, false);
-            
-            // Apply O_2 to evolved state
-            operators_2[op_idx].apply(evolved_psi_neg.data(), O2_evolved_psi_neg.data(), N);
-            
-            // Calculate correlation using BLAS
-            Complex corr_t_neg;
-            cblas_zdotc_sub(N, O2_evolved_psi_neg.data(), 1, evolved_O1_psi_neg.data(), 1, &corr_t_neg);
-            
-            double t_neg = -step * dt;
-            time_data.push_back(std::make_tuple(t_neg, corr_t_neg.real(), corr_t_neg.imag()));
-            
-            if (step % 100 == 0) {
-                std::cout << "      Negative time step " << step << " / " << num_steps << std::endl;
-            }
-        }
-        
-        // Sort by time (ascending order)
-        std::sort(time_data.begin(), time_data.end(), 
-                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-        
-        // Save to HDF5
-        std::string h5_file = dir + "/ed_results.h5";
-        if (!HDF5IO::fileExists(h5_file)) {
-            HDF5IO::createOrOpenFile(dir);
-        }
-        
-        HDF5IO::TimeCorrelationData h5_data;
-        h5_data.times.reserve(time_data.size());
-        h5_data.correlation_real.reserve(time_data.size());
-        h5_data.correlation_imag.reserve(time_data.size());
-        
-        for (const auto& data_point : time_data) {
-            h5_data.times.push_back(std::get<0>(data_point));
-            h5_data.correlation_real.push_back(std::get<1>(data_point));
-            h5_data.correlation_imag.push_back(std::get<2>(data_point));
-        }
-        
-        HDF5IO::saveTimeCorrelation(h5_file, op_name, sample, inv_temp, h5_data, "tpq");
-        
-        std::cout << "    Time correlation saved to HDF5" << std::endl;
-        std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
-                  << std::get<0>(time_data.back()) << "]" << std::endl;
-    }
-}
-
-/**
- * Legacy wrapper for backward compatibility with old TPQ code
- */
-SpectralFunctionData calculate_spectral_function_from_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& tpq_state,
-    uint64_t N,
-    double omega_min,
-    double omega_max,
-    uint64_t num_points,
-    double tmax,
-    double dt,
-    double eta,
-    bool use_lorentzian,
-    uint64_t n_max
-) {
-    // Compute time correlation using the general dynamics module
-    std::vector<Complex> time_corr = compute_time_correlation(
-        H, O, O, tpq_state, N, tmax, dt, 0, n_max, 30);
-    
-    // Compute spectral function from time correlation
-    return compute_spectral_function(time_corr, dt, omega_min, omega_max, 
-                                    num_points, eta, use_lorentzian);
-}
-
-/**
- * Legacy wrapper for computing time correlations with pre-constructed U_t
- */
-std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    uint64_t N,
-    const uint64_t num_steps
-) {
-    return compute_time_correlations_with_U_t(U_t, operators_1, operators_2, 
-                                             tpq_state, N, num_steps);
-}
-
-/**
- * Legacy wrapper for incremental time correlation computation
- */
-void calculate_spectral_function_from_tpq_U_t_incremental(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    uint64_t N,
-    const uint64_t num_steps,
-    double dt,
-    std::vector<std::ofstream>& output_files
-) {
-    compute_time_correlations_incremental(U_t, operators_1, operators_2, 
-                                         tpq_state, N, num_steps, dt, output_files);
-}
-
-/**
- * Compute observable dynamics for TPQ with legacy interface
- * OPTIMIZED: Process observables on-demand and stream results to disk
- */
-void computeObservableDynamics_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables_1,
-    const std::vector<Operator>& observables_2,
-    const std::vector<std::string>& observable_names,
-    uint64_t N,
-    const std::string& dir,
-    uint64_t sample,
-    double inv_temp,
-    double t_end,
-    double dt
-) {
-    // Save the current TPQ state to unified HDF5 file for later analysis
-    save_tpq_state_hdf5(tpq_state, dir, sample, inv_temp, nullptr);
-
-    std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
-    std::cout << "  Using memory-optimized matrix-free observable computation" << std::endl;
-    
-    uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
-    
-    // Create inverse time evolution operator (U_t^†) for negative time
-    auto U_t_dagger = [&U_t, N](const Complex* in, Complex* out, uint64_t size) {
-        // For a unitary operator U = exp(-iHt), U^† = exp(iHt)
-        // We compute U^†|ψ> = (U|ψ*>)*
-        ComplexVector in_conj(size);
-        ComplexVector out_temp(size);
-        
-        for (int i = 0; i < size; i++) {
-            in_conj[i] = std::conj(in[i]);
-        }
-        U_t(in_conj.data(), out_temp.data(), size);
-        for (int i = 0; i < size; i++) {
-            out[i] = std::conj(out_temp[i]);
-        }
-    };
-    
-    // ===== PROCESS EACH OBSERVABLE ON-DEMAND =====
-    // This saves memory by not keeping all observables in memory simultaneously
-    for (size_t op_idx = 0; op_idx < observables_1.size(); op_idx++) {
-        std::cout << "  Processing observable " << (op_idx+1) << "/" << observables_1.size() 
-                  << " (" << observable_names[op_idx] << ")..." << std::endl;
-        
-        // Open output file for streaming results - will collect and save to HDF5 at end
-        std::vector<std::tuple<double, double, double>> time_data;
-        time_data.reserve(2 * num_steps - 1);
-        
-        // Buffers for this observable only (reused for positive and negative time)
-        ComplexVector O_psi(N);
-        ComplexVector O_psi_next(N);
-        ComplexVector evolved_state(N);
-        ComplexVector state_next(N);
-        ComplexVector O_dag_state(N);
-        
-        // ===== INITIALIZE =====
-        std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
-        observables_1[op_idx].apply(evolved_state.data(), O_psi.data(), N);
-        observables_2[op_idx].apply(evolved_state.data(), O_dag_state.data(), N);
-        
-        // Calculate initial correlation C(0) = <O_dag_state | O_psi>
-        // BLAS-1 zdotc instead of a hand-rolled loop: BLAS implementations
-        // pipeline two-way SIMD multiply-add with proper reduction
-        // associativity (deterministic for fixed N) and avoid the temporary
-        // std::complex constructions on every iteration.
-        Complex init_corr;
-        cblas_zdotc_sub(N, O_dag_state.data(), 1, O_psi.data(), 1, &init_corr);
-        time_data.push_back(std::make_tuple(0.0, init_corr.real(), init_corr.imag()));
-        
-        // ===== POSITIVE TIME EVOLUTION =====
-        std::cout << "    Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
-        
-        for (int step = 1; step < num_steps; step++) {
-            double current_time = step * dt;
-            
-            // Evolve state and O|ψ>
-            U_t(evolved_state.data(), state_next.data(), N);
-            U_t(O_psi.data(), O_psi_next.data(), N);
-            
-            // Calculate O†|ψ(t)>
-            observables_2[op_idx].apply(state_next.data(), O_dag_state.data(), N);
-            
-            Complex corr;
-            cblas_zdotc_sub(N, O_dag_state.data(), 1, O_psi_next.data(), 1, &corr);
-            time_data.push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
-
-            std::swap(O_psi, O_psi_next);
-            std::swap(evolved_state, state_next);
-
-            if (step % 100 == 0) {
-                std::cout << "      Positive time step " << step << " / " << num_steps << std::endl;
-            }
-        }
-
-        // ===== NEGATIVE TIME EVOLUTION =====
-        std::cout << "    Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
-        
-        // Re-initialize
-        std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
-        observables_1[op_idx].apply(evolved_state.data(), O_psi.data(), N);
-    
-        
-        for (int step = 1; step < num_steps; step++) {
-            double current_time = -step * dt;
-            
-            // Evolve backward
-            U_t_dagger(evolved_state.data(), state_next.data(), N);
-            U_t_dagger(O_psi.data(), O_psi_next.data(), N);
-            
-            // Calculate O†|ψ(-t)>
-            observables_2[op_idx].apply(state_next.data(), O_dag_state.data(), N);
-            
-            Complex corr;
-            cblas_zdotc_sub(N, O_dag_state.data(), 1, O_psi_next.data(), 1, &corr);
-            time_data.push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
-
-            std::swap(O_psi, O_psi_next);
-            std::swap(evolved_state, state_next);
-
-            if (step % 100 == 0) {
-                std::cout << "      Negative time step " << step << " / " << num_steps << std::endl;
-            }
-        }
-        
-        // ===== SAVE TO HDF5 =====
-        // Sort by time and save to HDF5
-        std::sort(time_data.begin(), time_data.end(), 
-                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-        
-        std::string h5_file = dir + "/ed_results.h5";
-        if (!HDF5IO::fileExists(h5_file)) {
-            HDF5IO::createOrOpenFile(dir);
-        }
-        
-        HDF5IO::TimeCorrelationData h5_data;
-        h5_data.times.reserve(time_data.size());
-        h5_data.correlation_real.reserve(time_data.size());
-        h5_data.correlation_imag.reserve(time_data.size());
-        
-        for (const auto& data_point : time_data) {
-            h5_data.times.push_back(std::get<0>(data_point));
-            h5_data.correlation_real.push_back(std::get<1>(data_point));
-            h5_data.correlation_imag.push_back(std::get<2>(data_point));
-        }
-        
-        HDF5IO::saveTimeCorrelation(h5_file, observable_names[op_idx], sample, inv_temp, h5_data, "tpq_streaming");
-        
-        std::cout << "    Time correlation saved to HDF5" << std::endl;
-        std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
-                  << std::get<0>(time_data.back()) << "]" << std::endl;
-        
-        // time_data is freed here before next observable
-    }
-    
-    std::cout << "  All observables processed successfully!" << std::endl;
-}
 
 // ============================================================================
 // TPQ-SPECIFIC UTILITY FUNCTIONS
@@ -801,18 +371,10 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
 }
 
 
-/**
- * Write TPQ data to file
- */
-void writeTPQData(const std::string& filename, double inv_temp, double energy, 
-                 double variance, double norm, uint64_t step) {
-    std::ofstream file(filename, std::ios::app);
-    if (file.is_open()) {
-        file << std::setprecision(16) << inv_temp << " " << energy << " " 
-             << variance << " " << 0.0 << " " << 0.0 << " " << step << std::endl;
-        file.close();
-    }
-}
+// writeTPQData was retired in the minimalist-architecture rev (May 2026):
+// the text SS_rand*.dat sidecar was eliminated in favour of the unified
+// HDF5 store, so this append-only helper had no callers. Use
+// writeTPQDataHDF5 instead.
 
 /**
  * Write TPQ thermodynamic data to both text file and HDF5
@@ -874,109 +436,13 @@ void writeTPQNormHDF5(const std::string& text_file, const std::string& h5_file,
     }
 }
 
-/**
- * Read TPQ data from text file (legacy support)
- */
-bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
-                double& temp, double& specificHeat) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        return false;
-    }
-    
-    std::string line;
-    // Skip header
-    std::getline(file, line);
-    
-    double inv_temp, e, var, n, doublon;
-    uint64_t s;
-    
-    while (std::getline(file, line)) {
-        std::istringstream iss(line);
-        if (!(iss >> inv_temp >> e >> var >> n >> doublon >> s)) {
-            continue;
-        }
-        
-        if (s == step) {
-            energy = e;
-            temp = 1.0/inv_temp;
-            specificHeat = (var-e*e)*(inv_temp*inv_temp);
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-/**
- * Read TPQ data from HDF5 file
- * 
- * @param h5_file Path to HDF5 file
- * @param sample Sample index
- * @param step TPQ step to retrieve
- * @param energy Output: energy value
- * @param temp Output: temperature value
- * @param specificHeat Output: specific heat value
- * @return True if successful
- */
-bool readTPQDataHDF5(const std::string& h5_file, size_t sample, uint64_t step, 
-                     double& energy, double& temp, double& specificHeat) {
-    if (!HDF5IO::fileExists(h5_file)) {
-        return false;
-    }
-    
-    try {
-        auto points = HDF5IO::loadTPQThermodynamics(h5_file, sample);
-        for (const auto& point : points) {
-            if (point.step == step) {
-                energy = point.energy;
-                temp = 1.0 / point.beta;
-                double var = point.variance;
-                specificHeat = (var - energy * energy) * (point.beta * point.beta);
-                return true;
-            }
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Could not read TPQ data from HDF5: " << e.what() << std::endl;
-    }
-    
-    return false;
-}
-
-
-/**
- * Save the current TPQ state to a file
- * 
- * @param tpq_state TPQ state vector to save (in fixed-Sz or full basis)
- * @param filename Name of the file to save to
- * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms to full basis before saving
- * @return True if successful
- */
-bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename, 
-                    FixedSzOperator* fixed_sz_op) {
-    std::ofstream out(filename, std::ios::binary);
-    if (!out.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << " for writing" << std::endl;
-        return false;
-    }
-    
-    // Transform to full basis if using fixed-Sz
-    if (fixed_sz_op != nullptr) {
-        std::vector<Complex> full_state = fixed_sz_op->embedToFull(tpq_state);
-        size_t full_size = full_state.size();
-        out.write(reinterpret_cast<const char*>(&full_size), sizeof(size_t));
-        out.write(reinterpret_cast<const char*>(full_state.data()), full_size * sizeof(Complex));
-        std::cout << "  [Fixed-Sz] Transformed state from dim " << tpq_state.size() 
-                  << " to full space dim " << full_size << " before saving" << std::endl;
-    } else {
-        size_t size = tpq_state.size();
-        out.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
-        out.write(reinterpret_cast<const char*>(tpq_state.data()), size * sizeof(Complex));
-    }
-    
-    out.close();
-    return true;
-}
+// readTPQData / readTPQDataHDF5 / save_tpq_state (binary sidecar) were
+// retired in the minimalist-architecture rev (May 2026): the
+// legacy SS_rand*.dat reader path and the binary-sidecar writer were
+// only ever consumed by the equally-dead calculate_spectrum_from_tpq /
+// get_tpq_state_at_temperature flows. The live thermal-spectrum path
+// goes through HDF5IO::saveTPQState + HDF5IO::loadTPQState, and
+// post-processing reads the unified HDF5 store directly.
 
 /**
  * Save a TPQ state to the unified HDF5 file
@@ -995,19 +461,30 @@ bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename,
 bool save_tpq_state_hdf5(const ComplexVector& tpq_state, const std::string& dir,
                          size_t sample, double beta, FixedSzOperator* fixed_sz_op = nullptr) {
     try {
-        // MPI-safe: determine the correct HDF5 file path
+        // MPI-safe: determine the correct HDF5 file path. Guard with
+        // MPI_Initialized so this helper is callable from a non-MPI
+        // process (unit tests, Python single-process workflows,
+        // qed.thermal()).
         std::string hdf5_path;
+        bool mpi_path = false;
         #ifdef WITH_MPI
-        int mpi_rank = 0;
-        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-        hdf5_path = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
-        // Ensure file exists
-        if (!HDF5IO::fileExists(hdf5_path)) {
-            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        {
+            int mpi_inited = 0;
+            MPI_Initialized(&mpi_inited);
+            if (mpi_inited) {
+                int mpi_rank = 0;
+                MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+                hdf5_path = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+                if (!HDF5IO::fileExists(hdf5_path)) {
+                    HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+                }
+                mpi_path = true;
+            }
         }
-        #else
-        hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
         #endif
+        if (!mpi_path) {
+            hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        }
         
         // Ensure sample group exists
         HDF5IO::ensureTPQSampleGroup(hdf5_path, sample);
@@ -1119,33 +596,9 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename,
 }
 
 
-/**
- * Load eigenvector data from a raw binary file
- * 
- * @param tpq_state TPQ state vector to load into
- * @param filename Name of the file to load from
- * @param N Expected size of the vector
- * @return True if successful
- */
-bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, uint64_t N) {
-    std::ifstream in(filename, std::ios::binary);
-    if (!in.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << " for reading" << std::endl;
-        return false;
-    }
-    
-    tpq_state.resize(N);
-    in.read(reinterpret_cast<char*>(tpq_state.data()), N * sizeof(Complex));
-    
-    if (!in.good()) {
-        std::cerr << "Error: Failed to read data from " << filename << std::endl;
-        in.close();
-        return false;
-    }
-    
-    in.close();
-    return true;
-}
+// load_raw_data was retired in the minimalist-architecture rev (May 2026):
+// no external callers. State persistence goes through HDF5IO::loadTPQState
+// / saveTPQState now.
 
 /**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
@@ -1349,76 +802,10 @@ void writeFluctuationData(
     }
 }
 
-/**
- * Get a TPQ state at a specific inverse temperature by loading the closest available state
- * 
- * @param tpq_dir Directory containing TPQ data
- * @param sample TPQ sample index
- * @param target_beta Target inverse temperature
- * @param N Dimension of Hilbert space
- * @return TPQ state vector at the specified temperature
- */
-ComplexVector get_tpq_state_at_temperature(
-    const std::string& tpq_dir,
-    uint64_t sample,
-    double target_beta,
-    uint64_t N
-) {
-    std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
-    std::ifstream file(ss_file);
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open TPQ data file " << ss_file << std::endl;
-        return ComplexVector(N);
-    }
-    
-    // Skip header
-    std::string line;
-    std::getline(file, line);
-    
-    double best_beta = 0.0;
-    uint64_t best_step = 0;
-    double min_diff = std::numeric_limits<double>::max();
-    
-    // Find the step with the closest inverse temperature
-    while (std::getline(file, line)) {
-        std::istringstream iss(line);
-        double beta, energy, variance, norm, doublon;
-        uint64_t step;
-        
-        if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
-            continue;
-        }
-        
-        double diff = std::abs(beta - target_beta);
-        if (diff < min_diff) {
-            min_diff = diff;
-            best_beta = beta;
-            best_step = step;
-        }
-    }
-    file.close();
-    
-    if (best_step == 0) {
-        std::cerr << "Error: Could not find appropriate TPQ state" << std::endl;
-        return ComplexVector(N);
-    }
-    
-    std::cout << "Loading TPQ state at step " << best_step 
-              << ", beta = " << best_beta 
-              << " (target beta = " << target_beta << ")" << std::endl;
-    
-    // Load the state from file
-    std::string state_file = tpq_dir + "/tpq_state_" + std::to_string(sample) 
-                             + "_step" + std::to_string(best_step) + ".dat";
-    
-    ComplexVector tpq_state(N);
-    if (!load_tpq_state(tpq_state, state_file)) {
-        std::cerr << "Error: Could not load TPQ state from " << state_file << std::endl;
-        return ComplexVector(N);
-    }
-    
-    return tpq_state;
-}
+// get_tpq_state_at_temperature was retired in the minimalist-architecture
+// rev (May 2026): the SS_rand*.dat sidecar that it scanned for the closest
+// beta has been deleted; nearest-beta lookup now reads the unified HDF5
+// store via HDF5IO::loadTPQStateByName. No external callers remained.
 
 /**
  * Find the lowest energy state from saved TPQ state files
@@ -1628,15 +1015,27 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>, std:
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
     std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
     
-    // MPI-safe HDF5 file naming: each rank gets its own file
+    // MPI-safe HDF5 file naming: each rank gets its own file. The
+    // MPI_Initialized guard is needed because this helper can be
+    // reached from non-MPI processes (unit tests, Python single-process
+    // qed.thermal()) when the binary was built with -DWITH_MPI=ON.
     std::string h5_file;
     int mpi_rank = 0;
+    bool mpi_path = false;
     #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-    h5_file = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
-    #else
-    h5_file = dir + "/ed_results.h5";
+    {
+        int mpi_inited = 0;
+        MPI_Initialized(&mpi_inited);
+        if (mpi_inited) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+            h5_file = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+            mpi_path = true;
+        }
+    }
     #endif
+    if (!mpi_path) {
+        h5_file = dir + "/ed_results.h5";
+    }
     
     // Create vector of spin correlation files
     std::vector<std::string> spin_corr_files;
@@ -1676,19 +1075,16 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>, std:
         }
     }
     
-    // Initialize HDF5 file and sample group (MPI-safe: per-rank file)
+    // Initialize HDF5 file and sample group (MPI-safe: per-rank file
+    // when MPI is active; single file otherwise).
     try {
-        #ifdef WITH_MPI
-        // Create per-rank HDF5 file
         if (!HDF5IO::fileExists(h5_file)) {
-            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+            if (mpi_path) {
+                HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+            } else {
+                HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+            }
         }
-        #else
-        // Create or open single HDF5 file
-        if (!HDF5IO::fileExists(h5_file)) {
-            HDF5IO::createOrOpenFile(dir, "ed_results.h5");
-        }
-        #endif
         HDF5IO::ensureTPQSampleGroup(h5_file, sample);
     } catch (const std::exception& e) {
         std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
@@ -1719,89 +1115,12 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
 }
 
 
-/**
- * Calculate spectrum function from TPQ state
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param tpq_sample Sample index to use from TPQ calculation
- * @param tpq_step TPQ step to use
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param omega_step Step size in frequency domain
- * @param eta Broadening factor
- * @param tpq_dir Directory containing TPQ data
- * @param out_file Output file for spectrum
- */
-void calculate_spectrum_from_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t N,
-    uint64_t tpq_sample,
-    uint64_t tpq_step,
-    double omega_min,
-    double omega_max,
-    double omega_step,
-    double eta,
-    const std::string& tpq_dir,
-    const std::string& out_file
-) {
-    std::cout << "Calculating spectrum from TPQ state..." << std::endl;
-    
-    // Read TPQ data - try HDF5 first, fall back to text file
-    std::string h5_file = tpq_dir + "/ed_results.h5";
-    std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(tpq_sample) + ".dat";
-    double energy, temp, specificHeat;
-    
-    bool data_read = readTPQDataHDF5(h5_file, tpq_sample, tpq_step, energy, temp, specificHeat);
-    if (!data_read) {
-        // Fall back to text file for backwards compatibility
-        data_read = readTPQData(ss_file, tpq_step, energy, temp, specificHeat);
-    }
-    
-    if (!data_read) {
-        std::cerr << "Error: Could not read TPQ data from HDF5 or text file" << std::endl;
-        return;
-    }
-    
-    std::cout << "Using TPQ state at step " << tpq_step 
-              << ", temperature: " << temp 
-              << ", energy: " << energy << std::endl;
-    
-    // Open output file
-    std::ofstream spectrum_file(out_file);
-    if (!spectrum_file.is_open()) {
-        std::cerr << "Error: Could not open output file " << out_file << std::endl;
-        return;
-    }
-    spectrum_file << "# omega re(spectrum) im(spectrum)" << std::endl;
-    
-    // Calculate number of frequency points
-    uint64_t n_omega = static_cast<int>((omega_max - omega_min) / omega_step) + 1;
-    
-    // Pre-factor for Gaussian broadening
-    double pre_factor = 2.0 * temp * temp * specificHeat;
-    double factor = 1.0 / sqrt(M_PI * pre_factor);
-    
-    // Calculate spectrum for each frequency
-    for (int i = 0; i < n_omega; i++) {
-        double omega = omega_min + i * omega_step;
-        Complex z(omega, eta); // Complex frequency with broadening
-        
-        // This is a simplified version - the full algorithm would perform
-        // continued fraction expansion using Lanczos tridiagonalization
-        
-        // Calculate the spectrum using Gaussian broadening approximation
-        double spectrum_val = factor * exp(-pow((omega - energy), 2) / pre_factor);
-        
-        spectrum_file << std::setprecision(16) 
-                     << omega << " " 
-                     << spectrum_val << " " 
-                     << 0.0 << std::endl;
-    }
-    
-    spectrum_file.close();
-    std::cout << "Spectrum calculation complete. Written to " << out_file << std::endl;
-}
+// calculate_spectrum_from_tpq was retired in the minimalist-architecture
+// rev (May 2026): the Gaussian-broadening single-temperature spectrum
+// approximation was never wired into any workflow, and TPQ dynamical
+// spectra now go through ed::observables::cf_dynamical_correlator /
+// time_evolution_correlator with the proper continued-fraction
+// expansion. No external callers.
 
 
 /**
@@ -1855,41 +1174,51 @@ void microcanonical_tpq(
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
 
-    #ifdef WITH_MPI
-    int rank = 0, size = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    // Distribute samples across ranks using balanced assignment
-    uint64_t samples_per_rank = num_samples / size;
-    uint64_t remainder = num_samples % size;
-    
-    // Calculate start and end sample for this rank
-    // Ranks with index < remainder get one extra sample
-    uint64_t start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
-    uint64_t end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
-    uint64_t local_num_samples = end_sample - start_sample;
-    
-    if (rank == 0) {
-        std::cout << "\n==========================================\n";
-        std::cout << "MPI-Parallel TPQ Calculation\n";
-        std::cout << "==========================================\n";
-        std::cout << "Total MPI ranks: " << size << "\n";
-        std::cout << "Total samples: " << num_samples << "\n";
-        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
-        std::cout << "==========================================\n\n";
-    }
-    
-    std::cout << "Rank " << rank << " processing samples [" 
-              << start_sample << ", " << end_sample << ")\n";
-    
-    // Synchronize before starting computation
-    MPI_Barrier(MPI_COMM_WORLD);
-    #else
-    // Serial execution: process all samples on single rank
+    // Audit follow-up: guard with MPI_Initialized so this routine is
+    // safe to call from a non-MPI environment (unit tests, Python
+    // single-process scripts, qed.thermal()). Without the guard, the
+    // first MPI_Comm_rank below aborts because OpenMPI requires
+    // MPI_Init beforehand.
     uint64_t start_sample = 0;
     uint64_t end_sample = num_samples;
     uint64_t local_num_samples = num_samples;
+    int rank = 0, size = 1;
+    bool mpi_active = false;
+    #ifdef WITH_MPI
+    {
+        int mpi_inited = 0;
+        MPI_Initialized(&mpi_inited);
+        mpi_active = (mpi_inited != 0);
+    }
+    if (mpi_active) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+        // Distribute samples across ranks using balanced assignment
+        uint64_t samples_per_rank = num_samples / size;
+        uint64_t remainder = num_samples % size;
+
+        // Ranks with index < remainder get one extra sample
+        start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
+        end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
+        local_num_samples = end_sample - start_sample;
+
+        if (rank == 0) {
+            std::cout << "\n==========================================\n";
+            std::cout << "MPI-Parallel TPQ Calculation\n";
+            std::cout << "==========================================\n";
+            std::cout << "Total MPI ranks: " << size << "\n";
+            std::cout << "Total samples: " << num_samples << "\n";
+            std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+            std::cout << "==========================================\n\n";
+        }
+
+        std::cout << "Rank " << rank << " processing samples ["
+                  << start_sample << ", " << end_sample << ")\n";
+
+        // Synchronize before starting computation
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
     #endif
     
     // Create output directory if needed
@@ -1995,14 +1324,14 @@ void microcanonical_tpq(
     
     // Modified loop: only process samples assigned to this rank
     for (uint64_t sample = start_sample; sample < end_sample; sample++) {
-        #ifdef WITH_MPI
-        std::cout << "[Rank " << rank << "] TPQ sample " << sample 
-                  << " of " << num_samples 
-                  << " (local: " << (sample-start_sample+1) 
-                  << " of " << local_num_samples << ")" << std::endl;
-        #else
-        std::cout << "TPQ sample " << (sample+1) << " of " << num_samples << std::endl;
-        #endif
+        if (mpi_active) {
+            std::cout << "[Rank " << rank << "] TPQ sample " << sample
+                      << " of " << num_samples
+                      << " (local: " << (sample - start_sample + 1)
+                      << " of " << local_num_samples << ")" << std::endl;
+        } else {
+            std::cout << "TPQ sample " << (sample + 1) << " of " << num_samples << std::endl;
+        }
         
         std::vector<bool> temp_measured(num_temp_points, false);
         auto [ss_file, norm_file, flct_file, spin_corr, h5_file] = initializeTPQFilesWithHDF5(dir, sample, sublattice_size, measure_sz);
@@ -2150,18 +1479,23 @@ void microcanonical_tpq(
                 std::cout << "  Step " << step << " of " << final_step << std::endl;
             }
             
-            // In-place evolution: v0 = (L*D_S - H)|v0⟩
-            // First compute temp = H|v0⟩
+            // In-place evolution: v0 = (L*D_S - H)|v0⟩, then renormalise.
+            // First compute temp = H|v0⟩.
             H(v0.data(), temp.data(), N);
-            
-            // Then v0 = L*D_S*v0 - temp (in-place)
-            Complex scale_ld(LargeValue * D_S, 0.0);
-            cblas_zscal(N, &scale_ld, v0.data(), 1);  // v0 *= L*D_S
-            cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
 
-            current_norm = cblas_dznrm2(N, v0.data(), 1);
-            Complex scale_factor = Complex(1.0/current_norm, 0.0);
-            cblas_zscal(N, &scale_factor, v0.data(), 1);
+            // Wave 3.6 of the SOTA Performance rollout (May 2026): the
+            // (scale + axpy + norm + scale) tail of an mTPQ step is fused
+            // into one OpenMP parallel region by
+            // ``fused_mtpq_step_complex``. Saves three OMP fork/joins per
+            // iter -- non-trivial at N >= 2^18 where each pass crosses
+            // the L3 bandwidth wall. Numerically identical to the
+            // pre-Wave-3.6 sequence to within IEEE-754 round-off.
+            const Complex scale_ld(LargeValue * D_S, 0.0);
+            current_norm = ed::parallel::fused_mtpq_step_complex(
+                static_cast<std::uint64_t>(N),
+                scale_ld,
+                v0.data(),
+                temp.data());
             
             // Check if we should measure observables at target temperatures
             // We need to check this at EVERY step to avoid missing temperature points
@@ -2269,58 +1603,62 @@ void microcanonical_tpq(
     }
     
     #ifdef WITH_MPI
-    // Gather all eigenvalues from all ranks to rank 0
-    std::vector<double> all_eigenvalues;
-    if (rank == 0) {
-        all_eigenvalues.resize(num_samples);
-    }
-    
-    // Calculate receive counts and displacements for MPI_Gatherv
-    std::vector<int> recvcounts(size);
-    std::vector<int> displs(size);
-    
-    for (int r = 0; r < size; r++) {
-        uint64_t r_samples_per_rank = num_samples / size;
-        uint64_t r_remainder = num_samples % size;
-        uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
-        uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
-        
-        recvcounts[r] = static_cast<int>(r_count);
-        displs[r] = static_cast<int>(r_start);
-    }
-    
-    // Gather eigenvalues from all ranks
-    MPI_Gatherv(eigenvalues.data(), static_cast<int>(eigenvalues.size()), MPI_DOUBLE,
-                all_eigenvalues.data(), recvcounts.data(), displs.data(), 
-                MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    
-    // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
-    MPI_Barrier(MPI_COMM_WORLD);
-    
-    // Update eigenvalues on rank 0 with complete set
-    if (rank == 0) {
-        eigenvalues = std::move(all_eigenvalues);
-        std::cout << "\n==========================================\n";
-        std::cout << "MPI TPQ Computation Complete\n";
-        std::cout << "Collected " << eigenvalues.size() << " sample energies\n";
-        std::cout << "==========================================\n";
-        
-        // Merge per-rank HDF5 files into unified output
-        HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
-        
-        // Convert TPQ results to unified thermodynamic format
-        convert_tpq_to_unified_thermodynamics(dir, num_samples);
-    } else {
-        // Clear eigenvalues on non-root ranks to save memory
-        eigenvalues.clear();
-    }
-    
-    // Final barrier before returning
-    MPI_Barrier(MPI_COMM_WORLD);
-    #else
-    // Non-MPI: convert TPQ results to unified thermodynamic format
-    convert_tpq_to_unified_thermodynamics(dir, num_samples);
+    if (mpi_active) {
+        // Gather all eigenvalues from all ranks to rank 0
+        std::vector<double> all_eigenvalues;
+        if (rank == 0) {
+            all_eigenvalues.resize(num_samples);
+        }
+
+        // Calculate receive counts and displacements for MPI_Gatherv
+        std::vector<int> recvcounts(size);
+        std::vector<int> displs(size);
+
+        for (int r = 0; r < size; r++) {
+            uint64_t r_samples_per_rank = num_samples / size;
+            uint64_t r_remainder = num_samples % size;
+            uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
+            uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
+
+            recvcounts[r] = static_cast<int>(r_count);
+            displs[r] = static_cast<int>(r_start);
+        }
+
+        // Gather eigenvalues from all ranks
+        MPI_Gatherv(eigenvalues.data(), static_cast<int>(eigenvalues.size()), MPI_DOUBLE,
+                    all_eigenvalues.data(), recvcounts.data(), displs.data(),
+                    MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+        // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        // Update eigenvalues on rank 0 with complete set
+        if (rank == 0) {
+            eigenvalues = std::move(all_eigenvalues);
+            std::cout << "\n==========================================\n";
+            std::cout << "MPI TPQ Computation Complete\n";
+            std::cout << "Collected " << eigenvalues.size() << " sample energies\n";
+            std::cout << "==========================================\n";
+
+            // Merge per-rank HDF5 files into unified output
+            HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
+
+            // Convert TPQ results to unified thermodynamic format
+            convert_tpq_to_unified_thermodynamics(dir, num_samples);
+        } else {
+            // Clear eigenvalues on non-root ranks to save memory
+            eigenvalues.clear();
+        }
+
+        // Final barrier before returning
+        MPI_Barrier(MPI_COMM_WORLD);
+    } else
     #endif
+    {
+        // Non-MPI (or MPI not initialised): convert TPQ results to
+        // unified thermodynamic format on a single process.
+        convert_tpq_to_unified_thermodynamics(dir, num_samples);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2564,42 +1902,48 @@ void canonical_tpq(
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
 
-    #ifdef WITH_MPI
-    int rank = 0, size = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    // Distribute samples across ranks using balanced assignment
-    uint64_t samples_per_rank = num_samples / size;
-    uint64_t remainder = num_samples % size;
-    
-    // Calculate start and end sample for this rank
-    uint64_t start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
-    uint64_t end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
-    uint64_t local_num_samples = end_sample - start_sample;
-    
-    if (rank == 0) {
-        std::cout << "\n==========================================\n";
-        std::cout << "MPI-Parallel Canonical TPQ Calculation\n";
-        std::cout << "==========================================\n";
-        std::cout << "Total MPI ranks: " << size << "\n";
-        std::cout << "Total samples: " << num_samples << "\n";
-        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
-        std::cout << "==========================================\n\n";
-    }
-    
-    std::cout << "Rank " << rank << " processing samples [" 
-              << start_sample << ", " << end_sample << ")\n";
-    
-    // Synchronize before starting computation
-    MPI_Barrier(MPI_COMM_WORLD);
-    #else
-    // Serial execution: process all samples
+    // Audit follow-up: guard with MPI_Initialized so this routine is
+    // safe to call from a non-MPI environment.
     uint64_t start_sample = 0;
     uint64_t end_sample = num_samples;
     uint64_t local_num_samples = num_samples;
+    int rank = 0, size = 1;
+    bool mpi_active = false;
+    #ifdef WITH_MPI
+    {
+        int mpi_inited = 0;
+        MPI_Initialized(&mpi_inited);
+        mpi_active = (mpi_inited != 0);
+    }
+    if (mpi_active) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+        uint64_t samples_per_rank = num_samples / size;
+        uint64_t remainder = num_samples % size;
+
+        start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
+        end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
+        local_num_samples = end_sample - start_sample;
+
+        if (rank == 0) {
+            std::cout << "\n==========================================\n";
+            std::cout << "MPI-Parallel Canonical TPQ Calculation\n";
+            std::cout << "==========================================\n";
+            std::cout << "Total MPI ranks: " << size << "\n";
+            std::cout << "Total samples: " << num_samples << "\n";
+            std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+            std::cout << "==========================================\n\n";
+        }
+
+        std::cout << "Rank " << rank << " processing samples ["
+                  << start_sample << ", " << end_sample << ")\n";
+
+        // Synchronize before starting computation
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
     #endif
-    
+
     if (!dir.empty()) { ensureDirectoryExists(dir); }
     energies.clear();
     energies.reserve(local_num_samples);
@@ -2624,14 +1968,15 @@ void canonical_tpq(
 
     // Modified loop: only process samples assigned to this rank
     for (uint64_t sample = start_sample; sample < end_sample; ++sample) {
-        #ifdef WITH_MPI
-        std::cout << "[Rank " << rank << "] Canonical TPQ sample " << sample 
-                  << " of " << num_samples 
-                  << " (local: " << (sample-start_sample+1) 
-                  << " of " << local_num_samples << ")" << std::endl;
-        #else
-        std::cout << "Canonical TPQ sample " << (sample + 1) << " of " << num_samples << std::endl;
-        #endif
+        if (mpi_active) {
+            std::cout << "[Rank " << rank << "] Canonical TPQ sample " << sample
+                      << " of " << num_samples
+                      << " (local: " << (sample - start_sample + 1)
+                      << " of " << local_num_samples << ")" << std::endl;
+        } else {
+            std::cout << "Canonical TPQ sample " << (sample + 1)
+                      << " of " << num_samples << std::endl;
+        }
         
         std::vector<bool> temp_measured(num_temp_points, false);
         
@@ -2745,62 +2090,62 @@ void canonical_tpq(
     }
     
     #ifdef WITH_MPI
-    // Gather all energies from all ranks to rank 0
-    std::vector<double> all_energies;
-    if (rank == 0) {
-        all_energies.resize(num_samples);
-    }
-    
-    // Calculate receive counts and displacements for MPI_Gatherv
-    std::vector<int> recvcounts(size);
-    std::vector<int> displs(size);
-    
-    for (int r = 0; r < size; r++) {
-        uint64_t r_samples_per_rank = num_samples / size;
-        uint64_t r_remainder = num_samples % size;
-        uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
-        uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
-        
-        recvcounts[r] = static_cast<int>(r_count);
-        displs[r] = static_cast<int>(r_start);
-    }
-    
-    // Gather energies from all ranks
-    MPI_Gatherv(energies.data(), static_cast<int>(energies.size()), MPI_DOUBLE,
-                all_energies.data(), recvcounts.data(), displs.data(), 
-                MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    
-    // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
-    MPI_Barrier(MPI_COMM_WORLD);
-    
-    // Update energies on rank 0 with complete set
-    if (rank == 0) {
-        energies = std::move(all_energies);
-        std::cout << "\n==========================================\n";
-        std::cout << "MPI Canonical TPQ Computation Complete\n";
-        std::cout << "Collected " << energies.size() << " sample energies\n";
-        std::cout << "==========================================\n";
-        
-        // Merge per-rank HDF5 files into unified output
-        HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
-        
-        // Convert TPQ results to HDF5 format
-        // dir IS the output directory, use it directly
+    if (mpi_active) {
+        // Gather all energies from all ranks to rank 0
+        std::vector<double> all_energies;
+        if (rank == 0) {
+            all_energies.resize(num_samples);
+        }
+
+        std::vector<int> recvcounts(size);
+        std::vector<int> displs(size);
+
+        for (int r = 0; r < size; r++) {
+            uint64_t r_samples_per_rank = num_samples / size;
+            uint64_t r_remainder = num_samples % size;
+            uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
+            uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
+
+            recvcounts[r] = static_cast<int>(r_count);
+            displs[r] = static_cast<int>(r_start);
+        }
+
+        // Gather energies from all ranks
+        MPI_Gatherv(energies.data(), static_cast<int>(energies.size()), MPI_DOUBLE,
+                    all_energies.data(), recvcounts.data(), displs.data(),
+                    MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+        // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        // Update energies on rank 0 with complete set
+        if (rank == 0) {
+            energies = std::move(all_energies);
+            std::cout << "\n==========================================\n";
+            std::cout << "MPI Canonical TPQ Computation Complete\n";
+            std::cout << "Collected " << energies.size() << " sample energies\n";
+            std::cout << "==========================================\n";
+
+            // Merge per-rank HDF5 files into unified output
+            HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
+
+            // Convert TPQ results to HDF5 format
+            std::string h5_path = HDF5IO::createOrOpenFile(dir);
+            convert_tpq_to_unified_thermo(dir, h5_path);
+        } else {
+            // Clear energies on non-root ranks to save memory
+            energies.clear();
+        }
+
+        // Final barrier before returning
+        MPI_Barrier(MPI_COMM_WORLD);
+    } else
+    #endif
+    {
+        // Non-MPI (or MPI not initialised): single-process conversion.
         std::string h5_path = HDF5IO::createOrOpenFile(dir);
         convert_tpq_to_unified_thermo(dir, h5_path);
-    } else {
-        // Clear energies on non-root ranks to save memory
-        energies.clear();
     }
-    
-    // Final barrier before returning
-    MPI_Barrier(MPI_COMM_WORLD);
-    #else
-    // Non-MPI: convert TPQ results to HDF5 format
-    // dir IS the output directory, use it directly
-    std::string h5_path = HDF5IO::createOrOpenFile(dir);
-    convert_tpq_to_unified_thermo(dir, h5_path);
-    #endif
 }
 
 /**
@@ -2826,6 +2171,338 @@ void canonical_tpq(
  * @param num_temp_bins Number of temperature bins
  * @return true if successful
  */
+/**
+ * @brief In-memory TPQ post-processor.
+ *
+ * Implementation notes (audit follow-up): this function is now the
+ * canonical place where per-sample TPQ trajectories are interpolated
+ * onto a common temperature grid, averaged, and integrated to obtain
+ * S(T) and F(T). Both the HDF5-writing convert function and the
+ * unified ``ed::workflows::thermal`` entry point delegate here, so any
+ * future tweak to the interpolation / integration logic needs to
+ * happen in only one place.
+ */
+ThermodynamicData compute_tpq_unified_thermo(
+    const std::string& tpq_dir,
+    double temp_min,
+    double temp_max,
+    std::uint64_t num_temp_bins
+) {
+    ThermodynamicData thermo{};
+
+    struct TPQDataPoint {
+        double beta;
+        double energy;
+        double variance;
+    };
+
+    std::vector<std::vector<TPQDataPoint>> all_sample_data;
+
+    // Try to read from HDF5 file first (preferred).
+    std::string h5_file = HDF5IO::createOrOpenFile(tpq_dir, "ed_results.h5");
+    if (HDF5IO::fileExists(h5_file) && !HDF5IO::isDisabledOutputPath(h5_file)) {
+        H5E_auto2_t old_func;
+        void* old_client_data;
+        H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+        H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+        for (int sample = 0; sample < 1000; ++sample) {
+            auto points = HDF5IO::loadTPQThermodynamics(h5_file, sample);
+            if (points.empty()) break;
+
+            std::vector<TPQDataPoint> sample_data;
+            for (const auto& pt : points) {
+                if (pt.beta > 0 && std::isfinite(pt.energy) && std::isfinite(pt.variance)) {
+                    sample_data.push_back({pt.beta, pt.energy, pt.variance});
+                }
+            }
+            if (!sample_data.empty()) {
+                all_sample_data.push_back(sample_data);
+            }
+        }
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+    }
+
+    // Fallback: legacy text files.
+    if (all_sample_data.empty()) {
+        for (int sample = 0; sample < 1000; ++sample) {
+            std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
+            std::ifstream file(ss_file);
+            if (!file.is_open()) break;
+            std::vector<TPQDataPoint> sample_data;
+            std::string line;
+            std::getline(file, line);  // skip header
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream iss(line);
+                double inv_temp, energy, variance, num_acc, step;
+                if (iss >> inv_temp >> energy >> variance >> num_acc >> step) {
+                    if (inv_temp > 0 && std::isfinite(energy) && std::isfinite(variance)) {
+                        sample_data.push_back({inv_temp, energy, variance});
+                    }
+                }
+            }
+            if (!sample_data.empty()) {
+                all_sample_data.push_back(sample_data);
+            }
+        }
+    }
+
+    if (all_sample_data.empty() || num_temp_bins == 0) {
+        return thermo;  // empty
+    }
+
+    // Build log-spaced temperature grid.
+    std::vector<double> temperatures(num_temp_bins);
+    if (num_temp_bins == 1) {
+        temperatures[0] = temp_min;
+    } else {
+        double log_T_min = std::log(std::max(temp_min, 1e-300));
+        double log_T_max = std::log(std::max(temp_max, 1e-300));
+        double log_T_step = (log_T_max - log_T_min) / (num_temp_bins - 1);
+        for (std::uint64_t i = 0; i < num_temp_bins; ++i) {
+            temperatures[i] = std::exp(log_T_min + i * log_T_step);
+        }
+    }
+
+    std::vector<double> energy_mean(num_temp_bins, 0.0);
+    std::vector<double> cv_mean(num_temp_bins, 0.0);
+    std::vector<std::uint64_t> counts(num_temp_bins, 0);
+
+    for (const auto& sample_data : all_sample_data) {
+        std::vector<TPQDataPoint> sorted_data = sample_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+                  [](const TPQDataPoint& a, const TPQDataPoint& b) { return a.beta < b.beta; });
+
+        for (std::uint64_t t_idx = 0; t_idx < num_temp_bins; ++t_idx) {
+            double T = temperatures[t_idx];
+            double target_beta = 1.0 / std::max(T, 1e-300);
+
+            std::size_t i_low = 0, i_high = sorted_data.size() - 1;
+            for (std::size_t i = 0; i < sorted_data.size() - 1; ++i) {
+                if (sorted_data[i].beta <= target_beta && sorted_data[i + 1].beta >= target_beta) {
+                    i_low = i;
+                    i_high = i + 1;
+                    break;
+                }
+            }
+            if (target_beta < sorted_data.front().beta || target_beta > sorted_data.back().beta) {
+                continue;
+            }
+            double beta_low = sorted_data[i_low].beta;
+            double beta_high = sorted_data[i_high].beta;
+            double alpha = (beta_high > beta_low) ?
+                           (target_beta - beta_low) / (beta_high - beta_low) : 0.0;
+            double E = sorted_data[i_low].energy * (1.0 - alpha) +
+                       sorted_data[i_high].energy * alpha;
+            double var = sorted_data[i_low].variance * (1.0 - alpha) +
+                         sorted_data[i_high].variance * alpha;
+            double Cv = target_beta * target_beta * var;
+
+            ++counts[t_idx];
+            energy_mean[t_idx] += (E - energy_mean[t_idx]) / counts[t_idx];
+            cv_mean[t_idx]     += (Cv - cv_mean[t_idx])     / counts[t_idx];
+        }
+    }
+
+    // Fill missing bins (no samples at this T) by linear extrapolation from
+    // nearest covered bin so the returned grid is dense and the recombiner
+    // doesn't see NaNs / random zeros.
+    auto fill_holes = [&](std::vector<double>& v) {
+        std::int64_t first = -1, last = -1;
+        for (std::int64_t i = 0; i < static_cast<std::int64_t>(num_temp_bins); ++i) {
+            if (counts[i] > 0) { first = i; break; }
+        }
+        for (std::int64_t i = static_cast<std::int64_t>(num_temp_bins) - 1; i >= 0; --i) {
+            if (counts[i] > 0) { last = i; break; }
+        }
+        if (first < 0) return;
+        for (std::int64_t i = 0; i < first; ++i) v[i] = v[first];
+        for (std::int64_t i = last + 1; i < static_cast<std::int64_t>(num_temp_bins); ++i) {
+            v[i] = v[last];
+        }
+    };
+    fill_holes(energy_mean);
+    fill_holes(cv_mean);
+
+    // Trapezoidal integration of Cv/T → entropy
+    std::vector<double> entropy(num_temp_bins, 0.0);
+    std::vector<double> free_energy(num_temp_bins, 0.0);
+    for (std::uint64_t i = 1; i < num_temp_bins; ++i) {
+        double T1 = temperatures[i - 1];
+        double T2 = temperatures[i];
+        double Cv1 = cv_mean[i - 1];
+        double Cv2 = cv_mean[i];
+        entropy[i] = entropy[i - 1] + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
+    }
+    for (std::uint64_t i = 0; i < num_temp_bins; ++i) {
+        free_energy[i] = energy_mean[i] - temperatures[i] * entropy[i];
+    }
+
+    thermo.temperatures   = std::move(temperatures);
+    thermo.energy         = std::move(energy_mean);
+    thermo.specific_heat  = std::move(cv_mean);
+    thermo.entropy        = std::move(entropy);
+    thermo.free_energy    = std::move(free_energy);
+    return thermo;
+}
+
+// ============================================================================
+// SOTA in-memory TPQ trajectory aggregator (May 2026 surface unification).
+//
+// Companion to ``compute_tpq_unified_thermo``: same math, but takes the
+// per-sample (beta_k, E_k, var_k) trajectories DIRECTLY (no HDF5/text
+// round-trip) and interpolates onto the caller's temperature grid.
+// Called by the unified ``ed::workflows::thermal`` orchestrator for the
+// mTPQ / cTPQ lanes -- closes the long-standing gap where the unified
+// TPQ kernels populated only ``ground_state_energy`` and left the
+// ThermodynamicData arrays empty.
+// ============================================================================
+ThermodynamicData compute_tpq_thermo_from_trajectories(
+    const std::vector<std::vector<double>>& sample_inv_temps,
+    const std::vector<std::vector<double>>& sample_energies,
+    const std::vector<std::vector<double>>& sample_variances,
+    const std::vector<double>& target_temperatures
+) {
+    ThermodynamicData thermo{};
+
+    const std::size_t num_samples = sample_inv_temps.size();
+    const std::size_t num_T = target_temperatures.size();
+    if (num_samples == 0 || num_T == 0) {
+        return thermo;
+    }
+    // Shape sanity: every sample carries its three arrays in lockstep.
+    if (sample_energies.size() != num_samples
+        || sample_variances.size() != num_samples) {
+        return thermo;
+    }
+
+    // Pre-sort every sample's trajectory by beta so the per-target
+    // interpolation can use a single linear scan (kernels emit in
+    // step-monotone order; for mTPQ beta is also step-monotone since
+    // E_k drifts slowly, but defend against rounding-driven inversions).
+    std::vector<std::vector<std::array<double, 3>>> sorted(num_samples);
+    for (std::size_t s = 0; s < num_samples; ++s) {
+        const auto& betas = sample_inv_temps[s];
+        const auto& Es    = sample_energies[s];
+        const auto& vars  = sample_variances[s];
+        if (betas.size() != Es.size() || Es.size() != vars.size()) {
+            continue;  // skip malformed sample; cf. shape-mismatch policy
+        }
+        sorted[s].reserve(betas.size());
+        for (std::size_t k = 0; k < betas.size(); ++k) {
+            if (std::isfinite(betas[k]) && std::isfinite(Es[k])
+                && std::isfinite(vars[k])) {
+                sorted[s].push_back({betas[k], Es[k], vars[k]});
+            }
+        }
+        std::sort(sorted[s].begin(), sorted[s].end(),
+                  [](const auto& a, const auto& b) { return a[0] < b[0]; });
+    }
+
+    // Per-target Welford running mean across samples.
+    std::vector<double> energy_mean(num_T, 0.0);
+    std::vector<double> cv_mean(num_T, 0.0);
+    std::vector<std::uint64_t> counts(num_T, 0);
+
+    // Per-sample contribution to every target T:
+    //   * In-bracket beta:   linear interpolation of (E_k, var_k).
+    //   * target_beta > beta_max_traj (asked colder than the trajectory
+    //     reaches): clamp to the last trajectory point. For mTPQ this
+    //     is the asymptotic ground-state-projected state, which is the
+    //     correct extrapolation for T < T_min_traj. For cTPQ this is
+    //     the deepest beta the Taylor evolution reached.
+    //   * target_beta < beta_min_traj (asked warmer than beta=0): use
+    //     the first trajectory point (which is the beta=0 baseline,
+    //     <H> on the random seed -- the high-T limit).
+    //
+    // This per-sample boundary clamp replaces the previous per-bin
+    // "nearest covered bin" hole-filler, which produced incorrect E(T)
+    // at T_min when the trajectory bracketed (β_max_traj) was just
+    // below β_target = 1/T_min and the aggregator silently copied the
+    // value from the next-warmer bin.
+    bool any_covered = false;
+    for (std::size_t s = 0; s < num_samples; ++s) {
+        const auto& tr = sorted[s];
+        if (tr.empty()) continue;
+        any_covered = true;
+        const double beta_min = tr.front()[0];
+        const double beta_max = tr.back()[0];
+        for (std::size_t t = 0; t < num_T; ++t) {
+            const double T = target_temperatures[t];
+            const double target_beta = 1.0 / std::max(T, 1e-300);
+
+            double E_t, var_t;
+            if (target_beta <= beta_min) {
+                // Above-bracket warm: clamp to first point (beta=0 baseline).
+                E_t   = tr.front()[1];
+                var_t = tr.front()[2];
+            } else if (target_beta >= beta_max) {
+                // Below-bracket cold: clamp to last point (asymptotic E).
+                E_t   = tr.back()[1];
+                var_t = tr.back()[2];
+            } else {
+                // In-bracket: linear interpolation. Kernel emits in
+                // step-monotone order so the trajectory size is bounded
+                // by ``max_iter``; linear scan beats upper_bound's
+                // branch-mispredict cost on the small-N arrays.
+                std::size_t i_low = 0;
+                for (std::size_t i = 0; i + 1 < tr.size(); ++i) {
+                    if (tr[i][0] <= target_beta && tr[i + 1][0] >= target_beta) {
+                        i_low = i;
+                        break;
+                    }
+                }
+                const std::size_t i_high = i_low + 1;
+                const double beta_l = tr[i_low][0];
+                const double beta_h = tr[i_high][0];
+                const double alpha = (beta_h > beta_l)
+                    ? (target_beta - beta_l) / (beta_h - beta_l)
+                    : 0.0;
+                E_t   = tr[i_low][1] * (1.0 - alpha) + tr[i_high][1] * alpha;
+                var_t = tr[i_low][2] * (1.0 - alpha) + tr[i_high][2] * alpha;
+            }
+            const double Cv_t = target_beta * target_beta * var_t;
+
+            ++counts[t];
+            energy_mean[t] += (E_t  - energy_mean[t]) / counts[t];
+            cv_mean[t]     += (Cv_t - cv_mean[t])     / counts[t];
+        }
+    }
+
+    if (!any_covered) {
+        return thermo;  // no usable sample
+    }
+
+    // Trapezoidal integration of C_v / T -> entropy (zero baseline at
+    // the coldest target). F = E - T S.
+    std::vector<double> entropy(num_T, 0.0);
+    std::vector<double> free_energy(num_T, 0.0);
+    for (std::size_t i = 1; i < num_T; ++i) {
+        const double T1 = target_temperatures[i - 1];
+        const double T2 = target_temperatures[i];
+        const double Cv1 = cv_mean[i - 1];
+        const double Cv2 = cv_mean[i];
+        if (T1 > 0.0 && T2 > 0.0) {
+            entropy[i] = entropy[i - 1]
+                       + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
+        } else {
+            entropy[i] = entropy[i - 1];
+        }
+    }
+    for (std::size_t i = 0; i < num_T; ++i) {
+        free_energy[i] = energy_mean[i]
+                       - target_temperatures[i] * entropy[i];
+    }
+
+    thermo.temperatures   = target_temperatures;
+    thermo.energy         = std::move(energy_mean);
+    thermo.specific_heat  = std::move(cv_mean);
+    thermo.entropy        = std::move(entropy);
+    thermo.free_energy    = std::move(free_energy);
+    return thermo;
+}
+
 bool convert_tpq_to_unified_thermo(
     const std::string& tpq_dir,
     const std::string& output_file,
@@ -2835,16 +2512,31 @@ bool convert_tpq_to_unified_thermo(
 ) {
     std::cout << "\n=== Converting TPQ data to unified thermodynamic format ===" << std::endl;
     
-    // Data is already written directly to HDF5 during TPQ calculation
-    // Read from HDF5 instead of legacy SS_rand*.dat text files
+    // Delegate the actual interpolation / integration to
+    // ``compute_tpq_unified_thermo``. We still need to read the
+    // sample trajectories here to compute error bars (which the
+    // unified ThermodynamicData struct doesn't carry), but the
+    // averaged grid + entropy / free energy must match what
+    // ``ed::workflows::thermal`` sees in-memory.
+    ThermodynamicData unified =
+        compute_tpq_unified_thermo(tpq_dir, temp_min, temp_max, num_temp_bins);
+    if (unified.temperatures.empty()) {
+        std::cerr << "No TPQ data found in HDF5 or SS_rand*.dat files in " << tpq_dir << std::endl;
+        return false;
+    }
+
+    // Re-read per-sample data once more for error bar computation. This is
+    // unavoidable until ``ThermodynamicData`` gains error-bar fields, but
+    // it's still a single ``compute_tpq_unified_thermo`` source of truth
+    // for the averaged grid.
     struct TPQDataPoint {
         double beta;
         double energy;
         double variance;
     };
-    
+
     std::vector<std::vector<TPQDataPoint>> all_sample_data;
-    
+
     // Try to read from HDF5 file first (preferred)
     std::string h5_file = output_file;  // output_file is the HDF5 path
     if (HDF5IO::fileExists(h5_file)) {
@@ -2921,128 +2613,67 @@ bool convert_tpq_to_unified_thermo(
         }
     }
     
-    if (all_sample_data.empty()) {
-        std::cerr << "No TPQ data found in HDF5 or SS_rand*.dat files in " << tpq_dir << std::endl;
-        return false;
-    }
-    
-    std::cout << "Processing " << all_sample_data.size() << " TPQ samples" << std::endl;
-    
-    // Create temperature grid (logarithmic spacing)
-    std::vector<double> temperatures(num_temp_bins);
-    double log_T_min = std::log(temp_min);
-    double log_T_max = std::log(temp_max);
-    double log_T_step = (log_T_max - log_T_min) / (num_temp_bins - 1);
-    
-    for (size_t i = 0; i < num_temp_bins; ++i) {
-        temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    }
-    
-    // For each temperature, interpolate values from each sample
-    std::vector<double> energy_mean(num_temp_bins, 0.0);
+    std::cout << "Processing " << all_sample_data.size() << " TPQ samples for error bars" << std::endl;
+
+    // Re-walk samples to estimate per-bin standard error (the unified
+    // averaging itself was already done by compute_tpq_unified_thermo).
+    const auto& temperatures = unified.temperatures;
+    const auto& energy_mean  = unified.energy;
+    const auto& cv_mean      = unified.specific_heat;
     std::vector<double> energy_var(num_temp_bins, 0.0);
-    std::vector<double> cv_mean(num_temp_bins, 0.0);
     std::vector<double> cv_var(num_temp_bins, 0.0);
-    std::vector<uint64_t> counts(num_temp_bins, 0);
-    
+    std::vector<std::uint64_t> counts(num_temp_bins, 0);
+
     for (const auto& sample_data : all_sample_data) {
-        // Sort by beta (should already be sorted but ensure)
         std::vector<TPQDataPoint> sorted_data = sample_data;
-        std::sort(sorted_data.begin(), sorted_data.end(), 
+        std::sort(sorted_data.begin(), sorted_data.end(),
                   [](const TPQDataPoint& a, const TPQDataPoint& b) { return a.beta < b.beta; });
-        
-        for (size_t t_idx = 0; t_idx < num_temp_bins; ++t_idx) {
+
+        for (std::size_t t_idx = 0; t_idx < num_temp_bins; ++t_idx) {
             double T = temperatures[t_idx];
-            double target_beta = 1.0 / T;
-            
-            // Find bracketing points for interpolation
-            size_t i_low = 0, i_high = sorted_data.size() - 1;
-            
-            // Binary search for bracketing
-            for (size_t i = 0; i < sorted_data.size() - 1; ++i) {
-                if (sorted_data[i].beta <= target_beta && sorted_data[i+1].beta >= target_beta) {
+            double target_beta = 1.0 / std::max(T, 1e-300);
+            if (target_beta < sorted_data.front().beta ||
+                target_beta > sorted_data.back().beta) {
+                continue;
+            }
+            std::size_t i_low = 0, i_high = sorted_data.size() - 1;
+            for (std::size_t i = 0; i < sorted_data.size() - 1; ++i) {
+                if (sorted_data[i].beta <= target_beta &&
+                    sorted_data[i + 1].beta >= target_beta) {
                     i_low = i;
                     i_high = i + 1;
                     break;
                 }
             }
-            
-            // Check if target is within data range
-            if (target_beta < sorted_data.front().beta || target_beta > sorted_data.back().beta) {
-                continue;  // Skip this temperature for this sample
-            }
-            
-            // Linear interpolation in beta
             double beta_low = sorted_data[i_low].beta;
             double beta_high = sorted_data[i_high].beta;
-            double alpha = (beta_high > beta_low) ? 
-                           (target_beta - beta_low) / (beta_high - beta_low) : 0.0;
-            
-            double E = sorted_data[i_low].energy * (1.0 - alpha) + sorted_data[i_high].energy * alpha;
-            double var = sorted_data[i_low].variance * (1.0 - alpha) + sorted_data[i_high].variance * alpha;
-            
-            // Cv = beta^2 * variance
+            double alpha = (beta_high > beta_low)
+                               ? (target_beta - beta_low) / (beta_high - beta_low)
+                               : 0.0;
+            double E = sorted_data[i_low].energy * (1.0 - alpha) +
+                       sorted_data[i_high].energy * alpha;
+            double var = sorted_data[i_low].variance * (1.0 - alpha) +
+                         sorted_data[i_high].variance * alpha;
             double Cv = target_beta * target_beta * var;
-            
-            // Update running statistics
-            counts[t_idx]++;
-            double delta_E = E - energy_mean[t_idx];
-            energy_mean[t_idx] += delta_E / counts[t_idx];
-            double delta_E2 = E - energy_mean[t_idx];
-            energy_var[t_idx] += delta_E * delta_E2;
-            
-            double delta_Cv = Cv - cv_mean[t_idx];
-            cv_mean[t_idx] += delta_Cv / counts[t_idx];
-            double delta_Cv2 = Cv - cv_mean[t_idx];
-            cv_var[t_idx] += delta_Cv * delta_Cv2;
+
+            ++counts[t_idx];
+            double dE = E - energy_mean[t_idx];
+            energy_var[t_idx] += dE * dE;
+            double dCv = Cv - cv_mean[t_idx];
+            cv_var[t_idx] += dCv * dCv;
         }
     }
-    
-    // Finalize variance and compute standard error
-    std::vector<double> energy_error(num_temp_bins);
-    std::vector<double> cv_error(num_temp_bins);
-    
-    for (size_t i = 0; i < num_temp_bins; ++i) {
+
+    std::vector<double> energy_error(num_temp_bins, 0.0);
+    std::vector<double> cv_error(num_temp_bins, 0.0);
+    for (std::size_t i = 0; i < num_temp_bins; ++i) {
         if (counts[i] > 1) {
-            energy_var[i] /= (counts[i] - 1);
-            cv_var[i] /= (counts[i] - 1);
-            energy_error[i] = std::sqrt(energy_var[i] / counts[i]);
-            cv_error[i] = std::sqrt(cv_var[i] / counts[i]);
-        } else {
-            energy_error[i] = 0.0;
-            cv_error[i] = 0.0;
+            energy_error[i] = std::sqrt(energy_var[i] / (counts[i] - 1) / counts[i]);
+            cv_error[i]     = std::sqrt(cv_var[i] / (counts[i] - 1) / counts[i]);
         }
     }
-    
-    // Compute entropy and free energy by integration
-    // S(T) = S(0) + ∫_0^T (Cv/T') dT'
-    // For TPQ, we integrate from low T upward
-    std::vector<double> entropy(num_temp_bins, 0.0);
-    std::vector<double> free_energy(num_temp_bins, 0.0);
-    
-    // Use trapezoidal integration for entropy
-    for (size_t i = 1; i < num_temp_bins; ++i) {
-        if (counts[i] > 0 && counts[i-1] > 0) {
-            double T1 = temperatures[i-1];
-            double T2 = temperatures[i];
-            double Cv1 = cv_mean[i-1];
-            double Cv2 = cv_mean[i];
-            
-            // ∫(Cv/T)dT ≈ (T2-T1) * 0.5 * (Cv1/T1 + Cv2/T2)
-            entropy[i] = entropy[i-1] + 0.5 * (T2 - T1) * (Cv1/T1 + Cv2/T2);
-        } else {
-            entropy[i] = entropy[i-1];
-        }
-    }
-    
-    // F = E - TS
-    for (size_t i = 0; i < num_temp_bins; ++i) {
-        free_energy[i] = energy_mean[i] - temperatures[i] * entropy[i];
-    }
-    
+
     try {
-        // Save TPQ thermodynamics to HDF5
-        // output_file is the HDF5 file path (ed_results.h5)
         HDF5IO::saveFTLMThermodynamics(
             output_file,
             temperatures,
@@ -3050,14 +2681,14 @@ bool convert_tpq_to_unified_thermo(
             energy_error,
             cv_mean,
             cv_error,
-            entropy,
-            {},  // No entropy error from integration
-            free_energy,
-            {},  // No free energy error from integration
+            unified.entropy,
+            {},  // entropy errors come from integration
+            unified.free_energy,
+            {},  // free energy errors come from integration
             all_sample_data.size(),
             "TPQ"
         );
-        
+
         std::cout << "Saved TPQ thermodynamic data to HDF5: " << output_file << std::endl;
         return true;
     } catch (const std::exception& e) {

@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-# Benchmarks: `exact_diagonalization_cpp` vs peers
+# Benchmarks: QED vs peers
 
 This document is the canonical reference for **how fast each ED backend in
 this repository runs on a fixed reference workload**, with directly
@@ -225,14 +225,16 @@ Notes:
   path beyond `N = 26` on commodity hardware. See
   [`docs/architecture/SCALING.md`](../architecture/SCALING.md) for
   detailed memory tables.
-* **Symmetry-projected sectors**: the symmetry-aware partitioning
-  pass (Phase 3b #7, currently deferred and tracked in
-  [`docs/architecture/IMPLEMENTATION_NOTES.md`](../architecture/IMPLEMENTATION_NOTES.md))
-  is expected to drop the per-iteration cost by another 4-8x on
-  translation-invariant Heisenberg lattices.
-* **Multi-GPU**: the NCCL-based all-reduce backend (Phase 3c, also
-  deferred) extends the GPU advantage to clusters; its design and
-  acceptance tests are in `IMPLEMENTATION_NOTES.md`.
+* **Symmetry-projected sectors**: the symmetry-aware partitioning pass
+  (orbit LPT-greedy partition + orbit-aware halo plan) drops the
+  per-iteration cost by 4–8× on translation-invariant Heisenberg
+  lattices. The 4 × 6 sweep across all `(Subspace, ProjectorChain)`
+  cells and all six workflows is documented in
+  [`ORTHOGONAL_SYMMETRY.md`](ORTHOGONAL_SYMMETRY.md).
+* **Multi-GPU**: the NCCL-based all-reduce backend extends the GPU
+  advantage to clusters via `distributed_lanczos_gpu` /
+  `distributed_lanczos_gpu_symmetry` /
+  `distributed_krylov_schur_gpu`.
 
 ---
 

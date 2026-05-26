@@ -19,6 +19,10 @@ Backends covered:
   * gpu           : GPUOperator::matVecGPU / GPULanczos (cuSPARSE + cuBLAS).
   * distributed   : ed::distributed::DistributedOperator + distributed_lanczos
                     via mpiexec -n {1,2,4,8} on the local node.
+  * distributed_gpu : ed::distributed::distributed_lanczos_gpu (cuBLAS local +
+                    NCCL collectives), driven by `ed_distributed_main --gpu`
+                    via mpiexec, sweep over --gpu-mpi-ranks (skipped if no
+                    NCCL / no GPU).
   * quspin        : QuSpin's hamiltonian + scipy.sparse.linalg.eigsh.
   * scipy_csr     : QuSpin's CSR matrix + numpy @-product (apply only;
                     Lanczos shares the eigsh backend with QuSpin so we
@@ -181,9 +185,16 @@ def time_quspin_groundstate(H) -> tuple[float, float]:
 # ============================================================================
 
 def time_distributed_lanczos(ed_dist_bin: str, mpiexec: str, np_ranks: int,
-                             N: int, omp_threads: int) -> tuple[float, float]:
-    """Invoke ed_distributed_main with --mode=lanczos and parse its stdout for
-    elapsed_s + eig[0]. Returns (seconds, e0)."""
+                             N: int, omp_threads: int,
+                             gpu: bool = False) -> tuple[float, float]:
+    """Invoke ed_distributed_main with --mode=lanczos (CPU or GPU) and parse its
+    stdout for elapsed_s + eig[0]. Returns (seconds, e0).
+
+    Setting gpu=True adds the --gpu flag, which routes through
+    `distributed_lanczos_gpu` (cuBLAS local + NCCL collectives). Requires the
+    binary to be built with WITH_CUDA=ON and NCCL available at runtime; if
+    those preconditions are not met the binary will fail and we return
+    (None, None)."""
     import re
     if not os.path.exists(ed_dist_bin) or shutil.which(mpiexec) is None:
         return (None, None)
@@ -192,6 +203,8 @@ def time_distributed_lanczos(ed_dist_bin: str, mpiexec: str, np_ranks: int,
     cmd = [mpiexec, "-n", str(np_ranks), ed_dist_bin,
            "--mode", "lanczos", "--N", str(N), "--periodic", "1",
            "--max-iter", "200"]
+    if gpu:
+        cmd += ["--gpu", "--gpu-resident-spmv"]
     try:
         # warm up the cache once with a quick run; ignore the result.
         subprocess.run(cmd, capture_output=True, text=True, env=env,
@@ -231,11 +244,16 @@ def main() -> None:
                     default=[12, 14, 16, 18])
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--mpi-ranks", type=int, nargs="+", default=[1, 2, 4],
-                    help="Distributed sweep rank counts (skipped if mpiexec absent).")
+                    help="Distributed (CPU) sweep rank counts (skipped if mpiexec absent).")
+    ap.add_argument("--gpu-mpi-ranks", type=int, nargs="+", default=[1, 2],
+                    help="Distributed GPU+MPI sweep rank counts (one rank per visible GPU; "
+                         "skipped if mpiexec absent or binary not built with WITH_CUDA + NCCL).")
     ap.add_argument("--mpiexec", default="mpiexec")
     ap.add_argument("--output", default="bench_all_backends.json")
     ap.add_argument("--skip-quspin", action="store_true")
     ap.add_argument("--skip-distributed", action="store_true")
+    ap.add_argument("--skip-distributed-gpu", action="store_true",
+                    help="Skip the GPU+MPI sweep even if --gpu-mpi-ranks is set.")
     ap.add_argument("--skip-gpu", action="store_true")
     ap.add_argument("--min-time", default="0.4s")
     args = ap.parse_args()
@@ -295,7 +313,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"[quspin] N={N} failed: {exc}", flush=True)
 
-    # ---- distributed via mpiexec ------------------------------------------
+    # ---- distributed (CPU) via mpiexec ------------------------------------
     distributed_results: dict[int, dict[int, dict[str, float | None]]] = {}
     if not args.skip_distributed:
         for np_ranks in args.mpi_ranks:
@@ -312,6 +330,26 @@ def main() -> None:
                           f"wall={t_dist:.3f}s, e0={e0_dist}", flush=True)
                 else:
                     print(f"[mpi  np={np_ranks}] N={N} -> skipped", flush=True)
+
+    # ---- distributed (GPU + NCCL) via mpiexec -----------------------------
+    distributed_gpu_results: dict[int, dict[int, dict[str, float | None]]] = {}
+    if not (args.skip_distributed or args.skip_distributed_gpu or args.skip_gpu):
+        for np_ranks in args.gpu_mpi_ranks:
+            distributed_gpu_results[np_ranks] = {}
+            for N in args.sizes:
+                t_dist, e0_dist = time_distributed_lanczos(
+                    ed_dist_bin, args.mpiexec, np_ranks, N,
+                    omp_threads=max(1, args.threads // np_ranks),
+                    gpu=True)
+                distributed_gpu_results[np_ranks][N] = {
+                    "wall_s": t_dist, "e0": e0_dist,
+                }
+                if t_dist is not None:
+                    print(f"[mpi+gpu np={np_ranks}] N={N} -> "
+                          f"wall={t_dist:.3f}s, e0={e0_dist}", flush=True)
+                else:
+                    print(f"[mpi+gpu np={np_ranks}] N={N} -> skipped "
+                          "(requires WITH_CUDA + NCCL + GPUs)", flush=True)
 
     # ---- assemble result rows ---------------------------------------------
     rows = []
@@ -331,6 +369,8 @@ def main() -> None:
             "e0_quspin":            quspin_e0[N],
             "distributed":          {str(np_): distributed_results[np_].get(N)
                                      for np_ in distributed_results} if distributed_results else {},
+            "distributed_gpu":      {str(np_): distributed_gpu_results[np_].get(N)
+                                     for np_ in distributed_gpu_results} if distributed_gpu_results else {},
         })
 
     # ---- write JSON --------------------------------------------------------
@@ -338,6 +378,7 @@ def main() -> None:
         "threads": args.threads,
         "sizes": args.sizes,
         "mpi_ranks": args.mpi_ranks,
+        "gpu_mpi_ranks": args.gpu_mpi_ranks,
         "min_time": args.min_time,
         "rows": rows,
     }
@@ -394,7 +435,7 @@ def main() -> None:
     if distributed_results:
         print()
         print("=" * 110)
-        print("Distributed Lanczos (ed_distributed_main via mpiexec, wall seconds).")
+        print("Distributed Lanczos (CPU, ed_distributed_main via mpiexec, wall seconds).")
         print("=" * 110)
         hdr3 = f"{'N':>3} {'dim':>9} | " + "  ".join(
             [f"{'np='+str(np_):>12}" for np_ in args.mpi_ranks])
@@ -404,6 +445,27 @@ def main() -> None:
             cells = []
             for np_ in args.mpi_ranks:
                 d = r["distributed"].get(str(np_))
+                if d and d.get("wall_s"):
+                    cells.append(f"{d['wall_s']:.3f}")
+                else:
+                    cells.append("    -")
+            print(f"{r['N']:>3} {r['dim']:>9,} | " + "  ".join(
+                [f"{c:>12}" for c in cells]))
+
+    if distributed_gpu_results:
+        print()
+        print("=" * 110)
+        print("Distributed Lanczos (GPU + NCCL, ed_distributed_main --gpu via mpiexec, "
+              "wall seconds).")
+        print("=" * 110)
+        hdr4 = f"{'N':>3} {'dim':>9} | " + "  ".join(
+            [f"{'np='+str(np_):>12}" for np_ in args.gpu_mpi_ranks])
+        print(hdr4)
+        print("-" * len(hdr4))
+        for r in rows:
+            cells = []
+            for np_ in args.gpu_mpi_ranks:
+                d = r["distributed_gpu"].get(str(np_))
                 if d and d.get("wall_s"):
                     cells.append(f"{d['wall_s']:.3f}")
                 else:

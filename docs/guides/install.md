@@ -21,20 +21,22 @@ sudo apt-get install -y \
     build-essential cmake ninja-build pkg-config \
     libopenblas-dev liblapacke-dev \
     libhdf5-dev libhdf5-cpp-103 \
-    libeigen3-dev libarpack2-dev
+    libeigen3-dev
 ```
 
 Optional:
 
-- **MPI** (`libopenmpi-dev openmpi-bin`) — enables ScaLAPACK distributed
-  diagonalization and MPI-aware workflows.
+- **MPI** (`libopenmpi-dev openmpi-bin`) — enables the distributed
+  Lanczos / FTLM / TPQ lane and the `ed_distributed_main` binary.
 - **CUDA Toolkit ≥ 12.x** — enables the GPU solvers (`ed_solvers_gpu`).
+- **NCCL** — enables the multi-GPU distributed lane
+  (`distributed_lanczos_gpu`, NCCL collectives).
 
 Then:
 
 ```bash
-git clone https://github.com/.../exact_diagonalization_clean.git
-cd exact_diagonalization_clean/exact_diagonalization_cpp
+git clone https://github.com/ze-bang/QED.git
+cd QED
 cmake --preset ci-linux            # or pick another preset (see CMakePresets.json)
 cmake --build --preset ci-linux -- -j$(nproc)
 ctest --preset ci-linux

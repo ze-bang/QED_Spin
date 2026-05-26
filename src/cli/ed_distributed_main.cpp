@@ -39,7 +39,7 @@
 //   * stdout: parseable `key=value` style for grep-based regression suites.
 //   * --result-file (rank 0 only): HDF5 with /eigenvalues, /betas,
 //     /energy, /variance, /Z, /elapsed_s as appropriate. The Python
-//     workflow (qed.diag(H, device='mpi', ...)) reads this back so
+//     workflow (qed.solve(H, device='mpi', ...)) reads this back so
 //     callers get a real EDResults instead of a CompletedProcess.
 //   * --eigenvector-dir (rank 0 only): one ``rank_<r>.h5`` slab per
 //     rank, plus a ``manifest.json``. The Python workflow stitches

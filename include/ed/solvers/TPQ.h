@@ -9,6 +9,8 @@
 #include <random>
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
+#include <ed/core/thermal_types.h>       // ThermodynamicData (for compute_tpq_unified_thermo)
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
@@ -97,42 +99,12 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
     uint64_t sublattice_size
 );
 
-/**
- * Write TPQ data to file
- */
-void writeTPQData(const std::string& filename, double inv_temp, double energy, 
-                 double variance, double norm, uint64_t step);
-
-/**
- * Read TPQ data from text file (legacy support)
- */
-bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
-                double& temp, double& specificHeat);
-
-/**
- * Read TPQ data from HDF5 file
- * 
- * @param h5_file Path to HDF5 file
- * @param sample Sample index
- * @param step TPQ step to retrieve
- * @param energy Output: energy value
- * @param temp Output: temperature value
- * @param specificHeat Output: specific heat value
- * @return True if successful
- */
-bool readTPQDataHDF5(const std::string& h5_file, size_t sample, uint64_t step, 
-                     double& energy, double& temp, double& specificHeat);
-
-/**
- * Save the current TPQ state to a file
- * 
- * @param tpq_state TPQ state vector to save (in fixed-Sz or full basis)
- * @param filename Name of the file to save to
- * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms to full basis before saving
- * @return True if successful
- */
-bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename, 
-                    class FixedSzOperator* fixed_sz_op = nullptr);
+// writeTPQData / readTPQData / readTPQDataHDF5 / save_tpq_state (the
+// binary-sidecar / SS_rand*.dat reader-writer family) were retired in
+// the minimalist-architecture rev (May 2026). All TPQ persistence now
+// goes through HDF5IO::saveTPQState / loadTPQState (state vectors) and
+// HDF5IO::appendTPQThermodynamics / loadTPQThermodynamics
+// (thermodynamic trace). See src/solvers/cpu/TPQ.cpp for details.
 
 /**
  * Load a TPQ state from a file
@@ -155,15 +127,8 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename);
 bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename, 
                     class FixedSzOperator* fixed_sz_op, uint64_t expected_reduced_dim);
 
-/**
- * Load eigenvector data from a raw binary file
- * 
- * @param tpq_state TPQ state vector to load into
- * @param filename Name of the file to load from
- * @param N Expected size of the vector
- * @return True if successful
- */
-bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, uint64_t N);
+// load_raw_data was retired in the minimalist-architecture rev (May 2026):
+// no callers; state persistence is HDF5-only.
 
 /**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
@@ -198,21 +163,9 @@ void writeFluctuationData(
     uint64_t step
 );
 
-/**
- * Get a TPQ state at a specific inverse temperature by loading the closest available state
- * 
- * @param tpq_dir Directory containing TPQ data
- * @param sample TPQ sample index
- * @param target_beta Target inverse temperature
- * @param N Dimension of Hilbert space
- * @return TPQ state vector at the specified temperature
- */
-ComplexVector get_tpq_state_at_temperature(
-    const std::string& tpq_dir,
-    uint64_t sample,
-    double target_beta,
-    uint64_t N
-);
+// get_tpq_state_at_temperature was retired in the minimalist-architecture
+// rev (May 2026): no callers; nearest-beta lookup is done in-place by the
+// HDF5 loader.
 
 /**
  * Find the lowest energy state from saved TPQ state files
@@ -296,6 +249,37 @@ void microcanonical_tpq(
     double measure_beta_max = 1000.0
 );
 
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline void microcanonical_tpq(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N, uint64_t max_iter, uint64_t num_samples,
+    uint64_t temp_interval, std::vector<double>& eigenvalues,
+    std::string dir = "", bool compute_spectrum = false,
+    double LargeValue = 1e5, bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0, double omega_max = 20.0,
+    uint64_t num_points = 10000, double t_end = 50.0,
+    double dt = 0.01, float spin_length = 0.5,
+    bool measure_sz = false, uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    bool continue_quenching = false, uint64_t continue_sample = 0,
+    double continue_beta = 0.0, double target_beta = 1000.0,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0, double measure_beta_max = 1000.0)
+{
+    microcanonical_tpq(
+        ed::matvec::as_apply_function(H_op),
+        N, max_iter, num_samples, temp_interval, eigenvalues,
+        std::move(dir), compute_spectrum, LargeValue, compute_observables,
+        std::move(observables), std::move(observable_names),
+        omega_min, omega_max, num_points, t_end, dt, spin_length,
+        measure_sz, sublattice_size, num_sites, fixed_sz_op,
+        continue_quenching, continue_sample, continue_beta, target_beta,
+        num_measure_points, measure_beta_min, measure_beta_max);
+}
+
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
 inline void imaginary_time_evolve_tpq_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -334,41 +318,39 @@ void canonical_tpq(
     double measure_beta_max = 1000.0
 );
 
-/**
- * Compute dynamical correlations for TPQ using Krylov method
- * Delegates to the general dynamics module with TPQ-specific file naming
- */
-void computeDynamicCorrelationsKrylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& operators_1,
-    const std::vector<Operator>& operators_2,
-    const std::vector<std::string>& operator_names,
-    uint64_t N,
-    const std::string& dir,
-    uint64_t sample,
-    double inv_temp,
-    double t_end,
-    double dt,
-    uint64_t krylov_dim
-);
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline void canonical_tpq(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N, double beta_max, uint64_t num_samples,
+    uint64_t temp_interval, std::vector<double>& energies,
+    std::string dir = "", double delta_beta = 0.1, uint64_t taylor_order = 50,
+    bool compute_observables = false, std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0, double omega_max = 20.0,
+    uint64_t num_points = 10000, double t_end = 50.0,
+    double dt = 0.01, float spin_length = 0.5,
+    bool measure_sz = false, uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0, double measure_beta_max = 1000.0)
+{
+    canonical_tpq(
+        ed::matvec::as_apply_function(H_op),
+        N, beta_max, num_samples, temp_interval, energies, std::move(dir),
+        delta_beta, taylor_order, compute_observables,
+        std::move(observables), std::move(observable_names),
+        omega_min, omega_max, num_points, t_end, dt, spin_length,
+        measure_sz, sublattice_size, num_sites, fixed_sz_op,
+        num_measure_points, measure_beta_min, measure_beta_max);
+}
 
-/**
- * Compute observable dynamics for TPQ with legacy interface
- */
-void computeObservableDynamics_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables_1,
-    const std::vector<Operator>& observables_2,
-    const std::vector<std::string>& observable_names,
-    uint64_t N,
-    const std::string& dir,
-    uint64_t sample,
-    double inv_temp,
-    double t_end,
-    double dt
-);
+// computeDynamicCorrelationsKrylov, computeObservableDynamics_U_t, and
+// the older time_evolve_tpq_* / calculate_spectral_function_from_tpq*
+// wrappers were retired in the minimalist-architecture rev (May 2026):
+// none had external callers. The live TPQ dynamics path is
+// ed::observables::time_evolution_correlator and the workflow drivers
+// in src/cli/workflows.cpp.
 
 /**
  * Convert TPQ results (SS_rand*.dat files) to unified thermodynamic format
@@ -389,6 +371,72 @@ bool convert_tpq_to_unified_thermo(
     double temp_min = 0.01,
     double temp_max = 100.0,
     uint64_t num_temp_bins = 200
+);
+
+/**
+ * @brief In-memory variant of ``convert_tpq_to_unified_thermo``.
+ *
+ * Reads the per-sample TPQ trajectory (β, E, σ²) from
+ * ``<tpq_dir>/ed_results.h5`` (falling back to legacy
+ * ``SS_rand*.dat`` text files), interpolates onto a common
+ * temperature grid, averages across samples, and integrates to obtain
+ * entropy and free energy. Returns the resulting
+ * :class:`ThermodynamicData` directly so callers (notably
+ * ``ed::workflows::thermal``'s mTPQ / cTPQ branches) can attach it
+ * to ``EDResults`` without going through disk.
+ *
+ * Audit follow-up: this is the single source of truth for
+ * post-processing TPQ trajectories into ``ThermodynamicData``. Both
+ * the HDF5-writing variant (``convert_tpq_to_unified_thermo``) and the
+ * unified ``thermal()`` entry point delegate to this function.
+ *
+ * Returns an empty ``ThermodynamicData`` (all vectors empty) when no
+ * sample trajectories could be located -- callers should treat that
+ * as "TPQ produced no usable data" and skip the sector.
+ */
+ThermodynamicData compute_tpq_unified_thermo(
+    const std::string& tpq_dir,
+    double temp_min = 0.01,
+    double temp_max = 100.0,
+    std::uint64_t num_temp_bins = 200
+);
+
+/**
+ * @brief Aggregate per-sample TPQ trajectories into ThermodynamicData
+ *        on a user-supplied temperature grid (in-memory variant).
+ *
+ * Companion to ``compute_tpq_unified_thermo`` for the unified
+ * mTPQ/cTPQ kernels in ``include/ed/thermal/{mtpq,ctpq}_kernel.h``,
+ * which now emit per-step (beta_k, E_k, var_k) trajectories directly
+ * (no HDF5 / text-file round trip). The orchestrator's mTPQ/cTPQ
+ * branches in ``ed::workflows::thermal`` call this to populate
+ * ``ThermalResult::thermo`` so ``qed.thermal`` returns usable
+ * thermodynamics for both methods.
+ *
+ * Math: for each target temperature T (target_temperatures[t]), linearly
+ * interpolate every sample's (beta_k, E_k, var_k) at beta_target = 1/T,
+ * Welford-average across samples that bracket the target. Specific
+ * heat C_v = beta^2 * <var>. Entropy via trapezoidal integration of
+ * C_v / T from cold to hot. Free energy F = E - T * S.
+ *
+ * Samples whose trajectories don't bracket a given target beta are
+ * skipped for that bin; bins with no contributing sample are filled
+ * by nearest-bracketed-bin extrapolation (mirrors the legacy
+ * ``compute_tpq_unified_thermo`` behaviour for empty bins).
+ *
+ * Returns an empty ``ThermodynamicData`` (all vectors zero-length)
+ * when ``sample_*.empty()`` or ``target_temperatures.empty()``.
+ *
+ * @param sample_inv_temps    Per-sample beta_k trajectory
+ * @param sample_energies     Per-sample E_k trajectory (same length)
+ * @param sample_variances    Per-sample var_k trajectory (same length)
+ * @param target_temperatures Temperature grid for the output
+ */
+ThermodynamicData compute_tpq_thermo_from_trajectories(
+    const std::vector<std::vector<double>>& sample_inv_temps,
+    const std::vector<std::vector<double>>& sample_energies,
+    const std::vector<std::vector<double>>& sample_variances,
+    const std::vector<double>& target_temperatures
 );
 
 /**

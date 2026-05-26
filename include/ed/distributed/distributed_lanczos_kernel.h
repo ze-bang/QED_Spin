@@ -42,12 +42,16 @@
 #ifdef WITH_MPI
 
 #include <ed/distributed/distributed_lanczos.h>
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/ritz_convergence.h>
+#include <ed/matvec/backends/mpi_backend.h>
 #include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>     // Wave 4.5: ED_DIST_LANCZOS_LOCAL_DGKS env
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -214,6 +218,16 @@ inline void solve_tridiag_with_eigenvectors(const std::vector<double>& alpha,
 // vector slab on this rank. Caller is responsible for making it
 // L2-normalised globally; the kernel re-normalises defensively to absorb
 // scatter noise.
+//
+// May 2026 (Phase D of the Krylov-kernel unification): this body now
+// delegates to `ed::krylov::lanczos_kernel<MpiBackend>`. The previous
+// ~140-line inline three-term recurrence (matvec, dot/Allreduce, axpy,
+// batched CGS2 reorth, beta-breakdown, relative-Δλ early-exit) was
+// near-identical to the unified kernel in `ed/krylov/lanczos_kernel.h`;
+// this function now just supplies the `MpiBackend(op.comm())`, the
+// matvec callback, the early-exit predicate
+// (`make_smallest_ritz_convergence(exct, tol)`), and the
+// `DistributedLanczosResult`-flavoured post-processing.
 template <typename OpT>
 DistributedLanczosResult distributed_lanczos_kernel(
     const OpT& op,
@@ -221,7 +235,7 @@ DistributedLanczosResult distributed_lanczos_kernel(
     const DistributedLanczosOptions& options) {
 
     const int rank = op.rank();
-    const std::uint64_t local_n = op.local_size();
+    const std::uint64_t local_n  = op.local_size();
     const std::uint64_t max_iter = options.max_iter;
     const std::uint64_t exct = std::max<std::uint64_t>(1, options.exct);
     const double tol = options.tol;
@@ -237,132 +251,114 @@ DistributedLanczosResult distributed_lanczos_kernel(
     }
 
     // Phase 8 #3: dim-aware OMP+BLAS thread cap on the rank-local slab.
-    // Same heuristic as distributed_lanczos() in distributed_lanczos.cpp;
-    // applies equally to the templated path used by both
-    // DistributedOperator and DistributedSymmetryOperator. Disable via
-    // ED_AUTO_THREADS=0 if you are pinning threads externally.
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(local_n));
 
     const bool keep_basis =
         options.full_reorth || options.compute_eigenvectors;
 
-    std::vector<Complex> v_curr = std::move(v0_local);
-
-    // Defensive re-normalisation.
+    // Defensive re-normalise -- `lanczos_kernel` does this internally
+    // too, but doing it here means the initial vector slab the caller
+    // hands us is consistent with the kernel's first basis vector
+    // (otherwise different fp roundoff regimes produce subtly different
+    // V_0 across MPI runs and rank-local eigenvectors disagree on the
+    // last bit).
     {
-        const double n2 = dist_norm(v_curr.data(), local_n, op.comm());
-        if (n2 > 0.0) local_scal(1.0 / n2, v_curr.data(), local_n);
+        const double n2 = dist_norm(v0_local.data(), local_n, op.comm());
+        if (n2 > 0.0) local_scal(1.0 / n2, v0_local.data(), local_n);
     }
 
-    std::vector<std::vector<Complex>> basis;
+    ed::matvec::MpiBackend mpi(op.comm());
+
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter      = static_cast<std::size_t>(max_iter);
+
+    // Wave 4.5 of the SOTA Performance rollout (May 2026): on a
+    // distributed Lanczos with ``keep_basis == false`` (the
+    // eigenvalues-only path) the K=1 LocalDGKS3 reorth needs only
+    // ``v_curr`` / ``v_prev`` (already maintained), saving the
+    // m-vector ``dot_many``/``axpy_many`` batched Allreduce per
+    // iter that FullCGS2 demands. Opt-in via
+    // ``ED_DIST_LANCZOS_LOCAL_DGKS=1`` -- the default keeps the
+    // pre-Wave behaviour (None for eigvals-only, FullCGS2 with
+    // basis) so existing accuracy guarantees on near-degenerate
+    // spectra are preserved. Production users on latency-bound
+    // multi-node runs should benchmark both and adopt the env.
+    const bool use_local_dgks = []() {
+        const char* env = std::getenv("ED_DIST_LANCZOS_LOCAL_DGKS");
+        return env && env[0] == '1';
+    }();
     if (keep_basis) {
-        basis.reserve(max_iter);
-        basis.push_back(v_curr);
+        kopts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
+    } else if (use_local_dgks) {
+        kopts.reorth         = ed::krylov::ReorthPolicy::LocalDGKS3;
+        kopts.local_ring_size = 1;
+    } else {
+        kopts.reorth = ed::krylov::ReorthPolicy::None;
+    }
+    kopts.keep_basis    = keep_basis;
+    // Critical for distributed runs: the kernel's default
+    // `cap = min(max_iter, local_n)` is computed from the RANK-LOCAL
+    // slab, which is too small for small problems split over many
+    // ranks (e.g. global dim 6 / np=4 gives local_n in {1, 2} and the
+    // kernel would stop after a single iteration). Override the cap
+    // with the GLOBAL problem dimension to match the legacy
+    // `distributed_lanczos` body, which only bounded by `max_iter`.
+    kopts.dim_cap       = static_cast<std::size_t>(op.global_dim());
+    // Matches the legacy `b < 1e-14` breakdown threshold in this kernel's
+    // previous inline body. Distinct from the kernel's default
+    // `breakdown_tol = 1e-300` (which is the "exact zero" detection
+    // that the LTLM tests rely on); the historic distributed-MPI body
+    // had a much looser breakdown bar.
+    kopts.breakdown_tol = 1e-14;
+    // Relative-Δλ early-exit every 5 iterations, matching the legacy
+    // cadence and Ritz tolerance. The predicate captures its own state
+    // so we hand off a fresh closure per call.
+    kopts.convergence_check_interval = 5;
+    kopts.convergence_check =
+        ed::krylov::make_smallest_ritz_convergence(
+            static_cast<std::size_t>(exct), tol);
+
+    auto matvec = [&op](const Complex* in, Complex* out, std::size_t /*n*/) {
+        op.apply(in, out);
+    };
+
+    auto kres = ed::krylov::lanczos_kernel(
+        mpi, matvec, local_n, v0_local.data(), kopts);
+
+    if (options.verbose && rank == 0) {
+        std::cout << "  [dist-lanczos-kernel] completed "
+                  << kres.iters_done << " iters (max_iter=" << max_iter
+                  << ")\n";
     }
 
-    std::vector<Complex> v_prev(local_n, Complex(0.0, 0.0));
-    std::vector<Complex> w(local_n, Complex(0.0, 0.0));
-
-    std::vector<double> alpha; alpha.reserve(max_iter);
-    std::vector<double> beta;  beta.reserve(max_iter + 1);
-    beta.push_back(0.0);
-
-    double prev_smallest = std::numeric_limits<double>::infinity();
-    int iters_done = 0;
-
-    for (std::uint64_t j = 0; j < max_iter; ++j) {
-        op.apply(v_curr.data(), w.data());
-
-        Complex alpha_c =
-            dist_zdotc(v_curr.data(), w.data(), local_n, op.comm());
-        alpha.push_back(alpha_c.real());
-
-        local_axpy(Complex(-alpha.back(), 0.0), v_curr.data(),
-                   w.data(), local_n);
-        if (j > 0) {
-            local_axpy(Complex(-beta.back(), 0.0), v_prev.data(),
-                       w.data(), local_n);
-        }
-
-        if (keep_basis && !basis.empty()) {
-            // Phase 8 #6: batched CGS2 reorth -- mirrors the
-            // ed::distributed::distributed_lanczos branch. Two batched
-            // Allreduces total instead of basis.size() serial ones.
-            constexpr std::size_t kCgs2Threshold = 8;
-            if (basis.size() < kCgs2Threshold) {
-                for (std::size_t k = 0; k < basis.size(); ++k) {
-                    Complex c = dist_zdotc(basis[k].data(), w.data(),
-                                           local_n, op.comm());
-                    local_axpy(-c, basis[k].data(), w.data(), local_n);
-                }
-            } else {
-                std::vector<Complex> coeffs;
-                for (int pass = 0; pass < 2; ++pass) {
-                    dist_zdotc_batched(basis, w.data(), local_n, op.comm(),
-                                       coeffs);
-                    for (std::size_t k = 0; k < basis.size(); ++k) {
-                        if (coeffs[k] != Complex(0.0, 0.0)) {
-                            local_axpy(-coeffs[k], basis[k].data(),
-                                       w.data(), local_n);
-                        }
-                    }
-                }
-            }
-        }
-
-        const double b = dist_norm(w.data(), local_n, op.comm());
-        beta.push_back(b);
-        ++iters_done;
-
-        if (options.verbose && rank == 0) {
-            std::cout << "  [dist-lanczos-kernel] j=" << j
-                      << " alpha=" << alpha.back()
-                      << " beta_{j+1}=" << b << std::endl;
-        }
-
-        if (b < 1e-14) break;
-
-        if ((j + 1) % 5 == 0 || j + 1 == max_iter) {
-            std::vector<double> ev = solve_tridiag(alpha, beta, alpha.size());
-            const double smallest = ev.front();
-            if (alpha.size() >= exct + 1) {
-                if (std::abs(smallest - prev_smallest) < tol) {
-                    iters_done = static_cast<int>(alpha.size());
-                    if (options.verbose && rank == 0) {
-                        std::cout << "  [dist-lanczos-kernel] converged at "
-                                  << "iter " << alpha.size()
-                                  << " (smallest=" << smallest << ")\n";
-                    }
-                    break;
-                }
-            }
-            prev_smallest = smallest;
-        }
-
-        v_prev.swap(v_curr);
-        local_scal(1.0 / b, w.data(), local_n);
-        v_curr.swap(w);
-
-        if (keep_basis) basis.push_back(v_curr);
-    }
-
+    const std::size_t m = kres.alpha.size();
     DistributedLanczosResult result;
-    result.iterations = iters_done;
+    result.iterations = static_cast<int>(kres.iters_done);
 
     if (options.compute_eigenvectors) {
         std::vector<double> evals_unsorted, weights_unsorted, evecs_cm;
-        solve_tridiag_with_eigenvectors(alpha, beta, alpha.size(),
+        solve_tridiag_with_eigenvectors(kres.alpha, kres.beta, m,
                                         evals_unsorted, weights_unsorted,
                                         evecs_cm);
-        result.tridiag_eigenvalues  = evals_unsorted;
-        result.tridiag_weights      = weights_unsorted;
+        result.tridiag_eigenvalues  = std::move(evals_unsorted);
+        result.tridiag_weights      = std::move(weights_unsorted);
         result.tridiag_eigenvectors = std::move(evecs_cm);
-        if (basis.size() > static_cast<std::size_t>(iters_done)) {
-            basis.resize(static_cast<std::size_t>(iters_done));
+
+        // Copy the kernel's backend-owned basis (Backend::UniqueVec
+        // entries; host RAM for MpiBackend) into the
+        // `DistributedLanczosResult::krylov_basis_local` shape that the
+        // legacy ABI promises. `kres.basis.size() == kres.iters_done`
+        // already (the kernel does not push the trailing V_m on the
+        // final iteration), so no resize is needed.
+        result.krylov_basis_local.assign(kres.basis.size(),
+                                         std::vector<Complex>{});
+        for (std::size_t k = 0; k < kres.basis.size(); ++k) {
+            const Complex* src = kres.basis[k].get();
+            result.krylov_basis_local[k].assign(src, src + local_n);
         }
-        result.krylov_basis_local = std::move(basis);
-        std::vector<double> evals_sorted = evals_unsorted;
+
+        std::vector<double> evals_sorted = result.tridiag_eigenvalues;
         std::sort(evals_sorted.begin(), evals_sorted.end());
         const std::size_t n_keep =
             std::min<std::size_t>(static_cast<std::size_t>(exct),
@@ -371,11 +367,11 @@ DistributedLanczosResult distributed_lanczos_kernel(
                                   evals_sorted.begin() + n_keep);
     } else if (options.compute_weights) {
         std::vector<double> evals_unsorted, weights_unsorted;
-        solve_tridiag_with_weights(alpha, beta, alpha.size(),
+        solve_tridiag_with_weights(kres.alpha, kres.beta, m,
                                    evals_unsorted, weights_unsorted);
-        result.tridiag_eigenvalues = evals_unsorted;
-        result.tridiag_weights     = weights_unsorted;
-        std::vector<double> evals_sorted = evals_unsorted;
+        result.tridiag_eigenvalues = std::move(evals_unsorted);
+        result.tridiag_weights     = std::move(weights_unsorted);
+        std::vector<double> evals_sorted = result.tridiag_eigenvalues;
         std::sort(evals_sorted.begin(), evals_sorted.end());
         const std::size_t n_keep =
             std::min<std::size_t>(static_cast<std::size_t>(exct),
@@ -383,12 +379,12 @@ DistributedLanczosResult distributed_lanczos_kernel(
         result.eigenvalues.assign(evals_sorted.begin(),
                                   evals_sorted.begin() + n_keep);
     } else {
-        std::vector<double> all_ev =
-            solve_tridiag(alpha, beta, alpha.size());
+        std::vector<double> all_ev = solve_tridiag(kres.alpha, kres.beta, m);
         const std::size_t n_keep =
             std::min<std::size_t>(static_cast<std::size_t>(exct),
                                   all_ev.size());
-        result.eigenvalues.assign(all_ev.begin(), all_ev.begin() + n_keep);
+        result.eigenvalues.assign(all_ev.begin(),
+                                  all_ev.begin() + n_keep);
     }
     return result;
 }

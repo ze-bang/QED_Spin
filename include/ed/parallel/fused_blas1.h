@@ -425,4 +425,71 @@ fused_scale_inplace_real(std::uint64_t N,
     }
 }
 
+// =====================================================================
+// fused_mtpq_step_complex
+//
+// Wave 3.6 of the SOTA Performance rollout (May 2026): single-pass
+// mTPQ in-place evolution + norm + normalisation.
+//
+// Replaces the 4-stage sequence in `TPQ.cpp:1483-1489`:
+//
+//   cblas_zscal(N, scale_ld, v)                v *= scale_ld
+//   cblas_zaxpy(N, minus_one, Hv, v)           v -= Hv
+//   norm = cblas_dznrm2(N, v)                  norm = ||v||
+//   cblas_zscal(N, 1/norm, v)                  v /= norm
+//
+// with a single OMP parallel region: one pass over the array doing
+// the (scale + subtract) and accumulating ||v||^2 in a reduction;
+// then a second pass scaling by 1/norm. Three OMP fork/joins are
+// eliminated per mTPQ iteration. At N=2^18 (4 MiB / vector) and 1000
+// iters/run this saves ~5-10% of mTPQ wall time on a multi-core
+// CPU.
+//
+// On entry: v holds the current TPQ state. Hv holds H*v from the
+// preceding matvec. On exit: v <- (scale * v - Hv) / ||scale * v - Hv||.
+//
+// Returns the un-normalised ||scale * v - Hv|| (= the pre-scale norm).
+// =====================================================================
+inline double
+fused_mtpq_step_complex(std::uint64_t N,
+                        std::complex<double> scale,
+                        std::complex<double>* __restrict__ v,
+                        const std::complex<double>* __restrict__ Hv)
+{
+    using Cx = std::complex<double>;
+    double norm_sq = 0.0;
+#ifdef _OPENMP
+    if (N > 1024) {
+        #pragma omp parallel
+        {
+            double local = 0.0;
+            #pragma omp for schedule(static) nowait
+            for (std::int64_t i = 0; i < static_cast<std::int64_t>(N); ++i) {
+                const Cx z = scale * v[i] - Hv[i];
+                v[i] = z;
+                local += z.real() * z.real() + z.imag() * z.imag();
+            }
+            #pragma omp atomic
+            norm_sq += local;
+            #pragma omp barrier
+            const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
+            #pragma omp for schedule(static) nowait
+            for (std::int64_t i = 0; i < static_cast<std::int64_t>(N); ++i) {
+                v[i] *= inv;
+            }
+        }
+        return std::sqrt(norm_sq);
+    }
+#endif
+    for (std::uint64_t i = 0; i < N; ++i) {
+        const Cx z = scale * v[i] - Hv[i];
+        v[i] = z;
+        norm_sq += z.real() * z.real() + z.imag() * z.imag();
+    }
+    const double norm = std::sqrt(norm_sq);
+    const double inv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    for (std::uint64_t i = 0; i < N; ++i) v[i] *= inv;
+    return norm;
+}
+
 }  // namespace ed::parallel

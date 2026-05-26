@@ -10,7 +10,6 @@
 #                                    FetchContent fallback to v3.11.3)
 #   * HDF5 (CXX)          REQUIRED   binary I/O for diagonalization output
 #   * CUDAToolkit         optional   gated by WITH_CUDA
-#   * ARPACK              REQUIRED   sparse eigensolver
 #
 # Note: nlohmann_json is exposed via link_libraries() so its INTERFACE
 # include directories propagate to every subsequently-defined target.
@@ -90,8 +89,7 @@ if(WITH_CUDA)
     message(STATUS "CUDA Toolkit include directories: ${CUDAToolkit_INCLUDE_DIRS}")
 endif()
 
-# Find ARPACK
-find_library(ARPACK_LIBRARY NAMES arpack arpack-ng)
-if(NOT ARPACK_LIBRARY)
-    message(FATAL_ERROR "ARPACK library not found")
-endif()
+# ARPACK is no longer a dependency: the ARPACK_SM / ARPACK_LM /
+# ARPACK_SHIFT_INVERT / ARPACK_ADVANCED solvers were retired in the
+# minimalist-architecture rev (May 2026). All Krylov needs are served
+# by the in-tree LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR kernels.

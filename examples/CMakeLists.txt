@@ -19,7 +19,25 @@ set(_ed_example_targets "")
 
 function(ed_add_example name source)
     add_executable(${name} ${source})
-    target_link_libraries(${name} PRIVATE ed_solvers_cpu)
+    if(WITH_CUDA)
+        # `ed_solvers_cpu` compiles orchestrator.cpp + the kernel
+        # templates with WITH_CUDA defined; the resulting object file
+        # references cudaMalloc / cudaFree / etc. Even examples that
+        # never run on the GPU need to link CUDA libs so the
+        # instantiated symbols resolve. Linking `ed_solvers_gpu`
+        # PUBLIC-pulls the CUDA toolchain.
+        target_link_libraries(${name} PRIVATE ed_solvers_gpu ed_solvers_cpu)
+    else()
+        target_link_libraries(${name} PRIVATE ed_solvers_cpu)
+    endif()
+    # Wave A (Full unified-interface collapse, May 2026):
+    # `make_operator.h` references the DistributedOperator /
+    # DistributedSymmetryOperator constructors in inline factory bodies
+    # under `WITH_MPI`. Link transitively when the distributed library
+    # is in scope.
+    if(WITH_MPI AND TARGET ed_distributed)
+        target_link_libraries(${name} PRIVATE ed_distributed)
+    endif()
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
@@ -27,6 +45,7 @@ function(ed_add_example name source)
     set(_ed_example_targets ${_ed_example_targets} PARENT_SCOPE)
 endfunction()
 
+ed_add_example(ex00_unified_interface   00_unified_interface.cpp)
 ed_add_example(ex01_cpp_ground_state    01_cpp_ground_state.cpp)
 ed_add_example(ex02_cpp_full_spectrum   02_cpp_full_spectrum.cpp)
 ed_add_example(ex03_cpp_ftlm_thermal    03_cpp_ftlm_thermal.cpp)

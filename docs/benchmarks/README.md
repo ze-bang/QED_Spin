@@ -15,7 +15,15 @@ Three layers:
    ED library by A. Wietek et al. CPU-only, both unsymmetrised and
    `Sz = 0`-sector runs, with full reproducer commands.
 
-3. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
+3. **[ORTHOGONAL_SYMMETRY.md](./ORTHOGONAL_SYMMETRY.md)** — full
+   4 × 6 sweep (four `(Subspace, ProjectorChain)` cells × six
+   workflows) on both CPU and GPU lanes at N=8 and N=10. Pins the
+   functional + performance parity of the May-2026 orthogonal
+   symmetry composition refactor. Raw data:
+   [`bench_orthogonal_symmetry_N8.json`](./bench_orthogonal_symmetry_N8.json) /
+   [`bench_orthogonal_symmetry_N10.json`](./bench_orthogonal_symmetry_N10.json).
+
+4. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
    reference for every Google-Benchmark target in
    [`benchmarks/`](../../benchmarks/) (CPU SpMV, GPU SpMV, CPU/GPU
    Lanczos, GPU mixed-precision, MPI scaling, etc.). This is the

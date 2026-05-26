@@ -614,7 +614,7 @@ TEST_CASE("DistributedSymmetryOperator: Sz filter, all-up / all-down "
 // -----------------------------------------------------------------------------
 // Phase G: bare FixedSz route via the trivial 1-element symmetry group.
 //
-// The `qed.diag(H, device='mpi', sz=k)` path (without symmetry=) routes
+// The `qed.solve(H, device='mpi', sz=k)` path (without symmetry=) routes
 // through DistributedSymmetryOperator with a TRIVIAL one-element group
 // (identity only) + the Phase F popcount filter. With |G|=1 every orbit
 // is a singleton, so the popcount-filtered orbit basis IS exactly the

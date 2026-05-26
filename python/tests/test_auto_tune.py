@@ -22,6 +22,41 @@ def test_estimate_bandwidth_falls_back_when_operator_missing():
     assert auto_tune.estimate_bandwidth(None) == pytest.approx(4.0)
 
 
+def test_estimate_bandwidth_uses_iter_term_methods():
+    """Regression: the bandwidth estimator must walk the bound
+    ``iter_*_terms`` methods, not the private ``transform_data_`` field
+    that pybind does not expose. Before the fix, every bound Operator
+    silently fell back to ``fallback * num_sites`` regardless of its
+    coupling magnitudes. This stub mimics the iterator surface.
+    """
+
+    class FakeOp:
+        num_sites = 4
+
+        def iter_one_body_terms(self):
+            # (op_type, site, coeff) triples; only the last element matters.
+            return [(2, 0, complex(0.5, 0.0)),
+                    (2, 1, complex(0.5, 0.0)),
+                    (2, 2, complex(0.5, 0.0)),
+                    (2, 3, complex(0.5, 0.0))]
+
+        def iter_two_body_terms(self):
+            return []
+
+        def iter_three_body_terms(self):
+            return []
+
+    # Bandwidth must reflect the four 0.5-magnitude terms (sum of |c|=2,
+    # gershgorin upper bound 2*sum=4) -- _not_ the fallback
+    # ``4 * num_sites = 16``.
+    bw = auto_tune.estimate_bandwidth(FakeOp())
+    assert bw == pytest.approx(2.0 * 4 * 0.5)
+    # Sanity check the fallback path stays put when no iterators exist.
+    class BareOp:
+        num_sites = 4
+    assert auto_tune.estimate_bandwidth(BareOp()) == pytest.approx(16.0)
+
+
 def test_pick_omega_window_is_symmetric_around_zero():
     omin, omax = auto_tune.pick_omega_window(8.0)
     assert omin < 0 < omax
@@ -187,6 +222,13 @@ def test_pick_max_iterations_capped_by_dim():
     assert auto_tune.pick_max_iterations(4, 50) == 49
 
 
+@pytest.mark.skipif(
+    not hasattr(auto_tune, "pick_max_subspace"),
+    reason=(
+        "max_subspace was removed from EDParameters in the May 2026 "
+        "minimalist-solver-matrix cleanup along with its auto-tune helper."
+    ),
+)
 def test_pick_max_subspace_level_ordering():
     cons = auto_tune.pick_max_subspace(4, 1 << 18, level="conservative")
     bal  = auto_tune.pick_max_subspace(4, 1 << 18, level="balanced")
@@ -200,6 +242,14 @@ def test_pick_tolerance_level_ordering():
            auto_tune.pick_tolerance(level="aggressive")
 
 
+@pytest.mark.skipif(
+    not hasattr(auto_tune, "pick_arpack_ncv"),
+    reason=(
+        "The entire ARPACK_* family (and ``arpack_ncv``) was retired in "
+        "the May 2026 minimalist-solver-matrix cleanup; no auto-tune "
+        "helper for it remains."
+    ),
+)
 def test_pick_arpack_ncv_at_least_2k_plus_1():
     for k in (1, 4, 16, 64):
         for L in ("conservative", "balanced", "aggressive"):

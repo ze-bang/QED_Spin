@@ -1,89 +1,56 @@
 """qed: Python interface to the C++ exact-diagonalization engine.
 
-This package wraps the matrix-free C++ ``Operator`` / ``FixedSzOperator`` and
-the family of solvers (full diagonalization, every Lanczos / Krylov / Davidson
-variant, ARPACK, FTLM/LTLM/Hybrid, mTPQ/cTPQ, GPU per-sector dispatch under
-streaming symmetry, symmetrised block ED) through a thin pybind11 layer.
+The public surface is intentionally small: **three verbs**:
 
-The package has **two stress-free entry points** plus three layers of
-deeper access for advanced use:
+* :func:`qed.solve(H, ...) <qed.solve>` -- ground-state /
+  eigenvalue diagonalization. Picks the solver / device / Sz sector
+  automatically; opt-out via the matching kwargs.
 
-* **One-call API** (the recommended path for routine work)
+* :func:`qed.thermal(H, ...) <qed.thermal>` -- finite-temperature
+  thermodynamics (FTLM / LTLM / mTPQ / cTPQ / KPM-DOS). Iterates the
+  Sz axis automatically when Sz is conserved.
 
-  - :func:`qed.diag(H, ...) <qed.diag>` — exact diagonalisation of any
-    Hamiltonian. Auto-picks solver / device (CPU / GPU / MPI / MPI+GPU) /
-    Sz sector / pre-flight planner.
-  - :func:`qed.dssf.compute(directory, T=, omega=, ...) <qed.dssf.compute>`
-    — every structure-factor / spectral-function computation, finite or
-    zero temperature. Auto-picks the DSSF method **and** the internal knobs
-    (η broadening, ω window, FTLM Krylov dim, # random vectors, KPM moments,
-    device backend).
+* :func:`qed.spectral(H, observables, ...) <qed.spectral>` --
+  spectral / dynamical structure factors (ground-state continued
+  fraction, FTLM dynamical). Accepts an in-memory ``H`` plus a list
+  of observable operators, or a directory path for the ``./ED dssf``
+  CLI workflow.
 
-  See ``docs/guides/one_call_api.md`` for the canonical documentation of
-  both entry points, including the auto-selection rules and per-knob
-  overrides.
+All three call into the unified C++ orchestrator
+(``ed::workflows::{solve, thermal, spectral}`` in C++) and accept
+plain keyword arguments -- there are no separate ``SolveOptions`` /
+``ThermalOptions`` / ``SpectralOptions`` Python types.
 
-* **Low-level access** for niche / programmatic use:
+Operators are built via :class:`qed.input.HamiltonianBuilder` (the
+canonical fluent DSL) or directly via :class:`qed.Operator` /
+:class:`qed.FixedSzOperator`. The C++ ``ed::make_operator(OperatorSpec)``
+factory is the C++-side mirror; its Python binding lands in a follow-up
+commit.
 
-  1. **Solver-level** ``qed.lanczos / full_diagonalization /
-     finite_temperature_lanczos / low_temperature_lanczos /
-     hybrid_thermal_method``. Stable, narrowly-typed wrappers; great for
-     notebook prototyping.
-
-  2. **Dispatcher-level** ``qed.exact_diagonalization_core(op, method,
-     params)`` (and the directory + streaming-symmetry siblings). One Python
-     function reaches every solver the ``./ED`` CLI knows about, including
-     ARPACK, BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON,
-     LOBPCG, CHEBYSHEV_FILTERED, SHIFT_INVERT[_ROBUST], IRL/TRL, BICG,
-     FULL/SCALAPACK, mTPQ/cTPQ, FTLM/LTLM/HYBRID. Pass a GPU method to the
-     streaming or directory dispatchers and each sector / matrix-vector goes
-     to a CUDA kernel (when the build was made with ``WITH_CUDA=ON``; check
-     :func:`has_cuda_build`).
-
-  3. **Library-level submodules**: ``qed.input`` (lattice + Hamiltonian
-     builders), ``qed.symmetry`` (programmatic permutation groups),
-     ``qed.dssf`` (DSSF observable assembly + ``./ED dssf`` runner),
-     ``qed.auto_tune`` (heuristic helpers for the DSSF auto-tuner),
-     ``qed.bfg`` (BFG order-parameter kernels), ``qed.mpi``
-     (helper for the standalone ``mpiexec ed_distributed_main`` binary).
-
-Example -- one-call diagonalisation
------------------------------------
+Quick start
+-----------
 
     >>> import qed
     >>> N = 6
     >>> b = qed.input.HamiltonianBuilder(num_sites=N)
     >>> b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
     >>> H = b.to_operator()
-    >>> sorted(qed.diag(H, num_eigenvalues=2).eigenvalues)[:2]   # doctest: +SKIP
+    >>> sorted(qed.solve(H, num_eigenvalues=2).eigenvalues)[:2]   # doctest: +SKIP
     [-2.802..., -1.0]
 
-Example -- one-call DSSF
-------------------------
+Submodules
+----------
 
-    >>> import numpy as np                                       # doctest: +SKIP
-    >>> qed.dssf.compute("runs/heisenberg6",                     # doctest: +SKIP
-    ...                  T=[0.1, 0.5],
-    ...                  omega=np.linspace(-2, 2, 200))
-
-Example -- low-level dispatcher (when you want full control)
-------------------------------------------------------------
-
-    >>> params = qed.EDParameters()
-    >>> params.num_eigenvalues = 4
-    >>> result = qed.exact_diagonalization_core(
-    ...     H, qed.DiagonalizationMethod.LANCZOS, params)        # doctest: +SKIP
-
-Example -- in-process symmetry projection on the same chain
------------------------------------------------------------
-
-    >>> g = qed.symmetry.translation(N, 1)
-    >>> info = qed.symmetry.group_from_generators(N, [g])
-    >>> H.set_symmetry_info_from_dict(info)
-    >>> H.get_symmetry_info_as_dict()["num_generators"]
-    1
-
-See ``docs/guides/python_advanced.md`` for the full advanced-use catalogue.
+* :mod:`qed.input` -- lattice + Hamiltonian DSL.
+* :mod:`qed.symmetry` -- programmatic permutation-group helpers.
+* :mod:`qed.dssf` -- DSSF observable-pair builders (data helpers only;
+  the actual workflow lives in :func:`qed.spectral`).
+* :mod:`qed.bfg` -- BFG order-parameter helpers.
+* :mod:`qed.mpi` -- helper for the standalone ``mpiexec
+  ed_distributed_main`` binary.
+* :mod:`qed.auto_tune` -- internal heuristic tuner (used by
+  :func:`qed.spectral` when ``auto_tune=True``).
+* :mod:`qed.feasibility` -- pre-flight planner.
 """
 
 from __future__ import annotations
@@ -102,47 +69,41 @@ from ._core import (
     compute_thermodynamics_from_spectrum,
     finite_temperature_lanczos,
     low_temperature_lanczos,
-    hybrid_thermal_method,
     FTLMParameters,
     LTLMParameters,
-    HybridThermalParameters,
-    # Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +
-    # streaming/directory dispatchers + build introspection.
     DiagonalizationMethod,
-    HamiltonianFileFormat,
     EDParameters,
     EDResults,
     ThermodynamicData,
-    exact_diagonalization_core,
-    exact_diagonalization_from_directory,
-    exact_diagonalization_streaming_symmetry,
-    exact_diagonalization_streaming_symmetry_fixed_sz,
     has_cuda_build,
     has_mpi_build,
-    has_scalapack_build,
-    canonicalize_method,
 )
 
-from . import dssf  # high-level DSSF observable-pair builder + ./ED dssf runner (P2.8)
-from . import auto_tune  # Phase 9.2: heuristic helpers for the DSSF auto-tuner
-from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL (P2.10)
-from . import input  # standalone C++ ed_input library bindings (Phase 4)
-from . import symmetry  # programmatic site-permutation symmetry DSL (P2.11)
-from . import bfg  # BFG order-parameter library helpers (P2.1)
-from . import mpi  # mpiexec ed_distributed_main runner helper (Phase 5)
+from . import dssf  # DSSF observable-pair data helpers
+from . import auto_tune  # heuristic helpers consumed internally by qed.spectral
+from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
+from . import input  # standalone C++ ed_input library bindings
+from . import symmetry  # programmatic site-permutation symmetry DSL
+from . import bfg  # BFG order-parameter library helpers
+from . import mpi  # mpiexec ed_distributed_main runner helper
 from . import helpers  # re-export edlib utilities under qed.helpers
-from . import workflow  # Phase 9: stress-free unified workflow API
+from . import workflow  # internal implementation module for qed.solve
 from .workflow import (  # noqa: E402  (top-level re-exports)
     GeneratorSet,
     SymmetryReport,
-    diag,
+    solve,
     find_symmetries,
     list_diag_parameters,
     load_mpi_eigenvector,
     load_mpi_eigenvectors,
     solver_device_support,
 )
-from . import feasibility  # Phase 9 / Layer 6: pre-flight planner
+from . import thermal as _thermal_module  # one canonical finite-T entry point
+from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
+from . import spectral as _spectral_module  # one canonical spectral entry point
+from .spectral import spectral  # noqa: E402
+
+from . import feasibility  # pre-flight planner
 from .feasibility import (  # noqa: E402
     BasisChoice,
     FeasibilityReport,
@@ -157,37 +118,41 @@ from .feasibility import (  # noqa: E402
     suggest_workflow,
 )
 
-__version__: Final[str] = "0.2.0"
+__version__: Final[str] = "0.3.0"
 
 __all__ = [
+    # Core operator types
     "Operator",
     "FixedSzOperator",
     "OP_SPLUS",
     "OP_SMINUS",
     "OP_SZ",
+    # Low-level solver primitives (rarely needed; consider qed.solve instead)
     "full_diagonalization",
     "lanczos",
     "compute_thermodynamics_from_spectrum",
     "finite_temperature_lanczos",
     "low_temperature_lanczos",
-    "hybrid_thermal_method",
     "FTLMParameters",
     "LTLMParameters",
-    "HybridThermalParameters",
-    # Phase 5 dispatcher surface
+    # Enums and parameter helpers
     "DiagonalizationMethod",
-    "HamiltonianFileFormat",
     "EDParameters",
     "EDResults",
     "ThermodynamicData",
-    "exact_diagonalization_core",
-    "exact_diagonalization_from_directory",
-    "exact_diagonalization_streaming_symmetry",
-    "exact_diagonalization_streaming_symmetry_fixed_sz",
     "has_cuda_build",
     "has_mpi_build",
-    "has_scalapack_build",
-    "canonicalize_method",
+    # The three canonical entry points
+    "solve",
+    "thermal",
+    "spectral",
+    # Result types
+    "ThermalResult",
+    "ThermalSectorEntry",
+    # Symmetry helpers
+    "GeneratorSet",
+    "SymmetryReport",
+    "find_symmetries",
     # Submodules
     "dssf",
     "auto_tune",
@@ -198,16 +163,11 @@ __all__ = [
     "mpi",
     "helpers",
     "workflow",
-    # Phase 9 unified workflow API
-    "diag",
-    "find_symmetries",
+    # Helpers and feasibility planner
     "list_diag_parameters",
     "solver_device_support",
     "load_mpi_eigenvector",
     "load_mpi_eigenvectors",
-    "GeneratorSet",
-    "SymmetryReport",
-    # Phase 9 / Layer 6: feasibility planner
     "feasibility",
     "estimate_resources",
     "suggest_workflow",

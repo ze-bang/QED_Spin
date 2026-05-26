@@ -14,8 +14,9 @@
 //     `ed::dssf::build_observable_pairs` (P1.10), preserved so the four
 //     historical call sites in this file (and the `run_dssf_mode` shim
 //     still living in ed_main.cpp) keep compiling.
-//   * The four `run_*_workflow` (standard / streaming-symmetry /
-//     disk-streaming / chunked-symmetry) entry points.
+//   * The two `run_*_workflow` (standard / streaming-symmetry) entry points.
+//     (`run_disk_streaming_workflow` / `run_chunked_symmetry_workflow` were
+//      retired in matvec-unification Phase 7.2; see comment in this file.)
 //   * `compute_thermodynamics`.
 //   * The three `compute_*_workflow` entry points (dynamical response,
 //     static response, ground-state DSSF) — these are the principal
@@ -44,24 +45,34 @@
 #include <memory>
 #include <random>
 #include <algorithm>
+#include <cstdlib>          // getenv (Wave 3.4 ED_DSSF_PAIR_THREADS)
+#ifdef _OPENMP
+#include <omp.h>            // Wave 3.4 OpenMP-over-pairs
+#endif
 #include <map>
 #include <fstream>
 
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
-#include <ed/core/ed_wrapper.h>
-#include <ed/core/ed_wrapper_streaming.h>
-#include <ed/core/disk_streaming_symmetry.h>
-#include <ed/core/ed_wrapper_chunked.h>
+#include <ed/core/ed_wrapper.h>            // residue: EDResults envelope (legacy types only)
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/core/system_utils.h>          // create_directory_mpi_safe (was via ed_wrapper_streaming.h)
+
+// Full Unified-Interface Collapse, Wave C2 (May 2026): run_standard_workflow
+// and run_streaming_symmetry_workflow now build their operator via the
+// unified factory and dispatch through the orchestrator, replacing the
+// legacy `ed::exact_diagonalization(directory, method, params, ...)` entry
+// from the now-deleted <ed/core/dispatch.h>.
+#include <ed/core/make_operator.h>
+#include <ed/core/sector_loop.h>          // StreamingSymmetryHandle (SOTA)
+#include <ed/orchestrator.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/dssf/cross_sector_observable.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/fixed_sz_operator_types.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ftlm_dist.h>
-#include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
@@ -358,48 +369,234 @@ void construct_operators_from_config(
 
 
 // ============================================================================
+// Internal workflow helpers (May 2026): factored out of the otherwise
+// near-identical preambles in compute_*_workflow. Each function used to
+// inline a ~50-line MPI rank + Hamiltonian + H_func + Hilbert-dim block;
+// the helpers below collapse that to four lines per workflow without any
+// behavioural change. Audit #2 (FixedSz->Operator path) handling is
+// preserved by dispatching the apply() lambda on the concrete operator.
+// ============================================================================
+
+/// Returns (rank, size) from `MPI_COMM_WORLD`, falling back to (0, 1)
+/// when MPI is unavailable or `MPI_Init` has not been called. Mirrors
+/// the guard in `create_directory_mpi_safe`.
+static inline std::pair<int, int> get_mpi_rank_size_safe() {
+    int rank = 0, size = 1;
+#ifdef WITH_MPI
+    int mpi_inited = 0;
+    MPI_Initialized(&mpi_inited);
+    if (mpi_inited) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+    }
+#endif
+    return {rank, size};
+}
+
+/// Bundles every piece of Hamiltonian state the compute_*_workflow
+/// drivers need: the concrete operator (full or fixed-Sz), the sector
+/// dimension, and an apply lambda. The lambda dispatches via the
+/// concrete shared_ptr so the audit #2 fixed-Sz CPU path doesn't slice
+/// back to `Operator::apply` at the wrong dimension.
+struct WorkflowHamiltonian {
+    bool                              use_fixed_sz = false;
+    int64_t                           n_up         = -1;
+    uint64_t                          N            = 0;
+    std::shared_ptr<Operator>         ham_full;
+    std::shared_ptr<FixedSzOperator>  ham_fs;
+    std::function<void(const Complex*, Complex*, uint64_t)> H_func;
+
+    /// Slice-as-base for legacy callers that need `Operator&`.
+    Operator& ham_ref() {
+        return use_fixed_sz ? static_cast<Operator&>(*ham_fs) : *ham_full;
+    }
+};
+
+/// Construct the Hamiltonian, three-body terms, sector dimension, and
+/// `H_func` apply lambda from `config`. When `verbose_label` is non-null
+/// and `rank == 0`, prints the three-body load and the sector-dim
+/// summary the workflows used to print inline.
+static inline WorkflowHamiltonian
+build_workflow_hamiltonian(const EDConfig& config,
+                           int rank,
+                           const char* verbose_label)
+{
+    WorkflowHamiltonian out;
+    out.use_fixed_sz = config.system.use_fixed_sz;
+    out.n_up = (out.use_fixed_sz && config.system.n_up >= 0)
+                   ? config.system.n_up
+                   : static_cast<int64_t>(config.system.num_sites) / 2;
+
+    const std::string interaction_file =
+        config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    const std::string single_site_file =
+        config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+
+    if (out.use_fixed_sz) {
+        out.ham_fs = std::make_shared<FixedSzOperator>(
+            config.system.num_sites, config.system.spin_length, out.n_up);
+        out.ham_fs->loadFromInterAllFile(interaction_file);
+        out.ham_fs->loadFromFile(single_site_file);
+    } else {
+        out.ham_full = std::make_shared<Operator>(
+            config.system.num_sites, config.system.spin_length);
+        out.ham_full->loadFromInterAllFile(interaction_file);
+        out.ham_full->loadFromFile(single_site_file);
+    }
+
+    if (!config.system.three_body_file.empty()) {
+        const std::string three_body_file =
+            config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        if (std::filesystem::exists(three_body_file)) {
+            if (rank == 0 && verbose_label) {
+                std::cout << "Loading three-body terms from: "
+                          << three_body_file << "\n";
+            }
+            if (out.use_fixed_sz) out.ham_fs->loadThreeBodyTerm(three_body_file);
+            else                  out.ham_full->loadThreeBodyTerm(three_body_file);
+        }
+    }
+
+    if (out.use_fixed_sz) {
+        out.N = 1;
+        for (int64_t i = 0; i < out.n_up; i++) {
+            out.N = out.N * (config.system.num_sites - i) / (i + 1);
+        }
+        if (rank == 0 && verbose_label) {
+            std::cout << verbose_label << ": dim=" << out.N
+                      << " (n_up=" << out.n_up << ")\n";
+        }
+    } else {
+        out.N = 1ULL << config.system.num_sites;
+        if (rank == 0 && verbose_label) {
+            std::cout << verbose_label << ": full Hilbert space dim="
+                      << out.N << "\n";
+        }
+    }
+
+    // The lambda captures shared_ptrs by value so it survives any local
+    // lifetime questions in the caller.
+    auto ham_full_cap   = out.ham_full;
+    auto ham_fs_cap     = out.ham_fs;
+    const bool fz_cap   = out.use_fixed_sz;
+    out.H_func = [ham_full_cap, ham_fs_cap, fz_cap](
+        const Complex* in, Complex* outp, uint64_t dim) {
+        if (fz_cap) ham_fs_cap->apply(in, outp, dim);
+        else        ham_full_cap->apply(in, outp, dim);
+    };
+
+    return out;
+}
+
+// ============================================================================
 // WORKFLOW FUNCTIONS
 // ============================================================================
 
 /**
  * @brief Run standard diagonalization workflow
+ *
+ * Full Unified-Interface Collapse, Wave C2 (May 2026): collapses what used
+ * to be a single `ed::exact_diagonalization(directory, method, params, ...)`
+ * call into the canonical three-step unified shape:
+ *
+ *     OperatorSpec -> ed::make_operator(spec) -> ed::workflows::solve(...)
+ *
+ * Two behavioural lanes are preserved:
+ *   1. Standard: single sector (full Hilbert space, or fixed-Sz when the
+ *      caller sets `use_fixed_sz`).
+ *   2. ALL_SZ_SECTORS: when `params.full_sz_split && params.method == FULL`,
+ *      loop over every Sz sector (n_up = 0..num_sites) via the same
+ *      factory + orchestrator path, merge the eigenvalues, and sort.
+ *      This replaces the dispatcher's internal `exact_diagonalization_all_sz_sectors`
+ *      branch with an explicit, auditable loop in the CLI.
+ *
+ * HDF5 output is now emitted explicitly here (the orchestrator does not
+ * auto-save eigenvalues from the Lanczos / Krylov-Schur lane today), so
+ * the CLI's output contract is unchanged.
  */
 EDResults run_standard_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    // Check if fixed Sz mode is enabled
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-        std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-        
-        results = exact_diagonalization_fixed_sz(
-            interaction_file,
-            single_site_file,
-            config.system.num_sites,
-            config.system.spin_length,
-            n_up,
-            config.method,
-            params
-        );
-    } else {
-        results = exact_diagonalization_from_directory(
-            config.system.hamiltonian_dir,
-            config.method,
-            params,
-            HamiltonianFileFormat::STANDARD
-        );
+
+    // Force off the symmetry axis (this is the non-symmetry lane).
+    params.use_symmetry = false;
+    params.use_fixed_sz = config.system.use_fixed_sz;
+    if (config.system.use_fixed_sz && params.n_up < 0) {
+        params.n_up = (config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites / 2);
     }
-    
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    auto build_spec = [&](std::optional<int> sector_n_up) {
+        ed::OperatorSpec spec;
+        spec.source    = ed::DirectoryPath{config.system.hamiltonian_dir};
+        spec.num_sites = config.system.num_sites;
+        spec.spin_l    = config.system.spin_length;
+        if (sector_n_up.has_value()) {
+            spec.fixed_sz = sector_n_up.value();
+        }
+        return spec;
+    };
+
+    ed::workflows::SolveOptions opts =
+        ed_adapter::toSolveOptions(params, config.method);
+
+    EDResults results;
+
+    const bool all_sz_split =
+        params.full_sz_split && config.method == DiagonalizationMethod::FULL;
+
+    if (all_sz_split) {
+        // ALL_SZ_SECTORS lane: loop over n_up = 0..num_sites, projecting
+        // to each Sz sector via FixedSzOperator + workflows::solve, then
+        // merge and globally sort. Matches the legacy
+        // `exact_diagonalization_all_sz_sectors` behaviour now driven
+        // explicitly from the CLI rather than buried in the dispatcher.
+        std::vector<double> all_evals;
+        for (uint64_t n_up = 0; n_up <= config.system.num_sites; ++n_up) {
+            ed::OperatorSpec spec = build_spec(static_cast<int>(n_up));
+            auto sector_op  = ed::make_operator(std::move(spec));
+            ed::workflows::SolveOptions sopts = opts;
+            sopts.use_fixed_sz = true;
+            sopts.n_up         = static_cast<int>(n_up);
+            auto r = ed::workflows::solve(*sector_op, sopts);
+            all_evals.insert(all_evals.end(),
+                             r.eigenvalues.begin(), r.eigenvalues.end());
+        }
+        std::sort(all_evals.begin(), all_evals.end());
+        if (params.num_eigenvalues > 0 &&
+            all_evals.size() > params.num_eigenvalues) {
+            all_evals.resize(params.num_eigenvalues);
+        }
+        results.eigenvalues = std::move(all_evals);
+    } else {
+        ed::OperatorSpec spec = build_spec(
+            params.use_fixed_sz ? std::optional<int>(static_cast<int>(params.n_up))
+                                : std::nullopt);
+        auto op = ed::make_operator(std::move(spec));
+        auto r  = ed::workflows::solve(*op, opts);
+        results.eigenvalues = std::move(r.eigenvalues);
+    }
+
+    // Explicit HDF5 save for CLI parity. The orchestrator currently only
+    // auto-saves eigenvectors when `compute_vectors=true`; the CLI's
+    // contract has always been that eigenvalues land on disk regardless.
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string h5_path = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(h5_path, results.eigenvalues);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: failed to save eigenvalues to HDF5: "
+                      << e.what() << "\n";
+        }
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
+
     // Print results summary
     if (!results.eigenvalues.empty()) {
         std::cout << "\n  Lowest eigenvalues:\n";
@@ -414,8 +611,6 @@ EDResults run_standard_workflow(const EDConfig& config) {
     }
     
     std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
@@ -434,38 +629,161 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        results = exact_diagonalization_streaming_symmetry_fixed_sz(
-            config.system.hamiltonian_dir,
-            n_up,
-            config.method,
-            params,
-            "InterAll.dat",
-            "Trans.dat",
-            config.workflow.basis_cache_dir,
-            config.workflow.precompute_basis_only
-        );
-    } else {
-        results = exact_diagonalization_streaming_symmetry(
-            config.system.hamiltonian_dir,
-            config.method,
-            params,
-            "InterAll.dat",
-            "Trans.dat",
-            config.workflow.basis_cache_dir,
-            config.workflow.precompute_basis_only
-        );
+
+    // Full Unified-Interface Collapse, Wave C2 (May 2026): same factory +
+    // orchestrator pattern as run_standard_workflow, but with the
+    // `streaming_symmetry` axis flipped on (and `fixed_sz` honoured when
+    // the caller requests it).  The streaming-symmetry kernel walks every
+    // symmetry sector internally; the orchestrator iterates them via
+    // `StreamingSymmetryOperator::SectorView`.
+    params.use_symmetry         = true;
+    params.use_fixed_sz         = config.system.use_fixed_sz;
+    if (config.system.use_fixed_sz && params.n_up < 0) {
+        params.n_up = (config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites / 2);
     }
-    
+    params.basis_cache_dir      = config.workflow.basis_cache_dir;
+    params.precompute_basis_only = config.workflow.precompute_basis_only;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    ed::OperatorSpec spec;
+    spec.source             = ed::DirectoryPath{config.system.hamiltonian_dir};
+    spec.num_sites          = config.system.num_sites;
+    spec.spin_l             = config.system.spin_length;
+    spec.streaming_symmetry = true;
+    if (params.use_fixed_sz) {
+        spec.fixed_sz = static_cast<int>(params.n_up);
+    }
+    auto base_op = ed::make_operator(std::move(spec));
+
+    ed::workflows::SolveOptions opts =
+        ed_adapter::toSolveOptions(params, config.method);
+
+    // Walk every symmetry sector via SectorView and run the orchestrator
+    // per sector. This is the canonical streaming-symmetry sector loop
+    // (it replaced the deleted ``ed::exact_diagonalization_streaming_symmetry``
+    // entry point), expressed as a CLI-visible iteration over
+    // ``make_operator(streaming_symmetry=true) -> sector(k) -> workflows::solve``.
+    //
+    // SOTA upgrade (May 2026): the per-sector loop is now centralised in
+    // ``ed::core::StreamingSymmetryHandle`` so the CLI, the Pybind11
+    // bindings, and the thermal / spectral workflows all walk sectors
+    // through one well-tested helper. Each non-empty sector contributes
+    // a ``SectorTag`` (sector index + per-sector quantum numbers + Sz)
+    // that flows through into ``GroundStateResult::sector_tags`` for
+    // the in-process binding consumers; the CLI prints the tags on
+    // the diagnostic summary below.
+    EDResults results;
+    ed::core::StreamingSymmetryHandle handle(base_op.get());
+
+    const std::size_t num_sectors = handle.num_sectors();
+    if (num_sectors == 0) {
+        throw std::runtime_error(
+            "run_streaming_symmetry_workflow: make_operator returned an "
+            "operator with no symmetry sectors. Check the "
+            "automorphism_results/ directory and the InterAll.dat deck.");
+    }
+
+    const std::vector<std::size_t> sector_indices =
+        ed::core::filter_sectors(num_sectors, opts.selected_sectors);
+
+    std::vector<double>                      all_eigs;
+    std::vector<ed::SectorTag>               touched_tags;
+    std::vector<std::vector<double>>         eigs_per_sector;
+    for (std::size_t k : sector_indices) {
+        auto sec = handle.sector(k);
+        if (!sec || sec->dim() == 0) continue;
+        ed::workflows::SolveOptions sopts = opts;
+        sopts.num_eigs = std::min<std::size_t>(opts.num_eigs, sec->dim());
+        // Strip the per-sector filter / use_symmetry flag from the
+        // inner call so the orchestrator does not try to re-enter the
+        // streaming loop on a single SectorView.
+        sopts.selected_sectors.clear();
+        sopts.use_symmetry = false;
+        // Per-sector HDF5 save: `sector_<idx>/ed_results.h5`. This is
+        // the canonical layout that the symmetrized CLI workflow emits.
+        if (!opts.output_dir.empty()) {
+            sopts.output_dir = opts.output_dir + "/sector_" + std::to_string(k);
+        }
+        auto sr = ed::workflows::solve(*sec, sopts);
+        ed::SectorTag tag = handle.sector_tag(k);
+        touched_tags.push_back(tag);
+        eigs_per_sector.push_back(sr.eigenvalues);
+        all_eigs.insert(all_eigs.end(),
+                        sr.eigenvalues.begin(), sr.eigenvalues.end());
+        if (!sopts.output_dir.empty() && !sr.eigenvalues.empty()) {
+            try {
+                create_directory_mpi_safe(sopts.output_dir);
+                std::string h5 = HDF5IO::createOrOpenFile(sopts.output_dir);
+                HDF5IO::saveEigenvalues(h5, sr.eigenvalues);
+                // SOTA: persist the irrep quantum-number tag alongside
+                // the eigenvalues so downstream consumers (Python
+                // loaders, postproc scripts) can identify the irrep
+                // block on disk. HDF5IO does not expose a dedicated
+                // helper for the int vector; the sector directory name
+                // (``sector_<k>``) plus the per-sector listing in the
+                // CLI summary covers identification at the directory
+                // level. (A future HDF5IO::saveQuantumNumbers would
+                // move that metadata inside the file too.)
+                (void) tag;
+            } catch (const std::exception& e) {
+                std::cerr << "  Warning: sector " << k
+                          << " HDF5 save failed: " << e.what() << "\n";
+            }
+        }
+    }
+    std::sort(all_eigs.begin(), all_eigs.end());
+    // Note: the merged eigenvalue list is NOT truncated at
+    // `params.num_eigenvalues`; each sector contributes its own
+    // ``min(num_eigs, sector_dim)`` and the global vector is the
+    // union, sorted. The per-sector truncation is already enforced
+    // above via ``sopts.num_eigs = std::min(opts.num_eigs, sec->dim())``.
+    results.eigenvalues = std::move(all_eigs);
+
+    // SOTA upgrade (May 2026): print per-sector breakdown so the CLI
+    // user can see which irrep each low-lying eigenvalue came from
+    // (matches the SOTA-level output of HPhi / EDLib / QuSpin).
+    if (!touched_tags.empty()) {
+        std::cout << "\n  Per-sector eigenvalues:\n";
+        for (std::size_t s = 0; s < touched_tags.size(); ++s) {
+            const auto& t = touched_tags[s];
+            std::cout << "    sector " << t.sector_index
+                      << "  dim=" << t.sector_dim;
+            if (!t.quantum_numbers.empty()) {
+                std::cout << "  QN=[";
+                for (std::size_t q = 0; q < t.quantum_numbers.size(); ++q) {
+                    std::cout << (q == 0 ? "" : ",") << t.quantum_numbers[q];
+                }
+                std::cout << "]";
+            }
+            if (t.n_up >= 0) std::cout << "  n_up=" << t.n_up;
+            std::cout << "\n";
+            const auto& evs = eigs_per_sector[s];
+            std::size_t show = std::min<std::size_t>(evs.size(), 3);
+            for (std::size_t i = 0; i < show; ++i) {
+                std::cout << "      E[" << i << "] = "
+                          << std::fixed << std::setprecision(10)
+                          << evs[i] << "\n";
+            }
+        }
+    }
+
+    // Top-level merged HDF5 save (matches the legacy global summary).
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string h5_path = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(h5_path, results.eigenvalues);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: failed to save eigenvalues to HDF5: "
+                      << e.what() << "\n";
+        }
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
+
     // Print results summary
     if (!results.eigenvalues.empty()) {
         std::cout << "\n  Lowest eigenvalues:\n";
@@ -480,135 +798,21 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     }
     
     std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
 
-/**
- * @brief Run disk-based streaming symmetry diagonalization workflow
- * 
- * This ultra-low-memory mode processes sectors one at a time,
- * storing sector data on disk. Suitable for very large Hilbert spaces
- * (>64M states) where standard streaming would OOM.
- * 
- * NOTE: GPU methods are NOT supported - this uses matrix-free operations
- * which require CPU Lanczos. GPU methods will be automatically converted.
- */
-EDResults run_disk_streaming_workflow(const EDConfig& config) {
-    auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir;
-    create_directory_mpi_safe(params.output_dir);
-    
-    // Warn about GPU method override.
-    // NOTE: previously this hand-rolled list omitted KRYLOV_SCHUR_GPU,
-    // BLOCK_KRYLOV_SCHUR_GPU, FULL_GPU, and the deprecated _FIXED_SZ
-    // variants, so those silently slipped through into the matrix-free
-    // streaming path and crashed at the first SpMV. Use the centralized
-    // predicate from ed_method_traits.h instead. (D-4.)
-    DiagonalizationMethod method = config.method;
-    if (ed::is_gpu_method(method)) {
-        std::cout << "\n  WARNING: Disk-streaming mode uses matrix-free operations.\n";
-        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
-        method = DiagonalizationMethod::LANCZOS;
-    }
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results = exact_diagonalization_disk_streaming(
-        config.system.hamiltonian_dir,
-        method,
-        params
-    );
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
-    // Print results summary
-    if (!results.eigenvalues.empty()) {
-        std::cout << "\n  Lowest eigenvalues:\n";
-        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
-        for (size_t i = 0; i < show; i++) {
-            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
-                      << results.eigenvalues[i] << "\n";
-        }
-        if (results.eigenvalues.size() > 5) {
-            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
-        }
-    }
-    
-    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    return results;
-}
-
-/**
- * @brief Run ultra-low-memory chunked symmetry diagonalization workflow
- * 
- * This mode uses a two-pass algorithm to minimize memory during basis construction:
- * 1. Discover orbit representatives without caching (O(1) memory per state)
- * 2. Build sectors one at a time from the orbit representatives
- * 
- * Use this when standard streaming modes run out of memory during the
- * symmetry sector building phase.
- * 
- * NOTE: This trades speed for memory efficiency - it's slower than standard
- * streaming because it doesn't use orbit lookup caching.
- */
-EDResults run_chunked_symmetry_workflow(const EDConfig& config) {
-    auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir;
-    create_directory_mpi_safe(params.output_dir);
-    
-    // Warn about GPU method override (see comment in run_disk_streaming_workflow). (D-4.)
-    DiagonalizationMethod method = config.method;
-    if (ed::is_gpu_method(method)) {
-        std::cout << "\n  WARNING: Chunked-symmetry mode uses matrix-free operations.\n";
-        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
-        method = DiagonalizationMethod::LANCZOS;
-    }
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        results = exact_diagonalization_chunked_symmetry_fixed_sz(
-            config.system.hamiltonian_dir,
-            n_up,
-            method,
-            params
-        );
-    } else {
-        results = exact_diagonalization_chunked_symmetry(
-            config.system.hamiltonian_dir,
-            method,
-            params
-        );
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
-    // Print results summary
-    if (!results.eigenvalues.empty()) {
-        std::cout << "\n  Lowest eigenvalues:\n";
-        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
-        for (size_t i = 0; i < show; i++) {
-            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
-                      << results.eigenvalues[i] << "\n";
-        }
-        if (results.eigenvalues.size() > 5) {
-            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
-        }
-    }
-    
-    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    return results;
-}
+// ---------------------------------------------------------------------------
+// run_disk_streaming_workflow() and run_chunked_symmetry_workflow() were
+// retired in the matvec-unification cleanup (Phase 7.2). They were ultra-low-
+// memory single-node fallbacks (-> std::FILE-backed sector cache; two-pass
+// orbit discovery) intended for >64M-state Hilbert spaces on RAM-starved
+// machines. They never had a unit test, never had a Python binding, did not
+// support GPU, and were quietly slower than the streaming path even when
+// they fit in RAM. The right answer for those sizes is MPI/distributed
+// (which is now first-class in matvec-unification) -- there's no point in
+// shipping the disk/chunked CPU-only specialisations alongside it.
+// ---------------------------------------------------------------------------
 
 /**
  * @brief Compute thermodynamics from eigenvalue spectrum
@@ -641,20 +845,14 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
  * @brief Compute dynamical response (spectral functions)
  */
 void compute_dynamical_response_workflow(const EDConfig& config) {
-    // Get MPI rank and size
-    int rank = 0, size = 1;
-    #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    #endif
-    
-    // Note: Currently only thermal mode is supported in the integrated pipeline
+    auto [rank, size] = get_mpi_rank_size_safe();
+
     if (!config.dynamical.thermal_average) {
         if (rank == 0) {
             std::cerr << "Note: Only thermal mode is supported. Setting thermal_average mode.\n";
         }
     }
-    
+
     if (rank == 0) {
         std::cout << "\nDynamical Response Calculation\n";
 
@@ -676,76 +874,21 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         }
 #endif
     }
-    
-    // Check if using configuration-based or legacy file-based operator loading
-    bool use_config_operators = config.dynamical.operator_file.empty() || 
+
+    bool use_config_operators = config.dynamical.operator_file.empty() ||
                                 config.dynamical.operator_type != "sum";
-    
-    // Prepare Hamiltonian.
-    //
-    // Audit #2 (FixedSz->Operator path): under use_fixed_sz the legacy
-    // `Operator ham` would evaluate apply at the full Hilbert dimension
-    // (1 << num_sites) and throw when called with the smaller fixed-Sz
-    // dim. Mirror the audit #1 fix: keep two parallel shared pointers and
-    // dispatch via std::function so both modes work cleanly.
-    const bool use_fixed_sz = config.system.use_fixed_sz;
-    const int64_t n_up_dim =
-        (use_fixed_sz && config.system.n_up >= 0)
-            ? config.system.n_up
-            : static_cast<int64_t>(config.system.num_sites) / 2;
-    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    std::shared_ptr<Operator> ham_full;
-    std::shared_ptr<FixedSzOperator> ham_fs;
-    if (use_fixed_sz) {
-        ham_fs = std::make_shared<FixedSzOperator>(
-            config.system.num_sites, config.system.spin_length, n_up_dim);
-        ham_fs->loadFromInterAllFile(interaction_file);
-        ham_fs->loadFromFile(single_site_file);
-    } else {
-        ham_full = std::make_shared<Operator>(
-            config.system.num_sites, config.system.spin_length);
-        ham_full->loadFromInterAllFile(interaction_file);
-        ham_full->loadFromFile(single_site_file);
-    }
-    // Provide a `ham` reference for legacy code paths that need a base
-    // Operator& (e.g. convertOperatorToGPU). The slice preserves
-    // transform_data_, so the GPU-side basis-independent transform copy
-    // is unaffected.
-    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
-                                 : *ham_full;
-    
-    // Load three-body terms if specified
-    if (!config.system.three_body_file.empty()) {
-        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
-        if (std::filesystem::exists(three_body_file)) {
-            if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
-            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
-            else              ham_full->loadThreeBodyTerm(three_body_file);
-        }
-    }
-    
-    // Hilbert space dimension
-    uint64_t N;
-    if (use_fixed_sz) {
-        // Use binomial coefficient C(num_sites, n_up) for fixed-Sz sector
-        N = 1;
-        for (int64_t i = 0; i < n_up_dim; i++) {
-            N = N * (config.system.num_sites - i) / (i + 1);
-        }
-        if (rank == 0) std::cout << "Fixed-Sz dynamical response: dim=" << N << " (n_up=" << n_up_dim << ")\n";
-    } else {
-        N = 1ULL << config.system.num_sites;
-    }
-    
-    // Create function wrapper for Hamiltonian (audit #2: dispatches on
-    // use_fixed_sz so the CPU fallback path no longer throws).
-    auto H_func = [ham_full, ham_fs, use_fixed_sz](
-        const Complex* in, Complex* out, uint64_t dim) {
-        if (use_fixed_sz) ham_fs->apply(in, out, dim);
-        else              ham_full->apply(in, out, dim);
-    };
-    
+
+    auto wh = build_workflow_hamiltonian(
+        config, rank,
+        config.system.use_fixed_sz ? "Fixed-Sz dynamical response" : nullptr);
+    const bool use_fixed_sz   = wh.use_fixed_sz;
+    const uint64_t N          = wh.N;
+    auto& ham_full            = wh.ham_full;
+    auto& ham_fs              = wh.ham_fs;
+    auto& H_func              = wh.H_func;
+    Operator& ham             = wh.ham_ref();
+    (void)ham_full; (void)ham_fs;  // alive via wh; captured by lambdas elsewhere
+
     // Setup parameters
     DynamicalResponseParameters params;
     params.num_samples = config.dynamical.num_random_states;
@@ -1585,9 +1728,16 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         
         #ifdef WITH_MPI
         // Gather statistics
-        int total_processed_count;
-        MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-        
+        int total_processed_count = local_processed_count;
+        {
+            int mpi_inited_red = 0;
+            MPI_Initialized(&mpi_inited_red);
+            if (mpi_inited_red) {
+                MPI_Reduce(&local_processed_count, &total_processed_count, 1,
+                           MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+            }
+        }
+
         if (rank == 0) {
             std::cout << "\nProcessed " << total_processed_count << "/" << num_tasks << " tasks successfully.\n";
         }
@@ -1711,13 +1861,8 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
  * @brief Compute static response (thermal expectation values)
  */
 void compute_static_response_workflow(const EDConfig& config) {
-    // Get MPI rank and size
-    int rank = 0, size = 1;
-    #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    #endif
-    
+    auto [rank, size] = get_mpi_rank_size_safe();
+
     if (rank == 0) {
         std::cout << "\nStatic Response Calculation\n";
 
@@ -1739,65 +1884,21 @@ void compute_static_response_workflow(const EDConfig& config) {
         }
 #endif
     }
-    
-    // Check if using configuration-based or legacy file-based operator loading
-    bool use_config_operators = config.static_resp.operator_file.empty() || 
+
+    bool use_config_operators = config.static_resp.operator_file.empty() ||
                                 config.static_resp.operator_type != "sum";
-    
-    // Prepare Hamiltonian (audit #2: shared_ptr dispatch so fixed-Sz CPU
-    // path no longer slices into Operator::apply at the wrong dimension).
-    const bool use_fixed_sz = config.system.use_fixed_sz;
-    const int64_t n_up_dim =
-        (use_fixed_sz && config.system.n_up >= 0)
-            ? config.system.n_up
-            : static_cast<int64_t>(config.system.num_sites) / 2;
-    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    std::shared_ptr<Operator> ham_full;
-    std::shared_ptr<FixedSzOperator> ham_fs;
-    if (use_fixed_sz) {
-        ham_fs = std::make_shared<FixedSzOperator>(
-            config.system.num_sites, config.system.spin_length, n_up_dim);
-        ham_fs->loadFromInterAllFile(interaction_file);
-        ham_fs->loadFromFile(single_site_file);
-    } else {
-        ham_full = std::make_shared<Operator>(
-            config.system.num_sites, config.system.spin_length);
-        ham_full->loadFromInterAllFile(interaction_file);
-        ham_full->loadFromFile(single_site_file);
-    }
-    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
-                                 : *ham_full;
-    
-    // Load three-body terms if specified
-    if (!config.system.three_body_file.empty()) {
-        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
-        if (std::filesystem::exists(three_body_file)) {
-            if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
-            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
-            else              ham_full->loadThreeBodyTerm(three_body_file);
-        }
-    }
-    
-    // Hilbert space dimension
-    uint64_t N;
-    if (use_fixed_sz) {
-        N = 1;
-        for (int64_t i = 0; i < n_up_dim; i++) {
-            N = N * (config.system.num_sites - i) / (i + 1);
-        }
-        if (rank == 0) std::cout << "Fixed-Sz static response: dim=" << N << " (n_up=" << n_up_dim << ")\n";
-    } else {
-        N = 1ULL << config.system.num_sites;
-    }
-    
-    // Create function wrapper for Hamiltonian (audit #2 dispatch).
-    auto H_func = [ham_full, ham_fs, use_fixed_sz](
-        const Complex* in, Complex* out, uint64_t dim) {
-        if (use_fixed_sz) ham_fs->apply(in, out, dim);
-        else              ham_full->apply(in, out, dim);
-    };
-    
+
+    auto wh = build_workflow_hamiltonian(
+        config, rank,
+        config.system.use_fixed_sz ? "Fixed-Sz static response" : nullptr);
+    const bool use_fixed_sz   = wh.use_fixed_sz;
+    const uint64_t N          = wh.N;
+    auto& ham_full            = wh.ham_full;
+    auto& ham_fs              = wh.ham_fs;
+    auto& H_func              = wh.H_func;
+    Operator& ham             = wh.ham_ref();
+    (void)ham_full; (void)ham_fs;
+
     // Setup parameters
     StaticResponseParameters params;
     params.num_samples = config.static_resp.num_random_states;
@@ -1911,20 +2012,26 @@ void compute_static_response_workflow(const EDConfig& config) {
         // Broadcast task count
         int num_tasks = all_tasks.size();
         #ifdef WITH_MPI
-        MPI_Bcast(&num_tasks, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        
-        if (rank != 0) {
-            all_tasks.resize(num_tasks);
-        }
-        
-        // Broadcast all tasks
-        for (int i = 0; i < num_tasks; i++) {
-            int op = all_tasks[i].op_idx;
-            size_t w = all_tasks[i].weight;
-            MPI_Bcast(&op, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            MPI_Bcast(&w, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+        // Audit fix: guard collective calls when MPI is not initialised
+        // (workflow gets exercised from Catch2 unit tests).
+        int mpi_inited_bcast = 0;
+        MPI_Initialized(&mpi_inited_bcast);
+        if (mpi_inited_bcast) {
+            MPI_Bcast(&num_tasks, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
             if (rank != 0) {
-                all_tasks[i] = {op, w};
+                all_tasks.resize(num_tasks);
+            }
+
+            // Broadcast all tasks
+            for (int i = 0; i < num_tasks; i++) {
+                int op = all_tasks[i].op_idx;
+                size_t w = all_tasks[i].weight;
+                MPI_Bcast(&op, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                MPI_Bcast(&w, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+                if (rank != 0) {
+                    all_tasks[i] = {op, w};
+                }
             }
         }
         #endif
@@ -2145,9 +2252,16 @@ void compute_static_response_workflow(const EDConfig& config) {
         
         #ifdef WITH_MPI
         // Gather statistics
-        int total_processed_count;
-        MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-        
+        int total_processed_count = local_processed_count;
+        {
+            int mpi_inited_red = 0;
+            MPI_Initialized(&mpi_inited_red);
+            if (mpi_inited_red) {
+                MPI_Reduce(&local_processed_count, &total_processed_count, 1,
+                           MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+            }
+        }
+
         if (rank == 0) {
             std::cout << "\nProcessed " << total_processed_count << "/" << num_tasks << " tasks successfully.\n";
         }
@@ -2230,33 +2344,6 @@ void compute_static_response_workflow(const EDConfig& config) {
 
                 results = compute_connected_qh_response_ltlm(
                     H_func, O_func, N, ltlm_params,
-                    config.static_resp.temp_min,
-                    config.static_resp.temp_max,
-                    config.static_resp.num_temp_points,
-                    config.workflow.output_dir
-                );
-            } else if (config.method == DiagonalizationMethod::HYBRID) {
-                HybridThermalParameters hybrid_params;
-                hybrid_params.crossover_temperature = config.thermal.hybrid_crossover;
-                hybrid_params.auto_crossover = config.thermal.hybrid_auto_crossover;
-                hybrid_params.ltlm_krylov_dim = config.thermal.ltlm_krylov_dim;
-                hybrid_params.ltlm_ground_krylov = config.thermal.ltlm_ground_krylov;
-                hybrid_params.ltlm_full_reorth = config.thermal.ltlm_full_reorth;
-                hybrid_params.ltlm_reorth_freq = config.thermal.ltlm_reorth_freq;
-                hybrid_params.ltlm_seed = config.thermal.ltlm_seed;
-                hybrid_params.ltlm_store_data = config.thermal.ltlm_store_data;
-                hybrid_params.ftlm_num_samples = params.num_samples;
-                hybrid_params.ftlm_krylov_dim = params.krylov_dim;
-                hybrid_params.ftlm_full_reorth = params.full_reorthogonalization;
-                hybrid_params.ftlm_reorth_freq = params.reorth_frequency;
-                hybrid_params.ftlm_seed = params.random_seed;
-                hybrid_params.ftlm_store_samples = params.store_intermediate;
-                hybrid_params.ftlm_error_bars = params.compute_error_bars;
-                hybrid_params.max_iterations = config.diag.max_iterations;
-                hybrid_params.tolerance = config.diag.tolerance;
-
-                results = compute_connected_qh_response_hybrid(
-                    H_func, O_func, N, hybrid_params,
                     config.static_resp.temp_min,
                     config.static_resp.temp_max,
                     config.static_resp.num_temp_points,
@@ -2346,12 +2433,7 @@ void compute_static_response_workflow(const EDConfig& config) {
  * - Continued fraction avoids explicit eigendecomposition
  */
 void compute_ground_state_dssf_workflow(const EDConfig& config) {
-    // Get MPI rank and size
-    int rank = 0, size = 1;
-    #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    #endif
+    auto [rank, size] = get_mpi_rank_size_safe();
 
     if (rank == 0) {
         std::cout << "\n==========================================\n";
@@ -2364,74 +2446,22 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Build Hamiltonian (apply correctly under both full and fixed-Sz).
-    //
-    // Audit #1 (full): under use_fixed_sz the legacy `Operator ham` would
-    // slice all FixedSz* observables and `Operator::apply` would throw on
-    // the smaller fixed-Sz dimension. We now keep two parallel shared
-    // pointers and dispatch via std::function so both modes work cleanly.
-    // ------------------------------------------------------------------
-    const std::string interaction_file =
-        config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-    const std::string single_site_file =
-        config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    const bool use_fixed_sz = config.system.use_fixed_sz;
-    const int64_t n_up =
-        (use_fixed_sz && config.system.n_up >= 0)
-            ? config.system.n_up
-            : static_cast<int64_t>(config.system.num_sites) / 2;
+    auto wh = build_workflow_hamiltonian(
+        config, rank,
+        config.system.use_fixed_sz ? "Fixed-Sz sector"
+                                   : "Full Hilbert space");
+    const bool use_fixed_sz = wh.use_fixed_sz;
+    const int64_t n_up      = wh.n_up;
+    const uint64_t N        = wh.N;
+    auto& ham_full          = wh.ham_full;
+    auto& ham_fs            = wh.ham_fs;
+    (void)ham_full; (void)ham_fs; (void)size;
 
-    std::shared_ptr<Operator> ham_full;
-    std::shared_ptr<FixedSzOperator> ham_fs;
-    if (use_fixed_sz) {
-        ham_fs = std::make_shared<FixedSzOperator>(
-            config.system.num_sites, config.system.spin_length, n_up);
-        ham_fs->loadFromInterAllFile(interaction_file);
-        ham_fs->loadFromFile(single_site_file);
-    } else {
-        ham_full = std::make_shared<Operator>(
-            config.system.num_sites, config.system.spin_length);
-        ham_full->loadFromInterAllFile(interaction_file);
-        ham_full->loadFromFile(single_site_file);
-    }
-    if (!config.system.three_body_file.empty()) {
-        const std::string three_body_file =
-            config.system.hamiltonian_dir + "/" + config.system.three_body_file;
-        if (std::filesystem::exists(three_body_file)) {
-            if (rank == 0) {
-                std::cout << "Loading three-body terms from: " << three_body_file << "\n";
-            }
-            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
-            else              ham_full->loadThreeBodyTerm(three_body_file);
-        }
-    }
-
-    // Hilbert space dimension of the |0> sector.
-    uint64_t N;
-    if (use_fixed_sz) {
-        const uint64_t num_sites = config.system.num_sites;
-        N = 1;
-        for (int64_t i = 0; i < n_up; i++) {
-            N = N * (num_sites - i) / (i + 1);
-        }
-        if (rank == 0) {
-            std::cout << "Fixed-Sz sector: N_sites=" << num_sites
-                      << ", n_up=" << n_up << ", dim=" << N << "\n";
-        }
-    } else {
-        N = 1ULL << config.system.num_sites;
-        if (rank == 0) {
-            std::cout << "Full Hilbert space: dim=" << N << "\n";
-        }
-    }
-
-    // Hamiltonian apply lambda. Captures shared_ptrs by value so it
-    // outlives the local owners regardless of capture order issues.
-    auto H_apply_int = [ham_full, ham_fs, use_fixed_sz](
+    // Adapter: the GS-DSSF kernel below expects a `void(const*, *, int)`
+    // signature instead of the `uint64_t` one `wh.H_func` carries.
+    auto H_apply_int = [&H = wh.H_func](
         const Complex* in, Complex* out, int dim) {
-        if (use_fixed_sz) ham_fs->apply(in, out, static_cast<uint64_t>(dim));
-        else              ham_full->apply(in, out, static_cast<uint64_t>(dim));
+        H(in, out, static_cast<uint64_t>(dim));
     };
 
     create_directory_mpi_safe(config.workflow.output_dir);
@@ -2618,8 +2648,50 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         my_tasks.push_back(i);
     }
 
-    for (int op_idx : my_tasks) {
+    // Wave 3.4 of the SOTA Performance rollout (May 2026): when running
+    // single-rank (or when each rank still owns multiple pairs in the
+    // round-robin partition) the (alpha, beta) pairs are completely
+    // independent -- each launches its own Lanczos build against the
+    // same ground state. OpenMP-parallelise across pairs so 8 pairs
+    // on a single workstation hit all cores at once, instead of
+    // chaining serial inner Lanczos runs. The HDF5 layer is wrapped
+    // in a critical section -- HDF5 itself is not (always) thread
+    // safe and the per-pair writes are tiny vs the Lanczos compute.
+    //
+    // Cap the outer team at ``ED_DSSF_PAIR_THREADS`` (default =
+    // min(num_pairs, omp_max_threads / 2)); nested OMP keeps the
+    // inner SpMV / BLAS-1 multi-threaded too.
+    const int n_my_pairs = static_cast<int>(my_tasks.size());
+    int pair_threads = 1;
+    if (n_my_pairs > 1) {
+#ifdef _OPENMP
+        const int max_threads = omp_get_max_threads();
+#else
+        const int max_threads = 1;
+#endif
+        pair_threads = std::min(n_my_pairs, std::max(1, max_threads / 2));
+        if (const char* env = std::getenv("ED_DSSF_PAIR_THREADS")) {
+            try {
+                const long t = std::stol(env);
+                if (t >= 1 && t <= max_threads) {
+                    pair_threads = std::min(
+                        n_my_pairs, static_cast<int>(t));
+                }
+            } catch (...) {
+                // malformed env: keep default.
+            }
+        }
+#ifdef _OPENMP
+        if (pair_threads > 1) omp_set_max_active_levels(2);
+#endif
+    }
+
+    #pragma omp parallel for num_threads(pair_threads) \
+        if (pair_threads > 1) schedule(dynamic, 1)
+    for (int t = 0; t < n_my_pairs; ++t) {
+        const int op_idx = my_tasks[t];
         if (rank == 0) {
+            #pragma omp critical(stdout_lock)
             std::cout << "[Rank " << rank << "] Processing: "
                       << names[op_idx] << "\n";
         }
@@ -2639,15 +2711,18 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         auto results = compute_ground_state_cross_correlation(
             H_apply_int, O1_func, O2_func, ground_state, ground_state_energy,
             N, gs_params);
-        std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-        std::string op_name = "ground_state_dssf/" + names[op_idx];
-        HDF5IO::saveDynamicalResponseFull(
-            h5_path, op_name,
-            results.frequencies, results.spectral_function, results.spectral_function_imag,
-            results.spectral_error, results.spectral_error_imag,
-            1, 0.0);
-        if (rank == 0) {
-            std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+        #pragma omp critical(hdf5_lock)
+        {
+            std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            std::string op_name = "ground_state_dssf/" + names[op_idx];
+            HDF5IO::saveDynamicalResponseFull(
+                h5_path, op_name,
+                results.frequencies, results.spectral_function, results.spectral_function_imag,
+                results.spectral_error, results.spectral_error_imag,
+                1, 0.0);
+            if (rank == 0) {
+                std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+            }
         }
     }
 
@@ -2666,6 +2741,10 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         }
         // Cache one inner Hamiltonian per dst_n_up across pairs at the
         // same delta. With ladder basis the only deltas are +-1.
+        const std::string interaction_file =
+            config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+        const std::string single_site_file =
+            config.system.hamiltonian_dir + "/" + config.system.single_site_file;
         std::map<int64_t, std::shared_ptr<FixedSzOperator>> ham_dst_cache;
         auto get_ham_dst = [&](int64_t dst_n_up)
             -> std::shared_ptr<FixedSzOperator> {
@@ -2824,10 +2903,8 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
 // dispatch wiring lives in `src/cli/dssf_engine.cpp`; this is the body.
 // ============================================================================
 void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
-    int rank = 0;
-#ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-#endif
+    auto [rank, size] = get_mpi_rank_size_safe();
+    (void)size;
 
     if (rank == 0) {
         std::cout << "\n==========================================\n";
@@ -2835,60 +2912,15 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
         std::cout << "==========================================\n";
     }
 
-    // Load Hamiltonian.  Audit #2 pattern (mirrors
-    // compute_dynamical_response_workflow): under --fixed-sz we must build a
-    // FixedSzOperator so apply()/matVecGPU() work on the C(N, n_up) sector
-    // dimension; otherwise the CPU operator-free path throws "Input/output
-    // vector size mismatch" because Operator::apply assumes 2^N.
-    const bool use_fixed_sz = config.system.use_fixed_sz;
-    const int64_t n_up = (use_fixed_sz && config.system.n_up >= 0)
-                       ? config.system.n_up
-                       : static_cast<int64_t>(config.system.num_sites) / 2;
-
-    const std::string interaction_file =
-        config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-    const std::string single_site_file =
-        config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-
-    std::shared_ptr<Operator> ham_full;
-    std::shared_ptr<FixedSzOperator> ham_fs;
-    if (use_fixed_sz) {
-        ham_fs = std::make_shared<FixedSzOperator>(
-            config.system.num_sites, config.system.spin_length, n_up);
-        ham_fs->loadFromInterAllFile(interaction_file);
-        ham_fs->loadFromFile(single_site_file);
-    } else {
-        ham_full = std::make_shared<Operator>(
-            config.system.num_sites, config.system.spin_length);
-        ham_full->loadFromInterAllFile(interaction_file);
-        ham_full->loadFromFile(single_site_file);
-    }
-    if (!config.system.three_body_file.empty()) {
-        const std::string tb =
-            config.system.hamiltonian_dir + "/" + config.system.three_body_file;
-        if (std::filesystem::exists(tb)) {
-            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(tb);
-            else              ham_full->loadThreeBodyTerm(tb);
-        }
-    }
-    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
-                                 : *ham_full;
-
-    uint64_t N;
-    if (use_fixed_sz) {
-        N = 1;
-        for (int64_t i = 0; i < n_up; i++) {
-            N = N * (config.system.num_sites - i) / (i + 1);
-        }
-    } else {
-        N = 1ULL << config.system.num_sites;
-    }
-
-    auto H_func = [ham_full, ham_fs, use_fixed_sz](
-        const Complex* in, Complex* out, uint64_t dim) {
-        if (use_fixed_sz) ham_fs->apply(in, out, dim);
-        else              ham_full->apply(in, out, dim);
-    };
+    auto wh = build_workflow_hamiltonian(config, rank, /*verbose_label=*/nullptr);
+    const bool use_fixed_sz = wh.use_fixed_sz;
+    const int64_t n_up      = wh.n_up;
+    const uint64_t N        = wh.N;
+    auto& ham_full          = wh.ham_full;
+    auto& ham_fs            = wh.ham_fs;
+    Operator& ham           = wh.ham_ref();
+    auto& H_func            = wh.H_func;
+    (void)ham_full; (void)ham_fs;
 
     // Temperature grid: prefer the dynamical-block grid when a sweep is
     // configured (num_temp_bins > 1); else fall back to the thermal block

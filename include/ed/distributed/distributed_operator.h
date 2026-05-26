@@ -14,9 +14,9 @@
 //
 //   1.  Decompose [0, global_dim) into balanced 1D row slabs:
 //         rank r owns rows [offset_r, offset_r + n_r).
-//   2.  Walk the operator's separated-by-type term storage
-//       (Operator::diag_one_body_, offdiag_one_body_, diag_two_body_,
-//       mixed_two_body_, offdiag_two_body_, three_body_data_) and extract
+//   2.  Walk the operator's canonical SoA term storage
+//       (Operator::terms_.{diag_one_body, offdiag_one_body, diag_two_body,
+//       mixed_two_body, offdiag_two_body, three_body}) and extract
 //       the unique set of column-flip patterns
 //         { p in [0, 2^n_bits) : exists term s.t. col = row XOR p }
 //       For Heisenberg/Hubbard-style spin Hamiltonians this is bounded by
@@ -92,14 +92,17 @@
 #include <utility>
 #include <vector>
 
+#include <ed/core/linear_operator.h>
 #include <ed/core/sorted_uint64_index.h>
+#include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
+#include <ed/matvec/memory_space.h>    // DistributedHost tag
 
 // Forward declaration to avoid pulling all of construct_ham.h into this header.
 class Operator;
 
 namespace ed::distributed {
 
-class DistributedOperator {
+class DistributedOperator : public ed::LinearOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -121,22 +124,146 @@ public:
     /**
      * y_local = (H * v_global)[local_offset, local_offset + local_size).
      *
-     * v_local and y_local are sized exactly local_size().  Internally
-     * performs ONE MPI_Alltoallv of Complex values + one matrix-free local
-     * SpMV. Thread-safe within a single `apply()` call (the inner loop is
-     * parallelised with OpenMP).
+     * v_local and y_local must be sized exactly ``local_size()``.
+     * Internally performs ONE MPI_Alltoallv of Complex values + one
+     * matrix-free local SpMV. Thread-safe within a single ``apply()``
+     * call (the inner loop is parallelised with OpenMP).
+     *
+     * Both the 2-arg "legacy" entry and the 3-arg ``MatVecOperator``
+     * override now route through the same private ``apply_local_``
+     * implementation -- the 2-arg form is the back-compat fast path
+     * (trusts caller-sized buffers), the 3-arg form is the polymorphic
+     * surface and adds a defensive ``check_size`` first. Audit ref:
+     * STRUCTURAL_AUDIT.md S1 #10.
      */
-    void apply(const Complex* v_local, Complex* y_local) const;
+    void apply(const Complex* v_local, Complex* y_local) const {
+        apply_local_(v_local, y_local);
+    }
+
+    // -------------------------------------------------------------------------
+    // Matvec-unification Phase 2: MatVecOperator override.
+    //
+    // dim() reports the LOCAL (per-rank) length so solvers that walk
+    // through the polymorphic interface size their work buffers
+    // correctly. The orthogonal `global_dim()` accessor (already in
+    // the original API and now a MatVecOperator virtual) reports the
+    // full Hilbert-space length so reductions / norms can normalise.
+    // Memory space is DistributedHost -- solvers must use the MPI
+    // Backend variant for axpy/dot/norm; using a plain CpuBackend would
+    // give wrong norms (it does not allreduce across ranks).
+    // -------------------------------------------------------------------------
+    void apply(const ed::matvec::Complex* v_local,
+               ed::matvec::Complex* y_local,
+               std::size_t size) const override
+    {
+        check_size(size);
+        // ed::matvec::Complex is exactly std::complex<double>; identity cast.
+        apply_local_(reinterpret_cast<const Complex*>(v_local),
+                     reinterpret_cast<Complex*>(y_local));
+    }
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(local_n_);
+    }
+    [[nodiscard]] std::size_t global_dim() const override {
+        return static_cast<std::size_t>(global_dim_);
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::DistributedHost;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override {
+        return "DistributedOperator(local_n=" + std::to_string(local_n_)
+            + ", global_dim=" + std::to_string(global_dim_)
+            + ", nproc=" + std::to_string(size_) + ")";
+    }
+
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // `apply()` already performs the MPI_Alltoallv halo exchange and
+    // the local SpMV; the matching `bind_mpi` returns a callable that
+    // wraps it. Kernels using `MpiBackend::all_reduce_sum` for norm /
+    // dot reductions then compose with this matvec correctly --- the
+    // matvec emits per-rank y_local slices and the reductions sum
+    // across ranks. `bind_cpu` / `bind_cuda` are explicitly
+    // unsupported: a single-rank caller through `bind_cpu` would
+    // (correctly, on np = 1) just receive the same wrapper, but on
+    // np > 1 the `apply()` body needs the MpiBackend's collectives to
+    // make the per-rank vector lengths add up; routing through
+    // `bind_cpu` invites silent miscalibration. We allow `bind_cpu`
+    // when the operator's communicator is single-rank, matching the
+    // "degenerate to plain Operator" semantics callers expect.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        if (size_ > 1) {
+            throw std::runtime_error(
+                "DistributedOperator: bind_cpu() is not supported on a "
+                "multi-rank communicator. Use bind<MpiBackend>() so "
+                "axpy/dot reductions allreduce across ranks.");
+        }
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        throw std::runtime_error(
+            "DistributedOperator: bind_cuda() is not supported -- this "
+            "operator is host-resident. For the MPI+CUDA lane wrap a "
+            "ed::distributed::DistributedGPUOperator around this "
+            "instance and pair it with an MpiCudaBackend (see "
+            "ed::WithMpiCudaBackend in select_backend.h).");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "DistributedOperator: bind_mpi_cuda() is not supported -- "
+            "this operator is host-resident. Use "
+            "ed::distributed::DistributedGPUOperator for the MPI+CUDA "
+            "lane.");
+    }
+
+    // -------------------------------------------------------------------
+    // Wave 4 (May 2026, "Unify all 16 matvec cells" plan): real-arithmetic
+    // overrides. The Hamiltonian is real-Hermitian when the underlying
+    // serial ``Operator`` reports ``isReal() == true`` (the distributed
+    // wrapper doesn't add imaginary couplings of its own). The Wave 4
+    // ``bind_real_mpi`` here uses the default complex shim path; a
+    // native double-precision halo (MPI_DOUBLE instead of
+    // MPI_C_DOUBLE_COMPLEX) lands as a follow-up so the bandwidth halves
+    // for real-Hermitian workloads.
+    // -------------------------------------------------------------------
+    [[nodiscard]] bool is_real_hermitian() const noexcept override;
+    [[nodiscard]] RealMatvecFn bind_real_mpi() const override {
+        return bind_real_cpu();
+    }
 
     // -------------------------------------------------------------------------
     // Slab geometry (queryable on every rank).
     // -------------------------------------------------------------------------
-    std::uint64_t global_dim()   const noexcept { return global_dim_; }
     std::uint64_t local_offset() const noexcept { return local_offset_; }
     std::uint64_t local_size()   const noexcept { return local_n_; }
     int           rank()         const noexcept { return rank_; }
     int           comm_size()    const noexcept { return size_; }
     MPI_Comm      comm()         const noexcept { return comm_; }
+
+    // Phase 3.1 of the Minimalist ED Collapse (May 2026): expose the
+    // distributed slab geometry to `ed::select_backend` / orchestrators.
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g;
+        g.local_dim    = static_cast<std::size_t>(local_n_);
+        g.global_dim   = global_dim_;
+        g.local_offset = local_offset_;
+        g.memory_space = ed::matvec::MemorySpace::DistributedHost;
+        g.comm         = comm_;
+        return g;
+    }
 
     /// Owner rank for a given GLOBAL row/column index, under this object's
     /// balanced 1D decomposition.
@@ -217,6 +344,15 @@ public:
                                    int size) noexcept;
 
 private:
+    /**
+     * Canonical SpMV implementation -- one body, two public surfaces.
+     * Called from both ``apply(v, y)`` (legacy 2-arg, back-compat) and
+     * ``apply(v, y, size)`` (MatVecOperator override). Trusts that the
+     * caller-supplied buffers are sized ``local_n_``; the 3-arg form
+     * runs ``check_size`` before delegating.
+     */
+    void apply_local_(const Complex* v_local, Complex* y_local) const;
+
     void extract_flip_patterns_();
     void build_comm_pattern_();
 

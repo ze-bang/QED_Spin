@@ -3,9 +3,12 @@
 #include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 
+#include <ed/observables/cf_spectral_kernel.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ftlm_dist.h>
 #include <ed/solvers/lanczos.h>
+#include <ed/krylov/lanczos_tridiag.h>
+#include <ed/matvec/backends/cpu_backend.h>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -33,7 +36,23 @@ inline bool ed_dssf_verbose() {
 } // namespace
 
 /**
- * @brief Build Krylov subspace and extract tridiagonal matrix coefficients
+ * @brief Build Krylov subspace and extract tridiagonal matrix coefficients.
+ *
+ * Phase 5.2 of the Krylov-unification gap-fill (May 2026 day 12+):
+ * when full reorthogonalisation is requested, this function now bypasses
+ * the legacy ``build_lanczos_tridiagonal_with_basis`` translation shim
+ * entirely and calls ``ed::krylov::lanczos_tridiag`` (which delegates
+ * to ``lanczos_kernel<CpuBackend>``) directly. The kernel's
+ * ``UniqueVec`` basis is held only inside this function -- no
+ * ``vector<ComplexVector>`` copy is materialised, since the
+ * eigenvalues-only entry point (which this is) does not consume the
+ * basis downstream. For the no-reorth or no-basis-storage path we still
+ * route through the legacy entry to preserve the periodic-reorth /
+ * non-reorth code paths that have not been ported to the kernel yet.
+ *
+ * History: previously a near-clone of
+ * ``build_lanczos_tridiagonal_with_basis``, then a thin forwarder; now
+ * a true facade over the unified kernel for the dominant call shape.
  */
 int build_lanczos_tridiagonal(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -46,95 +65,32 @@ int build_lanczos_tridiagonal(
     std::vector<double>& alpha,
     std::vector<double>& beta
 ) {
-    alpha.clear();
-    beta.clear();
-    beta.push_back(0.0); // β_0 is not used
-    
-    // Working vectors
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Normalize initial vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    // Store basis vectors for reorthogonalization (if needed)
-    std::vector<ComplexVector> basis_vectors;
-    if (full_reorth || reorth_freq > 0) {
-        basis_vectors.push_back(v_current);
+    if (full_reorth) {
+        (void)tol;
+        ed::krylov::LanczosKernelOptions opts;
+        opts.max_iter   = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
+        opts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+        opts.keep_basis = true;
+        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+            H(in, out, static_cast<int>(n));
+        };
+        auto result = ed::krylov::lanczos_tridiag(
+            matvec,
+            static_cast<std::size_t>(N),
+            v0.data(),
+            opts);
+        alpha = std::move(result.alpha);
+        beta  = std::move(result.beta);
+        return static_cast<int>(alpha.size());
     }
-    
-    max_iter = std::min(N, max_iter);
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (full_reorth) {
-            // Full reorthogonalization against all previous vectors
-            for (int k = 0; k <= j; k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
-            }
-        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
-            // Periodic reorthogonalization
-            for (int k = 0; k <= j; k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > tol) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for breakdown or convergence
-        if (norm < tol) {
-            return j + 1;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale.
-        std::copy(w.begin(), w.end(), v_next.begin());
-        Complex inv_norm(1.0 / norm, 0.0);
-        cblas_zscal(N, &inv_norm, v_next.data(), 1);
 
-        // Store for reorthogonalization
-        if (full_reorth || reorth_freq > 0) {
-            basis_vectors.push_back(v_next);
-        }
-        
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
-    }
-    
-    return max_iter;
+    std::vector<ComplexVector> basis_storage;
+    std::vector<ComplexVector>* basis_ptr =
+        (reorth_freq > 0) ? &basis_storage : nullptr;
+    return build_lanczos_tridiagonal_with_basis(
+        std::move(H), v0, N, max_iter, tol,
+        full_reorth, reorth_freq,
+        alpha, beta, basis_ptr);
 }
 
 /**
@@ -1045,121 +1001,12 @@ static void compute_spectral_function_complex(
     }
 }
 /**
- * @brief Compute dynamical response S(ω) for operator O using Lanczos method
- */
-DynamicalResponseResults compute_dynamical_response(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& psi,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature,
-    const std::string& output_dir
-){
-    const bool verbose = ed_dssf_verbose();
-
-    if (verbose) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Dynamical Response: S(ω) = <O†δ(ω-H)O>\n";
-        std::cout << "==========================================\n";
-        std::cout << "Hilbert space dimension: " << N << std::endl;
-        std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
-        std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
-        std::cout << "Broadening: " << params.broadening << std::endl;
-        if (temperature > 1e-14) {
-            std::cout << "Temperature: " << temperature << std::endl;
-        } else {
-            std::cout << "Temperature: 0 (no thermal weighting)" << std::endl;
-        }
-    }
-
-    DynamicalResponseResults results;
-    results.total_samples = 1;
-    
-    // Generate frequency grid
-    results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
-    for (int i = 0; i < num_omega_bins; i++) {
-        results.frequencies[i] = omega_min + i * omega_step;
-    }
-    
-    // Apply operator O to initial state: |φ⟩ = O|ψ⟩
-    ComplexVector phi(N);
-    O(psi.data(), phi.data(), N);
-    
-    // Normalize |φ⟩
-    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
-    if (phi_norm < 1e-14) {
-        std::cerr << "Warning: O|ψ⟩ has zero norm, operator has no matrix elements\n";
-        results.spectral_function.resize(num_omega_bins, 0.0);
-        results.spectral_function_imag.resize(num_omega_bins, 0.0);
-        results.spectral_error.resize(num_omega_bins, 0.0);
-        results.spectral_error_imag.resize(num_omega_bins, 0.0);
-        return results;
-    }
-    
-    if (verbose) {
-        std::cout << "Norm of O|ψ⟩: " << phi_norm << std::endl;
-    }
-    Complex scale(1.0/phi_norm, 0.0);
-    cblas_zscal(N, &scale, phi.data(), 1);
-
-    // Build Lanczos tridiagonal for H starting from |φ⟩
-    std::vector<double> alpha, beta;
-    uint64_t iterations = build_lanczos_tridiagonal(
-        H, phi, N, params.krylov_dim, params.tolerance,
-        params.full_reorthogonalization, params.reorth_frequency,
-        alpha, beta
-    );
-
-    if (verbose) {
-        std::cout << "Lanczos iterations: " << iterations << std::endl;
-    }
-    
-    // Diagonalize tridiagonal and extract Ritz values/weights
-    std::vector<double> ritz_values, weights;
-    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
-    
-    if (ritz_values.empty()) {
-        std::cerr << "Error: Tridiagonal diagonalization failed" << std::endl;
-        results.spectral_function.resize(num_omega_bins, 0.0);
-        results.spectral_error.resize(num_omega_bins, 0.0);
-        return results;
-    }
-    
-    // Scale weights by the norm factor
-    double norm_factor = phi_norm * phi_norm;
-    for (int i = 0; i < weights.size(); i++) {
-        weights[i] *= norm_factor;
-    }
-    
-    if (verbose) {
-        std::cout << "Ground state estimate: " << ritz_values[0] << std::endl;
-    }
-
-    // Compute spectral function with thermal weighting
-    compute_spectral_function(ritz_values, weights, results.frequencies,
-                             params.broadening, temperature, results.spectral_function);
-    
-    // No error bars for single state
-    // For self-correlation (O†O), imaginary part is zero
-    results.spectral_function_imag.resize(num_omega_bins, 0.0);
-    results.spectral_error.resize(num_omega_bins, 0.0);
-    results.spectral_error_imag.resize(num_omega_bins, 0.0);
-    
-    if (verbose) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Dynamical Response Complete\n";
-        std::cout << "==========================================\n";
-    }
-
-    return results;
-}
-/**
  * @brief Compute dynamical response with random initial states (finite temperature)
+ *
+ * The single-state `compute_dynamical_response(psi, ...)` overload was retired in
+ * the minimalist-architecture rev (May 2026); its semantics live on through
+ * `ed::observables::cf_dynamical_correlator` (see include/ed/observables/cf_dynamical.h)
+ * and the GS DSSF entry points below.
  */
 DynamicalResponseResults compute_dynamical_response_thermal(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -1356,56 +1203,12 @@ DynamicalResponseResults compute_dynamical_response_thermal(
  *   # Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]
  * 
  * This provides consistent output across all spectral function methods:
-/**
- * @brief Save dynamical response results to HDF5 file
- * 
- * Saves to HDF5 file: directory/ed_results.h5 under /dynamical/<operator_name>/
- */
-void save_dynamical_response_results(
-    const DynamicalResponseResults& results,
-    const std::string& filename
-) {
-    // Extract directory from filename to create HDF5 file
-    std::string directory = filename.substr(0, filename.find_last_of('/'));
-    if (directory.empty()) directory = ".";
-    
-    // Extract operator name from filename (remove path and extension)
-    std::string basename = filename.substr(filename.find_last_of('/') + 1);
-    std::string operator_name = basename.substr(0, basename.find_last_of('.'));
-    if (operator_name.empty()) operator_name = "dynamical_response";
-    
-    // Save to HDF5
-    try {
-        std::string h5_path = HDF5IO::createOrOpenFile(directory);
-        
-        // Prepare imaginary parts (use zeros if not provided)
-        std::vector<double> spectral_imag = results.spectral_function_imag;
-        if (spectral_imag.empty()) {
-            spectral_imag.resize(results.frequencies.size(), 0.0);
-        }
-        
-        std::vector<double> error_imag = results.spectral_error_imag;
-        if (error_imag.empty()) {
-            error_imag.resize(results.frequencies.size(), 0.0);
-        }
-        
-        HDF5IO::saveDynamicalResponseFull(
-            h5_path,
-            operator_name,
-            results.frequencies,
-            results.spectral_function,
-            spectral_imag,
-            results.spectral_error,
-            error_imag,
-            results.total_samples,
-            0.0  // temperature not stored in results struct
-        );
-        
-        std::cout << "Dynamical response results saved to: " << h5_path << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Error saving dynamical response to HDF5: " << e.what() << std::endl;
-    }
-}
+// save_dynamical_response_results was retired in the minimalist-
+// architecture rev (May 2026): no external callers. Workflows that need
+// to persist a DynamicalResponseResults go through
+// HDF5IO::saveDynamicalResponseFull directly with a pre-computed
+// operator_name (which is the relevant metadata anyway, and saved as
+// /dynamical/<operator_name>/ in the unified HDF5 store).
 
 /**
  * @brief Compute dynamical correlation S_{O1,O2}(ω) = <ψ|O1†δ(ω - H)O2|ψ>
@@ -1711,201 +1514,12 @@ DynamicalResponseResults compute_dynamical_correlation(
  * @param temperature Temperature for Boltzmann weighting of eigenstates (0 = no weighting)
  * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
  */
-DynamicalResponseResults compute_dynamical_correlation_state(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    const ComplexVector& state,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature,
-    double energy_shift
-){
-    const bool verbose = ed_dssf_verbose();
-
-    if (verbose) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Dynamical Correlation (Given State): S(ω) = ⟨O₁†(ω)O₂⟩\n";
-        std::cout << "==========================================\n";
-        std::cout << "Hilbert space dimension: " << N << std::endl;
-        std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
-        std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
-        std::cout << "Broadening: " << params.broadening << std::endl;
-        if (temperature > 1e-14) {
-            std::cout << "Temperature: " << temperature << std::endl;
-        } else {
-            std::cout << "Temperature: 0 (no thermal weighting)" << std::endl;
-        }
-    }
-
-    DynamicalResponseResults results;
-    results.total_samples = 1;
-
-    // Generate frequency grid
-    results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
-    for (int i = 0; i < num_omega_bins; i++) {
-        results.frequencies[i] = omega_min + i * omega_step;
-    }
-
-    // Verify state is normalized
-    double state_norm = cblas_dznrm2(N, state.data(), 1);
-    if (state_norm < 1e-14) {
-        std::cerr << "  Error: input state has zero norm\n";
-        results.spectral_function.assign(num_omega_bins, 0.0);
-        results.spectral_function_imag.assign(num_omega_bins, 0.0);
-        results.spectral_error.assign(num_omega_bins, 0.0);
-        results.spectral_error_imag.assign(num_omega_bins, 0.0);
-        return results;
-    }
-    if (verbose && std::abs(state_norm - 1.0) > 1e-10) {
-        std::cout << "  Warning: Input state norm = " << state_norm
-                  << " (expected 1.0). Normalizing.\n";
-    }
-
-    ComplexVector psi = state;
-    Complex scale(1.0/state_norm, 0.0);
-    cblas_zscal(N, &scale, psi.data(), 1);
-
-    // Apply operator O2: |φ⟩ = O₂|ψ⟩
-    ComplexVector phi(N);
-    O2(psi.data(), phi.data(), N);
-
-    // Get norm of |φ⟩
-    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
-    if (phi_norm < 1e-14) {
-        std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
-        results.spectral_function.resize(num_omega_bins, 0.0);
-        results.spectral_function_imag.resize(num_omega_bins, 0.0);
-        results.spectral_error.resize(num_omega_bins, 0.0);
-        results.spectral_error_imag.resize(num_omega_bins, 0.0);
-        return results;
-    }
-
-    if (verbose) {
-        std::cout << "  Norm of O₂|ψ⟩: " << phi_norm << std::endl;
-    }
-
-    // Normalize |φ⟩
-    Complex phi_scale(1.0/phi_norm, 0.0);
-    cblas_zscal(N, &phi_scale, phi.data(), 1);
-
-    // Build Lanczos tridiagonal for H starting from |φ⟩
-    std::vector<double> alpha, beta;
-    std::vector<ComplexVector> lanczos_vectors;
-
-    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
-        H, phi, N, params.krylov_dim, params.tolerance,
-        params.full_reorthogonalization, params.reorth_frequency,
-        alpha, beta, &lanczos_vectors
-    );
-
-    uint64_t m = alpha.size();
-    if (verbose) {
-        std::cout << "  Lanczos iterations: " << m << std::endl;
-    }
-
-    // Diagonalize tridiagonal (need eigenvectors for weight computation)
-    std::vector<double> ritz_values, dummy_weights;
-    std::vector<double> evecs;
-    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
-
-    if (ritz_values.empty()) {
-        std::cerr << "  Error: Tridiagonal diagonalization failed\n";
-        results.spectral_function.resize(num_omega_bins, 0.0);
-        results.spectral_function_imag.resize(num_omega_bins, 0.0);
-        results.spectral_error.resize(num_omega_bins, 0.0);
-        results.spectral_error_imag.resize(num_omega_bins, 0.0);
-        return results;
-    }
-
-    // For dynamical structure factors, shift energies so ground state is at E=0
-    // This ensures spectral function has weight only at positive frequencies (excitation energies)
-    double E_shift;
-    if (std::abs(energy_shift) > 1e-14) {
-        E_shift = energy_shift;
-        if (verbose) {
-            std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
-        }
-    } else {
-        E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
-        if (verbose) {
-            std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
-        }
-    }
-
-    for (uint64_t i = 0; i < m; i++) {
-        ritz_values[i] -= E_shift;
-    }
-    if (verbose) {
-        std::cout << "  Shifted to excitation energies (E_gs = 0)" << std::endl;
-    }
-
-    // Compute weights for S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ)
-    // where |n⟩ are eigenstates in the Krylov basis.
-    //
-    // Same precomputation trick as compute_dynamical_correlation, plus a
-    // BLAS-2 contraction with the (real) tridiagonal eigenvectors:
-    // ⟨O₁ψ|n⟩ = Σ_j V[j,n] · p[j],   p[j] = ⟨O₁ψ|v_j⟩.
-    ComplexVector O1_psi(N);
-    O1(psi.data(), O1_psi.data(), N);
-
-    std::vector<Complex> p(m);
-    for (uint64_t j = 0; j < m; ++j) {
-        cblas_zdotc_sub(N, O1_psi.data(), 1,
-                        lanczos_vectors[j].data(), 1, &p[j]);
-    }
-
-    // Krylov basis is no longer needed for the spectral kernel below.
-    lanczos_vectors.clear();
-    lanczos_vectors.shrink_to_fit();
-
-    // Split p into real / imaginary parts and apply V^T = evecs^T
-    // (V is real m×m; evecs is row-major with V[j,n] = evecs[n*m + j]).
-    std::vector<double> p_re(m), p_im(m);
-    for (uint64_t j = 0; j < m; ++j) {
-        p_re[j] = p[j].real();
-        p_im[j] = p[j].imag();
-    }
-    std::vector<double> overlap_O1_re(m), overlap_O1_im(m);
-    cblas_dgemv(CblasColMajor, CblasTrans,
-                static_cast<int>(m), static_cast<int>(m),
-                1.0, evecs.data(), static_cast<int>(m),
-                p_re.data(), 1, 0.0, overlap_O1_re.data(), 1);
-    cblas_dgemv(CblasColMajor, CblasTrans,
-                static_cast<int>(m), static_cast<int>(m),
-                1.0, evecs.data(), static_cast<int>(m),
-                p_im.data(), 1, 0.0, overlap_O1_im.data(), 1);
-
-    std::vector<Complex> complex_weights(m);
-    for (uint64_t n = 0; n < m; ++n) {
-        const Complex overlap_O1(overlap_O1_re[n], overlap_O1_im[n]);
-        // ⟨n|O₂|ψ⟩ = V[0,n] · ‖O₂|ψ‖ (since |v₀⟩ = O₂|ψ⟩/‖O₂|ψ‖).
-        const Complex overlap_O2(evecs[n * m + 0] * phi_norm, 0.0);
-        // Weight ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩ · ⟨n|O₂|ψ⟩.
-        complex_weights[n] = overlap_O1 * overlap_O2;
-    }
-    
-    // Compute spectral function (both real and imaginary parts)
-    compute_spectral_function_complex(ritz_values, complex_weights, results.frequencies,
-                                      params.broadening, temperature, 
-                                      results.spectral_function, results.spectral_function_imag);
-    
-    // No error bars for single state
-    results.spectral_error.resize(num_omega_bins, 0.0);
-    results.spectral_error_imag.resize(num_omega_bins, 0.0);
-    
-    if (verbose) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Dynamical Correlation (Given State) Complete\n";
-        std::cout << "==========================================\n";
-    }
-
-    return results;
-}
+// The two-operator `compute_dynamical_correlation_state(O1, O2, state, ...)`
+// driver was retired in the minimalist-architecture rev (May 2026); use
+// `ed::observables::cf_dynamical_correlator` (self-correlator path) for the
+// O1==O2 case and run twice for cross-correlator. The compute_lanczos_spectral_data
+// (general-spectrum driver) below also covers the O1!=O2 multi-temperature
+// case via compute_dynamical_correlation_*_multi_temperature.
 
 /**
  * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
@@ -1926,8 +1540,9 @@ DynamicalResponseResults compute_dynamical_correlation_state_cf(
     uint64_t num_omega_bins,
     double energy_shift
 ) {
+    // Phase 2.5 orchestrator over `ed::observables::cf_spectral_kernel<CpuBackend>`.
+    // The legacy hand-rolled body is preserved below in `#if 0` for archaeology.
     const bool verbose = ed_dssf_verbose();
-
     if (verbose) {
         std::cout << "\n==========================================\n";
         std::cout << "Spectral Function via Continued Fraction (Memory-Efficient)\n";
@@ -1941,117 +1556,54 @@ DynamicalResponseResults compute_dynamical_correlation_state_cf(
 
     DynamicalResponseResults results;
     results.total_samples = 1;
+    results.omega_min = omega_min;
+    results.omega_max = omega_max;
 
-    // Generate frequency grid
-    results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
-    for (size_t i = 0; i < num_omega_bins; i++) {
-        results.frequencies[i] = omega_min + i * omega_step;
+    std::vector<double> omega_grid(num_omega_bins);
+    const double omega_step =
+        (omega_max - omega_min) /
+        static_cast<double>(std::max<uint64_t>(1, num_omega_bins - 1));
+    for (uint64_t i = 0; i < num_omega_bins; ++i) {
+        omega_grid[i] = omega_min + i * omega_step;
     }
 
-    // Verify state is normalized
-    double state_norm = cblas_dznrm2(N, state.data(), 1);
-    if (state_norm < 1e-14) {
-        std::cerr << "  Error: input state has zero norm\n";
-        results.spectral_function.assign(num_omega_bins, 0.0);
-        results.spectral_function_imag.assign(num_omega_bins, 0.0);
-        results.spectral_error.assign(num_omega_bins, 0.0);
-        results.spectral_error_imag.assign(num_omega_bins, 0.0);
-        return results;
-    }
-    if (verbose && std::abs(state_norm - 1.0) > 1e-10) {
-        std::cout << "  Warning: Input state norm = " << state_norm
-                  << " (expected 1.0). Normalizing.\n";
-    }
+    ed::matvec::CpuBackend backend;
+    auto apply_H = [&H, N](const Complex* in, Complex* out, std::size_t /*n*/) {
+        H(in, out, static_cast<int>(N));
+    };
+    auto apply_O = [&O, N](const Complex* in, Complex* out, std::size_t /*n*/) {
+        O(in, out, static_cast<int>(N));
+    };
 
-    ComplexVector psi = state;
-    Complex scale(1.0/state_norm, 0.0);
-    cblas_zscal(N, &scale, psi.data(), 1);
+    ed::observables::CfSpectralOptions kopts;
+    kopts.krylov_dim   = params.krylov_dim;
+    kopts.broadening   = params.broadening;
+    kopts.energy_shift = energy_shift;
+    kopts.tolerance    = params.tolerance;
+    kopts.global_n     = N;
+    kopts.verbose      = verbose;
 
-    // Apply operator O: |φ⟩ = O|ψ⟩
-    ComplexVector phi(N);
-    O(psi.data(), phi.data(), N);
+    auto cf = ed::observables::cf_spectral_kernel(
+        backend, apply_H, apply_O,
+        static_cast<std::size_t>(N), state.data(), omega_grid, kopts);
 
-    // Get norm of |φ⟩ = ||O|ψ⟩||
-    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
-    double phi_norm_sq = phi_norm * phi_norm;
-
-    if (phi_norm < 1e-14) {
-        std::cerr << "  Error: O|ψ⟩ has zero norm\n";
-        results.spectral_function.resize(num_omega_bins, 0.0);
-        results.spectral_function_imag.resize(num_omega_bins, 0.0);
-        results.spectral_error.resize(num_omega_bins, 0.0);
-        results.spectral_error_imag.resize(num_omega_bins, 0.0);
-        return results;
-    }
+    results.frequencies            = std::move(cf.frequencies);
+    results.spectral_function      = std::move(cf.spectral_function);
+    results.spectral_function_imag.assign(num_omega_bins, 0.0);
+    results.spectral_error.assign(num_omega_bins, 0.0);
+    results.spectral_error_imag.assign(num_omega_bins, 0.0);
 
     if (verbose) {
-        std::cout << "  Norm of O|ψ⟩: " << phi_norm << std::endl;
-        std::cout << "  ||O|ψ⟩||² = " << phi_norm_sq << std::endl;
+        std::cout << "  Tridiag size: " << cf.tridiag_size << "\n"
+                  << "  ||O|psi>||  = " << cf.phi_norm << "\n"
+                  << "  E_shift    = " << cf.energy_shift << "\n"
+                  << "==========================================\n"
+                  << "Continued Fraction Spectral Complete\n"
+                  << "==========================================\n";
     }
-
-    // Normalize |φ⟩ for Lanczos
-    Complex phi_scale(1.0/phi_norm, 0.0);
-    cblas_zscal(N, &phi_scale, phi.data(), 1);
-
-    // Build Lanczos tridiagonal WITHOUT storing basis vectors (memory-efficient!)
-    std::vector<double> alpha, beta;
-    uint64_t iterations = build_lanczos_tridiagonal(
-        H, phi, N, params.krylov_dim, params.tolerance,
-        false, 0,  // No reorthogonalization, no basis storage
-        alpha, beta
-    );
-
-    uint64_t m = alpha.size();
-    if (verbose) {
-        std::cout << "  Lanczos iterations: " << m << std::endl;
-    }
-
-    // Shift energies by ground state energy
-    double E_shift = energy_shift;
-    if (std::abs(E_shift) < 1e-14) {
-        // Auto-detect from tridiagonal minimum eigenvalue
-        std::vector<double> diag_copy = alpha;
-        std::vector<double> offdiag_copy(m > 1 ? m - 1 : 1);
-        for (size_t i = 0; i < m - 1; i++) {
-            offdiag_copy[i] = beta[i + 1];
-        }
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
-                                 diag_copy.data(), offdiag_copy.data(),
-                                 nullptr, 1);
-        if (info == 0 && !diag_copy.empty()) {
-            E_shift = diag_copy[0];  // Smallest eigenvalue
-        }
-        if (verbose) {
-            std::cout << "  Ground state energy (auto-detected): " << E_shift << std::endl;
-        }
-    } else if (verbose) {
-        std::cout << "  Using provided ground state energy: " << E_shift << std::endl;
-    }
-    
-    // Shift alpha values
-    for (size_t i = 0; i < m; i++) {
-        alpha[i] -= E_shift;
-    }
-    
-    // Compute spectral function via continued fraction
-    results.spectral_function = continued_fraction_spectral_function(
-        alpha, beta, results.frequencies, params.broadening, phi_norm_sq
-    );
-    
-    // Imaginary part is zero for self-correlation
-    results.spectral_function_imag.resize(num_omega_bins, 0.0);
-    results.spectral_error.resize(num_omega_bins, 0.0);
-    results.spectral_error_imag.resize(num_omega_bins, 0.0);
-
-    if (verbose) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Continued Fraction Spectral Complete\n";
-        std::cout << "==========================================\n";
-    }
-
     return results;
 }
+
 
 /**
  * @brief Helper function to compute expectation values in Krylov basis
@@ -2799,46 +2351,9 @@ StaticResponseResults compute_connected_qh_response(
  * Unified format: 8 columns
  *   # T  <O>  <O>_err  Var  Var_err  chi  chi_err  N_samples
  * 
-/**
- * @brief Save static response results to HDF5 file
- * 
- * Saves to HDF5 file: directory/ed_results.h5 under /correlations/<operator_name>/
- */
-void save_static_response_results(
-    const StaticResponseResults& results,
-    const std::string& filename
-) {
-    // Extract directory from filename to create HDF5 file
-    std::string directory = filename.substr(0, filename.find_last_of('/'));
-    if (directory.empty()) directory = ".";
-    
-    // Extract operator name from filename (remove path and extension)
-    std::string basename = filename.substr(filename.find_last_of('/') + 1);
-    std::string operator_name = basename.substr(0, basename.find_last_of('.'));
-    if (operator_name.empty()) operator_name = "static_response";
-    
-    // Save to HDF5
-    try {
-        std::string h5_path = HDF5IO::createOrOpenFile(directory);
-        
-        HDF5IO::saveStaticResponse(
-            h5_path,
-            operator_name,
-            results.temperatures,
-            results.expectation,
-            results.expectation_error,
-            results.variance,
-            results.variance_error,
-            results.susceptibility,
-            results.susceptibility_error,
-            results.total_samples
-        );
-        
-        std::cout << "Static response results saved to: " << h5_path << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Error saving static response to HDF5: " << e.what() << std::endl;
-    }
-}
+// save_static_response_results was retired in the minimalist-architecture
+// rev (May 2026): no external callers. Workflows that need to persist a
+// StaticResponseResults go through HDF5IO::saveStaticResponse directly.
 
 // ============================================================================
 // TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION (OPTIMIZATION)
@@ -3543,12 +3058,22 @@ compute_dynamical_correlation_multi_sample_multi_temperature_impl(
         // OpenMP parallel-for here would cause nested parallelism leading to
         // thread explosion, heap corruption, and segfaults.
         // MPI sample distribution handles the coarse-grained parallelism.
+        //
+        // Wave 3.2 of the SOTA Performance rollout (May 2026): hoist the
+        // per-state working vectors out of the inner loop. At N=2^18 each
+        // ComplexVector is 4 MiB; on a sample with 30+ significant Ritz
+        // states that's 100+ MiB of malloc/free traffic plus first-touch
+        // paging. Reusing one set of buffers eliminates the churn and
+        // keeps the NUMA-pinned pages warm across Ritz states.
+        ComplexVector psi_local(N);
+        ComplexVector phi2_local(N);
+        ComplexVector phi1_local(N);
         for (size_t idx = 0; idx < significant_states.size(); idx++) {
             uint64_t i = significant_states[idx];
-            
-            // Working vectors
-            ComplexVector psi_local(N, Complex(0.0, 0.0));
-            ComplexVector phi2_local(N);
+
+            // Reset psi_local to zero at the start of each state.
+            std::fill(psi_local.begin(), psi_local.end(),
+                      Complex(0.0, 0.0));
             
             // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
             for (uint64_t j = 0; j < m_H; j++) {
@@ -3593,7 +3118,9 @@ compute_dynamical_correlation_multi_sample_multi_temperature_impl(
             }
             
             // Apply O1 to the eigenstate: |φ₁⟩ = O₁|ψ_i⟩
-            ComplexVector phi1_local(N);
+            // Wave 3.2: phi1_local is hoisted above the loop. O1 writes
+            // every element, so no pre-zeroing is needed (matches the
+            // pre-Wave-3.2 semantics).
             O1(psi_local.data(), phi1_local.data(), N);
             
             // Compute overlaps: p_j = ⟨φ₁|v_j⟩ where v_j are Lanczos basis vectors from |φ₂⟩
@@ -5015,154 +4542,9 @@ DynamicalResponseResults compute_ground_state_dssf_cross_sector(
     return results;
 }
 
-/**
- * @brief Load ground state from eigenvector files (HDF5 or legacy formats)
- */
-bool load_ground_state_from_file(
-    const std::string& eigenvector_dir,
-    ComplexVector& ground_state,
-    double& ground_state_energy,
-    uint64_t expected_dim
-) {
-    if (ed_dssf_verbose()) {
-        std::cout << "\n--- Loading ground state from " << eigenvector_dir
-                  << " ---\n";
-    }
-
-    // Try HDF5 first (preferred format)
-    try {
-        std::string hdf5_file = eigenvector_dir + "/ed_results.h5";
-        std::ifstream test_file(hdf5_file);
-        if (test_file.good()) {
-            test_file.close();
-            
-            // Load eigenvalues
-            std::vector<double> eigenvalues = HDF5IO::loadEigenvalues(hdf5_file);
-            if (!eigenvalues.empty()) {
-                ground_state_energy = eigenvalues[0];
-                std::cout << "Loaded ground state energy from HDF5: " << ground_state_energy << std::endl;
-            }
-            
-            // Load eigenvector
-            std::vector<Complex> gs_vec = HDF5IO::loadEigenvector(hdf5_file, 0);
-            if (!gs_vec.empty()) {
-                if (expected_dim > 0 && gs_vec.size() != expected_dim) {
-                    std::cerr << "Warning: Dimension mismatch: HDF5 has " << gs_vec.size() 
-                              << ", expected " << expected_dim << std::endl;
-                } else {
-                    ground_state = std::move(gs_vec);
-                    
-                    // Normalize (should already be normalized, but just in case)
-                    double norm = cblas_dznrm2(ground_state.size(), ground_state.data(), 1);
-                    if (std::abs(norm - 1.0) > 1e-6) {
-                        std::cout << "Normalizing eigenvector (norm was " << norm << ")" << std::endl;
-                        Complex scale(1.0/norm, 0.0);
-                        cblas_zscal(ground_state.size(), &scale, ground_state.data(), 1);
-                    }
-                    std::cout << "Loaded ground state eigenvector from HDF5 (dim=" << ground_state.size() << ")" << std::endl;
-                    return true;
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        std::cout << "HDF5 load failed, trying legacy formats: " << e.what() << std::endl;
-    }
-    
-    // Legacy file naming conventions (fallback)
-    std::vector<std::string> eigenvector_files = {
-        eigenvector_dir + "/eigenvector_0.dat",
-        eigenvector_dir + "/eigenvector_block0_0.dat"
-    };
-    
-    std::vector<std::string> eigenvalue_files = {
-        eigenvector_dir + "/eigenvalues.dat",
-        eigenvector_dir + "/eigenvalues.txt"
-    };
-    
-    // Try to load eigenvector
-    bool loaded_eigenvector = false;
-    
-    for (const auto& filename : eigenvector_files) {
-        std::ifstream file(filename, std::ios::binary);
-        if (!file.is_open()) continue;
-        
-        std::cout << "Found eigenvector file: " << filename << std::endl;
-        
-        // Read dimension
-        uint64_t dim;
-        file.read(reinterpret_cast<char*>(&dim), sizeof(uint64_t));
-        
-        if (expected_dim > 0 && dim != expected_dim) {
-            std::cerr << "Warning: Dimension mismatch: file has " << dim 
-                      << ", expected " << expected_dim << std::endl;
-            file.close();
-            continue;
-        }
-        
-        // Read complex vector
-        ground_state.resize(dim);
-        file.read(reinterpret_cast<char*>(ground_state.data()), dim * sizeof(Complex));
-        
-        if (file.good()) {
-            loaded_eigenvector = true;
-            std::cout << "Loaded eigenvector with dimension " << dim << std::endl;
-            
-            // Normalize (should already be normalized, but just in case)
-            double norm = cblas_dznrm2(dim, ground_state.data(), 1);
-            if (std::abs(norm - 1.0) > 1e-6) {
-                std::cout << "Normalizing eigenvector (norm was " << norm << ")" << std::endl;
-                Complex scale(1.0/norm, 0.0);
-                cblas_zscal(dim, &scale, ground_state.data(), 1);
-            }
-            break;
-        }
-        file.close();
-    }
-    
-    if (!loaded_eigenvector) {
-        std::cerr << "Error: Could not load eigenvector from any expected location\n";
-        return false;
-    }
-    
-    // Try to load eigenvalue (ground state energy)
-    bool loaded_energy = false;
-    
-    for (const auto& filename : eigenvalue_files) {
-        std::ifstream file(filename);
-        if (!file.is_open()) continue;
-        
-        // Check if binary or text
-        if (filename.find(".dat") != std::string::npos) {
-            file.close();
-            std::ifstream binfile(filename, std::ios::binary);
-            if (!binfile.is_open()) continue;
-            
-            // Binary format: num_eigenvalues followed by eigenvalues
-            size_t num_eig;
-            binfile.read(reinterpret_cast<char*>(&num_eig), sizeof(size_t));
-            
-            if (num_eig > 0) {
-                binfile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
-                loaded_energy = true;
-                std::cout << "Loaded ground state energy: " << ground_state_energy << std::endl;
-            }
-            binfile.close();
-        } else {
-            // Text format: one eigenvalue per line
-            if (file >> ground_state_energy) {
-                loaded_energy = true;
-                std::cout << "Loaded ground state energy: " << ground_state_energy << std::endl;
-            }
-            file.close();
-        }
-        
-        if (loaded_energy) break;
-    }
-    
-    if (!loaded_energy) {
-        std::cerr << "Warning: Could not load ground state energy, using 0.0\n";
-        ground_state_energy = 0.0;
-    }
-    
-    return loaded_eigenvector;
-}
+// load_ground_state_from_file was retired in the minimalist-architecture
+// rev (May 2026): no external callers. Workflows that need a previously
+// computed ground state read it back via HDF5IO::loadEigenvector(/0/) on
+// the unified ed_results.h5 store; the legacy
+// eigenvector_block0_0.dat / eigenvalues.txt sidecar paths are no
+// longer written or supported.

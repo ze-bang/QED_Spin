@@ -1,7 +1,7 @@
 # =============================================================================
 # python/qed/feasibility.py    (Phase 9 / Layer 6)
 #
-# Pre-flight planner for `qed.diag` / `qed.find_symmetries` /
+# Pre-flight planner for `qed.solve` / `qed.find_symmetries` /
 # `qed.mpi.run_distributed`.
 #
 # Goal: given a Hamiltonian + a desired (solver, device, basis), tell the
@@ -435,7 +435,7 @@ def _vector_count_for(
     method_name: str,
     *,
     num_eigenvalues: int,
-    max_subspace: Optional[int],
+    max_iterations: Optional[int],
     n_samples: Optional[int],
     compute_eigenvectors: bool,
     block_size: Optional[int],
@@ -447,52 +447,43 @@ def _vector_count_for(
     """
     name = method_name.upper()
     nev = max(1, num_eigenvalues)
-    ms = max_subspace if (max_subspace and max_subspace > 0) else \
+    # Approximate Krylov subspace dimension: this used to be the dedicated
+    # ``max_subspace`` parameter; the minimalist architecture rev folded
+    # that into ``max_iterations``.
+    ms = max_iterations if (max_iterations and max_iterations > 0) else \
         max(80, 4 * nev + 40)
     bs = max(1, int(block_size or 1))
 
     # Eigenvalue solvers ----------------------------------------------------
-    if "FULL" in name and "SCALAPACK" not in name:
+    if "FULL" in name:
         # Dense H + dense eigvecs: 2 * dim^2 doubles. We model this as
         # "vector count = dim" so the planner sees dim * dim memory.
         return -1, "FULL dense LAPACK: ~2 * dim^2 complex<double>"
-    if "SCALAPACK" in name:
-        return -1, "SCALAPACK dense: ~2 * dim^2 complex<double> distributed"
-    if name.startswith("ARPACK"):
-        ncv = max(2 * nev + 1, ms)
-        return ncv + 3, f"ARPACK NCV={ncv} resident Arnoldi vectors + 3 scratch"
-    if "DAVIDSON" in name or "LOBPCG" in name:
-        return ms * 2 + 4, f"DAVIDSON/LOBPCG basis V + AV (~2*max_subspace={ms})"
-    if "BLOCK_KRYLOV_SCHUR" in name:
-        return ms + bs * 2 + 3, (
-            f"BLOCK_KRYLOV_SCHUR: max_subspace={ms} + 2*block_size={bs}")
     if "KRYLOV_SCHUR" in name:
         if compute_eigenvectors:
-            return ms + 4, f"KRYLOV_SCHUR: thick-restart basis (~max_subspace={ms})"
+            return ms + 4, f"KRYLOV_SCHUR: thick-restart basis (~max_iterations={ms})"
         return 4, "KRYLOV_SCHUR: 3 working vectors (basis regenerated)"
     if "BLOCK_LANCZOS" in name:
         return ms + bs * 2 + 3, (
-            f"BLOCK_LANCZOS: max_subspace={ms} + 2*block_size={bs}")
+            f"BLOCK_LANCZOS: max_iterations={ms} + 2*block_size={bs}")
     if "LANCZOS" in name:
         if compute_eigenvectors:
             return ms + 4, (
-                f"LANCZOS w/ eigenvectors: stored basis (~max_subspace={ms})")
+                f"LANCZOS w/ eigenvectors: stored basis (~max_iterations={ms})")
         return 4, "LANCZOS: ~4 working vectors (regenerated 2-pass)"
-    if "SHIFT_INVERT" in name or "BICG" in name or "OSS" in name \
-            or "CHEBYSHEV" in name:
-        return ms + 6, (
-            f"{name}: ~max_subspace={ms} + scratch for the linear solve")
 
     # Thermal solvers (sequential outer loop -> no n_samples multiplier) ----
     if "TPQ" in name:
         return 5, "TPQ: |psi> + term + Hterm + result + Hpsi (one sample at a time)"
-    if "FTLM" in name or "LTLM" in name or "HYBRID" in name:
+    if "FTLM" in name or "LTLM" in name:
         # Inner Lanczos basis (regen 2-pass) + observable scratch.
         return ms + 4, (
-            f"FTLM/LTLM: inner Lanczos basis (~max_subspace={ms}) + observable scratch")
+            f"FTLM/LTLM: inner Lanczos basis (~max_iterations={ms}) + observable scratch")
+    if "KPM" in name:
+        return 6, "KPM_DOS: 3 Chebyshev recurrence vectors + 3 scratch"
 
     # Unknown -> conservative default
-    return ms + 4, f"unknown solver: defaulting to max_subspace={ms} + 4"
+    return ms + 4, f"unknown solver: defaulting to max_iterations={ms} + 4"
 
 
 def estimate_memory_gb(
@@ -500,7 +491,7 @@ def estimate_memory_gb(
     method: Union[str, DiagonalizationMethod],
     *,
     num_eigenvalues: int = 1,
-    max_subspace: Optional[int] = None,
+    max_iterations: Optional[int] = None,
     n_samples: Optional[int] = None,
     block_size: Optional[int] = None,
     compute_eigenvectors: bool = False,
@@ -516,7 +507,7 @@ def estimate_memory_gb(
     vec_count, rationale = _vector_count_for(
         method_name,
         num_eigenvalues=num_eigenvalues,
-        max_subspace=max_subspace,
+        max_iterations=max_iterations,
         n_samples=n_samples,
         compute_eigenvectors=compute_eigenvectors,
         block_size=block_size,
@@ -524,7 +515,7 @@ def estimate_memory_gb(
     n_ranks = max(1, int(n_ranks))
 
     if vec_count < 0:
-        # Dense path: memory is dim * dim, distributed for SCALAPACK.
+        # Dense path: memory is dim * dim, replicated across ranks.
         bytes_total = 2.0 * (dim ** 2) * BYTES_PER_COMPLEX
         per_rank = bytes_total / n_ranks
         return (
@@ -573,19 +564,13 @@ def estimate_time_s(
     n_ranks = max(1, int(n_ranks))
 
     # SpMV count per call (number of H * v inside the kernel).
-    if "FULL" in method_name and "SCALAPACK" not in method_name:
+    if "FULL" in method_name:
         # LAPACK zheev: ~ (8/3) * dim^3 flops; rough wall-time at 100 GFLOPs
         flops = (8.0 / 3.0) * (dim ** 3)
         seconds = flops / (100.0e9)  # 100 GFLOPS dense BLAS rule of thumb
         return seconds, (
             f"FULL: ~(8/3) dim^3 flops at ~100 GFLOPS dense = "
             f"{seconds:.2g} s")
-    if "SCALAPACK" in method_name:
-        flops = (8.0 / 3.0) * (dim ** 3)
-        seconds = flops / (100.0e9 * n_ranks)
-        return seconds, (
-            f"SCALAPACK: ~(8/3) dim^3 flops distributed across {n_ranks} ranks "
-            f"@ 100 GFLOPS each = {seconds:.2g} s")
 
     if "TPQ" in method_name:
         # n_samples * n_betas * delta_betas/step * taylor_order
@@ -599,20 +584,16 @@ def estimate_time_s(
         n_spmv = n_samples * n_spmv_per_sample
         rationale_extra = (
             f"FTLM/LTLM: {n_samples} sample(s) * 2 * {max_iter} = {n_spmv} SpMV")
+    elif "KPM" in method_name:
+        n_spmv = max(1, int(n_samples)) * max_iter
+        rationale_extra = (
+            f"KPM_DOS: {n_samples} random vector(s) * {max_iter} moments "
+            f"= {n_spmv} SpMV")
     elif "BLOCK" in method_name:
         bs = max(1, int(block_size or nev))
         n_spmv = max_iter * bs
         rationale_extra = (
             f"BLOCK_*: {max_iter} iter * block_size={bs} = {n_spmv} SpMV")
-    elif "ARPACK" in method_name:
-        # Implicitly restarted Arnoldi: ncv * (max_restarts+1)
-        ncv = 2 * nev + 1
-        n_spmv = ncv * 4  # 4 implicit restarts is generous default
-        rationale_extra = f"ARPACK: NCV={ncv} * 4 restarts ~ {n_spmv} SpMV"
-    elif "DAVIDSON" in method_name or "LOBPCG" in method_name:
-        n_spmv = max_iter * max(1, nev)
-        rationale_extra = (
-            f"DAVIDSON/LOBPCG: {max_iter} iter * nev={nev} = {n_spmv} SpMV")
     else:
         # Lanczos / Krylov-Schur family: 2-pass when eigenvectors are kept;
         # we conservatively use 2x.
@@ -667,7 +648,7 @@ class FeasibilityReport:
     def summary(self) -> str:
         verdict = "FEASIBLE" if self.feasible else f"INFEASIBLE ({self.bottleneck})"
         lines = [
-            f"[qed.diag.planner] verdict: {verdict}",
+            f"[qed.solve.planner] verdict: {verdict}",
             f"  basis     : {self.basis.description}",
             f"  solver    : {self.solver_name}",
             f"  device    : {self.device}  (n_ranks={self.n_ranks})",
@@ -723,7 +704,6 @@ def estimate_resources(
     num_eigenvalues: int = 1,
     n_samples: Optional[int] = None,
     n_ranks: Optional[int] = None,
-    max_subspace: Optional[int] = None,
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
     compute_eigenvectors: bool = False,
@@ -732,7 +712,7 @@ def estimate_resources(
 ) -> FeasibilityReport:
     """Plan one (solver, device, basis, n_ranks) combination.
 
-    Parameters mirror :func:`qed.diag` so the planner can be
+    Parameters mirror :func:`qed.solve` so the planner can be
     invoked with the same kwargs the user is about to dispatch with.
     Returns a :class:`FeasibilityReport`. Does **not** raise on
     infeasibility; the caller decides whether to abort or proceed.
@@ -764,7 +744,7 @@ def estimate_resources(
     per_rank_gb, total_gb, mem_rationale = estimate_memory_gb(
         basis.dim, solver,
         num_eigenvalues=num_eigenvalues,
-        max_subspace=max_subspace,
+        max_iterations=max_iterations,
         n_samples=n_samples,
         block_size=block_size,
         compute_eigenvectors=compute_eigenvectors,
@@ -933,7 +913,7 @@ class WorkflowCandidate:
             kwargs.append(f"sz={self.sz}")
         if self.use_symmetry:
             kwargs.append("symmetry=qed.find_symmetries(H).full_set")
-        return f"qed.diag(H, {', '.join(kwargs)})"
+        return f"qed.solve(H, {', '.join(kwargs)})"
 
 
 @dataclass

@@ -1392,40 +1392,5 @@ void GPUBlockLanczos::run(int num_eigenvalues,
     std::cout << "============================\n\n";
 }
 
-void GPUBlockLanczos::runWithStartBlock(const std::vector<std::complex<double>>& start_block,
-                                        int num_eigenvalues,
-                                        std::vector<double>& eigenvalues,
-                                        std::vector<std::vector<std::complex<double>>>& eigenvectors,
-                                        bool compute_vectors) {
-    // Validate start block size
-    if (start_block.size() != static_cast<size_t>(dimension_ * block_size_)) {
-        std::cerr << "Error: Start block size mismatch. Expected " 
-                  << dimension_ * block_size_ << ", got " << start_block.size() << "\n";
-        return;
-    }
-    
-    // Copy start block to GPU
-    std::vector<cuDoubleComplex> h_start(dimension_ * block_size_);
-    for (size_t i = 0; i < start_block.size(); ++i) {
-        h_start[i] = make_cuDoubleComplex(start_block[i].real(), start_block[i].imag());
-    }
-    
-    CUDA_CHECK(cudaMemcpy(d_V_current_, h_start.data(),
-                         dimension_ * block_size_ * sizeof(cuDoubleComplex),
-                         cudaMemcpyHostToDevice));
-    
-    // Orthonormalize the provided starting block
-    orthonormalizeBlock(d_V_current_);
-    
-    // Store first block
-    if (num_stored_blocks_ > 0) {
-        blockCopy(d_V_current_, d_block_basis_[0]);
-        blocks_computed_ = 1;
-    }
-    
-    // Continue with the rest of the algorithm (similar to run() but skipping initialization)
-    // For simplicity, we call run() which will reinitialize - in production, factor out common code
-    run(num_eigenvalues, eigenvalues, eigenvectors, compute_vectors);
-}
 
 #endif // WITH_CUDA

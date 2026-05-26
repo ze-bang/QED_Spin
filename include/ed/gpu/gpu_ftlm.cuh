@@ -114,124 +114,15 @@ public:
     
     Stats getStats() const { return stats_; }
     
-    /**
-     * @brief Compute dynamical response S(ω) for operator O applied to a given state
-     * 
-     * GPU-accelerated version of compute_dynamical_response.
-     * Computes S(ω) = <ψ|O†δ(ω - H)O|ψ> where:
-     * - H is the Hamiltonian (via GPU operator)
-     * - O is an operator (via GPU operator)
-     * - |ψ> is an initial state vector (on GPU)
-     * 
-     * @param d_psi Initial state vector on GPU (normalized)
-     * @param op_O GPU operator for O (if nullptr, uses H)
-     * @param omega_min Minimum frequency
-     * @param omega_max Maximum frequency
-     * @param num_omega_bins Number of frequency points
-     * @param broadening Lorentzian broadening parameter (η)
-     * @param temperature Temperature for thermal weighting (0 = none)
-     * @return Spectral function data (frequencies and S(ω))
-     */
-    std::pair<std::vector<double>, std::vector<double>> 
-    computeDynamicalResponse(const cuDoubleComplex* d_psi,
-                           GPUOperator* op_O,
-                           double omega_min,
-                           double omega_max,
-                           int num_omega_bins,
-                           double broadening,
-                           double temperature = 0.0);
-    
-    /**
-     * @brief Compute dynamical response averaged over random initial states
-     * 
-     * GPU-accelerated thermal dynamical response using FTLM approach.
-     * Averages S(ω) over multiple random initial states to approximate
-     * finite temperature response.
-     * 
-     * @param num_samples Number of random initial states
-     * @param op_O GPU operator for O (if nullptr, uses H)
-     * @param omega_min Minimum frequency
-     * @param omega_max Maximum frequency
-     * @param num_omega_bins Number of frequency points
-     * @param broadening Lorentzian broadening parameter
-     * @param temperature Temperature for thermal weighting
-     * @param random_seed Random seed (0 = random)
-     * @return Spectral function with error bars
-     */
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
-    computeDynamicalResponseThermal(int num_samples,
-                                  GPUOperator* op_O,
-                                  double omega_min,
-                                  double omega_max,
-                                  int num_omega_bins,
-                                  double broadening,
-                                  double temperature = 0.0,
-                                  unsigned int random_seed = 0);
-    
-    /**
-     * @brief Compute dynamical correlation S_{O1,O2}(ω) = <O₁†(ω)O₂>
-     * 
-     * GPU-accelerated computation of cross-correlation spectral function.
-     * For O1=O2, gives auto-correlation/spectral density.
-     * 
-     * @param num_samples Number of random samples for thermal average
-     * @param op_O1 GPU operator for O₁
-     * @param op_O2 GPU operator for O₂
-     * @param omega_min Minimum frequency
-     * @param omega_max Maximum frequency
-     * @param num_omega_bins Number of frequency points
-     * @param broadening Lorentzian broadening parameter
-     * @param temperature Temperature for thermal weighting
-     * @param energy_shift Ground state energy shift (0 = auto-detect)
-     * @param random_seed Random seed (0 = random)
-     * @param output_dir Output directory for intermediate files (empty = no output)
-     * @param store_intermediate Whether to save per-sample spectra
-     * @return Spectral function with real/imaginary parts and errors
-     */
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
-               std::vector<double>, std::vector<double>>
-    computeDynamicalCorrelation(int num_samples,
-                              GPUOperator* op_O1,
-                              GPUOperator* op_O2,
-                              double omega_min,
-                              double omega_max,
-                              int num_omega_bins,
-                              double broadening,
-                              double temperature = 0.0,
-                              double energy_shift = 0.0,
-                              unsigned int random_seed = 0,
-                              const std::string& output_dir = "",
-                              bool store_intermediate = false);
-    
-    /**
-     * @brief Compute thermal expectation value ⟨O⟩_T and susceptibility
-     * 
-     * GPU-accelerated computation of thermal averages:
-     * - ⟨O⟩_T = Tr(O exp(-βH)) / Z
-     * - χ_T = β(⟨O²⟩ - ⟨O⟩²)  [generalized susceptibility]
-     * 
-     * Uses FTLM approach with multiple random samples.
-     * 
-     * @param num_samples Number of random samples for thermal average
-     * @param op_O GPU operator for O (if nullptr, uses H for energy)
-     * @param temp_min Minimum temperature
-     * @param temp_max Maximum temperature
-     * @param num_temp_bins Number of temperature points
-     * @param random_seed Random seed (0 = random)
-     * @param output_dir Output directory for intermediate files (empty = no output)
-     * @param store_intermediate Whether to save per-sample data
-     * @return Tuple of (temperatures, expectation values, errors)
-     */
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
-    computeThermalExpectation(int num_samples,
-                            GPUOperator* op_O,
-                            double temp_min,
-                            double temp_max,
-                            int num_temp_bins,
-                            unsigned int random_seed = 0,
-                            const std::string& output_dir = "",
-                            bool store_intermediate = false);
-    
+    // The following `GPUFTLMSolver` methods were retired in the minimalist-architecture
+    // rev (May 2026): `computeDynamicalResponse`, `computeDynamicalResponseThermal`,
+    // `computeDynamicalCorrelation`, `computeDynamicalCorrelationState`,
+    // `computeDynamicalCorrelationStateCF`, `computeThermalExpectation`. They were
+    // wrappers around the now-deleted single-state / FTLM-thermal entry points in
+    // `GPUEDWrapper`. Use `computeDynamicalCorrelationMultiTemp` (FTLM multi-T DSSF),
+    // `computeStaticCorrelation` (static thermal correlator), or the CPU
+    // `ed::observables::cf_dynamical_correlator` facade.
+
     /**
      * @brief Compute static correlation function ⟨O₁†O₂⟩_T
      * 
@@ -265,86 +156,6 @@ public:
                            unsigned int random_seed = 0,
                            const std::string& output_dir = "",
                            bool store_intermediate = false);
-    
-    /**
-     * @brief Compute dynamical correlation for a given state (single-state version)
-     * 
-     * GPU-accelerated version of compute_dynamical_correlation_state.
-     * Computes S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ) for a specific state |ψ⟩.
-     * 
-     * This is the single-state version (no random sampling/thermal averaging).
-     * Use this when you have a specific quantum state, such as:
-     * - Ground state from exact diagonalization
-     * - Excited state from Lanczos
-     * - Time-evolved state
-     * - Specific symmetry sector state
-     * 
-     * The function uses the Lehmann representation computed via Lanczos:
-     * 1. Applies O₂ to the given state: |φ⟩ = O₂|ψ⟩
-     * 2. Builds Krylov subspace starting from |φ⟩
-     * 3. Diagonalizes H in the Krylov basis to get approximate eigenstates
-     * 4. Computes weights: ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
-     * 5. Constructs spectral function with Lorentzian broadening
-     * 
-     * For O1=O2, gives spectral density. For different operators, gives cross-correlation.
-     * 
-     * @param d_psi Input quantum state on GPU (must be normalized)
-     * @param op_O1 GPU operator for O₁
-     * @param op_O2 GPU operator for O₂
-     * @param omega_min Minimum frequency
-     * @param omega_max Maximum frequency
-     * @param num_omega_bins Number of frequency points
-     * @param broadening Lorentzian broadening parameter (η)
-     * @param temperature Temperature for Boltzmann weighting (0 = no weighting)
-     * @param energy_shift Ground state energy shift (0 = auto-detect from Krylov)
-     * @return Tuple of (frequencies, Re[S(ω)], Im[S(ω)])
-     */
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
-    computeDynamicalCorrelationState(const cuDoubleComplex* d_psi,
-                                    GPUOperator* op_O1,
-                                    GPUOperator* op_O2,
-                                    double omega_min,
-                                    double omega_max,
-                                    int num_omega_bins,
-                                    double broadening,
-                                    double temperature = 0.0,
-                                    double energy_shift = 0.0);
-    
-    /**
-     * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
-     * 
-     * This version DOES NOT store Lanczos basis vectors, making it suitable for
-     * very large Hilbert spaces (>16M states) where storing krylov_dim vectors
-     * would require prohibitive memory (e.g., 100GB for 27 sites with krylov_dim=50).
-     * 
-     * LIMITATION: Only works when O1 = O2 (self-correlation).
-     * For O1 ≠ O2, use computeDynamicalCorrelationState which requires basis storage.
-     * 
-     * Algorithm:
-     * 1. Applies O to the given state: |φ⟩ = O|ψ⟩
-     * 2. Builds Lanczos tridiagonal WITHOUT storing basis vectors (3-term recurrence only)
-     * 3. Computes spectral function via continued fraction: G(z) = ||φ||²/(z-α₀-β₁²/...)
-     * 4. S(ω) = -Im[G(ω + iη)] / π
-     * 
-     * Memory: O(N) instead of O(krylov_dim × N)
-     * 
-     * @param d_psi Input quantum state on GPU (must be normalized)
-     * @param op_O GPU operator for O (self-correlation: O₁ = O₂ = O)
-     * @param omega_min Minimum frequency
-     * @param omega_max Maximum frequency
-     * @param num_omega_bins Number of frequency points
-     * @param broadening Lorentzian broadening parameter (η)
-     * @param energy_shift Ground state energy shift (0 = auto-detect from Krylov)
-     * @return Tuple of (frequencies, Re[S(ω)], Im[S(ω)])
-     */
-    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
-    computeDynamicalCorrelationStateCF(const cuDoubleComplex* d_psi,
-                                       GPUOperator* op_O,
-                                       double omega_min,
-                                       double omega_max,
-                                       int num_omega_bins,
-                                       double broadening,
-                                       double energy_shift = 0.0);
     
     /**
      * @brief CORRECTED FTLM multi-sample multi-temperature spectral function
@@ -478,16 +289,9 @@ private:
                                        cuDoubleComplex** d_basis, 
                                        cuDoubleComplex* d_out);
     
-    /**
-     * @brief Compute dot product of GPU vector with all basis vectors
-     * Returns: overlaps[j] = ⟨d_vec|d_basis[j]⟩ for j=0..num_basis-1
-     * Avoids host-device transfers by computing entirely on GPU
-     */
-    void computeOverlapsWithBasis(const cuDoubleComplex* d_vec,
-                                  cuDoubleComplex** d_basis,
-                                  int num_basis,
-                                  std::vector<std::complex<double>>& overlaps);
-    
+    // `computeOverlapsWithBasis` retired alongside the deleted
+    // computeDynamicalCorrelation[State] drivers (May 2026).
+
     // Orthogonalization
     void orthogonalizeAgainstBasis(cuDoubleComplex* d_vec, int num_basis_vecs);
     void gramSchmidt(cuDoubleComplex* d_vec, int iter);
@@ -534,15 +338,8 @@ private:
                                          std::vector<double>& alpha,
                                          std::vector<double>& beta);
     
-    /**
-     * @brief Compute spectral function from Ritz values and weights
-     */
-    void computeSpectralFunction(const std::vector<double>& ritz_values,
-                                const std::vector<double>& weights,
-                                const std::vector<double>& frequencies,
-                                double broadening,
-                                double temperature,
-                                std::vector<double>& spectral_func);
+    // `computeSpectralFunction` retired alongside the deleted single-state /
+    // FTLM-thermal dynamical-response drivers (May 2026).
     
     /**
      * @brief Build Lanczos tridiagonal and store basis vectors
@@ -565,19 +362,8 @@ private:
                                         std::vector<double>& beta,
                                         cuDoubleComplex*** d_basis_out);
     
-    /**
-     * @brief Compute spectral function from complex weights
-     * 
-     * For cross-correlation, weights can be complex. This computes both
-     * real and imaginary parts of the spectral function.
-     */
-    void computeSpectralFunctionComplex(const std::vector<double>& ritz_values,
-                                       const std::vector<std::complex<double>>& complex_weights,
-                                       const std::vector<double>& frequencies,
-                                       double broadening,
-                                       double temperature,
-                                       std::vector<double>& spectral_func_real,
-                                       std::vector<double>& spectral_func_imag);
+    // `computeSpectralFunctionComplex` retired alongside the deleted
+    // computeDynamicalCorrelation[State] drivers (May 2026).
 };
 
 /**

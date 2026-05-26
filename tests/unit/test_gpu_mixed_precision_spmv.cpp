@@ -206,6 +206,66 @@ TEST_CASE("GPU mixed-precision Lanczos ground state matches dense reference",
     REQUIRE(std::abs(eigs.front() - E_ref) < 1e-5);
 }
 
+// ============================================================================
+// 3. Mutating terms between two FP32 matvecs invalidates the cached CSR
+//    (audit STRUCTURAL_AUDIT.md S0 #3 regression). Without
+//    ``invalidateDerivedCaches() -> freeCsrFp32DeviceData()``, the second
+//    matvec would re-use the FP32 CSR built from the original term list
+//    and silently produce numerically inconsistent output.
+// ============================================================================
+TEST_CASE("GPU FP32 CSR cache is invalidated when terms mutate",
+          "[gpu_mixed_precision][matvec][regression][s0]") {
+    if (!gpu_available()) {
+        SKIP("No CUDA device available -- skipping FP32 cache invalidation test.");
+    }
+
+    ScopedMixedPrecisionEnv env_guard;
+    setenv("ED_GPU_MIXED_PRECISION_SPMV", "1", /*overwrite=*/1);
+    REQUIRE(ed::gpu::gpu_mixed_precision_spmv_enabled());
+
+    const int N = 8;                   // dim = 256
+    const uint64_t dim = 1ULL << N;
+    auto v = ed_tests::random_unit_vector(dim, /*seed=*/9999);
+
+    // Step 1: build chain with J=1.0, take FP32 matvec, populate FP32 CSR cache.
+    auto op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
+    std::vector<Complex> y1(dim, Complex(0.0, 0.0));
+    op->matVec(v.data(), y1.data(), static_cast<int>(dim));
+
+    // Step 2: append a new term (a uniform Zeeman field on site 0). This
+    // must invalidate every cache including the FP32 CSR.
+    const Complex h_zeeman(0.7, 0.0);
+    op->addOneBodyTerm(/*op=*/2, /*site=*/0, h_zeeman);
+    op->copyTransformDataToDevice();
+
+    // Step 3: take the second FP32 matvec. If the FP32 CSR cache were
+    // stale, ``y2`` would equal ``y1`` (modulo numerical noise) -- it
+    // would NOT see the new Zeeman term.
+    std::vector<Complex> y2(dim, Complex(0.0, 0.0));
+    op->matVec(v.data(), y2.data(), static_cast<int>(dim));
+
+    // Reference: same operator on CPU.
+    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0,
+                                                    /*periodic=*/true);
+    cpu_op->addOneBodyTerm(/*op=*/2, /*site=*/0, h_zeeman);
+    std::vector<Complex> y_ref(dim, Complex(0.0, 0.0));
+    cpu_op->apply(v.data(), y_ref.data(), static_cast<std::size_t>(dim));
+
+    const double diff_stale  = l2_diff(y2, y1);    // distance from pre-mutation
+    const double diff_to_ref = l2_diff(y2, y_ref); // distance from truth
+    const double norm        = l2_norm(y_ref);
+
+    INFO("||y2 - y1||_2 = "       << diff_stale
+         << "  ||y2 - y_ref||_2 = " << diff_to_ref
+         << "  ||y_ref||_2 = "    << norm);
+
+    // The added Zeeman is large enough that the new matvec must differ
+    // measurably from the old.
+    REQUIRE(diff_stale > 1e-3 * std::max(norm, 1e-30));
+    // The new matvec must match the CPU reference within FP32 tolerance.
+    REQUIRE(diff_to_ref < 5e-6 * std::max(norm, 1e-30));
+}
+
 #else  // !WITH_CUDA
 
 TEST_CASE("GPU mixed-precision SpMV: WITH_CUDA=OFF -- no-op",

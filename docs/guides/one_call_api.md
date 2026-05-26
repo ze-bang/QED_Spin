@@ -1,101 +1,207 @@
-# One-Call API: `qed.diag` and `qed.dssf.compute`
+# One-Call API: `qed.solve`, `qed.thermal`, `qed.spectral`
 
-This page documents the **two stress-free entry points** to QED. Both
-exist in C++ (`ed::auto_pilot::*`) and Python (`qed.*`); both pick the
-best solver, device, and per-method knobs from the problem size +
-build flags so you don't have to.
+This page documents the **three stress-free entry points** to QED. They
+exist in Python (`qed.solve` / `qed.thermal` / `qed.spectral`) on top of
+the C++ orchestrator (`ed::workflows::{solve, thermal, spectral}`); both
+pick the best solver, device, and per-method knobs from the problem
+size + build flags so you don't have to.
 
-If you are reaching for `qed.exact_diagonalization_core(op, method,
-params)` or assembling an `EDConfig` by hand, you are using the
-**low-level** API — that's still supported, but for routine work
-prefer the entry points below.
+If you are populating `OperatorSpec` / `SolveOptions` /
+`ThermalOptions` / `SpectralOptions` by hand and calling the
+`ed::workflows::*` orchestrator directly, you are using the
+**lower-level** C++ API — that's still supported, but for routine work
+prefer the Python entry points below.
 
 ## At a glance
 
 | Need                                                           | Python                                  | C++                                         |
 |----------------------------------------------------------------|-----------------------------------------|---------------------------------------------|
-| Diagonalize H (eigenvalues / GS / a few states / thermal TPQ)  | `qed.diag(H, ...)`                      | `ed::auto_pilot::solve(H, opts)`            |
-| Structure factor (zero or finite T, static or dynamical, KPM)  | `qed.dssf.compute(directory, T=, omega=)` | `ed::auto_pilot::dssf::compute(req, opts)` |
-| Pure heuristic helpers (η, ω, Krylov, R, KPM moments)          | `qed.auto_tune.*`                       | `ed::auto_pilot::dssf::pick_*`              |
+| Diagonalize H (eigenvalues / GS / a few states)                | `qed.solve(H, ...)`                     | `ed::workflows::solve(H, SolveOptions{...})`     |
+| Finite-temperature thermodynamics (mTPQ / cTPQ / FTLM / LTLM)  | `qed.thermal(H, ...)`                   | `ed::workflows::thermal(H, ThermalOptions{...})` |
+| Structure factor (zero or finite T, static or dynamical, KPM)  | `qed.spectral(directory, T=, omega=)`   | `ed::workflows::spectral(req, SpectralOptions{...})` |
+| Pure heuristic helpers (η, ω, Krylov, R, KPM moments)          | `qed.auto_tune.*`                       | (Python-only)                               |
 
 Each call accepts (a) **what you want** (`num_eigenvalues`, `T`,
 `omega`, …) and (b) **optional overrides** for any auto-selected
 internal knob. Anything left unspecified is auto-tuned.
 
-## 1. Diagonalization — `qed.diag`
+## 1. Diagonalization — `qed.solve`
 
 ```python
 import qed
 
-H = ...  # qed.Operator or qed.FixedSzOperator
-res = qed.diag(H)                       # ground state, smart everything
-res = qed.diag(H, num_eigenvalues=8)    # bottom-of-spectrum
-res = qed.diag(H, sz=N // 2)            # restrict to fixed Sz sector
-res = qed.diag(H, solver="mTPQ",        # thermal trajectory
-               num_samples=4, target_beta=20.0,
-               output_dir="ed_runs/thermal")
+H = ...                                  # qed.Operator or qed.FixedSzOperator
+res = qed.solve(H)                       # ground state, smart everything
+res = qed.solve(H, num_eigenvalues=8)    # bottom-of-spectrum
+res = qed.solve(H, sz=N // 2)            # restrict to fixed Sz sector
 ```
 
-What `qed.diag` decides for you (override any of these via kwargs):
+What `qed.solve` decides for you (override any of these via kwargs):
 
 * **Solver** (`solver=None` → `"auto"`): picks `FULL` (≤2048 dim),
   `LANCZOS` (≤5 eigs), `KRYLOV_SCHUR` (≤20), `BLOCK_LANCZOS` (more).
-  Also accepts `mTPQ`/`cTPQ`/`FTLM`/`LTLM`/`HYBRID` for thermal
-  trajectories.
 * **Device** (`device=None` → `"auto"`): picks `cpu`/`gpu`/`mpi`/`mpi_gpu`
   based on `qed.has_cuda_build()`, `qed.has_mpi_build()` and the
   Hilbert / sector dim.
-* **Sz sector**: if `H.conserves_sz()` and you didn't pass `sz=`, prints
-  a hint that fixed-Sz would be cheaper. Pass `sz=N//2` to project.
+* **Auto Sz** (`auto_sz=True` by default): if `H.conserves_sz()` and you
+  didn't pass `sz=`, projects to the half-filled Sz=N/2 sector
+  automatically (set `auto_sz=False` to keep the full Hilbert space).
 * **Symmetry**: pass `symmetry=` (a `GeneratorSet` or the dict from
   `qed.symmetry.group_from_generators`) to dispatch through the
-  streaming-symmetry kernel.
+  streaming-symmetry kernel. Symmetry projection is strictly opt-in.
+  Internally the `sz=` and `symmetry=` kwargs are orthogonal —
+  they map onto the `(Subspace, ProjectorChain)` decomposition
+  introduced in May 2026:
+  `sz=` selects between `FullSpaceSubspace` and `FixedSzSubspace`,
+  `symmetry=` populates a `ProjectorChain` with the spatial
+  projector. Future axes (global spin-flip Z_2, time-reversal
+  antiunitary, SU(2) total-S Casimir) extend the chain through the
+  same public surface. See
+  [`docs/architecture/SYMMETRY.md`](../architecture/SYMMETRY.md) §6
+  and
+  [`examples/16_python_orthogonal_symmetry.py`](../../examples/16_python_orthogonal_symmetry.py).
 * **Pre-flight planner** (`plan=True`): runs
   `qed.estimate_resources(...)` and refuses to dispatch infeasible
   jobs. Override with `force=True`.
 
+For finite-temperature trajectories, use `qed.thermal(...)` (next
+section); `qed.solve` is for eigenvalue solvers only.
+
 ### C++ equivalent
 
 ```cpp
-#include <ed/auto/solve.h>
+#include <ed/orchestrator.h>
+#include <ed/core/make_operator.h>
 
-ed::auto_pilot::AutoSolveOptions opts;
+ed::OperatorSpec spec = /* ... */;
+spec.sz = N / 2;                          // fixed-Sz sector (validated)
+auto H  = ed::make_operator(spec);
+
+ed::SolveOptions opts;
 opts.num_eigenvalues = 4;
-opts.sz              = N / 2;        // fixed-Sz sector (validated)
-opts.device          = ed::auto_pilot::Device::Auto;
-auto res = ed::auto_pilot::solve(H, opts);
+auto res = ed::workflows::solve(*H, opts);
 ```
 
-Same auto-selection logic; same fall-back warnings. The C++ façade
-**does not** spawn MPI ranks — for `device=Device::MPI` you must
-already be inside an `mpiexec` launcher (the Python `device="mpi"` path
-shells out to `mpiexec ed_distributed_main` for you).
+Same auto-selection logic; same fall-back warnings. The C++
+orchestrator **does not** spawn MPI ranks — for distributed runs you
+must already be inside an `mpiexec` launcher (the Python `device="mpi"`
+path shells out to `mpiexec ed_distributed_main` for you).
 
-## 2. Structure factors — `qed.dssf.compute`
+## 2. Finite-temperature — `qed.thermal`
+
+```python
+import qed
+
+H = ...
+res = qed.thermal(H, method="mTPQ", num_samples=4,
+                  target_beta=20.0,
+                  output_dir="ed_runs/thermal")
+res = qed.thermal(H, method="FTLM",
+                  num_temp_points=200,
+                  temp_min=0.05, temp_max=10.0)
+```
+
+What `qed.thermal` decides for you:
+
+* **β grid**: built from `temp_min` / `temp_max` / `num_temp_points` if
+  not given explicitly.
+* **mTPQ Taylor order / Δβ / energy shift**: filled by
+  `qed.auto_tune.tune_thermal(...)` from sector dim and target β.
+* **Sector orchestration**: when H conserves Sz, the orchestrator
+  sweeps Sz sectors, runs the kernel per-sector, then aggregates
+  `<O>(T) = Σ_sector Z_sector <O>_sector / Z_total`.
+* **Device / symmetry**: same `device=` / `symmetry=` knobs as
+  `qed.solve`.
+
+The result carries `result.thermo.{temperatures, free_energy, energy,
+entropy, specific_heat, …}` for direct plotting.
+
+## 3. Structure factors — `qed.spectral`
 
 ```python
 import qed
 import numpy as np
 
 # Zero-T <O> (one-shot expectation value):
-qed.dssf.compute("runs/heisenberg6")
+qed.spectral("runs/heisenberg6")
 
 # T=0 dynamical S(Q, ω) — auto-tuned eta/krylov/num_random/device:
-qed.dssf.compute("runs/heisenberg6", omega=np.linspace(-2, 2, 200))
+qed.spectral("runs/heisenberg6", omega=np.linspace(-2, 2, 200))
 
 # Static thermal S(Q, T):
-qed.dssf.compute("runs/heisenberg6", T=0.5)
+qed.spectral("runs/heisenberg6", T=0.5)
 
 # Full S(Q, ω, T):
-qed.dssf.compute("runs/heisenberg6",
-                 T=[0.1, 0.3, 1.0],
-                 omega=np.linspace(-2, 2, 400))
+qed.spectral("runs/heisenberg6",
+             T=[0.1, 0.3, 1.0],
+             omega=np.linspace(-2, 2, 400))
+
+# SOTA streaming-symmetry GS-CF (May 2026): pass `symmetry=True`
+# to route through the per-irrep sector loop and run continued-
+# fraction Lanczos only in the irrep containing the global GS.
+# The result carries `per_sector_pair` (irrep tags) and
+# `selection_rule_label` (Δk annotation).
+qed.spectral("runs/heisenberg16",
+             omega=np.linspace(-2, 6, 200), eta=0.05,
+             symmetry={"momentum_transfer": [0.0]},
+             num_sites=16)
+
+# SOTA cross-irrep S(Q, ω) with explicit momentum transfer (May 2026):
+# pass an `observable` (an _core.Operator describing the probe O_Q)
+# and a non-zero `momentum_transfer` (in fractional reciprocal-lattice
+# units, e.g. 1/N for one irrep step). The selection-rule walker resolves
+# the target sector, the CrossSectorOrbitObservable scatters the GS into
+# the target orbit basis, and continued-fraction Lanczos on H restricted
+# to that sector yields the spectral function. The result.S_real and
+# integrated spectral weight match the full-Hilbert Lehmann sum on a
+# small reference ring (see test_cross_irrep_spectral_matches_lehmann_reference).
+import math
+from qed import _core
+N, q_int = 6, 1
+obs = _core.Operator(N, 0.5)
+Q = 2 * math.pi * q_int / N
+for j in range(N):
+    obs.add_one_body(_core.OP_SZ, j,
+                     complex(math.cos(-Q * j), math.sin(-Q * j)) / math.sqrt(N))
+qed.spectral("runs/heisenberg6",
+             omega=np.linspace(-1, 6, 80), eta=0.05,
+             symmetry={
+                 "observable": obs,
+                 "momentum_transfer": [q_int / N],  # one irrep step
+                 "delta_n_up": 0,                   # Sz-conserving probe
+             },
+             num_sites=N)
+
+# SOTA FINITE-T cross-irrep S(Q, ω, T) (May 2026): same call shape
+# as above, but pass T= as well. Engages the per-source-sector FTLM
+# walk: random samples in each source orbit basis, outer Lanczos on
+# H restricted to k_src, scatter Ritz states into k_dst via
+# CrossSectorOrbitObservable, inner Lanczos on H restricted to k_dst,
+# Lehmann sum thermal-weighted by exp(-β E_m) * c_m^2, F-shifted-Z-
+# weighted recombination across source sectors. The returned
+# SpectralResult carries the recombined S(ω) at temperatures[0] in
+# S_real, and the full {T: S(ω)} payload via S_by_T_real (a dict
+# keyed by temperature, attached as a dynamic attribute).
+result_finite_T = qed.spectral(
+    "runs/heisenberg6",
+    T=[0.5, 2.0, 100.0],                  # one or more temperatures
+    omega=np.linspace(-2, 6, 60), eta=0.2,
+    num_random_vectors=30,                # FTLM samples per sector
+    symmetry={
+        "observable": obs,
+        "momentum_transfer": [q_int / N],
+        "delta_n_up": 0,
+    },
+    num_sites=N,
+)
+for T, S_T in result_finite_T.S_by_T_real.items():
+    print(f"T = {T:6.3f}   peak S = {max(S_T):.4e}")
 
 # KPM-DOS thermodynamics (uses every CPU core; no Lanczos at all):
-qed.dssf.compute("runs/heisenberg6", method="kpm_thermodynamics")
+qed.spectral("runs/heisenberg6", method="kpm_thermodynamics")
 ```
 
-What `qed.dssf.compute` decides for you:
+What `qed.spectral` decides for you:
 
 * **Method** (`method=None` → from `(T, omega)` truth table):
 
@@ -148,7 +254,7 @@ print(knobs.to_cli_args(method="dynamical_thermal"))
 ### C++ equivalent
 
 ```cpp
-#include <ed/auto/dssf.h>
+#include <ed/orchestrator.h>
 #include <ed/dssf/dssf_engine.h>
 
 ed::dssf::DSSFRequest req;
@@ -159,23 +265,22 @@ req.config     = &my_ed_config;       // EDConfig (any caller-set
                                       // honoured; sentinels get
                                       // auto-tuned).
 
-ed::auto_pilot::dssf::AutoDSSFOptions opts;
-opts.has_temperature      = true;
-opts.has_frequency        = true;
-opts.tune_overrides.level = ed::auto_pilot::dssf::TuneLevel::Balanced;
-opts.sector_dim_hint      = 1u << N;
+ed::SpectralOptions opts;
+opts.has_temperature = true;
+opts.has_frequency   = true;
+opts.sector_dim_hint = 1u << N;
 
-auto result = ed::auto_pilot::dssf::compute(req, opts);
+auto result = ed::workflows::spectral(req, opts);
 ```
 
-The C++ façade reads the user's `EDConfig` and overwrites only the
+The C++ orchestrator reads the user's `EDConfig` and overwrites only the
 fields still at their **struct default sentinel** (e.g. `broadening
 == 0.1`, `krylov_dim == 400`). Anything you set explicitly passes
 through untouched.
 
-## 3. Aggressiveness levels
+## 4. Aggressiveness levels
 
-Both Python (`level=`) and C++ (`TuneLevel`) accept three levels:
+The Python `level=` knob accepts three levels:
 
 * `conservative` — wider η, fewer Krylov steps, more random vectors.
   Cheaper, may over-broaden.
@@ -184,17 +289,14 @@ Both Python (`level=`) and C++ (`TuneLevel`) accept three levels:
   spectrally sharper.
 
 The exact numeric rules live in
-[python/qed/auto_tune.py](../../python/qed/auto_tune.py) and
-[include/ed/auto/dssf_tune.h](../../include/ed/auto/dssf_tune.h) +
-[include/ed/auto/diag_tune.h](../../include/ed/auto/diag_tune.h);
-they are kept in sync by the unit tests
-[python/tests/test_auto_tune.py](../../python/tests/test_auto_tune.py)
-and `tests/unit/test_dssf_tune.cpp` + `tests/unit/test_diag_tune.cpp`.
+[python/qed/auto_tune.py](../../python/qed/auto_tune.py); they are
+unit-tested by
+[python/tests/test_auto_tune.py](../../python/tests/test_auto_tune.py).
 
-### 3a. ED-solver auto-tuning
+### 4a. ED-solver auto-tuning
 
-`qed.diag(...)` ships the same `auto_tune=True, level="balanced"` knobs
-as `qed.dssf.compute`. Per-family fields filled from sector dim,
+`qed.solve(...)` ships the same `auto_tune=True, level="balanced"` knobs
+as `qed.spectral`. Per-family fields filled from sector dim,
 `num_eigenvalues`, and Hamiltonian bandwidth (sentinel-only — anything
 the caller sets passes through):
 
@@ -202,8 +304,7 @@ the caller sets passes through):
 | ----------------------- | ------------------------------- | ---------------- |
 | `tolerance`             | Eigenvalue convergence target   | `1e-10`          |
 | `max_iterations`        | Krylov outer-iteration cap      | `10000`          |
-| `max_subspace`          | Krylov subspace dim             | `100`            |
-| `arpack_ncv`            | ARPACK Lanczos vectors          | `-1`             |
+| `block_size`            | Block-Lanczos block size        | `4`              |
 | `ftlm_krylov_dim`       | FTLM Lanczos micro-basis        | `100`            |
 | `ltlm_krylov_dim`       | LTLM excitation Krylov dim      | `200`            |
 | `ltlm_ground_krylov`    | LTLM ground-state Krylov dim    | `100`            |
@@ -220,31 +321,21 @@ knobs = qed.auto_tune.tune_diag(
 print(knobs.solver, knobs.device, knobs.to_extra_params())
 ```
 
-C++ side (mirror of the above; called automatically by
-`ed::auto_pilot::solve(...)`):
+## 5. When to drop down to the low-level API
 
-```cpp
-EDParameters p;
-p.num_eigenvalues = 4;
-ed::auto_pilot::diag::AutoTuneOverrides ov;
-ov.level = ed::auto_pilot::dssf::TuneLevel::Aggressive;
-ed::auto_pilot::diag::apply_auto_tune(p, sector_dim, /*k=*/4, &H, ov);
-```
-
-## 4. When to drop down to the low-level API
-
-The auto-pilot is for the common path. Reach for the lower layers when
+The one-call API is for the common path. Reach for the lower layers when
 you need:
 
 * Programmatic per-iteration control of Lanczos (custom restart, custom
-  reorthogonalization tile size, custom shift-invert): use
-  `qed.exact_diagonalization_core(op, method, params)` and populate
-  `EDParameters` directly.
+  reorthogonalization tile size): instantiate `ed::lanczos_kernel` /
+  `ed::block_lanczos_kernel` / `ed::krylov_schur_kernel` directly with
+  your own `EDParameters` from C++.
 * A novel observable not covered by `qed.dssf.OperatorSpec`: build it
-  via `qed.input.HamiltonianBuilder` and call FTLM / mTPQ directly.
+  via `qed.input.HamiltonianBuilder` and call the FTLM / mTPQ kernels
+  directly via `qed._core.workflows_thermal` with `extra_params=`.
 * Custom MPI launchers, nonstandard symmetry decompositions, embedded
-  use-cases: skip the auto-pilot and call the C++ `Operator` /
-  `exact_diagonalization_core(...)` directly.
+  use-cases: skip Python and call `ed::make_operator(OperatorSpec{...})`
+  + `ed::workflows::*` directly from C++.
 
-For everything else: **`qed.diag(H, ...)`** and
-**`qed.dssf.compute(directory, T=, omega=)`**.
+For everything else: **`qed.solve(H, ...)`**, **`qed.thermal(H, ...)`**,
+and **`qed.spectral(directory, T=, omega=)`**.
