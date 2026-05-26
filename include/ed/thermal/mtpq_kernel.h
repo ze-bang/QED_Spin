@@ -42,7 +42,25 @@ struct MtpqOptions {
 };
 
 struct MtpqResult {
+    /// Final-iterate energy per sample (legacy field; kept for callers
+    /// that only need the long-imaginary-time E proxy).
     std::vector<double> energies;
+
+    /// Per-sample (beta_k, E_k, var_k) trajectories for the
+    /// orchestrator's ThermodynamicData post-processor. Each outer
+    /// vector has length ``num_samples``; inner vector lengths equal
+    /// the number of kernel steps that ran for that sample (the
+    /// kernel exits early if ``max_iter`` is hit or ``on_step``
+    /// returns false). beta_k is the classical microcanonical-TPQ
+    /// estimator
+    ///   beta_k = 2 k / (large_value - E_k)
+    /// (step >= 1; step == 0 contributes a beta=0 baseline so the
+    /// recombiner has a high-T anchor). var_k = <H^2> - E_k^2,
+    /// extracted as ||H psi||^2 - E_k^2 from the existing scratch
+    /// vector at no extra matvec cost.
+    std::vector<std::vector<double>> sample_inv_temps;
+    std::vector<std::vector<double>> sample_energies;
+    std::vector<std::vector<double>> sample_variances;
 };
 
 namespace detail {
@@ -75,6 +93,9 @@ MtpqResult mtpq_kernel(Backend&       backend,
 {
     MtpqResult out;
     out.energies.reserve(opts.num_samples);
+    out.sample_inv_temps.reserve(opts.num_samples);
+    out.sample_energies.reserve(opts.num_samples);
+    out.sample_variances.reserve(opts.num_samples);
 
     for (std::size_t s = 0; s < opts.num_samples; ++s) {
         const std::uint64_t seed = opts.random_seed
@@ -91,19 +112,54 @@ MtpqResult mtpq_kernel(Backend&       backend,
         kopts.large_value = opts.large_value;
         kopts.normalize_each_step = true;
 
-        // Capture the final-iterate energy via on_step (only commit the
-        // last one).  Energy = <psi|H|psi>, real part.
+        // Capture both the final-iterate energy (legacy) AND the
+        // per-step (beta_k, E_k, var_k) trajectory for ThermodynamicData
+        // recombination by the orchestrator. The variance comes free
+        // from the existing scratch vector via <H^2> = ||H psi||^2 -- no
+        // extra matvec, just one extra dot product per step.
         double final_E = 0.0;
+        std::vector<double> traj_betas;
+        std::vector<double> traj_Es;
+        std::vector<double> traj_vars;
+        // Reserve max_iter + 1 (the step=0 baseline + max_iter steps).
+        traj_betas.reserve(opts.max_iter + 1);
+        traj_Es.reserve(opts.max_iter + 1);
+        traj_vars.reserve(opts.max_iter + 1);
         auto scratch   = backend.make_zero_vector(local_n);
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
             apply_H(info.psi, scratch.get(), info.local_n);
             const Complex e = backend.dot(info.psi, scratch.get(), info.local_n);
-            final_E = std::real(e);
+            const double E_k = std::real(e);
+            final_E = E_k;
+            // <H^2> = ||H psi||^2 since H is Hermitian and psi is normalised.
+            const Complex hh = backend.dot(scratch.get(), scratch.get(),
+                                           info.local_n);
+            const double H2_k = std::real(hh);
+            const double var_k = std::max(H2_k - E_k * E_k, 0.0);
+            // mTPQ effective inverse temperature.
+            //   step == 0: beta = 0 (high-T baseline anchor)
+            //   step >= 1: beta_k = 2 k / (L - E_k) when (L - E_k) > 0
+            // Skip points where the denominator would be non-positive
+            // (E_k > L means the seed/state has energy above the
+            // microcanonical shift -- the formula is undefined there).
+            double beta_k = 0.0;
+            if (info.step >= 1) {
+                const double denom = opts.large_value - E_k;
+                if (denom > 0.0) {
+                    beta_k = 2.0 * static_cast<double>(info.step) / denom;
+                }
+            }
+            traj_betas.push_back(beta_k);
+            traj_Es.push_back(E_k);
+            traj_vars.push_back(var_k);
             return true;
         };
         auto kres = tpq_kernel<Backend>(backend, apply_H, local_n,
                                         seed_dev.get(), kopts, on_step);
         out.energies.push_back(final_E);
+        out.sample_inv_temps.push_back(std::move(traj_betas));
+        out.sample_energies.push_back(std::move(traj_Es));
+        out.sample_variances.push_back(std::move(traj_vars));
     }
     return out;
 }

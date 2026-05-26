@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """examples/09_python_quickstart.py
 
-The same 4-site Heisenberg ground state as `01_cpp_ground_state.cpp`, this
-time through the Python bindings (`pip install -e .` from the repo root,
-which installs the `qed` package).
+The same 4-site Heisenberg ground state as ``01_cpp_ground_state.cpp``,
+this time through the Python bindings (``pip install -e .`` from the
+repo root, which installs the ``qed`` package).
 
-Showcases the unified Python entry point :mod:`qed.workflows` introduced
-by the Full Unified-Interface Collapse (May 2026):
-
-    op -> qed.workflows.solve(op, opts)
-
-This is the canonical "hello world" for the toolkit's Python surface.
+Showcases the one canonical Python verb: :func:`qed.solve`.
+The legacy ``qed.workflows`` module and ``qed.diag`` alias were removed
+during the May-2026 surface unification.
 
 Run::
 
@@ -22,7 +19,6 @@ from __future__ import annotations
 import sys
 
 import qed
-from qed import workflows
 
 
 def build_heisenberg_chain(N: int, periodic: bool, J: float = 1.0) -> qed.Operator:
@@ -43,16 +39,18 @@ def main() -> int:
     op = build_heisenberg_chain(N, periodic)
     print(f"Heisenberg chain  N={N}  PBC={int(periodic)}  dim={2**N}")
 
-    opts = workflows.SolveOptions()
-    opts.num_eigs = 5
-    opts.method = workflows.SolveMethod.Lanczos
-    opts.tolerance = 1e-12
-    opts.compute_vectors = False
+    # One call. Auto-Sz projects to the half-filling sector when Sz is
+    # conserved; auto-method picks LANCZOS/FULL/KRYLOV_SCHUR based on
+    # dim + num_eigenvalues; auto-device picks CPU/GPU.
+    result = qed.solve(
+        op,
+        num_eigenvalues=5,
+        solver="LANCZOS",
+        tolerance=1e-12,
+        verbose=False,
+        plan=False,
+    )
 
-    result = workflows.solve(op, opts)
-
-    print(f"  backend lane = {result.backend.lane}  "
-          f"(wall = {result.backend.wall_seconds:.4f} s)")
     print("Lowest 5 eigenvalues:")
     for k, e in enumerate(result.eigenvalues[:5]):
         print(f"  E[{k}] = {e:.10f}")

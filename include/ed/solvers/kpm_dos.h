@@ -61,6 +61,8 @@
 #include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <vector>
 
 namespace ed::kpm_dos {
@@ -93,6 +95,12 @@ struct KPMDOSParameters {
     /// Fractional buffer added beyond the estimated [E_min, E_max] window
     /// (avoids the √(1-x²) singularity at the band edges).
     double spectral_bound_buffer = 0.05;
+
+    /// Wave B3 (May 2026): caller-supplied spectral-bound overrides.
+    /// When BOTH are finite the kernel skips the 150-iteration
+    /// Lanczos pre-pass. NaN means "estimate per call".
+    double e_min_override = std::numeric_limits<double>::quiet_NaN();
+    double e_max_override = std::numeric_limits<double>::quiet_NaN();
 
     /// Use Jackson kernel (true, default, positive-definite) or Lorentz.
     bool use_jackson_kernel = true;
@@ -166,6 +174,22 @@ struct KPMDOSResult {
 // ---------------------------------------------------------------------------
 // Core API
 // ---------------------------------------------------------------------------
+
+/// Wave B3 (May 2026): public spectral-bound estimator. The
+/// streaming-symmetry binding calls this ONCE on the largest sector
+/// and reuses the result for every per-sector `compute_kpm_dos` call.
+/// `gen` is in/out: callers seeding `gen` deterministically get a
+/// reproducible estimate.
+void estimate_spectral_bounds(
+    MatVec H,
+    std::uint64_t dim,
+    int krylov_dim,
+    bool full_reorth,
+    int reorth_freq,
+    double tol,
+    std::mt19937& gen,
+    double& e_min,
+    double& e_max);
 
 /// Compute Chebyshev DOS moments + thermodynamics for a Hermitian H.
 ///

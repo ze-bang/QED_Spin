@@ -7,6 +7,505 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Orthogonal symmetry composition: Subspace × ProjectorChain (May 2026)
+
+Refactors the four-mode symmetry taxonomy
+(`none` / `Sz` / `Symm` / `Sz+Symm`) into an orthogonal composition of
+a `Subspace` (which states are enumerated) and a `ProjectorChain`
+(zero or more group representations applied on top). Behavior is
+preserved; the change opens seams for spin-flip Z_2, time reversal,
+and SU(2) total-S without further surgery on the streaming-symmetry
+operator. Plan: `orthogonal_symmetry_composition_d303f6f1.plan.md`.
+
+* **Phase R1 — Subspace concept.** New
+  `include/ed/symmetry/subspace.h` declaring `FullSpaceSubspace` and
+  `FixedSzSubspace` as the two concrete Subspace types. The latter
+  has both an owning `build(n_bits, n_up)` factory and a non-owning
+  `view(n_bits, n_up, basis, lin)` factory; `FixedSzOperator` now
+  exposes a `subspace()` method that returns the view, so the
+  operator keeps ownership of its sorted-basis vector and Lin (1990)
+  index table while the new abstraction observes them. Both Subspaces
+  expose a `policy()` method returning the existing
+  `ed::matvec::basis::Full/FixedSzBasisPolicy` POD view that the
+  unified matvec kernels consume, so the kernel ABI is untouched.
+
+* **Phase R2 — Projector concept.** New
+  `include/ed/symmetry/projector.h` declaring `SpatialProjector` (a
+  thin view over the existing `SymmetryGroupInfo` blob) plus
+  `InternalZ2Projector` and `AntiunitaryProjector` placeholders that
+  open the seam for future spin-flip / time-reversal axes. The
+  per-sector character composition (`χ(g) = ∏_k pf[k]^p[g][k]`) and
+  the site-permutation `apply` now live in `SpatialProjector` and are
+  reused via delegation from the legacy `computeOrbitData` /
+  `computeOrbitDataFixedSz` (see R3 below).
+
+* **Phase R3 — ProjectorChain + unified orbit builder.** New
+  `include/ed/symmetry/projector_chain.h` with `ProjectorChain` (an
+  ordered list combining `Spatial` / `InternalZ2` /
+  `Antiunitary` projectors via `std::variant`) and the templated
+  `ed::symmetry::compute_orbit_for_state<Subspace>(...)` helper. The
+  two legacy inline orbit/character loops in
+  `StreamingSymmetryOperator::computeOrbitData` and
+  `FixedSzStreamingSymmetryOperator::computeOrbitDataFixedSz` now
+  delegate to the same templated helper; the only difference between
+  the full-space and fixed-Sz cells is the chosen `Subspace::index_of`
+  filter (both equivalent to `lookupState(state) >= 0` for the
+  fixed-Sz lane, identically `true` for the full-space lane). The
+  helper output is bit-identical to the legacy loops (pinned by
+  `tests/unit/test_projector_chain.cpp`).
+
+* **Phase R4 — Python facade documentation.** No public Python
+  kwargs change. `_diag_with_symmetry` in `python/qed/workflow.py`
+  picks up a docstring that maps the legacy mode strings onto the
+  `(Subspace, ProjectorChain)` decomposition; the matrix bench
+  `benchmarks/bench_gpu_symmetry_matrix.py` documents the same
+  mapping at the top so future axes (spin-flip, time-reversal, SU(2))
+  have an obvious place to land.
+
+* **Phase R5 — Pinning tests.**
+  * `tests/unit/test_projector_chain.cpp` (3 cases): byte-equality of
+    the new helper vs a verbatim reference of the pre-refactor inline
+    body, swept over every sector and every basis state for both
+    `FullSpaceSubspace` and `FixedSzSubspace` on a Heisenberg N=6
+    ring; plus an end-to-end Bethe-ansatz E0 smoke.
+  * `tests/unit/test_chain_extensibility.cpp` (5 cases): ABI smoke
+    for `InternalZ2Projector` and `AntiunitaryProjector` (size /
+    apply / character / quantum_numbers), heterogeneous `Cartesian
+    product` chain composition, and `FixedSzOperator::subspace()`
+    round-trip through the `FixedSzSubspace` view to the
+    `FixedSzBasisPolicy` POD policy.
+  * New Python parametrised test `test_chain_form_matches_legacy_modes`
+    in `python/tests/test_unified_symmetry_architecture.py` confirms
+    that every legacy mode (`none` / `Sz` / `Symm` / `Sz+Symm`) still
+    recovers the N=6 Bethe-ansatz ground state to 1e-9 after the
+    refactor.
+
+Verification: full `ctest` (299 tests; +8 over the previous baseline)
+and full `pytest` (307 tests; +4 over the previous baseline) green;
+`benchmarks/bench_gpu_symmetry_matrix.py --sizes 10` reports
+`ok / ok` on all 24 cells with observables matching the pre-refactor
+baseline to within the deterministic / stochastic envelopes already
+pinned by the 48-cell closure.
+
+Out of scope (seams opened; implementation deferred): spin-flip Z_2,
+time-reversal antiunitary projector, SU(2) total-S
+(Casimir-polynomial filter and coupled-basis routes), distributed
+(MPI) lane alignment with the `(Subspace, Chain)` abstraction. The
+relevant `include/ed/symmetry/{projector,projector_chain}.h`
+extension points are described in
+`orthogonal_symmetry_composition_d303f6f1.plan.md` § 4.
+
+#### Documentation, examples & benchmarks wave (post-R5)
+
+* **`README.md`** — new "Symmetries — orthogonal composition" block
+  under the unified-interface quick-start. Lists the four
+  `(Subspace, ProjectorChain)` cells, points at the three new
+  headers, and references the new example file and the SYMMETRY.md
+  §6 deep-dive.
+* **`docs/architecture/SYMMETRY.md`** — new banner update at the top
+  ("Orthogonal symmetry composition lands") and a new §6
+  ("Orthogonal symmetry composition") covering the Subspace axis,
+  the Projector axis (production `SpatialProjector` + the
+  `InternalZ2Projector` / `AntiunitaryProjector` placeholders), the
+  `ProjectorChain` container, the future-axis routing table
+  (spin-flip / time reversal / SU(2) Routes A & B / particle-hole),
+  the SU(2) non-abelianness discussion, and the deliberate
+  "legacy operator classes survive as host-side facades" stop-point.
+* **`docs/architecture/ARCHITECTURE.md`** — new "Sub-axis: Subspace ×
+  ProjectorChain" block under the three orthogonal axes; operator
+  inventory table grew a `(Subspace, ProjectorChain)` column
+  showing the four legacy operator classes as Cartesian-product
+  cells.
+* **`docs/architecture/CODEMAP.md`** — §5.11 "include/ed/symmetry/"
+  expanded from a one-line `group.h` to a full registry of
+  `subspace.h`, `projector.h`, `projector_chain.h` with what each
+  exports and which pinning test certifies it.
+* **`docs/guides/one_call_api.md`** + **`docs/guides/workflow.md`** —
+  added a callout that the public `sz=` / `symmetry=` kwargs map
+  onto the `(Subspace, ProjectorChain)` decomposition and that
+  future axes (spin-flip, time reversal, SU(2)) extend the chain
+  through the same kwargs signature.
+* **`examples/16_python_orthogonal_symmetry.py`** (new) — walks the
+  four `(Subspace, ProjectorChain)` cells on a Heisenberg ring via
+  `qed.solve` (confirms Bethe-ansatz E0 across all four cells to
+  4.4e-16) and via `qed.thermal` FTLM (confirms the recombined
+  free energy matches across the Subspace axis), then prints a
+  routing table for the future axes pointing at the exact header
+  and seat in the chain where each new symmetry plugs in.
+* **`docs/benchmarks/ORTHOGONAL_SYMMETRY.md`** (new) — full 4 × 6
+  matrix (four symmetry cells × six workflows) on CPU and GPU at
+  N=8 and N=10 with per-cell wall-clock and observable, plus the
+  `(Subspace, ProjectorChain)` annotation. CPU/GPU lanes return
+  identical observables on every deterministic cell; speed-ups
+  sit in `[0.83, 1.28]` across the 24 N=10 cells. Raw JSON checked
+  in at `docs/benchmarks/bench_orthogonal_symmetry_N{8,10}.json`.
+* **`docs/benchmarks/README.md`** + **`docs/index.md`** — register
+  the new write-up + the raw JSON next to the existing
+  `BENCHMARKS.md` and `bench_vs_xdiag.md` entries.
+
+Verification: example smoke runs clean (E0 deviation 4.44e-16 across
+the four cells); benchmark sweep 24/24 cells `ok / ok` on both
+backends at N=8 and N=10; CHANGELOG entry covers the full doc /
+example / benchmark surface for future readers.
+
+### Backend × Symmetries × Workflows: 48-cell matrix closed (May 2026)
+
+Closes every cell of the `{cpu, gpu} × {none, Sz, Symm, Sz+Symm} ×
+{GS, FT-FTLM, FT-LTLM, FT-KPM_DOS, DSSF-GS, DSSF-FT}` matrix end-to-end
+(plan: `close_backend_symmetries_workflows_matrix_3ad90dee.plan.md`).
+Follows up the previous "Unified CPU/GPU symmetry architecture" wave,
+which landed the plumbing (`Geometry::supports_device_matvec`,
+`select_backend` gating, `DeviceBasisPolicy` headers,
+`apply_terms_gpu_scatter` template, env-gated `SectorView::geometry`)
+but left every load-bearing GPU piece stubbed or unwired:
+
+* **Phase A — GPU symmetry mirror.** Replaced the
+  `StreamingSymmetryOperator::bind_cuda_for_sector` /
+  `FixedSzStreamingSymmetryOperator::bind_cuda_for_sector` Phase 1c
+  stub with a real lazy mirror: a new
+  `src/symmetry/streaming_symmetry_gpu_mirror.cu` translation unit
+  uploads the per-sector orbit CSR, the state→index projection hash
+  table, and the (shared) term arrays into a `GpuSectorMirror`
+  cached as `gpu_sector_cache_` (LRU-1 via `invalidateMatrixCaches`).
+  Both binders now hand back a `MatvecFn` that launches
+  `apply_terms_gpu_scatter<DeviceSymmetryBasisPolicy,
+  cuDoubleComplex>` directly on device pointers — no host round-trip,
+  no synchronous copy. `ED_GPU_SYMMETRY_MIRROR` defaults to `1`
+  (opt-out) and the `FixedSzStreamingSymmetryOperator::SectorView`
+  now exposes `bind_cpu`/`bind_cuda`/`bind_mpi`/`bind_mpi_cuda`
+  overrides so the orchestrator's `select_backend` reaches the new
+  binder for fixed-Sz × spatial-symmetry sectors too. New C++ test
+  `tests/unit/test_streaming_symmetry_gpu_mirror.cpp` exercises a
+  Heisenberg ring + Z_N translation end-to-end and asserts
+  CPU/GPU matvec agreement to 1e-10 plus LRU-1 cache eviction.
+
+* **Phase B — `_diag_with_symmetry` thermal lane.** Replaced the
+  `NotImplementedError` in `python/qed/workflow.py::_diag_with_symmetry`
+  for thermal methods with a direct call to
+  `_core.workflows_thermal_streaming_symmetry_directory` followed by
+  `_ed_result_from_thermal_result`. `qed.solve(H, symmetry=...,
+  solver='FTLM' | 'LTLM' | 'KPM_DOS' | 'mTPQ' | 'cTPQ')` is now
+  live for both in-memory and directory-form `Operator`s.
+
+* **Phase C — `qed.thermal(device=)`.** Added a `device:
+  Optional[str] = None` kwarg to the public `qed.thermal` API and
+  routed it through `_resolve_device` into
+  `ThermalOptions.backend.allow_gpu` / `.allow_mpi` on every code
+  path (in-memory full-Hilbert, in-memory per-Sz fallback,
+  directory-form per-Sz iteration, and the streaming-symmetry
+  directory dispatcher). The bench's "FT-* + Symm × GPU has no
+  `device=` kwarg yet" gap is gone.
+
+* **Phase D — `qed.spectral(device=)` for the in-memory lane.**
+  `_spectral_in_memory` now accepts `device=` and propagates it into
+  `SpectralOptions.backend.allow_gpu`. The `qed.spectral` dispatcher
+  forwards the same kwarg to the in-memory path it previously
+  dropped, so `qed.spectral(H, [obs], method='ground_state_cf',
+  device='gpu')` reaches `CudaBackend` for both DSSF-GS and DSSF-FT
+  in-memory cells.
+
+* **Phase E1 — KPM-DOS on `CudaBackend`.** Refactored
+  `src/solvers/gpu/kpm_dos_gpu.cu` to expose
+  `compute_kpm_dos_gpu_with_matvec(DeviceMatVec, ...)` taking an
+  arbitrary device matvec callable (the legacy
+  `compute_kpm_dos_gpu(GPUOperator*, ...)` is preserved as a thin
+  wrapper for the CLI). Replaced the CPU-only `static_assert` in
+  `include/ed/thermal/kpm_dos_kernel.h` with an `if constexpr`
+  dispatch that wires `Backend = CudaBackend` to the new
+  `_with_matvec` driver via the operator's `bind<CudaBackend>()`
+  MatvecFn. Dropped the orchestrator's `KpmDos + CudaBackend` throw.
+  Audited and removed the symmetric throw on FTLM's CUDA gate.
+  **Fixed a long-standing math bug** in the GPU Chebyshev
+  doubling-trick recurrence: the `μ_{2k+1}` dot product was being
+  taken against `H_sc v_k` instead of `v_{k+1} = 2 H_sc v_k -
+  v_{k-1}`. After the fix, GPU KPM-DOS matches CPU to within the
+  expected stochastic envelope.
+
+* **Phase E2 — LTLM on `CudaBackend`.** Replaced the LTLM CPU-only
+  `static_assert` in `include/ed/thermal/ltlm_kernel.h` with an `if
+  constexpr` dispatch. The new `CudaBackend` lane reuses
+  `lanczos_kernel<Backend>` twice (once to find the ground state
+  with `keep_basis=true`, once to build the excitation spectrum
+  from the reconstructed ground state), drives all BLAS-1
+  (axpy/dot/scal) through the `CudaBackend` device API, and uses
+  the existing `diagonalize_tridiagonal_ritz` helper on the host
+  for the tridiagonal step. Dropped the orchestrator's `Ltlm +
+  CudaBackend` throw. New C++ test `tests/unit/test_cuda_backend.cpp`
+  cells for both KPM-DOS and LTLM compare GPU output to the CPU
+  reference.
+
+* **Phase F — Validation.** Reran `benchmarks/bench_gpu_symmetry_matrix.py`
+  at N ∈ {8, 10, 12} (full 24-cell matrix) and N=14 (focused
+  GS / FT-FTLM / FT-LTLM / FT-KPM_DOS — 16 cells). **Every cell
+  reports `cpu_status=ok` and `gpu_status=ok`** with deterministic
+  observables (GS, DSSF-GS) matching to ≤ 1e-10 and stochastic
+  observables (FT-*, DSSF-FT) matching within the expected
+  Monte-Carlo envelope. The bench's previous `NotImplementedError`
+  guard for "FT-* + Symm × GPU" is removed. Three new Python tests
+  cover the public `device=` surface
+  (`tests/test_unified_symmetry_architecture.py::
+  test_qed_solve_symmetry_thermal_gpu`,
+  `test_qed_thermal_device_gpu`,
+  `test_qed_spectral_in_memory_device_gpu`).
+
+### Unified CPU/GPU symmetry architecture (May 2026)
+
+Lands the architectural backbone for the "Unified CPU/GPU symmetry
+architecture" plan (`unified_gpu_symmetry_architecture_f7173b6a.plan.md`).
+Closes the 4-cell × 3-workflow gap (CPU × {Full, Sz, Symm, Sz+Symm} ×
+{GS, FT, DSSF}) under a single kernel-template family + provides
+modular extension points for new symmetries, new backends, and the
+out-of-scope MPI lane (Phase 6 follow-up).
+
+#### Phase 1 — Device-side kernel template (new headers, opt-in path)
+
+* **New** `include/ed/matvec/device_basis_policy.cuh` — POD device
+  views with `__device__` `state_of` / `index_of` / `iter_orbit` /
+  `coeff_modifier` mirroring the host `BasisPolicy` ABI 1:1.
+  Specializations: `DeviceFullBasisPolicy`,
+  `DeviceFixedSzBasisPolicy`, `DeviceSymmetryBasisPolicy`,
+  `DeviceFixedSzSymmetryBasisPolicy` (alias of the symmetry policy,
+  populated from a different host-side filter).
+* **New** `include/ed/matvec/term_kernels_gpu.cuh` — single
+  `apply_terms_gpu_scatter<BasisPolicy, Scalar>` `__global__`
+  template that handles all 4 device policies via the same `if
+  constexpr` traits (`needs_orbit_walk`, `has_coeff_modifier`,
+  `may_leave_basis`, `is_distributed`) as the CPU twin. Atomic
+  complex add via two `atomicAdd(double*)` calls. Host launcher
+  `launch_apply_terms_gpu(...)`.
+* The unified template is **opt-in** behind `ED_GPU_UNIFIED_KERNEL=1`
+  (set by the future Phase 1b/1c port PRs); legacy bespoke kernels
+  remain the default for one release.
+
+#### Phase 2 — Lazy GPU mirror plumbing (live)
+
+* **New** `Geometry::supports_device_matvec` flag in
+  `include/ed/core/linear_operator.h`. Decouples DEVICE CAPABILITY
+  from STORAGE: a host-resident operator can opt in to GPU dispatch
+  via `bind_cuda()` lazily building a device mirror. Default `false`
+  preserves every existing operator's behavior.
+* `ed::select_backend` (in `include/ed/core/select_backend.h`)
+  honors the new flag: a `Host` operator that sets it picks
+  `CudaBackend` when `have_cuda() && gpu_fits && c.allow_gpu`.
+* `StreamingSymmetryOperator::SectorView::bind_cuda()` no longer
+  throws — it delegates to a new
+  `StreamingSymmetryOperator::bind_cuda_for_sector(sector_idx)`
+  helper that lazily builds (and caches) a `GPUSymmetrizedOperator`
+  per sector. The helper currently throws a documented
+  `std::logic_error` referencing the Phase 1c follow-up (the actual
+  `GPUSymmetrizedOperator` mirror construction is the next
+  deliverable); the architectural seam is in place so the Python
+  workflow (`qed.solve(symmetry=..., device='gpu')`) now reaches
+  this code path instead of silently falling back to CPU.
+* `SectorView::geometry()` override flips
+  `supports_device_matvec=true` when WITH_CUDA is enabled. Twin
+  hook lives on `FixedSzStreamingSymmetryOperator` (cell 4B, GPU
+  mirror is the Phase 1c follow-up).
+* **New** `src/symmetry/streaming_symmetry_gpu_mirror.cpp` — opaque
+  shared_ptr-based cache holder (works in both CUDA and non-CUDA
+  builds; the destructor type-erases via `shared_ptr`'s deleter).
+
+#### Phase 3 — Batch fusion on SectorView (live)
+
+* `StreamingSymmetryOperator::SectorView::apply_batch` and
+  `apply_batch_real` (and the `FixedSzStreamingSymmetryOperator`
+  twins) now parallelize the outer batch loop across OpenMP threads
+  when the inner `apply_terms` OpenMP region would NOT fire
+  (sector dim < `max_threads * 1024`). Production symmetry sectors
+  at N=12-14 are in this regime, so KPM-DOS / Block Lanczos calls
+  with B=64 columns now exploit the otherwise-idle cores.
+* Each call to `applySymmetrizedUnified*` from the batched override
+  is preceded by a single `commitPendingTransforms()` so concurrent
+  calls observe a stable SoA term cache. Column 0 is executed
+  serially first to lazy-build any first-call state; columns 1..B-1
+  run in parallel.
+
+#### Phase 4 — Symmetry CSR cache groundwork (live)
+
+* **New** `ed::matvec::detail::read_symmetry_tunables(default_cutoff)`
+  in `include/ed/matvec/matvec_backend.h`. Reads
+  `ED_SYM_CSR_DIM_MAX` (preferred), then `ED_CSR_DIM_MAX`, then the
+  caller default (1<<13 = 8192). Returns a `MatVecTunables` ready
+  for the future symmetry-CSR backend. `ED_CSR_FORCE` is the shared
+  knob across lanes.
+* **New** `ed::matvec::kernel::apply_term_to_state<Scalar>(s, ...,
+  callback)` helper in `include/ed/matvec/term_kernels.h`. Factored
+  single-state emitter that yields every reachable `(s', h)` pair
+  for one source state, mirroring the per-bin scan inside
+  `apply_terms`. Used by (i) the orbit-walk triplet emit replacement
+  in `DistributedSymmetryOperator::buildLocal` (Phase 4 follow-up),
+  and (ii) the future `make_cpu_symmetry_backend` CSR cache.
+* `DistributedSymmetryOperator::buildLocal` comment block updated
+  to document the orbit-walk replacement plan (gated by
+  `ED_DISTRIBUTED_LEGACY_PROBE`); the legacy O(n_orbits * 2^N)
+  probe is retained as default for one release while the new path
+  cross-checks land.
+
+#### Phase 5 — Validation, docs, CHANGELOG (live)
+
+* **New** `python/tests/test_unified_symmetry_architecture.py` —
+  pins Phase 2 + 3 + 4 invariants (env var pass-through, batch
+  fusion accuracy, legacy/unified branch agreement, end-to-end
+  symmetry-projected E0 on the N=6 Heisenberg ring).
+* **New** `docs/architecture/ADD_NEW_BASIS_POLICY.md`,
+  `docs/architecture/ADD_NEW_GPU_CELL.md`,
+  `docs/architecture/ADD_NEW_MPI_CELL.md` — recipe for adding new
+  symmetries / new device cells / new MPI lanes given the unified
+  template family.
+
+#### Environment variables added
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `ED_GPU_UNIFIED_KERNEL=1` | off | When Phase 1b/1c lands, opts into the unified `apply_terms_gpu` kernel path on the GPU operators. |
+| `ED_SYM_CSR_DIM_MAX=<N>` | 8192 | Symmetry-specific CSR cache cutoff (Phase 4 backend, lands as follow-up). |
+| `ED_DISTRIBUTED_LEGACY_PROBE=1` | on | When 0, switches `DistributedSymmetryOperator::buildLocal` from the O(2^N) probe to the orbit-walk emit (Phase 4 follow-up). |
+| `ED_GPU_SYMMETRY_MIRROR=1` | off | Reserved -- Phase 1c follow-up flips this to enable the lazy GPU symmetry mirror. |
+
+#### Carry-forward to follow-up PRs
+
+The architectural plumbing for the GPU symmetry lane is live, but
+two CUDA TUs still need to land before `qed.solve(symmetry=...,
+device='gpu')` runs end-to-end on the device:
+
+1. **Phase 1c TU** in `src/solvers/gpu/` (new):
+   ports `GPUSymmetrizedOperator::matVecGPU` to
+   `apply_terms_gpu_scatter<DeviceSymmetryBasisPolicy>`; adds
+   `GPUFixedSzSymmetryOperator` (cell 4B, new); flips the
+   `bind_cuda_for_sector` stub to a real lazy build.
+
+2. **Phase 4 distributed orbit-walk PR**: replaces the
+   `DistributedSymmetryOperator` probe with the
+   `apply_term_to_state`-based emit; bit-exact cross-check vs the
+   legacy probe path before flipping `ED_DISTRIBUTED_LEGACY_PROBE`
+   default to 0.
+
+### Surface unification — collapse to one Python surface (May 2026)
+
+The user-facing Python API is now exactly **three verbs**: `qed.solve`,
+`qed.thermal`, `qed.spectral`. All three take plain keyword arguments;
+the option-struct types (`SolveOptions` / `ThermalOptions` /
+`SpectralOptions`) are now internal to the pybind11 layer.
+
+#### Hard-removed Python names
+
+* **`qed.workflows`** (the entire ~156-line module) — was the structured
+  Python mirror of `_core.workflows_*`. Use `qed.solve` /
+  `qed.thermal` / `qed.spectral` (kwargs-only) instead. The raw
+  internals are still available on `qed._core.workflows_*` and
+  `qed._core.SolveOptions/ThermalOptions/SpectralOptions` for power
+  users.
+
+* **`qed.diag`** — renamed to **`qed.solve`**. Same signature plus a
+  new `auto_sz=True` kwarg (see "Behavioral changes" below).
+
+* **`qed.dssf.compute`**, **`qed.dssf.run_from_directory`**,
+  **`qed.dssf.pick_method`** — folded into the polymorphic
+  `qed.spectral(...)`. `qed.spectral(directory, ...)` is the new
+  directory CLI form; `qed.spectral(H, observables, ...)` is the
+  in-memory orchestrator form. `qed.dssf` now exposes only the
+  observable-pair data helpers (`OperatorSpec`, `ObservablePairs`,
+  `build_observable_pairs`, `compute_transverse_bases`).
+
+* **`qed.exact_diagonalization_core`**, **`qed.exact_diagonalization_from_directory`**,
+  **`qed.exact_diagonalization_streaming_symmetry`**,
+  **`qed.exact_diagonalization_streaming_symmetry_fixed_sz`** — removed
+  from the top-level `qed` namespace. (The pybind11 entry points
+  themselves remain on `qed._core` for one more cycle; the in-tree
+  streaming-symmetry path in `qed.solve` still routes through them
+  until the orchestrator's `make_operator` pybind binding lands.)
+
+* The `_deprecated_alias` helper in `qed/__init__.py` is gone with
+  no replacement.
+
+* `qed.solve` and `qed.spectral` wrapper *functions* that were
+  introduced earlier in the collapse for backward compatibility are
+  gone — the canonical implementations now live in `qed.workflow` and
+  `qed.spectral` (the new module), re-exported directly at package
+  top-level.
+
+#### Behavioral changes
+
+* **`qed.solve`** now **auto-projects** onto the half-filling
+  Sz = N // 2 sector by default when `H.conserves_sz()`. Old
+  behaviour (full Hilbert space) requires `auto_sz=False`. Pass
+  `sz=k` explicitly for any other sector. Rationale: the half-filling
+  sector is `C(N, N//2) ~ 2^N / sqrt(pi N / 2)`, i.e. a
+  `sqrt(pi N / 2)x` speedup at zero accuracy cost, and was previously
+  surfaced only as a `[qed.diag] HINT:` log line that ~zero users
+  noticed.
+
+* **`qed.thermal`** directory form no longer auto-detects spatial
+  symmetry. `use_symmetry_if_available` now defaults to `False`; pass
+  `True` to read `automorphism_results/` for the directory-form
+  thermal lane. This keeps the auto-pilot semantics uniform across the
+  three verbs (auto-Sz ON by default, symmetry strictly opt-in).
+
+#### New files / rewrites
+
+* **`python/qed/spectral.py`** (new) — implements `qed.spectral` over
+  `_core.workflows_spectral` (in-memory form) and the `./ED dssf`
+  CLI (directory form), polymorphic over the first positional
+  argument.
+
+* **`python/qed/dssf.py`** — stripped to the observable-pair data
+  helpers. ~250 LOC of `compute` / `run_from_directory` / `pick_method`
+  / `_tune_dssf` plumbing removed (folded into `qed.spectral`).
+
+* **`python/qed/workflow.py`** — `diag` renamed to `solve`. `auto_sz`
+  kwarg added with the auto-projection behaviour described above. The
+  old "HINT: this Hamiltonian conserves total Sz" log line is removed
+  (its job is done by the auto-projection).
+
+* **`python/qed/thermal.py`** — symmetry default flipped, `qed.diag`
+  internal references renamed.
+
+* **`python/qed/__init__.py`** — rewritten to the new surface
+  shape. Docstring rewritten around the three verbs; submodule
+  imports unchanged.
+
+* **Examples** rewritten: `examples/09_python_quickstart.py`,
+  `examples/10_python_dssf.py`, `examples/14_python_workflow.py`,
+  `examples/15_python_unified_interface.py` all use the kwargs-only
+  `qed.solve` / `qed.thermal` / `qed.spectral` shape.
+
+* **Docs** updated: `docs/guides/unified_interface.md` rewrites the
+  Python surface section; `docs/MIGRATION.md` documents every removed
+  name with a porting recipe; `docs/guides/{one_call_api,
+  python_advanced, python_api_coverage, workflow, quickstart,
+  usage}.md`, `docs/architecture/{STRUCTURAL_AUDIT,ARCHITECTURE}.md`,
+  and `README.md` were updated in bulk to spell `qed.solve` /
+  `qed.spectral` instead of `qed.diag` / `qed.dssf.compute` /
+  `qed.dssf.run_from_directory`.
+
+#### Still in flight (follow-up commit)
+
+* The C++ `ed::exact_diagonalization_*` family in
+  `include/ed/core/ed_wrapper.h` and `include/ed/core/ed_wrapper_streaming.h`
+  is **not** deleted in this commit. It remains alive for one cycle
+  because the in-tree streaming-symmetry path in `qed.solve` and the
+  thermal in-tree fallback in `qed.thermal` still call into them
+  through the existing pybind11 forwarders in
+  `python/qed/_bindings/dispatcher_bindings.cpp`. The follow-up
+  commit will:
+  1. Land a pybind11 binding for `ed::make_operator` so Python can
+     construct `StreamingSymmetryOperator` and feed it directly into
+     `_core.workflows_solve`.
+  2. Fix `ed::workflows::thermal` to populate the FTLM / LTLM
+     temperature grid (it currently returns an empty grid for those
+     methods).
+  3. Migrate `_diag_with_symmetry` in `workflow.py` and the
+     directory-form fallbacks in `thermal.py` to the orchestrator.
+  4. Hard-delete the 5 `m.def(...)` deprecation forwarders in
+     `dispatcher_bindings.cpp`.
+  5. Hard-delete the 6 `ed::exact_diagonalization_*` C++ functions
+     in `ed_wrapper.h` and the entire `ed_wrapper_streaming.h`
+     header.
+  6. Audit the supporting types (`EDResults`, `EDParameters`,
+     `HamiltonianFileFormat`, `hamiltonian_conserves_sz`,
+     `ed_internal::*`) and delete what's no longer referenced.
+  7. Remove the `BM_Legacy_Exact_Diag_Core` benchmark.
+
 ### Full Unified-Interface Collapse — Remaining waves C2, E1-E4, F-partial (May 2026)
 
 Continues the collapse landed in commit 6983531 ("Waves A, B, E-pilot, G").

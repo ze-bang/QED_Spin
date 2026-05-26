@@ -56,7 +56,7 @@ solver-specific algorithmic detail see
 | Compute `S(Q,ω)` or `S(Q)` for a system whose ground state / TPQ states already live in HDF5               | **Mode 3** (`./ED dssf <method> <dir>`)         |
 | Build and solve a system inside a Jupyter notebook or research script -- **including** GPU per-sector, in-process symmetry projection, ARPACK / Krylov-Schur / Davidson / LOBPCG, FTLM/LTLM/TPQ, and ScaLAPACK | **Mode 4** (`import qed`)                |
 | Launch MPI distributed solvers from Python without touching a shell      | **Mode 4** helper (`qed.mpi.run_distributed`) |
-| Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`qed.dssf.run_from_directory`) |
+| Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`qed.spectral`) |
 | Run a full Numerical Linked Cluster Expansion (NLCE) on the pyrochlore or triangular lattice               | **Mode 5** (the [`qed_nlce`](https://github.com/ze-bang/QED_NLCE) package, ships `qed-nlce`)         |
 | Validate distributed Lanczos / FTLM scaling on a Heisenberg test problem (no input files needed)           | **Mode 6** (`ed_distributed_main`)              |
 | Embed a solver call inside your own C++ program                                                            | **Mode 7** (link against `ed_solvers_cpu` etc.) |
@@ -167,23 +167,23 @@ grouped by what they affect.
 | `--eigenvectors`              | off     | Save eigenvectors into HDF5; required for DSSF / BFG / correlations.    |
 | `--iterations=<n>`            | `10000` | Iterative-method cap.                                                   |
 | `--tolerance=<f>`             | `1e-10` | Convergence tolerance.                                                  |
-| `--shift=<σ>`                 | `0`     | Shift-invert sigma.                                                     |
 | `--block-size=<n>`            | `4`     | Block / block-Lanczos width.                                            |
-| `--max_subspace=<n>`          | `100`   | Davidson subspace.                                                      |
-| `--target-lower=`, `--target-upper=` | `0` | Chebyshev-filtered window.                                            |
 | `--method-info=<NAME>`        | —       | Print the method-specific parameter blurb and exit.                     |
 
 **Methods** (case-insensitive token after `--method=`):
 
-| Family                       | Tokens                                                                                                     |
-|------------------------------|------------------------------------------------------------------------------------------------------------|
-| Lanczos / variants           | `lanczos`, `lanczos_selective`, `lanczos_no_ortho`, `block_lanczos`, `irl`, `trlan`, `krylov_schur`, `block_krylov_schur` |
-| Filtered / spectral transform| `chebyshev`, `chebyshev_filtered`, `shift_invert`, `shift_invert_robust`                                   |
-| Other iterative              | `bicg`, `lobpcg`, `davidson`                                                                               |
-| ARPACK                       | `arpack`, `arpack_sm`, `arpack_lm`, `arpack_shift_invert`, `arpack_advanced`                              |
-| Dense / "exact"              | `full`, `oss`, `scalapack`, `scalapack_mixed`                                                              |
-| Thermal (random sampling)    | `mtpq`, `ctpq`, `mtpq_mpi`, `mtpq_cuda`, `ftlm`, `ltlm`, `hybrid`                                          |
-| GPU variants                 | `lanczos_gpu`, `lanczos_gpu_fixed_sz`, `block_lanczos_gpu`, `davidson_gpu`, `lobpcg_gpu`, `krylov_schur_gpu`, `mtpq_gpu`, `ctpq_gpu`, `ftlm_gpu`, `ftlm_gpu_fixed_sz`, `full_gpu` |
+| Family                       | Tokens                                                                  |
+|------------------------------|-------------------------------------------------------------------------|
+| Lanczos / Krylov-Schur       | `lanczos`, `block_lanczos`, `krylov_schur`                              |
+| Dense                        | `full`                                                                  |
+| Finite-temperature           | `mtpq`, `ctpq`, `ftlm`, `ltlm`, `kpm_dos`                               |
+
+Device / parallelism axes (`use_gpu`, `use_mpi`, `use_fixed_sz`,
+`use_symmetry`) are now orthogonal flags on `EDParameters`; the
+solver token names no longer carry a `_GPU` / `_MPI` suffix. The
+older `ARPACK_*`, `LOBPCG`, `DAVIDSON`, `CHEBYSHEV_*`, `HYBRID`, and
+`*_GPU` / `*_MPI` enum spellings were retired in the May 2026
+minimalist-solver-matrix cleanup.
 
 Unknown tokens fall back to `LANCZOS` with a warning.
 
@@ -418,24 +418,18 @@ that runs this end-to-end on a synthetic 12-site chain.
 ## 5. Mode 4: in-process Python via `import qed`
 
 The modern Python package gives you the **full backend surface** in
-process: every CPU iterative method (`LANCZOS` family, `BLOCK_LANCZOS`,
-`KRYLOV_SCHUR`[`_BLOCK`], `DAVIDSON`, `LOBPCG`, `CHEBYSHEV_FILTERED`,
-`SHIFT_INVERT[_ROBUST]`, `IRL` / `TRL`, `BICG`, all four ARPACK
-variants), every dense backend (`FULL`, `OSS`,
-`SCALAPACK[_MIXED]`), every thermal solver (`FTLM`, `LTLM`, `HYBRID`,
-`mTPQ`, `cTPQ`), in-process symmetry projection
-(`Operator.set_symmetry_info_from_dict(...)`), streaming-symmetry ED
-(`exact_diagonalization_streaming_symmetry[_fixed_sz]`) and directory-driven
-ED (`exact_diagonalization_from_directory(...)` with
-`EDParameters::use_symmetry = true` for symmetry projection,
-`use_fixed_sz = true` + `n_up = ...` for the U(1) sector). GPU
-per-sector dispatch is reached by passing any `*_GPU`
-`DiagonalizationMethod` value to the streaming or directory
-dispatcher. The MPI distributed solvers and the
-full continued-fraction `./ED dssf` engine are reached through thin
-launcher helpers (`qed.mpi.run_distributed`,
-`qed.dssf.run_from_directory`) — no `subprocess` boilerplate
-required.
+process through three canonical verbs: `qed.solve(H, ...)` for
+eigenvalue solvers (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`,
+`FULL`), `qed.thermal(H, method=..., ...)` for finite-temperature
+trajectories (`FTLM`, `LTLM`, `mTPQ`, `cTPQ`), and `qed.spectral(dir,
+T=..., omega=..., ...)` for structure factors and KPM-DOS
+thermodynamics. Fixed-Sz sectors, spatial-symmetry projection, GPU
+dispatch, and (orthogonally) MPI are all selected via kwargs on these
+three verbs — `sz=`, `symmetry=`, `device='gpu'`, etc. The MPI
+distributed solvers and the full continued-fraction `./ED dssf`
+engine are reached through thin launcher helpers
+(`qed.mpi.run_distributed`, `qed.spectral`) — no `subprocess`
+boilerplate required.
 
 The complete C++ ↔ Python ↔ CLI capability matrix lives in
 [python_api_coverage.md §0](python_api_coverage.md#0-capability-matrix-c-vs-python-vs-cli).
@@ -498,74 +492,50 @@ op.load_trans("my_chain12/Trans.dat")
 
 ### 5.2 Solve
 
-There are now two equivalent paths: the **legacy thin wrappers**
-(`qed.full_diagonalization`, `qed.lanczos`,
-`qed.finite_temperature_lanczos`, `qed.low_temperature_lanczos`,
-`qed.hybrid_thermal_method`) and the **single-call dispatcher**
-(`qed.exact_diagonalization_core(op, method, params)`). The dispatcher
-unlocks every additional method (`BLOCK_LANCZOS`, `KRYLOV_SCHUR`,
-`DAVIDSON`, `LOBPCG`, every ARPACK variant, `mTPQ` / `cTPQ`, …) so it
-is the recommended modern entry point.
-
-Legacy thin wrappers (still supported, identical numerics):
+The canonical Python surface is **three verbs**: `qed.solve` for
+eigenvalue solvers, `qed.thermal` for finite-temperature
+trajectories, `qed.spectral` for structure factors. Every retained
+backend is reachable through one of these.
 
 ```python
-e_full = qed.full_diagonalization(op)            # dim must be small
-e_low  = qed.lanczos(op, max_iter=200, exct=3, tolerance=1e-10)
+import qed
 
-ftlm_p = qed.FTLMParameters()
-ftlm_p.krylov_dim = 100
-ftlm_p.num_samples = 32
-res = qed.finite_temperature_lanczos(op, ftlm_p,
-                                     temp_min=0.01, temp_max=10.0,
-                                     num_temp_bins=50)
-```
-
-Phase 5 dispatcher (every backend, one entry point):
-
-```python
-params = qed.EDParameters()
-params.num_eigenvalues = 4
-params.max_iterations = 400
-params.tolerance = 1e-12
-
-# CPU iterative (any of LANCZOS family, BLOCK_LANCZOS, KRYLOV_SCHUR,
-# BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG, CHEBYSHEV_FILTERED,
-# SHIFT_INVERT[_ROBUST], IRL/TRL, BICG, ARPACK_*).
-result = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params,
+# Eigenvalue solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL).
+res = qed.solve(
+    op,
+    num_eigenvalues=4,
+    solver="KRYLOV_SCHUR",
+    tolerance=1e-12,
+    max_iterations=400,
 )
-print("E0..E3 =", sorted(result.eigenvalues)[:4])
+print("E0..E3 =", sorted(res.eigenvalues)[:4])
 
-# Dense (FULL, OSS, SCALAPACK[_MIXED] when qed.has_scalapack_build()).
-result = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.FULL, params,
+# Auto Sz: when H conserves Sz and you didn't pass sz=, qed.solve
+# projects to the half-filled sector automatically (auto_sz=True
+# default). Pass auto_sz=False to keep the full Hilbert space.
+
+# Dense (FULL).
+res = qed.solve(op, solver="FULL", num_eigenvalues=8)
+
+# Finite-temperature trajectories (FTLM / LTLM / mTPQ / cTPQ).
+res = qed.thermal(
+    op,
+    method="FTLM",
+    num_samples=32,
+    temp_min=0.05, temp_max=5.0, num_temp_points=80,
+    extra_params={"ftlm_krylov_dim": 80},
 )
+T  = res.thermo_data.temperatures
+Cv = res.thermo_data.specific_heat
 
-# Thermal (FTLM, LTLM, HYBRID, mTPQ, cTPQ).
-fparams = qed.EDParameters()
-fparams.num_samples = 32
-fparams.ftlm_krylov_dim = 80
-fparams.temp_min, fparams.temp_max, fparams.num_temp_bins = 0.05, 5.0, 80
-result = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.FTLM, fparams,
-)
-T  = result.thermo_data.temperatures
-Cv = result.thermo_data.specific_heat
-
-# GPU per-method (LANCZOS_GPU, FULL_GPU, mTPQ_GPU, ...) via the
-# directory dispatcher. Requires WITH_CUDA=ON; check qed.has_cuda_build().
+# GPU dispatch (any solver) — orthogonal device= kwarg.
 if qed.has_cuda_build():
-    gpu_result = qed.exact_diagonalization_from_directory(
-        "./my_chain12", qed.DiagonalizationMethod.LANCZOS_GPU, params,
-    )
+    res = qed.solve(op, num_eigenvalues=2, device="gpu")
 
-# GPU per-sector (LANCZOS_GPU, BLOCK_LANCZOS_GPU, ...) via the
-# streaming-symmetry dispatcher (the right path for the largest clusters).
+# Per-sector GPU with symmetry projection (large clusters).
 if qed.has_cuda_build():
-    sym_result = qed.exact_diagonalization_streaming_symmetry(
-        "./my_kagome24", qed.DiagonalizationMethod.LANCZOS_GPU, params,
-    )
+    res = qed.solve(op, num_eigenvalues=2, device="gpu",
+                    symmetry=info)
 
 # MPI distributed solvers via mpiexec ed_distributed_main (no in-process
 # MPI_Init -- the helper just builds the right launcher argv).
@@ -577,13 +547,13 @@ if qed.has_mpi_build():
     )
 ```
 
-The dispatcher's `EDParameters` exposes every C++-side knob (block
-size, ARPACK NCV, FTLM Krylov dim, TPQ Taylor order, ScaLAPACK process
-grid, etc.) as a read/write Python attribute -- see
+`extra_params={...}` (and the underlying `qed.EDParameters`) exposes
+every C++-side knob (block size, FTLM Krylov dim, TPQ Taylor order,
+KPM moments, …) as a read/write attribute — see
 [`include/ed/core/ed_parameters.h`](../../include/ed/core/ed_parameters.h)
 for the full inventory and
-[python_advanced.md](python_advanced.md) for runnable patterns covering
-each backend family.
+[python_advanced.md](python_advanced.md) for runnable patterns
+covering each backend family.
 
 ### 5.3 Build observable pairs for DSSF
 
@@ -616,24 +586,20 @@ info = group_from_generators(12, [T, R],
                              sector_quantum_numbers=[0, 0])
 ```
 
-`info` is the same dict shape that `edlib.automorphism_finder` writes to
-`automorphism_results/`. From Phase 5 onwards you can hand it
-**directly** to an in-process `Operator` (no JSON detour) and then
-solve in any sector:
+`info` is the same dict shape that `edlib.automorphism_finder` writes
+to `automorphism_results/`. You can hand it **directly** to an
+in-process `Operator` (no JSON detour) and then solve in any sector
+via the `symmetry=` kwarg:
 
 ```python
 op.set_symmetry_info_from_dict(info)        # also works on FixedSzOperator
-result = qed.exact_diagonalization_streaming_symmetry(
-    "./my_chain12", qed.DiagonalizationMethod.LANCZOS, qed.EDParameters(),
-)
+result = qed.solve(op, symmetry=info)        # streaming-symmetry kernel
 ```
 
-The directory-mode equivalent is
-`qed.exact_diagonalization_from_directory(d, m, p)` with
-``p.use_symmetry = True`` (and optionally ``p.use_fixed_sz = True`` +
-``p.n_up = n_up``); it reads the `automorphism_results/` JSON tree the
-legacy CLI uses, generating it on the fly if missing. The same
-five-axis dispatcher routes into the canonical streaming kernel.
+Combine with `sz=` for fixed-Sz × symmetry, and `device='gpu'` for
+per-sector GPU dispatch. The same orchestrator binding
+(`_core.workflows_solve_streaming_symmetry_directory`) handles every
+combination.
 
 ### 5.5 BFG / cluster observables
 
@@ -706,7 +672,7 @@ The full continued-fraction `./ED dssf <method> <dir>` engine is wrapped
 the same way:
 
 ```python
-qed.dssf.run_from_directory(
+qed.spectral(
     directory="./my_chain12",
     method="LANCZOS",                # or "BICG", "FULL", "FTLM", ...
     extra_args=("--num_eigenvalues", "1"),
@@ -1011,13 +977,13 @@ stage 3).
 `Operator` has a public `symmetry_info` field
 ([`include/ed/core/construct_ham.h`](../../include/ed/core/construct_ham.h)).
 You can build a `SymmetryGroupInfo` programmatically (no JSON detour)
-with the [`ed::sym`](../../include/ed/symmetry/group.h) DSL, attach it to
-your operator, and then call the existing `generateSymmetrySectors*` /
-`exact_diagonalization_*_symmetrized` family:
+with the [`ed::sym`](../../include/ed/symmetry/group.h) DSL, attach it
+to your operator, and then dispatch through the orchestrator:
 
 ```cpp
 #include <ed/core/construct_ham.h>
-#include <ed/core/ed_wrapper.h>          // exact_diagonalization_*_symmetrized
+#include <ed/core/make_operator.h>
+#include <ed/orchestrator.h>
 #include <ed/symmetry/group.h>
 
 int main() {
@@ -1028,22 +994,25 @@ int main() {
     // Programmatic group: D_12 = Z_12 ⋊ Z_2 (translation × reflection).
     op.symmetry_info = ed::sym::translation_group_with_reflection_1d(/*n_sites=*/12);
 
-    // Now run any sector-aware workflow. Example: per-sector full diag,
-    // saving HDF5 blocks under "./out/sym/".
+    // Per-sector full diag, saving HDF5 blocks under "./out/sym/".
     op.generateSymmetrySectorsHDF5("./out/sym",
                                    /*verbose=*/false,
                                    /*save_blocks=*/true);
 
-    // Or use the canonical 5-axis dispatcher (reaches the streaming
-    // symmetry kernel inside ed/core/ed_wrapper_streaming.h):
-    EDParameters p;
-    p.num_sites            = 12;
-    p.num_eigenvalues      = 5;
-    p.compute_eigenvectors = true;
-    p.output_dir           = "./out/sym";
-    p.use_symmetry         = true;   // route through the streaming kernel
-    auto res = ed_dispatch::exact_diagonalization_from_directory(
-        "./my_chain12", DiagonalizationMethod::LANCZOS, p);
+    // Or use the unified orchestrator: route through the streaming
+    // symmetry kernel by populating OperatorSpec::generators.
+    ed::OperatorSpec spec;
+    spec.directory   = "./my_chain12";
+    spec.num_sites   = 12;
+    spec.spin_length = 0.5f;
+    spec.generators  = /* loaded from automorphism_results/ */ {};
+    auto H = ed::make_operator(spec);
+
+    ed::SolveOptions opts;
+    opts.num_eigenvalues      = 5;
+    opts.compute_eigenvectors = true;
+    opts.output_dir           = "./out/sym";
+    auto res = ed::workflows::solve(*H, opts);
 }
 ```
 
@@ -1057,10 +1026,8 @@ op.symmetry_info = ed::sym::group_from_generators(/*n_sites=*/24, {g0, g1});
 ```
 
 The same DSL is bound in Python (`qed.symmetry.*`) and returns
-the identical dict layout. Since Phase 5 (Apr 2026), the
-`Operator.symmetry_info` setter is also bound from Python, so the
-**entire** in-process symmetry-projected pipeline runs without any
-JSON detour:
+the identical dict layout. The Python side dispatches through the
+same orchestrator binding:
 
 ```python
 info = qed.symmetry.group_from_generators(
@@ -1068,48 +1035,54 @@ info = qed.symmetry.group_from_generators(
     sector_quantum_numbers=[0, 0],
 )
 op.set_symmetry_info_from_dict(info)
-result = qed.exact_diagonalization_streaming_symmetry(
-    "./my_chain24", qed.DiagonalizationMethod.LANCZOS, qed.EDParameters(),
-)
+result = qed.solve(op, symmetry=info)
 ```
 
 ### 8.6 Streaming symmetry (C++ and Python; large clusters)
 
-For clusters where the symmetrized basis would not fit in RAM,
-[`<ed/core/ed_wrapper_streaming.h>`](../../include/ed/core/ed_wrapper_streaming.h)
-provides `exact_diagonalization_streaming_symmetry` (and
-`_streaming_symmetry_fixed_sz`), which keep one orbit row at a time and
-optionally cache the orbit basis to HDF5 for restart:
+For clusters where the symmetrized basis would not fit in RAM, the
+orchestrator routes through the streaming-symmetry kernel when
+`OperatorSpec::generators` is populated; the kernel keeps one orbit
+row at a time and optionally caches the orbit basis to HDF5 for
+restart:
 
 ```cpp
-#include <ed/core/ed_wrapper_streaming.h>
+#include <ed/core/make_operator.h>
+#include <ed/core/streaming_symmetry.h>
+#include <ed/orchestrator.h>
 
 int main() {
-    EDParameters p;
-    p.num_sites          = 32;
-    p.num_eigenvalues    = 1;
-    p.tolerance          = 1e-10;
-    p.compute_eigenvectors = false;
-    p.output_dir         = "./out";
+    ed::OperatorSpec spec;
+    spec.directory      = "./my_pyrochlore_run";
+    spec.num_sites      = 32;
+    spec.spin_length    = 0.5f;
+    spec.generators     = /* loaded from automorphism_results/ */ {};
+    spec.basis_cache_dir = "./cache";   // optional restart cache
 
-    auto res = exact_diagonalization_streaming_symmetry(
-        /*directory=*/"./my_pyrochlore_run",
-        /*method=*/DiagonalizationMethod::LANCZOS,
-        /*params=*/p,
-        /*interaction_filename=*/"InterAll.dat",
-        /*single_site_filename=*/"Trans.dat",
-        /*basis_cache_dir=*/"./my_pyrochlore_run/basis_cache",
-        /*precompute_basis_only=*/false);
+    auto H = ed::make_streaming_symmetry_operator(spec);
+
+    ed::SolveOptions opts;
+    opts.num_eigenvalues      = 1;
+    opts.tolerance            = 1e-10;
+    opts.compute_eigenvectors = false;
+    opts.output_dir           = "./out";
+    auto res = ed::workflows::solve(*H, opts);
+
+    // All the legacy 8-argument positional parameters
+    // (interaction_filename, single_site_filename, basis_cache_dir,
+    // precompute_basis_only, restart_from_cache, etc.) are now fields
+    // on OperatorSpec.
 }
 ```
 
 This is the underlying call behind `./ED <dir> --streaming-symmetry
---precompute-basis`. With CUDA enabled it also dispatches per-sector to
-the GPU solvers via `dispatchGPUSymmetrizedSector` (no extra source
-changes required). The same entry point is bound from Python --
-`qed.exact_diagonalization_streaming_symmetry(directory, method, params,
-...)` -- so large-cluster GPU-per-sector runs are scriptable in
-exactly the same way (see [§5.2](#52-solve) and
+--precompute-basis`. With CUDA enabled it also dispatches per-sector
+to the GPU solvers via `dispatchGPUSymmetrizedSector` (no extra source
+changes required). The same orchestrator is bound from Python --
+`qed.solve(op, symmetry=info)` routes through
+`_core.workflows_solve_streaming_symmetry_directory` -- so
+large-cluster GPU-per-sector runs are scriptable in exactly the same
+way (see [§5.2](#52-solve) and
 [python_advanced.md](python_advanced.md)).
 
 ---

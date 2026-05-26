@@ -31,9 +31,10 @@
 //
 // `runGPULanczos(...)` dispatches between the facade entry points and
 // the legacy class on the combination of (`eigenvectors`, available
-// device memory). All current callers in `ed_wrapper.h` /
-// `ed_wrapper_streaming.h` pass through `runGPULanczos`, so they pick
-// up the unified-kernel path automatically.
+// device memory). All current callers (the orchestrator's GPU lane
+// in ``ed::workflows::solve`` and the streaming-symmetry GPU kernels)
+// go through `runGPULanczos`, so they pick up the unified-kernel
+// path automatically.
 // =============================================================================
 
 #ifdef WITH_CUDA
@@ -53,6 +54,7 @@
 #include <chrono>
 #include <complex>
 #include <cstddef>
+#include <cstdlib>   // Waves 4.1+4.2: getenv (ED_GPU_LANCZOS_FULL_CGS2)
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -183,7 +185,8 @@ struct KernelOutput {
 KernelOutput run_facade_kernel(GPUOperator& gpu_op,
                                int N, int max_iter,
                                double tol,
-                               unsigned long long seed)
+                               unsigned long long seed,
+                               bool keep_basis = false)
 {
     KernelOutput out;
     const auto t0  = std::chrono::high_resolution_clock::now();
@@ -194,8 +197,30 @@ KernelOutput run_facade_kernel(GPUOperator& gpu_op,
 
     ed::krylov::LanczosKernelOptions opts;
     opts.max_iter   = static_cast<std::size_t>(max_iter);
-    opts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
-    opts.keep_basis = true;
+
+    // Waves 4.1 & 4.2 of the SOTA Performance rollout (May 2026):
+    // for the eigenvalues-only path the GPU facade now defaults to
+    //
+    //   keep_basis = false  (Wave 4.1) -- skip storing
+    //                       m * N * 16 B of device-side basis vectors;
+    //                       eigvecs/CF spectral callers pass true.
+    //   LocalDGKS3 K=1      (Wave 4.2) -- 30-50% fewer cuBLAS BLAS-1
+    //                       calls vs FullCGS2 at large krylov_dim.
+    //                       Env opt-in ``ED_GPU_LANCZOS_FULL_CGS2=1``
+    //                       restores the pre-Wave defaults for
+    //                       near-degenerate spectra.
+    const bool force_cgs2 = []() {
+        const char* env = std::getenv("ED_GPU_LANCZOS_FULL_CGS2");
+        return env && env[0] == '1';
+    }();
+    if (force_cgs2 || keep_basis) {
+        opts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+        opts.keep_basis = true;
+    } else {
+        opts.reorth         = ed::krylov::ReorthPolicy::LocalDGKS3;
+        opts.local_ring_size = 1;
+        opts.keep_basis     = false;
+    }
     (void)tol;  // GPU Lanczos converges to the full Krylov dim; Ritz-tol
                 // early-exit goes through `opts.convergence_check` when
                 // we want it (none of the current facade callers do).
@@ -272,7 +297,9 @@ void run_lanczos_eigenpairs_kernel_facade(
 {
     validate_inputs(N, max_iter, num_eigs);
 
-    auto ko = run_facade_kernel(gpu_op, N, max_iter, tol, seed);
+    // Eigenpair path needs the kept basis for Ritz vector reconstruction.
+    auto ko = run_facade_kernel(gpu_op, N, max_iter, tol, seed,
+                                /*keep_basis=*/true);
     auto ts = solve_tridiag(ko.kres.alpha, ko.kres.beta);
 
     const std::size_t dim   = static_cast<std::size_t>(N);

@@ -127,7 +127,7 @@ std::cout << "E0 = " << res.eigenvalues[0]
           << "  backend = " << res.backend.lane << "\n";
 ```
 
-Python — `qed.workflows.solve / thermal / spectral` mirror the C++
+Python — `qed.solve / thermal / spectral` (kwargs-only) wrap the C++
 orchestrator surface (see
 [`examples/09_python_quickstart.py`](examples/09_python_quickstart.py)
 and [`examples/10_python_dssf.py`](examples/10_python_dssf.py)):
@@ -150,6 +150,47 @@ The backend (CPU / GPU / MPI / MPI+GPU) is auto-selected inside
 `make_operator + workflows::*` from the operator's `geometry()` and the
 runtime probes in `ed::select_backend`. Pass a `GPUOperator` to get the
 GPU lane; build under `WITH_MPI` and the distributed lane is auto-picked.
+
+#### Symmetries — orthogonal composition (May 2026)
+
+Symmetry projection is **orthogonal**: a sector is described by one
+`Subspace` (which computational basis states are enumerated) and one
+ordered `ProjectorChain` (zero or more group representations applied
+on top). The Python kwargs already encode the axes — `sz=` picks the
+subspace, `symmetry=` populates the chain:
+
+```python
+# Mode              Subspace                ProjectorChain
+# ----              --------                --------------
+qed.solve(H)                            # (FullSpaceSubspace, [])
+qed.solve(H, sz=N//2)                   # (FixedSzSubspace,   [])
+qed.solve(H, symmetry=gens)             # (FullSpaceSubspace, [SpatialProjector])
+qed.solve(H, sz=N//2, symmetry=gens)    # (FixedSzSubspace,   [SpatialProjector])
+```
+
+The same decomposition drives `qed.thermal` and `qed.spectral`. The
+C++ headers live at:
+
+* [`include/ed/symmetry/subspace.h`](include/ed/symmetry/subspace.h)
+  — `FullSpaceSubspace`, `FixedSzSubspace` (and a `view()` factory the
+  matvec kernels consume),
+* [`include/ed/symmetry/projector.h`](include/ed/symmetry/projector.h)
+  — `SpatialProjector` (the only shipped projector today; pulls the
+  per-sector character composition and site-permutation action out of
+  `SymmetryGroupInfo`), plus `InternalZ2Projector` and
+  `AntiunitaryProjector` placeholders that open the seam for global
+  spin-flip / time-reversal axes,
+* [`include/ed/symmetry/projector_chain.h`](include/ed/symmetry/projector_chain.h)
+  — the heterogeneous chain type (`std::variant`) plus the templated
+  `compute_orbit_for_state<Subspace>(...)` helper that is now the
+  single source of truth behind the legacy `computeOrbitData` and
+  `computeOrbitDataFixedSz` member functions.
+
+A full design discussion (the SU(2) non-abelianness, two routes to
+total-S projection, the time-reversal antiunitary fold) lives at
+[`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md).
+For a copy-pasteable end-to-end walkthrough of the four cells, see
+[`examples/16_python_orthogonal_symmetry.py`](examples/16_python_orthogonal_symmetry.py).
 
 #### Lower-level / legacy entry points
 
@@ -213,17 +254,17 @@ print(report.summary())
 # 3. One-call ED. Solver, device, Krylov sizes are auto-tuned. Pass `sz=k`
 #    to project onto the n_up=k sector (auto-checks Sz conservation),
 #    pass `symmetry=...` to project onto a generator subgroup, or both.
-e0 = qed.diag(H).eigenvalues[0]                                    # full Hilbert
-e_sz = qed.diag(H, num_eigenvalues=4, sz=N // 2).eigenvalues       # fixed Sz
-e_sym = qed.diag(H, num_eigenvalues=4,
+e0 = qed.solve(H).eigenvalues[0]                                    # full Hilbert
+e_sz = qed.solve(H, num_eigenvalues=4, sz=N // 2).eigenvalues       # fixed Sz
+e_sym = qed.solve(H, num_eigenvalues=4,
                  symmetry=report.full_set, sz=N // 2).eigenvalues   # both
 
 # 4. Pre-flight planner is ALWAYS on: when the requested (solver, device,
-#    basis) doesn't fit on this host, qed.diag raises qed.ResourceError
+#    basis) doesn't fit on this host, qed.solve raises qed.ResourceError
 #    with ranked, copy-pasteable suggestions ("pass sz=N//2 -- 7x smaller",
 #    "switch to device='mpi' with mpi_n_ranks>=7", ...). Use dry_run=True
 #    to see the verdict without dispatching, force=True to override.
-qed.diag(H_big, solver="FTLM", sz=16, dry_run=True)
+qed.solve(H_big, solver="FTLM", sz=16, dry_run=True)
 
 # 5. Goal-oriented: rank workflows for "I want a ground state / thermal
 #    curve / spectral function" against the actual host.
@@ -235,7 +276,7 @@ defaults table, recipes, the planner / dry_run / suggest_workflow
 surface, and the migration map from the legacy multi-step API.
 
 Modern Python — single-call dispatcher to **any** backend (Phase 5,
-lower-level than `qed.diag`):
+lower-level than `qed.solve`):
 
 ```python
 import qed as qed
@@ -246,13 +287,12 @@ op  = (qed.input.HamiltonianBuilder(lat.num_sites)
               .heisenberg(lat.nn_pairs(), 1.0)
               .to_operator())
 
-# Pick any of ~30 backends -- LANCZOS, KRYLOV_SCHUR, DAVIDSON, LOBPCG,
-# BLOCK_LANCZOS, every ARPACK variant, FULL/SCALAPACK, FTLM/LTLM,
-# mTPQ/cTPQ, ... See docs/guides/python_advanced.md.
-params = qed.EDParameters(); params.num_eigenvalues = 4; params.tolerance = 1e-12
-res    = qed.exact_diagonalization_core(
-    op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params,
-)
+# Pick any of ~30 backends -- LANCZOS, KRYLOV_SCHUR, BLOCK_LANCZOS,
+# FULL, FTLM/LTLM, mTPQ/cTPQ, ... See docs/guides/python_advanced.md.
+res = qed.solve(op,
+                num_eigenvalues=4,
+                solver="KRYLOV_SCHUR",
+                tolerance=1e-12)
 print("E0..E3 =", sorted(res.eigenvalues)[:4])
 
 # GPU per-sector with in-process symmetry projection (large clusters):
@@ -262,16 +302,17 @@ if qed.has_cuda_build():
         sector_quantum_numbers=[0, 0],
     )
     op.set_symmetry_info_from_dict(info)
-    res_sym = qed.exact_diagonalization_streaming_symmetry(
-        "./chain12", qed.DiagonalizationMethod.LANCZOS_GPU, params,
-    )
+    res_sym = qed.solve(op,
+                        num_eigenvalues=4,
+                        symmetry=info,
+                        device="gpu")
 
 # Distributed MPI (no MPI_Init in your script -- the helper builds argv):
 if qed.has_mpi_build():
     qed.mpi.run_distributed("./chain12", method="lanczos", n_ranks=8)
 
-# Full continued-fraction S(Q,omega) driver:
-qed.dssf.run_from_directory("./chain12", method="LANCZOS")
+# Full continued-fraction S(Q,omega) driver via the directory CLI form:
+qed.spectral("./chain12", method="ground_state_dssf")
 ```
 
 A full distributed (MPI) ground state on a 24-site chain:
@@ -312,7 +353,8 @@ Every supported workflow has a self-contained, runnable example under
 | [11_cli_thermo.sh](examples/11_cli_thermo.sh)                                     | CLI         | One-line FTLM thermodynamic sweep via `./ED`. |
 | [12_cli_dssf.sh](examples/12_cli_dssf.sh)                                         | CLI         | One-line finite-T DSSF via `./ED dssf dynamical_thermal`. |
 | [13_nlce_full_workflow.sh](examples/13_nlce_full_workflow.sh)                     | NLCE driver | Full pyrochlore NLCE pipeline. |
-| [14_python_workflow.py](examples/14_python_workflow.py)                           | Python      | The Phase-9 stress-free workflow: build → `find_symmetries` → `qed.diag` (full / Sz / symmetry / both). |
+| [14_python_workflow.py](examples/14_python_workflow.py)                           | Python      | The Phase-9 stress-free workflow: build → `find_symmetries` → `qed.solve` (full / Sz / symmetry / both). |
+| [16_python_orthogonal_symmetry.py](examples/16_python_orthogonal_symmetry.py)     | Python      | The four `(Subspace, ProjectorChain)` cells on a Heisenberg ring: walks `qed.solve` + `qed.thermal` and points at the future-axis seams (spin-flip Z_2, time-reversal, SU(2) total-S). |
 
 See [`examples/README.md`](examples/README.md) for the full index, build
 prerequisites, and run recipes.
@@ -587,7 +629,7 @@ is on the device.
 | `FixedSzOperator` (combinatorial sector basis) | ✓ | ✓ (`GPUFixedSzOperator`) | — | `include/ed/core/construct_ham.h`, `include/ed/gpu/gpu_operator.cuh` |
 | Every CPU iterative / thermal / dense solver above on a fixed-Sz sector | ✓ | n/a | n/a | Same call signature as the full-Hilbert version; pass `fop.apply` and `fop.getFixedSzDim()`. |
 | Per-Sz GPU variants (`runGPULanczosFixedSz`, `runGPUBlockLanczosFixedSz`, `runGPUFTLMFixedSz`, `runGPUDavidsonFixedSz`, `runGPULOBPCGFixedSz`, `runGPUMicrocanonicalTPQFixedSz`, `runGPUCanonicalTPQFixedSz`) | — | ✓ | — | `src/solvers/gpu/gpu_ed_wrapper.cu` |
-| Fixed-Sz × space-symmetry (streaming kernel; reach via `qed.diag(H, sz=..., symmetry=...)` or `exact_diagonalization_from_directory(..., params)` with `params.use_symmetry = True` and `params.use_fixed_sz = True`) | ✓ | ✓ (per-sector) | ✓ (`device='mpi'`) | `include/ed/core/ed_wrapper_streaming.h` |
+| Fixed-Sz × space-symmetry (streaming kernel; reach via `qed.solve(H, sz=..., symmetry=...)` or `exact_diagonalization_from_directory(..., params)` with `params.use_symmetry = True` and `params.use_fixed_sz = True`) | ✓ | ✓ (per-sector) | ✓ (`device='mpi'`) | `include/ed/core/ed_wrapper_streaming.h` |
 
 ### 7. Other
 

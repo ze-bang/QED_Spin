@@ -208,18 +208,10 @@ def test_obs_1_handles_are_apply_callable():
 
 
 # ---------------------------------------------------------------------------
-# Phase 9 auto-pilot: qed.dssf.pick_method + qed.dssf.compute
+# qed.spectral CLI-form (directory) argument validation
 # ---------------------------------------------------------------------------
 
-def test_pick_method_truth_table():
-    """The (T, omega) -> DSSFMethod rule must match the C++ enum mapping."""
-    assert dssf.pick_method(T=None, omega=None) == "single_expectation"
-    assert dssf.pick_method(T=None, omega=[0.0, 0.5]) == "ground_state_dssf"
-    assert dssf.pick_method(T=0.5,  omega=None) == "static_thermal"
-    assert dssf.pick_method(T=[0.1, 1.0], omega=[0.0, 0.5]) == "dynamical_thermal"
-
-
-def test_compute_rejects_unknown_method_override():
-    import pytest
+def test_spectral_rejects_unknown_method_override():
+    """qed.spectral validates the CLI ``method=`` token before shelling out."""
     with pytest.raises(ValueError):
-        dssf.compute("/nonexistent", T=0.5, method="not_a_real_method")
+        qed.spectral("/nonexistent", T=0.5, method="not_a_real_method")

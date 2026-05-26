@@ -20,6 +20,18 @@ struct Buffer {
 struct Registry {
     std::mutex mtx;
     std::unordered_map<std::string, Buffer> buffers;
+
+    // Wave B5 (May 2026): per-N free-list of recently-released vector
+    // pools. When a `BasisBufferScope` exits we move its `vectors`
+    // (which still holds the per-vector heap blocks) into this pool;
+    // the next `register_basis_buffer` for the same N pops the pool
+    // and gets pre-allocated storage. Most workloads call Lanczos
+    // many times for the same N (per-sample FTLM, per-sector
+    // streaming symmetry), so this collapses the heap traffic down
+    // to "warm pool" reuse after the first run. Cap the pool size at
+    // a few entries per N to avoid pathological memory growth.
+    static constexpr std::size_t kPoolPerN = 4;
+    std::unordered_map<uint64_t, std::vector<std::vector<ComplexVector>>> pool;
 };
 
 Registry& registry() {
@@ -56,6 +68,23 @@ void register_basis_buffer(const std::string& key,
     auto& buf = reg.buffers[key];
     buf = Buffer{};
     buf.N = N;
+
+    // Wave B5: try to pop a warm pool entry sized for this N. The
+    // pool holds the still-allocated per-vector heap blocks from the
+    // last release call -- reusing them collapses the heap traffic
+    // to "warm allocator" rates.
+    auto pool_it = reg.pool.find(N);
+    if (pool_it != reg.pool.end() && !pool_it->second.empty()) {
+        buf.vectors = std::move(pool_it->second.back());
+        pool_it->second.pop_back();
+        // The pooled vectors still hold capacity for their dim-N
+        // payloads; just clear the outer size so append() restarts
+        // from index 0 without dropping the inner allocations.
+        // (clear() preserves capacity of the outer vector AND each
+        // inner ComplexVector remains intact, so future
+        // ``vectors.push_back(...)`` slots reuse the popped storage.)
+        buf.vectors.clear();
+    }
     if (reserve_vectors > 0) {
         // Cap the reservation: for very large problems the caller's bound can
         // be wildly optimistic. We reserve at most ~4 GiB of pointer slots
@@ -69,7 +98,21 @@ void register_basis_buffer(const std::string& key,
 void release_basis_buffer(const std::string& key) {
     auto& reg = registry();
     std::lock_guard<std::mutex> lock(reg.mtx);
-    reg.buffers.erase(key);
+    auto it = reg.buffers.find(key);
+    if (it == reg.buffers.end()) return;
+
+    // Wave B5: move the per-vector storage into the per-N pool so the
+    // next ``register_basis_buffer`` for the same N can reuse it.
+    // Capped at ``kPoolPerN`` entries to avoid unbounded memory
+    // growth; pool slots beyond that are just dropped (free()'d).
+    Buffer& b = it->second;
+    if (b.N != 0 && !b.vectors.empty()) {
+        auto& slot = reg.pool[b.N];
+        if (slot.size() < Registry::kPoolPerN) {
+            slot.push_back(std::move(b.vectors));
+        }
+    }
+    reg.buffers.erase(it);
 }
 
 bool has_basis_buffer(const std::string& key) {

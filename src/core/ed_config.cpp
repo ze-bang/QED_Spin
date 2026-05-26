@@ -379,10 +379,11 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
-            // Phase 7.1: --symm and its deprecated aliases set BOTH the legacy
+            // --symm and its deprecated aliases set BOTH the legacy
             // workflow flag (which dispatches in ed_main.cpp) and the canonical
-            // SystemConfig::use_symmetry flag (the 5th orthogonal axis seen by
-            // exact_diagonalization_from_directory through toEDParameters).
+            // SystemConfig::use_symmetry flag (the 5th orthogonal axis carried
+            // through to ``ed::make_operator(OperatorSpec{...})`` via
+            // toEDParameters → toOperatorSpec).
             else if (arg == "--symmetrized") {  // deprecated alias
                 config.workflow.run_symm_auto = true;
                 config.system.use_symmetry = true;

@@ -222,6 +222,13 @@ def test_pick_max_iterations_capped_by_dim():
     assert auto_tune.pick_max_iterations(4, 50) == 49
 
 
+@pytest.mark.skipif(
+    not hasattr(auto_tune, "pick_max_subspace"),
+    reason=(
+        "max_subspace was removed from EDParameters in the May 2026 "
+        "minimalist-solver-matrix cleanup along with its auto-tune helper."
+    ),
+)
 def test_pick_max_subspace_level_ordering():
     cons = auto_tune.pick_max_subspace(4, 1 << 18, level="conservative")
     bal  = auto_tune.pick_max_subspace(4, 1 << 18, level="balanced")
@@ -235,6 +242,14 @@ def test_pick_tolerance_level_ordering():
            auto_tune.pick_tolerance(level="aggressive")
 
 
+@pytest.mark.skipif(
+    not hasattr(auto_tune, "pick_arpack_ncv"),
+    reason=(
+        "The entire ARPACK_* family (and ``arpack_ncv``) was retired in "
+        "the May 2026 minimalist-solver-matrix cleanup; no auto-tune "
+        "helper for it remains."
+    ),
+)
 def test_pick_arpack_ncv_at_least_2k_plus_1():
     for k in (1, 4, 16, 64):
         for L in ("conservative", "balanced", "aggressive"):

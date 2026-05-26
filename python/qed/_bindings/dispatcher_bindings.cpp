@@ -1,10 +1,45 @@
 // =============================================================================
 // python/qed/_bindings/dispatcher_bindings.cpp
 //
-// Phase 5 Python interface expansion (Apr 2026): bind the high-level C++
-// dispatcher and the directory- / streaming-symmetry drivers so the entire
-// Krylov + dense + thermal stack is reachable from a
-// single Python entry point. See the header for the full feature list.
+// Surface unification (May 2026): this file is the residual of the
+// legacy "dispatcher" binding surface. Every
+// ``exact_diagonalization_*`` Python forwarder was deleted in lockstep
+// with the C++ ``ed::exact_diagonalization_*`` family removal; the
+// canonical entry points now live in `workflow_bindings.cpp`
+// (``_core.workflows_solve / thermal / spectral`` and the streaming-
+// symmetry directory helper) and the Python module
+// `qed.{solve,thermal,spectral}` re-exports a kwargs-only surface
+// over them.
+//
+// What remains in this translation unit is the "type-level" plumbing
+// that the surviving public API still needs:
+//
+//   * ``DiagonalizationMethod`` enum -- consumed by the legacy
+//     ``EDParameters`` parameter-carrier and by Python helpers that
+//     bridge user-facing solver names onto the orchestrator's
+//     ``SolveOptions::method`` enum.
+//   * ``EDParameters`` mutable parameter bag -- still used internally
+//     by ``qed.workflow._diag_via_workflows_solve`` to carry the
+//     legacy knobs (FTLM krylov_dim, TPQ taylor_order, KPM moments,
+//     etc.) across the Python <-> C++ boundary before they get
+//     translated into ``SolveOptions`` / ``ThermalOptions``.
+//   * ``EDResults`` + ``ThermodynamicData`` -- the result envelope
+//     every legacy consumer (including the MPI Python wrapper that
+//     reads ``ed_distributed_main`` HDF5 dumps) expects.
+//   * Symmetry attribute setters/getters on ``Operator`` /
+//     ``FixedSzOperator`` -- the in-process bridge between
+//     ``qed.symmetry.group_from_generators(...)`` and the streaming
+//     kernel's expected ``SymmetryGroupInfo`` shape.
+//   * Build introspection (``has_cuda_build`` / ``has_mpi_build``).
+//
+// The five ``exact_diagonalization_*`` ``m.def`` forwarders that used
+// to live here (``_core``, ``_streaming_symmetry``,
+// ``_streaming_symmetry_fixed_sz``, ``_from_directory``, and the
+// ``Operator``/``FixedSzOperator`` overloads of ``_core``) are gone:
+// the equivalent behaviour is reachable through
+// ``_core.workflows_solve_streaming_symmetry_directory`` (streaming-
+// symmetry) and ``_core.workflows_solve`` / ``workflows_thermal``
+// (everything else).
 // =============================================================================
 
 #include "dispatcher_bindings.h"
@@ -14,20 +49,15 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 
-#include <ed/core/ed_wrapper.h>            // EDResults / EDParameters / legacy free functions
-#include <ed/core/ed_wrapper_streaming.h>  // streaming-symmetry kernel
-#include <ed/core/ed_method_traits.h>      // canonicalize_method_and_flags
+#include <ed/core/ed_legacy_types.h>  // EDResults envelope (slim residue of ed_wrapper.h)
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
-#include <ed/core/construct_ham.h>
-
-#include <filesystem>
+#include <ed/core/operator.h>
+#include <ed/core/fixed_sz_operator.h>
+#include <ed/core/results.h>          // ThermodynamicData + FTLMResults (legacy envelope)
 
 #include <complex>
 #include <cstdint>
-#include <cstring>
-#include <functional>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -38,50 +68,6 @@ namespace {
 using Complex = std::complex<double>;
 
 // -----------------------------------------------------------------------------
-// Full Unified-Interface Collapse, Wave E4 (May 2026): the
-// `exact_diagonalization_*` Python entry points exposed by this file are
-// legacy aliases. The canonical surface is now `qed.workflows.solve /
-// thermal / spectral` (which delegates to the C++
-// `ed::workflows::{solve,thermal,spectral}` orchestrator). The aliases
-// here keep working for out-of-tree consumers but emit a
-// `DeprecationWarning` to nudge migration.
-//
-// Internal in-tree callers should NOT use these aliases directly --
-// they should use `qed.workflows.*` or the C++ `_core.workflows_*`
-// bindings instead.
-// -----------------------------------------------------------------------------
-inline void emit_deprecation_warning(const char* legacy_name,
-                                     const char* replacement) {
-    // Use stacklevel = 2 so the warning points at the caller, not at
-    // the lambda inside the binding.
-    std::string msg = std::string(legacy_name) +
-        " is a legacy alias since the Full Unified-Interface Collapse "
-        "(May 2026); use " + replacement + " instead. "
-        "This alias will be removed in a future release.";
-    if (PyErr_WarnEx(PyExc_DeprecationWarning, msg.c_str(), 2) < 0) {
-        // PyErr_WarnEx returns -1 if the warning was promoted to an
-        // exception (e.g. via `-W error::DeprecationWarning`). The
-        // pybind11 trampoline will see PyErr_Occurred() and convert
-        // it into a Python exception on return.
-        throw py::error_already_set();
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Adapter: build an `apply(in, out, n)` callback closing over an Operator-like
-// object. `Op` is either `Operator` or `FixedSzOperator`; both provide the
-// same `apply(const Complex*, Complex*, size_t)` signature.
-// -----------------------------------------------------------------------------
-template <typename Op>
-std::function<void(const Complex*, Complex*, int)>
-make_matvec(const Op& op) {
-    const Op* p = &op;
-    return [p](const Complex* in, Complex* out, int n) {
-        p->apply(in, out, static_cast<std::size_t>(n));
-    };
-}
-
-// -----------------------------------------------------------------------------
 // Convert a Python dict (matching the schema returned by
 // qed.symmetry.group_from_generators / translation_group_1d) into a
 // SymmetryGroupInfo. Both endpoints round-trip:
@@ -89,17 +75,6 @@ make_matvec(const Op& op) {
 //   op.set_symmetry_info_from_dict(d)
 //   d2 = op.get_symmetry_info_as_dict()
 //   assert d2 == d  # up to ordering of generators
-//
-// The expected keys are:
-//   "num_generators"       -> int
-//   "generator_orders"     -> list[int]
-//   "generators"           -> list[list[int]]
-//   "max_clique"           -> list[list[int]]
-//   "power_representation" -> list[list[int]]
-//   "sectors"              -> list[dict] with keys
-//                             "sector_id" (int),
-//                             "quantum_numbers" (list[int]),
-//                             "phase_factors" (list[complex]).
 // -----------------------------------------------------------------------------
 SymmetryGroupInfo dict_to_symmetry_info(const py::dict& d) {
     SymmetryGroupInfo info;
@@ -161,14 +136,6 @@ py::dict symmetry_info_to_dict(const SymmetryGroupInfo& info) {
     return d;
 }
 
-// -----------------------------------------------------------------------------
-// FTLM "per-sector" trace data on EDResults.ftlm_results is a vector of small
-// structs; pybind11 needs an opaque wrapper or an explicit converter. We just
-// re-export the headline fields (eigenvalues / thermo_data) for now and let
-// callers that need per-sector internals reach into the C++ struct directly
-// via `EDResults.ftlm_eigenvalues_per_sector` / etc. (added below).
-// -----------------------------------------------------------------------------
-
 py::dict ftlm_results_to_dict(const FTLMResults& res) {
     py::dict d;
     d["ground_state_estimate"] = res.ground_state_estimate;
@@ -209,18 +176,11 @@ void bind_dispatcher(py::module_& m) {
     //    pybind11 preserves them, so cross-language IO via int casts works.
     // ------------------------------------------------------------------------
     py::enum_<DiagonalizationMethod>(m, "DiagonalizationMethod", R"pbdoc(
-        The 9 solver algorithms the dispatcher supports.
+        The 9 solver algorithms the unified orchestrator exposes.
 
-        Device (CPU vs GPU) and parallelism (single-process vs MPI) are
-        flags on :class:`EDParameters`, not enum values:
-
-            params = EDParameters()
-            params.use_gpu = True       # run on GPU when WITH_CUDA=ON
-            params.use_mpi = True       # use MPI (distributed-memory)
-            params.use_fixed_sz = True  # restrict to one Sz sector
-
-        Setting ``use_gpu`` on a build without CUDA falls back to CPU
-        with a runtime warning (see ``has_cuda_build()``).
+        These tags are consumed by the legacy ``EDParameters``
+        parameter-carrier; the orchestrator's own knob is
+        ``_core.SolveMethod`` (mapped 1:1 by the Python bridge).
     )pbdoc")
         // Ground-state / spectrum
         .value("LANCZOS",                  DiagonalizationMethod::LANCZOS)
@@ -235,45 +195,25 @@ void bind_dispatcher(py::module_& m) {
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
         .export_values();
 
-    // ------------------------------------------------------------------------
-    // 2. HamiltonianFileFormat (used by the directory dispatchers).
-    // ------------------------------------------------------------------------
-    py::enum_<HamiltonianFileFormat>(m, "HamiltonianFileFormat",
-        "On-disk format for the Hamiltonian files passed to "
-        "`exact_diagonalization_from_directory(...)`. The default "
-        "STANDARD value is the mVMC InterAll/Trans tuple that "
-        "`qed.input.HamiltonianBuilder.write_files(...)` "
-        "emits.")
-        .value("STANDARD",      HamiltonianFileFormat::STANDARD)
-        .value("SPARSE_MATRIX", HamiltonianFileFormat::SPARSE_MATRIX)
-        .value("CUSTOM",        HamiltonianFileFormat::CUSTOM)
-        .export_values();
+    // (``HamiltonianFileFormat`` enum was deleted alongside the
+    // legacy file-loader entry points; no surviving Python entry
+    // consumes it.)
 
     // ------------------------------------------------------------------------
-    // 3. EDParameters -- the legacy parameter bag the CPU dispatcher reads.
-    //    Every field of the C++ struct (excluding deprecated accessors) is
-    //    exposed read/write so callers can drive every solver.
+    // 3. EDParameters -- the legacy parameter bag still used internally by
+    //    ``qed.workflow._diag_via_workflows_solve`` to carry knobs the
+    //    orchestrator's ``SolveOptions`` / ``ThermalOptions`` don't carry
+    //    natively (FTLM krylov_dim, TPQ taylor_order, KPM moments, etc.).
     // ------------------------------------------------------------------------
     py::class_<EDParameters>(m, "EDParameters", R"pbdoc(
-        Parameter bag consumed by ``exact_diagonalization_core(...)``,
-        ``exact_diagonalization_from_directory[_symmetrized](...)``, and
-        ``exact_diagonalization_streaming_symmetry[_fixed_sz](...)``.
+        Parameter bag used internally by ``qed.workflow`` to carry the
+        legacy knobs across the Python <-> C++ boundary before they get
+        translated into ``_core.SolveOptions`` / ``_core.ThermalOptions``.
 
-        Construct an instance, set the fields you care about (everything
-        defaults to a sensible scalar), then pass it to one of the
-        dispatchers. Mirrors ``include/ed/core/ed_parameters.h`` 1:1.
-
-        Example
-        -------
-        >>> import qed as qed
-        >>> params = qed.EDParameters()
-        >>> params.num_sites = 6
-        >>> params.num_eigenvalues = 4
-        >>> params.tolerance = 1e-12
-        >>> result = qed.exact_diagonalization_core(
-        ...     op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params)
-        >>> result.eigenvalues
-        [-2.802..., -2.118..., -1.732..., -1.000...]
+        Mirrors ``include/ed/core/ed_parameters.h`` 1:1. End users should
+        prefer the kwargs-only ``qed.solve(H, ...)`` /
+        ``qed.thermal(H, ...)`` / ``qed.spectral(H, ...)`` API, which
+        wraps this struct internally.
     )pbdoc")
         .def(py::init<>())
         // General
@@ -351,9 +291,8 @@ void bind_dispatcher(py::module_& m) {
         //   use_mpi  : use the MPI backend (distributed-memory)
         .def_readwrite("use_gpu",          &EDParameters::use_gpu)
         .def_readwrite("use_mpi",          &EDParameters::use_mpi)
-        // 5th orthogonal axis -- spatial-symmetry projection. Routes
-        // through the streaming-symmetry kernel (per-sector, matrix-free,
-        // GPU-capable).
+        // 5th orthogonal axis -- spatial-symmetry projection. Consumed
+        // by ``_core.workflows_solve_streaming_symmetry_directory``.
         .def_readwrite("use_symmetry",     &EDParameters::use_symmetry)
         .def_readwrite("translation_only", &EDParameters::translation_only)
         .def("__repr__", [](const EDParameters& p) {
@@ -367,10 +306,11 @@ void bind_dispatcher(py::module_& m) {
         });
 
     // ------------------------------------------------------------------------
-    // 4. EDResults -- read-only result envelope returned by every dispatcher.
+    // 4. EDResults -- read-only result envelope returned by the legacy
+    //    Python adapter (``qed.workflow._ed_result_from_*``).
     // ------------------------------------------------------------------------
     py::class_<ThermodynamicData>(m, "ThermodynamicData",
-        "Thermodynamic observables on the temperature grid the dispatcher "
+        "Thermodynamic observables on the temperature grid the orchestrator "
         "computed. Populated by FTLM/LTLM/TPQ/KPM_DOS; otherwise empty.")
         .def(py::init<>())
         .def_readwrite("temperatures",  &ThermodynamicData::temperatures)
@@ -381,28 +321,10 @@ void bind_dispatcher(py::module_& m) {
         .def("to_dict", &thermo_data_to_dict);
 
     py::class_<EDResults>(m, "EDResults", R"pbdoc(
-        Result envelope returned by ``exact_diagonalization_core(...)`` and
-        the directory / streaming-symmetry dispatchers.
-
-        Attributes
-        ----------
-        eigenvalues : list[float]
-            Computed eigenvalues, ascending. For thermal methods this is
-            empty; consult ``thermo_data`` instead.
-        eigenvectors_computed : bool
-            True iff ``params.compute_eigenvectors`` was set; eigenvectors
-            are persisted to ``eigenvectors_path`` (HDF5).
-        eigenvectors_path : str
-            Directory holding the eigenvector HDF5 file (matches
-            ``params.output_dir`` when present).
-        thermo_data : ThermodynamicData
-            Per-temperature ``E(T)``, ``Cv(T)``, ``S(T)``, ``F(T)`` for
-            FTLM/LTLM/TPQ/KPM_DOS runs.
-
-        The fields are read-write so external code (notably the MPI
-        Python wrapper that reads ``ed_distributed_main`` HDF5 dumps)
-        can construct a fully-populated EDResults from disk and return
-        it from ``qed.diag(H, device='mpi', ...)``.
+        Legacy result envelope returned by the Python adapter
+        (``qed.workflow._diag_via_workflows_solve``). Carries the
+        ground-state eigenvalues plus (for thermal lanes) a
+        ``thermo_data`` block with the recombined temperature scan.
     )pbdoc")
         .def(py::init<>())
         .def_readwrite("eigenvalues",           &EDResults::eigenvalues)
@@ -412,106 +334,8 @@ void bind_dispatcher(py::module_& m) {
         .def("to_dict", &ed_results_to_dict);
 
     // ------------------------------------------------------------------------
-    // 5. The single high-level dispatcher: exact_diagonalization_core.
-    //
-    // Two overloads: one accepting an `Operator` (full-Hilbert), one
-    // accepting a `FixedSzOperator` (reduced sector). Both build the
-    // matrix-free apply callback internally; the GIL is released for the
-    // long-running C++ call.
-    // ------------------------------------------------------------------------
-    auto run_core_op = [](const Operator& op,
-                          DiagonalizationMethod method,
-                          const EDParameters& params) {
-        emit_deprecation_warning("exact_diagonalization_core",
-                                 "qed.workflows.solve / qed.workflows.thermal");
-        const std::uint64_t dim = (std::uint64_t{1} << op.getNumBits());
-        EDResults results;
-        auto matvec = make_matvec(op);
-        {
-            py::gil_scoped_release release;
-            results = exact_diagonalization_core(matvec, dim, method, params);
-        }
-        return results;
-    };
-
-    auto run_core_fixed = [](const FixedSzOperator& op,
-                             DiagonalizationMethod method,
-                             EDParameters params) {
-        emit_deprecation_warning("exact_diagonalization_core",
-                                 "qed.workflows.solve / qed.workflows.thermal");
-        const std::uint64_t dim = op.getFixedSzDim();
-        // Mirror the C++ convention: when called with a FixedSzOperator the
-        // dispatcher needs use_fixed_sz=True to dispatch the fixed-Sz
-        // observables / eigenvector layout. We mutate a local copy so
-        // callers can keep reusing their template params object.
-        params.use_fixed_sz = true;
-        params.fixed_sz_op  = const_cast<FixedSzOperator*>(&op);
-        EDResults results;
-        auto matvec = make_matvec(op);
-        {
-            py::gil_scoped_release release;
-            results = exact_diagonalization_core(matvec, dim, method, params);
-        }
-        return results;
-    };
-
-    // IMPORTANT: pybind11 dispatches overloads in *registration order*.
-    // FixedSzOperator inherits from Operator, so we must register the
-    // FixedSzOperator overload FIRST; otherwise pybind11 binds a
-    // FixedSzOperator argument to the base ``Operator`` overload, the
-    // dim is computed as ``1 << getNumBits()`` (the full Hilbert space),
-    // and the solver silently runs on the unprojected operator. This
-    // was the matvec-unification audit follow-up bug surfaced by the
-    // ``qed.thermal(...)`` end-to-end smoke test where every Sz sector
-    // came back with the global ground state energy.
-    m.def("exact_diagonalization_core", run_core_fixed,
-          py::arg("operator_"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          "Same as the Operator overload but for a FixedSzOperator. "
-          "Internally sets `params.use_fixed_sz = True` and points "
-          "`params.fixed_sz_op` at the supplied operator so the "
-          "dispatcher reaches the fixed-Sz observable code paths.");
-
-    m.def("exact_diagonalization_core", run_core_op,
-          py::arg("operator_"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          R"pbdoc(
-        Run the C++ high-level dispatcher on a matrix-free ``Operator``.
-
-        This single function routes through the same backend table the
-        ``./ED`` CLI uses, so you get one entry point for every
-        supported algorithm: the Krylov family (LANCZOS, BLOCK_LANCZOS,
-        KRYLOV_SCHUR), the dense LAPACK back-end (FULL), and every
-        thermal solver (FTLM, LTLM, mTPQ, cTPQ, KPM_DOS).
-
-        GPU execution is requested by setting ``params.use_gpu = True``
-        on a CUDA-enabled build. Streaming-symmetry / per-sector GPU
-        dispatch uses
-        :func:`exact_diagonalization_streaming_symmetry` or the
-        directory dispatcher.
-
-        Parameters
-        ----------
-        operator_ : Operator
-            Matrix-free Hamiltonian.
-        method : DiagonalizationMethod
-            Backend selector. Defaults to ``LANCZOS``.
-        params : EDParameters
-            Parameter bag. Use the defaults plus the field(s) you care
-            about; ``num_eigenvalues`` is the most common knob.
-
-        Returns
-        -------
-        EDResults
-            Eigenvalues, eigenvectors_path, and (for thermal methods)
-            ``thermo_data``.
-    )pbdoc");
-
-    // ------------------------------------------------------------------------
-    // 6. Symmetry projection: attach the Operator.symmetry_info setter /
-    //    getter so callers can wire `qed.symmetry.group_from_generators(...)`
+    // 5. Symmetry projection: attach the Operator.symmetry_info setter /
+    //    getter so callers can wire ``qed.symmetry.group_from_generators(...)``
     //    output straight onto an in-process Operator without going through
     //    the on-disk automorphism_results/ JSON detour.
     //
@@ -537,22 +361,6 @@ void bind_dispatcher(py::module_& m) {
             (list[list[int]]), ``power_representation`` (list[list[int]]),
             and ``sectors`` (list of dicts with ``sector_id``,
             ``quantum_numbers``, ``phase_factors``).
-
-            Once set the operator carries the symmetry group; callers
-            then run ``exact_diagonalization_streaming_symmetry(...)`` on
-            the corresponding directory of dat files (which is where
-            the C++ engine actually consumes the symmetry data).
-
-            Example
-            -------
-            >>> import qed as qed
-            >>> N = 6
-            >>> g = qed.symmetry.translation(N, 1)
-            >>> info = qed.symmetry.group_from_generators(N, [g])
-            >>> op = qed.Operator(N)
-            >>> op.set_symmetry_info_from_dict(info)
-            >>> op.get_symmetry_info_as_dict()["num_generators"]
-            1
         )pbdoc";
 
         const char* getter_doc =
@@ -584,250 +392,7 @@ void bind_dispatcher(py::module_& m) {
     }
 
     // ------------------------------------------------------------------------
-    // 7. Streaming symmetry: directory-driven wrapper around
-    //    exact_diagonalization_streaming_symmetry[_fixed_sz]. This is the
-    //    canonical Python entry point for symmetry-projected ED with
-    //    optional GPU per-sector dispatch (set ``params.use_gpu``).
-    //
-    //    The C++ functions take a directory containing InterAll.dat /
-    //    Trans.dat / automorphism_results/, run the streaming-symmetry
-    //    pipeline (orbit basis on the fly, per-sector matrix-free apply,
-    //    block-by-block diagonalization), and return aggregated EDResults.
-    // ------------------------------------------------------------------------
-    m.def("exact_diagonalization_streaming_symmetry",
-          [](const std::string& directory,
-             DiagonalizationMethod method,
-             const EDParameters& params,
-             const std::string& interaction_filename,
-             const std::string& single_site_filename,
-             const std::string& basis_cache_dir,
-             bool precompute_basis_only) {
-              emit_deprecation_warning(
-                  "exact_diagonalization_streaming_symmetry",
-                  "qed.workflows.solve with an OperatorSpec carrying "
-                  "streaming_symmetry=true (per-sector iteration via "
-                  "StreamingSymmetryOperator::sector(k))");
-              EDResults res;
-              {
-                  py::gil_scoped_release release;
-                  res = exact_diagonalization_streaming_symmetry(
-                      directory, method, params,
-                      interaction_filename, single_site_filename,
-                      basis_cache_dir, precompute_basis_only);
-              }
-              return res;
-          },
-          py::arg("directory"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          py::arg("interaction_filename") = "InterAll.dat",
-          py::arg("single_site_filename") = "Trans.dat",
-          py::arg("basis_cache_dir") = "",
-          py::arg("precompute_basis_only") = false,
-          R"pbdoc(
-        Symmetry-projected exact diagonalization, streaming variant.
-
-        Reads ``InterAll.dat`` / ``Trans.dat`` and the
-        ``automorphism_results/`` directory under ``directory``,
-        computes orbit representatives on the fly (no disk basis
-        materialisation), and dispatches each symmetry sector to the
-        chosen ``method``.
-
-        Set ``params.use_gpu = True`` to run each sector on the GPU
-        via the streaming-symmetry dispatch in
-        ``include/ed/core/ed_wrapper_streaming.h``.
-
-        Parameters
-        ----------
-        directory : str
-            Path containing the Hamiltonian dat files and
-            ``automorphism_results/``.
-        method : DiagonalizationMethod
-            Per-sector solver. Setting ``params.use_gpu = True`` runs
-            each sector via the cuSPARSE / per-sector kernels in
-            ``gpu_symmetrized_operator.cu``.
-        params : EDParameters
-            ``num_sites`` / ``spin_length`` MUST be set; everything else
-            inherits the dispatcher defaults.
-        basis_cache_dir : str, optional
-            HDF5 directory to cache orbit basis between runs.
-        precompute_basis_only : bool, optional
-            If True, materialise + cache the orbit basis and return
-            without solving.
-
-        Returns
-        -------
-        EDResults
-            Aggregated eigenvalues across every sector (sorted ascending).
-    )pbdoc");
-
-    m.def("exact_diagonalization_streaming_symmetry_fixed_sz",
-          [](const std::string& directory,
-             std::int64_t n_up,
-             DiagonalizationMethod method,
-             const EDParameters& params,
-             const std::string& interaction_filename,
-             const std::string& single_site_filename,
-             const std::string& basis_cache_dir,
-             bool precompute_basis_only) {
-              emit_deprecation_warning(
-                  "exact_diagonalization_streaming_symmetry_fixed_sz",
-                  "qed.workflows.solve with an OperatorSpec carrying "
-                  "streaming_symmetry=true and fixed_sz=<n_up>");
-              EDResults res;
-              {
-                  py::gil_scoped_release release;
-                  res = exact_diagonalization_streaming_symmetry_fixed_sz(
-                      directory, n_up, method, params,
-                      interaction_filename, single_site_filename,
-                      basis_cache_dir, precompute_basis_only);
-              }
-              return res;
-          },
-          py::arg("directory"),
-          py::arg("n_up"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          py::arg("interaction_filename") = "InterAll.dat",
-          py::arg("single_site_filename") = "Trans.dat",
-          py::arg("basis_cache_dir") = "",
-          py::arg("precompute_basis_only") = false,
-          "Streaming-symmetry ED restricted to the fixed-Sz sector with "
-          "``n_up`` up spins. Otherwise behaves exactly like "
-          ":func:`exact_diagonalization_streaming_symmetry`. The fixed-Sz "
-          "sector cuts both the orbit count and the per-sector dim, so "
-          "this is the right entry point for the largest tractable "
-          "clusters (32-site spin-1/2 with C2 + translations etc.).");
-
-    // ------------------------------------------------------------------------
-    // 8. Directory dispatchers: from_directory and the symmetrized variants.
-    //    These mirror the C++ inline wrappers in ed_wrapper.h.
-    // ------------------------------------------------------------------------
-    m.def("exact_diagonalization_from_directory",
-          [](const std::string& directory,
-             DiagonalizationMethod method,
-             const EDParameters& params,
-             HamiltonianFileFormat format,
-             const std::string& interaction_filename,
-             const std::string& single_site_filename,
-             const std::string& counterterm_filename,
-             const std::string& three_body_filename) {
-              emit_deprecation_warning(
-                  "exact_diagonalization_from_directory",
-                  "qed.workflows.solve / qed.workflows.thermal with an "
-                  "OperatorSpec carrying source=DirectoryPath(...)");
-              EDResults res;
-              {
-                  py::gil_scoped_release release;
-                  // Full Unified-Interface Collapse, Wave F-partial
-                  // (May 2026): the legacy `<ed/core/dispatch.h>` is
-                  // gone. The routing it used to do --
-                  // canonicalize_method_and_flags + auto-promote
-                  // use_symmetry when `automorphism_results/` is
-                  // present + route to streaming when use_symmetry is
-                  // set -- is inlined here so the deprecation alias
-                  // keeps the same observable behaviour for
-                  // out-of-tree callers.
-                  EDParameters resolved = params;
-                  {
-                      const auto canon = ed::canonicalize_method_and_flags(
-                          method,
-                          resolved.use_fixed_sz, resolved.use_gpu, resolved.use_mpi);
-                      method                = canon.method;
-                      resolved.use_fixed_sz = canon.use_fixed_sz;
-                      resolved.use_gpu      = canon.use_gpu;
-                      resolved.use_mpi      = canon.use_mpi;
-                  }
-                  if (!resolved.use_symmetry) {
-                      namespace fs = std::filesystem;
-                      const fs::path ar =
-                          fs::path(directory) / "automorphism_results";
-                      if (fs::exists(ar) && fs::is_directory(ar)) {
-                          for (const char* name : {
-                                  "automorphisms.json",
-                                  "max_clique.json",
-                                  "sector_metadata.json",
-                                  "minimal_generators.json",
-                                  "sectors.json",
-                                  "generators.json"}) {
-                              if (fs::exists(ar / name)) {
-                                  resolved.use_symmetry = true;
-                                  break;
-                              }
-                          }
-                      }
-                  }
-                  if (!resolved.use_symmetry) {
-                      res = ::exact_diagonalization_from_directory(
-                          directory, method, resolved, format,
-                          interaction_filename, single_site_filename,
-                          counterterm_filename, three_body_filename);
-                  } else if (resolved.use_fixed_sz) {
-                      const std::int64_t n_up = (resolved.n_up >= 0)
-                          ? resolved.n_up
-                          : static_cast<std::int64_t>(resolved.num_sites / 2);
-                      res = ::exact_diagonalization_streaming_symmetry_fixed_sz(
-                          directory, n_up, method, resolved,
-                          interaction_filename, single_site_filename,
-                          resolved.basis_cache_dir,
-                          resolved.precompute_basis_only);
-                  } else {
-                      res = ::exact_diagonalization_streaming_symmetry(
-                          directory, method, resolved,
-                          interaction_filename, single_site_filename,
-                          resolved.basis_cache_dir,
-                          resolved.precompute_basis_only);
-                  }
-              }
-              return res;
-          },
-          py::arg("directory"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          py::arg("format") = HamiltonianFileFormat::STANDARD,
-          py::arg("interaction_filename") = "InterAll.dat",
-          py::arg("single_site_filename") = "Trans.dat",
-          py::arg("counterterm_filename") = "CounterTerm.dat",
-          py::arg("three_body_filename") = "ThreeBodyG.dat",
-          R"pbdoc(
-        Run ED on a directory of Hamiltonian files (Phase 7.1: 5-axis dispatcher).
-
-        Reads ``InterAll.dat`` / ``Trans.dat`` (plus optional
-        ``CounterTerm.dat`` / ``ThreeBodyG.dat``) and dispatches on
-        the orthogonal axes carried by ``params``:
-
-        ====================  ================================================
-        Flag                  Effect
-        ====================  ================================================
-        ``use_fixed_sz``      restrict to the ``n_up`` Sz-sector
-        ``use_gpu``           use GPU kernels (requires WITH_CUDA=ON)
-        ``use_mpi``           use MPI parallelism (distributed-memory)
-        ``use_symmetry``      project onto symmetry-adapted basis (streaming)
-        ====================  ================================================
-
-        Setting ``params.use_symmetry = True`` is the canonical way to
-        request symmetry-projected ED -- it routes internally through
-        :func:`exact_diagonalization_streaming_symmetry` (or its
-        fixed-Sz cousin), which is the only symmetry kernel that
-        supports GPU per-sector dispatch and avoids materialising the
-        orbit basis on disk.
-    )pbdoc");
-
-    // Phase 9 cleanup: the explicit-block ``*_symmetrized`` entry points
-    // (``exact_diagonalization_from_directory_symmetrized`` and
-    // ``exact_diagonalization_fixed_sz_symmetrized``) were removed.
-    // They were already ``[[deprecated]]`` in Phase 7.1 -- they
-    // materialised block matrices on disk, were strictly slower than
-    // the streaming kernel, and had no GPU support. Anyone hitting
-    // ``AttributeError`` on those names should switch to
-    // ``exact_diagonalization_from_directory(...)`` with
-    // ``params.use_symmetry = True`` (and optionally
-    // ``params.use_fixed_sz = True`` + ``params.n_up = ...``), which is
-    // the canonical 5-axis dispatcher and is faster on every problem
-    // size we have benchmarked.
-
-    // ------------------------------------------------------------------------
-    // 9. Build introspection. Lets callers gate GPU / MPI codepaths in
+    // 6. Build introspection. Lets callers gate GPU / MPI codepaths in
     //    pure Python without trying a method and catching the warning.
     // ------------------------------------------------------------------------
     m.def("has_cuda_build", []() {
@@ -838,8 +403,8 @@ void bind_dispatcher(py::module_& m) {
 #endif
     },
         "True iff this build of ``qed._core`` was compiled with "
-        "``WITH_CUDA=ON``. When False, setting ``params.use_gpu = True`` "
-        "falls back to the CPU code path with a runtime warning.");
+        "``WITH_CUDA=ON``. When False, setting ``device='gpu'`` on "
+        "``qed.solve(...)`` falls back to CPU with a runtime warning.");
 
     m.def("has_mpi_build", []() {
 #ifdef WITH_MPI
@@ -853,5 +418,4 @@ void bind_dispatcher(py::module_& m) {
         "use the standalone ``mpiexec ed_distributed_main ...`` binary "
         "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
         "solvers.");
-
 }

@@ -2,13 +2,14 @@
 // benchmarks/bench_minimalist_collapse.cpp
 //
 // Final audit benchmark for the Minimalist ED Collapse (May 2026).
-// Compares three entry points on the same 1D Heisenberg ring (PBC):
+// Compares the unified orchestrator's Lanczos / KrylovSchur /
+// BlockLanczos lanes against a dense LAPACK_zheevr reference on the
+// same 1D Heisenberg ring (PBC). The legacy
+// `exact_diagonalization_core` lane was removed in the surface-
+// unification collapse (May 2026); the dispatch it provided is now
+// reachable solely through `ed::workflows::solve`.
 //
-//   * ed::workflows::solve(op, SolveOptions{.method=Lanczos})   [new]
-//   * exact_diagonalization_core(apply, dim, LANCZOS, params)   [legacy]
-//   * LAPACKE_zheevr   on the dense Hamiltonian                 [reference]
-//
-// All three solve the same physics. The benchmark measures:
+// The benchmark measures:
 //   - wall time per call (Google Benchmark median over repetitions)
 //   - dimension-scaling slope (log-log)
 //   - correctness: ground-state energy delta vs the LAPACK reference
@@ -18,10 +19,9 @@
 
 #include <benchmark/benchmark.h>
 
-#include <ed/core/ed_wrapper.h>          // legacy: exact_diagonalization_core
 #include <ed/core/linear_operator.h>
 #include <ed/core/operator.h>
-#include <ed/orchestrator.h>             // new:   ed::workflows::solve
+#include <ed/orchestrator.h>             // ed::workflows::solve
 
 #include <complex>
 #include <cstdint>
@@ -96,37 +96,97 @@ BENCHMARK(BM_Workflows_Solve_Lanczos)
     ->MinTime(0.5);
 
 // -----------------------------------------------------------------------------
-// Benchmark 2: legacy entry point  (exact_diagonalization_core, LANCZOS lane)
+// Benchmark 2b: new orchestrator path with compute_vectors=true
+// (exercises the eigenvector reconstruction path added in May 2026).
 // -----------------------------------------------------------------------------
-void BM_Legacy_EDCore_Lanczos(benchmark::State& state) {
+void BM_Workflows_Solve_Lanczos_WithVecs(benchmark::State& state) {
     const std::uint64_t N = static_cast<std::uint64_t>(state.range(0));
     auto op = make_heisenberg_chain_pbc(N);
-    const std::uint64_t dim = 1ull << N;
 
-    auto apply = [op_raw = op.get()](const Complex* in, Complex* out, int n) {
-        op_raw->apply(in, out, static_cast<std::size_t>(n));
-    };
+    ed::SolveOptions opts;
+    opts.num_eigs        = 1;
+    opts.max_iter        = 200;
+    opts.tolerance       = 1e-10;
+    opts.compute_vectors = true;
+    opts.method          = ed::SolveMethod::Lanczos;
 
-    EDParameters params;
-    params.num_eigenvalues     = 1;
-    params.max_iterations      = 200;
-    params.tolerance           = 1e-10;
-    params.compute_eigenvectors = false;
-    params.output_dir          = "";  // -> /dev/null
+    double e0 = 0.0;
+    std::size_t evec_dim = 0;
+    for (auto _ : state) {
+        auto res = ed::workflows::solve(*op, opts);
+        e0 = res.eigenvalues.empty() ? 0.0 : res.eigenvalues[0];
+        evec_dim = (res.eigenvectors && !res.eigenvectors->host.empty())
+                   ? res.eigenvectors->host.front().size()
+                   : 0;
+        benchmark::DoNotOptimize(e0);
+        benchmark::DoNotOptimize(evec_dim);
+    }
+    state.counters["dim"]   = static_cast<double>(1ull << N);
+    state.counters["E0"]    = e0;
+    state.counters["N"]     = static_cast<double>(N);
+    state.counters["evec_dim"] = static_cast<double>(evec_dim);
+}
+BENCHMARK(BM_Workflows_Solve_Lanczos_WithVecs)
+    ->Arg(6)->Arg(8)->Arg(10)->Arg(12)->Arg(14)
+    ->Unit(benchmark::kMillisecond)
+    ->MinTime(0.5);
+
+// -----------------------------------------------------------------------------
+// Benchmark 2c: KrylovSchur lane (multi-eigenvalue path through workflows).
+// -----------------------------------------------------------------------------
+void BM_Workflows_Solve_KrylovSchur(benchmark::State& state) {
+    const std::uint64_t N = static_cast<std::uint64_t>(state.range(0));
+    auto op = make_heisenberg_chain_pbc(N);
+
+    ed::SolveOptions opts;
+    opts.num_eigs        = 5;
+    opts.max_iter        = 200;
+    opts.tolerance       = 1e-10;
+    opts.compute_vectors = false;
+    opts.method          = ed::SolveMethod::KrylovSchur;
 
     double e0 = 0.0;
     for (auto _ : state) {
-        EDResults r = exact_diagonalization_core(
-            apply, dim, DiagonalizationMethod::LANCZOS, params);
-        e0 = r.eigenvalues.empty() ? 0.0 : r.eigenvalues[0];
+        auto res = ed::workflows::solve(*op, opts);
+        e0 = res.eigenvalues.empty() ? 0.0 : res.eigenvalues[0];
         benchmark::DoNotOptimize(e0);
     }
-    state.counters["dim"] = static_cast<double>(dim);
+    state.counters["dim"] = static_cast<double>(1ull << N);
     state.counters["E0"]  = e0;
     state.counters["N"]   = static_cast<double>(N);
 }
-BENCHMARK(BM_Legacy_EDCore_Lanczos)
-    ->Arg(6)->Arg(8)->Arg(10)->Arg(12)->Arg(14)
+BENCHMARK(BM_Workflows_Solve_KrylovSchur)
+    ->Arg(8)->Arg(10)->Arg(12)->Arg(14)
+    ->Unit(benchmark::kMillisecond)
+    ->MinTime(0.5);
+
+// -----------------------------------------------------------------------------
+// Benchmark 2d: BlockLanczos lane (multi-eigenvalue path through workflows).
+// -----------------------------------------------------------------------------
+void BM_Workflows_Solve_BlockLanczos(benchmark::State& state) {
+    const std::uint64_t N = static_cast<std::uint64_t>(state.range(0));
+    auto op = make_heisenberg_chain_pbc(N);
+
+    ed::SolveOptions opts;
+    opts.num_eigs        = 5;
+    opts.block_size      = 5;
+    opts.max_iter        = 200;
+    opts.tolerance       = 1e-10;
+    opts.compute_vectors = false;
+    opts.method          = ed::SolveMethod::BlockLanczos;
+
+    double e0 = 0.0;
+    for (auto _ : state) {
+        auto res = ed::workflows::solve(*op, opts);
+        e0 = res.eigenvalues.empty() ? 0.0 : res.eigenvalues[0];
+        benchmark::DoNotOptimize(e0);
+    }
+    state.counters["dim"] = static_cast<double>(1ull << N);
+    state.counters["E0"]  = e0;
+    state.counters["N"]   = static_cast<double>(N);
+}
+BENCHMARK(BM_Workflows_Solve_BlockLanczos)
+    ->Arg(8)->Arg(10)->Arg(12)->Arg(14)
     ->Unit(benchmark::kMillisecond)
     ->MinTime(0.5);
 

@@ -178,66 +178,46 @@ struct EDParameters {
     // -----------------------------------------------------------------------
     // GPU fallback policy (matvec-unification, May 2026).
     //
-    // ``exact_diagonalization_core`` is an in-memory dispatcher with no GPU
-    // implementation; the GPU kernels live behind ``from_files`` /
-    // ``from_directory`` where the operator can be uploaded as a
-    // GPUOperator. When a caller sets ``use_gpu=true`` against the core
-    // dispatcher, the historical behaviour is to silently re-canonicalise
-    // to the CPU base method and emit one stderr line.
-    //
-    // ``allow_gpu_cpu_fallback`` makes this policy explicit:
-    //   * true  (default) -- keep historical silent-fallback behaviour
-    //                        (the Python facade depends on it: it routes
-    //                        device='gpu' through a temp-dir
-    //                        ``from_directory`` call, but the auto-pilot
-    //                        sets ``use_gpu`` even when WITH_CUDA=OFF).
+    // ``allow_gpu_cpu_fallback`` controls what happens when
+    // ``use_gpu=true`` is requested but the build / runtime can't
+    // service the GPU lane:
+    //   * true  (default) -- silently re-canonicalise to the CPU base
+    //                        method and emit one stderr line. The
+    //                        Python facade depends on this: it surfaces
+    //                        device='gpu' as a hint and lets the
+    //                        orchestrator pick CPU when WITH_CUDA=OFF.
     //   * false           -- throw with an actionable message instead of
     //                        falling back. Set this when the caller has
     //                        explicitly asked for a GPU run and would
     //                        rather fail than silently get CPU output.
-    //                        ``auto_pilot::solve`` with the explicit
-    //                        ``Device::GPU`` value (vs ``Device::AUTO``)
-    //                        sets this to false.
+    //                        The orchestrator (``ed::workflows::solve``
+    //                        with ``BackendConstraints::allow_gpu =
+    //                        true`` but no other lane allowed) sets this
+    //                        to false.
     bool allow_gpu_cpu_fallback = true;
 
-    // ========== Symmetry Options (Phase 7.1: 5th orthogonal axis) ==========
+    // ========== Symmetry Options (5th orthogonal axis) ==========
     //
-    // Symmetry projection used to be encoded in the entry-point name:
-    //   exact_diagonalization_from_directory_symmetrized(...)   // disk-block
-    //   exact_diagonalization_streaming_symmetry(...)           // streaming
-    //   exact_diagonalization_chunked_symmetry(...)             // chunked
-    //   exact_diagonalization_disk_chunked_symmetry(...)        // disk-chunked
-    // plus the same four for fixed-Sz, giving 8 distinct symmetry-aware
-    // entry points. Phase 7.1 collapsed all of them onto a single flag:
+    // Symmetry projection used to be encoded in the entry-point name
+    // (`exact_diagonalization_from_directory_symmetrized`,
+    // `exact_diagonalization_streaming_symmetry`,
+    // `exact_diagonalization_chunked_symmetry`, etc., plus the same
+    // four for fixed-Sz, giving 8 distinct symmetry-aware entry
+    // points). The matvec / surface-unification refactors collapsed
+    // them all onto a single flag plus the orthogonal axes:
     //
-    //   * Phase 9: the deprecated explicit-block entry points
-    //     (`exact_diagonalization_from_directory_symmetrized`,
-    //     `exact_diagonalization_fixed_sz_symmetrized`) were removed.
-    //   * matvec-unification Phase 7.2: the chunked / disk-streaming
-    //     CPU-only fallbacks were retired entirely; the distributed/MPI
-    //     build (`ed_distributed_main`, `DistributedOperator` with
-    //     `MemorySpace::DistributedHost`) is the canonical answer at
-    //     the scales they targeted. `--disk-streaming` / `--chunked-symm`
-    //     CLI flags now print a one-line deprecation notice and are
-    //     ignored.
+    //     SOLVER_type × use_fixed_sz × use_gpu × use_mpi × use_symmetry
     //
-    //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi  ×  use_symmetry
-    //
-    // When `use_symmetry == true`, exact_diagonalization_from_files /
-    // exact_diagonalization_from_directory route through the streaming
-    // symmetry kernel (ed_wrapper_streaming.h), which is the only path that:
+    // When ``use_symmetry == true``, the orchestrator
+    // (``ed::workflows::solve``) routes through the streaming-symmetry
+    // operator built by ``ed::make_streaming_symmetry_operator``, which
+    // is the only path that:
     //   * keeps orbit data in memory (no disk basis materialisation),
-    //   * supports use_gpu (per-sector GPU kernels),
-    //   * supports use_fixed_sz orthogonally,
+    //   * supports ``use_gpu`` (per-sector GPU kernels),
+    //   * supports ``use_fixed_sz`` orthogonally,
     //   * scales to the largest tractable systems (32-site spin-1/2 etc.),
-    //   * works in pure Python (no /automorphism_results/ on disk required
-    //     beyond the one-shot generator the streaming path runs).
-    //
-    // The deprecated explicit-block path (`*_symmetrized`) and the
-    // chunked / disk-chunked variants are kept as CLI-only escape hatches
-    // for very-large-N memory-budget edge cases, but they are no longer
-    // selectable via the EDParameters flag axis. Setting use_symmetry=true
-    // is the only way new code should request symmetry projection.
+    //   * works in pure Python (no ``automorphism_results/`` on disk
+    //     required beyond the one-shot generator the streaming path runs).
     //
     // `translation_only` is an *orthogonal* sub-flag: when true, the
     // automorphism generator restricts to the translation subgroup. It
@@ -247,10 +227,10 @@ struct EDParameters {
     bool translation_only = false;
 
     // Streaming-symmetry-specific options. They are only consulted when
-    // ed::exact_diagonalization(...) (or auto_pilot::solve) routes through
-    // the streaming-symmetry kernel (use_symmetry == true). Promoted from
-    // the workflow layer into EDParameters in Phase 6 of matvec-unification
-    // so that there is *one* EDParameters bag carrying every solve option.
+    // ``ed::make_operator``/``ed::workflows::solve`` route through the
+    // streaming-symmetry kernel (``use_symmetry == true``). Carried on
+    // ``EDParameters`` so that there is *one* parameter bag carrying
+    // every solve option.
     //
     //   * basis_cache_dir       -- if non-empty, cache the per-sector
     //                              orbit basis here so reruns at fixed

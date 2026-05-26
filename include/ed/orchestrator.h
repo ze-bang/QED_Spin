@@ -39,6 +39,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -116,6 +117,13 @@ struct SolveOptions {
     /// `precompute_basis_only` mode to pre-warm the cache on a single
     /// node before launching the diagonalisation step on a cluster.
     bool        precompute_basis_only = false;
+
+    /// Filter for the streaming-symmetry sector loop. When non-empty,
+    /// only sectors whose linear index appears in this list are
+    /// solved. Empty means "iterate over every non-empty sector"
+    /// (the legacy / default behaviour). Used to probe a single
+    /// irrep without paying for the rest of the spectrum.
+    std::vector<std::size_t> selected_sectors;
 };
 
 struct ThermalOptions {
@@ -148,6 +156,40 @@ struct ThermalOptions {
 
     /// Lorentzian broadening eta for the KPM-DOS density lane.
     double      broadening     = 0.05;
+
+    /// Filter for the streaming-symmetry sector loop. See
+    /// ``SolveOptions::selected_sectors``. Empty => walk every
+    /// non-empty sector.
+    std::vector<std::size_t> selected_sectors;
+
+    // -----------------------------------------------------------------
+    // Wave B3 (May 2026): caller-supplied spectral bounds for the
+    // KPM-DOS lane. When BOTH ``e_min_override`` and ``e_max_override``
+    // are finite, the kernel skips its own Lanczos-based spectral
+    // estimation and uses the supplied window directly. Used by the
+    // streaming-symmetry binding to estimate the band edges once and
+    // reuse them across N sector calls. NaN means "estimate per
+    // sector" (the legacy behaviour).
+    // -----------------------------------------------------------------
+    double      e_min_override = std::numeric_limits<double>::quiet_NaN();
+    double      e_max_override = std::numeric_limits<double>::quiet_NaN();
+
+    // -----------------------------------------------------------------
+    // KPM-DOS knobs (closing-the-symmetry-gap follow-up, May 2026).
+    //
+    // Prior to this revision ``ThermalOptions`` carried no
+    // moment-count or Hutchinson-sample knobs for the KpmDos lane,
+    // so the orchestrator silently fell back to ``KpmDosOptions``'
+    // defaults (M=2048, R=20). The Python facade
+    // (qed.thermal(..., kpm_num_moments=..., kpm_num_random_vectors=...))
+    // had no way to reach the streaming-symmetry binding -- a ~250x
+    // amplifier on FT-KPM_DOS Symm at production sizes.
+    //
+    // ``0`` means "use the kernel default" so existing call sites
+    // (CLI, single-operator orchestrator entry) keep their behaviour.
+    // -----------------------------------------------------------------
+    int kpm_num_moments        = 0;  ///< 0 -> kernel default
+    int kpm_num_random_vectors = 0;  ///< 0 -> kernel default
 };
 
 struct SpectralOptions {
@@ -183,6 +225,30 @@ struct SpectralOptions {
     /// roundtripping (e.g., "Sz", "Sx_Sx", "Sz_Sz"). Optional --
     /// orchestrator does not consume it; the CLI uses it for naming.
     std::string observable_type;
+
+    // -----------------------------------------------------------------
+    // SOTA streaming-symmetry spectral controls (May 2026).
+    // -----------------------------------------------------------------
+
+    /// Momentum transfer Q of the probe operator (in fractional
+    /// reciprocal-lattice units, e.g. ``Q = (1/3, 0)`` for a three-site
+    /// chain). Used by the streaming-symmetry spectral workflow to
+    /// pick the (initial, final) sector pairs that survive the
+    /// selection rule ``k_final = k_initial + Q``. Empty => no
+    /// momentum filter (every sector pair is walked).
+    std::vector<double> momentum_transfer;
+
+    /// Tolerance for the momentum-transfer match (in units of the
+    /// fractional reciprocal-lattice coordinate). Pairs whose
+    /// ``|k_final - k_initial - Q| mod 1`` exceeds this threshold are
+    /// skipped. Default chosen so cubic-symmetry lattice integer
+    /// quanta are not accidentally rejected.
+    double      momentum_tolerance = 1e-6;
+
+    /// Filter for the streaming-symmetry sector loop. See
+    /// ``SolveOptions::selected_sectors``. Empty => walk every
+    /// (initial, final) pair surviving the selection rule.
+    std::vector<std::size_t> selected_sectors;
 };
 
 // ---------------------------------------------------------------------------

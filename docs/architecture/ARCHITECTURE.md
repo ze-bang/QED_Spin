@@ -39,10 +39,12 @@ The pre-collapse auto-pilot picture (`ed/auto/solve.h`,
 `ed/auto/dssf_tune.h`) has been removed in the May 2026 cleanup sweep
 — see `docs/MIGRATION.md` for the port. The dispatcher header family
 (`ed/core/dispatch.h`, `ed/core/ed_wrapper.h`,
-`ed/core/ed_wrapper_streaming.h`) is **soft-deprecated**: still
-buildable for the CLI binaries (`src/cli/workflows.cpp`,
-`src/cli/ed_distributed_main.cpp`), scheduled for hard-removal once the
-CLI migrates onto `ed::workflows::*`. The historical pre-collapse
+`ed/core/ed_wrapper_streaming.h`) has been **hard-removed**: the CLI
+binaries (`src/cli/workflows.cpp`, `src/cli/ed_distributed_main.cpp`)
+now route through `ed::make_operator(OperatorSpec)` +
+`ed::workflows::{solve,thermal,spectral}`, and `ed_wrapper.h` is
+retained as a thin shim that re-exports the result/parameter types
+in `ed_legacy_types.h`. The historical pre-collapse
 diagram lived here; consult git history (`git log -p docs/architecture/
 ARCHITECTURE.md`) if you need to see the legacy graph.
 
@@ -58,6 +60,29 @@ The inner SpMV picks `ed::matvec::basis::FullBasisPolicy` or
 `FixedSzBasisPolicy` (compile-time template parameter on
 `ed::matvec::CpuMatVecBackend<BasisPolicy>`); the choice of policy
 falls out of the concrete operator subclass.
+
+### Sub-axis: Subspace × ProjectorChain (May 2026)
+
+The "Basis" axis above is itself the Cartesian product of two
+orthogonal sub-axes, made explicit in
+[`include/ed/symmetry/{subspace,projector,projector_chain}.h`](../../include/ed/symmetry/):
+
+| Subspace                | × | ProjectorChain         | =  | Legacy operator class                       |
+|-------------------------|---|------------------------|----|---------------------------------------------|
+| `FullSpaceSubspace`     | × | `[]`                   | =  | `Operator`                                  |
+| `FixedSzSubspace`       | × | `[]`                   | =  | `FixedSzOperator`                           |
+| `FullSpaceSubspace`     | × | `[SpatialProjector]`   | =  | `StreamingSymmetryOperator`                 |
+| `FixedSzSubspace`       | × | `[SpatialProjector]`   | =  | `FixedSzStreamingSymmetryOperator`          |
+
+Future axes (spin-flip Z_2, time-reversal antiunitary, SU(2)
+total-S Casimir filter) extend the chain or add new Subspace
+specialisations without touching the operator hierarchy; the
+matvec layer only sees the post-orbit
+`(orbit_elements, orbit_coefficients, norm)` triple. See
+[`SYMMETRY.md`](SYMMETRY.md) §6 for the projector duck-type,
+the ABI placeholders (`InternalZ2Projector`,
+`AntiunitaryProjector`), and the SU(2) discussion (Casimir
+polynomial vs coupled basis).
 
 ## Inventory
 
@@ -90,15 +115,31 @@ falls out of the concrete operator subclass.
 The unified solver-facing interface is `ed::matvec::MatVecOperator`
 (`ed/matvec/matvec.h`). Every concrete operator class derives from it:
 
-| Type                                            | Header                                       |
-|-------------------------------------------------|----------------------------------------------|
-| `MatVecOperator` (abstract)                     | `ed/matvec/matvec.h`                         |
-| `Operator` (full Hilbert space)                 | `ed/core/operator.h`                         |
-| `FixedSzOperator` (fixed total Sz)              | `ed/core/fixed_sz_operator.h`                |
-| `StreamingSymmetryOperator` (symmetry block)    | `ed/core/streaming_symmetry.h`               |
-| `FixedSzStreamingSymmetryOperator`              | `ed/core/streaming_symmetry.h`               |
-| `DistributedOperator` / variants                | `ed/distributed/*.h`                         |
-| `GPUOperator` / `GPUFixedSzOperator` / GPU-symm | `ed/gpu/*.h`                                 |
+| Type                                            | Header                                       | (Subspace, ProjectorChain) |
+|-------------------------------------------------|----------------------------------------------|----------------------------|
+| `MatVecOperator` (abstract)                     | `ed/matvec/matvec.h`                         | —                          |
+| `Operator` (full Hilbert space)                 | `ed/core/operator.h`                         | `(FullSpace, [])`          |
+| `FixedSzOperator` (fixed total Sz)              | `ed/core/fixed_sz_operator.h`                | `(FixedSz, [])`            |
+| `StreamingSymmetryOperator` (symmetry block)    | `ed/core/streaming_symmetry.h`               | `(FullSpace, [Spatial])`   |
+| `FixedSzStreamingSymmetryOperator`              | `ed/core/streaming_symmetry.h`               | `(FixedSz, [Spatial])`     |
+| `DistributedOperator` / variants                | `ed/distributed/*.h`                         | per-class                  |
+| `GPUOperator` / `GPUFixedSzOperator` / GPU-symm | `ed/gpu/*.h`                                 | per-class                  |
+
+The right-hand column shows the orthogonal symmetry-composition
+breakdown introduced in May 2026 (see "Sub-axis" above). The
+`Subspace` types live in
+[`include/ed/symmetry/subspace.h`](../../include/ed/symmetry/subspace.h);
+the `Projector` duck-type and the production `SpatialProjector`
+live in
+[`include/ed/symmetry/projector.h`](../../include/ed/symmetry/projector.h);
+the chain container + the templated orbit-builder
+`compute_orbit_for_state<Subspace>(...)` live in
+[`include/ed/symmetry/projector_chain.h`](../../include/ed/symmetry/projector_chain.h).
+The host-side orbit/character builders inside
+`streaming_symmetry.h` (`computeOrbitData`,
+`computeOrbitDataFixedSz`) both delegate to that single helper;
+output is bit-identical to the pre-refactor inline loops, pinned by
+[`tests/unit/test_projector_chain.cpp`](../../tests/unit/test_projector_chain.cpp).
 
 The runtime basis-policy + `SquareOperator<MS>` / `RectangularOperator<MS>`
 wrapper layer described in the original Phase-2 plan was retired in
@@ -149,8 +190,9 @@ by a host-bound copy per Ritz vector. The legacy `GPULanczos::run` is
 retained only as a defensive fallback (invoked from a try/catch when
 the facade throws — currently the only realistic trigger is the
 `keep_basis = true` assertion under heavy device-memory pressure).
-Every existing call site in `ed_wrapper.h` / `ed_wrapper_streaming.h`
-picks up the new path without a source change; `test_cuda_backend`
+Every call site in the orchestrator's GPU lane (`ed::workflows::solve`
+via `runGPULanczos`) and the streaming-symmetry GPU kernels picks up
+the new path without a source change; `test_cuda_backend`
 pins eigenvalue accuracy to 1e-8 and eigenpair residuals
 `|| H y - λy ||` to 1e-6, with `test_cpu_gpu_equivalence` adding a
 second seal at the wrapper level.
@@ -236,14 +278,14 @@ The dynamical-correlator coverage moves to Phase 6 primitives.
 
 | Phase | Deliverable                                       | Status |
 |-------|---------------------------------------------------|--------|
-| 1     | Retire algorithms + delete kernel files           | **Done** — ~11 kLOC deleted (CG/ARPACK/SCALAPACK/HYBRID/FTLM_JP/FTLM_LTLM_DYN/FTLM_SSSF + Davidson/LOBPCG/Block-Krylov-Schur + ARPACK_THRESHOLDS/IRLM/TRLM/Chebyshev_Filtered/Shift_Invert/OSS solver bodies, plus all retired enum values, dispatch cases, auto-pilot heuristics, Python `qed.diag` branches, GPU LOBPCG/Davidson/Block-Krylov-Schur paths + their `GPUIterativeSolver` + `GPUBlockKrylovSchur` classes + the LOBPCG Eigen helper. May-2026 follow-on: also removed the single-state / FTLM-thermal duplicates `compute_dynamical_response`, `compute_dynamical_correlation_state` (CPU), and their GPU counterparts `runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation[State,StateCF]`, `runGPUFTLMFixedSz`, `runGPUThermalExpectation` plus the underlying `GPUFTLMSolver::computeDynamicalResponse[Thermal]` / `computeDynamicalCorrelation[State,StateCF]` / `computeThermalExpectation` methods + their helper methods `computeSpectralFunction[Complex]` / `computeOverlapsWithBasis`, and the dead inline helpers `process_thermal_correlations`, `diagonalize_matrix_free`, `get_fallback_method` in `ed_wrapper.h`.) |
+| 1     | Retire algorithms + delete kernel files           | **Done** — ~11 kLOC deleted (CG/ARPACK/SCALAPACK/HYBRID/FTLM_JP/FTLM_LTLM_DYN/FTLM_SSSF + Davidson/LOBPCG/Block-Krylov-Schur + ARPACK_THRESHOLDS/IRLM/TRLM/Chebyshev_Filtered/Shift_Invert/OSS solver bodies, plus all retired enum values, dispatch cases, auto-pilot heuristics, Python `qed.solve` branches, GPU LOBPCG/Davidson/Block-Krylov-Schur paths + their `GPUIterativeSolver` + `GPUBlockKrylovSchur` classes + the LOBPCG Eigen helper. May-2026 follow-on: also removed the single-state / FTLM-thermal duplicates `compute_dynamical_response`, `compute_dynamical_correlation_state` (CPU), and their GPU counterparts `runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation[State,StateCF]`, `runGPUFTLMFixedSz`, `runGPUThermalExpectation` plus the underlying `GPUFTLMSolver::computeDynamicalResponse[Thermal]` / `computeDynamicalCorrelation[State,StateCF]` / `computeThermalExpectation` methods + their helper methods `computeSpectralFunction[Complex]` / `computeOverlapsWithBasis`, and the dead inline helpers `process_thermal_correlations`, `diagonalize_matrix_free`, `get_fallback_method` in `ed_wrapper.h`.) |
 | 2     | SquareOperator / RectangularOperator + factories  | **Retired (May 2026)** — the `ed::core::SquareOperator<MS>`, `ed::core::RectangularOperator<MS>`, `BasisPolicy<MS>` runtime hierarchy, and `square_operator_factories.h` were deleted along with their lockdown test `test_square_operator.cpp`. Zero production consumers had migrated. The unification work happened on the simpler axis: `Operator` / `FixedSzOperator` / `*Symmetry*` / `Distributed*` / `GPU*` all derive from the single `ed::matvec::MatVecOperator` base, which is what every solver consumes. |
 | 3     | CudaBackend / MpiCudaBackend headers + facades    | **Done (days 7-12)** — CudaBackend + GPU Lanczos (day 7), BOTH CPU+MPI Lanczos paths consolidated onto `lanczos_kernel<MpiBackend>` (day 8), distributed Krylov-Schur per-cycle Lanczos also delegating via new `aux_ortho_ptrs` (day 9), `MpiCudaBackend` + Phase C migration (days 11-12, GPU+MPI Lanczos / Krylov-Schur / FTLM all kernel-driven). `ed/matvec/backends/cuda_backend.cuh` is the real cuBLAS-driven `Backend` implementation. `runGPULanczos(...)` / `runGPULanczosFixedSz(...)` route *both* branches into `src/solvers/gpu/gpu_lanczos_kernel_facade.cu`. **Day 8:** templated CPU+MPI kernel in `include/ed/distributed/distributed_lanczos_kernel.h` is a ~30-line facade over `lanczos_kernel<MpiBackend>`; the row-slab entry point in `src/distributed/distributed_lanczos.cpp` was collapsed too (665 → 310 LOC). **Day 9:** the thick-restart `src/distributed/distributed_krylov_schur.cpp` had its own inline per-cycle Lanczos body that orthogonalised against the union of the locked Ritz set and the in-cycle basis. The kernel didn't speak that idiom yet, so day 9 added `LanczosKernelOptions::aux_ortho_ptrs` (a fixed user-supplied ortho set the CGS2 pass projects out alongside the basis) and migrated the KS body to use it. Per-step Allreduce count drops from `2*(k+m)` sequential to `2` batched, same headline speedup the day-1 batched-CGS2 work brought to plain Lanczos now extends to thick-restart KS. Same convergence semantics across all paths preserved via `LanczosKernelOptions::convergence_check` + the `ed::krylov::make_smallest_ritz_convergence(exct, tol)` factory in `include/ed/krylov/ritz_convergence.h`. Day 8 also fixed two correctness bugs surfaced by the migration: (i) `cap = min(max_iter, local_n)` was wrong for distributed runs where `local_n < global_dim` — added `LanczosKernelOptions::dim_cap`; (ii) the kernel's `if (local_n == 0) return` was deadlocking np=4 runs on small symmetry sectors where some ranks receive an empty slab — removed. Cumulative Lanczos-body LOC eliminated across days 8-9: ~410. `MpiCudaBackend` (NCCL + cuBLAS sibling) is the next deliverable. Remaining unmigrated Lanczos body: `src/distributed/distributed_lanczos_gpu.cu`. |
 | 4     | block_lanczos / krylov_schur kernel headers       | **CPU-only facade, statically enforced.** `block_lanczos_kernel<Backend>` and `krylov_schur_kernel<Backend>` are inline templates that delegate to the existing CPU bodies in `src/solvers/cpu/lanczos.cpp` and round-trip through `test_kernel_facades.cpp`. As of day-10 the Backend template parameter has a `static_assert(std::is_base_of_v<CpuBackend, Backend>)` to surface mis-use at compile time — the body does not consult the backend object and uses BLAS-3 / Schur-reordering primitives that the `Backend` interface does not expose. CPU+MPI Krylov-Schur **is** unified — `src/distributed/distributed_krylov_schur.cpp` delegates its per-cycle Lanczos build to `lanczos_kernel<MpiBackend>` with `aux_ortho_ptrs` (day 9). GPU Krylov-Schur / GPU Block-Lanczos remain hand-rolled (`gpu_krylov_schur.cu` / `gpu_block_lanczos.cu`) pending either a BLAS-3 expansion of the Backend interface or a contiguous-buffer Backend variant — see STRUCTURAL_AUDIT.md "Phases B+D — what's now true" section for the current scoreboard. |
 | 5     | FTLM / LTLM / mTPQ / cTPQ / KPM-DOS kernel headers| **Working CPU facade** — all five `template<Backend, MatvecFn>` kernels have real inline bodies delegating to the CPU `finite_temperature_lanczos`, `low_temperature_lanczos`, `microcanonical_tpq`, `canonical_tpq`, and `ed::kpm_dos::compute_kpm_dos`. Round-tripped in `test_kernel_facades.cpp`. |
 | 6     | 5 correlator-primitive headers                    | **Working CPU facade** — `expectation_value`, `static_correlator`, `cf_dynamical_correlator`, `kpm_dynamical_correlator`, `time_evolution_correlator` are real inline templates. `time_evolution_correlator` is fully self-contained (composes `B.apply`, Krylov time-step from `ed/solvers/dynamics.h`, and `Backend::dot`); the others delegate to the CPU legacy entry points. |
 | 7     | Workflow facade `ed/workflows/workflows.h`        | **Retired (May 2026)** — header and namespace deleted. `WorkflowResult` had no consumers and the CLI workflow body in `src/cli/workflows.cpp` already composes the kernels above directly. |
-| 8     | Auto-pilot dispatch `ed/auto/dispatch.h`          | **Retired (May 2026)** — header deleted. `Device`, `DispatchKey`, `memory_space_for`, `has_implementation`, and `to_string` had no implementation and no consumers. The live dispatch surfaces are `ed/auto/solve.h` (`AutoSolveOptions`, `solve(Operator&)`), `ed/auto/diag_tune.h`, `ed/auto/thermal.h`, `ed/auto/dssf.h`, and `ed/core/dispatch.h` (304 lines). |
+| 8     | Auto-pilot dispatch `ed/auto/dispatch.h`          | **Retired (May 2026)** — header deleted. `Device`, `DispatchKey`, `memory_space_for`, `has_implementation`, and `to_string` had no implementation and no consumers. The live dispatch surface is now the orchestrator in `ed/orchestrator.h` (`ed::workflows::{solve, thermal, spectral}` + `SolveOptions` / `ThermalOptions` / `SpectralOptions`) together with `ed::make_operator(OperatorSpec)` in `ed/core/make_operator.h`. The entire `ed/auto/{solve,thermal,dssf,diag_tune,dssf_tune}.h` family was deleted in the surface-unification collapse alongside `ed/core/dispatch.h`. |
 | 9     | Test retirement + this document                   | **Done** — retired 8 obsolete tests (`test_ftlm_jp.cpp`, `test_ftlm_ltlm_dyn.cpp`, `test_ftlm_sssf.cpp`, `test_ftlm_kpm.cpp`, `test_thermal_methods.cpp`, `test_tpq_dynamical.cpp`, `test_method_canonicalize.cpp`, `test_square_operator.cpp`); added `test_kernel_facades.cpp`; updated audit / codemap / symmetry docs to point at this file. **268/268** tests pass after the refactor. |
 
 ### Scaffold vs working facade
@@ -294,12 +336,13 @@ The remaining forward path:
    (each workflow is a 20-50 line composition) is still good --
    apply it inside `workflows.cpp` rather than against a separate
    header.
-3. The dispatch logic in `ed/core/ed_wrapper.h` (~2140 lines) can be
-   re-expressed as a small table over `(algorithm, device,
-   basis-flag)` triples once the kernel facades cover GPU/MPI/MPI-CUDA.
-   The earlier `ed/auto/dispatch.h` sketch was a forward-only enum
-   that did not match the live `Device` enum in `ed/auto/solve.h`;
-   the live one is what new consumers should target.
+3. The dispatch logic that used to live in `ed/core/ed_wrapper.h`
+   (~2140 lines) was re-expressed as a small set of factory branches
+   in `ed::make_operator(OperatorSpec)` (`include/ed/core/make_operator.h`)
+   plus three orchestrator entry points in `ed::workflows::*`
+   (`include/ed/orchestrator.h`). The earlier `ed/auto/dispatch.h` sketch
+   was a forward-only enum that never matched a live API; the surface
+   above is what new consumers should target.
 
 ## Non-decisions (deferred deliberately)
 

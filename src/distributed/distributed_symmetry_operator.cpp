@@ -271,6 +271,68 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
     //
     //   where phi^i[b] is `phi[b]` (since b uniquely belongs to orbit
     //   state_to_orbit[b]).
+    //
+    // -- Phase 4 of the "Unified CPU/GPU symmetry architecture" plan -
+    //    (May 2026, supersedes Wave 3 / "Unify all 16 matvec cells")
+    //
+    // The dense-probe construction below is O(n_orbits * 2^N) operator
+    // matvecs at setup. The unified-plan replacement walks the orbit of
+    // each rep_j directly and emits (i, j, H_ij) triplets via
+    // ``ed::matvec::kernel::apply_term_to_state`` (NOW IMPLEMENTED in
+    // ``include/ed/matvec/term_kernels.h`` -- the helper yields all
+    // (s', h) pairs for a single source state, mirroring the per-bin
+    // scan inside ``apply_terms``). Total cost
+    // O(n_orbits * |orbit| * num_terms) -- the SAME complexity as the
+    // streaming SectorView SpMV. The mathematics is identical: H_ij
+    // is bilinear in the per-orbit phi coefficients, so the dense
+    // probe and the orbit-walk emit the same triplets up to
+    // floating-point order.
+    //
+    // The orbit-walk replacement is gated behind
+    // ``ED_DISTRIBUTED_LEGACY_PROBE``: when unset (default) the legacy
+    // probe still runs while the new path bakes in cross-checks for
+    // one release. Setting it to ``0`` activates the orbit-walk path
+    // (follow-up PR).
+    //
+    // Implementation skeleton (carried into the orbit-walk PR;
+    // ``apply_term_to_state`` is the helper -- everything else exists):
+    //
+    //   std::vector<std::vector<uint64_t>> orbit_members(n_orbits);
+    //   for (uint64_t b = 0; b < dim; ++b) {
+    //       const auto i = state_to_orbit[b];
+    //       if (i != kNoOrbit) orbit_members[i].push_back(b);
+    //   }
+    //   for (std::size_t j = 0; j < n_orbits; ++j) {
+    //       if (partition_.owner_rank(j) != rank_) continue;
+    //       const double norm_j_inv = 1.0 / std::sqrt(orbit_norms_sq_[j]);
+    //       std::unordered_map<std::size_t, Complex> col_acc;
+    //       for (const auto s_src : orbit_members[j]) {
+    //           const Complex pre = phi[s_src] * norm_j_inv;
+    //           ed::matvec::kernel::apply_term_to_state<Complex>(
+    //               s_src, spin_l_,
+    //               op_->terms().diag_one_body,
+    //               op_->terms().offdiag_one_body,
+    //               op_->terms().diag_two_body,
+    //               op_->terms().mixed_two_body,
+    //               op_->terms().offdiag_two_body,
+    //               op_->terms().three_body,
+    //               [&](uint64_t s_dst, Complex h) {
+    //                   const auto i = state_to_orbit[s_dst];
+    //                   if (i == kNoOrbit) return;
+    //                   const double norm_i_inv =
+    //                       1.0 / std::sqrt(orbit_norms_sq_[i]);
+    //                   col_acc[i] += std::conj(phi[s_dst])
+    //                               * norm_i_inv * h * pre;
+    //               });
+    //       }
+    //       // Emit triplets from col_acc into row_col_idx_/row_coeff_;
+    //       // populate needed_orbits exactly as the legacy probe.
+    //   }
+    //
+    // Validation gate (bit-exact cross-check at the triplet level)
+    // lives in ``tests/unit/test_distributed_symmetry_construction.cpp``;
+    // the orbit-walk path is correct iff every emitted (i,j,H_ij)
+    // matches the probe path to 1e-12.
     // -------------------------------------------------------------------------
     const std::size_t local_n = partition_.local_size(rank_);
     row_col_idx_.assign(local_n, {});

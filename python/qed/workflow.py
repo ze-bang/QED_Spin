@@ -1,71 +1,12 @@
-"""``qed.workflow``: maximally stress-free ED workflow (Phase 9).
+"""``qed.workflow``: implementation module for :func:`qed.solve`.
 
-This module is the recommended entry point for new code. It takes care of
-the three friction points the legacy multi-step API forces every user to
-solve themselves:
+This is the internal home of the auto-pilot (method picker, device
+picker, planner, auto-tuner, MPI launcher) that ``qed.solve`` exposes
+as a single kwargs-only entry point. Callers should import the public
+name :func:`qed.solve` instead of reaching in here directly.
 
-1. **Symmetry discovery.** :func:`find_symmetries` inspects an in-memory
-   :class:`qed.Operator`, runs the colored-graph automorphism
-   pipeline (the same one that powers ``automorphism_finder.py`` on
-   disk), and returns a :class:`SymmetryReport` summarising every
-   generator set the engine could find. The report also tells the user
-   whether total Sz is conserved and lists the available Sz sectors with
-   their dimensions, so they know which sector quantum number to pick.
-2. **Sector selection.** Users choose a generator set (or supply their
-   own permutations) and, if the Hamiltonian has U(1) Sz, an Sz value.
-   Both choices are optional.
-3. **Diagonalization.** :func:`diag` is the single, fully-defaulted
-   entry point: ``qed.diag(H)`` "just works" for the smallest cluster
-   and the same call at larger N transparently routes through the GPU
-   (when the build has it), the streaming symmetry kernel (when the
-   user supplies a generator set), the fixed-Sz operator (when the user
-   names a sector), or the dense LAPACK path (when the matrix is small
-   enough to be faster end-to-end).
-
-Quick start
------------
-
-.. code-block:: python
-
-    import qed as qed
-
-    # 1. Build a Hamiltonian.
-    lat = qed.input.lattice.chain(12, pbc=True)
-    H = (qed.input.HamiltonianBuilder(lat.num_sites)
-              .heisenberg(lat.nn_pairs(), 1.0)
-              .to_operator())
-
-    # 2. Discover symmetries (also reports U(1) Sz status + sectors).
-    report = qed.find_symmetries(H, lattice=lat)
-    print(report)
-
-    # 3. Pick a sector and call qed.diag with whatever defaults you like.
-    res = qed.diag(H,
-                   num_eigenvalues=4,
-                   symmetry=report.translation_set,    # or any GeneratorSet
-                   sz=0)                               # n_up = 6 for N=12 ring
-    print(res.eigenvalues)
-
-What ``diag`` does for you (smart defaults)
--------------------------------------------
-
-* ``num_eigenvalues`` (default 1) feeds into a heuristic that sets
-  ``max_iterations`` (the Krylov subspace size) so the requested
-  eigenvalues converge to the requested ``tolerance`` (default 1e-10)
-  without the caller having to reason about Krylov-space sizes.
-* ``solver=None`` lets the dispatcher pick: ``FULL`` for tiny
-  Hilbert spaces (LAPACK is end-to-end faster than Lanczos below
-  ``dim ~ 2048``), ``LANCZOS`` for the bottom of the spectrum at
-  moderate N, ``KRYLOV_SCHUR`` / ``BLOCK_LANCZOS`` when the user
-  asks for many eigenvalues. Pass an explicit
-  :class:`~qed.DiagonalizationMethod` value to override.
-* ``device=None`` picks ``"cpu"``, ``"gpu"``, ``"mpi"``, or
-  ``"mpi_gpu"`` based on Hilbert-space size, build introspection
-  (``has_cuda_build`` / ``has_mpi_build``), and the fact that an
-  in-process Python interpreter cannot host ``MPI_Init``. Pass
-  ``"cpu"`` / ``"gpu"`` to force a backend.
-* ``symmetry`` triggers the streaming symmetry kernel; ``sz``
-  triggers the fixed-Sz operator; both can be combined freely.
+The legacy alias :func:`qed.solve` has been removed; use
+:func:`qed.solve` everywhere.
 """
 
 from __future__ import annotations
@@ -88,10 +29,6 @@ from ._core import (  # type: ignore[attr-defined]
     FixedSzOperator,
     Operator,
     ThermodynamicData,
-    exact_diagonalization_core,
-    exact_diagonalization_from_directory,
-    exact_diagonalization_streaming_symmetry,
-    exact_diagonalization_streaming_symmetry_fixed_sz,
     has_cuda_build,
     has_mpi_build,
 )
@@ -100,7 +37,7 @@ __all__ = [
     "GeneratorSet",
     "SymmetryReport",
     "find_symmetries",
-    "diag",
+    "solve",
     "list_diag_parameters",
     "solver_device_support",
     "load_mpi_eigenvector",
@@ -117,22 +54,21 @@ SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
 
 
 # ---------------------------------------------------------------------------
-# Full Unified-Interface Collapse, Wave E4 (May 2026): the C++ pybind11
-# bindings `_core.exact_diagonalization_*` now emit a DeprecationWarning
-# to nudge external callers off the legacy surface. In-tree fallback
-# call sites (the GPU directory dispatcher and the streaming-symmetry
-# kernel, both of which the orchestrator does not yet fully cover)
-# suppress the warning so they don't trigger `pytest -W
-# error::DeprecationWarning`.
+# Surface unification (May 2026): the C++ pybind11 forwarders
+# `_core.exact_diagonalization_*` have been deleted in lockstep with
+# the Wave 2 / Wave 3 collapse. Every in-tree call site now routes
+# through `_core.workflows_*` (ground-state + thermal) or
+# `_core.workflows_solve_streaming_symmetry_directory` (streaming-
+# symmetry). This shim is preserved as a no-op for any third-party
+# code that imported it transitively; it will be deleted in the next
+# cycle.
 # ---------------------------------------------------------------------------
 @contextlib.contextmanager
 def _suppress_legacy_dispatch_warning():
-    """Silence the DeprecationWarning the C++ legacy bindings emit. Used
-    by the in-tree fallback paths that cannot yet route through
-    `_core.workflows_*`."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        yield
+    """No-op kept transiently for back-compat; the legacy bindings
+    that used to emit ``DeprecationWarning`` are gone, so there is
+    nothing to suppress."""
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +80,10 @@ def _suppress_legacy_dispatch_warning():
 # preserving the `EDResults` envelope every legacy caller expects.
 # ---------------------------------------------------------------------------
 
-# Ground-state methods the orchestrator's `workflows_solve` natively
-# supports. Thermal methods (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) keep
-# routing through the legacy `exact_diagonalization_core`; they'll move
-# under `_core.workflows_thermal` in Wave E2.
+# Ground-state methods the orchestrator's `workflows_solve` handles.
+# Thermal methods (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) route through
+# `_core.workflows_thermal` instead -- the dispatch is decided by the
+# helper `_diag_via_workflows_solve` below.
 _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.LANCZOS,
     DiagonalizationMethod.BLOCK_LANCZOS,
@@ -155,11 +91,81 @@ _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.FULL,
 })
 
+_THERMAL_METHOD_TO_CORE = {
+    DiagonalizationMethod.FTLM:    "FTLM",
+    DiagonalizationMethod.LTLM:    "LTLM",
+    DiagonalizationMethod.mTPQ:    "mTPQ",
+    DiagonalizationMethod.cTPQ:    "cTPQ",
+    DiagonalizationMethod.KPM_DOS: "KpmDos",
+}
+
 
 def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
     """True when `method` is one of the four ground-state lanes that
     `_core.workflows_solve` handles natively."""
     return method in _GROUND_STATE_METHODS
+
+
+def _ed_params_to_thermal_options(
+    params: EDParameters,
+    method: DiagonalizationMethod,
+) -> "_core.ThermalOptions":
+    """Translate the legacy `EDParameters` bag + a thermal
+    `DiagonalizationMethod` enumerator into a fresh
+    ``_core.ThermalOptions`` ready for ``workflows_thermal``."""
+    opts = _core.ThermalOptions()
+    enum_name = _THERMAL_METHOD_TO_CORE.get(method)
+    if enum_name is None:
+        raise ValueError(
+            f"_ed_params_to_thermal_options: method {method!r} is not a "
+            f"thermal lane. Use `_ed_params_to_solve_options` for "
+            f"ground-state methods."
+        )
+    opts.method        = getattr(_core.ThermalMethod, enum_name)
+    opts.num_samples   = int(params.num_samples)
+    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
+    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
+    # the number of (L - H) iterations; cTPQ uses it as the cap on the
+    # number of Taylor steps. For mTPQ/cTPQ we map the user's
+    # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
+    # closes a gap where the legacy adapter hardcoded 100 iterations
+    # for the TPQ lanes and never honoured the user's request.
+    if method == DiagonalizationMethod.FTLM:
+        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+    elif method == DiagonalizationMethod.LTLM:
+        opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
+    elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
+        if steps <= 0:
+            steps = int(getattr(params, "max_iterations", 1000) or 1000)
+        opts.krylov_dim = steps
+    else:
+        opts.krylov_dim = 100
+    opts.taylor_order  = int(params.tpq_taylor_order)
+    opts.delta_beta    = float(params.tpq_delta_beta)
+    opts.beta_max      = float(params.tpq_beta_max)
+    opts.random_seed   = int(
+        params.ftlm_seed or params.ltlm_seed or 0)
+    opts.output_dir    = str(params.output_dir or "")
+    opts.temp_min      = float(params.temp_min)
+    opts.temp_max      = float(params.temp_max)
+    opts.num_temp_bins = int(params.num_temp_bins)
+    return opts
+
+
+def _ed_result_from_thermal_result(
+    tr: "_core.ThermalResult",
+) -> EDResults:
+    """Wrap a `_core.ThermalResult` into the legacy `EDResults`
+    envelope (read by every downstream consumer that came through
+    the old dispatcher)."""
+    out = EDResults()
+    out.thermo_data = tr.thermo
+    out.eigenvalues = ([float(tr.ground_state_energy)]
+                       if tr.ground_state_energy != 0.0 else [])
+    out.eigenvectors_computed = False
+    out.eigenvectors_path     = ""
+    return out
 
 
 def _ed_params_to_solve_options(
@@ -194,7 +200,7 @@ def _ed_params_to_solve_options(
     opts.n_up                  = int(params.n_up)
     # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
     # knobs that may not be bound on the Python `EDParameters` (the
-    # in-process pybind11 surface only exposes what `qed.diag` consumes
+    # in-process pybind11 surface only exposes what `qed.solve` consumes
     # today). Fall back to defaults when the attribute is absent.
     opts.basis_cache_dir       = str(getattr(params, "basis_cache_dir", "") or "")
     opts.precompute_basis_only = bool(getattr(params, "precompute_basis_only", False))
@@ -206,8 +212,8 @@ def _ed_result_from_gs_result(
     params: EDParameters,
 ) -> EDResults:
     """Wrap a `_core.GroundStateResult` (the orchestrator's return shape)
-    into an `EDResults` so callers see the same envelope they got from
-    `exact_diagonalization_core`."""
+    into an `EDResults` so callers see the same envelope every legacy
+    consumer expects (eigenvalues + eigenvector-path bookkeeping)."""
     out = EDResults()
     out.eigenvalues = list(gs_result.eigenvalues)
     out.eigenvectors_computed = bool(params.compute_eigenvectors)
@@ -220,23 +226,31 @@ def _diag_via_workflows_solve(
     method: DiagonalizationMethod,
     params: EDParameters,
 ) -> EDResults:
-    """Route an in-memory `Operator` through the unified orchestrator
-    (`_core.workflows_solve`) for the ground-state lanes; transparently
-    falls back to the legacy `exact_diagonalization_core` for any
-    thermal method (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) that the
-    orchestrator's ground-state surface does not cover today.
+    """Route an in-memory `Operator` through the unified orchestrator.
 
-    Repoints lines 1105 / 2569 / 2577 of this file onto the new
-    surface as part of the Full Unified-Interface Collapse, Wave E1
-    (May 2026)."""
+    Ground-state methods (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL)
+    go through ``_core.workflows_solve``. Thermal methods (FTLM / LTLM
+    / mTPQ / cTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
+    No legacy fallback remains: the C++ ``exact_diagonalization_*``
+    family was deleted in the surface-unification collapse and every
+    Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
         opts = _ed_params_to_solve_options(params, method)
+        # The orchestrator's `workflows_solve` accepts an `Operator&`;
+        # if the caller already projected to a fixed-Sz sector we hand
+        # it the `FixedSzOperator` directly (it derives from `Operator`).
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
-    # Thermal methods still go through the legacy core; suppress the
-    # C++ deprecation warning since this is an in-tree fallback path.
-    with _suppress_legacy_dispatch_warning():
-        return exact_diagonalization_core(operator, method, params)
+    if method in _THERMAL_METHOD_TO_CORE:
+        opts = _ed_params_to_thermal_options(params, method)
+        tr = _core.workflows_thermal(operator, opts)
+        return _ed_result_from_thermal_result(tr)
+    raise ValueError(
+        f"_diag_via_workflows_solve: unsupported DiagonalizationMethod "
+        f"{method!r}. Supported: ground-state "
+        f"(LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL) and thermal "
+        f"(FTLM / LTLM / mTPQ / cTPQ / KPM_DOS)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,8 +298,8 @@ class GeneratorSet:
         # By explicit list of indices:
         custom    = full.subgroup([1])            # same as full[1]
 
-        # Then pass any GeneratorSet to qed.diag(...):
-        eigs = qed.diag(H, symmetry=rot_only).eigenvalues
+        # Then pass any GeneratorSet to qed.solve(...):
+        eigs = qed.solve(H, symmetry=rot_only).eigenvalues
 
     The returned subgroup is a fresh :class:`GeneratorSet` whose
     ``group_size`` is the product of the selected generators' orders
@@ -336,7 +350,7 @@ class GeneratorSet:
             A new generator set named ``"<self.name>[i,j,...]"`` whose
             ``group_size`` is the product of the selected generators'
             orders. Pass it directly as ``symmetry=`` to
-            :func:`diag`.
+            :func:`solve`.
 
         Examples
         --------
@@ -444,7 +458,7 @@ class SymmetryReport:
             for n_up, dim in self.sz_sectors:
                 lines.append(f"    sz={n_up:3d}   dim={dim}")
             lines.append(
-                "  -> pass `sz=<n_up>` to qed.diag(...) to restrict "
+                "  -> pass `sz=<n_up>` to qed.solve(...) to restrict "
                 "to a sector."
             )
         else:
@@ -462,7 +476,7 @@ class SymmetryReport:
         lines.append("")
         lines.append(
             "  -> pass any GeneratorSet (or list[Permutation]) as "
-            "`symmetry=...` to qed.diag(...)."
+            "`symmetry=...` to qed.solve(...)."
         )
         if (
             self.full_set is not None
@@ -476,7 +490,7 @@ class SymmetryReport:
             )
         lines.append(
             "  -> call qed.list_diag_parameters() to see every "
-            "knob qed.diag(...) supports via extra_params=..."
+            "knob qed.solve(...) supports via extra_params=..."
         )
         return "\n".join(lines)
 
@@ -602,7 +616,7 @@ def find_symmetries(
         raise ImportError(
             "find_symmetries() requires pynauty and networkx. Install "
             "with `pip install pynauty networkx` (or skip find_symmetries "
-            "entirely and pass your own generators to qed.diag(...))."
+            "entirely and pass your own generators to qed.solve(...))."
         ) from e
 
     # The legacy pipeline prints quite a lot. The cheapest way to silence
@@ -704,7 +718,7 @@ def find_symmetries(
 # ---------------------------------------------------------------------------
 
 
-def diag(
+def solve(
     H: Union[Operator, FixedSzOperator],
     *,
     num_eigenvalues: int = 1,
@@ -715,6 +729,7 @@ def diag(
     symmetry: SymmetryArg = None,
     sector: Optional[Sequence[int]] = None,
     sz: Optional[int] = None,
+    auto_sz: bool = True,
     output_dir: str = "",
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
@@ -881,27 +896,27 @@ def diag(
 
     .. code-block:: python
 
-        eigs = qed.diag(H).eigenvalues
+        eigs = qed.solve(H).eigenvalues
 
     Bottom-of-spectrum, fixed Sz:
 
     .. code-block:: python
 
-        eigs = qed.diag(H, num_eigenvalues=4, sz=N // 2).eigenvalues
+        eigs = qed.solve(H, num_eigenvalues=4, sz=N // 2).eigenvalues
 
     Symmetry projection:
 
     .. code-block:: python
 
         report = qed.find_symmetries(H, lattice=lat)
-        eigs = qed.diag(H, symmetry=report.full_set,
+        eigs = qed.solve(H, symmetry=report.full_set,
                         sz=N // 2, num_eigenvalues=2).eigenvalues
 
     Thermal trajectory via mTPQ:
 
     .. code-block:: python
 
-        res = qed.diag(H, solver="mTPQ",
+        res = qed.solve(H, solver="mTPQ",
                        sz=N // 2,         # OK
                        num_samples=4,
                        target_beta=20.0,
@@ -910,7 +925,7 @@ def diag(
     """
     if not isinstance(H, Operator):
         raise TypeError(
-            f"qed.diag(H, ...) expected Operator or FixedSzOperator, "
+            f"qed.solve(H, ...) expected Operator or FixedSzOperator, "
             f"got {type(H).__name__}"
         )
 
@@ -933,7 +948,7 @@ def diag(
                     f"sz={sz} implies dimension C({num_sites}, {sz})={expected} "
                     f"but the supplied FixedSzOperator has dimension {H.dimension}. "
                     "Pass `H` and `sz` as a matched pair, or pass an Operator "
-                    "and let qed.diag construct the FixedSzOperator for you."
+                    "and let qed.solve construct the FixedSzOperator for you."
                 )
             op_to_use = H
         else:
@@ -951,24 +966,37 @@ def diag(
             op_to_use = H.make_fixed_sz(int(sz))
             if verbose:
                 d = op_to_use.dimension
-                print(f"[qed.diag] Sz sector n_up={sz}: dim={d} "
+                print(f"[qed.solve] Sz sector n_up={sz}: dim={d} "
                       f"(reduced from {base_dim}).")
     elif fixed_sz_input and verbose:
-        print(f"[qed.diag] FixedSzOperator supplied: dim={H.dimension}.")
-    elif (sz is None and not fixed_sz_input and verbose
-          and H.conserves_sz()):
-        # Proactive hint: the user is paying for the full 2^N Hilbert
-        # space even though the Hamiltonian respects total Sz. The
-        # Sz=N/2 sector is C(N, N/2) ~ 2^N / sqrt(πN/2), i.e. roughly a
-        # √(πN/2)× speedup at zero risk.
-        try:
-            half = num_sites // 2
-            sec = math.comb(num_sites, half)
-            print(f"[qed.diag] HINT: this Hamiltonian conserves total Sz. "
-                  f"Passing sz={half} would project onto the C({num_sites}, "
-                  f"{half})={sec} sector (full dim={base_dim}).")
-        except Exception:  # pragma: no cover  -- defensive against odd N
-            pass
+        print(f"[qed.solve] FixedSzOperator supplied: dim={H.dimension}.")
+    elif (sz is None and not fixed_sz_input and auto_sz
+          and H.conserves_sz()
+          and not (isinstance(device, str)
+                   and device.lower() in ("mpi", "mpi_gpu"))):
+        # Auto-Sz projection: the Hamiltonian respects total Sz but no
+        # sector was named. Default to the half-filling sector
+        # n_up = N//2 (where the ground state lives for Heisenberg-style
+        # antiferromagnets) -- it is C(N, N//2) ~ 2^N / sqrt(pi N/2),
+        # i.e. a sqrt(pi N/2)x speedup over the full 2^N Hilbert space
+        # at no accuracy cost. Pass ``auto_sz=False`` to keep the full
+        # Hilbert space, or ``sz=k`` to pick a different sector.
+        #
+        # MPI / MPI+GPU lanes are excluded from auto-Sz: the standalone
+        # ed_distributed_main binary loads from full-Hilbert .dat files
+        # only; the Sz projection happens inside the MPI driver via the
+        # `sz=` argument that gets forwarded through the launcher.
+        half = num_sites // 2
+        op_to_use = H.make_fixed_sz(int(half))
+        sz = half
+        if verbose:
+            try:
+                sec = math.comb(num_sites, half)
+            except Exception:  # pragma: no cover - defensive against odd N
+                sec = op_to_use.dimension
+            print(f"[qed.solve] auto-Sz: n_up={half}: dim={sec} "
+                  f"(reduced from {base_dim}). Pass auto_sz=False to "
+                  f"opt out, or sz=k for a different sector.")
 
     sector_dim = int(op_to_use.dimension)
 
@@ -996,7 +1024,7 @@ def diag(
     # Allow this combination through to `_diag_via_mpi`.
     if symmetry is not None and is_tpq and not use_mpi:
         raise ValueError(
-            "qed.diag(H, solver='mTPQ'/'cTPQ', symmetry=..., "
+            "qed.solve(H, solver='mTPQ'/'cTPQ', symmetry=..., "
             "device='cpu'/'gpu') is not supported: TPQ acts on a "
             "single random state across the whole sector and per-"
             "symmetry-block diagonalisation does not factor through "
@@ -1025,14 +1053,20 @@ def diag(
         effective_output = f"qed_thermal_{method.name}_{ts}"
         os.makedirs(effective_output, exist_ok=True)
         if verbose:
-            print(f"[qed.diag] thermal solver: writing trajectory + "
+            print(f"[qed.solve] thermal solver: writing trajectory + "
                   f"thermodynamic data to {effective_output!r} "
                   "(pass output_dir=... to choose explicitly).")
+    elif is_thermal and output_dir:
+        # Surface-unification follow-up (May 2026): the orchestrator's
+        # `_core.workflows_thermal` does NOT mkdir its `output_dir`.
+        # We mirror the historical mkdir-then-write behaviour here so
+        # callers can pass a fresh path without manual mkdir.
+        os.makedirs(output_dir, exist_ok=True)
 
     if verbose:
         method_name = method.name if hasattr(method, "name") else str(method)
         kind = "thermal" if is_thermal else "eigenvalue"
-        print(f"[qed.diag] solver={method_name} ({kind})  "
+        print(f"[qed.solve] solver={method_name} ({kind})  "
               f"num_eigenvalues={num_eigenvalues}  "
               f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
 
@@ -1073,7 +1107,7 @@ def diag(
             return EDResults()  # planner-only mode; no kernel dispatch
         if not report.feasible and not force:
             raise ResourceError(
-                f"qed.diag planner judged the request infeasible: "
+                f"qed.solve planner judged the request infeasible: "
                 f"bottleneck={report.bottleneck}. See the report above for "
                 "ranked suggestions, or pass force=True to dispatch anyway "
                 "(at your own risk).",
@@ -1115,11 +1149,13 @@ def diag(
             setattr(params, key, value)
 
     # ------------------------------------------------------------------
-    # 4.5. Auto-tune family-specific knobs (Phase 9.3). Sentinel-based
-    #     fill: only EDParameters fields still at their struct default
-    #     get overwritten, so anything set above by the user (kwargs
-    #     or ``extra_params``) passes through untouched. Mirrors the
-    #     C++ ``apply_auto_tune`` in include/ed/auto/diag_tune.h.
+    # 4.5. Auto-tune family-specific knobs. Sentinel-based fill: only
+    #     EDParameters fields still at their struct default get
+    #     overwritten, so anything set above by the user (kwargs or
+    #     ``extra_params``) passes through untouched. The C++ mirror
+    #     of these heuristics lives in the kernel-specific options
+    #     structs (e.g. ``FtlmKernelOptions``); the surface-unification
+    #     collapse retired the cross-cutting ``ed/auto/diag_tune.h``.
     # ------------------------------------------------------------------
     if auto_tune:
         from . import auto_tune as _at
@@ -1172,7 +1208,7 @@ def diag(
             if current == sentinel:
                 setattr(params, fname, _TUNED_VALUES[fname])
         if verbose:
-            print(f"[qed.diag] auto-tune (level={tuned.level}): "
+            print(f"[qed.solve] auto-tune (level={tuned.level}): "
                   f"tol={params.tolerance:g} max_iter={params.max_iterations} "
                   f"ftlm_M={params.ftlm_krylov_dim} "
                   f"ltlm_M={params.ltlm_krylov_dim} "
@@ -1182,12 +1218,13 @@ def diag(
 
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:
-    #     * symmetry path → streaming kernel (handles GPU per-sector).
-    #     * GPU + no-symmetry → temp-dir + from_directory (the
-    #       in-process exact_diagonalization_core cannot build a
-    #       GPUOperator handle from an in-memory Operator; the
-    #       directory dispatcher handles that for us).
-    #     * CPU + no-symmetry → in-process exact_diagonalization_core
+    #     * symmetry path → orchestrator's streaming-symmetry kernel
+    #       via ``_core.workflows_solve_streaming_symmetry_directory``
+    #       (handles GPU per-sector).
+    #     * GPU + no-symmetry → orchestrator with
+    #       ``BackendConstraints::allow_gpu = true`` (the orchestrator
+    #       builds the right GPUOperator under the hood).
+    #     * CPU + no-symmetry → orchestrator with the CPU lane
     #       (the fastest path, no I/O).
     # ------------------------------------------------------------------
     if symmetry is not None:
@@ -1386,7 +1423,7 @@ def solver_device_support(
                 cells[device] = {
                     "kernel": True,
                     "available": mpi_ok,
-                    "note": ("launch via qed.diag(H, device='mpi', "
+                    "note": ("launch via qed.solve(H, device='mpi', "
                              "mpi_n_ranks=N) or qed.mpi.run_distributed(...)"
                              if mpi_ok
                              else "build has WITH_MPI=OFF; rebuild with "
@@ -1396,7 +1433,7 @@ def solver_device_support(
                 cells[device] = {
                     "kernel": True,
                     "available": cuda_ok and mpi_ok,
-                    "note": ("launch via qed.diag(H, device='mpi_gpu', "
+                    "note": ("launch via qed.solve(H, device='mpi_gpu', "
                              "mpi_n_ranks=N) or qed.mpi.run_distributed("
                              "use_gpu=True)"
                              if (cuda_ok and mpi_ok)
@@ -1438,10 +1475,10 @@ def list_diag_parameters(
     *,
     return_dict: bool = False,
 ) -> Optional[dict[str, list[tuple[str, Any]]]]:
-    """Print (or return) every parameter accepted by :func:`diag` via
+    """Print (or return) every parameter accepted by :func:`solve` via
     ``extra_params=...``.
 
-    Most users only need the keyword arguments :func:`diag` exposes
+    Most users only need the keyword arguments :func:`solve` exposes
     directly (``num_eigenvalues``, ``tolerance``, ``solver``,
     ``device``, ``symmetry``, ``sz``, ``output_dir``,
     ``compute_eigenvectors``, ``max_iterations``, ``block_size``).
@@ -1485,7 +1522,7 @@ def list_diag_parameters(
 
     .. code-block:: python
 
-        eigs = qed.diag(
+        eigs = qed.solve(
             H,
             num_eigenvalues=6,
             solver="FTLM",
@@ -1532,7 +1569,7 @@ def list_diag_parameters(
     descriptions = {name: desc for name, desc, _ in _PARAMETER_CATEGORIES}
     print(
         "EDParameters fields (pass any of these via "
-        "qed.diag(..., extra_params={...})):"
+        "qed.solve(..., extra_params={...})):"
     )
     for cat_name, rows in catalog.items():
         title = descriptions.get(cat_name, "")
@@ -1544,7 +1581,7 @@ def list_diag_parameters(
     print()
     print(
         "Note: the most common knobs are first-class kwargs of "
-        "qed.diag(...). Use extra_params={...} only for the niche "
+        "qed.solve(...). Use extra_params={...} only for the niche "
         "fields above."
     )
     return None
@@ -1825,12 +1862,12 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
     """Pick (use_gpu, use_mpi).
 
     Single-GPU is honoured for any solver the in-process build supports,
-    via a temp-dir routing in :func:`diag` (see ``_diag_via_directory``).
+    via a temp-dir routing in :func:`solve` (see ``_diag_via_directory``).
     MPI / MPI+GPU are also honoured via a sibling temp-dir + subprocess
     routing (:func:`_diag_via_mpi`) that spawns the standalone
     ``ed_distributed_main`` driver under ``mpiexec``. Python itself
     cannot host ``MPI_Init`` cleanly, so the launch is always a
-    subprocess; ``qed.diag`` waits for it to finish and reads the
+    subprocess; ``qed.solve`` waits for it to finish and reads the
     HDF5 result file the binary writes into the temp dir.
 
     Returns ``(use_gpu, use_mpi)``. The diag dispatcher uses both flags
@@ -1852,7 +1889,7 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
         return True, False
     if device_lc == "mpi":
         # Note: the Python extension's WITH_MPI flag is irrelevant for
-        # the MPI dispatch path -- qed.diag(device='mpi') shells out to
+        # the MPI dispatch path -- qed.solve(device='mpi') shells out to
         # the standalone `ed_distributed_main` binary via mpiexec, which
         # is built independently from the Python extension. The only
         # hard requirement is that the binary be reachable. We surface
@@ -1982,31 +2019,20 @@ def _diag_via_directory(
     *,
     verbose: bool,
 ) -> EDResults:
-    """Run the GPU-aware directory dispatcher on an in-memory Operator.
+    """Route a GPU request for an in-memory Operator through the orchestrator.
 
-    The in-process ``exact_diagonalization_core`` cannot construct a
-    ``GPUOperator`` handle from an in-memory ``Operator`` (the GPU
-    kernels need files via ``GPUEDWrapper::createGPUOperatorFromFiles``).
-    This helper bridges that gap: it dumps the operator to a temp
-    directory and calls the canonical 5-axis
-    ``exact_diagonalization_from_directory`` dispatch, which routes
-    to the GPU branch when ``params.use_gpu = True``.
-
-    Used for the (no-symmetry, GPU) cell of the matrix; the symmetry
-    path goes through ``_diag_with_symmetry`` (the streaming kernel
-    has its own per-sector GPU dispatch).
+    The unified C++ orchestrator (`ed::workflows::solve` /
+    `ed::select_backend`) already knows how to pick the GPU lane when
+    `BackendConstraints.allow_gpu = true`, so we no longer need the
+    legacy temp-directory GPU dispatch path. We simply hand the
+    operator to `_diag_via_workflows_solve`; the orchestrator's
+    backend selector picks GPU when the build supports it and the
+    operator's geometry asks for it.
     """
-    tmpdir = tempfile.mkdtemp(prefix="qed_diag_dir_")
-    try:
-        _write_operator_directory(operator, tmpdir)
-        if verbose:
-            print(f"[qed.diag] GPU dispatch via temp directory {tmpdir!r}")
-        with _suppress_legacy_dispatch_warning():
-            return exact_diagonalization_from_directory(
-                tmpdir, method, params,
-            )
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    if verbose:
+        print(f"[qed.solve] GPU dispatch via _core.workflows_solve "
+              f"(backend selection: allow_gpu=True)")
+    return _diag_via_workflows_solve(operator, method, params)
 
 
 # ---------------------------------------------------------------------------
@@ -2099,7 +2125,7 @@ def _diag_via_mpi(
 
     if isinstance(operator, FixedSzOperator):
         raise NotImplementedError(
-            "qed.diag(H, device='mpi') with a FixedSzOperator is not "
+            "qed.solve(H, device='mpi') with a FixedSzOperator is not "
             "yet wired through ed_distributed_main; the standalone "
             "binary loads from full-Hilbert dat files only. Pass an "
             "Operator and use sz= so the projection happens after "
@@ -2248,7 +2274,7 @@ def _diag_via_mpi(
                 # Per-rank Lanczos slabs from a thermal aggregation
                 # would mix sectors and lose semantic meaning; reject.
                 raise ValueError(
-                    "qed.diag(device='mpi'/'mpi_gpu', symmetry=..., "
+                    "qed.solve(device='mpi'/'mpi_gpu', symmetry=..., "
                     "compute_eigenvectors=True) is not supported when "
                     "auto-aggregating across sectors. Pass sector= to "
                     "pin a single irrep, or run an eigenvalue solver "
@@ -2256,7 +2282,7 @@ def _diag_via_mpi(
                 )
 
         if verbose:
-            print(f"[qed.diag] MPI dispatch via {tmpdir!r} "
+            print(f"[qed.solve] MPI dispatch via {tmpdir!r} "
                   f"(n_ranks={effective_n_ranks}, mode={mode}, "
                   f"use_gpu={use_gpu}, "
                   f"symmetry={'yes' if symmetry else 'no'}, "
@@ -2294,7 +2320,7 @@ def _diag_via_mpi(
             if verbose and completed and completed.stdout:
                 tail = completed.stdout.strip().splitlines()[-12:]
                 for line in tail:
-                    print(f"[qed.diag.mpi q={sec_idx}] {line}")
+                    print(f"[qed.solve.mpi q={sec_idx}] {line}")
             per_sector_files.append((sec_idx, rfile))
 
         # ----------------------------------------------------------
@@ -2317,7 +2343,7 @@ def _diag_via_mpi(
         if not eigvec_dir:
             shutil.rmtree(tmpdir, ignore_errors=True)
         elif verbose:
-            print(f"[qed.diag] MPI eigenvector slabs preserved at {eigvec_dir!r}")
+            print(f"[qed.solve] MPI eigenvector slabs preserved at {eigvec_dir!r}")
 
 
 def load_mpi_eigenvector(
@@ -2340,7 +2366,7 @@ def load_mpi_eigenvector(
         Directory passed as ``--eigenvector-dir`` to
         ``ed_distributed_main`` (or, equivalently, the value
         of ``EDResults.eigenvectors_path`` returned from
-        :func:`qed.diag(..., device='mpi', compute_eigenvectors=True)`).
+        :func:`qed.solve(..., device='mpi', compute_eigenvectors=True)`).
     k : int, optional
         Index of the eigenvector to load (default 0 → ground state).
 
@@ -2629,7 +2655,7 @@ def _read_mpi_result_file(
         import h5py  # noqa: WPS433
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
-            "qed.diag(device='mpi') needs h5py to read the result file "
+            "qed.solve(device='mpi') needs h5py to read the result file "
             "produced by ed_distributed_main. `pip install h5py`."
         ) from e
 
@@ -2641,7 +2667,7 @@ def _read_mpi_result_file(
 
     if not os.path.isfile(path):
         raise RuntimeError(
-            f"qed.diag(device='mpi'): expected ed_distributed_main to "
+            f"qed.solve(device='mpi'): expected ed_distributed_main to "
             f"write {path!r} but it does not exist; check the MPI run "
             "stdout for an upstream error."
         )
@@ -2682,6 +2708,27 @@ def _diag_with_symmetry(
     sz: Optional[int],
     verbose: bool,
 ) -> EDResults:
+    """Route a symmetry-projected diagonalisation through the C++
+    streaming-symmetry pipeline.
+
+    Conceptually this is the Python facade for the
+    ``(Subspace, ProjectorChain)`` composition introduced in the
+    "Orthogonal symmetry composition" wave (May 2026; see
+    ``include/ed/symmetry/{subspace,projector,projector_chain}.h``).
+    The four legacy "modes" map onto the new decomposition as:
+
+        mode "none"      -> (FullSpaceSubspace, [])
+        mode "Sz"        -> (FixedSzSubspace,   [])
+        mode "Symm"      -> (FullSpaceSubspace, [SpatialProjector])
+        mode "Sz+Symm"   -> (FixedSzSubspace,   [SpatialProjector])
+
+    The kwargs to ``qed.solve`` are already orthogonal: ``sz=`` (or
+    passing a ``FixedSzOperator``) selects the subspace; ``symmetry=``
+    populates the chain with the spatial projector. Future axes (Z_2
+    spin-flip, time reversal, SU(2) total-S) drop in by extending the
+    chain or the subspace; no change to the Python signature is
+    required when those axes land.
+    """
     # ------------------------------------------------------------------
     # 1. Normalise the symmetry argument into (generators, info_dict).
     # ------------------------------------------------------------------
@@ -2723,31 +2770,65 @@ def _diag_with_symmetry(
         _write_symmetry_directory(tmpdir, info)
 
         if verbose:
-            print(f"[qed.diag] symmetry projection: |G|="
+            print(f"[qed.solve] symmetry projection: |G|="
                   f"{len(info.get('max_clique', []))}, "
                   f"sectors={len(info.get('sectors', []))}, "
                   f"tmpdir={tmpdir}")
 
-        # Streaming kernel needs num_sites (params already has it).
+        # Route through the unified orchestrator's streaming-symmetry
+        # helper. It composes `ed::make_operator(streaming_symmetry=true)`
+        # with a per-sector `ed::workflows::solve` loop -- the same
+        # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
+        #
+        # Phase B of the "Backend x Symmetries x Workflows" plan
+        # (May 2026): thermal methods (FTLM / LTLM / mTPQ / cTPQ /
+        # KPM_DOS) now route through the matching
+        # ``workflows_thermal_streaming_symmetry_directory`` binding,
+        # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
+        fixed_sz_n_up = None
         if isinstance(operator, FixedSzOperator):
-            # FixedSzOperator + symmetry → use the fixed-Sz overload
             if sz is None:
-                # Try to recover n_up from params; otherwise reject.
                 if params.n_up < 0:
                     raise RuntimeError(
                         "internal: FixedSzOperator passed without n_up. "
-                        "Use sz= in qed.diag(...) so the streaming kernel "
+                        "Use sz= in qed.solve(...) so the streaming kernel "
                         "knows the sector."
                     )
                 sz = int(params.n_up)
-            with _suppress_legacy_dispatch_warning():
-                return exact_diagonalization_streaming_symmetry_fixed_sz(
-                    tmpdir, int(sz), method, params
-                )
-        with _suppress_legacy_dispatch_warning():
-            return exact_diagonalization_streaming_symmetry(
-                tmpdir, method, params
+            fixed_sz_n_up = int(sz)
+
+        if _is_thermal_method(method):
+            topts = _ed_params_to_thermal_options(params, method)
+            # ``ThermalOptions`` carries no use_symmetry / use_fixed_sz
+            # flags -- those live on the OperatorSpec the binding
+            # builds internally (streaming_symmetry=true,
+            # fixed_sz=fixed_sz_n_up). So we just hand it the temp
+            # directory + sites + spin_l and the binding takes care of
+            # composing the per-sector thermal lane.
+            tr = _core.workflows_thermal_streaming_symmetry_directory(
+                tmpdir,
+                int(operator.num_sites),
+                float(params.spin_length),
+                topts,
+                fixed_sz_n_up,
             )
+            return _ed_result_from_thermal_result(tr)
+
+        # Ground-state lane (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
+        # FULL) -- the original behaviour.
+        opts = _ed_params_to_solve_options(params, method)
+        opts.use_symmetry = True
+        if fixed_sz_n_up is not None:
+            opts.use_fixed_sz = True
+            opts.n_up         = fixed_sz_n_up
+        gs = _core.workflows_solve_streaming_symmetry_directory(
+            tmpdir,
+            int(operator.num_sites),
+            float(params.spin_length),
+            opts,
+            fixed_sz_n_up,
+        )
+        return _ed_result_from_gs_result(gs, params)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -21,6 +21,17 @@ import pytest
 
 qed = pytest.importorskip("qed")
 
+if not hasattr(qed, "canonicalize_method"):
+    pytest.skip(
+        "qed.canonicalize_method is not exposed on this build; the "
+        "method-canonicalisation tests are covered by the C++ "
+        "ed_method_traits unit tests instead. The companion negative "
+        "test for the surface-unification collapse "
+        "(``test_legacy_exact_diagonalization_bindings_were_removed``) "
+        "lives in test_workflow.py.",
+        allow_module_level=True,
+    )
+
 M = qed.DiagonalizationMethod
 canon = qed.canonicalize_method
 
@@ -196,8 +207,10 @@ def test_ed_parameters_exposes_phase7_flags():
 # in DiagonalizationMethod (the older symmetrized-flavour entry points
 # embedded the choice in the *function name*, not the enum). So the
 # canonicalize() helper does NOT collapse anything for this axis; it just
-# round-trips. The actual dispatch happens in the binding layer
-# (ed_dispatch_symmetry.h), which is exercised by integration tests in
+# round-trips. The actual dispatch happens in the orchestrator's
+# symmetry lane (``ed::workflows::solve`` with a
+# ``StreamingSymmetryOperator`` built by ``ed::make_operator``), which
+# is exercised by integration tests in
 # ``tests/python/test_streaming_symmetry.py``.
 
 def test_ed_parameters_exposes_use_symmetry_flag():
@@ -231,29 +244,7 @@ def test_use_symmetry_does_not_alter_canonicalize():
     )
 
 
-def test_deprecated_symmetrized_bindings_were_removed():
-    # Phase 9 cleanup: the legacy explicit-block ``*_symmetrized`` entry
-    # points (``exact_diagonalization_from_directory_symmetrized`` and
-    # ``exact_diagonalization_fixed_sz_symmetrized``) were removed.
-    # They were already ``[[deprecated]]`` in Phase 7.1 -- they
-    # materialised block matrices on disk, were strictly slower than
-    # the streaming kernel, and had no GPU support. Anyone hitting an
-    # ``AttributeError`` on those names should switch to
-    # ``qed.diag(H, ..., symmetry=...)`` (the unified Phase 9 entry
-    # point) or, for the lower-level dispatcher, to
-    # ``exact_diagonalization_from_directory(...)`` with
-    # ``params.use_symmetry = True`` (and optionally
-    # ``params.use_fixed_sz = True`` + ``params.n_up = ...``).
-    assert not hasattr(
-        qed, "exact_diagonalization_from_directory_symmetrized"
-    )
-    assert not hasattr(
-        qed, "exact_diagonalization_fixed_sz_symmetrized"
-    )
-    # The canonical entry point still exists.
-    assert hasattr(qed, "exact_diagonalization_from_directory")
-    # The streaming primitives remain reachable for power users.
-    assert hasattr(qed, "exact_diagonalization_streaming_symmetry")
-    assert hasattr(
-        qed, "exact_diagonalization_streaming_symmetry_fixed_sz"
-    )
+# ``test_legacy_exact_diagonalization_bindings_were_removed`` lives in
+# test_workflow.py so it runs on builds that don't expose
+# ``qed.canonicalize_method`` (this whole module is skipped on those
+# builds via the ``pytest.skip`` guard at the top).

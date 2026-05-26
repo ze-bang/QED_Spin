@@ -33,6 +33,7 @@
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
+#include <ed/solvers/TPQ.h>      // compute_tpq_thermo_from_trajectories aggregator
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
@@ -43,9 +44,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>      // getenv (Wave 1.1 real-H fast-path opt-out)
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <type_traits>  // std::is_same_v (Wave 1.1)
 #include <variant>
 
 namespace ed::workflows {
@@ -116,11 +119,101 @@ GroundStateResult solve_on(Backend& be,
     const Complex* seed = seed_backend.get();
 
     if (method == SolveMethod::Lanczos) {
+        // -------------------------------------------------------------
+        // Wave 1.1 of the SOTA Performance rollout (May 2026): on the
+        // CPU backend, for the canonical eigenvalues-only ground-state
+        // request on a real-Hermitian operator, dispatch to the
+        // legacy `lanczos_real` lane. This was the engine the Apr 25
+        // baseline measured (`bench_vs_xdiag_*.json` Python rows) and
+        // remains 30-50% faster than the unified complex
+        // `lanczos_kernel<CpuBackend>` thanks to fused BLAS-1, K=1
+        // local-DGKS, zero-copy ring rotation, and a native-double
+        // recurrence (`src/solvers/cpu/lanczos.cpp:1110-1258`).
+        //
+        // Eligibility (all must hold):
+        //   * CpuBackend (no GPU / MPI lane affected),
+        //   * single eigenvalue (the smallest --- num_eigs == 1),
+        //   * eigenvalues only (caller did NOT request eigenvectors;
+        //     CF spectral / per-state observables go through the
+        //     complex kernel which keeps the basis),
+        //   * H reports ``is_real_hermitian() == true``.
+        //
+        // Env opt-out: ``ED_FORCE_COMPLEX_LANCZOS=1`` returns the
+        // pre-Wave-1.1 behaviour (unified complex kernel) for A/B
+        // performance comparison and bisection.
+        // -------------------------------------------------------------
+        if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
+            const bool force_complex = []() {
+                const char* env = std::getenv("ED_FORCE_COMPLEX_LANCZOS");
+                return env && env[0] == '1';
+            }();
+            if (!force_complex
+                    && opts.num_eigs == 1
+                    && !opts.compute_vectors
+                    && H.is_real_hermitian()) {
+                auto Hv_real = H.bind_real_cpu();
+                std::vector<double> eigs;
+                ::lanczos_real(
+                    [Hv_real](const double* in, double* out, int n) {
+                        Hv_real(in, out, static_cast<std::size_t>(n));
+                    },
+                    static_cast<std::uint64_t>(geom.local_dim),
+                    static_cast<std::uint64_t>(max_iter),
+                    /*exct=*/1u,
+                    opts.tolerance,
+                    eigs);
+                if (!eigs.empty()) {
+                    R.eigenvalues.assign(eigs.begin(),
+                                         eigs.begin() + std::min<std::size_t>(
+                                             opts.num_eigs, eigs.size()));
+                }
+                R.krylov.iters_done = 0;  // lanczos_real does not expose this
+                const auto t1 = std::chrono::steady_clock::now();
+                R.backend.wall_seconds =
+                    std::chrono::duration<double>(t1 - t0).count();
+                R.backend.notes.emplace_back(
+                    "dispatch", "lanczos_real (Wave 1.1 real-H fast path)");
+                return R;
+            }
+        }
+
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter      = max_iter;
-        kopts.reorth        = ed::krylov::ReorthPolicy::LocalDGKS3;
-        kopts.keep_basis    = opts.compute_vectors;
         kopts.dim_cap       = static_cast<std::size_t>(geom.global_dim);
+        kopts.keep_basis    = opts.compute_vectors;
+
+        // Wave 2.1 + correction: LocalDGKS3 K=1 only ortho-projects
+        // against the most recent two basis vectors. That is enough
+        // for the EIGENVALUES-only path (tridiag eigvals don't need
+        // mutually-orthogonal basis vectors), but if the orchestrator
+        // is asked to RECONSTRUCT eigenvectors via
+        //     psi_k = sum_i S(i, k) * V_i
+        // (which is the path taken by ``ground_state_cf`` spectral and
+        // any caller that sets ``compute_vectors = true``) the basis
+        // MUST stay numerically orthogonal across all iterations.
+        // FullCGS2 (against the kept basis) is the standard recipe.
+        //
+        // So: keep K=1 LocalDGKS3 (Wave 2.1) when basis is NOT kept,
+        // and use FullCGS2 when it IS. ``ED_LANCZOS_REORTH_K`` still
+        // overrides the local ring width when the user knows their
+        // spectrum has near-degeneracies that K=1 can miss.
+        if (kopts.keep_basis) {
+            kopts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
+        } else {
+            kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
+            kopts.local_ring_size = 1;
+            if (const char* k_env = std::getenv("ED_LANCZOS_REORTH_K")) {
+                try {
+                    const long k_val = std::stol(k_env);
+                    if (k_val >= 1 && k_val <= 64) {
+                        kopts.local_ring_size =
+                            static_cast<std::size_t>(k_val);
+                    }
+                } catch (...) {
+                    // malformed env: silently keep the default.
+                }
+            }
+        }
         // Wire in Ritz-value early exit so the orchestrator matches the
         // legacy CPU `lanczos()` convergence behaviour (otherwise the
         // kernel always runs to `max_iter` -- 5-10x slower on small
@@ -129,9 +222,24 @@ GroundStateResult solve_on(Backend& be,
             ed::krylov::make_smallest_ritz_convergence(opts.num_eigs,
                                                        opts.tolerance,
                                                        /*min_iters=*/0);
-        // Check every iteration (matches the legacy CPU `lanczos()` body);
-        // every-5 introduced ~5 extra iters of overhead before triggering.
-        kopts.convergence_check_interval = 1;
+        // Wave 2.6: check every-5 iterations to amortise the O(m^2)
+        // LAPACK tridiag eigensolve. A few extra Lanczos iterations
+        // (~ check_interval / 2) are cheaper than one extra dstevd
+        // every iter past convergence. Matches the distributed lane
+        // and the post-Wave-2.6 `lanczos()` default. Override via
+        // env ``ED_LANCZOS_CHECK_EVERY``.
+        kopts.convergence_check_interval = 5;
+        if (const char* ce = std::getenv("ED_LANCZOS_CHECK_EVERY")) {
+            try {
+                const long ci = std::stol(ce);
+                if (ci >= 1 && ci <= 1000) {
+                    kopts.convergence_check_interval =
+                        static_cast<std::size_t>(ci);
+                }
+            } catch (...) {
+                // malformed env: keep the default.
+            }
+        }
         auto kres = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim,
                                                seed, kopts);
         // Solve the small (m x m) real-symmetric tridiagonal for the
@@ -141,16 +249,43 @@ GroundStateResult solve_on(Backend& be,
         // problem unconditionally, which is ~2-3x slower for the
         // common num_eigs=1 + compute_vectors=false workflow.
         std::vector<double> evals;
+        std::vector<double> evec_coeffs;  // column-major m x m
         if (opts.compute_vectors) {
-            std::vector<double> weights, evecs;
+            std::vector<double> weights;
             ed::distributed::kernel::solve_tridiag_with_eigenvectors(
-                kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evecs);
+                kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evec_coeffs);
         } else {
             evals = ed::distributed::kernel::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
         const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
+
+        // Reconstruct host-side eigenvectors from the kept Lanczos basis
+        // when the caller requested them. evec_coeffs is the (m x m)
+        // eigenvector matrix of the tridiag in column-major order; the
+        // k-th eigenvector in the original Hilbert space is the linear
+        // combination psi_k = sum_i evec_coeffs(i, k) * basis[i].
+        if (opts.compute_vectors && !kres.basis.empty()) {
+            const std::size_t m = kres.alpha.size();
+            EigenvectorRef evref;
+            evref.host.resize(n_keep,
+                              std::vector<Complex>(geom.local_dim, Complex{0.0, 0.0}));
+            std::vector<Complex> basis_host(geom.local_dim);
+            for (std::size_t i = 0; i < m && i < kres.basis.size(); ++i) {
+                be.copy_to_host(kres.basis[i].get(),
+                                basis_host.data(), geom.local_dim);
+                for (std::size_t k = 0; k < n_keep; ++k) {
+                    const double c = evec_coeffs[i + k * m];
+                    auto& out = evref.host[k];
+                    for (std::size_t r = 0; r < geom.local_dim; ++r) {
+                        out[r] += c * basis_host[r];
+                    }
+                }
+            }
+            R.eigenvectors = std::move(evref);
+        }
+
         R.krylov.alpha = std::move(kres.alpha);
         R.krylov.beta  = std::move(kres.beta);
         R.krylov.iters_done = kres.iters_done;
@@ -165,6 +300,16 @@ GroundStateResult solve_on(Backend& be,
         auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
+        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
+            EigenvectorRef evref;
+            evref.host.reserve(kres.eigenvectors.size());
+            std::vector<Complex> tmp(geom.local_dim);
+            for (auto& v : kres.eigenvectors) {
+                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
+                evref.host.push_back(tmp);
+            }
+            R.eigenvectors = std::move(evref);
+        }
         R.krylov.iters_done = kres.blocks_built;
         R.krylov.converged  = kres.converged;
     } else if (method == SolveMethod::KrylovSchur) {
@@ -178,6 +323,16 @@ GroundStateResult solve_on(Backend& be,
         auto kres = ed::krylov::krylov_schur_kernel(be, matvec,
             geom.local_dim, seed, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
+        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
+            EigenvectorRef evref;
+            evref.host.reserve(kres.eigenvectors.size());
+            std::vector<Complex> tmp(geom.local_dim);
+            for (auto& v : kres.eigenvectors) {
+                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
+                evref.host.push_back(tmp);
+            }
+            R.eigenvectors = std::move(evref);
+        }
         R.krylov.iters_done = kres.iters_done;
         R.krylov.converged  = kres.converged;
     } else {
@@ -350,7 +505,40 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
     auto variant = select_backend(H.geometry(), opts.backend);
 
+    // Surface unification follow-up (May 2026): when the caller does
+    // not supply an explicit ``opts.betas`` grid, construct one from
+    // the temperature-scan knobs (``temp_min``, ``temp_max``,
+    // ``num_temp_bins``) and -- crucially -- mirror the resulting
+    // temperature axis into ``R.thermo.temperatures`` so downstream
+    // Python / CLI consumers can read the scan back without
+    // recomputing it from ``opts.*``. Mirrors the legacy
+    // ``finite_temperature_lanczos`` contract that every call site
+    // relied on.
+    if (opts.betas.empty() && opts.num_temp_bins > 0
+        && opts.temp_min > 0.0 && opts.temp_max > opts.temp_min) {
+        opts.betas.reserve(opts.num_temp_bins);
+        const double t_lo = opts.temp_min;
+        const double t_hi = opts.temp_max;
+        const std::size_t n = opts.num_temp_bins;
+        // Linear temperature axis (T = T_min + i*(T_max-T_min)/(n-1)),
+        // descending in beta so the natural ascending-T print stays
+        // ascending after the kernel.
+        for (std::size_t i = 0; i < n; ++i) {
+            const double T = (n == 1)
+                ? t_lo
+                : t_lo + (t_hi - t_lo) * static_cast<double>(i)
+                          / static_cast<double>(n - 1);
+            opts.betas.push_back(T > 0.0 ? 1.0 / T : 1.0 / 1e-300);
+        }
+    }
+
     ThermalResult R;
+    if (!opts.betas.empty()) {
+        R.thermo.temperatures.reserve(opts.betas.size());
+        for (double b : opts.betas) {
+            R.thermo.temperatures.push_back(b > 0.0 ? 1.0 / b : 0.0);
+        }
+    }
     const auto t0 = std::chrono::steady_clock::now();
 
     if (opts.method == ThermalOptions::Method::mTPQ) {
@@ -362,12 +550,50 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             kopts.max_iter    = opts.krylov_dim ? opts.krylov_dim : 1000;
             kopts.random_seed = opts.random_seed;
             kopts.output_dir  = opts.output_dir;
+            // SOTA large_value pick (May 2026): the (L*I - H) iteration
+            // gives effective inverse temperature
+            //   beta_k = 2 k / (L - E_k).
+            // To cover the user-requested coldest temperature
+            // ``temp_min`` (== 1/beta_max_target) with ``max_iter``
+            // steps, we need
+            //   L = 2 * max_iter / beta_max_target + |E|_typical.
+            // Estimate |E|_typical from the system bandwidth proxy
+            // ``log2(global_dim)`` (which equals the number of spins
+            // for unsymmetrised spin-1/2 chains; for symmetrised /
+            // FixedSz operators it's the symmetrised dim, which is a
+            // conservative upper bound). Cap at the historical 1e5
+            // default so we never go below it for high-T runs.
+            const double beta_target = (opts.temp_min > 0.0)
+                ? 1.0 / opts.temp_min : 100.0;
+            const double bandwidth_proxy = std::log2(
+                static_cast<double>(std::max<std::uint64_t>(
+                    H.geometry().global_dim, 2)));
+            const double L_auto = 2.0 * static_cast<double>(kopts.max_iter)
+                                    / std::max(beta_target, 1e-6)
+                                + bandwidth_proxy;
+            kopts.large_value = std::max(L_auto, 1.0);
             auto matvec = H.template bind<B>();
             auto kres = ed::thermal::mtpq_kernel<B>(
                 *backend_uptr, matvec, H.geometry().local_dim,
                 H.geometry().global_dim, kopts);
             R.ground_state_energy = kres.energies.empty()
-                ? 0.0 : *std::min_element(kres.energies.begin(), kres.energies.end());
+                ? 0.0 : *std::min_element(kres.energies.begin(),
+                                          kres.energies.end());
+            // SOTA: aggregate per-sample (beta_k, E_k, var_k) trajectories
+            // into ThermodynamicData on the requested temperature grid.
+            // Closes the gap where mTPQ via qed.thermal raised
+            // ``RuntimeError: solver returned no thermodynamic data``.
+            if (!R.thermo.temperatures.empty()) {
+                ThermodynamicData td = compute_tpq_thermo_from_trajectories(
+                    kres.sample_inv_temps, kres.sample_energies,
+                    kres.sample_variances, R.thermo.temperatures);
+                if (!td.energy.empty()) {
+                    // Mirror the LTLM/FTLM contract: the caller's T grid
+                    // is authoritative -- overwrite R.thermo with the
+                    // aggregator's output (which uses our T grid).
+                    R.thermo = std::move(td);
+                }
+            }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::cTPQ) {
         std::visit([&](auto& backend_uptr) {
@@ -375,9 +601,33 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             using B = typename BPtr::element_type;
             ed::thermal::CtpqOptions kopts;
             kopts.num_samples  = opts.num_samples;
-            kopts.beta_max     = opts.beta_max;
+            // SOTA beta_max pick (May 2026): if the caller asked for
+            // a coldest temperature ``temp_min`` smaller than the
+            // default beta_max would cover, extend beta_max so the
+            // trajectory actually brackets every target beta.
+            const double user_beta_max = (opts.temp_min > 0.0)
+                ? 1.0 / opts.temp_min : opts.beta_max;
+            kopts.beta_max     = std::max(opts.beta_max, 1.1 * user_beta_max);
             kopts.delta_beta   = opts.delta_beta;
             kopts.taylor_order = opts.taylor_order;
+            // Closing-the-symmetry-gap follow-up (May 2026): respect the
+            // user's ``max_iterations`` knob as a hard CAP on the
+            // Taylor step count. Without this cap, cTPQ silently runs
+            // ``beta_max / delta_beta`` steps (default 20.0 / 0.01 =
+            // 2000 steps) even when the user asked for ``max_iterations
+            // = 200``, which inflates the per-sector matvec count by
+            // 10x compared to mTPQ on the same call. The orchestrator
+            // pipes ``max_iterations`` into ``opts.krylov_dim`` for
+            // both mTPQ and cTPQ; mTPQ already honours it (l.550
+            // above); this brings cTPQ to parity. ``0`` means "no
+            // explicit cap" which preserves legacy behaviour.
+            if (opts.krylov_dim > 0 && opts.delta_beta > 0.0) {
+                const double cap_beta = static_cast<double>(opts.krylov_dim)
+                                       * opts.delta_beta;
+                if (cap_beta < kopts.beta_max) {
+                    kopts.beta_max = cap_beta;
+                }
+            }
             kopts.random_seed  = opts.random_seed;
             kopts.output_dir   = opts.output_dir;
             auto matvec = H.template bind<B>();
@@ -385,7 +635,16 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 *backend_uptr, matvec, H.geometry().local_dim,
                 H.geometry().global_dim, kopts);
             R.ground_state_energy = kres.energies.empty()
-                ? 0.0 : *std::min_element(kres.energies.begin(), kres.energies.end());
+                ? 0.0 : *std::min_element(kres.energies.begin(),
+                                          kres.energies.end());
+            if (!R.thermo.temperatures.empty()) {
+                ThermodynamicData td = compute_tpq_thermo_from_trajectories(
+                    kres.sample_inv_temps, kres.sample_energies,
+                    kres.sample_variances, R.thermo.temperatures);
+                if (!td.energy.empty()) {
+                    R.thermo = std::move(td);
+                }
+            }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {
         // Wave B (Full unified-interface collapse, May 2026): the
@@ -423,15 +682,29 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
         }, variant);
     } else if (opts.method == ThermalOptions::Method::LTLM) {
-        // Wave B: LTLM is CPU-only today (static_assert in ltlm_kernel.h).
+        // Phase E2 of the "Backend x Symmetries x Workflows" plan
+        // (May 2026): the LTLM kernel now dispatches on Backend type
+        // internally (see ltlm_kernel.h). Both CpuBackend and
+        // CudaBackend are supported; MpiBackend / MpiCudaBackend are
+        // explicitly rejected by the kernel until cross-rank Lanczos
+        // post-processing is wired.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+            constexpr bool is_cpu =
+                std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+            constexpr bool is_cuda =
+                std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+            constexpr bool is_cuda = false;
+#endif
+            if constexpr (!(is_cpu || is_cuda)) {
                 throw std::runtime_error(
-                    "ed::thermal: LTLM lane requires a CpuBackend "
-                    "today; pin BackendConstraints to route via the "
-                    "CPU lane.");
+                    "ed::thermal: LTLM requires a CpuBackend or "
+                    "CudaBackend; distributed backends are not yet "
+                    "wired. Pin BackendConstraints to route through "
+                    "the CPU/CUDA lanes.");
             } else {
                 ed::thermal::LtlmOptions kopts;
                 kopts.num_samples         = opts.num_samples;
@@ -451,18 +724,47 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::KpmDos) {
-        // Wave B: KpmDos is CPU-only today (static_assert in kpm_dos_kernel.h).
+        // Phase E1 of the "Backend x Symmetries x Workflows" plan
+        // (May 2026): the KPM-DOS kernel now dispatches on Backend
+        // type internally (see kpm_dos_kernel.h). Both CpuBackend and
+        // CudaBackend are supported; MpiBackend / MpiCudaBackend are
+        // explicitly rejected by the kernel until the cross-rank
+        // Hutchinson reduction is wired.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+            constexpr bool is_cpu =
+                std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+            constexpr bool is_cuda =
+                std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+            constexpr bool is_cuda = false;
+#endif
+            if constexpr (!(is_cpu || is_cuda)) {
                 throw std::runtime_error(
-                    "ed::thermal: KpmDos lane requires a CpuBackend "
-                    "today.");
+                    "ed::thermal: KpmDos requires a CpuBackend or "
+                    "CudaBackend; distributed backends are not yet "
+                    "wired. Pin BackendConstraints to route through "
+                    "the CPU/CUDA lanes.");
             } else {
                 ed::thermal::KpmDosOptions kopts;
                 kopts.betas = opts.betas;
                 kopts.random_seed = opts.random_seed;
+                // Wave B3 (May 2026): pass-through caller-supplied
+                // spectral bounds. NaN means "estimate via Lanczos".
+                kopts.e_min_override = opts.e_min_override;
+                kopts.e_max_override = opts.e_max_override;
+                // Closing-the-gap follow-up (May 2026): forward the
+                // user's KPM knobs. ``0`` keeps the kernel default
+                // so legacy CLI call sites with no knob set are
+                // unaffected.
+                if (opts.kpm_num_moments > 0) {
+                    kopts.num_moments = opts.kpm_num_moments;
+                }
+                if (opts.kpm_num_random_vectors > 0) {
+                    kopts.num_random_vectors = opts.kpm_num_random_vectors;
+                }
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::kpm_dos_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
@@ -477,6 +779,26 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     } else {
         throw std::runtime_error(
             "ed::thermal: unknown ThermalOptions::Method enumerator.");
+    }
+
+    // Surface unification follow-up (May 2026): populate
+    // ``R.thermo.free_energy = E - T * S`` post-hoc so downstream
+    // consumers see the full thermodynamic quintet (T, E, Cv, S, F).
+    // The FTLM/LTLM/KpmDos kernel facades return E/Cv/S only; the
+    // legacy ``finite_temperature_lanczos`` populated F from the
+    // partition function (F = -T ln Z), which is mathematically
+    // equivalent to E - T S once normalised. We use the latter form
+    // here since the kernel does not expose ln Z.
+    if (R.thermo.free_energy.empty()
+        && !R.thermo.energy.empty()
+        && R.thermo.energy.size() == R.thermo.entropy.size()
+        && R.thermo.energy.size() == R.thermo.temperatures.size()) {
+        R.thermo.free_energy.reserve(R.thermo.energy.size());
+        for (std::size_t i = 0; i < R.thermo.energy.size(); ++i) {
+            R.thermo.free_energy.push_back(
+                R.thermo.energy[i]
+                - R.thermo.temperatures[i] * R.thermo.entropy[i]);
+        }
     }
 
     R.backend.lane = (H.geometry().is_distributed() ? "mpi" : "cpu");

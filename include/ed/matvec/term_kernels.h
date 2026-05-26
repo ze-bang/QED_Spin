@@ -280,18 +280,12 @@ inline void apply_terms(
             const uint64_t block_end   = std::min(block_start + kCacheBlockSize, dim);
 
             for (uint64_t i = block_start; i < block_end; ++i) {
-                const Scalar coeff = in[i];
+                const Scalar coeff_in = in[i];
                 // Skip negligible-amplitude states. Identical threshold
                 // to legacy Operator::apply_optimized; tweak with care
                 // (lowering breaks Lanczos invariants at quad-precision
                 // Krylov subspaces).
-                if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
-                    if (std::abs(coeff) < 1e-15) continue;
-                } else {
-                    if (std::abs(coeff) < 1e-15) continue;
-                }
-
-                const uint64_t basis_state = basis.state_of(i);
+                if (std::abs(coeff_in) < 1e-15) continue;
 
                 // Prefetch the next input amplitude. The basis lookup
                 // is policy-dependent; the FullBasisPolicy resolves
@@ -303,159 +297,201 @@ inline void apply_terms(
                     __builtin_prefetch(&in[i + 8], 0, 1);
                 }
 
-                // ----------------------------------------------------------
-                // 1. One-body diagonal (Sz_k):   |i> -> |i>, scalar = +/- s
-                // ----------------------------------------------------------
-                for (const auto& t : diag_one_body) {
-                    const double sign =
-                        ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
-                    const Scalar contrib =
-                        coerce_coeff<Scalar>(t.coefficient) * spin_l * sign * coeff;
-                    local_buffer.push_back({i, contrib});
-                }
+                // --------------------------------------------------------------
+                // process_source(s, pre_phase): apply every term to the
+                // computational state ``s``, accumulating into local_buffer.
+                //
+                // - Trivial policies (Full/FixedSz) call this once with
+                //   s = state_of(i) and pre_phase = 1.
+                // - Symmetry policies call this for each (orbit_state, alpha_s)
+                //   in the orbit of orbit index i, with pre_phase = alpha_s /
+                //   norm_i. The per-emit normalization (conj(beta_{s'}) *
+                //   group_norm / norm_{dst}) is supplied via coeff_modifier.
+                //
+                // This shape keeps the inner term loops byte-identical for
+                // Full/FixedSz (the constexpr branches on has_coeff_modifier
+                // elide the extra multiply), while letting Wave 1's
+                // SymmetryBasisPolicy reuse the same kernel.
+                // --------------------------------------------------------------
+                auto process_source = [&](uint64_t basis_state,
+                                          std::complex<double> pre_phase) {
+                    const Scalar coeff =
+                        coeff_in * coerce_coeff<Scalar>(pre_phase);
+                    if (std::abs(coeff) < 1e-15) return;
 
-                // ----------------------------------------------------------
-                // 2. One-body off-diagonal (S+_k or S-_k): flip one bit.
-                //    For fixed-Sz, this can leave the basis; index_of()
-                //    will return -1 and we skip. For full basis this is
-                //    a no-op check (compiler elides via may_leave_basis).
-                // ----------------------------------------------------------
-                for (const auto& t : offdiag_one_body) {
-                    const uint64_t bit = (basis_state >> t.site_index) & 1;
-                    if (bit == t.op_type) continue;
-                    const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
-                    if constexpr (BasisPolicy::may_leave_basis) {
-                        const int64_t j = basis.index_of(new_state);
-                        if (j < 0) continue;
-                        const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
-                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                    } else {
-                        // FullBasisPolicy: bitstring IS the array index.
-                        const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
-                        local_buffer.push_back({new_state, contrib});
-                    }
-                }
-
-                // ----------------------------------------------------------
-                // 3. Two-body purely diagonal (Sz_i Sz_j): |i> -> |i>.
-                // ----------------------------------------------------------
-                for (const auto& t : diag_two_body) {
-                    const double sign_a =
-                        ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                    const double sign_b =
-                        ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
-                    const Scalar contrib =
-                        coerce_coeff<Scalar>(t.coefficient)
-                        * spin_sq * sign_a * sign_b * coeff;
-                    local_buffer.push_back({i, contrib});
-                }
-
-                // ----------------------------------------------------------
-                // 4. Two-body mixed (Sz S+ / Sz S-): flip one bit.
-                // ----------------------------------------------------------
-                for (const auto& t : mixed_two_body) {
-                    const uint64_t flip_bit =
-                        (basis_state >> t.flip_site) & 1;
-                    if (flip_bit == t.flip_op_type) continue;
-                    const double sz_sign =
-                        ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
-                    const uint64_t new_state =
-                        basis_state ^ (1ULL << t.flip_site);
-                    const Scalar contrib =
-                        coerce_coeff<Scalar>(t.coefficient)
-                        * spin_l * sz_sign * coeff;
-
-                    if constexpr (BasisPolicy::may_leave_basis) {
-                        const int64_t j = basis.index_of(new_state);
-                        if (j < 0) continue;
-                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                    } else {
-                        local_buffer.push_back({new_state, contrib});
-                    }
-                }
-
-                // ----------------------------------------------------------
-                // 5. Two-body off-diagonal (S+ S- / S- S+ / S+ S+ / ...).
-                //    Both bits must flip; if either gate fails the term
-                //    contributes zero.
-                // ----------------------------------------------------------
-                for (const auto& t : offdiag_two_body) {
-                    const uint64_t bit_1 = (basis_state >> t.site_index_1) & 1;
-                    const uint64_t bit_2 = (basis_state >> t.site_index_2) & 1;
-                    if (bit_1 == t.op_type_1 || bit_2 == t.op_type_2) continue;
-                    const uint64_t new_state =
-                        basis_state ^ (1ULL << t.site_index_1)
-                                    ^ (1ULL << t.site_index_2);
-                    const Scalar contrib =
-                        coerce_coeff<Scalar>(t.coefficient) * coeff;
-
-                    if constexpr (BasisPolicy::may_leave_basis) {
-                        const int64_t j = basis.index_of(new_state);
-                        if (j < 0) continue;
-                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                    } else {
-                        local_buffer.push_back({new_state, contrib});
-                    }
-                }
-
-                // ----------------------------------------------------------
-                // 6. Three-body terms (op1 op2 op3). Rare; kept as a
-                //    straight-line product of three single-site gates.
-                // ----------------------------------------------------------
-                for (const auto& t : three_body) {
-                    uint64_t cur_state = basis_state;
-                    Scalar   scalar    = coerce_coeff<Scalar>(t.coefficient);
-                    bool     valid     = true;
-
-                    // op_type_1
-                    if (t.op_type_1 == kOpSz) {
-                        const double s =
-                            ((cur_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                        scalar *= spin_l * s;
-                    } else {
-                        const uint64_t b = (cur_state >> t.site_index_1) & 1;
-                        if (b != t.op_type_1) {
-                            cur_state ^= (1ULL << t.site_index_1);
+                    auto emit = [&](uint64_t j_idx, uint64_t s_prime,
+                                    const Scalar& base_contrib) {
+                        if constexpr (BasisPolicy::has_coeff_modifier) {
+                            const Scalar mod =
+                                basis.template coeff_modifier<Scalar>(
+                                    basis_state, s_prime, i, j_idx);
+                            local_buffer.push_back({j_idx, base_contrib * mod});
                         } else {
-                            valid = false;
+                            (void)s_prime;
+                            local_buffer.push_back({j_idx, base_contrib});
+                        }
+                    };
+
+                    // ------------------------------------------------------
+                    // 1. One-body diagonal (Sz_k):  s -> s, scalar = +/- s
+                    // ------------------------------------------------------
+                    for (const auto& t : diag_one_body) {
+                        const double sign =
+                            ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
+                        const Scalar contrib =
+                            coerce_coeff<Scalar>(t.coefficient) * spin_l * sign * coeff;
+                        emit(i, basis_state, contrib);
+                    }
+
+                    // ------------------------------------------------------
+                    // 2. One-body off-diagonal (S+_k or S-_k): flip one bit.
+                    //    For fixed-Sz, this can leave the basis; index_of()
+                    //    returns -1 and we skip. For full basis this is a
+                    //    no-op check (compiler elides via may_leave_basis).
+                    // ------------------------------------------------------
+                    for (const auto& t : offdiag_one_body) {
+                        const uint64_t bit = (basis_state >> t.site_index) & 1;
+                        if (bit == t.op_type) continue;
+                        const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
+                        const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
+                        if constexpr (BasisPolicy::may_leave_basis) {
+                            const int64_t j = basis.index_of(new_state);
+                            if (j < 0) continue;
+                            emit(static_cast<uint64_t>(j), new_state, contrib);
+                        } else {
+                            // FullBasisPolicy: bitstring IS the array index.
+                            emit(new_state, new_state, contrib);
                         }
                     }
-                    // op_type_2
-                    if (valid) {
-                        if (t.op_type_2 == kOpSz) {
+
+                    // ------------------------------------------------------
+                    // 3. Two-body purely diagonal (Sz_i Sz_j):  s -> s.
+                    // ------------------------------------------------------
+                    for (const auto& t : diag_two_body) {
+                        const double sign_a =
+                            ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
+                        const double sign_b =
+                            ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                        const Scalar contrib =
+                            coerce_coeff<Scalar>(t.coefficient)
+                            * spin_sq * sign_a * sign_b * coeff;
+                        emit(i, basis_state, contrib);
+                    }
+
+                    // ------------------------------------------------------
+                    // 4. Two-body mixed (Sz S+ / Sz S-): flip one bit.
+                    // ------------------------------------------------------
+                    for (const auto& t : mixed_two_body) {
+                        const uint64_t flip_bit =
+                            (basis_state >> t.flip_site) & 1;
+                        if (flip_bit == t.flip_op_type) continue;
+                        const double sz_sign =
+                            ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
+                        const uint64_t new_state =
+                            basis_state ^ (1ULL << t.flip_site);
+                        const Scalar contrib =
+                            coerce_coeff<Scalar>(t.coefficient)
+                            * spin_l * sz_sign * coeff;
+
+                        if constexpr (BasisPolicy::may_leave_basis) {
+                            const int64_t j = basis.index_of(new_state);
+                            if (j < 0) continue;
+                            emit(static_cast<uint64_t>(j), new_state, contrib);
+                        } else {
+                            emit(new_state, new_state, contrib);
+                        }
+                    }
+
+                    // ------------------------------------------------------
+                    // 5. Two-body off-diagonal. Both bits must flip; if
+                    //    either gate fails the term contributes zero.
+                    // ------------------------------------------------------
+                    for (const auto& t : offdiag_two_body) {
+                        const uint64_t bit_1 = (basis_state >> t.site_index_1) & 1;
+                        const uint64_t bit_2 = (basis_state >> t.site_index_2) & 1;
+                        if (bit_1 == t.op_type_1 || bit_2 == t.op_type_2) continue;
+                        const uint64_t new_state =
+                            basis_state ^ (1ULL << t.site_index_1)
+                                        ^ (1ULL << t.site_index_2);
+                        const Scalar contrib =
+                            coerce_coeff<Scalar>(t.coefficient) * coeff;
+
+                        if constexpr (BasisPolicy::may_leave_basis) {
+                            const int64_t j = basis.index_of(new_state);
+                            if (j < 0) continue;
+                            emit(static_cast<uint64_t>(j), new_state, contrib);
+                        } else {
+                            emit(new_state, new_state, contrib);
+                        }
+                    }
+
+                    // ------------------------------------------------------
+                    // 6. Three-body terms (op1 op2 op3). Rare; kept as a
+                    //    straight-line product of three single-site gates.
+                    // ------------------------------------------------------
+                    for (const auto& t : three_body) {
+                        uint64_t cur_state = basis_state;
+                        Scalar   scalar    = coerce_coeff<Scalar>(t.coefficient);
+                        bool     valid     = true;
+
+                        if (t.op_type_1 == kOpSz) {
                             const double s =
-                                ((cur_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                                ((cur_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
                             scalar *= spin_l * s;
                         } else {
-                            const uint64_t b = (cur_state >> t.site_index_2) & 1;
-                            if (b != t.op_type_2) cur_state ^= (1ULL << t.site_index_2);
-                            else                  valid = false;
+                            const uint64_t b = (cur_state >> t.site_index_1) & 1;
+                            if (b != t.op_type_1) {
+                                cur_state ^= (1ULL << t.site_index_1);
+                            } else {
+                                valid = false;
+                            }
                         }
-                    }
-                    // op_type_3
-                    if (valid) {
-                        if (t.op_type_3 == kOpSz) {
-                            const double s =
-                                ((cur_state >> t.site_index_3) & 1) ? -1.0 : 1.0;
-                            scalar *= spin_l * s;
+                        if (valid) {
+                            if (t.op_type_2 == kOpSz) {
+                                const double s =
+                                    ((cur_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                                scalar *= spin_l * s;
+                            } else {
+                                const uint64_t b = (cur_state >> t.site_index_2) & 1;
+                                if (b != t.op_type_2) cur_state ^= (1ULL << t.site_index_2);
+                                else                  valid = false;
+                            }
+                        }
+                        if (valid) {
+                            if (t.op_type_3 == kOpSz) {
+                                const double s =
+                                    ((cur_state >> t.site_index_3) & 1) ? -1.0 : 1.0;
+                                scalar *= spin_l * s;
+                            } else {
+                                const uint64_t b = (cur_state >> t.site_index_3) & 1;
+                                if (b != t.op_type_3) cur_state ^= (1ULL << t.site_index_3);
+                                else                  valid = false;
+                            }
+                        }
+
+                        if (!valid) continue;
+                        if (std::abs(scalar) < 1e-15) continue;
+
+                        const Scalar contrib = scalar * coeff;
+                        if constexpr (BasisPolicy::may_leave_basis) {
+                            const int64_t j = basis.index_of(cur_state);
+                            if (j < 0) continue;
+                            emit(static_cast<uint64_t>(j), cur_state, contrib);
                         } else {
-                            const uint64_t b = (cur_state >> t.site_index_3) & 1;
-                            if (b != t.op_type_3) cur_state ^= (1ULL << t.site_index_3);
-                            else                  valid = false;
+                            emit(cur_state, cur_state, contrib);
                         }
                     }
+                }; // end process_source
 
-                    if (!valid) continue;
-                    if (std::abs(scalar) < 1e-15) continue;
-
-                    const Scalar contrib = scalar * coeff;
-                    if constexpr (BasisPolicy::may_leave_basis) {
-                        const int64_t j = basis.index_of(cur_state);
-                        if (j < 0) continue;
-                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                    } else {
-                        local_buffer.push_back({cur_state, contrib});
-                    }
+                if constexpr (BasisPolicy::needs_orbit_walk) {
+                    // Symmetry path: walk |orbit(i)| computational states.
+                    basis.iter_orbit(i, process_source);
+                } else {
+                    // Trivial path: a single computational state with phase 1.
+                    // Bypasses iter_orbit for byte-identical performance to
+                    // the pre-Wave-0 kernel.
+                    process_source(basis.state_of(i),
+                                   std::complex<double>(1.0, 0.0));
                 }
 
                 if (local_buffer.size() >= kFlushThreshold) flush();
@@ -475,5 +511,137 @@ inline void apply_terms(
 // The unified ASSEMBLE kernel in term_kernels_assemble.h is the only
 // triplet emitter the codebase uses.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Phase 4 of the "Unified CPU/GPU symmetry architecture" plan
+// (May 2026). Factored single-state emitter:
+//
+//   apply_term_to_state<Scalar>(s, spin_l, terms, callback)
+//
+// Calls ``callback(uint64_t s_prime, Scalar matrix_element)`` for
+// each non-zero ``<s'|H|s>`` reachable from computational state
+// ``s`` via the term storage. Mirrors the per-term-bin scan inside
+// ``apply_terms`` -- exactly the same six branches (diag_one_body,
+// offdiag_one_body, diag_two_body, mixed_two_body, offdiag_two_body,
+// three_body) with the same numerical tolerance (1e-15 zero-skip).
+//
+// Used by:
+//   * The orbit-walk triplet emit path in
+//     ``DistributedSymmetryOperator`` -- replaces the O(n_orbits *
+//     2^N) probe loop with an O(n_orbits * |orbit| * num_terms)
+//     walk. Each orbit walks its members; for each member, this
+//     helper yields the reachable (s', h) pairs; the caller
+//     projects s' back to its orbit index.
+//   * The future ``make_cpu_symmetry_backend`` CSR cache. Builds a
+//     sparse representation by emitting all ``<s'|H|s>`` for every
+//     orbit representative s.
+//   * The future ``apply_term_to_state_gpu`` device-side twin in
+//     ``term_kernels_gpu.cuh`` (which the unified ``apply_terms_gpu``
+//     kernel already inlines, but the device twin exists for any
+//     device-side single-state emit work, e.g. NCCL halo packers).
+//
+// Pure function on its inputs; thread-safe by construction (callback
+// owns side effects). The callback is invoked sequentially -- callers
+// that want a parallel pass should distribute over states, not terms.
+// ---------------------------------------------------------------------------
+template <
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec,
+    class Callback>
+inline void apply_term_to_state(
+    uint64_t                 s,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    Callback&&               cb)
+{
+    const double spin_sq = spin_l * spin_l;
+
+    // 1. One-body diagonal (Sz_k): s -> s
+    for (const auto& t : diag_one_body) {
+        const double sign = ((s >> t.site_index) & 1) ? -1.0 : 1.0;
+        const Scalar h = coerce_coeff<Scalar>(t.coefficient) * spin_l * sign;
+        if (std::abs(h) < 1e-15) continue;
+        cb(s, h);
+    }
+
+    // 2. One-body off-diagonal (S+ / S-): flip one bit, gated
+    for (const auto& t : offdiag_one_body) {
+        const uint64_t bit = (s >> t.site_index) & 1;
+        if (bit == t.op_type) continue;
+        const uint64_t s_prime = s ^ (1ULL << t.site_index);
+        const Scalar h = coerce_coeff<Scalar>(t.coefficient);
+        if (std::abs(h) < 1e-15) continue;
+        cb(s_prime, h);
+    }
+
+    // 3. Two-body purely diagonal (Sz_i Sz_j)
+    for (const auto& t : diag_two_body) {
+        const double sa = ((s >> t.site_index_1) & 1) ? -1.0 : 1.0;
+        const double sb = ((s >> t.site_index_2) & 1) ? -1.0 : 1.0;
+        const Scalar h = coerce_coeff<Scalar>(t.coefficient) * spin_sq * sa * sb;
+        if (std::abs(h) < 1e-15) continue;
+        cb(s, h);
+    }
+
+    // 4. Two-body mixed (Sz * S+/-): flip one bit, gated
+    for (const auto& t : mixed_two_body) {
+        const uint64_t flip_bit = (s >> t.flip_site) & 1;
+        if (flip_bit == t.flip_op_type) continue;
+        const double sz_sign = ((s >> t.sz_site) & 1) ? -1.0 : 1.0;
+        const uint64_t s_prime = s ^ (1ULL << t.flip_site);
+        const Scalar h = coerce_coeff<Scalar>(t.coefficient) * spin_l * sz_sign;
+        if (std::abs(h) < 1e-15) continue;
+        cb(s_prime, h);
+    }
+
+    // 5. Two-body off-diagonal (S+- * S+-): flip two bits, both gated
+    for (const auto& t : offdiag_two_body) {
+        const uint64_t b1 = (s >> t.site_index_1) & 1;
+        const uint64_t b2 = (s >> t.site_index_2) & 1;
+        if (b1 == t.op_type_1 || b2 == t.op_type_2) continue;
+        const uint64_t s_prime =
+            s ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+        const Scalar h = coerce_coeff<Scalar>(t.coefficient);
+        if (std::abs(h) < 1e-15) continue;
+        cb(s_prime, h);
+    }
+
+    // 6. Three-body (general): walk gates sequentially. Mirror of the
+    //    apply_terms three-body branch.
+    for (const auto& t : three_body) {
+        uint64_t cur = s;
+        Scalar h = coerce_coeff<Scalar>(t.coefficient);
+        bool valid = true;
+
+        auto gate = [&](std::uint8_t op_type, std::uint64_t site) {
+            if (!valid) return;
+            if (op_type == kOpSz) {
+                const double sg = ((cur >> site) & 1) ? -1.0 : 1.0;
+                h *= spin_l * sg;
+            } else {
+                const uint64_t b = (cur >> site) & 1;
+                if (b != op_type) cur ^= (1ULL << site);
+                else              valid = false;
+            }
+        };
+        gate(t.op_type_1, t.site_index_1);
+        gate(t.op_type_2, t.site_index_2);
+        gate(t.op_type_3, t.site_index_3);
+
+        if (!valid) continue;
+        if (std::abs(h) < 1e-15) continue;
+        cb(cur, h);
+    }
+}
 
 } // namespace ed::matvec::kernel

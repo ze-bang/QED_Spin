@@ -2,8 +2,12 @@
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
+#include <ed/parallel/fused_blas1.h>    // Wave 3.6: fused_mtpq_step_complex
 #include <algorithm>
+#include <array>     // compute_tpq_thermo_from_trajectories aggregator
 #include <cctype>
+#include <cmath>     // std::isfinite in trajectory aggregator
+#include <cstdint>
 #include <filesystem>
 #include <regex>
 #include <sstream>
@@ -1475,18 +1479,23 @@ void microcanonical_tpq(
                 std::cout << "  Step " << step << " of " << final_step << std::endl;
             }
             
-            // In-place evolution: v0 = (L*D_S - H)|v0⟩
-            // First compute temp = H|v0⟩
+            // In-place evolution: v0 = (L*D_S - H)|v0⟩, then renormalise.
+            // First compute temp = H|v0⟩.
             H(v0.data(), temp.data(), N);
-            
-            // Then v0 = L*D_S*v0 - temp (in-place)
-            Complex scale_ld(LargeValue * D_S, 0.0);
-            cblas_zscal(N, &scale_ld, v0.data(), 1);  // v0 *= L*D_S
-            cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
 
-            current_norm = cblas_dznrm2(N, v0.data(), 1);
-            Complex scale_factor = Complex(1.0/current_norm, 0.0);
-            cblas_zscal(N, &scale_factor, v0.data(), 1);
+            // Wave 3.6 of the SOTA Performance rollout (May 2026): the
+            // (scale + axpy + norm + scale) tail of an mTPQ step is fused
+            // into one OpenMP parallel region by
+            // ``fused_mtpq_step_complex``. Saves three OMP fork/joins per
+            // iter -- non-trivial at N >= 2^18 where each pass crosses
+            // the L3 bandwidth wall. Numerically identical to the
+            // pre-Wave-3.6 sequence to within IEEE-754 round-off.
+            const Complex scale_ld(LargeValue * D_S, 0.0);
+            current_norm = ed::parallel::fused_mtpq_step_complex(
+                static_cast<std::uint64_t>(N),
+                scale_ld,
+                v0.data(),
+                temp.data());
             
             // Check if we should measure observables at target temperatures
             // We need to check this at EVERY step to avoid missing temperature points
@@ -2168,10 +2177,10 @@ void canonical_tpq(
  * Implementation notes (audit follow-up): this function is now the
  * canonical place where per-sample TPQ trajectories are interpolated
  * onto a common temperature grid, averaged, and integrated to obtain
- * S(T) and F(T). Both the legacy HDF5-writing convert function and
- * the new unified ``ed::auto_pilot::thermal`` entry point delegate
- * here, so any future tweak to the interpolation / integration logic
- * needs to happen in only one place.
+ * S(T) and F(T). Both the HDF5-writing convert function and the
+ * unified ``ed::workflows::thermal`` entry point delegate here, so any
+ * future tweak to the interpolation / integration logic needs to
+ * happen in only one place.
  */
 ThermodynamicData compute_tpq_unified_thermo(
     const std::string& tpq_dir,
@@ -2338,6 +2347,162 @@ ThermodynamicData compute_tpq_unified_thermo(
     return thermo;
 }
 
+// ============================================================================
+// SOTA in-memory TPQ trajectory aggregator (May 2026 surface unification).
+//
+// Companion to ``compute_tpq_unified_thermo``: same math, but takes the
+// per-sample (beta_k, E_k, var_k) trajectories DIRECTLY (no HDF5/text
+// round-trip) and interpolates onto the caller's temperature grid.
+// Called by the unified ``ed::workflows::thermal`` orchestrator for the
+// mTPQ / cTPQ lanes -- closes the long-standing gap where the unified
+// TPQ kernels populated only ``ground_state_energy`` and left the
+// ThermodynamicData arrays empty.
+// ============================================================================
+ThermodynamicData compute_tpq_thermo_from_trajectories(
+    const std::vector<std::vector<double>>& sample_inv_temps,
+    const std::vector<std::vector<double>>& sample_energies,
+    const std::vector<std::vector<double>>& sample_variances,
+    const std::vector<double>& target_temperatures
+) {
+    ThermodynamicData thermo{};
+
+    const std::size_t num_samples = sample_inv_temps.size();
+    const std::size_t num_T = target_temperatures.size();
+    if (num_samples == 0 || num_T == 0) {
+        return thermo;
+    }
+    // Shape sanity: every sample carries its three arrays in lockstep.
+    if (sample_energies.size() != num_samples
+        || sample_variances.size() != num_samples) {
+        return thermo;
+    }
+
+    // Pre-sort every sample's trajectory by beta so the per-target
+    // interpolation can use a single linear scan (kernels emit in
+    // step-monotone order; for mTPQ beta is also step-monotone since
+    // E_k drifts slowly, but defend against rounding-driven inversions).
+    std::vector<std::vector<std::array<double, 3>>> sorted(num_samples);
+    for (std::size_t s = 0; s < num_samples; ++s) {
+        const auto& betas = sample_inv_temps[s];
+        const auto& Es    = sample_energies[s];
+        const auto& vars  = sample_variances[s];
+        if (betas.size() != Es.size() || Es.size() != vars.size()) {
+            continue;  // skip malformed sample; cf. shape-mismatch policy
+        }
+        sorted[s].reserve(betas.size());
+        for (std::size_t k = 0; k < betas.size(); ++k) {
+            if (std::isfinite(betas[k]) && std::isfinite(Es[k])
+                && std::isfinite(vars[k])) {
+                sorted[s].push_back({betas[k], Es[k], vars[k]});
+            }
+        }
+        std::sort(sorted[s].begin(), sorted[s].end(),
+                  [](const auto& a, const auto& b) { return a[0] < b[0]; });
+    }
+
+    // Per-target Welford running mean across samples.
+    std::vector<double> energy_mean(num_T, 0.0);
+    std::vector<double> cv_mean(num_T, 0.0);
+    std::vector<std::uint64_t> counts(num_T, 0);
+
+    // Per-sample contribution to every target T:
+    //   * In-bracket beta:   linear interpolation of (E_k, var_k).
+    //   * target_beta > beta_max_traj (asked colder than the trajectory
+    //     reaches): clamp to the last trajectory point. For mTPQ this
+    //     is the asymptotic ground-state-projected state, which is the
+    //     correct extrapolation for T < T_min_traj. For cTPQ this is
+    //     the deepest beta the Taylor evolution reached.
+    //   * target_beta < beta_min_traj (asked warmer than beta=0): use
+    //     the first trajectory point (which is the beta=0 baseline,
+    //     <H> on the random seed -- the high-T limit).
+    //
+    // This per-sample boundary clamp replaces the previous per-bin
+    // "nearest covered bin" hole-filler, which produced incorrect E(T)
+    // at T_min when the trajectory bracketed (β_max_traj) was just
+    // below β_target = 1/T_min and the aggregator silently copied the
+    // value from the next-warmer bin.
+    bool any_covered = false;
+    for (std::size_t s = 0; s < num_samples; ++s) {
+        const auto& tr = sorted[s];
+        if (tr.empty()) continue;
+        any_covered = true;
+        const double beta_min = tr.front()[0];
+        const double beta_max = tr.back()[0];
+        for (std::size_t t = 0; t < num_T; ++t) {
+            const double T = target_temperatures[t];
+            const double target_beta = 1.0 / std::max(T, 1e-300);
+
+            double E_t, var_t;
+            if (target_beta <= beta_min) {
+                // Above-bracket warm: clamp to first point (beta=0 baseline).
+                E_t   = tr.front()[1];
+                var_t = tr.front()[2];
+            } else if (target_beta >= beta_max) {
+                // Below-bracket cold: clamp to last point (asymptotic E).
+                E_t   = tr.back()[1];
+                var_t = tr.back()[2];
+            } else {
+                // In-bracket: linear interpolation. Kernel emits in
+                // step-monotone order so the trajectory size is bounded
+                // by ``max_iter``; linear scan beats upper_bound's
+                // branch-mispredict cost on the small-N arrays.
+                std::size_t i_low = 0;
+                for (std::size_t i = 0; i + 1 < tr.size(); ++i) {
+                    if (tr[i][0] <= target_beta && tr[i + 1][0] >= target_beta) {
+                        i_low = i;
+                        break;
+                    }
+                }
+                const std::size_t i_high = i_low + 1;
+                const double beta_l = tr[i_low][0];
+                const double beta_h = tr[i_high][0];
+                const double alpha = (beta_h > beta_l)
+                    ? (target_beta - beta_l) / (beta_h - beta_l)
+                    : 0.0;
+                E_t   = tr[i_low][1] * (1.0 - alpha) + tr[i_high][1] * alpha;
+                var_t = tr[i_low][2] * (1.0 - alpha) + tr[i_high][2] * alpha;
+            }
+            const double Cv_t = target_beta * target_beta * var_t;
+
+            ++counts[t];
+            energy_mean[t] += (E_t  - energy_mean[t]) / counts[t];
+            cv_mean[t]     += (Cv_t - cv_mean[t])     / counts[t];
+        }
+    }
+
+    if (!any_covered) {
+        return thermo;  // no usable sample
+    }
+
+    // Trapezoidal integration of C_v / T -> entropy (zero baseline at
+    // the coldest target). F = E - T S.
+    std::vector<double> entropy(num_T, 0.0);
+    std::vector<double> free_energy(num_T, 0.0);
+    for (std::size_t i = 1; i < num_T; ++i) {
+        const double T1 = target_temperatures[i - 1];
+        const double T2 = target_temperatures[i];
+        const double Cv1 = cv_mean[i - 1];
+        const double Cv2 = cv_mean[i];
+        if (T1 > 0.0 && T2 > 0.0) {
+            entropy[i] = entropy[i - 1]
+                       + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
+        } else {
+            entropy[i] = entropy[i - 1];
+        }
+    }
+    for (std::size_t i = 0; i < num_T; ++i) {
+        free_energy[i] = energy_mean[i]
+                       - target_temperatures[i] * entropy[i];
+    }
+
+    thermo.temperatures   = target_temperatures;
+    thermo.energy         = std::move(energy_mean);
+    thermo.specific_heat  = std::move(cv_mean);
+    thermo.entropy        = std::move(entropy);
+    thermo.free_energy    = std::move(free_energy);
+    return thermo;
+}
+
 bool convert_tpq_to_unified_thermo(
     const std::string& tpq_dir,
     const std::string& output_file,
@@ -2347,12 +2512,12 @@ bool convert_tpq_to_unified_thermo(
 ) {
     std::cout << "\n=== Converting TPQ data to unified thermodynamic format ===" << std::endl;
     
-    // Audit follow-up: delegate the actual interpolation /
-    // integration to ``compute_tpq_unified_thermo``. We still need to
-    // read the sample trajectories here to compute error bars (which
-    // the unified ThermodynamicData struct doesn't carry), but the
+    // Delegate the actual interpolation / integration to
+    // ``compute_tpq_unified_thermo``. We still need to read the
+    // sample trajectories here to compute error bars (which the
+    // unified ThermodynamicData struct doesn't carry), but the
     // averaged grid + entropy / free energy must match what
-    // ``ed::auto_pilot::thermal`` sees in-memory.
+    // ``ed::workflows::thermal`` sees in-memory.
     ThermodynamicData unified =
         compute_tpq_unified_thermo(tpq_dir, temp_min, temp_max, num_temp_bins);
     if (unified.temperatures.empty()) {

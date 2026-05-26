@@ -33,6 +33,7 @@
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
 #include <ed/core/ed_wrapper.h>
+#include <ed/core/system_utils.h>      // create_directory_mpi_safe (formerly via ed_wrapper_streaming.h)
 #include <ed/dssf/dssf_engine.h>
 
 #ifdef WITH_MPI

@@ -7,9 +7,11 @@
 // are the second template argument of the unified term kernel
 // (term_kernels.h) and the *only* thing that distinguishes:
 //
-//   * full Hilbert space matvec
-//   * fixed total-Sz sector matvec
-//   * (eventually) symmetry-projected sector matvec
+//   * full Hilbert space matvec       -- FullBasisPolicy
+//   * fixed total-Sz sector matvec    -- FixedSzBasisPolicy
+//   * symmetry-projected sector       -- SymmetryBasisPolicy   (Wave 1)
+//   * Sz + symmetry sector            -- FixedSzSymmetryBasisPolicy (Wave 1)
+//   * distributed slab of any above   -- DistributedBasisPolicy<...> (Wave 2)
 //
 // A basis policy is a small value-type that exposes:
 //
@@ -29,6 +31,39 @@
 //       changes the popcount). The term kernel uses this to skip the
 //       `index_of() >= 0` check for the full basis at zero runtime cost.
 //
+// Optional ABI (Wave 0 of the close-the-symmetry-gap unification, May
+// 2026). Trivial policies inherit no-op defaults so the kernel's
+// ``if constexpr`` branches compile to nothing:
+//
+//   static constexpr bool needs_orbit_walk = false
+//       When true, the outer apply_terms loop calls ``iter_orbit(i, cb)``
+//       instead of using ``state_of(i)`` directly. Lets the symmetry
+//       policies walk |G| computational states per orbit representative.
+//
+//   template <class Callback>
+//   void iter_orbit(uint64_t src_idx, Callback&& cb) const
+//       Yields ``(state s, Scalar pre_phase)`` for each computational
+//       basis state in the orbit of ``src_idx``. Trivial policies yield
+//       ``(state_of(src_idx), Scalar(1))`` exactly once.
+//
+//   static constexpr bool has_coeff_modifier = false
+//       When true, the per-term emit multiplies by
+//       ``coeff_modifier<Scalar>(s, s_prime, src_idx, dst_idx)`` before
+//       pushing to the radix-sort buffer. Symmetry policies return
+//       ``conj(beta_{s'}) * group_norm / norm_{dst}``.
+//
+//   template <class Scalar>
+//   Scalar coeff_modifier(uint64_t s, uint64_t s_prime,
+//                         uint64_t src_idx, uint64_t dst_idx) const
+//       Optional per-emit phase / normalization factor. Default = 1.
+//
+//   static constexpr bool is_distributed = false
+//       When true, indicates the basis is a slab across MPI ranks and
+//       the kernel may need to consult ``is_local`` / ``local_offset``.
+//
+//   bool     is_local(uint64_t global_idx) const noexcept   -- default: true
+//   uint64_t local_offset() const noexcept                  -- default: 0
+//
 // Policies are passed by value (or by `const&`) to the term kernel; they
 // hold POD or pointers-to-POD and are trivially copyable so the kernel
 // can keep them in registers across the inner loops. The Hamiltonian
@@ -39,6 +74,8 @@
 // =============================================================================
 
 #include <cstdint>
+#include <complex>
+#include <utility>
 #include <vector>
 
 #include <ed/core/basis_utils.h>  // LinIndexTable
@@ -66,7 +103,36 @@ struct FullBasisPolicy {
         return state < (1ULL << n_bits) ? static_cast<int64_t>(state) : -1;
     }
 
-    static constexpr bool may_leave_basis = false;
+    static constexpr bool may_leave_basis  = false;
+
+    // Wave 0 ABI extension (May 2026): trivial-policy no-ops. ``apply_terms``
+    // gates these behind ``if constexpr`` so a compliant compiler elides
+    // them entirely for FullBasisPolicy / FixedSzBasisPolicy.
+    static constexpr bool needs_orbit_walk  = false;
+    static constexpr bool has_coeff_modifier = false;
+    static constexpr bool is_distributed    = false;
+
+    template <class Callback>
+    inline void iter_orbit(uint64_t src_idx, Callback&& cb) const {
+        // Trivial: orbit is the single state itself, phase 1.
+        // Kept for ABI completeness so a future apply_terms variant that
+        // doesn't constexpr-elide the orbit branch still compiles.
+        using cb_phase_t =
+            decltype(std::declval<Callback>()(uint64_t{}, std::complex<double>{}));
+        (void)cb_phase_t{};
+        cb(state_of(src_idx), std::complex<double>(1.0, 0.0));
+    }
+    template <class Scalar>
+    [[nodiscard]] inline Scalar coeff_modifier(uint64_t /*s*/,
+                                               uint64_t /*s_prime*/,
+                                               uint64_t /*src_idx*/,
+                                               uint64_t /*dst_idx*/) const noexcept {
+        return Scalar(1);
+    }
+    [[nodiscard]] inline bool is_local(uint64_t /*g*/) const noexcept {
+        return true;
+    }
+    [[nodiscard]] inline uint64_t local_offset() const noexcept { return 0; }
 };
 
 // ---------------------------------------------------------------------------
@@ -88,7 +154,29 @@ struct FixedSzBasisPolicy {
         return lin_index->lookup(state);
     }
 
-    static constexpr bool may_leave_basis = true;
+    static constexpr bool may_leave_basis  = true;
+
+    // Wave 0 ABI extension (May 2026): trivial-policy no-ops. See the
+    // twin block in ``FullBasisPolicy`` for the contract.
+    static constexpr bool needs_orbit_walk  = false;
+    static constexpr bool has_coeff_modifier = false;
+    static constexpr bool is_distributed    = false;
+
+    template <class Callback>
+    inline void iter_orbit(uint64_t src_idx, Callback&& cb) const {
+        cb(state_of(src_idx), std::complex<double>(1.0, 0.0));
+    }
+    template <class Scalar>
+    [[nodiscard]] inline Scalar coeff_modifier(uint64_t /*s*/,
+                                               uint64_t /*s_prime*/,
+                                               uint64_t /*src_idx*/,
+                                               uint64_t /*dst_idx*/) const noexcept {
+        return Scalar(1);
+    }
+    [[nodiscard]] inline bool is_local(uint64_t /*g*/) const noexcept {
+        return true;
+    }
+    [[nodiscard]] inline uint64_t local_offset() const noexcept { return 0; }
 };
 
 // ---------------------------------------------------------------------------

@@ -123,7 +123,7 @@ public:
 // Rather than touch every solver signature, this small free function turns
 // any MatVecOperator into that callable shape --- so callers can write:
 //
-//     ed::auto_pilot::solve(H, ...)               // H is an Operator
+//     ed::workflows::solve(H, ...)                // H is a LinearOperator
 //        -> uses H.apply(...) via virtual dispatch                  (best)
 //
 //     legacy_solver(as_apply_function(some_matvec_op), N, ...);    (bridge)

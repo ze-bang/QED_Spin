@@ -74,7 +74,7 @@ MPI_METHODS = (
 
 # Solver names whose only distributed kernel is via the standalone binary
 # above. ``run_distributed`` accepts these as ``method=`` for ergonomics
-# (so users can copy-paste the ``solver=`` value from ``qed.diag``).
+# (so users can copy-paste the ``solver=`` value from ``qed.solve``).
 #
 # Each entry maps ``alias -> (binary_mode, warn)``. ``warn=True`` means
 # the alias represents a semantic downgrade (e.g. an alias mapping to a
@@ -137,7 +137,7 @@ def run_distributed(
     ----------
     method : str
         One of :data:`MPI_METHODS` (``"lanczos"``, ``"ftlm"``, ``"tpq"``).
-        Common aliases from ``qed.diag(solver=...)`` are also accepted:
+        Common aliases from ``qed.solve(solver=...)`` are also accepted:
         ``"ks"`` maps to ``"krylov_schur"`` (real distributed kernel
         since Phase 9), and ``"mtpq"`` / ``"ctpq"`` map to ``"tpq"``.
     n_ranks : int
@@ -198,7 +198,7 @@ def run_distributed(
     FileNotFoundError
         If the launcher or ``ed_distributed_main`` cannot be found.
     """
-    # Accept the same names users pass to qed.diag(solver=...) and map
+    # Accept the same names users pass to qed.solve(solver=...) and map
     # them onto the binary's --mode tokens. Case-insensitive.
     requested = method
     method_key = method.lower()

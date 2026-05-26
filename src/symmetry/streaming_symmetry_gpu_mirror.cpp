@@ -1,0 +1,54 @@
+// =============================================================================
+// src/symmetry/streaming_symmetry_gpu_mirror.cpp
+//
+// CPU-only stub for the lazy GPU sector mirror entry points.
+//
+// When WITH_CUDA is OFF this TU is the sole provider of
+// ``StreamingSymmetryOperator::bind_cuda_for_sector`` and
+// ``FixedSzStreamingSymmetryOperator::bind_cuda_for_sector``. The real
+// implementation lives in ``streaming_symmetry_gpu_mirror.cu`` (compiled
+// into ``ed_solvers_gpu`` only when WITH_CUDA is ON). When WITH_CUDA is
+// ON this file is an empty TU -- the strong definitions come from the
+// .cu sibling.
+//
+// The stub throws ``std::logic_error`` with a clear message so callers
+// that misroute to ``bind_cuda()`` on a non-CUDA build get a loud,
+// localised failure rather than a silent fallback. The
+// ``select_backend`` gate (Phase 1c plumbing) avoids calling this on
+// a non-CUDA build because ``Geometry::supports_device_matvec`` is
+// only set when WITH_CUDA is defined AND the build runtime has at
+// least one GPU.
+// =============================================================================
+
+#ifndef WITH_CUDA
+
+#include <ed/core/streaming_symmetry.h>
+
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+[[noreturn]] void throw_no_cuda_build(const char* class_name) {
+    throw std::logic_error(
+        std::string(class_name) +
+        "::bind_cuda_for_sector: built without WITH_CUDA. "
+        "Rebuild with -DWITH_CUDA=ON to enable the GPU symmetry "
+        "mirror, or route the workload through CpuBackend "
+        "(device='cpu').");
+}
+
+}  // namespace
+
+ed::LinearOperator::MatvecFn
+StreamingSymmetryOperator::bind_cuda_for_sector(std::size_t /*sector_idx*/) const {
+    throw_no_cuda_build("StreamingSymmetryOperator");
+}
+
+ed::LinearOperator::MatvecFn
+FixedSzStreamingSymmetryOperator::bind_cuda_for_sector(
+    std::size_t /*sector_idx*/) const {
+    throw_no_cuda_build("FixedSzStreamingSymmetryOperator");
+}
+
+#endif  // !WITH_CUDA

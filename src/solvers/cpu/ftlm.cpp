@@ -3058,12 +3058,22 @@ compute_dynamical_correlation_multi_sample_multi_temperature_impl(
         // OpenMP parallel-for here would cause nested parallelism leading to
         // thread explosion, heap corruption, and segfaults.
         // MPI sample distribution handles the coarse-grained parallelism.
+        //
+        // Wave 3.2 of the SOTA Performance rollout (May 2026): hoist the
+        // per-state working vectors out of the inner loop. At N=2^18 each
+        // ComplexVector is 4 MiB; on a sample with 30+ significant Ritz
+        // states that's 100+ MiB of malloc/free traffic plus first-touch
+        // paging. Reusing one set of buffers eliminates the churn and
+        // keeps the NUMA-pinned pages warm across Ritz states.
+        ComplexVector psi_local(N);
+        ComplexVector phi2_local(N);
+        ComplexVector phi1_local(N);
         for (size_t idx = 0; idx < significant_states.size(); idx++) {
             uint64_t i = significant_states[idx];
-            
-            // Working vectors
-            ComplexVector psi_local(N, Complex(0.0, 0.0));
-            ComplexVector phi2_local(N);
+
+            // Reset psi_local to zero at the start of each state.
+            std::fill(psi_local.begin(), psi_local.end(),
+                      Complex(0.0, 0.0));
             
             // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
             for (uint64_t j = 0; j < m_H; j++) {
@@ -3108,7 +3118,9 @@ compute_dynamical_correlation_multi_sample_multi_temperature_impl(
             }
             
             // Apply O1 to the eigenstate: |φ₁⟩ = O₁|ψ_i⟩
-            ComplexVector phi1_local(N);
+            // Wave 3.2: phi1_local is hoisted above the loop. O1 writes
+            // every element, so no pre-zeroing is needed (matches the
+            // pre-Wave-3.2 semantics).
             O1(psi_local.data(), phi1_local.data(), N);
             
             // Compute overlaps: p_j = ⟨φ₁|v_j⟩ where v_j are Lanczos basis vectors from |φ₂⟩

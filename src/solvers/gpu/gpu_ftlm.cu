@@ -1150,11 +1150,11 @@ int GPUFTLMSolver::buildLanczosTridiagonalFromVector(
     int reorth_freq,
     std::vector<double>& alpha,
     std::vector<double>& beta) {
-
+    
     // First normalise (matches the legacy in-place normaliseVector call).
     vectorCopy(d_start_vec, d_v_current_);
     normalizeVector(d_v_current_);
-
+    
     // Drive the unified kernel; this path discards the kernel basis
     // (RAII-freed). No caller-visible basis pointer is set.
     return ed::matvec::gpu::run_ftlm_lanczos_kernel_facade(
@@ -1176,10 +1176,10 @@ int GPUFTLMSolver::buildLanczosTridiagonalWithBasis(
     std::vector<double>& alpha,
     std::vector<double>& beta,
     cuDoubleComplex*** d_basis_out) {
-
+    
     vectorCopy(d_start_vec, d_v_current_);
     normalizeVector(d_v_current_);
-
+    
     void* basis_void = nullptr;
     const int iters = ed::matvec::gpu::run_ftlm_lanczos_kernel_facade(
         *op_,

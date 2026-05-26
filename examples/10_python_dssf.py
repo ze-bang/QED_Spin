@@ -4,12 +4,10 @@
 T=0 ground-state Dynamical Structure Factor S(q, omega) on an 8-site
 Heisenberg PBC chain.
 
-Uses the high-level `qed.dssf` wrapper to assemble the momentum-resolved
-operator pairs (byte-identical to the production CLI), then runs the
-unified Python entry points :func:`qed.workflows.solve` for the
-spectrum and :func:`qed.workflows.spectral` for the dynamical
-correlator -- both introduced by the Full Unified-Interface Collapse
-(May 2026).
+Uses :mod:`qed.dssf` to assemble the momentum-resolved observable pairs
+(byte-identical to the production CLI), then drives the unified Python
+verbs :func:`qed.solve` (for the ground-state energy) and
+:func:`qed.spectral` (for the dynamical correlator).
 
 Run::
 
@@ -23,7 +21,6 @@ import tempfile
 import numpy as np
 
 import qed
-from qed import workflows
 
 
 def build_chain(N: int, periodic: bool = True, J: float = 1.0) -> qed.Operator:
@@ -70,26 +67,28 @@ def main() -> int:
     for name in pairs.names:
         print(f"    {name}")
 
-    print("\nRunning qed.workflows.solve to get the ground-state energy...")
-    solve_opts = workflows.SolveOptions()
-    solve_opts.num_eigs = 3
-    solve_opts.method = workflows.SolveMethod.Lanczos
-    solve_opts.tolerance = 1e-12
-    gs = workflows.solve(H, solve_opts)
+    print("\nRunning qed.solve(H, num_eigenvalues=3) to get the ground state...")
+    gs = qed.solve(H,
+                   num_eigenvalues=3,
+                   solver="LANCZOS",
+                   tolerance=1e-12,
+                   verbose=False,
+                   plan=False,
+                   auto_sz=False)
     print(f"  E_0 = {gs.eigenvalues[0]:.10f}  "
           f"(Bethe-ansatz reference for 8-site PBC chain ~ -3.65109)")
-    print(f"  backend lane = {gs.backend.lane}")
 
-    print("\nRunning qed.workflows.spectral on the first observable pair...")
+    print("\nRunning qed.spectral(H, [obs0], ...) on the first observable pair...")
     obs0 = pairs.obs_1[0]
-    sp_opts = workflows.SpectralOptions()
-    sp_opts.method = workflows.SpectralMethod.GroundStateCF
-    sp_opts.num_omega = 16
-    sp_opts.omega_min = -8.0
-    sp_opts.omega_max = 8.0
-    sp_opts.broadening = 0.1
-    sp_opts.krylov_dim = 80
-    spec_result = workflows.spectral(H, [obs0], sp_opts)
+    spec_result = qed.spectral(
+        H,
+        [obs0],
+        method="ground_state_cf",
+        omega=np.linspace(-8.0, 8.0, 16),
+        eta=0.1,
+        krylov_dim=80,
+        verbose=False,
+    )
     print(f"  computed S(omega) at {len(spec_result.omega)} omega points")
     print(f"  omega range = [{spec_result.omega[0]:.3f}, "
           f"{spec_result.omega[-1]:.3f}]")

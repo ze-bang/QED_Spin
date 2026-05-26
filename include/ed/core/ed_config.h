@@ -239,12 +239,11 @@ struct SystemConfig {
 
     // Phase 7.1: 5th orthogonal axis -- symmetry projection.
     //
-    // When true, exact_diagonalization_from_files /
-    // exact_diagonalization_from_directory route through the streaming
-    // symmetry kernel (ed_wrapper_streaming.h). This is the canonical
-    // (and only non-deprecated) way to opt into symmetry-projected ED.
-    // Equivalent to the legacy `--symm` CLI flag and to manually calling
-    // `exact_diagonalization_streaming_symmetry[_fixed_sz]`.
+    // When true, ``ed::make_operator(OperatorSpec{...generators=...})``
+    // builds the streaming-symmetry operator and
+    // ``ed::workflows::solve`` routes through it. This is the canonical
+    // way to opt into symmetry-projected ED (equivalent to the
+    // ``--symm`` CLI flag).
     bool use_symmetry = false;
 
     std::string hamiltonian_dir = "";

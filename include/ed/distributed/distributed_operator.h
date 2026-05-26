@@ -229,6 +229,21 @@ public:
             "lane.");
     }
 
+    // -------------------------------------------------------------------
+    // Wave 4 (May 2026, "Unify all 16 matvec cells" plan): real-arithmetic
+    // overrides. The Hamiltonian is real-Hermitian when the underlying
+    // serial ``Operator`` reports ``isReal() == true`` (the distributed
+    // wrapper doesn't add imaginary couplings of its own). The Wave 4
+    // ``bind_real_mpi`` here uses the default complex shim path; a
+    // native double-precision halo (MPI_DOUBLE instead of
+    // MPI_C_DOUBLE_COMPLEX) lands as a follow-up so the bandwidth halves
+    // for real-Hermitian workloads.
+    // -------------------------------------------------------------------
+    [[nodiscard]] bool is_real_hermitian() const noexcept override;
+    [[nodiscard]] RealMatvecFn bind_real_mpi() const override {
+        return bind_real_cpu();
+    }
+
     // -------------------------------------------------------------------------
     // Slab geometry (queryable on every rank).
     // -------------------------------------------------------------------------

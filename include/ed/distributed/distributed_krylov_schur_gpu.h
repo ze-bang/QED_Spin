@@ -19,7 +19,7 @@
 //
 // Result type and option semantics intentionally mirror the CPU
 // `distributed_krylov_schur` so callers / dispatchers (the standalone
-// CLI, `qed.diag`) can swap entry points without touching the
+// CLI, `qed.solve`) can swap entry points without touching the
 // surrounding code. The only piece this kernel honestly does NOT yet
 // surface is `compute_eigenvectors`: the locked Ritz vectors live on
 // device and are not staged back to host on exit. The result struct

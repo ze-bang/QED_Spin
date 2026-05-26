@@ -51,9 +51,12 @@
 // =============================================================================
 
 #include <algorithm>
+#include <chrono>     // Wave 5.1: ED_LANCZOS_KERNEL_PROFILE wallclock timers
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>     // Wave 5.1: profile summary to stderr
+#include <cstdlib>    // Wave 5.1: getenv
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -272,9 +275,21 @@ struct LanczosKernelOptions {
     std::vector<const Complex*> aux_ortho_ptrs;
 
     /// Number of recent basis vectors the LocalDGKS3 ring buffer
-    /// retains. Default 3 (the legacy `lanczos.cpp` value). Range:
-    /// 1..N. Only consulted when `reorth == LocalDGKS3`.
-    std::size_t local_ring_size = 3;
+    /// retains. Range: 1..N. Only consulted when
+    /// ``reorth == LocalDGKS3``.
+    ///
+    /// Default 1: K=1 local DGKS matches the legacy `lanczos_real`
+    /// fast path (`src/solvers/cpu/lanczos.cpp:1146-1154`) and is
+    /// the optimum for our Krylov dimensions on real-Hermitian /
+    /// well-conditioned spectra (validated to 1e-9 by the Apr 25
+    /// xdiag bake-off + the SOTA-symmetry suite). K=3 was the
+    /// pre-Wave-2.1 default and remains reachable via env
+    /// ``ED_LANCZOS_REORTH_K`` (read by `lanczos()` /
+    /// orchestrator) or by setting this field explicitly when
+    /// constructing options manually. Raise it for problems with
+    /// near-degenerate ground states where loss of orthogonality
+    /// across a small window is observable.
+    std::size_t local_ring_size = 1;
 
     /// Threshold below which a LocalDGKS3 projection is skipped (the
     /// resulting correction sits below the round-off floor). Default
@@ -346,6 +361,27 @@ LanczosKernelResult lanczos_kernel(
     const LanczosKernelOptions& opts)
 {
     using ed::matvec::Backend;
+
+    // ------------------------------------------------------------------
+    // Wave 5.1 of the SOTA Performance rollout (May 2026): per-bucket
+    // microsecond timers, opt-in via env ``ED_LANCZOS_KERNEL_PROFILE=1``.
+    // Mirrors the same gauges in ``lanczos_real`` so we can A/B the two
+    // engines on identical workloads. Zero cost when the env is unset
+    // (the gate is a single getenv at kernel entry, the per-iter cost
+    // is just `if (profile_on) accumulate`).
+    // ------------------------------------------------------------------
+    const bool profile_on = []() {
+        const char* env = std::getenv("ED_LANCZOS_KERNEL_PROFILE");
+        return env && env[0] == '1';
+    }();
+    auto now_us = [] {
+        return std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    double t_apply_us = 0.0, t_recur_us = 0.0, t_reorth_us = 0.0;
+    double t_norm_us  = 0.0, t_ring_us  = 0.0, t_check_us  = 0.0;
+    std::size_t iters_profiled = 0;
+    const double kernel_t0 = profile_on ? now_us() : 0.0;
 
     // FullCGS2/PeriodicCGS2 require keep_basis (we project against the
     // growing basis). LocalDGKS3 owns its own ring buffer and does NOT
@@ -492,9 +528,12 @@ LanczosKernelResult lanczos_kernel(
     const std::size_t cap = std::min<std::size_t>(opts.max_iter, dim_bound);
 
     for (std::size_t j = j_start; j < cap; ++j) {
+        const double t0 = profile_on ? now_us() : 0.0;
         // w = H * v_curr (matvec is opaque to this kernel --- it may
         // be a halo-aware distributed apply, a cuBLAS-backed SpMV, etc.)
         matvec(v_curr.get(), w.get(), local_n);
+        const double t1 = profile_on ? now_us() : 0.0;
+        if (profile_on) t_apply_us += (t1 - t0);
 
         // w -= beta[j] * v_prev   (skipped for j == 0; beta[0] is the
         // sentinel zero pushed above).
@@ -510,6 +549,8 @@ LanczosKernelResult lanczos_kernel(
         // w -= alpha[j] * v_curr
         be.axpy(Complex(-R.alpha[j], 0.0),
                 v_curr.get(), w.get(), local_n);
+        const double t2 = profile_on ? now_us() : 0.0;
+        if (profile_on) t_recur_us += (t2 - t1);
 
         // Reorthogonalisation. Three policies share the same
         // dispatch site:
@@ -543,28 +584,64 @@ LanczosKernelResult lanczos_kernel(
             for (auto& c : coeffs) c = -c;
             be.axpy_many(coeffs.data(), ortho_ptrs.data(),
                          ortho_ptrs.size(), w.get(), local_n);
-        } else if (opts.reorth == ReorthPolicy::LocalDGKS3 && ring_count > 0) {
-            // Walk the ring backward (most-recent first) for at most
-            // `local_ring_size` slots. Threshold-gated axpy: when the
-            // overlap is below sqrt(eps) the correction is in the
-            // round-off floor and we skip the axpy entirely.
-            const std::size_t cap_ring = ring.size();
-            const std::size_t k_max    = std::min<std::size_t>(
-                ring_count, opts.local_ring_size);
-            for (std::size_t k = 0; k < k_max; ++k) {
-                const std::size_t slot =
-                    (ring_head + ring_count - 1 - k) % cap_ring;
-                const Complex overlap =
-                    be.dot(ring[slot].get(), w.get(), local_n);
-                if (std::abs(overlap) > opts.local_ortho_threshold) {
-                    be.axpy(-overlap, ring[slot].get(), w.get(), local_n);
+        } else if (opts.reorth == ReorthPolicy::LocalDGKS3) {
+            // Wave 2.3 of the SOTA Performance rollout (May 2026):
+            // for the common cases K=1 and K=2 (the new defaults
+            // post-Wave 2.1) the kernel already holds the basis
+            // vectors we need to project against in ``v_curr`` (= V_j)
+            // and ``v_prev`` (= V_{j-1}). Use them directly and skip
+            // the ring buffer entirely. For K>=3 we still need V_{j-2}
+            // and beyond, so fall back to the ring storage path.
+            //
+            // This matches the `lanczos_real` zero-copy reorth in
+            // `src/solvers/cpu/lanczos.cpp:1146-1154` and eliminates
+            // the per-iter O(n) ``be.copy(v_curr -> ring[slot])``
+            // dominant for large-N small-state-space workloads.
+            const std::size_t K = opts.local_ring_size;
+            if (K <= 2) {
+                // K>=1: project against V_j (= v_curr).
+                if (j > 0 || j_start > 0) {
+                    const Complex overlap =
+                        be.dot(v_curr.get(), w.get(), local_n);
+                    if (std::abs(overlap) > opts.local_ortho_threshold) {
+                        be.axpy(-overlap, v_curr.get(), w.get(), local_n);
+                    }
+                }
+                // K==2: also project against V_{j-1} (= v_prev) when
+                // available. At j == 0 there is no prior basis vector.
+                if (K == 2 && j > 0) {
+                    const Complex overlap =
+                        be.dot(v_prev.get(), w.get(), local_n);
+                    if (std::abs(overlap) > opts.local_ortho_threshold) {
+                        be.axpy(-overlap, v_prev.get(), w.get(), local_n);
+                    }
+                }
+            } else if (ring_count > 0) {
+                // K>=3: fall back to the ring buffer (still updated
+                // below). Walks most-recent-first, threshold-gated.
+                const std::size_t cap_ring = ring.size();
+                const std::size_t k_max    = std::min<std::size_t>(
+                    ring_count, opts.local_ring_size);
+                for (std::size_t k = 0; k < k_max; ++k) {
+                    const std::size_t slot =
+                        (ring_head + ring_count - 1 - k) % cap_ring;
+                    const Complex overlap =
+                        be.dot(ring[slot].get(), w.get(), local_n);
+                    if (std::abs(overlap) > opts.local_ortho_threshold) {
+                        be.axpy(-overlap, ring[slot].get(), w.get(), local_n);
+                    }
                 }
             }
         }
 
+        const double t3 = profile_on ? now_us() : 0.0;
+        if (profile_on) t_reorth_us += (t3 - t2);
+
         // beta[j+1] = ||w||  (already-reduced for distributed backends)
         const double bnext = be.nrm2(w.get(), local_n);
         R.beta.push_back(bnext);
+        const double t4 = profile_on ? now_us() : 0.0;
+        if (profile_on) t_norm_us += (t4 - t3);
 
         // Lanczos breakdown: an invariant subspace has been found.
         // We use `breakdown_tol` (default ~1e-300, i.e. essentially
@@ -592,7 +669,19 @@ LanczosKernelResult lanczos_kernel(
         // Update the LocalDGKS3 ring buffer with V_{j+1} so the
         // on_step hook can snapshot it for resume. Ring is internal
         // state and unaffected by basis-keep semantics.
-        if (opts.reorth == ReorthPolicy::LocalDGKS3) {
+        //
+        // Wave 2.3: skip the ring update for K<=2 -- the reorth path
+        // reads v_curr/v_prev directly in that regime. The only
+        // remaining reason to maintain the ring is the on_step hook
+        // emitting ``ring_view`` for checkpointing; we still populate
+        // it when an on_step hook is registered.
+        const bool ring_needed_for_reorth =
+            (opts.reorth == ReorthPolicy::LocalDGKS3 &&
+             opts.local_ring_size > 2);
+        const bool ring_needed_for_checkpoint =
+            (opts.reorth == ReorthPolicy::LocalDGKS3 &&
+             opts.on_step != nullptr);
+        if (ring_needed_for_reorth || ring_needed_for_checkpoint) {
             const std::size_t cap_ring =
                 std::max<std::size_t>(opts.local_ring_size, 1);
             if (ring_count < cap_ring) {
@@ -633,6 +722,9 @@ LanczosKernelResult lanczos_kernel(
                          v_curr.get(), v_prev.get(), local_n, ring_view_ptr);
         }
 
+        const double t5 = profile_on ? now_us() : 0.0;
+        if (profile_on) t_ring_us += (t5 - t4);
+
         // Optional Ritz-convergence early-exit. We run the callback
         // AFTER on_step (so a checkpoint always gets written for the
         // iteration that triggered the break) but BEFORE the next
@@ -642,8 +734,13 @@ LanczosKernelResult lanczos_kernel(
             opts.convergence_check_interval > 0 &&
             ((j + 1) % opts.convergence_check_interval == 0))
         {
-            if (opts.convergence_check(R.alpha, R.beta)) break;
+            const double tc0 = profile_on ? now_us() : 0.0;
+            const bool converged = opts.convergence_check(R.alpha, R.beta);
+            if (profile_on) t_check_us += (now_us() - tc0);
+            if (converged) break;
         }
+
+        if (profile_on) ++iters_profiled;
 
         if (j + 1 >= cap) break;
 
@@ -666,6 +763,37 @@ LanczosKernelResult lanczos_kernel(
 
     R.iters_done = R.alpha.size();
     if (opts.keep_basis) R.basis = std::move(basis);
+
+    if (profile_on) {
+        const double t_total = now_us() - kernel_t0;
+        const double t_other = std::max(0.0,
+            t_total - t_apply_us - t_recur_us - t_reorth_us
+                    - t_norm_us  - t_ring_us  - t_check_us);
+        const std::size_t iters = R.iters_done;
+        const double inv_iters = (iters > 0)
+            ? 1.0 / static_cast<double>(iters) : 0.0;
+        const auto pct = [&](double x) -> double {
+            return (t_total > 0.0) ? 100.0 * x / t_total : 0.0;
+        };
+        std::fprintf(stderr,
+            "[lanczos_kernel] iters=%zu total=%.2f ms = "
+            "apply %.1f%% (%.1f us/it) "
+            "recur %.1f%% (%.1f us/it) "
+            "reorth %.1f%% (%.1f us/it) "
+            "norm %.1f%% (%.1f us/it) "
+            "ring %.1f%% (%.1f us/it) "
+            "check %.1f%% (%.1f us/it) "
+            "other %.1f%%\n",
+            iters, t_total / 1000.0,
+            pct(t_apply_us),  t_apply_us  * inv_iters,
+            pct(t_recur_us),  t_recur_us  * inv_iters,
+            pct(t_reorth_us), t_reorth_us * inv_iters,
+            pct(t_norm_us),   t_norm_us   * inv_iters,
+            pct(t_ring_us),   t_ring_us   * inv_iters,
+            pct(t_check_us),  t_check_us  * inv_iters,
+            pct(t_other));
+        (void)iters_profiled;  // available for callers that want it
+    }
 
     // Emit final v_curr / v_prev / ring buffer so callers can checkpoint
     // a resume-ready snapshot. We move out the unique_ptrs we own.

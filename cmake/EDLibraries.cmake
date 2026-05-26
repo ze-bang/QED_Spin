@@ -135,6 +135,25 @@ set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_core STATIC
     ${CORE_DIR}/ed_config.cpp
+    # Wave 1 ("Unify all 16 matvec cells", May 2026) -- unified
+    # symmetric matvec entry points that dispatch through
+    # ``ed::matvec::kernel::apply_terms<SymmetryBasisPolicy>``. Lives in
+    # ed_core because ``streaming_symmetry.h`` (which declares the
+    # methods) is part of ed_core's public include surface; every
+    # consumer of the symmetric matvec already links ed_core
+    # transitively.
+    ${SRC_DIR}/symmetry/streaming_symmetry_unified.cpp
+    # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026)
+    # -- CPU-only stub for the lazy GPU sector mirror entry point.
+    # When WITH_CUDA is OFF this TU provides the throwing stub that
+    # makes SectorView::bind_cuda() fail loudly. When WITH_CUDA is ON
+    # the file is an empty translation unit and the strong definitions
+    # come from ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
+    # (added to ed_solvers_gpu below). Splitting the TU avoids
+    # contaminating ed_core with a CUDA include path and avoids the
+    # multiple-definition / undefined-reference traps of a single
+    # source compiled into both libraries.
+    ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
@@ -195,6 +214,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/block_lanczos_dssf.cpp
     ${SOLVERS_CPU_DIR}/tpq_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
+    ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
 )
 
@@ -242,6 +262,10 @@ set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(WITH_MPI)
     add_library(ed_distributed STATIC
         ${DISTRIBUTED_DIR}/distributed_operator.cpp
+        # Wave 2 ("Unify all 16 matvec cells", May 2026) -- cell 2C
+        # (Distributed Fixed-Sz) as a native LinearOperator instead of
+        # the Phase G symmetry-with-trivial-group workaround.
+        ${DISTRIBUTED_DIR}/distributed_fixed_sz_operator.cpp
         ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
         ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
         ${DISTRIBUTED_DIR}/distributed_tpq.cpp
@@ -365,6 +389,7 @@ add_library(ed_dssf STATIC
     ${DSSF_DIR}/dssf_method.cpp
     ${DSSF_DIR}/dssf_io.cpp
     ${DSSF_DIR}/cross_sector_observable.cpp
+    ${DSSF_DIR}/cross_sector_orbit_observable.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_dssf PRIVATE ${HDF5_INCLUDE_DIRS})
@@ -602,6 +627,14 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
+        # Phase A of the "Backend x Symmetries x Workflows" plan
+        # (May 2026) -- real lazy GPU sector mirror for
+        # StreamingSymmetryOperator + FixedSz variant. Lives here (and
+        # not in ed_core) because it pulls in <cuda_runtime.h> +
+        # thrust + the device basis policy headers. The ed_core .cpp
+        # twin is an empty TU when WITH_CUDA is ON, so there is no
+        # multiple-definition risk.
+        ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

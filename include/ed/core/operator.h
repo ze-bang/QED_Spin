@@ -484,6 +484,31 @@ public:
         backend_->apply_real(&tv, in, out, size);
     }
 
+    // -----------------------------------------------------------------
+    // Wave 1.1 of the SOTA Performance rollout (May 2026): expose the
+    // real-Hermitian fast path through ``LinearOperator``'s virtuals so
+    // ``ed::workflows::solve`` can dispatch to ``lanczos_real``.
+    //
+    // ``is_real_hermitian()`` is the AND of (i) ``isReal()`` -- the
+    // existing per-coefficient scan with its own cache -- and
+    // (ii) ``is_hermitian()`` from the ``MatVecOperator`` base (true
+    // by default for the spin / fermion operators built via this
+    // class). ``bind_real_cpu()`` returns a lambda directly over
+    // ``apply_real`` (already routed through the matvec backend's
+    // native double path), avoiding the complex<->real shuttle that
+    // the ``LinearOperator`` default would impose.
+    // -----------------------------------------------------------------
+    [[nodiscard]] bool is_real_hermitian() const noexcept override {
+        return const_cast<Operator*>(this)->isReal() && is_hermitian();
+    }
+
+    [[nodiscard]] RealMatvecFn bind_real_cpu() const override {
+        const Operator* p = this;
+        return [p](const double* in, double* out, std::size_t n) {
+            p->apply_real(in, out, n);
+        };
+    }
+
     // ========================================================================
     // isReal: tests (and caches) whether all stored couplings are purely real.
     //

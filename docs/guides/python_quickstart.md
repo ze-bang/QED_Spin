@@ -168,47 +168,41 @@ same C++ ones bound on the top-level facade, so `qe.lanczos(pair_obs_1)` /
 
 ## Single-call dispatcher (Phase 5)
 
-The thin wrappers above (`qe.full_diagonalization`, `qe.lanczos`,
-`qe.finite_temperature_lanczos`, …) cover the everyday cases. For the
-full backend matrix use the dispatcher:
+The thin wrappers above (`qe.full_diagonalization`,
+`qe.compute_thermodynamics_from_spectrum`, …) cover specific
+low-level entry points. For the full backend matrix use the unified
+three-verb orchestrator (`qe.solve` / `qe.thermal` / `qe.spectral`):
 
 ```python
 import qed as qe
 
-params = qe.EDParameters()
-params.num_eigenvalues = 4
-params.tolerance = 1e-12
+# Eigenvalue solvers: LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL
+res = qe.solve(op, num_eigenvalues=4, solver="KRYLOV_SCHUR",
+               tolerance=1e-12)
 
-# CPU iterative: any of LANCZOS{,_SELECTIVE,_NO_ORTHO}, BLOCK_LANCZOS,
-# KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG,
-# THICK_RESTART_LANCZOS, IMPLICIT_RESTART_LANCZOS, CHEBYSHEV_FILTERED,
-# SHIFT_INVERT[_ROBUST], BICG, ARPACK_{SM,LM,SR,LR}.
-res = qe.exact_diagonalization_core(
-    op, qe.DiagonalizationMethod.KRYLOV_SCHUR, params,
-)
-
-# Dense (FULL, OSS, SCALAPACK[_MIXED]) and thermal
-# (FTLM, LTLM, HYBRID, mTPQ, cTPQ) flow through the same call.
+# Finite-temperature trajectories: mTPQ / cTPQ / FTLM / LTLM
+thermo = qe.thermal(op, method="FTLM",
+                    num_samples=4,
+                    temp_min=0.05, temp_max=10.0, num_temp_points=200)
 
 # GPU per-sector with symmetry projection (large clusters):
 if qe.has_cuda_build():
-    res = qe.exact_diagonalization_streaming_symmetry(
-        "./my_dir", qe.DiagonalizationMethod.LANCZOS_GPU, params,
-    )
+    res = qe.solve(op, symmetry=info, device="gpu",
+                   num_eigenvalues=2)
 
 # MPI distributed solvers (helper builds the mpiexec / srun argv):
 if qe.has_mpi_build():
     qe.mpi.run_distributed("./my_dir", method="lanczos", n_ranks=8)
 
 # Full continued-fraction S(Q,omega) engine:
-qe.dssf.run_from_directory("./my_dir", method="LANCZOS")
+qe.spectral("./my_dir", T=[0.1, 0.3, 1.0],
+            omega=[-2, -1, 0, 1, 2])
 ```
 
 See [`python_advanced.md`](python_advanced.md) for the full pattern
-catalogue (every `EDParameters` knob, GPU per-method dispatch, in-process
-symmetry round-trip, ScaLAPACK setup, choosing between
-`exact_diagonalization_core` / `_from_directory[_symmetrized]` /
-`_streaming_symmetry[_fixed_sz]`).
+catalogue (every `EDParameters` knob via `extra_params={}`, GPU
+per-method dispatch, in-process symmetry round-trip, choosing between
+`qe.solve` / `qe.thermal` / `qe.spectral`).
 
 ## Backwards compatibility with `edlib`
 

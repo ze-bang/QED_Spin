@@ -1,8 +1,8 @@
 """qed.thermal -- one canonical call for finite-T diagonalization.
 
 This module is the Python mirror of the C++ entry point
-``ed::auto_pilot::thermal(...)`` declared in
-``QED/include/ed/auto/thermal.h``. The motivation, as raised by the
+``ed::workflows::thermal(...)`` declared in
+``QED/include/ed/orchestrator.h``. The motivation, as raised by the
 matvec-unification audit, was: *"I just want one unified way that
 automatically gives me the proper thermodynamics, fully optimised with
 the Sz and symmetry sectors. Essentially the user just calls FTLM and
@@ -30,7 +30,7 @@ What the function does internally:
     2.  Iterate ``n_up`` over the requested window (default: full
         ``[0, N]``).  Empty sectors and sectors outside ``[0, N]`` are
         silently skipped.
-    3.  For each sector, dispatch through :func:`qed.diag` with
+    3.  For each sector, dispatch through :func:`qed.solve` with
         ``sz=n_up`` and -- in the directory form -- ``symmetry=``
         auto-loaded from ``automorphism_results/``. Each per-sector call
         therefore exploits BOTH the Sz and the spatial-symmetry axis.
@@ -63,27 +63,16 @@ from ._core import (
     EDResults,
     Operator,
     ThermodynamicData,
-    exact_diagonalization_from_directory,
 )
-from .workflow import diag
+from .workflow import solve as _solve  # per-sector dispatcher
+from .workflow import _resolve_device   # (use_gpu, use_mpi) device picker
 
 __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
 
 
-# ---------------------------------------------------------------------------
-# Full Unified-Interface Collapse, Wave E2 (May 2026): repoint the two
-# `exact_diagonalization_from_directory` call sites on this file at
-# `_core.workflows_thermal` when the dispatch is safely covered by the
-# orchestrator (no spatial symmetry, or TPQ which always disables
-# symmetry). The streaming-symmetry irrep loop is NOT yet a feature of
-# `workflows_thermal`; in that case we keep falling back to the legacy
-# directory dispatcher.
-# ---------------------------------------------------------------------------
-
-# Full Unified-Interface Collapse, Wave E4 (May 2026): suppress the C++
-# legacy deprecation warning when we deliberately fall back to
-# `exact_diagonalization_from_directory` for lanes the orchestrator
-# does not yet cover (streaming-symmetry irrep iteration).
+# Compatibility shim: a few helpers still spell ``_suppress_legacy_dispatch_warning``
+# as a no-op context manager. After the May-2026 surface unification this
+# is a stub kept so other modules don't crash on import.
 @contextlib.contextmanager
 def _suppress_legacy_dispatch_warning():
     with warnings.catch_warnings():
@@ -111,16 +100,46 @@ def _ed_params_to_thermal_options(
     opts = _core.ThermalOptions()
     opts.method        = _THERMAL_METHOD_MAP.get(method, _core.ThermalMethod.FTLM)
     opts.num_samples   = int(params.num_samples)
-    opts.krylov_dim    = int(params.ftlm_krylov_dim) \
-        if method == DiagonalizationMethod.FTLM \
-        else int(params.ltlm_krylov_dim) \
-        if method == DiagonalizationMethod.LTLM \
-        else 100
+    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
+    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
+    # the number of (L - H) iterations; cTPQ uses it as a CAP on the
+    # number of Taylor steps. For mTPQ/cTPQ we map the user's
+    # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
+    # closes a gap where the legacy adapter hardcoded 100 iterations
+    # for the TPQ lanes and never honoured the user's request.
+    if method == DiagonalizationMethod.FTLM:
+        opts.krylov_dim = int(params.ftlm_krylov_dim)
+    elif method == DiagonalizationMethod.LTLM:
+        opts.krylov_dim = int(params.ltlm_krylov_dim)
+    elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+        # ``tpq_max_steps`` is populated from ``qed.thermal(max_iterations=...)``
+        # by ``_ed_params_to_thermal_options``'s caller in workflow.py.
+        # Fall back to ``max_iterations`` if the TPQ-specific field
+        # was not set (defensive: both should be in lockstep today).
+        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
+        if steps <= 0:
+            steps = int(getattr(params, "max_iterations", 1000) or 1000)
+        opts.krylov_dim = steps
+    else:
+        opts.krylov_dim = 100
     opts.taylor_order  = int(params.tpq_taylor_order)
     opts.delta_beta    = float(params.tpq_delta_beta)
     opts.beta_max      = float(params.tpq_beta_max)
     opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")
+    # Closing-the-symmetry-gap follow-up (May 2026): forward the
+    # KPM moment / Hutchinson knobs the user passed through
+    # ``qed.thermal(kpm_num_moments=..., kpm_num_random_vectors=...)``
+    # so the streaming-symmetry binding does not silently fall back
+    # to the ``KpmDosOptions`` defaults (M=2048, R=20) -- the latter
+    # was a ~250x amplifier on FT-KPM_DOS Symm.
+    if method == DiagonalizationMethod.KPM_DOS:
+        kn_m = int(getattr(params, "kpm_num_moments", 0) or 0)
+        kn_r = int(getattr(params, "kpm_num_random_vectors", 0) or 0)
+        if kn_m > 0:
+            opts.kpm_num_moments = kn_m
+        if kn_r > 0:
+            opts.kpm_num_random_vectors = kn_r
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
@@ -144,31 +163,83 @@ def _can_use_workflows_thermal(
     method: DiagonalizationMethod,
     has_symmetry: bool,
 ) -> bool:
-    """True when the orchestrator's `workflows_thermal` covers the
-    requested lane today: any method that does not need the
-    streaming-symmetry irrep loop. TPQ silently disables symmetry,
-    so it is always safe; everything else is safe iff
-    `has_symmetry == False`."""
-    if method not in _THERMAL_METHOD_MAP:
-        return False
-    if method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
-        return True
-    return not has_symmetry
+    """True when `_core.workflows_thermal` (the single-operator
+    orchestrator entry) covers the requested lane.
+
+    Post-collapse SOTA upgrade (May 2026): when ``has_symmetry`` is
+    True we now route through
+    ``_core.workflows_thermal_streaming_symmetry_directory`` instead
+    (which composes the orchestrator's single-operator entry with a
+    per-irrep sector loop and recombines via
+    ``ed::core::combine_sector_thermodynamics``). So
+    ``_can_use_workflows_thermal`` returns True iff the method is
+    bound, regardless of ``has_symmetry``; callers branch on
+    ``has_symmetry`` to pick the right binding."""
+    return method in _THERMAL_METHOD_MAP
 
 
 def _thermal_via_workflows_thermal(
     H_op: Operator,
     method: DiagonalizationMethod,
     params: EDParameters,
+    *,
+    use_gpu: bool = False,
+    use_mpi: bool = False,
 ) -> EDResults:
     """Route a (possibly fixed-Sz) operator through
-    `_core.workflows_thermal` and reshape the result to `EDResults`."""
+    `_core.workflows_thermal` and reshape the result to `EDResults`.
+
+    ``use_gpu`` / ``use_mpi`` flips the matching ``BackendConstraints``
+    bits on the ``ThermalOptions`` so the C++ ``select_backend`` picks
+    ``CudaBackend`` / ``MpiBackend`` for the matvec inside the thermal
+    kernel."""
     if params.use_fixed_sz:
         op = H_op.make_fixed_sz(int(params.n_up))
     else:
         op = H_op
     opts = _ed_params_to_thermal_options(params, method)
+    opts.backend.allow_gpu = bool(use_gpu)
+    opts.backend.allow_mpi = bool(use_mpi)
     tr = _core.workflows_thermal(op, opts)
+    return _ed_result_from_thermal_result(tr)
+
+
+def _thermal_via_workflows_streaming_symmetry(
+    directory: str,
+    num_sites: int,
+    spin_l: float,
+    method: DiagonalizationMethod,
+    params: EDParameters,
+    *,
+    use_gpu: bool = False,
+    use_mpi: bool = False,
+) -> EDResults:
+    """Route a directory + ``automorphism_results/`` through the
+    SOTA C++ streaming-symmetry thermal binding
+    (``_core.workflows_thermal_streaming_symmetry_directory``).
+
+    Mirrors :func:`_thermal_via_workflows_thermal` but lets the C++
+    side own the per-irrep sector loop and the Z-recombination via
+    ``ed::core::combine_sector_thermodynamics``. The returned
+    ``EDResults.thermo_data`` is the full-Hilbert recombined thermo
+    on the requested temperature grid.
+
+    Phase C of the "Backend x Symmetries x Workflows" plan
+    (May 2026): honours the caller's ``use_gpu`` flag by flipping
+    ``opts.backend.allow_gpu`` on the streaming-symmetry binding
+    too. The C++ side then routes the per-sector matvec through the
+    lazy GPU mirror that Phase A wired up."""
+    opts = _ed_params_to_thermal_options(params, method)
+    opts.backend.allow_gpu = bool(use_gpu)
+    opts.backend.allow_mpi = bool(use_mpi)
+    fixed_sz = int(params.n_up) if params.use_fixed_sz else None
+    tr = _core.workflows_thermal_streaming_symmetry_directory(
+        directory,
+        int(num_sites),
+        float(spin_l),
+        opts,
+        fixed_sz,
+    )
     return _ed_result_from_thermal_result(tr)
 
 
@@ -369,12 +440,20 @@ def thermal(
     tolerance: float = 1e-10,
     max_iterations: int = 1000,
     random_seed: int = 0,
-    use_symmetry_if_available: bool = True,
+    use_symmetry_if_available: bool = False,
     use_sz_if_conserved: bool = True,
     auto_tune: bool = True,
     level: str = "balanced",
     output_dir: str = "",
     verbose: bool = True,
+    # Phase C of the "Backend x Symmetries x Workflows" plan
+    # (May 2026): explicit device selector. ``None`` / ``"auto"`` picks
+    # GPU when the Hilbert dim crosses the auto-tuner threshold;
+    # ``"cpu"`` / ``"gpu"`` pin the choice. The selected backend flag
+    # is threaded into every per-sector ``qed.solve`` (in-memory
+    # branch) AND into the ``ThermalOptions.backend`` carried by the
+    # directory / streaming-symmetry C++ binding.
+    device: Optional[str] = None,
     # ---- KPM_DOS specific ------------------------------------------
     kpm_num_moments: int = 200,
     kpm_num_random_vectors: int = 16,
@@ -390,7 +469,7 @@ def thermal(
     tpq_taylor_order: int = 8,
     tpq_measurement_interval: int = 1,
     # ``0.0`` -> auto-pick via a quick Lanczos spectral-bound estimate
-    # inside ``exact_diagonalization_core`` (single source of truth).
+    # inside the orchestrator's TPQ kernel (single source of truth).
     tpq_energy_shift: float = 0.0,
     # Directory-form-only knobs.
     num_sites: Optional[int] = None,
@@ -426,8 +505,14 @@ def thermal(
         partition-function weight at the temperatures of interest.
     num_samples, krylov_dim, tolerance, random_seed : optional
         Per-sector FTLM / LTLM solver knobs.
-    use_symmetry_if_available, use_sz_if_conserved : bool, optional
-        Force-off toggles for the auto-detection. Default both True.
+    use_symmetry_if_available : bool, optional
+        Opt-in spatial-symmetry detection for the directory form
+        (reads ``automorphism_results/`` if present). **Default False**
+        as of the May-2026 surface unification; pass
+        ``use_symmetry_if_available=True`` to restore the old
+        directory-form auto-detection.
+    use_sz_if_conserved : bool, optional
+        Force-off toggle for the Sz auto-iteration. Default True.
     auto_tune, level : optional
         Phase-9.3 auto-tuner. ``level`` is one of ``"conservative"``,
         ``"balanced"``, ``"aggressive"``.
@@ -439,7 +524,7 @@ def thermal(
     num_sites, spin : optional
         Required for the directory form.
     extra_params : dict, optional
-        Forwarded to :func:`qed.diag` per sector. Use for any niche
+        Forwarded to :func:`qed.solve` per sector. Use for any niche
         ``EDParameters`` field this helper doesn't expose.
 
     Returns
@@ -475,6 +560,28 @@ def thermal(
         raise ValueError(
             "qed.thermal: pass num_sites=... when using the "
             "directory form."
+        )
+
+    # Phase C of the "Backend x Symmetries x Workflows" plan
+    # (May 2026): resolve the device once at the top. We pass the
+    # whole-Hilbert dim as the "size hint" so ``device='auto'`` picks
+    # the GPU only when the dim crosses the auto-tuner threshold.
+    # Per-sector calls inherit the choice (the sector matvec is
+    # bounded by the whole-Hilbert dim anyway, so a single decision
+    # is the right grain).
+    if is_directory:
+        _dim_hint = 1 << int(num_sites)
+    else:
+        _dim_hint = 1 << int(H.num_sites)
+    _use_gpu, _use_mpi = _resolve_device(device, _dim_hint)
+    if _use_mpi:
+        # qed.thermal does not have an MPI route today -- the C++
+        # thermal binding is rank-local. We surface a clear error
+        # rather than silently dropping the MPI request.
+        raise NotImplementedError(
+            "qed.thermal(device={!r}): MPI thermal is not wired yet "
+            "(use the standalone ed_distributed_main binary). Pass "
+            "device='cpu' or device='gpu'.".format(device)
         )
 
     # ------------------------------------------------------------------
@@ -547,8 +654,8 @@ def thermal(
         if os.path.exists(inter):
             H_op.load_inter_all(inter)
         # `automorphism_results/` triggers the streaming-symmetry route
-        # via qed.diag(symmetry=...). When present we load the generator
-        # set; qed.diag handles the per-irrep streaming internally.
+        # via qed.solve(symmetry=...). When present we load the generator
+        # set; qed.solve handles the per-irrep streaming internally.
         sym_dir = os.path.join(directory, "automorphism_results")
         has_sym = (
             use_symmetry_if_available
@@ -631,19 +738,31 @@ def thermal(
             if ltlm_krylov_dim is not None:
                 p.ltlm_krylov_dim = int(ltlm_krylov_dim)
                 p.ltlm_ground_krylov = int(ltlm_krylov_dim)
+            # Pipe ``max_iterations`` into ``tpq_max_steps`` for the
+            # mTPQ / cTPQ lanes (closes a gap where this helper only
+            # set the FTLM/LTLM Krylov-dim and left the TPQ iteration
+            # budget at the EDParameters default). ``_ed_params_to_thermal_options``
+            # reads ``tpq_max_steps`` to populate ``opts.krylov_dim``
+            # for mTPQ/cTPQ.
+            if max_iterations is not None:
+                p.max_iterations = int(max_iterations)
+                p.tpq_max_steps  = int(max_iterations)
             if random_seed:
                 p.ftlm_seed = int(random_seed)
                 p.ltlm_seed = int(random_seed)
             if n_up_val is not None:
                 p.use_fixed_sz = True
                 p.n_up = int(n_up_val)
-            # TPQ doesn't factor cleanly through spatial irreps (single
-            # random state), so we silently disable symmetry for TPQ
-            # even when the directory has it. The Sz axis is still used.
-            if method_enum in _TPQ_METHODS:
-                p.use_symmetry = False
-            else:
-                p.use_symmetry = bool(has_sym)
+            # SOTA upgrade (May 2026): the per-irrep sector loop is
+            # now wired for every thermal method (FTLM / LTLM / KPM /
+            # mTPQ / cTPQ) via
+            # ``_core.workflows_thermal_streaming_symmetry_directory``
+            # + ``ed::core::combine_sector_thermodynamics``. We still
+            # honour the user's ``use_symmetry_if_available`` toggle,
+            # but no longer silently downgrade TPQ -- it now feeds
+            # exactly the same streaming loop as FTLM/LTLM/KPM, with
+            # the Z-weighted recombiner handling sector mixing.
+            p.use_symmetry = bool(has_sym)
             for k, v in merged_extra.items():
                 setattr(p, k, v)
             return p
@@ -656,16 +775,23 @@ def thermal(
                 )
             try:
                 p = _make_dir_params(None)
-                # Wave E2 (Full Unified-Interface Collapse, May 2026):
-                # repoint at `_core.workflows_thermal` when the
-                # orchestrator covers the lane (any method that doesn't
-                # need the streaming-symmetry irrep loop).
-                if _can_use_workflows_thermal(method_enum, has_sym):
-                    res = _thermal_via_workflows_thermal(H_op, method_enum, p)
+                if not _can_use_workflows_thermal(method_enum, has_sym):
+                    raise NotImplementedError(
+                        f"qed.thermal: method={method!r} has no "
+                        f"orchestrator binding; supported methods are "
+                        f"{sorted(_THERMAL_METHOD_MAP.keys())!r}."
+                    )
+                if has_sym:
+                    res = _thermal_via_workflows_streaming_symmetry(
+                        directory, N, float(spin),
+                        method_enum, p,
+                        use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    )
                 else:
-                    with _suppress_legacy_dispatch_warning():
-                        res = exact_diagonalization_from_directory(
-                            directory, method_enum, p)
+                    res = _thermal_via_workflows_thermal(
+                        H_op, method_enum, p,
+                        use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    )
                 thermo = _sector_thermo_arrays(res)
                 if thermo is None:
                     raise RuntimeError(
@@ -682,10 +808,11 @@ def thermal(
                 entropy=S, free_energy=F, method=str(method),
                 ground_state_energy=gs_E,
                 used_sz_decomposition=False,
-                # Spatial symmetry is suppressed for TPQ; report
-                # accurately so callers can spot the silent fallback.
-                used_symmetry_decomposition=(
-                    has_sym and method_enum not in _TPQ_METHODS),
+                # Post-SOTA upgrade (May 2026): the streaming-symmetry
+                # path is wired for every thermal method, so the
+                # symmetry-decomposition flag is now `has_sym`
+                # unconditionally.
+                used_symmetry_decomposition=bool(has_sym),
             )
 
         if verbose:
@@ -702,15 +829,23 @@ def thermal(
                 if verbose:
                     print(f"  [n_up={n_up}] dim={sec_dim}")
                 p = _make_dir_params(n_up)
-                # Wave E2 (Full Unified-Interface Collapse, May 2026):
-                # per-sector thermal lands on `workflows_thermal` when
-                # the orchestrator covers the lane.
-                if _can_use_workflows_thermal(method_enum, has_sym):
-                    res = _thermal_via_workflows_thermal(H_op, method_enum, p)
+                if not _can_use_workflows_thermal(method_enum, has_sym):
+                    raise NotImplementedError(
+                        f"qed.thermal: method={method!r} has no "
+                        f"orchestrator binding; supported methods are "
+                        f"{sorted(_THERMAL_METHOD_MAP.keys())!r}."
+                    )
+                if has_sym:
+                    res = _thermal_via_workflows_streaming_symmetry(
+                        directory, N, float(spin),
+                        method_enum, p,
+                        use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    )
                 else:
-                    with _suppress_legacy_dispatch_warning():
-                        res = exact_diagonalization_from_directory(
-                            directory, method_enum, p)
+                    res = _thermal_via_workflows_thermal(
+                        H_op, method_enum, p,
+                        use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    )
                 thermo = _sector_thermo_arrays(res)
                 if thermo is None:
                     if verbose:
@@ -756,7 +891,7 @@ def thermal(
         )
 
     # ------------------------------------------------------------------
-    # 3b. In-memory form -- iterate via qed.diag(H, sz=n_up).
+    # 3b. In-memory form -- iterate via qed.solve(H, sz=n_up).
     # ------------------------------------------------------------------
     def _make_diag_kwargs(n_up_val: Optional[int]) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -772,7 +907,19 @@ def thermal(
             "level": level,
             "verbose": False,
             "plan": False,
+            # Phase C of the "Backend x Symmetries x Workflows" plan
+            # (May 2026): forward the device selector to every
+            # per-sector solver call so the in-memory thermal path
+            # reaches the GPU when requested.
+            "device": device,
         }
+        # Pipe ``max_iterations`` into the per-sector solver call. For
+        # mTPQ / cTPQ this controls the iteration budget; for FTLM /
+        # LTLM / KPM_DOS it's the Lanczos / KPM cap. Closes a gap where
+        # this helper silently used the EDParameters default (1000)
+        # regardless of what the user asked for.
+        if max_iterations is not None:
+            kwargs["max_iterations"] = int(max_iterations)
         # Build the per-sector extra_params bag.
         sector_extra: dict[str, Any] = dict(merged_extra)
         # The `krylov_dim` argument is a legacy alias: for FTLM it maps to
@@ -801,7 +948,7 @@ def thermal(
                 f"full-Hilbert {method} call."
             )
         try:
-            res = diag(H_op, **_make_diag_kwargs(None))
+            res = _solve(H_op, auto_sz=False, **_make_diag_kwargs(None))
             thermo = _sector_thermo_arrays(res)
             if thermo is None:
                 raise RuntimeError(
@@ -837,7 +984,7 @@ def thermal(
             if verbose:
                 print(f"  [n_up={n_up}] dim={sec_dim}")
 
-            res = diag(H_op, sz=n_up, **_make_diag_kwargs(n_up))
+            res = _solve(H_op, sz=n_up, **_make_diag_kwargs(n_up))
             thermo = _sector_thermo_arrays(res)
             if thermo is None:
                 if verbose:

@@ -382,7 +382,7 @@ bool convert_tpq_to_unified_thermo(
  * temperature grid, averages across samples, and integrates to obtain
  * entropy and free energy. Returns the resulting
  * :class:`ThermodynamicData` directly so callers (notably
- * ``exact_diagonalization_core``'s mTPQ / cTPQ branches) can attach it
+ * ``ed::workflows::thermal``'s mTPQ / cTPQ branches) can attach it
  * to ``EDResults`` without going through disk.
  *
  * Audit follow-up: this is the single source of truth for
@@ -399,6 +399,44 @@ ThermodynamicData compute_tpq_unified_thermo(
     double temp_min = 0.01,
     double temp_max = 100.0,
     std::uint64_t num_temp_bins = 200
+);
+
+/**
+ * @brief Aggregate per-sample TPQ trajectories into ThermodynamicData
+ *        on a user-supplied temperature grid (in-memory variant).
+ *
+ * Companion to ``compute_tpq_unified_thermo`` for the unified
+ * mTPQ/cTPQ kernels in ``include/ed/thermal/{mtpq,ctpq}_kernel.h``,
+ * which now emit per-step (beta_k, E_k, var_k) trajectories directly
+ * (no HDF5 / text-file round trip). The orchestrator's mTPQ/cTPQ
+ * branches in ``ed::workflows::thermal`` call this to populate
+ * ``ThermalResult::thermo`` so ``qed.thermal`` returns usable
+ * thermodynamics for both methods.
+ *
+ * Math: for each target temperature T (target_temperatures[t]), linearly
+ * interpolate every sample's (beta_k, E_k, var_k) at beta_target = 1/T,
+ * Welford-average across samples that bracket the target. Specific
+ * heat C_v = beta^2 * <var>. Entropy via trapezoidal integration of
+ * C_v / T from cold to hot. Free energy F = E - T * S.
+ *
+ * Samples whose trajectories don't bracket a given target beta are
+ * skipped for that bin; bins with no contributing sample are filled
+ * by nearest-bracketed-bin extrapolation (mirrors the legacy
+ * ``compute_tpq_unified_thermo`` behaviour for empty bins).
+ *
+ * Returns an empty ``ThermodynamicData`` (all vectors zero-length)
+ * when ``sample_*.empty()`` or ``target_temperatures.empty()``.
+ *
+ * @param sample_inv_temps    Per-sample beta_k trajectory
+ * @param sample_energies     Per-sample E_k trajectory (same length)
+ * @param sample_variances    Per-sample var_k trajectory (same length)
+ * @param target_temperatures Temperature grid for the output
+ */
+ThermodynamicData compute_tpq_thermo_from_trajectories(
+    const std::vector<std::vector<double>>& sample_inv_temps,
+    const std::vector<std::vector<double>>& sample_energies,
+    const std::vector<std::vector<double>>& sample_variances,
+    const std::vector<double>& target_temperatures
 );
 
 /**

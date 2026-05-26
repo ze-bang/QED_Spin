@@ -93,9 +93,13 @@ omits `ed_solvers_gpu` entirely.*
 
 `ed_main.cpp` is intentionally thin: **parse** → **optional workflows** →
 **optional DSSF dispatch**. The heavy logic is in
-[`include/ed/core/ed_wrapper.h`](../../include/ed/core/ed_wrapper.h) (thousands
-of lines: `exact_diagonalization_from_files`, symmetry wrappers, GPU routing)
-and in [`src/cli/workflows.cpp`](../../src/cli/workflows.cpp).
+[`src/cli/workflows.cpp`](../../src/cli/workflows.cpp), which builds
+the input deck with [`ed::make_operator`](../../include/ed/core/make_operator.h)
+and dispatches through [`ed::workflows::{solve,thermal,spectral}`](../../include/ed/orchestrator.h).
+The thousands of lines of dispatch code that used to live in
+`include/ed/core/ed_wrapper.h` / `ed_wrapper_streaming.h` (legacy
+`exact_diagonalization_*` family + symmetry wrappers + GPU routing)
+were hard-removed in the May 2026 surface-unification collapse.
 
 ```mermaid
 flowchart TD
@@ -136,15 +140,21 @@ the most confusing case is `run_standard` **and** `run_symm_auto` both true
 — **both** runs execute and eigenvalues are **compared** (see `ed_main.cpp`).*
 
 **Where solvers actually run:** `run_*_workflow` calls into the single
-canonical entry `ed::exact_diagonalization(...)` in
-[`dispatch.h`](../../include/ed/core/dispatch.h) (matvec-unification Phase 6),
-which switches on the orthogonal `EDParameters` axes (`use_symmetry`,
-`use_fixed_sz`, `use_gpu`, `use_mpi`) and forwards to the per-kernel
-implementations in `ed_wrapper.h` (full-Hilbert / fixed-Sz / GPU /
-ScaLAPACK) and `ed_wrapper_streaming.h` (streaming symmetry). The choice
-of `DiagonalizationMethod` (the per-algorithm enum, in
-[`ed_types.h`](../../include/ed/core/ed_types.h)) is orthogonal and resolved
-inside `exact_diagonalization_core`.
+canonical orchestrator entry `ed::workflows::{solve,thermal,spectral}(*op, opts)`
+in [`orchestrator.h`](../../include/ed/orchestrator.h), passing a
+`LinearOperator` built by `ed::make_operator(OperatorSpec{...})`
+([`make_operator.h`](../../include/ed/core/make_operator.h)). The
+orchestrator dispatches over the orthogonal axes (`use_symmetry`,
+`use_fixed_sz`, GPU/MPI lanes via `BackendConstraints`) and forwards
+to the per-kernel implementations under
+[`include/ed/krylov/`](../../include/ed/krylov/),
+[`include/ed/solvers/`](../../include/ed/solvers/),
+[`include/ed/thermal/`](../../include/ed/thermal/), and the GPU
+counterparts in [`include/ed/gpu/`](../../include/ed/gpu/). The
+choice of `SolveMethod` / `ThermalMethod` / `SpectralMethod` (the
+per-algorithm enums, in
+[`orchestrator.h`](../../include/ed/orchestrator.h)) is orthogonal
+and resolved inside the orchestrator.
 
 ---
 
@@ -204,18 +214,21 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 - `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
   Hamiltonian I/O, much symmetry wiring; `Operator` and `FixedSzOperator`
-  now inherit from `ed::matvec::MatVecOperator` -- Phase 2 of matvec-
-  unification),
-- `dispatch.h` (matvec-unification Phase 6: the single canonical
-  `ed::exact_diagonalization()` entry; supersedes the legacy
-  `ed_dispatch_symmetry.h` -- now a 50-line forwarder shim),
+  inherit from `ed::matvec::MatVecOperator` and from `ed::LinearOperator`),
+- `make_operator.h` (the single factory:
+  `ed::make_operator(OperatorSpec) -> std::unique_ptr<LinearOperator>`,
+  with three input alternatives — programmatic `Operator`, directory
+  path, or in-memory edge list — plus orthogonal axes
+  `use_fixed_sz` / `streaming_symmetry` / `distributed`),
 - `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
-  `ed_method_traits.h`, `ed_parameters.h`, `ed_types.h`,
-- `ed_wrapper.h`, `ed_wrapper_streaming.h` (internal implementation
-  headers behind `dispatch.h`),
+  `ed_method_traits.h`, `ed_parameters.h`, `ed_legacy_types.h`,
+  `ed_types.h`,
+- `ed_wrapper.h` (thin shim re-exporting `EDResults` from
+  `ed_legacy_types.h`; the legacy `exact_diagonalization_*` family
+  and `ed_wrapper_streaming.h` were hard-removed in May 2026),
 - `hdf5_io.h`, `hdf5_symmetry_io.h`, `sorted_uint64_index.h`,
-- `streaming_symmetry.h` (now also exposes `SectorView` per-sector
-  `MatVecOperator` wrappers -- Phase 2),
+- `streaming_symmetry.h` (`SectorView` per-sector `MatVecOperator`
+  wrappers — driven by the orchestrator's symmetry lane),
 - `system_utils.h`, `thermal_types.h`
 
 The chunked-symmetry / disk-streaming triplet
@@ -278,7 +291,30 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.11 `include/ed/symmetry/`
 
-- `group.h`
+- `group.h` — group construction / character utilities consumed by
+  the lattice-side automorphism finder.
+- `subspace.h` *(May 2026)* — `FullSpaceSubspace` and
+  `FixedSzSubspace`, the two `Subspace` specialisations of the
+  orthogonal symmetry composition. `FixedSzOperator::subspace()`
+  returns a non-owning view backed by the operator's existing
+  sorted-basis vector and Lin (1990) index table; both Subspaces
+  expose `policy()` returning the matvec-side
+  `ed::matvec::basis::Full/FixedSzBasisPolicy` POD view.
+- `projector.h` *(May 2026)* — `SpatialProjector` (thin view over
+  `SymmetryGroupInfo` carrying the per-sector character and the
+  site-permutation `apply`), plus ABI placeholders
+  `InternalZ2Projector` and `AntiunitaryProjector` for global
+  spin-flip and antiunitary axes.
+- `projector_chain.h` *(May 2026)* — `ProjectorChain`
+  (heterogeneous `std::variant` container) and the templated
+  `compute_orbit_for_state<Subspace>(...)` orbit/character builder
+  that is now the single source of truth behind
+  `StreamingSymmetryOperator::computeOrbitData` and
+  `FixedSzStreamingSymmetryOperator::computeOrbitDataFixedSz`.
+  Byte-equality pinned by
+  [`tests/unit/test_projector_chain.cpp`](../../tests/unit/test_projector_chain.cpp);
+  ABI smoke for the future-axis placeholders pinned by
+  [`tests/unit/test_chain_extensibility.cpp`](../../tests/unit/test_chain_extensibility.cpp).
 
 ### 5.12 `src/apps/`
 
@@ -410,15 +446,15 @@ so `thermal(...)` explicitly clears `use_symmetry` for TPQ runs.
 The recommended path is one function call:
 
 ```cpp
-#include <ed/auto/thermal.h>
+#include <ed/orchestrator.h>
 
 // In-memory: auto-Sz only.
-auto thermo = ed::auto_pilot::thermal(
+auto thermo = ed::workflows::thermal(
     H, DiagonalizationMethod::FTLM,
     { .T_min = 0.05, .T_max = 5.0, .num_T = 64 });
 
 // Directory-based: auto-Sz AND auto-symmetry (`automorphism_results/`).
-auto thermo = ed::auto_pilot::thermal(
+auto thermo = ed::workflows::thermal(
     "ed_dir/", N, /*spin=*/0.5f, DiagonalizationMethod::FTLM,
     { .T_min = 0.05, .T_max = 5.0, .num_T = 64,
       .sz_min = N/2 - 2, .sz_max = N/2 + 2 });   // optional Sz window
@@ -443,8 +479,8 @@ symmetry the Hamiltonian possesses, in one call." Internally it:
 
 The lower layers are still there and still individually useful:
 
-1. **Auto-pilot (in-memory, single sector)** -- `ed::auto_pilot::solve(
-   Operator&, AutoSolveOptions)` (`include/ed/auto/solve.h`).
+1. **Auto-pilot (in-memory, single sector)** -- `ed::workflows::solve(
+   Operator&, SolveOptions)` (`include/ed/orchestrator.h`).
 
    * Detects total-Sz conservation by inspecting `transform_data_`.
    * With `auto_basis = On` (default) and no Zeeman field, projects to
@@ -460,27 +496,29 @@ The lower layers are still there and still individually useful:
      thermodynamics, which is correct for "I want Z within the GS Sz
      sector" but **not** the full-Hilbert thermo.
 
-2. **Canonical entry (file-based)** -- `ed::exact_diagonalization(directory,
-   method, params)` (`include/ed/core/dispatch.h`).
+2. **Canonical entry (file-based)** —
+   `ed::make_operator(OperatorSpec{ .source = DirectoryPath{...}, ... })`
+   followed by `ed::workflows::{solve,thermal,spectral}(*op, opts)`
+   (`include/ed/core/make_operator.h` +
+   `include/ed/orchestrator.h`).
 
    * Auto-detects spatial symmetry by probing
      `<directory>/automorphism_results/` for any of
      `automorphisms.json`, `max_clique.json`, `sector_metadata.json`,
      `minimal_generators.json` (the layout written by the Python
-     automorphism tool and by C++ `generate_automorphisms`), plus the
-     legacy `sectors.json` / `generators.json` names. When present,
-     the dispatcher flips `params.use_symmetry = true` and routes
-     through `exact_diagonalization_streaming_symmetry`.
-   * The streaming kernel iterates over every (`irrep` or
-     `Sz × irrep`) sector, calls
-     `exact_diagonalization_core(matvec_per_sector, sector_dim,
-     method, sector_params)` once per sector, and (post-matvec-
-     unification follow-up):
+     automorphism tool and by C++ `generate_automorphisms`), plus
+     the legacy `sectors.json` / `generators.json` names. When
+     present, the factory builds a `StreamingSymmetryOperator` and
+     the CLI helper `run_streaming_symmetry_workflow`
+     (`src/cli/workflows.cpp`) iterates over sectors via
+     `StreamingSymmetryOperator::sector(k)`, calling
+     `ed::workflows::solve(*sector, opts)` once per sector.
+   * Per-sector recombination:
        - For ground-state methods: collects per-sector eigenvalues
          into a global pool and sorts.
-       - For finite-T methods (`FTLM`, `LTLM`, `HYBRID`, `KPM_DOS`,
-         `mTPQ`, `cTPQ`): collects per-sector `ThermodynamicData` and
-         calls `ed::core::combine_sector_thermodynamics`
+       - For finite-T methods (`FTLM`, `LTLM`, `KPM_DOS`, `mTPQ`,
+         `cTPQ`): collects per-sector `ThermodynamicData` and calls
+         `ed::core::combine_sector_thermodynamics`
          (`include/ed/core/sector_thermo.h`) to produce the
          full-Hilbert thermo via free-energy Z-recombination.
 
@@ -521,13 +559,18 @@ generic version is what the streaming kernel now calls.
 
 ### 7.1 Intentional (design, not sloppiness)
 
-- **Symmetry front-end** is now a single header
-  (`ed_wrapper_streaming.h`, accessed via `ed::exact_diagonalization`
-  in `dispatch.h`). The chunked / disk-streaming variants
-  (`ed_wrapper_chunked.h`, `chunked_symmetry_builder.h`,
-  `disk_streaming_symmetry.h`) were retired in matvec-unification
-  Phase 7.2 -- the distributed/MPI build covers the very-large-Hilbert
-  case the chunked path was built for.
+- **Symmetry front-end** is now a single factory + orchestrator combo:
+  `ed::make_operator(OperatorSpec{ .streaming_symmetry = true, ... })`
+  builds a `StreamingSymmetryOperator`, and the per-sector iteration
+  is driven by `ed::workflows::{solve,thermal,spectral}(*sec, opts)`
+  in the CLI helper `run_streaming_symmetry_workflow`
+  (`src/cli/workflows.cpp`) and the Python binding
+  `_core.workflows_solve_streaming_symmetry_directory`. The chunked
+  / disk-streaming variants (`ed_wrapper_chunked.h`,
+  `chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`) were
+  retired in matvec-unification Phase 7.2 — the distributed/MPI
+  build covers the very-large-Hilbert case the chunked path was
+  built for.
 - **CPU + GPU solvers** (`lanczos.cpp` vs `gpu_lanczos.cu`, `TPQ.cpp` vs
   `gpu_tpq.cu`, …): separate implementations bound by regression tests
   (`test_cpu_gpu_equivalence.cpp`). Both paths plug into the unified

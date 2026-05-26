@@ -209,11 +209,75 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
         t.csr_force = read_force(env_use_legacy);
     }
 
+    // Wave 7 (May 2026, "Unify all 16 matvec cells" plan): ``ED_SYM_CSR_DIM_MAX``
+    // is the symmetry-specific override. When a SymmetryBasisPolicy-backed
+    // operator constructs its backend it reads this in addition to
+    // ``ED_CSR_DIM_MAX`` so users can apply a smaller cap on symmetry
+    // sectors (where orbit-walk amortizes more across matvecs) than on
+    // the full-Hilbert lane. The follow-up patch wires SectorView
+    // through a backend instance that pays attention to it.
     std::uint64_t unified_cutoff = read_cutoff("ED_CSR_DIM_MAX", 0);
     if (unified_cutoff != 0) {
         t.csr_cutoff_dim = unified_cutoff;
     } else {
         t.csr_cutoff_dim = read_cutoff(env_dim_legacy, default_cutoff);
+    }
+    return t;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 of the "Unified CPU/GPU symmetry architecture" plan (May 2026).
+//
+// ``read_symmetry_tunables(default_cutoff)`` returns a ``MatVecTunables``
+// configured for the symmetry lane: the cutoff is taken from
+// ``ED_SYM_CSR_DIM_MAX`` first, then ``ED_CSR_DIM_MAX``, then the
+// caller's default (typically ``1<<13 == 8192`` -- the "small N"
+// regime where symmetry-projected sectors benefit most from CSR
+// caching; large N is dominated by matrix-free SpMV time and the
+// CSR build would dwarf the savings).
+//
+// Why a separate env var: symmetry-projected sectors live in a
+// different size regime than the full Hilbert space. For an N=14 ring
+// with translation+reflection, the largest sector is ~5k states even
+// though the full Hilbert space is 16384. Users routinely want
+// ``ED_CSR_DIM_MAX=0`` (disable CSR for full) while still benefiting
+// from ``ED_SYM_CSR_DIM_MAX=8192`` (enable CSR for symmetry sectors).
+//
+// ``csr_force`` shares the unified ``ED_CSR_FORCE`` knob so a force-on
+// or force-off applies uniformly across lanes.
+// ---------------------------------------------------------------------------
+inline MatVecTunables read_symmetry_tunables(
+    std::uint64_t default_cutoff = (1ULL << 13)) noexcept
+{
+    MatVecTunables t;
+    t.csr_cutoff_dim = default_cutoff;
+
+    auto read_force = [](const char* name) -> int {
+        if (!name) return -1;
+        const char* v = std::getenv(name);
+        if (!v) return -1;
+        if (v[0] == '0') return 0;
+        if (v[0] == '1') return 1;
+        return -1;
+    };
+    auto read_cutoff = [](const char* name, std::uint64_t fallback) -> std::uint64_t {
+        if (!name) return fallback;
+        const char* v = std::getenv(name);
+        if (!v) return fallback;
+        return static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
+    };
+
+    int force = read_force("ED_CSR_FORCE");
+    t.csr_force = force;  // -1 if unset -> use cutoff
+
+    // Symmetry-specific cutoff: ED_SYM_CSR_DIM_MAX overrides
+    // ED_CSR_DIM_MAX overrides the caller default.
+    std::uint64_t sym_cutoff = read_cutoff("ED_SYM_CSR_DIM_MAX", 0);
+    if (sym_cutoff != 0) {
+        t.csr_cutoff_dim = sym_cutoff;
+    } else {
+        std::uint64_t unified = read_cutoff("ED_CSR_DIM_MAX", 0);
+        if (unified != 0) t.csr_cutoff_dim = unified;
     }
     return t;
 }

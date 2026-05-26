@@ -13,6 +13,7 @@
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/symmetry/subspace.h>
 
 // ============================================================================
 // Fixed Sz Operator Class
@@ -94,6 +95,21 @@ public:
     /// matvec-unification basis policy (FixedSzBasisPolicy) can build a
     /// non-owning view without copying the tables.
     const LinIndexTable& lin_index_table() const noexcept { return lin_index_; }
+
+    // ------------------------------------------------------------------
+    // Orthogonal symmetry composition (May 2026): expose this operator's
+    // (n_bits, n_up, basis_states_, lin_index_) tuple as a non-owning
+    // ``ed::symmetry::FixedSzSubspace`` view. The Subspace is the first
+    // orthogonal axis of the new (Subspace x ProjectorChain) decomposition
+    // and is consumed by the projector-chain orbit builder
+    // (``ed::symmetry::build_symmetry_basis``) at host time. The
+    // returned view's lifetime is bounded by this Operator's lifetime;
+    // see ``include/ed/symmetry/subspace.h`` for the full ABI contract.
+    // ------------------------------------------------------------------
+    [[nodiscard]] ed::symmetry::FixedSzSubspace subspace() const noexcept {
+        return ed::symmetry::FixedSzSubspace::view(
+            n_bits_, n_up_, basis_states_, lin_index_);
+    }
 
     /// Alias kept for GPU/CPU API symmetry (GPUFixedSzOperator also exposes
     /// projectToReduced).

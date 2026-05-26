@@ -604,6 +604,39 @@ PYBIND11_MODULE(_core, m) {
              py::arg("op_type_2"), py::arg("site_2"),
              py::arg("coeff"),
              "Append a two-body term `coeff * Op1[site_1] Op2[site_2]`.")
+        .def("transform_tuples",
+             [](const Operator& op) {
+                 // SOTA cross-irrep spectral path: the Python wrapper
+                 // `qed.spectral(symmetry={"observable": Op, ...})`
+                 // calls this to extract the one-/two-body terms in
+                 // the canonical (op_type, site, coeff, is_two_body,
+                 // op_type_2, site_2) layout that
+                 // ``workflows_spectral_streaming_symmetry_cross_irrep_directory``
+                 // ingests. We return a list of 6-tuples mirroring
+                 // ``Operator::TransformData``; three-body terms are
+                 // not yet plumbed through the cross-sector observable
+                 // (would need a separate scatter path).
+                 py::list out;
+                 for (const auto& t : op.transform_data_) {
+                     out.append(py::make_tuple(
+                         static_cast<int>(t.op_type),
+                         t.site_index,
+                         t.coefficient,
+                         t.is_two_body,
+                         static_cast<int>(t.op_type_2),
+                         t.site_index_2));
+                 }
+                 return out;
+             },
+             R"pbdoc(
+             Return the operator's one-/two-body terms as a list of
+             6-tuples ``(op_type, site, coeff, is_two_body, op_type_2,
+             site_2)``. Used by the cross-irrep streaming-symmetry
+             spectral path (qed.spectral with
+             ``symmetry={"observable": Op, ...}``) to extract the
+             probe O_Q's TransformData without exposing the SoA
+             internals directly.
+             )pbdoc")
         .def("add_three_body", &op_add_three_body,
              py::arg("op_type_1"), py::arg("site_1"),
              py::arg("op_type_2"), py::arg("site_2"),

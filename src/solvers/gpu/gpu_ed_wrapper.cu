@@ -1039,8 +1039,9 @@ void GPUEDWrapper::runGPUFullDiag(void* gpu_op_handle,
 // architecture rev (May 2026): it was unreachable. `gpu_ed_wrapper.cu`
 // is only added to the build inside `if(WITH_CUDA)`
 // (`cmake/EDLibraries.cmake:566`), and every `GPUEDWrapper::*`
-// callsite in `ed_wrapper.h` / `ed_wrapper_streaming.h` is itself
-// gated by `#ifdef WITH_CUDA`. An #error guard catches accidental
+// callsite in the GPU kernel facades (e.g.
+// `gpu_lanczos_kernel_facade.cu`, `gpu_block_lanczos_kernel.cu`) is
+// itself gated by `#ifdef WITH_CUDA`. An #error guard catches accidental
 // inclusion in a CPU-only build instead of silently providing
 // no-op symbols.
 #error "gpu_ed_wrapper.cu must only be compiled in WITH_CUDA builds (see cmake/EDLibraries.cmake)."

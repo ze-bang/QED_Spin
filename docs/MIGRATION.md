@@ -1,15 +1,55 @@
-# Migration Guide — Minimalist ED Collapse (May 2026)
+# Migration Guide — Surface Unification (May 2026)
 
-This guide explains how to port C++ and Python callers from the legacy
-public surface (`exact_diagonalization_*`, `ed::auto_pilot::*`,
-`ed_dispatch::*`, `qed.diag`, `qed.dssf.compute`, ...) to the new
+This guide explains how to port code from the legacy public surface
+(`exact_diagonalization_*`, `ed::auto_pilot::*`, `ed_dispatch::*`,
+`qed.diag`, `qed.dssf.compute`, `qed.workflows.*`, ...) to the new
 unified entry points (`ed::workflows::*`, `qed.solve / thermal / spectral`).
 
-The collapse is **source-compatible**: every legacy entry point remains
-buildable during the migration window and routes through the new
-orchestrators internally. New code MUST use the new entry points; the
-legacy surface is being removed phase-by-phase as in-tree callers
-(CLI binary, Python binding, unit/integration tests) are ported.
+## What changed in the final collapse (May 2026)
+
+**The Python surface is now exactly three verbs plus one factory:**
+
+* `qed.solve(H, **kwargs)`         — ground state / eigenvalues
+* `qed.thermal(H, **kwargs)`       — finite-temperature thermodynamics
+* `qed.spectral(H, observables, **kwargs)` — spectral / structure factors
+
+All three take plain keyword arguments — no `SolveOptions` /
+`ThermalOptions` / `SpectralOptions` objects in user code (those are
+constructed internally from your kwargs).
+
+**Hard-removed Python names:**
+
+* `qed.workflows` (the entire module, ~156 LOC) — was the structured
+  Python mirror of `_core.workflows_*` and is no longer needed.
+* `qed.diag` — renamed to `qed.solve`.
+* `qed.dssf.compute`, `qed.dssf.run_from_directory`, `qed.dssf.pick_method`
+  — folded into `qed.spectral(directory, ...)`.
+* `qed.exact_diagonalization_core`, `qed.exact_diagonalization_from_directory`,
+  `qed.exact_diagonalization_streaming_symmetry`, and
+  `qed.exact_diagonalization_streaming_symmetry_fixed_sz` — Python
+  re-exports of the legacy C++ bindings removed from the package top
+  level. (The underlying pybind11 entry points still exist on
+  `qed._core` for one cycle while the in-tree streaming-symmetry path
+  finishes its orchestrator migration.)
+
+**Behavioral changes worth flagging:**
+
+* `qed.solve` now auto-projects onto the half-filling Sz=N//2 sector
+  by default when `H.conserves_sz()`. To preserve the old "full
+  Hilbert space" behaviour, pass `auto_sz=False`.
+* `qed.thermal` directory form no longer auto-detects symmetry. Pass
+  `use_symmetry_if_available=True` to read `automorphism_results/`.
+
+**Still in-flight (deferred to the follow-up commit):**
+
+* `python/qed/_bindings/dispatcher_bindings.cpp`'s 5 ED-related
+  `m.def(...)` registrations remain as deprecation-warning forwarders
+  for the in-tree streaming-symmetry path.
+* `include/ed/core/ed_wrapper.h` and `ed_wrapper_streaming.h` (the
+  `ed::exact_diagonalization_*` C++ family) remain alive for one more
+  cycle while the orchestrator gains `make_operator` pybind coverage
+  and `workflows_thermal` gains full temperature-grid population for
+  FTLM.
 
 **Removed in the ED cleanup sweep (May 2026):**
 
@@ -67,15 +107,21 @@ kernel-delegation inversion land):**
 | `ed::auto_pilot::thermal(op, AutoThermalOptions{...})`    | `ed::workflows::thermal(op, ThermalOptions{...})`|
 | `ed::auto_pilot::dssf::compute(...)`                      | `ed::workflows::spectral(op, observables, ...)` |
 
-| Legacy (Python)                          | New (Python)                                          |
-|------------------------------------------|-------------------------------------------------------|
-| `qed.diag(directory, method=..., ...)`   | `qed.solve(directory, method=..., ...)`               |
-| `qed.lanczos(directory, ...)`            | `qed.solve(directory, method="lanczos", ...)`         |
-| `qed.finite_temperature_lanczos(...)`    | `qed.thermal(directory, method="ftlm", ...)`          |
-| `qed.dssf.compute(directory, ...)`       | `qed.spectral(directory, observables=..., ...)`       |
+| Legacy (Python)                              | New (Python)                                          |
+|----------------------------------------------|-------------------------------------------------------|
+| `qed.diag(H, ...)`                           | `qed.solve(H, ...)`                                   |
+| `qed.workflows.solve(op, SolveOptions(...))` | `qed.solve(H, solver="LANCZOS", **kwargs)`            |
+| `qed.workflows.thermal(op, ThermalOptions)`  | `qed.thermal(H, method="FTLM", **kwargs)`             |
+| `qed.workflows.spectral(op, obs, ...)`       | `qed.spectral(H, observables, **kwargs)`              |
+| `qed.dssf.compute(directory, ...)`           | `qed.spectral(directory, **kwargs)`                   |
+| `qed.dssf.run_from_directory(...)`           | `qed.spectral(directory, method=..., **kwargs)`       |
+| `qed.exact_diagonalization_core(op, ...)`    | `qed.solve(H, ...)` (or `_core.workflows_solve` for the raw orchestrator) |
 
-The legacy Python names remain as thin aliases that route through the
-new entry points; existing notebooks continue to work unchanged.
+**This is a hard rename for the public Python surface.** None of the
+legacy names above resolve under `qed.*` any more — old notebooks must
+be updated. The pybind11 internals on `qed._core` still expose
+`workflows_solve / workflows_thermal / workflows_spectral` for power
+users; you should not normally need them.
 
 ---
 
@@ -186,14 +232,20 @@ auto r = ed::workflows::spectral(*op, observables, ed::SpectralOptions{
 
 ```python
 # Before
-results = qed.diag("./data", method="lanczos", num_eigs=5)
+results = qed.diag(H, num_eigenvalues=5)
+# or, via the structured surface that no longer exists:
+opts = qed.workflows.SolveOptions(); opts.num_eigs = 5
+results = qed.workflows.solve(H, opts)
 
 # After
-results = qed.solve("./data", method="lanczos", num_eigs=5)
+results = qed.solve(H, num_eigenvalues=5)
 ```
 
-`qed.diag` is preserved as a deprecation alias that emits a
-`DeprecationWarning` and forwards to `qed.solve`.
+`qed.diag` was removed in this release; `qed.workflows.solve` was also
+removed. Use `qed.solve` with plain kwargs. Note that `qed.solve` now
+auto-projects onto the half-filling Sz sector by default when the
+Hamiltonian conserves Sz; pass `auto_sz=False` to keep the full
+Hilbert space.
 
 ### 2. Thermal
 
@@ -208,12 +260,21 @@ thermal = qed.thermal("./data", method="ftlm", temperatures=[0.1, 0.5, 1.0])
 ### 3. Dynamical structure factor (DSSF)
 
 ```python
-# Before
-res = qed.dssf.compute("./data", omega_grid=ws, T=0.0)
+# Before -- directory form
+res = qed.dssf.compute("./data", omega=ws, T=0.0)
+# Before -- in-memory form via the removed structured surface
+opts = qed.workflows.SpectralOptions(); opts.broadening = 0.05
+res = qed.workflows.spectral(H, [Sz], opts)
 
-# After
-res = qed.spectral("./data", observables=[Sx, Sy, Sz], omega_grid=ws, T=0.0)
+# After -- one verb, polymorphic over (H, observables) vs (directory)
+res = qed.spectral("./data", omega=ws, T=0.0)        # CLI form
+res = qed.spectral(H, [Sz], omega=ws, eta=0.05)      # in-memory form
 ```
+
+`qed.dssf` now only re-exports the **data helpers** (`OperatorSpec`,
+`ObservablePairs`, `build_observable_pairs`,
+`compute_transverse_bases`) — the actual workflow lives in
+`qed.spectral`.
 
 ---
 

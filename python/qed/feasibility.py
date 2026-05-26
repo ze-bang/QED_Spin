@@ -1,7 +1,7 @@
 # =============================================================================
 # python/qed/feasibility.py    (Phase 9 / Layer 6)
 #
-# Pre-flight planner for `qed.diag` / `qed.find_symmetries` /
+# Pre-flight planner for `qed.solve` / `qed.find_symmetries` /
 # `qed.mpi.run_distributed`.
 #
 # Goal: given a Hamiltonian + a desired (solver, device, basis), tell the
@@ -648,7 +648,7 @@ class FeasibilityReport:
     def summary(self) -> str:
         verdict = "FEASIBLE" if self.feasible else f"INFEASIBLE ({self.bottleneck})"
         lines = [
-            f"[qed.diag.planner] verdict: {verdict}",
+            f"[qed.solve.planner] verdict: {verdict}",
             f"  basis     : {self.basis.description}",
             f"  solver    : {self.solver_name}",
             f"  device    : {self.device}  (n_ranks={self.n_ranks})",
@@ -712,7 +712,7 @@ def estimate_resources(
 ) -> FeasibilityReport:
     """Plan one (solver, device, basis, n_ranks) combination.
 
-    Parameters mirror :func:`qed.diag` so the planner can be
+    Parameters mirror :func:`qed.solve` so the planner can be
     invoked with the same kwargs the user is about to dispatch with.
     Returns a :class:`FeasibilityReport`. Does **not** raise on
     infeasibility; the caller decides whether to abort or proceed.
@@ -913,7 +913,7 @@ class WorkflowCandidate:
             kwargs.append(f"sz={self.sz}")
         if self.use_symmetry:
             kwargs.append("symmetry=qed.find_symmetries(H).full_set")
-        return f"qed.diag(H, {', '.join(kwargs)})"
+        return f"qed.solve(H, {', '.join(kwargs)})"
 
 
 @dataclass

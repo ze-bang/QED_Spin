@@ -51,6 +51,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>     // Wave 4.5: ED_DIST_LANCZOS_LOCAL_DGKS env
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -271,9 +272,30 @@ DistributedLanczosResult distributed_lanczos_kernel(
 
     ed::krylov::LanczosKernelOptions kopts;
     kopts.max_iter      = static_cast<std::size_t>(max_iter);
-    kopts.reorth        = keep_basis
-                            ? ed::krylov::ReorthPolicy::FullCGS2
-                            : ed::krylov::ReorthPolicy::None;
+
+    // Wave 4.5 of the SOTA Performance rollout (May 2026): on a
+    // distributed Lanczos with ``keep_basis == false`` (the
+    // eigenvalues-only path) the K=1 LocalDGKS3 reorth needs only
+    // ``v_curr`` / ``v_prev`` (already maintained), saving the
+    // m-vector ``dot_many``/``axpy_many`` batched Allreduce per
+    // iter that FullCGS2 demands. Opt-in via
+    // ``ED_DIST_LANCZOS_LOCAL_DGKS=1`` -- the default keeps the
+    // pre-Wave behaviour (None for eigvals-only, FullCGS2 with
+    // basis) so existing accuracy guarantees on near-degenerate
+    // spectra are preserved. Production users on latency-bound
+    // multi-node runs should benchmark both and adopt the env.
+    const bool use_local_dgks = []() {
+        const char* env = std::getenv("ED_DIST_LANCZOS_LOCAL_DGKS");
+        return env && env[0] == '1';
+    }();
+    if (keep_basis) {
+        kopts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
+    } else if (use_local_dgks) {
+        kopts.reorth         = ed::krylov::ReorthPolicy::LocalDGKS3;
+        kopts.local_ring_size = 1;
+    } else {
+        kopts.reorth = ed::krylov::ReorthPolicy::None;
+    }
     kopts.keep_basis    = keep_basis;
     // Critical for distributed runs: the kernel's default
     // `cap = min(max_iter, local_n)` is computed from the RANK-LOCAL

@@ -271,9 +271,9 @@ collapse path itself is the supported user-facing route.
 
 **Fix applied (May 2026 roll-out):** `Device::MPI` is now honest about
 the ScaLAPACK semantics in its docstring
-(`include/ed/auto/solve.h:142-160`). It explicitly states that the
+(`include/ed/orchestrator.h:142-160`). It explicitly states that the
 Lanczos / FTLM / TPQ distributed kernels are reached via either the
-Python facade (`qed.diag(H, device='mpi', ...)`) or the
+Python facade (`qed.solve(H, device='mpi', ...)`) or the
 `ed::distributed::*` entry points (which run inside `ed_distributed_main`),
 not through this device flag. **Deferred (will need new entry):** an
 auto-pilot route that constructs a `DistributedOperator` from the
@@ -287,7 +287,7 @@ non-trivial new path that requires MPI to be live, so it belongs to the
 `EDParameters::allow_gpu_cpu_fallback` (default `true` for back-compat).
 The in-memory GPU case in `exact_diagonalization_core` now throws with
 an actionable message (pointing at the file-based `GPUOperator` path)
-when the flag is false. `auto_pilot::solve(Device::GPU,
+when the flag is false. `workflows::solve(Device::GPU,
 allow_fallback=false)` propagates the flag so an explicit GPU request
 fails loudly. `Device::Auto` keeps the default `true` so opportunistic
 GPU promotion still degrades gracefully when the in-memory path has no
@@ -331,7 +331,7 @@ as the directory overload. Both entries are symmetric.
 ### 18. [FIXED — partial] Auto-pilot symmetry story is half-built
 
 **Fix applied (May 2026 roll-out):** added
-`AutoSolveOptions::symmetry_dir` (the previously-documented-but-missing
+`SolveOptions::symmetry_dir` (the previously-documented-but-missing
 field) and wired it: when set with `auto_basis == AutoBasis::On`,
 `solve()` routes to `ed::exact_diagonalization(symmetry_dir, ...)`
 (the directory entry), passing the auto-detected Sz axes through. This
@@ -412,7 +412,7 @@ use case appears.
 ### 22. [FIXED — partial] Sentinel auto-overwrite hazard
 
 **Fix applied (May 2026 roll-out):** the user-facing `tolerance` field
-on both `AutoSolveOptions` and `ThermalOptions` is now
+on both `SolveOptions` and `ThermalOptions` is now
 `std::optional<double>`. `std::nullopt` (default) lets the auto-tuner
 pick a value sized to the sector dim; an explicit value passes through
 verbatim. The other sentinel cases (`arpack_ncv == -1`,
@@ -423,7 +423,7 @@ the `diag_tune.h` source. Long term they should also migrate to
 `std::optional`, but that would touch every solver that reads
 `EDParameters` so it is deferred.
 
-### 23. [FIXED] `auto_pilot::thermal` full-Hilbert path skips auto-tune
+### 23. [FIXED] `workflows::thermal` full-Hilbert path skips auto-tune
 
 **Fix applied (May 2026 roll-out):** both no-Sz branches in `thermal()`
 — the in-memory fall-through (`thermal.h:445+`) and the directory
@@ -602,7 +602,7 @@ API revision.
 | `include/ed/core/ed_wrapper.h` | 2989 | move all `exact_diagonalization_*` bodies to `src/core/ed_dispatch.cpp` |
 | `include/ed/core/streaming_symmetry.h` | 2745 | move bodies to `src/core/streaming_symmetry.cpp` |
 | `include/ed/core/ed_wrapper_streaming.h` | 953 | move bodies to `src/core/ed_dispatch_streaming.cpp`; template the sector loop |
-| `include/ed/auto/thermal.h` | 740 | move bodies to `src/auto/thermal.cpp` |
+| `include/ed/orchestrator.h` | 740 | move bodies to `src/auto/thermal.cpp` |
 | `include/ed/matvec/matvec_backend.h` | 566 | split `CpuMatVecBackend` body to `.cpp` |
 | `include/ed/gpu/gpu_operator.cuh` | 777 | acceptable for now (CUDA header convention), but keep kernels in `.cu` |
 
@@ -612,7 +612,7 @@ API revision.
 
 - `include/ed/distributed/distributed_operator.h:17-19` comment block
   rewritten to describe `terms_` SoA storage.
-- `include/ed/auto/solve.h:110-116` doc rewritten to reference
+- `include/ed/orchestrator.h:110-116` doc rewritten to reference
   `terms_.diag_one_body` after `commitPendingTransforms`.
 - `include/ed/core/ed_types.h:99-100` `LOBPCG_GPU` deprecation note
   corrected — it does **not** redirect to Davidson; the
@@ -643,12 +643,12 @@ Status as of the May 2026 roll-out:
 8. ~~**S1 #12**~~ — **DONE**: `mTPQ_MPI` case throws with the canonicalisation explanation + pointers to the distributed path.
 9. ~~**S1 #13**~~ — **DONE** (docs): `Device::MPI` is now honest about its ScaLAPACK semantics. Wiring an auto-pilot `Device::MPI` to `distributed_lanczos`/etc. is a new path that needs MPI to be live, so it belongs to the `ed_distributed_main` family.
 10. ~~**S1 #14**~~ — **DONE**: in-memory GPU honours `EDParameters::allow_gpu_cpu_fallback`; auto-pilot `Device::GPU` with `allow_fallback=false` now throws loudly instead of silently degrading.
-11. ~~**S1 #15 + #17 + #18**~~ — **DONE**: file overload of `ed::exact_diagonalization` mirrors the directory overload's auto-detect; `AutoSolveOptions::symmetry_dir` field is added and wired through `solve()`.
+11. ~~**S1 #15 + #17 + #18**~~ — **DONE**: file overload of `ed::exact_diagonalization` mirrors the directory overload's auto-detect; `SolveOptions::symmetry_dir` field is added and wired through `solve()`.
 12. ~~**S1 #16**~~ — **DONE**: streaming-symmetry GPU dispatch honours `params.use_gpu`; `canonicalize_method_and_flags` is now called in `dispatch.h` for both overloads.
-13. ~~**S1 #22**~~ — **PARTIAL DONE**: `tolerance` on both `AutoSolveOptions` and `ThermalOptions` is now `std::optional<double>` **and** `AutoTuneOverrides::tolerance_locked` plumbs the "user explicitly opined" bit through to `apply_auto_tune`, so passing `tolerance = 1e-10` (the same value as the struct default) is no longer silently retuned. Covered by new `[regression][s1]` test `apply_auto_tune honours tolerance_locked when value == struct default`. All four `thermal()` auto-tune call sites and the single `solve()` call site set `tolerance_locked` from `options.tolerance.has_value()`. Other `EDParameters` sentinels (arpack_ncv, tpq_*, output_dir) deferred.
-14. ~~**S1 #23**~~ — **DONE**: `auto_pilot::thermal` no-Sz branches both apply auto-tune now.
+13. ~~**S1 #22**~~ — **PARTIAL DONE**: `tolerance` on both `SolveOptions` and `ThermalOptions` is now `std::optional<double>` **and** `AutoTuneOverrides::tolerance_locked` plumbs the "user explicitly opined" bit through to `apply_auto_tune`, so passing `tolerance = 1e-10` (the same value as the struct default) is no longer silently retuned. Covered by new `[regression][s1]` test `apply_auto_tune honours tolerance_locked when value == struct default`. All four `thermal()` auto-tune call sites and the single `solve()` call site set `tolerance_locked` from `options.tolerance.has_value()`. Other `EDParameters` sentinels (arpack_ncv, tpq_*, output_dir) deferred.
+14. ~~**S1 #23**~~ — **DONE**: `workflows::thermal` no-Sz branches both apply auto-tune now.
 15. ~~**S2 #34**~~ — **DONE**: stale comments referencing removed members updated.
-16. ~~**S2 #36**~~ — **DONE** (May-2026 SOTA pass): `auto_pilot::thermal` now exploits spatial symmetry for the TPQ family (mTPQ / cTPQ / GPU variants). The previous build conservatively skipped it; the math (per-(Sz, irrep) TPQ + Z-recombination) is identical to FTLM/LTLM and is now backed by two regression tests in `tests/unit/test_auto_thermal.cpp`: the SOTA-flag check and an exact-thermo physics validation against full-diagonalization F(T). See `docs/architecture/SYMMETRY.md` §2 for the math write-up.
+16. ~~**S2 #36**~~ — **DONE** (May-2026 SOTA pass): `workflows::thermal` now exploits spatial symmetry for the TPQ family (mTPQ / cTPQ / GPU variants). The previous build conservatively skipped it; the math (per-(Sz, irrep) TPQ + Z-recombination) is identical to FTLM/LTLM and is now backed by two regression tests in `tests/unit/test_auto_thermal.cpp`: the SOTA-flag check and an exact-thermo physics validation against full-diagonalization F(T). See `docs/architecture/SYMMETRY.md` §2 for the math write-up.
 17. **S1 #37** — **DEFERRED (DSSF + spatial symmetry)**: the `compute_*_workflow` DSSF kernels (dynamical / static / GS) currently exploit Sz but **not** spatial irrep decomposition. SOTA codes (HPhi, EDLib, QuSpin) route an `O_Q` observable from source sector `(n_up, k_0)` to target sector `(n_up + dn, k_0 + Q)` and run double-Lanczos in the target sector. The reusable pieces are already in place (`SymmetrizedHamiltonian::applySymmetrized*`, `compute_ltlm_dynamical_correlation_cross_sector`); the missing glue is (1) an orbit-basis `CrossSectorOrbitObservable` and (2) workflow code that resolves the target sector from `(Q, dn_up)`. This is the highest-ROI follow-up workstream. Documented in `docs/architecture/SYMMETRY.md` §3.
 18. ~~**S1 #19 + #20**~~ — **DONE (May 2026 follow-on)**: `build_lanczos_tridiagonal` in `ftlm.cpp` is now a thin forwarder to `build_lanczos_tridiagonal_with_basis` in `lanczos.cpp`. One canonical recurrence + reorth body. LTLM, FTLM, HYBRID, KPM all share it.
 19. ~~**S1 #25**~~ — **DONE (May 2026 follow-on)**: the GPU KPM spectral-bound Lanczos now does full classical Gram-Schmidt reorthogonalisation against its saved basis when (a) the caller requests `full_reorthogonalization=true` (CPU default) AND (b) the basis fits in device memory. Falls back to the 3-vector path with a stderr warning otherwise, so the regime change is no longer silent. CPU/GPU parity is recovered on every system small enough to fit the basis on-device.
@@ -656,7 +656,7 @@ Status as of the May 2026 roll-out:
 21. ~~**S1 #21**~~ — **PARTIAL DONE (May 2026 follow-on)**: GPU Lanczos seed surfaced via `EDParameters::lanczos_seed` (0 keeps the legacy deterministic 42; nonzero passes through verbatim so a GPU run can reproduce a CPU run). The windowed-reorth fallback now emits a stderr warning detailing the regime change. The `cudaMalloc`-on-demand FP32-cache thread-safety hazard remains documented but not enforced (would require a mutex per `GPUOperator::apply` call, which would tank throughput).
 22. ~~**S1 #24**~~ — **DONE (May 2026 follow-on)**: deleted the dead `estimate_extreme_eigenvalues` / `auto_tpq_energy_shift` helpers in `thermal.h`. The mTPQ `LargeValue` auto-pick lives inside `exact_diagonalization_core` and is the only path.
 23. ~~**S1 #27**~~ — **PARTIAL DONE (May 2026 follow-on)**: the silent-fallback warnings in `exact_diagonalization_core` (in-memory GPU CPU-fallback) and `ed_wrapper_streaming.h` (sector-thermo recombine failure, both Sz+symmetry and symmetry-only branches) now route through `ed_log::warning` so a `setVerbosity(SILENT)` caller can suppress them. The auto-pilot diagnostic streams (already `if (opts.verbose)`-guarded) remain on raw `std::cerr` and can be migrated in a future pass.
-24. ~~**S1 #22 (follow-on)**~~ — **DONE (May 2026)**: `max_iterations`, `max_subspace`, `ftlm_krylov_dim`, `ltlm_krylov_dim`, `tpq_delta_beta`, `tpq_taylor_order` all gained `std::optional` shapes on `AutoSolveOptions` / `ThermalOptions` plus matching `_locked` flags on `AutoTuneOverrides`. The `tpq_energy_shift = 0` sentinel now propagates correctly through `base_params_from_options` (the old code silently kept the EDParameters default 1e5, so mTPQ auto-pick never fired through `thermal()`). Six new regression tests in `tests/unit/test_diag_tune.cpp` cover every new lock flag.
+24. ~~**S1 #22 (follow-on)**~~ — **DONE (May 2026)**: `max_iterations`, `max_subspace`, `ftlm_krylov_dim`, `ltlm_krylov_dim`, `tpq_delta_beta`, `tpq_taylor_order` all gained `std::optional` shapes on `SolveOptions` / `ThermalOptions` plus matching `_locked` flags on `AutoTuneOverrides`. The `tpq_energy_shift = 0` sentinel now propagates correctly through `base_params_from_options` (the old code silently kept the EDParameters default 1e5, so mTPQ auto-pick never fired through `thermal()`). Six new regression tests in `tests/unit/test_diag_tune.cpp` cover every new lock flag.
 25. ~~**S2 #29**~~ — **DONE (May 2026 follow-on)**: `[[deprecated]]` markers applied to `CrossSectorMatVecOperator`, `MatVecOperator::nnz_per_row_estimate`, `Operator::getSparseMatrix`, `Operator::getTransformData`, `Operator::getTerms`, `FixedSzOperator::binarySearchState`, `OperatorRef`, `ed::matvec::adapt`. All carry pointers at the canonical replacement (or note the deprecation cycle). `lanczos_real` is still used by `qed_bindings.cpp` so it stayed undeprecated (the audit's "no dispatch caller" finding was technically right but missed the Python facade).
 26. **S2 #28** — **DOCUMENTED, full migration deferred**: `Operator::transform_data_` / `three_body_data_` remain public for back-compat (~20 in-tree callers across Python bindings, Hamiltonian builder, distributed CLI main, tests, examples). The header now carries explicit API guidance pointing at the typed setters; the size-aware `commitPendingTransforms` from S0 #2 ensures direct pushes are safe. Migration to `protected:` is a one-release deprecation cycle that should be coordinated with the matvec-API rev.
 27. **S1 #33 / #6 / #7 / #8** — **DEFERRED**: moving `ed_wrapper.h` (3029 lines), `streaming_symmetry.h` (2745 lines), `ed_wrapper_streaming.h` (953 lines), `workflows.cpp` (3015 lines) into `.cpp` (resp. consolidating workflows.cpp into dssf_engine.cpp) is multi-day refactor work. Not a correctness blocker. Should be its own work-stream after a build-time / incremental-compile baseline is collected.
@@ -677,10 +677,10 @@ Every workflow ultimately reduces to repeated calls to a matrix-vector product o
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Layer A — Auto-pilots (one canonical call per workflow)         │
-│   ed::auto_pilot::solve()        for ground states              │
-│   ed::auto_pilot::thermal()      for finite-T thermodynamics    │
-│   ed::auto_pilot::dssf::compute()  for DSSF                     │
-│   Python: qed.diag / qed.thermal / qed.dssf.compute             │
+│   ed::workflows::solve()        for ground states              │
+│   ed::workflows::thermal()      for finite-T thermodynamics    │
+│   ed::workflows::spectral()  for DSSF                     │
+│   Python: qed.solve / qed.thermal / qed.spectral             │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer B — Dispatch (axis decisions: Sz, symmetry, GPU, MPI)     │
 │   ed::exact_diagonalization(dir, method, params) in dispatch.h  │
@@ -719,20 +719,20 @@ Flag canonicalization: `ed::canonicalize_method_and_flags` in `include/ed/core/e
 
 | User context | Call this | File:line |
 |---|---|---|
-| Python, in-memory `Operator` | `qed.diag(H, num_eigenvalues=1, ...)` | `python/qed/workflow.py:582` |
-| Python, file-based or GPU | `qed.diag(H, device='gpu', ...)` (same fn) | `python/qed/workflow.py:582` |
-| C++, in-memory `Operator` | `ed::auto_pilot::solve(H, AutoSolveOptions{...})` | `include/ed/auto/solve.h:275` |
+| Python, in-memory `Operator` | `qed.solve(H, num_eigenvalues=1, ...)` | `python/qed/workflow.py:582` |
+| Python, file-based or GPU | `qed.solve(H, device='gpu', ...)` (same fn) | `python/qed/workflow.py:582` |
+| C++, in-memory `Operator` | `ed::workflows::solve(H, SolveOptions{...})` | `include/ed/orchestrator.h:275` |
 | C++, directory deck | `ed::exact_diagonalization(directory, method, params)` | `include/ed/core/dispatch.h:142` |
 | C++, full manual control | `exact_diagonalization_core(matvec, dim, method, params)` | `include/ed/core/ed_wrapper.h:444` |
 
 ### 1.2 Master call graph
 
 ```
-ed::auto_pilot::solve(H, opts)                                 [solve.h:275]
+ed::workflows::solve(H, opts)                                 [solve.h:275]
 ├── detail::conserves_sz(H)                                    [solve.h:66]
 ├── detail::project_fixed_sz(H, n_up)                          [solve.h:83]   (if auto/user Sz)
 ├── pick solver heuristic (FULL ≤ 2048 dim, LANCZOS otherwise) [solve.h:361]
-├── apply auto-tune (ed::auto_pilot::apply_auto_tune)          [solve.h:451]
+├── apply auto-tune (ed::workflows::apply_auto_tune)          [solve.h:451]
 ├── ed::matvec::as_apply_function(*FixedSzOperator)            [matvec.h:153]
 └── exact_diagonalization_core(matvec, sector_dim, method, p)  [ed_wrapper.h:444]
     │
@@ -813,14 +813,14 @@ ed::exact_diagonalization(directory, LANCZOS, params)          [dispatch.h:142]
 | User context | Call this | File:line |
 |---|---|---|
 | Python, in-memory or directory | `qed.thermal(H, method="FTLM", T_min=..., T_max=..., num_T=...)` | `python/qed/thermal.py:252` |
-| C++, in-memory | `ed::auto_pilot::thermal(H, method, ThermalOptions{...})` | `include/ed/auto/thermal.h:432` |
-| C++, directory | `ed::auto_pilot::thermal(dir, N, spin, method, opts)` | `include/ed/auto/thermal.h:543` |
+| C++, in-memory | `ed::workflows::thermal(H, method, ThermalOptions{...})` | `include/ed/orchestrator.h:432` |
+| C++, directory | `ed::workflows::thermal(dir, N, spin, method, opts)` | `include/ed/orchestrator.h:543` |
 | C++, single sector, no recombination | `exact_diagonalization_core(matvec, dim, FTLM, params)` | `ed_wrapper.h:908` (FTLM case) |
 
 ### 2.2 Master call graph (auto-Sz + auto-symmetry orchestration)
 
 ```
-ed::auto_pilot::thermal(H or dir, method, opts)                 [thermal.h:432 / 543]
+ed::workflows::thermal(H or dir, method, opts)                 [thermal.h:432 / 543]
 ├── conserves_sz(H)                                              [solve.h:66]
 ├── (directory only) ed::detail::symmetry_data_present(dir)      [dispatch.h:78]
 ├── resolve_sz_window → [lo, hi]                                 [thermal.h:346]
@@ -897,9 +897,9 @@ S_total(β) = β (E_total - F_total)
 
 | User context | Call this | File:line |
 |---|---|---|
-| Python, easy mode | `qed.dssf.compute(directory, T=..., omega=...)` | `python/qed/dssf.py:255` |
+| Python, easy mode | `qed.spectral(directory, T=..., omega=...)` | `python/qed/dssf.py:255` |
 | Python, op assembly only | `qed.dssf.build_observable_pairs(spec)` | `python/qed/_bindings/qed_bindings.cpp:842` |
-| C++ auto-pilot | `ed::auto_pilot::dssf::compute(request, opts)` | `include/ed/auto/dssf.h:76` |
+| C++ auto-pilot | `ed::workflows::spectral(request, opts)` | `include/ed/orchestrator.h:76` |
 | C++ dispatcher | `ed::dssf::run(request)` | `src/cli/dssf_engine.cpp:24` |
 | CLI / batch | `./ED dssf <method> <directory>` | `src/apps/ed_main.cpp:372-425` |
 
@@ -915,7 +915,7 @@ S_total(β) = β (E_total - F_total)
 | `GROUND_STATE_DSSF` | `compute_ground_state_dssf_workflow` | `workflows.cpp:2263` | S(Q, ω) at T=0 via continued fraction |
 | `KPM_THERMODYNAMICS` | `compute_kpm_thermodynamics_workflow` | `workflows.cpp:2745` | Z, E, C, S, F from KPM DOS (not S(Q,ω); related to KPM_DOS thermal method) |
 
-Auto-method picker: `pick_method(has_temperature, has_frequency)` in `include/ed/auto/dssf.h:58-65` and Python mirror at `python/qed/dssf.py:212-252`.
+Auto-method picker: `pick_method(has_temperature, has_frequency)` in `include/ed/orchestrator.h:58-65` and Python mirror at `python/qed/dssf.py:212-252`.
 
 ### 3.3 Per-method call graphs (unchanged — see prior revision §3.3 A–D).
 
@@ -968,20 +968,20 @@ Fixed-Sz channel filtering: `filter_fixed_sz_transverse_channels` at `workflows.
 What do I want?
 │
 ├── Single eigenvalue (ground state, low-lying spectrum)
-│   ├── Python                   → qed.diag(H, num_eigenvalues=k, ...)
-│   ├── C++ in-memory            → ed::auto_pilot::solve(H, opts)
+│   ├── Python                   → qed.solve(H, num_eigenvalues=k, ...)
+│   ├── C++ in-memory            → ed::workflows::solve(H, opts)
 │   └── C++ directory deck       → ed::exact_diagonalization(dir, LANCZOS, params)
 │
 ├── Thermodynamics (E(T), C_v(T), S(T), F(T))
 │   ├── Python                   → qed.thermal(H, method="FTLM"|"LTLM"|"HYBRID"|"KPM_DOS"|"mTPQ"|"cTPQ", ...)
-│   ├── C++ in-memory            → ed::auto_pilot::thermal(H, method, opts)
-│   ├── C++ directory deck       → ed::auto_pilot::thermal(dir, N, spin, method, opts)
+│   ├── C++ in-memory            → ed::workflows::thermal(H, method, opts)
+│   ├── C++ directory deck       → ed::workflows::thermal(dir, N, spin, method, opts)
 │   └── Single sector, no recomb → exact_diagonalization_core(matvec, dim, method, params)
 │
 └── Correlation functions / structure factor
-    ├── Python, easy             → qed.dssf.compute(directory, T=..., omega=...)
+    ├── Python, easy             → qed.spectral(directory, T=..., omega=...)
     ├── Python, op assembly only → qed.dssf.build_observable_pairs(spec)
-    ├── C++ auto-pilot           → ed::auto_pilot::dssf::compute(request, opts)
+    ├── C++ auto-pilot           → ed::workflows::spectral(request, opts)
     ├── C++ direct dispatch      → ed::dssf::run(request)
     └── CLI                      → ./ED dssf <method> <directory>
 ```
@@ -995,10 +995,10 @@ What do I want?
 | MatVec interface | `include/ed/matvec/matvec.h` |
 | Single-source-of-truth term kernels | `include/ed/matvec/term_kernels.h`, `term_kernels_gather.h`, `term_kernels_assemble.h` |
 | Operator base | `include/ed/core/operator.h` |
-| Fixed-Sz projection | `include/ed/core/fixed_sz_operator.h`, `include/ed/auto/solve.h` |
+| Fixed-Sz projection | `include/ed/core/fixed_sz_operator.h`, `include/ed/orchestrator.h` |
 | Streaming symmetry | `include/ed/core/streaming_symmetry.h`, `ed_wrapper_streaming.h` |
-| GS auto-pilot | `include/ed/auto/solve.h` |
-| Finite-T auto-pilot | `include/ed/auto/thermal.h`, `python/qed/thermal.py` |
+| GS auto-pilot | `include/ed/orchestrator.h` |
+| Finite-T auto-pilot | `include/ed/orchestrator.h`, `python/qed/thermal.py` |
 | Sector recombination math | `include/ed/core/sector_thermo.h` |
 | Core dispatcher | `include/ed/core/ed_wrapper.h` |
 | Directory dispatch | `include/ed/core/dispatch.h` |
@@ -1036,8 +1036,8 @@ A second pass focused on the layers the first audit did not cover deeply: HDF5 /
 | P1 | S0 | `auto_tune.estimate_bandwidth()` reads the private `transform_data_` field that pybind never exposes → silent fallback to `fallback * num_sites` for every bound `Operator`; DSSF auto-tune picks η/ω/Krylov against a bandwidth that ignored every coefficient | `python/qed/auto_tune.py:91-123` | **FIXED**: rewritten to walk the exposed `iter_one_body_terms` / `iter_two_body_terms` / `iter_three_body_terms` iterators; new regression test (`test_auto_tune.test_estimate_bandwidth_uses_iter_term_methods`). |
 | P2 | S0 | `op_add_one_body` / `_two_body` / `_three_body` push directly into `transform_data_` / `three_body_data_` without calling `invalidateMatrixCaches()` → stale `isReal()` cache → wrong `lanczos_real` dispatch for a real-built operator that later gets a complex term | `qed_bindings.cpp:104-166` | **FIXED**: every term-add helper now calls `op.invalidateMatrixCaches()`; lock-in regression test in `test_operator_apply.cpp` `[regression][s0]`. |
 | P3 | S0 | BFG correlation kernels (`compute_smsp_correlations`, `compute_szsz_correlations`, three `*_bond_expectations`) `memcpy` an arbitrary `psi.shape[0]` into a `std::vector` without checking against `2^n_sites` (or `cluster.n_sites`) → out-of-bounds reads in the C++ matvec on an undersized array | `qed_bindings.cpp:1118-1126`, `1136-1206` | **FIXED**: shared `bfg_check_psi` lambda compares `psi.shape[0]` to the expected Hilbert dim and throws a `std::runtime_error` with file:line context on mismatch. |
-| P4 | S1 | Three parallel DSSF auto-pilot entry points (C++ `auto_pilot::dssf::compute`, Python `qed.dssf.compute` subprocess, raw CLI); the CLI itself never calls the C++ auto-pilot, so default knobs diverge between paths | `dssf.h:76-125`, `dssf.py:255-431`, `ed_main.cpp:372-425` | **DEFERRED**: requires either binding `auto_pilot::dssf::compute` to Python or routing the CLI through it. Architectural rev, not correctness blocker. |
-| P5 | S1 | `qed.diag` auto-tune writes only a 6-field sentinel subset; tolerance / max_iter / max_subspace / num_samples not propagated → `level="conservative"` does not change tolerance in Python | `workflow.py:1036-1059` | **DEFERRED**: requires Python-side refactor to match the (now-complete) C++ `apply_auto_tune` lock-flag surface. |
+| P4 | S1 | Three parallel DSSF auto-pilot entry points (C++ `workflows::spectral`, Python `qed.spectral` subprocess, raw CLI); the CLI itself never calls the C++ auto-pilot, so default knobs diverge between paths | `dssf.h:76-125`, `dssf.py:255-431`, `ed_main.cpp:372-425` | **DEFERRED**: requires either binding `workflows::spectral` to Python or routing the CLI through it. Architectural rev, not correctness blocker. |
+| P5 | S1 | `qed.solve` auto-tune writes only a 6-field sentinel subset; tolerance / max_iter / max_subspace / num_samples not propagated → `level="conservative"` does not change tolerance in Python | `workflow.py:1036-1059` | **DEFERRED**: requires Python-side refactor to match the (now-complete) C++ `apply_auto_tune` lock-flag surface. |
 | P6 | S1 | NumPy buffer handling missing `forcecast` in `py_compute_thermo_from_spectrum` | `qed_bindings.cpp:454-463` | **DEFERRED**: low impact; current callers go through `np.asarray`. |
 | P7 | S1 | Device-picker MPI gate is `has_mpi_build` in Python but `is_scalapack_compiled` in C++ → MPI-without-ScaLAPACK builds pick "mpi" in Python, "cpu" in C++ | `auto_tune.py:221-222` vs `dssf_tune.h:156-157` | **DEFERRED**: needs a shared compile-time probe binding. |
 
@@ -1071,7 +1071,7 @@ A second pass focused on the layers the first audit did not cover deeply: HDF5 /
 - **DSSF + spatial symmetry** (S1 #37): highest-ROI SOTA work-stream; needs `CrossSectorOrbitObservable` + workflow target-sector resolution.
 - **GPU distributed Lanczos reorth + convergence parity** (D2, D3, D4): now part of the Krylov-kernel unification roll-out (Part IV). Phases C–E will implement `CudaBackend` / `MpiCudaBackend` and route the GPU and GPU-MPI Lanczos paths through the same unified kernel as CPU, picking up CGS2 reorth for free.
 - **EDConfig / EDParameters unification** (S1 #39 first pass; C5, C6 second pass): the two parallel bag-of-parameters types remain. The size-tracking S0 fix and the new round-trip coverage closes the worst correctness symptoms; structural unification is a major rev.
-- **DSSF / Python auto-pilot architecture fragmentation** (P4, P5, P7): three parallel auto-pilot paths with divergent defaults. Requires either binding `auto_pilot::dssf::compute` to Python or routing the CLI through it.
+- **DSSF / Python auto-pilot architecture fragmentation** (P4, P5, P7): three parallel auto-pilot paths with divergent defaults. Requires either binding `workflows::spectral` to Python or routing the CLI through it.
 
 ---
 
@@ -1245,7 +1245,7 @@ That's the entire public C++ surface for routine work. Three entry points; one f
 | 4.2 (Workflow orchestrators)     | **DONE** | `include/ed/orchestrator.h` + `src/orchestrator.cpp` deliver `ed::workflows::solve / thermal / spectral`. `std::visit` dispatch through the kernel family. Heuristics for `SolveMethod::Auto` consolidated in one place. |
 | 4.3 (`make_operator` factory)    | **DONE (Phase A)** | `OperatorSpec` + `std::variant`-based factory in `include/ed/core/make_operator.h`. First landing accepts `FilePaths` / `DirectoryPath` / `InMemoryOperator` and loads InterAll only; the full per-file loader matrix is a tracked follow-up (Phase 4.3.b, see in-file note). |
 | 5 (Hard-break deletion)          | **PARTIAL HARD BREAK** | Wave F-partial (May 2026) hard-removed `ed/core/dispatch.h` (~312 LOC) and `tests/unit/test_dispatch_streaming_thermo.cpp` after migrating their callers (`run_standard_workflow`, `run_streaming_symmetry_workflow`, and the Python `exact_diagonalization_from_directory` binding) onto `ed::make_operator + ed::workflows::solve`. The remaining legacy headers (`ed/core/ed_wrapper.h`, `ed_wrapper_streaming.h`, `ed/auto/solve.h`, `ed/auto/thermal.h`, `ed/auto/dssf.h`) still carry deprecation notices pointing at `ed::workflows::*`; literal `rm -rf` of those is gated on the 5 remaining heavy CLI workflows + distributed CLI migration. The 5 Python `dispatcher_bindings.cpp` `m.def(...)` registrations are now thin deprecation-warning forwarders. `docs/MIGRATION.md` documents the porting path. |
-| 6 (Python collapse)              | **DONE** | `qed.solve` / `qed.spectral` added as canonical Python entry points (`qed.thermal` was already present from Part IV). `qed.diag` / `qed.dssf.compute` / `qed.finite_temperature_lanczos` / `qed.lanczos` remain as deprecation aliases so existing notebooks keep working. |
+| 6 (Python collapse)              | **DONE** | `qed.solve` / `qed.spectral` added as canonical Python entry points (`qed.thermal` was already present from Part IV). `qed.solve` / `qed.spectral` / `qed.finite_temperature_lanczos` / `qed.lanczos` remain as deprecation aliases so existing notebooks keep working. |
 | 7a (Tests)                       | **DONE** | New `test_orchestrator.cpp` (solve/thermal/spectral integration on 6-site Heisenberg) and `test_minimalist_collapse.cpp` (LinearOperator concept, `select_backend` decision tree, LocalDGKS3 reorth correctness). |
 | 7b (Docs)                        | **DONE** | This Part VI of the audit, `docs/MIGRATION.md`, CHANGELOG `[Unreleased]` entry. |
 
@@ -1260,7 +1260,7 @@ That's the entire public C++ surface for routine work. Three entry points; one f
 
 * **Operator polymorphism** (was Part IV-S1 #9): every operator now models a single concept (`LinearOperator`); no more cross-cutting `MatVecOperator` + `DistributedOperator` + `GPUOperator` duplication of `dim()` / `apply()` interfaces.
 * **Result-type fragmentation** (was Part IV-S1 #38): `EDResults` / `DistributedLanczosResult` / `DistributedLanczosGPUResult` / `DistributedEigenpairsResult` consolidated into `GroundStateResult` / `ThermalResult` / `SpectralResult` with shared `BackendMetadata` + `KrylovDiagnostics`.
-* **Dispatch-layer duplication** (was Part IV-S1 #14 + S1 #32): seven entry points (`exact_diagonalization_core`, `_from_files`, `_from_directory`, `_streaming_symmetry`, `_streaming_symmetry_fixed_sz`, `ed::auto_pilot::solve`, `ed::auto_pilot::thermal`) collapse to three (`solve`, `thermal`, `spectral`) routed through one `select_backend` + `std::visit` decision tree.
+* **Dispatch-layer duplication** (was Part IV-S1 #14 + S1 #32): seven entry points (`exact_diagonalization_core`, `_from_files`, `_from_directory`, `_streaming_symmetry`, `_streaming_symmetry_fixed_sz`, `ed::workflows::solve`, `ed::workflows::thermal`) collapse to three (`solve`, `thermal`, `spectral`) routed through one `select_backend` + `std::visit` decision tree.
 
 ## VI.5 Outstanding follow-ups
 

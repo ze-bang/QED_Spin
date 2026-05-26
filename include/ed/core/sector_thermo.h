@@ -7,15 +7,16 @@
 //
 // MOTIVATION (matvec-unification audit follow-up)
 // -----------------------------------------------
-// The streaming-symmetry kernel (ed/core/ed_wrapper_streaming.h) iterates
-// over symmetry sectors, calling ``exact_diagonalization_core(...)`` once
-// per sector. For ground-state methods (LANCZOS, BLOCK_LANCZOS,
-// KRYLOV_SCHUR, ...) it is enough to collect the per-sector eigenvalues
-// into a global pool and sort. For finite-temperature methods (FTLM,
-// LTLM, KPM_DOS, mTPQ, cTPQ) we *also* need to recombine
-// thermodynamic observables across sectors --- otherwise the result for
-// ``ed::exact_diagonalization(method=FTLM, use_symmetry=true)`` is just
-// the thermodynamics of the last sector touched, which is wrong.
+// The streaming-symmetry kernel built by
+// ``ed::make_streaming_symmetry_operator`` iterates over symmetry
+// sectors, calling ``ed::workflows::thermal(...)`` once per sector.
+// For ground-state methods (LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, ...)
+// it is enough to collect the per-sector eigenvalues into a global
+// pool and sort. For finite-temperature methods (FTLM, LTLM, KPM_DOS,
+// mTPQ, cTPQ) we *also* need to recombine thermodynamic observables
+// across sectors --- otherwise the result for ``ed::workflows::thermal``
+// with ``method=FTLM`` and ``use_symmetry=true`` would be just the
+// thermodynamics of the last sector touched, which is wrong.
 //
 // This header provides a single canonical combiner that operates on the
 // generic ``ThermodynamicData`` payload populated by every finite-T

@@ -78,6 +78,10 @@ The following live at the repository root and are rendered on GitHub:
   — deferred work and HPC-gated milestones.
 - [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/BENCHMARKS.md)
   — head-to-head benchmark write-up vs QuSpin / SciPy.
+- [`docs/benchmarks/ORTHOGONAL_SYMMETRY.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/ORTHOGONAL_SYMMETRY.md)
+  — full 4 × 6 sweep (four `(Subspace, ProjectorChain)` cells × six
+  workflows) on CPU and GPU at N=8 and N=10. Pins the May-2026
+  orthogonal symmetry composition refactor (`include/ed/symmetry/`).
 - [`docs/guides/python_api_coverage.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/guides/python_api_coverage.md)
   — what `import qed` covers vs the full `ED` binary.
 - [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)

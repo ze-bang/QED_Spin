@@ -25,8 +25,9 @@
 // All entry points are inline and zero-cost in release builds; the dynamic
 // cast is the only addition over the void* path, paid once per solver run.
 //
-// Existing call sites (ed_wrapper.h, ed_wrapper_streaming.h) that go through
-// the legacy `GPUEDWrapper::runGPU*` static methods directly stay valid; the
+// Existing call sites (the orchestrator's GPU lane in ``ed::workflows::solve``
+// and the streaming-symmetry GPU kernels) that go through the
+// ``GPUEDWrapper::runGPU*`` static methods directly stay valid; the
 // helpers below are additive sugar, not a replacement.
 // =============================================================================
 
@@ -216,9 +217,10 @@ inline void lanczos(const ed::matvec::MatVecOperator& op,
 // (May 2026): only the `lanczos` pair was ever called (from
 // test_cpu_gpu_equivalence.cpp; the rest were API scaffolding for an
 // unused unified surface). All remaining call sites go through
-// `GPUEDWrapper::runGPU*` directly from `ed_wrapper.h` /
-// `ed_wrapper_streaming.h`. To re-introduce one, write a one-line
-// forwarder following the `lanczos` template above.
+// `GPUEDWrapper::runGPU*` directly from the orchestrator's GPU lane
+// (``ed::workflows::solve``) and the streaming-symmetry GPU kernels.
+// To re-introduce one, write a one-line forwarder following the
+// `lanczos` template above.
 
 }  // namespace ed::matvec::gpu
 

@@ -391,6 +391,19 @@ void DistributedOperator::apply_local_(const Complex* v_local,
 // -----------------------------------------------------------------------------
 // Diagnostics
 // -----------------------------------------------------------------------------
+// Wave 4 (May 2026, "Unify all 16 matvec cells" plan): is_real_hermitian
+// delegates to the underlying serial operator's real-coefficient check.
+// We cannot inline this in the header because the header forward-
+// declares ``Operator`` (full definition pulled in via construct_ham.h
+// in this .cpp).
+bool DistributedOperator::is_real_hermitian() const noexcept {
+    try {
+        return op_ && const_cast<Operator&>(*op_).isReal();
+    } catch (...) {
+        return false;
+    }
+}
+
 std::size_t DistributedOperator::plan_bytes() const noexcept {
     std::size_t b = 0;
     b += rank_offsets_.capacity() * sizeof(std::uint64_t);

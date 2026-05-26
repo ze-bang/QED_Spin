@@ -738,6 +738,11 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
+    # Full Unified-Interface Collapse, end-to-end acceptance (May 2026):
+    # walks every (source x axis x workflow x method) cell of the
+    # unified interface on the same 6-site Heisenberg ring and asserts
+    # numerical agreement against the Bethe-ansatz reference E_0.
+    ed_add_test(test_unified_interface_e2e      tests/integration/test_unified_interface_e2e.cpp USE_CATCH2)
     # Wave A acceptance (Full unified-interface collapse, May 2026):
     # the `ed::make_operator(OperatorSpec)` factory + the new
     # `bind_<Backend>` override matrix.
@@ -749,16 +754,15 @@ if(BUILD_ED_TESTS)
     # required because GPU/MPI/fixed-Sz are now first-class EDParameters
     # flags rather than embedded in the DiagonalizationMethod enum.
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
-    # Phase 9 façade: smoke-test the modern-C++ auto-pilot
-    # `ed::auto_pilot::solve(Operator&, AutoSolveOptions)` — Sz guard,
+    # Smoke-test the unified orchestrator
+    # `ed::workflows::solve(LinearOperator&, SolveOptions)` — Sz guard,
     # auto fixed-Sz projection, default-method picker, GPU fallback.
     ed_add_test(test_auto_solve                 tests/unit/test_auto_solve.cpp USE_CATCH2)
-    # Matvec-unification audit follow-up: end-to-end correctness of every
-    # ground-state algorithm reachable through `ed::auto_pilot::solve`
-    # (LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, DAVIDSON, LOBPCG, FULL) with
-    # auto-Sz projection on. Validates the matvec-wiring through the
-    # virtual `Operator::apply` and the `exact_diagonalization_core`
-    # dispatch switch in one place.
+    # End-to-end correctness of every ground-state algorithm reachable
+    # through `ed::workflows::solve` (LANCZOS, BLOCK_LANCZOS,
+    # KRYLOV_SCHUR, FULL) with auto-Sz projection on. Validates the
+    # matvec wiring through the virtual `LinearOperator::apply` and
+    # the orchestrator's solver-family switch in one place.
     ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
     # Matvec-unification audit follow-up: cross-sector Z-recombination of
     # finite-T ThermodynamicData. The streaming-symmetry kernel relies on
@@ -772,23 +776,22 @@ if(BUILD_ED_TESTS)
     # were removed together with `include/ed/core/dispatch.h`. The
     # streaming-symmetry + FTLM end-to-end behaviour is now covered by
     # `tests/unit/test_auto_thermal.cpp` (which uses the unified entry
-    # `ed::auto_pilot::thermal(...)` rather than the legacy
-    # `ed::exact_diagonalization(...)` it was probing).
-    # Audit follow-up: one canonical finite-T entry point
-    # `ed::auto_pilot::thermal(...)`. Exercises auto-Sz + auto-symmetry +
-    # Z-recombination via both the in-memory and the directory overloads.
+    # `ed::workflows::thermal(...)`).
+    # One canonical finite-T entry point: `ed::workflows::thermal(...)`.
+    # Exercises auto-Sz + auto-symmetry + Z-recombination via both the
+    # in-memory and the directory overloads.
     ed_add_test(test_auto_thermal               tests/unit/test_auto_thermal.cpp USE_CATCH2)
     target_link_libraries(test_auto_thermal PRIVATE ed_input)
-    # Phase 9 façade: smoke-test the modern-C++ DSSF auto-pilot
-    # `ed::auto_pilot::dssf::compute(DSSFRequest, AutoDSSFOptions)` --
+    # Smoke-test the unified spectral entry point
+    # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.
     ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
     target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
-    # Phase 9.2: pure-numerical lockdown of the DSSF auto-tuner heuristics
-    # (eta / omega / krylov / num_random / device pickers). Header-only so
     # ED Cleanup Sweep Phase 5 (May 2026): test_dssf_tune / test_diag_tune
-    # locked down the legacy `ed::auto_pilot::*::*tune*` heuristics that
+    # locked down the cross-cutting DSSF / diag tune heuristics that
     # were deleted along with `include/ed/auto/{diag,dssf}_tune.h`.
+    # The per-kernel knobs are now exercised by the kernel-specific
+    # tests below.
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
@@ -1100,6 +1103,16 @@ if(BUILD_ED_TESTS)
     # time_evolution_correlator (Phase 6 / Phase 7).
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
+    # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026):
+    # end-to-end check that StreamingSymmetryOperator::bind_cuda_for_sector
+    # produces a device matvec that agrees with the CPU
+    # ``applySymmetrized`` to 1e-10 across every Z_N translation sector.
+    ed_add_test(test_streaming_symmetry_gpu_mirror tests/unit/test_streaming_symmetry_gpu_mirror.cpp USE_CATCH2)
+    # Phase R5 of the "Orthogonal symmetry composition: Subspace x
+    # ProjectorChain" plan (May 2026): byte-equality + extensibility
+    # pinning for the new (Subspace, ProjectorChain) decomposition.
+    ed_add_test(test_projector_chain            tests/unit/test_projector_chain.cpp USE_CATCH2)
+    ed_add_test(test_chain_extensibility        tests/unit/test_chain_extensibility.cpp USE_CATCH2)
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
     target_compile_definitions(test_dssf_operator_spec PRIVATE

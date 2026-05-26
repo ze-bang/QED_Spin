@@ -323,13 +323,30 @@ int build_lanczos_tridiagonal_with_basis(
         // Translate the result back to the legacy ABI:
         //   alpha / beta returned by reference,
         //   basis_vectors as std::vector<ComplexVector>.
+        //
+        // Wave C4 / B5 (May 2026): pool-aware. Resize the destination
+        // to ``result.basis.size()`` instead of clear+reserve+
+        // emplace_back -- this preserves existing inner ComplexVector
+        // heap allocations when the caller re-uses ``basis_vectors``
+        // across calls (e.g. across FTLM samples or cross-irrep
+        // pairs). When the destination is shorter than needed we
+        // append fresh entries; when it's longer we drop the tail.
         alpha = std::move(result.alpha);
         beta  = std::move(result.beta);
-        basis_vectors->clear();
-        basis_vectors->reserve(result.basis.size());
-        for (auto& uv : result.basis) {
+        const std::size_t need = result.basis.size();
+        if (basis_vectors->size() > need) {
+            basis_vectors->resize(need);
+        }
+        basis_vectors->reserve(need);
+        const std::size_t reuse = std::min(basis_vectors->size(), need);
+        for (std::size_t i = 0; i < reuse; ++i) {
+            (*basis_vectors)[i].resize(static_cast<std::size_t>(N));
+            std::memcpy((*basis_vectors)[i].data(), result.basis[i].get(),
+                        static_cast<std::size_t>(N) * sizeof(Complex));
+        }
+        for (std::size_t i = reuse; i < need; ++i) {
             ComplexVector v(static_cast<std::size_t>(N));
-            std::memcpy(v.data(), uv.get(),
+            std::memcpy(v.data(), result.basis[i].get(),
                         static_cast<std::size_t>(N) * sizeof(Complex));
             basis_vectors->emplace_back(std::move(v));
         }
@@ -830,14 +847,53 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // ---- assemble LanczosKernelOptions + (optional) resume state ------
     LanczosKernelOptions opts;
     opts.max_iter     = max_iter;
-    opts.reorth       = ReorthPolicy::LocalDGKS3;
     opts.keep_basis   = false;   // ring buffer is internal; disk is the eigenvector channel
     opts.breakdown_tol = tol;     // legacy body used `tol` for breakdown too
 
+    // Wave 2.1 + correction (cf. orchestrator.cpp): K=1 LocalDGKS3 is
+    // safe for eigenvalues-only paths. ``lanczos()`` writes the basis
+    // to disk in the ``on_step`` hook when eigenvectors are
+    // requested, but the kernel itself does not need ``keep_basis``
+    // -- the disk basis is the channel, and the legacy code did not
+    // do full reorth between iters even in the eigenvectors=true
+    // case. We preserve that behaviour explicitly here. Production
+    // users on near-degenerate spectra can opt in to higher K via
+    // ``ED_LANCZOS_REORTH_K``.
+    opts.reorth = ReorthPolicy::LocalDGKS3;
+    if (const char* k_env = std::getenv("ED_LANCZOS_REORTH_K")) {
+        try {
+            const long k_val = std::stol(k_env);
+            if (k_val >= 1 && k_val <= 64) {
+                opts.local_ring_size = static_cast<std::size_t>(k_val);
+            }
+        } catch (...) {
+            // malformed env: silently keep the default.
+        }
+    }
+
     // Eigenvalue convergence: relative tol on the lowest `exct` Ritz
-    // pairs, checked every iteration once we have at least `exct` pairs.
+    // pairs, checked every `convergence_check_interval` iters once we
+    // have at least `exct` pairs.
+    //
+    // Wave 2.6 of the SOTA Performance rollout (May 2026): every-5 is
+    // the safest default --- it amortises the O(m^2) LAPACK tridiag
+    // eigensolve over 5 iterations (a tiny overshoot vs ideal m,
+    // typically <5 extra matvecs out of 50-200) and matches the
+    // distributed lane (`distributed_lanczos_kernel.h:295`). Callers
+    // who need exact-best-m termination can re-enable per-iter
+    // checking via env ``ED_LANCZOS_CHECK_EVERY=1``.
     std::vector<double> prev_eigenvalues_outer;
-    opts.convergence_check_interval = 1;
+    opts.convergence_check_interval = 5;
+    if (const char* ce = std::getenv("ED_LANCZOS_CHECK_EVERY")) {
+        try {
+            const long ci = std::stol(ce);
+            if (ci >= 1 && ci <= 1000) {
+                opts.convergence_check_interval = static_cast<std::size_t>(ci);
+            }
+        } catch (...) {
+            // malformed env: keep the default.
+        }
+    }
     opts.convergence_check =
         [&prev_eigenvalues_outer, exct, tol]
         (const std::vector<double>& a, const std::vector<double>& b) -> bool {
@@ -873,6 +929,15 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // iters; `v_curr` is V_{iteration_count} (the next vector for the
     // resumed run), `v_prev` is V_{iteration_count - 1}. Matches the
     // legacy `cp.iteration` / `cp.v_current` / `cp.v_prev` semantics.
+    //
+    // Wave 2.4 of the SOTA Performance rollout (May 2026): skip the
+    // hook entirely when neither eigenvectors nor checkpointing are
+    // active. The kernel then bypasses both the per-iter callback
+    // dispatch AND the LocalDGKS3 ``ring_view`` materialisation that
+    // exists solely for the hook (see ``lanczos_kernel.h:633-643``),
+    // which is otherwise free O(K) pointer copy per iter.
+    const bool on_step_needed = eigenvectors || ckpt_write_enabled;
+    if (on_step_needed) {
     opts.on_step_interval = 1;
     opts.on_step =
         [&backend, &gen, N, eigenvectors, &temp_dir,
@@ -934,6 +999,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
                           << iteration_count << ": " << e.what() << std::endl;
             }
         };
+    }  // end if (on_step_needed)
 
     // Resume state for kernel re-entry.
     std::unique_ptr<LanczosResumeState> resume_state;

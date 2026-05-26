@@ -5,9 +5,9 @@
 // `ed::make_operator(OperatorSpec)`: the unified factory that supersedes
 // the legacy collection of construction-plus-solve helpers:
 //
-//   * `exact_diagonalization_from_files`            (ed_wrapper.h)
-//   * `exact_diagonalization_from_directory`        (ed_wrapper.h)
-//   * `exact_diagonalization_streaming_symmetry*`   (ed_wrapper_streaming.h)
+//   * (deleted) `ed::exact_diagonalization_from_files`            (ed_wrapper.h)
+//   * (deleted) `ed::exact_diagonalization_from_directory`        (ed_wrapper.h)
+//   * (deleted) `ed::exact_diagonalization_streaming_symmetry*`   (ed_wrapper_streaming.h)
 //   * `DistributedOperator(...)` / `DistributedSymmetryOperator(...)`
 //     manual construction in CLI binaries
 //

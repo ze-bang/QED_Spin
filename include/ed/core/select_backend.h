@@ -169,7 +169,15 @@ inline BackendVariant select_backend(const Geometry& geom,
 #endif
 
 #ifdef WITH_CUDA
-    if (op_is_device && have_gpu && gpu_fits && c.allow_gpu) {
+    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
+    // (May 2026): an operator can advertise device-matvec capability
+    // even when its native storage is host. `bind_cuda()` is expected
+    // to lazily build a GPU mirror in that case. This unblocks the
+    // `qed.solve(symmetry=..., device='gpu')` lane: the symmetry
+    // SectorViews are host-resident but their GPUSymmetrizedOperator
+    // mirror (lazily constructed inside `bind_cuda`) runs on the GPU.
+    const bool device_mv = op_is_device || geom.supports_device_matvec;
+    if (device_mv && have_gpu && gpu_fits && c.allow_gpu) {
         return BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
     }
 #endif

@@ -1,10 +1,11 @@
 """Heuristic auto-tuning for DSSF / structure-factor knobs.
 
-Pure helper functions used by :func:`qed.dssf.compute` (and mirrored in
-``include/ed/auto/dssf_tune.h`` for the C++ ``ed::auto_pilot::dssf``
-facade). Every function takes (problem-size, machine-size, aggressiveness)
-and returns a single scalar / tuple — no I/O, no side effects, easy to
-unit-test.
+Pure helper functions used by :func:`qed.spectral`. The C++ mirror of
+these heuristics is the ``DSSFKernelOptions`` plumbing inside
+``ed::workflows::spectral`` (the surface-unification collapse retired
+the cross-cutting ``include/ed/auto/dssf_tune.h``). Every function
+takes (problem-size, machine-size, aggressiveness) and returns a
+single scalar / tuple — no I/O, no side effects, easy to unit-test.
 
 Aggressiveness levels (matches the C++ ``DSSFTuneLevel`` enum):
 
@@ -63,7 +64,8 @@ Level = Literal["conservative", "balanced", "aggressive"]
 
 # ---------------------------------------------------------------------------
 # Per-level constants — kept in one place so the C++ mirror in
-# include/ed/auto/dssf_tune.h can copy them verbatim.
+# ``DSSFKernelOptions`` (and friends, inside the orchestrator) can copy
+# them verbatim.
 # ---------------------------------------------------------------------------
 
 _ETA_GRID_FACTOR = {"conservative": 5.0, "balanced": 3.0, "aggressive": 2.0}
@@ -156,7 +158,7 @@ def pick_omega_window(
 
     Defaults to symmetric window since DSSF spectra are typically two-sided
     and the dispatcher expects ``omega_min < 0 < omega_max``. Override by
-    passing your own grid via ``qed.dssf.compute(omega=...)``.
+    passing your own grid via ``qed.spectral(omega=...)``.
     """
     half = (1.0 + margin) * abs(bandwidth)
     return (-half, half)
@@ -250,7 +252,7 @@ def pick_device(
 
 
 # ---------------------------------------------------------------------------
-# Convenience bundle — used by qed.dssf.compute(...) to fill in EVERY
+# Convenience bundle — used by qed.spectral(...) to fill in EVERY
 # missing knob in one shot. Returns a dataclass whose fields map 1:1 to
 # the ``--dyn-*`` / ``--static-*`` / ``--ftlm-*`` CLI flags consumed by
 # ``./ED dssf``.
@@ -426,23 +428,26 @@ __all__ = [
 #                       ED solver auto-tuning helpers
 # ===========================================================================
 #
-# Mirrors the DSSF helpers above for the diagonalization side.
-# Used by :func:`qed.diag` (via :func:`tune_diag`) and the C++
-# `ed::auto_pilot::AutoSolveOptions` path (via
-# `include/ed/auto/diag_tune.h`). The numeric constants are kept here so
-# the C++ mirror can copy them verbatim.
+# Mirrors the DSSF helpers above for the diagonalization side. Used
+# by :func:`qed.solve` (via :func:`tune_diag`). The C++ mirror of
+# these knobs now lives in the per-kernel options structs
+# (``FtlmKernelOptions``, ``LtlmKernelOptions``, ``TpqKernelOptions``,
+# ...) that ``ed::workflows::solve`` and ``ed::workflows::thermal``
+# build up from ``SolveOptions`` / ``ThermalOptions``. The numeric
+# constants are kept here so the C++ side can copy them verbatim.
 #
 # Per-level knob bounds were chosen to match the bake-off vs xdiag in
 # docs/benchmarks/bench_vs_xdiag.md. "Balanced" is the default and is
-# what `qed.diag` ships today; "conservative" trims memory at the cost
+# what `qed.solve` ships today; "conservative" trims memory at the cost
 # of a few extra restarts; "aggressive" widens subspace + ncv for
 # stiff problems.
 # ---------------------------------------------------------------------------
 
 
-# Solver picker thresholds. Matches qed.workflow._resolve_solver +
-# include/ed/auto/solve.h. Surface them as module-level constants so the
-# C++ mirror in include/ed/auto/diag_tune.h can copy them verbatim.
+# Solver picker thresholds. Matches qed.workflow._resolve_solver and
+# the orchestrator's solver picker in ``ed::workflows::solve``. Surface
+# them as module-level constants so the C++ mirror (per-kernel options
+# structs) can copy them verbatim.
 _SMALL_DIM_THRESHOLD = 2048           # FULL below this
 _LANCZOS_NEIG_THRESHOLD = 5           # plain Lanczos at or below
 _KRYLOV_SCHUR_NEIG_THRESHOLD = 20     # KRYLOV_SCHUR at or below
@@ -484,7 +489,7 @@ _THERMAL_SAMPLES_MAX = {"conservative": 4, "balanced": 16, "aggressive": 32}
 def pick_solver(num_eigenvalues: int, sector_dim: int) -> str:
     """Return the recommended ``DiagonalizationMethod`` name string.
 
-    Same rule as :func:`qed.diag`'s default (and the C++ auto-pilot):
+    Same rule as :func:`qed.solve`'s default (and the C++ auto-pilot):
 
     * ``sector_dim ≤ 2048``         → ``"FULL"``      (LAPACK)
     * ``num_eigenvalues ≤ 5``       → ``"LANCZOS"``
@@ -607,7 +612,7 @@ class TunedDiagKnobs:
     level: str
 
     def to_extra_params(self) -> dict[str, object]:
-        """Render to an ``extra_params=`` dict for :func:`qed.diag`.
+        """Render to an ``extra_params=`` dict for :func:`qed.solve`.
 
         Only includes fields actually consumed by the requested
         ``solver`` family — keeps the dict small so logging is readable.
@@ -656,7 +661,7 @@ def tune_diag(
 ) -> TunedDiagKnobs:
     """Pick every ED-solver knob, honouring user overrides.
 
-    Sister of :func:`tune_dssf`. Used by :func:`qed.diag` to fill in the
+    Sister of :func:`tune_dssf`. Used by :func:`qed.solve` to fill in the
     family-specific fields of :class:`EDParameters` that the legacy
     ``_make_params`` path does not handle (FTLM / LTLM Krylov dim,
     mTPQ Taylor order + delta_beta, thermal sample count).

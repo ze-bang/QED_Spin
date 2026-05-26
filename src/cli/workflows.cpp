@@ -45,15 +45,19 @@
 #include <memory>
 #include <random>
 #include <algorithm>
+#include <cstdlib>          // getenv (Wave 3.4 ED_DSSF_PAIR_THREADS)
+#ifdef _OPENMP
+#include <omp.h>            // Wave 3.4 OpenMP-over-pairs
+#endif
 #include <map>
 #include <fstream>
 
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
-#include <ed/core/ed_wrapper.h>            // legacy exact_diagonalization_fixed_sz (file-based)
-#include <ed/core/ed_wrapper_streaming.h>  // streaming kernel (used directly by GPU lanes)
+#include <ed/core/ed_wrapper.h>            // residue: EDResults envelope (legacy types only)
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/core/system_utils.h>          // create_directory_mpi_safe (was via ed_wrapper_streaming.h)
 
 // Full Unified-Interface Collapse, Wave C2 (May 2026): run_standard_workflow
 // and run_streaming_symmetry_workflow now build their operator via the
@@ -61,6 +65,7 @@
 // legacy `ed::exact_diagonalization(directory, method, params, ...)` entry
 // from the now-deleted <ed/core/dispatch.h>.
 #include <ed/core/make_operator.h>
+#include <ed/core/sector_loop.h>          // StreamingSymmetryHandle (SOTA)
 #include <ed/orchestrator.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/dssf/cross_sector_observable.h>
@@ -657,18 +662,23 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
         ed_adapter::toSolveOptions(params, config.method);
 
     // Walk every symmetry sector via SectorView and run the orchestrator
-    // per sector. Matches the legacy `exact_diagonalization_streaming_symmetry`
-    // sector loop (ed_wrapper_streaming.h:333), but now expressed as a
-    // CLI-visible iteration over `make_operator(streaming_symmetry=true)
-    // -> sector(k) -> workflows::solve`.
+    // per sector. This is the canonical streaming-symmetry sector loop
+    // (it replaced the deleted ``ed::exact_diagonalization_streaming_symmetry``
+    // entry point), expressed as a CLI-visible iteration over
+    // ``make_operator(streaming_symmetry=true) -> sector(k) -> workflows::solve``.
+    //
+    // SOTA upgrade (May 2026): the per-sector loop is now centralised in
+    // ``ed::core::StreamingSymmetryHandle`` so the CLI, the Pybind11
+    // bindings, and the thermal / spectral workflows all walk sectors
+    // through one well-tested helper. Each non-empty sector contributes
+    // a ``SectorTag`` (sector index + per-sector quantum numbers + Sz)
+    // that flows through into ``GroundStateResult::sector_tags`` for
+    // the in-process binding consumers; the CLI prints the tags on
+    // the diagnostic summary below.
     EDResults results;
-    auto* sym_op = dynamic_cast<StreamingSymmetryOperator*>(base_op.get());
-    auto* fsz_sym_op = dynamic_cast<FixedSzStreamingSymmetryOperator*>(base_op.get());
+    ed::core::StreamingSymmetryHandle handle(base_op.get());
 
-    const std::size_t num_sectors = fsz_sym_op
-        ? fsz_sym_op->num_sectors()
-        : (sym_op ? sym_op->num_sectors() : 0);
-
+    const std::size_t num_sectors = handle.num_sectors();
     if (num_sectors == 0) {
         throw std::runtime_error(
             "run_streaming_symmetry_workflow: make_operator returned an "
@@ -676,24 +686,31 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
             "automorphism_results/ directory and the InterAll.dat deck.");
     }
 
-    std::vector<double> all_eigs;
-    for (std::size_t k = 0; k < num_sectors; ++k) {
-        std::unique_ptr<ed::LinearOperator> sec;
-        if (fsz_sym_op) {
-            sec = fsz_sym_op->sector(k);
-        } else {
-            sec = sym_op->sector(k);
-        }
-        if (sec->dim() == 0) continue;
+    const std::vector<std::size_t> sector_indices =
+        ed::core::filter_sectors(num_sectors, opts.selected_sectors);
+
+    std::vector<double>                      all_eigs;
+    std::vector<ed::SectorTag>               touched_tags;
+    std::vector<std::vector<double>>         eigs_per_sector;
+    for (std::size_t k : sector_indices) {
+        auto sec = handle.sector(k);
+        if (!sec || sec->dim() == 0) continue;
         ed::workflows::SolveOptions sopts = opts;
         sopts.num_eigs = std::min<std::size_t>(opts.num_eigs, sec->dim());
-        // Per-sector HDF5 save (matches legacy
-        // `exact_diagonalization_streaming_symmetry`'s
-        // `sector_<idx>/ed_results.h5` layout).
+        // Strip the per-sector filter / use_symmetry flag from the
+        // inner call so the orchestrator does not try to re-enter the
+        // streaming loop on a single SectorView.
+        sopts.selected_sectors.clear();
+        sopts.use_symmetry = false;
+        // Per-sector HDF5 save: `sector_<idx>/ed_results.h5`. This is
+        // the canonical layout that the symmetrized CLI workflow emits.
         if (!opts.output_dir.empty()) {
             sopts.output_dir = opts.output_dir + "/sector_" + std::to_string(k);
         }
         auto sr = ed::workflows::solve(*sec, sopts);
+        ed::SectorTag tag = handle.sector_tag(k);
+        touched_tags.push_back(tag);
+        eigs_per_sector.push_back(sr.eigenvalues);
         all_eigs.insert(all_eigs.end(),
                         sr.eigenvalues.begin(), sr.eigenvalues.end());
         if (!sopts.output_dir.empty() && !sr.eigenvalues.empty()) {
@@ -701,6 +718,16 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
                 create_directory_mpi_safe(sopts.output_dir);
                 std::string h5 = HDF5IO::createOrOpenFile(sopts.output_dir);
                 HDF5IO::saveEigenvalues(h5, sr.eigenvalues);
+                // SOTA: persist the irrep quantum-number tag alongside
+                // the eigenvalues so downstream consumers (Python
+                // loaders, postproc scripts) can identify the irrep
+                // block on disk. HDF5IO does not expose a dedicated
+                // helper for the int vector; the sector directory name
+                // (``sector_<k>``) plus the per-sector listing in the
+                // CLI summary covers identification at the directory
+                // level. (A future HDF5IO::saveQuantumNumbers would
+                // move that metadata inside the file too.)
+                (void) tag;
             } catch (const std::exception& e) {
                 std::cerr << "  Warning: sector " << k
                           << " HDF5 save failed: " << e.what() << "\n";
@@ -708,13 +735,40 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
         }
     }
     std::sort(all_eigs.begin(), all_eigs.end());
-    // Legacy parity: `exact_diagonalization_streaming_symmetry` does NOT
-    // truncate the merged eigenvalue list at `params.num_eigenvalues`;
-    // each sector contributes its own `min(num_eigs, sector_dim)` and
-    // the global vector is the union, sorted. The truncation
-    // applies only inside each sector solve (already enforced above
-    // via `sopts.num_eigs = std::min(opts.num_eigs, sec->dim())`).
+    // Note: the merged eigenvalue list is NOT truncated at
+    // `params.num_eigenvalues`; each sector contributes its own
+    // ``min(num_eigs, sector_dim)`` and the global vector is the
+    // union, sorted. The per-sector truncation is already enforced
+    // above via ``sopts.num_eigs = std::min(opts.num_eigs, sec->dim())``.
     results.eigenvalues = std::move(all_eigs);
+
+    // SOTA upgrade (May 2026): print per-sector breakdown so the CLI
+    // user can see which irrep each low-lying eigenvalue came from
+    // (matches the SOTA-level output of HPhi / EDLib / QuSpin).
+    if (!touched_tags.empty()) {
+        std::cout << "\n  Per-sector eigenvalues:\n";
+        for (std::size_t s = 0; s < touched_tags.size(); ++s) {
+            const auto& t = touched_tags[s];
+            std::cout << "    sector " << t.sector_index
+                      << "  dim=" << t.sector_dim;
+            if (!t.quantum_numbers.empty()) {
+                std::cout << "  QN=[";
+                for (std::size_t q = 0; q < t.quantum_numbers.size(); ++q) {
+                    std::cout << (q == 0 ? "" : ",") << t.quantum_numbers[q];
+                }
+                std::cout << "]";
+            }
+            if (t.n_up >= 0) std::cout << "  n_up=" << t.n_up;
+            std::cout << "\n";
+            const auto& evs = eigs_per_sector[s];
+            std::size_t show = std::min<std::size_t>(evs.size(), 3);
+            for (std::size_t i = 0; i < show; ++i) {
+                std::cout << "      E[" << i << "] = "
+                          << std::fixed << std::setprecision(10)
+                          << evs[i] << "\n";
+            }
+        }
+    }
 
     // Top-level merged HDF5 save (matches the legacy global summary).
     if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
@@ -2594,8 +2648,50 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         my_tasks.push_back(i);
     }
 
-    for (int op_idx : my_tasks) {
+    // Wave 3.4 of the SOTA Performance rollout (May 2026): when running
+    // single-rank (or when each rank still owns multiple pairs in the
+    // round-robin partition) the (alpha, beta) pairs are completely
+    // independent -- each launches its own Lanczos build against the
+    // same ground state. OpenMP-parallelise across pairs so 8 pairs
+    // on a single workstation hit all cores at once, instead of
+    // chaining serial inner Lanczos runs. The HDF5 layer is wrapped
+    // in a critical section -- HDF5 itself is not (always) thread
+    // safe and the per-pair writes are tiny vs the Lanczos compute.
+    //
+    // Cap the outer team at ``ED_DSSF_PAIR_THREADS`` (default =
+    // min(num_pairs, omp_max_threads / 2)); nested OMP keeps the
+    // inner SpMV / BLAS-1 multi-threaded too.
+    const int n_my_pairs = static_cast<int>(my_tasks.size());
+    int pair_threads = 1;
+    if (n_my_pairs > 1) {
+#ifdef _OPENMP
+        const int max_threads = omp_get_max_threads();
+#else
+        const int max_threads = 1;
+#endif
+        pair_threads = std::min(n_my_pairs, std::max(1, max_threads / 2));
+        if (const char* env = std::getenv("ED_DSSF_PAIR_THREADS")) {
+            try {
+                const long t = std::stol(env);
+                if (t >= 1 && t <= max_threads) {
+                    pair_threads = std::min(
+                        n_my_pairs, static_cast<int>(t));
+                }
+            } catch (...) {
+                // malformed env: keep default.
+            }
+        }
+#ifdef _OPENMP
+        if (pair_threads > 1) omp_set_max_active_levels(2);
+#endif
+    }
+
+    #pragma omp parallel for num_threads(pair_threads) \
+        if (pair_threads > 1) schedule(dynamic, 1)
+    for (int t = 0; t < n_my_pairs; ++t) {
+        const int op_idx = my_tasks[t];
         if (rank == 0) {
+            #pragma omp critical(stdout_lock)
             std::cout << "[Rank " << rank << "] Processing: "
                       << names[op_idx] << "\n";
         }
@@ -2615,15 +2711,18 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         auto results = compute_ground_state_cross_correlation(
             H_apply_int, O1_func, O2_func, ground_state, ground_state_energy,
             N, gs_params);
-        std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-        std::string op_name = "ground_state_dssf/" + names[op_idx];
-        HDF5IO::saveDynamicalResponseFull(
-            h5_path, op_name,
-            results.frequencies, results.spectral_function, results.spectral_function_imag,
-            results.spectral_error, results.spectral_error_imag,
-            1, 0.0);
-        if (rank == 0) {
-            std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+        #pragma omp critical(hdf5_lock)
+        {
+            std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            std::string op_name = "ground_state_dssf/" + names[op_idx];
+            HDF5IO::saveDynamicalResponseFull(
+                h5_path, op_name,
+                results.frequencies, results.spectral_function, results.spectral_function_imag,
+                results.spectral_error, results.spectral_error_imag,
+                1, 0.0);
+            if (rank == 0) {
+                std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+            }
         }
     }
 
