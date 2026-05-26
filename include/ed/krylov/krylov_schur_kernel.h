@@ -38,8 +38,8 @@
 #include <string>
 #include <vector>
 
-#include <ed/distributed/distributed_lanczos_kernel.h>  // solve_tridiag_with_eigenvectors
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag_with_eigenvectors (MPI-free)
 #include <ed/matvec/backend.h>
 
 namespace ed::krylov {
@@ -104,7 +104,7 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
                                       const KrylovSchurOptions& opts)
 {
     using ed::matvec::Backend;
-    using ed::distributed::kernel::solve_tridiag_with_eigenvectors;
+    using ed::krylov::detail::solve_tridiag_with_eigenvectors;
 
     if (opts.max_iter == 0) {
         throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");

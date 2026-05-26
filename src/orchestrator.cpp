@@ -29,6 +29,7 @@
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
+#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
@@ -252,10 +253,10 @@ GroundStateResult solve_on(Backend& be,
         std::vector<double> evec_coeffs;  // column-major m x m
         if (opts.compute_vectors) {
             std::vector<double> weights;
-            ed::distributed::kernel::solve_tridiag_with_eigenvectors(
+            ed::krylov::detail::solve_tridiag_with_eigenvectors(
                 kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evec_coeffs);
         } else {
-            evals = ed::distributed::kernel::solve_tridiag(
+            evals = ed::krylov::detail::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
         const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
