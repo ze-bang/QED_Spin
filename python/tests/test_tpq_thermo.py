@@ -204,6 +204,170 @@ def test_mtpq_converges_with_more_iterations():
     )
 
 
+# ---------------------------------------------------------------------------
+# Save & DSSF Upgrades follow-up (May 2026): the "TPQ + symmetry + save
+# thermal states" regression matrix.
+#
+# Three bugs are pinned by the test cases below (all manifested when the
+# user called qed.thermal(method="mTPQ"|"cTPQ", probe_betas=..., output_dir=...)
+# with symmetry on):
+#
+#   Bug 1 -- C++ streaming-symmetry binding (workflow_bindings.cpp)
+#            ``workflows_thermal_streaming_symmetry_directory`` called
+#            ``topts.output_dir.clear()`` for every per-sector run, so
+#            NO state vectors ever landed on disk when the user opted
+#            into spatial symmetry.
+#   Bug 2 -- Python multi-Sz iteration (thermal.py)
+#            Every Sz sector wrote to the same shared output_dir, so
+#            ``ed_results.h5`` got overwritten and only the last
+#            sector's state vectors survived.
+#   Bug 3 -- Python scratch cleanup (thermal.py)
+#            When the user passed ``probe_betas`` but no ``output_dir``,
+#            ``qed.thermal`` allocated a scratch dir, the C++ side wrote
+#            the snapshots there, and then ``_cleanup_scratch()`` deleted
+#            the dir at the end of the call -- silently destroying
+#            every user-requested state vector.
+# ---------------------------------------------------------------------------
+
+
+def _count_state_vectors(h5_path: str) -> int:
+    import h5py
+    with h5py.File(h5_path, "r") as f:
+        count = 0
+        def visit(name, obj):
+            nonlocal count
+            if isinstance(obj, h5py.Dataset) and "/states/beta_" in name:
+                count += 1
+        f.visititems(visit)
+        return count
+
+
+def test_tpq_save_with_symmetry_directory_lands_on_disk(tmp_path):
+    """Bug 1 pin: TPQ + use_symmetry_if_available + probe_betas + output_dir
+    must produce per-sector ed_results.h5 files with state vectors at
+    ``/tpq/samples/sample_<s>/states/beta_<b>``. Pre-fix every state
+    vector was silently dropped (the C++ binding cleared output_dir)."""
+    tmp_dir, _ = _directory_with_symmetry()
+    outdir = str(tmp_path / "save_with_sym")
+
+    R = qed.thermal(
+        tmp_dir, num_sites=N_SITES, method="mTPQ",
+        T_min=0.1, T_max=5.0, num_T=6,
+        num_samples=1, max_iterations=20,
+        probe_betas=[0.5, 2.0],
+        use_symmetry_if_available=True,
+        use_sz_if_conserved=False,
+        output_dir=outdir,
+        random_seed=7, verbose=False, device="cpu",
+    )
+
+    # hdf5_path now points to the parent output_dir; per-sector files
+    # live under <output_dir>/sector_k_<k>/ed_results.h5.
+    assert R.hdf5_path == outdir, (
+        f"expected R.hdf5_path == {outdir!r}, got {R.hdf5_path!r}")
+    import glob
+    per_sec = sorted(glob.glob(os.path.join(outdir, "sector_k_*",
+                                            "ed_results.h5")))
+    assert len(per_sec) >= 1, (
+        f"no per-sector ed_results.h5 files under {outdir}")
+    # Every per-sector file must carry the 2 probe-beta state vectors.
+    total = sum(_count_state_vectors(p) for p in per_sec)
+    expected = len(per_sec) * 2
+    assert total == expected, (
+        f"expected {expected} state vectors (one per (sector, probe_beta)), "
+        f"got {total}")
+
+
+def test_tpq_save_with_multi_sz_lands_per_sector(tmp_path):
+    """Bug 2 pin: multi-Sz iteration with probe_betas must namespace
+    per-sector writes so the per-Sz HDF5 files do NOT overwrite each
+    other (the dataset names are keyed by effective_beta with no sector
+    tag, so colliding betas across sectors silently corrupt the file)."""
+    H = _ring()
+    outdir = str(tmp_path / "save_multi_sz")
+
+    sz_lo = N_SITES // 2 - 1
+    sz_hi = N_SITES // 2 + 1
+    R = qed.thermal(
+        H, method="mTPQ",
+        T_min=0.1, T_max=5.0, num_T=6,
+        num_samples=1, max_iterations=20,
+        sz_min=sz_lo, sz_max=sz_hi,
+        probe_betas=[0.5, 2.0],
+        output_dir=outdir,
+        random_seed=11, verbose=False, device="cpu",
+    )
+
+    assert R.hdf5_path == outdir
+    # Every n_up bucket must produce its own ed_results.h5.
+    assert len(R.sector_hdf5_paths) == (sz_hi - sz_lo + 1), (
+        f"expected {sz_hi - sz_lo + 1} per-sector HDF5 files, "
+        f"got {R.sector_hdf5_paths}")
+    for n_up, path in R.sector_hdf5_paths.items():
+        assert path.endswith(f"n_up_{n_up}/ed_results.h5"), (
+            f"sector {n_up} HDF5 at unexpected location: {path}")
+        assert os.path.exists(path), f"missing {path}"
+        # Each per-sector file must carry exactly 2 state vectors.
+        assert _count_state_vectors(path) == 2, (
+            f"sector {n_up} should have 2 state vectors, got "
+            f"{_count_state_vectors(path)}")
+
+
+def test_tpq_save_without_output_dir_raises():
+    """Bug 3 pin: passing probe_betas with no output_dir would silently
+    cleanup the scratch dir and return a dangling hdf5_path. We now
+    raise instead so the user knows their snapshots need a stable home."""
+    H = _ring()
+    with pytest.raises(ValueError, match="probe_betas.*output_dir"):
+        qed.thermal(
+            H, method="mTPQ",
+            T_min=0.1, T_max=5.0, num_T=4,
+            num_samples=1, max_iterations=10,
+            sz_min=N_SITES // 2, sz_max=N_SITES // 2,
+            probe_betas=[1.0],
+            output_dir="",          # empty -- not OK with probe_betas
+            random_seed=13, verbose=False,
+        )
+
+
+def test_tpq_load_state_round_trip(tmp_path):
+    """End-to-end: save -> load -> verify dimension matches the sector
+    matvec dim (NOT the full Hilbert dim). This is the contract the
+    TPQ-to-CF spectral pipeline relies on: ``GroundStateCF`` takes the
+    snapshot in the orbit/sector basis directly."""
+    import h5py
+    tmp_dir, _ = _directory_with_symmetry()
+    outdir = str(tmp_path / "load_round_trip")
+
+    R = qed.thermal(
+        tmp_dir, num_sites=N_SITES, method="cTPQ",
+        T_min=0.1, T_max=5.0, num_T=4,
+        num_samples=1, max_iterations=15,
+        probe_betas=[1.0],
+        use_symmetry_if_available=True,
+        use_sz_if_conserved=False,
+        output_dir=outdir,
+        random_seed=23, verbose=False, device="cpu",
+    )
+    assert R.hdf5_path == outdir
+    import glob
+    per_sec = sorted(glob.glob(os.path.join(outdir, "sector_k_*",
+                                            "ed_results.h5")))
+    assert len(per_sec) >= 1
+    # Each sector's saved state vector should have shape (sector_dim,)
+    # which is < 2^N_SITES (the full Hilbert dim).
+    full_dim = 1 << N_SITES
+    for p in per_sec:
+        with h5py.File(p, "r") as f:
+            def visit(name, obj):
+                if isinstance(obj, h5py.Dataset) and "/states/beta_" in name:
+                    assert 0 < obj.shape[0] < full_dim, (
+                        f"{p}::{name} shape {obj.shape} should be a "
+                        f"sector dim, not the full Hilbert dim "
+                        f"{full_dim}")
+            f.visititems(visit)
+
+
 def test_specific_heat_is_nonnegative_and_peaks_in_range():
     """C_v = beta^2 <var> is non-negative by construction. The
     Heisenberg ring has its Schottky peak in [0.3, 2.0]; verify."""

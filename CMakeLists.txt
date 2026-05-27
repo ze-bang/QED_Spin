@@ -888,6 +888,25 @@ if(BUILD_ED_TESTS)
         ed_add_mpi_test(test_distributed_lanczos
                         tests/unit/test_distributed_lanczos.cpp)
 
+        # "Universal save contract" follow-up (May 2026): rank-0
+        # emission of <output_dir>/ed_results.h5 from
+        # ed::workflows::solve in the MPI lane (aggregate fields only;
+        # slab-distributed eigenvectors stay in per-rank rank_<r>.h5
+        # files). Pins the contract at np ∈ {1, 2, 4}.
+        ed_add_mpi_test(test_distributed_workflows_save
+                        tests/unit/test_distributed_workflows_save.cpp)
+        # The orchestrator template-instantiates ``solve_on<CudaBackend>``
+        # under WITH_CUDA so the linker needs the GPU solver libs even
+        # when the test exercises only the CPU/MPI lane.
+        if(WITH_CUDA AND TARGET ed_solvers_gpu)
+            target_link_libraries(test_distributed_workflows_save PRIVATE
+                ed_solvers_gpu)
+        endif()
+        target_link_libraries(test_distributed_workflows_save PRIVATE
+            ${HDF5_LIBRARIES})
+        target_include_directories(test_distributed_workflows_save PRIVATE
+            ${HDF5_INCLUDE_DIRS})
+
         # Phase 3b #3: distributed FTLM (J&P trace estimator with Ritz weights,
         # MPI parallelism over samples)
         ed_add_mpi_test(test_distributed_ftlm

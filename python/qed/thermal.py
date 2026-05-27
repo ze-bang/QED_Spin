@@ -296,14 +296,22 @@ class ThermalResult:
     per_sector: list[ThermalSectorEntry] = field(default_factory=list)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): path to
     # the HDF5 file produced by the thermal orchestrator (when
-    # ``output_dir`` was set). Empty string means no on-disk artefact
-    # was produced (or the run was multi-sector and only the last
-    # sector's file survived; see :func:`qed.thermal` for the
-    # multi-sector caveat). For mTPQ / cTPQ runs with ``probe_betas``
+    # ``output_dir`` was set). For mTPQ / cTPQ runs with ``probe_betas``
     # set, the file carries per-sample trajectories under
     # ``/tpq/samples/sample_<s>/thermodynamics`` and state vectors
-    # under ``/tpq/samples/sample_<s>/state_beta_<b>``.
+    # under ``/tpq/samples/sample_<s>/states/beta_<b>``.
+    #
+    # Multi-sector mode (Save & DSSF follow-up, May 2026): when
+    # ``qed.thermal`` iterates more than one Sz sector for a TPQ
+    # method, each sector lands in its own subdirectory
+    # ``<output_dir>/n_up_<n_up>/ed_results.h5`` to avoid the
+    # ``/tpq/samples/sample_<s>/states/beta_<b>`` namespace collision
+    # (the dataset names are NOT sector-tagged). In that case
+    # :attr:`hdf5_path` points to the parent ``<output_dir>`` and
+    # :attr:`sector_hdf5_paths` carries the per-sector ``(n_up, path)``
+    # mapping so callers can reload state vectors per sector.
     hdf5_path: str = ""
+    sector_hdf5_paths: dict[Optional[int], str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +346,28 @@ def _allocate_tpq_workdir(root: str, method_tag: str, n_up: Optional[int]) -> st
     workdir = os.path.join(base, f"{method_tag}{suffix}_{stamp}")
     os.makedirs(workdir, exist_ok=True)
     return workdir
+
+
+def _persistent_sector_outdir(output_dir: str, n_up: Optional[int]) -> str:
+    """Return a deterministic per-Sz-sector subdirectory under
+    ``output_dir`` for TPQ runs.
+
+    Save & DSSF Upgrades follow-up (May 2026): when the user passes an
+    explicit ``output_dir`` AND ``qed.thermal`` iterates multiple Sz
+    sectors, each sector's ``ed::workflows::thermal`` call would otherwise
+    write to the SAME ``<output_dir>/ed_results.h5`` and overwrite the
+    previous sector's TPQ samples / state vectors. The
+    ``/tpq/samples/sample_<s>/states/beta_<b>`` namespace is keyed only
+    by ``effective_beta`` -- there is no sector tag in the dataset name,
+    so collisions silently destroy probe-beta snapshots. We route each
+    sector to its own subdirectory; callers can rebuild the per-sector
+    file path as ``<output_dir>/n_up_<n_up>/ed_results.h5``.
+    """
+    if not output_dir:
+        return ""
+    if n_up is None:
+        return output_dir
+    return os.path.join(output_dir, f"n_up_{int(n_up)}")
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +702,24 @@ def thermal(
     if extra_params:
         merged_extra.update(extra_params)
 
+    # Save & DSSF Upgrades follow-up (May 2026): when the user requested
+    # state-vector snapshots via ``probe_betas`` but did NOT pass an
+    # ``output_dir``, the helper used to allocate scratch directories
+    # and then ``shutil.rmtree`` them in the ``finally`` block --
+    # silently destroying every state vector the user asked us to save
+    # AND surfacing a dangling ``hdf5_path``. Require an explicit
+    # ``output_dir`` whenever ``probe_betas`` is non-empty so the
+    # snapshots have a stable home on disk.
+    if method_enum in _TPQ_METHODS \
+            and probe_betas \
+            and not output_dir:
+        raise ValueError(
+            "qed.thermal: probe_betas is set but output_dir is empty. "
+            "State-vector snapshots would be written to a scratch "
+            "directory and then deleted at the end of this call. "
+            "Pass output_dir=... so the snapshots survive."
+        )
+
     # TPQ needs a real (non-/dev/null) output dir per sector so its
     # per-sample HDF5 trajectories survive long enough for
     # ``compute_tpq_unified_thermo`` to read them back. We allocate
@@ -760,6 +808,7 @@ def thermal(
     if is_directory:
         per_sector_blocks: list[tuple[np.ndarray, ...]] = []
         per_sector_records: list[ThermalSectorEntry] = []
+        sector_hdf5_paths: dict[Optional[int], str] = {}
         gs_E = math.inf
 
         def _make_dir_params(n_up_val: Optional[int]) -> EDParameters:
@@ -774,8 +823,21 @@ def thermal(
             # Decide output dir up-front. TPQ family always needs a real
             # scratch dir for the HDF5 round-trip; everything else
             # honours whatever the user passed (``""`` -> /dev/null).
+            #
+            # Multi-Sz overwrite fix (May 2026): when the user provided
+            # an explicit ``output_dir`` AND we are iterating over
+            # multiple Sz sectors for a TPQ method, each sector lands
+            # in its own subdirectory ``<output_dir>/n_up_<n_up>/`` so
+            # the per-sector ``ed_results.h5`` files do not overwrite
+            # one another. For non-TPQ methods (FTLM / LTLM / KPM-DOS)
+            # the file holds only aggregated curves which the
+            # ``averaged/`` group can dedupe in-place; we still route
+            # per-sector to be safe and consistent.
             if needs_scratch:
                 p.output_dir = _alloc_scratch(n_up_val)
+            elif output_dir and n_up_val is not None:
+                p.output_dir = _persistent_sector_outdir(output_dir, n_up_val)
+                os.makedirs(p.output_dir, exist_ok=True)
             else:
                 p.output_dir = output_dir
             if krylov_dim is not None:
@@ -912,6 +974,14 @@ def thermal(
                 )
                 if len(res.eigenvalues) > 0:
                     gs_E = min(gs_E, float(res.eigenvalues[0]))
+                # Save & DSSF Upgrades follow-up (May 2026): record the
+                # per-sector HDF5 file so callers can reload state
+                # vectors per Sz sector. With the per-sector
+                # subdirectory layout the file lives at
+                # ``<output_dir>/n_up_<n_up>/ed_results.h5``.
+                _sec_h5 = str(getattr(res, "eigenvectors_path", "") or "")
+                if _sec_h5:
+                    sector_hdf5_paths[n_up] = _sec_h5
 
             if not per_sector_blocks:
                 raise RuntimeError(
@@ -920,11 +990,13 @@ def thermal(
                 )
             temps, E, Cv, S, F = _combine_sector_thermodynamics(
                 per_sector_blocks)
-            # Pillar 1 (May 2026): the last sector's HDF5 file is the
-            # shared one (every sector writes to the same path); surface
-            # it. Per-sector overwrite under TPQ is a known limitation
-            # of the multi-Sz mode; see qed.thermal docs.
-            h5_path_multi = str(getattr(res, "eigenvectors_path", "") or "")
+            # Save & DSSF Upgrades follow-up (May 2026): with the
+            # per-sector subdirectory layout each sector now has its
+            # own ``ed_results.h5``. Surface the user-supplied parent
+            # ``output_dir`` here (the per-sector files live underneath)
+            # and expose the per-sector path map via
+            # ``ThermalResult.sector_hdf5_paths``.
+            h5_path_multi = output_dir if output_dir else ""
         finally:
             _cleanup_scratch()
         if verbose:
@@ -940,6 +1012,7 @@ def thermal(
             free_energy=F, method=str(method),
             ground_state_energy=gs_E,
             hdf5_path=h5_path_multi,
+            sector_hdf5_paths=sector_hdf5_paths,
             used_sz_decomposition=True,
             used_symmetry_decomposition=(
                 has_sym and method_enum not in _TPQ_METHODS),
@@ -950,6 +1023,29 @@ def thermal(
     # 3b. In-memory form -- iterate via qed.solve(H, sz=n_up).
     # ------------------------------------------------------------------
     def _make_diag_kwargs(n_up_val: Optional[int]) -> dict[str, Any]:
+        # Multi-Sz overwrite fix (May 2026): EVERY method's HDF5 schema
+        # ( ``/tpq/samples/sample_<s>/...`` for TPQ,
+        #   ``/ftlm/averaged/<curve>`` for FTLM,
+        #   ``/ltlm/averaged/<curve>`` for LTLM,
+        #   ``/kpm_dos/...`` for KPM_DOS )
+        # is keyed by sample / beta / curve with **no sector tag**, so
+        # if two Sz sectors share an ``output_dir`` the second sector's
+        # ``ed_results.h5`` write silently overwrites the first. Route
+        # every Sz sector to ``<output_dir>/n_up_<n_up>/ed_results.h5``
+        # regardless of method. TPQ + multi-Sz was the user-visible
+        # symptom because state vectors live ONLY on disk; for
+        # FTLM / LTLM / KPM_DOS the recombined thermo in
+        # ``ThermalResult.thermo`` would mask the corruption but the
+        # HDF5 file (used for diagnostics, post-processing, audit
+        # trails) would still be wrong.
+        if needs_scratch:
+            _resolved_outdir = _alloc_scratch(n_up_val)
+        elif output_dir and n_up_val is not None:
+            _resolved_outdir = _persistent_sector_outdir(output_dir, n_up_val)
+            os.makedirs(_resolved_outdir, exist_ok=True)
+        else:
+            _resolved_outdir = output_dir
+
         kwargs: dict[str, Any] = {
             "solver": method_enum,
             "num_eigenvalues": 1,
@@ -958,7 +1054,7 @@ def thermal(
             "num_temp_points": num_T,
             "temp_min": T_min,
             "temp_max": T_max,
-            "output_dir": _alloc_scratch(n_up_val) if needs_scratch else output_dir,
+            "output_dir": _resolved_outdir,
             "auto_tune": auto_tune,
             "level": level,
             "verbose": False,
@@ -1032,6 +1128,7 @@ def thermal(
 
     per_sector_blocks = []
     per_sector_records = []
+    sector_hdf5_paths_imem: dict[Optional[int], str] = {}
     gs_E = math.inf
 
     try:
@@ -1059,6 +1156,12 @@ def thermal(
             )
             if len(res.eigenvalues) > 0:
                 gs_E = min(gs_E, float(res.eigenvalues[0]))
+            # Save & DSSF Upgrades follow-up (May 2026): record this
+            # sector's HDF5 file (now per-sector under
+            # ``<output_dir>/n_up_<n_up>/``).
+            _sec_h5_imem = str(getattr(res, "eigenvectors_path", "") or "")
+            if _sec_h5_imem:
+                sector_hdf5_paths_imem[n_up] = _sec_h5_imem
 
         if not per_sector_blocks:
             raise RuntimeError(
@@ -1067,8 +1170,11 @@ def thermal(
             )
 
         temps, E, Cv, S, F = _combine_sector_thermodynamics(per_sector_blocks)
-        # Pillar 1 (May 2026): surface the last sector's HDF5 path.
-        h5_path_imem_multi = str(getattr(res, "eigenvectors_path", "") or "")
+        # Save & DSSF Upgrades follow-up (May 2026): with per-sector
+        # subdirectory layout the per-sector files live under
+        # ``<output_dir>/n_up_<n_up>/``; surface the parent here and
+        # expose the sector -> file map via ``sector_hdf5_paths``.
+        h5_path_imem_multi = output_dir if output_dir else ""
     finally:
         _cleanup_scratch()
     if verbose:
@@ -1084,4 +1190,5 @@ def thermal(
         used_symmetry_decomposition=False,
         per_sector=per_sector_records,
         hdf5_path=h5_path_imem_multi,
+        sector_hdf5_paths=sector_hdf5_paths_imem,
     )
