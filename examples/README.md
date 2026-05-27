@@ -1,93 +1,184 @@
-# Examples
+# `examples/` — one example per ONLINE cell
 
-This directory contains **runnable, self-contained** examples covering the
-major use cases of the toolkit. Every example is a single file
-(C++, Python, or shell) that prints either a numerical result or a path
-to an output file. Pick the closest example to your problem, copy it
-into your own working directory, and edit the constants at the top.
+The tree under this directory is the canonical reference for how to
+drive the unified ED API after the May 2026 *mirror examples* overhaul.
+Every cell is the smallest viable program that exercises a single
+`(backend × symmetry × method)` triple, and every C++ binary has a
+Python twin that prints the same numbers.
 
-## Quick index
+## Layout
 
-| File | What it does | Backend |
-|---|---|---|
-| [`01_cpp_ground_state.cpp`](./01_cpp_ground_state.cpp) | 4-site Heisenberg chain ground state via the C++ `Operator` API + `lanczos()` | CPU (single-process, OpenMP) |
-| [`02_cpp_full_spectrum.cpp`](./02_cpp_full_spectrum.cpp) | Full LAPACK eigendecomposition of an 8-site J1-J2 chain; prints the lowest 10 eigenvalues and their `Sz_total` content | CPU |
-| [`03_cpp_ftlm_thermal.cpp`](./03_cpp_ftlm_thermal.cpp) | Finite-temperature Lanczos: `<H>(β)`, `<S^2>(β)`, free energy on a 12-site Heisenberg ring | CPU |
-| [`04_cpp_gpu_lanczos.cpp`](./04_cpp_gpu_lanczos.cpp) | GPU Lanczos ground state on an N=16 chain via `GPUOperator` + `GPULanczos` | GPU (cuBLAS / cuSPARSE) |
-| [`05_mpi_distributed_lanczos.cpp`](./05_mpi_distributed_lanczos.cpp) | Rank-distributed ground state via `ed::distributed::distributed_lanczos`; verifies replicated eigenvalues across all ranks | MPI |
-| [`06_mpi_distributed_eigenvectors.cpp`](./06_mpi_distributed_eigenvectors.cpp) | Distributed Ritz vectors via `distributed_lanczos_eigenvectors`; assembles the global `\|psi_0>` and checks `\|H psi - E psi\|` | MPI |
-| [`07_mpi_distributed_ftlm.cpp`](./07_mpi_distributed_ftlm.cpp) | MPI-over-samples J&P FTLM: `Z(β)` and `<H>(β)` against exact thermal energy | MPI |
-| [`08_mpi_distributed_tpq.cpp`](./08_mpi_distributed_tpq.cpp) | Distributed canonical TPQ: Taylor-truncated imaginary-time evolution + `<H>(β)` measurement | MPI |
-| [`09_python_quickstart.py`](./09_python_quickstart.py) | 4-site Heisenberg ground state via `qed.solve(H, num_eigenvalues=5)` | Python (CPU) |
-| [`10_python_dssf.py`](./10_python_dssf.py) | T=0 dynamical structure factor `S(q,ω)` on an 8-site chain via `qed.spectral(H, observables, ...)` | Python (CPU) |
-| [`11_cli_thermo.sh`](./11_cli_thermo.sh) | One-line CLI invocation of `./ED` for a 12-site Heisenberg thermodynamic sweep | CLI |
-| [`12_cli_dssf.sh`](./12_cli_dssf.sh) | One-line CLI invocation of `./ED dssf dynamical_thermal` for finite-T DSSF | CLI |
-| [`13_nlce_full_workflow.sh`](./13_nlce_full_workflow.sh) | Complete NLCE workflow on the pyrochlore lattice using `qed-nlce` (requires the separate [QED_NLCE](https://github.com/ze-bang/QED_NLCE) package) | Python orchestrator |
-| [`14_python_workflow.py`](./14_python_workflow.py) | Stress-free workflow (auto-symmetry, auto-Sz, mTPQ trajectory, pre-flight planner) via `qed.solve` | Python (CPU) |
-| [`15_python_unified_interface.py`](./15_python_unified_interface.py) | Comprehensive walkthrough of the three canonical Python verbs: `qed.solve` / `qed.thermal` / `qed.spectral`, kwargs-only, including auto-Sz, eigenvectors, method comparison, and device pinning | Python (CPU/GPU) |
-| [`00_unified_interface.cpp`](./00_unified_interface.cpp) | C++ mirror of (15): `OperatorSpec` -> `ed::make_operator` -> `ed::workflows::*` across InMemoryOperator / FilePaths / DirectoryPath sources, every method, thermal, spectral | CPU |
-| [`16_python_orthogonal_symmetry.py`](./16_python_orthogonal_symmetry.py) | Walks the four `(Subspace, ProjectorChain)` cells (`none` / `Sz` / `Symm` / `Sz+Symm`) on a Heisenberg ring via `qed.solve` + `qed.thermal`, confirms Bethe-ansatz E0, and points at the future-axis seams (spin-flip Z_2, time-reversal antiunitary, SU(2) total-S Casimir / coupled basis) | Python (CPU) |
-
-## Prerequisites
-
-1. The toolkit must be **built** with the appropriate backends and the
-   `ED_BUILD_EXAMPLES` flag enabled. The examples are then built in-tree
-   alongside the rest of the project via the parent CMake:
-
-   ```bash
-   cd /path/to/QED
-   cmake -B build \
-         -DWITH_CUDA=ON -DWITH_MPI=ON \
-         -DED_BUILD_BENCHMARKS=ON \
-         -DED_BUILD_EXAMPLES=ON
-   cmake --build build --target ed_examples -j
-   ```
-
-   The C++ binaries land under `build/examples/ex01_cpp_ground_state`
-   etc. (see [`CMakeLists.txt`](./CMakeLists.txt) for the full list).
-
-2. Python examples need the bindings installed:
-
-   ```bash
-   pip install -e ..    # from the repo root
-   ```
-
-## Running
-
-Each example prints its own usage at the top of the file. The shell-script
-examples assume the build directory is at `../build/` relative to the
-`examples/` folder. Use `--help` on the C++ binaries (e.g.
-`./build/ex05_mpi_distributed_lanczos --help`) to see the few CLI knobs
-exposed.
-
-For MPI examples (run from the repo root):
-
-```bash
-# 4 ranks, 4 OMP threads each (16 logical CPUs total)
-OMP_NUM_THREADS=4 mpiexec -n 4 ./build/examples/ex05_mpi_distributed_lanczos
+```
+examples/
+├── README.md                        # you are here
+├── _shared/                         # heisenberg_chain, bethe_E0, rank0_print
+│   ├── common.h
+│   ├── common.py
+│   ├── codegen_solve.py             # regen scripts (committed for reproducibility)
+│   ├── codegen_thermal.py
+│   ├── codegen_spectral.py
+│   └── refresh_expected_output.py
+├── solve/                           # ground-state cells (48 ONLINE)
+│   ├── lanczos/{cpu,gpu,mpi,mpi_gpu}_{none,sz,spatial,sz_spatial}.{cpp,py}
+│   ├── block_lanczos/{cpu,gpu}_{none,sz,spatial,sz_spatial}.{cpp,py}
+│   ├── krylov_schur/{cpu,gpu,mpi,mpi_gpu}_{none,sz,spatial,sz_spatial}.{cpp,py}
+│   └── full/{cpu,gpu}_{none,sz,spatial,sz_spatial}.{cpp,py}
+├── thermal/                         # finite-T cells (62 ONLINE)
+│   ├── ftlm/...                    (full grid minus gpu+none, gpu+sz)
+│   ├── ltlm/...                    (cpu, gpu only)
+│   ├── mtpq/...                    (full grid)
+│   ├── ctpq/...                    (full grid)
+│   └── kpm_dos/...                 (cpu, gpu only)
+├── spectral/                        # dynamical / static cells (38 ONLINE)
+│   ├── single_expectation/...       (cpu_none, cpu_sz, gpu_*, mpi_*, mpi_gpu_*)
+│   ├── ground_state_dssf/...        (full grid minus mpi_gpu + sz)
+│   ├── static_thermal/...           (cpu_none, cpu_sz, gpu_*, mpi_*, mpi_gpu_*)
+│   └── dynamical_thermal/...        (cpu + mpi lanes; GPU is OFFLINE)
+└── _legacy/                         # frozen pre-mirror tutorials (see _legacy/README.md)
 ```
 
-For the GPU example:
+## Naming convention
+
+Each cell is named `<lane>_<symmetry>.cpp` (and `.py`), where:
+
+- `<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`}
+- `<symmetry>` ∈ {`none`, `sz`, `spatial`, `sz_spatial`}
+
+CMake's per-cell target follows the same scheme, prefixed with `ex_`
+and the family + method directories joined with `_`. For example:
+
+| Cell file                                          | Target                            |
+|----------------------------------------------------|-----------------------------------|
+| `solve/lanczos/cpu_sz.cpp`                         | `ex_solve_lanczos_cpu_sz`         |
+| `thermal/ftlm/mpi_spatial.cpp`                     | `ex_thermal_ftlm_mpi_spatial`     |
+| `spectral/ground_state_dssf/gpu_sz_spatial.cpp`    | `ex_spectral_ground_state_dssf_gpu_sz_spatial` |
+
+## Building and running
+
+The examples are off by default. Turn them on at configure time:
 
 ```bash
-./build/examples/ex04_cpp_gpu_lanczos
+cmake -B build -DED_BUILD_EXAMPLES=ON ...
+cmake --build build --target ed_examples              # build all cells in the new tree
+cmake --build build --target ed_examples_smoke        # build CPU-only cells (smoke set)
+cmake --build build --target ex_solve_lanczos_cpu_sz  # one cell
 ```
 
-The CLI shell scripts use the `ED_BIN` environment variable (default
-`./build/ED`) to locate the main `ED` executable, so they work from any
-directory:
+Each binary writes to `${CMAKE_BINARY_DIR}/examples/`. Run it directly:
 
 ```bash
-ED_BIN=./build/ED bash examples/11_cli_thermo.sh
+./build/examples/ex_solve_lanczos_cpu_sz
 ```
 
-## Where to go next
+The Python twins import a tiny in-tree helper (`examples/_shared/common.py`).
+Run them with the system Python (no install path manipulation needed):
 
-* **Production CLI**: see the top-level [`README.md`](../README.md) and
-  [`docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md).
-* **Pre-canned configs**: see [`../configs/`](../configs/) for 15+ worked
-  config files covering every solver (`LANCZOS`, `FTLM`, `LTLM`, `mTPQ`,
-  `cTPQ`, `OSS`, `DSSF`, ...).
-* **Performance**: see [`docs/benchmarks/BENCHMARKS.md`](../docs/benchmarks/BENCHMARKS.md)
-  for head-to-head numbers vs QuSpin / scipy.
-* **Scaling and tuning**: see [`docs/architecture/SCALING.md`](../docs/architecture/SCALING.md).
+```bash
+python3 examples/solve/lanczos/cpu_sz.py
+```
+
+## C++ ↔ Python parity
+
+Every `.cpp` cell and its `.py` sibling read line-for-line identical at
+the API surface. For example, `examples/solve/lanczos/cpu_sz.py`:
+
+```python
+import qed
+from _shared.common import heisenberg_chain
+
+N = 8
+H = heisenberg_chain(N, pbc=True)
+result = qed.solve(
+    H,
+    num_eigenvalues=1,
+    solver="LANCZOS",
+    device="cpu",
+    sz=N // 2,
+    tolerance=1e-10,
+    verbose=False,
+)
+```
+
+And the matching `examples/solve/lanczos/cpu_sz.cpp`:
+
+```cpp
+#include <ed/api.h>
+#include "../../_shared/common.h"
+
+int main() {
+    constexpr std::uint64_t N = 8;
+    auto op   = ed_example::heisenberg_chain(N, /*pbc=*/true);
+    auto spec = ed_example::in_memory_spec(std::move(op), N);
+
+    ed::api::SolveOptions opts;
+    opts.num_eigenvalues = 1;
+    opts.solver          = "LANCZOS";
+    opts.device          = "cpu";
+    opts.sz              = static_cast<int>(N / 2);
+    opts.tolerance       = 1e-10;
+
+    auto result = ed::api::solve(std::move(spec), opts);
+}
+```
+
+The C++ kwargs-style facade lives in [`include/ed/api.h`](../include/ed/api.h);
+its three verbs (`solve`, `thermal`, `spectral`) translate Python-named
+designated-initializer structs to the underlying `ed::workflows::*`
+options. See `tests/unit/test_api_mirror.cpp` for the
+1 e-12-byte-equality pinning test that locks the two surfaces together.
+
+## Expected-output blocks
+
+Every cell ends with a comment block of the form:
+
+```python
+# === Expected output (deterministic; captured on the CI reference runner) ===
+# E[0] = -3.6510934089
+# |E0 - E0_Bethe| = 1.34e-12
+# ===========================================================================
+```
+
+The values are populated by
+[`examples/_shared/refresh_expected_output.py`](_shared/refresh_expected_output.py),
+which runs each CPU cell once and writes its actual stdout into the
+comment block. The numbers are deterministic for Lanczos / Krylov-Schur
+/ FullDiag / LTLM; the randomized methods (FTLM / mTPQ / cTPQ /
+KPM_DOS) print stable expected output too but the upstream solver does
+not currently honour `random_seed=0` end-to-end, so reruns may
+disagree at the 2–3 sig-fig level. The smoke harness
+([`scripts/check_examples_output.py`](../scripts/check_examples_output.py))
+flags those methods as known-flaky and only smoke-builds / smoke-runs
+them rather than regression-testing the numbers.
+
+## Smoke testing
+
+The CPU lane of the new tree is regression-tested by CI:
+
+```bash
+python3 scripts/check_examples_output.py \
+    --build-dir build \
+    --family all \
+    --lane-prefix cpu_ \
+    --sig-figs 4
+```
+
+This is wired into `.github/workflows/ci.yml` as `linux-examples-smoke`.
+The Python twin side is also covered by
+[`python/tests/test_examples.py`](../python/tests/test_examples.py),
+which `pytest`-collects every `cpu_*.py` and asserts it runs cleanly.
+
+## Regenerating the tree
+
+If a template needs a tweak, edit the corresponding generator in
+`examples/_shared/codegen_{solve,thermal,spectral}.py` and re-run:
+
+```bash
+python3 examples/_shared/codegen_solve.py
+python3 examples/_shared/codegen_thermal.py
+python3 examples/_shared/codegen_spectral.py
+python3 examples/_shared/refresh_expected_output.py
+```
+
+The generated files are committed (no codegen at build time); the
+refresh step requires the CPU example binaries to exist (`cmake --build
+build --target ed_examples_smoke` first).

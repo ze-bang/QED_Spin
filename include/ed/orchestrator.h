@@ -131,11 +131,22 @@ struct ThermalOptions {
     enum class Method : std::uint8_t {
         FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos,
     } method = Method::FTLM;
-    std::size_t num_samples    = 30;
+
+    // ---------------------------------------------------------------
+    // Defaults aligned to `python/qed/thermal.py` (May 2026,
+    // PR-1 step 2 of the "mirror examples" plan). Previous C++ defaults
+    // are noted inline for callers consulting the diff. Most existing
+    // tests / call sites override these fields explicitly; the legacy
+    // defaults were also rather arbitrary (num_samples=30, taylor_order=50,
+    // num_temp_bins=100). Pinning the C++ defaults to the Python
+    // canonical values makes the two surfaces line up byte-for-byte
+    // when `ed::api::ThermalOptions` is passed through `to_legacy()`.
+    // ---------------------------------------------------------------
+    std::size_t num_samples    = 40;   ///< Python default (was 30).
     std::size_t krylov_dim     = 100;
-    std::size_t taylor_order   = 50;
+    std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
-    double      delta_beta     = 0.1;
+    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ/cTPQ imag-time step.
     double      beta_max       = 1000.0;
     std::uint64_t random_seed  = 0;
     std::string output_dir;
@@ -150,9 +161,9 @@ struct ThermalOptions {
     /// post-processing and the KPM-DOS lane). Linear in T by
     /// default; the CLI may convert to inverse-temperature betas if
     /// needed.
-    double      temp_min       = 0.01;
+    double      temp_min       = 0.1;  ///< Python `T_min` default (was 0.01).
     double      temp_max       = 10.0;
-    std::size_t num_temp_bins  = 100;
+    std::size_t num_temp_bins  = 24;   ///< Python `num_T` default (was 100).
 
     /// Lorentzian broadening eta for the KPM-DOS density lane.
     double      broadening     = 0.05;
@@ -188,8 +199,13 @@ struct ThermalOptions {
     // ``0`` means "use the kernel default" so existing call sites
     // (CLI, single-operator orchestrator entry) keep their behaviour.
     // -----------------------------------------------------------------
-    int kpm_num_moments        = 0;  ///< 0 -> kernel default
-    int kpm_num_random_vectors = 0;  ///< 0 -> kernel default
+    // Aligned to `python/qed/thermal.py` defaults (May 2026): 200
+    // Chebyshev moments and 16 Hutchinson random vectors. Previous
+    // value of 0 meant "use kernel default" (which was 2048/20 for
+    // production use); the new defaults are tighter and match what the
+    // Python facade has been shipping for the streaming-symmetry binding.
+    int kpm_num_moments        = 200; ///< Python default (was 0 -> kernel 2048).
+    int kpm_num_random_vectors = 16;  ///< Python default (was 0 -> kernel 20).
 };
 
 struct SpectralOptions {

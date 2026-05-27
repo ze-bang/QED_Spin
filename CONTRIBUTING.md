@@ -104,9 +104,20 @@ When extending the codebase, the relevant entry points are:
   [`docs/architecture/ADD_NEW_GPU_CELL.md`](docs/architecture/ADD_NEW_GPU_CELL.md).
 - **A new MPI lane** — see
   [`docs/architecture/ADD_NEW_MPI_CELL.md`](docs/architecture/ADD_NEW_MPI_CELL.md).
-- **A new example** — add a runnable file under `examples/`, register
-  it in `examples/CMakeLists.txt` if it is a C++ example, list it in
-  `examples/README.md` and the top-level `README.md`.
+- **A new example** — drop your cell into the appropriate
+  `examples/{solve,thermal,spectral}/<method>/<lane>_<sym>.{cpp,py}`
+  slot in the per-cell tree (the CMake glob in
+  `examples/CMakeLists.txt` will pick it up automatically as
+  `ex_<family>_<method>_<lane>_<sym>`). Always add **both** the C++
+  and the Python twin so they remain line-for-line equivalent. Append
+  a `# === Expected output ===` comment block at the bottom and run
+  `python3 examples/_shared/refresh_expected_output.py --family <fam>`
+  after building the CPU lane to populate it. The
+  `linux-examples-smoke` CI job will then regression-test the new cell.
+  Brand-new tutorials that don't fit the per-cell shape (e.g. CLI
+  recipes, multi-step shell pipelines) can still go directly under
+  `examples/_legacy/<topic>.sh` -- update `examples/_legacy/README.md`
+  and the top-level `README.md` if you want them indexed.
 
 ## Reporting bugs
 

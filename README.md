@@ -138,7 +138,7 @@ extend the chain or add new Subspace specialisations *without* touching
 the operator hierarchy. Full design discussion:
 [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6.
 Copy-pasteable end-to-end demo:
-[`examples/16_python_orthogonal_symmetry.py`](examples/16_python_orthogonal_symmetry.py).
+[`examples/_legacy/16_python_orthogonal_symmetry.py`](examples/_legacy/16_python_orthogonal_symmetry.py).
 
 ---
 
@@ -191,32 +191,50 @@ docs/
 
 ## Examples
 
-Every supported workflow has a self-contained, runnable example under
-[`examples/`](examples/). Build C++ examples with
-`-DED_BUILD_EXAMPLES=ON`; Python examples need only `pip install -e .`.
+The canonical example tree is **one file per ONLINE
+`(backend × symmetry × method)` cell**, organised by family / method:
 
-| File | Backend | What it does |
-|------|---------|--------------|
-| [00_unified_interface.cpp](examples/00_unified_interface.cpp) | CPU | `OperatorSpec` → `ed::make_operator` → `ed::workflows::*` across all three sources (in-memory / files / directory) and all three workflows |
-| [01_cpp_ground_state.cpp](examples/01_cpp_ground_state.cpp) | CPU | Heisenberg chain ground state |
-| [02_cpp_full_spectrum.cpp](examples/02_cpp_full_spectrum.cpp) | CPU | LAPACK full spectrum, J1–J2 chain |
-| [03_cpp_ftlm_thermal.cpp](examples/03_cpp_ftlm_thermal.cpp) | CPU | FTLM thermodynamics, 12-site ring |
-| [04_cpp_gpu_lanczos.cpp](examples/04_cpp_gpu_lanczos.cpp) | GPU | GPU Lanczos via cuBLAS / cuSPARSE |
-| [05_mpi_distributed_lanczos.cpp](examples/05_mpi_distributed_lanczos.cpp) | MPI | Rank-distributed ground state |
-| [06_mpi_distributed_eigenvectors.cpp](examples/06_mpi_distributed_eigenvectors.cpp) | MPI | Distributed Ritz vectors + residual check |
-| [07_mpi_distributed_ftlm.cpp](examples/07_mpi_distributed_ftlm.cpp) | MPI | MPI-over-samples FTLM |
-| [08_mpi_distributed_tpq.cpp](examples/08_mpi_distributed_tpq.cpp) | MPI | Distributed canonical TPQ |
-| [09_python_quickstart.py](examples/09_python_quickstart.py) | Python | Ground state via `qed.solve` |
-| [10_python_dssf.py](examples/10_python_dssf.py) | Python | `S(Q, ω)` at T = 0 via `qed.spectral` |
-| [11_cli_thermo.sh](examples/11_cli_thermo.sh) | CLI | One-line FTLM thermo sweep |
-| [12_cli_dssf.sh](examples/12_cli_dssf.sh) | CLI | One-line finite-T DSSF |
-| [13_nlce_full_workflow.sh](examples/13_nlce_full_workflow.sh) | NLCE | Pyrochlore NLCE pipeline |
-| [14_python_workflow.py](examples/14_python_workflow.py) | Python | Build → `find_symmetries` → `qed.solve` × (full / Sz / Symm / Sz+Symm) |
-| [15_python_unified_interface.py](examples/15_python_unified_interface.py) | Python | The three canonical verbs end-to-end |
-| [16_python_orthogonal_symmetry.py](examples/16_python_orthogonal_symmetry.py) | Python | The four `(Subspace, ProjectorChain)` cells + the future-axis routing table |
+```
+examples/
+├── solve/{lanczos,block_lanczos,krylov_schur,full}/<lane>_<sym>.{cpp,py}     # 48 cells
+├── thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}/<lane>_<sym>.{cpp,py}               # 62 cells
+└── spectral/{single_expectation,ground_state_dssf,static_thermal,
+              dynamical_thermal}/<lane>_<sym>.{cpp,py}                       # 38 cells
+```
 
-See [`examples/README.md`](examples/README.md) for the full index and
-run recipes.
+where `<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`} and
+`<sym>` ∈ {`none`, `sz`, `spatial`, `sz_spatial`}. **Every C++ cell has
+a Python twin that reads line-for-line identical at the API surface
+and prints the same numbers.** The full per-cell index, naming
+convention, expected-output schema, and smoke-test recipe live in
+[`examples/README.md`](examples/README.md).
+
+Quick examples (CPU lane, `examples/solve/lanczos/`):
+
+| Cell                                                                | What it does                                  |
+|---------------------------------------------------------------------|-----------------------------------------------|
+| [`solve/lanczos/cpu_none.py`](examples/solve/lanczos/cpu_none.py)   | Lanczos ground state, full Hilbert (N=8)      |
+| [`solve/lanczos/cpu_sz.py`](examples/solve/lanczos/cpu_sz.py)       | Lanczos in the half-filled Sz=0 sector        |
+| [`solve/lanczos/cpu_spatial.py`](examples/solve/lanczos/cpu_spatial.py) | Lanczos + cyclic-translation Z₈ symmetry     |
+| [`solve/lanczos/cpu_sz_spatial.py`](examples/solve/lanczos/cpu_sz_spatial.py) | Sz × translation joint symmetry      |
+| [`solve/full/cpu_none.py`](examples/solve/full/cpu_none.py)         | Dense diagonalisation, five lowest E[k]       |
+| [`thermal/ftlm/cpu_sz.py`](examples/thermal/ftlm/cpu_sz.py)         | FTLM E(T), Cv(T) with Sz auto-decomposition   |
+| [`thermal/ltlm/cpu_none.py`](examples/thermal/ltlm/cpu_none.py)     | LTLM low-T thermodynamics                     |
+| [`spectral/ground_state_dssf/cpu_none.py`](examples/spectral/ground_state_dssf/cpu_none.py) | T=0 S(ω) via CF resolvent      |
+| [`spectral/dynamical_thermal/cpu_none.py`](examples/spectral/dynamical_thermal/cpu_none.py) | Finite-T S(ω) via FTLM dynamical |
+
+The C++ twins live in the same directories with `.cpp` suffix; build
+them with `-DED_BUILD_EXAMPLES=ON` (the default is off):
+
+```bash
+cmake -B build -DED_BUILD_EXAMPLES=ON ...
+cmake --build build --target ed_examples_smoke      # CPU-only "smoke" subset
+cmake --build build --target ed_examples            # everything that's compilable
+```
+
+The previous, pre-mirror tutorials (the numbered `00_..16_*` files)
+are frozen under [`examples/_legacy/`](examples/_legacy/) -- they
+still build and run, but new tutorials only land in the new tree.
 
 ---
 

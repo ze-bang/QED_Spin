@@ -216,11 +216,30 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
+    # Phase A of the "mirror examples" plan (May 2026): Python-named
+    # kwargs facade + small helpers (build introspection, find_symmetries,
+    # estimate_resources, suggest_workflow, thermal_auto). Implementation
+    # is header-light, lives alongside orchestrator.cpp.
+    ${SRC_DIR}/api/api_facade.cpp
+    ${SRC_DIR}/api/build_introspection.cpp
+    ${SRC_DIR}/api/symmetry_helpers.cpp
+    ${SRC_DIR}/api/feasibility.cpp
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+
+# Phase A of the "mirror examples" plan (May 2026): the Python-mirror
+# facade `src/api/symmetry_helpers.cpp` calls `ed::sym::translation_group_1d`
+# / `group_from_generators`, which live in `ed_symmetry`. Pull the
+# library into ed_solvers_cpu's PUBLIC link surface so downstream
+# consumers (tests, examples, new SDK callers) do not have to remember
+# the dep. ed_distributed already PUBLIC-ly links ed_solvers_cpu, so
+# the inverse link would create a cycle; downstream targets that need
+# the `WITH_MPI` distributed lane of `ed::make_operator` continue to
+# link `ed_distributed` explicitly via the `ed_add_test` helper.
+target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry)
 # Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+): suppress
 # the `[[deprecated]]` warning on `build_lanczos_tridiagonal_with_basis`
 # for our own legacy CPU callsites. The attribute remains active for every

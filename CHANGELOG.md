@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Example tree overhaul (PR-2 / PR-3 / PR-4 / PR-5 of the "mirror examples" plan, May 2026)
+
+Companion to the PR-1 API mirror facade (see entry below). Reorganises
+`examples/` into a one-file-per-ONLINE-cell tree with full C++ ↔
+Python parity:
+
+**New tree:** `examples/{solve,thermal,spectral}/<method>/<lane>_<sym>.{cpp,py}`
+
+- **solve**: 48 cells (`lanczos` 16 + `block_lanczos` 8 + `krylov_schur` 16 + `full` 8).
+- **thermal**: 62 cells (`ftlm` 14 + `ltlm` 8 + `mtpq` 16 + `ctpq` 16 + `kpm_dos` 8).
+- **spectral**: 38 cells (`single_expectation` 8 + `ground_state_dssf` 14 + `static_thermal` 8 + `dynamical_thermal` 8).
+- Total: 148 cells × 2 langs = 296 example files, plus shared
+  scaffolding under `examples/_shared/` (`common.h`, `common.py`,
+  `codegen_{solve,thermal,spectral}.py`, `refresh_expected_output.py`).
+
+**Naming convention** — each cell is `<lane>_<sym>.{cpp,py}` where
+`<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`} and `<sym>` ∈ {`none`,
+`sz`, `spatial`, `sz_spatial`}. CMake glob registration auto-generates
+one target per cell (`ex_solve_lanczos_cpu_sz`, etc.) and dispatches it
+to the correct link list based on the filename prefix.
+
+**Twin commitment** — every `.cpp` cell reads line-for-line identical
+to its `.py` sibling and prints the same numbers at 4 sig-fig
+precision. The Python kwarg `qed.solve(H, num_eigenvalues=2,
+solver="LANCZOS", sz=N // 2, device="cpu")` becomes the C++ designated
+init `ed::api::SolveOptions{.num_eigenvalues=2, .solver="LANCZOS",
+.sz=N/2, .device="cpu"}`.
+
+**Expected-output blocks** — every cell ends with a deterministic
+`# === Expected output ===` comment block, populated by running the
+CPU binary / Python script on the reference runner. For Lanczos /
+Krylov-Schur / FullDiag / LTLM the numbers are reproducible to ≥ 6
+sig figs; FTLM / mTPQ / cTPQ / KPM_DOS print stable expected output
+but reruns may disagree at the 2–3 sig-fig level (the upstream solver
+does not currently honour `random_seed=0` end-to-end), so those are
+flagged as "known-flaky" by the smoke harness.
+
+**Smoke testing** — `scripts/check_examples_output.py` runs every CPU
+cell (C++ + Python) and verifies the printed numbers against the
+Expected-output block. Wired into CI as `linux-examples-smoke`. The
+Python twin side is also covered by `python/tests/test_examples.py`,
+which `pytest`-collects every `cpu_*.py` and asserts it exits cleanly
+and emits at least one deterministic schema line.
+
+**Legacy preservation** — the previous 17 numbered tutorials are
+moved to `examples/_legacy/` unchanged (with a `_legacy/README.md`
+explaining their frozen status). They still build under
+`-DED_BUILD_EXAMPLES=ON`; the CMake targets keep the same names
+(`ex00_unified_interface`, ..., `ex08_mpi_distributed_tpq`).
+
+**New / changed files:**
+
+- `examples/_shared/common.{h,py}` — `heisenberg_chain`,
+  `bethe_E0`, `rank0_print`, `mpi_guard`, `in_memory_spec`.
+- `examples/_shared/codegen_{solve,thermal,spectral}.py` — generators
+  emitting the per-cell file tree. Committed so the templates live
+  alongside the cells; not run at build time.
+- `examples/_shared/refresh_expected_output.py` — captures stdout from
+  every built CPU cell and patches its Expected-output block.
+- `examples/{solve,thermal,spectral}/**/cpu_*.{cpp,py}` — 96 CPU cells
+  with full deterministic / known-flaky annotations.
+- `examples/{solve,thermal,spectral}/**/{gpu,mpi,mpi_gpu}_*.{cpp,py}`
+  — 200 placeholder cells whose Expected-output blocks will be filled
+  in when CI runs on a hardware-equipped runner.
+- `examples/CMakeLists.txt` — glob-driven cell registration,
+  `ed_examples_smoke` target, legacy registration repointed at
+  `_legacy/`.
+- `examples/README.md` — master index, naming convention, build
+  recipes, smoke harness usage.
+- `examples/_legacy/README.md` — frozen-state notice and per-file
+  table.
+- `scripts/check_examples_output.py` — smoke harness with known-flaky
+  list.
+- `python/tests/test_examples.py` — pytest collector for the Python
+  twins.
+- `.github/workflows/ci.yml` — `linux-examples-smoke` job.
+
+### API mirror facade (PR-1 of the "mirror examples" plan, May 2026)
+
+Step 1 of the multi-PR effort to make C++ examples read line-for-line
+like their Python siblings. Introduces a Python-named kwargs facade
+over the legacy `ed::workflows::*` orchestrator without touching the
+underlying option structs (no ABI risk to existing C++ users) and
+ports the small helpers that the Python facade carries but C++ was
+missing.
+
+**New public surface:**
+
+- `include/ed/api.h`
+  - `ed::api::SolveOptions / ThermalOptions / SpectralOptions` —
+    aggregates with Python-named fields (`num_eigenvalues`,
+    `compute_eigenvectors`, `T_min`, `T_max`, `num_T`, `tpq_taylor_order`,
+    `eta`, ...) and Python-aligned defaults (`num_samples=40`,
+    `T_min=0.1`, `num_T=24`, `tpq_taylor_order=8`, `tpq_delta_beta=0.05`,
+    `kpm_num_moments=200`, `kpm_num_random_vectors=16`).
+  - `ed::api::solve(spec_or_op, opts) / thermal(...) / spectral(...)`
+    — three verbs taking either an `ed::OperatorSpec` (by value) or
+    a `const ed::LinearOperator&`. Designated-initializer ergonomics:
+    `ed::api::solve(op, {.num_eigenvalues = 5, .device = "auto"})`.
+  - `ed::api::parse_solve_method` / `parse_thermal_method` /
+    `parse_spectral_method` — case-insensitive token parsing for
+    Python (`"LANCZOS"`, `"FTLM"`, `"KPM_DOS"`, `"ground_state_cf"`,
+    ...) and C++ (`"Lanczos"`, `"KpmDos"`, ...) spellings.
+  - `ed::api::device_constraints(device, dim_hint)` — maps Python
+    device tokens (`"auto"` / `"cpu"` / `"gpu"` / `"mpi"` /
+    `"mpi_gpu"`) to `ed::BackendConstraints`. Threshold for `"auto"`
+    matches Python (`global_dim >= 1 << 14` => GPU preferred).
+  - `ed::api::to_legacy(opts, dim_hint)` — explicit translator that
+    callers can drive directly to consume the legacy orchestrator
+    with Python-named opts.
+- `include/ed/api/symmetry_helpers.h`
+  - `ed::find_symmetries(n_sites, preset)` — thin wrapper around
+    the named 1D presets in `ed/symmetry/group.h` (`"translation"`,
+    `"translation+reflection"`, `"reflection"`, `"identity"`).
+  - `ed::find_symmetries(n_sites, generators, sector_quantum_numbers)`
+    — free-form overload delegating to `ed::sym::group_from_generators`.
+    No automorphism-discovery C++ port; that surface stays Python-only.
+- `include/ed/api/feasibility.h`
+  - `ed::ResourceEstimate` / `ed::estimate_resources(spec, opts)` —
+    per-rank + total memory + wall-time floor estimates plus a one-
+    line device recommendation. Pure math; no host probing.
+  - `ed::Intent` / `ed::WorkflowSuggestion` /
+    `ed::suggest_workflow(spec, intent)` — picks (verb, method, device,
+    use_symmetry, use_fixed_sz) for the caller's intent.
+  - `ed::thermal_auto(spec, opts, use_sz_if_conserved, sz_min, sz_max)`
+    — Sz-loop wrapper that mirrors `qed.thermal(...,
+    use_sz_if_conserved=True)`. Defined `inline` in the header so the
+    per-sector `ed::make_operator` instantiation happens at the
+    consumer's translation unit (avoids a back-edge link to
+    `ed_distributed`, which already publicly depends on
+    `ed_solvers_cpu`).
+- `include/ed/api.h`
+  - `ed::has_cuda_build()` / `ed::has_mpi_build()` /
+    `ed::has_nccl_build()` — build-time introspection mirroring the
+    Python helpers.
+
+**Default alignment.** `ed::workflows::ThermalOptions` defaults shift
+from the C++ legacy values to Python's:
+
+| Field                     | Old        | New (Python-aligned) |
+|---------------------------|------------|----------------------|
+| `num_samples`             | 30         | 40                   |
+| `temp_min`                | 0.01       | 0.1                  |
+| `num_temp_bins`           | 100        | 24                   |
+| `taylor_order`            | 50         | 8                    |
+| `delta_beta`              | 0.1        | 0.05                 |
+| `kpm_num_moments`         | 0 (kernel) | 200                  |
+| `kpm_num_random_vectors`  | 0 (kernel) | 16                   |
+
+Existing tests / call sites that override these fields explicitly are
+unaffected; tests that consumed the legacy defaults (none in the
+current suite as of this PR) would need to update.
+
+**Pinning test.** `tests/unit/test_api_mirror.cpp` (17 Catch2 cases)
+asserts byte-equality (1e-12) between `ed::api::*` and
+`ed::workflows::*` across a representative cell from every solve
+method (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL), thermal
+method (FTLM / mTPQ / KPM_DOS), and spectral method (GroundStateCF).
+Also pins token parsing, device mapping, and the small helpers.
+
+**Build system.** New sources in `src/api/{api_facade,
+build_introspection, symmetry_helpers, feasibility}.cpp` join
+`ed_solvers_cpu`. The library now publicly depends on `ed_symmetry`
+(transitively for downstream consumers) since `symmetry_helpers.cpp`
+calls into `ed::sym::translation_group_1d` / `group_from_generators`.
+
 ### CI rehabilitation post-collapse (May 2026)
 
 A single-commit pass that gets every `.github/workflows/*.yml` lane

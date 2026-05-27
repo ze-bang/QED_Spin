@@ -3,6 +3,18 @@
 This page walks through a 4-site Heisenberg chain end-to-end, using only the
 public C++ API. The complete example fits in a single file.
 
+> **Tip — Python-mirror API.** If you want C++ code that reads
+> line-for-line like its Python sibling (designated initializers,
+> Python-named kwargs, case-insensitive method strings, `"auto"` /
+> `"cpu"` / `"gpu"` / `"mpi"` device tokens), use the
+> [`ed::api::*`](../../include/ed/api.h) facade introduced in PR-1 of
+> the May 2026 *mirror examples* plan. The page below sticks with the
+> underlying `ed::workflows::*` types for didactic reasons; for the
+> recommended new-code style see e.g.
+> [`examples/solve/lanczos/cpu_sz.cpp`](../../examples/solve/lanczos/cpu_sz.cpp)
+> next to its
+> [`cpu_sz.py`](../../examples/solve/lanczos/cpu_sz.py) twin.
+
 ```cpp
 #include <ed/core/construct_ham.h>
 #include <ed/solvers/diagonalization.h>

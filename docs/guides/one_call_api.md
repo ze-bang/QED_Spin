@@ -59,7 +59,10 @@ What `qed.solve` decides for you (override any of these via kwargs):
   same public surface. See
   [`docs/architecture/SYMMETRY.md`](../architecture/SYMMETRY.md) §6
   and
-  [`examples/16_python_orthogonal_symmetry.py`](../../examples/16_python_orthogonal_symmetry.py).
+  [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).
+  For the per-cell minimal twins see `examples/solve/lanczos/`,
+  `examples/solve/full/`, etc. (Python kwargs are mirrored 1:1 in C++ via
+  the new `ed::api::*` facade in [`include/ed/api.h`](../../include/ed/api.h)).
 * **Pre-flight planner** (`plan=True`): runs
   `qed.estimate_resources(...)` and refuses to dispatch infeasible
   jobs. Override with `force=True`.
