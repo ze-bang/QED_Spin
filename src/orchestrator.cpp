@@ -25,6 +25,7 @@
 
 #include <ed/orchestrator.h>
 
+#include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
 #include <ed/krylov/block_lanczos_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
@@ -32,6 +33,7 @@
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/observables/cf_spectral_kernel.h>
+#include <ed/observables/kpm_dynamical.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/TPQ.h>      // compute_tpq_thermo_from_trajectories aggregator
@@ -46,6 +48,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>      // getenv (Wave 1.1 real-H fast-path opt-out)
+#include <filesystem>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -430,6 +433,10 @@ GroundStateResult solve_on(Backend& be,
                                      opts.num_eigs, eigs,
                                      opts.output_dir,
                                      opts.compute_vectors);
+                if (!opts.output_dir.empty()
+                        && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+                    R.hdf5_path = opts.output_dir + "/ed_results.h5";
+                }
             }
             MPI_Bcast(eigs.data(), Nglobal, MPI_DOUBLE, 0, geom.comm);
             const std::size_t n_keep = std::min<std::size_t>(
@@ -448,11 +455,64 @@ GroundStateResult solve_on(Backend& be,
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
                                  opts.compute_vectors);
+            if (!opts.output_dir.empty()
+                    && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+                R.hdf5_path = opts.output_dir + "/ed_results.h5";
+            }
             const std::size_t n_keep = std::min<std::size_t>(
                 opts.num_eigs, eigs.size());
             R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
             R.krylov.iters_done = 0;
             R.krylov.converged  = true;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Uniform eigenvector HDF5 dump (May 2026 contract).
+    //
+    // Before this block, only the FullDiag lane persisted eigenvectors when
+    // `opts.output_dir` was set (via `full_diagonalization(...)`).
+    // Lanczos / BlockLanczos / KrylovSchur silently dropped the
+    // `output_dir` argument: the Krylov kernels accept it in their
+    // `Options` structs but never read it (header-comment is an explicit
+    // "TODO: not yet used"), so callers got `R.eigenvectors->host`
+    // populated but `R.hdf5_path` empty and Python's
+    // `EDResults.eigenvectors_path` silently empty as well.
+    //
+    // This finalizer hooks every method that lands eigenvectors in the
+    // shared host buffer onto the same HDF5 path the FullDiag lane and
+    // the streaming-symmetry CLI use. Guards:
+    //   * `opts.compute_vectors` was actually requested,
+    //   * the caller supplied a non-empty, non-/dev/null `output_dir`,
+    //   * the kernel populated host-side eigenvectors,
+    //   * no upstream path already wrote (and recorded) the file,
+    //   * single-rank lane only (the MPI lane uses per-rank rank_*.h5
+    //     files written by `ed_distributed_main` / the streaming-symmetry
+    //     directory walker -- writing a single shared `ed_results.h5`
+    //     from N ranks would clobber across processes).
+    // ---------------------------------------------------------------------
+    if (opts.compute_vectors
+            && !geom.is_distributed()
+            && !opts.output_dir.empty()
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
+            && R.eigenvectors.has_value()
+            && !R.eigenvectors->host.empty()
+            && R.hdf5_path.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(
+                opts.output_dir,
+                R.eigenvalues,
+                R.eigenvectors->host,
+                /*solver_name=*/"ed::workflows::solve");
+            R.hdf5_path = opts.output_dir + "/ed_results.h5";
+            R.eigenvectors->hdf5_path = R.hdf5_path;
+        } catch (const std::exception& e) {
+            // Persisting eigenvectors is best-effort: if HDF5 IO fails
+            // (read-only mount, quota, etc.) we keep the in-memory result
+            // intact and surface the failure as a diagnostic note rather
+            // than aborting the whole solve.
+            R.backend.notes.emplace_back(
+                "eigenvector_save_failed", e.what());
         }
     }
 
@@ -551,6 +611,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             kopts.max_iter    = opts.krylov_dim ? opts.krylov_dim : 1000;
             kopts.random_seed = opts.random_seed;
             kopts.output_dir  = opts.output_dir;
+            kopts.probe_betas = opts.probe_betas;
             // SOTA large_value pick (May 2026): the (L*I - H) iteration
             // gives effective inverse temperature
             //   beta_k = 2 k / (L - E_k).
@@ -595,6 +656,26 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     R.thermo = std::move(td);
                 }
             }
+            // Pillar 1 (May 2026): lift the per-sample TPQ trajectory
+            // + state-vector snapshots into the outer ThermalResult so
+            // the uniform finalizer (below) can persist them.
+            R.tpq_sample_betas     = std::move(kres.sample_inv_temps);
+            R.tpq_sample_energies  = std::move(kres.sample_energies);
+            R.tpq_sample_variances = std::move(kres.sample_variances);
+            for (std::size_t s = 0; s < kres.state_snapshots.size(); ++s) {
+                for (std::size_t p = 0; p < kres.state_snapshots[s].size(); ++p) {
+                    auto& psi = kres.state_snapshots[s][p];
+                    if (psi.empty()) continue;
+                    TpqStateSnapshot snap;
+                    snap.sample_index   = s;
+                    snap.requested_beta = (p < opts.probe_betas.size())
+                                              ? opts.probe_betas[p]
+                                              : 0.0;
+                    snap.effective_beta = kres.state_snapshot_betas[s][p];
+                    snap.psi            = std::move(psi);
+                    R.tpq_state_snapshots.push_back(std::move(snap));
+                }
+            }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::cTPQ) {
         std::visit([&](auto& backend_uptr) {
@@ -631,6 +712,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             }
             kopts.random_seed  = opts.random_seed;
             kopts.output_dir   = opts.output_dir;
+            kopts.probe_betas  = opts.probe_betas;
             auto matvec = H.template bind<B>();
             auto kres = ed::thermal::ctpq_kernel<B>(
                 *backend_uptr, matvec, H.geometry().local_dim,
@@ -644,6 +726,23 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     kres.sample_variances, R.thermo.temperatures);
                 if (!td.energy.empty()) {
                     R.thermo = std::move(td);
+                }
+            }
+            R.tpq_sample_betas     = std::move(kres.sample_inv_temps);
+            R.tpq_sample_energies  = std::move(kres.sample_energies);
+            R.tpq_sample_variances = std::move(kres.sample_variances);
+            for (std::size_t s = 0; s < kres.state_snapshots.size(); ++s) {
+                for (std::size_t p = 0; p < kres.state_snapshots[s].size(); ++p) {
+                    auto& psi = kres.state_snapshots[s][p];
+                    if (psi.empty()) continue;
+                    TpqStateSnapshot snap;
+                    snap.sample_index   = s;
+                    snap.requested_beta = (p < opts.probe_betas.size())
+                                              ? opts.probe_betas[p]
+                                              : 0.0;
+                    snap.effective_beta = kres.state_snapshot_betas[s][p];
+                    snap.psi            = std::move(psi);
+                    R.tpq_state_snapshots.push_back(std::move(snap));
                 }
             }
         }, variant);
@@ -802,6 +901,108 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): uniform
+    // thermal persistence finalizer. Mirrors the contract that lives in
+    // ``ed::workflows::solve`` (l. 458-510): when ``opts.output_dir``
+    // is set and the run is single-rank (the shared-file save is not
+    // safe under MPI; per-rank files are written elsewhere), persist
+    // the result to ``<output_dir>/ed_results.h5`` and surface the
+    // resulting path via ``R.hdf5_path``.
+    //
+    // Method-conditional payload (user-confirmed policy):
+    //   - mTPQ / cTPQ: the full per-sample (beta, E, var, step)
+    //     trajectory (one row per kernel step, appended via
+    //     ``HDF5IO::appendTPQThermodynamics``), plus state vectors at
+    //     the betas closest to ``opts.probe_betas`` written via
+    //     ``HDF5IO::saveTPQState``.
+    //   - FTLM / LTLM / KPM_DOS: aggregated thermodynamic curves
+    //     (``T, E, Cv, S, F``) only -- no state vectors.
+    // -----------------------------------------------------------------
+    if (!H.geometry().is_distributed()
+            && !opts.output_dir.empty()
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+        try {
+            std::error_code ec;
+            std::filesystem::create_directories(opts.output_dir, ec);
+            const std::string h5_path =
+                opts.output_dir + "/ed_results.h5";
+            // Creates the file (or opens it) and lays down the
+            // standard group skeleton (``/eigendata``, ``/tpq``,
+            // ``/spectral_data`` ...).
+            HDF5IO::createOrOpenFile(opts.output_dir);
+
+            const bool is_tpq =
+                (opts.method == ThermalOptions::Method::mTPQ
+                 || opts.method == ThermalOptions::Method::cTPQ);
+            if (is_tpq) {
+                // (a) Per-sample trajectory rows.
+                const std::size_t S =
+                    std::min({R.tpq_sample_betas.size(),
+                              R.tpq_sample_energies.size(),
+                              R.tpq_sample_variances.size()});
+                for (std::size_t s = 0; s < S; ++s) {
+                    HDF5IO::ensureTPQSampleGroup(h5_path, s);
+                    const auto& bs = R.tpq_sample_betas[s];
+                    const auto& es = R.tpq_sample_energies[s];
+                    const auto& vs = R.tpq_sample_variances[s];
+                    const std::size_t K =
+                        std::min({bs.size(), es.size(), vs.size()});
+                    for (std::size_t k = 0; k < K; ++k) {
+                        HDF5IO::TPQThermodynamicPoint pt;
+                        pt.beta     = bs[k];
+                        pt.energy   = es[k];
+                        pt.variance = vs[k];
+                        pt.doublon  = 0.0;
+                        pt.step     = static_cast<std::uint64_t>(k);
+                        HDF5IO::appendTPQThermodynamics(h5_path, s, pt);
+                    }
+                }
+                // (b) State-vector snapshots at probe-betas.
+                for (const auto& snap : R.tpq_state_snapshots) {
+                    if (snap.psi.empty()) continue;
+                    HDF5IO::ensureTPQSampleGroup(h5_path, snap.sample_index);
+                    HDF5IO::saveTPQState(h5_path,
+                                         snap.sample_index,
+                                         snap.effective_beta,
+                                         snap.psi,
+                                         /*overwrite=*/true);
+                }
+            } else {
+                // FTLM / LTLM / KPM-DOS: aggregated thermodynamic
+                // curves. The kernel facades do not surface per-T
+                // standard errors (those live on ``FTLMResults`` for
+                // the legacy CLI path); the shared-file saver below
+                // requires parallel arrays of equal length, so we
+                // ship zero-valued error vectors of matching size.
+                const std::size_t N = R.thermo.temperatures.size();
+                const std::vector<double> zeros(N, 0.0);
+                const char* label =
+                    (opts.method == ThermalOptions::Method::FTLM)   ? "FTLM"
+                  : (opts.method == ThermalOptions::Method::LTLM)   ? "LTLM"
+                  : (opts.method == ThermalOptions::Method::KpmDos) ? "KPM_DOS"
+                  : "thermal";
+                HDF5IO::saveFTLMThermodynamics(
+                    h5_path,
+                    R.thermo.temperatures,
+                    R.thermo.energy, zeros,
+                    R.thermo.specific_heat, zeros,
+                    R.thermo.entropy, zeros,
+                    R.thermo.free_energy, zeros,
+                    static_cast<std::uint64_t>(opts.num_samples),
+                    std::string(label));
+            }
+            R.hdf5_path = h5_path;
+        } catch (const std::exception& e) {
+            // Non-fatal: skip persistence on I/O failure but surface
+            // the cause via a backend note. The caller still gets the
+            // in-memory ``R`` back; the empty ``R.hdf5_path`` flags
+            // that no on-disk file was produced.
+            std::cerr << "ed::thermal: persistence finalizer failed: "
+                      << e.what() << std::endl;
+        }
+    }
+
     R.backend.lane = (H.geometry().is_distributed() ? "mpi" : "cpu");
     if (H.geometry().is_device()) {
         R.backend.lane = H.geometry().is_distributed() ? "mpi_gpu" : "gpu";
@@ -838,39 +1039,65 @@ SpectralResult spectral(const LinearOperator&                      H,
     R.omega = omega;
 
     if (opts.method == SpectralOptions::Method::GroundStateCF) {
-        // Compute ground state via Lanczos on H; pass the GS as the seed
-        // to cf_spectral_kernel.
-        SolveOptions sopts;
-        sopts.num_eigs       = 1;
-        sopts.compute_vectors = false;
-        sopts.tolerance       = 1e-12;
-        sopts.backend         = opts.backend;
-        sopts.method          = SolveMethod::Lanczos;  // skip FullDiag fallback
-        auto gs = solve(H, sopts);
-        const double E0 = gs.eigenvalues.empty() ? 0.0 : gs.eigenvalues.front();
-        const double shift = (std::abs(opts.energy_shift) > 1e-14)
-            ? opts.energy_shift : E0;
-
-        // The seed must be the ground state. For the orchestrator's first
-        // landing we keep this CPU-only and route the legacy
-        // `compute_ground_state_dssf` for richer cases. The CF kernel here
-        // produces S(omega) from a NORMALISED random seed (mirroring the
-        // "compute_dynamical_correlation_state_cf" code path that takes an
-        // arbitrary input state). Use it that way for now; a future
-        // tightening will plumb the actual eigenvector through.
+        // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
+        // resolve the CF seed.
+        //   - ``opts.initial_state`` non-empty -> renormalise and use
+        //     it directly (TPQ-to-CF, user-staged warm states, ...).
+        //   - else                              -> run an inner Lanczos
+        //     ground-state solve with ``compute_vectors=true`` and use
+        //     the resulting eigenvector. This closes the original
+        //     "shortcut": the previous implementation seeded the CF
+        //     kernel with a random vector, which gave a fundamentally
+        //     wrong S(omega) (it computed the average response over a
+        //     thermal state at T = infinity rather than the GS dynamic
+        //     structure factor).
+        double E0 = 0.0;
         std::vector<Complex> seed_host(H.geometry().local_dim);
-        {
-            std::mt19937_64 gen(0xC0FFEEULL);
-            std::normal_distribution<double> nd(0.0, 1.0);
-            double sumsq = 0.0;
-            for (auto& z : seed_host) {
-                const double a = nd(gen), b = nd(gen);
-                z = Complex(a, b);
-                sumsq += a * a + b * b;
+        if (!opts.initial_state.empty()) {
+            if (opts.initial_state.size() != H.geometry().local_dim) {
+                throw std::invalid_argument(
+                    "ed::spectral: opts.initial_state size ("
+                    + std::to_string(opts.initial_state.size())
+                    + ") does not match H.geometry().local_dim ("
+                    + std::to_string(H.geometry().local_dim) + ").");
             }
-            const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
+            seed_host = opts.initial_state;
+            double sumsq = 0.0;
+            for (const auto& z : seed_host) sumsq += std::norm(z);
+            const double inv = (sumsq > 0.0)
+                ? (1.0 / std::sqrt(sumsq)) : 1.0;
+            for (auto& z : seed_host) z *= inv;
+            // Caller-supplied seed: no GS energy estimate; use the
+            // user's ``energy_shift`` directly (legacy ``0.0`` -> the
+            // CF kernel does its own tridiag-based auto-detect).
+            E0 = 0.0;
+        } else {
+            SolveOptions sopts;
+            sopts.num_eigs        = 1;
+            sopts.compute_vectors = true;     // need the GS vector for the CF seed
+            sopts.tolerance       = 1e-12;
+            sopts.backend         = opts.backend;
+            sopts.method          = SolveMethod::Lanczos;
+            auto gs = solve(H, sopts);
+            E0 = gs.eigenvalues.empty() ? 0.0 : gs.eigenvalues.front();
+            if (!gs.eigenvectors.has_value() || gs.eigenvectors->host.empty()
+                    || gs.eigenvectors->host[0].size()
+                       != H.geometry().local_dim) {
+                throw std::runtime_error(
+                    "ed::spectral: GroundStateCF could not extract a "
+                    "host-side ground-state vector from the inner "
+                    "solve. Distributed lanes are not yet wired -- pin "
+                    "BackendConstraints to a CPU/GPU single-rank lane.");
+            }
+            seed_host = gs.eigenvectors->host[0];
+            double sumsq = 0.0;
+            for (const auto& z : seed_host) sumsq += std::norm(z);
+            const double inv = (sumsq > 0.0)
+                ? (1.0 / std::sqrt(sumsq)) : 1.0;
             for (auto& z : seed_host) z *= inv;
         }
+        const double shift = (std::abs(opts.energy_shift) > 1e-14)
+            ? opts.energy_shift : E0;
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
@@ -894,6 +1121,99 @@ SpectralResult spectral(const LinearOperator&                      H,
             R.S_real = std::move(kres.spectral_function);
         }, variant);
         R.S_imag.assign(opts.num_omega, 0.0);
+    } else if (opts.method == SpectralOptions::Method::KpmDynamical) {
+        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+        // KPM Chebyshev expansion of `delta(omega - H)` against a
+        // single seed. Promotes
+        // `ed::observables::kpm_dynamical_correlator` to a first-class
+        // SpectralOptions::Method on equal footing with GroundStateCF
+        // / FtlmDynamical.
+        //
+        // Seed resolution mirrors the GroundStateCF branch:
+        //   - ``opts.initial_state`` (renormalised) when non-empty
+        //     (TPQ-to-KPM warm seeding);
+        //   - else: inner Lanczos GS solve with compute_vectors=true.
+        if (observables.size() < 1) {
+            throw std::invalid_argument(
+                "ed::spectral: KpmDynamical requires at least one "
+                "observable.");
+        }
+        std::vector<Complex> seed_host(H.geometry().local_dim);
+        if (!opts.initial_state.empty()) {
+            if (opts.initial_state.size() != H.geometry().local_dim) {
+                throw std::invalid_argument(
+                    "ed::spectral: opts.initial_state size ("
+                    + std::to_string(opts.initial_state.size())
+                    + ") does not match H.geometry().local_dim ("
+                    + std::to_string(H.geometry().local_dim) + ").");
+            }
+            seed_host = opts.initial_state;
+        } else {
+            SolveOptions sopts;
+            sopts.num_eigs        = 1;
+            sopts.compute_vectors = true;
+            sopts.tolerance       = 1e-12;
+            sopts.backend         = opts.backend;
+            sopts.method          = SolveMethod::Lanczos;
+            auto gs = solve(H, sopts);
+            if (!gs.eigenvectors.has_value() || gs.eigenvectors->host.empty()
+                    || gs.eigenvectors->host[0].size()
+                       != H.geometry().local_dim) {
+                throw std::runtime_error(
+                    "ed::spectral: KpmDynamical could not extract a "
+                    "host-side ground-state vector from the inner "
+                    "solve. Distributed lanes are not yet wired -- "
+                    "pin BackendConstraints to a CPU/GPU single-rank "
+                    "lane.");
+            }
+            seed_host = gs.eigenvectors->host[0];
+        }
+        // Renormalise to absorb any sloppiness in the user seed.
+        {
+            double sumsq = 0.0;
+            for (const auto& z : seed_host) sumsq += std::norm(z);
+            const double inv = (sumsq > 0.0)
+                ? (1.0 / std::sqrt(sumsq)) : 1.0;
+            for (auto& z : seed_host) z *= inv;
+        }
+
+        const LinearOperator& O1 = *observables.front();
+        const LinearOperator& O2 = (observables.size() >= 2)
+            ? *observables[1] : O1;
+
+        ed::observables::KpmDynamicalOptions kopts;
+        kopts.num_moments         = opts.kpm_moments;
+        kopts.kernel              = (opts.kpm_kernel
+                                       == SpectralOptions::KpmKernel::Jackson)
+            ? ed::observables::KpmKernel::Jackson
+            : ed::observables::KpmKernel::Lorentz;
+        kopts.lorentz_lambda      = opts.kpm_lorentz_lambda;
+        kopts.spectral_bound_buffer = 0.05;
+        kopts.spectral_bounds_krylov = static_cast<int>(
+            std::max<std::size_t>(opts.krylov_dim, 32));
+
+        // Hand the host buffers + the (single) CPU backend to the
+        // kernel. The template body is backend-agnostic on the
+        // MatVecOperator side because LinearOperator IS-A
+        // MatVecOperator and the kernel only consumes the host
+        // pointer for the seed; no device copy is required.
+        ed::matvec::CpuBackend cpu_backend;
+        auto kres = ed::observables::kpm_dynamical_correlator(
+            cpu_backend,
+            static_cast<const ed::matvec::MatVecOperator&>(H),
+            static_cast<const ed::matvec::MatVecOperator&>(O1),
+            static_cast<const ed::matvec::MatVecOperator&>(O2),
+            seed_host.data(),
+            H.geometry().local_dim,
+            R.omega,
+            kopts);
+
+        R.omega  = std::move(kres.omega);
+        R.S_real = std::move(kres.spectral_real);
+        R.S_imag = std::move(kres.spectral_imag);
+        if (R.S_imag.size() != R.S_real.size()) {
+            R.S_imag.assign(R.S_real.size(), 0.0);
+        }
     } else {
         // FtlmDynamical lane (Wave A4 -- Full unified-interface
         // collapse, May 2026): finite-temperature dynamical correlator
@@ -953,8 +1273,8 @@ SpectralResult spectral(const LinearOperator&                      H,
         }
     }
 
-    R.errors_real.assign(opts.num_omega, 0.0);
-    R.errors_imag.assign(opts.num_omega, 0.0);
+    R.errors_real.assign(R.S_real.size(), 0.0);
+    R.errors_imag.assign(R.S_imag.size(), 0.0);
     R.backend.lane = (H.geometry().is_distributed() ? "mpi" : "cpu");
     if (H.geometry().is_device()) {
         R.backend.lane = H.geometry().is_distributed() ? "mpi_gpu" : "gpu";

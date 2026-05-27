@@ -163,6 +163,10 @@ and resolved inside the orchestrator.
 
 ## 3. DSSF: two CLI surfaces, one engine (not redundant)
 
+> Full landscape with **all four** spectral lanes (in-memory orchestrator,
+> streaming-symmetry same/cross-irrep walkers, CLI DSSF engine) and the
+> `qed.spectral` dispatcher: see [`DSSF.md`](DSSF.md).
+
 | Entry | Code path |
 |-------|-----------|
 | `ED dssf <method> <dir> …` | `ed_main.cpp` → `ed::dssf::run` |

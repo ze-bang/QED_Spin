@@ -150,6 +150,78 @@ disagree at the 2–3 sig-fig level. The smoke harness
 flags those methods as known-flaky and only smoke-builds / smoke-runs
 them rather than regression-testing the numbers.
 
+## Persisting eigenvectors to HDF5
+
+Pass `compute_eigenvectors=True` + `output_dir=...` to `qed.solve` (or
+the C++ `ed::api::SolveOptions::compute_eigenvectors` / `output_dir`
+mirror) and the orchestrator writes both eigenvalues and eigenvectors to
+`<output_dir>/ed_results.h5`, then returns the path in
+`result.eigenvectors_path` (Python) / `result.hdf5_path` (C++). The
+contract is honored by every solver method (`LANCZOS` / `BLOCK_LANCZOS`
+/ `KRYLOV_SCHUR` / `FULL`) on the CPU and single-rank GPU lanes -- the
+unified post-kernel save lives in
+[`src/orchestrator.cpp`](../src/orchestrator.cpp) and is pinned by
+[`tests/unit/test_eigenvector_save.cpp`](../tests/unit/test_eigenvector_save.cpp).
+
+The reference example pair is
+[`solve/lanczos/cpu_save.{cpp,py}`](solve/lanczos/cpu_save.cpp): it
+writes the file, reloads it via `HDF5IO::loadEigenvector` (C++) / `h5py`
+(Python), and checks the on-disk vector overlaps the in-memory copy to
+within a global phase.
+
+MPI lanes use the per-rank slab layout written by
+`ed_distributed_main` / the streaming-symmetry directory walker
+(`rank_*.h5` under `output_dir`); the in-memory `ed::api::solve` path
+skips the shared-file save on MPI builds to avoid cross-rank clobber.
+
+## Persisting thermal trajectories and TPQ states
+
+Pillar 1 of the May 2026 "Save and DSSF Upgrades" plan extends the
+`ed_results.h5` contract above to `ed::workflows::thermal`. Pass
+`output_dir=...` and the orchestrator writes:
+
+- FTLM / LTLM / KPM\_DOS: aggregated thermodynamic curves
+  (`/ftlm/averaged/{temperatures,energy,specific_heat,entropy,free_energy}`).
+- mTPQ / cTPQ: full per-sample trajectory rows at
+  `/tpq/samples/sample_<s>/thermodynamics` (one row per kernel step:
+  `beta, energy, variance, doublon, step`). When
+  `probe_betas=[beta_1, beta_2, ...]` is also passed, host-side state
+  vectors at the kernel-step beta closest to each requested probe beta
+  land at `/tpq/samples/sample_<s>/states/beta_<b>`.
+
+`result.eigenvectors_path` (Python) / `result.hdf5_path` (C++) reports
+the resulting file. The reference example pair is
+[`thermal/mtpq/cpu_save.{cpp,py}`](thermal/mtpq/cpu_save.cpp): runs
+mTPQ with two probe betas, reloads the snapshot via `HDF5IO::loadTPQState`
+(C++) / h5py (Python), and reports `<psi|psi> = 1`. The contract is
+pinned by [`tests/unit/test_thermal_save.cpp`](../tests/unit/test_thermal_save.cpp)
+across all five thermal methods. Reload the snapshot into
+`qed.spectral(method="GroundStateCF", initial_state=psi_beta)` for the
+TPQ-to-CF spectral pipeline.
+
+## TPQ-to-CF and KPM dynamical spectra (Pillars 3 & 4)
+
+Pillars 3 and 4 of the same May 2026 plan plumb a user-supplied
+`initial_state` through `ed::workflows::spectral` and promote KPM
+dynamical to a first-class `SpectralOptions::Method`:
+
+- [`spectral/ground_state_dssf/cpu_from_tpq_state.{cpp,py}`](spectral/ground_state_dssf/cpu_from_tpq_state.cpp)
+  -- the TPQ-to-CF pipeline: persist an mTPQ state at beta = 1 with
+  `qed.thermal(..., probe_betas=[1.0])`, reload it via h5py /
+  `HDF5IO::loadTPQState`, then feed it into
+  `qed.spectral(..., method="ground_state_cf",
+  initial_state=psi_beta)`. The orchestrator skips the inner GS solve
+  and uses the user state directly as the CF seed.
+- [`spectral/kpm_dynamical/cpu_none.{cpp,py}`](spectral/kpm_dynamical/cpu_none.cpp)
+  -- Chebyshev expansion of `delta(omega - H)` via the new
+  `method="kpm_dynamical"` lane. Knobs: `kpm_moments`,
+  `kpm_kernel ∈ {"Jackson", "Lorentz"}`, `kpm_lorentz_lambda`.
+
+These contracts are pinned by
+[`tests/unit/test_spectral_initial_state.cpp`](../tests/unit/test_spectral_initial_state.cpp)
+and
+[`tests/unit/test_kpm_dynamical_spectral.cpp`](../tests/unit/test_kpm_dynamical_spectral.cpp).
+
 ## Smoke testing
 
 The CPU lane of the new tree is regression-tested by CI:

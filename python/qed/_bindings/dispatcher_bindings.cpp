@@ -230,6 +230,9 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("temp_max",             &EDParameters::temp_max)
         .def_readwrite("num_temp_bins",        &EDParameters::num_temp_bins)
         // TPQ
+        // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+        // probe-beta list for TPQ state-vector snapshots.
+        .def_readwrite("tpq_probe_betas",          &EDParameters::tpq_probe_betas)
         .def_readwrite("tpq_max_steps",            &EDParameters::tpq_max_steps)
         .def_readwrite("tpq_measurement_interval", &EDParameters::tpq_measurement_interval)
         .def_readwrite("tpq_energy_shift",         &EDParameters::tpq_energy_shift)

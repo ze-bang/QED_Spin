@@ -50,6 +50,11 @@ ed_add_benchmark(bench_operator_apply       bench_operator_apply.cpp)
 ed_add_benchmark(bench_lanczos_ground_state bench_lanczos_ground_state.cpp)
 ed_add_benchmark(bench_full_diagonalization bench_full_diagonalization.cpp)
 ed_add_benchmark(bench_minimalist_collapse  bench_minimalist_collapse.cpp)
+# Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026): track the
+# speed-up of the omega-parallel Lehmann inner loop used by the
+# FtlmDynamical single-T lane. Reports a (serial, parallel) pair per
+# omega-grid size so the speed-up is visible at a glance.
+ed_add_benchmark(bench_dssf_omega_parallel  bench_dssf_omega_parallel.cpp)
 # bench_minimalist_collapse pulls in `ed::workflows::*` which instantiates
 # the kernel family for every conditionally-compiled Backend (CpuBackend,
 # CudaBackend under WITH_CUDA, MpiBackend under WITH_MPI). Add the CUDA
@@ -75,6 +80,7 @@ set(_ed_bench_targets
     bench_operator_apply
     bench_lanczos_ground_state
     bench_full_diagonalization
+    bench_dssf_omega_parallel
 )
 if(WITH_CUDA)
     function(ed_add_gpu_benchmark bench_name bench_source)

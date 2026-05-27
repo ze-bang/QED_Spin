@@ -182,6 +182,25 @@ struct ThermalSectorEntry {
 // ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
 // LTLM / mTPQ / cTPQ / KPM-DOS family.
 // ---------------------------------------------------------------------------
+/// One snapshotted TPQ state. Pillar 1 of the "Save and DSSF Upgrades"
+/// plan (May 2026). The orchestrator's thermal finalizer iterates these
+/// and lands each one in ``/tpq/samples/sample_<s>/state_beta_<b>`` of
+/// the shared ``ed_results.h5`` file via ``HDF5IO::saveTPQState``.
+struct TpqStateSnapshot {
+    std::size_t            sample_index    = 0;
+    /// Inverse temperature the caller requested via ``ThermalOptions
+    /// ::probe_betas``. Kept so the snapshot's provenance survives a
+    /// round-trip through HDF5 (the on-disk dataset name uses the
+    /// effective beta, since that is what the state actually
+    /// realises).
+    double                 requested_beta  = 0.0;
+    /// Closest kernel-step beta to ``requested_beta``. Used as the
+    /// HDF5 dataset key.
+    double                 effective_beta  = 0.0;
+    /// Host-side TPQ state vector, length ``H.geometry().local_dim``.
+    std::vector<Complex>   psi;
+};
+
 struct ThermalResult {
     /// Combined (across sectors / samples) thermodynamic functions.
     ThermodynamicData                thermo;
@@ -195,6 +214,24 @@ struct ThermalResult {
     KrylovDiagnostics                krylov;
     BackendMetadata                  backend;
     std::string                      hdf5_path;
+
+    // -----------------------------------------------------------------
+    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
+    // trajectory + state-snapshot surface. Populated only by the mTPQ
+    // and cTPQ branches of ``ed::workflows::thermal``; empty for
+    // FTLM / LTLM / KPM-DOS.
+    //
+    // The trajectory fields are mirror-images of
+    // ``MtpqResult::sample_*`` / ``CtpqResult::sample_*`` --
+    // outer index = sample, inner index = kernel step. The orchestrator
+    // copies them into ``R`` after the visit so the uniform finalizer
+    // can persist them via ``HDF5IO::appendTPQThermodynamics``.
+    // -----------------------------------------------------------------
+    std::vector<std::vector<double>>    tpq_sample_betas;
+    std::vector<std::vector<double>>    tpq_sample_energies;
+    std::vector<std::vector<double>>    tpq_sample_variances;
+    /// One entry per snapshot the kernel actually recorded.
+    std::vector<TpqStateSnapshot>       tpq_state_snapshots;
 };
 
 // ---------------------------------------------------------------------------

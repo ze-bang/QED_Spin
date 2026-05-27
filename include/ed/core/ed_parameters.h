@@ -67,6 +67,16 @@ struct EDParameters {
     double tpq_measure_beta_max = 1000.0;
 
     // ------------------------------------------------------------------
+    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    // user-supplied probe-beta list for mTPQ/cTPQ state-vector
+    // snapshots. The Python facade (``qed.thermal(probe_betas=[...])``)
+    // routes here, then ``_ed_params_to_thermal_options`` forwards it
+    // to ``_core.ThermalOptions::probe_betas``. Empty (default) means
+    // "trajectory only, no state vectors persisted".
+    // ------------------------------------------------------------------
+    std::vector<double> tpq_probe_betas;
+
+    // ------------------------------------------------------------------
     // Removed in matvec-unification Phase 7.5:
     //   - num_order()             -> tpq_taylor_order
     //   - num_measure_freq()      -> tpq_measurement_interval

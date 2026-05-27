@@ -206,13 +206,59 @@ struct ThermalOptions {
     // Python facade has been shipping for the streaming-symmetry binding.
     int kpm_num_moments        = 200; ///< Python default (was 0 -> kernel 2048).
     int kpm_num_random_vectors = 16;  ///< Python default (was 0 -> kernel 20).
+
+    // -----------------------------------------------------------------
+    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    // user-supplied probe-betas for TPQ state-vector snapshots. The
+    // orchestrator passes this through to ``MtpqOptions::probe_betas``
+    // / ``CtpqOptions::probe_betas``. Empty (default) -> no snapshots
+    // are taken. Ignored by FTLM / LTLM / KPM-DOS (which never have
+    // a meaningful TPQ state to snapshot). Combine with
+    // ``output_dir`` to land the saved states on disk under
+    // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
+    // -----------------------------------------------------------------
+    std::vector<double> probe_betas;
 };
 
 struct SpectralOptions {
     enum class Method : std::uint8_t {
         GroundStateCF = 0,   ///< compute_ground_state_dssf via cf_spectral_kernel
         FtlmDynamical = 1,
+        /// Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+        /// Chebyshev expansion of `delta(omega - H)` against a single
+        /// seed (GS by default, ``initial_state`` when provided).
+        /// Backed by `ed::observables::kpm_dynamical_correlator` ->
+        /// `ed::kpm::compute_kpm_ltlm_from_states` at beta = 0.
+        KpmDynamical  = 2,
     } method = Method::GroundStateCF;
+
+    /// KPM Chebyshev moments for ``Method::KpmDynamical``. Ignored by
+    /// the other lanes. Bigger M = sharper features but more matvecs.
+    std::size_t kpm_moments = 200;
+
+    /// Window function applied to the Chebyshev moments when
+    /// reconstructing S(omega). ``Jackson`` is the standard optimal
+    /// Gibbs-suppressing window; ``Lorentz`` is the alternative used by
+    /// the legacy `ed::kpm` driver and parametrised by
+    /// ``kpm_lorentz_lambda``.
+    enum class KpmKernel : std::uint8_t {
+        Jackson = 0,
+        Lorentz = 1,
+    } kpm_kernel = KpmKernel::Jackson;
+
+    /// Lorentz kernel decay parameter (only used when
+    /// ``kpm_kernel == Lorentz``).
+    double kpm_lorentz_lambda = 4.0;
+
+    /// Override the auto-detected ``[E_min, E_max]`` spectral bounds
+    /// used to rescale H into ``[-1, 1]`` before the Chebyshev
+    /// recursion. When unset (default), the orchestrator runs a small
+    /// Lanczos in `ed::kpm_dos::estimate_spectral_bounds` to discover
+    /// them. NB: the kernel currently uses the legacy driver's own
+    /// bound-estimation path; this field is reserved for the next
+    /// landing wave once we plumb caller-supplied bounds through
+    /// ``compute_kpm_ltlm_from_states``.
+    std::optional<std::pair<double, double>> kpm_spectral_bounds;
     std::size_t krylov_dim    = 200;
     double      broadening    = 0.05;
     double      omega_min     = -10.0;
@@ -265,6 +311,21 @@ struct SpectralOptions {
     /// ``SolveOptions::selected_sectors``. Empty => walk every
     /// (initial, final) pair surviving the selection rule.
     std::vector<std::size_t> selected_sectors;
+
+    // -----------------------------------------------------------------
+    // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
+    // user-supplied seed state for the GroundStateCF lane. When
+    // non-empty the orchestrator skips the inner Lanczos GS solve and
+    // feeds this vector (after L2-renormalisation) straight into
+    // ``cf_spectral_kernel`` -- this is the TPQ-to-CF pipeline (use
+    // ``ThermalOptions::probe_betas`` to persist a TPQ state at
+    // beta = 1/T, reload it via h5py, pass it here).
+    //
+    // Length MUST equal ``H.geometry().local_dim``. Empty (default)
+    // keeps the legacy behaviour: compute the GS via Lanczos and use
+    // it as the seed.
+    // -----------------------------------------------------------------
+    std::vector<std::complex<double>> initial_state;
 };
 
 // ---------------------------------------------------------------------------

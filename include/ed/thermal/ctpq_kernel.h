@@ -17,6 +17,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,11 @@ struct CtpqOptions {
     double      delta_beta     = 0.1;
     std::uint64_t random_seed  = 0;
     std::string output_dir;
+
+    /// User-supplied inverse temperatures at which the cTPQ kernel
+    /// should snapshot (copy to host) the running TPQ state. Mirrors
+    /// ``MtpqOptions::probe_betas``. Empty (default) -> no snapshots.
+    std::vector<double> probe_betas;
 };
 
 struct CtpqResult {
@@ -52,6 +58,13 @@ struct CtpqResult {
     std::vector<std::vector<double>> sample_inv_temps;
     std::vector<std::vector<double>> sample_energies;
     std::vector<std::vector<double>> sample_variances;
+
+    /// Host-side state snapshots at the betas closest to
+    /// ``CtpqOptions::probe_betas``. Same layout as
+    /// ``MtpqResult::state_snapshots`` (outer = sample,
+    /// inner = probe-beta slot). Empty when ``probe_betas`` was empty.
+    std::vector<std::vector<std::vector<Complex>>> state_snapshots;
+    std::vector<std::vector<double>>               state_snapshot_betas;
 };
 
 template <typename Backend, typename MatvecFn>
@@ -66,6 +79,16 @@ CtpqResult ctpq_kernel(Backend&       backend,
     out.sample_inv_temps.reserve(opts.num_samples);
     out.sample_energies.reserve(opts.num_samples);
     out.sample_variances.reserve(opts.num_samples);
+    const bool want_snapshots = !opts.probe_betas.empty();
+    if (want_snapshots) {
+        out.state_snapshots.assign(
+            opts.num_samples,
+            std::vector<std::vector<Complex>>(opts.probe_betas.size()));
+        out.state_snapshot_betas.assign(
+            opts.num_samples,
+            std::vector<double>(opts.probe_betas.size(),
+                                std::numeric_limits<double>::quiet_NaN()));
+    }
 
     const std::size_t steps = (opts.delta_beta > 0.0)
         ? static_cast<std::size_t>(
@@ -96,6 +119,12 @@ CtpqResult ctpq_kernel(Backend&       backend,
         traj_Es.reserve(steps + 1);
         traj_vars.reserve(steps + 1);
         auto scratch   = backend.make_zero_vector(local_n);
+        std::vector<double> best_dist;
+        std::vector<Complex> host_buf;
+        if (want_snapshots) {
+            best_dist.assign(opts.probe_betas.size(),
+                             std::numeric_limits<double>::infinity());
+        }
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
             apply_H(info.psi, scratch.get(), info.local_n);
             const Complex e = backend.dot(info.psi, scratch.get(),
@@ -109,6 +138,24 @@ CtpqResult ctpq_kernel(Backend&       backend,
             traj_betas.push_back(info.beta);
             traj_Es.push_back(E_k);
             traj_vars.push_back(var_k);
+            if (want_snapshots) {
+                bool host_copied = false;
+                for (std::size_t p = 0; p < opts.probe_betas.size(); ++p) {
+                    const double d = std::abs(info.beta - opts.probe_betas[p]);
+                    if (d < best_dist[p]) {
+                        if (!host_copied) {
+                            host_buf.assign(info.local_n, Complex{0.0, 0.0});
+                            info.backend->copy_to_host(info.psi,
+                                                       host_buf.data(),
+                                                       info.local_n);
+                            host_copied = true;
+                        }
+                        out.state_snapshots[s][p] = host_buf;
+                        out.state_snapshot_betas[s][p] = info.beta;
+                        best_dist[p] = d;
+                    }
+                }
+            }
             return true;
         };
         auto kres = tpq_kernel<Backend>(backend, apply_H, local_n,

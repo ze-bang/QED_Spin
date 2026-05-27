@@ -909,15 +909,22 @@ static void compute_spectral_function(
     // S(ω,T) = Σ_i w_i * exp(-βE_i)/Z * δ(ω - E_i)
     // Using Lorentzian broadening: δ(ω - E) → (η/π) / ((ω - E)² + η²)
     double norm_factor = broadening / M_PI;
-    
-    for (int i_omega = 0; i_omega < n_omega; i_omega++) {
-        double omega = frequencies[i_omega];
-        
+    // Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026):
+    // omega-parallelise the Lehmann sum. Each ``i_omega`` slot is
+    // written exactly once and the inner accumulator is local, so a
+    // plain ``parallel for`` over omega is safe; this is the
+    // single-T FtlmDynamical fast path so the win is unconditional.
+    #pragma omp parallel for schedule(static) if(n_omega > 32)
+    for (int64_t i_omega = 0; i_omega < static_cast<int64_t>(n_omega); i_omega++) {
+        const double omega = frequencies[i_omega];
+        double acc = 0.0;
         for (int i = 0; i < n_states; i++) {
-            double delta = omega - ritz_values[i];
-            double lorentzian = norm_factor / (delta * delta + broadening * broadening);
-            spectral_function[i_omega] += thermal_weights[i] * lorentzian;
+            const double delta = omega - ritz_values[i];
+            const double lorentzian =
+                norm_factor / (delta * delta + broadening * broadening);
+            acc += thermal_weights[i] * lorentzian;
         }
+        spectral_function[i_omega] += acc;
     }
 }
 
@@ -987,17 +994,20 @@ static void compute_spectral_function_complex(
     // S(ω,T) = Σ_i w_i * exp(-βE_i)/Z * δ(ω - E_i)
     // Using Lorentzian broadening: δ(ω - E) → (η/π) / ((ω - E)² + η²)
     double norm_factor = broadening / M_PI;
-    
-    for (int i_omega = 0; i_omega < n_omega; i_omega++) {
-        double omega = frequencies[i_omega];
-        
+    // Pillar 2 (May 2026): omega-parallel for the complex-weights
+    // Lehmann path. Same independence as the real-weights twin above.
+    #pragma omp parallel for schedule(static) if(n_omega > 32)
+    for (int64_t i_omega = 0; i_omega < static_cast<int64_t>(n_omega); i_omega++) {
+        const double omega = frequencies[i_omega];
+        Complex acc(0.0, 0.0);
         for (int i = 0; i < n_states; i++) {
-            double delta = omega - ritz_values[i];
-            double lorentzian = norm_factor / (delta * delta + broadening * broadening);
-            Complex contribution = thermal_weights[i] * lorentzian;
-            spectral_function_real[i_omega] += contribution.real();
-            spectral_function_imag[i_omega] += contribution.imag();
+            const double delta = omega - ritz_values[i];
+            const double lorentzian =
+                norm_factor / (delta * delta + broadening * broadening);
+            acc += thermal_weights[i] * lorentzian;
         }
+        spectral_function_real[i_omega] += acc.real();
+        spectral_function_imag[i_omega] += acc.imag();
     }
 }
 /**

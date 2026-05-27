@@ -481,6 +481,15 @@ def _spectral_in_memory(
     # ``"cpu"`` / ``"gpu"`` pins the choice via
     # ``SpectralOptions.backend.allow_gpu``.
     device: Optional[str] = None,
+    # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
+    # caller-supplied seed state for the GroundStateCF lane. Accepts a
+    # numpy array, list, or anything h5py reads as a 1D complex vector.
+    initial_state: Optional[Any] = None,
+    # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+    # KpmDynamical knobs.
+    kpm_moments: Optional[int] = None,
+    kpm_kernel: Optional[str] = None,
+    kpm_lorentz_lambda: Optional[float] = None,
 ) -> Any:
     """Build a `_core.SpectralOptions` and call `_core.workflows_spectral`."""
     opts = _core.SpectralOptions()
@@ -490,12 +499,14 @@ def _spectral_in_memory(
             opts.method = _core.SpectralMethod.GroundStateCF
         elif key in ("FTLM_DYNAMICAL", "DYNAMICAL_THERMAL", "FTLMDYNAMICAL"):
             opts.method = _core.SpectralMethod.FtlmDynamical
+        elif key in ("KPM_DYNAMICAL", "KPM_DYN", "KPMDYNAMICAL"):
+            opts.method = _core.SpectralMethod.KpmDynamical
         else:
             raise ValueError(
                 f"method={method!r} not supported by the in-memory "
-                f"spectral path. Use 'ground_state_cf' or "
-                f"'ftlm_dynamical', or pass a directory path to use "
-                f"the CLI form."
+                f"spectral path. Use 'ground_state_cf', "
+                f"'ftlm_dynamical', or 'kpm_dynamical', or pass a "
+                f"directory path to use the CLI form."
             )
     if krylov_dim is not None:
         opts.krylov_dim = int(krylov_dim)
@@ -550,6 +561,39 @@ def _spectral_in_memory(
                 "directory form with a launched MPI binary.")
         # "auto" => let select_backend decide (default behaviour).
 
+    # Pillar 3 (May 2026): user-supplied seed for the GroundStateCF
+    # lane. The C++ binding accepts a Python list of complex; numpy
+    # arrays are coerced via ``.tolist()`` to keep the conversion
+    # robust across structured (real/imag) and native complex dtypes.
+    if initial_state is not None:
+        import numpy as _np
+        arr = _np.asarray(initial_state)
+        if arr.dtype.names is not None and {"real", "imag"}.issubset(arr.dtype.names):
+            arr = arr["real"] + 1j * arr["imag"]
+        arr = arr.astype(_np.complex128, copy=False).ravel()
+        opts.initial_state = [complex(z) for z in arr.tolist()]
+
+    # Pillar 4 (May 2026): KPM-dynamical knobs. Only the moments knob
+    # is forwarded unconditionally (it is meaningful for any future
+    # KPM expansion lane). The kernel + lambda knobs are forwarded
+    # opaquely; the C++ binding stays the source of truth for
+    # validation.
+    if kpm_moments is not None:
+        opts.kpm_moments = int(kpm_moments)
+    if kpm_kernel is not None:
+        k_lc = str(kpm_kernel).lower()
+        if k_lc in ("jackson", "j"):
+            opts.kpm_kernel = _core.SpectralKpmKernel.Jackson
+        elif k_lc in ("lorentz", "l"):
+            opts.kpm_kernel = _core.SpectralKpmKernel.Lorentz
+        else:
+            raise ValueError(
+                f"qed.spectral: kpm_kernel={kpm_kernel!r} not in "
+                "{'Jackson', 'Lorentz'}."
+            )
+    if kpm_lorentz_lambda is not None:
+        opts.kpm_lorentz_lambda = float(kpm_lorentz_lambda)
+
     obs_list = list(observables)
     if verbose:
         print(
@@ -574,8 +618,14 @@ def spectral(
     energy_shift: Optional[float] = None,
     output_dir: str = "",
     observable_type: str = "",
-    # CLI only -----------------------------------------------------------
+    # Shared between CLI and in-memory KpmDynamical (Pillar 4 of the
+    # "Save and DSSF Upgrades" plan, May 2026). When the in-memory
+    # ``method="kpm_dynamical"`` lane is selected, these are forwarded
+    # to ``_core.SpectralOptions.kpm_*``; otherwise they only affect
+    # the CLI ``kpm_thermodynamics`` shell-out.
     kpm_moments: Optional[int] = None,
+    kpm_kernel: Optional[str] = None,
+    kpm_lorentz_lambda: Optional[float] = None,
     bandwidth: Optional[float] = None,
     device: Optional[str] = None,
     level: str = "balanced",
@@ -596,6 +646,8 @@ def spectral(
     momentum_transfer: Optional[Sequence[float]] = None,
     momentum_tolerance: float = 1e-6,
     selected_sectors: Optional[Sequence[int]] = None,
+    # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026) --------
+    initial_state: Optional[Any] = None,
 ):
     """Spectral / structure-factor calculation. Auto-routes by input shape.
 
@@ -923,4 +975,10 @@ def spectral(
         # Phase D of the "Backend x Symmetries x Workflows" plan
         # (May 2026): forward ``device=`` to the in-memory binding.
         device=device,
+        # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026).
+        initial_state=initial_state,
+        # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026).
+        kpm_moments=kpm_moments,
+        kpm_kernel=kpm_kernel,
+        kpm_lorentz_lambda=kpm_lorentz_lambda,
     )

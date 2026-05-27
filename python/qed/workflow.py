@@ -150,6 +150,14 @@ def _ed_params_to_thermal_options(
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
+    # the user-supplied probe-betas for mTPQ/cTPQ state-vector
+    # snapshots. Empty list -> the kernel runs the standard path with no
+    # state-vector copies and the orchestrator persists only the
+    # thermo trajectory.
+    pb = list(getattr(params, "tpq_probe_betas", []) or [])
+    if pb:
+        opts.probe_betas = pb
     return opts
 
 
@@ -163,8 +171,16 @@ def _ed_result_from_thermal_result(
     out.thermo_data = tr.thermo
     out.eigenvalues = ([float(tr.ground_state_energy)]
                        if tr.ground_state_energy != 0.0 else [])
-    out.eigenvectors_computed = False
-    out.eigenvectors_path     = ""
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    # the thermal orchestrator now persists ``ed_results.h5`` when
+    # ``output_dir`` is set (FTLM/LTLM/KPM_DOS: aggregated thermo;
+    # mTPQ/cTPQ: trajectory + state-vector snapshots at probe_betas).
+    # Mirror the saved path through the legacy ``eigenvectors_path``
+    # field so downstream consumers see the same envelope shape used
+    # by ``qed.solve``.
+    h5_path = str(getattr(tr, "hdf5_path", "") or "")
+    out.eigenvectors_computed = bool(h5_path)
+    out.eigenvectors_path     = h5_path
     return out
 
 

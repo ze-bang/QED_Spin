@@ -193,6 +193,12 @@ void accumulate_kpm_inner(
 
     // Evaluate spectral function on the output grid.
     // Pre-compute T_k(x) for all k using Chebyshev recursion at each ω.
+    // Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026):
+    // the Chebyshev recursion state (Tk_prev / Tk_curr / sum) is local
+    // to a single ``i`` iteration and ``S_acc[t][i]`` is the only
+    // shared write -- distinct ``i`` slots, no aliasing across the
+    // ``t`` axis -- so the omega loop is embarrassingly parallel.
+    #pragma omp parallel for schedule(static) if(n_omega > 32)
     for (int i = 0; i < n_omega; ++i) {
         // Absolute energy of the excited state.
         const double eps = omega_grid[i] + E_n;
