@@ -105,7 +105,13 @@ res = qed.solve(H, num_eigenvalues=4,
                 symmetry=report.full_set)
 ```
 
-End-to-end demo of all four cells: [`examples/16_python_orthogonal_symmetry.py`](../../examples/16_python_orthogonal_symmetry.py).
+End-to-end demo of all four cells: [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).
+Per-cell minimal twins live under
+[`examples/solve/lanczos/`](../../examples/solve/lanczos/),
+[`examples/solve/full/`](../../examples/solve/full/),
+[`examples/thermal/ftlm/`](../../examples/thermal/ftlm/), and
+[`examples/spectral/ground_state_dssf/`](../../examples/spectral/ground_state_dssf/)
+(each cell ships a `.py` *and* a line-for-line C++ `.cpp` twin).
 
 ## Hamiltonian builder DSL
 

@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Example tree overhaul (PR-2 / PR-3 / PR-4 / PR-5 of the "mirror examples" plan, May 2026)
+
+Companion to the PR-1 API mirror facade (see entry below). Reorganises
+`examples/` into a one-file-per-ONLINE-cell tree with full C++ ↔
+Python parity:
+
+**New tree:** `examples/{solve,thermal,spectral}/<method>/<lane>_<sym>.{cpp,py}`
+
+- **solve**: 48 cells (`lanczos` 16 + `block_lanczos` 8 + `krylov_schur` 16 + `full` 8).
+- **thermal**: 62 cells (`ftlm` 14 + `ltlm` 8 + `mtpq` 16 + `ctpq` 16 + `kpm_dos` 8).
+- **spectral**: 38 cells (`single_expectation` 8 + `ground_state_dssf` 14 + `static_thermal` 8 + `dynamical_thermal` 8).
+- Total: 148 cells × 2 langs = 296 example files, plus shared
+  scaffolding under `examples/_shared/` (`common.h`, `common.py`,
+  `codegen_{solve,thermal,spectral}.py`, `refresh_expected_output.py`).
+
+**Naming convention** — each cell is `<lane>_<sym>.{cpp,py}` where
+`<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`} and `<sym>` ∈ {`none`,
+`sz`, `spatial`, `sz_spatial`}. CMake glob registration auto-generates
+one target per cell (`ex_solve_lanczos_cpu_sz`, etc.) and dispatches it
+to the correct link list based on the filename prefix.
+
+**Twin commitment** — every `.cpp` cell reads line-for-line identical
+to its `.py` sibling and prints the same numbers at 4 sig-fig
+precision. The Python kwarg `qed.solve(H, num_eigenvalues=2,
+solver="LANCZOS", sz=N // 2, device="cpu")` becomes the C++ designated
+init `ed::api::SolveOptions{.num_eigenvalues=2, .solver="LANCZOS",
+.sz=N/2, .device="cpu"}`.
+
+**Expected-output blocks** — every cell ends with a deterministic
+`# === Expected output ===` comment block, populated by running the
+CPU binary / Python script on the reference runner. For Lanczos /
+Krylov-Schur / FullDiag / LTLM the numbers are reproducible to ≥ 6
+sig figs; FTLM / mTPQ / cTPQ / KPM_DOS print stable expected output
+but reruns may disagree at the 2–3 sig-fig level (the upstream solver
+does not currently honour `random_seed=0` end-to-end), so those are
+flagged as "known-flaky" by the smoke harness.
+
+**Smoke testing** — `scripts/check_examples_output.py` runs every CPU
+cell (C++ + Python) and verifies the printed numbers against the
+Expected-output block. Wired into CI as `linux-examples-smoke`. The
+Python twin side is also covered by `python/tests/test_examples.py`,
+which `pytest`-collects every `cpu_*.py` and asserts it exits cleanly
+and emits at least one deterministic schema line.
+
+**Legacy preservation** — the previous 17 numbered tutorials are
+moved to `examples/_legacy/` unchanged (with a `_legacy/README.md`
+explaining their frozen status). They still build under
+`-DED_BUILD_EXAMPLES=ON`; the CMake targets keep the same names
+(`ex00_unified_interface`, ..., `ex08_mpi_distributed_tpq`).
+
+**New / changed files:**
+
+- `examples/_shared/common.{h,py}` — `heisenberg_chain`,
+  `bethe_E0`, `rank0_print`, `mpi_guard`, `in_memory_spec`.
+- `examples/_shared/codegen_{solve,thermal,spectral}.py` — generators
+  emitting the per-cell file tree. Committed so the templates live
+  alongside the cells; not run at build time.
+- `examples/_shared/refresh_expected_output.py` — captures stdout from
+  every built CPU cell and patches its Expected-output block.
+- `examples/{solve,thermal,spectral}/**/cpu_*.{cpp,py}` — 96 CPU cells
+  with full deterministic / known-flaky annotations.
+- `examples/{solve,thermal,spectral}/**/{gpu,mpi,mpi_gpu}_*.{cpp,py}`
+  — 200 placeholder cells whose Expected-output blocks will be filled
+  in when CI runs on a hardware-equipped runner.
+- `examples/CMakeLists.txt` — glob-driven cell registration,
+  `ed_examples_smoke` target, legacy registration repointed at
+  `_legacy/`.
+- `examples/README.md` — master index, naming convention, build
+  recipes, smoke harness usage.
+- `examples/_legacy/README.md` — frozen-state notice and per-file
+  table.
+- `scripts/check_examples_output.py` — smoke harness with known-flaky
+  list.
+- `python/tests/test_examples.py` — pytest collector for the Python
+  twins.
+- `.github/workflows/ci.yml` — `linux-examples-smoke` job.
+
 ### API mirror facade (PR-1 of the "mirror examples" plan, May 2026)
 
 Step 1 of the multi-PR effort to make C++ examples read line-for-line
