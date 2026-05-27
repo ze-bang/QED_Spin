@@ -60,6 +60,143 @@ namespace ed::workflows {
 namespace {
 
 // ---------------------------------------------------------------------------
+// Helper: which rank should own the unified ``ed_results.h5`` writer?
+//
+// "Universal save contract" follow-up (May 2026): distributed lanes
+// (MPI / MPI+CUDA) were previously skipping the orchestrator's
+// HDF5 finalizer entirely on the assumption that every rank holds
+// only a slab of the result. That is true for slab-distributed
+// eigenvectors / TPQ state vectors -- those still get written to
+// per-rank ``rank_<r>.h5`` files by ``ed_distributed_main`` -- but
+// the *aggregate* fields (eigenvalues, thermo curves, S(omega)) are
+// already broadcast / reduced onto every rank, so rank 0 can write a
+// single, unified ``ed_results.h5`` next to the per-rank slabs.
+//
+// Contract:
+//   - serial (non-MPI) lane:  returns true on the single process.
+//   - MPI lane (any backend): returns true on rank 0 only.
+//   - MPI not initialised inside the orchestrator: returns true (we
+//     are the only writer).
+// ---------------------------------------------------------------------------
+inline bool is_unified_writer(const Geometry& geom) {
+#ifdef WITH_MPI
+    if (geom.is_distributed()) {
+        int inited = 0;
+        MPI_Initialized(&inited);
+        if (!inited) return true;
+        int rank = 0;
+        MPI_Comm_rank(geom.comm, &rank);
+        return rank == 0;
+    }
+#else
+    (void)geom;
+#endif
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// solve() persistence finalizer (extracted helper, May 2026 follow-up).
+//
+// Centralises the post-kernel HDF5 emission so every dispatch lane --
+// the ``lanczos_real`` real-Hermitian fast path, the standard complex
+// Lanczos / BlockLanczos / KrylovSchur kernels, and the FullDiag
+// fallback -- hits the same on-disk contract. Before this helper was
+// pulled out the ``lanczos_real`` lane returned early (skipping every
+// finalizer below the early-return), which left ``R.hdf5_path`` empty
+// even when the caller had supplied ``opts.output_dir``.
+//
+// Contract:
+//   * Serial lane (``!geom.is_distributed()``): writes
+//     ``<output_dir>/ed_results.h5`` carrying ``/eigendata/eigenvalues``
+//     and, when ``opts.compute_vectors == true`` and the kernel
+//     populated ``R.eigenvectors->host``, the ``/eigendata/eigenvector_*``
+//     datasets.
+//   * MPI lane: writes the unified file only from rank 0 (see
+//     ``is_unified_writer``) and only the aggregate eigenvalue array
+//     (gathering the slab-distributed eigenvectors would require an
+//     extra MPI_Gatherv pass; per-rank ``rank_<r>.h5`` files written by
+//     ``ed_distributed_main`` remain the canonical location for
+//     eigenvectors).
+//
+// No-ops when (a) the caller did not supply an ``output_dir``, (b) the
+// path is the explicit "disabled" sentinel, or (c) ``R.hdf5_path`` is
+// already populated by an upstream writer.
+// ---------------------------------------------------------------------------
+inline void apply_solve_save_finalizer(GroundStateResult& R,
+                                       const Geometry& geom,
+                                       const SolveOptions& opts) {
+    if (opts.output_dir.empty()
+            || HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+        return;
+    }
+    if (!R.hdf5_path.empty()) {
+        return;  // upstream lane (e.g. FullDiag) already wrote.
+    }
+
+    // ----- Serial lane -----------------------------------------------
+    if (!geom.is_distributed()) {
+        // Eigenvectors path: kernel populated host-side eigenvectors
+        // and caller asked for them.
+        if (opts.compute_vectors
+                && R.eigenvectors.has_value()
+                && !R.eigenvectors->host.empty()) {
+            try {
+                HDF5IO::saveDiagonalizationResults(
+                    opts.output_dir,
+                    R.eigenvalues,
+                    R.eigenvectors->host,
+                    /*solver_name=*/"ed::workflows::solve");
+                R.hdf5_path = opts.output_dir + "/ed_results.h5";
+                R.eigenvectors->hdf5_path = R.hdf5_path;
+            } catch (const std::exception& e) {
+                R.backend.notes.emplace_back(
+                    "eigenvector_save_failed", e.what());
+            }
+            return;
+        }
+        // Eigenvalues-only path: still want the unified ed_results.h5
+        // so downstream tools (Python ``qed.solve``, post-processing
+        // notebooks, etc.) have a single, canonical artefact to read.
+        if (!R.eigenvalues.empty()) {
+            try {
+                std::error_code ec;
+                std::filesystem::create_directories(opts.output_dir, ec);
+                const std::string h5_path =
+                    opts.output_dir + "/ed_results.h5";
+                HDF5IO::createOrOpenFile(opts.output_dir);
+                HDF5IO::saveEigenvalues(h5_path, R.eigenvalues);
+                R.hdf5_path = h5_path;
+            } catch (const std::exception& e) {
+                R.backend.notes.emplace_back(
+                    "eigenvalues_save_failed", e.what());
+            }
+        }
+        return;
+    }
+
+    // ----- MPI lane: rank 0 only writes aggregate eigenvalues. -------
+    if (is_unified_writer(geom) && !R.eigenvalues.empty()) {
+        try {
+            std::error_code ec;
+            std::filesystem::create_directories(opts.output_dir, ec);
+            const std::string h5_path =
+                opts.output_dir + "/ed_results.h5";
+            HDF5IO::createOrOpenFile(opts.output_dir);
+            HDF5IO::saveEigenvalues(h5_path, R.eigenvalues);
+            R.hdf5_path = h5_path;
+            R.backend.notes.emplace_back(
+                "mpi_unified_file",
+                "Rank 0 wrote eigenvalues to ed_results.h5; "
+                "eigenvectors remain slab-distributed across "
+                "per-rank rank_<r>.h5 files.");
+        } catch (const std::exception& e) {
+            R.backend.notes.emplace_back(
+                "mpi_unified_save_failed", e.what());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Default heuristics for "method == Auto".
 // ---------------------------------------------------------------------------
 SolveMethod auto_solve_method(std::uint64_t global_dim,
@@ -172,11 +309,22 @@ GroundStateResult solve_on(Backend& be,
                                              opts.num_eigs, eigs.size()));
                 }
                 R.krylov.iters_done = 0;  // lanczos_real does not expose this
+                R.krylov.converged  = true;
                 const auto t1 = std::chrono::steady_clock::now();
                 R.backend.wall_seconds =
                     std::chrono::duration<double>(t1 - t0).count();
                 R.backend.notes.emplace_back(
                     "dispatch", "lanczos_real (Wave 1.1 real-H fast path)");
+                R.backend.lane =
+                    (geom.is_distributed() ? "mpi" : "cpu");
+                R.backend.mpi_size = 1;
+                // "Universal save contract" follow-up (May 2026): the
+                // lanczos_real fast path used to ``return R`` here and
+                // silently bypass every persistence finalizer below.
+                // Run the shared finalizer so this lane lands on the
+                // same ``ed_results.h5`` on-disk contract as every
+                // other dispatch path.
+                apply_solve_save_finalizer(R, geom, opts);
                 return R;
             }
         }
@@ -447,9 +595,30 @@ GroundStateResult solve_on(Backend& be,
         } else
 #endif
         {
+            // "Universal save contract" follow-up (May 2026): the
+            // FullDiag column-extraction loop in
+            // ``::full_diagonalization`` (lanczos.cpp:1483-1488) calls
+            // ``H(unit_vec.data(), col_j.data(), N)`` with host
+            // ``std::vector<Complex>`` storage. If we hand it a matvec
+            // bound to a non-CPU backend (e.g. the streaming-symmetry
+            // GPU mirror, advertised via
+            // ``Geometry::supports_device_matvec=true``), the lambda
+            // dereferences the host pointers as device pointers and
+            // ``cudaMemsetAsync`` returns "invalid argument".
+            //
+            // The dense build is O(N) matvecs and the LAPACK O(N^3)
+            // call dominates, so there is no perf gain in keeping the
+            // FullDiag column build on the GPU. Pin it to the CPU
+            // binding (``LinearOperator::bind_cpu()`` is supported by
+            // every Operator subclass and is the fallback path
+            // ``LinearOperator::bind<CpuBackend>()`` selects). Krylov /
+            // BlockLanczos / KrylovSchur lanes above keep the original
+            // device-bound matvec since they operate entirely in the
+            // backend's memory space.
+            ed::LinearOperator::MatvecFn cpu_matvec = H.bind_cpu();
             std::function<void(const Complex*, Complex*, int)> Hv =
                 [&](const Complex* in, Complex* out, int n) {
-                    matvec(in, out, static_cast<std::size_t>(n));
+                    cpu_matvec(in, out, static_cast<std::size_t>(n));
                 };
             std::vector<double> eigs;
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
@@ -491,30 +660,23 @@ GroundStateResult solve_on(Backend& be,
     //     directory walker -- writing a single shared `ed_results.h5`
     //     from N ranks would clobber across processes).
     // ---------------------------------------------------------------------
-    if (opts.compute_vectors
-            && !geom.is_distributed()
-            && !opts.output_dir.empty()
-            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
-            && R.eigenvectors.has_value()
-            && !R.eigenvectors->host.empty()
-            && R.hdf5_path.empty()) {
-        try {
-            HDF5IO::saveDiagonalizationResults(
-                opts.output_dir,
-                R.eigenvalues,
-                R.eigenvectors->host,
-                /*solver_name=*/"ed::workflows::solve");
-            R.hdf5_path = opts.output_dir + "/ed_results.h5";
-            R.eigenvectors->hdf5_path = R.hdf5_path;
-        } catch (const std::exception& e) {
-            // Persisting eigenvectors is best-effort: if HDF5 IO fails
-            // (read-only mount, quota, etc.) we keep the in-memory result
-            // intact and surface the failure as a diagnostic note rather
-            // than aborting the whole solve.
-            R.backend.notes.emplace_back(
-                "eigenvector_save_failed", e.what());
-        }
-    }
+    // ---------------------------------------------------------------------
+    // Universal persistence finalizer (May 2026 follow-up). Pinned by
+    // the long block-comment on ``apply_solve_save_finalizer`` above.
+    //
+    // Writes:
+    //   * serial lane: ``<out>/ed_results.h5`` with
+    //     ``/eigendata/eigenvalues`` (always) and
+    //     ``/eigendata/eigenvector_*`` (when ``compute_vectors`` is set
+    //     and the kernel populated host-side eigenvectors).
+    //   * MPI lane: same file from rank 0 carrying only the aggregate
+    //     eigenvalue array. Per-rank ``rank_<r>.h5`` files remain the
+    //     canonical location for slab-distributed eigenvectors.
+    //
+    // No-op when ``R.hdf5_path`` was already filled by the FullDiag
+    // upstream lane.
+    // ---------------------------------------------------------------------
+    apply_solve_save_finalizer(R, geom, opts);
 
     R.backend.lane = (geom.is_distributed() ? "mpi" : "cpu");
     if (geom.is_device()) R.backend.lane = geom.is_distributed() ? "mpi_gpu" : "gpu";
@@ -919,9 +1081,23 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     //   - FTLM / LTLM / KPM_DOS: aggregated thermodynamic curves
     //     (``T, E, Cv, S, F``) only -- no state vectors.
     // -----------------------------------------------------------------
-    if (!H.geometry().is_distributed()
-            && !opts.output_dir.empty()
-            && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+    // MPI-aware single-file emission (May 2026 follow-up): rank 0 owns
+    // the aggregate thermo / TPQ-trajectory data (the kernels recombine
+    // per-sample columns onto rank 0 before the orchestrator wraps the
+    // result), so we run the finalizer there too. Slab-distributed TPQ
+    // state vectors are *not* re-gathered here -- the per-rank
+    // ``rank_<r>.h5`` files written by ``ed_distributed_main`` remain
+    // the canonical location for those. The unified file therefore
+    // ships:
+    //   * mTPQ / cTPQ: per-sample trajectory rows (always on rank 0).
+    //     The probe-beta state snapshots are written only when they are
+    //     populated -- which is the serial case; in the distributed
+    //     lane ``R.tpq_state_snapshots`` is empty on rank 0 and the
+    //     loop is a no-op.
+    //   * FTLM / LTLM / KPM_DOS: aggregated thermodynamic curves.
+    if (!opts.output_dir.empty()
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
+            && is_unified_writer(H.geometry())) {
         try {
             std::error_code ec;
             std::filesystem::create_directories(opts.output_dir, ec);
@@ -1282,6 +1458,77 @@ SpectralResult spectral(const LinearOperator&                      H,
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();
+
+    // -----------------------------------------------------------------
+    // "Universal save contract" follow-up (May 2026): uniform spectral
+    // persistence finalizer. Mirrors the thermal finalizer above --
+    // when the caller supplies a real ``output_dir`` and the current
+    // process is the unified-file writer (every rank for the serial
+    // lane, rank 0 only for MPI lanes), lay down the standard group
+    // skeleton and persist (omega, S_real, S_imag, errors_real,
+    // errors_imag) under ``/dynamical/<method>/...`` of
+    // ``<output_dir>/ed_results.h5``.
+    //
+    // Method labels:
+    //   GroundStateCF -> "ground_state_cf"
+    //   FtlmDynamical -> "ftlm_dynamical"
+    //   KpmDynamical  -> "kpm_dynamical"
+    //
+    // The legacy ``FtlmDynamical`` branch already passes
+    // ``opts.output_dir`` to ``compute_dynamical_correlation`` which
+    // writes ``/ftlm/samples/dynamical/...`` when
+    // ``store_intermediate=true``. The uniform finalizer is
+    // complementary: it ships the aggregated S(omega) at a stable,
+    // method-tagged path regardless of which kernel produced it.
+    //
+    // MPI: ``R.omega`` / ``R.S_*`` are reduced onto every rank by the
+    // kernels (CF / KPM use rank-local matvecs + ``MPI_Allreduce``;
+    // FTLM averages locally and reduces at the orchestrator level),
+    // so rank 0 holds the final aggregate. Per-rank ``rank_<r>.h5``
+    // files (when produced by the legacy CLI) remain the canonical
+    // location for any rank-local intermediates.
+    // -----------------------------------------------------------------
+    if (!opts.output_dir.empty()
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
+            && is_unified_writer(H.geometry())) {
+        try {
+            std::error_code ec;
+            std::filesystem::create_directories(opts.output_dir, ec);
+            const std::string h5_path =
+                opts.output_dir + "/ed_results.h5";
+            HDF5IO::createOrOpenFile(opts.output_dir);
+
+            const char* label =
+                (opts.method == SpectralOptions::Method::GroundStateCF)
+                    ? "ground_state_cf"
+              : (opts.method == SpectralOptions::Method::KpmDynamical)
+                    ? "kpm_dynamical"
+              : (opts.method == SpectralOptions::Method::FtlmDynamical)
+                    ? "ftlm_dynamical"
+              : "spectral";
+
+            HDF5IO::saveDynamicalResponseFull(
+                h5_path,
+                std::string(label),
+                R.omega,
+                R.S_real,
+                R.S_imag,
+                R.errors_real,
+                R.errors_imag,
+                /*total_samples=*/static_cast<std::uint64_t>(
+                    std::max<std::size_t>(1, opts.num_samples)),
+                /*temperature=*/0.0);
+
+            R.hdf5_path = h5_path;
+        } catch (const std::exception& e) {
+            // Non-fatal: skip persistence on I/O failure but surface
+            // the cause via stderr. The caller still gets the in-memory
+            // ``R`` back; an empty ``R.hdf5_path`` flags that no
+            // on-disk file was produced.
+            std::cerr << "ed::spectral: persistence finalizer failed: "
+                      << e.what() << "\n";
+        }
+    }
     return R;
 }
 

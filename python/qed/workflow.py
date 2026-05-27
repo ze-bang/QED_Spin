@@ -203,6 +203,19 @@ def _ed_params_to_solve_options(
     opts.compute_vectors = bool(params.compute_eigenvectors)
     opts.output_dir      = str(params.output_dir or "")
 
+    # "Universal save contract" follow-up (May 2026): pipe the
+    # ``device=`` selection through to ``opts.backend.allow_gpu``.
+    # Previously ``qed.solve(device='cpu')`` left ``opts.backend``
+    # at its default (``allow_gpu=true``), so the streaming-symmetry
+    # binding's ``select_backend`` happily picked the CUDA mirror
+    # for SectorViews (which advertises ``supports_device_matvec``
+    # whenever ``WITH_CUDA`` is on). Mirrors the existing
+    # ``qed.thermal`` / ``qed.spectral`` wiring.
+    use_gpu = bool(getattr(params, "use_gpu", False))
+    use_mpi = bool(getattr(params, "use_mpi", False))
+    opts.backend.allow_gpu = bool(use_gpu)
+    opts.backend.allow_mpi = bool(use_mpi)
+
     method_map = {
         DiagonalizationMethod.LANCZOS:       _core.SolveMethod.Lanczos,
         DiagonalizationMethod.BLOCK_LANCZOS: _core.SolveMethod.BlockLanczos,

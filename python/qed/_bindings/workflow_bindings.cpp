@@ -20,6 +20,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/complex.h>
 
+#include <ed/core/hdf5_io.h>             // isDisabledOutputPath
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/core/operator.h>
@@ -569,6 +570,23 @@ void bind_workflows(py::module_& m) {
                   const std::vector<std::size_t>& iter_sectors =
                       enable_two_phase ? phase2_sector_indices
                                        : sector_indices;
+                  // "Universal save contract" follow-up (May 2026):
+                  // when the user requested eigenvectors + a real
+                  // ``output_dir`` for a streaming-symmetry solve, every
+                  // sector wrote to the SAME ``<output_dir>/ed_results.h5``
+                  // -- the ``/eigendata/*`` datasets are keyed without
+                  // a sector tag, so every sector silently overwrote
+                  // the previous one and only the last sector's
+                  // eigenvectors survived. Route per-sector writes to
+                  // ``<output_dir>/sector_k_<k>/ed_results.h5`` (mirrors
+                  // the thermal streaming-symmetry binding) and surface
+                  // the parent dir + per-sector file list on the
+                  // aggregate ``GroundStateResult``.
+                  const bool need_per_sector_outdir =
+                      opts.compute_vectors
+                      && !opts.output_dir.empty()
+                      && !HDF5IO::isDisabledOutputPath(opts.output_dir);
+                  std::vector<std::string> sector_hdf5_paths;
                   for (std::size_t k : iter_sectors) {
                       auto sec = handle.sector(k);
                       if (!sec || sec->dim() == 0) continue;
@@ -579,6 +597,10 @@ void bind_workflows(py::module_& m) {
                       // the orchestrator is invoked on a SectorView.
                       sopts.selected_sectors.clear();
                       sopts.use_symmetry = false;
+                      if (need_per_sector_outdir) {
+                          sopts.output_dir = opts.output_dir
+                              + "/sector_k_" + std::to_string(k);
+                      }
                       auto sr = ed::workflows::solve(*sec, sopts);
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(k));
@@ -586,6 +608,9 @@ void bind_workflows(py::module_& m) {
                       all_eigs.insert(all_eigs.end(),
                                       sr.eigenvalues.begin(),
                                       sr.eigenvalues.end());
+                      if (need_per_sector_outdir && !sr.hdf5_path.empty()) {
+                          sector_hdf5_paths.push_back(sr.hdf5_path);
+                      }
                   }
 
                   // Build the global merged-then-sorted vector while
@@ -626,6 +651,12 @@ void bind_workflows(py::module_& m) {
                   agg.sector_tags                = std::move(touched_tags);
                   agg.eigenvalues_per_sector     = std::move(eigs_per_sector);
                   agg.sector_index_of_eigenvalue = std::move(sorted_origin);
+                  // Surface the parent ``output_dir`` on the aggregate
+                  // when at least one sector wrote a real HDF5 file --
+                  // mirrors the thermal binding's contract.
+                  if (need_per_sector_outdir && !sector_hdf5_paths.empty()) {
+                      agg.hdf5_path = opts.output_dir;
+                  }
               }
               return agg;
           },
@@ -830,15 +861,39 @@ void bind_workflows(py::module_& m) {
                       }
                   }
 
+                  // Save & DSSF Upgrades follow-up (May 2026): when the
+                  // user supplied an ``output_dir`` AND a TPQ method,
+                  // each per-sector run wrote to the SAME
+                  // ``<output_dir>/ed_results.h5`` and overwrote the
+                  // previous sector's TPQ samples / state vectors. The
+                  // workaround in the old code path was to clear
+                  // ``topts.output_dir`` entirely, which silently
+                  // destroyed every state-vector snapshot when
+                  // ``probe_betas`` was set. We now route per-sector
+                  // writes to ``<output_dir>/sector_k_<k>/`` and surface
+                  // the parent dir + the per-sector path list on the
+                  // aggregate ``ThermalResult``. Non-TPQ methods can
+                  // also benefit (per-sector ftlm/averaged groups stay
+                  // intact) but the bug was specific to TPQ because
+                  // FTLM/LTLM/KPM-DOS only ship the aggregated curves.
+                  const bool need_per_sector_outdir =
+                      !opts.output_dir.empty()
+                      && !HDF5IO::isDisabledOutputPath(opts.output_dir);
+                  std::vector<std::string> sector_hdf5_paths;
+
                   for (std::size_t k : sector_indices) {
                       auto sec = handle.sector(k);
                       if (!sec || sec->dim() == 0) continue;
                       ed::workflows::ThermalOptions topts = opts;
                       topts.selected_sectors.clear();
-                      // Drop output_dir so per-sector calls do not
-                      // collide; each contributes to the recombined
-                      // grid only.
-                      topts.output_dir.clear();
+                      if (need_per_sector_outdir) {
+                          topts.output_dir = opts.output_dir
+                              + "/sector_k_" + std::to_string(k);
+                      } else {
+                          // No user-supplied output_dir -- keep the
+                          // per-sector call silent on disk.
+                          topts.output_dir.clear();
+                      }
                       // Wave B3: inject shared spectral bounds when
                       // the binding-level estimator succeeded.
                       if (std::isfinite(shared_e_min)
@@ -869,6 +924,10 @@ void bind_workflows(py::module_& m) {
                       entry.tag                 = tag;
                       per_sector.push_back(std::move(entry));
 
+                      if (need_per_sector_outdir && !tr.hdf5_path.empty()) {
+                          sector_hdf5_paths.push_back(tr.hdf5_path);
+                      }
+
                       if (std::isfinite(tr.ground_state_energy)) {
                           gs_E = std::min(gs_E, tr.ground_state_energy);
                       }
@@ -880,6 +939,15 @@ void bind_workflows(py::module_& m) {
                   }
                   agg.per_sector         = std::move(per_sector);
                   agg.ground_state_energy = std::isfinite(gs_E) ? gs_E : 0.0;
+                  // Surface the parent output_dir on the aggregate
+                  // result when any per-sector run wrote to disk. Each
+                  // sector's per-file path is under
+                  // ``<output_dir>/sector_k_<k>/ed_results.h5``; the
+                  // aggregate value points at the parent so callers
+                  // can glob.
+                  if (need_per_sector_outdir && !sector_hdf5_paths.empty()) {
+                      agg.hdf5_path = opts.output_dir;
+                  }
               }
               return agg;
           },
