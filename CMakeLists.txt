@@ -743,6 +743,11 @@ if(BUILD_ED_TESTS)
     # it fresh against an actual consumer.
     ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
+    # Phase A (PR-1 step 6) of the "mirror examples" plan (May 2026):
+    # pins byte-equality between the Python-named `ed::api::*` kwargs
+    # facade and the legacy `ed::workflows::*` orchestrator across a
+    # representative cell from each method.
+    ed_add_test(test_api_mirror                 tests/unit/test_api_mirror.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     # Full Unified-Interface Collapse, end-to-end acceptance (May 2026):
     # walks every (source x axis x workflow x method) cell of the
