@@ -52,7 +52,7 @@ import tempfile
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 
@@ -143,6 +143,11 @@ def _ed_params_to_thermal_options(
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    # probe-beta list for mTPQ/cTPQ state-vector snapshots.
+    pb = list(getattr(params, "tpq_probe_betas", []) or [])
+    if pb:
+        opts.probe_betas = pb
     return opts
 
 
@@ -156,6 +161,15 @@ def _ed_result_from_thermal_result(
     out.thermo_data = tr.thermo
     out.eigenvalues = [float(tr.ground_state_energy)] \
         if tr.ground_state_energy != 0.0 else []
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): mirror
+    # the thermal orchestrator's ``ed_results.h5`` path through the
+    # legacy ``eigenvectors_path`` field. ``qed.thermal(output_dir=...)``
+    # now produces a self-describing HDF5 (trajectory + state vectors
+    # at probe-betas for mTPQ/cTPQ; aggregated thermo curves for
+    # FTLM/LTLM/KPM_DOS).
+    h5_path = str(getattr(tr, "hdf5_path", "") or "")
+    out.eigenvectors_computed = bool(h5_path)
+    out.eigenvectors_path     = h5_path
     return out
 
 
@@ -280,6 +294,16 @@ class ThermalResult:
     used_sz_decomposition: bool
     used_symmetry_decomposition: bool
     per_sector: list[ThermalSectorEntry] = field(default_factory=list)
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): path to
+    # the HDF5 file produced by the thermal orchestrator (when
+    # ``output_dir`` was set). Empty string means no on-disk artefact
+    # was produced (or the run was multi-sector and only the last
+    # sector's file survived; see :func:`qed.thermal` for the
+    # multi-sector caveat). For mTPQ / cTPQ runs with ``probe_betas``
+    # set, the file carries per-sample trajectories under
+    # ``/tpq/samples/sample_<s>/thermodynamics`` and state vectors
+    # under ``/tpq/samples/sample_<s>/state_beta_<b>``.
+    hdf5_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +495,15 @@ def thermal(
     # ``0.0`` -> auto-pick via a quick Lanczos spectral-bound estimate
     # inside the orchestrator's TPQ kernel (single source of truth).
     tpq_energy_shift: float = 0.0,
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    # user-supplied probe-betas at which the mTPQ/cTPQ kernel should
+    # snapshot the running state vector and persist it (together with
+    # the trajectory) inside ``<output_dir>/ed_results.h5``. Empty
+    # (default) -> no state vectors saved. Combine with
+    # ``output_dir="..."`` to land the snapshots on disk; reload via
+    # h5py at ``/tpq/samples/sample_<s>/state_beta_<b>`` for the
+    # TPQ-to-CF spectral pipeline.
+    probe_betas: Optional[List[float]] = None,
     # Directory-form-only knobs.
     num_sites: Optional[int] = None,
     spin: float = 0.5,
@@ -526,6 +559,16 @@ def thermal(
     extra_params : dict, optional
         Forwarded to :func:`qed.solve` per sector. Use for any niche
         ``EDParameters`` field this helper doesn't expose.
+    probe_betas : list of float, optional
+        Inverse temperatures at which the mTPQ / cTPQ kernel should
+        snapshot (copy to host) the running TPQ state vector. Combined
+        with ``output_dir``, this lands each snapshot in
+        ``<output_dir>/ed_results.h5`` at
+        ``/tpq/samples/sample_<s>/state_beta_<b>`` for downstream
+        reload (e.g. by :func:`qed.spectral(method="GroundStateCF",
+        initial_state=...)`). Empty / ``None`` (default) -> the
+        kernel skips state-vector copies and only the trajectory is
+        persisted. Ignored by FTLM / LTLM / KPM_DOS.
 
     Returns
     -------
@@ -619,6 +662,11 @@ def thermal(
             tpq_measurement_interval=int(tpq_measurement_interval),
             tpq_energy_shift=float(tpq_energy_shift),
         )
+        # Pillar 1: probe-beta list for state-vector snapshots.
+        # Empty/None => no snapshots; the orchestrator persists only
+        # the trajectory in HDF5.
+        if probe_betas:
+            method_extra["tpq_probe_betas"] = [float(b) for b in probe_betas]
 
     merged_extra: dict[str, Any] = {**method_extra}
     if extra_params:
@@ -801,6 +849,7 @@ def thermal(
                 temps, E, Cv, S, F = thermo
                 gs_E = (float(res.eigenvalues[0])
                         if len(res.eigenvalues) > 0 else math.inf)
+                h5_path = str(getattr(res, "eigenvectors_path", "") or "")
             finally:
                 _cleanup_scratch()
             return ThermalResult(
@@ -813,6 +862,7 @@ def thermal(
                 # symmetry-decomposition flag is now `has_sym`
                 # unconditionally.
                 used_symmetry_decomposition=bool(has_sym),
+                hdf5_path=h5_path,
             )
 
         if verbose:
@@ -870,6 +920,11 @@ def thermal(
                 )
             temps, E, Cv, S, F = _combine_sector_thermodynamics(
                 per_sector_blocks)
+            # Pillar 1 (May 2026): the last sector's HDF5 file is the
+            # shared one (every sector writes to the same path); surface
+            # it. Per-sector overwrite under TPQ is a known limitation
+            # of the multi-Sz mode; see qed.thermal docs.
+            h5_path_multi = str(getattr(res, "eigenvectors_path", "") or "")
         finally:
             _cleanup_scratch()
         if verbose:
@@ -884,6 +939,7 @@ def thermal(
             temperatures=temps, energy=E, specific_heat=Cv, entropy=S,
             free_energy=F, method=str(method),
             ground_state_energy=gs_E,
+            hdf5_path=h5_path_multi,
             used_sz_decomposition=True,
             used_symmetry_decomposition=(
                 has_sym and method_enum not in _TPQ_METHODS),
@@ -957,6 +1013,7 @@ def thermal(
             temps, E, Cv, S, F = thermo
             gs_E = (float(res.eigenvalues[0])
                     if len(res.eigenvalues) > 0 else math.inf)
+            h5_path_solo = str(getattr(res, "eigenvectors_path", "") or "")
         finally:
             _cleanup_scratch()
         return ThermalResult(
@@ -965,6 +1022,7 @@ def thermal(
             ground_state_energy=gs_E,
             used_sz_decomposition=False,
             used_symmetry_decomposition=False,
+            hdf5_path=h5_path_solo,
         )
 
     if verbose:
@@ -1009,6 +1067,8 @@ def thermal(
             )
 
         temps, E, Cv, S, F = _combine_sector_thermodynamics(per_sector_blocks)
+        # Pillar 1 (May 2026): surface the last sector's HDF5 path.
+        h5_path_imem_multi = str(getattr(res, "eigenvectors_path", "") or "")
     finally:
         _cleanup_scratch()
     if verbose:
@@ -1023,4 +1083,5 @@ def thermal(
         used_sz_decomposition=True,
         used_symmetry_decomposition=False,
         per_sector=per_sector_records,
+        hdf5_path=h5_path_imem_multi,
     )

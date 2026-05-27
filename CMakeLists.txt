@@ -748,6 +748,27 @@ if(BUILD_ED_TESTS)
     # facade and the legacy `ed::workflows::*` orchestrator across a
     # representative cell from each method.
     ed_add_test(test_api_mirror                 tests/unit/test_api_mirror.cpp USE_CATCH2)
+    # Eigenvector-save contract (May 2026): every CPU-single-rank solver
+    # method (Lanczos / BlockLanczos / KrylovSchur / FullDiag) MUST honor
+    # `compute_vectors=true` + `output_dir=...` by writing
+    # `<output_dir>/ed_results.h5` and reporting the path via
+    # `GroundStateResult::hdf5_path` (which `EDResults.eigenvectors_path`
+    # mirrors on the Python side).
+    ed_add_test(test_eigenvector_save           tests/unit/test_eigenvector_save.cpp USE_CATCH2)
+    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    # mirror-image of `test_eigenvector_save` but for
+    # `ed::workflows::thermal` -- pins the uniform `ed_results.h5`
+    # contract for FTLM / LTLM / KPM_DOS (thermo curves) and
+    # mTPQ / cTPQ (trajectory + probe-beta state vectors).
+    ed_add_test(test_thermal_save               tests/unit/test_thermal_save.cpp USE_CATCH2)
+    # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026): pins the
+    # ``SpectralOptions::initial_state`` contract on the GroundStateCF
+    # lane (auto-GS, user-supplied GS, and TPQ-style warm seeds).
+    ed_add_test(test_spectral_initial_state     tests/unit/test_spectral_initial_state.cpp USE_CATCH2)
+    # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026): pins the
+    # ``SpectralOptions::Method::KpmDynamical`` lane against the dense
+    # Lehmann reference (smoothed L2 < 5%) on the 4-site Heisenberg ring.
+    ed_add_test(test_kpm_dynamical_spectral     tests/unit/test_kpm_dynamical_spectral.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     # Full Unified-Interface Collapse, end-to-end acceptance (May 2026):
     # walks every (source x axis x workflow x method) cell of the

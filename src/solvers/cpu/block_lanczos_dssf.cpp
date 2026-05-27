@@ -397,8 +397,13 @@ MultiChannelDSSFResults compute_ground_state_block_dssf(
         }
     }
 
-    // Lorentzian-broadened spectra.
-    #pragma omp parallel for schedule(static) collapse(2) if(P * params.num_omega_points > 4096)
+    // Lorentzian-broadened spectra. Pillar 2 of the "Save and DSSF
+    // Upgrades" plan (May 2026): drop the ``P * num_omega > 4096``
+    // gate. The serial fall-through was a tiny-grid micro-optimisation
+    // that hid the user's expectation that "DSSF is omega-parallel"
+    // -- the OpenMP overhead at the typical production grids
+    // (P ~ 4, num_omega >= 200) is negligible.
+    #pragma omp parallel for schedule(static) collapse(2)
     for (std::size_t p = 0; p < P; ++p) {
         for (std::size_t iw = 0; iw < params.num_omega_points; ++iw) {
             const double omega = results.frequencies[iw];

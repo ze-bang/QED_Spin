@@ -155,6 +155,11 @@ struct ThermalOptions {
     std::size_t tpq_taylor_order      = 8;
     std::size_t tpq_measurement_interval = 1;
     double      tpq_energy_shift      = 0.0;
+    /// Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+    /// probe-beta list for mTPQ/cTPQ state-vector snapshots. Empty =
+    /// trajectory-only persistence. Plumbed straight through to
+    /// ``ed::workflows::ThermalOptions::probe_betas``.
+    std::vector<double> probe_betas;
     /// Streaming-symmetry sector filter (empty = walk every non-empty).
     std::vector<std::size_t> selected_sectors;
 };
@@ -193,6 +198,27 @@ struct SpectralOptions {
     std::vector<double> momentum_transfer;
     double      momentum_tolerance    = 1e-6;
     std::vector<std::size_t> selected_sectors;
+
+    /// Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
+    /// caller-supplied seed state for the GroundStateCF lane. Empty
+    /// (default) -> the orchestrator computes the GS via an inner
+    /// Lanczos solve. Length MUST match ``H.geometry().local_dim``.
+    /// Mirror of ``ed::workflows::SpectralOptions::initial_state``.
+    std::vector<std::complex<double>> initial_state;
+
+    /// Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+    /// KPM-dynamical knobs (used only by ``method == "kpm_dynamical"``;
+    /// ignored by the GroundStateCF / FtlmDynamical lanes).
+    std::size_t kpm_moments           = 200;
+    /// Chebyshev kernel for KPM-dynamical: "Jackson" (default) or
+    /// "Lorentz".
+    std::string kpm_kernel            = "Jackson";
+    /// Lorentz kernel decay parameter (only used when
+    /// ``kpm_kernel == "Lorentz"``).
+    double      kpm_lorentz_lambda    = 4.0;
+    /// Optional override for the (E_min, E_max) Chebyshev rescaling.
+    /// Unset (default) -> let the kernel discover them via Lanczos.
+    std::optional<std::pair<double, double>> kpm_spectral_bounds;
 };
 
 // ---------------------------------------------------------------------------

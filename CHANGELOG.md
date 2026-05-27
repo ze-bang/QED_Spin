@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Save and DSSF Upgrades (May 2026)
+
+Four pillars closing wiring gaps in the spectral + thermal stack.
+
+- **Pillar 1 -- uniform thermal persistence.** Extended the eigenvector
+  save contract above to `ed::workflows::thermal`. New
+  `ThermalOptions::probe_betas` (`std::vector<double>`); when set on
+  mTPQ / cTPQ, the orchestrator snapshots the running state vector at
+  the kernel-step beta closest to each user-requested beta. FTLM /
+  LTLM / KPM_DOS persist the aggregated thermodynamic curves
+  (`/ftlm/averaged/*`). mTPQ / cTPQ persist the full per-sample
+  trajectory under `/tpq/samples/sample_<s>/thermodynamics` plus
+  state vectors under `/tpq/samples/sample_<s>/states/beta_<b>`.
+  `ThermalResult::hdf5_path` (mirrored as
+  `EDResults.eigenvectors_path` / `ThermalResult.hdf5_path` in
+  Python) reports the produced file. `qed.thermal(..., probe_betas=[
+  ...])` is the public Python knob. Pinned by
+  `tests/unit/test_thermal_save.cpp` (7 cases) and demonstrated by
+  `examples/thermal/mtpq/cpu_save.{cpp,py}`.
+- **Pillar 2 -- omega-parallelise the remaining serial DSSF loops.**
+  Added `#pragma omp parallel for schedule(static) if(n_omega > 32)`
+  over the outer `i_omega` loop in
+  `compute_spectral_function` / `compute_spectral_function_complex`
+  (`src/solvers/cpu/ftlm.cpp`, the single-T `FtlmDynamical` Lehmann
+  path used by `ed::workflows::spectral::FtlmDynamical` and
+  `compute_dynamical_response_workflow`). Same pragma on the KPM
+  Chebyshev omega sweep in `src/solvers/cpu/ftlm_kpm.cpp`. Dropped
+  the `if (P * num_omega_points > 4096)` gate on Block-Lanczos DSSF
+  (`src/solvers/cpu/block_lanczos_dssf.cpp`) so OpenMP stays active
+  on small grids. New benchmark
+  `benchmarks/bench_dssf_omega_parallel.cpp` quantifies the speedup
+  on a single-T FTLM lane.
+- **Pillar 3 -- `ground_state_dssf` accepts an arbitrary input state.**
+  New `SpectralOptions::initial_state` (`std::vector<Complex>`,
+  default empty). When non-empty the GroundStateCF lane skips the
+  inner Lanczos seed step and feeds the user-supplied (renormalised)
+  vector into `cf_spectral_kernel` directly -- this is the TPQ-to-CF
+  pipeline. When empty, the orchestrator now runs the inner Lanczos
+  with `compute_vectors=true` and uses the *actual* ground-state
+  eigenvector (closing the legacy random-vector shortcut). Plumbed
+  through `ed::api::SpectralOptions::to_legacy` and the
+  `qed.spectral(..., initial_state=...)` Python kwarg (accepts numpy
+  arrays, lists, and structured `(real, imag)` HDF5 dtypes). Pinned
+  by `tests/unit/test_spectral_initial_state.cpp` (3 cases) and
+  demonstrated by
+  `examples/spectral/ground_state_dssf/cpu_from_tpq_state.{cpp,py}`.
+- **Pillar 4 -- KPM dynamical promoted to a first-class
+  `SpectralOptions::Method`.** Added
+  `SpectralOptions::Method::KpmDynamical` with knobs `kpm_moments`
+  (default 200), `kpm_kernel` ∈ {`Jackson`, `Lorentz`},
+  `kpm_lorentz_lambda`, `kpm_spectral_bounds`. The orchestrator
+  branch resolves the seed (same contract as GroundStateCF),
+  estimates `[E_min_H, E_max_H]` of H via
+  `ed::kpm_dos::estimate_spectral_bounds`, computes the rescaling so
+  the eigenvalues of `(H - b) / a` land in `[-1, 1]`, then drives
+  `ed::observables::kpm_dynamical_correlator` (->
+  `compute_kpm_ltlm_from_states` at beta = 0). Tokens accepted by
+  `ed::api::parse_spectral_method`: `kpm_dynamical`, `kpm_dyn`,
+  `KpmDynamical`, `KPM_DYNAMICAL`. Python:
+  `qed.spectral(..., method="kpm_dynamical", kpm_moments=...,
+  kpm_kernel="Jackson"|"Lorentz", kpm_lorentz_lambda=...)`. Pinned by
+  `tests/unit/test_kpm_dynamical_spectral.cpp` (4 cases including a
+  smoothed-L2 < 5% match against the dense Lehmann reference) and
+  demonstrated by `examples/spectral/kpm_dynamical/cpu_none.{cpp,py}`.
+  `docs/architecture/DSSF.md` Section 1 updated to list the new
+  method alongside `GroundStateCF` and `FtlmDynamical`.
+
+### Uniform eigenvector save + DSSF landscape doc (May 2026)
+
+- **Eigenvector save is now wired uniformly across every CPU and
+  single-rank GPU solver method.** Before this change, only the FullDiag
+  lane honoured `compute_eigenvectors=true` + `output_dir=...`:
+  `Lanczos` / `BlockLanczos` / `KrylovSchur` populated the in-memory
+  `GroundStateResult::eigenvectors->host` buffer but silently dropped
+  the requested `output_dir` (the kernel `Options::output_dir` was a
+  declared-but-unread placeholder marked "TODO: not yet used"). The
+  Python `EDResults.eigenvectors_path` therefore came back empty no
+  matter what the caller passed.
+  - Added a uniform post-kernel finalizer in
+    `src/orchestrator.cpp::ed::workflows::solve` that calls
+    `HDF5IO::saveDiagonalizationResults(output_dir, eigenvalues,
+    eigenvectors->host, "ed::workflows::solve")` whenever the caller
+    requested vectors *and* `output_dir` is non-empty *and* the run is
+    single-rank. `R.hdf5_path` (and Python's
+    `EDResults.eigenvectors_path`) is then set to the produced
+    `<output_dir>/ed_results.h5`.
+  - The FullDiag lane already wrote the file; it now also records the
+    path on `R.hdf5_path` for parity.
+  - MPI lanes intentionally skip the shared-file save (they would
+    cross-rank clobber a single `ed_results.h5`); the existing per-rank
+    `ed_distributed_main` / streaming-symmetry directory walker
+    continues to write `rank_*.h5` slabs under `output_dir`.
+  - New regression test:
+    `tests/unit/test_eigenvector_save.cpp` (Catch2 v3, 7 cases) walks
+    every CPU `SolveMethod` and the `ed::api::solve` facade, then
+    round-trips the eigenvalues + ground-state vector through
+    `HDF5IO::loadEigenvalues` / `loadEigenvector`.
+  - New example pair: `examples/solve/lanczos/cpu_save.{cpp,py}` -- the
+    canonical save-then-reload recipe with an Expected-output block.
+    Documented under "Persisting eigenvectors to HDF5" in
+    `examples/README.md`.
+
+- **DSSF / spectral landscape doc.** Added
+  [`docs/architecture/DSSF.md`](docs/architecture/DSSF.md) which maps
+  the four orthogonal spectral lanes (in-memory orchestrator,
+  streaming-symmetry same/cross-irrep walkers, CLI DSSF engine), shows
+  which Python `qed.spectral(...)` shape lands in which lane, and gives
+  a decision table for picking between them. Cross-linked from
+  `docs/architecture/CODEMAP.md` Section 3.
+
 ### Example tree overhaul (PR-2 / PR-3 / PR-4 / PR-5 of the "mirror examples" plan, May 2026)
 
 Companion to the PR-1 API mirror facade (see entry below). Reorganises

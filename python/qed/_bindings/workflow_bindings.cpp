@@ -214,7 +214,14 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("kpm_num_moments",
                        &ed::workflows::ThermalOptions::kpm_num_moments)
         .def_readwrite("kpm_num_random_vectors",
-                       &ed::workflows::ThermalOptions::kpm_num_random_vectors);
+                       &ed::workflows::ThermalOptions::kpm_num_random_vectors)
+        // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+        // user-supplied probe-betas for mTPQ/cTPQ state-vector
+        // snapshots. Empty list (default) means "no state vectors are
+        // saved"; the trajectory is always saved when ``output_dir``
+        // is set.
+        .def_readwrite("probe_betas",
+                       &ed::workflows::ThermalOptions::probe_betas);
 
     py::class_<ed::ThermalResult>(m, "ThermalResult")
         .def(py::init<>())
@@ -229,7 +236,27 @@ void bind_workflows(py::module_& m) {
         .def_readonly("ground_state_energy", &ed::ThermalResult::ground_state_energy)
         .def_readonly("krylov",              &ed::ThermalResult::krylov)
         .def_readonly("backend",             &ed::ThermalResult::backend)
-        .def_readonly("hdf5_path",           &ed::ThermalResult::hdf5_path);
+        .def_readonly("hdf5_path",           &ed::ThermalResult::hdf5_path)
+        // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
+        // TPQ trajectory + state-snapshot surface. Mirror-images of
+        // the kernel result so the user can introspect what landed
+        // in HDF5 (or post-process in memory) without re-running the
+        // sample.
+        .def_readonly("tpq_sample_betas",
+                      &ed::ThermalResult::tpq_sample_betas)
+        .def_readonly("tpq_sample_energies",
+                      &ed::ThermalResult::tpq_sample_energies)
+        .def_readonly("tpq_sample_variances",
+                      &ed::ThermalResult::tpq_sample_variances)
+        .def_readonly("tpq_state_snapshots",
+                      &ed::ThermalResult::tpq_state_snapshots);
+
+    py::class_<ed::TpqStateSnapshot>(m, "TpqStateSnapshot")
+        .def(py::init<>())
+        .def_readonly("sample_index",   &ed::TpqStateSnapshot::sample_index)
+        .def_readonly("requested_beta", &ed::TpqStateSnapshot::requested_beta)
+        .def_readonly("effective_beta", &ed::TpqStateSnapshot::effective_beta)
+        .def_readonly("psi",            &ed::TpqStateSnapshot::psi);
 
     // ThermalSectorEntry binding (needed for ThermalResult.per_sector).
     py::class_<ed::ThermalSectorEntry>(m, "ThermalSectorEntry")
@@ -246,6 +273,14 @@ void bind_workflows(py::module_& m) {
     py::enum_<ed::workflows::SpectralOptions::Method>(m, "SpectralMethod")
         .value("GroundStateCF",  ed::workflows::SpectralOptions::Method::GroundStateCF)
         .value("FtlmDynamical",  ed::workflows::SpectralOptions::Method::FtlmDynamical)
+        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+        // KpmDynamical -- Chebyshev expansion of `delta(omega - H)`.
+        .value("KpmDynamical",   ed::workflows::SpectralOptions::Method::KpmDynamical)
+        .export_values();
+
+    py::enum_<ed::workflows::SpectralOptions::KpmKernel>(m, "SpectralKpmKernel")
+        .value("Jackson", ed::workflows::SpectralOptions::KpmKernel::Jackson)
+        .value("Lorentz", ed::workflows::SpectralOptions::KpmKernel::Lorentz)
         .export_values();
 
     py::class_<ed::workflows::SpectralOptions>(m, "SpectralOptions")
@@ -273,7 +308,21 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("temperatures",
                        &ed::workflows::SpectralOptions::temperatures)
         .def_readwrite("observable_type",
-                       &ed::workflows::SpectralOptions::observable_type);
+                       &ed::workflows::SpectralOptions::observable_type)
+        // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
+        // user-supplied seed state for the GroundStateCF lane.
+        .def_readwrite("initial_state",
+                       &ed::workflows::SpectralOptions::initial_state)
+        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
+        // KpmDynamical knobs.
+        .def_readwrite("kpm_moments",
+                       &ed::workflows::SpectralOptions::kpm_moments)
+        .def_readwrite("kpm_kernel",
+                       &ed::workflows::SpectralOptions::kpm_kernel)
+        .def_readwrite("kpm_lorentz_lambda",
+                       &ed::workflows::SpectralOptions::kpm_lorentz_lambda)
+        .def_readwrite("kpm_spectral_bounds",
+                       &ed::workflows::SpectralOptions::kpm_spectral_bounds);
 
     // SOTA cross-sector spectral contribution (May 2026).
     py::class_<ed::SpectralSectorEntry>(m, "SpectralSectorEntry")

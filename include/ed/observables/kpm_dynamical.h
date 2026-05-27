@@ -15,13 +15,17 @@
 // Backend implementations.
 // =============================================================================
 
+#include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstddef>
+#include <random>
 #include <vector>
 
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec.h>
 #include <ed/solvers/ftlm_kpm.h>
+#include <ed/solvers/kpm_dos.h>  // estimate_spectral_bounds
 
 namespace ed::observables {
 
@@ -83,6 +87,41 @@ KpmDynamicalResult kpm_dynamical_correlator(
     }
     std::vector<double> energies{e_ref.real()};
 
+    // -----------------------------------------------------------------
+    // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026): when
+    // ``compute_kpm_ltlm_from_states`` is invoked with a SINGLE outer
+    // state, its internal Chebyshev rescaling ``a, b`` is collapsed
+    // (``E_min == E_max``, so the fall-back ``BW = 1`` kicks in and the
+    // rescaled spectrum sits outside ``[-1, 1]``). We restore the
+    // correct rescaling by estimating ``[E_lo, E_hi]`` of H via the
+    // shared ``kpm_dos::estimate_spectral_bounds`` Lanczos sweep, then
+    // setting ``spectral_bound_buffer`` so that
+    //     ``a = buffer >= max(E_n - E_lo, E_hi - E_n)``
+    // and ``b = E_n``; this guarantees the eigenvalues of H land in
+    // ``[-1, 1]`` after the ``(H - b) / a`` shift used by
+    // ``accumulate_kpm_inner``.
+    // -----------------------------------------------------------------
+    double e_lo = e_ref.real();
+    double e_hi = e_ref.real();
+    {
+        std::mt19937 gen;
+        if (opts.random_seed == 0) {
+            std::random_device rd; gen.seed(rd());
+        } else {
+            gen.seed(static_cast<std::uint32_t>(opts.random_seed));
+        }
+        ed::kpm_dos::estimate_spectral_bounds(
+            H_apply, static_cast<std::uint64_t>(local_n),
+            opts.spectral_bounds_krylov,
+            /*full_reorth=*/true, /*reorth_freq=*/0,
+            /*tol=*/1e-10, gen,
+            e_lo, e_hi);
+    }
+    const double half_width = std::max(e_ref.real() - e_lo,
+                                        e_hi - e_ref.real());
+    const double effective_buffer = (1.0 + opts.spectral_bound_buffer)
+                                     * std::max(half_width, 1e-6);
+
     ed::kpm::KPMParameters params;
     params.num_moments            = static_cast<int>(opts.num_moments);
     params.num_lowest_states      = 1;
@@ -90,7 +129,12 @@ KpmDynamicalResult kpm_dynamical_correlator(
     params.use_jackson_kernel     = (opts.kernel == KpmKernel::Jackson);
     params.lorentz_lambda         = opts.lorentz_lambda;
     params.random_seed            = opts.random_seed;
-    params.spectral_bound_buffer  = opts.spectral_bound_buffer;
+    // The kernel computes ``buffer = params.spectral_bound_buffer * BW``,
+    // with ``BW = max(E_max - E_min, 1.0) = 1.0`` for our single-state
+    // input. So setting this field directly to ``effective_buffer``
+    // gives ``a = effective_buffer, b = E_n`` -- exactly the rescaling
+    // we need to keep H's spectrum inside ``[-1, 1]``.
+    params.spectral_bound_buffer  = effective_buffer;
 
     const double omega_min = omega_grid.empty() ? -10.0 : omega_grid.front();
     const double omega_max = omega_grid.empty() ? +10.0 : omega_grid.back();
