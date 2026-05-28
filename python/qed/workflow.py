@@ -123,6 +123,18 @@ def _ed_params_to_thermal_options(
         )
     opts.method        = getattr(_core.ThermalMethod, enum_name)
     opts.num_samples   = int(params.num_samples)
+    # Pipe ``device=`` through to ``opts.backend.allow_gpu`` /
+    # ``allow_mpi`` so the orchestrator's ``select_backend`` picks the
+    # requested lane. Without this the thermal opts keep the C++
+    # default (``allow_gpu=true``) and ``qed.solve(method='mtpq',
+    # device='cpu')`` would silently route through the GPU promoter
+    # (rebuild GPUFixedSzOperator per sector, run on CUDA). Mirrors
+    # the ``_ed_params_to_solve_options`` wiring above and the
+    # ``_thermal_via_workflows_thermal`` override in thermal.py.
+    use_gpu = bool(getattr(params, "use_gpu", False))
+    use_mpi = bool(getattr(params, "use_mpi", False))
+    opts.backend.allow_gpu = bool(use_gpu)
+    opts.backend.allow_mpi = bool(use_mpi)
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
     # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
     # the number of (L - H) iterations; cTPQ uses it as the cap on the

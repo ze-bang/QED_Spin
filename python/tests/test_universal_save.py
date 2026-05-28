@@ -33,8 +33,10 @@ C++ streaming-symmetry binding (Bug 1), Python multi-Sz HDF5 collision
 from __future__ import annotations
 
 import glob
+import math
 import os
 import tempfile
+import warnings
 
 import h5py
 import numpy as np
@@ -427,3 +429,193 @@ def test_solve_streaming_symmetry_fulldiag_gpu_small_sectors(tmp_path):
     finally:
         import shutil
         shutil.rmtree(fixture_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Device routing: ``device='gpu'`` for plain Operators must actually run on
+# the GPU lane (not silently fall back to CPU). Symmetric: ``device='cpu'``
+# must NOT touch the GPU even when an NVIDIA device is visible.
+#
+# Both gaps closed in the May 2026 "make sure all workflows are properly
+# routed" follow-up:
+#   * The binding-side GPU promoter (``maybe_promote_to_gpu``) now lifts
+#     a host ``Operator`` / ``FixedSzOperator`` to ``GPUOperator`` /
+#     ``GPUFixedSzOperator`` when ``opts.backend.allow_gpu == true``.
+#   * ``_ed_params_to_thermal_options`` in ``workflow.py`` now forwards
+#     ``params.use_gpu`` / ``params.use_mpi`` into the ThermalOptions
+#     ``BackendConstraints`` (it previously stayed at the C++ default
+#     ``allow_gpu=true`` and the per-sector thermal path through
+#     ``qed.solve`` silently routed every Sz sector through the GPU
+#     even when the user passed ``device='cpu'``).
+# ---------------------------------------------------------------------------
+
+
+@_REQUIRES_GPU
+def test_solve_plain_operator_device_gpu_runs_on_gpu(tmp_path):
+    """``qed.solve(H, device='gpu')`` with a plain Operator must report
+    ``backend.lane == 'gpu'`` (not silently downgraded to CPU)."""
+    from qed import _core
+    H = _ring_n(14)  # dim=2^14, in Lanczos territory (skips FullDiag guard)
+    opts = _core.SolveOptions()
+    opts.num_eigs = 1
+    opts.compute_vectors = False
+    opts.use_fixed_sz = True
+    opts.n_up = 7
+    opts.method = _core.SolveMethod.Lanczos
+    opts.backend.allow_gpu = True
+    fsz = H.make_fixed_sz(7)
+    gs = _core.workflows_solve(fsz, opts)
+    assert gs.backend.lane == "gpu", (
+        f"device='gpu' on plain FixedSzOperator should land on the GPU "
+        f"lane after promotion; got {gs.backend.lane!r}.")
+    # And the eigenvalue agrees with the CPU baseline.
+    opts_cpu = _core.SolveOptions()
+    opts_cpu.num_eigs = 1
+    opts_cpu.compute_vectors = False
+    opts_cpu.method = _core.SolveMethod.Lanczos
+    opts_cpu.backend.allow_gpu = False
+    gs_cpu = _core.workflows_solve(fsz, opts_cpu)
+    assert gs_cpu.backend.lane == "cpu"
+    assert abs(gs.eigenvalues[0] - gs_cpu.eigenvalues[0]) < 1e-6
+
+
+def test_thermal_device_cpu_does_not_build_gpu_operator(tmp_path, capfd):
+    """``qed.thermal(..., device='cpu')`` must NOT print the GPUOperator
+    construction banner; the promoter is gated on ``allow_gpu`` and the
+    per-sector thermal opts now forward ``params.use_gpu`` correctly."""
+    H = _ring()
+    _ = qed.thermal(
+        H, method="mtpq",
+        num_samples=1, max_iterations=20,
+        num_T=2, T_min=0.5, T_max=4.0,
+        device="cpu", verbose=False, auto_tune=False,
+        output_dir=str(tmp_path / "th"),
+    )
+    out, _err = capfd.readouterr()
+    # The GPU operator constructor unconditionally prints
+    # "GPU Operator initialized for <N> sites" so we use that as the
+    # GPU-touch sentinel. If we see it under device='cpu', the
+    # routing regressed.
+    assert "GPU Operator initialized" not in out, (
+        "qed.thermal(device='cpu') touched the GPU lane; routing "
+        "regressed (probably _ed_params_to_thermal_options stopped "
+        "forwarding use_gpu).")
+
+
+@_REQUIRES_GPU
+def test_thermal_device_gpu_builds_gpu_operator(tmp_path, capfd):
+    """Symmetric to the above: ``qed.thermal(..., device='gpu')`` SHOULD
+    construct a GPU operator (sentinel banner present)."""
+    H = _ring()
+    _ = qed.thermal(
+        H, method="mtpq",
+        num_samples=1, max_iterations=20,
+        num_T=2, T_min=0.5, T_max=4.0,
+        device="gpu", verbose=False, auto_tune=False,
+        output_dir=str(tmp_path / "th_gpu"),
+    )
+    out, _err = capfd.readouterr()
+    assert "GPU Operator initialized" in out, (
+        "qed.thermal(device='gpu') did not construct a GPU operator; "
+        "the binding-side promoter is missing.")
+
+
+def _ring_n(n_sites: int):
+    b = qed.input.HamiltonianBuilder(n_sites)
+    b.heisenberg([(i, (i + 1) % n_sites) for i in range(n_sites)], J=1.0)
+    return b.to_operator()
+
+
+# ---------------------------------------------------------------------------
+# "Loud fallback" contract -- when ``device='gpu'`` is silently demoted to
+# CPU (FullDiag / FTLM / FtlmDynamical / KpmDynamical), the binding must
+# emit a Python ``RuntimeWarning`` so the caller can audit the demotion
+# rather than discover it through profiling.
+# ---------------------------------------------------------------------------
+
+@_REQUIRES_GPU
+def test_solve_full_diag_gpu_emits_loud_fallback_warning(tmp_path):
+    """``qed.solve(..., solver='full', device='gpu')`` must emit a
+    ``RuntimeWarning`` pointing at the silent CPU demotion, AND still
+    return the correct eigenvalues from the CPU lane."""
+    H = _ring()  # small dim -> FullDiag stays on CPU
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        r = qed.solve(
+            H, num_eigenvalues=1,
+            solver="full", device="gpu",
+            plan=False, verbose=False,
+        )
+    msgs = [str(w.message) for w in ws
+            if issubclass(w.category, RuntimeWarning)
+            and "FullDiag" in str(w.message)]
+    assert msgs, (
+        "qed.solve(solver='full', device='gpu') should emit a "
+        f"RuntimeWarning naming FullDiag; got: {[str(w.message) for w in ws]}")
+    assert "Falling back to the CPU lane" in msgs[0]
+    # Result is still correct (we stayed on CPU).
+    assert math.isfinite(float(r.eigenvalues[0]))
+
+
+@_REQUIRES_GPU
+def test_thermal_ftlm_gpu_emits_loud_fallback_warning(tmp_path):
+    """``qed.thermal(method='ftlm', device='gpu')`` must emit a
+    ``RuntimeWarning`` naming FTLM; FTLM has no GPU kernel."""
+    H = _ring()
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        _ = qed.thermal(
+            H, method="ftlm",
+            num_samples=1, ftlm_krylov_dim=20,
+            num_T=2, T_min=0.5, T_max=4.0,
+            device="gpu", verbose=False, auto_tune=False,
+            output_dir=str(tmp_path / "ftlm_gpu"),
+        )
+    msgs = [str(w.message) for w in ws
+            if issubclass(w.category, RuntimeWarning)
+            and "FTLM" in str(w.message)]
+    assert msgs, (
+        "qed.thermal(method='ftlm', device='gpu') should emit a "
+        f"RuntimeWarning naming FTLM; got: {[str(w.message) for w in ws]}")
+    assert "CPU lane" in msgs[0]
+
+
+@_REQUIRES_GPU
+def test_thermal_mtpq_gpu_no_loud_fallback_warning(tmp_path):
+    """Negative control: GPU-clean methods must NOT emit the loud
+    fallback warning. mTPQ has a CudaBackend kernel."""
+    H = _ring()
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        _ = qed.thermal(
+            H, method="mtpq",
+            num_samples=1, max_iterations=20,
+            num_T=2, T_min=0.5, T_max=4.0,
+            device="gpu", verbose=False, auto_tune=False,
+            output_dir=str(tmp_path / "mtpq_gpu"),
+        )
+    bad = [str(w.message) for w in ws
+           if issubclass(w.category, RuntimeWarning)
+           and "Falling back to the CPU lane" in str(w.message)]
+    assert not bad, (
+        f"mTPQ has a GPU lane; loud-fallback warning should NOT fire. "
+        f"Got: {bad}")
+
+
+@_REQUIRES_GPU
+def test_solve_lanczos_gpu_no_loud_fallback_warning(tmp_path):
+    """Negative control for solve: Lanczos has a GPU lane, no warning."""
+    H = _ring()
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        _ = qed.solve(
+            H, num_eigenvalues=1,
+            solver="lanczos", device="gpu",
+            plan=False, verbose=False,
+        )
+    bad = [str(w.message) for w in ws
+           if issubclass(w.category, RuntimeWarning)
+           and "Falling back to the CPU lane" in str(w.message)]
+    assert not bad, (
+        f"Lanczos has a GPU lane; loud-fallback warning should NOT fire. "
+        f"Got: {bad}")
