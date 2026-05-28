@@ -1253,6 +1253,21 @@ if(BUILD_ED_TESTS)
         # CpuBackend and CudaBackend on a 6-site Heisenberg chain. First
         # production consumer of `ed/matvec/backends/cuda_backend.cuh`.
         ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
+        # Phase I of the "Close CPU / GPU Gaps Across Workflows" plan
+        # (May 2026): standalone microbench harness for the
+        # streaming-symmetry GPU mirror. Not registered as a ctest
+        # since it prints timings rather than asserting; the CI
+        # "must-not-regress" gate runs it separately when a GPU is
+        # available and consumes the tab-separated output.
+        add_executable(bench_symmetry_gpu_matvec
+            tests/perf/bench_symmetry_gpu_matvec.cpp)
+        target_include_directories(bench_symmetry_gpu_matvec PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        )
+        target_link_libraries(bench_symmetry_gpu_matvec PRIVATE ed_solvers_gpu)
+        target_compile_options(bench_symmetry_gpu_matvec PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+        )
     endif()
 
     # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3

@@ -198,7 +198,13 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     R.frequencies = omega_grid;
 
     auto phi = be.make_zero_vector(local_n);
-    be.copy(phi_seed, phi.get(), local_n);
+    // ``phi_seed`` is documented as a host-memory pointer: a vector
+    // computed outside this kernel by applying a (possibly
+    // cross-sector) observable to a state stored in another sector
+    // basis. Use ``copy_from_host`` so the CUDA path actually stages
+    // the seed H2D once and runs the rest of the CF Lanczos
+    // device-resident; the CPU specialization is a plain memcpy.
+    be.copy_from_host(phi_seed, phi.get(), local_n);
     const double phi_norm = be.nrm2(phi.get(), local_n);
     if (phi_norm < 1e-14) {
         R.spectral_function.assign(omega_grid.size(), 0.0);

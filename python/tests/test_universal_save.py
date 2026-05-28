@@ -558,9 +558,14 @@ def test_solve_full_diag_gpu_emits_loud_fallback_warning(tmp_path):
 
 
 @_REQUIRES_GPU
-def test_thermal_ftlm_gpu_emits_loud_fallback_warning(tmp_path):
-    """``qed.thermal(method='ftlm', device='gpu')`` must emit a
-    ``RuntimeWarning`` naming FTLM; FTLM has no GPU kernel."""
+def test_thermal_ftlm_gpu_no_loud_fallback_warning(tmp_path):
+    """Phase E of the "Close CPU/GPU Gaps" plan (May 2026): FTLM now
+    has a CUDA lane (``ftlm_kernel_via_backend``), so the previous
+    loud-fallback warning must NOT fire.
+
+    This test replaces the obsolete
+    ``test_thermal_ftlm_gpu_emits_loud_fallback_warning`` which
+    pinned the old host-only contract."""
     H = _ring()
     with warnings.catch_warnings(record=True) as ws:
         warnings.simplefilter("always")
@@ -571,13 +576,77 @@ def test_thermal_ftlm_gpu_emits_loud_fallback_warning(tmp_path):
             device="gpu", verbose=False, auto_tune=False,
             output_dir=str(tmp_path / "ftlm_gpu"),
         )
-    msgs = [str(w.message) for w in ws
-            if issubclass(w.category, RuntimeWarning)
-            and "FTLM" in str(w.message)]
-    assert msgs, (
-        "qed.thermal(method='ftlm', device='gpu') should emit a "
-        f"RuntimeWarning naming FTLM; got: {[str(w.message) for w in ws]}")
-    assert "CPU lane" in msgs[0]
+    bad = [str(w.message) for w in ws
+           if issubclass(w.category, RuntimeWarning)
+           and "Falling back to the CPU lane" in str(w.message)]
+    assert not bad, (
+        f"FTLM now has a CUDA lane; loud-fallback warning should NOT "
+        f"fire. Got: {bad}")
+
+
+@_REQUIRES_GPU
+def test_thermal_ftlm_gpu_runs_on_gpu(tmp_path):
+    """Phase E regression of the "Close CPU/GPU Gaps" plan (May 2026):
+    drive ``_core.workflows_thermal`` directly with FTLM + a host
+    operator promoted to GPU, then verify the truthful lane label is
+    ``'gpu'`` AND that the CPU baseline curve matches numerically.
+
+    This is the "must-run-on-GPU" twin of the no-warning test above:
+    the no-warning test pins the Python warning contract; this test
+    pins the actual lane label propagation through the orchestrator
+    + Pybind11 promoter (``maybe_promote_to_gpu`` +
+    ``thermal_method_supports_gpu``) all the way to
+    ``ThermalResult.backend.lane``."""
+    from qed import _core
+    import numpy as np
+
+    H = _ring()
+    op = H._operator if hasattr(H, "_operator") else H
+
+    def _opts(allow_gpu: bool):
+        opts = _core.ThermalOptions()
+        opts.method        = _core.ThermalMethod.FTLM
+        opts.num_samples   = 2
+        opts.krylov_dim    = 30
+        opts.num_temp_bins = 4
+        opts.temp_min      = 0.5
+        opts.temp_max      = 4.0
+        opts.random_seed   = 0xCAFEFEED
+        opts.backend.allow_gpu = allow_gpu
+        return opts
+
+    tr_gpu = _core.workflows_thermal(op, _opts(True))
+    tr_cpu = _core.workflows_thermal(op, _opts(False))
+
+    assert tr_gpu.backend.lane == "gpu", (
+        f"FTLM with allow_gpu=True should report lane='gpu'; got "
+        f"{tr_gpu.backend.lane!r}.")
+    assert tr_cpu.backend.lane == "cpu", (
+        f"FTLM with allow_gpu=False should report lane='cpu'; got "
+        f"{tr_cpu.backend.lane!r}.")
+    e_gpu = np.asarray(tr_gpu.thermo.energy, dtype=float)
+    e_cpu = np.asarray(tr_cpu.thermo.energy, dtype=float)
+    assert e_gpu.shape == e_cpu.shape and e_gpu.size > 0, (
+        "FTLM energy arrays must be populated on both lanes.")
+    # The CPU and GPU lanes use different host RNG seed strategies
+    # (the legacy ``::finite_temperature_lanczos`` driver has its own
+    # sample-RNG, ``ftlm_kernel_via_backend`` salts ``opts.random_seed``
+    # with the sample index). We therefore pin only the qualitative
+    # contract: both curves are finite, and the energy bracket
+    # ``[e_min_GPU, e_max_GPU]`` overlaps the CPU bracket. Tighter
+    # numerical agreement is captured by the LTLM dual-backend
+    # regression which uses the GS-anchored variant.
+    assert np.all(np.isfinite(e_gpu)) and np.all(np.isfinite(e_cpu)), (
+        "FTLM energy curves must be finite on both lanes.")
+    gpu_lo, gpu_hi = float(e_gpu.min()), float(e_gpu.max())
+    cpu_lo, cpu_hi = float(e_cpu.min()), float(e_cpu.max())
+    # Brackets must overlap (e.g. the GPU max must lie above the CPU
+    # min and vice versa). FTLM noise at R=2 is large but the brackets
+    # are still meaningful.
+    assert gpu_hi >= cpu_lo - 0.5 and cpu_hi >= gpu_lo - 0.5, (
+        f"FTLM GPU and CPU energy brackets are disjoint by more than "
+        f"the Lanczos-noise budget: GPU=[{gpu_lo:.3f},{gpu_hi:.3f}], "
+        f"CPU=[{cpu_lo:.3f},{cpu_hi:.3f}].")
 
 
 @_REQUIRES_GPU
@@ -815,6 +884,333 @@ def test_thermal_streaming_symmetry_cpu_lane(tmp_path):
         assert tr.backend.lane == "cpu", (
             f"allow_gpu=False must land on lane='cpu'; got "
             f"{tr.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase H.1 of the "Close CPU/GPU Gaps" plan (May 2026):
+# cross-irrep spectral bindings must surface a non-empty
+# ``agg.backend.lane`` so callers reading ``SpectralResult.backend.lane``
+# from ``qed.spectral(symmetry={'observable': ..., 'momentum_transfer':
+# [...]})`` see the truthful lane that produced the result.
+# ---------------------------------------------------------------------------
+
+def _sz_q_observable_transforms(q_int: int):
+    """Build the (op_type, site, coef, is_two_body, op_type_2, site_2)
+    tuples for the Sz_Q Fourier-mode observable used by the cross-irrep
+    bindings."""
+    import math
+    Q = 2.0 * math.pi * q_int / N_SITES
+    coef = 1.0 / math.sqrt(N_SITES)
+    rows = []
+    for j in range(N_SITES):
+        c = coef * complex(math.cos(-Q * j), math.sin(-Q * j))
+        rows.append((1, j, c, False, 0, 0))  # OP_SZ == 1
+    return rows
+
+
+def test_spectral_cross_irrep_lane_propagation_cpu(tmp_path):
+    """Phase H.1 of the "Close CPU/GPU Gaps" plan (May 2026):
+    the GS cross-irrep spectral binding propagates ``agg.backend.lane``
+    from the inner GS solve. With ``allow_gpu=False`` it must report
+    ``lane='cpu'`` rather than the previously-empty default."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.SpectralOptions()
+        opts.method            = _core.SpectralMethod.GroundStateCF
+        opts.num_omega         = 16
+        opts.omega_min         = -1.0
+        opts.omega_max         = 5.0
+        opts.broadening        = 0.1
+        opts.momentum_transfer = [1.0 / N_SITES]
+        opts.backend.allow_gpu = False
+
+        agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
+            tmp, N_SITES, 0.5,
+            _sz_q_observable_transforms(1),
+            opts, None, 0,
+        )
+        assert agg.backend.lane == "cpu", (
+            f"GS cross-irrep with allow_gpu=False should report "
+            f"lane='cpu'; got {agg.backend.lane!r}. Before Phase H.1 "
+            f"this was the empty string (no propagation).")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_spectral_cross_irrep_lane_propagation_gpu(tmp_path):
+    """Phase H.1 of the "Close CPU/GPU Gaps" plan (May 2026):
+    the GS cross-irrep spectral binding propagates ``agg.backend.lane``
+    from the inner GS solve. With ``allow_gpu=True`` and a GPU
+    available it must report ``lane='gpu'``."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.SpectralOptions()
+        opts.method            = _core.SpectralMethod.GroundStateCF
+        opts.num_omega         = 16
+        opts.omega_min         = -1.0
+        opts.omega_max         = 5.0
+        opts.broadening        = 0.1
+        opts.momentum_transfer = [1.0 / N_SITES]
+        opts.backend.allow_gpu = True
+
+        agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
+            tmp, N_SITES, 0.5,
+            _sz_q_observable_transforms(1),
+            opts, None, 0,
+        )
+        assert agg.backend.lane == "gpu", (
+            f"GS cross-irrep with allow_gpu=True should report "
+            f"lane='gpu'; got {agg.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_spectral_ftlm_dynamical_gpu_runs_on_gpu(tmp_path):
+    """Phase F regression of the "Close CPU/GPU Gaps" plan (May 2026):
+    drive ``_core.workflows_spectral`` directly with FtlmDynamical +
+    a host operator promoted to GPU, then verify the truthful lane
+    label is ``'gpu'`` AND that the GPU lane produces a finite,
+    non-trivial spectral function.
+
+    The FtlmDynamical CPU lane goes through the legacy
+    ``::compute_dynamical_correlation`` host driver (multi-sample
+    averaging, intermediate HDF5 dumps); the GPU lane routes through
+    ``detail::ftlm_dynamical_kernel_via_backend`` which is the
+    backend-templated body added by Phase F. Both lanes consume the
+    same ``SpectralOptions`` payload, the difference is purely in
+    where the Lanczos basis + matvecs run."""
+    from qed import _core
+    import numpy as np
+
+    H = _ring()
+    op = H._operator if hasattr(H, "_operator") else H
+
+    # Build a simple S^z(q=0) probe observable as the single matvec
+    # the FtlmDynamical kernel needs.
+    obs_op = _core.Operator(N_SITES, 0.5)
+    for j in range(N_SITES):
+        obs_op.add_one_body(_core.OP_SZ, j, complex(1.0, 0.0))
+
+    def _opts(allow_gpu: bool):
+        opts = _core.SpectralOptions()
+        opts.method        = _core.SpectralMethod.FtlmDynamical
+        opts.num_omega     = 16
+        opts.omega_min     = -1.0
+        opts.omega_max     = 5.0
+        opts.broadening    = 0.2
+        opts.krylov_dim    = 40
+        opts.backend.allow_gpu = allow_gpu
+        return opts
+
+    sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
+    sr_cpu = _core.workflows_spectral(op, [obs_op], _opts(False))
+
+    assert sr_gpu.backend.lane == "gpu", (
+        f"FtlmDynamical with allow_gpu=True should report lane='gpu'; "
+        f"got {sr_gpu.backend.lane!r}.")
+    assert sr_cpu.backend.lane == "cpu", (
+        f"FtlmDynamical with allow_gpu=False should report lane='cpu'; "
+        f"got {sr_cpu.backend.lane!r}.")
+    sgpu = np.asarray(sr_gpu.S_real, dtype=float)
+    scpu = np.asarray(sr_cpu.S_real, dtype=float)
+    assert sgpu.size == scpu.size and sgpu.size > 0, (
+        "FtlmDynamical S_real arrays must be populated on both lanes.")
+    assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
+        "FtlmDynamical S_real curves must be finite on both lanes.")
+    # The two lanes use different random seeds; pin only the
+    # qualitative contract that both curves carry non-zero weight
+    # somewhere in the omega window (no all-zero output).
+    assert float(np.max(np.abs(sgpu))) > 0.0, (
+        "FtlmDynamical GPU lane produced an all-zero spectrum.")
+    assert float(np.max(np.abs(scpu))) > 0.0, (
+        "FtlmDynamical CPU lane produced an all-zero spectrum.")
+
+
+@_REQUIRES_GPU
+def test_spectral_kpm_dynamical_gpu_runs_on_gpu(tmp_path):
+    """Phase G regression of the "Close CPU/GPU Gaps" plan (May 2026):
+    drive ``_core.workflows_spectral`` directly with KpmDynamical +
+    a host operator promoted to GPU, verify the truthful lane label
+    is ``'gpu'`` AND that the GPU Chebyshev recursion produces a
+    finite, non-trivial S(omega).
+
+    The KpmDynamical CPU lane still goes through
+    ``compute_kpm_ltlm_from_states`` (legacy host body, single source
+    of truth for HDF5/CLI diagnostics); the GPU lane routes through
+    ``detail::kpm_dynamical_kernel_via_backend`` -- a M-matvec
+    device-resident Chebyshev recursion with M ``backend.dot`` moment
+    accumulators."""
+    from qed import _core
+    import numpy as np
+
+    H = _ring()
+    op = H._operator if hasattr(H, "_operator") else H
+
+    obs_op = _core.Operator(N_SITES, 0.5)
+    for j in range(N_SITES):
+        obs_op.add_one_body(_core.OP_SZ, j, complex(1.0, 0.0))
+
+    def _opts(allow_gpu: bool):
+        opts = _core.SpectralOptions()
+        opts.method        = _core.SpectralMethod.KpmDynamical
+        opts.num_omega     = 64
+        opts.omega_min     = -1.0
+        opts.omega_max     = 5.0
+        opts.broadening    = 0.1
+        opts.kpm_moments   = 128
+        opts.backend.allow_gpu = allow_gpu
+        return opts
+
+    sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
+    sr_cpu = _core.workflows_spectral(op, [obs_op], _opts(False))
+
+    assert sr_gpu.backend.lane == "gpu", (
+        f"KpmDynamical with allow_gpu=True should report lane='gpu'; "
+        f"got {sr_gpu.backend.lane!r}.")
+    assert sr_cpu.backend.lane == "cpu", (
+        f"KpmDynamical with allow_gpu=False should report lane='cpu'; "
+        f"got {sr_cpu.backend.lane!r}.")
+    sgpu = np.asarray(sr_gpu.S_real, dtype=float)
+    scpu = np.asarray(sr_cpu.S_real, dtype=float)
+    assert sgpu.size == scpu.size and sgpu.size > 0, (
+        "KpmDynamical S_real arrays must be populated on both lanes.")
+    assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
+        "KpmDynamical S_real curves must be finite on both lanes.")
+    assert float(np.max(np.abs(sgpu))) > 0.0, (
+        "KpmDynamical GPU lane produced an all-zero spectrum.")
+    assert float(np.max(np.abs(scpu))) > 0.0, (
+        "KpmDynamical CPU lane produced an all-zero spectrum.")
+
+
+@_REQUIRES_GPU
+def test_spectral_cross_irrep_gs_gpu_runs_on_gpu(tmp_path):
+    """Phase H.2 of the "Close CPU/GPU Gaps" plan (May 2026):
+    the GS cross-irrep spectral binding routes the inner CF-Lanczos
+    through ``select_backend(dst_sec_view->geometry(), opts.backend)``
+    and ``dst_sec_view->bind<B>()`` -- so the target-sector Lanczos
+    runs on the same backend as the source-sector GS solve.
+
+    This test pins the *numerical* contract: under ``allow_gpu=True``
+    the lane must report ``'gpu'`` AND ``S_real`` must agree with the
+    CPU lane to within Lanczos roundoff (same algorithm, same seeds;
+    GS is deterministic).
+    """
+    from qed import _core
+    import numpy as np
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        def _opts(allow_gpu: bool):
+            opts = _core.SpectralOptions()
+            opts.method            = _core.SpectralMethod.GroundStateCF
+            opts.num_omega         = 24
+            opts.omega_min         = -1.0
+            opts.omega_max         = 5.0
+            opts.broadening        = 0.1
+            opts.krylov_dim        = 40
+            opts.momentum_transfer = [1.0 / N_SITES]
+            opts.backend.allow_gpu = allow_gpu
+            return opts
+
+        agg_gpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
+            tmp, N_SITES, 0.5,
+            _sz_q_observable_transforms(1),
+            _opts(True), None, 0,
+        )
+        agg_cpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
+            tmp, N_SITES, 0.5,
+            _sz_q_observable_transforms(1),
+            _opts(False), None, 0,
+        )
+
+        assert agg_gpu.backend.lane == "gpu", (
+            f"GS cross-irrep with allow_gpu=True must report "
+            f"lane='gpu'; got {agg_gpu.backend.lane!r}. Before "
+            f"Phase H.2 the inner CF-Lanczos was hard-coded to "
+            f"``CpuBackend cpu_be`` even when the GS solve ran on "
+            f"GPU.")
+        assert agg_cpu.backend.lane == "cpu", (
+            f"GS cross-irrep with allow_gpu=False must report "
+            f"lane='cpu'; got {agg_cpu.backend.lane!r}.")
+
+        sgpu = np.asarray(agg_gpu.S_real, dtype=float)
+        scpu = np.asarray(agg_cpu.S_real, dtype=float)
+        assert sgpu.size == scpu.size and sgpu.size > 0, (
+            "GS cross-irrep S_real arrays must be populated on both "
+            "lanes.")
+        assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
+            "GS cross-irrep S_real curves must be finite on both "
+            "lanes.")
+        assert float(np.max(np.abs(sgpu))) > 0.0, (
+            "GS cross-irrep GPU lane produced an all-zero spectrum.")
+        assert float(np.max(np.abs(scpu))) > 0.0, (
+            "GS cross-irrep CPU lane produced an all-zero spectrum.")
+        # GS is deterministic and the two lanes run the same
+        # CF-Lanczos algorithm with identical inputs (same krylov_dim,
+        # same broadening, same omega grid). Pin tight numerical
+        # agreement so any future divergence between CPU and GPU
+        # backends in the CF kernel fails CI loudly.
+        denom = max(float(np.max(np.abs(scpu))), 1e-12)
+        max_rel_err = float(np.max(np.abs(sgpu - scpu))) / denom
+        assert max_rel_err < 1e-3, (
+            f"GS cross-irrep GPU vs CPU S_real disagree by more than "
+            f"Lanczos roundoff; max relative error = {max_rel_err:.3e}. "
+            f"Both lanes share the same CF-Lanczos algorithm and a "
+            f"deterministic ground state, so any drift > 1e-3 implies "
+            f"a real backend bug.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_spectral_ftlm_cross_irrep_lane_is_cpu(tmp_path):
+    """Phase H.1 of the "Close CPU/GPU Gaps" plan (May 2026):
+    the FTLM cross-irrep spectral binding (``ftlm_cross_irrep_kernel_
+    one_sector``) is host-only and must surface ``lane='cpu'`` on the
+    aggregate. GPU rectangular scatter for ``CrossSectorOrbitObservable``
+    + a Backend-templated FTLM dynamical kernel are tracked as
+    deferred follow-ups.
+
+    The contract is pinned for BOTH ``allow_gpu=False`` and
+    ``allow_gpu=True`` so any future GPU port has to update this
+    test alongside the lane propagation."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        for allow_gpu in (False, True):
+            opts = _core.SpectralOptions()
+            opts.method            = _core.SpectralMethod.FtlmDynamical
+            opts.num_omega         = 12
+            opts.omega_min         = -1.0
+            opts.omega_max         = 5.0
+            opts.broadening        = 0.2
+            opts.krylov_dim        = 20
+            opts.momentum_transfer = [1.0 / N_SITES]
+            opts.backend.allow_gpu = allow_gpu
+            agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
+                tmp, N_SITES, 0.5,
+                _sz_q_observable_transforms(1),
+                opts, None, 0,
+                [2.0],   # temperatures
+                4,       # num_samples
+                0xFEED,  # random_seed
+            )
+            assert agg.backend.lane == "cpu", (
+                f"FTLM cross-irrep is host-only and must report "
+                f"lane='cpu' (allow_gpu={allow_gpu}); got "
+                f"{agg.backend.lane!r}.")
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

@@ -161,12 +161,20 @@ struct DeviceSymmetryHashEntry {
 
 struct DeviceSymmetryBasisPolicy {
     // Orbit CSR: orbit_offsets[j..j+1) -> orbit_elements[k] are the
-    // computational states in orbit j; orbit_coefficients[k] is alpha_s,
-    // orbit_norms[j] is norm_j.
+    // computational states in orbit j; orbit_coefficients[k] is alpha_s.
+    //
+    // Phase I of the "Close CPU / GPU Gaps" plan (May 2026):
+    // ``orbit_inv_norms[j]`` stores ``1.0 / norm_j`` (pre-baked at
+    // mirror construction) so the inner kernel loop only multiplies
+    // instead of dividing once per orbit walk. The legacy name
+    // ``orbit_norms`` (raw norms) was removed in this rename --
+    // the only consumer was a single ``1.0 / basis.orbit_norms[i]``
+    // inside ``apply_terms_gpu_scatter`` which now reads
+    // ``basis.orbit_inv_norms[i]`` directly.
     const std::uint64_t*    orbit_elements     = nullptr;
     const cuDoubleComplex*  orbit_coefficients = nullptr;
     const std::uint32_t*    orbit_offsets      = nullptr;  // length dim_+1
-    const double*           orbit_norms        = nullptr;  // length dim_
+    const double*           orbit_inv_norms    = nullptr;  // length dim_, 1/norm_j
     std::uint64_t           dim_               = 0;
     double                  group_norm         = 1.0;      // 1.0 / |G|
 

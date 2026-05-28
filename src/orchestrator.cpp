@@ -32,6 +32,7 @@
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
 #include <ed/matvec/backends/cpu_backend.h>
+#include <ed/observables/cf_dynamical.h>
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/observables/kpm_dynamical.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
@@ -927,21 +928,29 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {
-        // Wave B (Full unified-interface collapse, May 2026): the
-        // FTLM/LTLM/KpmDos kernel facades are static_assert-gated to
-        // `CpuBackend` (see ftlm_kernel.h). Filter to that variant
-        // alternative explicitly so the std::visit doesn't try to
-        // instantiate the template against CudaBackend / MpiBackend.
+        // Phase E of the "Close CPU/GPU Gaps" plan (May 2026): the
+        // FTLM kernel facade now dispatches on Backend type internally
+        // (see ftlm_kernel.h, mirroring LTLM at the block below).
+        // Both CpuBackend and CudaBackend are supported; MpiBackend /
+        // MpiCudaBackend are explicitly rejected by the kernel until
+        // cross-rank Lanczos post-processing is wired.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+            constexpr bool is_cpu =
+                std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+            constexpr bool is_cuda =
+                std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+            constexpr bool is_cuda = false;
+#endif
+            if constexpr (!(is_cpu || is_cuda)) {
                 throw std::runtime_error(
-                    "ed::thermal: FTLM lane requires a CpuBackend "
-                    "today; the inner driver is host-side. Pin "
-                    "BackendConstraints::allow_gpu = false / "
-                    "allow_mpi = false to route through the CPU "
-                    "lane explicitly.");
+                    "ed::thermal: FTLM requires a CpuBackend or "
+                    "CudaBackend; distributed backends are not yet "
+                    "wired. Pin BackendConstraints to route through "
+                    "the CPU/CUDA lanes.");
             } else {
                 ed::thermal::FtlmOptions kopts;
                 kopts.num_samples = opts.num_samples;
@@ -1392,40 +1401,78 @@ SpectralResult spectral(const LinearOperator&                      H,
         kopts.spectral_bounds_krylov = static_cast<int>(
             std::max<std::size_t>(opts.krylov_dim, 32));
 
-        // Hand the host buffers + the (single) CPU backend to the
-        // kernel. The template body is backend-agnostic on the
-        // MatVecOperator side because LinearOperator IS-A
-        // MatVecOperator and the kernel only consumes the host
-        // pointer for the seed; no device copy is required.
-        ed::matvec::CpuBackend cpu_backend;
-        auto kres = ed::observables::kpm_dynamical_correlator(
-            cpu_backend,
-            static_cast<const ed::matvec::MatVecOperator&>(H),
-            static_cast<const ed::matvec::MatVecOperator&>(O1),
-            static_cast<const ed::matvec::MatVecOperator&>(O2),
-            seed_host.data(),
-            H.geometry().local_dim,
-            R.omega,
-            kopts);
-
-        R.omega  = std::move(kres.omega);
-        R.S_real = std::move(kres.spectral_real);
-        R.S_imag = std::move(kres.spectral_imag);
+        // Phase G of the "Close CPU/GPU Gaps" plan (May 2026):
+        // dispatch on Backend type. CpuBackend keeps the legacy host
+        // body (delegates to ``compute_kpm_ltlm_from_states`` -- the
+        // single source of truth for the CPU lane's intermediate
+        // diagnostics + future HDF5 hooks). CudaBackend routes
+        // through ``detail::kpm_dynamical_kernel_via_backend``, a
+        // fully device-resident Chebyshev recursion (M matvecs + M
+        // dot products on the GPU, host-side kernel-coefficient +
+        // spectral-function evaluation).
+        std::visit([&](auto& backend_uptr) {
+            using BPtr = std::decay_t<decltype(backend_uptr)>;
+            using B = typename BPtr::element_type;
+            constexpr bool is_cpu =
+                std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+            constexpr bool is_cuda =
+                std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+            constexpr bool is_cuda = false;
+#endif
+            if constexpr (!(is_cpu || is_cuda)) {
+                throw std::runtime_error(
+                    "ed::spectral: KpmDynamical requires a CpuBackend "
+                    "or CudaBackend; distributed backends are not yet "
+                    "wired. Pin BackendConstraints to route through "
+                    "the CPU/CUDA lanes.");
+            } else if constexpr (is_cpu) {
+                auto kres = ed::observables::kpm_dynamical_correlator(
+                    *backend_uptr,
+                    static_cast<const ed::matvec::MatVecOperator&>(H),
+                    static_cast<const ed::matvec::MatVecOperator&>(O1),
+                    static_cast<const ed::matvec::MatVecOperator&>(O2),
+                    seed_host.data(),
+                    H.geometry().local_dim,
+                    R.omega,
+                    kopts);
+                R.omega  = std::move(kres.omega);
+                R.S_real = std::move(kres.spectral_real);
+                R.S_imag = std::move(kres.spectral_imag);
+            } else {
+                // CudaBackend: device-resident Chebyshev recursion.
+                auto matvec_h = H.template bind<B>();
+                auto matvec_a = O1.template bind<B>();
+                auto matvec_b = O2.template bind<B>();
+                auto kres = ed::observables::detail::
+                    kpm_dynamical_kernel_via_backend(
+                        *backend_uptr, matvec_h, matvec_a, matvec_b,
+                        seed_host.data(),
+                        H.geometry().local_dim,
+                        R.omega, kopts);
+                R.omega  = std::move(kres.omega);
+                R.S_real = std::move(kres.spectral_real);
+                R.S_imag = std::move(kres.spectral_imag);
+            }
+        }, variant);
         if (R.S_imag.size() != R.S_real.size()) {
             R.S_imag.assign(R.S_real.size(), 0.0);
         }
     } else {
-        // FtlmDynamical lane (Wave A4 -- Full unified-interface
-        // collapse, May 2026): finite-temperature dynamical correlator
-        // via the legacy FTLM CF-Lanczos routine. We delegate to the
-        // existing `compute_dynamical_correlation` body since it is the
-        // single source of truth for the FTLM dynamical pipeline and
-        // already handles multi-sample averaging + per-temperature
-        // weighting. The orchestrator's first landing keeps the
-        // temperature axis at the legacy default (T = 0); per-T
-        // scanning is plumbed through the CLI / Python entry points
-        // until the SpectralOptions struct grows a `temperatures`
-        // vector (Wave A5).
+        // Phase F of the "Close CPU/GPU Gaps" plan (May 2026):
+        // finite-temperature dynamical correlator via FTLM CF-Lanczos.
+        // The CPU lane keeps the legacy ``::compute_dynamical_correlation``
+        // body (preserves intermediate HDF5 sample dumps when
+        // ``output_dir`` is set + matches existing per-sample
+        // diagnostics). The CUDA lane routes through
+        // ``detail::ftlm_dynamical_kernel_via_backend``, which mirrors
+        // the LTLM dual-backend pattern: device-resident O2 / O1 /
+        // Lanczos, host-side tridiag diagonalisation + Lorentzian sum.
+        // Distributed backends (MpiBackend / MpiCudaBackend) still
+        // require the cross-rank reduction story for FTLM sample
+        // averaging; pin BackendConstraints to a single-rank lane until
+        // that lands.
         if (observables.size() < 1) {
             throw std::invalid_argument(
                 "ed::spectral: FtlmDynamical requires at least one "
@@ -1435,39 +1482,81 @@ SpectralResult spectral(const LinearOperator&                      H,
         const LinearOperator& O2 = (observables.size() >= 2)
             ? *observables[1] : O1;
 
-        std::function<void(const Complex*, Complex*, int)> H_apply =
-            [&H](const Complex* in, Complex* out, int n) {
-                H.apply(in, out, static_cast<std::size_t>(n));
-            };
-        std::function<void(const Complex*, Complex*, int)> O1_apply =
-            [&O1](const Complex* in, Complex* out, int n) {
-                O1.apply(in, out, static_cast<std::size_t>(n));
-            };
-        std::function<void(const Complex*, Complex*, int)> O2_apply =
-            [&O2](const Complex* in, Complex* out, int n) {
-                O2.apply(in, out, static_cast<std::size_t>(n));
-            };
+        std::visit([&](auto& backend_uptr) {
+            using BPtr = std::decay_t<decltype(backend_uptr)>;
+            using B = typename BPtr::element_type;
+            constexpr bool is_cpu =
+                std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+            constexpr bool is_cuda =
+                std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+            constexpr bool is_cuda = false;
+#endif
+            if constexpr (!(is_cpu || is_cuda)) {
+                throw std::runtime_error(
+                    "ed::spectral: FtlmDynamical requires a CpuBackend "
+                    "or CudaBackend; distributed backends are not yet "
+                    "wired. Pin BackendConstraints to route through "
+                    "the CPU/CUDA lanes.");
+            } else if constexpr (is_cpu) {
+                std::function<void(const Complex*, Complex*, int)> H_apply =
+                    [&H](const Complex* in, Complex* out, int n) {
+                        H.apply(in, out, static_cast<std::size_t>(n));
+                    };
+                std::function<void(const Complex*, Complex*, int)> O1_apply =
+                    [&O1](const Complex* in, Complex* out, int n) {
+                        O1.apply(in, out, static_cast<std::size_t>(n));
+                    };
+                std::function<void(const Complex*, Complex*, int)> O2_apply =
+                    [&O2](const Complex* in, Complex* out, int n) {
+                        O2.apply(in, out, static_cast<std::size_t>(n));
+                    };
 
-        DynamicalResponseParameters params;
-        params.krylov_dim               =
-            static_cast<std::uint64_t>(opts.krylov_dim);
-        params.broadening               = opts.broadening;
-        params.tolerance                = 1e-10;
-        params.full_reorthogonalization = true;
-        params.random_seed              = 0;
+                DynamicalResponseParameters params;
+                params.krylov_dim               =
+                    static_cast<std::uint64_t>(opts.krylov_dim);
+                params.broadening               = opts.broadening;
+                params.tolerance                = 1e-10;
+                params.full_reorthogonalization = true;
+                params.random_seed              = 0;
 
-        const auto legacy = ::compute_dynamical_correlation(
-            H_apply, O1_apply, O2_apply,
-            static_cast<std::uint64_t>(H.geometry().local_dim),
-            params,
-            opts.omega_min, opts.omega_max,
-            static_cast<std::uint64_t>(opts.num_omega),
-            /*temperature=*/0.0,
-            opts.output_dir,
-            opts.energy_shift);
+                const auto legacy = ::compute_dynamical_correlation(
+                    H_apply, O1_apply, O2_apply,
+                    static_cast<std::uint64_t>(H.geometry().local_dim),
+                    params,
+                    opts.omega_min, opts.omega_max,
+                    static_cast<std::uint64_t>(opts.num_omega),
+                    /*temperature=*/0.0,
+                    opts.output_dir,
+                    opts.energy_shift);
 
-        R.S_real = legacy.spectral_function;
-        R.S_imag = legacy.spectral_function_imag;
+                R.S_real = legacy.spectral_function;
+                R.S_imag = legacy.spectral_function_imag;
+            } else {
+                // CudaBackend lane: backend-templated body.
+                ed::observables::FtlmDynamicalOptions kopts;
+                kopts.krylov_dim   = opts.krylov_dim;
+                kopts.num_samples  = (opts.kpm_moments > 0 ? 1u : 1u);
+                kopts.broadening   = opts.broadening;
+                kopts.temperature  = 0.0;
+                kopts.energy_shift = opts.energy_shift;
+                kopts.tolerance    = 1e-10;
+                kopts.random_seed  = 0;
+                kopts.global_n     = H.geometry().global_dim;
+                auto matvec_h  = H.template bind<B>();
+                auto matvec_o1 = O1.template bind<B>();
+                auto matvec_o2 = O2.template bind<B>();
+                auto kres = ed::observables::detail::
+                    ftlm_dynamical_kernel_via_backend(
+                        *backend_uptr,
+                        matvec_h, matvec_o1, matvec_o2,
+                        H.geometry().local_dim, R.omega, kopts);
+                R.S_real = std::move(kres.spectral_real);
+                R.S_imag = std::move(kres.spectral_imag);
+            }
+        }, variant);
+
         if (R.S_imag.size() != R.S_real.size()) {
             R.S_imag.assign(R.S_real.size(), 0.0);
         }

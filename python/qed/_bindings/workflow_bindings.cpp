@@ -157,38 +157,32 @@ inline bool will_use_full_diag(const ed::LinearOperator& op,
 ///   * LTLM, KpmDos : CPU or CUDA.
 ///   * mTPQ, cTPQ   : any backend.
 ///
-/// When the chosen method is FTLM we must NOT promote: routing a
-/// GPUOperator into ``ed::thermal::ftlm`` would land on
-/// ``std::is_same_v<B, ed::matvec::CpuBackend>`` failing and the
-/// orchestrator would raise a runtime error. The promoter therefore
-/// declines promotion for FTLM. (Before this helper landed, plain
-/// ``Operator`` was silently demoted to CpuBackend in
-/// ``select_backend``, so FTLM-with-``allow_gpu=true`` was a no-op
-/// rather than a crash; preserving that contract avoids a regression.)
+/// As of Phase E of the "Close CPU/GPU Gaps" plan (May 2026), the
+/// FTLM facade dispatches on Backend internally (see
+/// ``include/ed/thermal/ftlm_kernel.h``) and accepts both ``CpuBackend``
+/// and ``CudaBackend``, so it joins the GPU-eligible set.
 inline bool thermal_method_supports_gpu(
     ed::workflows::ThermalOptions::Method m) noexcept {
     using M = ed::workflows::ThermalOptions::Method;
-    return m == M::LTLM
+    return m == M::FTLM
+        || m == M::LTLM
         || m == M::KpmDos
         || m == M::mTPQ
         || m == M::cTPQ;
 }
 
-/// Spectral lanes split along the same "backend-aware vs host-only"
-/// boundary:
+/// Spectral lanes after Phases F + G of the "Close CPU/GPU Gaps"
+/// plan (May 2026): every method now dispatches on Backend
+/// internally, so the entire spectral lane is GPU-eligible.
 ///   * GroundStateCF : runs the inner solve + CF kernel through
-///                     ``H.template bind<B>()`` -- GPU-clean.
-///   * FtlmDynamical : drives ``compute_dynamical_correlation`` which
-///                     calls ``H.apply(host_in, host_out)``. A
-///                     GPUOperator's ``apply`` reinterprets the host
-///                     pointers as device pointers, which crashes.
-///   * KpmDynamical  : hands a stack-allocated ``CpuBackend`` and host
-///                     buffers to ``kpm_dynamical_correlator``. Same
-///                     host-only constraint as FtlmDynamical.
+///                     ``H.template bind<B>()``.
+///   * FtlmDynamical : routes through
+///                     ``detail::ftlm_dynamical_kernel_via_backend``.
+///   * KpmDynamical  : routes through
+///                     ``detail::kpm_dynamical_kernel_via_backend``.
 inline bool spectral_method_supports_gpu(
-    ed::workflows::SpectralOptions::Method m) noexcept {
-    using M = ed::workflows::SpectralOptions::Method;
-    return m == M::GroundStateCF;
+    ed::workflows::SpectralOptions::Method /*m*/) noexcept {
+    return true;
 }
 
 /// Emit a Python ``RuntimeWarning`` so the caller sees the silent
@@ -593,23 +587,22 @@ void bind_workflows(py::module_& m) {
 
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
-              // Skip promotion for thermal methods whose orchestrator
-              // dispatch is host-only (FTLM). Preserves the legacy
-              // silent CPU lane for ``device='gpu'`` callers running
-              // FTLM and prevents the runtime throw inside
-              // ``solve_on<CudaBackend>``. Surface the demotion as a
-              // Python RuntimeWarning so the caller can audit it.
+              // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
+              // every thermal method (FTLM / LTLM / mTPQ / cTPQ /
+              // KpmDos) now dispatches on Backend internally and
+              // accepts both ``CpuBackend`` and ``CudaBackend``, so
+              // promotion is always safe. The ``supports_gpu`` gate
+              // stays as a defensive future-proofing hook: if a new
+              // method lands that is host-only, it can opt out by
+              // returning ``false`` from ``thermal_method_supports_gpu``
+              // and the binding will demote loudly with a Python
+              // ``RuntimeWarning``.
               std::unique_ptr<ed::LinearOperator> gpu_owned;
               if (thermal_method_supports_gpu(opts.method)) {
                   gpu_owned = maybe_promote_to_gpu(op, opts.backend);
               } else {
-                  // For ``allow_gpu=true`` with a host-only method we
-                  // also need to clear ``allow_gpu`` so ``select_backend``
-                  // doesn't try to route through ``CudaBackend`` on
-                  // operators that DO advertise device matvec (e.g.
-                  // streaming-symmetry SectorView).
                   warn_silent_cpu_fallback(
-                      "qed.thermal (FTLM)", opts.backend);
+                      "qed.thermal (host-only method)", opts.backend);
                   opts.backend.allow_gpu = false;
               }
               const ed::LinearOperator& H =
@@ -641,8 +634,14 @@ void bind_workflows(py::module_& m) {
               if (can_promote) {
                   gpu_owned_H = maybe_promote_to_gpu(op, opts.backend);
               } else {
+                  // Phases F + G of the "Close CPU/GPU Gaps" plan
+                  // (May 2026): every spectral method now dispatches
+                  // on Backend internally, so this branch is dead
+                  // for valid methods. Keep the defensive demotion
+                  // for future host-only methods that may opt-out
+                  // via ``spectral_method_supports_gpu``.
                   warn_silent_cpu_fallback(
-                      "qed.spectral (FtlmDynamical/KpmDynamical)",
+                      "qed.spectral (host-only method)",
                       opts.backend);
                   opts.backend.allow_gpu = false;
               }
@@ -1224,31 +1223,15 @@ void bind_workflows(py::module_& m) {
                           // per-sector call silent on disk.
                           topts.output_dir.clear();
                       }
-                      // FTLM is host-only in the orchestrator (see the
-                      // ``ed::thermal: FTLM lane requires a CpuBackend
-                      // today`` guard in ``orchestrator.cpp``). The
-                      // streaming-symmetry SectorView advertises
-                      // ``supports_device_matvec=true`` (lazy GPU
-                      // mirror), so without this pin
-                      // ``select_backend`` would pick the CudaBackend
-                      // lane and the orchestrator would raise mid-loop.
-                      // Force the CPU lane explicitly for FTLM; the
-                      // other methods (LTLM / KpmDos / mTPQ / cTPQ)
-                      // are GPU-clean and stay on the caller's chosen
-                      // backend. Warn the FIRST time we demote so the
-                      // caller can audit the choice; per-sector
-                      // demotion is the same decision repeated.
-                      if (topts.method
-                          == ed::workflows::ThermalOptions::Method::FTLM) {
-                          if (k == sector_indices.front()) {
-                              py::gil_scoped_acquire gil;
-                              warn_silent_cpu_fallback(
-                                  "qed.thermal (FTLM, streaming-symmetry)",
-                                  topts.backend);
-                          }
-                          topts.backend.allow_gpu = false;
-                          topts.backend.allow_mpi = false;
-                      }
+                      // Phase E of the "Close CPU/GPU Gaps" plan
+                      // (May 2026): FTLM now dispatches on Backend
+                      // internally (see ``ftlm_kernel.h``) and
+                      // accepts both ``CpuBackend`` and ``CudaBackend``,
+                      // so the previous FTLM-specific demotion has
+                      // been removed. All thermal methods now stay on
+                      // the caller's chosen backend through the
+                      // streaming-symmetry SectorView's lazy GPU
+                      // mirror.
                       // Wave B3: inject shared spectral bounds when
                       // the binding-level estimator succeeded.
                       if (std::isfinite(shared_e_min)
@@ -1796,6 +1779,20 @@ void bind_workflows(py::module_& m) {
                           "directory: ground-state eigenvector reconstruction "
                           "failed (eigenvectors->host empty).");
                   }
+                  // Phase H.1 of the "Close CPU/GPU Gaps" plan
+                  // (May 2026): capture the truthful backend lane
+                  // from the inner GS solve so the cross-irrep
+                  // aggregate reports "gpu" (or "cpu" / "mpi") on
+                  // ``agg.backend.lane`` instead of leaving it
+                  // empty. The GS sector full solve is the anchor:
+                  // it's the only solve guaranteed to run in this
+                  // binding (the two-phase scan above does many
+                  // cheaper solves but those share the same backend
+                  // contract).
+                  if (!gs_sr.backend.lane.empty()) {
+                      agg.backend.lane     = gs_sr.backend.lane;
+                      agg.backend.mpi_size = gs_sr.backend.mpi_size;
+                  }
                   const auto& psi0 = gs_sr.eigenvectors->host[0];
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
@@ -1902,7 +1899,10 @@ void bind_workflows(py::module_& m) {
                   const std::size_t dim_dst = orb_obs.dim_dst();
                   if (dim_dst == 0) {
                       // Target sector is empty -- spectral function is
-                      // identically zero.
+                      // identically zero. Even so the GS solve above
+                      // already populated ``agg.backend.lane`` (Phase
+                      // H.1) so the caller can still see which lane
+                      // produced the zero result.
                       const std::size_t num_omega =
                           (opts.num_omega > 0) ? opts.num_omega : 1;
                       agg.omega.resize(num_omega);
@@ -1943,7 +1943,6 @@ void bind_workflows(py::module_& m) {
                           + std::to_string(dst_sec_view ? dst_sec_view->dim() : 0)
                           + ", observable=" + std::to_string(dim_dst) + ").");
                   }
-                  ed::matvec::CpuBackend cpu_be;
 
                   // Build the frequency grid -- linear spacing between
                   // [omega_min, omega_max]. Matches the convention used
@@ -1972,18 +1971,44 @@ void bind_workflows(py::module_& m) {
                   cfopts.global_n     = dim_dst;
                   cfopts.verbose      = false;
 
-                  auto apply_H = [&dst_sec_view](const Complex* x,
-                                                 Complex*       y,
-                                                 std::size_t    n) {
-                      dst_sec_view->apply(x, y, n);
-                  };
-                  auto cf = ed::observables::cf_spectral_from_vector(
-                      cpu_be, apply_H, dim_dst,
-                      phi.data(), omega_grid, cfopts);
+                  // Phase H.2 of the "Close CPU/GPU Gaps" plan
+                  // (May 2026): route the inner CF Lanczos through
+                  // ``select_backend`` + ``dst_sec_view->bind<B>()``
+                  // so the target-sector Lanczos runs on the same
+                  // backend as the source-sector GS solve. The
+                  // ``CrossSectorOrbitObservable::apply`` rectangular
+                  // scatter (line above this block) stays host-only;
+                  // we stage the resulting ``phi`` into backend memory
+                  // here as a single D2H/H2D trip and then run the
+                  // CF kernel entirely device-resident. The phi-norm
+                  // and spectral weight are preserved by
+                  // ``cf_spectral_from_vector`` (header-only,
+                  // backend-templated).
+                  ed::observables::CfSpectralResult cf;
+                  auto cf_variant = ed::select_backend(
+                      dst_sec_view->geometry(), opts.backend);
+                  std::visit([&](auto& backend_uptr) {
+                      using BPtr = std::decay_t<decltype(backend_uptr)>;
+                      using B = typename BPtr::element_type;
+                      auto apply_H = dst_sec_view->template bind<B>();
+                      cf = ed::observables::cf_spectral_from_vector(
+                          *backend_uptr, apply_H, dim_dst,
+                          phi.data(), omega_grid, cfopts);
+                  }, cf_variant);
 
                   // -----------------------------------------------------
                   // (8) Marshal the result into ed::SpectralResult.
                   // -----------------------------------------------------
+                  // Phase H.2: refine the propagated lane to reflect
+                  // the LANCZOS lane (which now matches the GS lane
+                  // by construction since both go through
+                  // ``select_backend(dst_sec_view->geometry(),
+                  // opts.backend)`` / ``H.geometry()`` with the same
+                  // ``opts.backend``). Falling back to the GS lane
+                  // captured by Phase H.1 above when the CF variant
+                  // didn't override the BackendMetadata.
+                  agg.backend.lane =
+                      ed::lane_label_from_variant(cf_variant);
                   agg.omega       = cf.frequencies;
                   agg.S_real      = cf.spectral_function;
                   agg.S_imag.assign(cf.spectral_function.size(), 0.0);
@@ -2366,6 +2391,19 @@ void bind_workflows(py::module_& m) {
                   agg.S_imag = merged.S_imag[T_primary];
                   agg.errors_real.assign(num_omega, 0.0);
                   agg.errors_imag.assign(num_omega, 0.0);
+
+                  // Phase H.1 of the "Close CPU/GPU Gaps" plan
+                  // (May 2026): surface the truthful backend lane on
+                  // the aggregate. The FTLM cross-irrep kernel
+                  // (``ftlm_cross_irrep_kernel_one_sector``) is
+                  // host-only -- it consumes raw ``apply_H_src/dst/O``
+                  // lambdas and runs the inner Lanczos / observable
+                  // contraction on the host. GPU rectangular scatter
+                  // for ``CrossSectorOrbitObservable`` is tracked as
+                  // a deferred follow-up. Until that lands, this
+                  // binding always reports ``lane='cpu'``.
+                  agg.backend.lane     = "cpu";
+                  agg.backend.mpi_size = 1;
 
                   std::string label =
                       "k_final = k_initial + Q (cross-irrep, FTLM, "

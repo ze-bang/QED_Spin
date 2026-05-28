@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Close CPU / GPU Gaps Across Workflows (May 2026)
+
+Phases E + H.1 + F + G + H.2 + I of the
+`close-cpu-gpu-gaps_69b4aa54.plan.md` plan. After Phase D's lane-truth
+fix in `src/orchestrator.cpp` (`b77423a`), three gaps remained:
+kernel parity (FTLM thermal + FtlmDynamical/KpmDynamical spectral all
+hard-cast to `CpuBackend`); cross-irrep lane non-truth +
+hard-coded `CpuBackend` in the inner CF Lanczos; and a
+symmetry-mirror kernel that was correct but slow.
+
+- **Phase E (FTLM thermal GPU).** Replaced the
+  `static_assert(CpuBackend)` body of
+  `ed::thermal::ftlm_kernel<Backend>` at
+  [include/ed/thermal/ftlm_kernel.h](include/ed/thermal/ftlm_kernel.h)
+  with an LTLM-style `if constexpr` dispatch:
+  - `CpuBackend` -> legacy `::finite_temperature_lanczos` host
+    driver (unchanged HDF5 contract, single source of truth for
+    intermediate per-sample dumps).
+  - `CudaBackend` -> new `detail::ftlm_kernel_via_backend<Backend>`
+    that loops samples through `lanczos_kernel<Backend>` (no basis
+    kept, `(alpha,beta)` only) then host-side
+    `diagonalize_tridiagonal_ritz` +
+    `compute_ftlm_thermodynamics` + `average_ftlm_samples`.
+  The orchestrator branch in
+  [src/orchestrator.cpp](src/orchestrator.cpp) is now a
+  `std::visit` over `select_backend(...)`. The Python binding
+  [`workflow_bindings.cpp`](python/qed/_bindings/workflow_bindings.cpp)
+  dropped the FTLM-specific `backend.allow_gpu = false` strip + the
+  matching `warn_silent_cpu_fallback("qed.thermal (FTLM)")`, and
+  marked FTLM in `thermal_method_supports_gpu`. Regression:
+  `test_universal_save.py::test_thermal_ftlm_gpu_runs_on_gpu`
+  (pins `lane='gpu'` + non-trivial energy curve).
+- **Phase H.1 (cross-irrep lane propagation).** Both cross-irrep
+  spectral bindings now surface a truthful `agg.backend.lane`:
+  `workflows_spectral_streaming_symmetry_cross_irrep_directory`
+  captures the lane + `mpi_size` from the inner GS solve and
+  copies them onto the aggregate; the FTLM cross-irrep variant
+  hard-codes `"cpu"` since its kernel
+  (`ftlm_cross_irrep_kernel_one_sector`) is still host-only.
+  Regressions: `test_spectral_cross_irrep_lane_propagation_cpu`,
+  `test_spectral_cross_irrep_lane_propagation_gpu`, and
+  `test_spectral_ftlm_cross_irrep_lane_is_cpu` (loop over both
+  `allow_gpu=False/True`).
+- **Phase F (FtlmDynamical spectral GPU).** Added
+  `detail::ftlm_dynamical_kernel_via_backend<Backend>` to
+  [include/ed/observables/cf_dynamical.h](include/ed/observables/cf_dynamical.h):
+  per-sample seed -> backend memory, `lanczos_kernel<B>(keep_basis=true)`,
+  host tridiag solve, `dot_many` for the spectral weights,
+  `cblas_dgemv` for the Ritz amplitudes, host-side Lorentzian sum
+  over omega. Orchestrator dispatches via `std::visit`. Python
+  binding updated `spectral_method_supports_gpu` to include
+  `M::FtlmDynamical` and refined the
+  `warn_silent_cpu_fallback` label to no longer mention
+  FtlmDynamical. Regression:
+  `test_universal_save.py::test_spectral_ftlm_dynamical_gpu_runs_on_gpu`.
+- **Phase G (KpmDynamical spectral GPU).** Refactored
+  `ed::observables::kpm_dynamical_correlator<Backend>` at
+  [include/ed/observables/kpm_dynamical.h](include/ed/observables/kpm_dynamical.h)
+  to actually use `Backend`: takes `H.template bind<B>()` /
+  `A.template bind<B>()` / `B.template bind<B>()`, runs the
+  Chebyshev recurrence `T_n = 2*Hbar*T_{n-1} - T_{n-2}` device-resident
+  via `backend.copy`/`dot`/`axpy`/`scale`, accumulates moments
+  `mu_n = <psi|A* T_n(Hbar) B|psi>` through `backend.dot`. Added
+  a backend-templated spectral-bounds estimator that uses
+  `lanczos_kernel<Backend>` with `LocalDGKS3` reorth (the
+  `FullCGS2 / PeriodicCGS2` policies require `keep_basis=true`
+  which the bounds sweep doesn't need). Lorentz/Jackson kernel
+  application + omega evaluation stays host-side (negligible
+  cost). Python binding mirrors Phase F. Regression:
+  `test_spectral_kpm_dynamical_gpu_runs_on_gpu`.
+- **Phase H.2 (GS cross-irrep on GPU).** Replaced the hard-coded
+  `ed::matvec::CpuBackend cpu_be` in
+  `workflows_spectral_streaming_symmetry_cross_irrep_directory`
+  with a `select_backend(dst_sec_view->geometry(), opts.backend)`
+  variant visit + `dst_sec_view->template bind<B>()`. The
+  `CrossSectorOrbitObservable::apply` rectangular scatter stays
+  host-only (no device path today); `cf_spectral_from_vector`
+  now stages the resulting `phi` H2D via `be.copy_from_host`
+  (was `be.copy` which fails with D2D on a host pointer). The
+  aggregate lane refines to the actual CF-Lanczos lane.
+  Regression: `test_spectral_cross_irrep_gs_gpu_runs_on_gpu` --
+  pins lane truth AND tight (<1e-3) numerical agreement between
+  CPU and GPU CF Lanczos (same algorithm, deterministic GS, same
+  inputs).
+- **Phase I (GPU symmetry-mirror small wins).** Pre-baked
+  `1.0 / orbit_norm` (renamed `orbit_norms` ->
+  `orbit_inv_norms` in `DeviceSymmetryBasisPolicy`; field had a
+  single consumer) so the inner orbit walk in
+  `apply_terms_gpu_scatter` multiplies once instead of dividing.
+  Behind `ED_GPU_SYMMETRY_MIRROR_V2=1`: dim-banded
+  `threads_per_block` sweep (`<=2048 -> 128`, `<=16384 -> 256`,
+  `> -> 512`) and per-mirror side-stream + event for
+  `cudaMemsetAsync(d_out)` so the zeroing overlaps with whatever
+  the host does between matvecs. Added microbench harness
+  [`tests/perf/bench_symmetry_gpu_matvec.cpp`](tests/perf/bench_symmetry_gpu_matvec.cpp)
+  (Z_N Heisenberg ring; tab-separated stdout). Captured A/B
+  measurement at [`docs/perf/bench_symmetry_gpu_matvec_2026-05-28.md`](docs/perf/bench_symmetry_gpu_matvec_2026-05-28.md):
+  V2 gives a ~22% improvement on N=12 over V1 (GPU goes from
+  ~0.235 to ~0.183 ms/matvec; CPU stays at ~10.5 ms; speedup
+  goes from ~45x to ~57x). Added a "must-not-regress" CI gate
+  inside `test_streaming_symmetry_gpu_mirror.cpp` that asserts
+  GPU speedup over CPU > 4x on the smallest tuple that fits in
+  the unit-test timeout (N=10). V2 stays default-off until one
+  acceptance cycle ships; the inv-norm prebake is always-on.
+
+#### Deferred follow-ups
+
+These were identified in the plan but explicitly deferred:
+
+- **FTLM cross-irrep on GPU.** Requires Phase F (landed) plus a
+  GPU-side rectangular scatter for `CrossSectorOrbitObservable`.
+  Until that scatter exists, the FTLM cross-irrep binding stays
+  host-only and reports `lane='cpu'` (pinned by
+  `test_spectral_ftlm_cross_irrep_lane_is_cpu`).
+- **MPI parity for FTLM / LTLM / KpmDos.** Today these methods
+  guard against distributed backends in the orchestrator and
+  fall to single-rank CPU/GPU. Bringing them to the
+  `lanczos_kernel<MpiBackend>` / `lanczos_kernel<MpiCudaBackend>`
+  level is the natural extension once the `Mpi*Backend`
+  classes ship a complete BLAS-1 surface (currently partial).
+- **MPI+GPU auto-dispatch convenience.** Ergonomic only:
+  `device='gpu' + mpi_size>1` should auto-select
+  `MpiCudaBackend` instead of requiring an explicit
+  `backend.mpi_cuda = true` flag.
+
 ### Save and DSSF Upgrades (May 2026)
 
 Four pillars closing wiring gaps in the spectral + thermal stack.
