@@ -1253,6 +1253,14 @@ if(BUILD_ED_TESTS)
         # CpuBackend and CudaBackend on a 6-site Heisenberg chain. First
         # production consumer of `ed/matvec/backends/cuda_backend.cuh`.
         ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
+        # Phase A.1 of the "Kill the GPU State-Lookup Hash" plan
+        # (May 2026): pin the colex convention between
+        # ``unrank_combination_dev`` (already in the codebase) and the
+        # new ``rank_combination_dev`` that replaces the 8-32 GiB
+        # ``d_state_hash_`` device table. Failure here means the
+        # fixed-Sz matvec kernels would silently miss states once we
+        # flip the dispatch in Phase A.2.
+        ed_add_test(test_gpu_fixed_sz_rank      tests/unit/test_gpu_fixed_sz_rank.cpp USE_CATCH2)
         # Phase I of the "Close CPU / GPU Gaps Across Workflows" plan
         # (May 2026): standalone microbench harness for the
         # streaming-symmetry GPU mirror. Not registered as a ctest

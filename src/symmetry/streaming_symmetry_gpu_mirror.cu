@@ -151,9 +151,30 @@ struct GpuSectorMirror {
     thrust::device_vector<double>                    d_orbit_inv_norms;
 
     // -------- hash table for state -> (basis_idx, projection) ----------------
+    // Legacy reverse-lookup path -- still populated for sym-only
+    // sectors (n_up_ < 0) where the dense rank table below would not
+    // fit. For sym+Sz sectors the hash stays empty and the rank-table
+    // path takes over (Phase E.1).
     thrust::device_vector<ed::matvec::basis::DeviceSymmetryHashEntry>
         d_hash_table;
     std::uint32_t hash_mask = 0;
+
+    // -------- Phase E.1: dense rank-table reverse-lookup ---------------------
+    // Two device arrays indexed by ``rank_combination(state, n_sites,
+    // n_up) in [0, C(n_sites, n_up))``:
+    //   * ``d_sz_to_sec[r]`` -- the canonical sector index for state
+    //     ``unrank(r)``, or ``-1`` if that state is not in this irrep.
+    //   * ``d_sz_to_proj[r]`` -- the pre-baked projection factor
+    //     ``conj(alpha_{s,k}) * group_norm / norm_k``; unspecified
+    //     when ``d_sz_to_sec[r] < 0``.
+    // Empty for sym-only sectors; populated for sym+Sz sectors with
+    // n_up_ >= 0 unless ``ED_GPU_USE_HASH=1`` re-enables the hash path
+    // wholesale (build_mirror gates on the env var).
+    thrust::device_vector<std::int32_t>    d_sz_to_sec;
+    thrust::device_vector<cuDoubleComplex> d_sz_to_proj;
+    int           n_sites_   = 0;
+    int           n_up_      = -1;       // -1 -> sym-only, no rank table
+
     double        group_norm = 1.0;
     std::uint64_t dim = 0;
 
@@ -192,8 +213,22 @@ struct GpuSectorMirror {
         v.orbit_inv_norms    = thrust::raw_pointer_cast(d_orbit_inv_norms.data());
         v.dim_               = dim;
         v.group_norm         = group_norm;
-        v.hash_table         = thrust::raw_pointer_cast(d_hash_table.data());
-        v.hash_mask          = hash_mask;
+        // Phase E.1: thread the rank-table fields into the device view.
+        // ``sz_to_sec == nullptr`` is the signal "use the hash"; the
+        // device-side lookup branches on it.
+        const bool have_rank_table = !d_sz_to_sec.empty();
+        v.hash_table  = have_rank_table
+                          ? nullptr
+                          : thrust::raw_pointer_cast(d_hash_table.data());
+        v.hash_mask   = have_rank_table ? 0u : hash_mask;
+        v.sz_to_sec   = have_rank_table
+                          ? thrust::raw_pointer_cast(d_sz_to_sec.data())
+                          : nullptr;
+        v.sz_to_proj  = have_rank_table
+                          ? thrust::raw_pointer_cast(d_sz_to_proj.data())
+                          : nullptr;
+        v.n_sites     = n_sites_;
+        v.n_up        = n_up_;
         return v;
     }
 
@@ -230,12 +265,16 @@ build_mirror(const SectorRef& sector,
              double group_size,
              double spin_l,
              const ed::matvec::TermStorage& terms,
-             std::size_t sector_idx)
+             std::size_t sector_idx,
+             int n_sites = 0,
+             int n_up    = -1)
 {
     auto mirror = std::make_shared<GpuSectorMirror>();
     mirror->sector_idx = sector_idx;
     mirror->spin_l     = spin_l;
     mirror->group_norm = (group_size > 0.0) ? (1.0 / group_size) : 0.0;
+    mirror->n_sites_   = n_sites;
+    mirror->n_up_      = n_up;
 
     const std::size_t sector_dim = sector.basis_states.size();
     mirror->dim = static_cast<std::uint64_t>(sector_dim);
@@ -270,76 +309,191 @@ build_mirror(const SectorRef& sector,
     }
 
     // -----------------------------------------------------------------
-    // Build the (state -> idx, projection) hash table on the host.
+    // Phase E.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+    // decide between the dense rank table (sym + Sz, the user's actual
+    // 32-site workload) and the legacy open-addressing hash (sym-only,
+    // where C(N, n_up) is not defined and the hash cap stays bounded
+    // by the orbit total). The choice flips on:
     //
-    // For each basis state k and each orbit element s' with coefficient
-    // alpha_{s',k}, insert key=s', value=k, projection = conj(alpha) *
-    // group_norm / norm_k. Open-addressing linear probing on a
-    // power-of-two table; the same Fibonacci constant the device
-    // kernel uses (so insertions and lookups follow identical probe
-    // sequences).
+    //   * ``n_up >= 0``   (this build is for a Sz-conserving sector), AND
+    //   * ``ED_GPU_USE_HASH != 1``  (rollback handle stays the legacy
+    //                                 path end-to-end for diagnostics).
     //
-    // Note on correctness: orbits in a single sector are disjoint, so
-    // every computational state s' appears in at most one orbit. The
-    // "key already present" branch below is therefore unreachable for
-    // valid sector data; we keep it defensively in case the host
-    // construction ever produces duplicate orbit entries.
+    // We also guard against degenerate cases where C(N, n_up) is large
+    // enough that the dense table would be worse than the hash.
+    // For n_up == 0 or n_up == n_sites the sector has dim 1, and we
+    // still build the rank table (1-entry array, costs nothing).
     // -----------------------------------------------------------------
-    const std::uint64_t hash_cap = hash_capacity_for(total_elements);
-    if (hash_cap == 0 || (hash_cap & (hash_cap - 1)) != 0) {
-        throw std::runtime_error(
-            "StreamingSymmetry GPU mirror: hash capacity is not a power of two");
-    }
-    mirror->hash_mask = static_cast<std::uint32_t>(hash_cap - 1);
-
-    std::vector<ed::matvec::basis::DeviceSymmetryHashEntry> h_hash(hash_cap);
-    for (auto& e : h_hash) {
-        e.key = kEmptyKey;
-        e.value = 0;
-        e._pad = 0;
-        e.projection = make_cuDoubleComplex(0.0, 0.0);
-    }
-
-    for (std::size_t k = 0; k < sector_dim; ++k) {
-        const auto& bs = sector.basis_states[k];
-        const double inv_norm_k = (bs.norm != 0.0) ? (1.0 / bs.norm) : 0.0;
-        const double scale = mirror->group_norm * inv_norm_k;
-        for (std::size_t j = 0; j < bs.orbit_elements.size(); ++j) {
-            const std::uint64_t s_prime = bs.orbit_elements[j];
-            const std::complex<double> alpha = bs.orbit_coefficients[j];
-            // conj(alpha) * scale: real = alpha.real * scale, imag = -alpha.imag * scale
-            const double proj_re =  alpha.real() * scale;
-            const double proj_im = -alpha.imag() * scale;
-
-            // Fibonacci-hash + linear probing (same constant the device
-            // side uses for bit-identical probe paths).
-            std::uint64_t h = (s_prime * 11400714819323198485ULL) & mirror->hash_mask;
-            for (;;) {
-                if (h_hash[h].key == kEmptyKey) {
-                    h_hash[h].key        = s_prime;
-                    h_hash[h].value      = static_cast<std::uint32_t>(k);
-                    h_hash[h].projection = make_cuDoubleComplex(proj_re, proj_im);
-                    break;
-                }
-                if (h_hash[h].key == s_prime) {
-                    // Already present (orbit overlap -- shouldn't happen
-                    // for valid sector data). Keep the first insertion.
-                    break;
-                }
-                h = (h + 1) & mirror->hash_mask;
-            }
+    static const bool kLegacyHashRequested = []() {
+        const char* s = std::getenv("ED_GPU_USE_HASH");
+        return (s != nullptr && s[0] == '1');
+    }();
+    const bool can_use_rank = (n_sites > 0) && (n_up >= 0)
+                              && (n_up <= n_sites) && (n_sites <= 64);
+    // Compute C(n_sites, n_up) host-side; cap at INT32_MAX so the
+    // sz_to_sec[r] = int32 cast stays defined. Beyond that we'd need a
+    // 64-bit rank type, which is out of scope for this phase.
+    std::uint64_t dim_full_sz = 0;
+    if (can_use_rank) {
+        // Standard host binomial; n_sites <= 64 so 128-bit math is not
+        // required for the intermediate.
+        int k = (n_up < n_sites - n_up) ? n_up : (n_sites - n_up);
+        long double dv = 1.0L;
+        for (int i = 0; i < k; ++i) {
+            dv *= static_cast<long double>(n_sites - i);
+            dv /= static_cast<long double>(i + 1);
+        }
+        if (dv <= static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
+            dim_full_sz = static_cast<std::uint64_t>(dv + 0.5L);
         }
     }
+    const bool use_rank_table = can_use_rank
+                                && !kLegacyHashRequested
+                                && dim_full_sz > 0;
 
-    // -----------------------------------------------------------------
-    // HtoD copy via thrust::device_vector assignment (one
-    // cudaMemcpyAsync each under the hood).
-    // -----------------------------------------------------------------
-    mirror->d_orbit_elements     = h_elements;
-    mirror->d_orbit_coefficients = h_coefs;
-    mirror->d_orbit_offsets      = h_offsets;
-    mirror->d_orbit_inv_norms    = h_inv_norms;
-    mirror->d_hash_table         = h_hash;
+    if (use_rank_table) {
+        // ---- Dense rank-table path -----------------------------------
+        // Allocate host-side sz_to_sec[] sized C(n_sites, n_up). The
+        // cudaMemcpyToSymbol-friendly Pascal upload happens on first
+        // device-side rank() call; we do an explicit upload here so
+        // every TU using the rank table sees the constant memory
+        // already populated.
+        ed::gpu::combinadic::detail::upload_pascal();
+
+        std::vector<std::int32_t>    h_sz_to_sec(dim_full_sz, -1);
+        std::vector<cuDoubleComplex> h_sz_to_proj(dim_full_sz,
+                                                  make_cuDoubleComplex(0.0, 0.0));
+
+        // Host-side Pascal table; matches the device ``d_pascal_shared``
+        // upload byte-for-byte. Computed once per build_mirror call;
+        // 65x65 = 4225 entries, trivial cost relative to the orbit
+        // walk that follows.
+        std::vector<std::vector<std::uint64_t>> pascal(65, std::vector<std::uint64_t>(65, 0));
+        for (int nn = 0; nn <= 64; ++nn) {
+            pascal[nn][0] = 1ULL;
+            for (int kk = 1; kk <= nn; ++kk) {
+                pascal[nn][kk] = pascal[nn - 1][kk - 1]
+                                 + (kk <  nn ? pascal[nn - 1][kk] : 0ULL);
+            }
+        }
+        auto binom_host = [&pascal](int nn, int kk) -> std::uint64_t {
+            if (kk < 0 || kk > nn || nn < 0 || nn > 64) return 0ULL;
+            return pascal[nn][kk];
+        };
+
+        // Same orbit-walk loop as the hash build, but writing into the
+        // dense table instead of inserting into the open-addressing
+        // hash. ``rank_combination_host`` is the inverse of the device
+        // ``rank_state`` -- we replicate the colex convention here so
+        // host and device land on the same r.
+        //
+        // Previously this had an inline binomial that returned 1 for
+        // C(0, 1) (any state with bit 0 set), shifting every host rank
+        // by 1 relative to the device. The Pascal-table form above
+        // exactly matches the device ``binomial()`` from
+        // ``combinadic.cuh`` (both return 0 when ``k > n``), so host
+        // and device produce identical r for every valid fixed-Sz
+        // state.
+        auto rank_combination_host = [&binom_host, n_sites](
+            std::uint64_t state, int kk) -> std::uint64_t {
+            std::uint64_t r = 0;
+            int seen = 0;
+            for (int bit = 0; bit < n_sites && seen < kk; ++bit) {
+                if ((state >> bit) & 1ULL) {
+                    ++seen;
+                    r += binom_host(bit, seen);
+                }
+            }
+            return r;
+        };
+
+        for (std::size_t k = 0; k < sector_dim; ++k) {
+            const auto& bs = sector.basis_states[k];
+            const double inv_norm_k = (bs.norm != 0.0) ? (1.0 / bs.norm) : 0.0;
+            const double scale = mirror->group_norm * inv_norm_k;
+            for (std::size_t j = 0; j < bs.orbit_elements.size(); ++j) {
+                const std::uint64_t s_prime = bs.orbit_elements[j];
+                const std::complex<double> alpha = bs.orbit_coefficients[j];
+                const double proj_re =  alpha.real() * scale;
+                const double proj_im = -alpha.imag() * scale;
+                const std::uint64_t r = rank_combination_host(s_prime, n_up);
+                if (r >= dim_full_sz) continue;  // defensive: out-of-sector
+                h_sz_to_sec[r]  = static_cast<std::int32_t>(k);
+                h_sz_to_proj[r] = make_cuDoubleComplex(proj_re, proj_im);
+            }
+        }
+
+        // Hash table stays empty for this sector; the basis_view()
+        // helper switches paths on ``d_sz_to_sec.empty()``.
+        mirror->d_orbit_elements     = h_elements;
+        mirror->d_orbit_coefficients = h_coefs;
+        mirror->d_orbit_offsets      = h_offsets;
+        mirror->d_orbit_inv_norms    = h_inv_norms;
+        mirror->d_sz_to_sec          = h_sz_to_sec;
+        mirror->d_sz_to_proj         = h_sz_to_proj;
+        mirror->hash_mask            = 0;
+    } else {
+        // ---- Legacy open-addressing hash path -----------------------
+        // Build the (state -> idx, projection) hash table on the host.
+        //
+        // For each basis state k and each orbit element s' with
+        // coefficient alpha_{s',k}, insert key=s', value=k, projection
+        // = conj(alpha) * group_norm / norm_k. Open-addressing linear
+        // probing on a power-of-two table; the same Fibonacci constant
+        // the device kernel uses (so insertions and lookups follow
+        // identical probe sequences).
+        //
+        // Note on correctness: orbits in a single sector are disjoint,
+        // so every computational state s' appears in at most one
+        // orbit. The "key already present" branch below is therefore
+        // unreachable for valid sector data; we keep it defensively in
+        // case the host construction ever produces duplicate orbit
+        // entries.
+        const std::uint64_t hash_cap = hash_capacity_for(total_elements);
+        if (hash_cap == 0 || (hash_cap & (hash_cap - 1)) != 0) {
+            throw std::runtime_error(
+                "StreamingSymmetry GPU mirror: hash capacity is not a power of two");
+        }
+        mirror->hash_mask = static_cast<std::uint32_t>(hash_cap - 1);
+
+        std::vector<ed::matvec::basis::DeviceSymmetryHashEntry> h_hash(hash_cap);
+        for (auto& e : h_hash) {
+            e.key = kEmptyKey;
+            e.value = 0;
+            e._pad = 0;
+            e.projection = make_cuDoubleComplex(0.0, 0.0);
+        }
+
+        for (std::size_t k = 0; k < sector_dim; ++k) {
+            const auto& bs = sector.basis_states[k];
+            const double inv_norm_k = (bs.norm != 0.0) ? (1.0 / bs.norm) : 0.0;
+            const double scale = mirror->group_norm * inv_norm_k;
+            for (std::size_t j = 0; j < bs.orbit_elements.size(); ++j) {
+                const std::uint64_t s_prime = bs.orbit_elements[j];
+                const std::complex<double> alpha = bs.orbit_coefficients[j];
+                const double proj_re =  alpha.real() * scale;
+                const double proj_im = -alpha.imag() * scale;
+
+                std::uint64_t h = (s_prime * 11400714819323198485ULL) & mirror->hash_mask;
+                for (;;) {
+                    if (h_hash[h].key == kEmptyKey) {
+                        h_hash[h].key        = s_prime;
+                        h_hash[h].value      = static_cast<std::uint32_t>(k);
+                        h_hash[h].projection = make_cuDoubleComplex(proj_re, proj_im);
+                        break;
+                    }
+                    if (h_hash[h].key == s_prime) break;
+                    h = (h + 1) & mirror->hash_mask;
+                }
+            }
+        }
+
+        mirror->d_orbit_elements     = h_elements;
+        mirror->d_orbit_coefficients = h_coefs;
+        mirror->d_orbit_offsets      = h_offsets;
+        mirror->d_orbit_inv_norms    = h_inv_norms;
+        mirror->d_hash_table         = h_hash;
+    }
 
     // Term SoA: trivially copyable POD records -> direct H2D.
     mirror->d_diag_one_body      = terms.diag_one_body;
@@ -446,12 +600,21 @@ StreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) const
     // different sector.
     auto cached = std::static_pointer_cast<GpuSectorMirror>(gpu_sector_cache_);
     if (!cached || cached->sector_idx != sector_idx) {
+        // Phase E.1: ``StreamingSymmetryOperator`` does NOT carry an
+        // n_up (the full Hilbert is the parent basis), so we pass
+        // n_up=-1 to skip the dense rank table. The legacy hash path
+        // is built instead -- still correct, just unchanged from
+        // pre-patch behavior for this class. A future plan can teach
+        // the operator to detect Sz conservation on its terms and
+        // pass the inferred n_up here.
         cached = build_mirror(
             sectors_[sector_idx],
             static_cast<double>(getGroupSize()),
             static_cast<double>(spin_l_),
             terms_,
-            sector_idx);
+            sector_idx,
+            /*n_sites=*/static_cast<int>(getNumBits()),
+            /*n_up=*/-1);
         gpu_sector_cache_ = std::static_pointer_cast<void>(cached);
     }
 
@@ -510,12 +673,17 @@ FixedSzStreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) c
 
     auto cached = std::static_pointer_cast<GpuSectorMirror>(gpu_sector_cache_);
     if (!cached || cached->sector_idx != sector_idx) {
+        // Phase E.1: this IS the sym+Sz workload that the kill-hash
+        // plan targets. Pass the operator's n_up so build_mirror
+        // builds the dense rank table instead of the 8-32 GiB hash.
         cached = build_mirror(
             sectors_[sector_idx],
             static_cast<double>(getGroupSize()),
             static_cast<double>(spin_l_),
             terms_,
-            sector_idx);
+            sector_idx,
+            /*n_sites=*/static_cast<int>(getNumBits()),
+            /*n_up=*/static_cast<int>(getNUp()));
         gpu_sector_cache_ = std::static_pointer_cast<void>(cached);
     }
 

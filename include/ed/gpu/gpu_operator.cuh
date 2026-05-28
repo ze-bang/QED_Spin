@@ -543,6 +543,21 @@ __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, i
 // the first generateFixedSzBasisKernel launch; idempotent across calls.
 void ensure_pascal_uploaded();
 
+// Phase A.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+// host-callable roundtrip test for ``rank_combination_dev``. For the
+// given (n_bits, k), checks that
+//   ``rank_combination_dev(unrank_combination_dev(r), n_bits, k) == r``
+// for every ``r`` in ``ranks``. Returns ``true`` on full agreement;
+// ``false`` if any ``r`` failed, in which case ``*first_fail_rank_out``
+// receives one of the failing ranks (any thread wins the atomic).
+//
+// Used by ``tests/unit/test_gpu_fixed_sz_rank.cpp`` to pin the colex
+// convention between rank and unrank before we replace the legacy
+// hash-table lookup in the matvec kernels.
+bool gpu_rank_unrank_roundtrip(const std::vector<uint64_t>& ranks,
+                               int n_bits, int k,
+                               uint64_t* first_fail_rank_out);
+
 // State lookup (binary search)
 __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);
 
@@ -580,6 +595,33 @@ __global__ void matVecFixedSzKernelOptimizedHash(const cuDoubleComplex* x,
                                                  int hash_table_size,
                                                  uint32_t hash_table_mask,
                                                  int N, int n_sites, float spin_l,
+                                                 const GPUTransformData* transforms,
+                                                 int num_transforms);
+
+// =========================================================================
+// Phase A.2 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+// Rank-lookup variants of the fixed-Sz matvec kernels.
+//
+// Identical semantics to the Hash variants, but the per-(state, transform)
+// "lookup new_state -> new_idx" call is replaced by a constant-cache
+// combinadic ``rank_combination_dev`` (zero global memory traffic, no
+// device hash table to malloc / memset). Default dispatch path; the Hash
+// variants stay buildable for diagnostic compares behind ``ED_GPU_USE_HASH=1``.
+//
+// New parameter ``int n_up`` (the fixed-Sz popcount) is required by the
+// rank function and threaded through the operator.
+// =========================================================================
+__global__ void matVecFixedSzTransformParallelRank(const cuDoubleComplex* x,
+                                                   cuDoubleComplex* y,
+                                                   const uint64_t* basis_states,
+                                                   const GPUTransformData* transforms,
+                                                   int num_transforms,
+                                                   int N, int n_sites, int n_up, float spin_l);
+
+__global__ void matVecFixedSzKernelOptimizedRank(const cuDoubleComplex* x,
+                                                 cuDoubleComplex* y,
+                                                 const uint64_t* basis_states,
+                                                 int N, int n_sites, int n_up, float spin_l,
                                                  const GPUTransformData* transforms,
                                                  int num_transforms);
 

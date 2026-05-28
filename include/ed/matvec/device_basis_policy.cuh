@@ -41,6 +41,7 @@
 #include <vector>
 
 #include <ed/matvec/basis_policy.h>
+#include <ed/gpu/combinadic.cuh>
 
 namespace ed::matvec::basis {
 
@@ -178,10 +179,34 @@ struct DeviceSymmetryBasisPolicy {
     std::uint64_t           dim_               = 0;
     double                  group_norm         = 1.0;      // 1.0 / |G|
 
-    // Reverse lookup: state -> (basis_idx, projection) via an
-    // open-addressing hash.
+    // -------------------------------------------------------------------
+    // Reverse lookup: state -> (basis_idx, projection).
+    //
+    // Phase E.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026)
+    // adds a two-level dense indirection ("rank table") that replaces
+    // the open-addressing hash table for the sym+Sz workload. When
+    // ``sz_to_sec != nullptr`` the device lookup is:
+    //   1. ``r = combinadic::rank_state(state, n_sites, n_up)`` --
+    //      constant-cache compute, zero global memory traffic.
+    //   2. ``sec_idx = sz_to_sec[r]`` -- a single coalesced int32 read
+    //      (or ``-1`` if state is absent from this sector).
+    //   3. ``proj = sz_to_proj[r]`` -- one coalesced complex read.
+    // Both tables have length ``C(n_sites, n_up) = dim_full_sz``,
+    // smaller than the legacy 16 GiB+ hash for the user's
+    // sym+Sz at N=32, n_up=20 workload.
+    //
+    // For sym-only sectors (n_up_ < 0) the rank-table path is not
+    // used: the dim of the full Hilbert ``2^N`` makes the dense
+    // approach unworkable at large N. ``sz_to_sec == nullptr`` is the
+    // signal to fall back to the legacy hash, which stays populated
+    // for those sectors only.
+    // -------------------------------------------------------------------
     const DeviceSymmetryHashEntry* hash_table = nullptr;
     std::uint32_t                  hash_mask  = 0;
+    const std::int32_t*            sz_to_sec  = nullptr;
+    const cuDoubleComplex*         sz_to_proj = nullptr;
+    int                            n_sites    = 0;
+    int                            n_up       = -1;  // -1 -> sym-only, use hash
 
     __host__ __device__ inline std::uint64_t dim() const noexcept {
         return dim_;
@@ -192,6 +217,12 @@ struct DeviceSymmetryBasisPolicy {
         return orbit_elements[off];
     }
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
+        if (sz_to_sec != nullptr) {
+            if (__popcll(state) != n_up) return kDeviceNotFound;
+            const int r = ed::gpu::combinadic::rank_state(state, n_sites, n_up);
+            const std::int32_t k = sz_to_sec[r];
+            return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
+        }
         std::uint64_t h = (state * 11400714819323198485ULL) & hash_mask;
         for (;;) {
             const DeviceSymmetryHashEntry e = hash_table[h];
@@ -204,6 +235,14 @@ struct DeviceSymmetryBasisPolicy {
     // Returns kDeviceNotFound for the index if the state is not in the basis.
     __device__ inline std::uint64_t
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
+        if (sz_to_sec != nullptr) {
+            if (__popcll(state) != n_up) return kDeviceNotFound;
+            const int r = ed::gpu::combinadic::rank_state(state, n_sites, n_up);
+            const std::int32_t k = sz_to_sec[r];
+            if (k < 0) return kDeviceNotFound;
+            proj_out = sz_to_proj[r];
+            return static_cast<std::uint64_t>(k);
+        }
         std::uint64_t h = (state * 11400714819323198485ULL) & hash_mask;
         for (;;) {
             const DeviceSymmetryHashEntry e = hash_table[h];
