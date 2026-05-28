@@ -4,7 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Run on PRs targeting any branch (not just main) so feature -> feature
+    # PRs also get CI. Was ``branches: [main]`` -- harmless restriction in
+    # the days when ``main`` was the only long-lived branch, but it blocked
+    # CI on the multi-branch workflow we've moved to in 2026.
+  workflow_dispatch:
+    # Manual re-run knob from the Actions tab. Useful for re-running a
+    # failed lane against an unchanged tree, or for triggering CI on a
+    # branch that was created without an upstream PR.
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -419,3 +426,151 @@ jobs:
 
       - name: Build (compile only, no execution)
         run: cmake --build build-cuda --target ed_solvers_gpu ED -- -j$(nproc)
+
+  # ---------------------------------------------------------------------------
+  # MPI lane: build with OpenMPI + run the distributed ctest suite. Catches
+  # regressions in the WITH_MPI=ON code paths (DistributedOperator,
+  # DistributedSymmetryOperator, distributed Lanczos / TPQ / streaming-
+  # symmetry directory walker) which the CPU/GCC/Clang lanes above cannot
+  # see -- every one of them is gated on ``WITH_MPI=OFF``.
+  #
+  # The MPI-tagged tests are registered with three rank counts (np=1, 2, 4)
+  # so this lane exercises both single-rank fallback and real cross-rank
+  # communication. Hosted runners have 4 cores, so np=4 is the cap.
+  # ---------------------------------------------------------------------------
+  linux-mpi:
+    name: Linux / GCC / OpenBLAS / Release + MPI
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build + MPI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libhdf5-openmpi-dev \
+            libeigen3-dev \
+            libopenmpi-dev \
+            openmpi-bin \
+            pkg-config
+
+      - name: Print toolchain versions
+        run: |
+          gcc --version | head -1
+          mpicc --version | head -1
+          mpiexec --version | head -3
+          cmake --version | head -1
+
+      - name: Configure (Release + MPI ON, CUDA OFF)
+        run: |
+          cmake -S . -B build-mpi \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_ED_TESTS=ON \
+            -DWITH_CUDA=OFF \
+            -DWITH_MPI=ON \
+            -DBLAS_PROFILE=OPENBLAS
+
+      - name: Build
+        run: cmake --build build-mpi -- -j$(nproc)
+
+      - name: Test (ctest, MPI tests run np=1/2/4)
+        env:
+          # Hosted runners share cores between sibling jobs so OpenMPI's
+          # default --bind-to-core can fail with "not enough slots
+          # available". --oversubscribe lets np=4 run on 4 cores without
+          # the scheduler bailing.
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+          OMPI_ALLOW_RUN_AS_ROOT: "1"
+          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+        run: ctest --test-dir build-mpi --output-on-failure -j$(nproc)
+
+      - name: Upload CTest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux-mpi
+          path: |
+            build-mpi/Testing/Temporary/LastTest.log
+            build-mpi/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # CUDA full lane (DISABLED-BY-DEFAULT, opt-in via self-hosted runner).
+  #
+  # GitHub-hosted runners have no NVIDIA GPU, so the ``linux-cuda-build``
+  # lane above only catches header / linker breakage. To actually execute
+  # the ``ed_solvers_gpu`` + ``ed_distributed_gpu`` test suites, point this
+  # lane at a runner that has a CUDA-capable device. Three options:
+  #
+  #   1. GitHub-hosted GPU runners (public beta -> GA 2024-2025).
+  #      Available labels include ``gpu_t4`` (T4, 16 GiB VRAM, 4 vCPU,
+  #      ~$0.07/min). Requires a Team or Enterprise GitHub plan and an
+  #      explicit per-runner-group allowlist in repo settings. Replace
+  #      ``runs-on: [self-hosted, linux, x64, gpu]`` below with
+  #      ``runs-on: gpu_t4`` to opt in.
+  #
+  #   2. Self-hosted runner on your own GPU box.
+  #      Install the Actions runner on a Linux host with NVIDIA drivers
+  #      + CUDA toolkit, register it to ``ze-bang/QED`` with labels
+  #      ``[self-hosted, linux, x64, gpu]``, and uncomment the block
+  #      below. This is what we recommend for the QED project today.
+  #
+  #   3. Third-party GPU CI providers (Cirun.io, BuildJet, etc.) that
+  #      proxy GPU hardware behind a ``runs-on:`` label.
+  #
+  # When enabled this job re-uses the CUDA toolkit install from
+  # ``linux-cuda-build`` and additionally:
+  #   * sets ``BUILD_ED_TESTS=ON`` so ctest targets are emitted;
+  #   * runs ``ctest`` which picks up ``test_cuda_backend``,
+  #     ``test_streaming_symmetry_gpu_mirror``, and any other
+  #     ``ed_add_test(...)`` registered under ``WITH_CUDA=ON``;
+  #   * if also paired with MPI (gpu_t4 + your self-hosted MPI mesh) you
+  #     get ``test_mpi_cuda_backend``, ``test_distributed_lanczos_gpu``
+  #     and friends (see ``ed_add_phase3c_test`` in CMakeLists.txt).
+  #
+  # Keep this commented until a GPU runner is registered -- a job that
+  # requests a missing label sits in "Queued" forever and looks worse on
+  # the PR check page than no job at all.
+  # ---------------------------------------------------------------------------
+  # linux-cuda-test:
+  #   name: Linux / CUDA + tests (self-hosted GPU)
+  #   runs-on: [self-hosted, linux, x64, gpu]
+  #   timeout-minutes: 60
+  #
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Print GPU + toolchain versions
+  #       run: |
+  #         nvidia-smi
+  #         nvcc --version | head -4
+  #         cmake --version | head -1
+  #
+  #     - name: Configure (CUDA on, MPI off, runtime test discovery)
+  #       run: |
+  #         cmake -S . -B build-cuda \
+  #           -G Ninja \
+  #           -DCMAKE_BUILD_TYPE=Release \
+  #           -DBUILD_ED_TESTS=ON \
+  #           -DWITH_CUDA=ON \
+  #           -DWITH_MPI=OFF \
+  #           -DBLAS_PROFILE=OPENBLAS
+  #
+  #     - name: Build
+  #       run: cmake --build build-cuda -- -j$(nproc)
+  #
+  #     - name: Test (ctest)
+  #       run: ctest --test-dir build-cuda --output-on-failure -j$(nproc)

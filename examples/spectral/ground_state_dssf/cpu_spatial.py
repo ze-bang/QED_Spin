@@ -21,7 +21,7 @@ H = heisenberg_chain(N, pbc=True)
 
 obs = qed.Operator(N, 0.5)
 for i in range(N):
-    obs.add_one_body(qed.OP_SZ, i, 1.0)
+    obs.add_one_body(qed.OP_SZ, i, 1.0 if i % 2 == 0 else -1.0)
 
 omega = np.linspace(-5.0, 5.0, 11)
 result = qed.spectral(
@@ -42,7 +42,7 @@ rank0_print(f"S(w= 0.0) = {result.S_real[mid]:.6f}")
 rank0_print(f"S(w= 5.0) = {result.S_real[-1]:.6f}")
 
 # === Expected output (deterministic; captured on the CI reference runner) ===
-# S(w=-5.0) = 0.000852
-# S(w= 0.0) = 0.005829
-# S(w= 5.0) = 0.459119
+# S(w=-5.0) = 0.006872
+# S(w= 0.0) = 0.703124
+# S(w= 5.0) = 0.013104
 # ===========================================================================

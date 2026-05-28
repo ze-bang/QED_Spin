@@ -86,13 +86,18 @@ PY_FENCE_RE = re.compile(
 )
 
 PRINTABLE_RE = re.compile(
+    # Keep this in lockstep with the copy in ``python/tests/test_examples.py``.
+    # We use ``\s*=\s*`` everywhere so cosmetic padding (e.g. ``E[0]      =
+    # ...``) does not silently fall out of the schema match -- the
+    # examples-smoke CI lane broke in May 2026 because the regex required
+    # a single space and one of the saved cells had column-aligned printing.
     r"^(?:"
-    r"E\[\d+\] = .+|"
-    r"\|E0 - E0_Bethe\| = .+|"
-    r"gs_E\s+=.+|"
-    r"T\[(?:\d+|mid|-1)\]\s+=.+|"
-    r"T_probe\s+=.+|"
-    r"<O>\s*=.+|"
+    r"E\[\d+\]\s*=\s*.+|"
+    r"\|E0 - E0_Bethe\|\s*=\s*.+|"
+    r"gs_E\s*=\s*.+|"
+    r"T\[(?:\d+|mid|-1)\]\s*=\s*.+|"
+    r"T_probe\s*=\s*.+|"
+    r"<O>\s*=\s*.+|"
     r"S\(.+"
     r")$"
 )

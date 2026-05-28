@@ -29,13 +29,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES  = REPO_ROOT / "examples"
 
 PRINTABLE_RE = re.compile(
+    # ``\s*=\s*`` everywhere so cosmetic padding (e.g. ``E[0]      = ...``
+    # vs the canonical ``E[0] = ...``) does NOT silently drop a line out
+    # of the schema match. This regression bit us in May 2026 when
+    # ``examples/solve/lanczos/cpu_save.py`` left right-aligned columns
+    # and the smoke test broke even though the example was correct.
     r"^(?:"
-    r"E\[\d+\] = .+|"
-    r"\|E0 - E0_Bethe\| = .+|"
-    r"gs_E\s+=.+|"
-    r"T\[(?:\d+|mid|-1)\]\s+=.+|"
-    r"T_probe\s+=.+|"
-    r"<O>\s*=.+|"
+    r"E\[\d+\]\s*=\s*.+|"
+    r"\|E0 - E0_Bethe\|\s*=\s*.+|"
+    r"gs_E\s*=\s*.+|"
+    r"T\[(?:\d+|mid|-1)\]\s*=\s*.+|"
+    r"T_probe\s*=\s*.+|"
+    r"<O>\s*=\s*.+|"
     r"S\(.+"
     r")$"
 )

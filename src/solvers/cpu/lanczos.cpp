@@ -609,12 +609,17 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                 }
             }
 
-            // Save eigenvector using HDF5 in main output directory (unified ed_results.h5)
-            try {
-                std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
-                HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
+            // Save eigenvector using HDF5 in main output directory
+            // (unified ed_results.h5). Skip when no output_dir was set,
+            // or when the caller pinned ``/dev/null`` to disable I/O --
+            // see the matching guard on the eigenvalues dump below.
+            if (!evec_dir.empty() && evec_dir != "/dev/null") {
+                try {
+                    std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+                    HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
+                }
             }
         }
         
@@ -662,9 +667,11 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
     // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5).
-    // Convention: dir == "/dev/null" disables the HDF5 dump entirely. Useful
-    // for benchmarks that don't want disk I/O in the timed loop.
-    if (evec_dir != "/dev/null") {
+    // Convention: ``evec_dir == "/dev/null"`` OR ``evec_dir.empty()``
+    // disables the HDF5 dump entirely. Useful for benchmarks that don't
+    // want disk I/O in the timed loop and for tests that don't care
+    // about persistence (no output_dir set => no per-test scratch race).
+    if (!evec_dir.empty() && evec_dir != "/dev/null") {
         try {
             std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
             HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
@@ -1039,7 +1046,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     uint64_t m = R.iters_done;
     std::cout << "Lanczos: " << m << " iterations" << std::endl;
 
-    std::string evec_dir = (dir.empty() ? "." : dir);
+    // ``dir.empty()`` -> "do not save" (see the SolveOptions::output_dir
+    // doc string in include/ed/orchestrator.h). The downstream sink
+    // ``solve_tridiagonal_matrix`` already special-cases ``/dev/null``
+    // and now also treats the empty string the same way -- both mean
+    // "skip the HDF5 dump". Defaulting to "." silently dumped
+    // ``./ed_results.h5`` from every test that forgot to set output_dir
+    // and produced the parallel-ctest race condition we saw in CI.
+    std::string evec_dir = dir;
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues,
                                               temp_dir, evec_dir, eigenvectors, N);
     if (info != 0) {
@@ -1422,11 +1436,18 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
 
-    // Create output directory if needed
-    if (dir.empty()) {
-        dir = ".";
-    }
-    if (compute_eigenvectors) {
+    // ``dir.empty()`` means "do not write" -- pinned by the SolveOptions
+    // contract (``output_dir`` doc string in include/ed/orchestrator.h)
+    // and by the FTLM thermal_persist contract. We used to default ``dir
+    // = "."`` here which silently spammed ``./ed_results.h5`` from every
+    // test/example/run that forgot to pass an output_dir. With parallel
+    // ctest (``-j$(nproc)``) that turned into a real race-condition (HDF5
+    // can't open the same file concurrently from multiple processes
+    // without SWMR) and made GCC Release CI fail intermittently. Now we
+    // skip the directory creation entirely when no path was supplied;
+    // the ``!dir.empty()`` guards on every ``saveDiagonalizationResults``
+    // call below already do the right thing.
+    if (compute_eigenvectors && !dir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
     }
