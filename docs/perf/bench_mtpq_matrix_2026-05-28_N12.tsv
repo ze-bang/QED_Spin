@@ -1,0 +1,18 @@
+# bench_mtpq_matrix
+# N=12  T=[0.5,4.0]  num_T=4  num_samples=2  max_iter=50
+# qed.has_cuda_build()=True
+basis	device	lane	wall_s	E_gs	samples	max_iter	status
+none	cpu	cpu	0.490	-3.601575	2	50	ok
+none	gpu	gpu	0.115	-3.601575	2	50	ok
+sz	cpu	cpu	0.274	-4.383333	2	50	ok
+sz	gpu	gpu	0.741	-4.383333	2	50	ok
+sym	cpu	cpu	4.410	-4.308992	2	50	ok
+sym	gpu	gpu	1.363	-4.740189	2	50	ok
+sym+sz	cpu	cpu	8.219	-5.186113	2	50	ok
+sym+sz	gpu	gpu	14.209	-4.976623	2	50	ok
+# CPU vs GPU per basis (wall_cpu / wall_gpu)
+basis	cpu_s	gpu_s	speedup	cpu_lane	gpu_lane
+none	0.490	0.115	4.26x	cpu	gpu
+sz	0.274	0.741	0.37x	cpu	gpu
+sym	4.410	1.363	3.24x	cpu	gpu
+sym+sz	8.219	14.209	0.58x	cpu	gpu

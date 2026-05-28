@@ -64,6 +64,39 @@ namespace ed::symmetry::gpu_mirror {
 
 namespace detail {
 
+// ---------------------------------------------------------------------------
+// Phase I of the "Close CPU / GPU Gaps" plan (May 2026):
+// ED_GPU_SYMMETRY_MIRROR_V2=1 (any non-zero string) enables the
+// targeted small-win optimizations:
+//   - dim-banded ``threads_per_block`` sweep
+//   - ``cudaMemsetAsync`` on a per-mirror side stream, gated by event
+//     so the kernel launch on the default stream waits on the memset
+//     completion without serializing the host call.
+// Off by default until the acceptance harness ships measurements;
+// the pre-baked ``orbit_inv_norms`` win above is unconditional
+// because it's a pure correctness-preserving simplification.
+// ---------------------------------------------------------------------------
+inline bool v2_enabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("ED_GPU_SYMMETRY_MIRROR_V2");
+        if (env == nullptr || env[0] == '\0') return false;
+        return env[0] != '0';
+    }();
+    return enabled;
+}
+
+inline int v2_threads_per_block_for(std::size_t dim) {
+    // Heuristic from the Phase I plan: small sectors do better with
+    // fewer threads per block (more blocks -> more chance of
+    // concurrent SM occupancy and less per-block atomic contention);
+    // very large sectors prefer more threads per block (amortizes
+    // scheduler overhead). Boundaries match the plan -- can be
+    // re-tuned once Nsight Compute traces land in docs/perf/.
+    if (dim <= 2048)  return 128;
+    if (dim <= 16384) return 256;
+    return 512;
+}
+
 inline constexpr std::uint64_t kEmptyKey = static_cast<std::uint64_t>(-1);
 
 inline void cuda_check(cudaError_t err, const char* what) {
@@ -110,7 +143,12 @@ struct GpuSectorMirror {
     thrust::device_vector<std::uint64_t>             d_orbit_elements;
     thrust::device_vector<cuDoubleComplex>           d_orbit_coefficients;
     thrust::device_vector<std::uint32_t>             d_orbit_offsets;
-    thrust::device_vector<double>                    d_orbit_norms;
+    // Phase I (Close CPU/GPU Gaps, May 2026): stores pre-baked
+    // ``1.0 / norm_j`` so the inner-loop scaling in
+    // ``apply_terms_gpu_scatter`` is a multiply rather than a
+    // divide. Host-side raw norms come from the SymmetrySector and
+    // are inverted exactly once per mirror upload.
+    thrust::device_vector<double>                    d_orbit_inv_norms;
 
     // -------- hash table for state -> (basis_idx, projection) ----------------
     thrust::device_vector<ed::matvec::basis::DeviceSymmetryHashEntry>
@@ -129,12 +167,29 @@ struct GpuSectorMirror {
 
     double spin_l = 0.5;
 
+    // Phase I (Close CPU/GPU Gaps, May 2026): per-mirror side stream
+    // + event used to overlap ``cudaMemsetAsync(d_out)`` with the
+    // prior matvec's tail. Created lazily on first matvec when
+    // ``ED_GPU_SYMMETRY_MIRROR_V2`` is enabled; otherwise the stream
+    // stays at ``nullptr`` and the legacy single-stream path runs.
+    // ``cudaStreamDestroy`` / ``cudaEventDestroy`` are safe on
+    // ``nullptr`` so the destructor stays trivial in the V2-off
+    // case.
+    mutable cudaStream_t memset_stream = nullptr;
+    mutable cudaEvent_t  memset_done   = nullptr;
+    mutable bool         v2_resources_inited = false;
+
+    ~GpuSectorMirror() {
+        if (memset_done   != nullptr) cudaEventDestroy(memset_done);
+        if (memset_stream != nullptr) cudaStreamDestroy(memset_stream);
+    }
+
     ed::matvec::basis::DeviceSymmetryBasisPolicy basis_view() const noexcept {
         ed::matvec::basis::DeviceSymmetryBasisPolicy v;
         v.orbit_elements     = thrust::raw_pointer_cast(d_orbit_elements.data());
         v.orbit_coefficients = thrust::raw_pointer_cast(d_orbit_coefficients.data());
         v.orbit_offsets      = thrust::raw_pointer_cast(d_orbit_offsets.data());
-        v.orbit_norms        = thrust::raw_pointer_cast(d_orbit_norms.data());
+        v.orbit_inv_norms    = thrust::raw_pointer_cast(d_orbit_inv_norms.data());
         v.dim_               = dim;
         v.group_norm         = group_norm;
         v.hash_table         = thrust::raw_pointer_cast(d_hash_table.data());
@@ -196,10 +251,16 @@ build_mirror(const SectorRef& sector,
     }
     std::vector<std::uint64_t>    h_elements(total_elements);
     std::vector<cuDoubleComplex>  h_coefs(total_elements);
-    std::vector<double>           h_norms(sector_dim);
+    // Phase I: pre-bake ``1.0 / norm_i`` so the kernel inner loop is
+    // multiply-only. Treats norm == 0 defensively as the host
+    // representative storage already guarantees positive norms for
+    // every populated orbit; if a degenerate sector ever produced
+    // norm == 0 the kernel would zero-weight that orbit walk, which
+    // is the correct behavior.
+    std::vector<double>           h_inv_norms(sector_dim);
     for (std::size_t i = 0; i < sector_dim; ++i) {
         const auto& bs = sector.basis_states[i];
-        h_norms[i] = bs.norm;
+        h_inv_norms[i] = (bs.norm > 0.0) ? (1.0 / bs.norm) : 0.0;
         const std::uint32_t off = h_offsets[i];
         for (std::size_t k = 0; k < bs.orbit_elements.size(); ++k) {
             h_elements[off + k] = bs.orbit_elements[k];
@@ -277,7 +338,7 @@ build_mirror(const SectorRef& sector,
     mirror->d_orbit_elements     = h_elements;
     mirror->d_orbit_coefficients = h_coefs;
     mirror->d_orbit_offsets      = h_offsets;
-    mirror->d_orbit_norms        = h_norms;
+    mirror->d_orbit_inv_norms    = h_inv_norms;
     mirror->d_hash_table         = h_hash;
 
     // Term SoA: trivially copyable POD records -> direct H2D.
@@ -309,14 +370,52 @@ void launch_symmetry_matvec(const GpuSectorMirror& mirror,
 {
     using detail::cuda_check;
     if (dim == 0) return;
-    cuda_check(cudaMemsetAsync(d_out, 0, dim * sizeof(cuDoubleComplex)),
-               "zero output before kernel");
+    const bool v2 = detail::v2_enabled();
+
+    if (v2) {
+        // Phase I V2 path: route the output-zeroing through a
+        // per-mirror side stream and gate the kernel launch via an
+        // event. The host call returns as soon as the kernel is
+        // enqueued; the scheduler is free to overlap the side-stream
+        // memset with the matvec invocation that produced the input
+        // (typical Lanczos pattern: previous matvec -> compute on
+        // host alpha/beta -> next matvec). Default-stream semantics
+        // are preserved by waiting on the event before launching.
+        if (!mirror.v2_resources_inited) {
+            cuda_check(cudaStreamCreateWithFlags(
+                           const_cast<cudaStream_t*>(&mirror.memset_stream),
+                           cudaStreamNonBlocking),
+                       "create memset side stream");
+            cuda_check(cudaEventCreateWithFlags(
+                           const_cast<cudaEvent_t*>(&mirror.memset_done),
+                           cudaEventDisableTiming),
+                       "create memset done event");
+            mirror.v2_resources_inited = true;
+        }
+        cuda_check(cudaMemsetAsync(d_out, 0,
+                                   dim * sizeof(cuDoubleComplex),
+                                   mirror.memset_stream),
+                   "zero output (side stream)");
+        cuda_check(cudaEventRecord(mirror.memset_done, mirror.memset_stream),
+                   "record memset event");
+        cuda_check(cudaStreamWaitEvent(/*stream=*/0, mirror.memset_done, 0),
+                   "wait for memset event");
+    } else {
+        cuda_check(cudaMemsetAsync(d_out, 0,
+                                   dim * sizeof(cuDoubleComplex)),
+                   "zero output before kernel");
+    }
+
     const auto basis = mirror.basis_view();
     const auto terms = mirror.terms_view();
+    const int threads_per_block =
+        v2 ? detail::v2_threads_per_block_for(static_cast<std::size_t>(dim))
+           : 256;
     const cudaError_t err =
         ed::matvec::kernel::gpu::launch_apply_terms_gpu<
             ed::matvec::basis::DeviceSymmetryBasisPolicy,
-            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out);
+            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
+                             /*stream=*/0, threads_per_block);
     cuda_check(err, "apply_terms_gpu_scatter kernel launch");
 }
 

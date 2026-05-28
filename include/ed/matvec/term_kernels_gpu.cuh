@@ -410,7 +410,10 @@ __global__ void apply_terms_gpu_scatter(
         // and is a CSR walk over the pre-uploaded orbit table.
         const std::uint32_t off_begin = basis.orbit_offsets[i];
         const std::uint32_t off_end   = basis.orbit_offsets[i + 1];
-        const double inv_norm_i = 1.0 / basis.orbit_norms[i];
+        // Phase I: orbit_inv_norms[i] == 1/norm_i (pre-baked at
+        // ``GpuSectorMirror`` construction). Saves one fdiv per
+        // launched orbit walk vs. the legacy ``1.0 / norm_i``.
+        const double inv_norm_i = basis.orbit_inv_norms[i];
 
         for (std::uint32_t off = off_begin; off < off_end; ++off) {
             const std::uint64_t s = basis.orbit_elements[off];

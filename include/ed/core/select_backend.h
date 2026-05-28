@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <type_traits>
 #include <variant>
 
 #include <ed/core/linear_operator.h>
@@ -190,6 +192,62 @@ inline BackendVariant select_backend(const Geometry& geom,
 inline BackendVariant select_backend(const LinearOperator& op,
                                      const BackendConstraints& c = {}) {
     return select_backend(op.geometry(), c);
+}
+
+// ---------------------------------------------------------------------------
+// lane_label_for<Backend>() / lane_label_from_variant(v): truthful lane
+// reporting helpers.
+//
+// `R.backend.lane` used to be inferred from `H.geometry().is_device()` /
+// `is_distributed()`. That is correct for native Operator / GPUOperator
+// instances, but it lies about every `SectorView` (streaming-symmetry /
+// fixed-Sz streaming-symmetry): the view advertises `Host` memory_space
+// yet lazily wires a GPU mirror via `bind_cuda_for_sector(...)`. With
+// `allow_gpu=true` and `supports_device_matvec=true`, `select_backend`
+// picks `CudaBackend` -- but the legacy reporter still read "cpu",
+// which is what made `qed.thermal(symmetry=..., device='gpu')` look
+// stuck on CPU even though the matvec ran on the device.
+//
+// `lane_label_for<Backend>()` is the template form (cheap, available
+// inside any `solve_on<Backend>` / `thermal_on<Backend>` body).
+// `lane_label_from_variant(v)` visits the variant for callers that
+// already hold a `BackendVariant`. Both return one of
+// {"cpu","gpu","mpi","mpi_gpu"}. Callers should set `R.backend.mpi_size`
+// separately -- the label encodes the lane class, not the rank count.
+//
+// Phase D of the "Backend x Symmetries x Workflows" plan (May 2026).
+// ---------------------------------------------------------------------------
+template <typename Backend>
+inline std::string lane_label_for() {
+    if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
+        return std::string{"cpu"};
+    }
+#ifdef WITH_CUDA
+    else if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
+        return std::string{"gpu"};
+    }
+#endif
+#ifdef WITH_MPI
+    else if constexpr (std::is_same_v<Backend, ed::matvec::MpiBackend>) {
+        return std::string{"mpi"};
+    }
+#  ifdef ED_HAVE_NCCL
+    else if constexpr (std::is_same_v<Backend, ed::matvec::MpiCudaBackend>) {
+        return std::string{"mpi_gpu"};
+    }
+#  endif
+#endif
+    else {
+        return std::string{"cpu"};
+    }
+}
+
+inline std::string lane_label_from_variant(const BackendVariant& v) {
+    return std::visit([](const auto& ptr) -> std::string {
+        using Ptr = std::decay_t<decltype(ptr)>;
+        using B   = typename Ptr::element_type;
+        return lane_label_for<B>();
+    }, v);
 }
 
 #if defined(WITH_MPI) && defined(WITH_CUDA) && defined(ED_HAVE_NCCL)

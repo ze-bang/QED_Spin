@@ -27,10 +27,12 @@
 #include <ed/core/streaming_symmetry.h>
 
 #ifdef WITH_CUDA
+#include <cuComplex.h>
 #include <cuda_runtime.h>
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -299,5 +301,107 @@ TEST_CASE("GPU mirror: LRU-1 cache survives repeated calls + sector switch",
     REQUIRE(run(sectors[1]) < 1e-10);
     // Fourth call back to first sector: rebuild path again.
     REQUIRE(run(sectors[0]) < 1e-10);
+#endif
+}
+
+// Phase I "must-not-regress" CI gate of the "Close CPU / GPU Gaps"
+// plan (May 2026): the GPU mirror matvec must beat the CPU
+// ``applySymmetrized`` by a non-trivial margin on the smallest tuple
+// the bench harness can build cheaply enough to run inside ctest
+// (``N=10``, Z_10 translation, ``J=1.0``). Threshold is 4x (CPU
+// ms/matvec / GPU ms/matvec >= 4.0). This is well below the
+// observed ~40x on the snapshot in ``docs/perf/`` but tight enough
+// to catch a real regression (e.g. accidental D2H sync in the
+// matvec hot path, or a launch-config bug that doubles the per-call
+// overhead).
+//
+// Skipped at runtime when no CUDA device is present. Capped to a
+// small ``reps`` count so the test stays under the 180s per-test
+// timeout even on cold caches.
+TEST_CASE("GPU mirror: must-not-regress speedup over CPU on N=10",
+          "[symmetry][gpu_mirror][perf]")
+{
+#ifndef WITH_CUDA
+    SKIP("Built without WITH_CUDA");
+#else
+    if (!cuda_runtime_available()) {
+        SKIP("No CUDA device available");
+    }
+
+    const uint64_t N = 10;
+    std::string dir = make_scratch_dir("gpu_mirror", "perf_N10");
+    write_zN_translation_fixtures(dir, static_cast<int>(N));
+
+    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
+    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+
+    // Find the largest sector to maximize signal.
+    std::size_t best_s = 0;
+    std::size_t best_sd = 0;
+    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
+        const std::size_t sd = sym_op->getSectorDimension(s);
+        if (sd > best_sd) {
+            best_sd = sd;
+            best_s = s;
+        }
+    }
+    REQUIRE(best_sd > 0);
+
+    auto in = random_unit_vector(best_sd, best_s * 31337ULL + 7);
+    std::vector<Complex> cpu_out(best_sd, Complex(0.0, 0.0));
+
+    // ----- CPU timing (15 reps) -----
+    constexpr int kReps = 15;
+    // Warmup.
+    sym_op->applySymmetrized(best_s, in.data(), cpu_out.data());
+    const auto t0_cpu = std::chrono::steady_clock::now();
+    for (int r = 0; r < kReps; ++r) {
+        sym_op->applySymmetrized(best_s, in.data(), cpu_out.data());
+    }
+    const auto t1_cpu = std::chrono::steady_clock::now();
+    const double cpu_ms = std::chrono::duration<double, std::milli>(
+                              t1_cpu - t0_cpu).count() /
+                          static_cast<double>(kReps);
+
+    // ----- GPU timing (15 reps) -----
+    auto view = sym_op->sector(best_s);
+    auto fn   = view->bind_cuda();
+
+    cuDoubleComplex* d_in  = nullptr;
+    cuDoubleComplex* d_out = nullptr;
+    REQUIRE(cudaMalloc(&d_in,  best_sd * sizeof(cuDoubleComplex)) == cudaSuccess);
+    REQUIRE(cudaMalloc(&d_out, best_sd * sizeof(cuDoubleComplex)) == cudaSuccess);
+    REQUIRE(cudaMemcpy(d_in, in.data(),
+                       best_sd * sizeof(cuDoubleComplex),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+
+    fn(reinterpret_cast<const Complex*>(d_in),
+       reinterpret_cast<Complex*>(d_out), best_sd);  // warmup
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+
+    const auto t0_gpu = std::chrono::steady_clock::now();
+    for (int r = 0; r < kReps; ++r) {
+        fn(reinterpret_cast<const Complex*>(d_in),
+           reinterpret_cast<Complex*>(d_out), best_sd);
+    }
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+    const auto t1_gpu = std::chrono::steady_clock::now();
+    const double gpu_ms = std::chrono::duration<double, std::milli>(
+                              t1_gpu - t0_gpu).count() /
+                          static_cast<double>(kReps);
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+
+    const double speedup = cpu_ms / std::max(gpu_ms, 1e-9);
+    INFO("N=" << N << " sector=" << best_s << " dim=" << best_sd
+         << " cpu_ms=" << cpu_ms << " gpu_ms=" << gpu_ms
+         << " speedup=" << speedup << "x");
+
+    // The plan's acceptance bar is 2x on dim >= 8k; this tuple has
+    // a smaller dim but the kernel-launch overhead model is the
+    // same, so a 4x threshold here catches real regressions while
+    // staying robust to host noise.
+    REQUIRE(speedup > 4.0);
 #endif
 }

@@ -2,21 +2,34 @@
 // =============================================================================
 // include/ed/thermal/ftlm_kernel.h
 //
-// Phase 5 (minimalist refactor) — `ftlm_kernel<Backend, MatvecFn>`: thin
-// inline facade over the existing `finite_temperature_lanczos` CPU
-// implementation in `src/solvers/cpu/ftlm.cpp`. The Backend interface
-// already abstracts axpy/dot/norm, so the CPU specialisation here is
-// the canonical body; GPU and MPI specialisations will land alongside
-// `CudaBackend` / `MpiBackend` in Phases 7-8.
+// FTLM (Finite-Temperature Lanczos Method) kernel ---
+// ``template<Backend, MatvecFn>``. Same dual-backend pattern as
+// ``ltlm_kernel<Backend>``:
+//
+//   * ``CpuBackend``: delegates to the legacy ``::finite_temperature_lanczos``
+//     in ``src/solvers/cpu/ftlm.cpp`` so existing HDF5 output, console
+//     logging, and OpenMP-over-samples behaviour are preserved.
+//   * ``CudaBackend`` (Phase E of the "Close CPU/GPU Gaps" plan,
+//     May 2026): delegates to ``detail::ftlm_kernel_via_backend``, a
+//     fully Backend-templated body that reuses ``lanczos_kernel<Backend>``
+//     (Phase 2 BLAS-1 facade) once per random sample. All BLAS-1 ops
+//     run device-resident; cross-PCI traffic is limited to a host-seeded
+//     random starting vector per sample and the small (M x M)
+//     tridiagonal diagonalisation handled on the host with LAPACK.
+//   * Distributed backends (MpiBackend / MpiCudaBackend): unsupported
+//     today -- the body throws ``std::runtime_error`` so the caller can
+//     pin ``BackendConstraints::allow_mpi = false`` and route through a
+//     single-rank lane. Tracked under the MPI-parity follow-up.
 //
 // Algorithm:
-//   * Draw `R` Gaussian random unit vectors |r>.
-//   * For each |r> run a length-`M` Lanczos.
-//   * Compute partition function and observables via
-//        Z(beta)    = sum_r <r|e^{-beta H}|r>
-//        <O>(beta)  = (1/Z) sum_r <r|e^{-beta H} O|r>
-//     using the Ritz-value Lehmann representation of the Krylov
-//     projection.
+//   * Draw ``R`` Gaussian random unit vectors ``|r>``.
+//   * For each ``|r>`` run a length-``M`` Lanczos.
+//   * Diagonalise the tridiagonal ``(alpha, beta)`` -> Ritz values + first-
+//     component weights ``|<r | q_k>|^2``.
+//   * Compute ``Z, <E>, Cv, S`` from the Ritz-value Lehmann representation
+//     of the Krylov projection (``compute_ftlm_thermodynamics``).
+//   * Average across samples using the Jensen-correct
+//     ``average_ftlm_samples`` post-processor.
 // =============================================================================
 
 #include <algorithm>
@@ -24,12 +37,26 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <random>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/solvers/ftlm.h>
+#include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz
+
+#ifdef WITH_CUDA
+// Forward declaration so the ``if constexpr`` branch below can refer to
+// CudaBackend without dragging the full ``cuda_backend.cuh`` into every
+// consumer of this header. The orchestrator TU (which actually calls
+// ``ftlm_kernel<CudaBackend>``) already pulls the full definition via
+// ``select_backend.h``.
+namespace ed { namespace matvec { class CudaBackend; } }
+#endif
 
 namespace ed::thermal {
 
@@ -64,69 +91,237 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
     return out;
 }
 
+/// Phase E of the "Close CPU/GPU Gaps" plan (May 2026): backend-
+/// templated FTLM body. Used by every non-Cpu Backend specialisation
+/// of ``ftlm_kernel`` (today: ``CudaBackend``; future MPI lanes will
+/// land alongside cross-rank Lanczos post-processing).
+///
+/// Mirrors the LTLM dual-backend pattern but is simpler:
+/// FTLM only needs the first-component weights ``|<v0 | q_k>|^2``
+/// (which the tridiagonal eigenvector solve already returns) so we do
+/// NOT keep the Lanczos basis around (``keep_basis=false``). This
+/// eliminates the per-sample device basis allocation that LTLM needs
+/// for Ritz reconstruction.
+///
+/// Algorithm per sample:
+///   1. Host-side Gaussian seed ``v_0`` (normalised), copy to backend
+///      device-side scratch via ``backend.copy_from_host``.
+///   2. ``lanczos_kernel<Backend>`` (krylov_dim, keep_basis=false) ->
+///      tridiagonal ``(alpha, beta)``.
+///   3. Host-side ``diagonalize_tridiagonal_ritz`` ->
+///      ``ritz_values`` + first-component ``weights``.
+///   4. Host-side ``compute_ftlm_thermodynamics`` -> per-sample
+///      ``ThermodynamicData`` on the supplied temperature grid.
+///
+/// After the sample loop we hand the per-sample
+/// ``ThermodynamicData`` vector to ``::average_ftlm_samples`` (the
+/// existing host-side Jensen-correct averager) so the (CPU vs GPU)
+/// lane produces identical output to within Lanczos noise.
+template <typename Backend, typename MatvecFn>
+FtlmResult ftlm_kernel_via_backend(const Backend& backend,
+                                    MatvecFn&&     apply_H,
+                                    std::size_t    local_n,
+                                    std::uint64_t  global_n,
+                                    const FtlmOptions& opts)
+{
+    if (local_n == 0) {
+        throw std::invalid_argument("ftlm_kernel: local_n must be > 0");
+    }
+    if (opts.krylov_dim < 2) {
+        throw std::invalid_argument(
+            "ftlm_kernel: krylov_dim must be >= 2");
+    }
+    if (opts.num_samples == 0) {
+        throw std::invalid_argument(
+            "ftlm_kernel: num_samples must be > 0");
+    }
+    if (opts.betas.empty()) {
+        throw std::invalid_argument(
+            "ftlm_kernel: opts.betas must be non-empty (the temperature "
+            "grid is required to evaluate Z, <E>, Cv, S).");
+    }
+
+    // Convert beta -> temperature for the host post-processors. The
+    // ``compute_ftlm_thermodynamics`` API is temperature-driven; we
+    // preserve the caller's beta ordering so the returned curves are
+    // index-aligned with ``opts.betas``.
+    std::vector<double> temperatures;
+    temperatures.reserve(opts.betas.size());
+    for (double b : opts.betas) {
+        if (!(b > 0.0)) {
+            throw std::invalid_argument(
+                "ftlm_kernel: opts.betas must be strictly positive.");
+        }
+        temperatures.push_back(1.0 / b);
+    }
+
+    const std::uint64_t base_seed = (opts.random_seed != 0)
+        ? opts.random_seed
+        : 0xFEEDFACEULL;
+
+    std::vector<::ThermodynamicData> per_sample;
+    per_sample.reserve(opts.num_samples);
+
+    for (std::size_t s = 0; s < opts.num_samples; ++s) {
+        // Per-sample RNG: salt the user seed with the sample index so
+        // the CPU and GPU lanes draw the same sequence given the same
+        // ``opts.random_seed``.
+        std::mt19937_64 rng(base_seed + 0x9E3779B97F4A7C15ULL * s);
+        std::normal_distribution<double> gauss(0.0, 1.0);
+
+        // ---- 1. Seed v_0 on the host, normalise, copy to backend ----
+        std::vector<Complex> v0_host(local_n);
+        for (auto& c : v0_host) c = Complex(gauss(rng), gauss(rng));
+        double sum_sq = 0.0;
+        for (auto c : v0_host) sum_sq += std::norm(c);
+        const double v0_nrm = std::sqrt(sum_sq);
+        if (!(v0_nrm > 0.0)) {
+            throw std::runtime_error(
+                "ftlm_kernel: zero-norm random start vector for sample "
+                + std::to_string(s));
+        }
+        const double inv = 1.0 / v0_nrm;
+        for (auto& c : v0_host) c *= inv;
+
+        auto d_v0 = backend.make_zero_vector(local_n);
+        backend.copy_from_host(v0_host.data(), d_v0.get(), local_n);
+
+        // ---- 2. Lanczos: tridiagonal only (no basis) ----
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter   = opts.krylov_dim;
+        kopts.keep_basis = false;
+        // FTLM's first-component weights come from the tridiagonal
+        // eigenvectors directly, so we only need a faithful (alpha,
+        // beta) -- LocalDGKS3 is the cheap canonical reorth policy
+        // matching the legacy CPU driver's
+        // ``build_lanczos_tridiagonal`` body when full reorth is off.
+        kopts.reorth = ed::krylov::ReorthPolicy::LocalDGKS3;
+
+        auto k = ed::krylov::lanczos_kernel(
+            backend,
+            std::forward<MatvecFn>(apply_H),
+            local_n, d_v0.get(), kopts);
+
+        if (k.alpha.empty()) {
+            throw std::runtime_error(
+                "ftlm_kernel: Lanczos produced no Ritz values for "
+                "sample " + std::to_string(s));
+        }
+
+        // ---- 3. Diagonalise tridiagonal on host -> ritz + weights ----
+        std::vector<double> ritz_values;
+        std::vector<double> weights;
+        diagonalize_tridiagonal_ritz(k.alpha, k.beta, ritz_values, weights);
+        if (ritz_values.empty()) {
+            throw std::runtime_error(
+                "ftlm_kernel: tridiagonal diagonalisation failed for "
+                "sample " + std::to_string(s));
+        }
+
+        // ---- 4. Host-side thermodynamics for this sample ----
+        ::ThermodynamicData td = ::compute_ftlm_thermodynamics(
+            ritz_values, weights, temperatures,
+            static_cast<std::uint64_t>(global_n));
+        per_sample.push_back(std::move(td));
+    }
+
+    // ---- 5. Jensen-correct sample averaging ----
+    ::FTLMResults legacy;
+    ::average_ftlm_samples(per_sample, legacy);
+    legacy.thermo_data.temperatures = temperatures;
+    // Surface the raw Z_sample average too so ``to_ftlm_result`` can
+    // forward it on the partition_function field. ``average_ftlm_samples``
+    // already populates ``legacy.thermo_data.{energy, specific_heat,
+    // entropy}``; we recompute Z_sample as the per-temperature mean
+    // because the averager does not write it into ``legacy.thermo_data``.
+    if (!per_sample.empty()
+        && !per_sample.front().Z_sample.empty()) {
+        legacy.thermo_data.Z_sample.assign(temperatures.size(), 0.0);
+        for (const auto& td : per_sample) {
+            for (std::size_t t = 0; t < temperatures.size(); ++t) {
+                if (t < td.Z_sample.size()) {
+                    legacy.thermo_data.Z_sample[t] += td.Z_sample[t];
+                }
+            }
+        }
+        const double inv_n =
+            1.0 / static_cast<double>(per_sample.size());
+        for (auto& z : legacy.thermo_data.Z_sample) z *= inv_n;
+    }
+    return to_ftlm_result(legacy, opts.betas);
+}
+
 }  // namespace detail
 
-/**
- * @brief Run FTLM using the supplied `Backend` linalg primitives and an
- *        `apply_H(in, out, n)` matvec callable.
- *
- * Today the CPU body delegates to `::finite_temperature_lanczos`. The
- * `apply_H` callable allocates HOST-side scratch vectors inside the
- * legacy body, so paired with a device-only Backend (CudaBackend /
- * MpiCudaBackend) it would silently miscalibrate (host vectors handed
- * to a device-pointer matvec). We guard against that here: only
- * `CpuBackend` (and the bandwidth-equivalent `MpiBackend` when
- * `apply_H` ferries host buffers) is supported, and the kernel throws
- * loudly when paired with anything else.
- *
- * Wave B (Full unified-interface collapse, May 2026): full delegation
- * inversion (moving the 200+ LOC FTLM driver from
- * `src/solvers/cpu/ftlm.cpp` into this header and replacing the inner
- * Lanczos loop with `ed::krylov::lanczos_kernel<Backend>`) is a
- * dedicated work item tracked separately. The explicit Backend guard
- * here keeps the facade honest until the inversion lands. mTPQ and
- * cTPQ (see `mtpq_kernel.h` / `ctpq_kernel.h`) are already fully
- * backend-templated through `tpq_kernel<Backend>`.
- */
+/// FTLM kernel facade.
+///
+/// Phase E of the "Close CPU/GPU Gaps" plan (May 2026): closes the
+/// previous CPU-only ``static_assert`` gap. The body now dispatches
+/// on the backend type:
+///   * ``CpuBackend``: delegates to ``::finite_temperature_lanczos``
+///     (the legacy CPU driver in ``src/solvers/cpu/ftlm.cpp``) so
+///     existing HDF5 output, console logging, and OpenMP-over-samples
+///     behaviour is preserved.
+///   * ``CudaBackend``: delegates to ``detail::ftlm_kernel_via_backend``
+///     -- a fully Backend-templated body that reuses
+///     ``lanczos_kernel<CudaBackend>`` (Phase 2 BLAS-1 facade) once per
+///     random sample. All BLAS-1 ops run device-resident; the only
+///     cross-PCI traffic is the host-seeded random starting vector per
+///     sample (a single ``~N*16`` byte transfer at the top of each
+///     sample) and the small ``(M x M)`` tridiagonal diagonalisation
+///     handled on the host with LAPACK.
 template <typename Backend, typename MatvecFn>
-FtlmResult ftlm_kernel(const Backend&  /*backend*/,
+FtlmResult ftlm_kernel(const Backend&  backend,
                        MatvecFn&&      apply_H,
                        std::size_t     local_n,
-                       std::uint64_t   /*global_n*/,
+                       std::uint64_t   global_n,
                        const FtlmOptions& opts)
 {
-    static_assert(
-        std::is_same_v<Backend, ed::matvec::CpuBackend>,
-        "ftlm_kernel: only CpuBackend is supported today. The "
-        "templated FTLM kernel body is tracked under wave-b-thermal "
-        "(see ed/thermal/ftlm_kernel.h comments). For the GPU lane, "
-        "construct a GPUOperator and use the legacy "
-        "compute_dynamical_correlation entry point until Wave B "
-        "lands.");
+    if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
+        // CPU lane: legacy driver with full I/O behaviour.
+        FTLMParameters params;
+        params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);
+        params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);
+        params.random_seed  = opts.random_seed;
 
-    FTLMParameters params;
-    params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);
-    params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);
-    params.random_seed  = opts.random_seed;
+        const double temp_min = opts.betas.empty()
+            ? 0.01 : 1.0 / *std::max_element(opts.betas.begin(), opts.betas.end());
+        const double temp_max = opts.betas.empty()
+            ? 100.0 : 1.0 / *std::min_element(opts.betas.begin(), opts.betas.end());
+        const std::uint64_t num_bins =
+            opts.betas.empty() ? 32u
+                                : static_cast<std::uint64_t>(opts.betas.size());
 
-    const double temp_min = opts.betas.empty()
-        ? 0.01 : 1.0 / *std::max_element(opts.betas.begin(), opts.betas.end());
-    const double temp_max = opts.betas.empty()
-        ? 100.0 : 1.0 / *std::min_element(opts.betas.begin(), opts.betas.end());
-    const std::uint64_t num_bins =
-        opts.betas.empty() ? 32u : static_cast<std::uint64_t>(opts.betas.size());
+        std::function<void(const Complex*, Complex*, int)> legacy_H =
+            [&apply_H](const Complex* in, Complex* out, int n) {
+                apply_H(in, out, static_cast<std::size_t>(n));
+            };
 
-    std::function<void(const Complex*, Complex*, int)> legacy_H =
-        [&apply_H](const Complex* in, Complex* out, int n) {
-            apply_H(in, out, static_cast<std::size_t>(n));
-        };
+        const auto legacy = ::finite_temperature_lanczos(
+            legacy_H,
+            static_cast<std::uint64_t>(local_n),
+            params, temp_min, temp_max, num_bins, opts.output_dir);
 
-    const auto legacy = ::finite_temperature_lanczos(
-        legacy_H,
-        static_cast<std::uint64_t>(local_n),
-        params, temp_min, temp_max, num_bins, opts.output_dir);
-
-    return detail::to_ftlm_result(legacy, opts.betas);
+        return detail::to_ftlm_result(legacy, opts.betas);
+    }
+#ifdef WITH_CUDA
+    else if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
+        return detail::ftlm_kernel_via_backend(
+            backend,
+            std::forward<MatvecFn>(apply_H),
+            local_n, global_n, opts);
+    }
+#endif
+    else {
+        // MpiBackend / MpiCudaBackend: needs cross-rank reductions in
+        // the Lanczos basis and in the per-temperature thermo averages
+        // that the current Backend-templated body does not yet handle.
+        // Tracked separately under the MPI-parity follow-up.
+        throw std::runtime_error(
+            "ftlm_kernel: distributed backends are not yet supported. "
+            "Pin BackendConstraints::allow_mpi = false to route through "
+            "the CPU/CUDA lanes.");
+    }
 }
 
 }  // namespace ed::thermal
