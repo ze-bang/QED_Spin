@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### mTPQ backend x basis bench (May 2026)
+
+Follow-up to the Phase-I work below. Added
+[`scripts/bench_mtpq_matrix.py`](scripts/bench_mtpq_matrix.py) and
+[`docs/perf/bench_mtpq_matrix_2026-05-28.md`](docs/perf/bench_mtpq_matrix_2026-05-28.md)
+to pin where mTPQ wants to live on the
+(CPU / GPU) x (none / Sz / sym / sym+Sz) matrix end-to-end through
+the public `qed.thermal(method='mTPQ', ...)` facade.
+
+Headline numbers on a Heisenberg ring (`J=1`, `T in [0.5, 4.0]`,
+`num_T=4`, `num_samples=2`, `max_iter=50`):
+
+| basis | N=12 CPU | N=12 GPU | N=12 speedup | N=14 CPU | N=14 GPU | N=14 speedup |
+| --- | --- | --- | --- | --- | --- | --- |
+| none    | 0.49 s | 0.12 s |  4.3x | 0.60 s | 0.10 s |  5.8x |
+| sz      | 0.27 s | 0.74 s | 0.4x  | 0.36 s | 0.89 s | 0.4x  |
+| sym     | 4.41 s | 1.36 s |  3.2x | 21.6 s | 2.14 s | 10.1x |
+| sym+sz  | 8.22 s | 14.2 s | 0.6x  | 26.4 s | 22.3 s |  1.2x |
+
+Confirms what the architecture predicts: the GPU lazy symmetry mirror
+amortizes beautifully over irrep sectors (10x at N=14 `sym`), but
+sub-N-sized Sz sectors and per-launch overhead make CPU the better
+fit for `sz` and (at small N) `sym+sz`. The `sym+sz` cell flips
+GPU-ward between N=12 and N=14, so above N~16 every column should
+favour GPU. No silent CPU fallbacks fired (the bench listens for the
+GPU-promoter `RuntimeWarning`), so the Phase-E loud-fallback +
+Phase-H lane-truth contracts hold end-to-end in mTPQ.
+
 ### Close CPU / GPU Gaps Across Workflows (May 2026)
 
 Phases E + H.1 + F + G + H.2 + I of the
