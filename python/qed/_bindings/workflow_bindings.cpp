@@ -878,6 +878,15 @@ void bind_workflows(py::module_& m) {
                       && !opts.output_dir.empty()
                       && !HDF5IO::isDisabledOutputPath(opts.output_dir);
                   std::vector<std::string> sector_hdf5_paths;
+                  // Phase D (May 2026): capture the truthful per-sector
+                  // backend lane on the first non-empty sector so the
+                  // aggregate result can surface "gpu" vs "cpu" vs
+                  // "mpi" instead of leaving ``agg.backend.lane``
+                  // empty. All sectors share the same ``opts.backend``
+                  // and the same SectorView geometry contract, so the
+                  // first lane is authoritative.
+                  std::string sector_lane;
+                  std::size_t sector_mpi_size = 1;
                   for (std::size_t k : iter_sectors) {
                       auto sec = handle.sector(k);
                       if (!sec || sec->dim() == 0) continue;
@@ -893,6 +902,11 @@ void bind_workflows(py::module_& m) {
                               + "/sector_k_" + std::to_string(k);
                       }
                       auto sr = ed::workflows::solve(*sec, sopts);
+                      if (sector_lane.empty()
+                          && !sr.backend.lane.empty()) {
+                          sector_lane     = sr.backend.lane;
+                          sector_mpi_size = sr.backend.mpi_size;
+                      }
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(k));
                       eigs_per_sector.push_back(sr.eigenvalues);
@@ -947,6 +961,20 @@ void bind_workflows(py::module_& m) {
                   // mirrors the thermal binding's contract.
                   if (need_per_sector_outdir && !sector_hdf5_paths.empty()) {
                       agg.hdf5_path = opts.output_dir;
+                  }
+                  // Phase D (May 2026): propagate the per-sector
+                  // backend lane on the aggregate so callers reading
+                  // ``GroundStateResult.backend.lane`` from
+                  // ``qed.solve(symmetry=...)`` see the truthful lane
+                  // ("gpu" when the SectorView's lazy GPU mirror
+                  // fired, "cpu" otherwise). All per-sector calls
+                  // share the same ``opts.backend``, so the first
+                  // non-empty sector lane is authoritative for the
+                  // aggregate; we keep ``mpi_size`` from the same
+                  // sector for symmetry.
+                  if (!sector_lane.empty()) {
+                      agg.backend.lane = sector_lane;
+                      agg.backend.mpi_size = sector_mpi_size;
                   }
               }
               return agg;
@@ -1171,6 +1199,17 @@ void bind_workflows(py::module_& m) {
                       !opts.output_dir.empty()
                       && !HDF5IO::isDisabledOutputPath(opts.output_dir);
                   std::vector<std::string> sector_hdf5_paths;
+                  // Phase D (May 2026): capture the truthful per-sector
+                  // backend lane on the first sector so the aggregate
+                  // ``ThermalResult.backend.lane`` correctly reports
+                  // the lane the orchestrator dispatched to. Before
+                  // this fix the aggregate left ``backend.lane``
+                  // empty, which made
+                  // ``qed.thermal(symmetry=..., device='gpu')`` read
+                  // back as if it ran on CPU even when the GPU mirror
+                  // fired (the timing-vs-CPU diff was masked).
+                  std::string sector_lane;
+                  std::size_t sector_mpi_size = 1;
 
                   for (std::size_t k : sector_indices) {
                       auto sec = handle.sector(k);
@@ -1218,6 +1257,11 @@ void bind_workflows(py::module_& m) {
                           topts.e_max_override = shared_e_max;
                       }
                       auto tr = ed::workflows::thermal(*sec, topts);
+                      if (sector_lane.empty()
+                          && !tr.backend.lane.empty()) {
+                          sector_lane     = tr.backend.lane;
+                          sector_mpi_size = tr.backend.mpi_size;
+                      }
 
                       if (tr.thermo.temperatures.empty()) {
                           // Method (e.g. raw TPQ) did not populate
@@ -1263,6 +1307,14 @@ void bind_workflows(py::module_& m) {
                   // can glob.
                   if (need_per_sector_outdir && !sector_hdf5_paths.empty()) {
                       agg.hdf5_path = opts.output_dir;
+                  }
+                  // Phase D (May 2026): propagate the per-sector
+                  // backend lane on the aggregate so callers reading
+                  // ``ThermalResult.backend.lane`` see the truthful
+                  // lane ("gpu" / "cpu" / "mpi" / "mpi_gpu").
+                  if (!sector_lane.empty()) {
+                      agg.backend.lane = sector_lane;
+                      agg.backend.mpi_size = sector_mpi_size;
                   }
               }
               return agg;

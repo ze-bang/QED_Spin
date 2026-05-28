@@ -315,8 +315,14 @@ GroundStateResult solve_on(Backend& be,
                     std::chrono::duration<double>(t1 - t0).count();
                 R.backend.notes.emplace_back(
                     "dispatch", "lanczos_real (Wave 1.1 real-H fast path)");
-                R.backend.lane =
-                    (geom.is_distributed() ? "mpi" : "cpu");
+                // Phase D (May 2026): truthful lane reporting. The
+                // lanczos_real fast path is guarded by the
+                // CpuBackend ``constexpr`` branch above so the lane
+                // label is the template's lane unconditionally. Using
+                // ed::lane_label_for<Backend>() keeps the labels
+                // consistent with the variant-driven helper used at
+                // the bottom of solve() / thermal() / spectral().
+                R.backend.lane = ed::lane_label_for<Backend>();
                 R.backend.mpi_size = 1;
                 // "Universal save contract" follow-up (May 2026): the
                 // lanczos_real fast path used to ``return R`` here and
@@ -678,8 +684,20 @@ GroundStateResult solve_on(Backend& be,
     // ---------------------------------------------------------------------
     apply_solve_save_finalizer(R, geom, opts);
 
-    R.backend.lane = (geom.is_distributed() ? "mpi" : "cpu");
-    if (geom.is_device()) R.backend.lane = geom.is_distributed() ? "mpi_gpu" : "gpu";
+    // Phase D (May 2026): truthful lane reporting. The legacy line
+    //
+    //     R.backend.lane = geom.is_device() ? "gpu" : "cpu";
+    //
+    // pulled the label from the operator's memory_space, which is
+    // wrong for every SectorView (streaming-symmetry /
+    // FixedSzStreamingSymmetry): those views report ``Host``
+    // memory_space yet advertise ``supports_device_matvec=true``, so
+    // ``select_backend`` actually picks ``CudaBackend`` and
+    // ``bind_cuda()`` wires a lazy GPU mirror -- the label simply
+    // misreported the lane. ``ed::lane_label_for<Backend>()`` reads
+    // the template parameter directly so the label always matches
+    // the lane ``std::visit`` dispatched to.
+    R.backend.lane = ed::lane_label_for<Backend>();
     R.backend.mpi_size = 1;
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
@@ -1179,10 +1197,16 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         }
     }
 
-    R.backend.lane = (H.geometry().is_distributed() ? "mpi" : "cpu");
-    if (H.geometry().is_device()) {
-        R.backend.lane = H.geometry().is_distributed() ? "mpi_gpu" : "gpu";
-    }
+    // Phase D (May 2026): truthful lane reporting -- pull the lane
+    // label from the actual ``BackendVariant`` ``select_backend``
+    // returned, NOT the host operator's memory_space. SectorView (and
+    // every other host-resident operator that lazily wires a GPU
+    // mirror through ``bind_cuda()``) reports ``Host`` memory_space
+    // but ``select_backend`` picks ``CudaBackend`` when
+    // ``allow_gpu=true`` and ``supports_device_matvec=true``. Reading
+    // the variant directly is the only way the label can tell the
+    // truth across all symmetry / non-symmetry workflows.
+    R.backend.lane = ed::lane_label_from_variant(variant);
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();
@@ -1451,10 +1475,11 @@ SpectralResult spectral(const LinearOperator&                      H,
 
     R.errors_real.assign(R.S_real.size(), 0.0);
     R.errors_imag.assign(R.S_imag.size(), 0.0);
-    R.backend.lane = (H.geometry().is_distributed() ? "mpi" : "cpu");
-    if (H.geometry().is_device()) {
-        R.backend.lane = H.geometry().is_distributed() ? "mpi_gpu" : "gpu";
-    }
+    // Phase D (May 2026): truthful lane reporting (same rationale as
+    // ``thermal()`` above) -- ``H.geometry().is_device()`` reads
+    // ``false`` for SectorView yet ``select_backend`` may have picked
+    // CudaBackend through ``supports_device_matvec=true``.
+    R.backend.lane = ed::lane_label_from_variant(variant);
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();

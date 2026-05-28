@@ -619,3 +619,202 @@ def test_solve_lanczos_gpu_no_loud_fallback_warning(tmp_path):
     assert not bad, (
         f"Lanczos has a GPU lane; loud-fallback warning should NOT fire. "
         f"Got: {bad}")
+
+
+# ---------------------------------------------------------------------------
+# Phase D (May 2026): GPU + symmetry truthful-lane regression tests.
+#
+# The user reported that ``qed.thermal(symmetry=..., device='gpu')`` ran
+# at CPU pace (~143 s/sector for the 12-site ring x 8 irreps). The root
+# cause was twofold:
+#
+#   (a) ``R.backend.lane`` was read from ``H.geometry().is_device()``,
+#       which is ``false`` for every ``SectorView`` (the view advertises
+#       ``Host`` memory_space but lazily wires a GPU mirror through
+#       ``bind_cuda()``). The lane label was misreporting "cpu" even
+#       when ``select_backend`` had picked CudaBackend -- making the
+#       diagnostic timing comparison useless.
+#
+#   (b) The per-sector aggregate ``ThermalResult`` / ``GroundStateResult``
+#       did not propagate the inner ``backend.lane`` -- it landed as
+#       empty string on the merged result.
+#
+# These tests pin both: ``lane == "gpu"`` on the aggregate AND on the
+# per-sector ``ed::workflows::solve`` / ``thermal`` / ``spectral``
+# calls under (Symm) and (Sz + Symm).
+# ---------------------------------------------------------------------------
+
+
+@_REQUIRES_GPU
+def test_solve_streaming_symmetry_gpu_lane(tmp_path):
+    """``qed.solve(symmetry=..., device='gpu')`` -- streaming-symmetry
+    SectorView advertises ``supports_device_matvec=true``, so
+    ``select_backend`` picks CudaBackend and ``bind_cuda()`` routes
+    every matvec through the lazy GPU mirror.
+
+    Phase D: the per-sector lane is now captured into the aggregate;
+    pre-fix this read back as empty string."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.SolveOptions()
+        opts.num_eigs        = 1
+        opts.tolerance       = 1e-10
+        opts.compute_vectors = False
+        opts.backend.allow_gpu = True
+        gs = _core.workflows_solve_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts, None,
+        )
+        assert gs.backend.lane == "gpu", (
+            f"GPU + spatial symmetry should report lane='gpu'; got "
+            f"{gs.backend.lane!r}. If this is empty, the per-sector "
+            f"aggregate did not propagate the inner lane; if 'cpu' "
+            f"either the SectorView mirror is off or "
+            f"ED_GPU_SYMMETRY_MIRROR=0.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_solve_streaming_symmetry_sz_gpu_lane(tmp_path):
+    """``qed.solve(symmetry=..., fixed_sz=..., device='gpu')`` --
+    FixedSzStreamingSymmetryOperator::SectorView mirrors the non-Sz
+    twin: ``supports_device_matvec=true`` + ``bind_cuda()`` overrides
+    deliver the GPU mirror. The aggregate lane must read "gpu"."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.SolveOptions()
+        opts.num_eigs        = 1
+        opts.tolerance       = 1e-10
+        opts.compute_vectors = False
+        opts.backend.allow_gpu = True
+        gs = _core.workflows_solve_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts,
+            N_SITES // 2,  # fixed_sz_n_up
+        )
+        assert gs.backend.lane == "gpu", (
+            f"GPU + Sz + spatial symmetry should report lane='gpu'; "
+            f"got {gs.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_thermal_streaming_symmetry_gpu_lane(tmp_path):
+    """``qed.thermal(symmetry=..., device='gpu')`` with mTPQ -- the path
+    PR #10 was supposed to accelerate but didn't, because the per-sector
+    aggregate dropped the lane label. After Phase D the aggregate reads
+    "gpu" correctly. (mTPQ is the GPU-clean method covered by the
+    binding's per-sector dispatch.)"""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.ThermalOptions()
+        opts.method        = _core.ThermalMethod.mTPQ
+        opts.num_samples   = 1
+        opts.krylov_dim    = 20
+        opts.num_temp_bins = 2
+        opts.temp_min      = 0.5
+        opts.temp_max      = 4.0
+        opts.backend.allow_gpu = True
+        tr = _core.workflows_thermal_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts, None,
+        )
+        assert tr.backend.lane == "gpu", (
+            f"GPU + spatial symmetry (thermal/mTPQ) should report "
+            f"lane='gpu'; got {tr.backend.lane!r}. This is what made "
+            f"the 12-site ring x 8 sectors look CPU-paced in the user "
+            f"workload -- the GPU mirror fires but the label lied.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_thermal_streaming_symmetry_sz_gpu_lane(tmp_path):
+    """``qed.thermal(symmetry=..., fixed_sz=..., device='gpu')`` -- same
+    contract as the non-Sz twin, but exercises the
+    FixedSzStreamingSymmetry SectorView GPU path."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.ThermalOptions()
+        opts.method        = _core.ThermalMethod.mTPQ
+        opts.num_samples   = 1
+        opts.krylov_dim    = 20
+        opts.num_temp_bins = 2
+        opts.temp_min      = 0.5
+        opts.temp_max      = 4.0
+        opts.backend.allow_gpu = True
+        tr = _core.workflows_thermal_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts,
+            N_SITES // 2,
+        )
+        assert tr.backend.lane == "gpu", (
+            f"GPU + Sz + spatial symmetry (thermal/mTPQ) should report "
+            f"lane='gpu'; got {tr.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@_REQUIRES_GPU
+def test_spectral_streaming_symmetry_gpu_lane(tmp_path):
+    """``qed.spectral(symmetry=..., device='gpu')`` (GroundStateCF) --
+    the same-irrep binding propagates ``sr.backend`` from the inner
+    ``ed::workflows::spectral`` call, so Phase D's lane fix on the
+    orchestrator finalizer lands here automatically."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.SpectralOptions()
+        opts.method     = _core.SpectralMethod.GroundStateCF
+        opts.num_omega  = 32
+        opts.omega_min  = 0.0
+        opts.omega_max  = 4.0
+        opts.broadening = 0.1
+        opts.backend.allow_gpu = True
+        sr = _core.workflows_spectral_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts, None,
+        )
+        assert sr.backend.lane == "gpu", (
+            f"GPU + spatial symmetry (spectral/GroundStateCF) should "
+            f"report lane='gpu'; got {sr.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_thermal_streaming_symmetry_cpu_lane(tmp_path):
+    """Negative control: ``allow_gpu=False`` on the streaming-symmetry
+    thermal binding must land on "cpu" (not the previously-stuck
+    empty string)."""
+    from qed import _core
+
+    tmp, _H = _ring_directory_with_symmetry()
+    try:
+        opts = _core.ThermalOptions()
+        opts.method        = _core.ThermalMethod.mTPQ
+        opts.num_samples   = 1
+        opts.krylov_dim    = 20
+        opts.num_temp_bins = 2
+        opts.temp_min      = 0.5
+        opts.temp_max      = 4.0
+        opts.backend.allow_gpu = False
+        tr = _core.workflows_thermal_streaming_symmetry_directory(
+            tmp, N_SITES, 0.5, opts, None,
+        )
+        assert tr.backend.lane == "cpu", (
+            f"allow_gpu=False must land on lane='cpu'; got "
+            f"{tr.backend.lane!r}.")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
