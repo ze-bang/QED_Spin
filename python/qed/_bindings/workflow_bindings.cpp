@@ -21,6 +21,7 @@
 #include <pybind11/complex.h>
 
 #include <ed/core/hdf5_io.h>             // isDisabledOutputPath
+#include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (for device='gpu' promotion)
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/core/operator.h>
@@ -35,6 +36,9 @@
 #include <ed/observables/ftlm_cross_irrep_kernel.h>  // SOTA finite-T cross-irrep
 #include <ed/orchestrator.h>
 #include <ed/solvers/kpm_dos.h>                      // Wave B3: estimate_spectral_bounds
+#ifdef WITH_CUDA
+#  include <ed/gpu/gpu_operator.cuh>     // GPUOperator + convertOperatorToGPU helper
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -58,6 +62,198 @@ using Complex = std::complex<double>;
 // `FixedSzOperator&` and rely on the fact that both inherit from
 // `ed::LinearOperator`. The orchestrator calls take `const LinearOperator&`,
 // so a simple reference upcast is enough.
+
+// ---------------------------------------------------------------------------
+// GPU promotion helper (May 2026 follow-up to the "Universal save contract").
+//
+// ``qed.solve/thermal/spectral(device='gpu')`` flips
+// ``opts.backend.allow_gpu = true`` in the Python wrappers, but the
+// orchestrator's ``ed::select_backend(geom, c)`` will only pick the
+// ``CudaBackend`` lane when the operator's ``Geometry`` either lives in
+// device memory (``MemorySpace::CudaDevice``) or advertises lazy device
+// matvec support (``supports_device_matvec=true``). The plain
+// ``ed::Operator`` and ``ed::FixedSzOperator`` (no symmetry) classes
+// advertise neither, so ``device='gpu'`` was silently downgraded to
+// ``CpuBackend`` -- the user got CPU performance while paying for the
+// GPU runtime check.
+//
+// The streaming-symmetry binding ``workflows_solve_streaming_symmetry_
+// directory`` is unaffected: ``StreamingSymmetryOperator::SectorView``
+// already advertises ``supports_device_matvec=true`` via the lazy GPU
+// mirror that ``bind_cuda_for_sector`` materialises.
+//
+// This helper bridges the gap for the plain ``Operator`` /
+// ``FixedSzOperator`` lanes by lazily constructing a ``GPUOperator``
+// (or ``GPUFixedSzOperator``) from the host operator's term list when
+// the caller actually wants the GPU lane. When the build does not
+// have CUDA, or no NVIDIA device is visible, or the operator already
+// supplies a device matvec path, we return ``nullptr`` -- the caller
+// uses the original host operator.
+//
+// The returned ``unique_ptr`` OWNS the GPU operator; callers MUST keep
+// it alive for the duration of the workflow call. The pattern in
+// every binding is:
+//
+//     auto gpu_owned = maybe_promote_to_gpu(op, opts.backend);
+//     const ed::LinearOperator& H =
+//         gpu_owned ? static_cast<ed::LinearOperator&>(*gpu_owned) : op;
+//     return ed::workflows::solve(H, std::move(opts));
+//
+// (Operator -> GPUOperator, FixedSzOperator -> GPUFixedSzOperator.)
+// ---------------------------------------------------------------------------
+inline bool gpu_runtime_available() noexcept {
+#ifdef WITH_CUDA
+    int n = 0;
+    if (cudaGetDeviceCount(&n) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return n > 0;
+#else
+    return false;
+#endif
+}
+
+inline bool needs_gpu_promotion(const ed::LinearOperator& op,
+                                const ed::BackendConstraints& c) noexcept {
+    if (!c.allow_gpu) return false;
+    if (!gpu_runtime_available()) return false;
+    const auto geom = op.geometry();
+    // Already a device-resident operator OR advertises lazy device
+    // matvec (streaming-symmetry SectorView, etc.) -> orchestrator
+    // picks CudaBackend natively.
+    if (ed::matvec::is_device(geom.memory_space)) return false;
+    if (geom.supports_device_matvec) return false;
+    // Distributed lanes pick MPI / MPI+CUDA via their own backends;
+    // never promote a DistributedOperator here.
+    if (ed::matvec::is_distributed(geom.memory_space)) return false;
+    return true;
+}
+
+/// FullDiag fallback in ``solve_on<Backend>`` calls the bound matvec
+/// with HOST ``std::vector<Complex>`` storage (the LAPACK dense
+/// eigensolver is host-only, so the column-build runs on host
+/// pointers). A GPUOperator's ``bind_cpu()`` throws because the
+/// operator is device-pointer-only; promoting a host Operator to a
+/// GPUOperator and then routing FullDiag through it would crash.
+///
+/// FullDiag is the auto-selected method for ``global_dim <= 2^12 =
+/// 4096`` (see ``auto_solve_method`` in orchestrator.cpp). At those
+/// dimensions the matvec is negligible compared to the O(N^3) LAPACK
+/// solve and the GPU lane offers no measurable win, so silently
+/// keeping the operator on the host is both safe and good for
+/// throughput. The promoter therefore declines promotion whenever
+/// the resolved method is (or would be) FullDiag.
+inline bool will_use_full_diag(const ed::LinearOperator& op,
+                               const ed::workflows::SolveOptions& opts) noexcept {
+    if (opts.method == ed::workflows::SolveMethod::FullDiag) return true;
+    if (opts.method != ed::workflows::SolveMethod::Auto)     return false;
+    const auto geom = op.geometry();
+    return geom.global_dim <= (1ULL << 12);
+}
+
+/// The thermal lane has uneven GPU coverage:
+///   * FTLM         : CPU only (orchestrator throws on CUDA).
+///   * LTLM, KpmDos : CPU or CUDA.
+///   * mTPQ, cTPQ   : any backend.
+///
+/// When the chosen method is FTLM we must NOT promote: routing a
+/// GPUOperator into ``ed::thermal::ftlm`` would land on
+/// ``std::is_same_v<B, ed::matvec::CpuBackend>`` failing and the
+/// orchestrator would raise a runtime error. The promoter therefore
+/// declines promotion for FTLM. (Before this helper landed, plain
+/// ``Operator`` was silently demoted to CpuBackend in
+/// ``select_backend``, so FTLM-with-``allow_gpu=true`` was a no-op
+/// rather than a crash; preserving that contract avoids a regression.)
+inline bool thermal_method_supports_gpu(
+    ed::workflows::ThermalOptions::Method m) noexcept {
+    using M = ed::workflows::ThermalOptions::Method;
+    return m == M::LTLM
+        || m == M::KpmDos
+        || m == M::mTPQ
+        || m == M::cTPQ;
+}
+
+/// Spectral lanes split along the same "backend-aware vs host-only"
+/// boundary:
+///   * GroundStateCF : runs the inner solve + CF kernel through
+///                     ``H.template bind<B>()`` -- GPU-clean.
+///   * FtlmDynamical : drives ``compute_dynamical_correlation`` which
+///                     calls ``H.apply(host_in, host_out)``. A
+///                     GPUOperator's ``apply`` reinterprets the host
+///                     pointers as device pointers, which crashes.
+///   * KpmDynamical  : hands a stack-allocated ``CpuBackend`` and host
+///                     buffers to ``kpm_dynamical_correlator``. Same
+///                     host-only constraint as FtlmDynamical.
+inline bool spectral_method_supports_gpu(
+    ed::workflows::SpectralOptions::Method m) noexcept {
+    using M = ed::workflows::SpectralOptions::Method;
+    return m == M::GroundStateCF;
+}
+
+/// Emit a Python ``RuntimeWarning`` so the caller sees the silent
+/// demotion ``device='gpu' -> CPU lane`` instead of finding out through
+/// a profiler. The warning fires only when the GPU was actually
+/// reachable (``allow_gpu=true`` AND ``gpu_runtime_available()``) -- if
+/// the build is CPU-only or no NVIDIA device is visible there is no
+/// "demotion" to report. Uses ``stacklevel=2`` so the warning blame
+/// points at the user's ``qed.solve / qed.thermal / qed.spectral``
+/// call site rather than at this binding.
+inline void warn_silent_cpu_fallback(const char* what,
+                                     const ed::BackendConstraints& c) {
+    if (!c.allow_gpu) return;
+#ifdef WITH_CUDA
+    if (!gpu_runtime_available()) return;
+#else
+    return;
+#endif
+    try {
+        py::module_::import("warnings").attr("warn")(
+            std::string(what)
+                + " requested device='gpu' but the chosen method has no GPU "
+                  "implementation in the orchestrator. Falling back to the "
+                  "CPU lane. Pass device='cpu' to silence this warning, or "
+                  "switch to a GPU-clean method (Lanczos/BlockLanczos/"
+                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ/cTPQ for "
+                  "thermal; GroundStateCF for spectral).",
+            py::module_::import("builtins").attr("RuntimeWarning"),
+            py::arg("stacklevel") = 2);
+    } catch (const py::error_already_set&) {
+        // Best-effort -- never let the warning machinery break the
+        // workflow call. The caller still gets the correct CPU result.
+    }
+}
+
+inline std::unique_ptr<ed::LinearOperator>
+maybe_promote_to_gpu(Operator& host_op,
+                     const ed::BackendConstraints& c) {
+#ifdef WITH_CUDA
+    if (!needs_gpu_promotion(host_op, c)) return nullptr;
+    // FixedSzOperator dispatches to GPUFixedSzOperator (preserves the
+    // n_up projection); plain Operator -> GPUOperator. The dynamic_cast
+    // chain runs in derived-first order so the fixed-Sz subclass wins.
+    if (auto* fsz = dynamic_cast<FixedSzOperator*>(&host_op)) {
+        auto gpu = std::make_unique<GPUFixedSzOperator>(
+            static_cast<int>(fsz->getNumBits()),
+            static_cast<int>(fsz->getNUp()),
+            fsz->getSpin());
+        if (!convertOperatorToGPU(*fsz, *gpu)) {
+            return nullptr;
+        }
+        return gpu;
+    }
+    auto gpu = std::make_unique<GPUOperator>(
+        static_cast<int>(host_op.getNumBits()),
+        host_op.getSpin());
+    if (!convertOperatorToGPU(host_op, *gpu)) {
+        return nullptr;
+    }
+    return gpu;
+#else
+    (void)host_op; (void)c;
+    return nullptr;
+#endif
+}
 
 }  // namespace
 
@@ -354,34 +550,127 @@ void bind_workflows(py::module_& m) {
     // -----------------------------------------------------------------
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
-              const ed::LinearOperator& H = op;
+              // GPU promotion (May 2026): when the caller requested the
+              // GPU lane (``opts.backend.allow_gpu==true``) but the
+              // operator does not natively supply a device matvec, lazily
+              // construct a GPU mirror (GPUOperator / GPUFixedSzOperator)
+              // from the host operator's term list. See
+              // ``maybe_promote_to_gpu`` for the full contract.
+              //
+              // Exception: FullDiag (small-dim O(N^3) dense LAPACK
+              // solve) keeps the host operator since its column-build
+              // calls the matvec with host pointers; routing through a
+              // GPUOperator would crash inside ``solve_on<Backend>``'s
+              // ``H.bind_cpu()`` call.
+              std::unique_ptr<ed::LinearOperator> gpu_owned;
+              if (will_use_full_diag(op, opts)) {
+                  // Silent demotion is the legacy contract for small-dim
+                  // FullDiag (GPU offers nothing over LAPACK at dim <
+                  // 2^12 and the column-build needs host pointers
+                  // anyway). Surface it as a Python RuntimeWarning so
+                  // the caller can audit the demotion instead of
+                  // discovering it via profiling.
+                  warn_silent_cpu_fallback(
+                      "qed.solve (FullDiag)", opts.backend);
+              } else {
+                  gpu_owned = maybe_promote_to_gpu(op, opts.backend);
+              }
+              const ed::LinearOperator& H =
+                  gpu_owned ? static_cast<const ed::LinearOperator&>(*gpu_owned)
+                            : static_cast<const ed::LinearOperator&>(op);
               return ed::workflows::solve(H, std::move(opts));
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::SolveOptions{},
           "Run the unified ground-state Krylov solver (Phase 4.2 collapse). "
-          "Backend (CPU/GPU/MPI/MPI+GPU) is chosen via `ed::select_backend`.");
+          "Backend (CPU/GPU/MPI/MPI+GPU) is chosen via `ed::select_backend`. "
+          "When ``opts.backend.allow_gpu`` is true and the operator does not "
+          "natively expose a device matvec, a transient GPUOperator mirror "
+          "is built from the host term list so the GPU lane actually runs. "
+          "FullDiag stays on the CPU lane (no GPU implementation) and the "
+          "binding emits a Python RuntimeWarning so the demotion is "
+          "visible at the call site.");
 
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
-              const ed::LinearOperator& H = op;
+              // Skip promotion for thermal methods whose orchestrator
+              // dispatch is host-only (FTLM). Preserves the legacy
+              // silent CPU lane for ``device='gpu'`` callers running
+              // FTLM and prevents the runtime throw inside
+              // ``solve_on<CudaBackend>``. Surface the demotion as a
+              // Python RuntimeWarning so the caller can audit it.
+              std::unique_ptr<ed::LinearOperator> gpu_owned;
+              if (thermal_method_supports_gpu(opts.method)) {
+                  gpu_owned = maybe_promote_to_gpu(op, opts.backend);
+              } else {
+                  // For ``allow_gpu=true`` with a host-only method we
+                  // also need to clear ``allow_gpu`` so ``select_backend``
+                  // doesn't try to route through ``CudaBackend`` on
+                  // operators that DO advertise device matvec (e.g.
+                  // streaming-symmetry SectorView).
+                  warn_silent_cpu_fallback(
+                      "qed.thermal (FTLM)", opts.backend);
+                  opts.backend.allow_gpu = false;
+              }
+              const ed::LinearOperator& H =
+                  gpu_owned ? static_cast<const ed::LinearOperator&>(*gpu_owned)
+                            : static_cast<const ed::LinearOperator&>(op);
               return ed::workflows::thermal(H, std::move(opts));
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
           "Run the unified finite-temperature workflow (FTLM / LTLM / mTPQ / "
-          "cTPQ / KPM-DOS) over the auto-selected Backend.");
+          "cTPQ / KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
+          "transparently lifts a host operator to a GPUOperator mirror so "
+          "the device-matvec lane runs without manual conversion.");
 
     m.def("workflows_spectral",
           [](Operator& op,
              std::vector<Operator*> observables,
              ed::workflows::SpectralOptions opts) {
-              const ed::LinearOperator& H = op;
+              // Promotion is only safe for the GroundStateCF lane (which
+              // routes through the backend matvec abstraction). The
+              // FtlmDynamical / KpmDynamical lanes call ``H.apply`` with
+              // HOST pointers, so a GPUOperator's device-pointer apply
+              // would crash. Skip promotion in those cases; the
+              // orchestrator falls through to CpuBackend (and we surface
+              // the silent demotion as a Python RuntimeWarning).
+              const bool can_promote =
+                  spectral_method_supports_gpu(opts.method);
+              std::unique_ptr<ed::LinearOperator> gpu_owned_H;
+              if (can_promote) {
+                  gpu_owned_H = maybe_promote_to_gpu(op, opts.backend);
+              } else {
+                  warn_silent_cpu_fallback(
+                      "qed.spectral (FtlmDynamical/KpmDynamical)",
+                      opts.backend);
+                  opts.backend.allow_gpu = false;
+              }
+              // Observables share the Hamiltonian's backend lane: when
+              // H is promoted to GPU, the matching observables must
+              // run on the device too (CF / KPM / FTLM kernels apply
+              // observables via the same Backend pointers as H).
+              std::vector<std::unique_ptr<ed::LinearOperator>> gpu_owned_obs;
+              gpu_owned_obs.reserve(observables.size());
               std::vector<const ed::LinearOperator*> obs;
               obs.reserve(observables.size());
               for (auto* o : observables) {
-                  obs.push_back(static_cast<const ed::LinearOperator*>(o));
+                  if (!o) continue;
+                  std::unique_ptr<ed::LinearOperator> o_owned;
+                  if (can_promote) {
+                      o_owned = maybe_promote_to_gpu(*o, opts.backend);
+                  }
+                  if (o_owned) {
+                      obs.push_back(
+                          static_cast<const ed::LinearOperator*>(o_owned.get()));
+                      gpu_owned_obs.push_back(std::move(o_owned));
+                  } else {
+                      obs.push_back(static_cast<const ed::LinearOperator*>(o));
+                  }
               }
+              const ed::LinearOperator& H =
+                  gpu_owned_H ? static_cast<const ed::LinearOperator&>(*gpu_owned_H)
+                              : static_cast<const ed::LinearOperator&>(op);
               return ed::workflows::spectral(H, obs, std::move(opts));
           },
           py::arg("op"),
@@ -389,7 +678,9 @@ void bind_workflows(py::module_& m) {
           py::arg("opts") = ed::workflows::SpectralOptions{},
           "Run the unified dynamical-correlator workflow "
           "(continued-fraction Lanczos or FTLM dynamical) over the auto-"
-          "selected Backend.");
+          "selected Backend. When ``allow_gpu`` is set and the Hamiltonian "
+          "is a host operator, both the Hamiltonian and the observable "
+          "pair are mirrored onto the device so the GPU lane actually runs.");
 
     // -----------------------------------------------------------------
     // Streaming-symmetry workflow over a directory (mirrors the CLI's
@@ -893,6 +1184,31 @@ void bind_workflows(py::module_& m) {
                           // No user-supplied output_dir -- keep the
                           // per-sector call silent on disk.
                           topts.output_dir.clear();
+                      }
+                      // FTLM is host-only in the orchestrator (see the
+                      // ``ed::thermal: FTLM lane requires a CpuBackend
+                      // today`` guard in ``orchestrator.cpp``). The
+                      // streaming-symmetry SectorView advertises
+                      // ``supports_device_matvec=true`` (lazy GPU
+                      // mirror), so without this pin
+                      // ``select_backend`` would pick the CudaBackend
+                      // lane and the orchestrator would raise mid-loop.
+                      // Force the CPU lane explicitly for FTLM; the
+                      // other methods (LTLM / KpmDos / mTPQ / cTPQ)
+                      // are GPU-clean and stay on the caller's chosen
+                      // backend. Warn the FIRST time we demote so the
+                      // caller can audit the choice; per-sector
+                      // demotion is the same decision repeated.
+                      if (topts.method
+                          == ed::workflows::ThermalOptions::Method::FTLM) {
+                          if (k == sector_indices.front()) {
+                              py::gil_scoped_acquire gil;
+                              warn_silent_cpu_fallback(
+                                  "qed.thermal (FTLM, streaming-symmetry)",
+                                  topts.backend);
+                          }
+                          topts.backend.allow_gpu = false;
+                          topts.backend.allow_mpi = false;
                       }
                       // Wave B3: inject shared spectral bounds when
                       // the binding-level estimator succeeded.
