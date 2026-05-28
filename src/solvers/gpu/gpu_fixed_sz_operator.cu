@@ -6,6 +6,8 @@
 #include <ed/gpu/gpu_operator.cuh>
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
+#include <cstdint>
 
 using namespace GPUConfig;
 
@@ -68,11 +70,52 @@ GPUFixedSzOperator::~GPUFixedSzOperator() {
 }
 
 void GPUFixedSzOperator::buildBasisOnGPU() {
-    std::cout << "Building fixed Sz basis on GPU...\n";
-
     // Combinadic-unrank kernel needs the Pascal triangle in __constant__
     // memory. ensure_pascal_uploaded() is idempotent across operators.
     GPUKernels::ensure_pascal_uploaded();
+
+    // Phase C of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+    // ``ED_GPU_STORE_BASIS=0`` opts out of the dim x 8 B basis-state
+    // array on device. The Rank matvec kernels (Phase A.2) handle a
+    // ``basis_states == nullptr`` input by computing the state on the
+    // fly via ``unrank_combination_dev`` from constant-cache Pascal
+    // entries -- same arithmetic that produced the array in the first
+    // place, so the cost is moved from a global ``__ldg`` to a few
+    // constant-cache reads. Saves 1.8 GB at dim = 225M.
+    //
+    // Refuses to drop the array when the Hash path is active or when
+    // ``ED_GPU_FIXED_SZ_HASH=1`` (default-ish): the Hash kernels still
+    // need basis_states for their initial state read, and the
+    // host-side ``embedToFull`` / ``projectToReduced`` helpers also
+    // do a single bulk D2H copy of it. Those helpers fall back to a
+    // host-side unrank when the array is absent (see implementations
+    // below).
+    static const bool keep_basis_env = []() {
+        const char* s = std::getenv("ED_GPU_STORE_BASIS");
+        // Default: keep the basis (compat / fastest at typical N).
+        // ``ED_GPU_STORE_BASIS=0`` -> drop it.
+        return !(s != nullptr && s[0] == '0');
+    }();
+    // Hash variants still need the array for the initial-state read,
+    // so if the user explicitly asked for the legacy hash path keep
+    // the basis around regardless.
+    static const bool legacy_hash_requested = []() {
+        const char* s = std::getenv("ED_GPU_USE_HASH");
+        return (s != nullptr && s[0] == '1');
+    }();
+    const bool will_store_basis = keep_basis_env || legacy_hash_requested;
+
+    std::cout << "Building fixed Sz basis on GPU"
+              << (will_store_basis ? "..." : " [device array dropped; unrank on demand]...")
+              << "\n";
+
+    if (!will_store_basis) {
+        d_basis_states_ = nullptr;
+        std::cout << "  Basis generation: skipped device storage "
+                     "(saves " << (fixed_sz_dim_ * sizeof(uint64_t) >> 20)
+                  << " MiB); states computed via combinadic unrank.\n";
+        return;
+    }
 
     CUDA_CHECK(cudaMalloc(&d_basis_states_, fixed_sz_dim_ * sizeof(uint64_t)));
 
@@ -97,6 +140,39 @@ void GPUFixedSzOperator::buildBasisOnGPU() {
 void GPUFixedSzOperator::buildStateHashOnGPU() {
     if (!use_hash_) return;
     if (d_state_hash_ != nullptr) return;  // already built
+
+    // Phase A.3 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+    // skip the entire hash build (malloc + 0xFF memset over 8 - 32 GiB +
+    // 225M atomicCAS inserts + cudaDeviceSynchronize) unless the user
+    // explicitly asks for the legacy lookup path via ED_GPU_USE_HASH=1.
+    // The matvec dispatch defaults to the Rank kernels (Phase A.2) so
+    // the hash is dead weight in the common case.
+    //
+    // Cached so a per-operator construction does not call getenv()
+    // every time; matches the convention used by the matvec dispatch
+    // above and the existing ED_GPU_TIMING knob.
+    static const bool legacy_hash_requested = []() {
+        const char* s = std::getenv("ED_GPU_USE_HASH");
+        return (s != nullptr && s[0] == '1');
+    }();
+    if (!legacy_hash_requested) {
+        // Quiet by default; one-shot log at the first skip so a user
+        // who set ED_GPU_USE_HASH=1 expecting the hash but mistyped the
+        // value still gets a hint in the run log.
+        static bool logged_once = false;
+        if (!logged_once) {
+            std::cout << "  [hash] skipping ``buildStateHashOnGPU`` -- "
+                         "matvec uses combinadic rank (set ED_GPU_USE_HASH=1 "
+                         "to restore the legacy 8-32 GiB hash table).\n";
+            logged_once = true;
+        }
+        // Leave use_hash_ alone (ABI compat) but record that we did
+        // not build, so the matvec dispatcher's ``hash_ready`` check
+        // correctly falls through to the Rank kernel.
+        state_hash_size_ = 0;
+        d_state_hash_    = nullptr;
+        return;
+    }
 
     // Pick power-of-two table size with load factor <= 0.5.
     // (load factor 0.5 keeps avg probe count ~1.5; max ~log N very rare.)
@@ -178,11 +254,60 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
             copyTransformDataToDevice();
         }
 
-        const bool hash_ready = (d_state_hash_ != nullptr) && (state_hash_size_ > 0);
-        const uint32_t hash_mask = hash_ready ? static_cast<uint32_t>(state_hash_size_ - 1) : 0u;
+        // Phase A.2 of the "Kill the GPU State-Lookup Hash" plan
+        // (May 2026): the Rank variants replace the 8 - 32 GiB
+        // ``d_state_hash_`` lookup with a constant-cache combinadic
+        // rank. They are the default; the legacy Hash path stays
+        // available for diagnostic compares behind ``ED_GPU_USE_HASH=1``.
+        //
+        // We cache the env var read in a function-local static so the
+        // matvec hot loop does not call getenv() per call; the cache
+        // is invalidated at process exit, matching how the other ED
+        // GPU env-var knobs work (e.g. ED_GPU_TIMING above).
+        static const bool use_hash = []() {
+            const char* s = std::getenv("ED_GPU_USE_HASH");
+            return (s != nullptr && s[0] == '1');
+        }();
+        const bool hash_ready = use_hash
+                                && (d_state_hash_ != nullptr)
+                                && (state_hash_size_ > 0);
+        const uint32_t hash_mask = hash_ready
+                                   ? static_cast<uint32_t>(state_hash_size_ - 1)
+                                   : 0u;
 
-        const int TRANSFORM_PARALLEL_THRESHOLD = 64;
-        if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
+        // Phase B of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+        // route between the 2D (state x transform) parallel kernel and
+        // the 1D-per-state kernel based on both transform count AND
+        // dimension. The legacy heuristic was ``num_transforms > 64
+        // -> 2D``, which is wrong at huge dim: the 2D kernel re-reads
+        // ``__ldg(x[state_idx])`` ``num_transforms`` times per state
+        // (different ``blockIdx.y`` -> different L1/L2 cache), turning
+        // input-vector reads into the dominant HBM traffic. At
+        // dim=225M, num_transforms=288 that is ~1 TB of redundant reads
+        // per matvec.
+        //
+        // The 1D kernel keeps each state on a single thread that
+        // iterates transforms in shared memory and reads ``x[idx]``
+        // exactly once. Once dim crosses ~64M the 1D pattern wins
+        // decisively even at large num_transforms; below that
+        // crossover the 2D kernel still wins via more grid-level
+        // parallelism.
+        //
+        // The crossover threshold is a single env-var knob
+        // (``ED_GPU_FIXEDSZ_1D_DIM_THRESHOLD``) so a benchmark sweep
+        // can pin it without rebuilding. The default (1 << 26 = ~64M)
+        // is a conservative initial guess to be refined in Phase F.
+        static const std::uint64_t kHugeDimThreshold = []() {
+            const char* s = std::getenv("ED_GPU_FIXEDSZ_1D_DIM_THRESHOLD");
+            if (s == nullptr || s[0] == '\0') return static_cast<std::uint64_t>(1ULL << 26);
+            const long long v = std::atoll(s);
+            return (v > 0) ? static_cast<std::uint64_t>(v)
+                           : static_cast<std::uint64_t>(1ULL << 26);
+        }();
+        const int  TRANSFORM_PARALLEL_THRESHOLD = 64;
+        const bool huge_dim = (static_cast<std::uint64_t>(fixed_sz_dim_) > kHugeDimThreshold);
+        const bool use_2d   = (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) && !huge_dim;
+        if (use_2d) {
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
             dim3 block(16, 16);
             dim3 grid((fixed_sz_dim_ + block.x - 1) / block.x,
@@ -193,9 +318,10 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
                     d_state_hash_, state_hash_size_, hash_mask,
                     d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
             } else {
-                GPUKernels::matVecFixedSzTransformParallel<<<grid, block>>>(
+                // Default: Rank variant -- zero-HBM-traffic lookup.
+                GPUKernels::matVecFixedSzTransformParallelRank<<<grid, block>>>(
                     d_x, d_y, d_basis_states_,
-                    d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
+                    d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, n_up_, spin_l_);
             }
         } else {
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
@@ -207,9 +333,10 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
                     fixed_sz_dim_, n_sites_, spin_l_,
                     d_transform_data_, num_transforms_);
             } else {
-                GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                // Default: Rank variant.
+                GPUKernels::matVecFixedSzKernelOptimizedRank<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
                     d_x, d_y, d_basis_states_,
-                    fixed_sz_dim_, n_sites_, spin_l_,
+                    fixed_sz_dim_, n_sites_, n_up_, spin_l_,
                     d_transform_data_, num_transforms_);
             }
         }
@@ -278,6 +405,70 @@ void GPUFixedSzOperator::matVec(const std::complex<double>* x, std::complex<doub
                          cudaMemcpyDeviceToHost));
 }
 
+// Phase C of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+// host-side combinadic unrank used by ``embedToFull`` /
+// ``projectToReduced`` when ``ED_GPU_STORE_BASIS=0`` dropped the device
+// array. Same colex convention as ``unrank_combination_dev`` in
+// gpu_kernels.cu. Builds a small Pascal table on the host (cheap,
+// ~33 KiB) and walks the rank top-down for each basis index.
+//
+// Cost: O(n_sites) per state, host-side; the function is called at
+// most a few times in a typical run (vector boundary conversions),
+// not in the matvec hot loop.
+namespace {
+struct HostPascal {
+    std::uint64_t v[65][65];
+    HostPascal() {
+        for (int n = 0; n <= 64; ++n) {
+            v[n][0] = 1ULL;
+            for (int k = 1; k <= n; ++k) {
+                v[n][k] = ((k - 1 >= 0) ? v[n-1][k-1] : 0ULL)
+                       +  ((k < n)      ? v[n-1][k]   : 0ULL);
+            }
+            for (int k = n + 1; k <= 64; ++k) v[n][k] = 0ULL;
+        }
+    }
+    std::uint64_t at(int n, int k) const {
+        if (k < 0 || k > n || n < 0 || n > 64) return 0ULL;
+        return v[n][k];
+    }
+};
+inline const HostPascal& host_pascal() {
+    static const HostPascal P;
+    return P;
+}
+
+inline std::uint64_t host_unrank(std::uint64_t rank, int n_bits, int k) {
+    const HostPascal& P = host_pascal();
+    std::uint64_t state = 0ULL;
+    for (int i = k - 1; i >= 0; --i) {
+        int p = i;
+        while (p + 1 < n_bits && P.at(p + 1, i + 1) <= rank) ++p;
+        state |= (1ULL << p);
+        rank -= P.at(p, i + 1);
+    }
+    return state;
+}
+
+// Materialise the basis-state array on the host, either by copying
+// from device (if stored) or by walking the unrank.
+std::vector<std::uint64_t> materialize_host_basis(const std::uint64_t* d_basis_states,
+                                                  int fixed_sz_dim,
+                                                  int n_sites, int n_up) {
+    std::vector<std::uint64_t> h_basis(fixed_sz_dim);
+    if (d_basis_states != nullptr) {
+        CUDA_CHECK(cudaMemcpy(h_basis.data(), d_basis_states,
+                              fixed_sz_dim * sizeof(std::uint64_t),
+                              cudaMemcpyDeviceToHost));
+    } else {
+        for (int i = 0; i < fixed_sz_dim; ++i) {
+            h_basis[i] = host_unrank(static_cast<std::uint64_t>(i), n_sites, n_up);
+        }
+    }
+    return h_basis;
+}
+}  // namespace
+
 // Transform vector from fixed-Sz basis to full Hilbert space
 std::vector<std::complex<double>> GPUFixedSzOperator::embedToFull(
     const std::vector<std::complex<double>>& fixed_sz_vec) {
@@ -286,10 +477,8 @@ std::vector<std::complex<double>> GPUFixedSzOperator::embedToFull(
         throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
     }
     
-    // Copy basis states from GPU to host
-    std::vector<uint64_t> h_basis_states(fixed_sz_dim_);
-    CUDA_CHECK(cudaMemcpy(h_basis_states.data(), d_basis_states_, 
-                         fixed_sz_dim_ * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    auto h_basis_states = materialize_host_basis(d_basis_states_, fixed_sz_dim_,
+                                                 n_sites_, n_up_);
     
     // Create full-space vector
     uint64_t full_dim = 1ULL << n_sites_;
@@ -312,10 +501,8 @@ std::vector<std::complex<double>> GPUFixedSzOperator::projectToReduced(
         throw std::invalid_argument("Input vector size mismatch with full Hilbert space dimension");
     }
     
-    // Copy basis states from GPU to host
-    std::vector<uint64_t> h_basis_states(fixed_sz_dim_);
-    CUDA_CHECK(cudaMemcpy(h_basis_states.data(), d_basis_states_, 
-                         fixed_sz_dim_ * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    auto h_basis_states = materialize_host_basis(d_basis_states_, fixed_sz_dim_,
+                                                 n_sites_, n_up_);
     
     // Create reduced-space vector
     std::vector<std::complex<double>> reduced_vec(fixed_sz_dim_);

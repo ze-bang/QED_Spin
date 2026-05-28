@@ -3,6 +3,8 @@
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/bit_operations.cuh>
 
+#include <vector>
+
 using namespace GPUBitOps;
 
 // ============================================================================
@@ -165,17 +167,37 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
 /**
  * Constant-memory Pascal triangle for combinadic unrank.
  *
- * Indexed as d_pascal[n][k] = C(n, k) for 0 <= n, k <= 64. ~33.8 KiB,
- * fits well within the 64 KiB constant-memory limit on every CUDA arch
- * we target. Populated once from the host via cudaMemcpyToSymbol when
- * the first fixed-Sz operator is constructed (see ensure_pascal_uploaded
- * below). Storage is uint64_t — C(64, 32) = 1.83e18 fits in 64 bits.
+ * Indexed as d_pascal_shared[n][k] = C(n, k) for 0 <= n, k <= 64.
+ * ~33.8 KiB, fits well within the 64 KiB constant-memory limit on
+ * every CUDA arch we target.
+ *
+ * Phase E.1 of the "Kill the GPU State-Lookup Hash" plan moved this
+ * symbol into the ``ed::gpu::combinadic`` namespace so that other
+ * CUDA TUs (e.g. ``streaming_symmetry_gpu_mirror.cu``) can read the
+ * SAME constant table via ``extern __device__ __constant__`` in
+ * ``include/ed/gpu/combinadic.cuh``. Without sharing, each TU would
+ * upload its own 33 KiB table and the device-link object would blow
+ * the 64 KiB per-binary constant-memory budget.
+ *
+ * Populated once from the host via cudaMemcpyToSymbol when the first
+ * fixed-Sz operator is constructed (see ensure_pascal_uploaded below).
+ * Storage is uint64_t — C(64, 32) = 1.83e18 fits in 64 bits.
  */
-__device__ __constant__ unsigned long long d_pascal[65][65];
+// We are currently inside ``namespace GPUKernels { ... }``. Briefly
+// close it so the constant-memory symbol lives at its true linkage
+// home (``::ed::gpu::combinadic::d_pascal_shared``), then reopen
+// ``GPUKernels`` to continue the original file.
+}  // namespace GPUKernels (paused for cross-TU symbol)
+
+namespace ed::gpu::combinadic {
+__device__ __constant__ unsigned long long d_pascal_shared[65][65];
+}  // namespace ed::gpu::combinadic
+
+namespace GPUKernels {
 
 static __device__ __forceinline__ unsigned long long binomial_dev(int n, int k) {
     if (k < 0 || k > n || n < 0 || n > 64) return 0ULL;
-    return d_pascal[n][k];
+    return ::ed::gpu::combinadic::d_pascal_shared[n][k];
 }
 
 /**
@@ -225,6 +247,79 @@ __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, i
 }
 
 /**
+ * Combinadic RANK: inverse of unrank_combination_dev.
+ *
+ * Phase A.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+ * `unrank_combination_dev` already enumerates the fixed-Sz basis by
+ * walking bit positions in colex order and consuming the rank top-down.
+ * The inverse direction was never written, so every state -> idx lookup
+ * was forced through ``d_state_hash_`` (8 - 32 GiB random-access HBM
+ * probe table).
+ *
+ * The colex convention used by unrank: a combination with set-bit
+ * positions ``p_{k-1} > ... > p_0`` has rank
+ *
+ *     rank = sum_{i=0}^{k-1} C(p_i, i + 1).
+ *
+ * Scanning ``state`` from low bit to high bit, the (seen)-th set bit
+ * encountered is exactly ``p_{seen-1}`` (with index ``seen``) and
+ * contributes ``C(p_{seen-1}, seen)``.  All reads land in
+ * ``__constant__`` cache (the Pascal triangle); no HBM traffic. The
+ * loop runs at most n_bits times (<= 64).
+ */
+static __device__ __forceinline__
+int rank_combination_dev(uint64_t state, int n_bits, int k) {
+    int rank = 0;
+    int seen = 0;
+    #pragma unroll
+    for (int bit = 0; bit < 64; ++bit) {
+        if (bit >= n_bits) break;
+        if (seen >= k) break;
+        if ((state >> bit) & 1ULL) {
+            ++seen;
+            // binomial_dev(bit, seen) reads d_pascal[bit][seen] from
+            // __constant__ memory; bit < n_bits <= 64 and seen <= k <= 32
+            // so we are inside the uploaded 65x65 triangle.
+            rank += static_cast<int>(binomial_dev(bit, seen));
+        }
+    }
+    return rank;
+}
+
+// =============================================================================
+// Host-callable roundtrip test harness for rank_combination_dev.
+//
+// Used by tests/unit/test_gpu_fixed_sz_rank.cpp to pin
+//     rank_combination_dev(unrank_combination_dev(r), N, k) == r
+// for r in [0, C(N, k)). The kernel writes 1 into ``d_fail`` on the
+// first mismatch; the host reads back ``h_fail`` to assert correctness.
+//
+// We accept a host-provided list of ranks (rather than scanning the
+// whole [0, dim) range) so the test can keep memory bounded at large
+// (N, k) like (32, 16) where C(32, 16) ~ 6e8.
+// =============================================================================
+__global__ void rankUnrankRoundtripKernel(const uint64_t* ranks_in,
+                                          int num_ranks, int n_bits, int k,
+                                          int* d_fail,
+                                          uint64_t* d_first_fail_rank) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_ranks) return;
+
+    uint64_t r = ranks_in[tid];
+    uint64_t state = unrank_combination_dev(r, n_bits, k);
+    int  popcount = __popcll(state);
+    int  back = rank_combination_dev(state, n_bits, k);
+
+    if (popcount != k || static_cast<uint64_t>(back) != r) {
+        // Race is fine: any failing thread wins, the host just needs to
+        // know SOMETHING failed at this (N, k).
+        atomicExch(d_fail, 1);
+        atomicExch(reinterpret_cast<unsigned long long*>(d_first_fail_rank),
+                   static_cast<unsigned long long>(r));
+    }
+}
+
+/**
  * Host-callable: upload Pascal triangle to constant memory. Idempotent
  * via a static flag — multiple GPUFixedSzOperator constructions share
  * the same uploaded table.
@@ -241,8 +336,89 @@ void ensure_pascal_uploaded() {
             h_pascal[n][k] = left + right;
         }
     }
-    cudaMemcpyToSymbol(d_pascal, h_pascal, sizeof(h_pascal));
+    cudaMemcpyToSymbol(::ed::gpu::combinadic::d_pascal_shared,
+                       h_pascal, sizeof(h_pascal));
     uploaded = true;
+}
+
+}  // namespace GPUKernels (paused so we can define the cross-TU
+   // ``ed::gpu::combinadic::upload_pascal_shared`` symbol at its true
+   // linkage home; reopened immediately below)
+
+// Phase E.1: expose the same upload through the public combinadic
+// namespace so callers that only include ``ed/gpu/combinadic.cuh``
+// (no internal ed_solvers_gpu deps) can populate the shared table.
+namespace ed::gpu::combinadic {
+void upload_pascal_shared() { GPUKernels::ensure_pascal_uploaded(); }
+}  // namespace ed::gpu::combinadic
+
+namespace GPUKernels {
+
+/**
+ * Host-callable roundtrip launcher for rank_combination_dev.
+ *
+ * Phase A.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026).
+ * The test harness builds a host-side list of ranks (random sample or
+ * exhaustive [0, dim)) and asks the GPU whether
+ *
+ *     rank_combination_dev(unrank_combination_dev(r), N, k) == r
+ *
+ * for every entry. Returns:
+ *   - ``true``: all ranks roundtripped.
+ *   - ``false``: at least one failure; the offending rank is written
+ *     to ``*first_fail_rank_out`` (host).
+ *
+ * The host stages the input ranks H -> D, launches the kernel, reads
+ * back two scalars (failure flag + first failing rank), and frees.
+ * This is a CORRECTNESS test, not a perf path, so the H2D + D2H + sync
+ * cost is fine.
+ */
+bool gpu_rank_unrank_roundtrip(const std::vector<uint64_t>& ranks,
+                               int n_bits, int k,
+                               uint64_t* first_fail_rank_out) {
+    if (first_fail_rank_out != nullptr) {
+        *first_fail_rank_out = static_cast<uint64_t>(-1);
+    }
+    if (ranks.empty()) return true;
+    if (n_bits <= 0 || n_bits > 64 || k < 0 || k > n_bits) return false;
+
+    ensure_pascal_uploaded();
+
+    uint64_t* d_ranks            = nullptr;
+    int*      d_fail             = nullptr;
+    uint64_t* d_first_fail_rank  = nullptr;
+    size_t    bytes_in           = ranks.size() * sizeof(uint64_t);
+
+    if (cudaMalloc(&d_ranks, bytes_in)               != cudaSuccess) return false;
+    if (cudaMalloc(&d_fail, sizeof(int))             != cudaSuccess) { cudaFree(d_ranks); return false; }
+    if (cudaMalloc(&d_first_fail_rank, sizeof(uint64_t)) != cudaSuccess) {
+        cudaFree(d_ranks); cudaFree(d_fail); return false;
+    }
+
+    cudaMemcpy(d_ranks, ranks.data(), bytes_in, cudaMemcpyHostToDevice);
+    cudaMemset(d_fail, 0, sizeof(int));
+    cudaMemset(d_first_fail_rank, 0xFF, sizeof(uint64_t));  // -> UINT64_MAX
+
+    const int threads = 256;
+    const int blocks  = static_cast<int>((ranks.size() + threads - 1) / threads);
+    rankUnrankRoundtripKernel<<<blocks, threads>>>(
+        d_ranks, static_cast<int>(ranks.size()), n_bits, k,
+        d_fail, d_first_fail_rank);
+
+    int      h_fail = 0;
+    uint64_t h_fail_rank = static_cast<uint64_t>(-1);
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_fail_rank, d_first_fail_rank, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_ranks);
+    cudaFree(d_fail);
+    cudaFree(d_first_fail_rank);
+
+    if (h_fail != 0) {
+        if (first_fail_rank_out != nullptr) *first_fail_rank_out = h_fail_rank;
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -536,6 +712,234 @@ __global__ void matVecFixedSzKernelOptimizedHash(const cuDoubleComplex* x,
                         ? idx
                         : lookupStateHashFixedSz(new_state, hash_table,
                                                   hash_table_size, hash_table_mask);
+                    if (new_idx >= 0) {
+                        cuDoubleComplex contrib = cuCmul(factor, x_val);
+                        atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                        atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// RANK-LOOKUP variants of the fixed-Sz matvec kernels.
+//
+// Phase A.2 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+// the legacy Hash variants probed an 8 - 32 GiB device hash table on
+// every (work_item), which dominated the matvec wall time on 32-site
+// fixed-Sz problems (the hot loop becomes latency-bound on
+// uncacheable HBM reads). The Rank variants drop the table entirely
+// and re-compute ``new_idx = rank_combination_dev(new_state, n_sites,
+// n_up)`` directly from the Pascal triangle in __constant__ memory.
+//
+// Costs per work item:
+//   Hash  : 1 HBM probe ~200 ns latency-bound, 16-32 GiB live memory.
+//   Rank  : ~n_sites constant-cache reads, zero global traffic, zero
+//           live memory.
+//
+// Signatures match the Hash variants byte-for-byte except for:
+//   - hash_table / hash_table_size / hash_table_mask are removed
+//   - ``int n_up`` is added (passed through from the operator's
+//     ``n_up_`` field; needed by ``rank_combination_dev``).
+// The dispatcher in ``gpu_fixed_sz_operator.cu`` picks Rank by default
+// and falls back to Hash when ``ED_GPU_USE_HASH=1`` is set.
+// =============================================================================
+
+__global__ void matVecFixedSzTransformParallelRank(const cuDoubleComplex* x,
+                                                   cuDoubleComplex* y,
+                                                   const uint64_t* basis_states,
+                                                   const GPUTransformData* transforms,
+                                                   int num_transforms,
+                                                   int N, int n_sites, int n_up, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+
+    // Phase C of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+    // ``basis_states == nullptr`` is the opt-in
+    // ``ED_GPU_STORE_BASIS=0`` path -- compute the state from its
+    // index via the same combinadic unrank that produced the basis in
+    // the first place. The branch is uniform across the launch
+    // (basis_states is a kernel parameter, not data) so the compiler
+    // collapses it to a single predicate at PTX time.
+    uint64_t state = (basis_states != nullptr)
+        ? basis_states[state_idx]
+        : unrank_combination_dev(static_cast<uint64_t>(state_idx), n_sites, n_up);
+    const GPUTransformData& tdata = transforms[transform_idx];
+
+    cuDoubleComplex factor = tdata.coefficient;
+    uint64_t new_state = state;
+    bool valid = true;
+
+    if (tdata.is_two_body) {
+        uint64_t bit1 = (state >> tdata.site_index) & 1;
+        if (tdata.op_type == 2) {
+            double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
+            factor = complex_scale(factor, sign);
+        } else {
+            if (bit1 != tdata.op_type) {
+                new_state ^= (1ULL << tdata.site_index);
+            } else {
+                valid = false;
+            }
+        }
+        if (valid) {
+            uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+            if (tdata.op_type_2 == 2) {
+                double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                factor = complex_scale(factor, sign);
+            } else {
+                if (bit2_new != tdata.op_type_2) {
+                    new_state ^= (1ULL << tdata.site_index_2);
+                } else {
+                    valid = false;
+                }
+            }
+        }
+    } else {
+        uint64_t bit = (state >> tdata.site_index) & 1;
+        if (tdata.op_type == 2) {
+            double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+            factor = complex_scale(factor, sign);
+        } else {
+            if (bit != tdata.op_type) {
+                new_state ^= (1ULL << tdata.site_index);
+            } else {
+                valid = false;
+            }
+        }
+    }
+
+    if (valid) {
+        // Diagonal short-circuit + combinadic rank instead of hash probe.
+        // ``rank_combination_dev`` reads d_pascal[][] from __constant__
+        // cache only -- no HBM traffic. We also defensively check the
+        // popcount: bitflips inside a fixed-Sz sector preserve n_up by
+        // construction, but a kernel-side popcount check costs ~1 ns and
+        // turns "raise/lower outside the sector" into a clean no-op.
+        int new_idx;
+        if (new_state == state) {
+            new_idx = state_idx;
+        } else if (__popcll(new_state) != n_up) {
+            new_idx = -1;
+        } else {
+            new_idx = rank_combination_dev(new_state, n_sites, n_up);
+        }
+        if (new_idx >= 0) {
+            cuDoubleComplex x_val = __ldg(&x[state_idx]);
+            cuDoubleComplex contrib = cuCmul(factor, x_val);
+            atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+        }
+    }
+}
+
+__global__ void matVecFixedSzKernelOptimizedRank(const cuDoubleComplex* x,
+                                                 cuDoubleComplex* y,
+                                                 const uint64_t* basis_states,
+                                                 int N, int n_sites, int n_up, float spin_l,
+                                                 const GPUTransformData* transforms,
+                                                 int num_transforms) {
+    extern __shared__ GPUTransformData s_transforms[];
+
+    int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
+    for (int i = 0; i < num_loads; ++i) {
+        int tidx = i * blockDim.x + threadIdx.x;
+        if (tidx < num_transforms) {
+            s_transforms[tidx] = transforms[tidx];
+        }
+    }
+    __syncthreads();
+
+    int grid_stride = blockDim.x * gridDim.x;
+
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        // Phase C: see comment in matVecFixedSzTransformParallelRank.
+        // ``basis_states == nullptr`` -> compute state on the fly via
+        // constant-cache unrank, skipping the dim*8 B global array.
+        uint64_t state = (basis_states != nullptr)
+            ? basis_states[idx]
+            : unrank_combination_dev(static_cast<uint64_t>(idx), n_sites, n_up);
+        cuDoubleComplex x_val = __ldg(&x[idx]);
+
+        const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
+
+        #pragma unroll 4
+        for (int t = 0; t < num_transforms; ++t) {
+            const GPUTransformData& tdata = t_data[t];
+
+            if (tdata.is_two_body) {
+                uint64_t bit1 = (state >> tdata.site_index) & 1;
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+
+                if (tdata.op_type == 2) {
+                    double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
+                    factor = complex_scale(factor, sign);
+                } else {
+                    if (bit1 != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
+                    } else {
+                        valid = false;
+                    }
+                }
+                if (valid) {
+                    uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+                    if (tdata.op_type_2 == 2) {
+                        double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                        factor = complex_scale(factor, sign);
+                    } else {
+                        if (bit2_new != tdata.op_type_2) {
+                            new_state ^= (1ULL << tdata.site_index_2);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                }
+                if (valid) {
+                    int new_idx;
+                    if (new_state == state) {
+                        new_idx = idx;
+                    } else if (__popcll(new_state) != n_up) {
+                        new_idx = -1;
+                    } else {
+                        new_idx = rank_combination_dev(new_state, n_sites, n_up);
+                    }
+                    if (new_idx >= 0) {
+                        cuDoubleComplex contrib = cuCmul(factor, x_val);
+                        atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                        atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+                    }
+                }
+            } else {
+                uint64_t bit = (state >> tdata.site_index) & 1;
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+
+                if (tdata.op_type == 2) {
+                    double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+                    factor = complex_scale(factor, sign);
+                } else {
+                    if (bit != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
+                    } else {
+                        valid = false;
+                    }
+                }
+                if (valid) {
+                    int new_idx;
+                    if (new_state == state) {
+                        new_idx = idx;
+                    } else if (__popcll(new_state) != n_up) {
+                        new_idx = -1;
+                    } else {
+                        new_idx = rank_combination_dev(new_state, n_sites, n_up);
+                    }
                     if (new_idx >= 0) {
                         cuDoubleComplex contrib = cuCmul(factor, x_val);
                         atomicAddDouble(&y[new_idx].x, cuCreal(contrib));

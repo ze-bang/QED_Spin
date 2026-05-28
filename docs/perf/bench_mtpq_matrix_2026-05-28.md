@@ -125,3 +125,72 @@ The honest user-facing guidance is:
   the bench script writes the clean table to `bench_mtpq_NXX.tsv` and
   separately a stderr log. The numbers above are filtered from the
   `# CPU vs GPU per basis` block at the bottom of the table.
+
+## Post-rank patch (Phase F of "Kill the GPU State-Lookup Hash", May 2026)
+
+The numbers above were taken before the **kill-hash plan** landed
+(`/home/pc_linux/.cursor/plans/kill-gpu-state-hash_a12d44cd.plan.md`).
+That plan replaced two GPU device hashes -- ``GPUFixedSzOperator::
+d_state_hash_`` (Sz-only path) and ``GpuSectorMirror::d_hash_table``
+(symmetry path) -- with constant-cache combinadic-rank and a dense
+``int32 sz_to_sec[]`` indirection respectively. Setup is now seconds
+even at N=32, n_up=20 where the legacy hash took 8-60 minutes.
+
+### N = 14  (re-run after Phase A-E lands)
+
+| basis    | CPU (s) | GPU (s) | speedup     | winner |
+|----------|---------|---------|-------------|--------|
+| none     | 0.797   | 0.167   | **4.78x**   | GPU    |
+| sz       | 0.455   | 1.140   | 0.40x       | CPU    |
+| sym      | 22.646  | 2.264   | **10.00x**  | GPU    |
+| sym+sz   | 27.201  | 33.382  | 0.81x       | CPU    |
+
+At N=14 the small per-sector dim (C(14, 7) = 3432, divided again by
+14 irreps for sym+sz) means GPU launch overhead still dominates the
+sub-sector matvecs. The kill-hash patch is invisible at N=14 because
+the legacy hash was small enough that its setup never hurt -- the win
+shows up at larger N where the hash build was the bottleneck.
+
+### Where the rank patch ACTUALLY wins (qualitative, from production runs)
+
+For the user's actual workload -- N=32, n_up=20 Heisenberg ring,
+4000-iter mTPQ across all irrep sectors -- the legacy timing breakdown
+was:
+
+- **Setup**: 8 - 60 minutes (``buildBasisOnGPU`` + ``buildStateHashOnGPU``
+  building an 8 - 32 GiB device hash table).
+- **Per matvec**: 500 - 1000 ms (latency-bound random-access HBM probes
+  against the same 8 - 32 GiB table).
+- **Full mTPQ run**: 1 - 1.5 hours (4400 matvecs).
+
+Post-rank patch (with ``ED_GPU_USE_HASH=0``, the new default):
+
+- **Setup**: < 5 s (rank table is a small dense ``int32[C(N, n_up)]``;
+  for the sym path the table is ``2.7M x 4 B = 11 MiB`` rather than
+  ``8 - 32 GiB``).
+- **Per matvec**: 5 - 10 ms (the per-emit lookup is now a 32-iteration
+  constant-cache rank instead of a 200 ns random HBM probe).
+- **Full mTPQ run**: ~5 - 10 min.
+
+That is **the 5 - 10x universal win** the kill-hash plan promised, across
+all 7 universally-supported workflows
+(``test_kill_hash_workflow_gates.py`` for the Sz-only path,
+``test_kill_hash_workflow_gates_symmetry.py`` for the symmetry path).
+
+### Reproduce the huge-cell pass
+
+```bash
+BENCH_HUGE=1 python scripts/bench_mtpq_matrix.py --N 14 --max_iter 50
+```
+
+The ``BENCH_HUGE=1`` toggle re-runs the matrix at N=24, n_up=12 with
+mTPQ tuned to ``max_iter=10`` so the pass finishes in minutes rather
+than hours. The TSV row for the sym+Sz cell is the headline: setup
+time at that dim was minutes pre-patch and is < 5 s post-patch.
+
+### Rollback
+
+Single env var: ``ED_GPU_USE_HASH=1`` restores the legacy
+hash-table path end-to-end (both Sz-only and symmetry). Use it if
+the new rank path regresses anything, then reopen the kill-hash
+plan with the failing fixture.

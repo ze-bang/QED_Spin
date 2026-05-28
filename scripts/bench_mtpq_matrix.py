@@ -16,11 +16,21 @@ target T grid, how long does mTPQ take in each (basis, backend) cell?".
 Run with:
     python scripts/bench_mtpq_matrix.py --N 12 --max_iter 50
     python scripts/bench_mtpq_matrix.py --N 12 --max_iter 50 --skip_gpu
+
+Phase F of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+the env var ``BENCH_HUGE=1`` adds a second pass at N=24, n_up=12,
+exercising the dim ~2.7M regime where the legacy hash build itself
+dominated and the rank-table rewrite delivers its biggest win. The
+huge pass uses smaller mTPQ knobs (one sample, max_iter=10) so the
+total bench stays under ~10 minutes even with the GPU+symmetry+Sz
+cell running all 24 sectors. Disabled by default to keep the
+default invocation cheap.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -147,6 +157,77 @@ def _run_one(*, label: str, N: int, device: str,
     return out
 
 
+def _run_matrix(*, N: int, max_iter: int, num_samples: int,
+                num_T: int, T_min: float, T_max: float,
+                skip_gpu: bool, label: str = "") -> list[dict[str, Any]]:
+    """Run the full 4 x 2 basis-x-backend matrix at a single N. Pulled
+    out of ``main`` so the Phase F BENCH_HUGE pass can re-invoke the
+    same loop at N=24 without duplicating the table-printing code."""
+    cells = [
+        ("none",     False, False),
+        ("sz",       True,  False),
+        ("sym",      False, True),
+        ("sym+sz",   True,  True),
+    ]
+    devices = ["cpu"] + ([] if skip_gpu else ["gpu"])
+
+    tag = f" [{label}]" if label else ""
+    print(f"# bench_mtpq_matrix{tag}")
+    print(f"# N={N}  T=[{T_min},{T_max}]  num_T={num_T}  "
+          f"num_samples={num_samples}  max_iter={max_iter}")
+    print(f"# qed.has_cuda_build()={qed.has_cuda_build()}")
+    print(f"# ED_GPU_USE_HASH={os.environ.get('ED_GPU_USE_HASH', '0')}  "
+          f"ED_GPU_STORE_BASIS={os.environ.get('ED_GPU_STORE_BASIS', '1')}")
+    print()
+    header = ("basis", "device", "lane", "wall_s",
+              "E_gs", "samples", "max_iter", "status")
+    print("\t".join(header))
+    sys.stdout.flush()
+
+    results = []
+    for cell_label, with_sz, with_sym in cells:
+        for device in devices:
+            r = _run_one(
+                label=cell_label, N=N, device=device,
+                with_sz=with_sz, with_symmetry=with_sym,
+                max_iter=max_iter,
+                num_samples=num_samples,
+                num_T=num_T,
+                T_min=T_min,
+                T_max=T_max,
+            )
+            results.append(r)
+            status = "ok" if r["ok"] else "ERR: " + r["error"][:80]
+            print(
+                f"{cell_label}\t{device}\t{r['lane']}\t"
+                f"{r['wall_seconds']:.3f}\t"
+                f"{r['E_gs']:.6f}\t"
+                f"{r['samples']}\t{r['max_iter']}\t{status}"
+            )
+            sys.stdout.flush()
+
+    print()
+    print("# CPU vs GPU per basis (wall_cpu / wall_gpu)")
+    print("basis\tcpu_s\tgpu_s\tspeedup\tcpu_lane\tgpu_lane")
+    by = {(r["label"], r["device"]): r for r in results}
+    for cell_label, _, _ in cells:
+        c = by.get((cell_label, "cpu"))
+        g = by.get((cell_label, "gpu"))
+        if c is None or g is None:
+            continue
+        if not (c["ok"] and g["ok"]):
+            cpu_s = f"{c['wall_seconds']:.3f}" if c["ok"] else "ERR"
+            gpu_s = f"{g['wall_seconds']:.3f}" if g["ok"] else "ERR"
+            print(f"{cell_label}\t{cpu_s}\t{gpu_s}\t-\t"
+                  f"{c['lane']}\t{g['lane']}")
+            continue
+        speedup = c["wall_seconds"] / max(g["wall_seconds"], 1e-9)
+        print(f"{cell_label}\t{c['wall_seconds']:.3f}\t"
+              f"{g['wall_seconds']:.3f}\t"
+              f"{speedup:.2f}x\t{c['lane']}\t{g['lane']}")
+    return results
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--N", type=int, default=12)
@@ -161,63 +242,39 @@ def main():
     p.add_argument("--skip_gpu", action="store_true")
     args = p.parse_args()
 
-    cells = [
-        ("none",     False, False),
-        ("sz",       True,  False),
-        ("sym",      False, True),
-        ("sym+sz",   True,  True),
-    ]
-    devices = ["cpu"] + ([] if args.skip_gpu else ["gpu"])
+    _run_matrix(
+        N=args.N,
+        max_iter=args.max_iter,
+        num_samples=args.num_samples,
+        num_T=args.num_T,
+        T_min=args.T_min,
+        T_max=args.T_max,
+        skip_gpu=args.skip_gpu,
+        label=f"N={args.N}",
+    )
 
-    print("# bench_mtpq_matrix")
-    print(f"# N={args.N}  T=[{args.T_min},{args.T_max}]  num_T={args.num_T}  "
-          f"num_samples={args.num_samples}  max_iter={args.max_iter}")
-    print(f"# qed.has_cuda_build()={qed.has_cuda_build()}")
-    print()
-    header = ("basis", "device", "lane", "wall_s",
-              "E_gs", "samples", "max_iter", "status")
-    print("\t".join(header))
-    sys.stdout.flush()
-
-    results = []
-    for label, with_sz, with_sym in cells:
-        for device in devices:
-            r = _run_one(
-                label=label, N=args.N, device=device,
-                with_sz=with_sz, with_symmetry=with_sym,
-                max_iter=args.max_iter,
-                num_samples=args.num_samples,
-                num_T=args.num_T,
-                T_min=args.T_min,
-                T_max=args.T_max,
-            )
-            results.append(r)
-            status = "ok" if r["ok"] else "ERR: " + r["error"][:80]
-            print(
-                f"{label}\t{device}\t{r['lane']}\t"
-                f"{r['wall_seconds']:.3f}\t"
-                f"{r['E_gs']:.6f}\t"
-                f"{r['samples']}\t{r['max_iter']}\t{status}"
-            )
-            sys.stdout.flush()
-
-    print()
-    print("# CPU vs GPU per basis (wall_cpu / wall_gpu)")
-    print("basis\tcpu_s\tgpu_s\tspeedup\tcpu_lane\tgpu_lane")
-    by = {(r["label"], r["device"]): r for r in results}
-    for label, _, _ in cells:
-        c = by.get((label, "cpu"))
-        g = by.get((label, "gpu"))
-        if c is None or g is None:
-            continue
-        if not (c["ok"] and g["ok"]):
-            cpu_s = f"{c['wall_seconds']:.3f}" if c["ok"] else "ERR"
-            gpu_s = f"{g['wall_seconds']:.3f}" if g["ok"] else "ERR"
-            print(f"{label}\t{cpu_s}\t{gpu_s}\t-\t{c['lane']}\t{g['lane']}")
-            continue
-        speedup = c["wall_seconds"] / max(g["wall_seconds"], 1e-9)
-        print(f"{label}\t{c['wall_seconds']:.3f}\t{g['wall_seconds']:.3f}\t"
-              f"{speedup:.2f}x\t{c['lane']}\t{g['lane']}")
+    # Phase F of the "Kill the GPU State-Lookup Hash" plan (May 2026):
+    # opt-in heavy run at N=24, n_up=12 (dim_full_sz = C(24, 12) = 2.7M)
+    # where the legacy hash build itself dominates wall time. The
+    # smaller knobs (1 sample, max_iter=10) keep this pass bounded
+    # while still demonstrating the post-rank-patch perf win.
+    huge_raw = os.environ.get("BENCH_HUGE", "").strip()
+    if huge_raw and huge_raw != "0":
+        print()
+        print("# " + "=" * 70)
+        print("# Phase F follow-up: BENCH_HUGE=1 at N=24, n_up=12 "
+              "(dim_full_sz=2.7M)")
+        print("# " + "=" * 70)
+        _run_matrix(
+            N=24,
+            max_iter=10,
+            num_samples=1,
+            num_T=args.num_T,
+            T_min=args.T_min,
+            T_max=args.T_max,
+            skip_gpu=args.skip_gpu,
+            label="huge N=24",
+        )
 
 
 if __name__ == "__main__":
