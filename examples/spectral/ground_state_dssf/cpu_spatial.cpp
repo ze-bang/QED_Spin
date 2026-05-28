@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     auto H_op = ed_example::heisenberg_chain(N, /*pbc=*/true);
     auto obs = std::make_unique<Operator>(N, /*spin=*/0.5f);
     for (std::uint64_t i = 0; i < N; ++i) {
-        obs->addOneBodyTerm(2, i, std::complex<double>(1.0, 0.0)); // Sz
+        obs->addOneBodyTerm(2, i, std::complex<double>((i % 2 == 0) ? 1.0 : -1.0, 0.0)); // (-1)^i Sz
     }
 
     auto h_spec   = ed_example::in_memory_spec(std::move(H_op), N);
@@ -49,9 +49,9 @@ int main(int argc, char** argv) {
     ed_example::rank0_print("S(w= 5.0) = ", result.S_real.back(),  "\n");
 
     // === Expected output (deterministic; captured on the CI reference runner) ===
-    // S(w=-5.0) = 0.000852
-    // S(w= 0.0) = 0.005829
-    // S(w= 5.0) = 0.459119
+    // S(w=-5.0) = 0.006872
+    // S(w= 0.0) = 0.703124
+    // S(w= 5.0) = 0.013104
     // ===========================================================================
     return 0;
 }
