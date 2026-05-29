@@ -105,7 +105,20 @@ inline cublasOperation_t to_cublas_op(char op) {
 
 }  // namespace cuda_backend_detail
 
-class CudaBackend final : public Backend {
+// NOTE: NOT marked ``final``. ``MpiCudaBackend``
+// (``include/ed/matvec/backends/mpi_cuda_backend.cuh``) extends this
+// class to add ``ncclAllReduce`` after the local cuBLAS reductions
+// in ``dot`` / ``nrm2`` / ``dot_many`` / ``all_reduce_sum``. Marking
+// this class ``final`` would prevent that inheritance at compile time
+// and the ``ed_distributed_gpu`` library (CI lane with WITH_MPI +
+// WITH_CUDA + NCCL_FOUND) would fail to build with cascade errors
+// like "a 'final' class type cannot be used as a base class". The
+// virtual-dispatch overhead is irrelevant in practice: every CudaBackend
+// call site outside MpiCudaBackend goes through the abstract
+// ``Backend*`` reference anyway, so devirt requires the static type to
+// be ``CudaBackend`` AND not held through a base pointer -- a
+// configuration we don't actually have in the codebase.
+class CudaBackend : public Backend {
 public:
     /// Construct a CudaBackend on the *current* CUDA device. Set the
     /// device with `cudaSetDevice(id)` BEFORE constructing if you want
