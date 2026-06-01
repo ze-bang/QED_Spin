@@ -106,6 +106,51 @@ WORKFLOW_WALL_BUDGET_S = 60.0
 CPU_REFERENCE_BUDGET_S = 300.0
 
 
+def _solve_sym_sz_cpu(H, generator, sz):
+    """GS Lanczos on the fixed-Sz + symmetry CPU lane (no GPU needed)."""
+    return qed.solve(
+        H,
+        num_eigenvalues=1,
+        solver="lanczos",
+        device="cpu",
+        symmetry=generator,
+        sz=sz,
+        plan=False,
+        verbose=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# "Stream sym sectors" plan (Jun 2026): lazy per-sector orbit
+# materialization parity. Forcing ``ED_SYM_LAZY_SECTORS=1`` builds each
+# sector's orbit CSR on demand (LRU-1) and the CPU reverse index lazily;
+# ``=0`` keeps the eager all-sectors build. The two MUST agree bit-for-bit
+# per the plan's verification criterion. CPU-only, so it runs everywhere.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("n_sites,n_up", [(12, 6)])
+def test_lazy_sector_materialization_matches_eager_cpu(n_sites, n_up, monkeypatch):
+    H = _build_heisenberg_ring(n_sites)
+    gen = _zn_generator(n_sites)
+
+    # Eager baseline (force the all-sectors build).
+    monkeypatch.setenv("ED_SYM_LAZY_SECTORS", "0")
+    res_eager = _solve_sym_sz_cpu(H, gen, n_up)
+    e_eager = np.asarray(res_eager.eigenvalues, dtype=float)
+
+    # Lazy path (force per-sector LRU-1 materialization regardless of size).
+    monkeypatch.setenv("ED_SYM_LAZY_SECTORS", "1")
+    res_lazy = _solve_sym_sz_cpu(H, gen, n_up)
+    e_lazy = np.asarray(res_lazy.eigenvalues, dtype=float)
+
+    assert e_eager.size >= 1 and e_lazy.size >= 1
+    assert np.isfinite(e_eager[0]) and np.isfinite(e_lazy[0])
+    # Same orbit data, same matvec -> bit-for-bit identical ground state.
+    assert np.isclose(e_lazy[0], e_eager[0], rtol=0.0, atol=1e-10), (
+        f"Lazy vs eager symmetry+Sz GS disagree: "
+        f"E_lazy={e_lazy[0]:.12f}, E_eager={e_eager[0]:.12f}"
+    )
+
+
 def _cuda_available() -> bool:
     if not getattr(qed, "has_cuda_build", lambda: False)():
         return False

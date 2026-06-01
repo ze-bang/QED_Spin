@@ -593,6 +593,10 @@ StreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) const
             " (have " + std::to_string(sectors_.size()) + " sectors)");
     }
 
+    // "stream sym sectors": ensure the host orbit CSR for this sector is
+    // resident (LRU-1) before build_mirror reads it. No-op in eager mode.
+    ensureSectorMaterialized_(sector_idx);
+
     // Make sure terms_ is up to date before snapshot.
     commitPendingTransforms();
 
@@ -668,6 +672,10 @@ FixedSzStreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) c
             "invalid sector index " + std::to_string(sector_idx) +
             " (have " + std::to_string(sectors_.size()) + " sectors)");
     }
+
+    // "stream sym sectors": ensure the host orbit CSR for this sector is
+    // resident (LRU-1) before build_mirror reads it. No-op in eager mode.
+    ensureSectorMaterialized_(sector_idx);
 
     commitPendingTransforms();
 
