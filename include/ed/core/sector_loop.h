@@ -29,16 +29,35 @@
 
 #include <ed/core/results.h>            // SectorTag
 #include <ed/core/streaming_symmetry.h> // StreamingSymmetryOperator + FixedSzStreamingSymmetryOperator
+#include <ed/symmetry/sector_set.h>     // make_sector_operator_adopt (P5b gate)
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace ed::core {
+
+// ---------------------------------------------------------------------------
+// Operator-collapse refactor (Phase C, Jun 2026).
+//
+// ``StreamingSymmetryHandle::sector(k)`` returns a standalone
+// ``ed::symmetry::SectorOperator`` (owning its sector's orbit data + a copy
+// of the Hamiltonian terms, driven by the unified
+// ``CpuMatVecBackend<SymmetryBasisPolicy>`` on the CPU and the GPU sector
+// mirror via ``bind_cuda()`` on CUDA builds). This routes the ENTIRE
+// production sector loop (CLI, Python bindings, thermal, spectral) through
+// the collapse-target operator.
+//
+// Phase C (Jun 2026): the cutover gate (``ED_SYMMETRY_SECTOR_OPERATOR``) and
+// the legacy back-referencing ``SectorView`` escape hatch have been REMOVED.
+// ``SectorOperator`` is now the only sector-matvec path on every backend
+// (CPU/GPU parity landed in Phase A; production cutover validated in Phase B).
+// ---------------------------------------------------------------------------
 
 /// Lightweight handle over either flavour of streaming-symmetry
 /// operator. The handle does NOT own the operator -- callers must keep
@@ -70,10 +89,23 @@ public:
 
     /// Per-sector matvec view (one irrep block). The returned
     /// LinearOperator is owned and must outlive its uses.
+    ///
+    /// Returns a standalone ``ed::symmetry::SectorOperator``
+    /// (collapse-target path) built by adopting the underlying operator's
+    /// materialised sector data. It satisfies the ``ed::LinearOperator``
+    /// contract the orchestrator consumes.
     [[nodiscard]] std::unique_ptr<ed::LinearOperator>
     sector(std::size_t k) const {
-        if (fsz_sym_op_) return fsz_sym_op_->sector(k);
-        return sym_op_->sector(k);
+        if (fsz_sym_op_) {
+            SymmetrySector sec = fsz_sym_op_->getSector(k);  // copy (materialises)
+            return ed::symmetry::make_sector_operator_adopt(
+                *fsz_sym_op_, std::move(sec),
+                static_cast<std::size_t>(fsz_sym_op_->getGroupSize()));
+        }
+        SymmetrySector sec = sym_op_->getSector(k);          // copy (materialises)
+        return ed::symmetry::make_sector_operator_adopt(
+            *sym_op_, std::move(sec),
+            static_cast<std::size_t>(sym_op_->getGroupSize()));
     }
 
     /// Quantum-number tag for sector ``k``. Pulls

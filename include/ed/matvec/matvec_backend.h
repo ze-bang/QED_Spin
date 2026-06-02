@@ -81,6 +81,9 @@
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/matvec/term_storage.h>   // canonical term-view record types
+                                      // (named only by the extern template
+                                      //  declarations at the foot of this file)
 
 namespace ed::matvec {
 
@@ -329,41 +332,55 @@ public:
         const auto& terms = *static_cast<const term_view_t*>(tv);
         check_size(n);
 
-        const bool use_csr = detail::csr_eligible(
-            tunables_, basis_.dim(), csr_complex_built_ || csr_real_built_);
+        // Symmetry policies (needs_orbit_walk) must always take the complex
+        // matrix-free kernel. The assembled-CSR path is invalid (the
+        // assemble kernel does not perform the orbit walk / symmetry
+        // weighting), and the real-input fast path is invalid too: a real
+        // Hamiltonian projected onto a complex momentum sector has complex
+        // off-diagonals (coeff_modifier<double> would silently drop the
+        // imaginary part of the phase). This branch is compiled out for the
+        // Full / FixedSz policies (needs_orbit_walk == false).
+        if constexpr (BasisPolicy::needs_orbit_walk) {
+            std::fill(out, out + n, Complex{});
+            matrix_free_complex(terms, in, out);
+            return;
+        } else {
+            const bool use_csr = detail::csr_eligible(
+                tunables_, basis_.dim(), csr_complex_built_ || csr_real_built_);
 
-        if (use_csr) {
-            // Real-input fast path: if both the operator and the input are
-            // real, take the real CSR (half the bytes, half the flops).
-            if (terms.is_real && input_is_real(in, n)) {
-                ensure_csr_real(terms);
+            if (use_csr) {
+                // Real-input fast path: if both the operator and the input are
+                // real, take the real CSR (half the bytes, half the flops).
+                if (terms.is_real && input_is_real(in, n)) {
+                    ensure_csr_real(terms);
+                    ensure_real_scratch(n);
+                    for (std::size_t i = 0; i < n; ++i) real_in_buf_[i] = in[i].real();
+                    csr_spmv_real(real_in_buf_.data(), real_out_buf_.data(), n);
+                    for (std::size_t i = 0; i < n; ++i) out[i] = Complex(real_out_buf_[i], 0.0);
+                    return;
+                }
+                ensure_csr_complex(terms);
+                csr_spmv_complex(in, out, n);
+                return;
+            }
+
+            // Matrix-free path. Take the real specialisation when the operator
+            // and the input are both real AND the vector is big enough to amortise
+            // the input-scan and the buffer copies (legacy threshold: dim >= 1024).
+            if (terms.is_real && n >= tunables_.real_matvec_min_dim
+                && input_is_real(in, n))
+            {
                 ensure_real_scratch(n);
                 for (std::size_t i = 0; i < n; ++i) real_in_buf_[i] = in[i].real();
-                csr_spmv_real(real_in_buf_.data(), real_out_buf_.data(), n);
+                std::fill(real_out_buf_.begin(), real_out_buf_.begin() + n, 0.0);
+                matrix_free_real(terms, real_in_buf_.data(), real_out_buf_.data());
                 for (std::size_t i = 0; i < n; ++i) out[i] = Complex(real_out_buf_[i], 0.0);
                 return;
             }
-            ensure_csr_complex(terms);
-            csr_spmv_complex(in, out, n);
-            return;
-        }
 
-        // Matrix-free path. Take the real specialisation when the operator
-        // and the input are both real AND the vector is big enough to amortise
-        // the input-scan and the buffer copies (legacy threshold: dim >= 1024).
-        if (terms.is_real && n >= tunables_.real_matvec_min_dim
-            && input_is_real(in, n))
-        {
-            ensure_real_scratch(n);
-            for (std::size_t i = 0; i < n; ++i) real_in_buf_[i] = in[i].real();
-            std::fill(real_out_buf_.begin(), real_out_buf_.begin() + n, 0.0);
-            matrix_free_real(terms, real_in_buf_.data(), real_out_buf_.data());
-            for (std::size_t i = 0; i < n; ++i) out[i] = Complex(real_out_buf_[i], 0.0);
-            return;
+            std::fill(out, out + n, Complex{});
+            matrix_free_complex(terms, in, out);
         }
-
-        std::fill(out, out + n, Complex{});
-        matrix_free_complex(terms, in, out);
     }
 
     void apply_real(const void*   tv,
@@ -378,17 +395,29 @@ public:
         }
         check_size(n);
 
-        const bool use_csr = detail::csr_eligible(
-            tunables_, basis_.dim(), csr_real_built_);
-
-        if (use_csr) {
-            ensure_csr_real(terms);
-            csr_spmv_real(in, out, n);
+        // Symmetry policies must skip the assembled-CSR path (the assemble
+        // kernel performs no orbit walk). The real matrix-free kernel is
+        // valid here only because apply_real is reached solely when the
+        // owning operator reports a real effective matrix (real terms AND
+        // real momentum phases); coeff_modifier<double> is then exact.
+        // Compiled out for Full / FixedSz (needs_orbit_walk == false).
+        if constexpr (BasisPolicy::needs_orbit_walk) {
+            std::fill(out, out + n, 0.0);
+            matrix_free_real(terms, in, out);
             return;
-        }
+        } else {
+            const bool use_csr = detail::csr_eligible(
+                tunables_, basis_.dim(), csr_real_built_);
 
-        std::fill(out, out + n, 0.0);
-        matrix_free_real(terms, in, out);
+            if (use_csr) {
+                ensure_csr_real(terms);
+                csr_spmv_real(in, out, n);
+                return;
+            }
+
+            std::fill(out, out + n, 0.0);
+            matrix_free_real(terms, in, out);
+        }
     }
 
     [[nodiscard]] std::size_t  dim()          const override { return basis_.dim(); }
@@ -625,5 +654,29 @@ make_cpu_fixed_sz_backend(const std::vector<std::uint64_t>& basis_states,
         tunables,
         "CpuFixedSz(dim=" + std::to_string(basis_states.size()) + ")");
 }
+
+// ---------------------------------------------------------------------------
+// P6 (operator-collapse): extern-template declarations for the two trivial-
+// basis host cells of the Operator<BasisPolicy, MemSpace> grid, over the
+// single canonical term-view shape every Operator instantiates (the six SoA
+// record types from term_storage.h; see the Operator::DiagonalOneBody ...
+// aliases). The matching explicit instantiation DEFINITIONS live in
+// src/matvec/cpu_backend_instantiations.cpp (compiled into ed_matvec). Every
+// target that uses these specializations links ed_matvec transitively
+// (ed_solvers_cpu / ed_solvers_gpu -> ed_matvec), so suppressing the
+// per-TU implicit instantiation here is link-safe and bounds the
+// compile-time cost of the heavy CSR + matrix-free kernel tree to one TU.
+//
+// The Symmetry cell's extern declaration lives in symmetry_matvec_backend.h
+// (its policy type pulls in the heavyweight streaming-symmetry chain, which
+// this leaf header deliberately avoids).
+// ---------------------------------------------------------------------------
+extern template class CpuMatVecBackend<basis::FullBasisPolicy,
+                                       DiagOneBody, OffDiagOneBody, DiagTwoBody,
+                                       MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
+
+extern template class CpuMatVecBackend<basis::FixedSzBasisPolicy,
+                                       DiagOneBody, OffDiagOneBody, DiagTwoBody,
+                                       MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 
 } // namespace ed::matvec
