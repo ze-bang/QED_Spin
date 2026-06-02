@@ -101,9 +101,9 @@ struct SymmetryBasisPolicy {
     template <class Callback>
     inline void iter_orbit(uint64_t src_idx, Callback&& cb) const {
         const auto& state_j     = sector->basis_states[src_idx];
-        const double inv_norm_j = (state_j.norm != 0.0)
-                                ? (1.0 / state_j.norm)
-                                : 0.0;
+        // Cached reciprocal norm (refreshed by SymBasisState::sortOrbit(),
+        // the universal finalize point) -- turns a division into a multiply.
+        const double inv_norm_j = state_j.inv_norm;
         const std::size_t M = state_j.orbit_elements.size();
         for (std::size_t k = 0; k < M; ++k) {
             const std::complex<double> alpha = state_j.orbit_coefficients[k];
@@ -125,9 +125,10 @@ struct SymmetryBasisPolicy {
                    uint64_t /*src_idx*/, uint64_t dst_idx) const noexcept
     {
         const auto& state_k = sector->basis_states[dst_idx];
-        const double scale  = (state_k.norm != 0.0)
-                            ? (group_norm / state_k.norm)
-                            : 0.0;
+        // group_norm * inv_norm replaces a per-emit division by the cached
+        // reciprocal norm (set in SymBasisState::sortOrbit()). When norm == 0
+        // inv_norm == 0, so scale == 0 -- bit-identical to the prior guard.
+        const double scale  = group_norm * state_k.inv_norm;
         const std::complex<double> beta_s_prime = state_k.findCoeff(s_prime);
         if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
             return std::conj(beta_s_prime) * scale;

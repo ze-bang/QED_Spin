@@ -159,11 +159,18 @@ struct SymBasisState {
     std::vector<uint64_t> orbit_elements;  // All states in the orbit (sorted ascending after sortOrbit())
     std::vector<Complex> orbit_coefficients;  // Coefficient of each orbit element in symmetrized state (parallel to orbit_elements)
     double norm;                           // Normalization factor
+    // Cached reciprocal of `norm` (0 when norm == 0). Derived, NOT persisted:
+    // recomputed by sortOrbit() -- the universal finalize point invoked once
+    // after `norm` is assigned on every construction / HDF5-load path. Lets the
+    // matvec hot loop turn the per-emit `group_norm / norm_k` division into a
+    // multiply (see SymmetryBasisPolicy::coeff_modifier / iter_orbit).
+    double inv_norm;
 
-    SymBasisState() : orbit_rep(0), norm(0.0) {}
+    SymBasisState() : orbit_rep(0), norm(0.0), inv_norm(0.0) {}
 
     SymBasisState(uint64_t rep, const std::vector<int>& qn, double n = 1.0)
-        : orbit_rep(rep), quantum_numbers(qn), norm(n) {}
+        : orbit_rep(rep), quantum_numbers(qn), norm(n),
+          inv_norm(n != 0.0 ? 1.0 / n : 0.0) {}
 
     /**
      * Sort orbit_elements ascending and parallel-sort orbit_coefficients to
@@ -174,6 +181,10 @@ struct SymBasisState {
      * Idempotent and safe to call multiple times; cheap if already sorted.
      */
     void sortOrbit() {
+        // Refresh the cached reciprocal norm at the canonical finalize point.
+        // Done before the early-out so size-0/1 orbits also get a valid
+        // inv_norm (their `norm` is still set by the construction path).
+        inv_norm = (norm != 0.0) ? (1.0 / norm) : 0.0;
         const size_t n = orbit_elements.size();
         if (n < 2) return;
         std::vector<size_t> idx(n);
@@ -196,6 +207,15 @@ struct SymBasisState {
      * symmetrised basis state. Returns 0 if s_prime is not in the orbit.
      * Requires orbit_elements to be sorted ascending (call sortOrbit()
      * exactly once after the orbit is fully populated).
+     *
+     * NOTE: kept as std::lower_bound deliberately. Unlike
+     * ed::core::SortedUint64Index::find() (which searches multi-GB,
+     * cache-cold arrays where a branch-free + prefetch form wins ~2x),
+     * an orbit is SMALL -- bounded by the group order |G| (typically ~N
+     * up to ~768) and almost always L1/L2-resident. There the manual
+     * prefetch hints are pure overhead and the branch-free cmov form is
+     * no faster than the well-predicted std::lower_bound, so the simple
+     * form is retained.
      */
     inline Complex findCoeff(uint64_t s_prime) const {
         auto it = std::lower_bound(orbit_elements.begin(), orbit_elements.end(), s_prime);
