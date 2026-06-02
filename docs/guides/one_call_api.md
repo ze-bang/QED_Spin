@@ -200,6 +200,34 @@ result_finite_T = qed.spectral(
 for T, S_T in result_finite_T.S_by_T_real.items():
     print(f"T = {T:6.3f}   peak S = {max(S_T):.4e}")
 
+# SOTA Amortized Multi-Q Cross-Irrep S(Q, ω) (NEW, May 2026):
+# Avoids re-solving the ground state for each momentum transfer Q.
+# Pass `observables` and `momentum_points` plural. The global GS
+# is solved ONCE, then reused across all Q points to calculate
+# the dynamical S(Q, omega) and free static S(Q) (static_sf).
+obs_list = []
+q_pts = [[q / N] for q in [1, 2]]
+for q_val in [1, 2]:
+    op_q = _core.Operator(N, 0.5)
+    phases = [complex(math.cos(-2*math.pi*q_val*j/N), math.sin(-2*math.pi*q_val*j/N))/math.sqrt(N) for j in range(N)]
+    for j in range(N):
+        op_q.add_one_body(_core.OP_SZ, j, phases[j])
+    obs_list.append(op_q)
+
+result_multi = qed.spectral(
+    "runs/heisenberg6",
+    omega=np.linspace(-1, 6, 80), eta=0.05,
+    symmetry={
+        "observables": obs_list,
+        "momentum_points": q_pts,
+        "delta_n_up": 0,
+    },
+    num_sites=N,
+)
+# Each momentum point's contribution is stored in res.per_sector_pair:
+# for idx, sector_pair in enumerate(result_multi.per_sector_pair):
+#     print(f"Q = {q_pts[idx]}   SSSF = {sector_pair.static_sf:.4f}")
+
 # KPM-DOS thermodynamics (uses every CPU core; no Lanczos at all):
 qed.spectral("runs/heisenberg6", method="kpm_thermodynamics")
 ```
