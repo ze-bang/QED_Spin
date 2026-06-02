@@ -1,13 +1,12 @@
 # Code map: libraries, leaves, `ED` pipeline, redundancies
 
-> **Update (2026-05-22):** The minimalist ED architecture refactor
-> (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) has cut the solver
-> surface roughly in half. The kernels, operators, backends, and
-> dispatch tables described in this document have been collapsed
-> into a much smaller set of orthogonal pieces. Read
-> `ARCHITECTURE.md` first for the post-refactor picture; this file
-> remains useful as the canonical guide to the directory layout
-> that the refactor is converging on.
+> **Update (June 2026):** The minimalist ED architecture refactor
+> (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) is fully finalized.
+> The kernels, operators, backends, and dispatch tables have been
+> completely collapsed into a smaller, cleaner set of orthogonal
+> pieces. This document represents the exact post-collapse production
+> state, providing a canonical guide to the directory layout,
+> libraries, and active solver endpoints.
 
 This document is a **structural atlas** of the C++ tree under `include/ed/`
 and `src/`, how the **`ED` binary** navigates solvers and workflows, and
@@ -42,7 +41,7 @@ flowchart TB
     ep["ed_parallel<br/>numa.cpp"]
     eio["ed_io<br/>basis + reorth + checkpoint"]
     ec["ed_core<br/>ed_config.cpp"]
-    esc["ed_solvers_cpu<br/>lanczos arpack … TPQ FTLM …"]
+    esc["ed_solvers_cpu<br/>lanczos KPM … TPQ FTLM …"]
     esg["ed_solvers_gpu<br/>.cu GPU solvers"]
     edssf["ed_dssf<br/>operator_spec dssf_method dssf_io"]
     esym["ed_symmetry<br/>group.cpp"]
@@ -219,7 +218,7 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 ### 5.3 `include/ed/core/`
 
-- `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
+- `basis_utils.h`, `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
   Hamiltonian I/O, much symmetry wiring; `Operator` and `FixedSzOperator`
   inherit from `ed::matvec::MatVecOperator` and from `ed::LinearOperator`),
 - `make_operator.h` (the single factory:
@@ -233,10 +232,13 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 - `ed_wrapper.h` (thin shim re-exporting `EDResults` from
   `ed_legacy_types.h`; the legacy `exact_diagonalization_*` family
   and `ed_wrapper_streaming.h` were hard-removed in May 2026),
-- `hdf5_io.h`, `hdf5_symmetry_io.h`, `sorted_uint64_index.h`,
+- `fixed_sz_operator.h`, `fixed_sz_operator_types.h`, `linear_operator.h`,
+- `hdf5_io.h`, `sorted_uint64_index.h`, `matvec_types.h`,
+- `operator.h`, `operator_types.h`, `operator_types_detail.h`, `results.h`,
+- `sector_loop.h`, `sector_thermo.h`, `select_backend.h`,
 - `streaming_symmetry.h` (`SectorView` per-sector `MatVecOperator`
   wrappers — driven by the orchestrator's symmetry lane),
-- `system_utils.h`, `thermal_types.h`
+- `symmetry_metadata.h`, `system_utils.h`, `thermal_types.h`
 
 The chunked-symmetry / disk-streaming triplet
 (`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
@@ -259,9 +261,9 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.6 `include/ed/gpu/`
 
-- `bit_operations.cuh`, `gpu_cg.cuh`, `gpu_dynamics.cuh`, `gpu_ed_wrapper.h`,
-  `gpu_ftlm.cuh`, `gpu_lanczos.cuh`, `gpu_mixed_precision.h`,
-  `gpu_operator.cuh`, `gpu_tpq.cuh`, `kernel_config.h`
+- `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_ftlm.cuh`,
+  `gpu_solvers.h`, `gpu_lanczos.cuh`, `gpu_mixed_precision.h`,
+  `gpu_operator.cuh`, `gpu_tpq.cuh`, `kernel_config.h`, `kpm_dos_gpu.cuh`
 
 ### 5.7 `include/ed/input/`  *(Phase 4 — replaces `python/edlib/helper_*.py`)*
 
@@ -293,8 +295,9 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.10 `include/ed/solvers/`
 
-- `CG.h`, `TPQ.h`, `arpack.h`, `dynamics.h`, `ftlm.h`, `hybrid_thermal.h`,
-  `lanczos.h`, `ltlm.h`, `observables.h`, `scalapack_diag.h`, `tpq_seeding.h`
+- `block_lanczos_dssf.h`, `dynamics.h`, `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`,
+  `kpm_dos.h`, `lanczos.h`, `ltlm.h`, `observables.h`, `TPQ.h`, `tpq_dynamical.h`,
+  `tpq_seeding.h`
 
 ### 5.11 `include/ed/symmetry/`
 
@@ -376,18 +379,17 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.21 `src/solvers/cpu/`
 
-- `CG.cpp`, `TPQ.cpp`, `arpack.cpp`, `dynamics.cpp`, `ftlm.cpp`,
-  `hybrid_thermal.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`,
-  `scalapack_diag.cpp` *(optional, `WITH_SCALAPACK`)*
+- `block_lanczos_dssf.cpp`, `dynamics.cpp`, `ftlm.cpp`, `ftlm_kpm.cpp`,
+  `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `TPQ.cpp`,
+  `tpq_dynamical.cpp`
 
 ### 5.22 `src/solvers/gpu/`
 
-- `gpu_block_krylov_schur.cu`, `gpu_block_lanczos.cu`, `gpu_cg.cu`,
-  `gpu_dynamics.cu`, `gpu_ed_wrapper.cu`, `gpu_fixed_sz_operator.cu`,
+- `gpu_block_lanczos.cu`, `gpu_ed_wrapper.cu`, `gpu_fixed_sz_operator.cu`,
   `gpu_ftlm.cu`, `gpu_full_diag.cu`, `gpu_kernels.cu`, `gpu_krylov_schur.cu`,
-  `gpu_lanczos.cu`, `gpu_mixed_precision.cu`, `gpu_operator.cu`,
-  `gpu_operator_conversion.cpp`, `gpu_symmetrized_operator.cu`, `gpu_tpq.cu`,
-  `lobpcg_eigen_solve.cpp`
+  `gpu_lanczos.cu`, `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`,
+  `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `gpu_symmetrized_operator.cu`,
+  `gpu_tpq.cu`, `kpm_dos_gpu.cu`
 
 ### 5.23 `src/symmetry/`
 
@@ -419,7 +421,6 @@ exactly the same dispatch axes as the ground-state solvers
 |-------------|------------------------------------------|----------------------------------------------------------------------------|--------------------------------|
 | `FTLM`      | `include/ed/solvers/ftlm.h`             | `Z ≈ (D/R) Σ_r Σ_k |<r|ψ_k>|^2 e^{-β E_k}`, R random Lanczos starts        | `num_samples × krylov_dim`     |
 | `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
-| `HYBRID`    | `include/ed/solvers/hybrid_thermal.h`   | LTLM for `T < T_cross`, FTLM for `T ≥ T_cross`, auto-crossover from `Cv`     | union of LTLM/FTLM budgets     |
 | `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
 | `mTPQ`      | `include/ed/solvers/TPQ.h`              | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
 | `cTPQ`      | `include/ed/solvers/TPQ.h`              | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
@@ -436,7 +437,6 @@ with proper Jensen-inequality handling.
 |----------|:-----------------:|:--------------------------:|:----------------------:|----------------------------------------------------------|
 | FTLM     | ✓                 | ✓ (directory form)         | ✓                      | Reference random-vector method; statistical match.       |
 | LTLM     | ✓                 | ✓ (directory form)         | ✓                      | Designed for T → 0; biased high at high T.               |
-| HYBRID   | ✓                 | ✓ (directory form)         | ✓                      | LTLM below `T_cross`, FTLM above.                        |
 | KPM_DOS  | ✓                 | ✓ (directory form)         | ✓                      | Polynomial DOS fit; needs enough moments for fine T.     |
 | mTPQ     | ✓                 | **silently disabled**      | ✓                      | Single random state per sector. `tpq_energy_shift = 0` triggers a Lanczos auto-pick for `LargeValue`. `dim == 1` sectors short-circuit to the exact single-eigenstate thermo. |
 | cTPQ     | ✓                 | **silently disabled**      | ✓                      | Same single-random-state restriction. Same `dim == 1` short-circuit. |
