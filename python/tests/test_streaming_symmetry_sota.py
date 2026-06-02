@@ -627,6 +627,122 @@ def test_cross_irrep_spectral_raises_on_incommensurate_q():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _sz_q_observable_operator(num_sites: int, q_int: int):
+    """Build the phased Fourier-mode S^z_Q observable Operator."""
+    from qed import _core
+
+    obs = _core.Operator(num_sites, 0.5)
+    Q = 2.0 * math.pi * q_int / num_sites
+    coef = 1.0 / math.sqrt(num_sites)
+    for j in range(num_sites):
+        c = coef * complex(math.cos(-Q * j), math.sin(-Q * j))
+        obs.add_one_body(_core.OP_SZ, j, c)
+    return obs
+
+
+def test_cross_irrep_multiq_matches_single_q_amortized():
+    """The amortised multi-Q cross-irrep path (single GS solve, internal
+    Q-loop) is numerically equivalent to invoking the single-Q path once
+    per Q, AND surfaces the equal-time S(Q) = ||O_Q|psi_0>||^2 for free
+    on ``per_sector_pair[i].static_sf``.
+
+    Pins:
+    * ``symmetry={"observables": [...], "momentum_points": [...]}``
+      routes through
+      ``workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory``.
+    * Per-Q dynamical S(Q, omega) matches the single-Q binding to
+      machine precision (same physics, only the GS solve is amortised).
+    * ``static_sf`` equals the full-Hilbert ``||O_Q|psi_0>||^2`` (SSSF).
+    """
+    from qed import _core
+
+    eta    = 0.1
+    omega  = np.linspace(-1.0, 6.0, 64)
+    q_ints = [1, 2, 3]
+    q_pts  = [[q / N_SITES] for q in q_ints]
+    obs_list = [_sz_q_observable_operator(N_SITES, q) for q in q_ints]
+
+    # Dense GS for the SSSF reference (N=6 AFM Heisenberg GS is a unique
+    # singlet, so |psi_0> is well-defined up to a global phase and the
+    # norm ||O_Q|psi_0>|| is phase-independent).
+    H_dense = _build_dense_hamiltonian_heisenberg(N_SITES)
+    E, V = np.linalg.eigh(H_dense)
+    psi0 = V[:, 0]
+
+    tmpdir = _write_directory_with_automorphisms()
+    try:
+        # (a) Single-Q baseline: one call per Q.
+        single_S = []
+        for q_int, obs in zip(q_ints, obs_list):
+            res1 = qed.spectral(
+                tmpdir,
+                omega=omega,
+                eta=eta,
+                method="ground_state_cf",
+                symmetry={
+                    "observable": obs,
+                    "momentum_transfer": [q_int / N_SITES],
+                    "delta_n_up": 0,
+                },
+                num_sites=N_SITES,
+                spin_l=0.5,
+                verbose=False,
+            )
+            single_S.append(np.asarray(res1.S_real))
+
+        # (b) Amortised multi-Q: one call, GS solved once.
+        res = qed.spectral(
+            tmpdir,
+            omega=omega,
+            eta=eta,
+            method="ground_state_cf",
+            symmetry={
+                "observables": obs_list,
+                "momentum_points": q_pts,
+                "delta_n_up": 0,
+            },
+            num_sites=N_SITES,
+            spin_l=0.5,
+            verbose=False,
+        )
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    assert isinstance(res, _core.SpectralResult)
+    assert len(res.per_sector_pair) == len(q_ints), (
+        f"expected one entry per Q-point, got "
+        f"{len(res.per_sector_pair)} for {len(q_ints)} Q-points"
+    )
+    assert "multi-q" in res.selection_rule_label.lower()
+
+    for i, q_int in enumerate(q_ints):
+        entry = res.per_sector_pair[i]
+        S_multi = np.asarray(entry.S_real)
+
+        # Per-Q dynamical spectrum must match the single-Q path: same
+        # physics, the only difference is the amortised GS solve.
+        diff = np.max(np.abs(S_multi - single_S[i]))
+        assert diff < 1e-9, (
+            f"multi-Q S(Q,omega) diverges from single-Q for q_int={q_int} "
+            f"by {diff:.3e} (expected < 1e-9)"
+        )
+
+        # static_sf (equal-time SSSF) must equal the dense
+        # ||O_Q|psi_0>||^2.
+        O_dense = _build_dense_sz_q_observable(N_SITES, q_int)
+        Opsi = O_dense @ psi0
+        sssf_ref = float(np.vdot(Opsi, Opsi).real)
+        assert math.isclose(entry.static_sf, sssf_ref,
+                            rel_tol=1e-7, abs_tol=1e-10), (
+            f"static_sf mismatch for q_int={q_int}: "
+            f"multi-Q={entry.static_sf:.8e}, dense ref={sssf_ref:.8e}"
+        )
+
+    # The top-level S_real mirrors the first resolved Q for back-compat.
+    assert np.max(np.abs(np.asarray(res.S_real) - single_S[0])) < 1e-9
+
+
 # ---------------------------------------------------------------------------
 # 5. Cross-irrep FINITE-T spectral (DYNAMICAL_THERMAL + spatial symmetry).
 #

@@ -518,10 +518,11 @@ void bind_workflows(py::module_& m) {
     // SOTA cross-sector spectral contribution (May 2026).
     py::class_<ed::SpectralSectorEntry>(m, "SpectralSectorEntry")
         .def(py::init<>())
-        .def_readonly("initial", &ed::SpectralSectorEntry::initial)
-        .def_readonly("final",   &ed::SpectralSectorEntry::final_)
-        .def_readonly("S_real",  &ed::SpectralSectorEntry::S_real)
-        .def_readonly("S_imag",  &ed::SpectralSectorEntry::S_imag);
+        .def_readonly("initial",   &ed::SpectralSectorEntry::initial)
+        .def_readonly("final",     &ed::SpectralSectorEntry::final_)
+        .def_readonly("S_real",    &ed::SpectralSectorEntry::S_real)
+        .def_readonly("S_imag",    &ed::SpectralSectorEntry::S_imag)
+        .def_readonly("static_sf", &ed::SpectralSectorEntry::static_sf);
 
     py::class_<ed::SpectralResult>(m, "SpectralResult", py::dynamic_attr())
         .def(py::init<>())
@@ -2100,6 +2101,438 @@ void bind_workflows(py::module_& m) {
             ``per_sector_pair`` records the (initial, final)
             SectorTag pair; ``selection_rule_label`` documents the
             resolved transition.
+    )pbdoc");
+
+    // -----------------------------------------------------------------
+    // SOTA cross-irrep MULTI-Q streaming-symmetry spectral binding.
+    //
+    // Amortised sister of
+    // ``workflows_spectral_streaming_symmetry_cross_irrep_directory``.
+    // The single-Q entry re-pays the (dominant) per-sector ground-state
+    // scan + GS eigenvector solve on every call -- but |psi_0> and the
+    // GS irrep ``k_src`` are Q-INDEPENDENT. This entry solves the
+    // ground state ONCE and then loops the requested momentum-transfer
+    // points internally; each Q only costs one ``resolve_target_sector``
+    // + one ``CrossSectorOrbitObservable`` scatter + one inner
+    // CF-Lanczos. For a Q-path sweep at 32-36 sites this turns N_Q
+    // expensive ground-state solves into a single one.
+    //
+    // Each Q lands as one ``SpectralSectorEntry`` in
+    // ``per_sector_pair`` (positionally aligned with
+    // ``momentum_points``):
+    //   - ``S_real``     : dynamical S(Q, omega) on the shared grid
+    //   - ``static_sf``  : equal-time S(Q) = ||O_Q|psi_0>||^2 (free
+    //                      from the CF pivot norm -- this is the SSSF)
+    // ``agg.S_real`` mirrors the first Q for back-compat; the per-Q
+    // payload always lives in ``per_sector_pair``.
+    //
+    // Per-Q robustness: a Q that is incommensurate, lands on no
+    // surviving sector, or maps to an empty target sector records a
+    // zero entry (with a diagnostic note) and the sweep CONTINUES,
+    // rather than aborting every other Q-point.
+    // -----------------------------------------------------------------
+    m.def("workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory",
+          [](const std::string&                       directory,
+             std::uint64_t                             num_sites,
+             double                                    spin_l,
+             const std::vector<std::vector<py::tuple>>& observable_transforms_per_q,
+             const std::vector<std::vector<double>>&   momentum_points,
+             ed::workflows::SpectralOptions            opts,
+             py::object                                fixed_sz_n_up,
+             int                                       delta_n_up) {
+              // Decode the per-Q transform tuples. Each Q-point carries
+              // its OWN observable O_Q (the e^{-iQ.r} Fourier phase is
+              // baked into the transform coefficients), so the outer
+              // list MUST be aligned 1:1 with ``momentum_points``.
+              if (momentum_points.empty()) {
+                  throw std::invalid_argument(
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "multiq_directory: momentum_points is empty -- pass at "
+                      "least one Q vector.");
+              }
+              if (observable_transforms_per_q.size() != momentum_points.size()) {
+                  throw std::invalid_argument(
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "multiq_directory: observable_transforms_per_q must be "
+                      "aligned 1:1 with momentum_points (got " +
+                      std::to_string(observable_transforms_per_q.size()) +
+                      " transform lists for " +
+                      std::to_string(momentum_points.size()) + " Q-points).");
+              }
+              std::vector<std::vector<Operator::TransformData>> tlist_per_q;
+              tlist_per_q.reserve(observable_transforms_per_q.size());
+              for (const auto& rows : observable_transforms_per_q) {
+                  std::vector<Operator::TransformData> tlist;
+                  tlist.reserve(rows.size());
+                  for (const auto& row : rows) {
+                      if (row.size() < 6) {
+                          throw std::invalid_argument(
+                              "workflows_spectral_streaming_symmetry_cross_"
+                              "irrep_multiq_directory: each transform must be "
+                              "a 6-tuple (op_type, site, coeff, is_two_body, "
+                              "op_type_2, site_2).");
+                      }
+                      Operator::TransformData t;
+                      t.op_type      = static_cast<uint8_t>(row[0].cast<int>());
+                      t.site_index   = row[1].cast<std::uint64_t>();
+                      t.coefficient  = row[2].cast<std::complex<double>>();
+                      t.is_two_body  = row[3].cast<bool>();
+                      t.op_type_2    = static_cast<uint8_t>(row[4].cast<int>());
+                      t.site_index_2 = row[5].cast<std::uint64_t>();
+                      tlist.push_back(t);
+                  }
+                  if (tlist.empty()) {
+                      throw std::invalid_argument(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory: one of the per-Q observable "
+                          "transform lists is empty.");
+                  }
+                  tlist_per_q.push_back(std::move(tlist));
+              }
+
+              ed::SpectralResult agg;
+              {
+                  py::gil_scoped_release release;
+
+                  // (1) Source streaming operator + OperatorRef.
+                  ed::OperatorSpec src_spec;
+                  src_spec.source             = ed::DirectoryPath{directory};
+                  src_spec.num_sites          = num_sites;
+                  src_spec.spin_l             = static_cast<float>(spin_l);
+                  src_spec.streaming_symmetry = true;
+                  if (!fixed_sz_n_up.is_none()) {
+                      src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  }
+                  auto src_base = ed::make_streaming_symmetry_operator(src_spec);
+                  ed::core::StreamingSymmetryHandle src_handle(src_base.get());
+                  auto* src_fsz =
+                      dynamic_cast<FixedSzStreamingSymmetryOperator*>(src_base.get());
+                  auto* src_sym =
+                      dynamic_cast<StreamingSymmetryOperator*>(src_base.get());
+                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref;
+                  if (src_fsz)      src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_fsz);
+                  else if (src_sym) src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_sym);
+                  else {
+                      throw std::runtime_error(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory: streaming-symmetry operator "
+                          "dynamic_cast failed.");
+                  }
+
+                  const std::size_t src_num_sectors = src_handle.num_sectors();
+                  if (src_num_sectors == 0) {
+                      throw std::runtime_error(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory: source operator has no symmetry "
+                          "sectors; check automorphism_results/.");
+                  }
+
+                  // (2) Locate the global GS sector -- two-phase scan
+                  //     (cheap krylov=40 pass, refine within gap), run
+                  //     ONCE and reused across all Q.
+                  const std::vector<std::size_t> src_sector_indices =
+                      ed::core::filter_sectors(src_num_sectors,
+                                               opts.selected_sectors);
+                  std::size_t gs_src_idx = 0;
+                  double      gs_energy  = std::numeric_limits<double>::infinity();
+                  bool        any_solved = false;
+
+                  const bool enable_two_phase =
+                      src_sector_indices.size() > 2;
+                  std::vector<std::size_t> phase2_candidates;
+                  if (enable_two_phase) {
+                      std::vector<std::pair<double, std::size_t>> phase1_min;
+                      phase1_min.reserve(src_sector_indices.size());
+                      for (std::size_t k : src_sector_indices) {
+                          auto sec = src_handle.sector(k);
+                          if (!sec || sec->dim() == 0) continue;
+                          ed::workflows::SolveOptions p1;
+                          p1.num_eigs        = 1;
+                          p1.tolerance       = 1e-8;
+                          p1.backend         = opts.backend;
+                          p1.method          = ed::workflows::SolveMethod::Lanczos;
+                          p1.compute_vectors = false;
+                          p1.max_iter        = std::min<std::size_t>(40, sec->dim());
+                          try {
+                              auto sr = ed::workflows::solve(*sec, p1);
+                              if (!sr.eigenvalues.empty()) {
+                                  phase1_min.emplace_back(
+                                      sr.eigenvalues.front(), k);
+                              }
+                          } catch (...) {
+                              phase1_min.emplace_back(
+                                  -std::numeric_limits<double>::infinity(), k);
+                          }
+                      }
+                      if (!phase1_min.empty()) {
+                          std::sort(phase1_min.begin(), phase1_min.end(),
+                                    [](const auto& a, const auto& b) {
+                                        return a.first < b.first;
+                                    });
+                          const double best_E = phase1_min.front().first;
+                          const double gap =
+                              std::max(1e-2 * std::abs(best_E), 1e-4);
+                          for (const auto& [E, k] : phase1_min) {
+                              if (E <= best_E + gap) {
+                                  phase2_candidates.push_back(k);
+                              }
+                          }
+                      }
+                  }
+                  const std::vector<std::size_t>& src_scan_indices =
+                      enable_two_phase ? phase2_candidates
+                                       : src_sector_indices;
+                  for (std::size_t k : src_scan_indices) {
+                      auto sec = src_handle.sector(k);
+                      if (!sec || sec->dim() == 0) continue;
+                      ed::workflows::SolveOptions sopts;
+                      sopts.num_eigs        = 1;
+                      sopts.tolerance       = 1e-12;
+                      sopts.backend         = opts.backend;
+                      sopts.method          = ed::workflows::SolveMethod::Lanczos;
+                      sopts.compute_vectors = false;
+                      auto sr = ed::workflows::solve(*sec, sopts);
+                      if (sr.eigenvalues.empty()) continue;
+                      const double E_k = sr.eigenvalues.front();
+                      if (E_k < gs_energy) {
+                          gs_energy  = E_k;
+                          gs_src_idx = k;
+                      }
+                      any_solved = true;
+                  }
+                  if (!any_solved) {
+                      throw std::runtime_error(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory: every source sector returned an "
+                          "empty spectrum.");
+                  }
+
+                  // (3) Re-solve GS sector with eigenvectors -> |psi_0>.
+                  auto gs_sec_view = src_handle.sector(gs_src_idx);
+                  ed::workflows::SolveOptions sopts_full;
+                  sopts_full.num_eigs        = 1;
+                  sopts_full.tolerance       = 1e-12;
+                  sopts_full.backend         = opts.backend;
+                  sopts_full.method          = ed::workflows::SolveMethod::Lanczos;
+                  sopts_full.compute_vectors = true;
+                  auto gs_sr = ed::workflows::solve(*gs_sec_view, sopts_full);
+                  if (gs_sr.eigenvalues.empty() || !gs_sr.eigenvectors ||
+                      gs_sr.eigenvectors->host.empty()) {
+                      throw std::runtime_error(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory: GS eigenvector reconstruction "
+                          "failed.");
+                  }
+                  if (!gs_sr.backend.lane.empty()) {
+                      agg.backend.lane     = gs_sr.backend.lane;
+                      agg.backend.mpi_size = gs_sr.backend.mpi_size;
+                  }
+                  const auto& psi0 = gs_sr.eigenvectors->host[0];
+                  const double E0  = gs_sr.eigenvalues.front();
+                  ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
+
+                  // (4) Build / re-use the target streaming operator ONCE
+                  //     (depends only on delta_n_up, not on Q).
+                  std::unique_ptr<ed::LinearOperator> dst_base;
+                  ed::core::StreamingSymmetryHandle dst_handle_storage = src_handle;
+                  ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref = src_ref;
+                  if (delta_n_up != 0) {
+                      if (!src_spec.fixed_sz.has_value()) {
+                          throw std::invalid_argument(
+                              "workflows_spectral_streaming_symmetry_cross_"
+                              "irrep_multiq_directory: delta_n_up != 0 "
+                              "requires fixed_sz_n_up to be set.");
+                      }
+                      ed::OperatorSpec dst_spec;
+                      dst_spec.source             = ed::DirectoryPath{directory};
+                      dst_spec.num_sites          = num_sites;
+                      dst_spec.spin_l             = static_cast<float>(spin_l);
+                      dst_spec.streaming_symmetry = true;
+                      dst_spec.fixed_sz           = *src_spec.fixed_sz + delta_n_up;
+                      dst_base = ed::make_streaming_symmetry_operator(dst_spec);
+                      dst_handle_storage =
+                          ed::core::StreamingSymmetryHandle(dst_base.get());
+                      auto* dst_fsz =
+                          dynamic_cast<FixedSzStreamingSymmetryOperator*>(dst_base.get());
+                      auto* dst_sym =
+                          dynamic_cast<StreamingSymmetryOperator*>(dst_base.get());
+                      if (dst_fsz)      dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_fsz);
+                      else if (dst_sym) dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_sym);
+                      else {
+                          throw std::runtime_error(
+                              "workflows_spectral_streaming_symmetry_cross_"
+                              "irrep_multiq_directory: target operator "
+                              "dynamic_cast failed.");
+                      }
+                  }
+                  ed::core::StreamingSymmetryHandle* dst_handle_ptr =
+                      &dst_handle_storage;
+
+                  // (5) Shared omega grid (built once).
+                  const std::size_t num_omega =
+                      std::max<std::size_t>(opts.num_omega, 1);
+                  std::vector<double> omega_grid(num_omega);
+                  if (num_omega == 1) {
+                      omega_grid[0] = opts.omega_min;
+                  } else {
+                      const double step =
+                          (opts.omega_max - opts.omega_min) /
+                          static_cast<double>(num_omega - 1);
+                      for (std::size_t i = 0; i < num_omega; ++i) {
+                          omega_grid[i] =
+                              opts.omega_min + static_cast<double>(i) * step;
+                      }
+                  }
+                  agg.omega = omega_grid;
+
+                  const double resolvent_shift =
+                      (std::abs(opts.energy_shift) > 1e-14) ? opts.energy_shift
+                                                            : E0;
+
+                  // (6) Loop the requested Q-points. The GS solve above is
+                  //     NOT repeated -- only the per-Q scatter + inner CF.
+                  std::string lane_label = agg.backend.lane;
+                  for (std::size_t qi = 0; qi < momentum_points.size(); ++qi) {
+                      const std::vector<double>& Q = momentum_points[qi];
+
+                      auto push_zero_entry = [&](const std::string& why) {
+                          ed::SpectralSectorEntry e;
+                          e.initial   = gs_src_tag;
+                          e.final_    = gs_src_tag;
+                          e.S_real.assign(num_omega, 0.0);
+                          e.S_imag.assign(num_omega, 0.0);
+                          e.static_sf = 0.0;
+                          e.notes.emplace_back("status", why);
+                          agg.per_sector_pair.push_back(std::move(e));
+                      };
+
+                      double q_residual = 0.0;
+                      const std::size_t dst_sector_idx =
+                          ed::core::resolve_target_sector(
+                              *dst_handle_ptr, gs_src_idx, Q, &q_residual);
+                      if (dst_sector_idx == ed::core::kSectorNotFound) {
+                          push_zero_entry(
+                              "no surviving target sector (residual=" +
+                              std::to_string(q_residual) + ")");
+                          continue;
+                      }
+                      if (q_residual > opts.momentum_tolerance) {
+                          push_zero_entry(
+                              "Q incommensurate (residual=" +
+                              std::to_string(q_residual) + " > tol=" +
+                              std::to_string(opts.momentum_tolerance) + ")");
+                          continue;
+                      }
+                      ed::SectorTag dst_tag =
+                          dst_handle_ptr->sector_tag(dst_sector_idx);
+
+                      ed::dssf::CrossSectorOrbitObservable orb_obs(
+                          src_ref, gs_src_idx,
+                          dst_ref, dst_sector_idx,
+                          tlist_per_q[qi], static_cast<float>(spin_l));
+                      const std::size_t dim_dst = orb_obs.dim_dst();
+                      if (dim_dst == 0) {
+                          push_zero_entry("target sector empty");
+                          continue;
+                      }
+                      std::vector<Complex> phi(dim_dst, Complex(0.0, 0.0));
+                      orb_obs.apply(psi0.data(), phi.data(), dim_dst);
+
+                      auto dst_sec_view =
+                          dst_handle_ptr->sector(dst_sector_idx);
+                      if (!dst_sec_view || dst_sec_view->dim() != dim_dst) {
+                          push_zero_entry("target sector dim mismatch");
+                          continue;
+                      }
+
+                      ed::observables::CfSpectralOptions cfopts;
+                      cfopts.krylov_dim   = opts.krylov_dim;
+                      cfopts.broadening   = opts.broadening;
+                      cfopts.energy_shift = resolvent_shift;
+                      cfopts.tolerance    = 1e-12;
+                      cfopts.global_n     = dim_dst;
+                      cfopts.verbose      = false;
+
+                      ed::observables::CfSpectralResult cf;
+                      auto cf_variant = ed::select_backend(
+                          dst_sec_view->geometry(), opts.backend);
+                      std::visit([&](auto& backend_uptr) {
+                          using BPtr = std::decay_t<decltype(backend_uptr)>;
+                          using B = typename BPtr::element_type;
+                          auto apply_H = dst_sec_view->template bind<B>();
+                          cf = ed::observables::cf_spectral_from_vector(
+                              *backend_uptr, apply_H, dim_dst,
+                              phi.data(), omega_grid, cfopts);
+                      }, cf_variant);
+                      if (lane_label.empty()) {
+                          lane_label = ed::lane_label_from_variant(cf_variant);
+                      }
+
+                      ed::SpectralSectorEntry entry;
+                      entry.initial   = gs_src_tag;
+                      entry.final_    = dst_tag;
+                      entry.S_real    = cf.spectral_function;
+                      entry.S_imag.assign(cf.spectral_function.size(), 0.0);
+                      entry.static_sf = cf.phi_norm * cf.phi_norm;
+                      entry.notes.emplace_back("status", "ok");
+                      agg.per_sector_pair.push_back(std::move(entry));
+
+                      // Mirror the FIRST resolved Q into the top-level
+                      // S_real for back-compat with single-Q callers.
+                      if (agg.S_real.empty()) {
+                          agg.S_real = cf.spectral_function;
+                          agg.S_imag.assign(cf.spectral_function.size(), 0.0);
+                          agg.errors_real.assign(cf.spectral_function.size(), 0.0);
+                          agg.errors_imag.assign(cf.spectral_function.size(), 0.0);
+                      }
+                  }
+
+                  if (agg.S_real.empty()) {
+                      agg.S_real.assign(num_omega, 0.0);
+                      agg.S_imag.assign(num_omega, 0.0);
+                      agg.errors_real.assign(num_omega, 0.0);
+                      agg.errors_imag.assign(num_omega, 0.0);
+                  }
+                  if (!lane_label.empty()) agg.backend.lane = lane_label;
+                  agg.selection_rule_label =
+                      "k_final = k_initial + Q (cross-irrep, multi-Q "
+                      "amortised; " +
+                      std::to_string(momentum_points.size()) +
+                      " Q-points, single GS solve)";
+              }
+              return agg;
+          },
+          py::arg("directory"),
+          py::arg("num_sites"),
+          py::arg("spin_l")                       = 0.5,
+          py::arg("observable_transforms_per_q")  = std::vector<std::vector<py::tuple>>{},
+          py::arg("momentum_points")              = std::vector<std::vector<double>>{},
+          py::arg("opts")                         = ed::workflows::SpectralOptions{},
+          py::arg("fixed_sz_n_up")                = py::none(),
+          py::arg("delta_n_up")                   = 0,
+          R"pbdoc(
+        Amortised multi-Q cross-irrep streaming-symmetry spectral
+        workflow (SOTA).
+
+        Identical physics to
+        ``workflows_spectral_streaming_symmetry_cross_irrep_directory``
+        but the per-sector ground-state scan and the GS eigenvector
+        solve -- the dominant cost -- run ONCE and are reused across
+        every momentum-transfer point in ``momentum_points``. Each Q
+        carries its OWN observable O_Q (its e^{-iQ.r} Fourier phase is
+        baked into the transform coefficients), so
+        ``observable_transforms_per_q`` is a list of transform lists
+        aligned 1:1 with ``momentum_points``. Per Q the only work is a
+        selection-rule lookup, a ``CrossSectorOrbitObservable`` scatter,
+        and one inner CF-Lanczos in the (reduced) target sector.
+
+        Results land in ``per_sector_pair`` positionally aligned with
+        ``momentum_points``: ``S_real`` is the dynamical S(Q, omega)
+        and ``static_sf`` is the equal-time S(Q) = ||O_Q|psi_0>||^2
+        (the static / equal-time structure factor, obtained for free
+        from the CF pivot norm). Incommensurate or empty-target Q
+        points record a zero entry with a ``status`` note and the
+        sweep continues.
     )pbdoc");
 
     // -----------------------------------------------------------------

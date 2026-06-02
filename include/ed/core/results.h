@@ -250,6 +250,11 @@ struct SpectralSectorEntry {
     /// out by the selection rule.
     std::vector<double> S_real;
     std::vector<double> S_imag;
+    /// Static (equal-time) structure factor for this (initial, final)
+    /// pair: ``||O_Q|psi_0>||^2 = sum_n |<n|O_Q|0>|^2``. Computed for
+    /// free from the CF pivot norm by the cross-irrep spectral
+    /// workflows; 0 when not populated.
+    double              static_sf = 0.0;
     /// Free-form per-pair diagnostics (e.g. transition matrix element).
     std::vector<std::pair<std::string, std::string>> notes;
 };

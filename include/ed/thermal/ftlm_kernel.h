@@ -284,13 +284,25 @@ FtlmResult ftlm_kernel(const Backend&  backend,
         params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);
         params.random_seed  = opts.random_seed;
 
-        const double temp_min = opts.betas.empty()
-            ? 0.01 : 1.0 / *std::max_element(opts.betas.begin(), opts.betas.end());
-        const double temp_max = opts.betas.empty()
-            ? 100.0 : 1.0 / *std::min_element(opts.betas.begin(), opts.betas.end());
-        const std::uint64_t num_bins =
-            opts.betas.empty() ? 32u
-                                : static_cast<std::uint64_t>(opts.betas.size());
+        // Evaluate the thermodynamics on the EXACT temperature grid the
+        // caller supplied via ``opts.betas`` (T_k = 1/beta_k), preserving
+        // its spacing. The previous code forwarded only (temp_min,
+        // temp_max, num_bins) to the legacy driver, which rebuilt a
+        // *log-spaced* grid internally -- so a linear ``opts.betas`` axis
+        // produced energies sampled at the wrong temperatures while the
+        // reported ``temperatures`` (derived from ``opts.betas``) stayed
+        // linear. That mismatch is now closed: the CPU lane matches the
+        // GPU lane, which already used 1/betas directly.
+        std::vector<double> temperatures;
+        temperatures.reserve(opts.betas.size());
+        for (double b : opts.betas) {
+            if (!(b > 0.0)) {
+                throw std::invalid_argument(
+                    "ftlm_kernel (CPU lane): opts.betas must be strictly "
+                    "positive.");
+            }
+            temperatures.push_back(1.0 / b);
+        }
 
         std::function<void(const Complex*, Complex*, int)> legacy_H =
             [&apply_H](const Complex* in, Complex* out, int n) {
@@ -300,7 +312,7 @@ FtlmResult ftlm_kernel(const Backend&  backend,
         const auto legacy = ::finite_temperature_lanczos(
             legacy_H,
             static_cast<std::uint64_t>(local_n),
-            params, temp_min, temp_max, num_bins, opts.output_dir);
+            params, temperatures, opts.output_dir);
 
         return detail::to_ftlm_result(legacy, opts.betas);
     }

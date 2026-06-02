@@ -385,15 +385,19 @@ void average_ftlm_samples(
 }
 
 /**
- * @brief Main FTLM driver function
+ * @brief Main FTLM driver function (explicit temperatures overload).
+ *
+ * The temperature grid is supplied verbatim by the caller; this preserves
+ * whatever axis (linear / logarithmic / arbitrary) was requested so the
+ * returned curves are index-aligned with it. The (temp_min, temp_max,
+ * num_temp_bins) overload below forwards a log-spaced grid for backwards
+ * compatibility with the legacy CLI / pybind call sites.
  */
 FTLMResults finite_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
     uint64_t N,
     const FTLMParameters& params,
-    double temp_min,
-    double temp_max,
-    uint64_t num_temp_bins,
+    const std::vector<double>& temperatures,
     const std::string& output_dir
 ) {
     // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
@@ -406,6 +410,21 @@ FTLMResults finite_temperature_lanczos(
 
     const bool verbose = ed_dssf_verbose();
 
+    // 1/T below diverges at T=0; reject empty / non-positive grids.
+    if (temperatures.empty()) {
+        throw std::invalid_argument(
+            "finite_temperature_lanczos: temperatures grid must be "
+            "non-empty.");
+    }
+    for (double T : temperatures) {
+        if (!(T > 0.0)) {
+            throw std::invalid_argument(
+                "finite_temperature_lanczos: every temperature must be "
+                "> 0 (got T=" + std::to_string(T) + ").");
+        }
+    }
+    const uint64_t num_temp_bins = temperatures.size();
+
     if (verbose) {
         std::cout << "\n==========================================\n";
         std::cout << "Finite Temperature Lanczos Method (FTLM)\n";
@@ -413,29 +432,11 @@ FTLMResults finite_temperature_lanczos(
         std::cout << "Hilbert space dimension: " << N << std::endl;
         std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
         std::cout << "Number of samples: " << params.num_samples << std::endl;
-        std::cout << "Temperature range: [" << temp_min << ", " << temp_max << "]" << std::endl;
+        std::cout << "Temperature range: [" << temperatures.front() << ", "
+                  << temperatures.back() << "]" << std::endl;
         std::cout << "Temperature bins: " << num_temp_bins << std::endl;
     }
 
-    // log() / 1/T below diverge at T=0; reject non-positive temperatures
-    // before constructing the grid.
-    if (!(temp_min > 0.0) || !(temp_max > 0.0)) {
-        throw std::invalid_argument(
-            "finite_temperature_lanczos: temp_min and temp_max must both "
-            "be > 0 (got temp_min=" + std::to_string(temp_min) +
-            ", temp_max=" + std::to_string(temp_max) + ").");
-    }
-
-    // Generate temperature grid (logarithmic spacing)
-    std::vector<double> temperatures(num_temp_bins);
-    double log_tmin = std::log(temp_min);
-    double log_tmax = std::log(temp_max);
-    double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
-    
-    for (int i = 0; i < num_temp_bins; i++) {
-        temperatures[i] = std::exp(log_tmin + i * log_step);
-    }
-    
     // Reproducible base seed: 0 means "draw from random_device"; non-zero
     // is taken verbatim. Each sample derives its own per-thread RNG below
     // so the loop is safe to parallelize without giving up reproducibility.
@@ -588,6 +589,45 @@ FTLMResults finite_temperature_lanczos(
     }
 
     return results;
+}
+
+/**
+ * @brief (temp_min, temp_max, num_temp_bins) overload -- builds a
+ *        logarithmically-spaced temperature grid and forwards to the
+ *        explicit-temperatures driver above. Kept verbatim for the
+ *        existing CLI / pybind call sites that relied on the legacy
+ *        log-spacing contract.
+ */
+FTLMResults finite_temperature_lanczos(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    const FTLMParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir
+) {
+    // log() / 1/T diverge at T=0; reject non-positive temperatures
+    // before constructing the grid.
+    if (!(temp_min > 0.0) || !(temp_max > 0.0)) {
+        throw std::invalid_argument(
+            "finite_temperature_lanczos: temp_min and temp_max must both "
+            "be > 0 (got temp_min=" + std::to_string(temp_min) +
+            ", temp_max=" + std::to_string(temp_max) + ").");
+    }
+
+    // Generate temperature grid (logarithmic spacing).
+    std::vector<double> temperatures(num_temp_bins);
+    const double log_tmin = std::log(temp_min);
+    const double log_tmax = std::log(temp_max);
+    const double log_step =
+        (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
+    for (uint64_t i = 0; i < num_temp_bins; i++) {
+        temperatures[i] = std::exp(log_tmin + i * log_step);
+    }
+
+    return finite_temperature_lanczos(
+        std::move(H), N, params, temperatures, output_dir);
 }
 
 /**
