@@ -204,9 +204,9 @@ make_sector_operator_adopt(const ::Operator& host,
     // Copy the canonical Hamiltonian term list verbatim; the symmetry
     // backend applies these terms within the orbit walk exactly as the
     // legacy applySymmetrizedUnified path does (which reads the same
-    // term_view_).
-    op->transform_data_  = host.transform_data_;
-    op->three_body_data_ = host.three_body_data_;
+    // term_view_). ``copyTermsFrom`` keeps the host's term members behind
+    // a single intentional API rather than touching them directly.
+    op->copyTermsFrom(host);
     return op;
 }
 

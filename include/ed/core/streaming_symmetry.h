@@ -255,23 +255,6 @@ private:
     uint64_t cached_group_size_ = 0;
 
     // ------------------------------------------------------------------
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror cache. The cache type lives in
-    // src/core/streaming_symmetry_gpu_mirror.cu (WITH_CUDA only) so
-    // this header stays compilable without a CUDA toolchain. Stored
-    // type-erased via shared_ptr<void> -- the deleter is captured at
-    // construction time so default-destruction in any TU is correct.
-    //
-    // Built lazily by ``bind_cuda_for_sector(sector_idx)``: the first
-    // call per sector constructs a ``GPUSymmetrizedOperator`` with the
-    // sector's orbit data + the parent's term storage and stashes it
-    // here; subsequent calls return the cached mirror. Invalidated
-    // implicitly: any change to ``transform_data_`` clears the cache
-    // via ``invalidateMatrixCaches()``.
-    // ------------------------------------------------------------------
-    mutable std::shared_ptr<void> gpu_sector_cache_;
-
-    // ------------------------------------------------------------------
     // Streaming sector materialization ("stream sym sectors" plan,
     // Jun 2026). Twin of the block in FixedSzStreamingSymmetryOperator;
     // see that class for the rationale. Keeps only the deduped orbit-rep
@@ -291,30 +274,6 @@ public:
             throw std::runtime_error("StreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 2 helper: drop any cached GPU mirrors. Called from
-    // ``invalidateMatrixCaches()`` below when the Hamiltonian term
-    // storage mutates. Safe to call when no cache exists; resets the
-    // type-erased shared_ptr to nullptr. The shared_ptr<void> deleter
-    // was captured in the .cu TU at construction time, so the
-    // GpuSectorMirror destructor (which frees device memory) runs in
-    // that TU regardless of where ``reset()`` is invoked.
-    // ------------------------------------------------------------------
-    void invalidateGpuSectorCache() const noexcept {
-        gpu_sector_cache_.reset();
-    }
-
-    // Phase A of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): make sure a term-list mutation also evicts the
-    // device snapshot. The base ``Operator::invalidateMatrixCaches``
-    // resets the SoA cache + ``isReal()`` cache + the matvec backend
-    // CSR cache; we extend it to also drop the GPU mirror so the next
-    // sector mirror build re-uploads the fresh terms.
-    void invalidateMatrixCaches() override {
-        Operator::invalidateMatrixCaches();
-        invalidateGpuSectorCache();
     }
 
     /**
@@ -669,7 +628,6 @@ public:
         }
         if (k < reverse_index_built_.size()) reverse_index_built_[k] = 0;
         dense_lookup_state_.store(0, std::memory_order_release);
-        invalidateGpuSectorCache();
     }
 
     void ensureSectorMaterialized_(std::size_t k) const {
@@ -1867,15 +1825,6 @@ private:
     // Cached group size from HDF5 load (allows skipping symmetry_info loading)
     uint64_t cached_group_size_ = 0;
 
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror cache. See the twin block in
-    // ``StreamingSymmetryOperator`` for design notes. Mirror type is
-    // ``GPUFixedSzSymmetryOperator`` (cell 4B, NEW in Phase 1c). When
-    // Phase 1c lands the mirror is a true 4B device cell; until then
-    // ``bind_cuda_for_sector`` throws ``std::logic_error`` even when
-    // WITH_CUDA is set.
-    mutable std::shared_ptr<void> gpu_sector_cache_;
-
 public:
     FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, int64_t n_up)
         : FixedSzOperator(n_bits, spin_l, n_up) {
@@ -1883,22 +1832,6 @@ public:
             throw std::runtime_error("FixedSzStreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 2 helper: drop any cached GPU mirrors. See twin in
-    // ``StreamingSymmetryOperator``.
-    // ------------------------------------------------------------------
-    void invalidateGpuSectorCache() const noexcept {
-        gpu_sector_cache_.reset();
-    }
-
-    // Phase A of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): mirror of the override in StreamingSymmetryOperator
-    // so term-list mutation evicts the cached GPU snapshot.
-    void invalidateMatrixCaches() override {
-        FixedSzOperator::invalidateMatrixCaches();
-        invalidateGpuSectorCache();
     }
 
     /**
@@ -2257,7 +2190,6 @@ public:
         // Dense lookup (if it was built) is keyed across all sectors; force
         // a rebuild decision next time.
         dense_lookup_state_.store(0, std::memory_order_release);
-        invalidateGpuSectorCache();
     }
 
     /// LRU-1 chokepoint: ensure sector ``k`` orbit CSR is resident,

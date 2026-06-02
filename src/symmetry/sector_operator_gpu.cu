@@ -28,16 +28,18 @@ ed::symmetry::SectorOperator::bind_cuda() const {
     commitPendingTransforms();
 
     // One sector == one mirror, built once and captured by the returned
-    // callable. n_up = -1 selects the legacy open-addressing hash lookup,
-    // which is correct for both full-Hilbert and fixed-Sz sectors (the
-    // dense rank-table perf opt is deferred).
+    // callable. ``sector_n_up_()`` returns the shared magnetization of a
+    // fixed-Sz sector (every orbit representative has the same popcount),
+    // which selects the O(1) dense combinadic rank-table device lookup;
+    // it returns -1 for a full-Hilbert (sym-only) sector, falling back to
+    // the open-addressing hash that handles mixed-popcount states.
     return ed::symmetry::make_sector_matvec_gpu(
         sector_basis_.sector(),
         static_cast<double>(sector_basis_.group_size()),
         static_cast<double>(spin_l_),
         terms_,
         static_cast<int>(n_bits_),
-        /*n_up=*/-1);
+        /*n_up=*/sector_n_up_());
 }
 
 #endif  // WITH_CUDA

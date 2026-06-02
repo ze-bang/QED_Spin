@@ -200,6 +200,20 @@ public:
         invalidateMatrixCaches();
     }
 
+    /// Replace this operator's canonical AoS term storage with a verbatim
+    /// copy of ``src``'s terms, then invalidate the derived SoA / CSR
+    /// caches. Provided so that builders which assemble a fresh operator
+    /// from an existing host operator (e.g. the per-sector
+    /// ``make_sector_operator_adopt`` bridge) do not have to reach into
+    /// the public ``transform_data_`` / ``three_body_data_`` members
+    /// directly -- keeping that coupling behind a single intentional API
+    /// as the members migrate toward ``protected:``.
+    void copyTermsFrom(const Operator& src) {
+        transform_data_  = src.transform_data_;
+        three_body_data_ = src.three_body_data_;
+        invalidateMatrixCaches();
+    }
+
     /**
      * Rebuild the SoA cache ``terms_`` from the canonical AoS storage.
      * Skips work when the cache is already in sync (``terms_fresh_`` and

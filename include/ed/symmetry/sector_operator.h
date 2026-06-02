@@ -199,6 +199,25 @@ private:
         return true;
     }
 
+    // Derive the magnetization quantum number ``n_up`` for the GPU device
+    // mirror's dense combinadic rank table. Returns the shared popcount of
+    // the orbit representatives iff EVERY basis state in this sector has the
+    // same popcount (i.e. this is a fixed-Sz sector, where every full state
+    // shares that magnetization) -- in which case the GPU mirror can use the
+    // O(1) rank-table lookup instead of the open-addressing hash. Returns -1
+    // for a full-Hilbert (sym-only) sector, where popcounts vary and the
+    // dense rank table is undefined. Self-validating: requires no external
+    // convention, derives purely from the resident orbit data.
+    [[nodiscard]] int sector_n_up_() const noexcept {
+        const auto& states = sector_basis_.sector().basis_states;
+        if (states.empty()) return -1;
+        const int n_up = __builtin_popcountll(states.front().orbit_rep);
+        for (const auto& st : states) {
+            if (__builtin_popcountll(st.orbit_rep) != n_up) return -1;
+        }
+        return n_up;
+    }
+
     SectorBasis sector_basis_;
 };
 

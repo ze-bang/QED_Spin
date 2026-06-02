@@ -25,14 +25,6 @@
 // cuDoubleComplex>`` kernel for both the StreamingSymmetryOperator
 // (full Hilbert + symmetry, cell 3B) and the FixedSz variant (cell 4B).
 //
-// Cache policy: LRU-1. The parent operator caches at most one mirror at
-// a time in ``gpu_sector_cache_`` (shared_ptr<void> with the deleter
-// captured in this TU). Switching sectors evicts and rebuilds. This
-// keeps peak GPU memory bounded by the largest sector + term storage,
-// which is the right trade-off for the workflows that drive multiple
-// sectors sequentially (qed.thermal Sz loop, qed.spectral symmetry
-// sweep).
-//
 // Validation: an end-to-end C++ test at
 // tests/unit/test_streaming_symmetry_gpu_mirror.cpp asserts the GPU
 // matvec result matches the CPU ``applySymmetrized`` to 1e-10 on a
