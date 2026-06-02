@@ -154,6 +154,11 @@ add_library(ed_core STATIC
     # multiple-definition / undefined-reference traps of a single
     # source compiled into both libraries.
     ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cpp
+    # Phase A operator-collapse GPU parity (Jun 2026) -- CPU-only stub
+    # for ed::symmetry::SectorOperator::bind_cuda(). Empty TU under
+    # WITH_CUDA (strong def comes from sector_operator_gpu.cu in
+    # ed_solvers_gpu below); throwing stub when WITH_CUDA is OFF.
+    ${SRC_DIR}/symmetry/sector_operator_gpu.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
@@ -189,6 +194,9 @@ set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_matvec STATIC
     ${MATVEC_DIR}/sanity_check.cpp
+    # P6: explicit instantiation of the three host CpuMatVecBackend cells
+    # (Full / FixedSz / Symmetry) over the canonical term-view shape.
+    ${MATVEC_DIR}/cpu_backend_instantiations.cpp
 )
 target_include_directories(ed_matvec PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_matvec PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
@@ -654,6 +662,11 @@ if(WITH_CUDA)
         # twin is an empty TU when WITH_CUDA is ON, so there is no
         # multiple-definition risk.
         ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
+        # Phase A operator-collapse GPU parity (Jun 2026) -- strong def of
+        # ed::symmetry::SectorOperator::bind_cuda(), built once into
+        # ed_solvers_gpu (reuses make_sector_matvec_gpu from the mirror TU
+        # above). The ed_core .cpp twin is an empty TU under WITH_CUDA.
+        ${SRC_DIR}/symmetry/sector_operator_gpu.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

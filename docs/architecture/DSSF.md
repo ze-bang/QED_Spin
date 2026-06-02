@@ -14,7 +14,48 @@ The four lanes solve different but overlapping problems:
 | **In-memory orchestrator** (`ed::workflows::spectral`)            | `S(omega)` from one (H, O) pair, single sector            | T=0: no; T>0: yes (FTLM seed) | one sector (the operator you hand in)         | `src/orchestrator.cpp::spectral` |
 | **Streaming-symmetry same-irrep** (`workflows_spectral_streaming_symmetry_directory`) | `S(omega)` per sector, no momentum transfer               | T=0: no   | every sector under `automorphism_results/`    | `python/qed/_bindings/workflow_bindings.cpp` |
 | **Streaming-symmetry cross-irrep** (`*_cross_irrep_directory`)    | `S(Q, omega)` respecting `k_f = k_i + Q` selection rules  | T=0: no  ; T>0: yes (FTLM)   | source + destination sectors                   | same file, `cross_irrep_directory` |
+| **Amortized Multi-Q cross-irrep** (`*_cross_irrep_multiq_directory`) | `S(Q, omega)` and static `S(Q)` for multiple Q-points in one pass | T=0: no | source + multiple target sectors | same file, `cross_irrep_multiq_directory` |
 | **DSSF engine / CLI** (`ed::dssf::run(DSSFRequest)`)              | Full production `(method × T-grid × Q-grid × operator-pair)` matrix | varies by method | every sector via `OperatorSpec`               | `src/cli/dssf_engine.cpp`, `src/dssf/dssf_method.cpp` |
+
+## 0. Implementation Architecture Flowchart
+
+Below is a detailed topological map showing how `qed.spectral` dispatches requests across different workflows, symmetries, and backends (CPU, GPU, and MPI):
+
+```mermaid
+graph TD
+    %% Entry Layer
+    User["User call: qed.spectral()"] --> Router["qed.spectral dispatcher<br>(spectral.py)"]
+
+    %% Router branching based on inputs
+    Router -- "Option A: Pass H (Operator)" --> Lane1["Lane 1: In-Memory Orchestrator<br>(_spectral_in_memory)"]
+    Router -- "Option B: Pass Directory,<br>level='streaming'" --> Lane2["Lane 2: Same-Irrep Walker<br>(same_irrep_directory)"]
+    Router -- "Option C: Pass Directory,<br>Q is given, T=0/None" --> Lane3GS["Lane 3 (T=0): Cross-Irrep Walker<br>(cross_irrep_directory)"]
+    Router -- "Option D: Pass Directory,<br>Q is given, T>0 (FTLM)" --> Lane3FTLM["Lane 3 (FTLM): Cross-Irrep Walker<br>(ftlm_cross_irrep_directory)"]
+    Router -- "Option E: Pass Directory,<br>symmetry contains multi-Q keys" --> Lane3MultiQ["Lane 3 (Amortized Multi-Q):<br>(cross_irrep_multiq_directory)"]
+    Router -- "Option F: Pass Directory,<br>method is given (Shell out)" --> Lane4["Lane 4: DSSF Engine / CLI<br>(subprocess shell-out to ./ED dssf)"]
+
+    %% Lane Details
+    subspace1["Symmetry / Subspaces:<br>• FullSpaceSubspace<br>• FixedSzSubspace"]
+    projectors["Symmetry / ProjectorChain:<br>• SpatialProjector (point groups / translations)<br>• Orthogonal U(1) Sz × Point Group composition"]
+
+    Lane1 --> |"Supports any Backend:<br>• CPU (OpenMP)<br>• Single-GPU<br>• MPI Custom Ranks"| Lane1_Workflows["Workflows:<br>• GroundStateCF (T=0)<br>• FtlmDynamical (T>0)<br>• KpmDynamical (Chebyshev DOS)"]
+
+    Lane2 --> Lane2_Logic["Walks automorphism_results/ sectors<br>Perform GS CF within same irrep (Q=0)"]
+    
+    Lane3GS --> Lane3GS_Logic["S(Q, ω) at T=0:<br>• Walks source sector k_initial<br>• Resolves k_final = k_initial + Q<br>• Multi-Sz support via delta_n_up"]
+    
+    Lane3FTLM --> Lane3FTLM_Logic["S(Q, ω) at T>0:<br>• Walks source sector k_initial<br>• Resolves k_final = k_initial + Q<br>• Performs Gaussian random vector initialization<br>• Boltzmann weight-recombination across sectors<br>• Explicit Temperature Alignment (T=1/beta)"]
+
+    Lane3MultiQ --> Lane3MultiQ_Logic["S(Q, ω) for multiple Q-points:<br>• Performs a SINGLE amortized GS solve<br>• Loops over Q-points internally to scatter/continued-fraction<br>• Outputs per-Q dynamical spectra and equal-time SSSF (static_sf)"]
+
+    Lane4 --> Lane4_Logic["DSSF Engine Workflow Handler:<br>• DYNAMICAL_THERMAL<br>• STATIC_THERMAL<br>• GROUND_STATE_DSSF<br>• SINGLE_EXPECTATION<br>• KPM_THERMODYNAMICS"]
+
+    %% Backend Layer
+    Lane1_Workflows & Lane2_Logic & Lane3GS_Logic & Lane3FTLM_Logic & Lane3MultiQ_Logic & Lane4_Logic --> Backends["Target Execution Backend"]
+    Backends --> CPU["CPU Backend (OpenMP)<br>• Multi-threaded loops<br>• Explicit temperature grid support (FTLM fix)"]
+    Backends --> GPU["GPU Backend (CUDA)<br>• Single-GPU cuBLAS/cuSPARSE matvecs"]
+    Backends --> MPI["MPI (ed_distributed_main)<br>• Subprocess orchestration for 32-36 sites<br>• Memory-distributed operations"]
+```
 
 Below: who calls what, and the method-token catalogue each layer
 exposes.
@@ -136,9 +177,11 @@ instead.
 Pybind entries:
 
 - `_core.workflows_spectral_streaming_symmetry_cross_irrep_directory`
-  -- the **T = 0** S(Q, omega) lane.
+  -- the same-irrep or cross-irrep **T = 0** single-$Q$ $S(Q, \omega)$ lane.
 - `_core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory`
-  -- the **T > 0** S(Q, omega) lane via FTLM.
+  -- the same-irrep or cross-irrep **T > 0** single-$Q$ $S(Q, \omega)$ lane via FTLM.
+- `_core.workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory`
+  -- the **T = 0** amortized multi-$Q$ $S(\vec{Q}, \omega)$ lane (NEW Stage 1+2).
 
 These respect the **selection rule** `k_final = k_initial + Q` on the
 Brillouin zone of the lattice's translation group. The walker:
@@ -147,19 +190,31 @@ Brillouin zone of the lattice's translation group. The walker:
    ground state (T = 0 lane) or builds the FTLM Boltzmann shell
    (T > 0 lane).
 2. For every requested `Q`, identifies the unique destination sector
-   `k_final = k_initial + Q` (modulo the BZ).
+   `k_final = k_initial + Q` (modulo the BZ) using the sector map.
 3. Builds the cross-irrep matvec `O_{Q}` that lifts `psi_initial`
    into the destination sector, runs the resolvent there, and reads
    off `<psi_final | (omega - i*eta - H)^-1 | O_Q psi_initial>`.
 4. Aggregates over `k_initial` (Boltzmann-weighted for T > 0) to
    produce `S(Q, omega)`.
 
+### Amortized Multi-Q S(Q, ω) and Static SF (Stage 1+2)
+
+For larger systems (e.g., up to 32–36 sites), solving the ground state in each sector in order to evaluate $S(Q, \omega)$ across multiple momentum transfers is computationally prohibitive if done independently. Under `workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory`, a single call accepts a list of observables and an aligned list of target momentum points:
+* **Amortized Ground State Solve**: The CPU/GPU only solves the ground state (GS) in the initial sector **once**, then reuses that GS eigenvector to scatter into multiple destination sectors for all target $Q$ coordinates.
+* **Equal-Time Static Structure Factor (SSSF)**: Along with the dynamical curves, the equal-time structure factor $S(Q) = \langle \psi_0 | O_Q^\dagger O_Q | \psi_0 \rangle = \| O_Q | \psi_0 \rangle \|^2$ is computed directly from the GS wavefunctions and returned on `per_sector_pair[i].static_sf`.
+
+### CPU FTLM Temperature Axis Alignment Fix
+
+Previously, when the unified `qed.thermal()` dispatcher was invoked with `use_symmetry_if_available=True` or `device='cpu'`, it passed `T_min`, `T_max`, and `num_bins` to the legacy backend. The legacy CPU driver internally reconstructed a logarithmically-spaced temperature axis, but the returned results were mapped to a linear temperature grid constructed from `opts.betas` — introducing a temperature/energy indexing mismatch. 
+* This is now fully resolved: the CPU FTLM driver supports an explicit temperature grid overload `finite_temperature_lanczos(..., const std::vector<double>& temperatures, ...)`.
+* The `ftlm_kernel.h` CPU lane constructs the actual $T_k = 1/\beta_k$ grid in C++ and forwards it verbatim, perfectly aligning CPU calculations with the exact linear/geometric temperatures computed in the GPU lane.
+
 `Q` incommensurate with the lattice (residual greater than
 `momentum_tolerance`) is rejected, which is correct: for finite L
 exact diagonalization the BZ has L discrete points.
 
 Exposed in Python through `qed.spectral(directory, Q=..., omega=...,
-T=...)` -- the presence of `Q` flips the dispatcher.
+T=...)` -- the presence of `Q` flips the dispatcher. Or supply a list of Q-points as `symmetry={"observables": [...], "momentum_points": [...]}` to activate the amortized multi-Q cross-irrep binding.
 
 ## 4. DSSF engine (`ed::dssf::run(DSSFRequest)`) — the CLI lane
 

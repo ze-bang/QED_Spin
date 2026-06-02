@@ -267,6 +267,92 @@ def _spectral_streaming_symmetry_cross_irrep_directory(
     )
 
 
+def _spectral_streaming_symmetry_cross_irrep_multiq_directory(
+    directory: str,
+    *,
+    num_sites: int,
+    spin_l: float,
+    fixed_sz_n_up: Optional[int],
+    omega: Optional[Iterable[float]],
+    eta: Optional[float],
+    krylov_dim: Optional[int],
+    energy_shift: Optional[float],
+    momentum_points: Sequence[Sequence[float]],
+    momentum_tolerance: float,
+    selected_sectors: Optional[Sequence[int]],
+    observable_transforms_per_q: list,
+    delta_n_up: int,
+    output_dir: str,
+    observable_type: str,
+    verbose: bool,
+) -> Any:
+    """SOTA amortised multi-Q cross-irrep streaming-symmetry spectral
+    routing to
+    ``_core.workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory``.
+
+    The ground state is solved ONCE and reused across every Q in
+    ``momentum_points``; each Q only pays a selection-rule lookup, a
+    ``CrossSectorOrbitObservable`` scatter, and one inner CF-Lanczos in
+    the reduced target sector. ``observable_transforms_per_q`` is a list
+    of transform lists aligned 1:1 with ``momentum_points`` (each Q owns
+    its phased observable O_Q). Results land in ``per_sector_pair``
+    positionally aligned with ``momentum_points``: ``.S_real`` is the
+    dynamical S(Q, omega) and ``.static_sf`` is the equal-time S(Q)
+    (the SSSF, obtained for free from the CF pivot norm).
+    """
+    opts = _core.SpectralOptions()
+    opts.method = _core.SpectralMethod.GroundStateCF
+    if krylov_dim is not None:
+        opts.krylov_dim = int(krylov_dim)
+    if eta is not None:
+        opts.broadening = float(eta)
+    if energy_shift is not None:
+        opts.energy_shift = float(energy_shift)
+    if output_dir:
+        opts.output_dir = str(output_dir)
+    if observable_type:
+        opts.observable_type = str(observable_type)
+    if omega is not None:
+        ws = list(omega)
+        if len(ws) >= 2:
+            opts.omega_min = float(min(ws))
+            opts.omega_max = float(max(ws))
+            opts.num_omega = int(len(ws))
+    opts.momentum_tolerance = float(momentum_tolerance)
+    if selected_sectors is not None:
+        opts.selected_sectors = [int(k) for k in selected_sectors]
+
+    q_points = [[float(c) for c in q] for q in momentum_points]
+    if not q_points:
+        raise ValueError(
+            "qed.spectral multi-Q cross-irrep: momentum_points is empty."
+        )
+    if len(observable_transforms_per_q) != len(q_points):
+        raise ValueError(
+            "qed.spectral multi-Q cross-irrep: observable list must be "
+            f"aligned 1:1 with momentum_points (got "
+            f"{len(observable_transforms_per_q)} observables for "
+            f"{len(q_points)} Q-points)."
+        )
+    if verbose:
+        print(
+            f"[qed.spectral] multi-Q cross-irrep streaming-symmetry: "
+            f"directory={directory!r}  N={num_sites}  "
+            f"fixed_sz_n_up={fixed_sz_n_up}  delta_n_up={delta_n_up}  "
+            f"n_Q={len(q_points)} (single amortised GS solve)"
+        )
+    return _core.workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory(
+        directory,
+        int(num_sites),
+        float(spin_l),
+        observable_transforms_per_q,
+        q_points,
+        opts,
+        fixed_sz_n_up,
+        int(delta_n_up),
+    )
+
+
 def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
     directory: str,
     *,
@@ -799,6 +885,8 @@ def spectral(
         # same-irrep DOS path.
         cross_irrep_observable = None
         cross_irrep_delta_n_up = 0
+        cross_irrep_momentum_points = None
+        cross_irrep_observables_list = None
         if isinstance(symmetry, dict):
             momentum_transfer = symmetry.get(
                 "momentum_transfer", momentum_transfer)
@@ -812,6 +900,9 @@ def spectral(
                 else symmetry.get("transforms")
             )
             cross_irrep_delta_n_up = int(symmetry.get("delta_n_up", 0))
+            cross_irrep_momentum_points = symmetry.get(
+                "momentum_points", None)
+            cross_irrep_observables_list = symmetry.get("observables", None)
 
         # The streaming-symmetry C++ binding is available for the
         # GS-CF method (T is None) AND for the FTLM-cross-irrep
@@ -864,6 +955,59 @@ def spectral(
                 temperatures=list(Ts_list),
                 num_samples=int(num_random_vectors or 30),
                 random_seed=0,
+                output_dir=output_dir,
+                observable_type=observable_type,
+                verbose=verbose,
+            )
+        if (wants_streaming_sym
+                and ground_state_cf_compatible
+                and cross_irrep_momentum_points is not None
+                and cross_irrep_observables_list is not None):
+            # ----------------------------------------------------------
+            # SOTA amortised multi-Q cross-irrep path. The GS solve is
+            # done once and reused across every Q in ``momentum_points``.
+            # Each Q owns its phased observable O_Q via the parallel
+            # ``observables`` list. Routes through
+            # ``workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory``.
+            # ----------------------------------------------------------
+            if num_sites is None:
+                raise TypeError(
+                    "qed.spectral(directory, ..., symmetry={'observables': "
+                    "[...], 'momentum_points': [...]}) requires `num_sites=`."
+                )
+            obs_list = list(cross_irrep_observables_list)
+            q_pts = list(cross_irrep_momentum_points)
+            if len(obs_list) != len(q_pts):
+                raise ValueError(
+                    "qed.spectral multi-Q cross-irrep: symmetry['observables'] "
+                    f"must be aligned 1:1 with symmetry['momentum_points'] "
+                    f"(got {len(obs_list)} observables for {len(q_pts)} "
+                    f"Q-points)."
+                )
+            transforms_per_q = []
+            for idx, obs_q in enumerate(obs_list):
+                tq = _extract_transforms(obs_q)
+                if not tq:
+                    raise ValueError(
+                        f"qed.spectral multi-Q cross-irrep: observable #{idx} "
+                        "expanded to zero transforms; check the Operator has "
+                        "at least one one-body / two-body term."
+                    )
+                transforms_per_q.append(tq)
+            return _spectral_streaming_symmetry_cross_irrep_multiq_directory(
+                H_or_directory,
+                num_sites=int(num_sites),
+                spin_l=float(spin_l),
+                fixed_sz_n_up=(int(sz) if sz is not None else None),
+                omega=omega,
+                eta=eta,
+                krylov_dim=krylov_dim,
+                energy_shift=energy_shift,
+                momentum_points=q_pts,
+                momentum_tolerance=momentum_tolerance,
+                selected_sectors=selected_sectors,
+                observable_transforms_per_q=transforms_per_q,
+                delta_n_up=cross_irrep_delta_n_up,
                 output_dir=output_dir,
                 observable_type=observable_type,
                 verbose=verbose,

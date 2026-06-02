@@ -230,6 +230,30 @@ FTLMResults finite_temperature_lanczos(
     const std::string& output_dir = ""
 );
 
+/**
+ * @brief Explicit-temperatures FTLM driver.
+ *
+ * Identical to the (temp_min, temp_max, num_temp_bins) overload but the
+ * temperature grid is supplied verbatim by the caller, so the returned
+ * curves are index-aligned with whatever axis (linear / logarithmic /
+ * arbitrary) the caller requested. This is the overload the unified
+ * thermal backend lane forwards to with ``1.0 / beta`` so the reported
+ * temperatures match the computed observables exactly.
+ *
+ * @param H Hamiltonian matrix-vector product function
+ * @param N Hilbert space dimension
+ * @param params FTLM parameters
+ * @param temperatures Temperature grid (must be non-empty and all > 0)
+ * @param output_dir Directory for output files
+ */
+FTLMResults finite_temperature_lanczos(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    const FTLMParameters& params,
+    const std::vector<double>& temperatures,
+    const std::string& output_dir = ""
+);
+
 // Phase 4 (matvec-unification): MatVecOperator-taking overload. The body
 // is a single ed::matvec::as_apply_function() forward; see lanczos.h for
 // the design notes.

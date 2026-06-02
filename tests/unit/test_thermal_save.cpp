@@ -29,6 +29,7 @@
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/core/operator.h>
+#include <ed/core/sector_loop.h>
 #include <ed/core/streaming_symmetry.h>
 #include <ed/orchestrator.h>
 
@@ -397,7 +398,8 @@ TEST_CASE("ed::thermal persists StreamingSymmetryOperator cTPQ snapshots",
         const std::size_t d = sym->getSectorDimension(s);
         if (d > best) { best = d; pick = s; }
     }
-    auto view = sym->sector(pick);
+    ed::core::StreamingSymmetryHandle handle(sym.get());
+    auto view = handle.sector(pick);
     REQUIRE(view->dim() > 0);
 
     const std::string outdir = make_scratch_dir(
@@ -453,7 +455,8 @@ TEST_CASE("ed::thermal persists FixedSzStreamingSymmetry mTPQ snapshots",
         const std::size_t d = sym->getSectorDimension(s);
         if (d > best) { best = d; pick = s; }
     }
-    auto view = sym->sector(pick);
+    ed::core::StreamingSymmetryHandle handle(sym.get());
+    auto view = handle.sector(pick);
     REQUIRE(view->dim() > 0);
 
     const std::string outdir = make_scratch_dir(

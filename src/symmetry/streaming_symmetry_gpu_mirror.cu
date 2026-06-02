@@ -25,14 +25,6 @@
 // cuDoubleComplex>`` kernel for both the StreamingSymmetryOperator
 // (full Hilbert + symmetry, cell 3B) and the FixedSz variant (cell 4B).
 //
-// Cache policy: LRU-1. The parent operator caches at most one mirror at
-// a time in ``gpu_sector_cache_`` (shared_ptr<void> with the deleter
-// captured in this TU). Switching sectors evicts and rebuilds. This
-// keeps peak GPU memory bounded by the largest sector + term storage,
-// which is the right trade-off for the workflows that drive multiple
-// sectors sequentially (qed.thermal Sz loop, qed.spectral symmetry
-// sweep).
-//
 // Validation: an end-to-end C++ test at
 // tests/unit/test_streaming_symmetry_gpu_mirror.cpp asserts the GPU
 // matvec result matches the CPU ``applySymmetrized`` to 1e-10 on a
@@ -45,6 +37,7 @@
 #include <ed/matvec/device_basis_policy.cuh>
 #include <ed/matvec/term_kernels_gpu.cuh>
 #include <ed/matvec/term_storage.h>
+#include <ed/symmetry/sector_gpu_mirror.h>
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
@@ -576,128 +569,54 @@ void launch_symmetry_matvec(const GpuSectorMirror& mirror,
 }  // namespace ed::symmetry::gpu_mirror
 
 // =============================================================================
-// StreamingSymmetryOperator (cell 3B): full Hilbert + symmetry.
-// =============================================================================
-
-ed::LinearOperator::MatvecFn
-StreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) const
-{
-    using ed::symmetry::gpu_mirror::GpuSectorMirror;
-    using ed::symmetry::gpu_mirror::detail::build_mirror;
-    using ed::symmetry::gpu_mirror::launch_symmetry_matvec;
-
-    if (sector_idx >= sectors_.size()) {
-        throw std::runtime_error(
-            "StreamingSymmetryOperator::bind_cuda_for_sector: "
-            "invalid sector index " + std::to_string(sector_idx) +
-            " (have " + std::to_string(sectors_.size()) + " sectors)");
-    }
-
-    // Make sure terms_ is up to date before snapshot.
-    commitPendingTransforms();
-
-    // LRU-1 cache: rebuild only if the cache is empty or holds a
-    // different sector.
-    auto cached = std::static_pointer_cast<GpuSectorMirror>(gpu_sector_cache_);
-    if (!cached || cached->sector_idx != sector_idx) {
-        // Phase E.1: ``StreamingSymmetryOperator`` does NOT carry an
-        // n_up (the full Hilbert is the parent basis), so we pass
-        // n_up=-1 to skip the dense rank table. The legacy hash path
-        // is built instead -- still correct, just unchanged from
-        // pre-patch behavior for this class. A future plan can teach
-        // the operator to detect Sz conservation on its terms and
-        // pass the inferred n_up here.
-        cached = build_mirror(
-            sectors_[sector_idx],
-            static_cast<double>(getGroupSize()),
-            static_cast<double>(spin_l_),
-            terms_,
-            sector_idx,
-            /*n_sites=*/static_cast<int>(getNumBits()),
-            /*n_up=*/-1);
-        gpu_sector_cache_ = std::static_pointer_cast<void>(cached);
-    }
-
-    // Capture the strong shared_ptr by value so the mirror stays alive
-    // for the entire matvec sequence (Lanczos, etc.) even if the
-    // parent's cache is concurrently invalidated.
-    std::shared_ptr<const GpuSectorMirror> mirror = cached;
-    const double spin = static_cast<double>(spin_l_);
-    const std::uint64_t dim_captured = mirror->dim;
-
-    return [mirror, spin, dim_captured](const ed::matvec::Complex* in,
-                                         ed::matvec::Complex* out,
-                                         std::size_t n) {
-        if (n != dim_captured) {
-            throw std::runtime_error(
-                "StreamingSymmetryOperator GPU mirror: "
-                "size mismatch (" + std::to_string(n) + " vs " +
-                std::to_string(dim_captured) + ")");
-        }
-        launch_symmetry_matvec(
-            *mirror,
-            reinterpret_cast<const cuDoubleComplex*>(in),
-            reinterpret_cast<cuDoubleComplex*>(out),
-            n,
-            spin);
-    };
-}
-
-// =============================================================================
-// FixedSzStreamingSymmetryOperator (cell 4B): fixed-Sz + symmetry.
+// make_sector_matvec_gpu -- standalone per-sector GPU matvec entry.
 //
-// The mirror layout is identical to cell 3B -- the
-// DeviceSymmetryBasisPolicy already factors out the Sz vs full-Hilbert
-// difference at the host-side orbit construction step (host code in
-// FixedSzStreamingSymmetryOperator::generateSymmetrySectorsStreamingFixedSz
-// only populates orbits with valid Sz). Off-Sz states then naturally
-// produce hash misses in the device lookup and the corresponding
-// emits are dropped.
+// The collapse-target twin of bind_cuda_for_sector: where the legacy
+// operators own an LRU-1 cache keyed by sector index (because one
+// monolithic operator holds every sector), an ``ed::symmetry::SectorOperator``
+// IS a single sector, so we build the mirror ONCE here and capture it by
+// value (shared_ptr) in the returned callable. A Lanczos / FTLM sweep
+// reuses the same mirror across all of its matvecs; the mirror is freed
+// when the callable is dropped.
+//
+// Declared in include/ed/symmetry/sector_gpu_mirror.h (CUDA-free header);
+// the non-CUDA stub lives in streaming_symmetry_gpu_mirror.cpp.
 // =============================================================================
 
 ed::LinearOperator::MatvecFn
-FixedSzStreamingSymmetryOperator::bind_cuda_for_sector(std::size_t sector_idx) const
+ed::symmetry::make_sector_matvec_gpu(const ::SymmetrySector&        sector,
+                                     double                         group_size,
+                                     double                         spin_l,
+                                     const ed::matvec::TermStorage& terms,
+                                     int                            n_sites,
+                                     int                            n_up)
 {
     using ed::symmetry::gpu_mirror::GpuSectorMirror;
     using ed::symmetry::gpu_mirror::detail::build_mirror;
     using ed::symmetry::gpu_mirror::launch_symmetry_matvec;
 
-    if (sector_idx >= sectors_.size()) {
-        throw std::runtime_error(
-            "FixedSzStreamingSymmetryOperator::bind_cuda_for_sector: "
-            "invalid sector index " + std::to_string(sector_idx) +
-            " (have " + std::to_string(sectors_.size()) + " sectors)");
-    }
+    // One-shot device mirror for this single sector (no LRU; the
+    // SectorOperator owns exactly one sector). sector_idx is irrelevant
+    // here (no cache to key), so pass 0.
+    std::shared_ptr<const GpuSectorMirror> mirror = build_mirror(
+        sector,
+        group_size,
+        spin_l,
+        terms,
+        /*sector_idx=*/static_cast<std::size_t>(0),
+        n_sites,
+        n_up);
 
-    commitPendingTransforms();
-
-    auto cached = std::static_pointer_cast<GpuSectorMirror>(gpu_sector_cache_);
-    if (!cached || cached->sector_idx != sector_idx) {
-        // Phase E.1: this IS the sym+Sz workload that the kill-hash
-        // plan targets. Pass the operator's n_up so build_mirror
-        // builds the dense rank table instead of the 8-32 GiB hash.
-        cached = build_mirror(
-            sectors_[sector_idx],
-            static_cast<double>(getGroupSize()),
-            static_cast<double>(spin_l_),
-            terms_,
-            sector_idx,
-            /*n_sites=*/static_cast<int>(getNumBits()),
-            /*n_up=*/static_cast<int>(getNUp()));
-        gpu_sector_cache_ = std::static_pointer_cast<void>(cached);
-    }
-
-    std::shared_ptr<const GpuSectorMirror> mirror = cached;
-    const double spin = static_cast<double>(spin_l_);
+    const double spin = spin_l;
     const std::uint64_t dim_captured = mirror->dim;
 
     return [mirror, spin, dim_captured](const ed::matvec::Complex* in,
-                                         ed::matvec::Complex* out,
-                                         std::size_t n) {
+                                        ed::matvec::Complex* out,
+                                        std::size_t n) {
         if (n != dim_captured) {
             throw std::runtime_error(
-                "FixedSzStreamingSymmetryOperator GPU mirror: "
-                "size mismatch (" + std::to_string(n) + " vs " +
+                "ed::symmetry::make_sector_matvec_gpu: size mismatch (" +
+                std::to_string(n) + " vs " +
                 std::to_string(dim_captured) + ")");
         }
         launch_symmetry_matvec(

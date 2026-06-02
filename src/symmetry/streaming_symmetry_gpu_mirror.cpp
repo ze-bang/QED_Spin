@@ -23,32 +23,22 @@
 #ifndef WITH_CUDA
 
 #include <ed/core/streaming_symmetry.h>
+#include <ed/symmetry/sector_gpu_mirror.h>
 
 #include <stdexcept>
 #include <string>
 
-namespace {
-
-[[noreturn]] void throw_no_cuda_build(const char* class_name) {
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_sector_matvec_gpu(const ::SymmetrySector&        /*sector*/,
+                                     double                         /*group_size*/,
+                                     double                         /*spin_l*/,
+                                     const ed::matvec::TermStorage& /*terms*/,
+                                     int                            /*n_sites*/,
+                                     int                            /*n_up*/) {
     throw std::logic_error(
-        std::string(class_name) +
-        "::bind_cuda_for_sector: built without WITH_CUDA. "
-        "Rebuild with -DWITH_CUDA=ON to enable the GPU symmetry "
-        "mirror, or route the workload through CpuBackend "
-        "(device='cpu').");
-}
-
-}  // namespace
-
-ed::LinearOperator::MatvecFn
-StreamingSymmetryOperator::bind_cuda_for_sector(std::size_t /*sector_idx*/) const {
-    throw_no_cuda_build("StreamingSymmetryOperator");
-}
-
-ed::LinearOperator::MatvecFn
-FixedSzStreamingSymmetryOperator::bind_cuda_for_sector(
-    std::size_t /*sector_idx*/) const {
-    throw_no_cuda_build("FixedSzStreamingSymmetryOperator");
+        "ed::symmetry::make_sector_matvec_gpu: built without WITH_CUDA. "
+        "Rebuild with -DWITH_CUDA=ON to enable the GPU symmetry mirror, "
+        "or route the workload through CpuBackend (device='cpu').");
 }
 
 #endif  // !WITH_CUDA

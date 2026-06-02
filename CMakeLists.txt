@@ -775,6 +775,12 @@ if(BUILD_ED_TESTS)
     # unified interface on the same 6-site Heisenberg ring and asserts
     # numerical agreement against the Bethe-ansatz reference E_0.
     ed_add_test(test_unified_interface_e2e      tests/integration/test_unified_interface_e2e.cpp USE_CATCH2)
+    # Operator-collapse option-1 acceptance (Jun 2026): the
+    # `ed::make_sector_operators(OperatorSpec)` factory routes a
+    # directory-loaded Hamiltonian through the P5 sector-set enumerator
+    # and solves each sector via ed::workflows::solve, cross-checking the
+    # full union spectrum against the legacy streaming-symmetry path.
+    ed_add_test(test_make_sector_operators_e2e  tests/integration/test_make_sector_operators_e2e.cpp USE_CATCH2)
     # Wave A acceptance (Full unified-interface collapse, May 2026):
     # the `ed::make_operator(OperatorSpec)` factory + the new
     # `bind_<Backend>` override matrix.
@@ -883,6 +889,22 @@ if(BUILD_ED_TESTS)
         # Phase 3b #1: distributed matrix-free SpMV (DistributedOperator)
         ed_add_mpi_test(test_distributed_operator
                         tests/unit/test_distributed_operator.cpp)
+
+        # P4: policy-agnostic CommPlan halo-exchange schedule (the reusable
+        # extraction of DistributedOperator's build_comm_pattern_ for the
+        # unified MemSpace=DistributedHost matvec lane). Self-contained; no
+        # Operator dependency. Validates geometry, send/recv conservation,
+        # and end-to-end halo correctness (complex + real lanes) at np 1/2/4.
+        ed_add_mpi_test(test_comm_plan
+                        tests/unit/test_comm_plan.cpp)
+
+        # P4: MpiMatVecImpl -- the MemSpace=DistributedHost matrix-free SpMV
+        # built on CommPlan + the GATHER kernel (the per-apply body lifted
+        # out of DistributedOperator::apply_local_). Validates the slab SpMV
+        # (complex + real lanes) against the INDEPENDENT serial SCATTER
+        # kernel over the full Hilbert space at np 1/2/4.
+        ed_add_mpi_test(test_mpi_matvec_impl
+                        tests/unit/test_mpi_matvec_impl.cpp)
 
         # Phase 3b #2: distributed Lanczos (rank-local Krylov + MPI_Allreduce)
         ed_add_mpi_test(test_distributed_lanczos
@@ -1154,16 +1176,69 @@ if(BUILD_ED_TESTS)
     # time_evolution_correlator (Phase 6 / Phase 7).
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
-    # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026):
-    # end-to-end check that StreamingSymmetryOperator::bind_cuda_for_sector
-    # produces a device matvec that agrees with the CPU
-    # ``applySymmetrized`` to 1e-10 across every Z_N translation sector.
-    ed_add_test(test_streaming_symmetry_gpu_mirror tests/unit/test_streaming_symmetry_gpu_mirror.cpp USE_CATCH2)
     # Phase R5 of the "Orthogonal symmetry composition: Subspace x
     # ProjectorChain" plan (May 2026): byte-equality + extensibility
     # pinning for the new (Subspace, ProjectorChain) decomposition.
     ed_add_test(test_projector_chain            tests/unit/test_projector_chain.cpp USE_CATCH2)
     ed_add_test(test_chain_extensibility        tests/unit/test_chain_extensibility.cpp USE_CATCH2)
+    # Operator-collapse refactor (Jun 2026): owning ``SectorBasis`` that
+    # completes the basis triplet (FullSpaceSubspace / FixedSzSubspace /
+    # SectorBasis) and yields the POD SymmetryBasisPolicy. Pins build()
+    # / adopt() lookup round-trips + norm parity against
+    # compute_orbit_for_state for the Heisenberg Z_N ring (N=6).
+    ed_add_test(test_sector_basis               tests/unit/test_sector_basis.cpp USE_CATCH2)
+    # P2: the unified CpuMatVecBackend<SymmetryBasisPolicy> + make_cpu_symmetry_backend
+    # factory reproduce the legacy StreamingSymmetryOperator::applySymmetrized matvec
+    # byte-for-byte in every momentum sector (Heisenberg Z_N ring, N=6).
+    ed_add_test(test_symmetry_backend           tests/unit/test_symmetry_backend.cpp USE_CATCH2)
+    # P2 (fixed-Sz symmetry lane): the SAME generic backend reproduces the
+    # legacy FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSz matvec
+    # byte-for-byte in every momentum sector (half-filled Heisenberg Z_N ring,
+    # N=6, n_up=3) -- orbits built over a FixedSzSubspace instead of full space.
+    ed_add_test(test_symmetry_backend_fixedsz   tests/unit/test_symmetry_backend_fixedsz.cpp USE_CATCH2)
+    # P2c: the standalone per-sector ed::symmetry::SectorOperator (owning
+    # SectorBasis + symmetry backend, no parent StreamingSymmetryOperator)
+    # matches the legacy applySymmetrized matvec in every sector and its
+    # dense k=0 spectrum yields the Bethe-ansatz GS (Heisenberg Z_N, N=6).
+    ed_add_test(test_sector_operator            tests/unit/test_sector_operator.cpp USE_CATCH2)
+    # P5: build_full_sector_operators / build_fixed_sz_sector_operators emit a flat
+    # vector of standalone SectorOperators (one per surviving sector) whose dims tile
+    # the Hilbert space (full) / fixed-Sz subspace and whose min ground state is the
+    # Bethe-ansatz GS (Heisenberg Z_N, N=6) -- the SectorView fan-out replacement.
+    ed_add_test(test_sector_set                 tests/unit/test_sector_set.cpp USE_CATCH2)
+    # Operator-collapse refactor (Phase C, Jun 2026): the production cutover --
+    # StreamingSymmetryHandle::sector(k) routes through the standalone
+    # SectorOperator (collapse target); the legacy SectorView and the
+    # ED_SYMMETRY_SECTOR_OPERATOR gate were removed. Verifies the handle
+    # returns a SectorOperator and the min sector GS is the Bethe GS (N=6).
+    ed_add_test(test_sector_loop_gate           tests/unit/test_sector_loop_gate.cpp USE_CATCH2)
+    # Cutover-safety invariant: the legacy StreamingSymmetryOperator and the new
+    # build_full_sector_operators path emit the SAME per-sector basis ORDERING
+    # (orbit_rep + orbit_elements sequence), not just matching dims/eigenvalues
+    # (which are basis-order-invariant). Guards the sector index -> basis index
+    # mapping that keys HDF5 orbit caches + cross-sector observables (N=6 Z_N).
+    ed_add_test(test_symmetry_ordering_parity   tests/unit/test_symmetry_ordering_parity.cpp USE_CATCH2)
+    # P3a: CudaMatVecBackend<DeviceFullBasisPolicy> (GPU twin of CpuMatVecBackend)
+    # matvec matches the host CpuMatVecBackend to <1e-9 across every term bin and
+    # both scalar lanes (complex apply + real apply_real) on the full Hilbert
+    # space. CUDA-only; plain main() harness (not Catch2). Needs a GPU at runtime
+    # (skips cleanly with exit 0 when no device is present).
+    if(WITH_CUDA)
+        ed_add_test(test_cuda_matvec_backend    tests/unit/test_cuda_matvec_backend.cu)
+        # P3c: CudaMatVecBackend<DeviceSymmetryBasisPolicy> (GPU symmetry lane)
+        # -- DeviceSymmetryBasisPolicyHolder uploads the orbit CSR + pre-baked
+        # projection hash; the GPU symmetry matvec matches the host
+        # CpuMatVecBackend<Symmetry> to <1e-9 across every momentum sector of
+        # the Heisenberg Z_N ring (N=6). CUDA-only; plain main() harness.
+        ed_add_test(test_cuda_symmetry_matvec_backend tests/unit/test_cuda_symmetry_matvec_backend.cu)
+        # Phase A operator-collapse GPU parity (Jun 2026): a standalone
+        # ed::symmetry::SectorOperator (from make_sector_operators -> the P5
+        # sector-set enumerator, no StreamingSymmetryOperator) is backend-
+        # complete on the GPU -- its bind_cuda() matvec matches its own CPU
+        # apply to <1e-9 across every full-Hilbert and fixed-Sz (n_up=3)
+        # sector of the Heisenberg Z_N ring (N=6). CUDA-only; plain main().
+        ed_add_test(test_sector_operator_gpu tests/unit/test_sector_operator_gpu.cu)
+    endif()
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
     target_compile_definitions(test_dssf_operator_spec PRIVATE
@@ -1261,21 +1336,6 @@ if(BUILD_ED_TESTS)
         # fixed-Sz matvec kernels would silently miss states once we
         # flip the dispatch in Phase A.2.
         ed_add_test(test_gpu_fixed_sz_rank      tests/unit/test_gpu_fixed_sz_rank.cpp USE_CATCH2)
-        # Phase I of the "Close CPU / GPU Gaps Across Workflows" plan
-        # (May 2026): standalone microbench harness for the
-        # streaming-symmetry GPU mirror. Not registered as a ctest
-        # since it prints timings rather than asserting; the CI
-        # "must-not-regress" gate runs it separately when a GPU is
-        # available and consumes the tab-separated output.
-        add_executable(bench_symmetry_gpu_matvec
-            tests/perf/bench_symmetry_gpu_matvec.cpp)
-        target_include_directories(bench_symmetry_gpu_matvec PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests
-        )
-        target_link_libraries(bench_symmetry_gpu_matvec PRIVATE ed_solvers_gpu)
-        target_compile_options(bench_symmetry_gpu_matvec PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-        )
     endif()
 
     # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3

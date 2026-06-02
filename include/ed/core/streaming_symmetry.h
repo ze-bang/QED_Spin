@@ -159,11 +159,18 @@ struct SymBasisState {
     std::vector<uint64_t> orbit_elements;  // All states in the orbit (sorted ascending after sortOrbit())
     std::vector<Complex> orbit_coefficients;  // Coefficient of each orbit element in symmetrized state (parallel to orbit_elements)
     double norm;                           // Normalization factor
+    // Cached reciprocal of `norm` (0 when norm == 0). Derived, NOT persisted:
+    // recomputed by sortOrbit() -- the universal finalize point invoked once
+    // after `norm` is assigned on every construction / HDF5-load path. Lets the
+    // matvec hot loop turn the per-emit `group_norm / norm_k` division into a
+    // multiply (see SymmetryBasisPolicy::coeff_modifier / iter_orbit).
+    double inv_norm;
 
-    SymBasisState() : orbit_rep(0), norm(0.0) {}
+    SymBasisState() : orbit_rep(0), norm(0.0), inv_norm(0.0) {}
 
     SymBasisState(uint64_t rep, const std::vector<int>& qn, double n = 1.0)
-        : orbit_rep(rep), quantum_numbers(qn), norm(n) {}
+        : orbit_rep(rep), quantum_numbers(qn), norm(n),
+          inv_norm(n != 0.0 ? 1.0 / n : 0.0) {}
 
     /**
      * Sort orbit_elements ascending and parallel-sort orbit_coefficients to
@@ -174,6 +181,10 @@ struct SymBasisState {
      * Idempotent and safe to call multiple times; cheap if already sorted.
      */
     void sortOrbit() {
+        // Refresh the cached reciprocal norm at the canonical finalize point.
+        // Done before the early-out so size-0/1 orbits also get a valid
+        // inv_norm (their `norm` is still set by the construction path).
+        inv_norm = (norm != 0.0) ? (1.0 / norm) : 0.0;
         const size_t n = orbit_elements.size();
         if (n < 2) return;
         std::vector<size_t> idx(n);
@@ -196,6 +207,15 @@ struct SymBasisState {
      * symmetrised basis state. Returns 0 if s_prime is not in the orbit.
      * Requires orbit_elements to be sorted ascending (call sortOrbit()
      * exactly once after the orbit is fully populated).
+     *
+     * NOTE: kept as std::lower_bound deliberately. Unlike
+     * ed::core::SortedUint64Index::find() (which searches multi-GB,
+     * cache-cold arrays where a branch-free + prefetch form wins ~2x),
+     * an orbit is SMALL -- bounded by the group order |G| (typically ~N
+     * up to ~768) and almost always L1/L2-resident. There the manual
+     * prefetch hints are pure overhead and the branch-free cmov form is
+     * no faster than the well-predicted std::lower_bound, so the simple
+     * form is retained.
      */
     inline Complex findCoeff(uint64_t s_prime) const {
         auto it = std::lower_bound(orbit_elements.begin(), orbit_elements.end(), s_prime);
@@ -235,7 +255,9 @@ struct SymmetrySector {
  */
 class StreamingSymmetryOperator : public Operator {
 private:
-    std::vector<SymmetrySector> sectors_;
+    // Mutable so the lazy per-sector orbit materialization can (re)build
+    // sectors_[k].basis_states from inside const matvec / bind entry points.
+    mutable std::vector<SymmetrySector> sectors_;
     mutable ShardedOrbitCache state_to_orbit_cache_;  // Striped-lock cache (16 shards) -- lower contention than single-mutex map
     
     // Lookup table: computational_state -> basis_idx_in_sector (one per sector).
@@ -253,21 +275,17 @@ private:
     uint64_t cached_group_size_ = 0;
 
     // ------------------------------------------------------------------
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror cache. The cache type lives in
-    // src/core/streaming_symmetry_gpu_mirror.cu (WITH_CUDA only) so
-    // this header stays compilable without a CUDA toolchain. Stored
-    // type-erased via shared_ptr<void> -- the deleter is captured at
-    // construction time so default-destruction in any TU is correct.
-    //
-    // Built lazily by ``bind_cuda_for_sector(sector_idx)``: the first
-    // call per sector constructs a ``GPUSymmetrizedOperator`` with the
-    // sector's orbit data + the parent's term storage and stashes it
-    // here; subsequent calls return the cached mirror. Invalidated
-    // implicitly: any change to ``transform_data_`` clears the cache
-    // via ``invalidateMatrixCaches()``.
+    // Streaming sector materialization ("stream sym sectors" plan,
+    // Jun 2026). Twin of the block in FixedSzStreamingSymmetryOperator;
+    // see that class for the rationale. Keeps only the deduped orbit-rep
+    // list resident and builds one sector's orbit CSR on demand (LRU-1),
+    // with the CPU reverse index built lazily on first matvec.
     // ------------------------------------------------------------------
-    mutable std::shared_ptr<void> gpu_sector_cache_;
+    std::vector<uint64_t>        unique_orbit_reps_;
+    bool                         lazy_sectors_enabled_ = false;
+    mutable std::atomic<std::ptrdiff_t> materialized_sector_{-1};
+    mutable std::vector<char>    reverse_index_built_;
+    mutable std::mutex           materialize_mu_;
 
 public:
     StreamingSymmetryOperator(uint64_t n_bits, float spin_l) 
@@ -276,50 +294,6 @@ public:
             throw std::runtime_error("StreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror entry point.
-    //
-    // Returns a MatvecFn whose underlying device matvec runs on a
-    // GPUSymmetrizedOperator that was lazily built (and cached) for
-    // ``sector_idx`` on first call. The returned ``MatvecFn`` accepts
-    // DEVICE pointers (per the ``CudaBackend`` contract); the
-    // underlying ``GPUSymmetrizedOperator::matVecGPU`` is called
-    // directly without an extra HtoD/DtoH copy.
-    //
-    // Implementation lives in src/core/streaming_symmetry_gpu_mirror.cu
-    // (WITH_CUDA only). When built without CUDA, this throws
-    // ``std::logic_error`` -- callers must gate on the geometry's
-    // ``supports_device_matvec`` flag (which is only set true after
-    // sector generation when WITH_CUDA is active).
-    // ------------------------------------------------------------------
-    [[nodiscard]] ed::LinearOperator::MatvecFn
-    bind_cuda_for_sector(std::size_t sector_idx) const;
-
-    // ------------------------------------------------------------------
-    // Phase 2 helper: drop any cached GPU mirrors. Called from
-    // ``invalidateMatrixCaches()`` below when the Hamiltonian term
-    // storage mutates. Safe to call when no cache exists; resets the
-    // type-erased shared_ptr to nullptr. The shared_ptr<void> deleter
-    // was captured in the .cu TU at construction time, so the
-    // GpuSectorMirror destructor (which frees device memory) runs in
-    // that TU regardless of where ``reset()`` is invoked.
-    // ------------------------------------------------------------------
-    void invalidateGpuSectorCache() const noexcept {
-        gpu_sector_cache_.reset();
-    }
-
-    // Phase A of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): make sure a term-list mutation also evicts the
-    // device snapshot. The base ``Operator::invalidateMatrixCaches``
-    // resets the SoA cache + ``isReal()`` cache + the matvec backend
-    // CSR cache; we extend it to also drop the GPU mirror so the next
-    // ``bind_cuda_for_sector`` re-uploads the fresh terms.
-    void invalidateMatrixCaches() override {
-        Operator::invalidateMatrixCaches();
-        invalidateGpuSectorCache();
     }
 
     /**
@@ -374,7 +348,8 @@ public:
         // rep(i) over all i, but only O(|orbits|) storage. With OpenMP, each thread
         // appends canonical bases in a static chunk, then we sort to restore
         // deterministic ascending order (matches the old "first occurrence" scan).
-        std::vector<uint64_t> unique_orbit_reps;
+        // Kept resident in ``unique_orbit_reps_`` for lazy materialization.
+        unique_orbit_reps_.clear();
 #ifdef _OPENMP
         {
             const int nthreads = omp_get_max_threads();
@@ -398,14 +373,14 @@ public:
             for (const auto& v : thread_reps) {
                 total += v.size();
             }
-            unique_orbit_reps.reserve(total);
+            unique_orbit_reps_.reserve(total);
             for (const auto& v : thread_reps) {
-                unique_orbit_reps.insert(unique_orbit_reps.end(), v.begin(), v.end());
+                unique_orbit_reps_.insert(unique_orbit_reps_.end(), v.begin(), v.end());
             }
-            std::sort(unique_orbit_reps.begin(), unique_orbit_reps.end());
+            std::sort(unique_orbit_reps_.begin(), unique_orbit_reps_.end());
         }
 #else
-        unique_orbit_reps.reserve(dim / symmetry_info.max_clique.size() + 1);
+        unique_orbit_reps_.reserve(dim / symmetry_info.max_clique.size() + 1);
         for (size_t basis = 0; basis < dim; ++basis) {
             uint64_t rep = basis;
             for (const auto& perm : symmetry_info.max_clique) {
@@ -413,33 +388,110 @@ public:
                 if (permuted < rep) rep = permuted;
             }
             if (basis == rep) {
-                unique_orbit_reps.push_back(static_cast<uint64_t>(basis));
+                unique_orbit_reps_.push_back(static_cast<uint64_t>(basis));
             }
         }
 #endif
         
         auto pass1_end = std::chrono::high_resolution_clock::now();
         double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
-        std::cout << " found " << unique_orbit_reps.size() << " unique orbits"
+        const size_t num_orbits = unique_orbit_reps_.size();
+        std::cout << " found " << num_orbits << " unique orbits"
                   << " (" << std::fixed << std::setprecision(1) << pass1_ms << " ms)" << std::endl;
-        
+
+        // Copy per-sector metadata up front (cheap; needed by both modes).
+        for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+            const auto& sector_meta = symmetry_info.sectors[sector_idx];
+            auto& sector = sectors_[sector_idx];
+            sector.sector_id       = sector_meta.sector_id;
+            sector.quantum_numbers = sector_meta.quantum_numbers;
+            sector.phase_factors   = sector_meta.phase_factors;
+        }
+
         // =====================================================================
+        // Decide eager vs lazy ("stream sym sectors", Jun 2026). See the twin
+        // in generateSymmetrySectorsStreamingFixedSz for the rationale.
+        // =====================================================================
+        std::size_t lazy_budget_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;  // 4 GiB
+        if (const char* env = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
+            try { lazy_budget_bytes = std::stoull(env); } catch (...) {}
+        }
+        const std::size_t group_sz =
+            std::max<std::size_t>(1, symmetry_info.max_clique.size());
+        const long double est_elems =
+            static_cast<long double>(num_orbits) * group_sz * num_sectors;
+        const long double est_bytes = est_elems * (24.0L + 16.0L);
+        bool force_lazy = false, force_eager = false;
+        if (const char* env = std::getenv("ED_SYM_LAZY_SECTORS")) {
+            if (env[0] == '1') force_lazy = true;
+            else if (env[0] == '0') force_eager = true;
+        }
+        lazy_sectors_enabled_ = !force_eager
+            && (force_lazy
+                || est_bytes > static_cast<long double>(lazy_budget_bytes));
+        reverse_index_built_.assign(num_sectors,
+                                    lazy_sectors_enabled_ ? char(0) : char(1));
+
+        if (lazy_sectors_enabled_) {
+            // LAZY MODE: Pass 1.5 -- norm-only dimension scan.
+            std::cout << "Pass 1.5 (lazy streaming; est. eager footprint "
+                      << std::fixed << std::setprecision(1)
+                      << static_cast<double>(est_bytes
+                             / (1024.0L * 1024.0L * 1024.0L))
+                      << " GiB > "
+                      << (lazy_budget_bytes / (1024.0 * 1024.0 * 1024.0))
+                      << " GiB budget): scanning " << num_sectors
+                      << " sector dimensions..." << std::endl;
+            auto p15_start = std::chrono::high_resolution_clock::now();
+            for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+                const auto& sector = sectors_[sector_idx];
+                std::atomic<size_t> valid_count{0};
+                #pragma omp parallel for schedule(dynamic, 64)
+                for (size_t oi = 0; oi < num_orbits; ++oi) {
+                    std::vector<uint64_t> elements;
+                    std::vector<Complex> coefficients;
+                    double norm_sq = 0.0;
+                    computeOrbitData(unique_orbit_reps_[oi], sector.phase_factors,
+                                     elements, coefficients, norm_sq);
+                    if (norm_sq > 1e-10) {
+                        valid_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                symmetrized_block_ham_sizes[sector_idx] =
+                    static_cast<int>(valid_count.load());
+            }
+            auto p15_end = std::chrono::high_resolution_clock::now();
+            double p15_ms =
+                std::chrono::duration<double, std::milli>(p15_end - p15_start)
+                    .count();
+            size_t total_basis = 0;
+            for (int d : symmetrized_block_ham_sizes)
+                total_basis += static_cast<size_t>(d);
+            std::cout << "\n=== Matrix-Free Sector Generation Complete (lazy) ==="
+                      << std::endl;
+            std::cout << "Total sectors: " << num_sectors << std::endl;
+            std::cout << "Total symmetrized basis: " << total_basis << std::endl;
+            std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1)
+                      << pass1_ms << " ms" << std::endl;
+            std::cout << "Pass 1.5 time: " << std::fixed << std::setprecision(1)
+                      << p15_ms << " ms" << std::endl;
+            std::cout << "Orbit CSR + reverse index are built one sector at a "
+                         "time (LRU-1) at solve/bind time." << std::endl;
+            return;
+        }
+
+        // =====================================================================
+        // EAGER MODE (small systems): original behavior.
         // PASS 2 (parallelizable): Compute orbit data per sector
         // =====================================================================
         std::cout << "Pass 2: Computing orbit data for " << num_sectors
                   << " sectors..." << std::endl;
         
         auto pass2_start = std::chrono::high_resolution_clock::now();
-        const size_t num_orbits = unique_orbit_reps.size();
         size_t total_orbit_elements = 0;
         
         for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
-            const auto& sector_meta = symmetry_info.sectors[sector_idx];
             auto& sector = sectors_[sector_idx];
-            
-            sector.sector_id = sector_meta.sector_id;
-            sector.quantum_numbers = sector_meta.quantum_numbers;
-            sector.phase_factors = sector_meta.phase_factors;
             
             struct OrbitResult {
                 uint64_t orbit_rep;
@@ -453,7 +505,7 @@ public:
             
             #pragma omp parallel for schedule(dynamic, 64)
             for (size_t oi = 0; oi < num_orbits; ++oi) {
-                uint64_t rep = unique_orbit_reps[oi];
+                uint64_t rep = unique_orbit_reps_[oi];
                 std::vector<uint64_t> elements;
                 std::vector<Complex> coefficients;
                 double norm_sq = 0.0;
@@ -537,6 +589,102 @@ public:
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * dim)))
                   << "%" << std::endl;
     }
+
+    // ------------------------------------------------------------------
+    // Streaming sector materialization helpers ("stream sym sectors").
+    // Twin of the FixedSz block; uses computeOrbitData (full Hilbert).
+    // ------------------------------------------------------------------
+    void materializeSectorOrbits_(std::size_t k) const {
+        auto& sector = sectors_[k];
+        if (!sector.basis_states.empty()) return;
+        const size_t num_orbits = unique_orbit_reps_.size();
+        struct OrbitResult {
+            uint64_t orbit_rep;
+            std::vector<uint64_t> orbit_elements;
+            std::vector<Complex> orbit_coefficients;
+            double norm;
+        };
+        std::vector<OrbitResult> valid_orbits(num_orbits);
+        std::vector<char> orbit_valid(num_orbits, 0);
+        #pragma omp parallel for schedule(dynamic, 64)
+        for (size_t oi = 0; oi < num_orbits; ++oi) {
+            std::vector<uint64_t> elements;
+            std::vector<Complex> coefficients;
+            double norm_sq = 0.0;
+            computeOrbitData(unique_orbit_reps_[oi], sector.phase_factors,
+                             elements, coefficients, norm_sq);
+            if (norm_sq > 1e-10) {
+                valid_orbits[oi].orbit_rep = unique_orbit_reps_[oi];
+                valid_orbits[oi].orbit_elements = std::move(elements);
+                valid_orbits[oi].orbit_coefficients = std::move(coefficients);
+                valid_orbits[oi].norm = std::sqrt(norm_sq);
+                orbit_valid[oi] = 1;
+            }
+        }
+        sector.basis_states.clear();
+        if (k < symmetrized_block_ham_sizes.size()) {
+            sector.basis_states.reserve(
+                static_cast<size_t>(symmetrized_block_ham_sizes[k]));
+        }
+        for (size_t oi = 0; oi < num_orbits; ++oi) {
+            if (!orbit_valid[oi]) continue;
+            auto& orb = valid_orbits[oi];
+            SymBasisState state(orb.orbit_rep, sector.quantum_numbers, orb.norm);
+            state.orbit_elements = std::move(orb.orbit_elements);
+            state.orbit_coefficients = std::move(orb.orbit_coefficients);
+            state.sortOrbit();
+            sector.basis_states.push_back(std::move(state));
+        }
+    }
+
+    void releaseSectorOrbits_(std::size_t k) const {
+        if (k >= sectors_.size()) return;
+        std::vector<SymBasisState>().swap(sectors_[k].basis_states);
+        if (k < state_to_sector_basis_.size()) {
+            state_to_sector_basis_[k] = ed::core::SortedUint64Index{};
+        }
+        if (k < sector_lookup_dense_.size()) {
+            std::vector<std::int32_t>().swap(sector_lookup_dense_[k]);
+        }
+        if (k < reverse_index_built_.size()) reverse_index_built_[k] = 0;
+        dense_lookup_state_.store(0, std::memory_order_release);
+    }
+
+    void ensureSectorMaterialized_(std::size_t k) const {
+        if (!lazy_sectors_enabled_) return;
+        if (materialized_sector_.load(std::memory_order_acquire)
+                == static_cast<std::ptrdiff_t>(k)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(materialize_mu_);
+        if (materialized_sector_.load(std::memory_order_relaxed)
+                == static_cast<std::ptrdiff_t>(k)) {
+            return;
+        }
+        const std::ptrdiff_t prev =
+            materialized_sector_.load(std::memory_order_relaxed);
+        if (prev >= 0) releaseSectorOrbits_(static_cast<std::size_t>(prev));
+        materializeSectorOrbits_(k);
+        materialized_sector_.store(static_cast<std::ptrdiff_t>(k),
+                                   std::memory_order_release);
+    }
+
+    void ensureSectorReverseIndex_(std::size_t k) const {
+        if (!lazy_sectors_enabled_) return;
+        if (k < reverse_index_built_.size() && reverse_index_built_[k]) return;
+        std::lock_guard<std::mutex> lock(materialize_mu_);
+        if (k < reverse_index_built_.size() && reverse_index_built_[k]) return;
+        const auto& sector = sectors_[k];
+        auto& idx = state_to_sector_basis_[k];
+        idx = ed::core::SortedUint64Index{};
+        for (size_t j = 0; j < sector.basis_states.size(); ++j) {
+            for (uint64_t elem : sector.basis_states[j].orbit_elements) {
+                idx[elem] = j;
+            }
+        }
+        idx.finalize();
+        if (k < reverse_index_built_.size()) reverse_index_built_[k] = 1;
+    }
     
     /**
      * @brief Matrix-free Hamiltonian application in symmetrized sector
@@ -557,6 +705,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
 
         const auto& sector = sectors_[sector_idx];
         const size_t sector_dim = sector.basis_states.size();
@@ -609,134 +758,18 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Wave A1 (May 2026): real-arithmetic SpMV for real-Hermitian
-    // sectors. Many production workloads run on real Hamiltonians
-    // (Heisenberg, t-J, real spin chains) and many physically
-    // interesting irreps -- in particular the trivial k=0 irrep of
-    // translation symmetry, the totally symmetric A_1 irrep of point
-    // groups, etc. -- have purely real orbit coefficients. For those
-    // sectors the matvec is genuinely real-symmetric and routing
-    // through ``lanczos_real`` is 30-50% faster than the unified
-    // complex path. The check is per-sector (cached) -- mixed groups
-    // still get the complex path for non-real irreps.
+    // Unified symmetric matvec via ``apply_terms<SymmetryBasisPolicy,
+    // Scalar>`` ("Unify all 16 matvec cells" plan, May 2026).
     //
-    // Behaviour is undefined when ``isSectorReal(sector_idx) == false``;
-    // callers must gate via ``SectorView::is_real_hermitian()``.
-    // -----------------------------------------------------------------
-    void applySymmetrizedReal(size_t sector_idx, const double* in,
-                              double* out) const {
-        if (sector_idx >= sectors_.size()) {
-            throw std::runtime_error("Invalid sector index");
-        }
-
-        const auto& sector = sectors_[sector_idx];
-        const size_t sector_dim = sector.basis_states.size();
-        const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
-
-        std::fill(out, out + sector_dim, 0.0);
-
-        const double group_size = static_cast<double>(getGroupSize());
-        const double group_norm = 1.0 / group_size;
-
-        // Wave A3 + A4 (May 2026): parallel real-arithmetic matvec with
-        // thread-local scratch.
-        #pragma omp parallel if(sector_dim > 100)
-        {
-            static thread_local std::vector<double> local_out;
-            local_out.assign(sector_dim, 0.0);
-
-            #pragma omp for schedule(dynamic, 4)
-            for (size_t j = 0; j < sector_dim; ++j) {
-                const double c_j = in[j];
-                if (std::abs(c_j) < 1e-15) continue;
-
-                const auto& state_j = sector.basis_states[j];
-                const double norm_j = state_j.norm;
-
-                for (size_t orbit_idx = 0;
-                     orbit_idx < state_j.orbit_elements.size(); ++orbit_idx) {
-                    const uint64_t s = state_j.orbit_elements[orbit_idx];
-                    const double alpha_s =
-                        state_j.orbit_coefficients[orbit_idx].real();
-                    if (std::abs(alpha_s) < 1e-15) continue;
-
-                    applyHamiltonianTermsFullSpaceReal(
-                        s, c_j * alpha_s / norm_j,
-                        sector, lookup, group_norm, local_out);
-                }
-            }
-
-            #pragma omp critical
-            {
-                for (size_t k = 0; k < sector_dim; ++k) {
-                    out[k] += local_out[k];
-                }
-            }
-        }
-    }
-
-    /// Whether sector ``sector_idx`` is real-arithmetic-capable:
-    /// (i) every orbit coefficient is real within ``tol``, and (ii)
-    /// the underlying Hamiltonian is real (``Operator::isReal()``).
-    /// Cached on first call. Used by ``SectorView::is_real_hermitian``
-    /// to gate the ``lanczos_real`` fast path.
-    bool isSectorReal(size_t sector_idx, double tol = 1e-12) const {
-        if (sector_idx >= sectors_.size()) return false;
-        // Lazy fill of cache; ensures O(orbit_total) one-shot.
-        {
-            std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-            if (sector_real_cache_.size() != sectors_.size()) {
-                sector_real_cache_.assign(sectors_.size(), -1);
-            }
-            if (sector_real_cache_[sector_idx] >= 0) {
-                return sector_real_cache_[sector_idx] != 0;
-            }
-        }
-
-        if (!const_cast<StreamingSymmetryOperator*>(this)->isReal(tol)) {
-            std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-            sector_real_cache_[sector_idx] = 0;
-            return false;
-        }
-
-        bool all_real = true;
-        for (const auto& bs : sectors_[sector_idx].basis_states) {
-            for (const Complex& c : bs.orbit_coefficients) {
-                if (std::abs(c.imag()) > tol) {
-                    all_real = false;
-                    break;
-                }
-            }
-            if (!all_real) break;
-        }
-
-        std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-        sector_real_cache_[sector_idx] = all_real ? 1 : 0;
-        return all_real;
-    }
-
-    // -----------------------------------------------------------------
-    // Wave 1 (May 2026, "Unify all 16 matvec cells" plan): unified
-    // symmetric matvec via ``apply_terms<SymmetryBasisPolicy, Scalar>``.
-    //
-    // Drop-in replacement for ``applySymmetrized`` /
-    // ``applySymmetrizedReal``: same input/output shape, bit-exact
-    // semantics, but the per-term scatter goes through the unified
+    // The per-term scatter goes through the unified
     // ``ed::matvec::kernel::apply_terms`` kernel that already powers
     // ``Operator::apply`` and ``FixedSzOperator::apply``. The orbit
     // walk + per-emit ``conj(beta) * group_norm / norm_k`` modifier
     // are absorbed via the BasisPolicy ABI extension introduced in
     // Wave 0 (``iter_orbit`` + ``coeff_modifier``).
     //
-    // Both methods accept a pre-built ``SectorLookupHandle`` so they
-    // are safe to call from the SectorView wrappers without
-    // re-running the dense-lookup affordability check. Defined in
-    // ``src/symmetry/streaming_symmetry_unified.cpp``.
-    //
-    // Gated at the SectorView dispatch site by
-    // ``ED_SYMMETRY_LEGACY_MATVEC`` (set to ``1``) -- when set, the
-    // legacy bespoke ``applySymmetrized`` / ``applySymmetrizedReal``
-    // path is used instead. Default = unified.
+    // Both methods accept a pre-built ``SectorLookupHandle``. Defined
+    // in ``src/symmetry/streaming_symmetry_unified.cpp``.
     // -----------------------------------------------------------------
     void applySymmetrizedUnified(size_t sector_idx,
                                  const Complex* in,
@@ -744,12 +777,6 @@ public:
     void applySymmetrizedUnifiedReal(size_t sector_idx,
                                      const double* in,
                                      double* out) const;
-
-    /// Cached read of ``ED_SYMMETRY_LEGACY_MATVEC``. Returns ``true``
-    /// when the environment variable is set to a non-zero value, in
-    /// which case the SectorView falls back to the bespoke
-    /// ``applySymmetrized*`` path. One-shot read (first call wins).
-    static bool useLegacySymmetricMatvec();
 
 private:
     // -----------------------------------------------------------------
@@ -773,6 +800,14 @@ private:
         if (dense_lookup_state_.load(std::memory_order_acquire) != 0) return;
         std::lock_guard<std::mutex> lock(dense_lookup_build_mu_);
         if (dense_lookup_state_.load(std::memory_order_acquire) != 0) return;
+
+        // "stream sym sectors": cross-sector dense lookup is incompatible
+        // with lazy single-sector residency. Skip it -- per-sector
+        // SortedUint64Index fallback is used instead.
+        if (lazy_sectors_enabled_) {
+            dense_lookup_state_.store(2, std::memory_order_release);
+            return;
+        }
 
         if (sectors_.empty() || state_to_sector_basis_.empty()) {
             dense_lookup_state_.store(2, std::memory_order_release);
@@ -811,6 +846,10 @@ private:
     }
 
     SectorLookupHandle makeSectorLookup_(std::size_t sector_idx) const {
+        // "stream sym sectors": ensure orbit CSR + reverse index resident
+        // (no-ops in eager mode).
+        ensureSectorMaterialized_(sector_idx);
+        ensureSectorReverseIndex_(sector_idx);
         buildDenseLookupsIfAffordable_();
         SectorLookupHandle h;
         h.fallback = &state_to_sector_basis_[sector_idx];
@@ -833,6 +872,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         
         const size_t sector_dim = sectors_[sector_idx].basis_states.size();
         std::vector<Complex> result(sector_dim);
@@ -842,328 +882,9 @@ public:
         return result;
     }
 
-    // -----------------------------------------------------------------
-    // Matvec-unification Phase 2: per-sector MatVecOperator view.
-    //
-    // A StreamingSymmetryOperator is naturally multi-sector: each
-    // symmetry sector has its own Hamiltonian block and its own matvec
-    // (applySymmetrized(sector_idx, in, out)). It therefore cannot be
-    // a single MatVecOperator -- instead it MANUFACTURES them on demand
-    // via the lightweight SectorView wrapper below.
-    //
-    // Usage:
-    //
-    //     StreamingSymmetryOperator H(...);
-    //     H.generateSymmetrySectorsStreaming(dir);
-    //     for (std::size_t k = 0; k < H.num_sectors(); ++k) {
-    //         auto Hk = H.sector(k);                  // owns a SectorView
-    //         lanczos(*Hk, num_eigenvalues, ...);     // solver sees a
-    //                                                 // standard
-    //                                                 // MatVecOperator
-    //     }
-    //
-    // The view does not own the underlying operator -- the caller must
-    // keep the StreamingSymmetryOperator alive for the view's lifetime.
-    // -----------------------------------------------------------------
-    class SectorView final : public ed::LinearOperator {
-    public:
-        SectorView(const StreamingSymmetryOperator& op, std::size_t sector_idx)
-            : op_(&op), sector_idx_(sector_idx)
-        {
-            if (sector_idx >= op.sectors_.size()) {
-                throw std::out_of_range(
-                    "StreamingSymmetryOperator::SectorView: sector_idx out of range");
-            }
-            dim_ = op.sectors_[sector_idx].basis_states.size();
-        }
-
-        void apply(const ed::matvec::Complex* in,
-                   ed::matvec::Complex* out,
-                   std::size_t size) const override
-        {
-            check_size(size);
-            if (StreamingSymmetryOperator::useLegacySymmetricMatvec()) {
-                op_->applySymmetrized(sector_idx_, in, out);
-            } else {
-                op_->applySymmetrizedUnified(sector_idx_, in, out);
-            }
-        }
-
-        [[nodiscard]] std::size_t dim() const override { return dim_; }
-        [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-            return ed::matvec::MemorySpace::Host;
-        }
-        [[nodiscard]] bool is_hermitian() const override { return true; }
-        [[nodiscard]] std::string description() const override {
-            return "StreamingSymmetrySectorView(sector="
-                + std::to_string(sector_idx_) + ", dim="
-                + std::to_string(dim_) + ")";
-        }
-
-        // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-        // (May 2026): advertise device-matvec capability when
-        // WITH_CUDA was set at build time, so ``select_backend`` picks
-        // ``CudaBackend`` for this view. The host operator stays at
-        // ``MemorySpace::Host`` (the view IS host-resident); the
-        // capability flag is the contract that ``bind_cuda()`` lazily
-        // builds a GPU mirror.
-        //
-        // Opt-out gate (Phase A of the "Backend x Symmetries x
-        // Workflows" plan, May 2026): the real lazy GPU mirror is now
-        // in ``streaming_symmetry_gpu_mirror.cu``, so we default
-        // ``supports_device_matvec`` to TRUE on every WITH_CUDA build.
-        // Set ``ED_GPU_SYMMETRY_MIRROR=0`` to force the legacy CPU
-        // route (useful for bisection if a regression turns up).
-        [[nodiscard]] ed::Geometry geometry() const override {
-            ed::Geometry g;
-            g.local_dim    = this->dim();
-            g.global_dim   = this->global_dim();
-            g.local_offset = 0;
-            g.memory_space = this->memory_space();
-#ifdef WITH_CUDA
-            static const bool kGpuMirrorEnabled = []{
-                const char* e = std::getenv("ED_GPU_SYMMETRY_MIRROR");
-                if (e == nullptr) return true;          // default ON
-                if (e[0] == '\0') return true;          // empty -> ON
-                if (e[0] == '0' && e[1] == '\0') return false;  // "0" -> OFF
-                return true;                            // any other value -> ON
-            }();
-            g.supports_device_matvec = kGpuMirrorEnabled;
-#endif
-#ifdef WITH_MPI
-            g.comm = MPI_COMM_NULL;
-#endif
-            return g;
-        }
-
-        [[nodiscard]] std::size_t sector_index() const noexcept { return sector_idx_; }
-
-        // ----------------------------------------------------------
-        // Wave A1 (May 2026): real-Hermitian fast-path overrides.
-        //
-        // A sector view is real-Hermitian-capable iff the underlying
-        // Hamiltonian is real AND every orbit coefficient in that
-        // sector is real (within tol). Cached on the parent operator
-        // via ``isSectorReal``. When this returns true the
-        // orchestrator dispatches through ``lanczos_real`` (a 30-50%
-        // win on the GS lane) instead of the unified complex
-        // ``lanczos_kernel<CpuBackend>``.
-        //
-        // Non-real irreps (e.g. k != 0 translation sectors) fall back
-        // to the complex path transparently.
-        // ----------------------------------------------------------
-        [[nodiscard]] bool is_real_hermitian() const noexcept override {
-            try {
-                return op_->isSectorReal(sector_idx_);
-            } catch (...) {
-                return false;
-            }
-        }
-
-        void apply_real(const double* in, double* out,
-                        std::size_t size) const {
-            check_size(size);
-            if (StreamingSymmetryOperator::useLegacySymmetricMatvec()) {
-                op_->applySymmetrizedReal(sector_idx_, in, out);
-            } else {
-                op_->applySymmetrizedUnifiedReal(sector_idx_, in, out);
-            }
-        }
-
-        [[nodiscard]] RealMatvecFn bind_real_cpu() const override {
-            return [this](const double* in, double* out, std::size_t n) {
-                this->apply_real(in, out, n);
-            };
-        }
-
-        // ----------------------------------------------------------
-        // bind_<Backend> overrides (Wave A2 -- Full unified-interface
-        // collapse, May 2026).
-        //
-        // SectorView is host-resident; `apply()` calls
-        // `op_->applySymmetrized(sector_idx, in, out)` which is the
-        // host-side symmetry-projected matvec. `bind_cpu` is the
-        // supported lane. The GPU-side symmetrized apply
-        // (`GPUSymmetrizedOperator::matVecGPU`, defined in
-        // src/solvers/gpu/gpu_symmetrized_operator.cu) is a separate
-        // type with its own term storage; integrating it into
-        // SectorView::bind_cuda would require holding a
-        // GPUSymmetrizedOperator alongside the host view, which is
-        // out of scope for this wave. Callers needing the GPU lane
-        // construct GPUSymmetrizedOperator directly today.
-        // ----------------------------------------------------------
-        [[nodiscard]] MatvecFn bind_cpu() const override {
-            return [this](const ed::matvec::Complex* in,
-                          ed::matvec::Complex* out, std::size_t n) {
-                this->apply(in, out, n);
-            };
-        }
-        // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-        // (May 2026): lazy GPU mirror. The parent
-        // StreamingSymmetryOperator lazily builds (and caches) a
-        // GPUSymmetrizedOperator for this sector on first call and
-        // returns a MatvecFn that runs the GPU matvec directly on
-        // device pointers. ``select_backend`` picks ``CudaBackend``
-        // because the geometry's ``supports_device_matvec`` flag is
-        // set true on this view (see ``geometry()`` override below).
-        //
-        // Without WITH_CUDA the parent helper throws
-        // ``std::logic_error`` and ``select_backend`` falls back to
-        // CpuBackend anyway (have_cuda() returns false), so this is
-        // safe -- but the throw is loud if a caller invokes
-        // bind_cuda directly on a non-CUDA build.
-        [[nodiscard]] MatvecFn bind_cuda() const override {
-            return op_->bind_cuda_for_sector(sector_idx_);
-        }
-        [[nodiscard]] MatvecFn bind_mpi() const override {
-            throw std::runtime_error(
-                "StreamingSymmetryOperator::SectorView: bind_mpi() is "
-                "not supported -- for the MPI lane use "
-                "ed::distributed::DistributedSymmetryOperator.");
-        }
-        [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
-            throw std::runtime_error(
-                "StreamingSymmetryOperator::SectorView: bind_mpi_cuda() "
-                "is not supported.");
-        }
-
-        // ----------------------------------------------------------
-        // Phase 3 of the "Unified CPU/GPU symmetry architecture"
-        // plan (May 2026): batched multi-column matvec.
-        //
-        // KPM-DOS (R random vectors), Block Lanczos (b columns), and
-        // FTLM all drive a sequence of B independent matvecs at each
-        // outer iteration. The unified ``apply_terms<SymmetryBasisPolicy>``
-        // internal OpenMP team fires only when ``dim >= max_threads
-        // * 1024`` (it's keyed on ``par_threshold`` in
-        // ``term_kernels.h``). For symmetry sectors at production N
-        // (12-14), the per-sector dim is usually well below that --
-        // so the inner OMP region is serial, and the existing
-        // single-column loop leaves all but one core idle.
-        //
-        // This override parallelizes across the batch dimension when
-        // the inner OMP would not fire (small sector). Each thread
-        // owns a column; the per-column work is itself serial. For
-        // large sectors we keep the inner-OMP path (the team picks
-        // up many orbits at once) and the outer loop is serial to
-        // avoid oversubscription.
-        //
-        // Pre-warming: ``commitPendingTransforms`` is called once
-        // outside the parallel region so concurrent matvecs observe
-        // a stable SoA term cache. ``makeSectorLookup_`` is private,
-        // but its dense-lookup build is triggered by any prior
-        // ``applySymmetrized*`` call and amortized over the
-        // operator's lifetime; if this is the very first matvec on
-        // the sector we run column 0 serially first.
-        // ----------------------------------------------------------
-        void apply_batch(const ed::matvec::Complex* in_block,
-                         ed::matvec::Complex* out_block,
-                         std::size_t dim,
-                         std::size_t batch) const override {
-            check_size(dim);
-            if (batch == 0) return;
-            const bool legacy =
-                StreamingSymmetryOperator::useLegacySymmetricMatvec();
-
-            // Pre-warm SoA term cache so concurrent matvecs are safe.
-            op_->commitPendingTransforms();
-
-            auto run_column = [&](std::size_t b) {
-                if (legacy) {
-                    op_->applySymmetrized(sector_idx_,
-                                          in_block + b * dim,
-                                          out_block + b * dim);
-                } else {
-                    op_->applySymmetrizedUnified(sector_idx_,
-                                                 in_block + b * dim,
-                                                 out_block + b * dim);
-                }
-            };
-
-            // Run column 0 serially to ensure the sector lookup +
-            // any lazy first-call state is built.
-            run_column(0);
-            if (batch == 1) return;
-
-#ifdef _OPENMP
-            const std::size_t par_threshold =
-                static_cast<std::size_t>(omp_get_max_threads()) * 1024ULL;
-            const bool batch_parallel = (dim < par_threshold);
-#else
-            const bool batch_parallel = false;
-#endif
-
-            if (batch_parallel) {
-#ifdef _OPENMP
-                #pragma omp parallel for schedule(dynamic, 1)
-#endif
-                for (std::size_t b = 1; b < batch; ++b) {
-                    run_column(b);
-                }
-            } else {
-                // Large sectors: inner OMP team handles parallelism;
-                // outer loop is serial to avoid nested teams.
-                for (std::size_t b = 1; b < batch; ++b) {
-                    run_column(b);
-                }
-            }
-        }
-
-        void apply_batch_real(const double* in_block,
-                              double* out_block,
-                              std::size_t dim,
-                              std::size_t batch) const override {
-            check_size(dim);
-            if (batch == 0) return;
-            const bool legacy =
-                StreamingSymmetryOperator::useLegacySymmetricMatvec();
-
-            op_->commitPendingTransforms();
-            auto run_column = [&](std::size_t b) {
-                if (legacy) {
-                    op_->applySymmetrizedReal(sector_idx_,
-                                              in_block + b * dim,
-                                              out_block + b * dim);
-                } else {
-                    op_->applySymmetrizedUnifiedReal(sector_idx_,
-                                                     in_block + b * dim,
-                                                     out_block + b * dim);
-                }
-            };
-            run_column(0);
-            if (batch == 1) return;
-
-#ifdef _OPENMP
-            const std::size_t par_threshold =
-                static_cast<std::size_t>(omp_get_max_threads()) * 1024ULL;
-            const bool batch_parallel = (dim < par_threshold);
-            if (batch_parallel) {
-                #pragma omp parallel for schedule(dynamic, 1)
-                for (std::size_t b = 1; b < batch; ++b) {
-                    run_column(b);
-                }
-            } else {
-                for (std::size_t b = 1; b < batch; ++b) run_column(b);
-            }
-#else
-            for (std::size_t b = 1; b < batch; ++b) run_column(b);
-#endif
-        }
-
-    private:
-        const StreamingSymmetryOperator* op_;
-        std::size_t                      sector_idx_;
-        std::size_t                      dim_;
-    };
-
     /// Number of symmetry sectors after generateSymmetrySectorsStreaming().
     [[nodiscard]] std::size_t num_sectors() const noexcept {
         return sectors_.size();
-    }
-
-    /// MatVecOperator view of a single symmetry sector.
-    [[nodiscard]] std::unique_ptr<SectorView> sector(std::size_t sector_idx) const {
-        return std::make_unique<SectorView>(*this, sector_idx);
     }
 
     /**
@@ -1173,6 +894,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         return sectors_[sector_idx];
     }
     
@@ -1184,6 +906,12 @@ public:
     uint64_t getSectorDimension(size_t sector_idx) const {
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
+        }
+        // "stream sym sectors": dimension known from Pass 1.5 without
+        // materializing the orbit CSR.
+        if (sector_idx < symmetrized_block_ham_sizes.size()) {
+            return static_cast<uint64_t>(
+                symmetrized_block_ham_sizes[sector_idx]);
         }
         return sectors_[sector_idx].basis_states.size();
     }
@@ -1208,6 +936,9 @@ public:
         if (sector_idx >= state_to_sector_basis_.size()) {
             return ed::core::SortedUint64Index::kNotFound;
         }
+        // "stream sym sectors": ensure orbit CSR + reverse index resident.
+        ensureSectorMaterialized_(sector_idx);
+        ensureSectorReverseIndex_(sector_idx);
         return state_to_sector_basis_[sector_idx].find(s);
     }
 
@@ -1357,6 +1088,10 @@ public:
 
             // --- Per-sector data ---
             for (size_t si = 0; si < sectors_.size(); ++si) {
+                // "stream sym sectors": materialize on demand so saving in
+                // lazy mode does not serialize empty sectors (LRU-1 keeps
+                // peak bounded).
+                ensureSectorMaterialized_(si);
                 const auto& sector = sectors_[si];
                 std::string grp_name = "/orbit_basis/sector_"
                                        + std::to_string(si);
@@ -1721,6 +1456,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         const auto& sector = sectors_[sector_idx];
         size_t sector_dim = sector.basis_states.size();
         if (sym_vec.size() != sector_dim) {
@@ -2050,15 +1786,6 @@ private:
             if (valid) projectResult(s_prime, h_element);
         }
     }
-
-private:
-    // Per-sector cache of the "real-Hermitian sector" verdict; -1 means
-    // not-yet-computed, 0 means complex, 1 means real. Lazily filled by
-    // isSectorReal() on first call. Protected by a single mutex because
-    // the populate-once pattern means there is essentially zero
-    // contention after the first matvec.
-    mutable std::vector<int>   sector_real_cache_;
-    mutable std::mutex         sector_real_cache_mu_;
 };
 
 // ============================================================================
@@ -2082,26 +1809,41 @@ private:
  */
 class FixedSzStreamingSymmetryOperator : public FixedSzOperator {
 private:
-    std::vector<SymmetrySector> sectors_;
+    // Mutable so that the lazy per-sector orbit materialization below can
+    // (re)build sectors_[k].basis_states from inside const matvec / bind
+    // entry points. See the "Streaming sector materialization" block.
+    mutable std::vector<SymmetrySector> sectors_;
     
     // Lookup table: computational_state -> basis_idx_in_sector (one per sector).
     // Phase 3a #5: same SortedUint64Index swap as in StreamingSymmetryOperator
     // (see comment there). 16 B/entry vs ~32-40 B/entry for unordered_map.
     mutable std::vector<ed::core::SortedUint64Index> state_to_sector_basis_;
+
+    // ------------------------------------------------------------------
+    // Streaming sector materialization ("stream sym sectors" plan,
+    // Jun 2026). At N=32, n_up=16, |G|=8 the eager Pass 2 used to build
+    // every sector's orbit CSR (~115 GB) AND the CPU-only reverse index
+    // (~77 GB) simultaneously -> host OOM. We now keep only the cheap
+    // unique-orbit-rep list resident and build the orbit CSR for one
+    // sector on demand (LRU-1), freeing the previous one, and we build
+    // the reverse index lazily only when a CPU matvec actually needs it
+    // (the GPU mirror never reads it).
+    //
+    // ``lazy_sectors_enabled_`` is decided at generation time from the
+    // estimated all-sector footprint; small systems stay fully eager so
+    // the dense-lookup fast path and existing test behavior are
+    // unchanged.
+    // ------------------------------------------------------------------
+    std::vector<uint64_t>        unique_orbit_reps_;       // Pass 1 result (kept resident)
+    bool                         lazy_sectors_enabled_ = false;
+    mutable std::atomic<std::ptrdiff_t> materialized_sector_{-1};
+    mutable std::vector<char>    reverse_index_built_;     // per-sector flag
+    mutable std::mutex           materialize_mu_;
     
     mutable ShardedOrbitCache state_to_orbit_cache_;  // Striped-lock cache (16 shards) -- lower contention than single-mutex map
     
     // Cached group size from HDF5 load (allows skipping symmetry_info loading)
     uint64_t cached_group_size_ = 0;
-
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror cache. See the twin block in
-    // ``StreamingSymmetryOperator`` for design notes. Mirror type is
-    // ``GPUFixedSzSymmetryOperator`` (cell 4B, NEW in Phase 1c). When
-    // Phase 1c lands the mirror is a true 4B device cell; until then
-    // ``bind_cuda_for_sector`` throws ``std::logic_error`` even when
-    // WITH_CUDA is set.
-    mutable std::shared_ptr<void> gpu_sector_cache_;
 
 public:
     FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, int64_t n_up)
@@ -2110,35 +1852,6 @@ public:
             throw std::runtime_error("FixedSzStreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): lazy GPU mirror entry point. Mirrors the twin in
-    // ``StreamingSymmetryOperator`` -- defined in
-    // src/core/streaming_symmetry_gpu_mirror.cu when WITH_CUDA is set.
-    //
-    // Currently throws ``std::logic_error`` because the Sz+Symmetry
-    // GPU cell (4B, ``GPUFixedSzSymmetryOperator``) is a Phase 1c
-    // deliverable; the parent ``GPUFixedSzOperator`` lacks the
-    // orbit-walk machinery the symmetry projection needs. Until then,
-    // ``select_backend`` falls back to CpuBackend on the FixedSz
-    // SectorView because that view does not flip
-    // ``supports_device_matvec`` to true.
-    // ------------------------------------------------------------------
-    [[nodiscard]] ed::LinearOperator::MatvecFn
-    bind_cuda_for_sector(std::size_t sector_idx) const;
-
-    void invalidateGpuSectorCache() const noexcept {
-        gpu_sector_cache_.reset();
-    }
-
-    // Phase A of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): mirror of the override in StreamingSymmetryOperator
-    // so term-list mutation evicts the cached GPU snapshot.
-    void invalidateMatrixCaches() override {
-        FixedSzOperator::invalidateMatrixCaches();
-        invalidateGpuSectorCache();
     }
 
     /**
@@ -2183,11 +1896,13 @@ public:
         auto pass1_start = std::chrono::high_resolution_clock::now();
         
         // Single streaming pass: compute rep(basis) and dedupe without storing
-        // orbit_reps[num_basis] (~8 bytes per Sz-sector basis element).
+        // orbit_reps[num_basis] (~8 bytes per Sz-sector basis element). The
+        // deduped rep list is kept resident in ``unique_orbit_reps_`` so the
+        // lazy per-sector materialization can rebuild orbit CSR on demand.
         const size_t num_basis = basis_states_.size();
         std::unordered_set<uint64_t> seen_reps;
-        std::vector<uint64_t> unique_orbit_reps;
-        unique_orbit_reps.reserve(num_basis / symmetry_info.max_clique.size() + 1);
+        unique_orbit_reps_.clear();
+        unique_orbit_reps_.reserve(num_basis / symmetry_info.max_clique.size() + 1);
         
         for (size_t i = 0; i < num_basis; ++i) {
             uint64_t basis = basis_states_[i];
@@ -2202,16 +1917,117 @@ public:
                 }
             }
             if (seen_reps.insert(rep).second) {
-                unique_orbit_reps.push_back(rep);
+                unique_orbit_reps_.push_back(rep);
             }
         }
+        std::unordered_set<uint64_t>().swap(seen_reps);  // free the dedupe set
         
         auto pass1_end = std::chrono::high_resolution_clock::now();
         double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
-        std::cout << " found " << unique_orbit_reps.size() << " unique orbits"
+        const size_t num_orbits = unique_orbit_reps_.size();
+        std::cout << " found " << num_orbits << " unique orbits"
                   << " (" << std::fixed << std::setprecision(1) << pass1_ms << " ms)" << std::endl;
-        
+
+        // Copy per-sector metadata (sector_id / quantum numbers / phase
+        // factors) up front -- cheap and needed by both eager and lazy modes.
+        for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+            const auto& sector_meta = symmetry_info.sectors[sector_idx];
+            auto& sector = sectors_[sector_idx];
+            sector.sector_id       = sector_meta.sector_id;
+            sector.quantum_numbers = sector_meta.quantum_numbers;
+            sector.phase_factors   = sector_meta.phase_factors;
+        }
+
         // =====================================================================
+        // Decide eager vs lazy ("stream sym sectors" plan, Jun 2026). Estimate
+        // the all-sector resident footprint (orbit CSR ~24 B/elem + reverse
+        // index ~16 B/elem) using the upper bound
+        //   total_orbit_elements ~ num_orbits * |G| * num_sectors.
+        // Small systems stay fully eager (build everything now) so the
+        // dense-lookup fast path and existing test behavior are unchanged.
+        // Large systems (e.g. N=32, n_up=16, |G|=8 -> ~192 GB) go lazy.
+        // =====================================================================
+        std::size_t lazy_budget_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;  // 4 GiB
+        if (const char* env = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
+            try { lazy_budget_bytes = std::stoull(env); } catch (...) {}
+        }
+        const std::size_t group_sz =
+            std::max<std::size_t>(1, symmetry_info.max_clique.size());
+        const long double est_elems =
+            static_cast<long double>(num_orbits) * group_sz * num_sectors;
+        const long double est_bytes = est_elems * (24.0L + 16.0L);
+        bool force_lazy = false, force_eager = false;
+        if (const char* env = std::getenv("ED_SYM_LAZY_SECTORS")) {
+            if (env[0] == '1') force_lazy = true;
+            else if (env[0] == '0') force_eager = true;
+        }
+        lazy_sectors_enabled_ = !force_eager
+            && (force_lazy
+                || est_bytes > static_cast<long double>(lazy_budget_bytes));
+        reverse_index_built_.assign(num_sectors,
+                                    lazy_sectors_enabled_ ? char(0) : char(1));
+
+        if (lazy_sectors_enabled_) {
+            // -----------------------------------------------------------
+            // LAZY MODE: Pass 1.5 -- norm-only dimension scan. Walk each
+            // orbit per sector to count valid (norm_sq > tol) orbits to
+            // get the per-sector dimension WITHOUT storing the orbit CSR
+            // or the reverse index. O(1) extra memory. The orbit CSR is
+            // then built on demand (LRU-1) in materializeSectorOrbits_,
+            // and the CPU reverse index lazily in makeSectorLookup_.
+            // -----------------------------------------------------------
+            std::cout << "Pass 1.5 (lazy streaming; est. eager footprint "
+                      << std::fixed << std::setprecision(1)
+                      << static_cast<double>(est_bytes
+                             / (1024.0L * 1024.0L * 1024.0L))
+                      << " GiB > "
+                      << (lazy_budget_bytes / (1024.0 * 1024.0 * 1024.0))
+                      << " GiB budget): scanning " << num_sectors
+                      << " sector dimensions..." << std::endl;
+            auto p15_start = std::chrono::high_resolution_clock::now();
+            for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+                const auto& sector = sectors_[sector_idx];
+                std::atomic<size_t> valid_count{0};
+                #pragma omp parallel for schedule(dynamic, 64)
+                for (size_t oi = 0; oi < num_orbits; ++oi) {
+                    std::vector<uint64_t> elements;
+                    std::vector<Complex> coefficients;
+                    double norm_sq = 0.0;
+                    computeOrbitDataFixedSz(unique_orbit_reps_[oi],
+                                            sector.phase_factors,
+                                            elements, coefficients, norm_sq);
+                    if (norm_sq > 1e-10) {
+                        valid_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                symmetrized_block_ham_sizes[sector_idx] =
+                    static_cast<int>(valid_count.load());
+            }
+            auto p15_end = std::chrono::high_resolution_clock::now();
+            double p15_ms =
+                std::chrono::duration<double, std::milli>(p15_end - p15_start)
+                    .count();
+
+            size_t total_basis = 0;
+            for (int d : symmetrized_block_ham_sizes)
+                total_basis += static_cast<size_t>(d);
+            std::cout << "\n=== Matrix-Free Sector Generation Complete (lazy) ==="
+                      << std::endl;
+            std::cout << "Total sectors: " << num_sectors << std::endl;
+            std::cout << "Total symmetrized basis: " << total_basis << std::endl;
+            std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1)
+                      << pass1_ms << " ms" << std::endl;
+            std::cout << "Pass 1.5 time: " << std::fixed << std::setprecision(1)
+                      << p15_ms << " ms" << std::endl;
+            std::cout << "Orbit CSR + reverse index are built one sector at a "
+                         "time (LRU-1) at solve/bind time." << std::endl;
+            return;
+        }
+
+        // =====================================================================
+        // EAGER MODE (small systems): original behavior -- build every
+        // sector's orbit CSR + reverse index now.
+        //
         // PASS 2 (parallelizable): For each sector, compute orbit data for
         // each unique orbit rep.  The orbit data (elements + coefficients) is
         // phase-factor-dependent, so we must do this per sector.  However the
@@ -2221,16 +2037,10 @@ public:
                   << " sectors..." << std::endl;
         
         auto pass2_start = std::chrono::high_resolution_clock::now();
-        const size_t num_orbits = unique_orbit_reps.size();
         size_t total_orbit_elements = 0;
         
         for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
-            const auto& sector_meta = symmetry_info.sectors[sector_idx];
             auto& sector = sectors_[sector_idx];
-            
-            sector.sector_id = sector_meta.sector_id;
-            sector.quantum_numbers = sector_meta.quantum_numbers;
-            sector.phase_factors = sector_meta.phase_factors;
             
             // Parallel orbit data computation for this sector
             // Each thread computes orbit data for a subset of orbit reps
@@ -2246,7 +2056,7 @@ public:
             
             #pragma omp parallel for schedule(dynamic, 64)
             for (size_t oi = 0; oi < num_orbits; ++oi) {
-                uint64_t rep = unique_orbit_reps[oi];
+                uint64_t rep = unique_orbit_reps_[oi];
                 std::vector<uint64_t> elements;
                 std::vector<Complex> coefficients;
                 double norm_sq = 0.0;
@@ -2328,6 +2138,135 @@ public:
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * fixed_sz_dim_)))
                   << "%" << std::endl;
     }
+
+    // ------------------------------------------------------------------
+    // Streaming sector materialization helpers ("stream sym sectors").
+    // Active only when ``lazy_sectors_enabled_`` is true. In eager mode
+    // these are cheap no-ops (sectors already materialized).
+    // ------------------------------------------------------------------
+
+    /// Build sectors_[k].basis_states orbit CSR from the resident
+    /// ``unique_orbit_reps_`` for a single sector. Does NOT build the CPU
+    /// reverse index (that is lazy in makeSectorLookup_).
+    void materializeSectorOrbits_(std::size_t k) const {
+        auto& sector = sectors_[k];
+        if (!sector.basis_states.empty()) return;  // already resident
+        const size_t num_orbits = unique_orbit_reps_.size();
+
+        struct OrbitResult {
+            uint64_t orbit_rep;
+            std::vector<uint64_t> orbit_elements;
+            std::vector<Complex> orbit_coefficients;
+            double norm;
+        };
+        std::vector<OrbitResult> valid_orbits(num_orbits);
+        std::vector<char> orbit_valid(num_orbits, 0);
+
+        #pragma omp parallel for schedule(dynamic, 64)
+        for (size_t oi = 0; oi < num_orbits; ++oi) {
+            std::vector<uint64_t> elements;
+            std::vector<Complex> coefficients;
+            double norm_sq = 0.0;
+            computeOrbitDataFixedSz(unique_orbit_reps_[oi],
+                                    sector.phase_factors,
+                                    elements, coefficients, norm_sq);
+            if (norm_sq > 1e-10) {
+                valid_orbits[oi].orbit_rep = unique_orbit_reps_[oi];
+                valid_orbits[oi].orbit_elements = std::move(elements);
+                valid_orbits[oi].orbit_coefficients = std::move(coefficients);
+                valid_orbits[oi].norm = std::sqrt(norm_sq);
+                orbit_valid[oi] = 1;
+            }
+        }
+
+        sector.basis_states.clear();
+        if (k < symmetrized_block_ham_sizes.size()) {
+            sector.basis_states.reserve(
+                static_cast<size_t>(symmetrized_block_ham_sizes[k]));
+        }
+        for (size_t oi = 0; oi < num_orbits; ++oi) {
+            if (!orbit_valid[oi]) continue;
+            auto& orb = valid_orbits[oi];
+            SymBasisState state(orb.orbit_rep, sector.quantum_numbers, orb.norm);
+            state.orbit_elements = std::move(orb.orbit_elements);
+            state.orbit_coefficients = std::move(orb.orbit_coefficients);
+            state.sortOrbit();
+            sector.basis_states.push_back(std::move(state));
+        }
+    }
+
+    /// Free a sector's orbit CSR + reverse index + dense lookup so the
+    /// resident footprint stays bounded to a single sector (LRU-1).
+    void releaseSectorOrbits_(std::size_t k) const {
+        if (k >= sectors_.size()) return;
+        std::vector<SymBasisState>().swap(sectors_[k].basis_states);
+        if (k < state_to_sector_basis_.size()) {
+            state_to_sector_basis_[k] = ed::core::SortedUint64Index{};
+        }
+        if (k < sector_lookup_dense_.size()) {
+            std::vector<std::int32_t>().swap(sector_lookup_dense_[k]);
+        }
+        if (k < reverse_index_built_.size()) reverse_index_built_[k] = 0;
+        // Dense lookup (if it was built) is keyed across all sectors; force
+        // a rebuild decision next time.
+        dense_lookup_state_.store(0, std::memory_order_release);
+    }
+
+    /// LRU-1 chokepoint: ensure sector ``k`` orbit CSR is resident,
+    /// releasing the previously materialized sector. Cheap fast path when
+    /// ``k`` is already the resident sector (or in eager mode).
+    void ensureSectorMaterialized_(std::size_t k) const {
+        if (!lazy_sectors_enabled_) return;
+        if (materialized_sector_.load(std::memory_order_acquire)
+                == static_cast<std::ptrdiff_t>(k)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(materialize_mu_);
+        if (materialized_sector_.load(std::memory_order_relaxed)
+                == static_cast<std::ptrdiff_t>(k)) {
+            return;
+        }
+        const std::ptrdiff_t prev =
+            materialized_sector_.load(std::memory_order_relaxed);
+        if (prev >= 0) releaseSectorOrbits_(static_cast<std::size_t>(prev));
+        materializeSectorOrbits_(k);
+        materialized_sector_.store(static_cast<std::ptrdiff_t>(k),
+                                   std::memory_order_release);
+        // Bounded-peak diagnostic: report the resident sector footprint so a
+        // cluster log shows only one sector's orbit CSR alive at a time.
+        std::size_t elems = 0;
+        for (const auto& bs : sectors_[k].basis_states)
+            elems += bs.orbit_elements.size();
+        const double gib =
+            static_cast<double>(elems) * (sizeof(uint64_t) + sizeof(Complex))
+            / (1024.0 * 1024.0 * 1024.0);
+        std::cout << "[lazy-sym] materialized sector " << k << " (dim="
+                  << sectors_[k].basis_states.size() << ", " << elems
+                  << " orbit elems, ~" << std::fixed << std::setprecision(2)
+                  << gib << " GiB orbit CSR resident; previous sector "
+                  << (prev >= 0 ? std::to_string(prev) : std::string("none"))
+                  << " freed)" << std::endl;
+    }
+
+    /// Build the CPU reverse index (state -> sector-basis index) for a
+    /// single sector on first use. No-op in eager mode (already built at
+    /// generation) and on repeat calls for the same sector.
+    void ensureSectorReverseIndex_(std::size_t k) const {
+        if (!lazy_sectors_enabled_) return;
+        if (k < reverse_index_built_.size() && reverse_index_built_[k]) return;
+        std::lock_guard<std::mutex> lock(materialize_mu_);
+        if (k < reverse_index_built_.size() && reverse_index_built_[k]) return;
+        const auto& sector = sectors_[k];
+        auto& idx = state_to_sector_basis_[k];
+        idx = ed::core::SortedUint64Index{};
+        for (size_t j = 0; j < sector.basis_states.size(); ++j) {
+            for (uint64_t elem : sector.basis_states[j].orbit_elements) {
+                idx[elem] = j;
+            }
+        }
+        idx.finalize();
+        if (k < reverse_index_built_.size()) reverse_index_built_[k] = 1;
+    }
     
     /**
      * @brief Matrix-free Hamiltonian application in symmetrized sector
@@ -2348,6 +2287,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         
         const auto& sector = sectors_[sector_idx];
         const size_t sector_dim = sector.basis_states.size();
@@ -2404,101 +2344,6 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Wave A1 (May 2026): real-arithmetic twin of
-    // ``applySymmetrizedFixedSz`` (see ``StreamingSymmetryOperator::
-    // applySymmetrizedReal`` for design notes). Behaviour is undefined
-    // when ``isSectorReal(sector_idx) == false``; callers must gate via
-    // ``SectorView::is_real_hermitian()``.
-    // -----------------------------------------------------------------
-    void applySymmetrizedFixedSzReal(size_t sector_idx, const double* in,
-                                     double* out) const {
-        if (sector_idx >= sectors_.size()) {
-            throw std::runtime_error("Invalid sector index");
-        }
-
-        const auto& sector = sectors_[sector_idx];
-        const size_t sector_dim = sector.basis_states.size();
-        const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
-
-        std::fill(out, out + sector_dim, 0.0);
-
-        const double group_size = static_cast<double>(getGroupSize());
-        const double group_norm = 1.0 / group_size;
-
-        #pragma omp parallel if(sector_dim > 100)
-        {
-            // Wave A4 (May 2026): thread-local scratch.
-            static thread_local std::vector<double> local_out;
-            local_out.assign(sector_dim, 0.0);
-
-            #pragma omp for schedule(dynamic, 4)
-            for (size_t j = 0; j < sector_dim; ++j) {
-                const double c_j = in[j];
-                if (std::abs(c_j) < 1e-15) continue;
-
-                const auto& state_j = sector.basis_states[j];
-                const double norm_j = state_j.norm;
-
-                for (size_t orbit_idx = 0;
-                     orbit_idx < state_j.orbit_elements.size(); ++orbit_idx) {
-                    const uint64_t s = state_j.orbit_elements[orbit_idx];
-                    const double alpha_s =
-                        state_j.orbit_coefficients[orbit_idx].real();
-                    if (std::abs(alpha_s) < 1e-15) continue;
-
-                    applyHamiltonianTermsReal(
-                        s, c_j * alpha_s / norm_j,
-                        sector, lookup, group_norm, local_out);
-                }
-            }
-
-            #pragma omp critical
-            {
-                for (size_t k = 0; k < sector_dim; ++k) {
-                    out[k] += local_out[k];
-                }
-            }
-        }
-    }
-
-    /// Whether sector ``sector_idx`` is real-arithmetic-capable. Mirrors
-    /// ``StreamingSymmetryOperator::isSectorReal``.
-    bool isSectorReal(size_t sector_idx, double tol = 1e-12) const {
-        if (sector_idx >= sectors_.size()) return false;
-        {
-            std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-            if (sector_real_cache_.size() != sectors_.size()) {
-                sector_real_cache_.assign(sectors_.size(), -1);
-            }
-            if (sector_real_cache_[sector_idx] >= 0) {
-                return sector_real_cache_[sector_idx] != 0;
-            }
-        }
-
-        if (!const_cast<FixedSzStreamingSymmetryOperator*>(this)
-                ->isReal(tol)) {
-            std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-            sector_real_cache_[sector_idx] = 0;
-            return false;
-        }
-
-        bool all_real = true;
-        for (const auto& bs : sectors_[sector_idx].basis_states) {
-            for (const Complex& c : bs.orbit_coefficients) {
-                if (std::abs(c.imag()) > tol) {
-                    all_real = false;
-                    break;
-                }
-            }
-            if (!all_real) break;
-        }
-
-        std::lock_guard<std::mutex> lock(sector_real_cache_mu_);
-        sector_real_cache_[sector_idx] = all_real ? 1 : 0;
-        return all_real;
-    }
-
-    // -----------------------------------------------------------------
     // Wave 1 (May 2026, "Unify all 16 matvec cells" plan): unified
     // Sz+symmetry matvec via ``apply_terms<SymmetryBasisPolicy, Scalar>``.
     // See the twin block in ``StreamingSymmetryOperator`` for the
@@ -2528,6 +2373,15 @@ private:
         if (dense_lookup_state_.load(std::memory_order_acquire) != 0) return;
         std::lock_guard<std::mutex> lock(dense_lookup_build_mu_);
         if (dense_lookup_state_.load(std::memory_order_acquire) != 0) return;
+
+        // "stream sym sectors": the cross-sector dense lookup assumes every
+        // sector's reverse index is resident simultaneously, which is exactly
+        // what lazy mode avoids. Disable it -- the per-sector SortedUint64Index
+        // fallback (built lazily in makeSectorLookup_) is used instead.
+        if (lazy_sectors_enabled_) {
+            dense_lookup_state_.store(2, std::memory_order_release);
+            return;
+        }
 
         if (sectors_.empty() || state_to_sector_basis_.empty()) {
             dense_lookup_state_.store(2, std::memory_order_release);
@@ -2572,6 +2426,11 @@ private:
     }
 
     SectorLookupHandle makeSectorLookup_(std::size_t sector_idx) const {
+        // "stream sym sectors": ensure the sector's orbit CSR is resident
+        // (LRU-1) and build the CPU reverse index for it on first use. Both
+        // are no-ops in eager mode.
+        ensureSectorMaterialized_(sector_idx);
+        ensureSectorReverseIndex_(sector_idx);
         buildDenseLookupsIfAffordable_();
         SectorLookupHandle h;
         h.fallback = &state_to_sector_basis_[sector_idx];
@@ -2588,6 +2447,7 @@ public:
     
     std::vector<Complex> applySymmetrizedFixedSz(size_t sector_idx,
                                                  const std::vector<Complex>& vec) const {
+        ensureSectorMaterialized_(sector_idx);
         const size_t sector_dim = sectors_[sector_idx].basis_states.size();
         std::vector<Complex> result(sector_dim);
         applySymmetrizedFixedSz(sector_idx, vec.data(), result.data());
@@ -2631,241 +2491,25 @@ public:
     // threshold so we defer until the small-N regime matters.
     // -----------------------------------------------------------------
 
-    // -----------------------------------------------------------------
-    // Matvec-unification Phase 2: per-sector MatVecOperator view.
-    // Symmetric to StreamingSymmetryOperator::SectorView (see the long
-    // comment there); the only difference is that this view forwards to
-    // applySymmetrizedFixedSz instead of applySymmetrized.
-    // -----------------------------------------------------------------
-    class SectorView final : public ed::LinearOperator {
-    public:
-        SectorView(const FixedSzStreamingSymmetryOperator& op,
-                   std::size_t sector_idx)
-            : op_(&op), sector_idx_(sector_idx)
-        {
-            if (sector_idx >= op.sectors_.size()) {
-                throw std::out_of_range(
-                    "FixedSzStreamingSymmetryOperator::SectorView: "
-                    "sector_idx out of range");
-            }
-            dim_ = op.sectors_[sector_idx].basis_states.size();
-        }
-
-        void apply(const ed::matvec::Complex* in,
-                   ed::matvec::Complex* out,
-                   std::size_t size) const override
-        {
-            check_size(size);
-            if (StreamingSymmetryOperator::useLegacySymmetricMatvec()) {
-                op_->applySymmetrizedFixedSz(sector_idx_, in, out);
-            } else {
-                op_->applySymmetrizedFixedSzUnified(sector_idx_, in, out);
-            }
-        }
-
-        [[nodiscard]] std::size_t dim() const override { return dim_; }
-        [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-            return ed::matvec::MemorySpace::Host;
-        }
-        [[nodiscard]] bool is_hermitian() const override { return true; }
-        [[nodiscard]] std::string description() const override {
-            return "FixedSzStreamingSymmetrySectorView(sector="
-                + std::to_string(sector_idx_) + ", dim="
-                + std::to_string(dim_) + ")";
-        }
-
-        // Phase A of the "Backend x Symmetries x Workflows" plan
-        // (May 2026): advertise device-matvec capability so
-        // ``select_backend`` picks ``CudaBackend`` for this view, then
-        // the ``bind_cuda()`` override below delegates to the parent's
-        // lazy GPU mirror. Same opt-out gate as the non-Sz variant:
-        // ``ED_GPU_SYMMETRY_MIRROR=0`` forces the CPU fallback.
-        [[nodiscard]] ed::Geometry geometry() const override {
-            ed::Geometry g;
-            g.local_dim    = this->dim();
-            g.global_dim   = this->global_dim();
-            g.local_offset = 0;
-            g.memory_space = this->memory_space();
-#ifdef WITH_CUDA
-            static const bool kGpuMirrorEnabled = []{
-                const char* e = std::getenv("ED_GPU_SYMMETRY_MIRROR");
-                if (e == nullptr) return true;
-                if (e[0] == '\0') return true;
-                if (e[0] == '0' && e[1] == '\0') return false;
-                return true;
-            }();
-            g.supports_device_matvec = kGpuMirrorEnabled;
-#endif
-#ifdef WITH_MPI
-            g.comm = MPI_COMM_NULL;
-#endif
-            return g;
-        }
-
-        [[nodiscard]] std::size_t sector_index() const noexcept { return sector_idx_; }
-
-        // Wave A1 (May 2026): real-Hermitian fast-path overrides. See
-        // the twin block in ``StreamingSymmetryOperator::SectorView``
-        // for design notes.
-        [[nodiscard]] bool is_real_hermitian() const noexcept override {
-            try {
-                return op_->isSectorReal(sector_idx_);
-            } catch (...) {
-                return false;
-            }
-        }
-
-        void apply_real(const double* in, double* out,
-                        std::size_t size) const {
-            check_size(size);
-            if (StreamingSymmetryOperator::useLegacySymmetricMatvec()) {
-                op_->applySymmetrizedFixedSzReal(sector_idx_, in, out);
-            } else {
-                op_->applySymmetrizedFixedSzUnifiedReal(sector_idx_, in, out);
-            }
-        }
-
-        [[nodiscard]] RealMatvecFn bind_real_cpu() const override {
-            return [this](const double* in, double* out, std::size_t n) {
-                this->apply_real(in, out, n);
-            };
-        }
-
-        // Phase 3 of the "Unified CPU/GPU symmetry architecture"
-        // plan (May 2026): batched multi-column matvec. See twin in
-        // ``StreamingSymmetryOperator::SectorView`` for design notes.
-        // For small Sz+symmetry sectors (which dominate the
-        // production regime at N=12-14), the outer batch loop is
-        // parallelized across OMP threads.
-        void apply_batch(const ed::matvec::Complex* in_block,
-                         ed::matvec::Complex* out_block,
-                         std::size_t dim,
-                         std::size_t batch) const override {
-            check_size(dim);
-            if (batch == 0) return;
-            const bool legacy =
-                StreamingSymmetryOperator::useLegacySymmetricMatvec();
-
-            op_->commitPendingTransforms();
-            auto run_column = [&](std::size_t b) {
-                if (legacy) {
-                    op_->applySymmetrizedFixedSz(sector_idx_,
-                                                 in_block + b * dim,
-                                                 out_block + b * dim);
-                } else {
-                    op_->applySymmetrizedFixedSzUnified(sector_idx_,
-                                                        in_block + b * dim,
-                                                        out_block + b * dim);
-                }
-            };
-            run_column(0);
-            if (batch == 1) return;
-
-#ifdef _OPENMP
-            const std::size_t par_threshold =
-                static_cast<std::size_t>(omp_get_max_threads()) * 1024ULL;
-            const bool batch_parallel = (dim < par_threshold);
-            if (batch_parallel) {
-                #pragma omp parallel for schedule(dynamic, 1)
-                for (std::size_t b = 1; b < batch; ++b) run_column(b);
-            } else {
-                for (std::size_t b = 1; b < batch; ++b) run_column(b);
-            }
-#else
-            for (std::size_t b = 1; b < batch; ++b) run_column(b);
-#endif
-        }
-
-        void apply_batch_real(const double* in_block,
-                              double* out_block,
-                              std::size_t dim,
-                              std::size_t batch) const override {
-            check_size(dim);
-            if (batch == 0) return;
-            const bool legacy =
-                StreamingSymmetryOperator::useLegacySymmetricMatvec();
-
-            op_->commitPendingTransforms();
-            auto run_column = [&](std::size_t b) {
-                if (legacy) {
-                    op_->applySymmetrizedFixedSzReal(sector_idx_,
-                                                     in_block + b * dim,
-                                                     out_block + b * dim);
-                } else {
-                    op_->applySymmetrizedFixedSzUnifiedReal(sector_idx_,
-                                                            in_block + b * dim,
-                                                            out_block + b * dim);
-                }
-            };
-            run_column(0);
-            if (batch == 1) return;
-
-#ifdef _OPENMP
-            const std::size_t par_threshold =
-                static_cast<std::size_t>(omp_get_max_threads()) * 1024ULL;
-            const bool batch_parallel = (dim < par_threshold);
-            if (batch_parallel) {
-                #pragma omp parallel for schedule(dynamic, 1)
-                for (std::size_t b = 1; b < batch; ++b) run_column(b);
-            } else {
-                for (std::size_t b = 1; b < batch; ++b) run_column(b);
-            }
-#else
-            for (std::size_t b = 1; b < batch; ++b) run_column(b);
-#endif
-        }
-
-        // Phase A of the "Backend x Symmetries x Workflows" plan
-        // (May 2026): bind_cpu/bind_cuda overrides for the Sz+symmetry
-        // sector view. The CPU lane delegates to ``apply`` (same as
-        // the non-Sz twin); the GPU lane delegates to the parent's
-        // lazy GPU mirror in ``bind_cuda_for_sector``. MPI lanes are
-        // unsupported here -- a Sz+symmetry MPI workflow uses
-        // ed::distributed::DistributedSymmetryOperator directly.
-        [[nodiscard]] MatvecFn bind_cpu() const override {
-            return [this](const ed::matvec::Complex* in,
-                          ed::matvec::Complex* out, std::size_t n) {
-                this->apply(in, out, n);
-            };
-        }
-        [[nodiscard]] MatvecFn bind_cuda() const override {
-            return op_->bind_cuda_for_sector(sector_idx_);
-        }
-        [[nodiscard]] MatvecFn bind_mpi() const override {
-            throw std::runtime_error(
-                "FixedSzStreamingSymmetryOperator::SectorView: bind_mpi() "
-                "is not supported -- use ed::distributed::"
-                "DistributedSymmetryOperator for the MPI lane.");
-        }
-        [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
-            throw std::runtime_error(
-                "FixedSzStreamingSymmetryOperator::SectorView: "
-                "bind_mpi_cuda() is not supported.");
-        }
-
-    private:
-        const FixedSzStreamingSymmetryOperator* op_;
-        std::size_t                             sector_idx_;
-        std::size_t                             dim_;
-    };
-
     /// Number of symmetry sectors after generation.
     [[nodiscard]] std::size_t num_sectors() const noexcept {
         return sectors_.size();
     }
 
-    /// MatVecOperator view of a single symmetry sector.
-    [[nodiscard]] std::unique_ptr<SectorView> sector(std::size_t sector_idx) const {
-        return std::make_unique<SectorView>(*this, sector_idx);
-    }
-
     const SymmetrySector& getSector(size_t sector_idx) const {
+        ensureSectorMaterialized_(sector_idx);
         return sectors_[sector_idx];
     }
     
     size_t getNumSectors() const { return sectors_.size(); }
     
     uint64_t getSectorDimension(size_t sector_idx) const {
+        // "stream sym sectors": dimension is known from Pass 1.5 without
+        // materializing the orbit CSR (eager mode: same value).
+        if (sector_idx < symmetrized_block_ham_sizes.size()) {
+            return static_cast<uint64_t>(
+                symmetrized_block_ham_sizes[sector_idx]);
+        }
         return sectors_[sector_idx].basis_states.size();
     }
 
@@ -2881,6 +2525,10 @@ public:
         if (sector_idx >= state_to_sector_basis_.size()) {
             return ed::core::SortedUint64Index::kNotFound;
         }
+        // "stream sym sectors": ensure the orbit CSR + reverse index for
+        // this sector are resident (no-ops in eager mode).
+        ensureSectorMaterialized_(sector_idx);
+        ensureSectorReverseIndex_(sector_idx);
         return state_to_sector_basis_[sector_idx].find(s);
     }
 
@@ -2958,6 +2606,8 @@ public:
 
             // --- Per-sector data ---
             for (size_t si = 0; si < sectors_.size(); ++si) {
+                // "stream sym sectors": materialize on demand (LRU-1).
+                ensureSectorMaterialized_(si);
                 const auto& sector = sectors_[si];
                 std::string grp_name = "/orbit_basis/sector_" + std::to_string(si);
                 file.createGroup(grp_name);
@@ -3310,6 +2960,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         const auto& sector = sectors_[sector_idx];
         size_t sector_dim = sector.basis_states.size();
         if (sym_vec.size() != sector_dim) {
@@ -3361,6 +3012,7 @@ public:
         if (sector_idx >= sectors_.size()) {
             throw std::runtime_error("Invalid sector index");
         }
+        ensureSectorMaterialized_(sector_idx);
         const auto& sector = sectors_[sector_idx];
         size_t sector_dim = sector.basis_states.size();
         if (sym_vec.size() != sector_dim) {
@@ -3681,11 +3333,4 @@ private:
     // computeSymmetrizedNormFixedSz was retired in the
     // minimalist-architecture rev (May 2026): no callers. Norms come
     // directly from computeOrbitDataFixedSz when sectors are generated.
-
-private:
-    // Wave A1 (May 2026): per-sector real-arithmetic verdict cache.
-    // See ``StreamingSymmetryOperator::sector_real_cache_`` for design
-    // notes.
-    mutable std::vector<int>   sector_real_cache_;
-    mutable std::mutex         sector_real_cache_mu_;
 };

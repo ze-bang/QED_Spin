@@ -63,6 +63,8 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/operator.h>
 #include <ed/core/streaming_symmetry.h>
+#include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 
 #ifdef WITH_MPI
 #  include <mpi.h>
@@ -280,6 +282,69 @@ make_streaming_symmetry_operator(const OperatorSpec& spec) {
     detail::load_terms_into(*op, spec);
     op->generateSymmetrySectorsStreaming(dir);
     return op;
+}
+
+// ---------------------------------------------------------------------------
+// Direct sector-set lane (operator-collapse, Jun 2026)
+// ---------------------------------------------------------------------------
+
+/// Build the symmetry sectors as a flat vector of standalone, owning
+/// ``ed::symmetry::SectorOperator`` objects -- the collapse-target twin of
+/// ``make_streaming_symmetry_operator``. Where the streaming lane returns a
+/// single monolithic ``StreamingSymmetryOperator`` whose nested
+/// ``SectorView``s back-reference the parent, this lane routes the spec
+/// straight through the P5 enumerator
+/// (``ed::symmetry::build_{full,fixed_sz}_sector_operators``): orbit reps and
+/// per-sector ``SectorBasis`` objects are built directly from the loaded
+/// ``SymmetryGroupInfo``, with no ``StreamingSymmetryOperator`` materialised
+/// at all. Each returned operator owns its sector and is driven by the
+/// unified ``CpuMatVecBackend<SymmetryBasisPolicy>``.
+///
+/// This is additive: ``make_operator`` (which must return a single
+/// ``LinearOperator``) is unchanged; callers that want the collapse-target
+/// multi-sector list opt in by calling this function. The production sector
+/// loop continues to use ``StreamingSymmetryHandle`` (whose own
+/// ``ED_SYMMETRY_SECTOR_OPERATOR`` gate adopts the legacy sector into a
+/// ``SectorOperator``); this entry point is the orbit-enumeration-free
+/// alternative that skips the legacy operator entirely.
+///
+/// Requirements: ``spec.streaming_symmetry == true`` and a ``DirectoryPath``
+/// source carrying ``<directory>/automorphism_results/``. ``spec.fixed_sz``
+/// selects the fixed-Sz lane (orbits restricted to the ``n_up`` subspace);
+/// absent, the full-Hilbert lane is used.
+inline std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>
+make_sector_operators(const OperatorSpec& spec) {
+    if (!spec.streaming_symmetry) {
+        throw std::runtime_error(
+            "ed::make_sector_operators: requires "
+            "OperatorSpec::streaming_symmetry = true (this lane builds the "
+            "symmetry sector set; use ed::make_operator for the plain / "
+            "fixed-Sz / distributed lanes).");
+    }
+    const std::string& dir = detail::require_directory(spec);
+
+    // Carrier operator: load the Hamiltonian term list + the symmetry group
+    // metadata exactly once. The terms are copied verbatim into every sector
+    // operator by the term-builder below (identical to the proven
+    // ``make_sector_operator_adopt`` term-copy contract).
+    auto base = detail::build_base_op(spec);
+    detail::load_terms_into(*base, spec);
+    base->symmetry_info.loadFromDirectory(dir);
+
+    auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
+        op.transform_data_  = base->transform_data_;
+        op.three_body_data_ = base->three_body_data_;
+    };
+
+    if (spec.fixed_sz.has_value()) {
+        return ed::symmetry::build_fixed_sz_sector_operators(
+            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+            static_cast<std::int64_t>(*spec.fixed_sz),
+            base->symmetry_info, term_builder);
+    }
+    return ed::symmetry::build_full_sector_operators(
+        static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+        base->symmetry_info, term_builder);
 }
 
 #ifdef WITH_MPI

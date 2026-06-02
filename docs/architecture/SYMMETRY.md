@@ -380,6 +380,15 @@ bindings, one Python facade:
   Sectors are F-shifted-Z-weighted recombined via
   `combine_sector_dynamical_spectra` so disparate per-sector
   `E_min` values do not destabilise the floating-point exponent.
+* `_core.workflows_spectral_streaming_symmetry_cross_irrep_multiq_directory`
+  — **SOTA amortized multi-Q cross-irrep lane** (Stage 1+2). Solves the
+  ground-state wave function in the source sector exactly **once**, then loops
+  internally over multiple requested target $Q$ coordinates. For each $Q$, it
+  scatters the ground state into the resolved target sector via its own
+  `CrossSectorOrbitObservable`, evaluates the continued-fraction poles, and
+  returns of both the dynamical $S(Q, \omega)$ and the equal-time static structure
+  factor (SSSF) $S(Q) = \|O_Q|\psi_0\rangle\|^2$. Highly optimized for large
+  systems (e.g. up to 32–36 sites).
 
 All three bindings surface through the Python wrapper
 `qed.spectral(directory, ..., symmetry=...)`. Routing logic:
@@ -388,6 +397,8 @@ All three bindings surface through the Python wrapper
   + `T is None` + `omega` → same-irrep binding.
 * `symmetry={"observable": Op, "momentum_transfer": Q_frac, ...}`
   + `T is None` + `omega` → ground-state cross-irrep binding.
+* `symmetry={"observables": [Op1, Op2, ...], "momentum_points": [Q1, Q2, ...], ...}`
+  + `T is None` + `omega` → ground-state amortized multi-Q cross-irrep binding.
 * `symmetry={"observable": Op, "momentum_transfer": Q_frac, ...}`
   + **finite `T`** (or list of `T`s) + `omega` → FTLM
   cross-irrep binding (NEW, May 2026).

@@ -28,6 +28,7 @@
 // =============================================================================
 
 #include <ed/core/streaming_symmetry.h>
+#include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/symmetry_basis_policy.h>
 #include <ed/matvec/term_kernels.h>
 
@@ -36,27 +37,47 @@
 
 namespace {
 
-// One-shot environment-variable read shared by every SectorView in the
-// process. ``ED_SYMMETRY_LEGACY_MATVEC=1`` forces the bespoke pre-Wave-1
-// path; default = unified.
-inline bool read_legacy_symmetric_env_once() {
-    const char* env = std::getenv("ED_SYMMETRY_LEGACY_MATVEC");
-    if (env == nullptr) return false;
-    if (env[0] == '\0') return false;
-    if (env[0] == '0' && env[1] == '\0') return false;
-    return true;
+// ---------------------------------------------------------------------------
+// Operator-collapse refactor (P2b, Jun 2026): the unified symmetric matvec
+// now drives the SAME host backend object the eventual
+// ``Operator<SymmetryBasisPolicy, Host>`` collapse will hold --
+// ``CpuMatVecBackend<SymmetryBasisPolicy, ...>`` -- instead of calling the
+// ``apply_terms`` kernel directly. For the symmetry policy the backend
+// always takes the matrix-free kernel (CSR is compiled out via
+// ``if constexpr (needs_orbit_walk)``), so the result is bit-identical to
+// the former direct call while exercising the production backend in the
+// default solve path. The backend is constructed on the stack per call --
+// it only stores a (POD) policy + tunables, so there is no heap traffic in
+// the Lanczos / FTLM / TPQ inner loop.
+// ---------------------------------------------------------------------------
+using SymBackend = ed::matvec::CpuMatVecBackend<
+    ed::matvec::basis::SymmetryBasisPolicy,
+    ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,
+    ed::matvec::DiagTwoBody, ed::matvec::MixedTwoBody,
+    ed::matvec::OffDiagTwoBody, ed::matvec::ThreeBodyTerm>;
+using SymTermView = SymBackend::term_view_t;
+
+inline void sym_backend_apply_complex(
+    const ed::matvec::basis::SymmetryBasisPolicy& basis,
+    const SymTermView& tv,
+    const Complex* in, Complex* out, std::size_t dim)
+{
+    SymBackend backend(basis, ed::matvec::detail::read_symmetry_tunables(),
+                       "CpuSymmetry(unified)");
+    backend.apply_complex(&tv, in, out, dim);
+}
+
+inline void sym_backend_apply_real(
+    const ed::matvec::basis::SymmetryBasisPolicy& basis,
+    const SymTermView& tv,
+    const double* in, double* out, std::size_t dim)
+{
+    SymBackend backend(basis, ed::matvec::detail::read_symmetry_tunables(),
+                       "CpuSymmetry(unified)");
+    backend.apply_real(&tv, in, out, dim);
 }
 
 } // namespace
-
-// =============================================================================
-// Shared env-var gate
-// =============================================================================
-
-bool StreamingSymmetryOperator::useLegacySymmetricMatvec() {
-    static const bool kLegacy = read_legacy_symmetric_env_once();
-    return kLegacy;
-}
 
 // =============================================================================
 // StreamingSymmetryOperator (full Hilbert, complex)
@@ -78,26 +99,11 @@ void StreamingSymmetryOperator::applySymmetrizedUnified(
     const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
     const double group_size       = static_cast<double>(getGroupSize());
 
-    // ``apply_terms`` atomic-adds into ``out``; caller-zeroed.
-    std::fill(out, out + sector_dim, Complex(0.0, 0.0));
-
-    commitPendingTransforms();
-
+    // ``term_view_()`` runs commitPendingTransforms() and stamps is_real;
+    // the backend zero-fills ``out`` before the matrix-free scatter.
     const ed::matvec::basis::SymmetryBasisPolicy basis =
         ed::matvec::basis::make_symmetry_basis(sector, lookup, group_size);
-
-    ed::matvec::kernel::apply_terms<
-        ed::matvec::basis::SymmetryBasisPolicy, Complex>(
-            basis,
-            static_cast<double>(spin_l_),
-            terms_.diag_one_body,
-            terms_.offdiag_one_body,
-            terms_.diag_two_body,
-            terms_.mixed_two_body,
-            terms_.offdiag_two_body,
-            terms_.three_body,
-            in,
-            out);
+    sym_backend_apply_complex(basis, term_view_(), in, out, sector_dim);
 }
 
 void StreamingSymmetryOperator::applySymmetrizedUnifiedReal(
@@ -116,25 +122,9 @@ void StreamingSymmetryOperator::applySymmetrizedUnifiedReal(
     const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
     const double group_size       = static_cast<double>(getGroupSize());
 
-    std::fill(out, out + sector_dim, 0.0);
-
-    commitPendingTransforms();
-
     const ed::matvec::basis::SymmetryBasisPolicy basis =
         ed::matvec::basis::make_symmetry_basis(sector, lookup, group_size);
-
-    ed::matvec::kernel::apply_terms<
-        ed::matvec::basis::SymmetryBasisPolicy, double>(
-            basis,
-            static_cast<double>(spin_l_),
-            terms_.diag_one_body,
-            terms_.offdiag_one_body,
-            terms_.diag_two_body,
-            terms_.mixed_two_body,
-            terms_.offdiag_two_body,
-            terms_.three_body,
-            in,
-            out);
+    sym_backend_apply_real(basis, term_view_(), in, out, sector_dim);
 }
 
 // =============================================================================
@@ -157,25 +147,9 @@ void FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSzUnified(
     const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
     const double group_size       = static_cast<double>(getGroupSize());
 
-    std::fill(out, out + sector_dim, Complex(0.0, 0.0));
-
-    commitPendingTransforms();
-
     const ed::matvec::basis::SymmetryBasisPolicy basis =
         ed::matvec::basis::make_symmetry_basis(sector, lookup, group_size);
-
-    ed::matvec::kernel::apply_terms<
-        ed::matvec::basis::SymmetryBasisPolicy, Complex>(
-            basis,
-            static_cast<double>(spin_l_),
-            terms_.diag_one_body,
-            terms_.offdiag_one_body,
-            terms_.diag_two_body,
-            terms_.mixed_two_body,
-            terms_.offdiag_two_body,
-            terms_.three_body,
-            in,
-            out);
+    sym_backend_apply_complex(basis, term_view_(), in, out, sector_dim);
 }
 
 void FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSzUnifiedReal(
@@ -194,23 +168,7 @@ void FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSzUnifiedReal(
     const SectorLookupHandle lookup = makeSectorLookup_(sector_idx);
     const double group_size       = static_cast<double>(getGroupSize());
 
-    std::fill(out, out + sector_dim, 0.0);
-
-    commitPendingTransforms();
-
     const ed::matvec::basis::SymmetryBasisPolicy basis =
         ed::matvec::basis::make_symmetry_basis(sector, lookup, group_size);
-
-    ed::matvec::kernel::apply_terms<
-        ed::matvec::basis::SymmetryBasisPolicy, double>(
-            basis,
-            static_cast<double>(spin_l_),
-            terms_.diag_one_body,
-            terms_.offdiag_one_body,
-            terms_.diag_two_body,
-            terms_.mixed_two_body,
-            terms_.offdiag_two_body,
-            terms_.three_body,
-            in,
-            out);
+    sym_backend_apply_real(basis, term_view_(), in, out, sector_dim);
 }
