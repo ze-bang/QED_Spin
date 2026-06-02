@@ -1212,6 +1212,12 @@ if(BUILD_ED_TESTS)
     # ED_SYMMETRY_SECTOR_OPERATOR gate were removed. Verifies the handle
     # returns a SectorOperator and the min sector GS is the Bethe GS (N=6).
     ed_add_test(test_sector_loop_gate           tests/unit/test_sector_loop_gate.cpp USE_CATCH2)
+    # Cutover-safety invariant: the legacy StreamingSymmetryOperator and the new
+    # build_full_sector_operators path emit the SAME per-sector basis ORDERING
+    # (orbit_rep + orbit_elements sequence), not just matching dims/eigenvalues
+    # (which are basis-order-invariant). Guards the sector index -> basis index
+    # mapping that keys HDF5 orbit caches + cross-sector observables (N=6 Z_N).
+    ed_add_test(test_symmetry_ordering_parity   tests/unit/test_symmetry_ordering_parity.cpp USE_CATCH2)
     # P3a: CudaMatVecBackend<DeviceFullBasisPolicy> (GPU twin of CpuMatVecBackend)
     # matvec matches the host CpuMatVecBackend to <1e-9 across every term bin and
     # both scalar lanes (complex apply + real apply_real) on the full Hilbert
