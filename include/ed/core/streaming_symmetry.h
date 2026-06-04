@@ -1895,32 +1895,68 @@ public:
         
         auto pass1_start = std::chrono::high_resolution_clock::now();
         
-        // Single streaming pass: compute rep(basis) and dedupe without storing
-        // orbit_reps[num_basis] (~8 bytes per Sz-sector basis element). The
-        // deduped rep list is kept resident in ``unique_orbit_reps_`` so the
-        // lazy per-sector materialization can rebuild orbit CSR on demand.
+        // Canonical-representative pass (no dedupe hash set). A basis state is
+        // its orbit's canonical representative iff it equals the orbit minimum
+        // ``rep = min_{g in G} g(basis)``. Site permutations preserve popcount,
+        // so every image g(basis) is itself a valid state of this fixed-Sz
+        // sector and the orbit minimum is hit exactly once as ``i`` sweeps the
+        // complete basis -- so ``basis == rep`` enumerates the unique orbit
+        // reps WITHOUT the old ``std::unordered_set<uint64_t> seen_reps``
+        // (which held ~|orbits| entries, ~3-4 GB at N=32 half-filling and was
+        // the symmetry-build OOM source). Parallelised exactly like the
+        // full-space twin: each thread appends its canonical bases, then we
+        // concatenate + sort to restore deterministic ascending order.
         const size_t num_basis = basis_states_.size();
-        std::unordered_set<uint64_t> seen_reps;
         unique_orbit_reps_.clear();
+#ifdef _OPENMP
+        {
+            const int nthreads = omp_get_max_threads();
+            std::vector<std::vector<uint64_t>> thread_reps(static_cast<size_t>(nthreads));
+            #pragma omp parallel
+            {
+                const int tid = omp_get_thread_num();
+                #pragma omp for schedule(static) nowait
+                for (size_t i = 0; i < num_basis; ++i) {
+                    const uint64_t basis = basis_states_[i];
+                    uint64_t rep = basis;
+                    for (const auto& perm : symmetry_info.max_clique) {
+                        uint64_t permuted = applyPermutation(basis, perm);
+                        // Cheap `< rep` short-circuit first; the lookupState
+                        // guard stays defensive in case applyPermutation ever
+                        // emits an out-of-sector image.
+                        if (permuted < rep && lookupState(permuted) >= 0) {
+                            rep = permuted;
+                        }
+                    }
+                    if (basis == rep) {
+                        thread_reps[static_cast<size_t>(tid)].push_back(basis);
+                    }
+                }
+            }
+            size_t total = 0;
+            for (const auto& v : thread_reps) total += v.size();
+            unique_orbit_reps_.reserve(total);
+            for (const auto& v : thread_reps) {
+                unique_orbit_reps_.insert(unique_orbit_reps_.end(), v.begin(), v.end());
+            }
+            std::sort(unique_orbit_reps_.begin(), unique_orbit_reps_.end());
+        }
+#else
         unique_orbit_reps_.reserve(num_basis / symmetry_info.max_clique.size() + 1);
-        
         for (size_t i = 0; i < num_basis; ++i) {
-            uint64_t basis = basis_states_[i];
+            const uint64_t basis = basis_states_[i];
             uint64_t rep = basis;
             for (const auto& perm : symmetry_info.max_clique) {
                 uint64_t permuted = applyPermutation(basis, perm);
-                // Site permutations preserve popcount, so lookupState always
-                // returns >= 0 for permuted images of basis states. We keep
-                // the check defensively in case applyPermutation evolves.
-                if (lookupState(permuted) >= 0 && permuted < rep) {
+                if (permuted < rep && lookupState(permuted) >= 0) {
                     rep = permuted;
                 }
             }
-            if (seen_reps.insert(rep).second) {
-                unique_orbit_reps_.push_back(rep);
+            if (basis == rep) {
+                unique_orbit_reps_.push_back(basis);
             }
         }
-        std::unordered_set<uint64_t>().swap(seen_reps);  // free the dedupe set
+#endif
         
         auto pass1_end = std::chrono::high_resolution_clock::now();
         double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
