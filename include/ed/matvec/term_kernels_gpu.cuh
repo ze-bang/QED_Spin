@@ -153,6 +153,241 @@ struct ScalarTraits<double> {
 };
 
 // ---------------------------------------------------------------------------
+// process_source_terms: apply every term bin to a single computational
+// state ``s`` with an optional ``pre_phase`` multiplier and atomicAdd the
+// contributions into ``out``.
+//
+// This is the shared term-walk body extracted (verbatim) from the former
+// ``process_source`` lambda inside ``apply_terms_gpu_scatter`` so that the
+// orbit-CSR kernel and the on-the-fly representative kernel
+// (``apply_terms_rep_symmetry_scatter``) drive IDENTICAL term logic -- the
+// only thing that differs between them is how the source state(s) and the
+// ``pre_phase`` are produced, and how the destination index + projection
+// are looked up (both delegated to the BasisPolicy). Keeping one body
+// guarantees the rep kernel cannot diverge from the validated reference.
+//
+// Compile-time branches (gated on the BasisPolicy traits):
+//   * ``has_coeff_modifier`` -- per-emit projection multiplier looked up via
+//     ``index_and_projection`` (symmetry / rep policies); trivial policies
+//     elide it and emit directly.
+//   * ``may_leave_basis``    -- gates the ``index_of`` membership check.
+//
+// ``self_idx`` is the array index of the row owning this call (used only by
+// the trivial-policy diagonal path, which emits to ``out[self_idx]``).
+// ---------------------------------------------------------------------------
+template <class BasisPolicy, class Scalar>
+__device__ __forceinline__ void process_source_terms(
+    const BasisPolicy&       basis,
+    double                   spin_l,
+    const DeviceTermStorage& terms,
+    std::uint64_t            s,
+    cuDoubleComplex          pre_phase,
+    Scalar                   coeff_in,
+    std::uint64_t            self_idx,
+    Scalar* __restrict__     out)
+{
+    using ST = ScalarTraits<Scalar>;
+    const double spin_sq = spin_l * spin_l;
+
+    Scalar src = ST::mul(coeff_in, ST::from_coeff(pre_phase));
+    if (ST::abs2(src) < 1e-30) return;
+
+    // Helper: emit one contribution. Branches on may_leave_basis
+    // (skip OOB) and has_coeff_modifier (apply per-emit projection).
+    auto emit_to = [&](std::uint64_t dst_idx, std::uint64_t s_prime,
+                       Scalar contrib) {
+        if constexpr (BasisPolicy::has_coeff_modifier) {
+            // Look up dst_idx AND projection in one shot.
+            cuDoubleComplex proj;
+            const std::uint64_t k =
+                basis.index_and_projection(s_prime, proj);
+            if (k == ed::matvec::basis::kDeviceNotFound) return;
+            contrib = ST::mul(contrib, ST::from_coeff(proj));
+            atomic_add_complex(&out[k], contrib);
+        } else {
+            (void)s_prime;
+            atomic_add_complex(&out[dst_idx], contrib);
+        }
+    };
+
+    // ----------------------------------------------------------
+    // 1. One-body diagonal (Sz_k)
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_diag_one_body; ++t) {
+        const auto& term = terms.diag_one_body[t];
+        const double sign = ((s >> term.site_index) & 1) ? -1.0 : 1.0;
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        Scalar contrib =
+            ST::mul(ST::from_coeff(c),
+                    ST::mul_real(src, spin_l * sign));
+        if constexpr (BasisPolicy::has_coeff_modifier) {
+            emit_to(self_idx, s, contrib);
+        } else {
+            atomic_add_complex(&out[self_idx], contrib);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 2. One-body off-diagonal (S+ / S-): flip one bit, gated
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_offdiag_one_body; ++t) {
+        const auto& term = terms.offdiag_one_body[t];
+        const std::uint64_t bit = (s >> term.site_index) & 1ULL;
+        if (bit == term.op_type) continue;
+        const std::uint64_t new_s = s ^ (1ULL << term.site_index);
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        Scalar contrib = ST::mul(ST::from_coeff(c), src);
+
+        if constexpr (BasisPolicy::may_leave_basis) {
+            if constexpr (BasisPolicy::has_coeff_modifier) {
+                emit_to(0, new_s, contrib);
+            } else {
+                const std::uint64_t j = basis.index_of(new_s);
+                if (j == ed::matvec::basis::kDeviceNotFound) continue;
+                atomic_add_complex(&out[j], contrib);
+            }
+        } else {
+            atomic_add_complex(&out[new_s], contrib);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 3. Two-body purely diagonal (Sz_i Sz_j)
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_diag_two_body; ++t) {
+        const auto& term = terms.diag_two_body[t];
+        const double sa = ((s >> term.site_index_1) & 1) ? -1.0 : 1.0;
+        const double sb = ((s >> term.site_index_2) & 1) ? -1.0 : 1.0;
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        Scalar contrib =
+            ST::mul(ST::from_coeff(c),
+                    ST::mul_real(src, spin_sq * sa * sb));
+        if constexpr (BasisPolicy::has_coeff_modifier) {
+            emit_to(self_idx, s, contrib);
+        } else {
+            atomic_add_complex(&out[self_idx], contrib);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 4. Two-body mixed (Sz * S+/-): flip one bit, gated
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_mixed_two_body; ++t) {
+        const auto& term = terms.mixed_two_body[t];
+        const std::uint64_t flip_bit = (s >> term.flip_site) & 1ULL;
+        if (flip_bit == term.flip_op_type) continue;
+        const double sz_sign = ((s >> term.sz_site) & 1) ? -1.0 : 1.0;
+        const std::uint64_t new_s = s ^ (1ULL << term.flip_site);
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        Scalar contrib =
+            ST::mul(ST::from_coeff(c),
+                    ST::mul_real(src, spin_l * sz_sign));
+
+        if constexpr (BasisPolicy::may_leave_basis) {
+            if constexpr (BasisPolicy::has_coeff_modifier) {
+                emit_to(0, new_s, contrib);
+            } else {
+                const std::uint64_t j = basis.index_of(new_s);
+                if (j == ed::matvec::basis::kDeviceNotFound) continue;
+                atomic_add_complex(&out[j], contrib);
+            }
+        } else {
+            atomic_add_complex(&out[new_s], contrib);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 5. Two-body off-diagonal (S+- * S+-): flip two bits, both gated
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_offdiag_two_body; ++t) {
+        const auto& term = terms.offdiag_two_body[t];
+        const std::uint64_t b1 = (s >> term.site_index_1) & 1ULL;
+        const std::uint64_t b2 = (s >> term.site_index_2) & 1ULL;
+        if (b1 == term.op_type_1 || b2 == term.op_type_2) continue;
+        const std::uint64_t new_s =
+            s ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        Scalar contrib = ST::mul(ST::from_coeff(c), src);
+
+        if constexpr (BasisPolicy::may_leave_basis) {
+            if constexpr (BasisPolicy::has_coeff_modifier) {
+                emit_to(0, new_s, contrib);
+            } else {
+                const std::uint64_t j = basis.index_of(new_s);
+                if (j == ed::matvec::basis::kDeviceNotFound) continue;
+                atomic_add_complex(&out[j], contrib);
+            }
+        } else {
+            atomic_add_complex(&out[new_s], contrib);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 6. Three-body terms (op1 op2 op3) -- arbitrary mixing.
+    // ----------------------------------------------------------
+    for (std::uint32_t t = 0; t < terms.num_three_body; ++t) {
+        const auto& term = terms.three_body[t];
+        std::uint64_t cur = s;
+        cuDoubleComplex scalar = load_coeff(term.coefficient);
+        bool valid = true;
+
+        // Gate 1
+        if (term.op_type_1 == kOpSz) {
+            const double sg = ((cur >> term.site_index_1) & 1) ? -1.0 : 1.0;
+            scalar = make_cuDoubleComplex(
+                cuCreal(scalar) * spin_l * sg,
+                cuCimag(scalar) * spin_l * sg);
+        } else {
+            const std::uint64_t b = (cur >> term.site_index_1) & 1ULL;
+            if (b != term.op_type_1) cur ^= (1ULL << term.site_index_1);
+            else                     valid = false;
+        }
+        // Gate 2
+        if (valid) {
+            if (term.op_type_2 == kOpSz) {
+                const double sg = ((cur >> term.site_index_2) & 1) ? -1.0 : 1.0;
+                scalar = make_cuDoubleComplex(
+                    cuCreal(scalar) * spin_l * sg,
+                    cuCimag(scalar) * spin_l * sg);
+            } else {
+                const std::uint64_t b = (cur >> term.site_index_2) & 1ULL;
+                if (b != term.op_type_2) cur ^= (1ULL << term.site_index_2);
+                else                     valid = false;
+            }
+        }
+        // Gate 3
+        if (valid) {
+            if (term.op_type_3 == kOpSz) {
+                const double sg = ((cur >> term.site_index_3) & 1) ? -1.0 : 1.0;
+                scalar = make_cuDoubleComplex(
+                    cuCreal(scalar) * spin_l * sg,
+                    cuCimag(scalar) * spin_l * sg);
+            } else {
+                const std::uint64_t b = (cur >> term.site_index_3) & 1ULL;
+                if (b != term.op_type_3) cur ^= (1ULL << term.site_index_3);
+                else                     valid = false;
+            }
+        }
+        if (!valid) continue;
+        if (cuCreal(scalar) * cuCreal(scalar) +
+            cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
+
+        Scalar contrib = ST::mul(ST::from_coeff(scalar), src);
+        if constexpr (BasisPolicy::may_leave_basis) {
+            if constexpr (BasisPolicy::has_coeff_modifier) {
+                emit_to(0, cur, contrib);
+            } else {
+                const std::uint64_t j = basis.index_of(cur);
+                if (j == ed::matvec::basis::kDeviceNotFound) continue;
+                atomic_add_complex(&out[j], contrib);
+            }
+        } else {
+            atomic_add_complex(&out[cur], contrib);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // THE KERNEL.
 //
 // One thread per input state ``i``. For each term, accumulate
@@ -188,222 +423,6 @@ __global__ void apply_terms_gpu_scatter(
     const Scalar coeff_in = in[i];
     if (ST::abs2(coeff_in) < 1e-30) return;  // skip negligible amplitudes
 
-    const double spin_sq = spin_l * spin_l;
-
-    // -----------------------------------------------------------------------
-    // process_source: apply every term bin to a single computational
-    // state ``s``, with optional pre-phase. Trivial policies invoke
-    // this once with pre_phase == 1; symmetry policies invoke this
-    // once per orbit member with pre_phase == alpha_s / norm_k.
-    //
-    // The lambda emits into the global output via atomic_add_complex.
-    // Each emit either uses ``s_prime``'s array index directly (full
-    // basis) or looks it up via ``index_of()`` / ``index_and_projection()``
-    // (fixed-Sz / symmetry). For symmetry policies the projection is
-    // pre-baked, so the lookup returns both index AND the per-emit
-    // modifier in one hash probe.
-    // -----------------------------------------------------------------------
-    auto process_source = [&](std::uint64_t s, cuDoubleComplex pre_phase) {
-        Scalar src = ST::mul(coeff_in, ST::from_coeff(pre_phase));
-        if (ST::abs2(src) < 1e-30) return;
-
-        // Helper: emit one contribution. Branches on may_leave_basis
-        // (skip OOB) and has_coeff_modifier (apply per-emit projection).
-        auto emit_to = [&](std::uint64_t dst_idx, std::uint64_t s_prime,
-                           Scalar contrib) {
-            if constexpr (BasisPolicy::has_coeff_modifier) {
-                // Look up dst_idx AND projection in one hash probe.
-                cuDoubleComplex proj;
-                const std::uint64_t k =
-                    basis.index_and_projection(s_prime, proj);
-                if (k == ed::matvec::basis::kDeviceNotFound) return;
-                contrib = ST::mul(contrib, ST::from_coeff(proj));
-                atomic_add_complex(&out[k], contrib);
-            } else {
-                (void)s_prime;
-                atomic_add_complex(&out[dst_idx], contrib);
-            }
-        };
-
-        // ----------------------------------------------------------
-        // 1. One-body diagonal (Sz_k)
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_diag_one_body; ++t) {
-            const auto& term = terms.diag_one_body[t];
-            const double sign = ((s >> term.site_index) & 1) ? -1.0 : 1.0;
-            const cuDoubleComplex c = load_coeff(term.coefficient);
-            Scalar contrib =
-                ST::mul(ST::from_coeff(c),
-                        ST::mul_real(src, spin_l * sign));
-            if constexpr (BasisPolicy::has_coeff_modifier) {
-                emit_to(i, s, contrib);
-            } else {
-                atomic_add_complex(&out[i], contrib);
-            }
-        }
-
-        // ----------------------------------------------------------
-        // 2. One-body off-diagonal (S+ / S-): flip one bit, gated
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_offdiag_one_body; ++t) {
-            const auto& term = terms.offdiag_one_body[t];
-            const std::uint64_t bit = (s >> term.site_index) & 1ULL;
-            if (bit == term.op_type) continue;
-            const std::uint64_t new_s = s ^ (1ULL << term.site_index);
-            const cuDoubleComplex c = load_coeff(term.coefficient);
-            Scalar contrib = ST::mul(ST::from_coeff(c), src);
-
-            if constexpr (BasisPolicy::may_leave_basis) {
-                if constexpr (BasisPolicy::has_coeff_modifier) {
-                    emit_to(0, new_s, contrib);
-                } else {
-                    const std::uint64_t j = basis.index_of(new_s);
-                    if (j == ed::matvec::basis::kDeviceNotFound) continue;
-                    atomic_add_complex(&out[j], contrib);
-                }
-            } else {
-                atomic_add_complex(&out[new_s], contrib);
-            }
-        }
-
-        // ----------------------------------------------------------
-        // 3. Two-body purely diagonal (Sz_i Sz_j)
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_diag_two_body; ++t) {
-            const auto& term = terms.diag_two_body[t];
-            const double sa = ((s >> term.site_index_1) & 1) ? -1.0 : 1.0;
-            const double sb = ((s >> term.site_index_2) & 1) ? -1.0 : 1.0;
-            const cuDoubleComplex c = load_coeff(term.coefficient);
-            Scalar contrib =
-                ST::mul(ST::from_coeff(c),
-                        ST::mul_real(src, spin_sq * sa * sb));
-            if constexpr (BasisPolicy::has_coeff_modifier) {
-                emit_to(i, s, contrib);
-            } else {
-                atomic_add_complex(&out[i], contrib);
-            }
-        }
-
-        // ----------------------------------------------------------
-        // 4. Two-body mixed (Sz * S+/-): flip one bit, gated
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_mixed_two_body; ++t) {
-            const auto& term = terms.mixed_two_body[t];
-            const std::uint64_t flip_bit = (s >> term.flip_site) & 1ULL;
-            if (flip_bit == term.flip_op_type) continue;
-            const double sz_sign = ((s >> term.sz_site) & 1) ? -1.0 : 1.0;
-            const std::uint64_t new_s = s ^ (1ULL << term.flip_site);
-            const cuDoubleComplex c = load_coeff(term.coefficient);
-            Scalar contrib =
-                ST::mul(ST::from_coeff(c),
-                        ST::mul_real(src, spin_l * sz_sign));
-
-            if constexpr (BasisPolicy::may_leave_basis) {
-                if constexpr (BasisPolicy::has_coeff_modifier) {
-                    emit_to(0, new_s, contrib);
-                } else {
-                    const std::uint64_t j = basis.index_of(new_s);
-                    if (j == ed::matvec::basis::kDeviceNotFound) continue;
-                    atomic_add_complex(&out[j], contrib);
-                }
-            } else {
-                atomic_add_complex(&out[new_s], contrib);
-            }
-        }
-
-        // ----------------------------------------------------------
-        // 5. Two-body off-diagonal (S+- * S+-): flip two bits, both gated
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_offdiag_two_body; ++t) {
-            const auto& term = terms.offdiag_two_body[t];
-            const std::uint64_t b1 = (s >> term.site_index_1) & 1ULL;
-            const std::uint64_t b2 = (s >> term.site_index_2) & 1ULL;
-            if (b1 == term.op_type_1 || b2 == term.op_type_2) continue;
-            const std::uint64_t new_s =
-                s ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
-            const cuDoubleComplex c = load_coeff(term.coefficient);
-            Scalar contrib = ST::mul(ST::from_coeff(c), src);
-
-            if constexpr (BasisPolicy::may_leave_basis) {
-                if constexpr (BasisPolicy::has_coeff_modifier) {
-                    emit_to(0, new_s, contrib);
-                } else {
-                    const std::uint64_t j = basis.index_of(new_s);
-                    if (j == ed::matvec::basis::kDeviceNotFound) continue;
-                    atomic_add_complex(&out[j], contrib);
-                }
-            } else {
-                atomic_add_complex(&out[new_s], contrib);
-            }
-        }
-
-        // ----------------------------------------------------------
-        // 6. Three-body terms (op1 op2 op3) -- arbitrary mixing.
-        //    The CPU version walks the three gates sequentially; we
-        //    do the same on the device.
-        // ----------------------------------------------------------
-        for (std::uint32_t t = 0; t < terms.num_three_body; ++t) {
-            const auto& term = terms.three_body[t];
-            std::uint64_t cur = s;
-            cuDoubleComplex scalar = load_coeff(term.coefficient);
-            bool valid = true;
-
-            // Gate 1
-            if (term.op_type_1 == kOpSz) {
-                const double sg = ((cur >> term.site_index_1) & 1) ? -1.0 : 1.0;
-                scalar = make_cuDoubleComplex(
-                    cuCreal(scalar) * spin_l * sg,
-                    cuCimag(scalar) * spin_l * sg);
-            } else {
-                const std::uint64_t b = (cur >> term.site_index_1) & 1ULL;
-                if (b != term.op_type_1) cur ^= (1ULL << term.site_index_1);
-                else                     valid = false;
-            }
-            // Gate 2
-            if (valid) {
-                if (term.op_type_2 == kOpSz) {
-                    const double sg = ((cur >> term.site_index_2) & 1) ? -1.0 : 1.0;
-                    scalar = make_cuDoubleComplex(
-                        cuCreal(scalar) * spin_l * sg,
-                        cuCimag(scalar) * spin_l * sg);
-                } else {
-                    const std::uint64_t b = (cur >> term.site_index_2) & 1ULL;
-                    if (b != term.op_type_2) cur ^= (1ULL << term.site_index_2);
-                    else                     valid = false;
-                }
-            }
-            // Gate 3
-            if (valid) {
-                if (term.op_type_3 == kOpSz) {
-                    const double sg = ((cur >> term.site_index_3) & 1) ? -1.0 : 1.0;
-                    scalar = make_cuDoubleComplex(
-                        cuCreal(scalar) * spin_l * sg,
-                        cuCimag(scalar) * spin_l * sg);
-                } else {
-                    const std::uint64_t b = (cur >> term.site_index_3) & 1ULL;
-                    if (b != term.op_type_3) cur ^= (1ULL << term.site_index_3);
-                    else                     valid = false;
-                }
-            }
-            if (!valid) continue;
-            if (cuCreal(scalar) * cuCreal(scalar) +
-                cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
-
-            Scalar contrib = ST::mul(ST::from_coeff(scalar), src);
-            if constexpr (BasisPolicy::may_leave_basis) {
-                if constexpr (BasisPolicy::has_coeff_modifier) {
-                    emit_to(0, cur, contrib);
-                } else {
-                    const std::uint64_t j = basis.index_of(cur);
-                    if (j == ed::matvec::basis::kDeviceNotFound) continue;
-                    atomic_add_complex(&out[j], contrib);
-                }
-            } else {
-                atomic_add_complex(&out[cur], contrib);
-            }
-        }
-    }; // end process_source
-
     if constexpr (BasisPolicy::needs_orbit_walk) {
         // Symmetry policies sweep |orbit(i)| computational states.
         // The device-side iter_orbit is provided by the symmetry policy
@@ -422,12 +441,55 @@ __global__ void apply_terms_gpu_scatter(
             const cuDoubleComplex pre_phase = make_cuDoubleComplex(
                 cuCreal(alpha_s) * inv_norm_i,
                 cuCimag(alpha_s) * inv_norm_i);
-            process_source(s, pre_phase);
+            process_source_terms<BasisPolicy, Scalar>(
+                basis, spin_l, terms, s, pre_phase, coeff_in, i, out);
         }
     } else {
-        process_source(basis.state_of(i),
-                       make_cuDoubleComplex(1.0, 0.0));
+        process_source_terms<BasisPolicy, Scalar>(
+            basis, spin_l, terms, basis.state_of(i),
+            make_cuDoubleComplex(1.0, 0.0), coeff_in, i, out);
     }
+}
+
+// ---------------------------------------------------------------------------
+// apply_terms_rep_symmetry_scatter -- on-the-fly representative SpMV.
+//
+// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
+//
+// One thread per orbit representative ``i``. Unlike
+// ``apply_terms_gpu_scatter`` with a symmetry policy, this does NOT walk an
+// orbit CSR: it applies the Hamiltonian terms to the single representative
+// ``reps[i]`` (``basis.state_of(i)``) with ``pre_phase = inv_norms[i]``, and
+// the policy's ``index_and_projection`` regenerates the destination orbit
+// index + projection phase arithmetically from the group action (no orbit
+// table). The shared ``process_source_terms`` body guarantees identical term
+// logic to the validated reference kernel; only the source/pre_phase differ.
+//
+// Requires ``BasisPolicy`` to be ``DeviceRepSymmetryBasisPolicy`` (or any
+// policy with ``needs_orbit_walk == false`` + ``has_coeff_modifier == true``
+// whose ``index_and_projection`` folds in the destination norm).
+// ---------------------------------------------------------------------------
+template <class BasisPolicy, class Scalar>
+__global__ void apply_terms_rep_symmetry_scatter(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    using ST = ScalarTraits<Scalar>;
+    const std::uint64_t dim = basis.dim();
+    const std::uint64_t i =
+        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+
+    const Scalar coeff_in = in[i];
+    if (ST::abs2(coeff_in) < 1e-30) return;
+
+    const double inv_norm_i = basis.inv_norms[i];
+    const cuDoubleComplex pre_phase = make_cuDoubleComplex(inv_norm_i, 0.0);
+    process_source_terms<BasisPolicy, Scalar>(
+        basis, spin_l, terms, basis.state_of(i), pre_phase, coeff_in, i, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +516,36 @@ inline cudaError_t launch_apply_terms_gpu(
         static_cast<std::uint64_t>(threads_per_block);
 
     apply_terms_gpu_scatter<BasisPolicy, Scalar>
+        <<<static_cast<unsigned int>(blocks),
+           static_cast<unsigned int>(threads_per_block),
+           0, stream>>>
+        (basis, spin_l, terms, d_in, d_out);
+
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
+// Host-side launcher for the on-the-fly representative kernel. Same contract
+// as ``launch_apply_terms_gpu`` (``d_out`` MUST be pre-zeroed by the caller).
+// ---------------------------------------------------------------------------
+template <class BasisPolicy, class Scalar>
+inline cudaError_t launch_apply_terms_rep_symmetry_gpu(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar*         d_in,
+    Scalar*               d_out,
+    cudaStream_t          stream = 0,
+    int                   threads_per_block = 256)
+{
+    const std::uint64_t dim = basis.dim();
+    if (dim == 0) return cudaSuccess;
+
+    const std::uint64_t blocks =
+        (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
+        static_cast<std::uint64_t>(threads_per_block);
+
+    apply_terms_rep_symmetry_scatter<BasisPolicy, Scalar>
         <<<static_cast<unsigned int>(blocks),
            static_cast<unsigned int>(threads_per_block),
            0, stream>>>

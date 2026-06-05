@@ -20,12 +20,56 @@
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
 
+#include <cstdlib>
+
+namespace {
+// Gate for the on-the-fly representative GPU matvec ("On-the-fly
+// representative SpMV" plan, Jun 2026). DEFAULT ON after the validation cycle
+// (test_rep_symmetry_gpu pins it bit-for-bit vs the CPU applySymmetrized
+// reference across n_up/k sectors incl. the |G|=8 fixed-Sz fixture). It is the
+// resident N=32 Sz+Symm path: no orbit CSR, no O(full-Sz-dim) projection
+// table. Set ``ED_GPU_SYMMETRY_REP=0`` to opt back into the legacy orbit-CSR
+// mirror (diagnostics / bisection). Only fixed-Sz sectors take this path
+// (``rep_data_.usable()``); sym-only full-Hilbert sectors always fall back.
+inline bool rep_path_enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("ED_GPU_SYMMETRY_REP");
+        if (e == nullptr || e[0] == '\0') return true;   // default ON
+        if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
+        return true;                                     // anything else -> ON
+    }();
+    return enabled;
+}
+}  // namespace
+
 ed::LinearOperator::MatvecFn
 ed::symmetry::SectorOperator::bind_cuda() const {
     // Bake any pending in-place transforms into ``terms_`` before the
     // device mirror snapshots the term SoA (mirrors the legacy
     // ``bind_cuda_for_sector`` ordering).
     commitPendingTransforms();
+
+    // On-the-fly representative path: resident, no orbit CSR / no
+    // O(full-Sz-dim) projection table. Engaged only when the env gate is on
+    // AND this is a fixed-Sz sector with a usable RepSectorData. The factory
+    // either populates ``rep_data_`` eagerly or supplies a CSR-free provider
+    // (``configureRepLazy``); ``ensure_rep_data_`` builds it on first use,
+    // WITHOUT ever materialising the host orbit CSR. Sym-only sectors leave
+    // it unusable and fall through to the orbit-CSR mirror.
+    if (rep_path_enabled()) {
+        const RepSectorData& rd = ensure_rep_data_();
+        if (rd.usable()) {
+            return ed::symmetry::make_sector_matvec_gpu_rep(
+                rd,
+                static_cast<double>(spin_l_),
+                terms_);
+        }
+    }
+
+    // Fallback orbit-CSR mirror: needs the host orbit CSR. In CSR-free lazy
+    // mode it has not been built yet -- materialise it now (only reached for
+    // sym-only sectors or when ED_GPU_SYMMETRY_REP=0).
+    ensure_sector_basis_();
 
     // One sector == one mirror, built once and captured by the returned
     // callable. ``sector_n_up_()`` returns the shared magnetization of a

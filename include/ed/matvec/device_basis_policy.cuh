@@ -380,6 +380,137 @@ struct DeviceSymmetryBasisPolicy {
 // ===========================================================================
 using DeviceFixedSzSymmetryBasisPolicy = DeviceSymmetryBasisPolicy;
 
+// ===========================================================================
+// 5. DeviceRepSymmetryBasisPolicy  -- on-the-fly representative SpMV
+//
+// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
+//
+// The orbit-CSR policies above (cells 3B / 4B) materialise, per orbit
+// representative, ALL |G| computational images and their character
+// coefficients -- a structure whose total length equals the FULL fixed-Sz
+// dimension C(N, n_up). At N=32, n_up=16 that is ~601M entries (~4.8 GiB of
+// indices + ~9.6 GiB of coefficients) plus a ~9.6 GiB ``sz_to_proj`` reverse
+// table. In lazy mode that is streamed across PCIe every SpMV; even resident
+// it defeats the memory win of symmetry.
+//
+// This policy stores NONE of that. It keeps only:
+//   * ``reps[i]``      -- the representative computational state of orbit i
+//                         (the sector basis index ``i`` IS the orbit index).
+//   * ``inv_norms[i]`` -- ``1 / norm_i`` for orbit i.
+//   * ``perms``        -- the |G| site permutations (group action), flat
+//                         row-major ``perms[g*n_sites + site]`` (the same
+//                         convention as the host ``applyPermutation``).
+//   * ``characters[g]``-- the per-SECTOR character ``chi_k(g)`` (one complex
+//                         per group element; this is a SINGLE irrep block).
+//   * ``rep_index_of_rank`` -- reverse lookup ``rank(representative) ->
+//                         orbit index``, length ``C(n_sites, n_up)``; ``-1``
+//                         when that fixed-Sz state is not a representative
+//                         of a surviving orbit in this irrep.
+//
+// The group action and the projection phase are regenerated arithmetically
+// inside ``index_and_projection`` from ``perms`` + ``characters`` -- no
+// O(dim) orbit table. This is the standard Sandvik / HPhi / QuSpin
+// representative scheme; the matvec applies H to the single representative
+// of each row (``needs_orbit_walk == false``) and the rep-symmetry kernel
+// in ``term_kernels_gpu.cuh`` supplies ``pre_phase = inv_norms[i]``.
+//
+// Math (matches the orbit-CSR reference bit-for-bit; derivation in the plan):
+//   For a connected state ``s'`` reached by a term from ``reps[i]`` we need
+//   the destination orbit index ``k`` and the projection
+//   ``conj(beta_{s'}) / norm_k`` where ``beta_{s'}`` is the coefficient of
+//   ``s'`` in basis vector ``k``. Writing ``r_b = min_g g(s')`` (the
+//   representative of s'),
+//       conj(beta_{s'}) = sum_{h: h(s') = r_b}  conj(chi_k(h))
+//   (because the coefficient of g(r_b) in ``sum_g conj(chi(g)) |g r_b>`` is
+//   ``conj(chi(g))``, and {g: g(r_b)=s'} = {h^{-1}: h(s')=r_b} with
+//   ``chi(h^{-1}) = conj(chi(h))`` for unit-modulus characters). The
+//   group_norm (1/|G|) and the orbit walk of the reference collapse into the
+//   single representative term, so it does NOT appear here.
+// ===========================================================================
+struct DeviceRepSymmetryBasisPolicy {
+    const std::uint64_t*    reps              = nullptr;  // length dim_
+    const double*           inv_norms         = nullptr;  // length dim_, 1/norm_i
+    const int*              perms             = nullptr;  // group_size * n_sites
+    const cuDoubleComplex*  characters        = nullptr;  // length group_size, chi_k(g)
+    const std::int32_t*     rep_index_of_rank = nullptr;  // length C(n_sites,n_up)
+    std::uint64_t           dim_              = 0;
+    int                     group_size        = 1;
+    int                     n_sites           = 0;
+    int                     n_up              = -1;
+
+    __host__ __device__ inline std::uint64_t dim() const noexcept {
+        return dim_;
+    }
+
+    // Apply the g'th site permutation to a computational state (same bit
+    // convention as the host ``applyPermutation``: output bit i is sourced
+    // from input bit perms[g*n_sites + i]).
+    __device__ inline std::uint64_t apply_perm(std::uint64_t s, int g) const noexcept {
+        const int* p = perms + static_cast<std::size_t>(g) * n_sites;
+        std::uint64_t r = 0;
+        for (int i = 0; i < n_sites; ++i) {
+            r |= ((s >> p[i]) & 1ULL) << i;
+        }
+        return r;
+    }
+
+    __device__ inline std::uint64_t state_of(std::uint64_t idx) const noexcept {
+        return reps[idx];
+    }
+
+    __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
+        if (__popcll(state) != n_up) return kDeviceNotFound;
+        std::uint64_t rb = state;
+        for (int g = 1; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            if (img < rb) rb = img;
+        }
+        const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
+        const std::int32_t k = rep_index_of_rank[r];
+        return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
+    }
+
+    // Look up the destination orbit index AND the projection phase for a
+    // connected computational state ``state`` in ONE shot, regenerating both
+    // from the group action on the fly (no orbit table).
+    __device__ inline std::uint64_t
+    index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
+        if (__popcll(state) != n_up) return kDeviceNotFound;
+        // Pass 1: representative r_b = min_g g(state).
+        std::uint64_t rb = state;
+        for (int g = 1; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            if (img < rb) rb = img;
+        }
+        const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
+        const std::int32_t k = rep_index_of_rank[r];
+        if (k < 0) return kDeviceNotFound;
+        // Pass 2: conj(beta_state) = sum_{h: h(state)==r_b} conj(chi_k(h)).
+        cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+        for (int h = 0; h < group_size; ++h) {
+            if (apply_perm(state, h) == rb) {
+                const cuDoubleComplex c = characters[h];
+                acc.x += cuCreal(c);   // conj: +real
+                acc.y -= cuCimag(c);   //       -imag
+            }
+        }
+        const double s = inv_norms[k];
+        proj_out = make_cuDoubleComplex(acc.x * s, acc.y * s);
+        return static_cast<std::uint64_t>(k);
+    }
+
+    // Compile-time traits: the rep-symmetry kernel applies H to the single
+    // representative (no orbit walk) but still leaves the basis on
+    // off-diagonal terms and needs the per-emit projection phase.
+    static constexpr bool may_leave_basis    = true;
+    static constexpr bool needs_orbit_walk   = false;
+    static constexpr bool has_coeff_modifier = true;
+    static constexpr bool is_distributed     = false;
+
+    __device__ inline bool is_local(std::uint64_t /*g*/) const noexcept { return true; }
+    __device__ inline std::uint64_t local_offset() const noexcept { return 0; }
+};
+
 // ---------------------------------------------------------------------------
 // DeviceSymmetryBasisPolicyHolder
 //

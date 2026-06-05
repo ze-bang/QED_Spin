@@ -157,6 +157,40 @@ codes (HPhi, EDLib, QuSpin, Pomerol). It complements
   combinations \( |\psi_{\alpha}^{k,n_\uparrow}\rangle =
   (1/\mathcal{N}_\alpha) \sum_g \chi_k(g)^* g |s_\alpha\rangle \) over
   the group orbit of a representative \( s_\alpha \).
+- **GPU sector matvec — on-the-fly representative SpMV (default).** For a
+  fixed-Sz + symmetry sector, `SectorOperator::bind_cuda()` no longer uploads
+  the per-sector **orbit CSR** (the materialised `\{g|s_\alpha\rangle\}` images
+  + their `\chi_k(g)^*` coefficients, an O(`dim_Sz`) structure) nor the
+  O(`dim_Sz`) projection table. Instead it keeps only the representatives,
+  `1/\mathcal{N}_\alpha`, the `|G|` site permutations, and the per-sector
+  characters `\chi_k(g)` resident, and **regenerates the group action +
+  projection arithmetically on the device**: apply `H` to the single
+  representative `r_\alpha`, find each connected state's representative
+  `r_\beta = \min_g g(s')`, look it up via a combinadic-rank → orbit-index
+  table, and accumulate with `\sum_{h: h(s')=r_\beta} \chi_k(h)` and the norm
+  factors. This collapses the reference's `|G|`-fold orbit walk (with the
+  `1/|G|` weight) into the single-representative term, matching the CPU
+  `applySymmetrized` reference bit-for-bit (`test_rep_symmetry_gpu`). It is the
+  resident N=32 Sz+Symm path — see `ED_GPU_SYMMETRY_REP` in
+  `SCALING.md` (default on; `=0` reverts to the orbit-CSR mirror). Code:
+  `DeviceRepSymmetryBasisPolicy` (`include/ed/matvec/device_basis_policy.cuh`),
+  `apply_terms_rep_symmetry_scatter` (`include/ed/matvec/term_kernels_gpu.cuh`),
+  `make_sector_matvec_gpu_rep` (`src/symmetry/streaming_symmetry_gpu_mirror.cu`).
+- **Host sector loop — CSR-free lazy sector (default, same gate).** The device
+  win above is matched on the host: with `ED_GPU_SYMMETRY_REP` on,
+  `StreamingSymmetryHandle::sector(k)` returns a *lazy* `SectorOperator`
+  (`make_rep_sector_operator_lazy`) that knows its `dim` up-front (from the
+  Pass 1.5 `getSectorDimension`, no orbit walk) and **defers the per-sector
+  host orbit CSR**. `bind_cuda()` builds the CSR-free `RepSectorData` on demand
+  via `FixedSzStreamingSymmetryOperator::getRepSectorData` (reps + `1/norm` +
+  characters + flattened permutations, with the per-rep orbit expansion run
+  transiently and discarded), so a GPU run **never materializes the
+  ~24 GiB/sector orbit CSR** (`orbit_elements`/`orbit_coefficients` +
+  `SortedUint64Index` reverse lookup). A CPU `apply` lazily materializes that
+  CSR (`getSector(k)` → `SectorBasis::adopt`) only as a fallback — so CPU-only
+  runs stay correct. Pinned by `test_rep_lazy_sector_loop` (GPU rep matvec ==
+  CPU `apply`; host-CSR-never-materialized invariant asserted on the GPU path).
+  `=0` reverts to the eager `make_sector_operator_adopt` + orbit-CSR mirror.
 
 ---
 
