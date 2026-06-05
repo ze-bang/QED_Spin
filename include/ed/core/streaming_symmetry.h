@@ -4,6 +4,7 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/sorted_uint64_index.h>   // Phase 3a #5: compact uint64->size_t map
 #include <ed/symmetry/projector_chain.h>   // Orthogonal symmetry composition (May 2026)
+#include <ed/symmetry/rep_sector_data.h>   // On-the-fly representative SpMV (Jun 2026)
 #include <H5Cpp.h>
 #include <unordered_set>
 #include <algorithm>
@@ -2536,7 +2537,58 @@ public:
         ensureSectorMaterialized_(sector_idx);
         return sectors_[sector_idx];
     }
-    
+
+    // -----------------------------------------------------------------
+    // getRepSectorData: CSR-FREE per-sector source for the on-the-fly
+    // representative GPU matvec ("On-the-fly representative SpMV" plan,
+    // Jun 2026).
+    //
+    // Returns the orbit representatives + ``1/norm`` + the |G| per-sector
+    // characters ``chi_k(g)`` + the flattened group permutations for sector
+    // ``sector_idx``, WITHOUT materialising the orbit CSR (the per-rep orbit
+    // expansion is computed transiently into reusable scratch and discarded
+    // after its norm is read). This is the resident-GPU replacement for
+    // ``materializeSectorOrbits_`` + the ~13.44 GiB orbit-CSR upload: the
+    // device regenerates the group action arithmetically.
+    //
+    // The representative ORDER is bit-identical to
+    // ``materializeSectorOrbits_`` (iterate ``unique_orbit_reps_`` ascending,
+    // keep those whose symmetrised norm^2 > 1e-10), so the array index ``i``
+    // here equals the sector-basis index used by the solver's in/out vectors.
+    // -----------------------------------------------------------------
+    [[nodiscard]] ed::symmetry::RepSectorData
+    getRepSectorData(std::size_t sector_idx) const {
+        ed::symmetry::RepSectorData out;
+        out.n_sites    = static_cast<int>(n_bits_);
+        out.n_up       = static_cast<int>(n_up_);
+        out.group_size = static_cast<int>(symmetry_info.max_clique.size());
+        if (sector_idx >= sectors_.size()) return out;
+        const auto& sector = sectors_[sector_idx];
+
+        if (!symmetry_info.power_representation.empty()) {
+            out.characters =
+                ed::symmetry::sector_characters_from(symmetry_info,
+                                                     sector.phase_factors);
+        }
+        out.perms_flat =
+            ed::symmetry::flatten_group_perms(symmetry_info, out.n_sites);
+
+        out.reps.reserve(unique_orbit_reps_.size());
+        out.inv_norms.reserve(unique_orbit_reps_.size());
+        std::vector<uint64_t> elems;
+        std::vector<Complex>  coeffs;
+        double                norm_sq = 0.0;
+        for (uint64_t rep : unique_orbit_reps_) {
+            computeOrbitDataFixedSz(rep, sector.phase_factors,
+                                    elems, coeffs, norm_sq);
+            if (norm_sq > 1e-10) {
+                out.reps.push_back(rep);
+                out.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+            }
+        }
+        return out;
+    }
+
     size_t getNumSectors() const { return sectors_.size(); }
     
     uint64_t getSectorDimension(size_t sector_idx) const {
@@ -2547,6 +2599,20 @@ public:
                 symmetrized_block_ham_sizes[sector_idx]);
         }
         return sectors_[sector_idx].basis_states.size();
+    }
+
+    // CSR-FREE sector metadata accessors ("scan other region" optimisation,
+    // Jun 2026). ``phase_factors`` / ``quantum_numbers`` are set at sector
+    // GENERATION time (not at orbit materialisation), so these reads never
+    // trigger ``ensureSectorMaterialized_`` -- letting the lazy rep loop tag
+    // a sector and decide its real/complex character without paying the
+    // ~24 GiB/sector orbit-CSR materialisation cost.
+    const std::vector<Complex>& getSectorPhaseFactors(size_t sector_idx) const {
+        return sectors_[sector_idx].phase_factors;
+    }
+
+    const std::vector<int>& getSectorQuantumNumbers(size_t sector_idx) const {
+        return sectors_[sector_idx].quantum_numbers;
     }
 
     /// Public computational-state -> orbit-basis-index lookup for

@@ -39,6 +39,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -52,6 +53,7 @@
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
+#include <ed/symmetry/rep_sector_data.h>
 
 namespace ed::symmetry {
 
@@ -86,17 +88,81 @@ public:
     // Basis introspection.
     // -----------------------------------------------------------------
     [[nodiscard]] std::size_t dim() const override {
-        return static_cast<std::size_t>(sector_basis_.dim());
+        // CSR-free lazy mode: the sector dimension is known up-front (from
+        // Pass 1.5 ``getSectorDimension``) without ever materialising the
+        // host orbit CSR, so report it directly. Otherwise it is the owned
+        // SectorBasis's orbit count.
+        return rep_lazy_
+            ? static_cast<std::size_t>(rep_dim_)
+            : static_cast<std::size_t>(sector_basis_.dim());
     }
 
     [[nodiscard]] const SectorBasis& basis() const noexcept {
         return sector_basis_;
     }
 
+    // -----------------------------------------------------------------
+    // On-the-fly representative GPU path ("On-the-fly representative SpMV"
+    // plan, Jun 2026). When ``ED_GPU_SYMMETRY_REP`` is set AND this CSR-free
+    // RepSectorData is usable (fixed-Sz sector), ``bind_cuda()`` builds a
+    // resident GpuRepSectorMirror instead of uploading the orbit CSR. The
+    // factory (``make_sector_operators`` / ``make_sector_operator_adopt``)
+    // populates it; it stays empty for sym-only (full-Hilbert) sectors, which
+    // fall back to the orbit-CSR mirror.
+    // -----------------------------------------------------------------
+    void setRepSectorData(RepSectorData rep) noexcept {
+        rep_data_ = std::move(rep);
+    }
+
+    [[nodiscard]] const RepSectorData& repSectorData() const noexcept {
+        return rep_data_;
+    }
+
+    // -----------------------------------------------------------------
+    // CSR-FREE lazy rep mode ("scan other region" optimisation, Jun 2026).
+    //
+    // The production streaming-symmetry sector loop used to FULLY materialise
+    // each sector's host orbit CSR (orbit_elements + orbit_coefficients +
+    // the state->orbit lookup) in ``StreamingSymmetryHandle::sector(k)`` --
+    // ~24 GiB/sector at N=32 (14.4 GiB CSR + 9.6 GiB SortedUint64Index) --
+    // EVEN THOUGH the GPU on-the-fly representative matvec needs none of it.
+    //
+    // ``configureRepLazy`` lets the loop hand over a SectorOperator that:
+    //   * knows its ``dim`` up-front (Pass 1.5 ``getSectorDimension``),
+    //   * knows its real/complex character up-front (cheap |G| characters),
+    //   * builds the CSR-free RepSectorData ON DEMAND (only when ``bind_cuda``
+    //     actually engages the GPU rep path) via ``rep_provider``, and
+    //   * materialises the host orbit CSR ON DEMAND (only if a CPU ``apply``
+    //     is ever invoked -- never on the GPU path) via ``csr_provider``.
+    //
+    // Net effect: a GPU-only mTPQ+symmetry run NEVER allocates the per-sector
+    // host orbit CSR; the host working set drops from ~24 GiB/sector to the
+    // CSR-free RepSectorData (~1.2 GiB) plus transient orbit scratch.
+    // -----------------------------------------------------------------
+    void configureRepLazy(std::uint64_t                   dim,
+                          std::size_t                     group_size,
+                          bool                            is_real,
+                          std::function<RepSectorData()>  rep_provider,
+                          std::function<SymmetrySector()> csr_provider) {
+        rep_lazy_       = true;
+        rep_dim_        = dim;
+        rep_group_size_ = group_size;
+        rep_is_real_    = is_real;
+        rep_provider_   = std::move(rep_provider);
+        csr_provider_   = std::move(csr_provider);
+    }
+
+    [[nodiscard]] bool rep_lazy() const noexcept { return rep_lazy_; }
+
+    // True once the host orbit CSR has actually been materialised (CPU
+    // fallback). On the GPU rep path this stays false for the operator's
+    // whole lifetime -- the invariant the host-memory optimisation rests on.
+    [[nodiscard]] bool host_csr_materialized() const noexcept {
+        return sector_basis_.dim() > 0;
+    }
+
     [[nodiscard]] std::string description() const override {
-        return "SectorOperator(sector="
-            + std::to_string(sector_basis_.sector().sector_id)
-            + ", dim=" + std::to_string(sector_basis_.dim()) + ")";
+        return "SectorOperator(dim=" + std::to_string(dim()) + ")";
     }
 
     // -----------------------------------------------------------------
@@ -139,6 +205,14 @@ public:
     // true, so the guard is sufficient.
     // -----------------------------------------------------------------
     [[nodiscard]] bool is_real_hermitian() const noexcept override {
+        // In CSR-free lazy mode the per-sector real/complex character is
+        // precomputed from the |G| sector characters (``rep_is_real_``) so
+        // we never need to scan an orbit CSR that may not be materialised.
+        if (rep_lazy_) {
+            return const_cast<SectorOperator*>(this)->isReal()
+                && is_hermitian()
+                && rep_is_real_;
+        }
         return const_cast<SectorOperator*>(this)->isReal()
             && is_hermitian()
             && sector_is_real_();
@@ -180,13 +254,39 @@ public:
 protected:
     [[nodiscard]] std::unique_ptr<ed::matvec::MatVecBackendBase>
     make_backend_() const override {
+        // CPU matvec needs the full orbit CSR. In CSR-free lazy mode the
+        // host CSR has not been built yet -- materialise it now (once). On a
+        // GPU-only run this path is never reached, so the CSR is never built.
+        ensure_sector_basis_();
         return ed::matvec::make_cpu_symmetry_backend<
             DiagonalOneBody, OffDiagonalOneBody,
             DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
             ThreeBodyTransformData>(sector_basis_.policy());
     }
 
+    // Lazily build the CSR-free RepSectorData (GPU rep path source). For the
+    // eager factories this is a no-op (rep_data_ already usable or no
+    // provider); for the lazy loop it runs ``getRepSectorData`` exactly once,
+    // the first time ``bind_cuda`` engages the rep path. Defined here so the
+    // CUDA translation unit (sector_operator_gpu.cu) can call it.
+    [[nodiscard]] const RepSectorData& ensure_rep_data_() const {
+        if (!rep_data_.usable() && rep_provider_) {
+            rep_data_ = rep_provider_();
+        }
+        return rep_data_;
+    }
+
 private:
+    // Lazily materialise the host orbit CSR (SectorBasis) from the deferred
+    // provider. No-op when the basis is already populated (eager factories)
+    // or when no provider was supplied.
+    void ensure_sector_basis_() const {
+        if (sector_basis_.dim() == 0 && csr_provider_) {
+            sector_basis_ =
+                SectorBasis::adopt(csr_provider_(), rep_group_size_);
+        }
+    }
+
     // True iff every orbit coefficient in this sector is real within tol.
     // Matches the legacy ``StreamingSymmetryOperator::isSectorReal``
     // semantics (scan of orbit coefficients), restricted to this sector.
@@ -218,7 +318,18 @@ private:
         return n_up;
     }
 
-    SectorBasis sector_basis_;
+    // ``mutable``: both are populated lazily by const matvec entry points
+    // (``make_backend_`` / ``bind_cuda``) in CSR-free lazy mode.
+    mutable SectorBasis   sector_basis_;
+    mutable RepSectorData rep_data_;  // CSR-free on-the-fly rep path source
+
+    // CSR-free lazy mode state (see ``configureRepLazy``).
+    bool                            rep_lazy_       = false;
+    std::uint64_t                   rep_dim_        = 0;
+    std::size_t                     rep_group_size_ = 0;
+    bool                            rep_is_real_    = false;
+    mutable std::function<RepSectorData()>  rep_provider_;
+    mutable std::function<SymmetrySector()> csr_provider_;
 };
 
 } // namespace ed::symmetry

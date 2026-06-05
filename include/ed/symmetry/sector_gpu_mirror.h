@@ -33,6 +33,7 @@
 #include <ed/core/linear_operator.h>     // ed::LinearOperator::MatvecFn
 #include <ed/core/streaming_symmetry.h>  // ::SymmetrySector
 #include <ed/matvec/term_storage.h>      // ed::matvec::TermStorage
+#include <ed/symmetry/rep_sector_data.h> // ed::symmetry::RepSectorData
 
 namespace ed::symmetry {
 
@@ -54,5 +55,22 @@ make_sector_matvec_gpu(const ::SymmetrySector&         sector,
                        const ed::matvec::TermStorage&  terms,
                        int                             n_sites,
                        int                             n_up = -1);
+
+/// Build a RESIDENT on-the-fly representative GPU matvec for one symmetry
+/// sector ("On-the-fly representative SpMV" plan, Jun 2026). Consumes a
+/// CSR-free ``RepSectorData`` (representatives + ``1/norm`` + the |G|
+/// per-sector characters + the group permutations) and returns a complex
+/// matvec callable taking DEVICE pointers. Unlike ``make_sector_matvec_gpu``
+/// this allocates NO orbit CSR and NO O(full-Sz-dim) projection table: the
+/// group action + projection are regenerated arithmetically on the device,
+/// so per-SpMV traffic is just the in/out vectors (the genuine /|G| win for
+/// the N=32 Sz+Symm mTPQ run).
+///
+/// Requires ``rep.usable()`` (fixed-Sz sector, ``n_up >= 0``). On a non-CUDA
+/// build this throws ``std::logic_error``.
+ed::LinearOperator::MatvecFn
+make_sector_matvec_gpu_rep(const RepSectorData&            rep,
+                           double                          spin_l,
+                           const ed::matvec::TermStorage&  terms);
 
 } // namespace ed::symmetry

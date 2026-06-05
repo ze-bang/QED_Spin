@@ -59,6 +59,32 @@ namespace ed::core {
 // (CPU/GPU parity landed in Phase A; production cutover validated in Phase B).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CSR-free lazy rep path gate ("scan other region" optimisation, Jun 2026).
+//
+// On CUDA builds the fixed-Sz sector loop hands out CSR-free lazy
+// SectorOperators (``make_rep_sector_operator_lazy``): the GPU on-the-fly
+// representative matvec never materialises the per-sector host orbit CSR
+// (~24 GiB/sector at N=32), and a CPU fallback lazily materialises it only if
+// ``apply`` is actually called. Tied to the SAME ``ED_GPU_SYMMETRY_REP`` gate
+// as the device rep matvec so ``=0`` restores the legacy adopt/orbit-CSR path
+// end-to-end. On non-CUDA builds there is no GPU rep matvec, so the CPU always
+// needs the orbit CSR -- keep the eager adopt path (return false).
+// ---------------------------------------------------------------------------
+inline bool rep_lazy_sector_path_enabled() {
+#ifdef WITH_CUDA
+    static const bool enabled = [] {
+        const char* e = std::getenv("ED_GPU_SYMMETRY_REP");
+        if (e == nullptr || e[0] == '\0') return true;   // default ON
+        if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
+        return true;                                     // anything else -> ON
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 /// Lightweight handle over either flavour of streaming-symmetry
 /// operator. The handle does NOT own the operator -- callers must keep
 /// the underlying ``ed::LinearOperator`` alive for the handle's
@@ -97,6 +123,14 @@ public:
     [[nodiscard]] std::unique_ptr<ed::LinearOperator>
     sector(std::size_t k) const {
         if (fsz_sym_op_) {
+            // CSR-free lazy path (CUDA, default ON): hand out a SectorOperator
+            // that defers the host orbit CSR -- the GPU rep matvec never
+            // materialises it (~24 GiB/sector saved at N=32). Falls back to a
+            // lazy CPU materialisation only if ``apply`` is invoked.
+            if (rep_lazy_sector_path_enabled()) {
+                return ed::symmetry::make_rep_sector_operator_lazy(
+                    *fsz_sym_op_, k);
+            }
             SymmetrySector sec = fsz_sym_op_->getSector(k);  // copy (materialises)
             return ed::symmetry::make_sector_operator_adopt(
                 *fsz_sym_op_, std::move(sec),
@@ -115,9 +149,11 @@ public:
         SectorTag t;
         t.sector_index = k;
         if (fsz_sym_op_) {
-            const auto& s = fsz_sym_op_->getSector(k);
-            t.sector_dim      = static_cast<std::uint64_t>(s.basis_states.size());
-            t.quantum_numbers = s.quantum_numbers;
+            // CSR-free: dim from Pass 1.5, quantum numbers from generation --
+            // neither triggers orbit-CSR materialisation (see the cheap
+            // accessors on FixedSzStreamingSymmetryOperator).
+            t.sector_dim      = fsz_sym_op_->getSectorDimension(k);
+            t.quantum_numbers = fsz_sym_op_->getSectorQuantumNumbers(k);
             t.n_up            = static_cast<int>(fsz_sym_op_->getNUp());
         } else {
             const auto& s = sym_op_->getSector(k);

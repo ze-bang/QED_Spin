@@ -566,6 +566,203 @@ void launch_symmetry_matvec(const GpuSectorMirror& mirror,
     cuda_check(err, "apply_terms_gpu_scatter kernel launch");
 }
 
+// =============================================================================
+// GpuRepSectorMirror -- on-the-fly representative SpMV device snapshot.
+//
+// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
+//
+// Unlike GpuSectorMirror this holds NO orbit CSR and NO O(full-Sz-dim)
+// projection table. The resident footprint is:
+//   * reps (dim x 8 B) + inv_norms (dim x 8 B)
+//   * the |G| site permutations (group_size * n_sites ints)
+//   * the per-sector character array (group_size complex)
+//   * rep_index_of_rank: C(n_sites, n_up) int32 reverse lookup keyed by the
+//     combinadic rank of an orbit REPRESENTATIVE (built from ``reps`` alone,
+//     no orbit walk).
+// The group action + projection are regenerated arithmetically inside the
+// kernel; per-SpMV traffic is just the in/out vectors -> the genuine /|G|.
+// =============================================================================
+struct GpuRepSectorMirror {
+    thrust::device_vector<std::uint64_t>   d_reps;
+    thrust::device_vector<double>          d_inv_norms;
+    thrust::device_vector<int>             d_perms;
+    thrust::device_vector<cuDoubleComplex> d_characters;
+    thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
+
+    int           group_size = 1;
+    int           n_sites    = 0;
+    int           n_up       = -1;
+    std::uint64_t dim        = 0;
+    double        spin_l     = 0.5;
+
+    thrust::device_vector<ed::matvec::DiagOneBody>     d_diag_one_body;
+    thrust::device_vector<ed::matvec::OffDiagOneBody>  d_offdiag_one_body;
+    thrust::device_vector<ed::matvec::DiagTwoBody>     d_diag_two_body;
+    thrust::device_vector<ed::matvec::MixedTwoBody>    d_mixed_two_body;
+    thrust::device_vector<ed::matvec::OffDiagTwoBody>  d_offdiag_two_body;
+    thrust::device_vector<ed::matvec::ThreeBodyTerm>   d_three_body;
+
+    ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis_view() const noexcept {
+        ed::matvec::basis::DeviceRepSymmetryBasisPolicy v;
+        v.reps              = thrust::raw_pointer_cast(d_reps.data());
+        v.inv_norms         = thrust::raw_pointer_cast(d_inv_norms.data());
+        v.perms             = thrust::raw_pointer_cast(d_perms.data());
+        v.characters        = thrust::raw_pointer_cast(d_characters.data());
+        v.rep_index_of_rank = thrust::raw_pointer_cast(d_rep_index_of_rank.data());
+        v.dim_              = dim;
+        v.group_size        = group_size;
+        v.n_sites           = n_sites;
+        v.n_up              = n_up;
+        return v;
+    }
+
+    ed::matvec::kernel::gpu::DeviceTermStorage terms_view() const noexcept {
+        ed::matvec::kernel::gpu::DeviceTermStorage t;
+        t.diag_one_body        = thrust::raw_pointer_cast(d_diag_one_body.data());
+        t.num_diag_one_body    = static_cast<std::uint32_t>(d_diag_one_body.size());
+        t.offdiag_one_body     = thrust::raw_pointer_cast(d_offdiag_one_body.data());
+        t.num_offdiag_one_body = static_cast<std::uint32_t>(d_offdiag_one_body.size());
+        t.diag_two_body        = thrust::raw_pointer_cast(d_diag_two_body.data());
+        t.num_diag_two_body    = static_cast<std::uint32_t>(d_diag_two_body.size());
+        t.mixed_two_body       = thrust::raw_pointer_cast(d_mixed_two_body.data());
+        t.num_mixed_two_body   = static_cast<std::uint32_t>(d_mixed_two_body.size());
+        t.offdiag_two_body     = thrust::raw_pointer_cast(d_offdiag_two_body.data());
+        t.num_offdiag_two_body = static_cast<std::uint32_t>(d_offdiag_two_body.size());
+        t.three_body           = thrust::raw_pointer_cast(d_three_body.data());
+        t.num_three_body       = static_cast<std::uint32_t>(d_three_body.size());
+        return t;
+    }
+};
+
+namespace detail {
+
+// Build a GpuRepSectorMirror from a CSR-free RepSectorData + term storage.
+// Builds the reverse rank table from ``reps`` only (no orbit walk).
+inline std::shared_ptr<GpuRepSectorMirror>
+build_rep_mirror(const ed::symmetry::RepSectorData& data,
+                 double spin_l,
+                 const ed::matvec::TermStorage& terms)
+{
+    if (!data.usable()) {
+        throw std::runtime_error(
+            "build_rep_mirror: RepSectorData is not usable (need n_up >= 0, "
+            "non-empty reps, and matching characters / perms sizes)");
+    }
+    const int n_sites = data.n_sites;
+    const int n_up    = data.n_up;
+    if (n_sites <= 0 || n_sites > 64 || n_up < 0 || n_up > n_sites) {
+        throw std::runtime_error("build_rep_mirror: invalid n_sites / n_up");
+    }
+
+    auto mirror = std::make_shared<GpuRepSectorMirror>();
+    mirror->spin_l     = spin_l;
+    mirror->group_size = data.group_size;
+    mirror->n_sites    = n_sites;
+    mirror->n_up       = n_up;
+    mirror->dim        = data.dim();
+
+    // C(n_sites, n_up), capped at INT32_MAX (the rank-table value type).
+    long double dv = 1.0L;
+    {
+        int kk = (n_up < n_sites - n_up) ? n_up : (n_sites - n_up);
+        for (int i = 0; i < kk; ++i) {
+            dv *= static_cast<long double>(n_sites - i);
+            dv /= static_cast<long double>(i + 1);
+        }
+    }
+    if (dv > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error(
+            "build_rep_mirror: C(n_sites, n_up) exceeds INT32_MAX; the rank "
+            "table value type would overflow");
+    }
+    const std::uint64_t dim_full_sz = static_cast<std::uint64_t>(dv + 0.5L);
+
+    // Device combinadic rank() reads a Pascal triangle from constant memory.
+    ed::gpu::combinadic::detail::upload_pascal();
+
+    // Host Pascal table matching the device ``binomial`` (0 when k > n), so
+    // host-built ranks line up with the device ``rank_state``.
+    std::vector<std::vector<std::uint64_t>> pascal(
+        65, std::vector<std::uint64_t>(65, 0));
+    for (int nn = 0; nn <= 64; ++nn) {
+        pascal[nn][0] = 1ULL;
+        for (int kk = 1; kk <= nn; ++kk) {
+            pascal[nn][kk] = pascal[nn - 1][kk - 1]
+                             + (kk < nn ? pascal[nn - 1][kk] : 0ULL);
+        }
+    }
+    auto binom_host = [&pascal](int nn, int kk) -> std::uint64_t {
+        if (kk < 0 || kk > nn || nn < 0 || nn > 64) return 0ULL;
+        return pascal[nn][kk];
+    };
+    auto rank_combination_host = [&binom_host, n_sites](
+        std::uint64_t state, int kk) -> std::uint64_t {
+        std::uint64_t r = 0;
+        int seen = 0;
+        for (int bit = 0; bit < n_sites && seen < kk; ++bit) {
+            if ((state >> bit) & 1ULL) {
+                ++seen;
+                r += binom_host(bit, seen);
+            }
+        }
+        return r;
+    };
+
+    // Reverse table: rank(representative) -> orbit index. Built from reps
+    // ONLY -- no orbit images materialised.
+    std::vector<std::int32_t> h_rep_index_of_rank(dim_full_sz, -1);
+    for (std::size_t i = 0; i < data.reps.size(); ++i) {
+        const std::uint64_t r = rank_combination_host(data.reps[i], n_up);
+        if (r < dim_full_sz) {
+            h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
+        }
+    }
+
+    std::vector<cuDoubleComplex> h_characters(data.characters.size());
+    for (std::size_t g = 0; g < data.characters.size(); ++g) {
+        h_characters[g] = make_cuDoubleComplex(data.characters[g].real(),
+                                               data.characters[g].imag());
+    }
+
+    mirror->d_reps              = data.reps;
+    mirror->d_inv_norms         = data.inv_norms;
+    mirror->d_perms             = data.perms_flat;
+    mirror->d_characters        = h_characters;
+    mirror->d_rep_index_of_rank = h_rep_index_of_rank;
+
+    mirror->d_diag_one_body    = terms.diag_one_body;
+    mirror->d_offdiag_one_body = terms.offdiag_one_body;
+    mirror->d_diag_two_body    = terms.diag_two_body;
+    mirror->d_mixed_two_body   = terms.mixed_two_body;
+    mirror->d_offdiag_two_body = terms.offdiag_two_body;
+    mirror->d_three_body       = terms.three_body;
+
+    cuda_check(cudaDeviceSynchronize(), "synchronize after rep mirror upload");
+    return mirror;
+}
+
+}  // namespace detail
+
+void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
+                                const cuDoubleComplex* d_in,
+                                cuDoubleComplex* d_out,
+                                std::size_t dim,
+                                double spin_l)
+{
+    using detail::cuda_check;
+    if (dim == 0) return;
+    cuda_check(cudaMemsetAsync(d_out, 0, dim * sizeof(cuDoubleComplex)),
+               "zero output before rep kernel");
+    const auto basis = mirror.basis_view();
+    const auto terms = mirror.terms_view();
+    const cudaError_t err =
+        ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu<
+            ed::matvec::basis::DeviceRepSymmetryBasisPolicy,
+            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
+                             /*stream=*/0, /*threads_per_block=*/256);
+    cuda_check(err, "apply_terms_rep_symmetry_scatter kernel launch");
+}
+
 }  // namespace ed::symmetry::gpu_mirror
 
 // =============================================================================
@@ -620,6 +817,50 @@ ed::symmetry::make_sector_matvec_gpu(const ::SymmetrySector&        sector,
                 std::to_string(dim_captured) + ")");
         }
         launch_symmetry_matvec(
+            *mirror,
+            reinterpret_cast<const cuDoubleComplex*>(in),
+            reinterpret_cast<cuDoubleComplex*>(out),
+            n,
+            spin);
+    };
+}
+
+// =============================================================================
+// make_sector_matvec_gpu_rep -- on-the-fly representative GPU matvec entry.
+//
+// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
+//
+// Builds a resident GpuRepSectorMirror from a CSR-free RepSectorData (reps +
+// inv_norms + |G| characters + group perms) and returns a DEVICE-pointer
+// MatvecFn driving ``apply_terms_rep_symmetry_scatter``. No orbit CSR / no
+// O(full-Sz-dim) projection table is allocated or streamed -- this is the
+// resident N=32 Sz+Symm path.
+// =============================================================================
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
+                                         double                         spin_l,
+                                         const ed::matvec::TermStorage& terms)
+{
+    using ed::symmetry::gpu_mirror::GpuRepSectorMirror;
+    using ed::symmetry::gpu_mirror::detail::build_rep_mirror;
+    using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
+
+    std::shared_ptr<const GpuRepSectorMirror> mirror =
+        build_rep_mirror(rep, spin_l, terms);
+
+    const double spin = spin_l;
+    const std::uint64_t dim_captured = mirror->dim;
+
+    return [mirror, spin, dim_captured](const ed::matvec::Complex* in,
+                                        ed::matvec::Complex* out,
+                                        std::size_t n) {
+        if (n != dim_captured) {
+            throw std::runtime_error(
+                "ed::symmetry::make_sector_matvec_gpu_rep: size mismatch (" +
+                std::to_string(n) + " vs " +
+                std::to_string(dim_captured) + ")");
+        }
+        launch_rep_symmetry_matvec(
             *mirror,
             reinterpret_cast<const cuDoubleComplex*>(in),
             reinterpret_cast<cuDoubleComplex*>(out),

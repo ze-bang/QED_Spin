@@ -118,9 +118,10 @@ them in your run script, not mid-run.
 |---|---|---|
 | `ED_LANCZOS_DISK` | `0` (in-memory) | If `1`/`true`/`yes`, the Krylov basis is spilled to a per-call working directory instead of registering in `lanczos_io::register_basis_buffer`. **Required for N≥36.** Costs disk I/O bandwidth per re-orth sweep; pair with NVMe. |
 | `ED_USE_SPARSE` | unset (auto) | `0` forces matrix-free SpMV always; `1` forces CSR assembly. The auto threshold is `dim ≤ 2²⁰` (~1 M states), see `Operator::apply`. **Never set `=1` for N≥28** — assembling a 10⁸-row CSR will OOM you. |
-| `ED_SYM_LAZY_SECTORS` | unset (auto) | Controls whether the streaming-symmetry build materializes **all** per-sector orbit CSRs + reverse indices eagerly (Pass 2) or lazily one sector at a time (LRU-1, built at solve/bind time). `1` forces lazy, `0` forces eager. **Auto-lazy when the estimated all-sector footprint exceeds `ED_SYM_LAZY_SECTORS_BYTES_MAX`** — at N=32 half-filling the eager footprint is ~190 GB, so lazy auto-engages. The lazy path keeps only the deduped orbit-rep list (~600 MB at N=32) + the fixed-Sz basis resident; this is the **cleanest N=32 symmetry setup** and is the default. |
+| `ED_SYM_LAZY_SECTORS` | unset (auto) | Controls whether the streaming-symmetry build materializes **all** per-sector orbit CSRs + reverse indices eagerly (Pass 2) or lazily one sector at a time (LRU-1, built at solve/bind time). `1` forces lazy, `0` forces eager. **Auto-lazy when the estimated all-sector footprint exceeds `ED_SYM_LAZY_SECTORS_BYTES_MAX`** — at N=32 half-filling the eager footprint is ~190 GB, so lazy auto-engages. The lazy path keeps only the deduped orbit-rep list (~600 MB at N=32) + the fixed-Sz basis resident; this is the **cleanest N=32 symmetry setup** and is the default. **On the GPU lane the orbit-CSR streaming this knob governs is superseded by the on-the-fly representative SpMV (`ED_GPU_SYMMETRY_REP`, default on)** — that path never materializes the per-sector orbit CSR at all, so the lazy↔eager distinction is moot for the GPU 32-site Sz+Symm matvec. |
 | `ED_SYM_LAZY_SECTORS_BYTES_MAX` | `4 GiB` | Eager→lazy crossover for the symmetry-sector build above. Lower it (e.g. `2147483648` for 2 GiB) on a tight node to force lazy earlier; raise it only if you have the RAM for every sector's orbit CSR at once and want the fastest repeated matvec. |
 | `ED_SYM_DENSE_LOOKUP_BYTES_MAX` | `512 MB` | Total budget (across all sectors) for the optional dense `int32_t` state→basis side-table that makes the SpMV reverse lookup O(1). Above this the operator stays on the compact `SortedUint64Index` (O(log N) binary search). Raise on a fat node for faster matvec; lower to save RAM. |
+| `ED_GPU_SYMMETRY_REP` | `1` (on) | **On-the-fly representative GPU SpMV** for fixed-Sz + symmetry sectors (`SectorOperator::bind_cuda`). Instead of uploading the per-sector **orbit CSR** (≈`dim_Sz` images + character coefficients, ~14 GiB at N=32) and an O(`dim_Sz`) projection table (~10 GiB), it keeps only the representatives + `1/norm` + the `|G|` group permutations + the per-sector characters resident, and **regenerates the group action + projection arithmetically on the device** (`min_g g(s')` + combinadic rank + a `C(N,n_up)` rep→index table). Working set drops from ~30+ GiB to ~6 GiB at N=32 and per-SpMV traffic becomes just the in/out vectors — the genuine ÷\|G\| win. **This same gate also drives the host sector loop**: `StreamingSymmetryHandle::sector(k)` returns a CSR-free *lazy* `SectorOperator` (`make_rep_sector_operator_lazy`) that defers the per-sector host orbit CSR (~24 GiB at N=32: orbit images/coefficients + reverse-lookup index) — the GPU path never builds it; a CPU `apply` lazily materializes it only as a fallback. Set `=0` to opt back into the legacy orbit-CSR mirror **and** the eager host materialization (diagnostics / bisection). Only fixed-Sz sectors take this path; sym-only full-Hilbert sectors always use the orbit-CSR mirror. |
 | `ED_SPARSE_DIM_MAX` | `1<<20` | Custom dim cutoff for the sparse-vs-matrix-free dispatch. Raise carefully. |
 | `ED_LANCZOS_CHECKPOINT_DIR` | unset (off) | Directory for atomic Krylov-state checkpoints (Phase 3a #1, see `include/ed/io/lanczos_checkpoint.h`). When set, the default `lanczos()` writes `lanczos_checkpoint.h5` every `ED_LANCZOS_CHECKPOINT_INTERVAL` iterations and on the final iteration. Atomic write-then-rename, so a SIGKILL mid-write leaves the previous checkpoint intact. |
 | `ED_LANCZOS_CHECKPOINT_INTERVAL` | `100` | Iterations between checkpoint writes. Lower for faster crash recovery, higher to amortize HDF5 I/O on long runs (each write is ~22 N complex doubles). |
@@ -230,6 +231,31 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
   `2 × N_τ` SpMV per sample (Taylor) or `m × N_τ` SpMV (Krylov, set
   `ED_CTPQ_PROPAGATOR=krylov`). For canonical TPQ at very low T, prefer
   Krylov — it's stable for Δτ ~ 0.1 instead of the ~ 0.01 Taylor needs.
+* **N=32 mTPQ on a single large GPU, Sz + symmetry**: this is the
+  motivating case for the **on-the-fly representative SpMV**
+  (`ED_GPU_SYMMETRY_REP`, default on). Working in one k-sector reduces the
+  fixed-Sz dim (601 M at n_up=16) to ≈`dim_Sz/|G|` ≈ 75 M. The legacy
+  orbit-CSR mirror uploaded (or, in lazy mode, **streamed across PCIe every
+  SpMV**) ~14 GiB of orbit indices + coefficients plus a ~10 GiB projection
+  table, so the ÷8 FLOP win was entirely eaten by host↔device traffic. The
+  rep path keeps only `reps` + `1/norm` + the `|G|` permutations + per-sector
+  characters + a `C(N,n_up)` rep→index table (~6 GiB total at N=32, fits a
+  40–80 GB A100/H100) and regenerates the group action on the device, so the
+  per-SpMV traffic is just the two 75 M-element vectors — the genuine ÷|G|.
+  Correctness is pinned bit-for-bit vs the CPU `applySymmetrized` reference
+  by `test_rep_symmetry_gpu` (Z_N rings, incl. a |G|=8 complex-character
+  fixed-Sz fixture).
+  The matching **host** win lands in the production sector loop: with the rep
+  path on, `StreamingSymmetryHandle::sector(k)` hands out a CSR-free *lazy*
+  `SectorOperator` (`make_rep_sector_operator_lazy`) that knows its dimension
+  up-front (Pass 1.5) and builds the CSR-free `RepSectorData` on demand for
+  `bind_cuda` — it **never materializes the ~24 GiB/sector host orbit CSR**
+  (14 GiB orbit images/coefficients + ~10 GiB `SortedUint64Index` reverse
+  lookup). The host orbit CSR is materialized only if a CPU `apply` is invoked
+  (the CPU-only fallback), so the GPU 32-site Sz+Symm mTPQ run no longer needs
+  a 64 GB+ host just to stage a sector. Pinned end-to-end by
+  `test_rep_lazy_sector_loop` (GPU rep matvec == CPU `apply`, with the
+  host-CSR-never-materialized invariant asserted on the GPU path).
 
 ---
 

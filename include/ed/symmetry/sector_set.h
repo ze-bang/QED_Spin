@@ -39,7 +39,9 @@
 // =============================================================================
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <set>
 #include <vector>
@@ -94,6 +96,46 @@ enumerate_fixed_sz_orbit_reps(const FixedSzSubspace& sub,
         reps.insert(mn);
     }
     return std::vector<std::uint64_t>(reps.begin(), reps.end());
+}
+
+// ---------------------------------------------------------------------------
+// rep_sector_data_from_sector: extract the CSR-free on-the-fly representative
+// description ("On-the-fly representative SpMV" plan, Jun 2026) from an
+// already-built ``SymmetrySector`` + its owning group info.
+//
+// Reads ONLY ``orbit_rep`` + ``norm`` from each basis state (cheap, O(dim);
+// never touches the orbit images), and composes the |G| per-sector characters
+// + flattened group permutations from the group info. ``n_up`` is the shared
+// popcount of the representatives (uniform for a fixed-Sz sector); it stays
+// ``-1`` for a full-Hilbert sym-only sector, which makes the result NOT usable
+// (the rep matvec needs a fixed-Sz combinadic rank table) so those sectors
+// transparently fall back to the orbit-CSR mirror.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline RepSectorData
+rep_sector_data_from_sector(const ::SymmetrySector&  sec,
+                            const SymmetryGroupInfo& info,
+                            int                      n_sites)
+{
+    RepSectorData d;
+    d.n_sites    = n_sites;
+    d.group_size = static_cast<int>(info.max_clique.size());
+    d.reps.reserve(sec.basis_states.size());
+    d.inv_norms.reserve(sec.basis_states.size());
+    int  n_up    = -1;
+    bool uniform = true;
+    for (const auto& bs : sec.basis_states) {
+        d.reps.push_back(bs.orbit_rep);
+        d.inv_norms.push_back(bs.norm > 0.0 ? 1.0 / bs.norm : 0.0);
+        const int pc = __builtin_popcountll(bs.orbit_rep);
+        if (n_up < 0) n_up = pc;
+        else if (pc != n_up) uniform = false;
+    }
+    d.n_up = uniform ? n_up : -1;
+    if (!info.power_representation.empty() && !sec.phase_factors.empty()) {
+        d.characters = sector_characters_from(info, sec.phase_factors);
+    }
+    d.perms_flat = flatten_group_perms(info, n_sites);
+    return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +210,11 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
         auto op = std::make_unique<SectorOperator>(
             n_bits, spin_l, std::move(sb));
         terms(*op);
+        // Populate the CSR-free on-the-fly representative source so
+        // ``bind_cuda()`` can take the resident rep path under
+        // ``ED_GPU_SYMMETRY_REP``. Fixed-Sz sectors yield a usable record.
+        op->setRepSectorData(rep_sector_data_from_sector(
+            op->basis().sector(), info, static_cast<int>(n_bits)));
         ops.push_back(std::move(op));
     }
     return ops;
@@ -207,6 +254,71 @@ make_sector_operator_adopt(const ::Operator& host,
     // term_view_). ``copyTermsFrom`` keeps the host's term members behind
     // a single intentional API rather than touching them directly.
     op->copyTermsFrom(host);
+    // Populate the CSR-free on-the-fly representative source (reps + 1/norm
+    // from the adopted sector, characters + perms from the host's group
+    // info) so ``bind_cuda()`` can take the resident rep path under
+    // ``ED_GPU_SYMMETRY_REP``. Reads only orbit_rep + norm from the sector.
+    op->setRepSectorData(rep_sector_data_from_sector(
+        op->basis().sector(), host.symmetry_info,
+        static_cast<int>(host.getNumBits())));
+    return op;
+}
+
+// ---------------------------------------------------------------------------
+// make_rep_sector_operator_lazy: CSR-FREE per-sector operator for the GPU
+// on-the-fly representative path ("scan other region" optimisation, Jun 2026).
+//
+// Unlike ``make_sector_operator_adopt`` (which requires an already-materialised
+// ``SymmetrySector`` -- i.e. the ~24 GiB/sector host orbit CSR), this builds a
+// SectorOperator that knows its dimension + real/complex character up-front
+// (cheap, CSR-free) and DEFERS:
+//   * the CSR-free RepSectorData (GPU rep matvec source) to ``bind_cuda`` via
+//     ``host.getRepSectorData(k)`` -- regenerates the group action on device,
+//     never stores the orbit CSR; and
+//   * the host orbit CSR (CPU ``apply`` fallback) to first CPU use via
+//     ``host.getSector(k)`` -- so a GPU-only run NEVER materialises it.
+//
+// Only valid for the fixed-Sz streaming operator (the rep matvec needs a
+// fixed-Sz combinadic rank table). The host operator MUST outlive every
+// returned SectorOperator (the providers capture it by pointer) -- the same
+// lifetime contract ``StreamingSymmetryHandle`` already imposes.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline std::unique_ptr<SectorOperator>
+make_rep_sector_operator_lazy(
+        const ::FixedSzStreamingSymmetryOperator& host,
+        std::size_t                               sector_idx)
+{
+    const std::uint64_t dim =
+        host.getSectorDimension(sector_idx);
+    const std::size_t group_size =
+        static_cast<std::size_t>(host.getGroupSize());
+
+    // Cheap CSR-free real/complex test: the |G| per-sector characters depend
+    // only on the group info + the sector's phase factors (both known at
+    // generation), never on the orbit CSR. A momentum sector with any complex
+    // character must stay on the complex matvec path.
+    bool is_real = true;
+    if (!host.symmetry_info.power_representation.empty()) {
+        const auto chi = sector_characters_from(
+            host.symmetry_info, host.getSectorPhaseFactors(sector_idx));
+        for (const auto& c : chi) {
+            if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+        }
+    }
+
+    auto op = std::make_unique<SectorOperator>(
+        host.getNumBits(), host.getSpin(), SectorBasis{});
+    op->copyTermsFrom(host);
+
+    const ::FixedSzStreamingSymmetryOperator* host_ptr = &host;
+    op->configureRepLazy(
+        dim, group_size, is_real,
+        /*rep_provider=*/[host_ptr, sector_idx]() {
+            return host_ptr->getRepSectorData(sector_idx);
+        },
+        /*csr_provider=*/[host_ptr, sector_idx]() -> ::SymmetrySector {
+            return host_ptr->getSector(sector_idx);  // const ref -> copy
+        });
     return op;
 }
 

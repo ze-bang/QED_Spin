@@ -1238,6 +1238,24 @@ if(BUILD_ED_TESTS)
         # apply to <1e-9 across every full-Hilbert and fixed-Sz (n_up=3)
         # sector of the Heisenberg Z_N ring (N=6). CUDA-only; plain main().
         ed_add_test(test_sector_operator_gpu tests/unit/test_sector_operator_gpu.cu)
+        # "On-the-fly representative SpMV for streaming symmetry" plan
+        # (Jun 2026): with ED_GPU_SYMMETRY_REP=1 a fixed-Sz SectorOperator's
+        # bind_cuda() takes the resident on-the-fly representative path
+        # (apply_terms_rep_symmetry_scatter -- NO orbit CSR / no
+        # O(full-Sz-dim) projection table). The rep matvec matches the CPU
+        # applySymmetrized reference to <1e-10 across every momentum sector
+        # of the Heisenberg Z_N ring at N=6 (n_up=3) and N=8 (n_up=4, |G|=8,
+        # non-trivial complex characters). CUDA-only; plain main().
+        ed_add_test(test_rep_symmetry_gpu tests/unit/test_rep_symmetry_gpu.cu)
+
+        # CSR-free lazy sector loop ("scan other region", Jun 2026): drives
+        # the fixed-Sz streaming operator THROUGH StreamingSymmetryHandle and
+        # pins that (a) the handle hands out a rep-lazy SectorOperator whose
+        # dim is known WITHOUT materialising the ~24 GiB/sector host orbit CSR,
+        # (b) bind_cuda's GPU rep path never materialises it either, (c) the GPU
+        # matvec matches the CPU apply reference to <1e-10, and (d) the CPU
+        # apply fallback lazily materialises the CSR. CUDA-only; plain main().
+        ed_add_test(test_rep_lazy_sector_loop tests/unit/test_rep_lazy_sector_loop.cu)
     endif()
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
