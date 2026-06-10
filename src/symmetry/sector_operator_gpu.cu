@@ -50,12 +50,21 @@ ed::symmetry::SectorOperator::bind_cuda() const {
     commitPendingTransforms();
 
     // On-the-fly representative path: resident, no orbit CSR / no
-    // O(full-Sz-dim) projection table. Engaged only when the env gate is on
-    // AND this is a fixed-Sz sector with a usable RepSectorData. The factory
+    // O(full-Sz-dim) projection table. Engaged when the env gate is on AND
+    // this is a fixed-Sz sector with a usable RepSectorData. The factory
     // either populates ``rep_data_`` eagerly or supplies a CSR-free provider
     // (``configureRepLazy``); ``ensure_rep_data_`` builds it on first use,
     // WITHOUT ever materialising the host orbit CSR. Sym-only sectors leave
     // it unusable and fall through to the orbit-CSR mirror.
+    //
+    // Backend-specific policy: unlike the CPU (where the precomputed orbit-CSR
+    // walk is ~100x faster per matvec than regenerating the group action), the
+    // GPU rep kernel is FASTER than the orbit-CSR mirror -- it skips the Pass-2
+    // CSR build + the multi-GiB device upload, and the per-element min-image /
+    // projection recompute is hidden by the thousands of resident threads
+    // (measured N=24: rep 4.8 s vs CSR-mirror 18.2 s end-to-end). So the GPU
+    // takes the rep path in BOTH regimes whenever it is usable; only the CPU
+    // reserves it for the lazy regime (see ``make_backend_``).
     if (rep_path_enabled()) {
         const RepSectorData& rd = ensure_rep_data_();
         if (rd.usable()) {

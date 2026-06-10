@@ -50,6 +50,18 @@ ed_add_benchmark(bench_operator_apply       bench_operator_apply.cpp)
 ed_add_benchmark(bench_lanczos_ground_state bench_lanczos_ground_state.cpp)
 ed_add_benchmark(bench_full_diagonalization bench_full_diagonalization.cpp)
 ed_add_benchmark(bench_minimalist_collapse  bench_minimalist_collapse.cpp)
+
+# Standalone (NOT Google-Benchmark) full-spectrum dense-vs-symmetry driver:
+# it carries its own main() and forks each phase to measure isolated peak
+# RSS, so it links ed_solvers_cpu directly without benchmark_main.
+add_executable(bench_symmetry_full_spectrum bench_symmetry_full_spectrum.cpp)
+target_link_libraries(bench_symmetry_full_spectrum PRIVATE ed_solvers_cpu)
+target_include_directories(bench_symmetry_full_spectrum PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(bench_symmetry_full_spectrum PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
+set_target_properties(bench_symmetry_full_spectrum PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 # Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026): track the
 # speed-up of the omega-parallel Lehmann inner loop used by the
 # FtlmDynamical single-T lane. Reports a (serial, parallel) pair per
@@ -81,6 +93,7 @@ set(_ed_bench_targets
     bench_lanczos_ground_state
     bench_full_diagonalization
     bench_dssf_omega_parallel
+    bench_symmetry_full_spectrum
 )
 if(WITH_CUDA)
     function(ed_add_gpu_benchmark bench_name bench_source)

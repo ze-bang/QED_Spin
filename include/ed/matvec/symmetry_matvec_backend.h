@@ -43,6 +43,8 @@
 
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/symmetry_basis_policy.h>
+#include <ed/matvec/rep_symmetry_basis_policy.h>
+#include <ed/symmetry/rep_sector_data.h>
 
 namespace ed::matvec {
 
@@ -67,6 +69,51 @@ make_cpu_symmetry_backend(basis::SymmetryBasisPolicy policy,
 }
 
 // ---------------------------------------------------------------------------
+// make_cpu_rep_symmetry_backend: the CPU on-the-fly representative SpMV
+// backend ("Optimized symmetry ED + NLCE" plan, Jun 2026). Builds a
+// ``CpuMatVecBackend<RepSymmetryBasisPolicy, ...>`` over a non-owning view
+// into a ``RepSectorData`` (reps + 1/norm + group perms + per-sector
+// characters). NO orbit CSR is materialised; the group action + projection
+// phase are regenerated arithmetically in the matvec.
+//
+// Lifetime: the ``RepSectorData`` (typically ``SectorOperator::rep_data_``)
+// MUST outlive the returned backend (the policy holds raw pointers into its
+// vectors).
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline basis::RepSymmetryBasisPolicy
+rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
+{
+    basis::RepSymmetryBasisPolicy p;
+    p.reps       = rd.reps.data();
+    p.inv_norms  = rd.inv_norms.data();
+    p.perms      = rd.perms_flat.data();
+    p.characters = rd.characters.data();
+    p.dim_       = rd.reps.size();
+    p.group_size = rd.group_size;
+    p.n_sites    = rd.n_sites;
+    p.n_up       = rd.n_up;
+    return p;
+}
+
+template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
+          class OffDiagTwo, class ThreeBody>
+[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
+make_cpu_rep_symmetry_backend(const ed::symmetry::RepSectorData& rd)
+{
+    using Backend = CpuMatVecBackend<basis::RepSymmetryBasisPolicy,
+                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
+                                     OffDiagTwo, ThreeBody>;
+    // The rep policy forces the complex matrix-free path; tunables are inert
+    // (no CSR branch) but forwarded for ABI parity with the other factories.
+    auto tunables = detail::read_symmetry_tunables();
+    const std::uint64_t dim = rd.reps.size();
+    return std::make_unique<Backend>(
+        rep_policy_from(rd),
+        tunables,
+        "CpuRepSymmetry(dim=" + std::to_string(dim) + ")");
+}
+
+// ---------------------------------------------------------------------------
 // P6 (operator-collapse): extern-template declaration for the Symmetry host
 // cell over the canonical term-view shape. The explicit instantiation
 // DEFINITION lives in src/matvec/cpu_backend_instantiations.cpp (ed_matvec);
@@ -77,6 +124,12 @@ make_cpu_symmetry_backend(basis::SymmetryBasisPolicy policy,
 // matvec_backend.h now includes.
 // ---------------------------------------------------------------------------
 extern template class CpuMatVecBackend<basis::SymmetryBasisPolicy,
+                                       DiagOneBody, OffDiagOneBody, DiagTwoBody,
+                                       MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
+
+// On-the-fly representative host cell (Jun 2026). Definition in
+// src/matvec/cpu_backend_instantiations.cpp.
+extern template class CpuMatVecBackend<basis::RepSymmetryBasisPolicy,
                                        DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                        MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 

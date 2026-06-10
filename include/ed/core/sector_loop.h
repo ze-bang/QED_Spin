@@ -123,11 +123,27 @@ public:
     [[nodiscard]] std::unique_ptr<ed::LinearOperator>
     sector(std::size_t k) const {
         if (fsz_sym_op_) {
-            // CSR-free lazy path (CUDA, default ON): hand out a SectorOperator
-            // that defers the host orbit CSR -- the GPU rep matvec never
-            // materialises it (~24 GiB/sector saved at N=32). Falls back to a
-            // lazy CPU materialisation only if ``apply`` is invoked.
-            if (rep_lazy_sector_path_enabled()) {
+            // Matvec path follows the memory regime decided at generation:
+            //
+            //   * LAZY regime (orbit CSR too big, e.g. N=32 ~24 GiB/sector):
+            //     hand out a CSR-free ``make_rep_sector_operator_lazy``. The
+            //     GPU rep mirror / CPU rep kernel regenerate the group action
+            //     arithmetically and never materialise the host orbit CSR.
+            //
+            //   * EAGER regime (CSR fits): hand out a CSR-backed
+            //     ``make_sector_operator_adopt``. The precomputed orbit CSR
+            //     gives a much faster per-matvec than the on-the-fly rep
+            //     (which recomputes min-image + binary search every element --
+            //     ~100x slower for ground states at small/moderate N).
+            //
+            // ``ED_SYM_REP`` / ``ED_GPU_SYMMETRY_REP`` remain explicit
+            // overrides inside the SectorOperator (force the rep kernel when a
+            // usable RepSectorData is present) for A/B + bisection.
+            const bool use_rep_path =
+                fsz_sym_op_->lazy_sectors_enabled()
+                && (rep_lazy_sector_path_enabled()
+                    || ed::symmetry::cpu_rep_symmetry_enabled());
+            if (use_rep_path) {
                 return ed::symmetry::make_rep_sector_operator_lazy(
                     *fsz_sym_op_, k);
             }

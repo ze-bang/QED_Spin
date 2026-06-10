@@ -323,11 +323,16 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("free_energy",   &ThermodynamicData::free_energy)
         .def("to_dict", &thermo_data_to_dict);
 
-    py::class_<EDResults>(m, "EDResults", R"pbdoc(
+    py::class_<EDResults>(m, "EDResults", py::dynamic_attr(), R"pbdoc(
         Legacy result envelope returned by the Python adapter
         (``qed.workflow._diag_via_workflows_solve``). Carries the
         ground-state eigenvalues plus (for thermal lanes) a
         ``thermo_data`` block with the recombined temperature scan.
+
+        ``py::dynamic_attr`` is enabled so the Python layer can attach
+        optional per-sector diagnostics (``eigenvalues_per_sector``,
+        ``sector_tags``) populated by the symmetry-decomposed solve /
+        full-spectrum paths without growing the C++ POD.
     )pbdoc")
         .def(py::init<>())
         .def_readwrite("eigenvalues",           &EDResults::eigenvalues)

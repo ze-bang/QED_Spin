@@ -39,15 +39,12 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
-
-#ifdef WITH_CUDA
-#include <cstdlib>
-#endif
 
 #include <ed/core/operator.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
@@ -56,6 +53,24 @@
 #include <ed/symmetry/rep_sector_data.h>
 
 namespace ed::symmetry {
+
+// ---------------------------------------------------------------------------
+// CPU on-the-fly representative SpMV gate ("Optimized symmetry ED + NLCE"
+// plan, Jun 2026). When enabled (default ON), a fixed-Sz symmetry sector's
+// CPU matvec runs the CSR-free representative kernel
+// (``make_cpu_rep_symmetry_backend``) instead of materialising the per-sector
+// orbit CSR (~24 GiB/sector at N=32). Set ``ED_SYM_REP=0`` to restore the
+// legacy orbit-CSR path (A/B + bisection).
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline bool cpu_rep_symmetry_enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("ED_SYM_REP");
+        if (e == nullptr || e[0] == '\0') return true;   // default ON
+        if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
+        return true;                                      // anything else -> ON
+    }();
+    return enabled;
+}
 
 class SectorOperator final : public ::Operator {
 public:
@@ -254,9 +269,30 @@ public:
 protected:
     [[nodiscard]] std::unique_ptr<ed::matvec::MatVecBackendBase>
     make_backend_() const override {
-        // CPU matvec needs the full orbit CSR. In CSR-free lazy mode the
-        // host CSR has not been built yet -- materialise it now (once). On a
-        // GPU-only run this path is never reached, so the CSR is never built.
+        // CPU on-the-fly representative path: for a fixed-Sz symmetry sector
+        // the CSR-free RepSectorData (reps + 1/norm + group perms + characters)
+        // is all the matvec needs. This NEVER materialises the per-sector orbit
+        // CSR (~24 GiB/sector at N=32) -- the group action + projection phase
+        // are regenerated arithmetically in the kernel. It is taken ONLY in the
+        // lazy regime (``rep_lazy_``: the orbit CSR was estimated too big to
+        // build), because the rep kernel is ~100x slower per matvec than the
+        // precomputed CSR when the CSR fits. The eager regime keeps the fast
+        // CSR backend even though ``make_sector_operator_adopt`` also populated
+        // ``rep_data_`` (for GPU). Falls back to CSR when the rep path is
+        // disabled (``ED_SYM_REP=0``) or the RepSectorData is unusable (sym-only
+        // sectors with varying popcount, where the rep reverse lookup is
+        // undefined).
+        if (rep_lazy_ && cpu_rep_symmetry_enabled()) {
+            const RepSectorData& rd = ensure_rep_data_();
+            if (rd.usable()) {
+                return ed::matvec::make_cpu_rep_symmetry_backend<
+                    DiagonalOneBody, OffDiagonalOneBody,
+                    DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
+                    ThreeBodyTransformData>(rd);
+            }
+        }
+        // Legacy CSR path. In CSR-free lazy mode the host CSR has not been
+        // built yet -- materialise it now (once).
         ensure_sector_basis_();
         return ed::matvec::make_cpu_symmetry_backend<
             DiagonalOneBody, OffDiagonalOneBody,

@@ -1,0 +1,400 @@
+% =============================================================================
+% symmetry_spmv_optimizations.tex
+%
+% Algorithmic speedup & implementation of the fixed-Sz + spatial-symmetry
+% construction and the symmetrized matrix-vector product (QED, N=32 regime).
+%
+% Build: pdflatex symmetry_spmv_optimizations.tex
+% =============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+% ---- code listing style (C++ / CUDA) ---------------------------------------
+\definecolor{codegray}{gray}{0.45}
+\definecolor{codekw}{rgb}{0.10,0.10,0.60}
+\definecolor{codestr}{rgb}{0.55,0.10,0.10}
+\definecolor{codecmt}{rgb}{0.20,0.45,0.20}
+\lstdefinestyle{cpp}{
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codekw}\bfseries,
+  stringstyle=\color{codestr},
+  commentstyle=\color{codecmt}\itshape,
+  numberstyle=\tiny\color{codegray},
+  numbers=left,
+  numbersep=6pt,
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{codegray},
+  morekeywords={uint64_t,int32_t,cuDoubleComplex,__device__,__global__,__constant__,
+                __forceinline__,std,size_t,nodiscard,constexpr,noexcept,Complex}
+}
+\lstset{style=cpp}
+
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\Norm}{\mathcal{N}}
+\newcommand{\reps}{\texttt{reps}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\title{Algorithmic Speedup and Implementation of the\\
+       Fixed-$S^z$ + Symmetry Construction and Symmetrized SpMV}
+\author{QED exact-diagonalization library}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We document the algorithm- and implementation-level optimizations that make a
+32-site fixed-$S^z$ plus spatial-symmetry exact-diagonalization workload
+(microcanonical TPQ) feasible on a single large GPU. Two hot paths are covered:
+(i) the \emph{symmetry construction} (orbit-representative enumeration, sector
+dimensioning, and lazy / CSR-free sector data), and (ii) the \emph{symmetrized
+matrix--vector product} (SpMV). The central result is replacing an orbit-CSR
+``expand $\rightarrow$ apply $\rightarrow$ project'' SpMV---whose
+$\mathcal{O}(\text{full-}S^z\text{ dim})$ scatter/gather tables are streamed over
+PCIe every iteration---with an \emph{on-the-fly representative} SpMV that
+regenerates the group action arithmetically on the device, turning the
+$|G|$-fold dimension reduction into a genuine $|G|$-fold matvec speedup while
+dropping the host working set from ${\sim}24$\,GiB/sector to ${\sim}1.2$\,GiB.
+\end{abstract}
+
+\section{Notation and setting}
+
+For $N$ sites at magnetization $n_{\uparrow}$, the fixed-$S^z$ subspace has
+dimension
+\[
+  D \;=\; \binom{N}{n_{\uparrow}},
+  \qquad
+  D\big|_{N=32,\,n_{\uparrow}=16} = 601{,}080{,}390 \approx 6.0\times 10^{8}.
+\]
+A spatial symmetry group $G$ (here $|G|=8$ translations) acts on computational
+basis states by site permutations $g$. It partitions the $D$ states into
+\emph{orbits}; each orbit is labeled by its canonical \emph{representative}
+\[
+  r_\alpha \;=\; \min_{g\in G} g(s),\qquad s\in \text{orbit}(\alpha).
+\]
+A momentum/irrep sector $k$ keeps one symmetrized basis vector per surviving
+orbit,
+\begin{equation}
+  |\alpha\rangle
+   \;=\; \frac{1}{\Norm_\alpha}\sum_{g\in G}\chi_k(g)^{*}\, g\,|r_\alpha\rangle,
+  \label{eq:symvec}
+\end{equation}
+with characters $\chi_k(g)$ and normalization $\Norm_\alpha$. The sector
+dimension is $\approx D/|G| \approx 7.5\times 10^{7}$. The goal is to build and
+apply $H$ in this reduced basis \emph{without} ever paying $\bigO(D)$ memory.
+
+Throughout, ``orbit CSR'' denotes the compressed structure storing, per
+representative, all $|G|$ computational images $\{g\,|r_\alpha\rangle\}$ and
+their coefficients $\chi_k(g)^{*}$---an $\bigO(D)$ object (${\approx}14$\,GiB at
+$N{=}32$) plus an $\bigO(D)$ reverse index (${\approx}10$\,GiB).
+
+\section{Symmetry construction}
+
+\subsection{Orbit-representative enumeration: hash-set dedup $\rightarrow$
+            min-image identity}
+
+The naive enumerator scans all $D$ states and de-duplicates representatives in a
+hash set (\code{std::unordered\_set<uint64\_t>}), costing ${\sim}3.5$\,GB and
+running serially (${\sim}200$\,s; an out-of-memory source at $N{=}32$). We
+replace it with the identity
+\begin{equation}
+  s \text{ is a representative} \iff s = \min_{g\in G} g(s).
+  \label{eq:repid}
+\end{equation}
+Site permutations preserve popcount, so every image $g(s)$ is itself a
+fixed-$S^z$ state, and the orbit minimum is hit \emph{exactly once} as the loop
+sweeps the basis. No deduplication structure is needed:
+
+\begin{lstlisting}[caption={Canonical-representative pass (per-thread, no dedup
+set). \code{include/ed/core/streaming\_symmetry.h}},label={lst:pass1}]
+for (size_t i = 0; i < num_basis; ++i) {
+    const uint64_t basis = basis_states_[i];
+    uint64_t rep = basis;
+    for (const auto& perm : symmetry_info.max_clique) {
+        uint64_t permuted = applyPermutation(basis, perm);
+        if (permuted < rep && lookupState(permuted) >= 0) rep = permuted;
+    }
+    if (basis == rep) thread_reps[tid].push_back(basis);   // canonical
+}
+\end{lstlisting}
+
+The per-state kernel is a bit-gather, one per group element:
+\begin{lstlisting}[caption={\code{applyPermutation} --- output bit $i$ is sourced
+from input bit \code{perm[i]}. \code{include/ed/core/basis\_utils.h}}]
+inline uint64_t applyPermutation(uint64_t basis, const std::vector<int>& perm) {
+    uint64_t result = 0;
+    for (size_t i = 0; i < perm.size(); ++i)
+        result |= ((basis >> perm[i]) & 1) << i;
+    return result;
+}
+\end{lstlisting}
+
+\paragraph{Complexity.} $\bigO(D\,|G|)$ time, $\bigO(1)$ auxiliary memory. The
+loop is OpenMP-parallel (each thread appends to a private vector, then a single
+concatenate $+$ \code{std::sort} restores deterministic ascending order).
+Measured effect: $200\,\text{s}\rightarrow 6\,\text{s}$ and elimination of the
+${\sim}3.5$\,GB set.
+
+\subsection{Sector dimensions without the CSR (``Pass 1.5'')}
+
+Choosing lazy vs.\ eager builds and sizing solver vectors requires each sector's
+dimension. Rather than \emph{building} the orbit CSR to discover it, Pass~1.5
+walks each orbit, computes only the symmetrized norm of \eqref{eq:symvec}, and
+counts survivors, storing a single integer per sector:
+
+\begin{lstlisting}[caption={Norm-only dimension scan; thread-local scratch is
+discarded. \code{streaming\_symmetry.h}}]
+#pragma omp parallel for schedule(dynamic, 64)
+for (size_t oi = 0; oi < num_orbits; ++oi) {
+    std::vector<uint64_t> elements; std::vector<Complex> coefficients;
+    double norm_sq = 0.0;
+    computeOrbitDataFixedSz(unique_orbit_reps_[oi], sector.phase_factors,
+                            elements, coefficients, norm_sq);
+    if (norm_sq > 1e-10) valid_count.fetch_add(1, std::memory_order_relaxed);
+}
+symmetrized_block_ham_sizes[sector_idx] = (int)valid_count.load();
+\end{lstlisting}
+
+\code{symmetrized\_block\_ham\_sizes[k]} becomes the authoritative dimension,
+exposed by \code{getSectorDimension(k)}. This is what lets the GPU sector loop
+know \code{dim()} with \emph{zero} orbit materialization. The orbit expansion
+goes through the single shared helper \code{compute\_orbit\_for\_state}, so
+Pass~1.5, the eager build, and the CSR-free extractor of
+\S\ref{sec:repdata} are bit-identical.
+
+\subsection{Lazy LRU-1 materialization}
+
+The eager build materializes every sector's orbit CSR plus reverse index
+(${\sim}190$\,GB across $8$ sectors at $N{=}32$). The lazy path materializes
+\emph{one} sector at a time at solve/bind time and frees the previous one
+(LRU-1), capping instantaneous host RSS at a single sector's footprint
+(${\sim}24$\,GiB). This was the prior state of the art but still pays that
+$\bigO(D)$ cost while a sector is resident.
+
+\subsection{CSR-free representative data}
+\label{sec:repdata}
+
+The decisive step removes the orbit CSR from the GPU path entirely.
+\code{getRepSectorData(k)} reproduces the exact survivor set and ordering of the
+eager build, but stores only $\bigO(D/|G|)$ data---representatives and
+$1/\Norm_\alpha$---using transient scratch for the orbit expansion:
+
+\begin{lstlisting}[caption={CSR-free per-sector source. \code{streaming\_symmetry.h}}]
+std::vector<uint64_t> elems; std::vector<Complex> coeffs; double norm_sq = 0.0;
+for (uint64_t rep : unique_orbit_reps_) {
+    computeOrbitDataFixedSz(rep, sector.phase_factors, elems, coeffs, norm_sq);
+    if (norm_sq > 1e-10) {
+        out.reps.push_back(rep);
+        out.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+    }
+}
+\end{lstlisting}
+
+It additionally packs the $|G|$ per-sector characters $\chi_k(g)$ and the
+flattened group permutations---the only other quantities the device needs. Host
+footprint per sector: ${\sim}1.2$\,GiB (\code{reps} $+$ \code{inv\_norms}) versus
+${\sim}24$\,GiB (CSR $+$ reverse index).
+
+\paragraph{Lazy host loop.} With this in hand, the production sector loop
+(\code{StreamingSymmetryHandle::sector(k)}) hands out a \emph{lazy}
+\code{SectorOperator} that (a) knows its dimension up-front (Pass~1.5),
+(b) builds the CSR-free record on demand for the GPU bind, and (c) materializes
+the orbit CSR \emph{only} if a CPU \code{apply} is ever invoked. A pure-GPU run
+therefore never allocates the per-sector orbit CSR on the host.
+
+\section{The symmetrized matrix--vector product}
+
+\subsection{The orbit-CSR SpMV and why it is PCIe-bound}
+
+The orbit-CSR SpMV performs \emph{expand $\rightarrow$ apply $\rightarrow$
+project}:
+\begin{enumerate}
+  \item scatter the ${\sim}75$M reduced vector into the $D$-dim full basis via
+        the orbit CSR;
+  \item apply $H$ in the full basis;
+  \item gather back over the $|G|$ images per orbit via the orbit CSR again.
+\end{enumerate}
+Steps 1 and 3 each \emph{read} ${\approx}13.44$\,GiB of orbit indices and
+coefficients. In lazy mode that CSR lives in host RAM and is streamed over PCIe
+(${\sim}50$\,GB/s) every SpMV:
+\[
+  \frac{13.44\,\text{GiB}\times 2}{50\,\text{GB/s}} \approx 0.54\ \text{s/SpMV},
+\]
+so the $\div 8$ FLOP win is entirely consumed by host$\leftrightarrow$device
+traffic, and the symmetric run is no faster than the unsymmetrized one.
+
+\subsection{On-the-fly representative SpMV: the algebraic collapse}
+
+The new path never expands. It applies $H$ to the \emph{single} representative of
+each row and reconstructs the destination index and projection phase
+arithmetically. For a connected computational state $s'$ reached from
+$r_\alpha$, let $r_\beta=\min_g g(s')$ be its destination representative. The
+coefficient of $s'$ in the destination symmetrized vector is
+\begin{equation}
+  \overline{\beta_{s'}}
+   \;=\; \sum_{h:\,h(s')=r_\beta}\overline{\chi_k(h)},
+  \qquad
+  \text{projection} \;=\; \overline{\beta_{s'}}\,\cdot\,\frac{1}{\Norm_{r_\beta}} .
+  \label{eq:proj}
+\end{equation}
+
+\paragraph{Derivation.} In \eqref{eq:symvec} the amplitude on $g\,r_\beta$ is
+$\chi_k(g)^{*}/\Norm_{r_\beta}$. Writing the set $\{g : g(r_\beta)=s'\}$ as
+$\{h^{-1}: h(s')=r_\beta\}$ and using $\chi_k(h^{-1})=\overline{\chi_k(h)}$ for
+unit-modulus characters yields \eqref{eq:proj}. The reference's $|G|$-fold orbit
+walk and the global $1/|G|$ weight collapse into this single representative
+term, so neither appears explicitly. This is implemented in one device
+function with no orbit table:
+
+\begin{lstlisting}[caption={\code{DeviceRepSymmetryBasisPolicy::index\_and\_projection}.
+\code{include/ed/matvec/device\_basis\_policy.cuh}},label={lst:idxproj}]
+__device__ inline std::uint64_t
+index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const {
+    if (__popcll(state) != n_up) return kDeviceNotFound;
+    std::uint64_t rb = state;                          // r_b = min_g g(state)
+    for (int g = 1; g < group_size; ++g) {
+        const std::uint64_t img = apply_perm(state, g);
+        if (img < rb) rb = img;
+    }
+    const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
+    const std::int32_t k = rep_index_of_rank[r];
+    if (k < 0) return kDeviceNotFound;
+    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+    for (int h = 0; h < group_size; ++h)              // sum conj(chi_k(h))
+        if (apply_perm(state, h) == rb) {
+            const cuDoubleComplex c = characters[h];
+            acc.x += cuCreal(c); acc.y -= cuCimag(c); // conjugate
+        }
+    const double s = inv_norms[k];
+    proj_out = make_cuDoubleComplex(acc.x * s, acc.y * s);
+    return (std::uint64_t)k;
+}
+\end{lstlisting}
+
+\code{apply\_perm} is the device twin of \code{applyPermutation}: the entire
+group action is regenerated in registers from $|G|\le 8$ permutations and $|G|$
+characters---nothing of size $\bigO(D)$ is read or streamed.
+
+\subsection{$\bigO(1)$ reverse lookup: combinadic rank and a dense rank table}
+
+Mapping $r_\beta \mapsto$ orbit index was previously a hash over all $D$ orbit
+elements. It is now two $\bigO(1)$ steps.
+
+\paragraph{(a) Combinadic rank.} A fixed-$S^z$ bitmask is converted to its
+colexicographic index in $[0,\binom{N}{n_{\uparrow}})$ by reading a Pascal
+triangle from \code{\_\_constant\_\_} memory (no global loads):
+\begin{equation}
+  \mathrm{rank}(s) \;=\; \sum_{b:\,s_b=1}\binom{b}{\,\#\{b'\le b:\,s_{b'}=1\}\,}.
+\end{equation}
+\begin{lstlisting}[caption={\code{rank\_state}. \code{include/ed/gpu/combinadic.cuh}}]
+__device__ __forceinline__
+int rank_state(std::uint64_t state, int n_bits, int k) {
+    int rank = 0, seen = 0;
+    #pragma unroll
+    for (int bit = 0; bit < 64; ++bit) {
+        if (bit >= n_bits || seen >= k) break;
+        if ((state >> bit) & 1ULL) { ++seen; rank += (int)binomial(bit, seen); }
+    }
+    return rank;
+}
+\end{lstlisting}
+
+\paragraph{(b) Dense rank table.} \code{rep\_index\_of\_rank} maps
+$\mathrm{rank}(\text{rep})\rightarrow$ orbit index, length
+$\binom{N}{n_{\uparrow}}$, \code{int32}, with $-1$ for non-representatives. It is
+built from \reps{} \emph{only}---no orbit images materialized---and uploaded once
+per sector:
+\begin{lstlisting}[caption={Reverse table built from reps only.
+\code{src/symmetry/streaming\_symmetry\_gpu\_mirror.cu}}]
+std::vector<std::int32_t> h_rep_index_of_rank(dim_full_sz, -1);
+for (std::size_t i = 0; i < data.reps.size(); ++i) {
+    const std::uint64_t r = rank_combination_host(data.reps[i], n_up);
+    if (r < dim_full_sz) h_rep_index_of_rank[r] = (std::int32_t)i;
+}
+\end{lstlisting}
+A destination lookup is thus a handful of constant-memory additions
+(\code{rank\_state}) followed by a single \code{int32} global load, replacing the
+multi-cache-miss hash probe. Device memory for the table is
+$\binom{32}{16}\cdot 4\,\text{B}\approx 2.4$\,GiB---negligible on a 40--80\,GB
+GPU.
+
+\subsection{The kernel: one thread per representative}
+
+The kernel launches one thread per orbit representative, applies $H$ to
+$\reps[i]$ once, and uses $1/\Norm_\alpha=\code{inv\_norms[i]}$ as the source
+pre-phase:
+\begin{lstlisting}[caption={Rep kernel core. \code{include/ed/matvec/term\_kernels\_gpu.cuh}}]
+const double inv_norm_i = basis.inv_norms[i];
+const cuDoubleComplex pre_phase = make_cuDoubleComplex(inv_norm_i, 0.0);
+process_source_terms<BasisPolicy, Scalar>(
+    basis, spin_l, terms, basis.state_of(i), pre_phase, coeff_in, i, out);
+\end{lstlisting}
+The Hamiltonian term walk \code{process\_source\_terms} is shared verbatim with
+the orbit-CSR kernel (extracted into one \code{\_\_device\_\_
+\_\_forceinline\_\_} body), so the representative path cannot diverge
+numerically from the validated reference. The two policies differ only in
+compile-time traits: \code{needs\_orbit\_walk == false} (apply to the single
+representative, no CSR sweep) and \code{has\_coeff\_modifier == true} (each
+off-diagonal emit routes through \code{index\_and\_projection},
+Listing~\ref{lst:idxproj}, for its destination and phase).
+
+\subsection{CPU hot-path lookup (fallback)}
+
+On CPU runs the reverse lookup is a 16\,B/entry sorted array searched with a
+branch-free ``monobound'' binary search that prefetches both candidate probe
+points one level ahead, compiling the narrow step to a \code{cmov}:
+\begin{lstlisting}[caption={\code{SortedUint64Index::find}.
+\code{include/ed/core/sorted\_uint64\_index.h}}]
+while (len > 1) {
+    const std::size_t half = len / 2;
+    __builtin_prefetch(a + low + half / 2, 0, 0);
+    __builtin_prefetch(a + low + half + half / 2, 0, 0);
+    low += (a[low + half] < key) ? half : 0;   // branch-free narrow
+    len -= half;
+}
+\end{lstlisting}
+This removes the per-probe mispredict (the hottest op in the CPU symmetry SpMV)
+for ${\sim}2\times$; a companion optimization pre-bakes $1/\Norm_\alpha$ so the
+inner loop multiplies instead of dividing per emit.
+
+\section{Net accounting}
+
+\begin{table}[h]
+\centering
+\caption{Per-SpMV cost for one $N{=}32$ fixed-$S^z$ symmetry sector.}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & Orbit-CSR (lazy) & On-the-fly representative \\
+\midrule
+Host$\rightarrow$device traffic & $2\times 13.44$\,GiB CSR & two ${\sim}75$M vectors only \\
+Device resident                 & ${\sim}30{+}$\,GiB       & ${\sim}6$\,GiB \\
+Reverse lookup                  & hash over $D$ elements   & \code{rank\_state} $+$ one \code{int32} load \\
+Group action                    & materialized images      & regenerated from $|G|$ perms in registers \\
+Host build / sector             & ${\sim}24$\,GiB CSR $+$ index & ${\sim}1.2$\,GiB \reps{}$+$\code{inv\_norms} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The orbit-CSR column is PCIe-bound and roughly matches the unsymmetrized cost;
+the representative column converts the $|G|$-fold dimension reduction into a real
+$|G|$-fold matvec speedup and removes the host-RSS ceiling that previously forced
+a $64$\,GB$+$ node. Correctness is pinned bit-for-bit against the CPU
+\code{applySymmetrized} reference across $\mathbb{Z}_N$ rings (including a
+$|G|{=}8$ complex-character fixed-$S^z$ fixture), and the host-CSR-never-%
+materialized invariant on the GPU path is asserted end-to-end through the
+production sector loop.
+
+\end{document}

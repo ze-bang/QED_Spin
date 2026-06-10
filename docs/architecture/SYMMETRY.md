@@ -1,5 +1,103 @@
 # Symmetry implementation — finite temperature & DSSF
 
+> **Update (2026-06-09): backend-aware symmetry matvec; memory-light full
+> spectrum + NLCE wiring. (Revised — see "when symmetry helps" below.)**
+>
+> The GPU "on-the-fly representative" scheme (`DeviceRepSymmetryBasisPolicy`)
+> has been ported to the CPU. Instead of materialising the per-sector
+> **orbit CSR** (~24 GiB/sector at N=32), the rep path stores only `reps[]`
+> (sorted), per-irrep `inv_norms[]`, the group permutations, and characters
+> (~600 MB at N=32), regenerating the group action + projection phase
+> arithmetically inside the matvec.
+>
+> **The matvec path is chosen by backend AND memory regime** (the rep
+> kernel recomputes `rb = min_g g(s)` + the projection phase per connected
+> state — an O(|G|) cost that makes it ~100x slower *per matvec* than the
+> precomputed orbit-CSR walk when the CSR fits):
+>
+> | Backend | CSR fits (eager regime) | CSR too big (lazy regime, e.g. N=32) |
+> |---------|-------------------------|--------------------------------------|
+> | **CPU** | precomputed orbit-CSR walk (fast) | on-the-fly rep SpMV (memory-light) |
+> | **GPU** | on-the-fly rep SpMV (skips CSR build + upload; faster) | on-the-fly rep SpMV |
+>
+> The regime is decided at generation (`lazy_sectors_enabled()`, est. orbit
+> footprint vs `ED_SYM_LAZY_SECTORS_BYTES_MAX`, default 4 GiB) and the
+> `sector_loop` routes the per-sector operator accordingly.
+>
+> **When symmetry helps (important).** Spatial-symmetry decomposition is a
+> MEMORY tool and a FULL-SPECTRUM tool — it does **not** speed up an
+> iterative ground state that scans every irrep. The |G| irrep blocks sum
+> to the full Sz dimension and each block's matvec carries the ~|G|
+> representative-mapping cost, so an all-irrep ground-state search does
+> ~|G|x the matvec work of a single plain-Sz Lanczos (measured CPU
+> Heisenberg ring: Sz+symm 1.2/3.2/31.7 s for N=14/16/18 vs ~0.5 s flat for
+> Sz-only). Correct usage:
+>
+> * **Memory-bound ground state** (e.g. N=32, where a plain-Sz vector is
+>   ~9.6 GB and will not fit a 16 GB GPU): target the block holding the
+>   ground state with `sector=[q0,q1,...]` (e.g. k=0) — one |G|x-smaller
+>   block, built alone in the lazy regime. If plain Sz fits, it is faster.
+> * **Full spectrum / thermodynamics**: `qed.full_spectrum` /
+>   `full_ed --method FULL_SYMMETRIZED` (dense per block, O(D^3/|G|^2)).
+>
+> New pieces:
+>
+> * [`include/ed/matvec/rep_symmetry_basis_policy.h`](../../include/ed/matvec/rep_symmetry_basis_policy.h)
+>   — host twin of the device policy: `index_of` / `index_and_projection`
+>   recompute `rb = min_g g(s)` (binary search on sorted `reps`) and
+>   `conj(beta) = sum_{h: h(s)=rb} conj(chi(h))`. `is_rep_symmetry = true`.
+> * [`include/ed/core/combinadic.h`](../../include/ed/core/combinadic.h)
+>   — host Pascal table + colex rank/unrank (optional O(1) lookup; binary
+>   search is the default).
+> * `apply_terms_rep_symmetry` in
+>   [`include/ed/matvec/term_kernels.h`](../../include/ed/matvec/term_kernels.h)
+>   — the host rep kernel mirroring the GPU `apply_terms_rep_symmetry_scatter`.
+> * `make_cpu_rep_symmetry_backend` in
+>   [`include/ed/matvec/symmetry_matvec_backend.h`](../../include/ed/matvec/symmetry_matvec_backend.h).
+> * `FixedSzStreamingSymmetryOperator::lazy_sectors_enabled()` — the regime
+>   accessor the `sector_loop` reads to route CSR-vs-rep.
+>
+> **Env knobs.**
+>
+> | Env var        | Default | Effect                                            |
+> |----------------|---------|---------------------------------------------------|
+> | `ED_SYM_LAZY_SECTORS=1/0` | (auto) | Force the lazy (rep) / eager (CSR) regime. |
+> | `ED_SYM_REP=0` | (on)    | Keep the CPU on the orbit-CSR walk even in the lazy regime (bisection). |
+> | `ED_GPU_SYMMETRY_REP=0` | (on) | Restore the GPU orbit-CSR mirror. |
+>
+> Equivalence is verified bit-for-bit against the orbit-CSR reference in
+> [`tests/unit/test_rep_symmetry_backend.cpp`](../../tests/unit/test_rep_symmetry_backend.cpp)
+> (rep matvec == CSR matvec to ~1e-11 in every sector); the streaming
+> symmetry / workflow / smoke pytest suites pass against the rebuilt
+> `qed._core`.
+>
+> **Full spectrum on the solve surface.** `qed.full_spectrum(H,
+> symmetry=...)` (and `qed.solve(H, full_spectrum=True)`) loop every
+> `(n_up x spatial irrep)` block through the rep path and return the
+> COMPLETE sorted spectrum (multiset-identical to `numpy.linalg.eigvalsh`).
+> `EDResults` now carries optional `eigenvalues_per_sector` / `sector_tags`
+> (dynamic attrs; legacy `.eigenvalues` consumers unaffected).
+>
+> **NLCE.** `QED_NLCE`'s `full_ed` pipeline now defaults to
+> `--method FULL_SYMMETRIZED`, which discovers the cluster's spatial
+> generators (cached per topology), sweeps all `(Sz x irrep)` blocks via
+> `qed.full_spectrum`, and writes the same `/eigendata/eigenvalues`
+> contract the summation reads. `--method FULL` keeps the legacy dense
+> path. Per-cluster spectra match the dense path to ~1e-14; cross-order
+> reuse is handled by the existing `EigenvalueCache` (verified 100% hit
+> rate on a warm cache). Benchmarks:
+> [`benchmarks/bench_symmetry_full_spectrum.cpp`](../../benchmarks/bench_symmetry_full_spectrum.cpp)
+> (C++ dense-vs-sym wall+RSS; ~6.6x faster / ~9.5x less RSS at N=12 and
+> widening) and `QED_NLCE/scripts/benchmark_pipelines.py --symmetry_ab`.
+>
+> *Note on the orbit-CSR HDF5 cache:* `saveOrbitBasisHDF5` /
+> `loadOrbitBasisHDF5` persist the **legacy** orbit CSR and are only
+> relevant to the `ED_SYM_REP=0` fallback. The rep path deliberately does
+> not materialise that structure; cross-cluster reuse in NLCE is provided
+> at the coarser, more effective granularity of the eigenvalue cache
+> (whole spectrum keyed by topology+options) plus the in-process spatial-
+> generator cache, so no separate per-sector rep HDF5 cache is wired.
+
 > **Update (2026-05-26): Orthogonal symmetry composition lands.**
 >
 > The four-mode taxonomy (`none` / `Sz` / `Symm` / `Sz+Symm`) is now

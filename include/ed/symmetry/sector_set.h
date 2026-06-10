@@ -86,16 +86,26 @@ enumerate_full_orbit_reps(const SymmetryGroupInfo& info, std::uint64_t n_bits)
 enumerate_fixed_sz_orbit_reps(const FixedSzSubspace& sub,
                               const SymmetryGroupInfo& info)
 {
-    std::set<std::uint64_t> reps;
+    // A fixed-Sz state ``s`` is its orbit's canonical rep iff ``s`` is the
+    // numeric minimum over its in-subspace images -- so we can detect reps
+    // in a single pass (no global dedup container) and only the survivors
+    // enter the output. Site permutations preserve popcount, so every orbit
+    // image of a fixed-Sz state is itself in the subspace; the explicit
+    // ``index_of`` guard is kept for defensive parity with the legacy loop.
+    // Sorted-vector output (ascending) replaces the old ``std::set`` insert
+    // (O(n log n) once vs O(n log n) with per-insert tree allocations).
+    std::vector<std::uint64_t> reps;
     for (std::uint64_t s : sub.basis_states()) {
-        std::uint64_t mn = s;
+        bool is_rep = true;
         for (std::size_t g = 0; g < info.max_clique.size(); ++g) {
             const std::uint64_t img = applyPermutation(s, info.max_clique[g]);
-            if (sub.index_of(img) >= 0) mn = std::min(mn, img);
+            if (sub.index_of(img) >= 0 && img < s) { is_rep = false; break; }
         }
-        reps.insert(mn);
+        if (is_rep) reps.push_back(s);
     }
-    return std::vector<std::uint64_t>(reps.begin(), reps.end());
+    std::sort(reps.begin(), reps.end());
+    reps.erase(std::unique(reps.begin(), reps.end()), reps.end());
+    return reps;
 }
 
 // ---------------------------------------------------------------------------

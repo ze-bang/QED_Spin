@@ -1196,6 +1196,13 @@ if(BUILD_ED_TESTS)
     # byte-for-byte in every momentum sector (half-filled Heisenberg Z_N ring,
     # N=6, n_up=3) -- orbits built over a FixedSzSubspace instead of full space.
     ed_add_test(test_symmetry_backend_fixedsz   tests/unit/test_symmetry_backend_fixedsz.cpp USE_CATCH2)
+    # "Optimized symmetry ED + NLCE" (Jun 2026), Phase 1 gate: the CPU
+    # on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
+    # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
+    # reproduces the orbit-CSR reference matvec in every momentum sector
+    # WITHOUT materialising the per-sector orbit CSR (rep data from the
+    # CSR-free getRepSectorData). Heisenberg Z_N ring, N=6/8.
+    ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp USE_CATCH2)
     # P2c: the standalone per-sector ed::symmetry::SectorOperator (owning
     # SectorBasis + symmetry backend, no parent StreamingSymmetryOperator)
     # matches the legacy applySymmetrized matvec in every sector and its
