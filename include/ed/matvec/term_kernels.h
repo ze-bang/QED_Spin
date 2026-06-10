@@ -644,4 +644,109 @@ inline void apply_term_to_state(
     }
 }
 
+// ---------------------------------------------------------------------------
+// apply_terms_rep_symmetry -- the HOST on-the-fly representative SpMV.
+//
+// "Optimized symmetry ED + NLCE" plan (Jun 2026). The CPU twin of the device
+// ``apply_terms_rep_symmetry_scatter`` (term_kernels_gpu.cuh): one row per
+// orbit representative ``i``. It does NOT walk an orbit CSR -- it applies the
+// Hamiltonian terms to the SINGLE representative ``reps[i]``
+// (``basis.state_of(i)``) with ``pre_phase = inv_norms[i]``, and the policy's
+// ``index_and_projection`` regenerates the destination orbit index +
+// projection phase arithmetically from the group action (no orbit table).
+//
+// Requires ``BasisPolicy`` to expose ``state_of`` / ``inv_norm_of`` /
+// ``index_and_projection`` (i.e. ``RepSymmetryBasisPolicy``). Reuses the same
+// ``apply_term_to_state`` single-state emitter + radix-sort scatter flush as
+// ``apply_terms`` so the term logic + accumulation into ``out`` are identical;
+// the caller MUST zero ``out`` first (this kernel only atomic-adds).
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void apply_terms_rep_symmetry(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    using Contrib = LocalContribution<Scalar>;
+    const uint64_t dim = basis.dim();
+
+    constexpr size_t kCacheBlockSize = 4096;
+    constexpr size_t kFlushThreshold = 4096;
+    const uint64_t num_blocks =
+        (dim + kCacheBlockSize - 1) / kCacheBlockSize;
+
+#ifdef _OPENMP
+    const uint64_t par_threshold =
+        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+#else
+    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
+#endif
+
+    #pragma omp parallel if(dim > par_threshold)
+    {
+        std::vector<Contrib> local_buffer;
+        std::vector<Contrib> radix_scratch;
+        std::array<size_t, 257> radix_count;
+        local_buffer.reserve(kFlushThreshold);
+        radix_scratch.reserve(kFlushThreshold);
+
+        auto flush = [&]() {
+            if (local_buffer.empty()) return;
+            radix_sort_local<Scalar>(local_buffer, radix_scratch, radix_count, dim);
+            scatter_flush<Scalar>(local_buffer, out);
+        };
+
+        #pragma omp for schedule(dynamic, 1) nowait
+        for (uint64_t block = 0; block < num_blocks; ++block) {
+            const uint64_t block_start = block * kCacheBlockSize;
+            const uint64_t block_end   = std::min(block_start + kCacheBlockSize, dim);
+
+            for (uint64_t i = block_start; i < block_end; ++i) {
+                const Scalar coeff_in = in[i];
+                if (std::abs(coeff_in) < 1e-15) continue;
+
+                // pre_phase = inv_norm[i] applied to the single representative.
+                const Scalar pre = coeff_in
+                    * coerce_coeff<Scalar>(
+                          std::complex<double>(basis.inv_norm_of(i), 0.0));
+                if (std::abs(pre) < 1e-15) continue;
+
+                const uint64_t rep = basis.state_of(i);
+                apply_term_to_state<Scalar>(
+                    rep, spin_l,
+                    diag_one_body, offdiag_one_body,
+                    diag_two_body, mixed_two_body, offdiag_two_body,
+                    three_body,
+                    [&](uint64_t s_prime, const Scalar& h) {
+                        std::complex<double> proj;
+                        const int64_t k = basis.index_and_projection(s_prime, proj);
+                        if (k < 0) return;
+                        const Scalar contrib = pre * h * coerce_coeff<Scalar>(proj);
+                        local_buffer.push_back(
+                            {static_cast<uint64_t>(k), contrib});
+                    });
+
+                if (local_buffer.size() >= kFlushThreshold) flush();
+            }
+        }
+
+        flush();
+    } // end parallel
+}
+
 } // namespace ed::matvec::kernel

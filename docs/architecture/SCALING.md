@@ -12,6 +12,48 @@ orphan: true
 > Read this file *before* you spin up a 36-site DSSF run, and definitely
 > before you tell anyone we can do 40+.
 
+> **Update (2026-06-09): backend-aware symmetry matvec + when symmetry
+> actually helps.** The per-sector matvec path now follows the memory
+> regime AND the backend (see [`SYMMETRY.md`](SYMMETRY.md)):
+>
+> * **CPU** — the precomputed orbit-CSR walk when the CSR fits (eager
+>   regime), the CSR-free on-the-fly representative SpMV only when it does
+>   not (lazy regime, e.g. ~24 GiB/sector at N=32). The rep kernel is
+>   ~100x slower *per matvec* than the CSR walk when the CSR fits, so it is
+>   reserved for the scale where the CSR is infeasible.
+> * **GPU** — always the on-the-fly representative SpMV when usable: it
+>   skips the orbit-CSR build + multi-GiB device upload and the per-element
+>   recompute is hidden by the resident threads (measured N=24: rep 4.8 s
+>   vs CSR-mirror 18.2 s end-to-end). Per-sector memory is just
+>   `reps[] + inv_norms[] + perms + characters` (~600 MB at N=32).
+>
+> **Symmetry is a MEMORY tool and a FULL-SPECTRUM tool, not an
+> iterative-ground-state speed tool.** The symmetry matvec carries an
+> inherent ~|G| per-element cost (mapping each connected state back to its
+> representative), and the |G| irrep blocks sum to the full Sz dimension,
+> so scanning every irrep for a ground state does ~|G|x the matvec work of
+> a single plain-Sz Lanczos (measured CPU Heisenberg ring: Sz+symm
+> 1.2/3.2/31.7 s for N=14/16/18 vs ~0.5 s flat for Sz-only). Use it for:
+>
+> * **Memory-bound ground states** — at N=32 a plain-Sz vector is ~9.6 GB
+>   (C(32,16)x16 B) and Lanczos needs several, so it will not fit a 16 GB
+>   GPU. A symmetry block is |G|x smaller and fits. For a ground state,
+>   target the block holding it with `sector=[q0,q1,...]` (e.g. k=0) rather
+>   than scanning all irreps; in the lazy regime only that block is built.
+>   If plain Sz *does* fit, it is faster (no |G| factor, no orbit
+>   enumeration setup).
+> * **Full spectrum** — `qed.full_spectrum(...)` /
+>   `qed.solve(..., full_spectrum=True)`, or in NLCE the default
+>   `full_ed --method FULL_SYMMETRIZED`. Dense per block is O((D/|G|)^3)
+>   summed = O(D^3/|G|^2); the dense-vs-symmetry crossover (1D Heisenberg
+>   ring, `benchmarks/bench_symmetry_full_spectrum.cpp`) is near N≈11; by
+>   N=12 the symmetry path is ~6.6x faster at ~9.5x less peak RSS, widening
+>   with N.
+>
+> Knobs: `ED_SYM_LAZY_SECTORS=1/0` forces the lazy/eager regime;
+> `ED_SYM_REP=0` keeps the CPU on the CSR walk even in the lazy regime
+> (bisection); `ED_GPU_SYMMETRY_REP=0` restores the GPU orbit-CSR mirror.
+
 This document tells you, for a given system size N:
 
 1. how much memory one Lanczos / FTLM / TPQ vector costs,

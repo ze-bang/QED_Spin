@@ -38,6 +38,7 @@ __all__ = [
     "SymmetryReport",
     "find_symmetries",
     "solve",
+    "full_spectrum",
     "list_diag_parameters",
     "solver_device_support",
     "load_mpi_eigenvector",
@@ -259,6 +260,15 @@ def _ed_result_from_gs_result(
     out.eigenvalues = list(gs_result.eigenvalues)
     out.eigenvectors_computed = bool(params.compute_eigenvectors)
     out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
+    # Surface symmetry-decomposed diagnostics when the orchestrator
+    # populated them (streaming-symmetry lane). Stored as dynamic attrs
+    # so legacy consumers that only read `.eigenvalues` are unaffected.
+    _eps = getattr(gs_result, "eigenvalues_per_sector", None)
+    if _eps:
+        out.eigenvalues_per_sector = [list(s) for s in _eps]
+    _tags = getattr(gs_result, "sector_tags", None)
+    if _tags:
+        out.sector_tags = list(_tags)
     return out
 
 
@@ -800,6 +810,7 @@ def solve(
     # explicitly set on this call (or via ``extra_params``) wins.
     auto_tune: bool = True,
     level: str = "balanced",
+    full_spectrum: bool = False,
     extra_params: Optional[dict[str, Any]] = None,
 ) -> EDResults:
     """One-call exact diagonalization with smart defaults.
@@ -969,6 +980,27 @@ def solve(
             f"qed.solve(H, ...) expected Operator or FixedSzOperator, "
             f"got {type(H).__name__}"
         )
+
+    # ------------------------------------------------------------------
+    # Full-spectrum shortcut: compute EVERY eigenvalue decomposed by all
+    # (Sz x spatial) symmetries via the memory-light representative SpMV.
+    # Routes to the standalone :func:`full_spectrum` helper, which loops
+    # the symmetry blocks and dense-diagonalises each. (Honours symmetry=
+    # / sz auto-detection; the remaining solver/device/thermal kwargs do
+    # not apply to a full-spectrum sweep.)
+    # ------------------------------------------------------------------
+    if full_spectrum:
+        if isinstance(H, FixedSzOperator):
+            raise ValueError(
+                "full_spectrum=True spans every Sz sector; pass the full "
+                "Operator (not a FixedSzOperator) so the sweep can loop "
+                "magnetisation blocks.")
+        spin_l = float(getattr(H, "spin", 0.5))
+        _dev = device if isinstance(device, str) else "cpu"
+        return full_spectrum_compute(
+            H, symmetry=symmetry,
+            sz_conserved=(None if auto_sz else False),
+            spin_length=spin_l, device=_dev, verbose=verbose)
 
     fixed_sz_input = isinstance(H, FixedSzOperator)
     num_sites = int(H.num_sites)
@@ -2872,6 +2904,213 @@ def _diag_with_symmetry(
         return _ed_result_from_gs_result(gs, params)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _operator_conserves_sz(operator: Operator) -> bool:
+    """True iff every Hamiltonian term commutes with total Sz.
+
+    Each elementary operator changes total Sz by op_type 0 (S+) -> +1,
+    1 (S-) -> -1, 2 (Sz) -> 0. A term conserves Sz iff the net change
+    over its factors is zero. Used to decide whether
+    :func:`full_spectrum` can decompose by magnetisation (loop n_up)
+    in addition to the spatial irreps. Conservative: any parse failure
+    -> ``False`` (treat as non-conserving, fall back to the full span).
+    """
+    # Prefer the operator's own predicate when present (authoritative).
+    try:
+        return bool(operator.conserves_sz())
+    except Exception:
+        pass
+    _delta = {0: 1, 1: -1, 2: 0}
+    try:
+        for op_type, _site, _c in operator.iter_one_body_terms():
+            if _delta.get(int(op_type), 1) != 0:
+                return False
+        for op1, _s1, op2, _s2, _c in operator.iter_two_body_terms():
+            if _delta.get(int(op1), 1) + _delta.get(int(op2), 1) != 0:
+                return False
+        for op1, _s1, op2, _s2, op3, _s3, _c in operator.iter_three_body_terms():
+            if (_delta.get(int(op1), 1) + _delta.get(int(op2), 1)
+                    + _delta.get(int(op3), 1) != 0):
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _normalize_symmetry_info(
+    operator: Operator, symmetry: SymmetryArg
+) -> Optional[dict[str, Any]]:
+    """Normalise a symmetry argument into the group ``info`` dict the
+    streaming kernel reads, or ``None`` for the trivial (no spatial
+    symmetry) case."""
+    from .symmetry import group_from_generators
+
+    if symmetry is None:
+        return None
+    if isinstance(symmetry, GeneratorSet):
+        gens = symmetry.generators
+        return (group_from_generators(int(operator.num_sites), gens)
+                if gens else None)
+    if isinstance(symmetry, dict):
+        return symmetry
+    if isinstance(symmetry, (list, tuple)):
+        gens = [list(map(int, p)) for p in symmetry]
+        return (group_from_generators(int(operator.num_sites), gens)
+                if gens else None)
+    raise TypeError(
+        f"symmetry must be GeneratorSet, list[Permutation], or dict, "
+        f"got {type(symmetry).__name__}"
+    )
+
+
+def full_spectrum(
+    operator: Operator,
+    *,
+    symmetry: SymmetryArg = None,
+    sz_conserved: Optional[bool] = None,
+    spin_length: float = 0.5,
+    device: str = "cpu",
+    verbose: bool = False,
+) -> EDResults:
+    """Compute the COMPLETE eigenvalue spectrum of ``operator`` decomposed
+    by all available ``(Sz x spatial)`` symmetries.
+
+    Each ``(n_up, spatial irrep)`` block is dense-diagonalised through the
+    memory-light on-the-fly representative SpMV
+    (``CpuMatVecBackend<RepSymmetryBasisPolicy>`` on CPU, the GPU rep
+    mirror on CUDA), and the full multiset of eigenvalues is collected and
+    sorted. The result is mathematically identical to
+    ``numpy.linalg.eigvalsh`` of the dense Hamiltonian, but never builds
+    the full ``2^N x 2^N`` matrix.
+
+    Parameters
+    ----------
+    operator : Operator
+        The spin Hamiltonian (full Hilbert space).
+    symmetry : GeneratorSet | list[Permutation] | dict | None
+        Spatial symmetry generators. ``None`` => no spatial symmetry
+        (still decomposes by Sz when conserved).
+    sz_conserved : bool | None
+        Whether the model conserves total Sz. ``None`` (default)
+        auto-detects from the term list.
+    spin_length : float
+        Spin magnitude (0.5 for spin-1/2).
+
+    Returns
+    -------
+    EDResults
+        ``.eigenvalues`` is the complete sorted spectrum (every
+        eigenvalue with its multiplicity).
+    """
+    import math
+
+    N = int(operator.num_sites)
+    info = _normalize_symmetry_info(operator, symmetry)
+    if sz_conserved is None:
+        sz_conserved = _operator_conserves_sz(operator)
+    use_gpu = isinstance(device, str) and device.lower() in ("gpu", "cuda")
+
+    # No spatial symmetry: a plain dense full diagonalisation already
+    # returns every eigenvalue. (Sz-block looping without a spatial group
+    # buys nothing for the spectrum multiset, so keep it simple.)
+    if info is None:
+        params = _bare_full_params(N, 1 << N, spin_length)
+        params.use_gpu = use_gpu
+        res = _diag_via_workflows_solve(
+            operator, DiagonalizationMethod.FULL, params)
+        res.eigenvalues = sorted(res.eigenvalues)
+        return res
+
+    tmpdir = tempfile.mkdtemp(prefix="qed_fullspec_")
+    try:
+        _write_operator_directory(operator, tmpdir)
+        _write_symmetry_directory(tmpdir, info)
+
+        sz_values: list[Optional[int]] = (
+            list(range(N + 1)) if sz_conserved else [None])
+        if verbose:
+            print(f"[qed.full_spectrum] N={N} |G|="
+                  f"{len(info.get('max_clique', []))} "
+                  f"sectors={len(info.get('sectors', []))} "
+                  f"sz_conserved={sz_conserved} "
+                  f"blocks={'Sz x irrep' if sz_conserved else 'irrep'}")
+
+        eigs: list[float] = []
+        eigs_per_sector: list[list[float]] = []
+        sector_tags: list[Any] = []
+        for n_up in sz_values:
+            block_dim = (math.comb(N, n_up) if n_up is not None
+                         else (1 << N))
+            params = _bare_full_params(N, block_dim, spin_length)
+            params.use_symmetry = True
+            params.use_gpu = use_gpu
+            if n_up is not None:
+                params.use_fixed_sz = True
+                params.n_up = int(n_up)
+            opts = _ed_params_to_solve_options(
+                params, DiagonalizationMethod.FULL)
+            opts.use_symmetry = True
+            if n_up is not None:
+                opts.use_fixed_sz = True
+                opts.n_up = int(n_up)
+            gs = _core.workflows_solve_streaming_symmetry_directory(
+                tmpdir, N, float(spin_length), opts, n_up)
+            eigs.extend(gs.eigenvalues)
+            _eps = getattr(gs, "eigenvalues_per_sector", None)
+            if _eps:
+                eigs_per_sector.extend([list(s) for s in _eps])
+            _tags = getattr(gs, "sector_tags", None)
+            if _tags:
+                sector_tags.extend(
+                    (int(n_up) if n_up is not None else None, t)
+                    for t in _tags)
+            if verbose:
+                print(f"[qed.full_spectrum]   n_up={n_up} "
+                      f"block_dim={block_dim} got={len(gs.eigenvalues)}")
+
+        eigs.sort()
+        out = EDResults()
+        out.eigenvalues = eigs
+        # Per-sector eigenvalues / sector tags are OPTIONAL diagnostics.
+        # They rely on ``py::dynamic_attr`` being compiled into the
+        # ``EDResults`` binding; on a stale ``_core`` (built before that
+        # was enabled) the attribute set raises ``AttributeError``. The
+        # complete spectrum in ``out.eigenvalues`` is the contract every
+        # caller (incl. NLCE FULL_SYMMETRIZED) depends on, so never let a
+        # missing diagnostic slot break it -- attach best-effort.
+        if eigs_per_sector:
+            try:
+                out.eigenvalues_per_sector = eigs_per_sector
+            except AttributeError:
+                pass
+        if sector_tags:
+            try:
+                out.sector_tags = sector_tags
+            except AttributeError:
+                pass
+        return out
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# Internal alias so :func:`solve` can call the helper without colliding
+# with its own ``full_spectrum`` (bool) keyword argument.
+full_spectrum_compute = full_spectrum
+
+
+def _bare_full_params(
+    num_sites: int, num_eigenvalues: int, spin_length: float
+) -> EDParameters:
+    """Minimal EDParameters for a dense full-spectrum block (no
+    auto-tune / thermal knobs)."""
+    p = EDParameters()
+    p.num_sites = int(num_sites)
+    p.num_eigenvalues = int(num_eigenvalues)
+    p.spin_length = float(spin_length)
+    p.tolerance = 1e-12
+    p.compute_eigenvectors = False
+    return p
 
 
 def _write_operator_directory(operator: Operator, directory: str) -> None:

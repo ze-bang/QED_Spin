@@ -67,6 +67,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -88,6 +89,26 @@
 namespace ed::matvec {
 
 using Complex = std::complex<double>;
+
+// ---------------------------------------------------------------------------
+// Compile-time detection of the on-the-fly representative symmetry policy
+// (``RepSymmetryBasisPolicy``). Detected via the optional ``is_rep_symmetry``
+// trait so the trivial / orbit-CSR policies need not declare it. When true,
+// CpuMatVecBackend (i) always takes the complex matrix-free path -- the
+// assembled-CSR + real-input fast paths are invalid for a momentum sector,
+// exactly as for ``needs_orbit_walk`` -- and (ii) dispatches the dedicated
+// ``apply_terms_rep_symmetry`` kernel instead of the orbit-walk
+// ``apply_terms``.
+// ---------------------------------------------------------------------------
+namespace detail {
+template <class P, class = void>
+struct policy_is_rep : std::false_type {};
+template <class P>
+struct policy_is_rep<P, std::void_t<decltype(P::is_rep_symmetry)>>
+    : std::bool_constant<P::is_rep_symmetry> {};
+template <class P>
+inline constexpr bool policy_is_rep_v = policy_is_rep<P>::value;
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // TermView: a non-owning view onto the operator's SoA term storage.
@@ -340,7 +361,8 @@ public:
         // off-diagonals (coeff_modifier<double> would silently drop the
         // imaginary part of the phase). This branch is compiled out for the
         // Full / FixedSz policies (needs_orbit_walk == false).
-        if constexpr (BasisPolicy::needs_orbit_walk) {
+        if constexpr (BasisPolicy::needs_orbit_walk
+                      || detail::policy_is_rep_v<BasisPolicy>) {
             std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
             return;
@@ -401,7 +423,8 @@ public:
         // owning operator reports a real effective matrix (real terms AND
         // real momentum phases); coeff_modifier<double> is then exact.
         // Compiled out for Full / FixedSz (needs_orbit_walk == false).
-        if constexpr (BasisPolicy::needs_orbit_walk) {
+        if constexpr (BasisPolicy::needs_orbit_walk
+                      || detail::policy_is_rep_v<BasisPolicy>) {
             std::fill(out, out + n, 0.0);
             matrix_free_real(terms, in, out);
             return;
@@ -436,22 +459,40 @@ private:
     void matrix_free_complex(const term_view_t& t,
                              const Complex* in, Complex* out) const
     {
-        ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
-            basis_, t.spin_l,
-            *t.diag_one, *t.offdiag_one,
-            *t.diag_two, *t.mixed_two, *t.offdiag_two,
-            *t.three_body,
-            in, out);
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, Complex>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        } else {
+            ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        }
     }
     void matrix_free_real(const term_view_t& t,
                           const double* in, double* out) const
     {
-        ed::matvec::kernel::apply_terms<BasisPolicy, double>(
-            basis_, t.spin_l,
-            *t.diag_one, *t.offdiag_one,
-            *t.diag_two, *t.mixed_two, *t.offdiag_two,
-            *t.three_body,
-            in, out);
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, double>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        } else {
+            ed::matvec::kernel::apply_terms<BasisPolicy, double>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        }
     }
 
     // ------------------------------------------------------------------

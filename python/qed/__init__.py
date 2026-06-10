@@ -92,6 +92,7 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     GeneratorSet,
     SymmetryReport,
     solve,
+    full_spectrum,
     find_symmetries,
     list_diag_parameters,
     load_mpi_eigenvector,
@@ -144,6 +145,7 @@ __all__ = [
     "has_mpi_build",
     # The three canonical entry points
     "solve",
+    "full_spectrum",
     "thermal",
     "spectral",
     # Result types

@@ -1998,6 +1998,16 @@ public:
             if (env[0] == '1') force_lazy = true;
             else if (env[0] == '0') force_eager = true;
         }
+        // Memory regime decides eager (orbit CSR fits -> fast CSR matvec) vs
+        // lazy (CSR too big -> CSR-free on-the-fly representative matvec). This
+        // single boundary now ALSO selects the per-sector matvec path: the
+        // sector loop hands out a CSR-backed ``make_sector_operator_adopt`` in
+        // the eager regime and a CSR-free ``make_rep_sector_operator_lazy`` in
+        // the lazy regime (see StreamingSymmetryHandle::sector). The rep kernel
+        // recomputes the group action per matvec (~|G|x slower per element than
+        // the precomputed CSR), so it must stay reserved for the regime where
+        // the CSR genuinely does not fit -- making it the unconditional default
+        // made small/moderate N pathologically slow (96 s vs <1 s at N=20).
         lazy_sectors_enabled_ = !force_eager
             && (force_lazy
                 || est_bytes > static_cast<long double>(lazy_budget_bytes));
@@ -2590,7 +2600,15 @@ public:
     }
 
     size_t getNumSectors() const { return sectors_.size(); }
-    
+
+    // True iff generation chose the lazy regime (orbit CSR estimated to
+    // exceed the budget). The sector loop reads this to pick the matvec
+    // path: lazy => CSR-free on-the-fly representative SpMV; eager => the
+    // precomputed orbit-CSR SpMV (faster per matvec when it fits).
+    [[nodiscard]] bool lazy_sectors_enabled() const noexcept {
+        return lazy_sectors_enabled_;
+    }
+
     uint64_t getSectorDimension(size_t sector_idx) const {
         // "stream sym sectors": dimension is known from Pass 1.5 without
         // materializing the orbit CSR (eager mode: same value).
