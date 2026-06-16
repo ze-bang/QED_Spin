@@ -132,11 +132,12 @@
 > Why this matters: layering a new symmetry axis (spin-flip Z_2,
 > time-reversal antiunitary, SU(2) Casimir) is now "push a
 > `Projector` onto the chain" rather than "spawn a new sibling
-> operator class". The four legacy class names
-> (`Operator` / `FixedSzOperator` / `StreamingSymmetryOperator` /
-> `FixedSzStreamingSymmetryOperator`) remain — they are the host-side
-> ownership classes; the (Subspace, Chain) decomposition is the
-> *semantic* axis breakdown that drives the orbit/character builder.
+> operator class". As of the Jun 2026 operator collapse (§6.6) the
+> host-side ownership classes are just `Operator` (base) and the
+> `SubspaceOperator<BasisPolicy, MemSpace>` template, with
+> `FixedSzOperator` / `SectorOperator` as `using`-aliases; the
+> streaming carriers were deleted. The (Subspace, Chain) decomposition
+> is the *semantic* axis breakdown that drives the orbit/character builder.
 > Section 6 below covers the future-axis seams in detail.
 
 > **Update (2026-05-25):** SOTA streaming-symmetry exploitation now
@@ -303,8 +304,9 @@ codes (HPhi, EDLib, QuSpin, Pomerol). It complements
 | `workflows_solve_streaming_symmetry_directory(dir, opts)` | ✓ via `use_fixed_sz + n_up` | ✓ via `use_symmetry` + streaming kernel | ✓ (streaming kernel filters orbits by both labels) | ✓ |
 
 Implementation: per-sector loop driven by
-`ed::make_operator(streaming_symmetry=true) -> StreamingSymmetryOperator::sector(k) ->
-ed::workflows::solve(*sec, opts)`. Each sector gets its own
+`ed::make_sector_operators_tagged(streaming_symmetry=true) -> SectorOperator (per k) ->
+ed::workflows::solve(*sec, opts)`, where each tagged `SectorOperator` is
+a `SubspaceOperator<SymmetryBasisPolicy>`. Each sector gets its own
 `applySymmetrized` matvec, sector_dim, optional GPU operator. The
 all-sector eigenvalue pool is sorted globally and the lowest-k Ritz
 pairs are returned.
@@ -839,22 +841,30 @@ Two routes that both reuse the (Subspace, Chain) seam:
 
 Either way, you don't touch the operator hierarchy.
 
-### 6.6. The legacy operator classes survive as-is
+### 6.6. The operator collapse (Jun 2026): one template
 
-The four legacy classes still exist and own the matvec state; they
-are now thin host-side facades over the (Subspace,
-ProjectorChain) decomposition:
+The operator-class collapse foreshadowed by the May 2026 refactor has
+**landed**. The streaming-symmetry carriers
+(`StreamingSymmetryOperator` / `FixedSzStreamingSymmetryOperator`) were
+deleted, and `FixedSzOperator` / `SectorOperator` are now `using`-aliases
+for a single class template
+`SubspaceOperator<BasisPolicy, MemSpace>` (derives from `Operator`,
+`include/ed/core/subspace_operator.h`). Each instantiation owns the
+producer descriptor selected by `SubspaceProducerTraits<BasisPolicy>`:
 
-* `Operator` ↔ `(FullSpaceSubspace, [])`
-* `FixedSzOperator` ↔ `(FixedSzSubspace, [])` (with the subspace
-  exposed as `op.subspace()`)
-* `StreamingSymmetryOperator` ↔ `(FullSpaceSubspace,
-  [SpatialProjector])`
-* `FixedSzStreamingSymmetryOperator` ↔ `(FixedSzSubspace,
-  [SpatialProjector])`
+* `Operator` ↔ `(FullSpaceSubspace, [])` — concrete base class,
+  `FullBasisPolicy`
+* `FixedSzOperator = SubspaceOperator<FixedSzBasisPolicy>` ↔
+  `(FixedSzSubspace, [])` (subspace exposed as `op.subspace()`)
+* `SectorOperator = SubspaceOperator<SymmetryBasisPolicy>` ↔
+  `(SectorBasis, [SpatialProjector])`
 
-This is the **deliberate** stop-point of the May 2026 refactor:
-the operator-class collapse (one `StreamingProjectedOperator`
-parameterised by `(Subspace, Chain)`) is a follow-up; the
-abstractions ship NOW so future symmetry axes can land without
-gating on that collapse.
+The producer member holds the matvec state: `FixedSzSubspace` owns the
+fixed-Sz basis/lin-index storage, and `SectorBasis` owns the symmetry
+orbit data plus the rep-lazy materialisation mode that the old carrier
+baked into the operator. The unified template only stores the producer
+and reads its `policy()` POD in `make_backend_()`; `bind_cuda_impl_()`
+is an explicit per-policy member specialization that preserves the weak
+(CPU build) / strong (CUDA build) symbol split. Future symmetry axes
+extend the `ProjectorChain` or add a `Subspace`/producer specialisation
+without touching the operator template.

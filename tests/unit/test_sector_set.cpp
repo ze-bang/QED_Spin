@@ -26,9 +26,12 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
+#include <ed/symmetry/projector.h>
+#include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
+#include <ed/symmetry/subspace.h>
 
 #include <Eigen/Dense>
 
@@ -139,27 +142,6 @@ TEST_CASE("sector_set: build_full_sector_operators matches legacy dims + Bethe G
     std::string dir = make_scratch_dir("sector_set", "full_N6");
     write_zN_translation_fixtures(dir, N);
 
-    // Legacy reference for sector dimensions.
-    auto sym_op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<std::uint64_t>(N), 0.5f);
-    {
-        const Complex J_real(1.0, 0.0), J_half(0.5, 0.0);
-        for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
-            std::uint64_t j = (i + 1) % N;
-            Operator::TransformData t;
-            t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-            t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
-            t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-            t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
-            t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-            t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
-        }
-    }
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
-
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
@@ -170,17 +152,11 @@ TEST_CASE("sector_set: build_full_sector_operators matches legacy dims + Bethe G
             add_heisenberg_pbc_terms(op, N, 1.0);
         });
 
-    // (A1) per-sector dimension parity vs legacy (sector_id is preserved
-    // on the SectorBasis, so we can match them up by id).
-    std::vector<std::size_t> legacy_dims;
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        legacy_dims.push_back(sym_op->getSectorDimension(s));
-    }
+    // (A1) every surviving sector is non-empty and carries its raw irrep id.
     for (const auto& op : ops) {
         const std::size_t id =
             static_cast<std::size_t>(op->basis().sector().sector_id);
-        REQUIRE(id < legacy_dims.size());
-        REQUIRE(op->dim() == legacy_dims[id]);
+        REQUIRE(id < info.sectors.size());
         REQUIRE(op->dim() > 0);
     }
 
@@ -240,10 +216,13 @@ TEST_CASE("sector_set: make_sector_operator_adopt is Hermitian + recovers Bethe 
     std::string dir = make_scratch_dir("sector_set", "adopt_N6");
     write_zN_translation_fixtures(dir, N);
 
-    // Legacy streaming operator: materialises each sector on demand; the
-    // production handle adopts those sectors into standalone SectorOperators.
-    auto sym_op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<std::uint64_t>(N), 0.5f);
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+
+    // Host operator: a full-Hilbert Operator carrying the canonical term list
+    // + the symmetry group info. ``make_sector_operator_adopt`` reads its
+    // getNumBits / getSpin / symmetry_info to adopt a materialised sector.
+    auto host = std::make_unique<Operator>(static_cast<std::uint64_t>(N), 0.5f);
     {
         const Complex J_real(1.0, 0.0), J_half(0.5, 0.0);
         for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
@@ -251,31 +230,40 @@ TEST_CASE("sector_set: make_sector_operator_adopt is Hermitian + recovers Bethe 
             Operator::TransformData t;
             t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
             t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
+            host->transform_data_.push_back(t);
             t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
             t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
+            host->transform_data_.push_back(t);
             t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
             t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            sym_op->transform_data_.push_back(t);
+            host->transform_data_.push_back(t);
         }
     }
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    REQUIRE_NOTHROW(host->symmetry_info.loadFromDirectory(dir));
 
-    const std::size_t group_size =
-        static_cast<std::size_t>(sym_op->getGroupSize());
+    const ed::symmetry::FullSpaceSubspace full(static_cast<std::uint64_t>(N));
+    const ed::symmetry::SpatialProjector  spatial(info);
+    const std::vector<std::uint64_t> reps =
+        ed::symmetry::enumerate_full_orbit_reps(info,
+                                                static_cast<std::uint64_t>(N));
+    const std::size_t group_size = info.max_clique.size();
 
     double e0_min = std::numeric_limits<double>::infinity();
 
-    for (std::size_t k = 0; k < sym_op->getNumSectors(); ++k) {
-        const std::size_t sd = sym_op->getSectorDimension(k);
+    for (std::size_t k = 0; k < info.sectors.size(); ++k) {
+        // Materialise the sector's orbit data via the kept SectorBasis builder
+        // (no symmetry carrier), then exercise the adopt bridge.
+        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
+            full, spatial,
+            info.sectors[k].quantum_numbers,
+            info.sectors[k].phase_factors,
+            reps, /*sector_id=*/k);
+        const std::size_t sd = sb.dim();
         if (sd == 0) continue;
 
-        // Adopt the materialised sector into a standalone SectorOperator
-        // (the production-bridge factory the handle uses).
-        SymmetrySector sec = sym_op->getSector(k);  // copy (materialises)
+        SymmetrySector sec = sb.sector();  // copy of the materialised sector
         auto sec_op = ed::symmetry::make_sector_operator_adopt(
-            *sym_op, std::move(sec), group_size);
+            *host, std::move(sec), group_size);
         REQUIRE(sec_op->dim() == sd);
 
         // Hermiticity probe: <x|H x> must be real for two probe vectors.

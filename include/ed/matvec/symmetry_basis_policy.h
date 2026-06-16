@@ -46,7 +46,7 @@
 #include <cstdint>
 #include <type_traits>
 
-#include <ed/core/streaming_symmetry.h>   // SymmetrySector, SymBasisState,
+#include <ed/symmetry/symmetry_sector_data.h>   // SymmetrySector, SymBasisState,
                                           // SectorLookupHandle
 #include <ed/core/sorted_uint64_index.h>  // kNotFound sentinel
 

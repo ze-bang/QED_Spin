@@ -1,27 +1,29 @@
 // =============================================================================
 // test_sector_loop_gate
 //
-// Validation pin for the operator-collapse refactor (Phase C, Jun 2026):
-// the production cutover in
-// ``ed::core::StreamingSymmetryHandle::sector(k)``.
+// Validation pin for the operator-collapse refactor (Phase 3, Jun 2026):
+// the production per-sector loop now keys off ``ed::core::SectorSetView``
+// (the carrier-free replacement for the retired
+// ``StreamingSymmetryHandle``).
 //
-// The handle returns a standalone ``ed::symmetry::SectorOperator`` (the
-// collapse-target path, driven by the unified
-// ``CpuMatVecBackend<SymmetryBasisPolicy>``). The legacy back-referencing
-// ``SectorView`` and the ``ED_SYMMETRY_SECTOR_OPERATOR`` gate were removed in
-// Phase C. This test wraps a ``StreamingSymmetryOperator`` in a handle and
-// verifies -- for the Heisenberg Z_N ring (N=6, J=1) -- that the handle's
-// per-sector operator IS a ``SectorOperator`` and that the minimum sector
-// ground state equals the Bethe-ansatz GS.
+// ``SectorSetView`` owns a (compacted) ``SectorOperatorSet`` -- one
+// standalone ``ed::symmetry::SectorOperator`` per non-empty irrep, driven by
+// the unified ``CpuMatVecBackend<SymmetryBasisPolicy>`` -- and exposes the
+// same random-access surface (``num_sectors()`` over RAW irrep indices,
+// ``sector(raw_k)`` returning the persistent operator or ``nullptr`` for a
+// dropped/empty irrep). This test builds the set for the Heisenberg Z_N ring
+// (N=6, J=1) and verifies that each surviving sector operator IS a
+// ``SectorOperator`` and that the minimum sector ground state equals the
+// Bethe-ansatz GS.
 // =============================================================================
 
 #include "common/catch2_harness.h"
 
-#include <cstdlib>  // setenv -- MUST precede the first gate read
+#include <cstdlib>
 
-#include <ed/core/sector_loop.h>
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/make_operator.h>      // SectorOperatorSet + SectorSetView
 #include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>     // build_full_sector_operators
 
 #include <Eigen/Dense>
 
@@ -95,21 +97,39 @@ void write_zN_translation_fixtures(const std::string& dir, int N) {
     }
 }
 
-void add_heisenberg_pbc_terms(StreamingSymmetryOperator& op, int N) {
+void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op, int N) {
     const Complex J_real(1.0, 0.0), J_half(0.5, 0.0);
     for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
-        std::uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op.transform_data_.push_back(t);
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op.transform_data_.push_back(t);
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op.transform_data_.push_back(t);
+        const std::uint64_t j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, J_real);
+        op.addTwoBodyTerm(0, i, 1, j, J_half);
+        op.addTwoBodyTerm(1, i, 0, j, J_half);
     }
+}
+
+// Assemble a SectorOperatorSet (the payload SectorSetView wraps) from the
+// carrier-free full-Hilbert sector builder, mirroring exactly what
+// make_sector_operators_tagged() populates.
+ed::SectorOperatorSet build_full_sector_set(int N, const SymmetryGroupInfo& info) {
+    ed::SectorOperatorSet set;
+    std::vector<std::size_t> ids;
+    set.operators = ed::symmetry::build_full_sector_operators(
+        static_cast<std::uint64_t>(N), 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) { add_heisenberg_pbc_terms(op, N); },
+        &ids);
+    set.num_raw_sectors = info.sectors.size();
+    for (const auto& sec : info.sectors) {
+        set.all_quantum_numbers.push_back(sec.quantum_numbers);
+    }
+    for (std::size_t i = 0; i < set.operators.size(); ++i) {
+        ed::SectorTag tag;
+        tag.sector_index    = ids[i];
+        tag.sector_dim      = static_cast<std::uint64_t>(set.operators[i]->dim());
+        tag.quantum_numbers = info.sectors[ids[i]].quantum_numbers;
+        tag.n_up            = -1;
+        set.tags.push_back(std::move(tag));
+    }
+    return set;
 }
 
 double lowest_eigenvalue(ed::LinearOperator& op) {
@@ -129,33 +149,31 @@ double lowest_eigenvalue(ed::LinearOperator& op) {
 
 }  // namespace
 
-TEST_CASE("sector_loop_gate: handle routes through SectorOperator (N=6)",
+TEST_CASE("sector_loop_gate: SectorSetView routes through SectorOperator (N=6)",
           "[symmetry][sector_loop][gate][N6]")
 {
     const int N = 6;
     std::string dir = make_scratch_dir("sector_loop_gate", "N6");
     write_zN_translation_fixtures(dir, N);
 
-    auto sym_op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<std::uint64_t>(N), 0.5f);
-    add_heisenberg_pbc_terms(*sym_op, N);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    ed::core::StreamingSymmetryHandle handle(sym_op.get());
-    REQUIRE(handle.num_sectors() == sym_op->getNumSectors());
+    ed::core::SectorSetView view(build_full_sector_set(N, info));
+    REQUIRE(view.num_sectors() == info.sectors.size());
 
     double e0_min = std::numeric_limits<double>::infinity();
+    std::size_t surviving = 0;
 
-    for (std::size_t k = 0; k < handle.num_sectors(); ++k) {
-        const std::size_t sd = sym_op->getSectorDimension(k);
-        if (sd == 0) continue;
-
-        // Handle path -> standalone SectorOperator (collapse-target).
-        auto gated = handle.sector(k);
-        REQUIRE(gated != nullptr);
-        REQUIRE(gated->dim() == sd);
-        // The handle operator must be a SectorOperator.
-        REQUIRE(dynamic_cast<ed::symmetry::SectorOperator*>(gated.get()) != nullptr);
+    for (std::size_t k = 0; k < view.num_sectors(); ++k) {
+        // SectorSetView path -> persistent standalone SectorOperator
+        // (nullptr for an empty / dropped irrep).
+        ed::symmetry::SectorOperator* gated = view.sector(k);
+        if (gated == nullptr) continue;  // empty irrep
+        ++surviving;
+        const std::size_t sd = gated->dim();
+        REQUIRE(sd > 0);
+        REQUIRE(sd == view.sector_tag(k).sector_dim);
 
         // The per-sector operator must be Hermitian (probe symmetry of the
         // dense matvec) before we trust its spectrum.
@@ -177,5 +195,6 @@ TEST_CASE("sector_loop_gate: handle routes through SectorOperator (N=6)",
         e0_min = std::min(e0_min, lowest_eigenvalue(*gated));
     }
 
+    REQUIRE(surviving > 0);
     REQUIRE(std::abs(e0_min - kE0_N6) < 1e-10);
 }

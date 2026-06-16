@@ -50,6 +50,13 @@ std::unique_ptr<Operator> build_single_site_sz(uint64_t N) {
     return op;
 }
 
+// Plain Operators advertise supports_device_matvec on WITH_CUDA builds
+// (operator-collapse Phase 2a), so the CF-spectral Lanczos lane auto-dispatches
+// to the GPU when a device is visible.
+std::string expected_iterative_lane() {
+    return ed::have_cuda() ? "gpu" : "cpu";
+}
+
 }  // namespace
 
 TEST_CASE("workflows::spectral GroundStateCF produces a finite S(omega) grid",
@@ -71,7 +78,7 @@ TEST_CASE("workflows::spectral GroundStateCF produces a finite S(omega) grid",
 
     REQUIRE(res.omega.size() == opts.num_omega);
     REQUIRE(res.S_real.size() == opts.num_omega);
-    REQUIRE(res.backend.lane == "cpu");
+    REQUIRE(res.backend.lane == expected_iterative_lane());
 
     // Every value must be finite; the spectral function may be zero at
     // some grid points (e.g. inside the gap) but never NaN/inf.

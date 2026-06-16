@@ -9,6 +9,7 @@
 #include <random>
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
+#include <ed/core/operator.h>            // Operator (single-site observables)
 #include <ed/core/thermal_types.h>       // ThermodynamicData (for compute_tpq_unified_thermo)
 #include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 #include <fstream>
@@ -58,15 +59,15 @@ std::pair<double, double> calculateEnergyAndVariance(
     const ComplexVector& v,
     uint64_t N
 );
-std::vector<SingleSiteOperator> createSzOperators(int num_sites, float spin_length);
-std::vector<SingleSiteOperator> createSxOperators(int num_sites, float spin_length);
-std::vector<SingleSiteOperator> createSyOperators(int num_sites, float spin_length);
+std::vector<Operator> createSzOperators(int num_sites, float spin_length);
+std::vector<Operator> createSxOperators(int num_sites, float spin_length);
+std::vector<Operator> createSyOperators(int num_sites, float spin_length);
 
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Sz_ops,
+    const std::vector<Operator>& Sz_ops,
     uint64_t sublattice_size
 );
 
@@ -74,28 +75,18 @@ Complex calculateSpm_onsite(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Spm_ops,
+    const std::vector<Operator>& Spm_ops,
     uint64_t sublattice_size
 );
 
-std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> createDoubleSiteOperators(int num_sites, float spin_length);
+std::pair<std::vector<Operator>, std::vector<Operator>> createSingleOperators_pair(int num_sites, float spin_length);
 
-std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> createSingleOperators_pair(int num_sites, float spin_length);
-
-
-std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
-    const ComplexVector& tpq_state,
-    uint64_t num_sites,
-    float spin_length,
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops,
-    uint64_t sublattice_size
-);
 
 std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
+    std::pair<std::vector<Operator>, std::vector<Operator>> double_site_ops,
     uint64_t sublattice_size
 );
 
@@ -125,7 +116,7 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename);
  * @return True if successful
  */
 bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename, 
-                    class FixedSzOperator* fixed_sz_op, uint64_t expected_reduced_dim);
+                    FixedSzOperator* fixed_sz_op, uint64_t expected_reduced_dim);
 
 // load_raw_data was retired in the minimalist-architecture rev (May 2026):
 // no callers; state persistence is HDF5-only.
@@ -155,10 +146,10 @@ void writeFluctuationData(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Sx_ops,
-    const std::vector<SingleSiteOperator>& Sy_ops,
-    const std::vector<SingleSiteOperator>& Sz_ops,
-    const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
+    const std::vector<Operator>& Sx_ops,
+    const std::vector<Operator>& Sy_ops,
+    const std::vector<Operator>& Sz_ops,
+    const std::pair<std::vector<Operator>, std::vector<Operator>>& double_site_ops,
     uint64_t sublattice_size,
     uint64_t step
 );
@@ -239,7 +230,7 @@ void microcanonical_tpq(
     bool measure_sz = false,
     uint64_t sublattice_size = 1,
     uint64_t num_sites = 16,
-    class FixedSzOperator* fixed_sz_op = nullptr,
+    FixedSzOperator* fixed_sz_op = nullptr,
     bool continue_quenching = false,
     uint64_t continue_sample = 0,
     double continue_beta = 0.0,
@@ -263,7 +254,7 @@ inline void microcanonical_tpq(
     double dt = 0.01, float spin_length = 0.5,
     bool measure_sz = false, uint64_t sublattice_size = 1,
     uint64_t num_sites = 16,
-    class FixedSzOperator* fixed_sz_op = nullptr,
+    FixedSzOperator* fixed_sz_op = nullptr,
     bool continue_quenching = false, uint64_t continue_sample = 0,
     double continue_beta = 0.0, double target_beta = 1000.0,
     uint64_t num_measure_points = 20,
@@ -312,7 +303,7 @@ void canonical_tpq(
     bool measure_sz = false,
     uint64_t sublattice_size = 1,
     uint64_t num_sites = 16,
-    class FixedSzOperator* fixed_sz_op = nullptr,
+    FixedSzOperator* fixed_sz_op = nullptr,
     uint64_t num_measure_points = 20,
     double measure_beta_min = 1.0,
     double measure_beta_max = 1000.0
@@ -331,7 +322,7 @@ inline void canonical_tpq(
     double dt = 0.01, float spin_length = 0.5,
     bool measure_sz = false, uint64_t sublattice_size = 1,
     uint64_t num_sites = 16,
-    class FixedSzOperator* fixed_sz_op = nullptr,
+    FixedSzOperator* fixed_sz_op = nullptr,
     uint64_t num_measure_points = 20,
     double measure_beta_min = 1.0, double measure_beta_max = 1000.0)
 {

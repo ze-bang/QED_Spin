@@ -65,8 +65,9 @@
 
 #include <ed/core/linear_operator.h>
 #include <ed/core/operator.h>             // Operator::TransformData
-#include <ed/core/streaming_symmetry.h>   // StreamingSymmetryOperator,
-                                          // FixedSzStreamingSymmetryOperator
+#include <ed/core/sorted_uint64_index.h>  // SortedUint64Index::kNotFound
+#include <ed/symmetry/symmetry_sector_data.h>  // SymmetrySector
+#include <ed/symmetry/sector_basis.h>     // SectorBasis (operator-collapse lane)
 
 #include <complex>
 #include <cstdint>
@@ -91,49 +92,53 @@ public:
     using Complex       = std::complex<double>;
     using TransformData = Operator::TransformData;
 
-    /// Polymorphic source/target handle so a single class works
-    /// against ``StreamingSymmetryOperator`` and
-    /// ``FixedSzStreamingSymmetryOperator``. The handle is non-owning
-    /// -- callers must keep the underlying operator alive for the
-    /// CrossSectorOrbitObservable's lifetime.
+    /// Non-owning handle onto a single materialised symmetry sector,
+    /// owned by an ``ed::symmetry::SectorBasis`` (the producer behind
+    /// ``make_sector_operators_tagged``). The ref wraps exactly ONE
+    /// sector (``num_sectors() == 1``), so the CrossSectorOrbitObservable
+    /// is built with ``src_sector == dst_sector == 0``. ``sb_bits``
+    /// carries the lattice site count (the SectorBasis itself does not
+    /// store it). Callers must keep the underlying SectorBasis /
+    /// SectorOperator alive for the observable's lifetime.
+    ///
+    /// Operator-collapse Phase 3 (Jun 2026): the StreamingSymmetryOperator /
+    /// FixedSzStreamingSymmetryOperator carrier lanes have been retired; the
+    /// SectorBasis lane is the sole path.
     struct OperatorRef {
-        StreamingSymmetryOperator*        sym = nullptr;
-        FixedSzStreamingSymmetryOperator* fsz = nullptr;
-        static OperatorRef from(StreamingSymmetryOperator& op) {
-            OperatorRef r;
-            r.sym = &op;
-            return r;
-        }
-        static OperatorRef from(FixedSzStreamingSymmetryOperator& op) {
-            OperatorRef r;
-            r.fsz = &op;
-            return r;
-        }
-        /// Either ``sym`` or ``fsz`` must be non-null. The "raw"
-        /// pointer interpretation is what consumers use; the typed
-        /// references just give them a static-polymorphic API.
-        bool valid() const { return sym != nullptr || fsz != nullptr; }
+        const ed::symmetry::SectorBasis*  sb       = nullptr;
+        std::uint64_t                     sb_bits  = 0;
 
-        const SymmetrySector& sector(std::size_t k) const {
-            if (sym) return sym->getSector(k);
-            return fsz->getSector(k);
+        /// Wrap a single materialised SectorBasis.
+        /// ``num_bits`` is the lattice site count.
+        static OperatorRef from(const ed::symmetry::SectorBasis& basis,
+                                std::uint64_t                    num_bits) {
+            OperatorRef r;
+            r.sb      = &basis;
+            r.sb_bits = num_bits;
+            return r;
+        }
+        bool valid() const {
+            return sb != nullptr;
+        }
+
+        const SymmetrySector& sector(std::size_t /*k*/) const {
+            return sb->sector();   // single-sector lane; k == 0
         }
         std::size_t num_sectors() const {
-            if (sym) return sym->num_sectors();
-            return fsz->num_sectors();
+            return 1;
         }
         std::uint64_t num_bits() const {
-            if (sym) return sym->getNumBits();
-            return fsz->getNumBits();
+            return sb_bits;
         }
-        std::size_t lookupBasisIndex(std::size_t k,
+        std::size_t lookupBasisIndex(std::size_t /*k*/,
                                      std::uint64_t s) const {
-            if (sym) return sym->lookupBasisIndex(k, s);
-            return fsz->lookupBasisIndex(k, s);
+            const std::int64_t idx = sb->index_of(s);
+            return (idx < 0)
+                ? ed::core::SortedUint64Index::kNotFound
+                : static_cast<std::size_t>(idx);
         }
         std::uint64_t group_size() const {
-            if (sym) return sym->getGroupSize();
-            return fsz->getGroupSize();
+            return static_cast<std::uint64_t>(sb->group_size());
         }
     };
 

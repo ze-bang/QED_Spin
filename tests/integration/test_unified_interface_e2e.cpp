@@ -114,6 +114,17 @@ void write_chain_interall(const std::filesystem::path& path,
     }
 }
 
+// Plain in-memory Operators advertise supports_device_matvec on WITH_CUDA
+// builds (operator-collapse Phase 2a), so the iterative workflows
+// (Lanczos / KrylovSchur / mTPQ / FTLM / CF) auto-dispatch to the GPU lane
+// whenever a CUDA device is visible -- exactly like the symmetry-sector
+// operators already did. Dense FullDiag stays on the CPU lane. Tests that want
+// to pin the CPU lane regardless of hardware set opts.backend.allow_gpu=false
+// (see the dedicated BackendConstraints case below).
+inline std::string expected_iterative_lane() {
+    return ed::have_cuda() ? "gpu" : "cpu";
+}
+
 }  // namespace
 
 TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
@@ -138,7 +149,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         auto r = ed::workflows::solve(*op, opts);
         REQUIRE_FALSE(r.eigenvalues.empty());
         REQUIRE(std::abs(r.eigenvalues[0] - kE0_N6) < kLanczosTol);
-        REQUIRE(r.backend.lane == "cpu");
+        REQUIRE(r.backend.lane == expected_iterative_lane());
     }
 
     SECTION("C2: FullDiag matches the Bethe-ansatz ground state tightly") {
@@ -323,7 +334,7 @@ TEST_CASE("[unified-e2e] thermal mTPQ end-to-end on the in-memory operator",
     opts.random_seed = 0xC0FFEEULL;
 
     auto r = ed::workflows::thermal(*op, opts);
-    REQUIRE(r.backend.lane == "cpu");
+    REQUIRE(r.backend.lane == expected_iterative_lane());
     // mTPQ produces a finite-temperature trajectory; with 1 sample the
     // `ground_state_energy` field is the running minimum over the
     // trajectory (high-T plateau down to whatever beta the run reached),
@@ -353,7 +364,7 @@ TEST_CASE("[unified-e2e] thermal FTLM end-to-end on the in-memory operator",
     opts.num_temp_bins = 16;
 
     auto r = ed::workflows::thermal(*op, opts);
-    REQUIRE(r.backend.lane == "cpu");
+    REQUIRE(r.backend.lane == expected_iterative_lane());
 }
 
 TEST_CASE("[unified-e2e] spectral CF ground-state on the in-memory operator",
@@ -386,7 +397,7 @@ TEST_CASE("[unified-e2e] spectral CF ground-state on the in-memory operator",
     REQUIRE(r.omega.size() == 16);
     REQUIRE(r.S_real.size() == 16);
     REQUIRE(r.S_imag.size() == 16);
-    REQUIRE(r.backend.lane == "cpu");
+    REQUIRE(r.backend.lane == expected_iterative_lane());
 }
 
 TEST_CASE("[unified-e2e] solve carries Krylov diagnostics and backend "
@@ -408,7 +419,7 @@ TEST_CASE("[unified-e2e] solve carries Krylov diagnostics and backend "
 
     auto r = ed::workflows::solve(*op, opts);
 
-    REQUIRE(r.backend.lane == "cpu");
+    REQUIRE(r.backend.lane == expected_iterative_lane());
     REQUIRE(r.backend.wall_seconds >= 0.0);
     // Krylov-method results expose `iters_done` > 0.
     REQUIRE(r.krylov.iters_done > 0u);

@@ -22,7 +22,7 @@
 
 #ifndef WITH_CUDA
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/symmetry/symmetry_sector_data.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
 
 #include <stdexcept>

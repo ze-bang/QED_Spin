@@ -27,11 +27,10 @@
 //   (defaults to N = 8..14)
 // =============================================================================
 
-#include <ed/core/streaming_symmetry.h>
-#include <ed/matvec/symmetry_matvec_backend.h>
-#include <ed/matvec/term_storage.h>
+#include <ed/core/operator.h>
 #include <ed/solvers/lanczos.h>
-#include <ed/symmetry/rep_sector_data.h>
+#include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -124,24 +123,6 @@ void write_zN_translation_fixtures(const std::string& dir, int N) {
     }
 }
 
-using TermView_t = ed::matvec::TermViewT<
-    ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,
-    ed::matvec::DiagTwoBody, ed::matvec::MixedTwoBody,
-    ed::matvec::OffDiagTwoBody, ed::matvec::ThreeBodyTerm>;
-
-TermView_t make_term_view(const ed::matvec::TermStorage& soa, double spin_l) {
-    TermView_t tv;
-    tv.diag_one    = &soa.diag_one_body;
-    tv.offdiag_one = &soa.offdiag_one_body;
-    tv.diag_two    = &soa.diag_two_body;
-    tv.mixed_two   = &soa.mixed_two_body;
-    tv.offdiag_two = &soa.offdiag_two_body;
-    tv.three_body  = &soa.three_body;
-    tv.spin_l      = spin_l;
-    tv.is_real     = true;
-    return tv;
-}
-
 // ---- The two full-spectrum paths -------------------------------------------
 
 std::size_t run_dense(std::uint64_t N) {
@@ -160,32 +141,24 @@ std::size_t run_dense(std::uint64_t N) {
 
 std::size_t run_symmetry(std::uint64_t N, const std::string& dir) {
     write_zN_translation_fixtures(dir, static_cast<int>(N));
+    SymmetryGroupInfo info;
+    info.loadFromDirectory(dir);
+
     std::size_t total = 0;
     for (std::int64_t n_up = 0; n_up <= static_cast<std::int64_t>(N); ++n_up) {
-        auto sym = std::make_unique<FixedSzStreamingSymmetryOperator>(
-            N, 0.5f, n_up);
-        push_heisenberg_ring(sym->transform_data_, N, 1.0);
-        sym->generateSymmetrySectorsStreamingFixedSz(dir);
+        // CSR-free lazy-rep SectorOperators: the on-the-fly representative
+        // SpMV path (never materialises the 2^N matrix nor the orbit CSR).
+        auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
+            N, 0.5f, n_up, info,
+            [&](ed::symmetry::SectorOperator& op) {
+                push_heisenberg_ring(op.transform_data_, N, 1.0);
+            });
 
-        ed::matvec::TermStorage soa;
-        ed::matvec::TermStorage::classify_route(
-            soa, sym->transform_data_, sym->three_body_data_,
-            [](const Complex& c) { return c; });
-        const TermView_t tv = make_term_view(soa, 0.5);
-
-        for (std::size_t s = 0; s < sym->getNumSectors(); ++s) {
-            const std::size_t sd = sym->getSectorDimension(s);
+        for (auto& op : ops) {
+            const std::size_t sd = op->dim();
             if (sd == 0) continue;
-            ed::symmetry::RepSectorData rd = sym->getRepSectorData(s);
-            if (!rd.usable()) continue;
-            auto backend = ed::matvec::make_cpu_rep_symmetry_backend<
-                ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,
-                ed::matvec::DiagTwoBody, ed::matvec::MixedTwoBody,
-                ed::matvec::OffDiagTwoBody, ed::matvec::ThreeBodyTerm>(rd);
-
             auto Hv = [&](const Complex* in, Complex* out, int n) {
-                backend->apply_complex(&tv, in, out,
-                                       static_cast<std::size_t>(n));
+                op->apply(in, out, static_cast<std::size_t>(n));
             };
             std::vector<double> eigs;
             full_diagonalization(Hv, sd, /*num_eigs=*/sd, eigs, "",

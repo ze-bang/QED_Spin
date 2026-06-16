@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Operator collapse: one `SubspaceOperator<BasisPolicy, MemSpace>` template + streaming-carrier removal (Jun 2026)
+
+The operator hierarchy is collapsed into a single class template, and the
+streaming-symmetry carrier classes are fully deleted.
+
+- **Phase 3 — streaming carriers retired.** Physically deleted
+  `StreamingSymmetryOperator` / `FixedSzStreamingSymmetryOperator`
+  (`streaming_symmetry.h`), `ShardedOrbitCache`,
+  `make_streaming_symmetry_operator`, the `make_operator` streaming branch,
+  `StreamingSymmetryHandle` (`sector_loop.h`), and the carrier-based
+  `make_rep_sector_operator_lazy` (`sector_set.h`), plus
+  `src/symmetry/streaming_symmetry_unified.cpp`. The KEEP structs
+  (`SymmetrySector` / `SymBasisState` / `SectorLookupHandle`) moved to the
+  new leaf header [`include/ed/symmetry/symmetry_sector_data.h`](include/ed/symmetry/symmetry_sector_data.h).
+  Symmetry blocks are now built exclusively via
+  `make_sector_operators_tagged` / `SectorSetView`. `CrossSectorOrbitObservable`
+  drops its streaming/fixed-Sz `OperatorRef` lanes (the `SectorBasis` lane is
+  the sole path). Parity/golden tests were re-pinned to numeric goldens before
+  carrier deletion.
+- **Phase 4 — single template.** New
+  [`SubspaceOperator<BasisPolicy, MemSpace>`](include/ed/core/subspace_operator.h)
+  derives from `Operator` and owns the producer descriptor chosen by
+  `SubspaceProducerTraits<BasisPolicy>` (`FixedSzSubspace` / `SectorBasis`).
+  `FixedSzOperator` and `SectorOperator` are now back-compat `using`-aliases
+  (`SubspaceOperator<FixedSzBasisPolicy>` / `SubspaceOperator<SymmetryBasisPolicy>`),
+  so the ~80 construction sites, pybind classes, MPI wrappers, and DSSF refs
+  compile unchanged. `FixedSzSubspace` gained safe copy/move semantics (owned
+  basis re-homing) and `SectorBasis` absorbed the operator's rep-lazy
+  materialisation state (`configureRepLazy` / `ensureRepData` / `ensureHostCsr`).
+  A new forward-declaration header
+  [`include/ed/core/operator_fwd.h`](include/ed/core/operator_fwd.h) lets headers
+  reference the aliases as incomplete types.
+- **GPU gather/binding unification.** The GPU `bind_cuda` hooks are re-spelled
+  as explicit `SubspaceOperator<…>::bind_cuda_impl_()` member specializations,
+  preserving the weak (CPU build, in `operator_gpu.cpp`) / strong (CUDA build,
+  in `operator_gpu.cu` / `sector_operator_gpu.cu`) symbol split so `ed_core`
+  links without CUDA and `ed_solvers_gpu` overrides on CUDA builds.
+- **Validation.** Full CPU build (`build-ci`, 292 ctest) and full CUDA+Python
+  build (`build`, 373 ctest) green; Python test suite + N≥28 lazy-rep parity
+  smoke exercised.
+
+### SOTA matrix apply: lock-free row GATHER default (CPU + GPU) (Jun 2026)
+
+The default shared-memory matrix-free SpMV is now the **lock-free, row-owned
+GATHER** kernel on both CPU and GPU, replacing the legacy SCATTER form
+(thread-local buffers + per-flush radix sort + `omp atomic` on CPU; `atomicAdd`
+on GPU). Each output row is owned by exactly one thread, accumulated in a
+register, and written once — no atomics, no sort, no buffer, no output
+pre-zero.
+
+- **CPU** ([`term_kernels_gather.h`](include/ed/matvec/term_kernels_gather.h),
+  [`matvec_backend.h`](include/ed/matvec/matvec_backend.h)): new
+  `apply_terms_gather<BasisPolicy, Scalar>` OpenMP driver over the single-source
+  `gather_row_terms` row kernel; `CpuMatVecBackend` defaults Full / FixedSz
+  matrix-free to gather. The Hamiltonian **diagonal is precomputed once**
+  (`diag_*_` cache, invalidated with the CSR caches) and fused as
+  `out[r] = diag[r]*in[r] + gather(off-diagonal)`, dropping the per-row Sz
+  sign-product recomputation that dominates XXZ/Heisenberg.
+  Measured **4.8–11× faster** than scatter on the matrix-free path (N=20 PBC
+  Heisenberg: 9.0 ms vs 60 ms; see
+  [`bench_operator_apply.cpp`](benchmarks/bench_operator_apply.cpp)
+  `BM_MatFree_Gather_PBC` vs `BM_MatFree_Scatter_PBC`).
+- **GPU** ([`term_kernels_gpu.cuh`](include/ed/matvec/term_kernels_gpu.cuh),
+  [`cuda_matvec_backend.cuh`](include/ed/matvec/cuda_matvec_backend.cuh)): new
+  `apply_terms_gpu_gather` (one thread per output row, register accumulate,
+  single global write, diagonal fused inline) is the default for the trivial /
+  fixed-Sz device policies in `CudaMatVecBackend`. The symmetry orbit-walk and
+  on-the-fly representative GPU kernels keep the validated atomic-scatter form
+  (a symmetry-row gather would require inverting the group action).
+- **Bisection fallback**: `ED_MATVEC_SCATTER=1` restores the legacy scatter
+  kernel on both backends for one release.
+
+**Correctness fix (latent bug):** the pre-existing GATHER row kernel
+(`gather_row` / `gather_row_basis`, previously used only on the MPI lane) had
+**inverted off-diagonal existence gates** (`r_bit != op_type` instead of
+`r_bit == op_type`). For Hermitian operators with symmetric *real* couplings
+(plain Heisenberg) the two conjugate terms swap and the bug cancels, so the MPI
+path was correct; with **asymmetric or complex** off-diagonal couplings it
+computed the wrong (effectively conjugate-transposed) matrix element. The gate
+is now the exact transpose of the SCATTER kernel, pinned bit-for-bit by new
+equivalence tests across {Full, FixedSz} × {real, complex} × {1/2/3-body} in
+[`test_operator_apply.cpp`](tests/unit/test_operator_apply.cpp). This also
+corrects the MPI distributed SpMV for complex/asymmetric Hamiltonians.
+
+**CSR cutoffs re-evaluated, defaults retained:** with matrix-free gather now
+much faster, the matrix-free penalty *above* the CSR cutoff shrank 4–11×.
+Assembled CSR still wins in steady state where it fits (e.g. N=16 full: 0.12 ms
+CSR vs 0.58 ms gather, build excluded), so lowering the cutoffs would regress
+the common in-memory Lanczos case; `ED_CSR_DIM_MAX` defaults (1<<20 full,
+1<<22 fixed-Sz) are kept. The win is concentrated in the large-system
+(above-cutoff) and GPU regimes. Full sweep + methodology:
+[`docs/perf/bench_matvec_gather_2026-06-15.md`](docs/perf/bench_matvec_gather_2026-06-15.md).
+
 ### mTPQ backend x basis bench (May 2026)
 
 Follow-up to the Phase-I work below. Added

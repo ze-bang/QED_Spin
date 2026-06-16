@@ -12,8 +12,7 @@
 //
 //   1. `ed::matvec::gpu::lanczos(const GPUOperator& op, ...)` etc. --
 //      type-safe, zero-overhead forwarders. The GPUOperator subclass
-//      hierarchy (GPUFixedSzOperator, GPUSymmetrizedOperator)
-//      participates naturally.
+//      hierarchy (GPUFixedSzOperator) participates naturally.
 //
 //   2. `ed::matvec::gpu::lanczos(const MatVecOperator& op, ...)` etc. --
 //      runtime-checks `op.memory_space() == MemorySpace::CudaDevice`, then
@@ -43,6 +42,7 @@
 #include <utility>
 #include <vector>
 #include <complex>
+#include <functional>
 
 namespace ed::matvec::gpu {
 
@@ -63,7 +63,7 @@ inline const GPUOperator& require_gpu_operator(
             ": operator memory_space is not CudaDevice (got memory_space "
             "tag " + std::to_string(static_cast<int>(op.memory_space())) +
             "); the GPU solvers require a GPU-resident operator "
-            "(GPUOperator / GPUFixedSzOperator / GPUSymmetrizedOperator). "
+            "(GPUOperator / GPUFixedSzOperator). "
             "Use the CPU solver overload in ed/solvers/* instead.");
     }
     const auto* gpu = dynamic_cast<const GPUOperator*>(&op);
@@ -72,7 +72,7 @@ inline const GPUOperator& require_gpu_operator(
             std::string("ed::matvec::gpu::") + solver_name +
             ": operator advertises MemorySpace::CudaDevice but is not a "
             "GPUOperator subclass; rejecting to avoid undefined behaviour. "
-            "Pass a GPUOperator / GPUFixedSzOperator / GPUSymmetrizedOperator.");
+            "Pass a GPUOperator / GPUFixedSzOperator.");
     }
     return *gpu;
 }
@@ -190,7 +190,7 @@ void run_lanczos_eigenpairs_kernel_facade(
 // Return: number of iterations actually completed (equals
 // `alpha_out.size()`).
 int run_ftlm_lanczos_kernel_facade(
-    GPUOperator& gpu_op,
+    const std::function<void(const cuDoubleComplex*, cuDoubleComplex*, int)>& matvec,
     const void*  d_start_vec,            // cuDoubleComplex*; void* to keep cuda.h optional
     int          N,
     int          krylov_dim,

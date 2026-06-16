@@ -26,6 +26,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <random>
 #include <vector>
@@ -143,6 +144,47 @@ void BM_OperatorApplyReal_PBC(benchmark::State& state) {
     state.counters["N"]   = static_cast<double>(N);
 }
 
+// ---------------------------------------------------------------------------
+// SOTA matrix-apply plan (Phase 1 gate): matrix-free GATHER vs SCATTER.
+//
+// Forces the matrix-free path (ED_CSR_FORCE=0) and toggles the shared-memory
+// kernel via ED_MATVEC_SCATTER so the new lock-free row-GATHER default can be
+// compared head-to-head against the legacy SCATTER baseline (atomic + radix
+// sort) on the identical Heisenberg workload. Both env vars are read once when
+// the lazy backend is built (inside the warm-up apply below), so we set them
+// before constructing/warming the operator and clear them afterwards.
+// ---------------------------------------------------------------------------
+void run_matfree(benchmark::State& state, bool scatter) {
+    const auto N   = static_cast<uint64_t>(state.range(0));
+    const uint64_t dim = (1ULL << N);
+
+    ::setenv("ED_CSR_FORCE", "0", 1);   // pin matrix-free (no assembled CSR)
+    if (scatter) ::setenv("ED_MATVEC_SCATTER", "1", 1);
+    else         ::unsetenv("ED_MATVEC_SCATTER");
+
+    auto op = make_heisenberg_chain(N, /*periodic=*/true);
+    ComplexVec vin  = random_unit_vector(dim, /*seed=*/42);
+    ComplexVec vout(dim);
+
+    op->apply(vin.data(), vout.data(), dim);  // warm-up: builds backend + diag
+
+    for (auto _ : state) {
+        op->apply(vin.data(), vout.data(), dim);
+        benchmark::DoNotOptimize(vout.data());
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations() * dim);
+    state.SetBytesProcessed(state.iterations() * dim * 2 * 16);
+    state.counters["dim"] = static_cast<double>(dim);
+    state.counters["N"]   = static_cast<double>(N);
+
+    ::unsetenv("ED_MATVEC_SCATTER");
+    ::unsetenv("ED_CSR_FORCE");
+}
+
+void BM_MatFree_Gather_PBC(benchmark::State& state)  { run_matfree(state, /*scatter=*/false); }
+void BM_MatFree_Scatter_PBC(benchmark::State& state) { run_matfree(state, /*scatter=*/true);  }
+
 }  // namespace
 
 // Dims swept: 2^8=256, ..., 2^20=1.05M. The largest two stress true
@@ -161,4 +203,12 @@ BENCHMARK(BM_OperatorApply_PBC_Real)
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK(BM_OperatorApplyReal_PBC)
     ->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
+    ->Unit(benchmark::kMicrosecond);
+
+// Head-to-head: new lock-free row GATHER (default) vs legacy SCATTER baseline.
+BENCHMARK(BM_MatFree_Gather_PBC)
+    ->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_MatFree_Scatter_PBC)
+    ->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
     ->Unit(benchmark::kMicrosecond);

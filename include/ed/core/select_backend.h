@@ -176,7 +176,7 @@ inline BackendVariant select_backend(const Geometry& geom,
     // even when its native storage is host. `bind_cuda()` is expected
     // to lazily build a GPU mirror in that case. This unblocks the
     // `qed.solve(symmetry=..., device='gpu')` lane: the symmetry
-    // SectorViews are host-resident but their GPUSymmetrizedOperator
+    // sector operators are host-resident but their CudaMatVecBackend
     // mirror (lazily constructed inside `bind_cuda`) runs on the GPU.
     const bool device_mv = op_is_device || geom.supports_device_matvec;
     if (device_mv && have_gpu && gpu_fits && c.allow_gpu) {

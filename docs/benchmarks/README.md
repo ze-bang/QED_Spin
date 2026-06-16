@@ -23,7 +23,13 @@ Three layers:
    [`bench_orthogonal_symmetry_N8.json`](./bench_orthogonal_symmetry_N8.json) /
    [`bench_orthogonal_symmetry_N10.json`](./bench_orthogonal_symmetry_N10.json).
 
-4. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
+4. **[`../perf/bench_matvec_gather_2026-06-15.md`](../perf/bench_matvec_gather_2026-06-15.md)**
+   — H@v microbenchmark for the row-GATHER (default) vs SCATTER
+   (`ED_MATVEC_SCATTER=1`) shared-memory SpMV, plus the CSR-cutoff
+   re-evaluation behind the SOTA matrix-apply change (5–10× matrix-free
+   speedup). Reproducer: `bench_operator_apply --benchmark_filter=MatFree`.
+
+5. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
    reference for every Google-Benchmark target in
    [`benchmarks/`](../../benchmarks/) (CPU SpMV, GPU SpMV, CPU/GPU
    Lanczos, GPU mixed-precision, MPI scaling, etc.). This is the

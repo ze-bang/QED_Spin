@@ -135,14 +135,6 @@ set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_core STATIC
     ${CORE_DIR}/ed_config.cpp
-    # Wave 1 ("Unify all 16 matvec cells", May 2026) -- unified
-    # symmetric matvec entry points that dispatch through
-    # ``ed::matvec::kernel::apply_terms<SymmetryBasisPolicy>``. Lives in
-    # ed_core because ``streaming_symmetry.h`` (which declares the
-    # methods) is part of ed_core's public include surface; every
-    # consumer of the symmetric matvec already links ed_core
-    # transitively.
-    ${SRC_DIR}/symmetry/streaming_symmetry_unified.cpp
     # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026)
     # -- CPU-only stub for the lazy GPU sector mirror entry point.
     # When WITH_CUDA is OFF this TU provides the throwing stub that
@@ -159,6 +151,16 @@ add_library(ed_core STATIC
     # WITH_CUDA (strong def comes from sector_operator_gpu.cu in
     # ed_solvers_gpu below); throwing stub when WITH_CUDA is OFF.
     ${SRC_DIR}/symmetry/sector_operator_gpu.cpp
+    # Phase 2a operator-collapse GPU parity (Jun 2026) -- WEAK ed_core
+    # fallbacks for the NON-VIRTUAL GPU mirror hooks on Operator /
+    # FixedSzOperator (cuda_mirror_available_ + bind_cuda_*_impl_). Under
+    # WITH_CUDA these report "no device mirror" and are overridden by the
+    # strong defs in operator_gpu.cu (ed_solvers_gpu) for any binary that
+    # links the GPU archive; CPU-only binaries keep the weak fallback so
+    # they still link. bind_cuda()/geometry() stay inline in the headers,
+    # so Operator's vtable has no key function pinned to ed_solvers_gpu.
+    # Empty TU when WITH_CUDA is OFF (the hooks are never referenced).
+    ${CORE_DIR}/operator_gpu.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
@@ -642,15 +644,15 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_operator.cu
         ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
         ${SOLVERS_GPU_DIR}/gpu_kernels.cu
-        ${SOLVERS_GPU_DIR}/gpu_fixed_sz_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_symmetrized_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_full_diag.cu
+        # Operator-collapse Phase 2b (Jun 2026): gpu_fixed_sz_operator.cu,
+        # gpu_full_diag.cu, gpu_block_lanczos.cu, gpu_krylov_schur.cu, and
+        # gpu_tpq.cu were deleted along with the dead GPUEDWrapper forwarders
+        # that were their only callers. The production GPU paths now run off
+        # the unified host operators' bind_cuda() device matvec (CudaBackend /
+        # CudaMatVecBackend) and a directly-constructed GPUFTLMSolver.
         ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
-        ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
-        ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
-        ${SOLVERS_GPU_DIR}/gpu_tpq.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
@@ -667,6 +669,13 @@ if(WITH_CUDA)
         # ed_solvers_gpu (reuses make_sector_matvec_gpu from the mirror TU
         # above). The ed_core .cpp twin is an empty TU under WITH_CUDA.
         ${SRC_DIR}/symmetry/sector_operator_gpu.cu
+        # Phase 2a operator-collapse GPU parity (Jun 2026) -- STRONG defs of
+        # the Operator / FixedSzOperator GPU mirror hooks
+        # (cuda_mirror_available_ + bind_cuda_*_impl_), routing the
+        # full-Hilbert / fixed-Sz GPU matvec through the SOTA no-atomic
+        # CudaMatVecBackend. Override the weak ed_core fallbacks
+        # (operator_gpu.cpp) wherever this archive is linked.
+        ${CORE_DIR}/operator_gpu.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

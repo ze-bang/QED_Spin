@@ -251,8 +251,8 @@ private:
 // 3. DeviceSymmetryBasisPolicy
 //
 // Holds device-resident orbit CSR data + a pre-baked coefficient modifier
-// hash. Mirrors the optimization the existing GPUSymmetrizedOperator
-// already does: the per-emit phase
+// hash. Mirrors the optimization the former GPUSymmetrizedOperator
+// did: the per-emit phase
 // ``conj(beta_{s'}) * group_norm / norm_k`` is precomputed at upload
 // time and stored in the hash, so the kernel's coeff_modifier lookup
 // is a single hash hit, not a recomputation.

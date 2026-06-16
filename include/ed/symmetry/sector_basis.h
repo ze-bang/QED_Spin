@@ -55,16 +55,18 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include <ed/core/sorted_uint64_index.h>
-#include <ed/core/streaming_symmetry.h>      // SymmetrySector, SymBasisState,
+#include <ed/symmetry/symmetry_sector_data.h>      // SymmetrySector, SymBasisState,
                                              // SectorLookupHandle
 #include <ed/matvec/symmetry_basis_policy.h>  // SymmetryBasisPolicy + factory
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/projector_chain.h>
+#include <ed/symmetry/rep_sector_data.h>      // RepSectorData (CSR-free rep path)
 #include <ed/symmetry/subspace.h>
 
 namespace ed::symmetry {
@@ -178,6 +180,13 @@ public:
     // Basis introspection (mirrors the Subspace surface).
     // -----------------------------------------------------------------
     [[nodiscard]] std::uint64_t dim() const noexcept {
+        // CSR-free lazy regime: the sector dimension is known up-front (from
+        // Pass 1.5 ``getSectorDimension``) before the host orbit CSR is
+        // materialised, so report it directly while the orbit CSR is still
+        // empty. After a CPU ``apply`` materialises the CSR the two agree.
+        if (rep_lazy_ && sector_.basis_states.empty()) {
+            return rep_dim_;
+        }
         return sector_.basis_states.size();
     }
 
@@ -222,6 +231,69 @@ public:
     static constexpr bool has_coeff_modifier = true;
     static constexpr bool is_distributed     = false;
 
+    // =================================================================
+    // CSR-FREE lazy rep mode (operator-collapse Phase 4: folded down from
+    // ``SectorOperator``). The production streaming-symmetry sector loop
+    // used to fully materialise each sector's host orbit CSR (~24 GiB/sector
+    // at N=32) even though the GPU on-the-fly representative matvec needs
+    // none of it. ``configureRepLazy`` lets the loop hand over a SectorBasis
+    // that:
+    //   * knows its ``dim`` up-front (Pass 1.5 ``getSectorDimension``),
+    //   * knows its real/complex character up-front (cheap |G| characters),
+    //   * builds the CSR-free RepSectorData ON DEMAND (only when the GPU /
+    //     CPU rep path actually engages) via ``rep_provider``, and
+    //   * materialises the host orbit CSR ON DEMAND (only if a CPU orbit-CSR
+    //     ``apply`` is ever invoked -- never on the GPU rep path) via
+    //     ``csr_provider``.
+    // =================================================================
+    void configureRepLazy(std::uint64_t                   dim,
+                          std::size_t                     group_size,
+                          bool                            is_real,
+                          std::function<RepSectorData()>  rep_provider,
+                          std::function<SymmetrySector()> csr_provider) {
+        rep_lazy_       = true;
+        rep_dim_        = dim;
+        group_size_     = group_size;
+        rep_is_real_    = is_real;
+        rep_provider_   = std::move(rep_provider);
+        csr_provider_   = std::move(csr_provider);
+    }
+
+    [[nodiscard]] bool rep_lazy() const noexcept { return rep_lazy_; }
+    [[nodiscard]] bool rep_is_real() const noexcept { return rep_is_real_; }
+
+    // True once the host orbit CSR has actually been materialised (CPU
+    // fallback). On the GPU rep path this stays false for the basis's whole
+    // lifetime -- the invariant the host-memory optimisation rests on.
+    [[nodiscard]] bool host_csr_materialized() const noexcept {
+        return sector_.basis_states.size() > 0;
+    }
+
+    // CSR-free on-the-fly rep path source. The factories either populate this
+    // eagerly (``setRepData``) or supply a CSR-free provider via
+    // ``configureRepLazy``; ``ensureRepData`` builds it on first use without
+    // ever materialising the host orbit CSR.
+    void setRepData(RepSectorData rep) noexcept { rep_data_ = std::move(rep); }
+    [[nodiscard]] const RepSectorData& repData() const noexcept { return rep_data_; }
+
+    [[nodiscard]] const RepSectorData& ensureRepData() const {
+        if (!rep_data_.usable() && rep_provider_) {
+            rep_data_ = rep_provider_();
+        }
+        return rep_data_;
+    }
+
+    // Lazily materialise the host orbit CSR from the deferred provider. No-op
+    // when the basis is already populated (eager factories) or no provider
+    // was supplied.
+    void ensureHostCsr() const {
+        if (sector_.basis_states.size() == 0 && csr_provider_) {
+            auto* self = const_cast<SectorBasis*>(this);
+            self->sector_ = csr_provider_();
+            self->rebuild_lookup_();
+        }
+    }
+
 private:
     // Build the state->orbit lookup index from the orbit elements of every
     // SymBasisState. Maps every computational state appearing in any orbit
@@ -252,6 +324,14 @@ private:
     SymmetrySector             sector_{};
     ed::core::SortedUint64Index lookup_{};
     std::size_t                group_size_ = 1;
+
+    // ---- CSR-free lazy rep mode (see configureRepLazy) ----------------
+    bool                            rep_lazy_    = false;
+    std::uint64_t                   rep_dim_     = 0;
+    bool                            rep_is_real_ = false;
+    mutable RepSectorData           rep_data_{};   // CSR-free rep path source
+    mutable std::function<RepSectorData()>  rep_provider_;
+    mutable std::function<SymmetrySector()> csr_provider_;
 };
 
 } // namespace ed::symmetry

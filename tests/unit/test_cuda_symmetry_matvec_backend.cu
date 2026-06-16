@@ -15,14 +15,14 @@
 // k != 0, pi sectors that exercise the symmetry weighting's imaginary part.
 //
 // Standalone (plain main, no Catch2): nvcc compiles the host symmetry
-// machinery (streaming_symmetry / projector / sector_basis) as host code,
-// exactly as src/symmetry/streaming_symmetry_gpu_mirror.cu does. The test
-// skips with exit 0 if no CUDA device is present.
+// machinery (projector / sector_basis) as host code, exactly as
+// src/symmetry/streaming_symmetry_gpu_mirror.cu does. The test skips with
+// exit 0 if no CUDA device is present.
 // =============================================================================
 
 #ifdef WITH_CUDA
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/cuda_matvec_backend.cuh>
 #include <ed/matvec/term_storage.h>
@@ -116,25 +116,19 @@ enumerate_orbit_reps(const SymmetryGroupInfo& info, int N) {
     return reps;
 }
 
-std::unique_ptr<StreamingSymmetryOperator>
-build_heisenberg_pbc_streaming(std::uint64_t N, double J) {
-    auto op = std::make_unique<StreamingSymmetryOperator>(N, 0.5f);
+// Full-Hilbert Operator carrying just the Heisenberg term list; we only use
+// its ``transform_data_`` / ``three_body_data_`` to feed TermStorage. The
+// per-sector basis is built independently via SectorBasis::build.
+std::unique_ptr<Operator>
+build_heisenberg_pbc_full(std::uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
     for (std::uint64_t i = 0; i < N; ++i) {
-        std::uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        const std::uint64_t j = (i + 1) % N;
+        op->addTwoBodyTerm(2, i, 2, j, J_real);
+        op->addTwoBodyTerm(0, i, 1, j, J_half);
+        op->addTwoBodyTerm(1, i, 0, j, J_half);
     }
     return op;
 }
@@ -225,12 +219,11 @@ int main() {
     }
     write_zN_translation_fixtures(dir, N);
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    sym_op->generateSymmetrySectorsStreaming(dir);
+    auto full_op = build_heisenberg_pbc_full(N, 1.0);
 
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, sym_op->transform_data_, sym_op->three_body_data_,
+        soa, full_op->transform_data_, full_op->three_body_data_,
         [](const Complex& c) { return c; });
     const TermView_t tv = make_term_view(soa, /*spin_l=*/0.5, /*is_real=*/true);
 
@@ -240,15 +233,15 @@ int main() {
     const ed::symmetry::SpatialProjector  spatial(info);
     const std::vector<std::uint64_t> reps = enumerate_orbit_reps(info, N);
 
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const std::size_t sd = sym_op->getSectorDimension(s);
-        if (sd == 0) continue;
-
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
         ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
             full, spatial,
             info.sectors[s].quantum_numbers,
             info.sectors[s].phase_factors,
             reps, /*sector_id=*/s);
+
+        const std::size_t sd = sb.policy().sector->basis_states.size();
+        if (sd == 0) continue;
 
         auto cpu_backend = ed::matvec::make_cpu_symmetry_backend<
             ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,

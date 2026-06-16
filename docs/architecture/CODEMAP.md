@@ -219,26 +219,39 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 ### 5.3 `include/ed/core/`
 
 - `basis_utils.h`, `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
-  Hamiltonian I/O, much symmetry wiring; `Operator` and `FixedSzOperator`
+  Hamiltonian I/O, much symmetry wiring; `Operator` is the concrete base
+  and `SubspaceOperator<BasisPolicy, MemSpace>` derives from it — all
   inherit from `ed::matvec::MatVecOperator` and from `ed::LinearOperator`),
 - `make_operator.h` (the single factory:
   `ed::make_operator(OperatorSpec) -> std::unique_ptr<LinearOperator>`,
   with three input alternatives — programmatic `Operator`, directory
   path, or in-memory edge list — plus orthogonal axes
-  `use_fixed_sz` / `streaming_symmetry` / `distributed`),
+  `use_fixed_sz` / `symmetry` / `distributed`),
 - `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
   `ed_method_traits.h`, `ed_parameters.h`, `ed_legacy_types.h`,
   `ed_types.h`,
 - `ed_wrapper.h` (thin shim re-exporting `EDResults` from
   `ed_legacy_types.h`; the legacy `exact_diagonalization_*` family
   and `ed_wrapper_streaming.h` were hard-removed in May 2026),
-- `fixed_sz_operator.h`, `fixed_sz_operator_types.h`, `linear_operator.h`,
+- `subspace_operator.h` (the unified `SubspaceOperator<BasisPolicy, MemSpace>`
+  template, deriving from `Operator`; owns the producer member chosen by
+  `SubspaceProducerTraits<BasisPolicy>`),
+- `fixed_sz_operator.h` (now defines `FixedSzOperator` as a
+  `using`-alias for `SubspaceOperator<FixedSzBasisPolicy>` plus its
+  `make_backend_()` / `bind_cuda_impl_()` specializations),
+  `fixed_sz_operator_types.h`, `operator_fwd.h` (forward-decl of the
+  template + aliases for headers that only need an incomplete type),
+  `linear_operator.h`,
 - `hdf5_io.h`, `sorted_uint64_index.h`, `matvec_types.h`,
 - `operator.h`, `operator_types.h`, `operator_types_detail.h`, `results.h`,
 - `sector_loop.h`, `sector_thermo.h`, `select_backend.h`,
-- `streaming_symmetry.h` (`SectorView` per-sector `MatVecOperator`
-  wrappers — driven by the orchestrator's symmetry lane),
 - `symmetry_metadata.h`, `system_utils.h`, `thermal_types.h`
+
+The streaming-symmetry carrier header (`streaming_symmetry.h`) was
+deleted in operator-collapse Phase 3; its KEEP structs
+(`SymmetrySector` / `SymBasisState` / `SectorLookupHandle`) moved to the
+leaf header `include/ed/symmetry/symmetry_sector_data.h`, and the
+`SectorOperator` alias now lives in `include/ed/symmetry/sector_operator.h`.
 
 The chunked-symmetry / disk-streaming triplet
 (`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
@@ -318,9 +331,9 @@ distributed/MPI path is the canonical answer at those scales).
 - `projector_chain.h` *(May 2026)* — `ProjectorChain`
   (heterogeneous `std::variant` container) and the templated
   `compute_orbit_for_state<Subspace>(...)` orbit/character builder
-  that is now the single source of truth behind
-  `StreamingSymmetryOperator::computeOrbitData` and
-  `FixedSzStreamingSymmetryOperator::computeOrbitDataFixedSz`.
+  that is now the single source of truth for symmetry orbit/character
+  data feeding the `SectorBasis` producer and the
+  `SymmetryBasisPolicy` matvec backend.
   Byte-equality pinned by
   [`tests/unit/test_projector_chain.cpp`](../../tests/unit/test_projector_chain.cpp);
   ABI smoke for the future-axis placeholders pinned by
@@ -515,11 +528,11 @@ The lower layers are still there and still individually useful:
      `minimal_generators.json` (the layout written by the Python
      automorphism tool and by C++ `generate_automorphisms`), plus
      the legacy `sectors.json` / `generators.json` names. When
-     present, the factory builds a `StreamingSymmetryOperator` and
-     the CLI helper `run_streaming_symmetry_workflow`
-     (`src/cli/workflows.cpp`) iterates over sectors via
-     `StreamingSymmetryOperator::sector(k)`, calling
-     `ed::workflows::solve(*sector, opts)` once per sector.
+     present, the CLI helper `run_streaming_symmetry_workflow`
+     (`src/cli/workflows.cpp`) builds the symmetry-projected sector set
+     via `ed::make_sector_operators_tagged(spec)` (each tagged sector is
+     a `SectorOperator = SubspaceOperator<SymmetryBasisPolicy>`) and
+     iterates `ed::workflows::solve(*sector, opts)` once per sector.
    * Per-sector recombination:
        - For ground-state methods: collects per-sector eigenvalues
          into a global pool and sorts.
@@ -567,8 +580,9 @@ generic version is what the streaming kernel now calls.
 ### 7.1 Intentional (design, not sloppiness)
 
 - **Symmetry front-end** is now a single factory + orchestrator combo:
-  `ed::make_operator(OperatorSpec{ .streaming_symmetry = true, ... })`
-  builds a `StreamingSymmetryOperator`, and the per-sector iteration
+  `ed::make_sector_operators_tagged(OperatorSpec{ .streaming_symmetry = true, ... })`
+  builds the tagged `SectorOperator` set (each a
+  `SubspaceOperator<SymmetryBasisPolicy>`), and the per-sector iteration
   is driven by `ed::workflows::{solve,thermal,spectral}(*sec, opts)`
   in the CLI helper `run_streaming_symmetry_workflow`
   (`src/cli/workflows.cpp`) and the Python binding

@@ -19,8 +19,9 @@
 //   [A] Full lane: make_sector_operators yields sectors whose dims tile
 //       2^6, every sector solves through ed::workflows::solve, the global
 //       minimum equals the Bethe GS, and the FULL union spectrum is
-//       byte-equal (sorted, 1e-9) to the legacy make_streaming_symmetry_
-//       operator + StreamingSymmetryHandle path.
+//       byte-equal (sorted, 1e-9) to an INDEPENDENT full-Hilbert dense
+//       diagonalisation of the same Hamiltonian (the carrier-free golden
+//       reference after the operator-collapse Phase 3 removal).
 //   [B] Fixed-Sz lane (n_up = 3): dims tile C(6,3) = 20, solver min over
 //       sectors equals the Bethe GS.
 // =============================================================================
@@ -28,7 +29,6 @@
 #include "common/catch2_harness.h"
 
 #include <ed/core/make_operator.h>
-#include <ed/core/sector_loop.h>
 #include <ed/orchestrator.h>
 
 #include <algorithm>
@@ -190,30 +190,28 @@ TEST_CASE("make_sector_operators: full lane solves to Bethe GS + matches legacy"
     // (A2) global GS == Bethe ansatz.
     REQUIRE(std::abs(e0_min - kE0_N6) < 1e-9);
 
-    // --- Legacy reference path: streaming op + StreamingSymmetryHandle ----
-    auto legacy = ed::make_streaming_symmetry_operator(heisenberg_spec(dir, N));
-    ed::core::StreamingSymmetryHandle handle(legacy.get());
-    std::vector<double> legacy_spectrum;
-    std::size_t legacy_total = 0;
-    for (std::size_t k = 0; k < handle.num_sectors(); ++k) {
-        auto sec = handle.sector(k);
-        if (sec->dim() == 0) continue;
-        legacy_total += sec->dim();
-        auto e = solve_full_spectrum(*sec);
-        legacy_spectrum.insert(legacy_spectrum.end(), e.begin(), e.end());
-    }
-    REQUIRE(legacy_total == (1ULL << N));
+    // --- Independent reference: full-Hilbert dense diagonalisation -------
+    // Build the SAME Hamiltonian on the full 2^N space (no symmetry) and
+    // diagonalise it densely. Its spectrum is the carrier-free golden the
+    // symmetry-sector union must reproduce.
+    ed::OperatorSpec full_spec;
+    full_spec.source             = ed::DirectoryPath{dir};
+    full_spec.num_sites          = static_cast<std::uint64_t>(N);
+    full_spec.spin_l             = 0.5f;
+    full_spec.streaming_symmetry = false;
+    auto full_op = ed::make_operator(std::move(full_spec));
+    REQUIRE(full_op->dim() == (1ULL << N));
+    std::vector<double> ref_spectrum = solve_full_spectrum(*full_op);
 
     // (A3) the union spectra agree element-wise once sorted.
     std::sort(new_spectrum.begin(), new_spectrum.end());
-    std::sort(legacy_spectrum.begin(), legacy_spectrum.end());
-    REQUIRE(new_spectrum.size() == legacy_spectrum.size());
+    REQUIRE(new_spectrum.size() == ref_spectrum.size());
     double max_diff = 0.0;
     for (std::size_t i = 0; i < new_spectrum.size(); ++i) {
         max_diff = std::max(max_diff,
-                            std::abs(new_spectrum[i] - legacy_spectrum[i]));
+                            std::abs(new_spectrum[i] - ref_spectrum[i]));
     }
-    INFO("max |E_new - E_legacy| over full spectrum = " << max_diff);
+    INFO("max |E_sym - E_full| over full spectrum = " << max_diff);
     REQUIRE(max_diff < 1e-9);
 }
 

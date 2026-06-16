@@ -228,11 +228,11 @@ void run_ring(int N, int n_up) {
     write_zN_translation_fixtures(dir, N);
     write_heisenberg_directory(dir, N, 1.0);
 
-    // Build the fixed-Sz streaming operator and drive it THROUGH the handle --
-    // exactly the production sector-loop path the workflows use.
-    std::unique_ptr<ed::LinearOperator> host =
-        ed::make_streaming_symmetry_operator(heisenberg_spec(dir, N, n_up));
-    ed::core::StreamingSymmetryHandle handle(host.get());
+    // Build the fixed-Sz symmetry sector set and drive it THROUGH the
+    // carrier-free SectorSetView -- exactly the production sector-loop path
+    // the workflows use after the operator-collapse Phase 3 carrier removal.
+    ed::core::SectorSetView view(
+        ed::make_sector_operators_tagged(heisenberg_spec(dir, N, n_up)));
 
     if (!ed::core::rep_lazy_sector_path_enabled()) {
         std::cerr << "  FAIL " << lane
@@ -241,14 +241,13 @@ void run_ring(int N, int n_up) {
     }
 
     const auto sectors =
-        ed::core::filter_sectors(handle.num_sectors(), /*selected=*/{});
+        ed::core::filter_sectors(view.num_sectors(), /*selected=*/{});
 
     for (std::size_t k : sectors) {
-        const auto tag = handle.sector_tag(k);            // CSR-free dim
+        const auto tag = view.sector_tag(k);              // CSR-free dim
         if (tag.sector_dim == 0) continue;
 
-        auto op_base = handle.sector(k);
-        auto* op = dynamic_cast<ed::symmetry::SectorOperator*>(op_base.get());
+        ed::symmetry::SectorOperator* op = view.sector(k);
         const std::string tg = lane + " sector " + std::to_string(k);
 
         if (!op) {
@@ -307,9 +306,28 @@ int main() {
         return 0;
     }
 
-    // Engage the on-the-fly representative path + the CSR-free lazy sector
-    // loop (latched via function-local statics on first use).
+    // Pin the full CSR-free lazy configuration this acceptance test models.
+    // Three independent knobs all have to line up; the tiny Z_6 / Z_8 rings
+    // below would otherwise NOT trigger lazy mode on their own:
+    //
+    //   * ED_SYM_LAZY_SECTORS=1 forces build_fixed_sz_sector_operators_lazy
+    //     into lazy generation (Pass 1.5 dims, no eager orbit CSR). Without
+    //     it the ~4 GiB memory-budget heuristic keeps these small systems
+    //     eager, so SectorSetView::sector(k) would hand out a CSR-backed
+    //     adopt operator and checks (1)-(3) (rep_lazy / no host CSR) would
+    //     fail.
+    //   * ED_GPU_SYMMETRY_REP=1 engages the GPU on-the-fly representative
+    //     matvec in bind_cuda() (check (2): no host CSR on the GPU path).
+    //   * ED_SYM_REP=0 keeps the CPU `apply` on the orbit-CSR backend so the
+    //     CPU fallback lazily MATERIALISES the host CSR (check (4)). With the
+    //     CPU rep kernel on (its default) `apply` would also run CSR-free and
+    //     `host_csr_materialized()` would stay false, contradicting (4).
+    //
+    // All three are latched via function-local statics / read at generation
+    // time, so they must be set before the first operator is built.
+    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);
     setenv("ED_GPU_SYMMETRY_REP", "1", /*overwrite=*/1);
+    setenv("ED_SYM_REP", "0", /*overwrite=*/1);
 
     run_ring(/*N=*/6, /*n_up=*/3);
     run_ring(/*N=*/8, /*n_up=*/4);  // |G|=8 fixture, complex characters

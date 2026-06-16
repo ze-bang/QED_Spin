@@ -236,6 +236,17 @@ toSolveOptions(const EDParameters& params,
     opts.basis_cache_dir       = params.basis_cache_dir;
     opts.precompute_basis_only = params.precompute_basis_only;
 
+    // Streaming-symmetry sector filter (CLI ``--sectors=`` -> the
+    // per-sector solve loop). ``EDParameters`` stores it as ``int``;
+    // ``SolveOptions`` as ``std::size_t``. Previously this never made it
+    // onto SolveOptions, so the CLI flag was silently ignored.
+    opts.selected_sectors.reserve(params.selected_sectors.size());
+    for (int s : params.selected_sectors) {
+        if (s >= 0) {
+            opts.selected_sectors.push_back(static_cast<std::size_t>(s));
+        }
+    }
+
     return opts;
 }
 

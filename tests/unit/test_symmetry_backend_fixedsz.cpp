@@ -28,13 +28,16 @@
 // =============================================================================
 
 #include "common/catch2_harness.h"
+#include "common/symmetry_reference.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/term_storage.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/subspace.h>
+
+#include <functional>
 
 #include <algorithm>
 #include <cmath>
@@ -126,10 +129,12 @@ enumerate_fixed_sz_orbit_reps(const ed::symmetry::FixedSzSubspace& sub,
     return std::vector<std::uint64_t>(reps.begin(), reps.end());
 }
 
-std::unique_ptr<FixedSzStreamingSymmetryOperator>
-build_heisenberg_pbc_fixed_sz(std::uint64_t N, std::int64_t n_up, double J) {
-    auto op = std::make_unique<FixedSzStreamingSymmetryOperator>(
-        N, 0.5f, n_up);
+// Full-Hilbert Heisenberg PBC operator (carrier-free). The full-space ``H``
+// apply doubles as the symmetrized reference's engine: Heisenberg preserves
+// Sz, so applying it to a fixed-Sz-supported ``psi`` stays in the subspace.
+std::unique_ptr<Operator>
+build_heisenberg_pbc_full(std::uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
     for (std::uint64_t i = 0; i < N; ++i) {
@@ -181,16 +186,16 @@ TEST_CASE("symmetry_backend: CpuMatVecBackend<Symmetry> matches "
         make_scratch_dir("symmetry_backend_fixedsz", "heisenberg_N6_nup3");
     write_zN_translation_fixtures(dir, N);
 
-    // Legacy reference operator + its per-sector orbit data (fixed-Sz).
-    auto sym_op = build_heisenberg_pbc_fixed_sz(N, n_up, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreamingFixedSz(dir));
+    // Full-Hilbert operator: term list (classified into the symmetry SoA) +
+    // full-space ``H`` apply for the independent symmetrized reference.
+    auto full_op = build_heisenberg_pbc_full(N, 1.0);
 
     // Shared term storage: classify the operator's AoS terms once. The
     // symmetry backend consumes EXACTLY this SoA; only the basis policy
     // (and the subspace its orbits were enumerated over) differs.
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, sym_op->transform_data_, sym_op->three_body_data_,
+        soa, full_op->transform_data_, full_op->three_body_data_,
         [](const Complex& c) { return c; });
     const TermView_t tv = make_term_view(soa, /*spin_l=*/0.5, /*is_real=*/true);
 
@@ -205,13 +210,15 @@ TEST_CASE("symmetry_backend: CpuMatVecBackend<Symmetry> matches "
     const ed::symmetry::SpatialProjector spatial(info);
     const std::vector<std::uint64_t> reps =
         enumerate_fixed_sz_orbit_reps(fixed, info);
+    const double group_size =
+        static_cast<double>(info.max_clique.size());
 
-    REQUIRE(sym_op->getNumSectors() == info.sectors.size());
+    std::function<void(const Complex*, Complex*, std::size_t)> full_apply =
+        [&full_op](const Complex* x, Complex* y, std::size_t n) {
+            full_op->apply(x, y, n);
+        };
 
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const std::size_t sd = sym_op->getSectorDimension(s);
-        if (sd == 0) continue;
-
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
         // New path: owning SectorBasis over the fixed-Sz subspace (kept
         // alive for the backend's borrowed policy view) + symmetry backend.
         ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
@@ -219,7 +226,8 @@ TEST_CASE("symmetry_backend: CpuMatVecBackend<Symmetry> matches "
             info.sectors[s].quantum_numbers,
             info.sectors[s].phase_factors,
             reps, /*sector_id=*/s);
-        REQUIRE(sb.dim() == sd);
+        const std::size_t sd = sb.dim();
+        if (sd == 0) continue;
 
         auto backend = ed::matvec::make_cpu_symmetry_backend<
             ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,
@@ -238,7 +246,9 @@ TEST_CASE("symmetry_backend: CpuMatVecBackend<Symmetry> matches "
             std::vector<Complex> y_ref(sd, Complex(0.0, 0.0));
             std::vector<Complex> y_new(sd, Complex(0.0, 0.0));
 
-            sym_op->applySymmetrizedFixedSz(s, x.data(), y_ref.data());
+            ed_tests::apply_symmetrized_reference(
+                sb.sector(), static_cast<std::uint64_t>(N), group_size,
+                full_apply, x.data(), y_ref.data(), sd);
             backend->apply_complex(&tv, x.data(), y_new.data(), sd);
 
             double max_abs_diff = 0.0;

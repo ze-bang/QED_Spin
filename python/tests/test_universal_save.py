@@ -479,45 +479,55 @@ def test_solve_plain_operator_device_gpu_runs_on_gpu(tmp_path):
     assert abs(gs.eigenvalues[0] - gs_cpu.eigenvalues[0]) < 1e-6
 
 
-def test_thermal_device_cpu_does_not_build_gpu_operator(tmp_path, capfd):
-    """``qed.thermal(..., device='cpu')`` must NOT print the GPUOperator
-    construction banner; the promoter is gated on ``allow_gpu`` and the
-    per-sector thermal opts now forward ``params.use_gpu`` correctly."""
+def test_thermal_device_cpu_does_not_build_gpu_operator(tmp_path):
+    """``qed.thermal(..., device='cpu')`` must NOT touch the GPU lane.
+
+    Operator-collapse Phase 3 (Jun 2026): the obsolete ``GPUFixedSzOperator``
+    (and its ``"GPU Operator initialized"`` stdout banner) was retired -- the
+    GPU lane is now the host operator's lazy ``CudaMatVecBackend`` device
+    mirror engaged via ``bind_cuda()``. The canonical "did we run on the GPU"
+    sentinel is therefore ``ThermalResult.backend.lane`` (set by
+    ``ed::select_backend``), so we drive the low-level ``workflows_thermal``
+    binding directly and assert on the lane rather than scraping stdout.
+    """
+    from qed import _core
     H = _ring()
-    _ = qed.thermal(
-        H, method="mtpq",
-        num_samples=1, max_iterations=20,
-        num_T=2, T_min=0.5, T_max=4.0,
-        device="cpu", verbose=False, auto_tune=False,
-        output_dir=str(tmp_path / "th"),
-    )
-    out, _err = capfd.readouterr()
-    # The GPU operator constructor unconditionally prints
-    # "GPU Operator initialized for <N> sites" so we use that as the
-    # GPU-touch sentinel. If we see it under device='cpu', the
-    # routing regressed.
-    assert "GPU Operator initialized" not in out, (
-        "qed.thermal(device='cpu') touched the GPU lane; routing "
-        "regressed (probably _ed_params_to_thermal_options stopped "
-        "forwarding use_gpu).")
+    opts = _core.ThermalOptions()
+    opts.method        = _core.ThermalMethod.mTPQ
+    opts.num_samples   = 1
+    opts.krylov_dim    = 20
+    opts.num_temp_bins = 2
+    opts.temp_min      = 0.5
+    opts.temp_max      = 4.0
+    opts.output_dir    = str(tmp_path / "th")
+    opts.backend.allow_gpu = False
+    r = _core.workflows_thermal(H, opts)
+    assert r.backend.lane != "gpu", (
+        "qed.thermal(device='cpu') touched the GPU lane; routing regressed "
+        f"(backend.lane == {r.backend.lane!r}).")
 
 
 @_REQUIRES_GPU
-def test_thermal_device_gpu_builds_gpu_operator(tmp_path, capfd):
-    """Symmetric to the above: ``qed.thermal(..., device='gpu')`` SHOULD
-    construct a GPU operator (sentinel banner present)."""
-    H = _ring()
-    _ = qed.thermal(
-        H, method="mtpq",
-        num_samples=1, max_iterations=20,
-        num_T=2, T_min=0.5, T_max=4.0,
-        device="gpu", verbose=False, auto_tune=False,
-        output_dir=str(tmp_path / "th_gpu"),
-    )
-    out, _err = capfd.readouterr()
-    assert "GPU Operator initialized" in out, (
-        "qed.thermal(device='gpu') did not construct a GPU operator; "
-        "the binding-side promoter is missing.")
+def test_thermal_device_gpu_builds_gpu_operator(tmp_path):
+    """Symmetric to the above: ``qed.thermal(..., device='gpu')`` SHOULD run
+    the matvec on the GPU lane (host operator's lazy ``CudaMatVecBackend``
+    device mirror via ``bind_cuda()``), reported by
+    ``ThermalResult.backend.lane == 'gpu'``."""
+    from qed import _core
+    H = _ring_n(14)  # dim=2^14 keeps the GPU lane the clear winner
+    opts = _core.ThermalOptions()
+    opts.method        = _core.ThermalMethod.mTPQ
+    opts.num_samples   = 1
+    opts.krylov_dim    = 20
+    opts.num_temp_bins = 2
+    opts.temp_min      = 0.5
+    opts.temp_max      = 4.0
+    opts.output_dir    = str(tmp_path / "th_gpu")
+    opts.backend.allow_gpu = True
+    r = _core.workflows_thermal(H, opts)
+    assert r.backend.lane == "gpu", (
+        "qed.thermal(device='gpu') did not run on the GPU lane; the "
+        f"CudaMatVecBackend bind_cuda path is missing (lane == {r.backend.lane!r}).")
 
 
 def _ring_n(n_sites: int):

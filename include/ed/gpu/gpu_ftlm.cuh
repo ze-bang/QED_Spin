@@ -39,17 +39,27 @@ void save_ftlm_results(const FTLMResults& results, const std::string& filename);
  */
 class GPUFTLMSolver {
 public:
+    /// Device-resident matvec ``y := A x`` on ``cuDoubleComplex`` pointers.
+    /// ``std::complex<double>`` and ``cuDoubleComplex`` are layout-compatible,
+    /// so callers wrapping an ``ed::LinearOperator::bind_cuda()`` MatvecFn just
+    /// reinterpret_cast the pointers. Operator-collapse Phase 2b (Jun 2026)
+    /// replaced the bespoke ``GPUOperator*`` handle with this callable so the
+    /// unified host ``Operator`` / ``FixedSzOperator`` device matvec
+    /// (``CudaMatVecBackend``) drives FTLM directly.
+    using DeviceMatVec =
+        std::function<void(const cuDoubleComplex*, cuDoubleComplex*, int)>;
+
     /**
      * @brief Constructor
-     * @param op GPU operator (Hamiltonian)
-     * @param N Hilbert space dimension
+     * @param h_matvec Device matvec for the Hamiltonian (y := H x)
+     * @param N Hilbert space (or sector) dimension
      * @param krylov_dim Maximum Krylov subspace dimension
      * @param tolerance Convergence tolerance for Lanczos
      * @param skip_basis_pool_alloc If true, skip pre-allocating the Lanczos basis pool
      *                              (for large systems where memory is constrained)
      */
-    GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim = 100, double tolerance = 1e-10,
-                  bool skip_basis_pool_alloc = false);
+    GPUFTLMSolver(DeviceMatVec h_matvec, int N, int krylov_dim = 100,
+                  double tolerance = 1e-10, bool skip_basis_pool_alloc = false);
     
     /**
      * @brief Destructor - cleanup GPU memory
@@ -136,8 +146,8 @@ public:
      * - Connected correlations (subtract ⟨O₁⟩*⟨O₂⟩*)
      * 
      * @param num_samples Number of random samples for thermal average
-     * @param op_O1 GPU operator for O₁
-     * @param op_O2 GPU operator for O₂
+     * @param op_O1 Device matvec for O₁ (empty = skip)
+     * @param op_O2 Device matvec for O₂ (empty = skip)
      * @param temp_min Minimum temperature
      * @param temp_max Maximum temperature
      * @param num_temp_bins Number of temperature points
@@ -148,8 +158,8 @@ public:
      */
     std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
     computeStaticCorrelation(int num_samples,
-                           GPUOperator* op_O1,
-                           GPUOperator* op_O2,
+                           const DeviceMatVec& op_O1,
+                           const DeviceMatVec& op_O2,
                            double temp_min,
                            double temp_max,
                            int num_temp_bins,
@@ -177,8 +187,8 @@ public:
      * via the continued fraction method.
      * 
      * @param num_samples Number of random samples
-     * @param op_O1 GPU operator for O₁
-     * @param op_O2 GPU operator for O₂
+     * @param op_O1 Device matvec for O₁ (empty = skip)
+     * @param op_O2 Device matvec for O₂ (empty = skip)
      * @param omega_min Minimum frequency
      * @param omega_max Maximum frequency
      * @param num_omega_bins Number of frequency points
@@ -192,8 +202,8 @@ public:
                                 std::vector<double>, std::vector<double>>>
     computeDynamicalCorrelationMultiTemp(
         int num_samples,
-        GPUOperator* op_O1,
-        GPUOperator* op_O2,
+        const DeviceMatVec& op_O1,
+        const DeviceMatVec& op_O2,
         double omega_min,
         double omega_max,
         int num_omega_bins,
@@ -203,7 +213,7 @@ public:
         unsigned int random_seed = 0);
     
 private:
-    GPUOperator* op_;
+    DeviceMatVec h_matvec_;   // Hamiltonian device matvec (y := H x)
     int N_;  // Hilbert space dimension
     int krylov_dim_;
     double tolerance_;

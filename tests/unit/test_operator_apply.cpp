@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdlib>
 #include <memory>
 #include <random>
 #include <vector>
@@ -25,6 +26,184 @@
 #include <ed/matvec/term_storage.h>
 
 using namespace ed_tests;
+
+// =============================================================================
+// Phase 1 of the SOTA matrix-apply plan: GATHER == SCATTER equivalence gate.
+//
+// The default shared-memory matrix-free SpMV is now the lock-free row GATHER
+// (apply_terms_gather + precomputed diagonal). ED_MATVEC_SCATTER=1 selects the
+// legacy SCATTER kernel (apply_terms, atomic + radix sort). Both forms must
+// produce bit-for-bit identical results (to ~1e-12). We pin the equivalence
+// across {Full, FixedSz} x {complex, real} x {1/2/3-body} by toggling the env
+// var around backend construction (the tunables are read once, when the lazy
+// backend is built on first apply). ED_CSR_FORCE=0 keeps both runs on the
+// matrix-free path (otherwise the tiny dims would route through assembled CSR
+// and the two kernels would never be exercised).
+//
+// The symmetry orbit-CSR and on-the-fly representative paths are unchanged by
+// this plan (orbit-CSR is already a lock-free row gather; rep stays scatter),
+// so their existing dedicated tests remain the equivalence gate there.
+// =============================================================================
+namespace {
+
+// Push a deliberately rich, Hermitian-agnostic term mix that lights up all six
+// SoA bins with nonzero imaginary parts so the GATHER/SCATTER transpose is
+// exercised on every code path (diag/offdiag one-body, diag/mixed/offdiag
+// two-body, three-body). Sz-non-conserving terms are harmless: in the FixedSz
+// sector both kernels gate identically on basis membership.
+inline void add_rich_complex_terms(Operator& op) {
+    // one-body diagonal (Sz)
+    op.addOneBodyTerm(/*Sz*/ 2, /*site*/ 0, Complex(0.37, 0.0));
+    // one-body off-diagonal (S+/S-) with complex weight
+    op.addOneBodyTerm(/*S+*/ 0, /*site*/ 1, Complex(0.2, 0.5));
+    op.addOneBodyTerm(/*S-*/ 1, /*site*/ 1, Complex(0.2, -0.5));
+    // two-body diagonal (SzSz)
+    op.addTwoBodyTerm(2, 0, 2, 1, Complex(0.91, 0.0));
+    // mixed two-body (Sz S+/-) complex
+    op.addTwoBodyTerm(2, 0, 0, 2, Complex(0.1, 0.3));
+    op.addTwoBodyTerm(2, 0, 1, 2, Complex(0.1, -0.3));
+    // off-diagonal two-body (S+ S- / S- S+) complex -- Sz-conserving
+    op.addTwoBodyTerm(0, 0, 1, 1, Complex(0.45, 0.22));
+    op.addTwoBodyTerm(1, 0, 0, 1, Complex(0.45, -0.22));
+    // three-body complex (S+_0 S-_1 Sz_2) -- Sz-conserving
+    op.addThreeBodyTerm(0, 0, 1, 1, 2, 2, Complex(0.0, 0.7));
+    op.addThreeBodyTerm(1, 0, 0, 1, 2, 2, Complex(0.0, -0.7));
+}
+
+// Real-only rich term mix (lights up every bin, no imaginary parts) so the
+// real-arithmetic fast path (apply_real -> matrix_free_real -> gather<double>)
+// can be compared against its SCATTER counterpart.
+inline void add_rich_real_terms(Operator& op) {
+    op.addOneBodyTerm(2, 0, Complex(0.37, 0.0));
+    op.addTwoBodyTerm(2, 0, 2, 1, Complex(0.91, 0.0));
+    op.addTwoBodyTerm(0, 0, 1, 1, Complex(0.45, 0.0));
+    op.addTwoBodyTerm(1, 0, 0, 1, Complex(0.45, 0.0));
+    op.addThreeBodyTerm(0, 0, 1, 1, 2, 2, Complex(0.5, 0.0));
+    op.addThreeBodyTerm(1, 0, 0, 1, 2, 2, Complex(0.5, 0.0));
+}
+
+// Run op.apply() under a chosen matrix-free form. The backend is built lazily
+// on first apply, reading ED_MATVEC_SCATTER then; ED_CSR_FORCE=0 pins it to
+// matrix-free. ``build`` must return a freshly-constructed operator so the
+// backend (and its tunables) are created inside this scope.
+template <class Build>
+inline ComplexVector apply_under_mode(bool scatter, Build&& build,
+                                      const ComplexVector& v) {
+    ::setenv("ED_CSR_FORCE", "0", 1);
+    if (scatter) ::setenv("ED_MATVEC_SCATTER", "1", 1);
+    else         ::unsetenv("ED_MATVEC_SCATTER");
+    auto op = build();
+    ComplexVector out(v.size(), Complex(0.0, 0.0));
+    op->apply(v.data(), out.data(), v.size());
+    ::unsetenv("ED_MATVEC_SCATTER");
+    ::unsetenv("ED_CSR_FORCE");
+    return out;
+}
+
+template <class Build>
+inline std::vector<double> apply_real_under_mode(bool scatter, Build&& build,
+                                                 const std::vector<double>& v) {
+    ::setenv("ED_CSR_FORCE", "0", 1);
+    if (scatter) ::setenv("ED_MATVEC_SCATTER", "1", 1);
+    else         ::unsetenv("ED_MATVEC_SCATTER");
+    auto op = build();
+    std::vector<double> out(v.size(), 0.0);
+    op->apply_real(v.data(), out.data(), v.size());
+    ::unsetenv("ED_MATVEC_SCATTER");
+    ::unsetenv("ED_CSR_FORCE");
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("matvec: GATHER == SCATTER on Full basis (complex, 1/2/3-body)",
+          "[operator_apply][gather][equivalence]") {
+    constexpr uint64_t N   = 10;
+    constexpr uint64_t dim = 1ULL << N;
+    auto build = [] {
+        auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+        add_rich_complex_terms(*op);
+        return op;
+    };
+    for (uint64_t seed : {1u, 42u, 90210u}) {
+        auto v = random_unit_vector(dim, seed);
+        auto y_scatter = apply_under_mode(/*scatter=*/true,  build, v);
+        auto y_gather  = apply_under_mode(/*scatter=*/false, build, v);
+        INFO("seed=" << seed << "  ||gather - scatter|| = "
+             << l2_diff(y_gather, y_scatter));
+        REQUIRE(l2_diff(y_gather, y_scatter) < 1e-12);
+    }
+}
+
+TEST_CASE("matvec: GATHER == SCATTER on FixedSz basis (complex, 1/2/3-body)",
+          "[operator_apply][gather][equivalence][fixed_sz]") {
+    constexpr uint64_t N    = 10;
+    constexpr int64_t  n_up = 5;
+    auto build = [] {
+        auto op = build_heisenberg_chain_fixed_sz(N, /*J=*/1.0, n_up,
+                                                  /*periodic=*/true);
+        add_rich_complex_terms(*op);
+        return op;
+    };
+    const uint64_t dim = build()->getFixedSzDim();
+    REQUIRE(dim > 0);
+    for (uint64_t seed : {3u, 17u, 65537u}) {
+        auto v = random_unit_vector(dim, seed);
+        auto y_scatter = apply_under_mode(/*scatter=*/true,  build, v);
+        auto y_gather  = apply_under_mode(/*scatter=*/false, build, v);
+        INFO("seed=" << seed << "  ||gather - scatter|| = "
+             << l2_diff(y_gather, y_scatter));
+        REQUIRE(l2_diff(y_gather, y_scatter) < 1e-12);
+    }
+}
+
+TEST_CASE("matvec: GATHER == SCATTER real fast path (Full + FixedSz)",
+          "[operator_apply][gather][equivalence][apply_real]") {
+    SECTION("Full basis") {
+        constexpr uint64_t N   = 10;
+        constexpr uint64_t dim = 1ULL << N;
+        auto build = [] {
+            auto op = build_heisenberg_chain(N, 1.0, /*periodic=*/true);
+            add_rich_real_terms(*op);
+            return op;
+        };
+        std::vector<double> v(dim);
+        std::mt19937_64 g(2024);
+        std::normal_distribution<double> nd(0, 1);
+        for (auto& x : v) x = nd(g);
+        auto y_scatter = apply_real_under_mode(true,  build, v);
+        auto y_gather  = apply_real_under_mode(false, build, v);
+        double s = 0.0;
+        for (uint64_t i = 0; i < dim; ++i) {
+            double d = y_gather[i] - y_scatter[i];
+            s += d * d;
+        }
+        REQUIRE(std::sqrt(s) < 1e-12);
+    }
+    SECTION("FixedSz basis") {
+        constexpr uint64_t N    = 10;
+        constexpr int64_t  n_up = 5;
+        auto build = [] {
+            auto op = build_heisenberg_chain_fixed_sz(N, 1.0, n_up,
+                                                      /*periodic=*/true);
+            add_rich_real_terms(*op);
+            return op;
+        };
+        const uint64_t dim = build()->getFixedSzDim();
+        std::vector<double> v(dim);
+        std::mt19937_64 g(99);
+        std::normal_distribution<double> nd(0, 1);
+        for (auto& x : v) x = nd(g);
+        auto y_scatter = apply_real_under_mode(true,  build, v);
+        auto y_gather  = apply_real_under_mode(false, build, v);
+        double s = 0.0;
+        for (uint64_t i = 0; i < dim; ++i) {
+            double d = y_gather[i] - y_scatter[i];
+            s += d * d;
+        }
+        REQUIRE(std::sqrt(s) < 1e-12);
+    }
+}
 
 TEST_CASE("Operator::apply: N=2 Heisenberg dimer matches analytic spectrum",
           "[operator_apply][analytic]") {

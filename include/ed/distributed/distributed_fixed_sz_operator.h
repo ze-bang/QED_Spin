@@ -29,11 +29,10 @@
 #include <vector>
 
 #include <ed/core/linear_operator.h>
+#include <ed/core/operator_fwd.h>   // FixedSzOperator alias (forward)
 #include <ed/core/sorted_uint64_index.h>
 #include <ed/matvec/matvec.h>
 #include <ed/matvec/memory_space.h>
-
-class FixedSzOperator;
 
 namespace ed::distributed {
 
