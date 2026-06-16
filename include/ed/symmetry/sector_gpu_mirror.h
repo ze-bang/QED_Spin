@@ -31,7 +31,7 @@
 #include <cstdint>
 
 #include <ed/core/linear_operator.h>     // ed::LinearOperator::MatvecFn
-#include <ed/core/streaming_symmetry.h>  // ::SymmetrySector
+#include <ed/symmetry/symmetry_sector_data.h>  // ::SymmetrySector
 #include <ed/matvec/term_storage.h>      // ed::matvec::TermStorage
 #include <ed/symmetry/rep_sector_data.h> // ed::symmetry::RepSectorData
 

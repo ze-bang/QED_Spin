@@ -118,26 +118,26 @@ std::pair<double, double> calculateEnergyAndVariance(
     return {energy, variance};
 }
 
-std::vector<SingleSiteOperator> createSzOperators(int num_sites, float spin_length) {
-    std::vector<SingleSiteOperator> Sz_ops;
+std::vector<Operator> createSzOperators(int num_sites, float spin_length) {
+    std::vector<Operator> Sz_ops;
     for (int site = 0; site < num_sites; site++) {
-        Sz_ops.emplace_back(num_sites, spin_length, 2, site);
+        Sz_ops.push_back(ed::ops::make_single_site(num_sites, spin_length, 2, site));
     }
     return Sz_ops;
 }
 
-std::vector<SingleSiteOperator> createSxOperators(int num_sites, float spin_length) {
-    std::vector<SingleSiteOperator> Sx_ops;
+std::vector<Operator> createSxOperators(int num_sites, float spin_length) {
+    std::vector<Operator> Sx_ops;
     for (int site = 0; site < num_sites; site++) {
-        Sx_ops.emplace_back(num_sites, spin_length, 3, site);
+        Sx_ops.push_back(ed::ops::make_single_site(num_sites, spin_length, 3, site));
     }
     return Sx_ops;
 }
 
-std::vector<SingleSiteOperator> createSyOperators(int num_sites, float spin_length) {
-    std::vector<SingleSiteOperator> Sy_ops;
+std::vector<Operator> createSyOperators(int num_sites, float spin_length) {
+    std::vector<Operator> Sy_ops;
     for (int site = 0; site < num_sites; site++) {
-        Sy_ops.emplace_back(num_sites, spin_length, 4, site);
+        Sy_ops.push_back(ed::ops::make_single_site(num_sites, spin_length, 4, site));
     }
     return Sy_ops;
 }
@@ -146,7 +146,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Sz_ops,
+    const std::vector<Operator>& Sz_ops,
     uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
@@ -195,7 +195,7 @@ Complex calculateSpm_onsite(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Spm_ops,
+    const std::vector<Operator>& Spm_ops,
     uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
@@ -223,90 +223,24 @@ Complex calculateSpm_onsite(
 }
 
 
-std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> createDoubleSiteOperators(int num_sites, float spin_length) {
-    std::vector<DoubleSiteOperator> Szz_ops;
-    std::vector<DoubleSiteOperator> Spm_ops;
+std::pair<std::vector<Operator>, std::vector<Operator>> createSingleOperators_pair(int num_sites, float spin_length) {
+    std::vector<Operator> Szz_ops;
+    std::vector<Operator> Spm_ops;
 
     for (int site = 0; site < num_sites; site++) {
-        for (int site2 = 0; site2 < num_sites; site2++) {
-            Szz_ops.emplace_back(num_sites, spin_length, 2, site, 2, site2);
-            Spm_ops.emplace_back(num_sites, spin_length, 0, site, 1, site2);
-        }
+        Szz_ops.push_back(ed::ops::make_single_site(num_sites, spin_length, 2, site));
+        Spm_ops.push_back(ed::ops::make_single_site(num_sites, spin_length, 0, site));
     }
     return {Szz_ops, Spm_ops};
 }
 
 
-std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> createSingleOperators_pair(int num_sites, float spin_length) {
-    std::vector<SingleSiteOperator> Szz_ops;
-    std::vector<SingleSiteOperator> Spm_ops;
-
-    for (int site = 0; site < num_sites; site++) {
-        Szz_ops.emplace_back(num_sites, spin_length, 2, site);
-        Spm_ops.emplace_back(num_sites, spin_length, 0, site);
-    }
-    return {Szz_ops, Spm_ops};
-}
-
-
-
-std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
-    const ComplexVector& tpq_state,
-    uint64_t num_sites,
-    float spin_length,
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops,
-    uint64_t sublattice_size
-){
-    // Calculate the dimension of the Hilbert space
-    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
-    
-    ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-
-    // Reference operators (avoid copy)
-    const std::vector<DoubleSiteOperator>& Szz_ops = double_site_ops.first;
-    const std::vector<DoubleSiteOperator>& Spm_ops = double_site_ops.second;
-    
-    // OPTIMIZED: Pre-allocate reusable buffers outside nested loop
-    std::vector<Complex> Szz_psi(N);
-    std::vector<Complex> Spm_psi(N);
-    
-    // For each site, compute the expectation values
-    for (int site = 0; site < num_sites; site++) {
-        for (int site2 = 0; site2 < num_sites; site2++) {
-            uint64_t n1 = site % sublattice_size;
-            uint64_t n2 = site2 % sublattice_size;
-
-            // Apply operators into pre-allocated buffers
-            Szz_ops[site*num_sites+site2].apply(tpq_state.data(), Szz_psi.data(), N);
-            Spm_ops[site*num_sites+site2].apply(tpq_state.data(), Spm_psi.data(), N);
-
-            // Calculate expectation values using BLAS
-            Complex Szz_exp, Spm_exp;
-            cblas_zdotc_sub(N, tpq_state.data(), 1, Szz_psi.data(), 1, &Szz_exp);
-            cblas_zdotc_sub(N, tpq_state.data(), 1, Spm_psi.data(), 1, &Spm_exp);
-            
-            Spm_exps[n1*sublattice_size+n2] += Spm_exp;
-            Szz_exps[n1*sublattice_size+n2] += Szz_exp;
-        }
-    }
-
-    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-        Spm_exps[i] /= double(num_sites);
-        Szz_exps[i] /= double(num_sites);
-        Spm_exps[sublattice_size*sublattice_size] += Spm_exps[i];
-        Szz_exps[sublattice_size*sublattice_size] += Szz_exps[i];
-    }
-    
-    return {Szz_exps, Spm_exps};
-
-}
 
 std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
+    std::pair<std::vector<Operator>, std::vector<Operator>> double_site_ops,
     uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
@@ -318,8 +252,8 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
     ComplexVector Spz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     
     // Reference operators (avoid copy)
-    const std::vector<SingleSiteOperator>& Szz_ops = double_site_ops.first;
-    const std::vector<SingleSiteOperator>& Spm_ops = double_site_ops.second;
+    const std::vector<Operator>& Szz_ops = double_site_ops.first;
+    const std::vector<Operator>& Spm_ops = double_site_ops.second;
     
     // OPTIMIZED: Pre-allocate reusable buffers outside nested loop
     std::vector<Complex> Szz_psi(N);
@@ -624,14 +558,14 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
     
     // Create S operators for each site
-    std::vector<SingleSiteOperator> Sp_ops;
-    std::vector<SingleSiteOperator> Sm_ops;
-    std::vector<SingleSiteOperator> Sz_ops;
+    std::vector<Operator> Sp_ops;
+    std::vector<Operator> Sm_ops;
+    std::vector<Operator> Sz_ops;
     
     for (int site = 0; site < num_sites; site++) {
-        Sp_ops.emplace_back(num_sites, spin_l, 0, site);
-        Sm_ops.emplace_back(num_sites, spin_l, 1, site);
-        Sz_ops.emplace_back(num_sites, spin_l, 2, site);
+        Sp_ops.push_back(ed::ops::make_single_site(num_sites, spin_l, 0, site));
+        Sm_ops.push_back(ed::ops::make_single_site(num_sites, spin_l, 1, site));
+        Sz_ops.push_back(ed::ops::make_single_site(num_sites, spin_l, 2, site));
     }
     
     // For each site, compute the expectation values
@@ -713,10 +647,10 @@ void writeFluctuationData(
     const ComplexVector& tpq_state,
     uint64_t num_sites,
     float spin_length,
-    const std::vector<SingleSiteOperator>& Sx_ops,
-    const std::vector<SingleSiteOperator>& Sy_ops,
-    const std::vector<SingleSiteOperator>& Sz_ops,
-    const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
+    const std::vector<Operator>& Sx_ops,
+    const std::vector<Operator>& Sy_ops,
+    const std::vector<Operator>& Sz_ops,
+    const std::pair<std::vector<Operator>, std::vector<Operator>>& double_site_ops,
     uint64_t sublattice_size,
     uint64_t step
 ) {

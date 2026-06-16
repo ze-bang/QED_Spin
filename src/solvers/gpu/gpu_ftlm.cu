@@ -206,9 +206,9 @@ __global__ void scaleKernel(cuDoubleComplex* x, double alpha, int N) {
 // GPUFTLMSolver Implementation
 // ============================================================================
 
-GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tolerance,
+GPUFTLMSolver::GPUFTLMSolver(DeviceMatVec h_matvec, int N, int krylov_dim, double tolerance,
                              bool skip_basis_pool_alloc)
-    : op_(op), N_(N), krylov_dim_(krylov_dim), tolerance_(tolerance),
+    : h_matvec_(std::move(h_matvec)), N_(N), krylov_dim_(krylov_dim), tolerance_(tolerance),
       d_v_current_(nullptr), d_v_prev_(nullptr), d_w_(nullptr), d_temp_(nullptr),
       d_temp2_(nullptr),
       d_lanczos_basis_(nullptr), num_stored_vectors_(0), store_basis_(false),
@@ -722,7 +722,7 @@ int GPUFTLMSolver::buildLanczosTridiagonal(unsigned int seed,
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
         // w = H * v_current
-        op_->matVecGPU(d_v_current_, d_w_, N_);
+        h_matvec_(d_v_current_, d_w_, N_);
         
         // α_j = ⟨v_current|w⟩
         std::complex<double> alpha_complex = vectorDot(d_v_current_, d_w_);
@@ -1158,7 +1158,7 @@ int GPUFTLMSolver::buildLanczosTridiagonalFromVector(
     // Drive the unified kernel; this path discards the kernel basis
     // (RAII-freed). No caller-visible basis pointer is set.
     return ed::matvec::gpu::run_ftlm_lanczos_kernel_facade(
-        *op_,
+        h_matvec_,
         /*d_start_vec=*/static_cast<const void*>(d_v_current_),
         /*N=*/N_,
         /*krylov_dim=*/krylov_dim_,
@@ -1182,7 +1182,7 @@ int GPUFTLMSolver::buildLanczosTridiagonalWithBasis(
     
     void* basis_void = nullptr;
     const int iters = ed::matvec::gpu::run_ftlm_lanczos_kernel_facade(
-        *op_,
+        h_matvec_,
         /*d_start_vec=*/static_cast<const void*>(d_v_current_),
         /*N=*/N_,
         /*krylov_dim=*/krylov_dim_,
@@ -1211,8 +1211,8 @@ int GPUFTLMSolver::buildLanczosTridiagonalWithBasis(
 std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
 GPUFTLMSolver::computeStaticCorrelation(
     int num_samples,
-    GPUOperator* op_O1,
-    GPUOperator* op_O2,
+    const DeviceMatVec& op_O1,
+    const DeviceMatVec& op_O2,
     double temp_min,
     double temp_max,
     int num_temp_bins,
@@ -1312,14 +1312,14 @@ GPUFTLMSolver::computeStaticCorrelation(
             reconstructEigenstateFromBasis(&evecs[n * m], m, d_lanczos_basis, d_temp_);
             
             // Apply O₁ and O₂
-            if (op_O1 != nullptr) {
-                op_O1->matVecGPU(d_temp_, d_O1_psi, N_);
+            if (op_O1) {
+                op_O1(d_temp_, d_O1_psi, N_);
             } else {
                 vectorCopy(d_temp_, d_O1_psi);
             }
             
-            if (op_O2 != nullptr) {
-                op_O2->matVecGPU(d_temp_, d_O2_psi, N_);
+            if (op_O2) {
+                op_O2(d_temp_, d_O2_psi, N_);
             } else {
                 vectorCopy(d_temp_, d_O2_psi);
             }
@@ -1492,8 +1492,8 @@ std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vecto
                             std::vector<double>, std::vector<double>>>
 GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
     int num_samples,
-    GPUOperator* op_O1,
-    GPUOperator* op_O2,
+    const DeviceMatVec& op_O1,
+    const DeviceMatVec& op_O2,
     double omega_min,
     double omega_max,
     int num_omega_bins,
@@ -1687,8 +1687,8 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
             vectorScale(d_psi_i, 1.0 / psi_norm);
             
             // Apply operator O2: |φ_i⟩ = O₂|ψ_i⟩
-            if (op_O2 != nullptr) {
-                op_O2->matVecGPU(d_psi_i, d_phi_i, N_);
+            if (op_O2) {
+                op_O2(d_psi_i, d_phi_i, N_);
             } else {
                 vectorCopy(d_psi_i, d_phi_i);
             }

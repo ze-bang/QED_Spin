@@ -28,8 +28,6 @@
 // =============================================================================
 
 #include <ed/core/results.h>            // SectorTag
-#include <ed/core/streaming_symmetry.h> // StreamingSymmetryOperator + FixedSzStreamingSymmetryOperator
-#include <ed/symmetry/sector_set.h>     // make_sector_operator_adopt (P5b gate)
 
 #include <algorithm>
 #include <cmath>
@@ -84,106 +82,6 @@ inline bool rep_lazy_sector_path_enabled() {
     return false;
 #endif
 }
-
-/// Lightweight handle over either flavour of streaming-symmetry
-/// operator. The handle does NOT own the operator -- callers must keep
-/// the underlying ``ed::LinearOperator`` alive for the handle's
-/// lifetime.
-class StreamingSymmetryHandle {
-public:
-    explicit StreamingSymmetryHandle(ed::LinearOperator* op) {
-        if (!op) {
-            throw std::invalid_argument(
-                "ed::core::StreamingSymmetryHandle: null operator.");
-        }
-        fsz_sym_op_ = dynamic_cast<FixedSzStreamingSymmetryOperator*>(op);
-        sym_op_     = dynamic_cast<StreamingSymmetryOperator*>(op);
-        if (!fsz_sym_op_ && !sym_op_) {
-            throw std::invalid_argument(
-                "ed::core::StreamingSymmetryHandle: operator is neither a "
-                "StreamingSymmetryOperator nor a "
-                "FixedSzStreamingSymmetryOperator. Build it via "
-                "ed::make_operator(OperatorSpec{ .streaming_symmetry = true }).");
-        }
-    }
-
-    [[nodiscard]] std::size_t num_sectors() const {
-        return fsz_sym_op_
-            ? fsz_sym_op_->num_sectors()
-            : sym_op_->num_sectors();
-    }
-
-    /// Per-sector matvec view (one irrep block). The returned
-    /// LinearOperator is owned and must outlive its uses.
-    ///
-    /// Returns a standalone ``ed::symmetry::SectorOperator``
-    /// (collapse-target path) built by adopting the underlying operator's
-    /// materialised sector data. It satisfies the ``ed::LinearOperator``
-    /// contract the orchestrator consumes.
-    [[nodiscard]] std::unique_ptr<ed::LinearOperator>
-    sector(std::size_t k) const {
-        if (fsz_sym_op_) {
-            // Matvec path follows the memory regime decided at generation:
-            //
-            //   * LAZY regime (orbit CSR too big, e.g. N=32 ~24 GiB/sector):
-            //     hand out a CSR-free ``make_rep_sector_operator_lazy``. The
-            //     GPU rep mirror / CPU rep kernel regenerate the group action
-            //     arithmetically and never materialise the host orbit CSR.
-            //
-            //   * EAGER regime (CSR fits): hand out a CSR-backed
-            //     ``make_sector_operator_adopt``. The precomputed orbit CSR
-            //     gives a much faster per-matvec than the on-the-fly rep
-            //     (which recomputes min-image + binary search every element --
-            //     ~100x slower for ground states at small/moderate N).
-            //
-            // ``ED_SYM_REP`` / ``ED_GPU_SYMMETRY_REP`` remain explicit
-            // overrides inside the SectorOperator (force the rep kernel when a
-            // usable RepSectorData is present) for A/B + bisection.
-            const bool use_rep_path =
-                fsz_sym_op_->lazy_sectors_enabled()
-                && (rep_lazy_sector_path_enabled()
-                    || ed::symmetry::cpu_rep_symmetry_enabled());
-            if (use_rep_path) {
-                return ed::symmetry::make_rep_sector_operator_lazy(
-                    *fsz_sym_op_, k);
-            }
-            SymmetrySector sec = fsz_sym_op_->getSector(k);  // copy (materialises)
-            return ed::symmetry::make_sector_operator_adopt(
-                *fsz_sym_op_, std::move(sec),
-                static_cast<std::size_t>(fsz_sym_op_->getGroupSize()));
-        }
-        SymmetrySector sec = sym_op_->getSector(k);          // copy (materialises)
-        return ed::symmetry::make_sector_operator_adopt(
-            *sym_op_, std::move(sec),
-            static_cast<std::size_t>(sym_op_->getGroupSize()));
-    }
-
-    /// Quantum-number tag for sector ``k``. Pulls
-    /// ``SymmetrySector::quantum_numbers`` + the basis dimension out
-    /// of the underlying operator's sector metadata.
-    [[nodiscard]] SectorTag sector_tag(std::size_t k) const {
-        SectorTag t;
-        t.sector_index = k;
-        if (fsz_sym_op_) {
-            // CSR-free: dim from Pass 1.5, quantum numbers from generation --
-            // neither triggers orbit-CSR materialisation (see the cheap
-            // accessors on FixedSzStreamingSymmetryOperator).
-            t.sector_dim      = fsz_sym_op_->getSectorDimension(k);
-            t.quantum_numbers = fsz_sym_op_->getSectorQuantumNumbers(k);
-            t.n_up            = static_cast<int>(fsz_sym_op_->getNUp());
-        } else {
-            const auto& s = sym_op_->getSector(k);
-            t.sector_dim      = static_cast<std::uint64_t>(s.basis_states.size());
-            t.quantum_numbers = s.quantum_numbers;
-            t.n_up            = -1;
-        }
-        return t;
-    }
-
-private:
-    FixedSzStreamingSymmetryOperator* fsz_sym_op_ = nullptr;
-    StreamingSymmetryOperator*        sym_op_     = nullptr;
-};
 
 /// Canonical filter for the ``selected_sectors`` axis. Returns the
 /// list of sector indices (in ascending order) that the streaming
@@ -277,8 +175,14 @@ inline constexpr std::size_t kSectorNotFound =
 /// inferred order matches ``N`` exactly when at least one sector hits
 /// the maximal irrep, which is always true for the streaming-symmetry
 /// builder (it enumerates ``N`` distinct sectors per generator).
+// Templated on the handle type so the same logic drives both the legacy
+// ``StreamingSymmetryHandle`` and the operator-collapse ``SectorSetView``
+// (``ed/core/make_operator.h``). Any type exposing ``num_sectors()`` +
+// ``sector_tag(k).quantum_numbers`` for EVERY raw sector (including empty
+// irreps) satisfies the contract.
+template <class HandleT>
 inline std::vector<int>
-infer_generator_orders(const StreamingSymmetryHandle& handle) {
+infer_generator_orders(const HandleT& handle) {
     const std::size_t S = handle.num_sectors();
     if (S == 0) return {};
     std::vector<int> orders;
@@ -356,9 +260,10 @@ add_quantum_numbers(const std::vector<int>& src_qn,
 /// multiple disagree -- the streaming-symmetry builder guarantees
 /// uniqueness for a fixed (n_up, irrep) tuple so duplicates would
 /// indicate a metadata bug upstream.
+template <class HandleT>
 inline std::size_t
 find_sector_by_quantum_numbers(
-        const StreamingSymmetryHandle& handle,
+        const HandleT&                 handle,
         const std::vector<int>&        target_qn) {
     const std::size_t S = handle.num_sectors();
     std::size_t hit  = kSectorNotFound;
@@ -382,8 +287,9 @@ find_sector_by_quantum_numbers(
 /// ``kSectorNotFound`` if the selection rule lands outside the
 /// builder's sector set (e.g. when the user specifies an
 /// incommensurate Q).
+template <class HandleT>
 inline std::size_t
-resolve_target_sector(const StreamingSymmetryHandle& handle,
+resolve_target_sector(const HandleT&                 handle,
                       std::size_t                    src_sector,
                       const std::vector<double>&     Q_frac,
                       double*                        out_residual = nullptr) {

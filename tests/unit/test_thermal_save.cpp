@@ -29,9 +29,9 @@
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/core/operator.h>
-#include <ed/core/sector_loop.h>
-#include <ed/core/streaming_symmetry.h>
 #include <ed/orchestrator.h>
+#include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 
 #include <H5Cpp.h>
 
@@ -340,6 +340,29 @@ inline void fill_heisenberg_pbc(Op& op, uint64_t N, double J) {
     }
 }
 
+inline void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op,
+                                     uint64_t N, double J) {
+    const Complex J_real(J, 0.0);
+    const Complex J_half(0.5 * J, 0.0);
+    for (uint64_t i = 0; i < N; ++i) {
+        const uint64_t j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, J_real);
+        op.addTwoBodyTerm(0, i, 1, j, J_half);
+        op.addTwoBodyTerm(1, i, 0, j, J_half);
+    }
+}
+
+// Pick the largest non-empty sector operator from a freshly built set.
+inline ed::symmetry::SectorOperator&
+largest_sector(std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>& ops) {
+    std::size_t pick = 0, best = 0;
+    for (std::size_t s = 0; s < ops.size(); ++s) {
+        const std::size_t d = ops[s]->dim();
+        if (d > best) { best = d; pick = s; }
+    }
+    return *ops[pick];
+}
+
 }  // namespace
 
 TEST_CASE("ed::thermal persists FixedSzOperator mTPQ snapshots at sector dim",
@@ -380,7 +403,7 @@ TEST_CASE("ed::thermal persists FixedSzOperator mTPQ snapshots at sector dim",
     std::filesystem::remove_all(outdir);
 }
 
-TEST_CASE("ed::thermal persists StreamingSymmetryOperator cTPQ snapshots",
+TEST_CASE("ed::thermal persists symmetry-sector cTPQ snapshots",
           "[orchestrator][thermal-save][tpq][symmetry]") {
     constexpr uint64_t N = 6;
     // Force CPU lane so the test does not depend on a CUDA device.
@@ -388,19 +411,15 @@ TEST_CASE("ed::thermal persists StreamingSymmetryOperator cTPQ snapshots",
     const std::string sym_dir = write_zN_translation_fixture(
         N, "thermal_save", "sym_ctpq_sym");
 
-    auto sym = std::make_unique<StreamingSymmetryOperator>(N, 0.5f);
-    fill_heisenberg_pbc(*sym, N, 1.0);
-    sym->generateSymmetrySectorsStreaming(sym_dir);
-
-    // Pick the largest non-empty sector.
-    std::size_t pick = 0; std::size_t best = 0;
-    for (std::size_t s = 0; s < sym->getNumSectors(); ++s) {
-        const std::size_t d = sym->getSectorDimension(s);
-        if (d > best) { best = d; pick = s; }
-    }
-    ed::core::StreamingSymmetryHandle handle(sym.get());
-    auto view = handle.sector(pick);
-    REQUIRE(view->dim() > 0);
+    SymmetryGroupInfo info;
+    info.loadFromDirectory(sym_dir);
+    auto ops = ed::symmetry::build_full_sector_operators(
+        N, 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms(op, N, 1.0);
+        });
+    ed::symmetry::SectorOperator& view = largest_sector(ops);
+    REQUIRE(view.dim() > 0);
 
     const std::string outdir = make_scratch_dir(
         "thermal_save", "sym_ctpq_out");
@@ -417,10 +436,10 @@ TEST_CASE("ed::thermal persists StreamingSymmetryOperator cTPQ snapshots",
     opts.output_dir    = outdir;
     opts.probe_betas   = {0.5, 2.0};
 
-    auto R = ed::workflows::thermal(*view, opts);
+    auto R = ed::workflows::thermal(view, opts);
 
     REQUIRE_FALSE(R.tpq_state_snapshots.empty());
-    const std::size_t sector_dim = view->dim();
+    const std::size_t sector_dim = view.dim();
     for (const auto& snap : R.tpq_state_snapshots) {
         REQUIRE(snap.psi.size() == sector_dim);
     }
@@ -438,26 +457,22 @@ TEST_CASE("ed::thermal persists StreamingSymmetryOperator cTPQ snapshots",
     unsetenv("ED_GPU_SYMMETRY_MIRROR");
 }
 
-TEST_CASE("ed::thermal persists FixedSzStreamingSymmetry mTPQ snapshots",
+TEST_CASE("ed::thermal persists fixed-Sz symmetry-sector mTPQ snapshots",
           "[orchestrator][thermal-save][tpq][symmetry]") {
     constexpr uint64_t N = 6;
     setenv("ED_GPU_SYMMETRY_MIRROR", "0", 1);
     const std::string sym_dir = write_zN_translation_fixture(
         N, "thermal_save", "fsz_sym_mtpq_sym");
 
-    auto sym = std::make_unique<FixedSzStreamingSymmetryOperator>(
-                   N, 0.5f, int64_t(N/2));
-    fill_heisenberg_pbc(*sym, N, 1.0);
-    sym->generateSymmetrySectorsStreamingFixedSz(sym_dir);
-
-    std::size_t pick = 0; std::size_t best = 0;
-    for (std::size_t s = 0; s < sym->getNumSectors(); ++s) {
-        const std::size_t d = sym->getSectorDimension(s);
-        if (d > best) { best = d; pick = s; }
-    }
-    ed::core::StreamingSymmetryHandle handle(sym.get());
-    auto view = handle.sector(pick);
-    REQUIRE(view->dim() > 0);
+    SymmetryGroupInfo info;
+    info.loadFromDirectory(sym_dir);
+    auto ops = ed::symmetry::build_fixed_sz_sector_operators(
+        N, 0.5f, int64_t(N / 2), info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms(op, N, 1.0);
+        });
+    ed::symmetry::SectorOperator& view = largest_sector(ops);
+    REQUIRE(view.dim() > 0);
 
     const std::string outdir = make_scratch_dir(
         "thermal_save", "fsz_sym_mtpq_out");
@@ -472,10 +487,10 @@ TEST_CASE("ed::thermal persists FixedSzStreamingSymmetry mTPQ snapshots",
     opts.output_dir    = outdir;
     opts.probe_betas   = {0.5, 2.0};
 
-    auto R = ed::workflows::thermal(*view, opts);
+    auto R = ed::workflows::thermal(view, opts);
 
     REQUIRE_FALSE(R.tpq_state_snapshots.empty());
-    const std::size_t sector_dim = view->dim();
+    const std::size_t sector_dim = view.dim();
     for (const auto& snap : R.tpq_state_snapshots) {
         REQUIRE(snap.psi.size() == sector_dim);
     }

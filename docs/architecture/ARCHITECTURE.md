@@ -62,12 +62,16 @@ in `ed_legacy_types.h`. The historical pre-collapse diagram lives in
 |----------------------|------------------|----------------------------------------------------------------------|
 | Algorithm            | runtime          | `DiagonalizationMethod` enum (9 values)                              |
 | Backend (device)     | compile-time     | `Backend` interface, 4 concrete impls                                |
-| Basis                | runtime + concrete subclass | `Operator` / `FixedSzOperator` / `*Symmetry*` / `Distributed*` / `GPU*` (all derive from `MatVecOperator`) |
+| Basis                | compile-time policy + owned producer | `Operator` (base) + `SubspaceOperator<BasisPolicy, MemSpace>` (one template; `FixedSzOperator` / `SectorOperator` are `using`-aliases) |
 
-The inner SpMV picks `ed::matvec::basis::FullBasisPolicy` or
-`FixedSzBasisPolicy` (compile-time template parameter on
-`ed::matvec::CpuMatVecBackend<BasisPolicy>`); the choice of policy
-falls out of the concrete operator subclass.
+The inner SpMV picks `ed::matvec::basis::FullBasisPolicy`,
+`FixedSzBasisPolicy`, or `SymmetryBasisPolicy` (compile-time template
+parameter on `ed::matvec::CpuMatVecBackend<BasisPolicy>` /
+`CudaMatVecBackend<DevicePolicy>`); the choice of policy is the
+`BasisPolicy` template argument of `SubspaceOperator`, and the owning
+producer member (`FixedSzSubspace` / `SectorBasis`, selected by
+`SubspaceProducerTraits<BasisPolicy>`) emits the matching `policy()`
+POD that the backend consumes.
 
 ### Sub-axis: Subspace × ProjectorChain (May 2026)
 
@@ -75,12 +79,19 @@ The "Basis" axis above is itself the Cartesian product of two
 orthogonal sub-axes, made explicit in
 [`include/ed/symmetry/{subspace,projector,projector_chain}.h`](../../include/ed/symmetry/):
 
-| Subspace                | × | ProjectorChain         | =  | Legacy operator class                       |
-|-------------------------|---|------------------------|----|---------------------------------------------|
-| `FullSpaceSubspace`     | × | `[]`                   | =  | `Operator`                                  |
-| `FixedSzSubspace`       | × | `[]`                   | =  | `FixedSzOperator`                           |
-| `FullSpaceSubspace`     | × | `[SpatialProjector]`   | =  | `StreamingSymmetryOperator`                 |
-| `FixedSzSubspace`       | × | `[SpatialProjector]`   | =  | `FixedSzStreamingSymmetryOperator`          |
+| Subspace / producer     | × | ProjectorChain         | =  | Operator instantiation                                    |
+|-------------------------|---|------------------------|----|-----------------------------------------------------------|
+| `FullSpaceSubspace`     | × | `[]`                   | =  | `Operator` (concrete base; `FullBasisPolicy`)             |
+| `FixedSzSubspace`       | × | `[]`                   | =  | `FixedSzOperator = SubspaceOperator<FixedSzBasisPolicy>`  |
+| `SectorBasis`           | × | `[SpatialProjector]`   | =  | `SectorOperator = SubspaceOperator<SymmetryBasisPolicy>`  |
+
+`SectorBasis` is the owning symmetry producer: it folds the orbit data
+(and the optional rep-lazy materialisation mode that was previously held
+by the operator) so the unified `SubspaceOperator` only stores the
+producer descriptor. The streaming-symmetry carrier classes
+(`StreamingSymmetryOperator` / `FixedSzStreamingSymmetryOperator`) were
+fully removed; symmetry blocks are now built via
+`make_sector_operators_tagged` / `SectorSetView`.
 
 Future axes (spin-flip Z_2, time-reversal antiunitary, SU(2)
 total-S Casimir filter) extend the chain or add new Subspace
@@ -126,12 +137,21 @@ The unified solver-facing interface is `ed::matvec::MatVecOperator`
 | Type                                            | Header                                       | (Subspace, ProjectorChain) |
 |-------------------------------------------------|----------------------------------------------|----------------------------|
 | `MatVecOperator` (abstract)                     | `ed/matvec/matvec.h`                         | —                          |
-| `Operator` (full Hilbert space)                 | `ed/core/operator.h`                         | `(FullSpace, [])`          |
-| `FixedSzOperator` (fixed total Sz)              | `ed/core/fixed_sz_operator.h`                | `(FixedSz, [])`            |
-| `StreamingSymmetryOperator` (symmetry block)    | `ed/core/streaming_symmetry.h`               | `(FullSpace, [Spatial])`   |
-| `FixedSzStreamingSymmetryOperator`              | `ed/core/streaming_symmetry.h`               | `(FixedSz, [Spatial])`     |
+| `Operator` (full Hilbert space, base class)     | `ed/core/operator.h`                         | `(FullSpace, [])`          |
+| `SubspaceOperator<BasisPolicy, MemSpace>`       | `ed/core/subspace_operator.h`                | per `BasisPolicy`          |
+| ⮑ `FixedSzOperator` (alias, fixed total Sz)     | `ed/core/fixed_sz_operator.h`                | `(FixedSz, [])`            |
+| ⮑ `SectorOperator` (alias, symmetry block)      | `ed/symmetry/sector_operator.h`              | `(Sector, [Spatial])`      |
 | `DistributedOperator` / variants                | `ed/distributed/*.h`                         | per-class                  |
-| `GPUOperator` / `GPUFixedSzOperator` / GPU-symm | `ed/gpu/*.h`                                 | per-class                  |
+
+`SubspaceOperator<BasisPolicy, MemSpace>` is a single class template
+deriving from `Operator`. `FixedSzOperator` and `SectorOperator` are
+back-compat `using`-aliases for the `FixedSzBasisPolicy` /
+`SymmetryBasisPolicy` instantiations, so the ~80 construction sites,
+pybind classes, MPI wrappers, and DSSF refs compile unchanged. The
+per-policy `make_backend_()` and GPU `bind_cuda_impl_()` are explicit
+member specializations; the latter keep the weak (CPU build) / strong
+(CUDA build) symbol split that lets `ed_core` link without CUDA and
+`ed_solvers_gpu` override on CUDA builds.
 
 The right-hand column shows the orthogonal symmetry-composition
 breakdown introduced in May 2026 (see "Sub-axis" above). The

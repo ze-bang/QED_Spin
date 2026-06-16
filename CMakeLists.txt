@@ -743,6 +743,11 @@ if(BUILD_ED_TESTS)
     # it fresh against an actual consumer.
     ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
+    # Operator-collapse Phase 2a (Jun 2026): orchestrator-level GPU parity
+    # for the plain Operator / FixedSzOperator device-mirror lane
+    # (supports_device_matvec + bind_cuda -> CudaMatVecBackend). SKIPs at
+    # runtime without a CUDA device; no-op TU when WITH_CUDA is OFF.
+    ed_add_test(test_operator_gpu_parity        tests/unit/test_operator_gpu_parity.cpp USE_CATCH2)
     # Phase A (PR-1 step 6) of the "mirror examples" plan (May 2026):
     # pins byte-equality between the Python-named `ed::api::*` kwargs
     # facade and the legacy `ed::workflows::*` orchestrator across a

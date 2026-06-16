@@ -46,7 +46,8 @@
 #include <set>
 #include <vector>
 
-#include <ed/core/streaming_symmetry.h>   // SymmetryGroupInfo, applyPermutation
+#include <ed/core/basis_utils.h>          // generateFixedSzBasis, LinIndexTable, applyPermutation
+#include <ed/symmetry/symmetry_sector_data.h>  // SymmetrySector
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_operator.h>
@@ -167,7 +168,8 @@ template <class TermBuilder>
 build_full_sector_operators(std::uint64_t            n_bits,
                             float                    spin_l,
                             const SymmetryGroupInfo& info,
-                            TermBuilder&&            terms)
+                            TermBuilder&&            terms,
+                            std::vector<std::size_t>* out_sector_ids = nullptr)
 {
     const FullSpaceSubspace full(n_bits);
     const SpatialProjector  projector(info);
@@ -187,6 +189,10 @@ build_full_sector_operators(std::uint64_t            n_bits,
             n_bits, spin_l, std::move(sb));
         terms(*op);
         ops.push_back(std::move(op));
+        // Record the RAW sector index (the loop variable) so callers can
+        // reconstruct the per-sector ``SectorTag`` (quantum numbers + dim)
+        // without the now-compacted output losing the irrep label.
+        if (out_sector_ids) out_sector_ids->push_back(s);
     }
     return ops;
 }
@@ -201,7 +207,8 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
                                 float                    spin_l,
                                 std::int64_t             n_up,
                                 const SymmetryGroupInfo& info,
-                                TermBuilder&&            terms)
+                                TermBuilder&&            terms,
+                                std::vector<std::size_t>* out_sector_ids = nullptr)
 {
     const FixedSzSubspace  fixed = FixedSzSubspace::build(n_bits, n_up);
     const SpatialProjector projector(info);
@@ -226,6 +233,7 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
         op->setRepSectorData(rep_sector_data_from_sector(
             op->basis().sector(), info, static_cast<int>(n_bits)));
         ops.push_back(std::move(op));
+        if (out_sector_ids) out_sector_ids->push_back(s);
     }
     return ops;
 }
@@ -275,61 +283,135 @@ make_sector_operator_adopt(const ::Operator& host,
 }
 
 // ---------------------------------------------------------------------------
-// make_rep_sector_operator_lazy: CSR-FREE per-sector operator for the GPU
-// on-the-fly representative path ("scan other region" optimisation, Jun 2026).
+// build_fixed_sz_sector_operators_lazy: CSR-FREE direct-enumeration twin of
+// ``build_fixed_sz_sector_operators`` (operator-collapse Phase 3, Jun 2026).
 //
-// Unlike ``make_sector_operator_adopt`` (which requires an already-materialised
-// ``SymmetrySector`` -- i.e. the ~24 GiB/sector host orbit CSR), this builds a
-// SectorOperator that knows its dimension + real/complex character up-front
-// (cheap, CSR-free) and DEFERS:
-//   * the CSR-free RepSectorData (GPU rep matvec source) to ``bind_cuda`` via
-//     ``host.getRepSectorData(k)`` -- regenerates the group action on device,
-//     never stores the orbit CSR; and
-//   * the host orbit CSR (CPU ``apply`` fallback) to first CPU use via
-//     ``host.getSector(k)`` -- so a GPU-only run NEVER materialises it.
+// Where the eager builder materialises every sector's full orbit CSR up-front
+// (~24 GiB/sector at N=32), this builder produces ``SectorOperator``s that:
+//   * know their dimension + real/complex character up-front from a CSR-free
+//     "Pass 1.5" orbit-norm scan (walk each rep's orbit, keep only the norm,
+//     discard the orbit images), and
+//   * defer the GPU RepSectorData / host orbit CSR exactly like the streaming
+//     handle's ``make_rep_sector_operator_lazy`` -- but WITHOUT a
+//     ``FixedSzStreamingSymmetryOperator`` carrier. The deferred providers
+//     instead co-own (via shared_ptr) the group info, the fixed-Sz subspace,
+//     and the orbit-rep list, so they stay valid for the operators' whole
+//     lifetime even though ``make_sector_operators`` builds nothing else.
 //
-// Only valid for the fixed-Sz streaming operator (the rep matvec needs a
-// fixed-Sz combinadic rank table). The host operator MUST outlive every
-// returned SectorOperator (the providers capture it by pointer) -- the same
-// lifetime contract ``StreamingSymmetryHandle`` already imposes.
+// This is the Phase 3 piece that lets the production sector loop drop the
+// streaming carrier as a *public* type while preserving the memory
+// optimisation: the RepSectorData is precomputed (cheap, CSR-free) and the
+// CPU ``apply`` fallback rebuilds the orbit CSR on demand via the same
+// ``SectorBasis::build`` the eager lane uses -- so a GPU-only run never
+// allocates the host orbit CSR.
 // ---------------------------------------------------------------------------
-[[nodiscard]] inline std::unique_ptr<SectorOperator>
-make_rep_sector_operator_lazy(
-        const ::FixedSzStreamingSymmetryOperator& host,
-        std::size_t                               sector_idx)
+template <class TermBuilder>
+[[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
+build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
+                                     float                    spin_l,
+                                     std::int64_t             n_up,
+                                     const SymmetryGroupInfo& info,
+                                     TermBuilder&&            terms,
+                                     std::vector<std::size_t>* out_sector_ids = nullptr)
 {
-    const std::uint64_t dim =
-        host.getSectorDimension(sector_idx);
-    const std::size_t group_size =
-        static_cast<std::size_t>(host.getGroupSize());
+    // Co-own the inputs the deferred providers capture. The group info backs
+    // the SpatialProjector (a non-owning view). The fixed-Sz subspace is
+    // self-referential (``FixedSzSubspace::build`` sets ``basis_ptr_`` to its
+    // own ``owned_basis_``), so it cannot be moved into a ``shared_ptr``
+    // without dangling -- we instead own the basis vector + Lin table directly
+    // (shared, stable heap storage) and hand out cheap ``FixedSzSubspace::view``
+    // observers over them. ``reps`` drives both the Pass 1.5 norm scan and the
+    // on-demand CSR rebuild.
+    auto info_sp  = std::make_shared<SymmetryGroupInfo>(info);
+    auto basis_sp = std::make_shared<std::vector<std::uint64_t>>(
+        generateFixedSzBasis(n_bits, n_up));
+    auto lin_sp   = std::make_shared<LinIndexTable>();
+    lin_sp->build(n_bits, n_up, *basis_sp);
 
-    // Cheap CSR-free real/complex test: the |G| per-sector characters depend
-    // only on the group info + the sector's phase factors (both known at
-    // generation), never on the orbit CSR. A momentum sector with any complex
-    // character must stay on the complex matvec path.
-    bool is_real = true;
-    if (!host.symmetry_info.power_representation.empty()) {
-        const auto chi = sector_characters_from(
-            host.symmetry_info, host.getSectorPhaseFactors(sector_idx));
-        for (const auto& c : chi) {
+    const FixedSzSubspace subspace =
+        FixedSzSubspace::view(n_bits, n_up, *basis_sp, *lin_sp);
+    auto reps_sp = std::make_shared<std::vector<std::uint64_t>>(
+        enumerate_fixed_sz_orbit_reps(subspace, *info_sp));
+
+    const SpatialProjector  projector(*info_sp);
+    const std::size_t        group_size = info_sp->max_clique.size();
+    const std::size_t        num_sectors = info_sp->sectors.size();
+
+    std::vector<std::unique_ptr<SectorOperator>> ops;
+    ops.reserve(num_sectors);
+
+    std::vector<std::uint64_t> elems;
+    std::vector<Complex>       coeffs;
+
+    for (std::size_t s = 0; s < num_sectors; ++s) {
+        const std::vector<Complex>& phase = info_sp->sectors[s].phase_factors;
+
+        // Pass 1.5: CSR-free per-sector dimension + RepSectorData. Walk each
+        // rep's orbit, keep ONLY (rep, 1/norm) for the survivors, discard the
+        // orbit images. Same survival cutoff + ordering as SectorBasis::build,
+        // so the rep-index <-> basis-index mapping is bit-identical.
+        RepSectorData rd;
+        rd.n_sites    = static_cast<int>(n_bits);
+        rd.group_size = static_cast<int>(group_size);
+        rd.reps.reserve(reps_sp->size());
+        rd.inv_norms.reserve(reps_sp->size());
+        int  sec_n_up = -1;
+        bool uniform  = true;
+        for (std::uint64_t rep : *reps_sp) {
+            double norm_sq = 0.0;
+            compute_orbit_for_state(subspace, projector, rep, phase,
+                                    elems, coeffs, norm_sq);
+            if (elems.empty() ||
+                norm_sq <= SectorBasis::kOrbitNormSqEpsilon) {
+                continue;  // orbit fully cancels in this irrep
+            }
+            rd.reps.push_back(rep);
+            rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+            const int pc = __builtin_popcountll(rep);
+            if (sec_n_up < 0) sec_n_up = pc;
+            else if (pc != sec_n_up) uniform = false;
+        }
+        if (rd.reps.empty()) continue;  // empty sector: nothing to solve
+
+        rd.n_up = uniform ? sec_n_up : -1;
+        if (!info_sp->power_representation.empty() && !phase.empty()) {
+            rd.characters = sector_characters_from(*info_sp, phase);
+        }
+        rd.perms_flat = flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+
+        bool is_real = true;
+        for (const auto& c : rd.characters) {
             if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
         }
+
+        const std::uint64_t dim = static_cast<std::uint64_t>(rd.reps.size());
+        auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+
+        auto op = std::make_unique<SectorOperator>(n_bits, spin_l, SectorBasis{});
+        terms(*op);
+        op->configureRepLazy(
+            dim, group_size, is_real,
+            /*rep_provider=*/[rep_sp]() { return *rep_sp; },
+            /*csr_provider=*/[basis_sp, lin_sp, reps_sp, info_sp, n_bits, n_up, s]()
+                -> ::SymmetrySector {
+                // First CPU ``apply`` only: rebuild this sector's orbit CSR
+                // with the same enumerator the eager lane uses. A fresh view
+                // over the (still-alive) shared basis + Lin table avoids the
+                // self-referential ``FixedSzSubspace`` move hazard.
+                const FixedSzSubspace sub =
+                    FixedSzSubspace::view(n_bits, n_up, *basis_sp, *lin_sp);
+                const SpatialProjector proj(*info_sp);
+                return SectorBasis::build(
+                           sub, proj,
+                           info_sp->sectors[s].quantum_numbers,
+                           info_sp->sectors[s].phase_factors,
+                           *reps_sp, /*sector_id=*/s)
+                    .sector();
+            });
+        ops.push_back(std::move(op));
+        if (out_sector_ids) out_sector_ids->push_back(s);
     }
-
-    auto op = std::make_unique<SectorOperator>(
-        host.getNumBits(), host.getSpin(), SectorBasis{});
-    op->copyTermsFrom(host);
-
-    const ::FixedSzStreamingSymmetryOperator* host_ptr = &host;
-    op->configureRepLazy(
-        dim, group_size, is_real,
-        /*rep_provider=*/[host_ptr, sector_idx]() {
-            return host_ptr->getRepSectorData(sector_idx);
-        },
-        /*csr_provider=*/[host_ptr, sector_idx]() -> ::SymmetrySector {
-            return host_ptr->getSector(sector_idx);  // const ref -> copy
-        });
-    return op;
+    return ops;
 }
 
 } // namespace ed::symmetry

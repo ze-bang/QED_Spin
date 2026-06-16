@@ -27,7 +27,7 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/symmetry/symmetry_sector_data.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/projector_chain.h>
 #include <ed/symmetry/sector_basis.h>

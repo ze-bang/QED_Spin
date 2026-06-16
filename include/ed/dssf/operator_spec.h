@@ -23,7 +23,7 @@
 #pragma once
 
 #include <ed/core/construct_ham.h>
-#include <ed/core/fixed_sz_operator_types.h>
+#include <ed/core/fixed_sz_operator.h>
 
 #include <array>
 #include <cstdint>
@@ -127,7 +127,7 @@ struct ObservablePairs {
     /// Audit #2 (FixedSz->Operator path): parallel
     /// `shared_ptr<FixedSzOperator>` arrays of equal length to obs_1/obs_2,
     /// populated only when `spec.use_fixed_sz` is true. Needed because
-    /// slicing `FixedSzSumOperator(...)` etc. into a value-type `Operator`
+    /// slicing a fixed-Sz operator into a value-type `Operator`
     /// destroys the dimension semantics: the base `Operator::apply` checks
     /// `size != (1ULL << n_bits_)` and throws on the smaller fixed-Sz
     /// dimension. CPU dispatch in workflows that consume these vectors

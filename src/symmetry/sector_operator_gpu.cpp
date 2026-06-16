@@ -14,18 +14,9 @@
 // Phase A of the operator-collapse GPU-parity work (Jun 2026).
 // =============================================================================
 
-#ifndef WITH_CUDA
-
-#include <ed/symmetry/sector_operator.h>
-
-#include <stdexcept>
-
-ed::LinearOperator::MatvecFn
-ed::symmetry::SectorOperator::bind_cuda() const {
-    throw std::logic_error(
-        "ed::symmetry::SectorOperator::bind_cuda: built without WITH_CUDA. "
-        "Rebuild with -DWITH_CUDA=ON to enable the GPU symmetry mirror, "
-        "or route the workload through CpuBackend (device='cpu').");
-}
-
-#endif  // !WITH_CUDA
+// Operator-collapse Phase 4: SectorOperator is now the alias
+// SubspaceOperator<SymmetryBasisPolicy, Host>, whose bind_cuda() is an INLINE
+// template member. Under !WITH_CUDA it throws inline (no out-of-line key
+// function needed); under WITH_CUDA the strong bind_cuda_impl_ specialization
+// lives in sector_operator_gpu.cu (ed_solvers_gpu). This TU therefore no
+// longer defines any symbol -- it is intentionally empty.

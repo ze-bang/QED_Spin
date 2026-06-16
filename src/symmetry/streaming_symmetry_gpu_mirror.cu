@@ -33,7 +33,7 @@
 
 #ifdef WITH_CUDA
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/symmetry/symmetry_sector_data.h>
 #include <ed/matvec/device_basis_policy.cuh>
 #include <ed/matvec/term_kernels_gpu.cuh>
 #include <ed/matvec/term_storage.h>

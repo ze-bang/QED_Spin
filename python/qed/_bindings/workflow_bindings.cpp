@@ -21,24 +21,20 @@
 #include <pybind11/complex.h>
 
 #include <ed/core/hdf5_io.h>             // isDisabledOutputPath
-#include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (for device='gpu' promotion)
+#include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/core/operator.h>
 #include <ed/core/results.h>
-#include <ed/core/sector_loop.h>          // StreamingSymmetryHandle (SOTA)
+#include <ed/core/sector_loop.h>          // filter_sectors + resolve_target_sector
 #include <ed/core/sector_thermo.h>        // combine_sector_thermodynamics (SOTA)
 #include <ed/core/select_backend.h>
-#include <ed/core/streaming_symmetry.h>
 #include <ed/dssf/cross_sector_orbit_observable.h>  // SOTA cross-irrep observable
 #include <ed/matvec/backends/cpu_backend.h>          // CpuBackend for cf_spectral_from_vector
 #include <ed/observables/cf_spectral_kernel.h>      // cf_spectral_from_vector
 #include <ed/observables/ftlm_cross_irrep_kernel.h>  // SOTA finite-T cross-irrep
 #include <ed/orchestrator.h>
 #include <ed/solvers/kpm_dos.h>                      // Wave B3: estimate_spectral_bounds
-#ifdef WITH_CUDA
-#  include <ed/gpu/gpu_operator.cuh>     // GPUOperator + convertOperatorToGPU helper
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -64,42 +60,26 @@ using Complex = std::complex<double>;
 // so a simple reference upcast is enough.
 
 // ---------------------------------------------------------------------------
-// GPU promotion helper (May 2026 follow-up to the "Universal save contract").
+// GPU lane (operator-collapse Phase 2a, Jun 2026).
 //
 // ``qed.solve/thermal/spectral(device='gpu')`` flips
-// ``opts.backend.allow_gpu = true`` in the Python wrappers, but the
-// orchestrator's ``ed::select_backend(geom, c)`` will only pick the
-// ``CudaBackend`` lane when the operator's ``Geometry`` either lives in
-// device memory (``MemorySpace::CudaDevice``) or advertises lazy device
-// matvec support (``supports_device_matvec=true``). The plain
-// ``ed::Operator`` and ``ed::FixedSzOperator`` (no symmetry) classes
-// advertise neither, so ``device='gpu'`` was silently downgraded to
-// ``CpuBackend`` -- the user got CPU performance while paying for the
-// GPU runtime check.
+// ``opts.backend.allow_gpu = true`` in the Python wrappers. The plain
+// ``ed::Operator`` / ``ed::FixedSzOperator`` now advertise
+// ``geometry().supports_device_matvec=true`` (WITH_CUDA), and their
+// ``bind_cuda()`` lazily builds a ``CudaMatVecBackend`` device mirror (the
+// SOTA no-atomic gather kernel). So ``ed::select_backend`` picks the
+// ``CudaBackend`` lane straight off the host operator's capability flag --
+// no bespoke ``GPUOperator`` / ``GPUFixedSzOperator`` promotion needed
+// (that path is retired here; the legacy classes go away in Phase 2b).
 //
-// The streaming-symmetry binding ``workflows_solve_streaming_symmetry_
-// directory`` is unaffected: ``StreamingSymmetryOperator::SectorView``
-// already advertises ``supports_device_matvec=true`` via the lazy GPU
-// mirror that ``bind_cuda_for_sector`` materialises.
+// The streaming-symmetry directory binding is likewise capability-driven:
+// the per-sector operators advertise the flag and wire their own lazy GPU
+// mirror.
 //
-// This helper bridges the gap for the plain ``Operator`` /
-// ``FixedSzOperator`` lanes by lazily constructing a ``GPUOperator``
-// (or ``GPUFixedSzOperator``) from the host operator's term list when
-// the caller actually wants the GPU lane. When the build does not
-// have CUDA, or no NVIDIA device is visible, or the operator already
-// supplies a device matvec path, we return ``nullptr`` -- the caller
-// uses the original host operator.
-//
-// The returned ``unique_ptr`` OWNS the GPU operator; callers MUST keep
-// it alive for the duration of the workflow call. The pattern in
-// every binding is:
-//
-//     auto gpu_owned = maybe_promote_to_gpu(op, opts.backend);
-//     const ed::LinearOperator& H =
-//         gpu_owned ? static_cast<ed::LinearOperator&>(*gpu_owned) : op;
-//     return ed::workflows::solve(H, std::move(opts));
-//
-// (Operator -> GPUOperator, FixedSzOperator -> GPUFixedSzOperator.)
+// What remains below: a runtime probe + a Python ``RuntimeWarning`` for the
+// few lanes that genuinely have no GPU implementation (FullDiag for solve;
+// any future host-only thermal/spectral method), so a ``device='gpu'``
+// request that silently runs on CPU is visible at the call site.
 // ---------------------------------------------------------------------------
 inline bool gpu_runtime_available() noexcept {
 #ifdef WITH_CUDA
@@ -114,36 +94,16 @@ inline bool gpu_runtime_available() noexcept {
 #endif
 }
 
-inline bool needs_gpu_promotion(const ed::LinearOperator& op,
-                                const ed::BackendConstraints& c) noexcept {
-    if (!c.allow_gpu) return false;
-    if (!gpu_runtime_available()) return false;
-    const auto geom = op.geometry();
-    // Already a device-resident operator OR advertises lazy device
-    // matvec (streaming-symmetry SectorView, etc.) -> orchestrator
-    // picks CudaBackend natively.
-    if (ed::matvec::is_device(geom.memory_space)) return false;
-    if (geom.supports_device_matvec) return false;
-    // Distributed lanes pick MPI / MPI+CUDA via their own backends;
-    // never promote a DistributedOperator here.
-    if (ed::matvec::is_distributed(geom.memory_space)) return false;
-    return true;
-}
-
-/// FullDiag fallback in ``solve_on<Backend>`` calls the bound matvec
-/// with HOST ``std::vector<Complex>`` storage (the LAPACK dense
-/// eigensolver is host-only, so the column-build runs on host
-/// pointers). A GPUOperator's ``bind_cpu()`` throws because the
-/// operator is device-pointer-only; promoting a host Operator to a
-/// GPUOperator and then routing FullDiag through it would crash.
-///
-/// FullDiag is the auto-selected method for ``global_dim <= 2^12 =
-/// 4096`` (see ``auto_solve_method`` in orchestrator.cpp). At those
-/// dimensions the matvec is negligible compared to the O(N^3) LAPACK
-/// solve and the GPU lane offers no measurable win, so silently
-/// keeping the operator on the host is both safe and good for
-/// throughput. The promoter therefore declines promotion whenever
-/// the resolved method is (or would be) FullDiag.
+/// FullDiag in ``solve_on<Backend>`` builds the dense matrix by calling
+/// the bound matvec with HOST ``std::vector<Complex>`` storage and runs
+/// the (host-only) LAPACK dense eigensolver; it explicitly pins the
+/// column-build to ``bind_cpu()``. FullDiag is the auto-selected method
+/// for ``global_dim <= 2^12 = 4096`` (see ``auto_solve_method`` in
+/// orchestrator.cpp). At those dimensions the matvec is negligible
+/// compared to the O(N^3) LAPACK solve and the GPU lane offers no
+/// measurable win, so the binding pins ``allow_gpu=false`` for FullDiag
+/// to avoid spinning up an unused CudaBackend (and a misleading "gpu"
+/// lane label).
 inline bool will_use_full_diag(const ed::LinearOperator& op,
                                const ed::workflows::SolveOptions& opts) noexcept {
     if (opts.method == ed::workflows::SolveMethod::FullDiag) return true;
@@ -216,37 +176,6 @@ inline void warn_silent_cpu_fallback(const char* what,
         // Best-effort -- never let the warning machinery break the
         // workflow call. The caller still gets the correct CPU result.
     }
-}
-
-inline std::unique_ptr<ed::LinearOperator>
-maybe_promote_to_gpu(Operator& host_op,
-                     const ed::BackendConstraints& c) {
-#ifdef WITH_CUDA
-    if (!needs_gpu_promotion(host_op, c)) return nullptr;
-    // FixedSzOperator dispatches to GPUFixedSzOperator (preserves the
-    // n_up projection); plain Operator -> GPUOperator. The dynamic_cast
-    // chain runs in derived-first order so the fixed-Sz subclass wins.
-    if (auto* fsz = dynamic_cast<FixedSzOperator*>(&host_op)) {
-        auto gpu = std::make_unique<GPUFixedSzOperator>(
-            static_cast<int>(fsz->getNumBits()),
-            static_cast<int>(fsz->getNUp()),
-            fsz->getSpin());
-        if (!convertOperatorToGPU(*fsz, *gpu)) {
-            return nullptr;
-        }
-        return gpu;
-    }
-    auto gpu = std::make_unique<GPUOperator>(
-        static_cast<int>(host_op.getNumBits()),
-        host_op.getSpin());
-    if (!convertOperatorToGPU(host_op, *gpu)) {
-        return nullptr;
-    }
-    return gpu;
-#else
-    (void)host_op; (void)c;
-    return nullptr;
-#endif
 }
 
 }  // namespace
@@ -545,43 +474,32 @@ void bind_workflows(py::module_& m) {
     // -----------------------------------------------------------------
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
-              // GPU promotion (May 2026): when the caller requested the
-              // GPU lane (``opts.backend.allow_gpu==true``) but the
-              // operator does not natively supply a device matvec, lazily
-              // construct a GPU mirror (GPUOperator / GPUFixedSzOperator)
-              // from the host operator's term list. See
-              // ``maybe_promote_to_gpu`` for the full contract.
+              // GPU lane (operator-collapse Phase 2a): the host Operator /
+              // FixedSzOperator advertise ``supports_device_matvec`` and
+              // ``bind_cuda()`` builds a CudaMatVecBackend device mirror, so
+              // ``ed::select_backend`` picks the CudaBackend lane straight
+              // off the capability flag -- no GPUOperator promotion needed.
               //
-              // Exception: FullDiag (small-dim O(N^3) dense LAPACK
-              // solve) keeps the host operator since its column-build
-              // calls the matvec with host pointers; routing through a
-              // GPUOperator would crash inside ``solve_on<Backend>``'s
-              // ``H.bind_cpu()`` call.
-              std::unique_ptr<ed::LinearOperator> gpu_owned;
+              // Exception: FullDiag (small-dim O(N^3) dense LAPACK solve) has
+              // no GPU implementation and its column-build runs on host
+              // pointers, so pin it to the CPU lane (avoids an unused
+              // CudaBackend + a misleading "gpu" label). Surface the demotion
+              // as a Python RuntimeWarning when device='gpu' was requested.
               if (will_use_full_diag(op, opts)) {
-                  // Silent demotion is the legacy contract for small-dim
-                  // FullDiag (GPU offers nothing over LAPACK at dim <
-                  // 2^12 and the column-build needs host pointers
-                  // anyway). Surface it as a Python RuntimeWarning so
-                  // the caller can audit the demotion instead of
-                  // discovering it via profiling.
                   warn_silent_cpu_fallback(
                       "qed.solve (FullDiag)", opts.backend);
-              } else {
-                  gpu_owned = maybe_promote_to_gpu(op, opts.backend);
+                  opts.backend.allow_gpu = false;
               }
-              const ed::LinearOperator& H =
-                  gpu_owned ? static_cast<const ed::LinearOperator&>(*gpu_owned)
-                            : static_cast<const ed::LinearOperator&>(op);
-              return ed::workflows::solve(H, std::move(opts));
+              return ed::workflows::solve(
+                  static_cast<const ed::LinearOperator&>(op), std::move(opts));
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::SolveOptions{},
           "Run the unified ground-state Krylov solver (Phase 4.2 collapse). "
           "Backend (CPU/GPU/MPI/MPI+GPU) is chosen via `ed::select_backend`. "
-          "When ``opts.backend.allow_gpu`` is true and the operator does not "
-          "natively expose a device matvec, a transient GPUOperator mirror "
-          "is built from the host term list so the GPU lane actually runs. "
+          "When ``opts.backend.allow_gpu`` is true and a CUDA device is "
+          "available, the host operator's lazy CudaMatVecBackend device "
+          "mirror runs the matvec on the GPU (no manual conversion). "
           "FullDiag stays on the CPU lane (no GPU implementation) and the "
           "binding emits a Python RuntimeWarning so the demotion is "
           "visible at the call site.");
@@ -590,97 +508,64 @@ void bind_workflows(py::module_& m) {
           [](Operator& op, ed::workflows::ThermalOptions opts) {
               // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
               // every thermal method (FTLM / LTLM / mTPQ / cTPQ /
-              // KpmDos) now dispatches on Backend internally and
-              // accepts both ``CpuBackend`` and ``CudaBackend``, so
-              // promotion is always safe. The ``supports_gpu`` gate
-              // stays as a defensive future-proofing hook: if a new
-              // method lands that is host-only, it can opt out by
-              // returning ``false`` from ``thermal_method_supports_gpu``
-              // and the binding will demote loudly with a Python
-              // ``RuntimeWarning``.
-              std::unique_ptr<ed::LinearOperator> gpu_owned;
-              if (thermal_method_supports_gpu(opts.method)) {
-                  gpu_owned = maybe_promote_to_gpu(op, opts.backend);
-              } else {
+              // KpmDos) dispatches on Backend internally and accepts both
+              // ``CpuBackend`` and ``CudaBackend``, so the host operator's
+              // lazy CudaMatVecBackend mirror (operator-collapse Phase 2a)
+              // serves the GPU lane directly. The ``supports_gpu`` gate
+              // stays as a defensive future-proofing hook: a new host-only
+              // method opts out via ``thermal_method_supports_gpu`` and the
+              // binding demotes loudly with a Python ``RuntimeWarning``.
+              if (!thermal_method_supports_gpu(opts.method)) {
                   warn_silent_cpu_fallback(
                       "qed.thermal (host-only method)", opts.backend);
                   opts.backend.allow_gpu = false;
               }
-              const ed::LinearOperator& H =
-                  gpu_owned ? static_cast<const ed::LinearOperator&>(*gpu_owned)
-                            : static_cast<const ed::LinearOperator&>(op);
-              return ed::workflows::thermal(H, std::move(opts));
+              return ed::workflows::thermal(
+                  static_cast<const ed::LinearOperator&>(op), std::move(opts));
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
           "Run the unified finite-temperature workflow (FTLM / LTLM / mTPQ / "
           "cTPQ / KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
-          "transparently lifts a host operator to a GPUOperator mirror so "
-          "the device-matvec lane runs without manual conversion.");
+          "routes the matvec through the host operator's lazy "
+          "CudaMatVecBackend device mirror without manual conversion.");
 
     m.def("workflows_spectral",
           [](Operator& op,
              std::vector<Operator*> observables,
              ed::workflows::SpectralOptions opts) {
-              // Promotion is only safe for the GroundStateCF lane (which
-              // routes through the backend matvec abstraction). The
-              // FtlmDynamical / KpmDynamical lanes call ``H.apply`` with
-              // HOST pointers, so a GPUOperator's device-pointer apply
-              // would crash. Skip promotion in those cases; the
-              // orchestrator falls through to CpuBackend (and we surface
-              // the silent demotion as a Python RuntimeWarning).
-              const bool can_promote =
-                  spectral_method_supports_gpu(opts.method);
-              std::unique_ptr<ed::LinearOperator> gpu_owned_H;
-              if (can_promote) {
-                  gpu_owned_H = maybe_promote_to_gpu(op, opts.backend);
-              } else {
-                  // Phases F + G of the "Close CPU/GPU Gaps" plan
-                  // (May 2026): every spectral method now dispatches
-                  // on Backend internally, so this branch is dead
-                  // for valid methods. Keep the defensive demotion
-                  // for future host-only methods that may opt-out
-                  // via ``spectral_method_supports_gpu``.
+              // GPU lane (operator-collapse Phase 2a): every spectral method
+              // dispatches on Backend internally and consumes H + the
+              // observables through ``bind<Backend>()``. The host operators
+              // advertise ``supports_device_matvec`` and their ``bind_cuda()``
+              // device mirror serves the CudaBackend lane directly, so both
+              // the Hamiltonian and the observables run device-resident with
+              // no GPUOperator promotion. ``spectral_method_supports_gpu``
+              // stays as a defensive hook for any future host-only method.
+              if (!spectral_method_supports_gpu(opts.method)) {
                   warn_silent_cpu_fallback(
                       "qed.spectral (host-only method)",
                       opts.backend);
                   opts.backend.allow_gpu = false;
               }
-              // Observables share the Hamiltonian's backend lane: when
-              // H is promoted to GPU, the matching observables must
-              // run on the device too (CF / KPM / FTLM kernels apply
-              // observables via the same Backend pointers as H).
-              std::vector<std::unique_ptr<ed::LinearOperator>> gpu_owned_obs;
-              gpu_owned_obs.reserve(observables.size());
               std::vector<const ed::LinearOperator*> obs;
               obs.reserve(observables.size());
               for (auto* o : observables) {
                   if (!o) continue;
-                  std::unique_ptr<ed::LinearOperator> o_owned;
-                  if (can_promote) {
-                      o_owned = maybe_promote_to_gpu(*o, opts.backend);
-                  }
-                  if (o_owned) {
-                      obs.push_back(
-                          static_cast<const ed::LinearOperator*>(o_owned.get()));
-                      gpu_owned_obs.push_back(std::move(o_owned));
-                  } else {
-                      obs.push_back(static_cast<const ed::LinearOperator*>(o));
-                  }
+                  obs.push_back(static_cast<const ed::LinearOperator*>(o));
               }
-              const ed::LinearOperator& H =
-                  gpu_owned_H ? static_cast<const ed::LinearOperator&>(*gpu_owned_H)
-                              : static_cast<const ed::LinearOperator&>(op);
-              return ed::workflows::spectral(H, obs, std::move(opts));
+              return ed::workflows::spectral(
+                  static_cast<const ed::LinearOperator&>(op), obs,
+                  std::move(opts));
           },
           py::arg("op"),
           py::arg("observables"),
           py::arg("opts") = ed::workflows::SpectralOptions{},
           "Run the unified dynamical-correlator workflow "
           "(continued-fraction Lanczos or FTLM dynamical) over the auto-"
-          "selected Backend. When ``allow_gpu`` is set and the Hamiltonian "
-          "is a host operator, both the Hamiltonian and the observable "
-          "pair are mirrored onto the device so the GPU lane actually runs.");
+          "selected Backend. When ``allow_gpu`` is set and a CUDA device is "
+          "available, the Hamiltonian and the observable pair run through "
+          "their lazy CudaMatVecBackend device mirrors on the GPU lane.");
 
     // -----------------------------------------------------------------
     // Streaming-symmetry workflow over a directory (mirrors the CLI's
@@ -713,13 +598,15 @@ void bind_workflows(py::module_& m) {
               ed::GroundStateResult agg;
               {
                   py::gil_scoped_release release;
-                  // Call the streaming-symmetry sub-factory directly
-                  // instead of the top-level `ed::make_operator` so the
-                  // bind never references `make_distributed_operator`
-                  // (whose constructor lives in `ed_distributed`, not
-                  // linked against `_core.so`).
-                  auto base_op = ed::make_streaming_symmetry_operator(spec);
-                  ed::core::StreamingSymmetryHandle handle(base_op.get());
+                  // Operator-collapse Phase 3 (Jun 2026): enumerate the
+                  // symmetry sectors directly via
+                  // ``make_sector_operators_tagged`` and view them through
+                  // the handle-shaped ``SectorSetView`` (random access by raw
+                  // irrep index). No monolithic streaming operator is
+                  // materialised; the CSR-free lazy-rep memory optimisation
+                  // is preserved by the tagged factory's lazy regime.
+                  ed::core::SectorSetView handle(
+                      ed::make_sector_operators_tagged(spec));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -1061,8 +948,12 @@ void bind_workflows(py::module_& m) {
               ed::ThermalResult agg;
               {
                   py::gil_scoped_release release;
-                  auto base_op = ed::make_streaming_symmetry_operator(spec);
-                  ed::core::StreamingSymmetryHandle handle(base_op.get());
+                  // Operator-collapse Phase 3 (Jun 2026): direct sector
+                  // enumeration via ``make_sector_operators_tagged`` viewed
+                  // through ``SectorSetView`` (preserves the CSR-free
+                  // lazy-rep memory path for large N).
+                  ed::core::SectorSetView handle(
+                      ed::make_sector_operators_tagged(spec));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -1387,8 +1278,13 @@ void bind_workflows(py::module_& m) {
               ed::SpectralResult agg;
               {
                   py::gil_scoped_release release;
-                  auto base_op = ed::make_streaming_symmetry_operator(spec);
-                  ed::core::StreamingSymmetryHandle handle(base_op.get());
+                  // Operator-collapse Phase 3 (Jun 2026): direct sector
+                  // enumeration via ``make_sector_operators_tagged`` viewed
+                  // through ``SectorSetView`` (same-irrep spectral path;
+                  // cross-irrep transitions remain on CrossSectorOrbitObservable
+                  // below).
+                  ed::core::SectorSetView handle(
+                      ed::make_sector_operators_tagged(spec));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -1482,7 +1378,7 @@ void bind_workflows(py::module_& m) {
                   // observable to the orbit basis before calling
                   // this entry.
                   std::vector<const ed::LinearOperator*> obs_vec{
-                      gs_sec.get()};
+                      gs_sec};
                   ed::SpectralResult sr =
                       ed::workflows::spectral(*gs_sec, obs_vec, sopts);
 
@@ -1642,22 +1538,15 @@ void bind_workflows(py::module_& m) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
                   }
 
-                  auto src_base = ed::make_streaming_symmetry_operator(src_spec);
-                  ed::core::StreamingSymmetryHandle src_handle(src_base.get());
-                  auto* src_fsz =
-                      dynamic_cast<FixedSzStreamingSymmetryOperator*>(src_base.get());
-                  auto* src_sym =
-                      dynamic_cast<StreamingSymmetryOperator*>(src_base.get());
-
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref;
-                  if (src_fsz)      src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_fsz);
-                  else if (src_sym) src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_sym);
-                  else {
-                      throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: streaming-symmetry operator dynamic_cast "
-                          "failed (neither fixed-Sz nor full streaming op).");
-                  }
+                  // Operator-collapse Phase 3 (Jun 2026): enumerate the source
+                  // symmetry sectors directly via
+                  // ``make_sector_operators_tagged`` + ``SectorSetView``. The
+                  // cross-irrep observable's ``OperatorRef`` is built later
+                  // from the resolved source / target sectors'
+                  // ``SectorOperator::materialized_basis()`` (no monolithic
+                  // streaming operator).
+                  ed::core::SectorSetView src_handle(
+                      ed::make_sector_operators_tagged(src_spec));
 
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
@@ -1798,18 +1687,25 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
+                  // Source observable handle: the GS sector's materialised
+                  // orbit basis (forces the host CSR for this one sector even
+                  // in the CSR-free lazy regime). ``num_bits`` is the lattice
+                  // site count the legacy streaming op exposed via
+                  // ``getNumBits()``.
+                  const ed::symmetry::SectorBasis& src_basis =
+                      gs_sec_view->materialized_basis();
+                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                          src_basis, static_cast<std::uint64_t>(num_sites));
+
                   // -----------------------------------------------------
-                  // (4) Build / re-use the target streaming operator. If
-                  //     ``delta_n_up == 0`` we re-use the source object;
-                  //     otherwise we build a second operator with the
-                  //     shifted ``fixed_sz_n_up``.
+                  // (4) Build / re-use the target sector set. If
+                  //     ``delta_n_up == 0`` we re-use the source set (the
+                  //     view is cheaply copyable -- shared_ptr-backed);
+                  //     otherwise we enumerate a second set with the shifted
+                  //     ``fixed_sz_n_up``.
                   // -----------------------------------------------------
-                  std::unique_ptr<ed::LinearOperator> dst_base;
-                  ed::core::StreamingSymmetryHandle* dst_handle_ptr = nullptr;
-                  ed::core::StreamingSymmetryHandle dst_handle_storage =
-                      src_handle;
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                      src_ref;
+                  ed::core::SectorSetView dst_handle = src_handle;
 
                   if (delta_n_up != 0) {
                       if (!src_spec.fixed_sz.has_value()) {
@@ -1824,23 +1720,9 @@ void bind_workflows(py::module_& m) {
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
                       dst_spec.fixed_sz           = *src_spec.fixed_sz + delta_n_up;
-                      dst_base = ed::make_streaming_symmetry_operator(dst_spec);
-                      dst_handle_storage =
-                          ed::core::StreamingSymmetryHandle(dst_base.get());
-                      auto* dst_fsz =
-                          dynamic_cast<FixedSzStreamingSymmetryOperator*>(dst_base.get());
-                      auto* dst_sym =
-                          dynamic_cast<StreamingSymmetryOperator*>(dst_base.get());
-                      if (dst_fsz)      dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_fsz);
-                      else if (dst_sym) dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_sym);
-                      else {
-                          throw std::runtime_error(
-                              "workflows_spectral_streaming_symmetry_cross_"
-                              "irrep_directory: target operator dynamic_cast "
-                              "failed.");
-                      }
+                      dst_handle = ed::core::SectorSetView(
+                          ed::make_sector_operators_tagged(dst_spec));
                   }
-                  dst_handle_ptr = &dst_handle_storage;
 
                   // -----------------------------------------------------
                   // (5) Resolve the target sector via the selection
@@ -1851,7 +1733,7 @@ void bind_workflows(py::module_& m) {
                   double q_residual = 0.0;
                   const std::size_t dst_sector_idx =
                       ed::core::resolve_target_sector(
-                          *dst_handle_ptr,
+                          dst_handle,
                           gs_src_idx,
                           opts.momentum_transfer,
                           &q_residual);
@@ -1886,24 +1768,20 @@ void bind_workflows(py::module_& m) {
                           std::to_string(opts.momentum_tolerance) + ").");
                   }
                   ed::SectorTag dst_tag =
-                      dst_handle_ptr->sector_tag(dst_sector_idx);
+                      dst_handle.sector_tag(dst_sector_idx);
 
                   // -----------------------------------------------------
-                  // (6) Build phi = O_Q |psi_0> in the target orbit
-                  //     basis via CrossSectorOrbitObservable.
+                  // (6) Resolve the target sector operator. An empty
+                  //     (dropped) target irrep => spectral function is
+                  //     identically zero (the SectorSetView returns nullptr
+                  //     for a vanishing sector). Even so the GS solve above
+                  //     already populated ``agg.backend.lane`` (Phase H.1)
+                  //     so the caller can still see which lane produced the
+                  //     zero result.
                   // -----------------------------------------------------
-                  ed::dssf::CrossSectorOrbitObservable orb_obs(
-                      src_ref, gs_src_idx,
-                      dst_ref, dst_sector_idx,
-                      tlist,
-                      static_cast<float>(spin_l));
-                  const std::size_t dim_dst = orb_obs.dim_dst();
-                  if (dim_dst == 0) {
-                      // Target sector is empty -- spectral function is
-                      // identically zero. Even so the GS solve above
-                      // already populated ``agg.backend.lane`` (Phase
-                      // H.1) so the caller can still see which lane
-                      // produced the zero result.
+                  ed::symmetry::SectorOperator* dst_sec_view =
+                      dst_handle.sector(dst_sector_idx);
+                  if (!dst_sec_view || dst_sec_view->dim() == 0) {
                       const std::size_t num_omega =
                           (opts.num_omega > 0) ? opts.num_omega : 1;
                       agg.omega.resize(num_omega);
@@ -1928,22 +1806,37 @@ void bind_workflows(py::module_& m) {
                       agg.per_sector_pair.push_back(std::move(entry));
                       return agg;
                   }
+
+                  // Target observable handle: the resolved sector's
+                  // materialised orbit basis. Build phi = O_Q |psi_0> in the
+                  // target orbit basis via CrossSectorOrbitObservable. Each
+                  // OperatorRef wraps exactly ONE sector, so the source /
+                  // target sector indices passed to the observable are 0.
+                  const ed::symmetry::SectorBasis& dst_basis =
+                      dst_sec_view->materialized_basis();
+                  ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                          dst_basis, static_cast<std::uint64_t>(num_sites));
+                  ed::dssf::CrossSectorOrbitObservable orb_obs(
+                      src_ref, /*src_sector=*/0,
+                      dst_ref, /*dst_sector=*/0,
+                      tlist,
+                      static_cast<float>(spin_l));
+                  const std::size_t dim_dst = orb_obs.dim_dst();
+                  if (dst_sec_view->dim() != dim_dst) {
+                      throw std::runtime_error(
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "directory: target sector dim mismatch (view="
+                          + std::to_string(dst_sec_view->dim())
+                          + ", observable=" + std::to_string(dim_dst) + ").");
+                  }
                   std::vector<Complex> phi(dim_dst, Complex(0.0, 0.0));
                   orb_obs.apply(psi0.data(), phi.data(), dim_dst);
 
                   // -----------------------------------------------------
                   // (7) Run cf_spectral_from_vector on H restricted to
-                  //     the target sector. Uses CpuBackend (host memory)
-                  //     and the SectorView matvec.
+                  //     the target sector (the resolved ``dst_sec_view``).
                   // -----------------------------------------------------
-                  auto dst_sec_view = dst_handle_ptr->sector(dst_sector_idx);
-                  if (!dst_sec_view || dst_sec_view->dim() != dim_dst) {
-                      throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: target sector dim mismatch (view="
-                          + std::to_string(dst_sec_view ? dst_sec_view->dim() : 0)
-                          + ", observable=" + std::to_string(dim_dst) + ").");
-                  }
 
                   // Build the frequency grid -- linear spacing between
                   // [omega_min, omega_max]. Matches the convention used
@@ -2203,21 +2096,14 @@ void bind_workflows(py::module_& m) {
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
                   }
-                  auto src_base = ed::make_streaming_symmetry_operator(src_spec);
-                  ed::core::StreamingSymmetryHandle src_handle(src_base.get());
-                  auto* src_fsz =
-                      dynamic_cast<FixedSzStreamingSymmetryOperator*>(src_base.get());
-                  auto* src_sym =
-                      dynamic_cast<StreamingSymmetryOperator*>(src_base.get());
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref;
-                  if (src_fsz)      src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_fsz);
-                  else if (src_sym) src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_sym);
-                  else {
-                      throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "multiq_directory: streaming-symmetry operator "
-                          "dynamic_cast failed.");
-                  }
+                  // Operator-collapse Phase 3 (Jun 2026): direct sector
+                  // enumeration via ``make_sector_operators_tagged`` +
+                  // ``SectorSetView``. ``src_ref`` is built once after the GS
+                  // solve from the GS sector's materialised orbit basis;
+                  // ``dst_ref`` is rebuilt per-Q from the resolved target
+                  // sector (the target sector varies with Q).
+                  ed::core::SectorSetView src_handle(
+                      ed::make_sector_operators_tagged(src_spec));
 
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
@@ -2331,11 +2217,20 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
-                  // (4) Build / re-use the target streaming operator ONCE
-                  //     (depends only on delta_n_up, not on Q).
-                  std::unique_ptr<ed::LinearOperator> dst_base;
-                  ed::core::StreamingSymmetryHandle dst_handle_storage = src_handle;
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref = src_ref;
+                  // Source observable handle: GS sector's materialised orbit
+                  // basis (Q-independent, built once). Each OperatorRef wraps
+                  // exactly ONE sector.
+                  const ed::symmetry::SectorBasis& src_basis =
+                      gs_sec_view->materialized_basis();
+                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                          src_basis, static_cast<std::uint64_t>(num_sites));
+
+                  // (4) Build / re-use the target sector set ONCE (depends
+                  //     only on delta_n_up, not on Q). The view is cheaply
+                  //     copyable (shared_ptr-backed), so the ``delta == 0``
+                  //     case shares the source set.
+                  ed::core::SectorSetView dst_handle = src_handle;
                   if (delta_n_up != 0) {
                       if (!src_spec.fixed_sz.has_value()) {
                           throw std::invalid_argument(
@@ -2349,24 +2244,9 @@ void bind_workflows(py::module_& m) {
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
                       dst_spec.fixed_sz           = *src_spec.fixed_sz + delta_n_up;
-                      dst_base = ed::make_streaming_symmetry_operator(dst_spec);
-                      dst_handle_storage =
-                          ed::core::StreamingSymmetryHandle(dst_base.get());
-                      auto* dst_fsz =
-                          dynamic_cast<FixedSzStreamingSymmetryOperator*>(dst_base.get());
-                      auto* dst_sym =
-                          dynamic_cast<StreamingSymmetryOperator*>(dst_base.get());
-                      if (dst_fsz)      dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_fsz);
-                      else if (dst_sym) dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_sym);
-                      else {
-                          throw std::runtime_error(
-                              "workflows_spectral_streaming_symmetry_cross_"
-                              "irrep_multiq_directory: target operator "
-                              "dynamic_cast failed.");
-                      }
+                      dst_handle = ed::core::SectorSetView(
+                          ed::make_sector_operators_tagged(dst_spec));
                   }
-                  ed::core::StreamingSymmetryHandle* dst_handle_ptr =
-                      &dst_handle_storage;
 
                   // (5) Shared omega grid (built once).
                   const std::size_t num_omega =
@@ -2409,7 +2289,7 @@ void bind_workflows(py::module_& m) {
                       double q_residual = 0.0;
                       const std::size_t dst_sector_idx =
                           ed::core::resolve_target_sector(
-                              *dst_handle_ptr, gs_src_idx, Q, &q_residual);
+                              dst_handle, gs_src_idx, Q, &q_residual);
                       if (dst_sector_idx == ed::core::kSectorNotFound) {
                           push_zero_entry(
                               "no surviving target sector (residual=" +
@@ -2424,26 +2304,35 @@ void bind_workflows(py::module_& m) {
                           continue;
                       }
                       ed::SectorTag dst_tag =
-                          dst_handle_ptr->sector_tag(dst_sector_idx);
+                          dst_handle.sector_tag(dst_sector_idx);
+
+                      // Resolve the target sector operator; an empty (dropped)
+                      // irrep => zero entry. Build ``dst_ref`` from the
+                      // resolved sector's materialised orbit basis (the target
+                      // sector varies with Q, so this is per-Q).
+                      ed::symmetry::SectorOperator* dst_sec_view =
+                          dst_handle.sector(dst_sector_idx);
+                      if (!dst_sec_view || dst_sec_view->dim() == 0) {
+                          push_zero_entry("target sector empty");
+                          continue;
+                      }
+                      const ed::symmetry::SectorBasis& dst_basis =
+                          dst_sec_view->materialized_basis();
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
+                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                              dst_basis, static_cast<std::uint64_t>(num_sites));
 
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
-                          src_ref, gs_src_idx,
-                          dst_ref, dst_sector_idx,
+                          src_ref, /*src_sector=*/0,
+                          dst_ref, /*dst_sector=*/0,
                           tlist_per_q[qi], static_cast<float>(spin_l));
                       const std::size_t dim_dst = orb_obs.dim_dst();
-                      if (dim_dst == 0) {
-                          push_zero_entry("target sector empty");
+                      if (dst_sec_view->dim() != dim_dst) {
+                          push_zero_entry("target sector dim mismatch");
                           continue;
                       }
                       std::vector<Complex> phi(dim_dst, Complex(0.0, 0.0));
                       orb_obs.apply(psi0.data(), phi.data(), dim_dst);
-
-                      auto dst_sec_view =
-                          dst_handle_ptr->sector(dst_sector_idx);
-                      if (!dst_sec_view || dst_sec_view->dim() != dim_dst) {
-                          push_zero_entry("target sector dim mismatch");
-                          continue;
-                      }
 
                       ed::observables::CfSpectralOptions cfopts;
                       cfopts.krylov_dim   = opts.krylov_dim;
@@ -2626,17 +2515,13 @@ void bind_workflows(py::module_& m) {
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
                   }
-                  auto src_base = ed::make_streaming_symmetry_operator(src_spec);
-                  ed::core::StreamingSymmetryHandle src_handle(src_base.get());
-                  auto* src_fsz = dynamic_cast<FixedSzStreamingSymmetryOperator*>(src_base.get());
-                  auto* src_sym = dynamic_cast<StreamingSymmetryOperator*>(src_base.get());
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref;
-                  if (src_fsz)      src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_fsz);
-                  else if (src_sym) src_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*src_sym);
-                  else throw std::runtime_error(
-                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                      "irrep_directory: streaming-symmetry operator "
-                      "dynamic_cast failed.");
+                  // Operator-collapse Phase 3 (Jun 2026): direct sector
+                  // enumeration via ``make_sector_operators_tagged`` +
+                  // ``SectorSetView``. ``src_ref`` / ``dst_ref`` are built
+                  // per (k_src, k_dst) pair inside the loop from each sector
+                  // operator's materialised orbit basis.
+                  ed::core::SectorSetView src_handle(
+                      ed::make_sector_operators_tagged(src_spec));
 
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
@@ -2649,11 +2534,7 @@ void bind_workflows(py::module_& m) {
                   // -----------------------------------------------
                   // (2) Build / re-use target operator + ref.
                   // -----------------------------------------------
-                  std::unique_ptr<ed::LinearOperator> dst_base;
-                  ed::core::StreamingSymmetryHandle dst_handle_storage =
-                      src_handle;
-                  ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                      src_ref;
+                  ed::core::SectorSetView dst_handle = src_handle;
                   if (delta_n_up != 0) {
                       if (!src_spec.fixed_sz.has_value()) {
                           throw std::invalid_argument(
@@ -2667,16 +2548,8 @@ void bind_workflows(py::module_& m) {
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
                       dst_spec.fixed_sz           = *src_spec.fixed_sz + delta_n_up;
-                      dst_base = ed::make_streaming_symmetry_operator(dst_spec);
-                      dst_handle_storage =
-                          ed::core::StreamingSymmetryHandle(dst_base.get());
-                      auto* dst_fsz = dynamic_cast<FixedSzStreamingSymmetryOperator*>(dst_base.get());
-                      auto* dst_sym = dynamic_cast<StreamingSymmetryOperator*>(dst_base.get());
-                      if (dst_fsz)      dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_fsz);
-                      else if (dst_sym) dst_ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(*dst_sym);
-                      else throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                          "irrep_directory: target dynamic_cast failed.");
+                      dst_handle = ed::core::SectorSetView(
+                          ed::make_sector_operators_tagged(dst_spec));
                   }
 
                   // -----------------------------------------------
@@ -2719,13 +2592,14 @@ void bind_workflows(py::module_& m) {
                   sector_tags.reserve(src_sector_indices.size());
 
                   for (std::size_t k_src : src_sector_indices) {
-                      auto src_view = src_handle.sector(k_src);
+                      ed::symmetry::SectorOperator* src_view =
+                          src_handle.sector(k_src);
                       if (!src_view || src_view->dim() == 0) continue;
 
                       double q_residual = 0.0;
                       const std::size_t k_dst =
                           ed::core::resolve_target_sector(
-                              dst_handle_storage,
+                              dst_handle,
                               k_src,
                               opts.momentum_transfer,
                               &q_residual);
@@ -2739,14 +2613,27 @@ void bind_workflows(py::module_& m) {
                               " > tolerance = " +
                               std::to_string(opts.momentum_tolerance) + ").");
                       }
-                      auto dst_view = dst_handle_storage.sector(k_dst);
+                      ed::symmetry::SectorOperator* dst_view =
+                          dst_handle.sector(k_dst);
                       if (!dst_view || dst_view->dim() == 0) continue;
 
                       // Cross-irrep rectangular observable for THIS
-                      // (k_src, k_dst) pair.
+                      // (k_src, k_dst) pair. Each OperatorRef wraps one
+                      // sector's materialised orbit basis (src_sector ==
+                      // dst_sector == 0).
+                      const ed::symmetry::SectorBasis& src_basis =
+                          src_view->materialized_basis();
+                      const ed::symmetry::SectorBasis& dst_basis =
+                          dst_view->materialized_basis();
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
+                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                              src_basis, static_cast<std::uint64_t>(num_sites));
+                      ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
+                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
+                              dst_basis, static_cast<std::uint64_t>(num_sites));
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
-                          src_ref, k_src,
-                          dst_ref, k_dst,
+                          src_ref, /*src_sector=*/0,
+                          dst_ref, /*dst_sector=*/0,
                           tlist,
                           static_cast<float>(spin_l));
                       const std::size_t dim_src = src_view->dim();
@@ -2799,7 +2686,7 @@ void bind_workflows(py::module_& m) {
                       sector_results.push_back(std::move(sec_res));
                       sector_tags.emplace_back(
                           src_handle.sector_tag(k_src),
-                          dst_handle_storage.sector_tag(k_dst));
+                          dst_handle.sector_tag(k_dst));
                   }
 
                   // -----------------------------------------------

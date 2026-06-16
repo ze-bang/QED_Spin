@@ -17,8 +17,10 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
 #include <ed/solvers/lanczos.h>
+#include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -92,27 +94,46 @@ void write_zN_translation_fixtures(const std::string& dir, int N) {
     }
 }
 
-std::unique_ptr<StreamingSymmetryOperator>
-build_heisenberg_pbc_streaming(uint64_t N, double J) {
-    auto op = std::make_unique<StreamingSymmetryOperator>(N, 0.5f);
+void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op,
+                              uint64_t N, double J) {
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
     for (uint64_t i = 0; i < N; ++i) {
-        uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        const uint64_t j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, J_real);
+        op.addTwoBodyTerm(0, i, 1, j, J_half);
+        op.addTwoBodyTerm(1, i, 0, j, J_half);
+    }
+}
 
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+// Full-Hilbert reference operator (no symmetry) built from the same explicit
+// term list, so we can cross-check the standard chain builder.
+std::unique_ptr<Operator> build_heisenberg_pbc_full(uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
+    const Complex J_real(J, 0.0);
+    const Complex J_half(0.5 * J, 0.0);
+    for (uint64_t i = 0; i < N; ++i) {
+        const uint64_t j = (i + 1) % N;
+        op->addTwoBodyTerm(2, i, 2, j, J_real);
+        op->addTwoBodyTerm(0, i, 1, j, J_half);
+        op->addTwoBodyTerm(1, i, 0, j, J_half);
     }
     return op;
+}
+
+// Build the dense matrix of a (small) operator by probing standard-basis
+// vectors through its matvec.
+Eigen::MatrixXcd dense_from_operator(ed::LinearOperator& op) {
+    const std::size_t d = op.dim();
+    Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(d, d);
+    std::vector<Complex> in(d), out(d);
+    for (std::size_t j = 0; j < d; ++j) {
+        std::fill(in.begin(), in.end(), Complex(0, 0));
+        in[j] = Complex(1.0, 0.0);
+        op.apply(in.data(), out.data(), d);
+        for (std::size_t i = 0; i < d; ++i) H(i, j) = out[i];
+    }
+    return H;
 }
 
 } // namespace
@@ -140,19 +161,19 @@ TEST_CASE("Z_N JSON fixture loads (smoke)",
     }
 }
 
-TEST_CASE("StreamingSymmetryOperator::apply == Operator::apply on full space",
+TEST_CASE("explicit-term Operator::apply == chain-builder Operator::apply",
           "[symmetry][apply]") {
     const uint64_t N = 4;
     const uint64_t dim = 1ULL << N;
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    auto op     = build_heisenberg_chain(N, 1.0, /*periodic=*/true);
+    auto full_op = build_heisenberg_pbc_full(N, 1.0);
+    auto op      = build_heisenberg_chain(N, 1.0, /*periodic=*/true);
 
     double max_err = 0.0;
     for (uint64_t seed = 1; seed <= 4; ++seed) {
         auto v = random_unit_vector(dim, seed * 991ULL);
         ComplexVector a(dim, Complex(0.0, 0.0)), b(dim, Complex(0.0, 0.0));
-        sym_op->apply(v.data(), a.data(), dim);
+        full_op->apply(v.data(), a.data(), dim);
         op->apply(v.data(), b.data(), dim);
         max_err = std::max(max_err, l2_diff(a, b));
     }
@@ -168,35 +189,29 @@ TEST_CASE("Σ Z_N sector spectra == full spectrum (N=4)",
     std::string dir = make_scratch_dir("symmetry", "streaming_sectors");
     write_zN_translation_fixtures(dir, static_cast<int>(N));
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+
+    auto ops = ed::symmetry::build_full_sector_operators(
+        N, 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms(op, N, 1.0);
+        });
 
     uint64_t total = 0;
-    std::vector<uint64_t> dims;
-    for (size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        uint64_t d = sym_op->getSectorDimension(s);
-        dims.push_back(d);
-        total += d;
-    }
+    for (const auto& op : ops) total += op->dim();
     INFO("Σ sector_dim=" << total << " want=" << dim);
     REQUIRE(total == dim);
 
     auto ref = reference_from_operator(*build_heisenberg_chain(N, 1.0, true), dim);
 
     std::vector<double> all_eigs;
-    for (size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        uint64_t sd = sym_op->getSectorDimension(s);
+    for (const auto& op : ops) {
+        const std::size_t sd = op->dim();
         if (sd == 0) continue;
-        Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(sd, sd);
-        std::vector<Complex> in(sd), out(sd);
-        for (uint64_t j = 0; j < sd; ++j) {
-            std::fill(in.begin(), in.end(), Complex(0, 0));
-            in[j] = Complex(1.0, 0.0);
-            sym_op->applySymmetrized(s, in.data(), out.data());
-            for (uint64_t i = 0; i < sd; ++i) H(i, j) = out[i];
-        }
+        Eigen::MatrixXcd H = dense_from_operator(*op);
         double herm_err = (H - H.adjoint()).cwiseAbs().maxCoeff();
-        INFO("sector=" << s << " max |H - H†| = " << herm_err);
+        INFO("sector dim=" << sd << " max |H - H†| = " << herm_err);
         REQUIRE(herm_err < 1e-10);
 
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(H);
@@ -216,13 +231,17 @@ TEST_CASE("Σ Z_N sector spectra == full spectrum (N=6)",
     std::string dir = make_scratch_dir("symmetry", "streaming_n6");
     write_zN_translation_fixtures(dir, static_cast<int>(N));
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+
+    auto ops = ed::symmetry::build_full_sector_operators(
+        N, 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms(op, N, 1.0);
+        });
 
     uint64_t total = 0;
-    for (size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        total += sym_op->getSectorDimension(s);
-    }
+    for (const auto& op : ops) total += op->dim();
     INFO("N=6: Σ sector_dim=" << total << " want=" << dim);
     REQUIRE(total == dim);
 
@@ -230,17 +249,10 @@ TEST_CASE("Σ Z_N sector spectra == full spectrum (N=6)",
     auto ref = reference_from_operator(*std_op, dim);
 
     std::vector<double> all_eigs;
-    for (size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        uint64_t sd = sym_op->getSectorDimension(s);
+    for (const auto& op : ops) {
+        const std::size_t sd = op->dim();
         if (sd == 0) continue;
-        Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(sd, sd);
-        std::vector<Complex> in(sd), out(sd);
-        for (uint64_t j = 0; j < sd; ++j) {
-            std::fill(in.begin(), in.end(), Complex(0, 0));
-            in[j] = Complex(1.0, 0.0);
-            sym_op->applySymmetrized(s, in.data(), out.data());
-            for (uint64_t i = 0; i < sd; ++i) H(i, j) = out[i];
-        }
+        Eigen::MatrixXcd H = dense_from_operator(*op);
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(H);
         for (int i = 0; i < es.eigenvalues().size(); ++i) {
             all_eigs.push_back(es.eigenvalues()[i]);

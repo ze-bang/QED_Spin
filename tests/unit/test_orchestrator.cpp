@@ -38,6 +38,11 @@ TEST_CASE("workflows::solve recovers the 6-site Heisenberg ground state",
     opts.tolerance      = 1e-10;
     opts.compute_vectors = false;
     opts.method         = ed::SolveMethod::Lanczos;
+    // Single-rank CPU-lane smoke test: plain Operators advertise
+    // supports_device_matvec on WITH_CUDA builds (operator-collapse Phase 2a),
+    // so without this pin the run would auto-dispatch to the GPU lane. The GPU
+    // lane is validated separately in test_operator_gpu_parity / the gpu tree.
+    opts.backend.allow_gpu = false;
 
     auto res = ed::workflows::solve(*H, opts);
 
@@ -61,6 +66,7 @@ TEST_CASE("workflows::thermal runs the mTPQ lane end-to-end",
     opts.num_samples = 1;
     opts.krylov_dim  = 50;
     opts.random_seed = 7;
+    opts.backend.allow_gpu = false;  // single-rank CPU-lane smoke test (see above)
 
     auto res = ed::workflows::thermal(*H, opts);
     REQUIRE(res.backend.lane == "cpu");
@@ -79,6 +85,7 @@ TEST_CASE("workflows::spectral produces a non-empty CF spectral function",
     opts.omega_min  = -5.0;
     opts.omega_max  =  5.0;
     opts.num_omega  =  21;
+    opts.backend.allow_gpu = false;  // single-rank CPU-lane smoke test (see above)
 
     std::vector<const ed::LinearOperator*> obs = {H.get()};
     auto res = ed::workflows::spectral(*H, obs, opts);

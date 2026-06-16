@@ -446,73 +446,13 @@ struct GPUStateLookupEntry {
         : key(static_cast<uint64_t>(-1)), value(-1), _pad(0) {}
 };
 
-/**
- * GPU-accelerated Fixed Sz Operator class
- * Optimized for fixed magnetization sectors
- */
-class GPUFixedSzOperator : public GPUOperator {
-public:
-    GPUFixedSzOperator(int n_sites, int n_up, float spin_l = 0.5f);
-    ~GPUFixedSzOperator();
-    
-    // Override matrix-vector product for fixed Sz basis
-    void matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y);
-    
-    // Override base class methods to use fixed Sz
-    void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
-    void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
-    void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
-
-    // MatVecOperator overrides (Phase 2): dim() and description() reflect the
-    // projected sector. apply / memory_space / is_hermitian are inherited
-    // from GPUOperator and dispatch to GPUFixedSz::matVecGPU virtually.
-    [[nodiscard]] std::size_t dim() const override {
-        return static_cast<std::size_t>(fixed_sz_dim_);
-    }
-    [[nodiscard]] std::string description() const override {
-        return "GPUFixedSzOperator(n_sites=" + std::to_string(n_sites_)
-            + ", n_up=" + std::to_string(n_up_)
-            + ", dim=" + std::to_string(fixed_sz_dim_) + ")";
-    }
-
-    // Fixed-Sz kernels use shared basis table and atomic accumulation,
-    // so concurrent multi-stream execution is not safe.
-    bool supportsAsyncMatVec() const override { return false; }
-    
-    // Build basis states on GPU
-    void buildBasisOnGPU();
-
-    // Build open-addressing hash table state -> basis_idx on GPU
-    // (sized to next power of two >= 2 * fixed_sz_dim_, load factor <= 0.5).
-    // No-op if hash already built or env ED_GPU_FIXED_SZ_HASH=0.
-    void buildStateHashOnGPU();
-    
-    // Get basis dimension
-    int getFixedSzDimension() const { return fixed_sz_dim_; }
-    
-    // Get full Hilbert space dimension
-    size_t getFullDim() const { return 1ULL << n_sites_; }
-    
-    // Transform vector from fixed-Sz basis to full Hilbert space
-    std::vector<std::complex<double>> embedToFull(const std::vector<std::complex<double>>& fixed_sz_vec);
-    
-    // Project vector from full Hilbert space to fixed-Sz basis
-    std::vector<std::complex<double>> projectToReduced(const std::vector<std::complex<double>>& full_vec);
-    
-private:
-    int n_up_;
-    int fixed_sz_dim_;
-    
-    // Basis states stored on GPU
-    uint64_t* d_basis_states_;
-
-    // Open-addressing hash table for state -> basis_idx (O(1) avg lookup)
-    // d_state_hash_ == nullptr signals "not built" -> kernels fall back to
-    // binary search on basis_states. state_hash_size_ is a power of two.
-    GPUStateLookupEntry* d_state_hash_      = nullptr;
-    int                  state_hash_size_   = 0;  // power of 2, mask = size-1
-    bool                 use_hash_          = true;
-};
+// The GPU-accelerated fixed-Sz operator class (`GPUFixedSzOperator : public
+// GPUOperator`) was retired in operator-collapse Phase 2b (Jun 2026): its only
+// callers were the now-deleted `GPUEDWrapper::runGPU*FixedSz` / DSSF / TPQ
+// forwarders. CLI fixed-Sz GPU paths now build their device matvec from the
+// unified host `FixedSzOperator::bind_cuda()` (-> `CudaMatVecBackend`). The
+// fixed-Sz device kernels below stay declared for `gpu_kernels.cu` (and the
+// rank/hash diagnostic tests), even though the legacy host wrapper is gone.
 
 // CUDA kernel declarations
 namespace GPUKernels {
@@ -722,121 +662,6 @@ struct GPUHashEntry {
         projection = make_cuDoubleComplex(0.0, 0.0);
     }
 };
-
-/**
- * @brief GPU-accelerated operator for symmetry-projected sectors
- *
- * Implements the streaming symmetrized matvec on GPU:
- *   out[k] += Σ_j c_j Σ_{s∈orbit_j} (α_s/norm_j) Σ_t h(s,s') · proj(s',k)
- *
- * Data stored on device:
- *   - orbit_elements[orbit_offsets[j]..orbit_offsets[j+1]] = states in orbit j
- *   - orbit_coefficients[..] = α_s coefficients
- *   - orbit_norms[j] = normalization of |φ_j⟩
- *   - hash_table[] = open-addressing lookup: state → (basis_idx, projection_factor)
- *   - transform_data_/separated storage from GPUOperator base
- *
- * Parallelize over (j, orbit_idx) pairs via 2D grid; scatter to out[k] with atomics.
- */
-class GPUSymmetrizedOperator : public GPUOperator {
-public:
-    GPUSymmetrizedOperator(int n_sites, float spin_l = 0.5f);
-    ~GPUSymmetrizedOperator();
-    
-    /**
-     * @brief Set up sector data from CPU-side orbit information
-     *
-     * @param sector_dim       Number of symmetrized basis states in this sector
-     * @param orbit_elements   Flattened orbit elements (all orbits concatenated)
-     * @param orbit_coefficients Matching complex coefficients
-     * @param orbit_offsets    CSR-style offsets: orbit_offsets[j] = start of orbit j
-     * @param orbit_norms      Normalization factor for each basis state
-     * @param group_size       |G|, the order of the symmetry group
-     */
-    void setSectorData(
-        int sector_dim,
-        const std::vector<uint64_t>& orbit_elements,
-        const std::vector<std::complex<double>>& orbit_coefficients,
-        const std::vector<int>& orbit_offsets,
-        const std::vector<double>& orbit_norms,
-        int group_size);
-    
-    // Override matvec for symmetrized operation
-    void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
-    void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
-    void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
-
-    // MatVecOperator overrides (Phase 2): symmetrized sector dim + label.
-    [[nodiscard]] std::size_t dim() const override {
-        return static_cast<std::size_t>(sector_dim_);
-    }
-    [[nodiscard]] std::string description() const override {
-        return "GPUSymmetrizedOperator(n_sites=" + std::to_string(n_sites_)
-            + ", sector_dim=" + std::to_string(sector_dim_) + ")";
-    }
-
-    // Fixed-Sz kernels use shared basis table and atomic accumulation
-    bool supportsAsyncMatVec() const override { return false; }
-    
-    int getSectorDimension() const { return sector_dim_; }
-    
-private:
-    // Build the GPU open-addressing hash table
-    void buildHashTable();
-    
-    // Copy orbit data to device
-    void copyOrbitDataToDevice();
-    
-    // Sector properties
-    int sector_dim_ = 0;
-    int group_size_ = 1;
-    int total_orbit_elements_ = 0;
-    
-    // Host-side orbit data
-    std::vector<uint64_t> h_orbit_elements_;
-    std::vector<std::complex<double>> h_orbit_coefficients_;
-    std::vector<int> h_orbit_offsets_;
-    std::vector<double> h_orbit_norms_;
-    
-    // Device-side orbit data (CSR layout)
-    uint64_t*        d_orbit_elements_    = nullptr;
-    cuDoubleComplex* d_orbit_coefficients_ = nullptr;
-    int*             d_orbit_offsets_     = nullptr;
-    double*          d_orbit_norms_       = nullptr;
-    
-    // Device-side hash table for state → (basis_idx, projection_factor)
-    GPUHashEntry*    d_hash_table_        = nullptr;
-    int              hash_table_size_     = 0;
-    
-    bool             sector_data_on_device_ = false;
-};
-
-// ============================================================================
-// Symmetrized matvec kernel declarations
-// ============================================================================
-namespace GPUKernels {
-
-/**
- * @brief Symmetrized matvec kernel — scatter pattern
- *
- * 2D grid: x-dim = orbit elements across all basis states, y-dim = transforms.
- * Each thread applies one transform to one orbit element, then looks up the
- * result in the hash table and atomically accumulates into the output.
- */
-__global__ void matVecSymmetrized(
-    const cuDoubleComplex* __restrict__ x,
-    cuDoubleComplex* __restrict__ y,
-    const uint64_t* orbit_elements,
-    const cuDoubleComplex* orbit_coefficients,
-    const int* orbit_offsets,
-    const double* orbit_norms,
-    int sector_dim,
-    const GPUTransformData* transforms, int num_transforms,
-    const GPUHashEntry* hash_table, int hash_table_size,
-    int n_sites, float spin_l,
-    int total_orbit_elements);
-
-} // namespace GPUKernels
 
 // ============================================================================
 // CPU → GPU Conversion Helper

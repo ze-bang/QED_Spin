@@ -42,8 +42,15 @@ inline bool rep_path_enabled() {
 }
 }  // namespace
 
+// Operator-collapse Phase 4: SectorOperator is now the alias
+// SubspaceOperator<SymmetryBasisPolicy, Host>; this strong definition of its
+// bind_cuda_impl_ member specialization replaces the legacy out-of-line
+// ed::symmetry::SectorOperator::bind_cuda. The orbit data + lazy-rep state come
+// from the owned SectorBasis producer.
+template <>
 ed::LinearOperator::MatvecFn
-ed::symmetry::SectorOperator::bind_cuda() const {
+ed::SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
+                     ed::matvec::MemorySpace::Host>::bind_cuda_impl_() const {
     // Bake any pending in-place transforms into ``terms_`` before the
     // device mirror snapshots the term SoA (mirrors the legacy
     // ``bind_cuda_for_sector`` ordering).
@@ -66,7 +73,7 @@ ed::symmetry::SectorOperator::bind_cuda() const {
     // takes the rep path in BOTH regimes whenever it is usable; only the CPU
     // reserves it for the lazy regime (see ``make_backend_``).
     if (rep_path_enabled()) {
-        const RepSectorData& rd = ensure_rep_data_();
+        const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
         if (rd.usable()) {
             return ed::symmetry::make_sector_matvec_gpu_rep(
                 rd,
@@ -78,7 +85,7 @@ ed::symmetry::SectorOperator::bind_cuda() const {
     // Fallback orbit-CSR mirror: needs the host orbit CSR. In CSR-free lazy
     // mode it has not been built yet -- materialise it now (only reached for
     // sym-only sectors or when ED_GPU_SYMMETRY_REP=0).
-    ensure_sector_basis_();
+    producer_.ensureHostCsr();
 
     // One sector == one mirror, built once and captured by the returned
     // callable. ``sector_n_up_()`` returns the shared magnetization of a
@@ -87,8 +94,8 @@ ed::symmetry::SectorOperator::bind_cuda() const {
     // it returns -1 for a full-Hilbert (sym-only) sector, falling back to
     // the open-addressing hash that handles mixed-popcount states.
     return ed::symmetry::make_sector_matvec_gpu(
-        sector_basis_.sector(),
-        static_cast<double>(sector_basis_.group_size()),
+        producer_.sector(),
+        static_cast<double>(producer_.group_size()),
         static_cast<double>(spin_l_),
         terms_,
         static_cast<int>(n_bits_),

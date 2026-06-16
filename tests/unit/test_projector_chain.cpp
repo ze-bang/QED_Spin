@@ -28,9 +28,10 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/streaming_symmetry.h>
 #include <ed/symmetry/projector_chain.h>
 #include <ed/symmetry/projector.h>
+#include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 #include <ed/symmetry/subspace.h>
 
 #include <algorithm>
@@ -180,27 +181,16 @@ bool coeffs_close(const std::vector<Complex>& a,
     return true;
 }
 
-std::unique_ptr<StreamingSymmetryOperator>
-build_heisenberg_pbc_streaming(uint64_t N, double J) {
-    auto op = std::make_unique<StreamingSymmetryOperator>(N, 0.5f);
+void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op,
+                              uint64_t N, double J) {
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
     for (uint64_t i = 0; i < N; ++i) {
-        uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        const uint64_t j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, J_real);
+        op.addTwoBodyTerm(0, i, 1, j, J_half);
+        op.addTwoBodyTerm(1, i, 0, j, J_half);
     }
-    return op;
 }
 
 } // namespace
@@ -297,19 +287,27 @@ TEST_CASE("projector_chain: end-to-end ground state on Heisenberg N=6 unchanged"
     std::string dir = make_scratch_dir("projector_chain", "e2e_N6");
     write_zN_translation_fixtures(dir, static_cast<int>(N));
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+
+    // Carrier-free standalone per-sector operators (the production path).
+    auto ops = ed::symmetry::build_full_sector_operators(
+        N, 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms(op, N, 1.0);
+        });
 
     // Run a tiny power iteration in each sector and pick the minimum
     // Rayleigh quotient; for N=6 PBC Heisenberg the ground state is
     // -2.802775637731995. The refactor must not change this value.
     const double bethe_e0 = -2.802775637731995;
     double best = std::numeric_limits<double>::infinity();
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const std::size_t sd = sym_op->getSectorDimension(s);
+    for (std::size_t si = 0; si < ops.size(); ++si) {
+        ed::symmetry::SectorOperator& op = *ops[si];
+        const std::size_t sd = op.dim();
         if (sd == 0) continue;
 
-        auto v = random_unit_vector(sd, (s + 1) * 31337ULL);
+        auto v = random_unit_vector(sd, (si + 1) * 31337ULL);
         std::vector<Complex> w(sd, Complex(0.0, 0.0));
 
         // 200 inverse-iteration-free power steps with explicit shift
@@ -319,7 +317,7 @@ TEST_CASE("projector_chain: end-to-end ground state on Heisenberg N=6 unchanged"
         const double shift = 5.0;
         for (int it = 0; it < 200; ++it) {
             std::vector<Complex> Hv(sd, Complex(0.0, 0.0));
-            sym_op->applySymmetrized(s, v.data(), Hv.data());
+            op.apply(v.data(), Hv.data(), sd);
             for (std::size_t i = 0; i < sd; ++i) {
                 w[i] = shift * v[i] - Hv[i];
             }
@@ -331,7 +329,7 @@ TEST_CASE("projector_chain: end-to-end ground state on Heisenberg N=6 unchanged"
             v = w;
         }
         std::vector<Complex> Hv(sd, Complex(0.0, 0.0));
-        sym_op->applySymmetrized(s, v.data(), Hv.data());
+        op.apply(v.data(), Hv.data(), sd);
         Complex e(0.0, 0.0);
         for (std::size_t i = 0; i < sd; ++i) e += std::conj(v[i]) * Hv[i];
         if (e.real() < best) best = e.real();

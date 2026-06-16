@@ -50,6 +50,7 @@
 #include <omp.h>            // Wave 3.4 OpenMP-over-pairs
 #endif
 #include <map>
+#include <set>
 #include <fstream>
 
 #include <ed/core/ed_config.h>
@@ -70,7 +71,7 @@
 #include <ed/dssf/operator_spec.h>
 #include <ed/dssf/cross_sector_observable.h>
 #include <ed/core/fixed_sz_operator.h>
-#include <ed/core/fixed_sz_operator_types.h>
+#include <ed/core/operator_builders.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ftlm_dist.h>
 #include <ed/solvers/kpm_dos.h>
@@ -84,8 +85,29 @@
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_ed_wrapper.h>
+#include <ed/gpu/gpu_ftlm.cuh>        // GPUFTLMSolver (DSSF dynamical / static, Phase 2b)
 #include <ed/gpu/kpm_dos_gpu.cuh>
 #include <cuda_runtime.h>
+#include <functional>
+
+namespace {
+// Operator-collapse Phase 2b (Jun 2026): wrap a unified host operator's device
+// matvec (CudaMatVecBackend via Operator/FixedSzOperator::bind_cuda) as the
+// cuDoubleComplex-typed callable the GPU FTLM / KPM drivers expect.
+// std::complex<double> and cuDoubleComplex are layout-compatible, so the
+// reinterpret_cast is well-defined. Replaces the legacy GPUOperator mirror +
+// convertOperatorToGPU round-trip for the CLI DSSF / KPM GPU lanes.
+inline std::function<void(const cuDoubleComplex*, cuDoubleComplex*, int)>
+device_matvec_from(ed::LinearOperator& op) {
+    auto fn = op.bind_cuda();
+    return [fn = std::move(fn)](const cuDoubleComplex* in,
+                                cuDoubleComplex* out, int n) {
+        fn(reinterpret_cast<const ed::Complex*>(in),
+           reinterpret_cast<ed::Complex*>(out),
+           static_cast<std::size_t>(n));
+    };
+}
+}  // namespace
 #endif
 
 /**
@@ -656,59 +678,61 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     if (params.use_fixed_sz) {
         spec.fixed_sz = static_cast<int>(params.n_up);
     }
-    auto base_op = ed::make_operator(std::move(spec));
 
     ed::workflows::SolveOptions opts =
         ed_adapter::toSolveOptions(params, config.method);
 
-    // Walk every symmetry sector via SectorView and run the orchestrator
-    // per sector. This is the canonical streaming-symmetry sector loop
-    // (it replaced the deleted ``ed::exact_diagonalization_streaming_symmetry``
-    // entry point), expressed as a CLI-visible iteration over
-    // ``make_operator(streaming_symmetry=true) -> sector(k) -> workflows::solve``.
-    //
-    // SOTA upgrade (May 2026): the per-sector loop is now centralised in
-    // ``ed::core::StreamingSymmetryHandle`` so the CLI, the Pybind11
-    // bindings, and the thermal / spectral workflows all walk sectors
-    // through one well-tested helper. Each non-empty sector contributes
-    // a ``SectorTag`` (sector index + per-sector quantum numbers + Sz)
-    // that flows through into ``GroundStateResult::sector_tags`` for
-    // the in-process binding consumers; the CLI prints the tags on
-    // the diagnostic summary below.
+    // Operator-collapse Phase 3 (Jun 2026): the per-sector loop now builds the
+    // symmetry sector set directly through ``ed::make_sector_operators_tagged``
+    // -- a flat, compacted vector of standalone ``SectorOperator``s plus their
+    // ``SectorTag``s -- instead of materialising a monolithic
+    // ``FixedSzStreamingSymmetryOperator`` and walking it through
+    // ``StreamingSymmetryHandle``. The CSR-free lazy-rep memory optimisation is
+    // preserved end-to-end (the tagged factory hands out the same lazy
+    // operators the handle used to, and the tag dim is read from Pass 1.5
+    // without materialising any orbit CSR). The returned operators are
+    // self-contained (no external carrier to keep alive).
     EDResults results;
-    ed::core::StreamingSymmetryHandle handle(base_op.get());
+    ed::SectorOperatorSet sector_set = ed::make_sector_operators_tagged(spec);
 
-    const std::size_t num_sectors = handle.num_sectors();
-    if (num_sectors == 0) {
+    if (sector_set.operators.empty()) {
         throw std::runtime_error(
-            "run_streaming_symmetry_workflow: make_operator returned an "
-            "operator with no symmetry sectors. Check the "
-            "automorphism_results/ directory and the InterAll.dat deck.");
+            "run_streaming_symmetry_workflow: make_sector_operators_tagged "
+            "returned no symmetry sectors. Check the automorphism_results/ "
+            "directory and the InterAll.dat deck.");
     }
 
-    const std::vector<std::size_t> sector_indices =
-        ed::core::filter_sectors(num_sectors, opts.selected_sectors);
+    // ``selected_sectors`` filters by RAW irrep index (the tag's
+    // ``sector_index``), matching the legacy ``filter_sectors`` semantics:
+    // empty => keep all; out-of-range indices silently dropped.
+    const bool keep_all_sectors = opts.selected_sectors.empty();
+    const std::set<std::size_t> selected_set(opts.selected_sectors.begin(),
+                                             opts.selected_sectors.end());
 
     std::vector<double>                      all_eigs;
     std::vector<ed::SectorTag>               touched_tags;
     std::vector<std::vector<double>>         eigs_per_sector;
-    for (std::size_t k : sector_indices) {
-        auto sec = handle.sector(k);
+    for (std::size_t i = 0; i < sector_set.operators.size(); ++i) {
+        const ed::SectorTag& tag = sector_set.tags[i];
+        if (!keep_all_sectors && selected_set.count(tag.sector_index) == 0) {
+            continue;
+        }
+        auto& sec = sector_set.operators[i];
         if (!sec || sec->dim() == 0) continue;
         ed::workflows::SolveOptions sopts = opts;
         sopts.num_eigs = std::min<std::size_t>(opts.num_eigs, sec->dim());
         // Strip the per-sector filter / use_symmetry flag from the
         // inner call so the orchestrator does not try to re-enter the
-        // streaming loop on a single SectorView.
+        // streaming loop on a single sector operator.
         sopts.selected_sectors.clear();
         sopts.use_symmetry = false;
         // Per-sector HDF5 save: `sector_<idx>/ed_results.h5`. This is
         // the canonical layout that the symmetrized CLI workflow emits.
         if (!opts.output_dir.empty()) {
-            sopts.output_dir = opts.output_dir + "/sector_" + std::to_string(k);
+            sopts.output_dir =
+                opts.output_dir + "/sector_" + std::to_string(tag.sector_index);
         }
         auto sr = ed::workflows::solve(*sec, sopts);
-        ed::SectorTag tag = handle.sector_tag(k);
         touched_tags.push_back(tag);
         eigs_per_sector.push_back(sr.eigenvalues);
         all_eigs.insert(all_eigs.end(),
@@ -729,7 +753,7 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
                 // move that metadata inside the file too.)
                 (void) tag;
             } catch (const std::exception& e) {
-                std::cerr << "  Warning: sector " << k
+                std::cerr << "  Warning: sector " << tag.sector_index
                           << " HDF5 save failed: " << e.what() << "\n";
             }
         }
@@ -1135,11 +1159,10 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         // Lambda to process a single task (single temperature, single operator).
         //
         // GPU is only supported in the multi-temperature path
-        // (`process_operator_all_temps` below, via runGPUDynamicalCorrelationMultiTemp)
-        // and only when fixed-Sz is not active. Single-T or fixed-Sz combinations
-        // silently use the CPU kernel; the relevant heads-up is printed once at
-        // the workflow banner above (`config.dynamical.use_gpu` summary), so we
-        // do not repeat it per task here.
+        // (`process_operator_all_temps` below, via GPUFTLMSolver). Single-T
+        // tasks silently use the CPU kernel; the relevant heads-up is printed
+        // once at the workflow banner above (`config.dynamical.use_gpu`
+        // summary), so we do not repeat it per task here.
         auto process_task_single = [&](const DynTask& task) -> bool {
             int t_idx = task.temp_idx;
             int op_idx = task.op_idx;
@@ -1200,74 +1223,51 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             
 #ifdef WITH_CUDA
             // GPU multi-temperature path: requires --use-gpu (or --dyn-use-gpu).
-            // Audit item #2: fixed-Sz now also takes the GPU path via
-            // `GPUFixedSzOperator` (subclass of GPUOperator); the wrapper
-            // dispatches polymorphically on virtual `matVecGPU`. Cross-sector
-            // operators (S±) still need audit item #1 to produce non-zero
-            // transverse channels.
+            // Operator-collapse Phase 2b (Jun 2026): GPUFTLMSolver is driven
+            // directly off the unified host operators' device matvec
+            // (CudaMatVecBackend via Operator/FixedSzOperator::bind_cuda); the
+            // bespoke GPUFixedSzOperator / convertOperatorToGPU round-trip is
+            // gone. `ham` (= wh.ham_ref()) and the fixed-Sz / full observable
+            // operators carry the correct sector basis. Cross-sector operators
+            // (S±) still need cross-sector wiring for non-zero transverse
+            // channels.
             if (config.dynamical.use_gpu) {
                 try {
-                    std::unique_ptr<GPUOperator> gpu_ham_owned;
-                    std::unique_ptr<GPUOperator> gpu_obs1_owned;
-                    std::unique_ptr<GPUOperator> gpu_obs2_owned;
+                    GPUFTLMSolver::DeviceMatVec o1_dev, o2_dev;
                     if (config.system.use_fixed_sz) {
-                        const int n_up_int = static_cast<int>(
-                            (config.system.n_up >= 0)
-                                ? config.system.n_up
-                                : config.system.num_sites / 2);
-                        gpu_ham_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
-                        gpu_obs1_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
-                        gpu_obs2_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
+                        o1_dev = device_matvec_from(*obs_1_fs[op_idx]);
+                        o2_dev = device_matvec_from(*obs_2_fs[op_idx]);
                     } else {
-                        gpu_ham_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                        gpu_obs1_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                        gpu_obs2_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                    }
-                    GPUOperator& gpu_ham  = *gpu_ham_owned;
-                    GPUOperator& gpu_obs1 = *gpu_obs1_owned;
-                    GPUOperator& gpu_obs2 = *gpu_obs2_owned;
-
-                    if (!convertOperatorToGPU(ham, gpu_ham) ||
-                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
-                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
-                        throw std::runtime_error("GPU operator conversion failed");
+                        o1_dev = device_matvec_from(obs_1[op_idx]);
+                        o2_dev = device_matvec_from(obs_2[op_idx]);
                     }
 
-                    auto gpu_results = GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(
-                        &gpu_ham, &gpu_obs1, &gpu_obs2,
-                        N, params.num_samples, params.krylov_dim,
+                    GPUFTLMSolver ftlm_solver(
+                        device_matvec_from(ham),
+                        static_cast<int>(N), params.krylov_dim, 1e-10);
+
+                    auto gpu_results = ftlm_solver.computeDynamicalCorrelationMultiTemp(
+                        params.num_samples, o1_dev, o2_dev,
                         config.dynamical.omega_min,
                         config.dynamical.omega_max,
                         config.dynamical.num_omega_points,
                         params.broadening,
                         temperatures,
-                        params.random_seed,
-                        ground_state_energy
+                        ground_state_energy,
+                        params.random_seed
                     );
 
                     for (const auto& [temp, result_tuple] : gpu_results) {
-                        auto [freqs, S_real, S_imag] = result_tuple;
+                        auto [freqs, S_real, S_imag, err_real, err_imag] = result_tuple;
 
                         DynamicalResponseResults result;
                         result.frequencies = freqs;
                         result.spectral_function = S_real;
                         result.spectral_function_imag = S_imag;
-                        // GPU multi-T kernel does not currently propagate
-                        // per-omega standard errors; leave them at zero.
-                        result.spectral_error.resize(freqs.size(), 0.0);
-                        result.spectral_error_imag.resize(freqs.size(), 0.0);
+                        result.spectral_error = err_real.size() == freqs.size()
+                            ? err_real : std::vector<double>(freqs.size(), 0.0);
+                        result.spectral_error_imag = err_imag.size() == freqs.size()
+                            ? err_imag : std::vector<double>(freqs.size(), 0.0);
                         result.total_samples = params.num_samples;
 
                         results_map[temp] = result;
@@ -2044,66 +2044,42 @@ void compute_static_response_workflow(const EDConfig& config) {
             
 #ifdef WITH_CUDA
             // GPU static path: requires --use-gpu (or --static-use-gpu).
-            // Audit item #2: fixed-Sz now also takes the GPU path via
-            // `GPUFixedSzOperator`. Operators that change Sz still need
-            // cross-sector wiring (audit item #1) to produce non-zero values.
+            // Operator-collapse Phase 2b (Jun 2026): GPUFTLMSolver is driven
+            // directly off the unified host operators' device matvec
+            // (CudaMatVecBackend via Operator/FixedSzOperator::bind_cuda); the
+            // bespoke GPUFixedSzOperator / convertOperatorToGPU round-trip is
+            // gone. Operators that change Sz still need cross-sector wiring to
+            // produce non-zero values.
             if (config.static_resp.use_gpu) {
                 try {
-                    std::unique_ptr<GPUOperator> gpu_ham_owned;
-                    std::unique_ptr<GPUOperator> gpu_obs1_owned;
-                    std::unique_ptr<GPUOperator> gpu_obs2_owned;
+                    GPUFTLMSolver::DeviceMatVec o1_dev, o2_dev;
                     if (config.system.use_fixed_sz) {
-                        const int n_up_int = static_cast<int>(
-                            (config.system.n_up >= 0)
-                                ? config.system.n_up
-                                : config.system.num_sites / 2);
-                        gpu_ham_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
-                        gpu_obs1_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
-                        gpu_obs2_owned.reset(new GPUFixedSzOperator(
-                            config.system.num_sites, n_up_int,
-                            config.system.spin_length));
+                        o1_dev = device_matvec_from(*obs_1_fs[op_idx]);
+                        o2_dev = device_matvec_from(*obs_2_fs[op_idx]);
                     } else {
-                        gpu_ham_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                        gpu_obs1_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                        gpu_obs2_owned.reset(new GPUOperator(
-                            config.system.num_sites,
-                            config.system.spin_length));
-                    }
-                    GPUOperator& gpu_ham  = *gpu_ham_owned;
-                    GPUOperator& gpu_obs1 = *gpu_obs1_owned;
-                    GPUOperator& gpu_obs2 = *gpu_obs2_owned;
-
-                    if (!convertOperatorToGPU(ham, gpu_ham) ||
-                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
-                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
-                        throw std::runtime_error("GPU operator conversion failed");
+                        o1_dev = device_matvec_from(obs_1[op_idx]);
+                        o2_dev = device_matvec_from(obs_2[op_idx]);
                     }
 
-                    auto [temps, corr_real, corr_imag, err_real, err_imag] =
-                        GPUEDWrapper::runGPUStaticCorrelation(
-                            &gpu_ham, &gpu_obs1, &gpu_obs2,
-                            N, params.num_samples, params.krylov_dim,
-                            config.static_resp.temp_min,
-                            config.static_resp.temp_max,
-                            config.static_resp.num_temp_points,
-                            params.random_seed
-                        );
+                    GPUFTLMSolver ftlm_solver(
+                        device_matvec_from(ham),
+                        static_cast<int>(N), params.krylov_dim, 1e-10);
 
-                    // GPU kernel returns complex correlation (real, imag);
-                    // CPU returns expectation value and susceptibility.
-                    // We currently only surface the real part as ⟨O⟩ and skip
-                    // GPU susceptibility (TODO: kernel does not produce it).
+                    // computeStaticCorrelation returns (temperatures, correlations, errors).
+                    auto [temps, corr, errs] = ftlm_solver.computeStaticCorrelation(
+                        params.num_samples, o1_dev, o2_dev,
+                        config.static_resp.temp_min,
+                        config.static_resp.temp_max,
+                        config.static_resp.num_temp_points,
+                        params.random_seed
+                    );
+
+                    // Static correlations are real-valued for Hermitian
+                    // operators; surface the real part as ⟨O⟩. GPU
+                    // susceptibility is not produced by the FTLM kernel.
                     results.temperatures      = temps;
-                    results.expectation       = corr_real;
-                    results.expectation_error = err_real;
+                    results.expectation       = corr;
+                    results.expectation_error = errs;
                     results.total_samples     = params.num_samples;
                 } catch (const std::exception& e) {
                     if (rank == 0) {
@@ -2823,26 +2799,25 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             auto ham_dst = get_ham_dst(dst_n_up);
             const uint64_t dst_dim = ham_dst->getFixedSzDim();
 
-            // Build src and dst FixedSzSumOperators. We use src's
-            // transform_data_ (independent of n_up by construction)
-            // as the operator definition; dst supplies the basis +
-            // Lin lookup table.
-            auto src_op1 = std::make_shared<FixedSzSumOperator>(
-                config.system.num_sites, config.system.spin_length, n_up,
-                static_cast<uint64_t>(task.op_type_1), task.Q, positions_file);
-            auto dst_op1 = std::make_shared<FixedSzSumOperator>(
-                config.system.num_sites, config.system.spin_length, dst_n_up,
-                static_cast<uint64_t>(task.op_type_1), task.Q, positions_file);
+            // Build src and dst fixed-Sz Sum operators (basis-aligned op).
+            // We use src's transform_data_ (independent of n_up by
+            // construction) as the operator definition; dst supplies the
+            // basis + Lin lookup table.
+            auto make_sum_op = [&](std::int64_t nup, int op_type) {
+                auto p = std::make_shared<FixedSzOperator>(
+                    config.system.num_sites, config.system.spin_length, nup);
+                ed::ops::add_sum(*p, static_cast<uint64_t>(op_type), task.Q,
+                                 positions_file, /*use_xyz=*/false);
+                return p;
+            };
+            auto src_op1 = make_sum_op(n_up, task.op_type_1);
+            auto dst_op1 = make_sum_op(dst_n_up, task.op_type_1);
             ed::dssf::CrossSectorObservable O1_cross(
                 src_op1, dst_op1,
                 src_op1->transform_data_, config.system.spin_length);
 
-            auto src_op2 = std::make_shared<FixedSzSumOperator>(
-                config.system.num_sites, config.system.spin_length, n_up,
-                static_cast<uint64_t>(task.op_type_2), task.Q, positions_file);
-            auto dst_op2 = std::make_shared<FixedSzSumOperator>(
-                config.system.num_sites, config.system.spin_length, dst_n_up,
-                static_cast<uint64_t>(task.op_type_2), task.Q, positions_file);
+            auto src_op2 = make_sum_op(n_up, task.op_type_2);
+            auto dst_op2 = make_sum_op(dst_n_up, task.op_type_2);
             ed::dssf::CrossSectorObservable O2_cross(
                 src_op2, dst_op2,
                 src_op2->transform_data_, config.system.spin_length);
@@ -3022,25 +2997,16 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
     const bool kpm_use_gpu =
         config.dynamical.use_gpu || config.system.use_gpu;
     if (kpm_use_gpu) {
-        std::unique_ptr<GPUOperator> gpu_ham_owned;
-        if (use_fixed_sz) {
-            gpu_ham_owned.reset(new GPUFixedSzOperator(
-                config.system.num_sites,
-                static_cast<int>(n_up),
-                config.system.spin_length));
-        } else {
-            gpu_ham_owned.reset(new GPUOperator(
-                config.system.num_sites,
-                config.system.spin_length));
-        }
-        if (!convertOperatorToGPU(ham, *gpu_ham_owned)) {
-            throw std::runtime_error(
-                "compute_kpm_thermodynamics_workflow: GPU operator conversion failed");
-        }
-        std::cout << "  backend      = GPU (matrix-free"
+        // Operator-collapse Phase 2b (Jun 2026): drive the GPU KPM
+        // Chebyshev/Hutchinson loop straight off the unified host operator's
+        // device matvec (CudaMatVecBackend via Operator/FixedSzOperator::
+        // bind_cuda) -- no bespoke GPUOperator mirror / convertOperatorToGPU
+        // round-trip. `ham` is a FixedSzOperator in the fixed-Sz sector and a
+        // full-Hilbert Operator otherwise; bind_cuda() dispatches virtually.
+        std::cout << "  backend      = GPU (SOTA gather matvec"
                   << (use_fixed_sz ? ", fixed-Sz" : "") << ")\n";
-        kpm = ed::kpm_dos::compute_kpm_dos_gpu(
-            gpu_ham_owned.get(), N, betas, /*dos_grid=*/{}, kpm_params);
+        kpm = ed::kpm_dos::compute_kpm_dos_gpu_with_matvec(
+            device_matvec_from(ham), N, betas, /*dos_grid=*/{}, kpm_params);
     } else {
         std::cout << "  backend      = CPU (operator-free)\n";
         kpm = ed::kpm_dos::compute_kpm_dos(

@@ -51,6 +51,12 @@ TEST_CASE("workflows::thermal mTPQ produces a finite ground-state estimate "
     opts.num_samples  = 4;
     opts.krylov_dim   = 80;
     opts.random_seed  = 12345;
+    // CPU-lane smoke test. Plain Operators advertise supports_device_matvec on
+    // WITH_CUDA builds (operator-collapse Phase 2a), but the GPU lane for these
+    // tiny, high-iteration TPQ runs is dominated by kernel-launch overhead; GPU
+    // thermal correctness is covered by the thermal::*_kernel<CudaBackend>
+    // tests. Pin CPU so the smoke test stays fast and hardware-independent.
+    opts.backend.allow_gpu = false;
 
     auto res = ed::workflows::thermal(*H, opts);
 
@@ -79,6 +85,7 @@ TEST_CASE("workflows::thermal cTPQ produces a finite ground-state estimate",
     opts.delta_beta   = 0.1;
     opts.taylor_order = 30;
     opts.random_seed  = 9999;
+    opts.backend.allow_gpu = false;  // CPU-lane smoke test (see mTPQ case above)
 
     auto res = ed::workflows::thermal(*H, opts);
 
@@ -106,6 +113,9 @@ TEST_CASE("workflows::thermal FTLM / LTLM / KpmDos lanes are wired",
 
     const std::vector<double> betas = { 0.1, 1.0, 5.0 };
 
+    // CPU-lane smoke tests (see the mTPQ case above): these tiny,
+    // high-iteration FTLM/LTLM/KPM runs are dominated by GPU launch overhead;
+    // GPU correctness is covered by the thermal::*_kernel<CudaBackend> tests.
     SECTION("FTLM") {
         ThermalOptions opts;
         opts.method      = ThermalOptions::Method::FTLM;
@@ -113,6 +123,7 @@ TEST_CASE("workflows::thermal FTLM / LTLM / KpmDos lanes are wired",
         opts.krylov_dim  = 30;
         opts.betas       = betas;
         opts.random_seed = 7;
+        opts.backend.allow_gpu = false;
         REQUIRE_NOTHROW(ed::workflows::thermal(*H, opts));
     }
     SECTION("LTLM") {
@@ -122,6 +133,7 @@ TEST_CASE("workflows::thermal FTLM / LTLM / KpmDos lanes are wired",
         opts.krylov_dim  = 30;
         opts.betas       = betas;
         opts.random_seed = 7;
+        opts.backend.allow_gpu = false;
         REQUIRE_NOTHROW(ed::workflows::thermal(*H, opts));
     }
     SECTION("KpmDos") {
@@ -129,6 +141,7 @@ TEST_CASE("workflows::thermal FTLM / LTLM / KpmDos lanes are wired",
         opts.method      = ThermalOptions::Method::KpmDos;
         opts.betas       = betas;
         opts.random_seed = 7;
+        opts.backend.allow_gpu = false;
         REQUIRE_NOTHROW(ed::workflows::thermal(*H, opts));
     }
 }

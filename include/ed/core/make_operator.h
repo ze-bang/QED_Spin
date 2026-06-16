@@ -50,19 +50,23 @@
 // without losing dispatchability.
 // =============================================================================
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/linear_operator.h>
 #include <ed/core/operator.h>
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/results.h>            // SectorTag
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
 
@@ -254,35 +258,52 @@ inline const std::string& require_directory(const OperatorSpec& spec) {
     }, spec.source);
 }
 
-}  // namespace detail
-
 // ---------------------------------------------------------------------------
-// Streaming-symmetry lane (CPU, multi-sector)
+// Eager-vs-lazy regime decision for the fixed-Sz sector set (operator-collapse
+// Phase 3, Jun 2026). Mirrors the budget logic baked into
+// ``FixedSzStreamingSymmetryOperator::generateSymmetrySectorsStreamingFixedSz``
+// so ``make_sector_operators`` picks the SAME regime as the legacy streaming
+// loop for any (N, n_up, |G|) -- the invariant the N>=28 parity check rests
+// on. Estimates the all-sector resident orbit-CSR footprint as
+// ``C(n_bits, n_up) * num_sectors * 40 B`` (the streaming op uses
+// ``num_orbits * |G| * num_sectors * 40`` and ``num_orbits * |G| ~ dim``, so
+// the two estimates agree to within the orbit-fragmentation factor). The
+// fixed-Sz dimension is computed via the binomial directly -- we must NOT
+// build the FixedSzSubspace just to size it (that is the ~5 GB allocation the
+// lazy path exists to defer). Env overrides (identical names/semantics to the
+// streaming op): ``ED_SYM_LAZY_SECTORS`` (1 force lazy / 0 force eager),
+// ``ED_SYM_LAZY_SECTORS_BYTES_MAX`` (budget in bytes, default 4 GiB).
 // ---------------------------------------------------------------------------
-
-/// Build a `StreamingSymmetryOperator` (or its fixed-Sz sibling). The
-/// returned operator carries every symmetry sector loaded from
-/// `<directory>/automorphism_results/`. Callers drive one sector at a
-/// time via the operator's `SectorView` nested class.
-inline std::unique_ptr<LinearOperator>
-make_streaming_symmetry_operator(const OperatorSpec& spec) {
-    const std::string& dir = detail::require_directory(spec);
-
-    if (spec.fixed_sz.has_value()) {
-        auto op = std::make_unique<FixedSzStreamingSymmetryOperator>(
-            static_cast<uint64_t>(spec.num_sites), spec.spin_l,
-            static_cast<int64_t>(*spec.fixed_sz));
-        detail::load_terms_into(*op, spec);
-        op->generateSymmetrySectorsStreamingFixedSz(dir);
-        return op;
+inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
+                                            std::int64_t            n_up,
+                                            const SymmetryGroupInfo& info) {
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS")) {
+        if (e[0] == '1') return true;
+        if (e[0] == '0') return false;
     }
-
-    auto op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<uint64_t>(spec.num_sites), spec.spin_l);
-    detail::load_terms_into(*op, spec);
-    op->generateSymmetrySectorsStreaming(dir);
-    return op;
+    std::size_t budget = 4ULL * 1024ULL * 1024ULL * 1024ULL;  // 4 GiB
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
+        try { budget = std::stoull(e); } catch (...) {}
+    }
+    // C(n_bits, n_up) in long double (multiplicative form, no overflow).
+    const int n = static_cast<int>(n_bits);
+    int k = static_cast<int>(n_up);
+    long double dim = 0.0L;
+    if (k >= 0 && k <= n) {
+        k = std::min(k, n - k);
+        dim = 1.0L;
+        for (int i = 0; i < k; ++i) {
+            dim = dim * static_cast<long double>(n - i)
+                / static_cast<long double>(i + 1);
+        }
+    }
+    const long double num_sectors =
+        static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
+    const long double est_bytes = dim * num_sectors * 40.0L;
+    return est_bytes > static_cast<long double>(budget);
 }
+
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // Direct sector-set lane (operator-collapse, Jun 2026)
@@ -303,17 +324,46 @@ make_streaming_symmetry_operator(const OperatorSpec& spec) {
 /// This is additive: ``make_operator`` (which must return a single
 /// ``LinearOperator``) is unchanged; callers that want the collapse-target
 /// multi-sector list opt in by calling this function. The production sector
-/// loop continues to use ``StreamingSymmetryHandle`` (whose own
-/// ``ED_SYMMETRY_SECTOR_OPERATOR`` gate adopts the legacy sector into a
-/// ``SectorOperator``); this entry point is the orbit-enumeration-free
-/// alternative that skips the legacy operator entirely.
+/// loop continues to use ``StreamingSymmetryHandle`` (which unconditionally
+/// adopts each legacy sector into a ``SectorOperator``); this entry point is
+/// the orbit-enumeration-free alternative that skips the legacy operator
+/// entirely.
 ///
 /// Requirements: ``spec.streaming_symmetry == true`` and a ``DirectoryPath``
 /// source carrying ``<directory>/automorphism_results/``. ``spec.fixed_sz``
 /// selects the fixed-Sz lane (orbits restricted to the ``n_up`` subspace);
 /// absent, the full-Hilbert lane is used.
-inline std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>
-make_sector_operators(const OperatorSpec& spec) {
+// ---------------------------------------------------------------------------
+// Tagged sector set: the sector operators paired with their ``SectorTag``s
+// (raw irrep index + dim + quantum numbers + n_up). This is the
+// streaming-handle-free replacement for the production sector loop -- the
+// caller iterates ``set.operators`` (compacted: empty irreps dropped) and
+// keys per-sector HDF5 / cross-irrep selection off ``set.tags`` exactly as it
+// used ``StreamingSymmetryHandle::sector_tag(k)``. Crucially the dim is read
+// from ``op->dim()`` (Pass 1.5 in the lazy regime), so building the tags never
+// materialises a per-sector orbit CSR.
+// ---------------------------------------------------------------------------
+struct SectorOperatorSet {
+    std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> operators;
+    std::vector<ed::SectorTag>                                 tags;
+    /// Total RAW sector count (== ``symmetry_info.sectors.size()``, i.e.
+    /// including irreps that fully cancel). ``operators`` / ``tags`` are
+    /// COMPACTED (empty irreps dropped), so this is the upper bound on the
+    /// raw irrep index ``tags[i].sector_index`` and the value the legacy
+    /// ``filter_sectors(num_sectors, ...)`` semantics expect.
+    std::size_t                                                num_raw_sectors = 0;
+    /// Quantum-number labels for EVERY raw sector (length
+    /// ``num_raw_sectors``), including the empty irreps dropped from
+    /// ``operators`` / ``tags``. The cross-irrep selection-rule walker
+    /// (``infer_generator_orders`` / ``resolve_target_sector``) needs the
+    /// full irrep lattice -- e.g. for ``n_up == 0`` only ``k == 0`` survives,
+    /// so inferring generator orders from the surviving tags alone would
+    /// collapse a Z_N translation order to 1. Keyed by raw irrep index.
+    std::vector<std::vector<int>>                              all_quantum_numbers;
+};
+
+inline SectorOperatorSet
+make_sector_operators_tagged(const OperatorSpec& spec) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_sector_operators: requires "
@@ -336,16 +386,180 @@ make_sector_operators(const OperatorSpec& spec) {
         op.three_body_data_ = base->three_body_data_;
     };
 
+    SectorOperatorSet set;
+    std::vector<std::size_t> sector_ids;
+
     if (spec.fixed_sz.has_value()) {
-        return ed::symmetry::build_fixed_sz_sector_operators(
+        // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
+        // fixed-Sz mTPQ): hand out operators that know their dim up-front and
+        // defer the per-sector orbit CSR / GPU RepSectorData. Small/moderate
+        // systems stay eager (fast precomputed-CSR matvec). Same budget knobs
+        // as the streaming operator so both production paths agree.
+        if (detail::fixed_sz_sectors_should_be_lazy(
+                static_cast<std::uint64_t>(spec.num_sites),
+                static_cast<std::int64_t>(*spec.fixed_sz),
+                base->symmetry_info)) {
+            set.operators = ed::symmetry::build_fixed_sz_sector_operators_lazy(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                static_cast<std::int64_t>(*spec.fixed_sz),
+                base->symmetry_info, term_builder, &sector_ids);
+        } else {
+            set.operators = ed::symmetry::build_fixed_sz_sector_operators(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                static_cast<std::int64_t>(*spec.fixed_sz),
+                base->symmetry_info, term_builder, &sector_ids);
+        }
+    } else {
+        set.operators = ed::symmetry::build_full_sector_operators(
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-            static_cast<std::int64_t>(*spec.fixed_sz),
-            base->symmetry_info, term_builder);
+            base->symmetry_info, term_builder, &sector_ids);
     }
-    return ed::symmetry::build_full_sector_operators(
-        static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-        base->symmetry_info, term_builder);
+
+    set.num_raw_sectors = base->symmetry_info.sectors.size();
+    set.all_quantum_numbers.reserve(set.num_raw_sectors);
+    for (const auto& s : base->symmetry_info.sectors) {
+        set.all_quantum_numbers.push_back(s.quantum_numbers);
+    }
+    const int n_up = spec.fixed_sz.has_value()
+        ? static_cast<int>(*spec.fixed_sz) : -1;
+    set.tags.reserve(set.operators.size());
+    for (std::size_t i = 0; i < set.operators.size(); ++i) {
+        ed::SectorTag tag;
+        tag.sector_index = sector_ids[i];
+        tag.sector_dim   = static_cast<std::uint64_t>(set.operators[i]->dim());
+        if (sector_ids[i] < base->symmetry_info.sectors.size()) {
+            tag.quantum_numbers =
+                base->symmetry_info.sectors[sector_ids[i]].quantum_numbers;
+        }
+        tag.n_up = n_up;
+        set.tags.push_back(std::move(tag));
+    }
+    return set;
 }
+
+/// Operators-only convenience: drops the tags. Preserves the original
+/// ``make_sector_operators(spec)`` surface for callers that don't need the
+/// per-sector irrep metadata (the GPU parity unit tests, the e2e check).
+inline std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>
+make_sector_operators(const OperatorSpec& spec) {
+    return make_sector_operators_tagged(spec).operators;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming-symmetry lane (single LinearOperator).
+//
+// Operator-collapse Phase 3 (Jun 2026): the StreamingSymmetryOperator /
+// FixedSzStreamingSymmetryOperator carriers have been retired. Symmetry
+// sectors are now built directly as standalone ``SectorOperator``s by
+// ``make_sector_operators_tagged``. Since ``make_operator`` must return a
+// SINGLE ``LinearOperator``, this lane returns ONE symmetry sector selected
+// by ``spec.sector_index`` (raw irrep index). For the full multi-sector
+// enumeration -- the production CLI / Python sector loop -- call
+// ``ed::make_sector_operators_tagged(spec)`` directly.
+inline std::unique_ptr<LinearOperator>
+make_streaming_symmetry_operator(const OperatorSpec& spec) {
+    SectorOperatorSet set = make_sector_operators_tagged(spec);
+    if (set.operators.empty()) {
+        throw std::runtime_error(
+            "ed::make_operator: streaming-symmetry spec produced no "
+            "non-empty symmetry sectors for the requested (n_up, group).");
+    }
+    std::size_t pos = 0;
+    if (spec.sector_index.has_value()) {
+        const std::size_t raw = *spec.sector_index;
+        bool found = false;
+        for (std::size_t i = 0; i < set.tags.size(); ++i) {
+            if (set.tags[i].sector_index == raw) {
+                pos = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error(
+                "ed::make_operator: requested streaming-symmetry "
+                "sector_index is empty (orbits cancel) or out of range. Use "
+                "ed::make_sector_operators_tagged(spec) for the full set.");
+        }
+    }
+    return std::unique_ptr<LinearOperator>(set.operators[pos].release());
+}
+
+}  // namespace ed
+
+namespace ed::core {
+
+// ---------------------------------------------------------------------------
+// SectorSetView: a copyable, handle-shaped view over a ``SectorOperatorSet``
+// (operator-collapse Phase 3, Jun 2026). It exposes the SAME random-access
+// surface as the legacy ``StreamingSymmetryHandle`` -- ``num_sectors()``,
+// ``sector(raw_k)``, ``sector_tag(raw_k)`` -- so the per-sector loops in the
+// CLI / Python bindings can switch from the monolithic
+// ``FixedSzStreamingSymmetryOperator`` + handle to the direct
+// ``make_sector_operators_tagged`` enumeration with a near-mechanical type
+// swap.
+//
+// Unlike the handle (which builds a fresh sector operator per ``sector(k)``
+// call), this view owns the (compacted) sector set and returns a stable,
+// non-owning pointer to the persistent operator -- callers reuse the same
+// object across the two-phase scan instead of rebuilding it. The set is held
+// behind a ``shared_ptr`` so the view is cheaply copyable (the cross-irrep
+// bindings copy their handle for the ``delta == 0`` src==dst case).
+//
+// ``raw_k`` is the RAW irrep index in ``[0, num_sectors())``; empty irreps
+// were dropped from the set, so ``sector(raw_k)`` returns ``nullptr`` for them
+// (equivalent to the handle's ``dim() == 0`` sentinel the loops already
+// guard against).
+// ---------------------------------------------------------------------------
+class SectorSetView {
+public:
+    explicit SectorSetView(ed::SectorOperatorSet set)
+        : set_(std::make_shared<ed::SectorOperatorSet>(std::move(set))) {
+        for (std::size_t i = 0; i < set_->tags.size(); ++i) {
+            raw_to_pos_[set_->tags[i].sector_index] = i;
+        }
+    }
+
+    [[nodiscard]] std::size_t num_sectors() const noexcept {
+        return set_->num_raw_sectors;
+    }
+
+    /// Non-owning pointer to the persistent per-sector operator for the RAW
+    /// irrep index ``raw_k`` (``nullptr`` for an empty / dropped irrep).
+    [[nodiscard]] ed::symmetry::SectorOperator*
+    sector(std::size_t raw_k) const {
+        auto it = raw_to_pos_.find(raw_k);
+        return it == raw_to_pos_.end()
+            ? nullptr
+            : set_->operators[it->second].get();
+    }
+
+    /// Quantum-number tag for the RAW irrep index ``raw_k``. For a dropped
+    /// (empty) irrep, returns a tag carrying ``sector_index`` + the raw
+    /// ``quantum_numbers`` (dim 0). The quantum numbers are surfaced even for
+    /// empty irreps so the cross-irrep selection-rule walker can infer the
+    /// full generator-order lattice (matching the legacy
+    /// ``StreamingSymmetryHandle::sector_tag`` contract, which reads cheap
+    /// generation metadata for every raw sector).
+    [[nodiscard]] ed::SectorTag sector_tag(std::size_t raw_k) const {
+        auto it = raw_to_pos_.find(raw_k);
+        if (it != raw_to_pos_.end()) return set_->tags[it->second];
+        ed::SectorTag t;
+        t.sector_index = raw_k;
+        if (raw_k < set_->all_quantum_numbers.size()) {
+            t.quantum_numbers = set_->all_quantum_numbers[raw_k];
+        }
+        return t;
+    }
+
+private:
+    std::shared_ptr<ed::SectorOperatorSet>       set_;
+    std::unordered_map<std::size_t, std::size_t> raw_to_pos_;
+};
+
+}  // namespace ed::core
+
+namespace ed {
 
 #ifdef WITH_MPI
 // ---------------------------------------------------------------------------

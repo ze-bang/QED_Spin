@@ -55,7 +55,15 @@ ed_add_benchmark(bench_minimalist_collapse  bench_minimalist_collapse.cpp)
 # it carries its own main() and forks each phase to measure isolated peak
 # RSS, so it links ed_solvers_cpu directly without benchmark_main.
 add_executable(bench_symmetry_full_spectrum bench_symmetry_full_spectrum.cpp)
-target_link_libraries(bench_symmetry_full_spectrum PRIVATE ed_solvers_cpu)
+target_link_libraries(bench_symmetry_full_spectrum PRIVATE ed_solvers_cpu ed_symmetry)
+# The carrier-free symmetry sector path builds ed::symmetry::SectorOperator,
+# whose vtable key function (bind_cuda) lives in ed_solvers_gpu under CUDA
+# (the ed_core .cpp twin is an empty TU when WITH_CUDA is ON).
+if(WITH_CUDA)
+    target_link_libraries(bench_symmetry_full_spectrum PRIVATE
+        ed_solvers_gpu
+        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
+endif()
 target_include_directories(bench_symmetry_full_spectrum PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(bench_symmetry_full_spectrum PRIVATE

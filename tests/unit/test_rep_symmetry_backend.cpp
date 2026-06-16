@@ -18,11 +18,18 @@
 // =============================================================================
 
 #include "common/catch2_harness.h"
+#include "common/symmetry_reference.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/term_storage.h>
+#include <ed/symmetry/projector.h>
 #include <ed/symmetry/rep_sector_data.h>
+#include <ed/symmetry/sector_basis.h>
+#include <ed/symmetry/sector_set.h>
+#include <ed/symmetry/subspace.h>
+
+#include <functional>
 
 #include <algorithm>
 #include <cmath>
@@ -91,10 +98,11 @@ void write_zN_translation_fixtures(const std::string& dir, int N) {
     }
 }
 
-std::unique_ptr<FixedSzStreamingSymmetryOperator>
-build_heisenberg_pbc_fixed_sz(std::uint64_t N, std::int64_t n_up, double J) {
-    auto op = std::make_unique<FixedSzStreamingSymmetryOperator>(
-        N, 0.5f, n_up);
+// Full-Hilbert Heisenberg PBC operator (carrier-free) -- term list for the
+// SoA + full-space ``H`` apply backing the independent symmetrized reference.
+std::unique_ptr<Operator>
+build_heisenberg_pbc_full(std::uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
     for (std::uint64_t i = 0; i < N; ++i) {
@@ -140,22 +148,45 @@ void run_case(int N, std::int64_t n_up) {
         "heis_N" + std::to_string(N) + "_nup" + std::to_string(n_up));
     write_zN_translation_fixtures(dir, N);
 
-    auto sym_op = build_heisenberg_pbc_fixed_sz(
-        static_cast<std::uint64_t>(N), n_up, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreamingFixedSz(dir));
+    auto full_op = build_heisenberg_pbc_full(
+        static_cast<std::uint64_t>(N), 1.0);
 
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, sym_op->transform_data_, sym_op->three_body_data_,
+        soa, full_op->transform_data_, full_op->three_body_data_,
         [](const Complex& c) { return c; });
     const TermView_t tv = make_term_view(soa, /*spin_l=*/0.5, /*is_real=*/true);
 
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const std::size_t sd = sym_op->getSectorDimension(s);
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+    const ed::symmetry::FixedSzSubspace fixed =
+        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N),
+                                             n_up);
+    const ed::symmetry::SpatialProjector spatial(info);
+    const std::vector<std::uint64_t> reps =
+        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+    const double group_size =
+        static_cast<double>(info.max_clique.size());
+
+    std::function<void(const Complex*, Complex*, std::size_t)> full_apply =
+        [&full_op](const Complex* x, Complex* y, std::size_t n) {
+            full_op->apply(x, y, n);
+        };
+
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        // Carrier-free owning SectorBasis over the fixed-Sz subspace.
+        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
+            fixed, spatial,
+            info.sectors[s].quantum_numbers,
+            info.sectors[s].phase_factors,
+            reps, /*sector_id=*/s);
+        const std::size_t sd = sb.dim();
         if (sd == 0) continue;
 
-        // CSR-free rep data straight from the production builder.
-        ed::symmetry::RepSectorData rd = sym_op->getRepSectorData(s);
+        // CSR-free rep data from the same production helper the sector-set
+        // builder uses (reads only orbit_rep + norm from the sector).
+        ed::symmetry::RepSectorData rd =
+            ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
         INFO("sector " << s << " dim " << sd
              << " rep dim " << rd.reps.size()
              << " usable " << rd.usable());
@@ -179,7 +210,9 @@ void run_case(int N, std::int64_t n_up) {
             std::vector<Complex> y_ref(sd, Complex(0.0, 0.0));
             std::vector<Complex> y_rep(sd, Complex(0.0, 0.0));
 
-            sym_op->applySymmetrizedFixedSz(s, x.data(), y_ref.data());
+            ed_tests::apply_symmetrized_reference(
+                sb.sector(), static_cast<std::uint64_t>(N), group_size,
+                full_apply, x.data(), y_ref.data(), sd);
             backend->apply_complex(&tv, x.data(), y_rep.data(), sd);
 
             double max_abs_diff = 0.0;

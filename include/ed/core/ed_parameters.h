@@ -20,8 +20,6 @@
 #include <string>
 #include <vector>
 
-class FixedSzOperator;  // forward decl — used as bare pointer member
-
 /**
  * @brief Structure for exact diagonalization parameters
  *

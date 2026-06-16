@@ -50,6 +50,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -146,7 +147,17 @@ public:
                       std::string  label = "CudaMatVecBackend",
                       std::shared_ptr<void> backing = nullptr)
         : basis_(basis), spin_l_(spin_l), label_(std::move(label)),
-          backing_(std::move(backing)) {}
+          backing_(std::move(backing)) {
+        const char* s = std::getenv("ED_MATVEC_SCATTER");
+        use_scatter_ = (s && s[0] == '1');
+    }
+
+    // The trivial / fixed-Sz device policies (no orbit walk, no per-emit
+    // coeff modifier) support the lock-free row-GATHER kernel. Symmetry /
+    // representative policies keep the validated atomic-scatter kernel
+    // (gathering a symmetry row would require inverting the group action).
+    static constexpr bool kGatherCapable =
+        !DevicePolicy::needs_orbit_walk && !DevicePolicy::has_coeff_modifier;
 
     // ---- MatVecBackendBase interface --------------------------------------
     void apply_complex(const void*    tv,
@@ -161,15 +172,7 @@ public:
         namespace cd = cuda_matvec_detail;
         d_in_c_.upload(reinterpret_cast<const cuDoubleComplex*>(in), n);
         d_out_c_.ensure(n);
-        cd::check(cudaMemset(d_out_c_.data(), 0,
-                             n * sizeof(cuDoubleComplex)), "memset out");
-
-        cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu<
-                      DevicePolicy, cuDoubleComplex>(
-                      basis_, spin_l_, device_terms_(),
-                      d_in_c_.data(), d_out_c_.data()),
-                  "launch (complex)");
-        cd::check(cudaDeviceSynchronize(), "sync (complex)");
+        launch_complex_(d_in_c_.data(), d_out_c_.data(), n);
         cd::check(cudaMemcpy(reinterpret_cast<cuDoubleComplex*>(out),
                              d_out_c_.data(), n * sizeof(cuDoubleComplex),
                              cudaMemcpyDeviceToHost), "memcpy out (complex)");
@@ -191,15 +194,7 @@ public:
         namespace cd = cuda_matvec_detail;
         d_in_r_.upload(in, n);
         d_out_r_.ensure(n);
-        cd::check(cudaMemset(d_out_r_.data(), 0, n * sizeof(double)),
-                  "memset out (real)");
-
-        cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu<
-                      DevicePolicy, double>(
-                      basis_, spin_l_, device_terms_(),
-                      d_in_r_.data(), d_out_r_.data()),
-                  "launch (real)");
-        cd::check(cudaDeviceSynchronize(), "sync (real)");
+        launch_real_(d_in_r_.data(), d_out_r_.data(), n);
         cd::check(cudaMemcpy(out, d_out_r_.data(), n * sizeof(double),
                              cudaMemcpyDeviceToHost), "memcpy out (real)");
     }
@@ -210,7 +205,97 @@ public:
 
     void invalidate_caches() override { terms_dirty_ = true; }
 
+    // ---- Device-pointer fast path -----------------------------------------
+    // Snapshot the host term SoA to the device. After this call the
+    // ``apply_*_device`` entry points can run with in/out already resident in
+    // device memory (no per-apply staging). Mirrors the contract documented on
+    // ``MatVecBackendBase``; consumed by ``Operator``/``FixedSzOperator``'s
+    // ``bind_cuda()``.
+    void upload_terms(const void* tv) override {
+        const auto& terms = *static_cast<const term_view_t*>(tv);
+        ensure_terms_uploaded(terms);
+    }
+
+    void apply_complex_device(const Complex* d_in,
+                              Complex*       d_out,
+                              std::size_t    n) override {
+        check_size(n);
+        if (terms_dirty_) {
+            throw std::runtime_error(
+                "CudaMatVecBackend::apply_complex_device: terms not uploaded "
+                "(call upload_terms before the first device apply)");
+        }
+        launch_complex_(reinterpret_cast<const cuDoubleComplex*>(d_in),
+                        reinterpret_cast<cuDoubleComplex*>(d_out), n);
+    }
+
+    void apply_real_device(const double* d_in,
+                           double*       d_out,
+                           std::size_t   n) override {
+        check_size(n);
+        if (terms_dirty_) {
+            throw std::runtime_error(
+                "CudaMatVecBackend::apply_real_device: terms not uploaded "
+                "(call upload_terms before the first device apply)");
+        }
+        launch_real_(d_in, d_out, n);
+    }
+
 private:
+    // Launch the complex SpMV on DEVICE pointers (gather when the policy
+    // supports it, else the validated atomic-scatter). Synchronises before
+    // returning so the caller can read ``d_out`` immediately. Shared by the
+    // host-staged ``apply_complex`` and the device-resident
+    // ``apply_complex_device``.
+    void launch_complex_(const cuDoubleComplex* d_in,
+                         cuDoubleComplex*       d_out,
+                         std::size_t            n) {
+        namespace cd = cuda_matvec_detail;
+        bool did_gather = false;
+        if constexpr (kGatherCapable) {
+            if (!use_scatter_) {
+                // Lock-free row GATHER: overwrites every row, no pre-zero.
+                cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu_gather<
+                              DevicePolicy, cuDoubleComplex>(
+                              basis_, spin_l_, device_terms_(), d_in, d_out),
+                          "launch gather (complex)");
+                did_gather = true;
+            }
+        }
+        if (!did_gather) {
+            cd::check(cudaMemset(d_out, 0, n * sizeof(cuDoubleComplex)),
+                      "memset out");
+            cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu<
+                          DevicePolicy, cuDoubleComplex>(
+                          basis_, spin_l_, device_terms_(), d_in, d_out),
+                      "launch (complex)");
+        }
+        cd::check(cudaDeviceSynchronize(), "sync (complex)");
+    }
+
+    void launch_real_(const double* d_in, double* d_out, std::size_t n) {
+        namespace cd = cuda_matvec_detail;
+        bool did_gather = false;
+        if constexpr (kGatherCapable) {
+            if (!use_scatter_) {
+                cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu_gather<
+                              DevicePolicy, double>(
+                              basis_, spin_l_, device_terms_(), d_in, d_out),
+                          "launch gather (real)");
+                did_gather = true;
+            }
+        }
+        if (!did_gather) {
+            cd::check(cudaMemset(d_out, 0, n * sizeof(double)),
+                      "memset out (real)");
+            cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu<
+                          DevicePolicy, double>(
+                          basis_, spin_l_, device_terms_(), d_in, d_out),
+                      "launch (real)");
+        }
+        cd::check(cudaDeviceSynchronize(), "sync (real)");
+    }
+
     void check_size(std::size_t n) const {
         if (n != basis_.dim()) {
             throw std::runtime_error(
@@ -258,6 +343,7 @@ private:
     double       spin_l_ = 0.5;
     std::string  label_;
     bool         terms_dirty_ = true;
+    bool         use_scatter_ = false;  // ED_MATVEC_SCATTER=1 bisection fallback
     // Device-resident term SoA bins (typed to the canonical POD records).
     cuda_matvec_detail::DeviceBuffer<DiagOne>    d_diag_one_;
     cuda_matvec_detail::DeviceBuffer<OffDiagOne> d_offdiag_one_;

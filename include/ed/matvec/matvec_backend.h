@@ -82,6 +82,7 @@
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/matvec/term_kernels_gather.h>  // SOTA lock-free row-gather SpMV
 #include <ed/matvec/term_storage.h>   // canonical term-view record types
                                       // (named only by the extern template
                                       //  declarations at the foot of this file)
@@ -173,6 +174,49 @@ public:
 
     // Drop assembled-CSR caches whenever the operator's term list mutates.
     virtual void invalidate_caches() = 0;
+
+    // -----------------------------------------------------------------
+    // Device-pointer fast path (operator-collapse GPU unification,
+    // Jun 2026).
+    //
+    // The host ``apply_complex`` / ``apply_real`` above take HOST
+    // pointers and a device backend (CudaMatVecBackend) stages them
+    // H2D / D2H internally. That is correct for a host-driven solver
+    // loop, but the orchestrator's CUDA lane keeps every Krylov vector
+    // resident on the device and hands the bound matvec DEVICE
+    // pointers. These three hooks express that contract:
+    //
+    //   * ``upload_terms``        : snapshot the host term SoA to the
+    //                               device once (so the per-apply path
+    //                               needs no host TermView). No-op on
+    //                               host backends.
+    //   * ``apply_complex_device``/``apply_real_device`` : run the SpMV
+    //                               with in/out already in device
+    //                               memory. ``upload_terms`` must have
+    //                               been called first.
+    //
+    // The defaults make host backends throw if a device apply is
+    // requested -- only ``CudaMatVecBackend`` overrides them. Used by
+    // ``LinearOperator::bind_cuda()`` for ``Operator`` /
+    // ``FixedSzOperator``.
+    // -----------------------------------------------------------------
+    virtual void upload_terms(const void* /*term_view_erased*/) {}
+
+    virtual void apply_complex_device(const Complex* /*d_in*/,
+                                      Complex*       /*d_out*/,
+                                      std::size_t    /*n*/) {
+        throw std::runtime_error(
+            "MatVecBackendBase::apply_complex_device: this backend has "
+            "no device-pointer matvec");
+    }
+
+    virtual void apply_real_device(const double* /*d_in*/,
+                                   double*       /*d_out*/,
+                                   std::size_t   /*n*/) {
+        throw std::runtime_error(
+            "MatVecBackendBase::apply_real_device: this backend has "
+            "no device-pointer matvec");
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -198,7 +242,20 @@ struct MatVecTunables {
     // matrix-free branch even if both op and input are real. The OMP fork+join
     // + the input-real scan cost dominates the savings for tiny vectors.
     std::uint64_t real_matvec_min_dim = 1024;
+    // Matrix-free SpMV form for the trivial (Full / FixedSz) policies.
+    // Default false -> the SOTA lock-free row-GATHER kernel
+    // (apply_terms_gather). Set ED_MATVEC_SCATTER=1 to fall back to the
+    // legacy SCATTER kernel (apply_terms, atomic + radix-sort) for one
+    // release as a bisection escape hatch.
+    bool matvec_scatter = false;
 };
+
+// Read the ED_MATVEC_SCATTER bisection flag once (shared by every tunable
+// reader so the env var controls all lanes uniformly).
+inline bool read_matvec_scatter() noexcept {
+    const char* v = std::getenv("ED_MATVEC_SCATTER");
+    return v && v[0] == '1';
+}
 
 inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
                                     const char*   env_use_legacy,
@@ -246,6 +303,7 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
     } else {
         t.csr_cutoff_dim = read_cutoff(env_dim_legacy, default_cutoff);
     }
+    t.matvec_scatter = read_matvec_scatter();
     return t;
 }
 
@@ -303,6 +361,7 @@ inline MatVecTunables read_symmetry_tunables(
         std::uint64_t unified = read_cutoff("ED_CSR_DIM_MAX", 0);
         if (unified != 0) t.csr_cutoff_dim = unified;
     }
+    t.matvec_scatter = read_matvec_scatter();
     return t;
 }
 
@@ -394,13 +453,14 @@ public:
             {
                 ensure_real_scratch(n);
                 for (std::size_t i = 0; i < n; ++i) real_in_buf_[i] = in[i].real();
-                std::fill(real_out_buf_.begin(), real_out_buf_.begin() + n, 0.0);
+                if (tunables_.matvec_scatter)
+                    std::fill(real_out_buf_.begin(), real_out_buf_.begin() + n, 0.0);
                 matrix_free_real(terms, real_in_buf_.data(), real_out_buf_.data());
                 for (std::size_t i = 0; i < n; ++i) out[i] = Complex(real_out_buf_[i], 0.0);
                 return;
             }
 
-            std::fill(out, out + n, Complex{});
+            if (tunables_.matvec_scatter) std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
         }
     }
@@ -438,7 +498,7 @@ public:
                 return;
             }
 
-            std::fill(out, out + n, 0.0);
+            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
             matrix_free_real(terms, in, out);
         }
     }
@@ -450,6 +510,8 @@ public:
     void invalidate_caches() override {
         csr_complex_built_ = false;
         csr_real_built_    = false;
+        diag_cplx_built_   = false;
+        diag_real_built_   = false;
     }
 
 private:
@@ -460,19 +522,43 @@ private:
                              const Complex* in, Complex* out) const
     {
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            // On-the-fly representative (momentum) sector: dedicated kernel
+            // (scatter; caller pre-zeroed ``out``).
             ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, Complex>(
                 basis_, t.spin_l,
                 *t.diag_one, *t.offdiag_one,
                 *t.diag_two, *t.mixed_two, *t.offdiag_two,
                 *t.three_body,
                 in, out);
-        } else {
+        } else if constexpr (BasisPolicy::needs_orbit_walk) {
+            // Orbit-walk symmetry: SCATTER (caller pre-zeroed ``out``). The
+            // CPU symmetry default is the assembled orbit-CSR (already a
+            // lock-free row gather); this matrix-free fallback stays scatter.
             ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
                 basis_, t.spin_l,
                 *t.diag_one, *t.offdiag_one,
                 *t.diag_two, *t.mixed_two, *t.offdiag_two,
                 *t.three_body,
                 in, out);
+        } else if (tunables_.matvec_scatter) {
+            // Trivial policy, bisection fallback: legacy SCATTER kernel
+            // (caller pre-zeroed ``out``).
+            ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        } else {
+            // Trivial policy, DEFAULT: SOTA lock-free row GATHER + precomputed
+            // diagonal. Overwrites ``out`` (no pre-zero needed).
+            ensure_diag_complex(t);
+            ed::matvec::kernel::apply_terms_gather<BasisPolicy, Complex>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out, diag_cplx_.data());
         }
     }
     void matrix_free_real(const term_view_t& t,
@@ -485,14 +571,86 @@ private:
                 *t.diag_two, *t.mixed_two, *t.offdiag_two,
                 *t.three_body,
                 in, out);
-        } else {
+        } else if constexpr (BasisPolicy::needs_orbit_walk) {
             ed::matvec::kernel::apply_terms<BasisPolicy, double>(
                 basis_, t.spin_l,
                 *t.diag_one, *t.offdiag_one,
                 *t.diag_two, *t.mixed_two, *t.offdiag_two,
                 *t.three_body,
                 in, out);
+        } else if (tunables_.matvec_scatter) {
+            ed::matvec::kernel::apply_terms<BasisPolicy, double>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out);
+        } else {
+            ensure_diag_real(t);
+            ed::matvec::kernel::apply_terms_gather<BasisPolicy, double>(
+                basis_, t.spin_l,
+                *t.diag_one, *t.offdiag_one,
+                *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                *t.three_body,
+                in, out, diag_real_.data());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Precomputed Hamiltonian diagonal (Phase 2 of the SOTA matrix-apply
+    // plan). For the trivial (Full / FixedSz) policies the diagonal is a
+    // pure per-row function of the bitstring (Sz and SzSz sign products),
+    // so it can be computed ONCE and reused across every matvec instead of
+    // re-walking the diag_one_body / diag_two_body bins per row per apply.
+    // The row-GATHER driver then applies ``out[r] = diag[r]*in[r] + (off-
+    // diagonal gather)`` and skips the diagonal bins. Lazy-built; dropped by
+    // ``invalidate_caches`` whenever the term list mutates.
+    //
+    // Only the trivial policies ever call these (the orbit-walk / rep
+    // branches are selected via ``if constexpr`` in matrix_free_*), but the
+    // bodies compile for every policy because ``state_of`` / ``dim`` are
+    // part of the common BasisPolicy surface.
+    // ------------------------------------------------------------------
+    template <class S>
+    void build_diag_into(const term_view_t& t, std::vector<S>& diag) const {
+        const std::uint64_t dim = basis_.dim();
+        diag.assign(dim, S(0));
+        const double spin    = t.spin_l;
+        const double spin_sq = spin * spin;
+        const auto& d1 = *t.diag_one;
+        const auto& d2 = *t.diag_two;
+#ifdef _OPENMP
+        const std::uint64_t par_threshold =
+            static_cast<std::uint64_t>(omp_get_max_threads()) * 1024ULL;
+        #pragma omp parallel for schedule(static) if(dim > par_threshold)
+#endif
+        for (long long ii = 0; ii < static_cast<long long>(dim); ++ii) {
+            const std::uint64_t s = basis_.state_of(static_cast<std::uint64_t>(ii));
+            S acc = S(0);
+            for (const auto& term : d1) {
+                const double sign = ((s >> term.site_index) & 1) ? -1.0 : 1.0;
+                acc += ed::matvec::kernel::coerce_coeff<S>(term.coefficient)
+                     * (spin * sign);
+            }
+            for (const auto& term : d2) {
+                const double si = ((s >> term.site_index_1) & 1) ? -1.0 : 1.0;
+                const double sj = ((s >> term.site_index_2) & 1) ? -1.0 : 1.0;
+                acc += ed::matvec::kernel::coerce_coeff<S>(term.coefficient)
+                     * (spin_sq * si * sj);
+            }
+            diag[static_cast<std::uint64_t>(ii)] = acc;
+        }
+    }
+
+    void ensure_diag_complex(const term_view_t& t) const {
+        if (diag_cplx_built_) return;
+        build_diag_into<Complex>(t, diag_cplx_);
+        diag_cplx_built_ = true;
+    }
+    void ensure_diag_real(const term_view_t& t) const {
+        if (diag_real_built_) return;
+        build_diag_into<double>(t, diag_real_);
+        diag_real_built_ = true;
     }
 
     // ------------------------------------------------------------------
@@ -645,6 +803,13 @@ private:
     Eigen::SparseMatrix<double,  Eigen::RowMajor> csr_real_{};
     bool csr_complex_built_ = false;
     bool csr_real_built_    = false;
+
+    // Precomputed Hamiltonian diagonal caches (real / complex), lazy-built
+    // by ensure_diag_*; consumed by the row-GATHER matrix-free path.
+    mutable std::vector<Complex> diag_cplx_{};
+    mutable std::vector<double>  diag_real_{};
+    mutable bool diag_cplx_built_ = false;
+    mutable bool diag_real_built_ = false;
 
     // Persistent scratch for the real-input/complex-output fast path.
     std::vector<double> real_in_buf_;

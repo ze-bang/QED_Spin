@@ -38,7 +38,6 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/streaming_symmetry.h>
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
 
@@ -109,27 +108,7 @@ void write_zN_translation_fixtures(const std::string& dir, int N) {
     }
 }
 
-// Append J=1 PBC Heisenberg terms to the legacy streaming operator's raw
-// transform list (the form test_sector_set uses for the legacy reference).
-void add_heisenberg_pbc_terms_legacy(StreamingSymmetryOperator& op,
-                                     int N, double J) {
-    const Complex J_real(J, 0.0), J_half(0.5 * J, 0.0);
-    for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
-        const std::uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op.transform_data_.push_back(t);
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op.transform_data_.push_back(t);
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op.transform_data_.push_back(t);
-    }
-}
-
-// Append the same Heisenberg terms to a new-path SectorOperator.
+// Append the J=1 PBC Heisenberg terms to a SectorOperator.
 void add_heisenberg_pbc_terms_new(ed::symmetry::SectorOperator& op,
                                   int N, double J) {
     const Complex J_real(J, 0.0), J_half(0.5 * J, 0.0);
@@ -150,58 +129,56 @@ TEST_CASE("symmetry ordering parity: rep-set union matches enumerate_full_orbit_
     std::string dir = make_scratch_dir("sym_ordering", "repset_N6");
     write_zN_translation_fixtures(dir, N);
 
-    // Legacy path: materialise all sectors.
-    auto sym_op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<std::uint64_t>(N), 0.5f);
-    add_heisenberg_pbc_terms_legacy(*sym_op, N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
-
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    // Canonical rep list straight from the new free function.
-    const std::vector<std::uint64_t> new_reps =
+    // Canonical rep list straight from the production free function.
+    const std::vector<std::uint64_t> reps =
         ed::symmetry::enumerate_full_orbit_reps(
             info, static_cast<std::uint64_t>(N));
-    REQUIRE_FALSE(new_reps.empty());
+    REQUIRE_FALSE(reps.empty());
     // enumerate_full_orbit_reps is ascending by construction.
-    REQUIRE(std::is_sorted(new_reps.begin(), new_reps.end()));
+    REQUIRE(std::is_sorted(reps.begin(), reps.end()));
 
-    // Deduplicated union of every legacy sector's orbit_rep. Each orbit
+    // Deduplicated union of every surviving sector's orbit_rep. Each orbit
     // survives in at least one sector (the k=0 symmetric combination has
     // nonzero norm), so the union must be the full canonical rep set.
-    std::vector<std::uint64_t> legacy_union;
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const SymmetrySector& sec = sym_op->getSector(s);
-        for (const auto& bs : sec.basis_states) {
-            legacy_union.push_back(bs.orbit_rep);
+    auto ops = ed::symmetry::build_full_sector_operators(
+        static_cast<std::uint64_t>(N), 0.5f, info,
+        [&](ed::symmetry::SectorOperator& op) {
+            add_heisenberg_pbc_terms_new(op, N, 1.0);
+        });
+    std::vector<std::uint64_t> union_reps;
+    for (const auto& op : ops) {
+        for (const auto& bs : op->basis().sector().basis_states) {
+            union_reps.push_back(bs.orbit_rep);
         }
     }
-    std::sort(legacy_union.begin(), legacy_union.end());
-    legacy_union.erase(std::unique(legacy_union.begin(), legacy_union.end()),
-                       legacy_union.end());
+    std::sort(union_reps.begin(), union_reps.end());
+    union_reps.erase(std::unique(union_reps.begin(), union_reps.end()),
+                     union_reps.end());
 
-    REQUIRE(legacy_union.size() == new_reps.size());
-    REQUIRE(legacy_union == new_reps);
+    REQUIRE(union_reps.size() == reps.size());
+    REQUIRE(union_reps == reps);
 }
 
-TEST_CASE("symmetry ordering parity: legacy vs build_full per-sector basis order (N=6)",
+TEST_CASE("symmetry ordering parity: build_full per-sector basis is canonically ordered (N=6)",
           "[symmetry][ordering][parity][N6]")
 {
     const int N = 6;
     std::string dir = make_scratch_dir("sym_ordering", "perorder_N6");
     write_zN_translation_fixtures(dir, N);
 
-    // Legacy reference: per-sector basis states in Pass-2 order.
-    auto sym_op = std::make_unique<StreamingSymmetryOperator>(
-        static_cast<std::uint64_t>(N), 0.5f);
-    add_heisenberg_pbc_terms_legacy(*sym_op, N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
-
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    // New path: independently-constructed standalone per-sector operators.
+    // The canonical (ascending) orbit-rep list every sector basis is a
+    // subsequence of -- ``SectorBasis::build`` iterates it ascending and
+    // appends each surviving orbit in order.
+    const std::vector<std::uint64_t> reps =
+        ed::symmetry::enumerate_full_orbit_reps(
+            info, static_cast<std::uint64_t>(N));
+
     auto ops = ed::symmetry::build_full_sector_operators(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
@@ -209,26 +186,38 @@ TEST_CASE("symmetry ordering parity: legacy vs build_full per-sector basis order
         });
     REQUIRE_FALSE(ops.empty());
 
-    // For each surviving new sector, match it to the legacy sector by id and
-    // assert the basis ORDERING is identical -- the invariant the eigenvalue
-    // tests cannot see.
+    // The basis ordering invariant the eigenvalue tests cannot see: for each
+    // sector the ``orbit_rep`` sequence is a strictly-ascending subsequence of
+    // the canonical rep list (Pass-2 order), each orbit's canonical rep is the
+    // numeric minimum of its (ascending-sorted) orbit elements, and the
+    // lookup index keys off exactly that ordering. These are the integer,
+    // convention-free guarantees the HDF5 orbit caches + cross-sector
+    // observables depend on.
     for (const auto& op : ops) {
-        const std::size_t id =
-            static_cast<std::size_t>(op->basis().sector().sector_id);
-        REQUIRE(id < sym_op->getNumSectors());
+        const SymmetrySector& sec = op->basis().sector();
+        REQUIRE_FALSE(sec.basis_states.empty());
 
-        const SymmetrySector& leg = sym_op->getSector(id);
-        const SymmetrySector& neu = op->basis().sector();
+        std::size_t rep_cursor = 0;
+        std::uint64_t prev_rep = 0;
+        bool have_prev = false;
+        for (const auto& bs : sec.basis_states) {
+            // Strictly ascending orbit_rep sequence.
+            if (have_prev) REQUIRE(bs.orbit_rep > prev_rep);
+            prev_rep = bs.orbit_rep;
+            have_prev = true;
 
-        // Same surviving dimension.
-        REQUIRE(neu.basis_states.size() == leg.basis_states.size());
+            // orbit_rep is a member of the canonical ascending rep list, in
+            // increasing position (subsequence of ``reps``).
+            while (rep_cursor < reps.size() && reps[rep_cursor] != bs.orbit_rep) {
+                ++rep_cursor;
+            }
+            REQUIRE(rep_cursor < reps.size());
 
-        // Same orbit_rep sequence and same orbit_elements sequence, in order.
-        for (std::size_t j = 0; j < neu.basis_states.size(); ++j) {
-            const auto& bl = leg.basis_states[j];
-            const auto& bn = neu.basis_states[j];
-            REQUIRE(bn.orbit_rep == bl.orbit_rep);
-            REQUIRE(bn.orbit_elements == bl.orbit_elements);
+            // orbit_elements sorted ascending + rep == numeric minimum.
+            REQUIRE(std::is_sorted(bs.orbit_elements.begin(),
+                                   bs.orbit_elements.end()));
+            REQUIRE_FALSE(bs.orbit_elements.empty());
+            REQUIRE(bs.orbit_rep == bs.orbit_elements.front());
         }
     }
 }

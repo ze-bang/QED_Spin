@@ -29,14 +29,18 @@
 // =============================================================================
 
 #include "common/catch2_harness.h"
+#include "common/symmetry_reference.h"
 
-#include <ed/core/streaming_symmetry.h>
+#include <ed/core/operator.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/subspace.h>
 
 #include <Eigen/Dense>
+
+#include <functional>
+#include <limits>
 
 #include <algorithm>
 #include <cmath>
@@ -135,26 +139,12 @@ void add_heisenberg_pbc_terms(Op& op, std::uint64_t N, double J) {
     }
 }
 
-std::unique_ptr<StreamingSymmetryOperator>
-build_heisenberg_pbc_streaming(std::uint64_t N, double J) {
-    auto op = std::make_unique<StreamingSymmetryOperator>(N, 0.5f);
-    const Complex J_real(J, 0.0);
-    const Complex J_half(0.5 * J, 0.0);
-    for (std::uint64_t i = 0; i < N; ++i) {
-        std::uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-    }
+// Full-Hilbert Heisenberg PBC operator (carrier-free) -- the full-space
+// ``H`` apply backs the independent symmetrized reference.
+std::unique_ptr<Operator>
+build_heisenberg_pbc_full(std::uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
+    add_heisenberg_pbc_terms(*op, N, J);
     return op;
 }
 
@@ -183,38 +173,40 @@ TEST_CASE("sector_operator: standalone SectorOperator matches legacy applySymmet
     std::string dir = make_scratch_dir("sector_operator", "heisenberg_N6");
     write_zN_translation_fixtures(dir, N);
 
-    auto sym_op = build_heisenberg_pbc_streaming(N, 1.0);
-    REQUIRE_NOTHROW(sym_op->generateSymmetrySectorsStreaming(dir));
+    auto full_op = build_heisenberg_pbc_full(N, 1.0);
 
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
     const ed::symmetry::FullSpaceSubspace full(static_cast<std::uint64_t>(N));
     const ed::symmetry::SpatialProjector  spatial(info);
     const std::vector<std::uint64_t> reps = enumerate_orbit_reps(info, N);
+    const double group_size =
+        static_cast<double>(info.max_clique.size());
 
-    REQUIRE(sym_op->getNumSectors() == info.sectors.size());
+    std::function<void(const Complex*, Complex*, std::size_t)> full_apply =
+        [&full_op](const Complex* x, Complex* y, std::size_t n) {
+            full_op->apply(x, y, n);
+        };
 
     double e0_min = std::numeric_limits<double>::infinity();
 
-    for (std::size_t s = 0; s < sym_op->getNumSectors(); ++s) {
-        const std::size_t sd = sym_op->getSectorDimension(s);
-        if (sd == 0) continue;
-
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
         // Standalone per-sector operator: owning SectorBasis + its own
-        // inherited term list. No reference to sym_op.
+        // inherited term list. No reference to any symmetry carrier.
         ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
             full, spatial,
             info.sectors[s].quantum_numbers,
             info.sectors[s].phase_factors,
             reps, /*sector_id=*/s);
-        REQUIRE(sb.dim() == sd);
+        const std::size_t sd = sb.dim();
+        if (sd == 0) continue;
 
         ed::symmetry::SectorOperator sec_op(
             static_cast<std::uint64_t>(N), 0.5f, std::move(sb));
         add_heisenberg_pbc_terms(sec_op, N, 1.0);
         REQUIRE(sec_op.dim() == sd);
 
-        // (1) complex matvec equivalence vs legacy, two probes.
+        // (1) complex matvec equivalence vs the independent reference, two probes.
         for (int probe = 0; probe < 2; ++probe) {
             std::vector<Complex> x(sd);
             if (probe == 0) {
@@ -224,7 +216,9 @@ TEST_CASE("sector_operator: standalone SectorOperator matches legacy applySymmet
             }
             std::vector<Complex> y_ref(sd, Complex(0.0, 0.0));
             std::vector<Complex> y_new(sd, Complex(0.0, 0.0));
-            sym_op->applySymmetrized(s, x.data(), y_ref.data());
+            ed_tests::apply_symmetrized_reference(
+                sec_op.basis().sector(), static_cast<std::uint64_t>(N),
+                group_size, full_apply, x.data(), y_ref.data(), sd);
             sec_op.apply(x.data(), y_new.data(), sd);
             for (std::size_t i = 0; i < sd; ++i) {
                 REQUIRE(std::abs(y_new[i] - y_ref[i]) < 1e-12);

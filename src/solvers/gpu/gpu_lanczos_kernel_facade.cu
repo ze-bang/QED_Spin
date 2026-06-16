@@ -42,6 +42,7 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/gpu/gpu_operator.cuh>
+#include <ed/gpu/gpu_solvers.h>   // declarations of the kernel-facade entry points
 
 #include <cuComplex.h>
 #include <cuda_runtime.h>
@@ -54,6 +55,7 @@
 #include <chrono>
 #include <complex>
 #include <cstddef>
+#include <functional>
 #include <cstdlib>   // Waves 4.1+4.2: getenv (ED_GPU_LANCZOS_FULL_CGS2)
 #include <iostream>
 #include <stdexcept>
@@ -385,7 +387,7 @@ void run_lanczos_eigenpairs_kernel_facade(
 // basis is freed by the kernel's RAII destructors at scope exit.
 // ---------------------------------------------------------------------------
 int run_ftlm_lanczos_kernel_facade(
-    GPUOperator& gpu_op,
+    const std::function<void(const cuDoubleComplex*, cuDoubleComplex*, int)>& matvec,
     const void*  d_start_vec_raw,
     int          N,
     int          krylov_dim,
@@ -440,7 +442,7 @@ int run_ftlm_lanczos_kernel_facade(
     auto kres = ed::krylov::lanczos_kernel(
         backend,
         [&](const Complex* in, Complex* o, std::size_t n) {
-            gpu_op.matVecGPU(
+            matvec(
                 reinterpret_cast<const cuDoubleComplex*>(in),
                 reinterpret_cast<cuDoubleComplex*>(o),
                 static_cast<int>(n));

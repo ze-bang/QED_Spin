@@ -128,6 +128,52 @@ class FixedSzSubspace {
 public:
     FixedSzSubspace() = default;
 
+    // ------------------------------------------------------------------
+    // Copy / move with pointer re-homing (operator-collapse Phase 4).
+    //
+    // A built (owning) FixedSzSubspace stores its tables in
+    // ``owned_basis_`` / ``owned_lin_`` and points ``basis_ptr_`` /
+    // ``lin_ptr_`` at them. A naive default copy/move would copy the
+    // vectors but leave the pointers aimed at the SOURCE's storage,
+    // dangling once the source dies. Now that ``SubspaceOperator`` holds
+    // a FixedSzSubspace as an owned member (and that operator is copyable
+    // -- e.g. ``std::vector<Operator>`` in the DSSF spec), we re-home the
+    // pointers to ``this`` on copy/move whenever the source was owning.
+    // View-only subspaces (pointers aimed at external storage) copy the
+    // external pointers verbatim, exactly as before.
+    // ------------------------------------------------------------------
+    FixedSzSubspace(const FixedSzSubspace& o)
+        : n_bits_(o.n_bits_), n_up_(o.n_up_),
+          owned_basis_(o.owned_basis_), owned_lin_(o.owned_lin_) {
+        rehome_from_(o);
+    }
+    FixedSzSubspace(FixedSzSubspace&& o) noexcept
+        : n_bits_(o.n_bits_), n_up_(o.n_up_),
+          owned_basis_(std::move(o.owned_basis_)),
+          owned_lin_(std::move(o.owned_lin_)) {
+        rehome_from_(o);
+    }
+    FixedSzSubspace& operator=(const FixedSzSubspace& o) {
+        if (this != &o) {
+            n_bits_      = o.n_bits_;
+            n_up_        = o.n_up_;
+            owned_basis_ = o.owned_basis_;
+            owned_lin_   = o.owned_lin_;
+            rehome_from_(o);
+        }
+        return *this;
+    }
+    FixedSzSubspace& operator=(FixedSzSubspace&& o) noexcept {
+        if (this != &o) {
+            n_bits_      = o.n_bits_;
+            n_up_        = o.n_up_;
+            owned_basis_ = std::move(o.owned_basis_);
+            owned_lin_   = std::move(o.owned_lin_);
+            rehome_from_(o);
+        }
+        return *this;
+    }
+
     /// Owning build: enumerates basis states with popcount = n_up and
     /// builds the Lin index table.
     [[nodiscard]] static FixedSzSubspace
@@ -206,6 +252,19 @@ public:
     static constexpr bool is_distributed     = false;
 
 private:
+    // Re-home the non-owning pointers after a copy/move from ``o``: if the
+    // source pointed at its own ``owned_*`` storage we point at OUR copies;
+    // otherwise we adopt the source's external pointers verbatim.
+    void rehome_from_(const FixedSzSubspace& o) noexcept {
+        if (o.basis_ptr_ == &o.owned_basis_) {
+            basis_ptr_ = &owned_basis_;
+            lin_ptr_   = &owned_lin_;
+        } else {
+            basis_ptr_ = o.basis_ptr_;
+            lin_ptr_   = o.lin_ptr_;
+        }
+    }
+
     std::uint64_t n_bits_ = 0;
     std::int64_t  n_up_   = 0;
     // Owned tables (populated only by ``build``); viewers initialize

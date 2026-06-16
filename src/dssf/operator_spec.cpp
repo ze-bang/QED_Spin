@@ -18,6 +18,8 @@
 
 #include <ed/dssf/operator_spec.h>
 
+#include <ed/core/operator_builders.h>
+
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -29,22 +31,35 @@
 namespace ed::dssf {
 namespace {
 
-// Audit #2 helper: emit a sliced Operator (legacy obs_1/obs_2 entry) AND a
-// type-preserving shared_ptr<FixedSzOperator> entry (obs_1_fs/obs_2_fs).
-// Use a templated lambda factory pattern via this small helper so callers
-// keep the constructor-arg list local. The shared_ptr keeps the fully
-// derived deleter (make_shared<Derived>) so non-virtual ~Operator is OK.
-template <typename FsT, typename... Args>
-void push_fs_pair_a(ObservablePairs& out, Args&&... args) {
-    auto p = std::make_shared<FsT>(std::forward<Args>(args)...);
+// Build a fixed-Sz observable via ``build`` (a callable that appends terms to
+// a FixedSzOperator&), then emit BOTH a sliced value-type Operator (the legacy
+// obs_1/obs_2 entry) AND a type-preserving shared_ptr<FixedSzOperator>
+// (obs_1_fs/obs_2_fs). Slicing a fixed-Sz operator into a value-type Operator
+// destroys the dimension semantics, so the shared_ptr is what CPU dispatch
+// must actually apply -- see ObservablePairs docs.
+template <typename BuildFn>
+void push_fs_a(ObservablePairs& out, const OperatorSpec& spec, BuildFn&& build) {
+    auto p = std::make_shared<FixedSzOperator>(spec.num_sites, spec.spin_length,
+                                               spec.n_up);
+    build(*p);
     out.obs_1.push_back(Operator(*p));
-    out.obs_1_fs.push_back(std::static_pointer_cast<FixedSzOperator>(p));
+    out.obs_1_fs.push_back(p);
 }
-template <typename FsT, typename... Args>
-void push_fs_pair_b(ObservablePairs& out, Args&&... args) {
-    auto p = std::make_shared<FsT>(std::forward<Args>(args)...);
+template <typename BuildFn>
+void push_fs_b(ObservablePairs& out, const OperatorSpec& spec, BuildFn&& build) {
+    auto p = std::make_shared<FixedSzOperator>(spec.num_sites, spec.spin_length,
+                                               spec.n_up);
+    build(*p);
     out.obs_2.push_back(Operator(*p));
-    out.obs_2_fs.push_back(std::static_pointer_cast<FixedSzOperator>(p));
+    out.obs_2_fs.push_back(p);
+}
+
+// Build a full-Hilbert observable value-type Operator via ``build``.
+template <typename BuildFn>
+Operator make_full(const OperatorSpec& spec, BuildFn&& build) {
+    Operator op(spec.num_sites, spec.spin_length);
+    build(op);
+    return op;
 }
 
 constexpr double kZeroTol = 1e-10;
@@ -90,34 +105,19 @@ void append_sum_pair(const OperatorSpec& spec,
                      bool use_xyz_basis,
                      ObservablePairs& out) {
     const auto& pf = spec.positions_file;
-    const auto N = spec.num_sites;
-    const auto S = spec.spin_length;
     const bool emit_b = !spec.single_obs_only;
+    const auto w1 = static_cast<std::uint64_t>(op_type_1);
+    const auto w2 = static_cast<std::uint64_t>(op_type_2);
+
+    auto build1 = [&](auto& op) { ed::ops::add_sum(op, w1, Q, pf, use_xyz_basis); };
+    auto build2 = [&](auto& op) { ed::ops::add_sum(op, w2, Q, pf, use_xyz_basis); };
 
     if (spec.use_fixed_sz) {
-        if (use_xyz_basis) {
-            push_fs_pair_a<FixedSzSumOperatorXYZ>(out, N, S, spec.n_up, op_type_1, Q, pf);
-            if (emit_b) {
-                push_fs_pair_b<FixedSzSumOperatorXYZ>(out, N, S, spec.n_up, op_type_2, Q, pf);
-            }
-        } else {
-            push_fs_pair_a<FixedSzSumOperator>(out, N, S, spec.n_up, op_type_1, Q, pf);
-            if (emit_b) {
-                push_fs_pair_b<FixedSzSumOperator>(out, N, S, spec.n_up, op_type_2, Q, pf);
-            }
-        }
+        push_fs_a(out, spec, build1);
+        if (emit_b) push_fs_b(out, spec, build2);
     } else {
-        if (use_xyz_basis) {
-            out.obs_1.push_back(Operator(SumOperatorXYZ(N, S, op_type_1, Q, pf)));
-            if (emit_b) {
-                out.obs_2.push_back(Operator(SumOperatorXYZ(N, S, op_type_2, Q, pf)));
-            }
-        } else {
-            out.obs_1.push_back(Operator(SumOperator(N, S, op_type_1, Q, pf)));
-            if (emit_b) {
-                out.obs_2.push_back(Operator(SumOperator(N, S, op_type_2, Q, pf)));
-            }
-        }
+        out.obs_1.push_back(make_full(spec, build1));
+        if (emit_b) out.obs_2.push_back(make_full(spec, build2));
     }
 }
 
@@ -130,34 +130,27 @@ void append_transverse_pair(const OperatorSpec& spec,
                             const std::vector<double>& e2_vec,
                             ObservablePairs& out) {
     const auto& pf = spec.positions_file;
-    const auto N = spec.num_sites;
-    const auto S = spec.spin_length;
+    const auto w1 = static_cast<std::uint64_t>(op_type_1);
+    const auto w2 = static_cast<std::uint64_t>(op_type_2);
 
-    if (spec.use_fixed_sz) {
-        if (use_xyz_basis) {
-            push_fs_pair_a<FixedSzTransverseOperatorXYZ>(out, N, S, spec.n_up, op_type_1, Q, e1_vec, pf);
-            push_fs_pair_b<FixedSzTransverseOperatorXYZ>(out, N, S, spec.n_up, op_type_2, Q, e1_vec, pf);
-            push_fs_pair_a<FixedSzTransverseOperatorXYZ>(out, N, S, spec.n_up, op_type_1, Q, e2_vec, pf);
-            push_fs_pair_b<FixedSzTransverseOperatorXYZ>(out, N, S, spec.n_up, op_type_2, Q, e2_vec, pf);
+    // For each transverse basis vector e, emit the (op_type_1, op_type_2) pair.
+    auto emit = [&](const std::vector<double>& e) {
+        auto build1 = [&](auto& op) {
+            ed::ops::add_transverse(op, w1, Q, e, pf, use_xyz_basis);
+        };
+        auto build2 = [&](auto& op) {
+            ed::ops::add_transverse(op, w2, Q, e, pf, use_xyz_basis);
+        };
+        if (spec.use_fixed_sz) {
+            push_fs_a(out, spec, build1);
+            push_fs_b(out, spec, build2);
         } else {
-            push_fs_pair_a<FixedSzTransverseOperator>(out, N, S, spec.n_up, op_type_1, Q, e1_vec, pf);
-            push_fs_pair_b<FixedSzTransverseOperator>(out, N, S, spec.n_up, op_type_2, Q, e1_vec, pf);
-            push_fs_pair_a<FixedSzTransverseOperator>(out, N, S, spec.n_up, op_type_1, Q, e2_vec, pf);
-            push_fs_pair_b<FixedSzTransverseOperator>(out, N, S, spec.n_up, op_type_2, Q, e2_vec, pf);
+            out.obs_1.push_back(make_full(spec, build1));
+            out.obs_2.push_back(make_full(spec, build2));
         }
-    } else {
-        if (use_xyz_basis) {
-            out.obs_1.push_back(Operator(TransverseOperatorXYZ(N, S, op_type_1, Q, e1_vec, pf)));
-            out.obs_2.push_back(Operator(TransverseOperatorXYZ(N, S, op_type_2, Q, e1_vec, pf)));
-            out.obs_1.push_back(Operator(TransverseOperatorXYZ(N, S, op_type_1, Q, e2_vec, pf)));
-            out.obs_2.push_back(Operator(TransverseOperatorXYZ(N, S, op_type_2, Q, e2_vec, pf)));
-        } else {
-            out.obs_1.push_back(Operator(TransverseOperator(N, S, op_type_1, Q, e1_vec, pf)));
-            out.obs_2.push_back(Operator(TransverseOperator(N, S, op_type_2, Q, e1_vec, pf)));
-            out.obs_1.push_back(Operator(TransverseOperator(N, S, op_type_1, Q, e2_vec, pf)));
-            out.obs_2.push_back(Operator(TransverseOperator(N, S, op_type_2, Q, e2_vec, pf)));
-        }
-    }
+    };
+    emit(e1_vec);
+    emit(e2_vec);
 }
 
 void append_sublattice_pair(const OperatorSpec& spec,
@@ -168,20 +161,23 @@ void append_sublattice_pair(const OperatorSpec& spec,
                             std::uint64_t sub_j,
                             ObservablePairs& out) {
     const auto& pf = spec.positions_file;
-    const auto N = spec.num_sites;
-    const auto S = spec.spin_length;
     const auto U = spec.unit_cell_size;
     const bool emit_b = !spec.single_obs_only;
+    const auto w1 = static_cast<std::uint64_t>(op_type_1);
+    const auto w2 = static_cast<std::uint64_t>(op_type_2);
+
+    auto build1 = [&](auto& op) {
+        ed::ops::add_sublattice(op, sub_i, U, w1, Q, pf);
+    };
+    auto build2 = [&](auto& op) {
+        ed::ops::add_sublattice(op, sub_j, U, w2, Q, pf);
+    };
     if (spec.use_fixed_sz) {
-        push_fs_pair_a<FixedSzSublatticeOperator>(out, sub_i, U, N, S, spec.n_up, op_type_1, Q, pf);
-        if (emit_b) {
-            push_fs_pair_b<FixedSzSublatticeOperator>(out, sub_j, U, N, S, spec.n_up, op_type_2, Q, pf);
-        }
+        push_fs_a(out, spec, build1);
+        if (emit_b) push_fs_b(out, spec, build2);
     } else {
-        out.obs_1.push_back(Operator(SublatticeOperator(sub_i, U, N, S, op_type_1, Q, pf)));
-        if (emit_b) {
-            out.obs_2.push_back(Operator(SublatticeOperator(sub_j, U, N, S, op_type_2, Q, pf)));
-        }
+        out.obs_1.push_back(make_full(spec, build1));
+        if (emit_b) out.obs_2.push_back(make_full(spec, build2));
     }
 }
 
@@ -189,19 +185,17 @@ void append_experimental_pair(const OperatorSpec& spec,
                               const std::vector<double>& Q,
                               ObservablePairs& out) {
     const auto& pf = spec.positions_file;
-    const auto N = spec.num_sites;
-    const auto S = spec.spin_length;
     const bool emit_b = !spec.single_obs_only;
+
+    auto build = [&](auto& op) {
+        ed::ops::add_experimental(op, spec.theta, Q, pf);
+    };
     if (spec.use_fixed_sz) {
-        push_fs_pair_a<FixedSzExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, pf);
-        if (emit_b) {
-            push_fs_pair_b<FixedSzExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, pf);
-        }
+        push_fs_a(out, spec, build);
+        if (emit_b) push_fs_b(out, spec, build);
     } else {
-        out.obs_1.push_back(Operator(ExperimentalOperator(N, S, spec.theta, Q, pf)));
-        if (emit_b) {
-            out.obs_2.push_back(Operator(ExperimentalOperator(N, S, spec.theta, Q, pf)));
-        }
+        out.obs_1.push_back(make_full(spec, build));
+        if (emit_b) out.obs_2.push_back(make_full(spec, build));
     }
 }
 
@@ -211,19 +205,21 @@ void append_transverse_experimental_pair(const OperatorSpec& spec,
                                          const std::vector<double>& e2_vec,
                                          ObservablePairs& out) {
     const auto& pf = spec.positions_file;
-    const auto N = spec.num_sites;
-    const auto S = spec.spin_length;
-    if (spec.use_fixed_sz) {
-        push_fs_pair_a<FixedSzTransverseExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, e1_vec, pf);
-        push_fs_pair_b<FixedSzTransverseExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, e1_vec, pf);
-        push_fs_pair_a<FixedSzTransverseExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, e2_vec, pf);
-        push_fs_pair_b<FixedSzTransverseExperimentalOperator>(out, N, S, spec.n_up, spec.theta, Q, e2_vec, pf);
-    } else {
-        out.obs_1.push_back(Operator(TransverseExperimentalOperator(N, S, spec.theta, Q, e1_vec, pf)));
-        out.obs_2.push_back(Operator(TransverseExperimentalOperator(N, S, spec.theta, Q, e1_vec, pf)));
-        out.obs_1.push_back(Operator(TransverseExperimentalOperator(N, S, spec.theta, Q, e2_vec, pf)));
-        out.obs_2.push_back(Operator(TransverseExperimentalOperator(N, S, spec.theta, Q, e2_vec, pf)));
-    }
+
+    auto emit = [&](const std::vector<double>& e) {
+        auto build = [&](auto& op) {
+            ed::ops::add_transverse_experimental(op, spec.theta, Q, e, pf);
+        };
+        if (spec.use_fixed_sz) {
+            push_fs_a(out, spec, build);
+            push_fs_b(out, spec, build);
+        } else {
+            out.obs_1.push_back(make_full(spec, build));
+            out.obs_2.push_back(make_full(spec, build));
+        }
+    };
+    emit(e1_vec);
+    emit(e2_vec);
 }
 
 } // namespace

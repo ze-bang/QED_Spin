@@ -247,6 +247,78 @@ void check_lane(const std::string& lane,
     }
 }
 
+// Operator-collapse Phase 3 (Jun 2026): the CSR-free lazy-rep lane of
+// ``make_sector_operators``. Builds the SAME fixed-Sz system twice -- once
+// forced eager (orbit-CSR matvec, the proven reference) and once forced lazy
+// (``build_fixed_sz_sector_operators_lazy``) -- and asserts the lazy lane:
+//   * returns rep-lazy operators whose dims match the eager lane sector-for-
+//     sector WITHOUT materialising the host orbit CSR at construction;
+//   * keeps the host orbit CSR un-materialised after ``bind_cuda`` (GPU path);
+//   * reproduces the eager CSR CPU reference matvec on the GPU to < 1e-9.
+// This pins that the direct-enumeration lazy path (no streaming carrier)
+// builds bit-identical physics to the eager path.
+void check_lazy_lane(const std::string& dir, int N, int n_up) {
+    const std::string lane = "lazy(n_up=" + std::to_string(n_up) + ")";
+    ed::OperatorSpec spec = heisenberg_spec(dir, N);
+    spec.fixed_sz = n_up;
+
+    setenv("ED_SYM_LAZY_SECTORS", "0", /*overwrite=*/1);
+    auto eager = ed::make_sector_operators(spec);
+    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);
+    auto lazy = ed::make_sector_operators(spec);
+    unsetenv("ED_SYM_LAZY_SECTORS");
+
+    if (eager.size() != lazy.size()) {
+        std::cerr << "  FAIL " << lane << ": sector count eager="
+                  << eager.size() << " lazy=" << lazy.size() << "\n";
+        ++g_failures;
+        return;
+    }
+    for (std::size_t s = 0; s < lazy.size(); ++s) {
+        auto& lop = lazy[s];
+        auto& eop = eager[s];
+        const std::string tg = lane + " sector " + std::to_string(s);
+
+        if (!lop->rep_lazy()) {
+            std::cerr << "  FAIL " << tg << ": rep_lazy()\n";
+            ++g_failures;
+        }
+        if (lop->dim() != eop->dim()) {
+            std::cerr << "  FAIL " << tg << ": dim " << lop->dim()
+                      << " vs eager " << eop->dim() << "\n";
+            ++g_failures;
+            continue;
+        }
+        if (lop->host_csr_materialized()) {
+            std::cerr << "  FAIL " << tg
+                      << ": host CSR materialised at construction\n";
+            ++g_failures;
+        }
+        const std::size_t sd = lop->dim();
+        if (sd == 0) continue;
+
+        auto fn = lop->bind_cuda();
+        if (lop->host_csr_materialized()) {
+            std::cerr << "  FAIL " << tg
+                      << ": host CSR materialised after bind_cuda (GPU path)\n";
+            ++g_failures;
+        }
+        for (int probe = 0; probe < 2; ++probe) {
+            std::vector<Complex> x(sd);
+            if (probe == 0) std::fill(x.begin(), x.end(), Complex(1.0, 0.0));
+            else            x = random_complex_vec(sd, (s + 9) * 70001ULL + 3);
+
+            std::vector<Complex> y_eager_cpu(sd, Complex(0.0, 0.0));
+            eop->apply(x.data(), y_eager_cpu.data(), sd);  // orbit-CSR reference
+            std::vector<Complex> y_lazy_gpu = run_gpu_matvec(fn, x);
+
+            expect_close(y_lazy_gpu, y_eager_cpu,
+                         tg + " probe " + std::to_string(probe) +
+                         " (dim " + std::to_string(sd) + ")");
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -280,6 +352,9 @@ int main() {
         auto ops = ed::make_sector_operators(spec);
         check_lane("fixedsz", ops);
     }
+
+    std::cout << "[lazy lane] make_sector_operators (CSR-free lazy-rep, n_up=3)\n";
+    check_lazy_lane(dir, N, /*n_up=*/3);
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
