@@ -32,6 +32,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <ed/core/combinadic.h>  // BinomialTable + rank_state (O(1) reverse lookup)
+
 namespace ed::symmetry {
 
 struct RepSectorData {
@@ -43,8 +45,52 @@ struct RepSectorData {
     int n_sites    = 0;
     int n_up       = -1;  // -1 => not a fixed-Sz sector (rep path needs n_up >= 0)
 
+    // Optional O(1) reverse lookup (host twin of the GPU dense rank table,
+    // symmetry_spmv_optimizations.pdf Section 3.3). ``rep_index_of_rank`` maps
+    // the combinadic rank of a representative to its orbit index (-1 for a
+    // non-representative); ``binom`` is the matching Pascal table. EMPTY by
+    // default => the policy falls back to a binary search over ``reps``. Built
+    // once per sector (``build_rank_table``) and reused across every solver
+    // iteration. Cost: C(n_sites, n_up) * 4 B (~2.4 GiB at N=32, n_up=16).
+    std::vector<std::int32_t>          rep_index_of_rank;
+    ed::core::combinadic::BinomialTable binom;
+
     [[nodiscard]] std::uint64_t dim() const noexcept {
         return static_cast<std::uint64_t>(reps.size());
+    }
+
+    [[nodiscard]] bool has_rank_table() const noexcept {
+        return !rep_index_of_rank.empty();
+    }
+
+    // Number of int32 entries a full rank table would need for this sector
+    // (== C(n_sites, n_up)). 0 when the sector cannot carry a rank table.
+    [[nodiscard]] std::uint64_t rank_table_entries() const noexcept {
+        if (n_up < 0 || n_sites <= 0) return 0;
+        ed::core::combinadic::BinomialTable b(n_sites);
+        return b.at(n_sites, n_up);
+    }
+
+    // Build the dense rank -> orbit-index table from ``reps`` only (no orbit
+    // images materialised; bit-identical to the GPU build in
+    // streaming_symmetry_gpu_mirror.cu). Idempotent / no-op when already built
+    // or when the sector is not a usable fixed-Sz sector.
+    void build_rank_table() {
+        if (has_rank_table()) return;
+        if (n_up < 0 || n_sites <= 0 || reps.empty()) return;
+        binom.resize(n_sites);
+        const std::uint64_t dim_full_sz = binom.at(n_sites, n_up);
+        if (dim_full_sz == 0) return;
+        rep_index_of_rank.assign(static_cast<std::size_t>(dim_full_sz),
+                                 std::int32_t{-1});
+        for (std::size_t i = 0; i < reps.size(); ++i) {
+            const std::int64_t r = ed::core::combinadic::rank_state(
+                reps[i], n_sites, n_up, binom);
+            if (r >= 0 && static_cast<std::uint64_t>(r) < dim_full_sz) {
+                rep_index_of_rank[static_cast<std::size_t>(r)] =
+                    static_cast<std::int32_t>(i);
+            }
+        }
     }
 
     // A RepSectorData is usable by the rep matvec only when it carries a

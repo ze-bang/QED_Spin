@@ -55,6 +55,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <stdexcept>
 #include <utility>
@@ -70,6 +71,38 @@
 #include <ed/symmetry/subspace.h>
 
 namespace ed::symmetry {
+
+// ---------------------------------------------------------------------------
+// O(1) rep reverse-lookup gate ("Optimized symmetry ED" plan, Phase A).
+//
+// The CSR-free rep matvec can resolve ``state -> orbit index`` either by a
+// binary search over the sorted ``reps`` array (O(log dim), zero extra memory)
+// or by a dense combinadic rank table (O(1), C(n_sites,n_up) int32). For an
+// iterative solver doing thousands of matvecs the table is reused every
+// iteration, so it pays for itself -- but it costs ~2.4 GiB at N=32, so it is
+// gated by a memory budget.
+//
+//   ED_SYM_REP_RANKTABLE = "0"  -> force OFF (always binary search)
+//                          "1"  -> force ON  (build regardless of budget)
+//                          unset -> build when table bytes <= budget
+//   ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 8) sets the budget.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
+    if (table_entries == 0) return false;
+    const char* force = std::getenv("ED_SYM_REP_RANKTABLE");
+    if (force != nullptr && force[0] == '0' && force[1] == '\0') return false;
+    if (force != nullptr && force[0] == '1' && force[1] == '\0') return true;
+    double budget_gib = 8.0;
+    if (const char* b = std::getenv("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
+        const double parsed = std::atof(b);
+        if (parsed > 0.0) budget_gib = parsed;
+    }
+    const long double table_bytes =
+        static_cast<long double>(table_entries) * sizeof(std::int32_t);
+    const long double budget_bytes =
+        static_cast<long double>(budget_gib) * 1024.0L * 1024.0L * 1024.0L;
+    return table_bytes <= budget_bytes;
+}
 
 // ---------------------------------------------------------------------------
 // SectorBasis -- owning orbit data + lookup for one symmetry sector.
@@ -279,6 +312,13 @@ public:
     [[nodiscard]] const RepSectorData& ensureRepData() const {
         if (!rep_data_.usable() && rep_provider_) {
             rep_data_ = rep_provider_();
+        }
+        // Phase A: build the O(1) dense rank table once (gated by budget). The
+        // RepSymmetryBasisPolicy consumes it transparently (binary-search
+        // fallback when absent), so this only ever speeds the reverse lookup.
+        if (rep_data_.usable() && !rep_data_.has_rank_table()
+            && rep_rank_table_enabled(rep_data_.rank_table_entries())) {
+            rep_data_.build_rank_table();
         }
         return rep_data_;
     }

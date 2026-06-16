@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Symmetry / Sz+symmetry SpMV brought to optimality (CPU + GPU) (Jun 2026)
+
+The symmetry and Sz+symmetry matrix-vector lanes now match the Full / Fixed-Sz
+lanes: O(1) reverse lookup, a precomputed representative diagonal, and a
+lock-free row-GATHER SpMV that drops the atomic + radix-sort scatter. The
+enabling identity is Hermiticity: with `H[r,j] = conj(H[j,r])` and real
+`inv_norm`, the gather kernel applies `H` to the **output** representative once
+and accumulates `out[r] = inv_norm[r] * Σ conj(h·proj)·in[j]` in a register
+(one write per row, no atomics, no pre-zero). Provably equal to the scatter and
+pinned bit-for-bit by the parity tests (including the complex-character
+`|G|=8` fixtures).
+
+- **Phase A — O(1) reverse lookup (CPU).** `RepSectorData` grew an optional
+  dense `rep_index_of_rank` table + host `BinomialTable`
+  ([`rep_sector_data.h`](include/ed/symmetry/rep_sector_data.h)), built once in
+  `SectorBasis::ensureRepData` and wired into `rep_policy_from`
+  ([`symmetry_matvec_backend.h`](include/ed/matvec/symmetry_matvec_backend.h)).
+  `RepSymmetryBasisPolicy::index_of_rep` consumes it transparently (binary-search
+  fallback when absent). Gated by a memory budget
+  (`ED_SYM_REP_RANKTABLE=0/1`, `ED_SYM_REP_RANKTABLE_BUDGET_GIB`, default 8 GiB)
+  so the rep-lazy memory win is preserved. The GPU already used this table.
+- **Phase B — precomputed rep diagonal.** The representative-basis diagonal is a
+  per-row scalar `diag[r] = inv_norm[r]·Σ conj(h_diag·proj_r)`; it is cached once
+  in `CpuMatVecBackend` (`compute_rep_diagonal`,
+  [`term_kernels.h`](include/ed/matvec/term_kernels.h)) and fused as
+  `out[r] += diag[r]·in[r]`. The GPU gather fuses the diagonal inline (no `diag[]`
+  upload), matching `apply_terms_gpu_gather`.
+- **Phase C — lock-free GATHER rep kernel (CPU + GPU).**
+  `apply_terms_rep_symmetry_gather` (host,
+  [`term_kernels.h`](include/ed/matvec/term_kernels.h)) and the device twin +
+  launcher ([`term_kernels_gpu.cuh`](include/ed/matvec/term_kernels_gpu.cuh))
+  are now the DEFAULT rep path; `make_sector_matvec_gpu_rep` launches the gather
+  with no `atomicAdd` and no `cudaMemset`. The validated atomic scatter remains
+  the bisection fallback under `ED_MATVEC_SCATTER=1`.
+- **Phase D — orbit-walk symmetry lane GATHER.** The non-default
+  `SymmetryBasisPolicy` lane (sym without fixed-Sz / eager orbit-CSR) gained
+  `apply_terms_gather_symmetry`, the Hermitian transpose of the orbit-walk
+  scatter (reusing the `coeff_modifier` ABI verbatim), routed by default with
+  the scatter under `ED_MATVEC_SCATTER=1`.
+- **Validation.** New GATHER==SCATTER + O(1)-vs-binary-search parity test
+  ([`test_rep_symmetry_backend.cpp`](tests/unit/test_rep_symmetry_backend.cpp)).
+  CPU `build-ci` ctest (293/293) and the CUDA rep/symmetry matvec tests pass on
+  both the gather and scatter paths to ~1e-15.
+
 ### Operator collapse: one `SubspaceOperator<BasisPolicy, MemSpace>` template + streaming-carrier removal (Jun 2026)
 
 The operator hierarchy is collapsed into a single class template, and the

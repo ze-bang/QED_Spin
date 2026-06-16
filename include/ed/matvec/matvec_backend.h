@@ -422,7 +422,9 @@ public:
         // Full / FixedSz policies (needs_orbit_walk == false).
         if constexpr (BasisPolicy::needs_orbit_walk
                       || detail::policy_is_rep_v<BasisPolicy>) {
-            std::fill(out, out + n, Complex{});
+            // GATHER (default) overwrites every row; only the SCATTER fallback
+            // needs a pre-zeroed accumulator.
+            if (tunables_.matvec_scatter) std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
             return;
         } else {
@@ -485,7 +487,9 @@ public:
         // Compiled out for Full / FixedSz (needs_orbit_walk == false).
         if constexpr (BasisPolicy::needs_orbit_walk
                       || detail::policy_is_rep_v<BasisPolicy>) {
-            std::fill(out, out + n, 0.0);
+            // GATHER (default) overwrites every row; only the SCATTER fallback
+            // needs a pre-zeroed accumulator.
+            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
             matrix_free_real(terms, in, out);
             return;
         } else {
@@ -522,24 +526,46 @@ private:
                              const Complex* in, Complex* out) const
     {
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
-            // On-the-fly representative (momentum) sector: dedicated kernel
-            // (scatter; caller pre-zeroed ``out``).
-            ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, Complex>(
-                basis_, t.spin_l,
-                *t.diag_one, *t.offdiag_one,
-                *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                *t.three_body,
-                in, out);
+            // On-the-fly representative (momentum) sector.
+            if (tunables_.matvec_scatter) {
+                // Bisection fallback: legacy SCATTER kernel (caller pre-zeroed).
+                ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else {
+                // DEFAULT: SOTA lock-free row GATHER + precomputed rep diagonal.
+                // Overwrites ``out`` (no pre-zero needed).
+                ensure_diag_complex(t);
+                ed::matvec::kernel::apply_terms_rep_symmetry_gather<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out, diag_cplx_.data());
+            }
         } else if constexpr (BasisPolicy::needs_orbit_walk) {
-            // Orbit-walk symmetry: SCATTER (caller pre-zeroed ``out``). The
-            // CPU symmetry default is the assembled orbit-CSR (already a
-            // lock-free row gather); this matrix-free fallback stays scatter.
-            ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
-                basis_, t.spin_l,
-                *t.diag_one, *t.offdiag_one,
-                *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                *t.three_body,
-                in, out);
+            // Orbit-walk symmetry lane.
+            if (tunables_.matvec_scatter) {
+                // Bisection fallback: orbit-walk SCATTER (caller pre-zeroed).
+                ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else {
+                // DEFAULT: lock-free row GATHER (Hermitian transpose of the
+                // orbit walk). Overwrites ``out`` (no pre-zero needed).
+                ed::matvec::kernel::apply_terms_gather_symmetry<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            }
         } else if (tunables_.matvec_scatter) {
             // Trivial policy, bisection fallback: legacy SCATTER kernel
             // (caller pre-zeroed ``out``).
@@ -565,19 +591,38 @@ private:
                           const double* in, double* out) const
     {
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
-            ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, double>(
-                basis_, t.spin_l,
-                *t.diag_one, *t.offdiag_one,
-                *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                *t.three_body,
-                in, out);
+            if (tunables_.matvec_scatter) {
+                ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, double>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else {
+                ensure_diag_real(t);
+                ed::matvec::kernel::apply_terms_rep_symmetry_gather<BasisPolicy, double>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out, diag_real_.data());
+            }
         } else if constexpr (BasisPolicy::needs_orbit_walk) {
-            ed::matvec::kernel::apply_terms<BasisPolicy, double>(
-                basis_, t.spin_l,
-                *t.diag_one, *t.offdiag_one,
-                *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                *t.three_body,
-                in, out);
+            if (tunables_.matvec_scatter) {
+                ed::matvec::kernel::apply_terms<BasisPolicy, double>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else {
+                ed::matvec::kernel::apply_terms_gather_symmetry<BasisPolicy, double>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            }
         } else if (tunables_.matvec_scatter) {
             ed::matvec::kernel::apply_terms<BasisPolicy, double>(
                 basis_, t.spin_l,
@@ -642,14 +687,38 @@ private:
         }
     }
 
+    // Rep-symmetry diagonal (Phase B): the diagonal in the representative basis
+    // is NOT the bare Sz/SzSz sign product -- it carries the per-orbit
+    // projection phase + 1/norm. Built via the dedicated kernel; reuses the
+    // same diag_* buffers (a backend is either a trivial OR a rep policy, never
+    // both, so the buffers never alias across policies).
+    template <class S>
+    void build_rep_diag_into(const term_view_t& t, std::vector<S>& diag) const {
+        diag.assign(basis_.dim(), S(0));
+        ed::matvec::kernel::compute_rep_diagonal<BasisPolicy, S>(
+            basis_, t.spin_l,
+            *t.diag_one, *t.offdiag_one,
+            *t.diag_two, *t.mixed_two, *t.offdiag_two,
+            *t.three_body,
+            diag.data());
+    }
+
     void ensure_diag_complex(const term_view_t& t) const {
         if (diag_cplx_built_) return;
-        build_diag_into<Complex>(t, diag_cplx_);
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            build_rep_diag_into<Complex>(t, diag_cplx_);
+        } else {
+            build_diag_into<Complex>(t, diag_cplx_);
+        }
         diag_cplx_built_ = true;
     }
     void ensure_diag_real(const term_view_t& t) const {
         if (diag_real_built_) return;
-        build_diag_into<double>(t, diag_real_);
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            build_rep_diag_into<double>(t, diag_real_);
+        } else {
+            build_diag_into<double>(t, diag_real_);
+        }
         diag_real_built_ = true;
     }
 

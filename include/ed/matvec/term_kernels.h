@@ -749,4 +749,326 @@ inline void apply_terms_rep_symmetry(
     } // end parallel
 }
 
+// ---------------------------------------------------------------------------
+// conj_scalar -- std::conj for the complex path, identity for the real path.
+// (std::conj(double) returns std::complex<double>, which would not compile in
+// the real-Scalar instantiation, so we specialise via if constexpr.)
+// ---------------------------------------------------------------------------
+template <class Scalar>
+[[nodiscard]] inline Scalar conj_scalar(const Scalar& s) noexcept {
+    if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+        return std::conj(s);
+    } else {
+        static_assert(std::is_same_v<Scalar, double>,
+                      "conj_scalar: Scalar must be std::complex<double> or double");
+        return s;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compute_rep_diagonal -- precompute the rep-symmetry Hamiltonian diagonal.
+//
+// "Optimized symmetry ED" plan, Phase B. The diagonal of H in the
+// representative basis is a per-row scalar independent of the input vector:
+// a diagonal term applied to ``rep_r`` emits ``(rep_r, h)`` which projects
+// back onto orbit ``r`` with phase ``proj_r``, so
+//   diag[r] = inv_norm[r] * sum_diag conj(h * proj_r).
+// Computed ONCE (the term list is fixed across solver iterations) and fused as
+// ``out[r] += diag[r]*in[r]`` by the gather driver, which then skips the
+// diagonal bins -- exactly the Full / Fixed-Sz precomputed-diagonal pattern.
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void compute_rep_diagonal(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& /*offdiag_one_body*/,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   /*mixed_two_body*/,
+    const OffDiagTwoBodyVec& /*offdiag_two_body*/,
+    const ThreeBodyVec&      /*three_body*/,
+    Scalar*       __restrict__ diag_out)
+{
+    const uint64_t dim = basis.dim();
+    const OffDiagOneBodyVec empty_o1{};
+    const MixedTwoBodyVec   empty_m{};
+    const OffDiagTwoBodyVec empty_o2{};
+    const ThreeBodyVec      empty_t{};
+
+#ifdef _OPENMP
+    const uint64_t par_threshold =
+        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+#else
+    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
+#endif
+
+    #pragma omp parallel for schedule(static) if(dim > par_threshold)
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+        const uint64_t r     = static_cast<uint64_t>(ir);
+        const uint64_t rep_r = basis.state_of(r);
+        Scalar dacc = Scalar(0);
+        apply_term_to_state<Scalar>(
+            rep_r, spin_l,
+            diag_one_body, empty_o1, diag_two_body, empty_m, empty_o2, empty_t,
+            [&](uint64_t s_prime, const Scalar& h) {
+                std::complex<double> proj;
+                const int64_t j = basis.index_and_projection(s_prime, proj);
+                if (j < 0) return;  // diagonal stays in-orbit (j == r)
+                dacc += conj_scalar<Scalar>(h * coerce_coeff<Scalar>(proj));
+            });
+        diag_out[r] =
+            coerce_coeff<Scalar>(std::complex<double>(basis.inv_norm_of(r), 0.0))
+            * dacc;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// apply_terms_rep_symmetry_gather -- the SOTA lock-free GATHER twin of
+// ``apply_terms_rep_symmetry``.
+//
+// "Optimized symmetry ED" plan, Phase C. One thread OWNS each output orbit row
+// ``r``: it applies H to the single representative ``rep_r`` once, maps each
+// connected computational state ``s'`` back to its SOURCE orbit ``j`` +
+// projection ``proj`` via ``index_and_projection`` (reused verbatim from the
+// scatter), and accumulates in a register. By Hermiticity (H[r,j] =
+// conj(H[j,r]); inv_norm is real):
+//
+//   out[r] = inv_norm[r] * sum over s' from rep_r of conj(h(s') * proj(s')) * in[j].
+//
+// Each ``out[r]`` is written exactly once -- NO atomics, NO radix sort, NO
+// thread-local buffer (the three costs the scatter pays). ``out`` is fully
+// overwritten (no pre-zero needed). When ``diag_cache != nullptr`` the
+// precomputed diagonal (compute_rep_diagonal) is fused as
+// ``out[r] += diag_cache[r]*in[r]`` and the diagonal bins are skipped.
+//
+// Equivalence with ``apply_terms_rep_symmetry`` (scatter) is the Hermitian
+// transpose of the iteration and is pinned bit-for-bit by the parity tests.
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void apply_terms_rep_symmetry_gather(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out,
+    const Scalar* __restrict__ diag_cache = nullptr)
+{
+    const uint64_t dim = basis.dim();
+
+    // With a precomputed diagonal, hand the row kernel empty diagonal bins and
+    // fuse diag_cache[r]*in[r] in the driver.
+    const bool use_cache = (diag_cache != nullptr);
+    const DiagOneBodyVec empty_d1{};
+    const DiagTwoBodyVec empty_d2{};
+    const DiagOneBodyVec& d1 = use_cache ? empty_d1 : diag_one_body;
+    const DiagTwoBodyVec& d2 = use_cache ? empty_d2 : diag_two_body;
+
+#ifdef _OPENMP
+    const uint64_t par_threshold =
+        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+#else
+    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
+#endif
+
+    #pragma omp parallel for schedule(static) if(dim > par_threshold)
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+        const uint64_t r     = static_cast<uint64_t>(ir);
+        const uint64_t rep_r = basis.state_of(r);
+        Scalar acc = Scalar(0);
+        apply_term_to_state<Scalar>(
+            rep_r, spin_l,
+            d1, offdiag_one_body, d2, mixed_two_body, offdiag_two_body,
+            three_body,
+            [&](uint64_t s_prime, const Scalar& h) {
+                std::complex<double> proj;
+                const int64_t j = basis.index_and_projection(s_prime, proj);
+                if (j < 0) return;
+                acc += conj_scalar<Scalar>(h * coerce_coeff<Scalar>(proj))
+                     * in[static_cast<std::size_t>(j)];
+            });
+        Scalar row =
+            coerce_coeff<Scalar>(std::complex<double>(basis.inv_norm_of(r), 0.0))
+            * acc;
+        if (use_cache) row += diag_cache[r] * in[r];
+        out[r] = row;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// apply_terms_gather_symmetry -- the lock-free GATHER twin of the orbit-walk
+// scatter ``apply_terms`` for the ``SymmetryBasisPolicy`` lane (sym without
+// fixed-Sz, or the eager orbit-CSR path).
+//
+// "Optimized symmetry ED" plan, Phase D. The scatter computes, for a SOURCE
+// orbit ``r`` walked over its members ``t`` (coefficient alpha_{t,r}):
+//   out[dst] += in[r] * emitted,   emitted = (alpha_{t,r}/norm_r) * h(t->t')
+//                                          * conj(beta_{t',dst})*group_norm/norm_dst
+// where ``dst = index_of(t')`` and the projection factor is exactly
+// ``coeff_modifier(t, t', r, dst)``. By Hermiticity (H[r,dst] = conj(H[dst,r])):
+//   out[r] = sum over orbit_r members t, terms:  conj(emitted) * in[dst].
+//
+// So the gather row kernel runs the IDENTICAL orbit walk + term emit as the
+// scatter (treating ``r`` as the source, ``coeff_in`` dropped), and instead of
+// an atomic scatter to ``out[dst]`` accumulates ``conj(emitted) * in[dst]`` in
+// a register, then writes ``out[r]`` exactly once. NO atomics, NO radix sort,
+// NO thread-local buffer, NO pre-zero. Provably equal to ``apply_terms`` and
+// pinned by the symmetry-backend parity tests.
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void apply_terms_gather_symmetry(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    static_assert(BasisPolicy::needs_orbit_walk && BasisPolicy::has_coeff_modifier,
+                  "apply_terms_gather_symmetry is for orbit-walk symmetry policies");
+    const uint64_t dim     = basis.dim();
+    const double   spin_sq = spin_l * spin_l;
+
+#ifdef _OPENMP
+    const uint64_t par_threshold =
+        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+#else
+    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
+#endif
+
+    #pragma omp parallel for schedule(static) if(dim > par_threshold)
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+        const uint64_t r = static_cast<uint64_t>(ir);
+        Scalar acc = Scalar(0);
+
+        // Accumulate conj(emitted) * in[dst] for one connected (dst, s') pair.
+        auto gather_emit = [&](uint64_t dst_idx, uint64_t s_prime,
+                               uint64_t basis_state, const Scalar& base_contrib) {
+            const Scalar mod = basis.template coeff_modifier<Scalar>(
+                basis_state, s_prime, r, dst_idx);
+            acc += conj_scalar<Scalar>(base_contrib * mod) * in[dst_idx];
+        };
+
+        // process_source mirrors apply_terms exactly, with coeff = pre_phase
+        // (NO in[r] factor) and the scatter replaced by the gather accumulate.
+        auto process_source = [&](uint64_t basis_state,
+                                  std::complex<double> pre_phase) {
+            const Scalar coeff = coerce_coeff<Scalar>(pre_phase);
+            if (std::abs(coeff) < 1e-15) return;
+
+            // 1. One-body diagonal (Sz_k): s -> s, dst == r.
+            for (const auto& t : diag_one_body) {
+                const double sign =
+                    ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
+                const Scalar contrib =
+                    coerce_coeff<Scalar>(t.coefficient) * spin_l * sign * coeff;
+                gather_emit(r, basis_state, basis_state, contrib);
+            }
+            // 2. One-body off-diagonal (S+/S-): flip one bit.
+            for (const auto& t : offdiag_one_body) {
+                const uint64_t bit = (basis_state >> t.site_index) & 1;
+                if (bit == t.op_type) continue;
+                const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
+                const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
+                const int64_t j = basis.index_of(new_state);
+                if (j < 0) continue;
+                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
+            }
+            // 3. Two-body purely diagonal (Sz_i Sz_j): s -> s, dst == r.
+            for (const auto& t : diag_two_body) {
+                const double sa = ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
+                const double sb = ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                const Scalar contrib =
+                    coerce_coeff<Scalar>(t.coefficient) * spin_sq * sa * sb * coeff;
+                gather_emit(r, basis_state, basis_state, contrib);
+            }
+            // 4. Two-body mixed (Sz S+/-): flip one bit.
+            for (const auto& t : mixed_two_body) {
+                const uint64_t flip_bit = (basis_state >> t.flip_site) & 1;
+                if (flip_bit == t.flip_op_type) continue;
+                const double sz_sign = ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
+                const uint64_t new_state = basis_state ^ (1ULL << t.flip_site);
+                const Scalar contrib =
+                    coerce_coeff<Scalar>(t.coefficient) * spin_l * sz_sign * coeff;
+                const int64_t j = basis.index_of(new_state);
+                if (j < 0) continue;
+                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
+            }
+            // 5. Two-body off-diagonal (S+- S+-): flip two bits, both gated.
+            for (const auto& t : offdiag_two_body) {
+                const uint64_t b1 = (basis_state >> t.site_index_1) & 1;
+                const uint64_t b2 = (basis_state >> t.site_index_2) & 1;
+                if (b1 == t.op_type_1 || b2 == t.op_type_2) continue;
+                const uint64_t new_state =
+                    basis_state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+                const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
+                const int64_t j = basis.index_of(new_state);
+                if (j < 0) continue;
+                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
+            }
+            // 6. Three-body (general).
+            for (const auto& t : three_body) {
+                uint64_t cur_state = basis_state;
+                Scalar   scalar    = coerce_coeff<Scalar>(t.coefficient);
+                bool     valid     = true;
+                auto gate = [&](std::uint8_t op_type, std::uint64_t site) {
+                    if (!valid) return;
+                    if (op_type == kOpSz) {
+                        const double sg = ((cur_state >> site) & 1) ? -1.0 : 1.0;
+                        scalar *= spin_l * sg;
+                    } else {
+                        const uint64_t b = (cur_state >> site) & 1;
+                        if (b != op_type) cur_state ^= (1ULL << site);
+                        else              valid = false;
+                    }
+                };
+                gate(t.op_type_1, t.site_index_1);
+                gate(t.op_type_2, t.site_index_2);
+                gate(t.op_type_3, t.site_index_3);
+                if (!valid) continue;
+                if (std::abs(scalar) < 1e-15) continue;
+                const Scalar contrib = scalar * coeff;
+                const int64_t j = basis.index_of(cur_state);
+                if (j < 0) continue;
+                gather_emit(static_cast<uint64_t>(j), cur_state, basis_state, contrib);
+            }
+        };
+
+        basis.iter_orbit(r, process_source);
+        out[r] = acc;
+    }
+}
+
 } // namespace ed::matvec::kernel

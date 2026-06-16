@@ -741,6 +741,173 @@ inline cudaError_t launch_apply_terms_gpu_gather(
     return cudaGetLastError();
 }
 
+// ===========================================================================
+// REP-SYMMETRY GATHER device kernel ("Optimized symmetry ED" plan, Phase C).
+//
+// The lock-free row-GATHER twin of ``apply_terms_rep_symmetry_scatter``. One
+// thread OWNS each output orbit row ``r``: it applies H to the single
+// representative ``rep_r = state_of(r)`` once, maps every connected state
+// ``s'`` back to its source orbit ``j`` + projection ``proj`` via
+// ``index_and_projection`` (the validated device reverse lookup, O(1) dense
+// rank table), and accumulates in a register. By Hermiticity (H[r,j] =
+// conj(H[j,r]); inv_norm is real):
+//
+//   out[r] = inv_norm[r] * sum over s' from rep_r of conj(h(s') * proj(s')) * in[j].
+//
+// Each ``out[r]`` is written exactly ONCE -- NO atomicAdd, NO output pre-zero.
+// The diagonal is included naturally (diagonal terms emit ``rep_r`` which maps
+// back to ``r``), so no separate diag[] array is uploaded -- the GPU-appropriate
+// "precomputed diagonal" (Phase B), identical in spirit to ``apply_terms_gpu_gather``.
+//
+// Mirrors ``process_source_terms`` term-by-term (same FORWARD gates, applying
+// H to ``rep_r``), differing only in the gather accumulation vs atomic scatter.
+// ===========================================================================
+__device__ __forceinline__ cuDoubleComplex
+conj_cuDoubleComplex(cuDoubleComplex z) {
+    return make_cuDoubleComplex(cuCreal(z), -cuCimag(z));
+}
+
+template <class BasisPolicy, class Scalar>
+__device__ __forceinline__ Scalar rep_gather_row_device(
+    const BasisPolicy&       basis,
+    double                   spin_l,
+    const DeviceTermStorage& terms,
+    std::uint64_t            r_idx,
+    const Scalar* __restrict__ in)
+{
+    using ST = ScalarTraits<Scalar>;
+    const double spin_sq = spin_l * spin_l;
+    const std::uint64_t s = basis.state_of(r_idx);  // representative rep_r
+    Scalar acc = ST::zero();
+
+    // For each connected (s', h): accumulate conj(h*proj)*in[j], j=orbit(s').
+    auto gather = [&](std::uint64_t s_prime, cuDoubleComplex h) {
+        cuDoubleComplex proj;
+        const std::uint64_t j = basis.index_and_projection(s_prime, proj);
+        if (j == ed::matvec::basis::kDeviceNotFound) return;
+        const cuDoubleComplex hp = cuCmul(h, proj);
+        acc = ST::add(acc,
+                      ST::mul(ST::from_coeff(conj_cuDoubleComplex(hp)), in[j]));
+    };
+
+    // 1. One-body diagonal (Sz_k): s' = s
+    for (std::uint32_t t = 0; t < terms.num_diag_one_body; ++t) {
+        const auto& term = terms.diag_one_body[t];
+        const double sign = ((s >> term.site_index) & 1) ? -1.0 : 1.0;
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        gather(s, make_cuDoubleComplex(cuCreal(c) * spin_l * sign,
+                                       cuCimag(c) * spin_l * sign));
+    }
+    // 2. One-body off-diagonal (S+/S-): flip one bit, forward gate
+    for (std::uint32_t t = 0; t < terms.num_offdiag_one_body; ++t) {
+        const auto& term = terms.offdiag_one_body[t];
+        const std::uint64_t bit = (s >> term.site_index) & 1ULL;
+        if (bit == term.op_type) continue;
+        gather(s ^ (1ULL << term.site_index), load_coeff(term.coefficient));
+    }
+    // 3. Two-body diagonal (Sz_i Sz_j): s' = s
+    for (std::uint32_t t = 0; t < terms.num_diag_two_body; ++t) {
+        const auto& term = terms.diag_two_body[t];
+        const double sa = ((s >> term.site_index_1) & 1) ? -1.0 : 1.0;
+        const double sb = ((s >> term.site_index_2) & 1) ? -1.0 : 1.0;
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        gather(s, make_cuDoubleComplex(cuCreal(c) * spin_sq * sa * sb,
+                                       cuCimag(c) * spin_sq * sa * sb));
+    }
+    // 4. Two-body mixed (Sz * S+/-): flip one bit, forward gate
+    for (std::uint32_t t = 0; t < terms.num_mixed_two_body; ++t) {
+        const auto& term = terms.mixed_two_body[t];
+        const std::uint64_t flip_bit = (s >> term.flip_site) & 1ULL;
+        if (flip_bit == term.flip_op_type) continue;
+        const double sz_sign = ((s >> term.sz_site) & 1) ? -1.0 : 1.0;
+        const cuDoubleComplex c = load_coeff(term.coefficient);
+        gather(s ^ (1ULL << term.flip_site),
+               make_cuDoubleComplex(cuCreal(c) * spin_l * sz_sign,
+                                    cuCimag(c) * spin_l * sz_sign));
+    }
+    // 5. Two-body off-diagonal (S+- S+-): flip two bits, both gated
+    for (std::uint32_t t = 0; t < terms.num_offdiag_two_body; ++t) {
+        const auto& term = terms.offdiag_two_body[t];
+        const std::uint64_t b1 = (s >> term.site_index_1) & 1ULL;
+        const std::uint64_t b2 = (s >> term.site_index_2) & 1ULL;
+        if (b1 == term.op_type_1 || b2 == term.op_type_2) continue;
+        gather(s ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2),
+               load_coeff(term.coefficient));
+    }
+    // 6. Three-body (general): forward walk, mirror process_source_terms
+    for (std::uint32_t t = 0; t < terms.num_three_body; ++t) {
+        const auto& term = terms.three_body[t];
+        std::uint64_t cur = s;
+        cuDoubleComplex scalar = load_coeff(term.coefficient);
+        bool valid = true;
+        auto step = [&](std::uint8_t op_type, std::uint64_t site) {
+            if (!valid) return;
+            if (op_type == kOpSz) {
+                const double sg = ((cur >> site) & 1) ? -1.0 : 1.0;
+                scalar = make_cuDoubleComplex(cuCreal(scalar) * spin_l * sg,
+                                              cuCimag(scalar) * spin_l * sg);
+            } else {
+                const std::uint64_t b = (cur >> site) & 1ULL;
+                if (b != op_type) cur ^= (1ULL << site);
+                else              valid = false;
+            }
+        };
+        step(term.op_type_1, term.site_index_1);
+        step(term.op_type_2, term.site_index_2);
+        step(term.op_type_3, term.site_index_3);
+        if (!valid) continue;
+        if (cuCreal(scalar) * cuCreal(scalar) +
+            cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
+        gather(cur, scalar);
+    }
+    return acc;
+}
+
+template <class BasisPolicy, class Scalar>
+__global__ void apply_terms_rep_symmetry_gather(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    using ST = ScalarTraits<Scalar>;
+    const std::uint64_t dim = basis.dim();
+    const std::uint64_t r =
+        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (r >= dim) return;
+    const Scalar acc =
+        rep_gather_row_device<BasisPolicy, Scalar>(basis, spin_l, terms, r, in);
+    out[r] = ST::mul_real(acc, basis.inv_norms[r]);
+}
+
+// ---------------------------------------------------------------------------
+// Host-side launcher for the rep-symmetry GATHER kernel. Like the trivial
+// gather launcher the caller does NOT pre-zero ``d_out`` (every row written).
+// ---------------------------------------------------------------------------
+template <class BasisPolicy, class Scalar>
+inline cudaError_t launch_apply_terms_rep_symmetry_gpu_gather(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar*         d_in,
+    Scalar*               d_out,
+    cudaStream_t          stream = 0,
+    int                   threads_per_block = 256)
+{
+    const std::uint64_t dim = basis.dim();
+    if (dim == 0) return cudaSuccess;
+    const std::uint64_t blocks =
+        (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
+        static_cast<std::uint64_t>(threads_per_block);
+    apply_terms_rep_symmetry_gather<BasisPolicy, Scalar>
+        <<<static_cast<unsigned int>(blocks),
+           static_cast<unsigned int>(threads_per_block),
+           0, stream>>>
+        (basis, spin_l, terms, d_in, d_out);
+    return cudaGetLastError();
+}
+
 }  // namespace ed::matvec::kernel::gpu
 
 #endif  // WITH_CUDA
