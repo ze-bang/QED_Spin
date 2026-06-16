@@ -22,6 +22,8 @@
 
 #include <ed/core/operator.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
+#include <ed/matvec/term_kernels.h>
+#include <ed/matvec/rep_symmetry_basis_policy.h>
 #include <ed/matvec/term_storage.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/rep_sector_data.h>
@@ -32,9 +34,12 @@
 #include <functional>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -229,7 +234,218 @@ void run_case(int N, std::int64_t n_up) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GATHER == SCATTER parity + O(1) rank-table parity ("Optimized symmetry ED"
+// plan, Phase E). Drives the rep-symmetry GATHER and SCATTER kernels DIRECTLY
+// (bypassing the env-read backend tunables) so both run in one process, and
+// asserts they agree bit-for-bit (modulo atomic FP reordering). Also builds
+// the dense O(1) rank table and asserts the O(1) reverse lookup yields the
+// IDENTICAL matvec as the O(log dim) binary-search fallback.
+// ---------------------------------------------------------------------------
+void run_parity_case(int N, std::int64_t n_up) {
+    std::string dir = make_scratch_dir(
+        "rep_symmetry_parity",
+        "heis_N" + std::to_string(N) + "_nup" + std::to_string(n_up));
+    write_zN_translation_fixtures(dir, N);
+
+    auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
+    ed::matvec::TermStorage soa;
+    ed::matvec::TermStorage::classify_route(
+        soa, full_op->transform_data_, full_op->three_body_data_,
+        [](const Complex& c) { return c; });
+
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+    const ed::symmetry::FixedSzSubspace fixed =
+        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
+    const ed::symmetry::SpatialProjector spatial(info);
+    const std::vector<std::uint64_t> reps =
+        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
+            fixed, spatial, info.sectors[s].quantum_numbers,
+            info.sectors[s].phase_factors, reps, /*sector_id=*/s);
+        const std::size_t sd = sb.dim();
+        if (sd == 0) continue;
+
+        ed::symmetry::RepSectorData rd =
+            ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+        REQUIRE(rd.usable());
+
+        // Binary-search policy (no rank table).
+        REQUIRE_FALSE(rd.has_rank_table());
+        const auto pol_bs = ed::matvec::rep_policy_from(rd);
+
+        for (int probe = 0; probe < 3; ++probe) {
+            std::vector<Complex> x =
+                (probe == 0)
+                    ? std::vector<Complex>(sd, Complex(1.0, 0.0))
+                    : random_unit_vector(sd, (s + 11) * 2654435761ULL + probe + N);
+
+            std::vector<Complex> y_scatter(sd, Complex(0.0, 0.0));
+            std::vector<Complex> y_gather(sd, Complex(0.0, 0.0));
+
+            ed::matvec::kernel::apply_terms_rep_symmetry<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                pol_bs, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+                soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+                soa.three_body, x.data(), y_scatter.data());
+
+            ed::matvec::kernel::apply_terms_rep_symmetry_gather<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                pol_bs, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+                soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+                soa.three_body, x.data(), y_gather.data(), /*diag_cache=*/nullptr);
+
+            double gs_diff = 0.0, scale = 0.0;
+            for (std::size_t i = 0; i < sd; ++i) {
+                gs_diff = std::max(gs_diff, std::abs(y_gather[i] - y_scatter[i]));
+                scale   = std::max(scale, std::abs(y_scatter[i]));
+            }
+            INFO("GATHER==SCATTER sector " << s << " probe " << probe
+                 << " diff " << gs_diff << " scale " << scale);
+            REQUIRE(gs_diff < 1e-11 * (1.0 + scale));
+
+            // O(1) rank-table path must equal the binary-search GATHER exactly.
+            ed::symmetry::RepSectorData rd_tab =
+                ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+            rd_tab.build_rank_table();
+            REQUIRE(rd_tab.has_rank_table());
+            const auto pol_tab = ed::matvec::rep_policy_from(rd_tab);
+            REQUIRE(pol_tab.rep_index_of_rank != nullptr);
+
+            std::vector<Complex> y_gather_tab(sd, Complex(0.0, 0.0));
+            ed::matvec::kernel::apply_terms_rep_symmetry_gather<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                pol_tab, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+                soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+                soa.three_body, x.data(), y_gather_tab.data(), nullptr);
+
+            double tab_diff = 0.0;
+            for (std::size_t i = 0; i < sd; ++i) {
+                tab_diff = std::max(tab_diff, std::abs(y_gather_tab[i] - y_gather[i]));
+            }
+            INFO("O(1) vs O(log) GATHER sector " << s << " diff " << tab_diff);
+            REQUIRE(tab_diff < 1e-13 * (1.0 + scale));
+        }
+    }
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Dense-vector throughput micro-benchmark (hidden; run with
+// `./test_rep_symmetry_backend "[.][bench]"`). This is the ITERATIVE-SOLVER
+// regime (Lanczos / FTLM / TPQ): a DENSE input vector applied many times --
+// where the lock-free GATHER (no atomics, no radix sort, single write) is the
+// optimal kernel. (The full-spectrum bench's dense-block construction instead
+// feeds UNIT vectors, the input-sparse regime that favours the scatter's
+// early-skip; that path is the ED_MATVEC_SCATTER fallback.)
+// ---------------------------------------------------------------------------
+TEST_CASE("rep_symmetry_backend: dense-vector GATHER vs SCATTER throughput",
+          "[.][bench][symmetry][rep]")
+{
+    auto env_int = [](const char* k, int dflt) -> int {
+        const char* v = std::getenv(k);
+        return (v && *v) ? std::atoi(v) : dflt;
+    };
+    const int N = env_int("ED_BENCH_N", 20);
+    const std::int64_t n_up = env_int("ED_BENCH_NUP", N / 2);
+    std::string dir = make_scratch_dir("rep_symmetry_bench",
+                                       "heis_N" + std::to_string(N) +
+                                       "_nup" + std::to_string(n_up));
+    write_zN_translation_fixtures(dir, N);
+
+    auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
+    ed::matvec::TermStorage soa;
+    ed::matvec::TermStorage::classify_route(
+        soa, full_op->transform_data_, full_op->three_body_data_,
+        [](const Complex& c) { return c; });
+
+    SymmetryGroupInfo info;
+    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
+    const ed::symmetry::FixedSzSubspace fixed =
+        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
+    const ed::symmetry::SpatialProjector spatial(info);
+    const std::vector<std::uint64_t> reps =
+        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+
+    // Largest sector (k=0).
+    ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
+        fixed, spatial, info.sectors[0].quantum_numbers,
+        info.sectors[0].phase_factors, reps, 0);
+    ed::symmetry::RepSectorData rd =
+        ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+    rd.build_rank_table();
+    const auto pol = ed::matvec::rep_policy_from(rd);
+    const std::size_t sd = rd.reps.size();
+    REQUIRE(sd > 1000);
+
+    std::vector<Complex> x = random_unit_vector(sd, 12345);
+    std::vector<Complex> y(sd);
+    const int iters = 50;
+
+    auto bench = [&](const char* name, auto&& fn) {
+        fn(); // warm up
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int it = 0; it < iters; ++it) fn();
+        const double s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::printf("  %-10s dim=%zu  %.3f ms/apply\n",
+                    name, sd, 1e3 * s / iters);
+    };
+
+    bench("GATHER", [&]() {
+        ed::matvec::kernel::apply_terms_rep_symmetry_gather<
+            ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+            pol, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+            soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+            soa.three_body, x.data(), y.data(), nullptr);
+    });
+    bench("SCATTER", [&]() {
+        std::fill(y.begin(), y.end(), Complex(0.0, 0.0));
+        ed::matvec::kernel::apply_terms_rep_symmetry<
+            ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+            pol, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+            soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+            soa.three_body, x.data(), y.data());
+    });
+
+    // Scale parity: GATHER == SCATTER on the dense vector (the N>=28 smoke
+    // when run with ED_BENCH_N=28). The full-space reference is infeasible at
+    // this dim, so this is the self-consistent transpose check.
+    std::vector<Complex> yg(sd, Complex(0.0, 0.0));
+    std::vector<Complex> ysc(sd, Complex(0.0, 0.0));
+    ed::matvec::kernel::apply_terms_rep_symmetry_gather<
+        ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+        pol, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+        soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+        soa.three_body, x.data(), yg.data(), nullptr);
+    ed::matvec::kernel::apply_terms_rep_symmetry<
+        ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+        pol, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+        soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+        soa.three_body, x.data(), ysc.data());
+    double diff = 0.0, scale = 0.0;
+    for (std::size_t i = 0; i < sd; ++i) {
+        diff  = std::max(diff, std::abs(yg[i] - ysc[i]));
+        scale = std::max(scale, std::abs(ysc[i]));
+    }
+    std::printf("  N=%d n_up=%lld dim=%zu  GATHER==SCATTER diff=%.3e (scale %.3e)\n",
+                N, static_cast<long long>(n_up), sd, diff, scale);
+    REQUIRE(diff < 1e-10 * (1.0 + scale));
+    SUCCEED("benchmark complete");
+}
+
+TEST_CASE("rep_symmetry_backend: GATHER == SCATTER + O(1) rank-table parity "
+          "(N=6,8)",
+          "[symmetry][matvec_backend][rep][parity]")
+{
+    run_parity_case(6, 3);
+    run_parity_case(8, 4);
+    run_parity_case(8, 3);
+}
 
 TEST_CASE("rep_symmetry_backend: CPU rep matvec matches orbit-CSR reference "
           "(N=6, n_up=3)",

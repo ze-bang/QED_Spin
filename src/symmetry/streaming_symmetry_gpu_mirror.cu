@@ -751,16 +751,32 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
 {
     using detail::cuda_check;
     if (dim == 0) return;
-    cuda_check(cudaMemsetAsync(d_out, 0, dim * sizeof(cuDoubleComplex)),
-               "zero output before rep kernel");
     const auto basis = mirror.basis_view();
     const auto terms = mirror.terms_view();
-    const cudaError_t err =
-        ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu<
+
+    // DEFAULT: SOTA lock-free row GATHER (one write per row, no atomics, no
+    // pre-zero memset; the diagonal is fused inline). Bisection fallback to the
+    // validated atomic scatter via ED_MATVEC_SCATTER=1.
+    static const bool use_scatter = []() {
+        const char* v = std::getenv("ED_MATVEC_SCATTER");
+        return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
+
+    cudaError_t err;
+    if (use_scatter) {
+        cuda_check(cudaMemsetAsync(d_out, 0, dim * sizeof(cuDoubleComplex)),
+                   "zero output before rep scatter kernel");
+        err = ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu<
             ed::matvec::basis::DeviceRepSymmetryBasisPolicy,
             cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
                              /*stream=*/0, /*threads_per_block=*/256);
-    cuda_check(err, "apply_terms_rep_symmetry_scatter kernel launch");
+    } else {
+        err = ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu_gather<
+            ed::matvec::basis::DeviceRepSymmetryBasisPolicy,
+            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
+                             /*stream=*/0, /*threads_per_block=*/256);
+    }
+    cuda_check(err, "apply_terms_rep_symmetry kernel launch");
 }
 
 }  // namespace ed::symmetry::gpu_mirror

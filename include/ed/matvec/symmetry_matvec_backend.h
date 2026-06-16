@@ -92,6 +92,12 @@ rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
     p.group_size = rd.group_size;
     p.n_sites    = rd.n_sites;
     p.n_up       = rd.n_up;
+    // Phase A: when the sector carries the dense rank table, wire it in for the
+    // O(1) reverse lookup (index_of_rep falls back to binary search when null).
+    if (rd.has_rank_table()) {
+        p.rep_index_of_rank = rd.rep_index_of_rank.data();
+        p.binom             = &rd.binom;
+    }
     return p;
 }
 
