@@ -152,7 +152,7 @@ def test_ctpq_low_T_matches_ftlm(ftlm_reference):
     r = qed.thermal(
         H, method="cTPQ", T_min=0.1, T_max=5.0, num_T=10,
         num_samples=8, max_iterations=2000,
-        use_sz_if_conserved=False, verbose=False,
+        use_sz_if_conserved=False, random_seed=7, verbose=False,
     )
     # cTPQ uses exact Taylor evolution; should match FTLM to ~1e-2 at
     # the coldest T (sample noise + finite delta_beta floor).
@@ -253,7 +253,10 @@ def test_tpq_save_with_symmetry_directory_lands_on_disk(tmp_path):
     R = qed.thermal(
         tmp_dir, num_sites=N_SITES, method="mTPQ",
         T_min=0.1, T_max=5.0, num_T=6,
-        num_samples=1, max_iterations=20,
+        # max_iterations=None (auto): size the trajectory to bracket
+        # beta_max = 1/T_min so both probe betas are reached (see the
+        # multi-Sz save test for the large-auto-L rationale).
+        num_samples=1, max_iterations=None,
         probe_betas=[0.5, 2.0],
         use_symmetry_if_available=True,
         use_sz_if_conserved=False,
@@ -291,7 +294,12 @@ def test_tpq_save_with_multi_sz_lands_per_sector(tmp_path):
     R = qed.thermal(
         H, method="mTPQ",
         T_min=0.1, T_max=5.0, num_T=6,
-        num_samples=1, max_iterations=20,
+        # max_iterations=None (auto): the orchestrator sizes the (L - H)
+        # step count from the spectral bounds so the trajectory brackets
+        # beta_max = 1/T_min = 10, which covers both probe betas. A fixed
+        # tiny budget would, with the (correct) large auto-L, stall at
+        # beta << 2.0 and collapse both snapshots onto the same step.
+        num_samples=1, max_iterations=None,
         sz_min=sz_lo, sz_max=sz_hi,
         probe_betas=[0.5, 2.0],
         output_dir=outdir,

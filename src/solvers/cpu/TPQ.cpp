@@ -2296,7 +2296,8 @@ ThermodynamicData compute_tpq_thermo_from_trajectories(
     const std::vector<std::vector<double>>& sample_inv_temps,
     const std::vector<std::vector<double>>& sample_energies,
     const std::vector<std::vector<double>>& sample_variances,
-    const std::vector<double>& target_temperatures
+    const std::vector<double>& target_temperatures,
+    double hilbert_dim
 ) {
     ThermodynamicData thermo{};
 
@@ -2408,25 +2409,98 @@ ThermodynamicData compute_tpq_thermo_from_trajectories(
         return thermo;  // no usable sample
     }
 
-    // Trapezoidal integration of C_v / T -> entropy (zero baseline at
-    // the coldest target). F = E - T S.
     std::vector<double> entropy(num_T, 0.0);
     std::vector<double> free_energy(num_T, 0.0);
-    for (std::size_t i = 1; i < num_T; ++i) {
-        const double T1 = target_temperatures[i - 1];
-        const double T2 = target_temperatures[i];
-        const double Cv1 = cv_mean[i - 1];
-        const double Cv2 = cv_mean[i];
-        if (T1 > 0.0 && T2 > 0.0) {
-            entropy[i] = entropy[i - 1]
-                       + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
-        } else {
-            entropy[i] = entropy[i - 1];
+
+    if (hilbert_dim > 1.0) {
+        // ABSOLUTE thermodynamics via thermodynamic integration of the
+        // energy over inverse temperature:
+        //
+        //   ln Z(beta) = ln(D) - \int_0^beta <E>(beta') dbeta'
+        //   F(beta)    = -ln Z(beta) / beta
+        //   S(beta)    = beta * <E>(beta) + ln Z(beta)
+        //
+        // This anchors the high-T entropy correctly (S(T->inf) -> ln(D),
+        // since at beta=0 the integral vanishes and S = ln(D)) and gives
+        // the ABSOLUTE free energy. Crucially, the absolute F is what makes
+        // each sector's free energy usable as a Boltzmann weight inside
+        // ``combine_sector_thermodynamics``; the previous zero-baseline
+        // integration dropped the per-sector ln(dim_s) constant and so
+        // produced a systematically biased Sz / spatial recombination.
+        //
+        // The [0, beta_first] head segment must be anchored at the TRUE
+        // beta=0 energy <E>(0) = Tr(H)/D, NOT at the warmest target's
+        // energy. Using E(beta_first) for the head over-counts the
+        // integral by ~0.5*(E(0) - E(beta_first))*beta_first, which shows
+        // up as a constant ~1% offset in S(T) across the whole curve
+        // (and a matching error in F). Every mTPQ sample already records
+        // the beta=0 baseline as its first trajectory point
+        // (<rand|H|rand> -> Tr(H)/D as samples accumulate), so we recover
+        // <E>(0) for free from the sorted fronts -- a moment-exact anchor
+        // with no extra matvec.
+        const double lnD = std::log(hilbert_dim);
+        double E_inf = 0.0;
+        std::uint64_t e_inf_cnt = 0;
+        for (std::size_t s = 0; s < num_samples; ++s) {
+            if (!sorted[s].empty()) {
+                E_inf += sorted[s].front()[1];  // smallest-beta (~0) point
+                ++e_inf_cnt;
+            }
         }
-    }
-    for (std::size_t i = 0; i < num_T; ++i) {
-        free_energy[i] = energy_mean[i]
-                       - target_temperatures[i] * entropy[i];
+        if (e_inf_cnt > 0) {
+            E_inf /= static_cast<double>(e_inf_cnt);
+        } else {
+            E_inf = energy_mean[0];
+        }
+
+        // Visit target temperatures in ascending-beta (descending-T) order
+        // without assuming the caller's grid ordering.
+        std::vector<std::size_t> order(num_T);
+        for (std::size_t i = 0; i < num_T; ++i) order[i] = i;
+        std::sort(order.begin(), order.end(),
+                  [&](std::size_t a, std::size_t b) {
+                      const double ba = 1.0
+                          / std::max(target_temperatures[a], 1e-300);
+                      const double bb = 1.0
+                          / std::max(target_temperatures[b], 1e-300);
+                      return ba < bb;
+                  });
+
+        double integral  = 0.0;
+        double prev_beta  = 0.0;
+        double prev_E     = E_inf;  // exact <E>(beta=0) = Tr(H)/D anchor
+        for (std::size_t r = 0; r < num_T; ++r) {
+            const std::size_t t = order[r];
+            const double beta = 1.0
+                / std::max(target_temperatures[t], 1e-300);
+            const double E_t = energy_mean[t];
+            integral += 0.5 * (prev_E + E_t) * (beta - prev_beta);
+            const double lnZ = lnD - integral;
+            free_energy[t] = -lnZ / std::max(beta, 1e-300);
+            entropy[t]     = beta * E_t + lnZ;
+            prev_beta = beta;
+            prev_E    = E_t;
+        }
+    } else {
+        // Legacy: trapezoidal integration of C_v / T -> entropy (zero
+        // baseline at the coldest target). F = E - T S. Kept for callers
+        // that do not supply the Hilbert dimension.
+        for (std::size_t i = 1; i < num_T; ++i) {
+            const double T1 = target_temperatures[i - 1];
+            const double T2 = target_temperatures[i];
+            const double Cv1 = cv_mean[i - 1];
+            const double Cv2 = cv_mean[i];
+            if (T1 > 0.0 && T2 > 0.0) {
+                entropy[i] = entropy[i - 1]
+                           + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
+            } else {
+                entropy[i] = entropy[i - 1];
+            }
+        }
+        for (std::size_t i = 0; i < num_T; ++i) {
+            free_energy[i] = energy_mean[i]
+                           - target_temperatures[i] * entropy[i];
+        }
     }
 
     thermo.temperatures   = target_temperatures;

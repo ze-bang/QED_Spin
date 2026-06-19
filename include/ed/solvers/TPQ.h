@@ -422,12 +422,26 @@ ThermodynamicData compute_tpq_unified_thermo(
  * @param sample_energies     Per-sample E_k trajectory (same length)
  * @param sample_variances    Per-sample var_k trajectory (same length)
  * @param target_temperatures Temperature grid for the output
+ * @param hilbert_dim         Hilbert-space dimension D of the (sub)space
+ *                            the trajectories live in. When ``> 1`` the
+ *                            entropy and free energy are reconstructed in
+ *                            ABSOLUTE form via thermodynamic integration
+ *                            ``ln Z(beta) = ln(D) - \int_0^beta <E> dbeta'``,
+ *                            so ``S(T->inf) -> ln(D)`` and ``F`` carries the
+ *                            correct dimensional normalisation. This is what
+ *                            makes the per-sector ``F_s`` usable as a
+ *                            Boltzmann weight in
+ *                            ``combine_sector_thermodynamics`` (U(1)/Sz and
+ *                            spatial recombination). When ``0`` (default) the
+ *                            legacy zero-baseline integration ``S(T_min)=0``
+ *                            is used (kept for backwards compatibility).
  */
 ThermodynamicData compute_tpq_thermo_from_trajectories(
     const std::vector<std::vector<double>>& sample_inv_temps,
     const std::vector<std::vector<double>>& sample_energies,
     const std::vector<std::vector<double>>& sample_variances,
-    const std::vector<double>& target_temperatures
+    const std::vector<double>& target_temperatures,
+    double hilbert_dim = 0.0
 );
 
 /**

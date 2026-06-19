@@ -186,6 +186,17 @@ struct ThermalOptions {
     double      e_max_override = std::numeric_limits<double>::quiet_NaN();
 
     // -----------------------------------------------------------------
+    // mTPQ expert override (June 2026). The microcanonical iteration
+    // |psi_{k+1}> = (L*I - H)|psi_k> uses a "large value" L that the
+    // orchestrator auto-tunes from a short Lanczos spectral-bound
+    // estimate (see the mTPQ branch in orchestrator.cpp). A finite,
+    // POSITIVE value here pins L directly and skips the auto-tune,
+    // mirroring the HPhi ``LargeValue`` knob. ``0.0`` (default) means
+    // "auto". Ignored by every non-mTPQ lane.
+    // -----------------------------------------------------------------
+    double      energy_shift   = 0.0;
+
+    // -----------------------------------------------------------------
     // KPM-DOS knobs (closing-the-symmetry-gap follow-up, May 2026).
     //
     // Prior to this revision ``ThermalOptions`` carried no
