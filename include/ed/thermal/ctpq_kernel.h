@@ -52,9 +52,9 @@ struct CtpqResult {
     /// Per-sample (beta_k, E_k, var_k) trajectories for
     /// ThermodynamicData recombination. For cTPQ, beta_k is exact
     /// (= step * delta_beta) -- no estimator needed -- because the
-    /// kernel propagates by e^{-delta_beta H} via Taylor expansion.
-    /// var_k = ||H psi||^2 - E_k^2 (extracted from the existing
-    /// scratch vector at the cost of one extra dot per step).
+    /// kernel propagates by e^{-delta_beta/2 * H} via Taylor expansion
+    /// so that after k steps the state is e^{-beta_k/2 * H}|r⟩, and
+    /// E_k = ⟨ψ|H|ψ⟩ is exactly E_canonical(beta_k).
     std::vector<std::vector<double>> sample_inv_temps;
     std::vector<std::vector<double>> sample_energies;
     std::vector<std::vector<double>> sample_variances;

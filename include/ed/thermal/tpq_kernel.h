@@ -11,10 +11,13 @@
 //                                  beta_k = (large_value - <H>_k) / variance
 //                                  (read off by the per-step callback).
 //
-//     Method::CanonicalTaylor   --- propagate by e^{-delta_beta H} via a
+//     Method::CanonicalTaylor   --- propagate by e^{-delta_beta/2 · H} via a
 //                                  Taylor expansion of order `taylor_order`,
 //                                  renormalise after every step. Each step
-//                                  advances beta by delta_beta.
+//                                  advances beta by delta_beta so that after
+//                                  k steps the state is e^{-β/2 H}|r⟩ with
+//                                  β = k·delta_beta, giving the canonical
+//                                  thermal energy E(β) from ⟨ψ|H|ψ⟩.
 //
 // The kernel itself does ONLY the iteration; all HDF5 result bookkeeping,
 // observable measurement, MPI sample partitioning, log-spaced temperature
@@ -198,7 +201,15 @@ TpqKernelResult tpq_kernel(Backend&                        be,
         const std::size_t total = opts.beta_steps;
         double beta = 0.0;
         for (std::size_t k = 1; k <= total; ++k) {
-            detail::apply_taylor_step(be, apply_H, opts.delta_beta,
+            // The canonical-TPQ energy formula is
+            //   E_r(β) = ⟨r|e^{-βH/2} H e^{-βH/2}|r⟩ / ⟨r|e^{-βH}|r⟩
+            // which requires the state to be e^{-βH/2}|r⟩.  Each imaginary-
+            // time step must therefore advance the exponent by Δβ/2, not Δβ,
+            // so that after k steps the state is e^{-k(Δβ/2)H}|r⟩ = e^{-β/2 H}|r⟩
+            // and ⟨ψ|H|ψ⟩/⟨ψ|ψ⟩ = E_canonical(β = k·Δβ).  Using Δβ instead
+            // of Δβ/2 would produce E_canonical(2β) — a factor-of-2 error in
+            // the temperature axis.
+            detail::apply_taylor_step(be, apply_H, opts.delta_beta / 2.0,
                                       opts.taylor_order,
                                       psi.get(), scratchA.get(),
                                       scratchB.get(), local_n);

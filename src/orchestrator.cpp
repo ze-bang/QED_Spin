@@ -789,33 +789,129 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             using B = typename BPtr::element_type;
             ed::thermal::MtpqOptions kopts;
             kopts.num_samples = opts.num_samples;
-            kopts.max_iter    = opts.krylov_dim ? opts.krylov_dim : 1000;
             kopts.random_seed = opts.random_seed;
             kopts.output_dir  = opts.output_dir;
             kopts.probe_betas = opts.probe_betas;
-            // SOTA large_value pick (May 2026): the (L*I - H) iteration
-            // gives effective inverse temperature
-            //   beta_k = 2 k / (L - E_k).
-            // To cover the user-requested coldest temperature
-            // ``temp_min`` (== 1/beta_max_target) with ``max_iter``
-            // steps, we need
-            //   L = 2 * max_iter / beta_max_target + |E|_typical.
-            // Estimate |E|_typical from the system bandwidth proxy
-            // ``log2(global_dim)`` (which equals the number of spins
-            // for unsymmetrised spin-1/2 chains; for symmetrised /
-            // FixedSz operators it's the symmetrised dim, which is a
-            // conservative upper bound). Cap at the historical 1e5
-            // default so we never go below it for high-T runs.
-            const double beta_target = (opts.temp_min > 0.0)
-                ? 1.0 / opts.temp_min : 100.0;
-            const double bandwidth_proxy = std::log2(
-                static_cast<double>(std::max<std::uint64_t>(
-                    H.geometry().global_dim, 2)));
-            const double L_auto = 2.0 * static_cast<double>(kopts.max_iter)
-                                    / std::max(beta_target, 1e-6)
-                                + bandwidth_proxy;
-            kopts.large_value = std::max(L_auto, 1.0);
             auto matvec = H.template bind<B>();
+
+            // -------------------------------------------------------------
+            // SOTA mTPQ auto-tune (June 2026).
+            //
+            // The microcanonical iteration |psi_{k+1}> = (L*I - H)|psi_k>
+            // advances the effective inverse temperature by
+            //   Delta_beta ~ 2 / (L - <H>),     beta_k = 2 k / (L - E_k).
+            // So L sets BOTH (a) the high-temperature resolution (small
+            // Delta_beta needs large L) and -- together with the step
+            // count -- (b) the coldest temperature reached.
+            //
+            // The previous heuristic used ``log2(global_dim)`` as a
+            // stand-in for the spectral ceiling E_max and coupled L to
+            // ``temp_min`` via ``L = 2*max_iter/beta_target + proxy``.
+            // That is doubly wrong: the dim proxy has nothing to do with
+            // the actual band edge, and lowering ``temp_min`` to reach
+            // colder T *shrank* L, coarsening Delta_beta and biasing the
+            // specific heat / entropy (and risking L < E_max, which makes
+            // (L - H) indefinite and corrupts the trajectory).
+            //
+            // SOTA recipe:
+            //   1. Measure the true spectral bounds (E_min, E_max) with a
+            //      short Lanczos (reuse the KPM estimator).
+            //   2. Pick L from ONE resolution knob: Delta_beta_target.
+            //        L_res  = <H>_inf + 2 / Delta_beta_target
+            //        L_stab = E_max + buffer   (strictly above the ceiling)
+            //        L      = max(L_res, L_stab)
+            //   3. Size the iteration count INDEPENDENTLY so the trajectory
+            //      still brackets beta_max = 1/temp_min:
+            //        steps ~ beta_max * (L - E_min) / 2.
+            // Resolution and cold-reach are thus decoupled; matvecs are
+            // cheap so over-provisioning steps is affordable.
+            // -------------------------------------------------------------
+            const double dbeta_target = 0.02;  // internal quality knob
+            const double beta_max = (opts.temp_min > 0.0)
+                ? 1.0 / opts.temp_min : 100.0;
+
+            double e_min_est = 0.0, e_max_est = 0.0;
+            bool have_bounds = false;
+            if (std::isfinite(opts.e_min_override)
+                && std::isfinite(opts.e_max_override)
+                && opts.e_max_override > opts.e_min_override) {
+                // Caller-supplied bounds (e.g. estimated once on the
+                // largest sector and reused across the Sz loop).
+                e_min_est = opts.e_min_override;
+                e_max_est = opts.e_max_override;
+                have_bounds = true;
+            } else if constexpr (std::is_same_v<B, ed::matvec::CpuBackend>) {
+                // CPU lane: run the shared Lanczos spectral-bound
+                // estimator on a host-pointer wrapper of the matvec.
+                ed::kpm_dos::MatVec legacy_H =
+                    [&matvec](const std::complex<double>* in,
+                              std::complex<double>* out, int n) {
+                        matvec(in, out, static_cast<std::size_t>(n));
+                    };
+                const std::uint64_t bdim = H.geometry().local_dim;
+                std::mt19937 gen(opts.random_seed
+                                     ? static_cast<unsigned>(opts.random_seed)
+                                     : 0x9E3779B9u);
+                try {
+                    const int kry = static_cast<int>(
+                        std::min<std::uint64_t>(
+                            60, std::max<std::uint64_t>(bdim, 1)));
+                    // Extreme Ritz values converge first and are robust
+                    // without reorthogonalization; skip it (the estimator
+                    // does not retain the Krylov basis anyway) to avoid a
+                    // spurious "reorth skipped" warning and wasted work.
+                    ed::kpm_dos::estimate_spectral_bounds(
+                        legacy_H, bdim, kry, /*full_reorth=*/false,
+                        /*reorth_freq=*/0, /*tol=*/1e-10,
+                        gen, e_min_est, e_max_est);
+                    have_bounds = std::isfinite(e_min_est)
+                                && std::isfinite(e_max_est)
+                                && e_max_est > e_min_est;
+                } catch (...) {
+                    have_bounds = false;
+                }
+            }
+
+            double L_auto;
+            if (have_bounds) {
+                const double W      = e_max_est - e_min_est;
+                const double e_high = 0.5 * (e_min_est + e_max_est);
+                const double L_res  = e_high + 2.0 / std::max(dbeta_target, 1e-6);
+                const double L_stab = e_max_est + std::max(0.05 * W, 1e-9);
+                L_auto = std::max(L_res, L_stab);
+            } else {
+                // Non-CPU backend or failed estimate: resolution-driven
+                // floor plus a conservative dim-based pad (never below
+                // the historical behaviour for high-T runs).
+                const double bandwidth_proxy = std::log2(
+                    static_cast<double>(std::max<std::uint64_t>(
+                        H.geometry().global_dim, 2)));
+                L_auto = 2.0 / std::max(dbeta_target, 1e-6) + bandwidth_proxy;
+            }
+
+            // Expert override (HPhi-style ``LargeValue``): a finite,
+            // positive ``energy_shift`` pins L and skips the auto-tune.
+            kopts.large_value = (opts.energy_shift > 0.0)
+                ? opts.energy_shift : L_auto;
+
+            // Iteration budget contract:
+            //   * krylov_dim == 0  -> AUTO: size the step count so the
+            //     trajectory brackets beta_max = 1/temp_min, using
+            //     steps ~ beta_max*(L - E_min)/2 (capped for safety).
+            //   * krylov_dim  > 0  -> RESPECT the caller's value exactly
+            //     (expert override / explicit ``max_iterations=...``).
+            // This keeps the default surface clean (no knob needed -- the
+            // auto path guarantees the requested coldest T is reached)
+            // while never silently overriding an explicit request.
+            const double e_low = have_bounds ? e_min_est : 0.0;
+            const std::size_t reach_iters = static_cast<std::size_t>(
+                std::ceil(beta_max
+                          * (kopts.large_value - e_low) / 2.0)) + 16;
+            constexpr std::size_t MTPQ_HARD_CAP = 200000;
+            kopts.max_iter = (opts.krylov_dim == 0)
+                ? std::max<std::size_t>(std::min(reach_iters, MTPQ_HARD_CAP), 1)
+                : opts.krylov_dim;
+
             auto kres = ed::thermal::mtpq_kernel<B>(
                 *backend_uptr, matvec, H.geometry().local_dim,
                 H.geometry().global_dim, kopts);
@@ -827,9 +923,14 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             // Closes the gap where mTPQ via qed.thermal raised
             // ``RuntimeError: solver returned no thermodynamic data``.
             if (!R.thermo.temperatures.empty()) {
+                // Pass the (sub)space dimension so the aggregator can
+                // reconstruct ABSOLUTE entropy / free energy (ln(D)
+                // baseline). This is what makes per-sector F_s a valid
+                // Boltzmann weight for U(1)/Sz + spatial recombination.
                 ThermodynamicData td = compute_tpq_thermo_from_trajectories(
                     kres.sample_inv_temps, kres.sample_energies,
-                    kres.sample_variances, R.thermo.temperatures);
+                    kres.sample_variances, R.thermo.temperatures,
+                    static_cast<double>(H.geometry().global_dim));
                 if (!td.energy.empty()) {
                     // Mirror the LTLM/FTLM contract: the caller's T grid
                     // is authoritative -- overwrite R.thermo with the
@@ -902,9 +1003,12 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? 0.0 : *std::min_element(kres.energies.begin(),
                                           kres.energies.end());
             if (!R.thermo.temperatures.empty()) {
+                // Absolute entropy / free energy (ln(D) baseline); see the
+                // mTPQ branch above for the rationale.
                 ThermodynamicData td = compute_tpq_thermo_from_trajectories(
                     kres.sample_inv_temps, kres.sample_energies,
-                    kres.sample_variances, R.thermo.temperatures);
+                    kres.sample_variances, R.thermo.temperatures,
+                    static_cast<double>(H.geometry().global_dim));
                 if (!td.energy.empty()) {
                     R.thermo = std::move(td);
                 }

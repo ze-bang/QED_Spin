@@ -150,7 +150,14 @@ def _ed_params_to_thermal_options(
     elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
         steps = int(getattr(params, "tpq_max_steps", 0) or 0)
         if steps <= 0:
-            steps = int(getattr(params, "max_iterations", 1000) or 1000)
+            mi = getattr(params, "max_iterations", 0)
+            steps = int(mi) if mi else 0
+        if steps <= 0 and method == DiagonalizationMethod.cTPQ:
+            # cTPQ uses ``krylov_dim`` as a Taylor-step CAP; preserve the
+            # historical default for an unset call.
+            steps = 1000
+        # mTPQ: ``steps == 0`` -> orchestrator auto-sizes the iteration
+        # count from the spectral bounds to bracket beta_max = 1/T_min.
         opts.krylov_dim = steps
     else:
         opts.krylov_dim = 100
@@ -160,6 +167,9 @@ def _ed_params_to_thermal_options(
     opts.random_seed   = int(
         params.ftlm_seed or params.ltlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")
+    # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
+    if hasattr(opts, "energy_shift"):
+        opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
