@@ -100,13 +100,13 @@ res = qed.thermal(H, method="mTPQ", num_samples=4,
                   target_beta=20.0,
                   output_dir="ed_runs/thermal")
 res = qed.thermal(H, method="FTLM",
-                  num_temp_points=200,
-                  temp_min=0.05, temp_max=10.0)
+                  num_T=200,
+                  T_min=0.05, T_max=10.0)
 ```
 
 What `qed.thermal` decides for you:
 
-* **β grid**: built from `temp_min` / `temp_max` / `num_temp_points` if
+* **β grid**: built from `T_min` / `T_max` / `num_T` if
   not given explicitly.
 * **mTPQ Taylor order / Δβ / energy shift**: filled by
   `qed.auto_tune.tune_thermal(...)` from sector dim and target β.
@@ -116,8 +116,8 @@ What `qed.thermal` decides for you:
 * **Device / symmetry**: same `device=` / `symmetry=` knobs as
   `qed.solve`.
 
-The result carries `result.thermo.{temperatures, free_energy, energy,
-entropy, specific_heat, …}` for direct plotting.
+The result carries `result.{temperatures, free_energy, energy,
+entropy, specific_heat, …}` as top-level attributes for direct plotting.
 
 ## 3. Structure factors — `qed.spectral`
 

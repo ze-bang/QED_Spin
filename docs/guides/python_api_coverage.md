@@ -131,7 +131,7 @@ from `qed/__init__.py`:
 | `OP_SPLUS`, `OP_SMINUS`, `OP_SZ` | Integer op-type tags matching `Trans.dat` / C++ |
 | `full_diagonalization(op, …)` | Dense eigensolve **through** `apply` (small Hilbert spaces). Equivalent to `qed.solve(op, solver="FULL")`. |
 | `solve(H, *, num_eigenvalues=1, solver=None, device=None, sz=None, symmetry=None, auto_sz=True, ...)` | The canonical eigenvalue / ground-state entry point. Smart defaults + kwargs-only overrides. |
-| `thermal(H, *, method="mTPQ", num_samples=None, target_beta=None, temp_min=None, temp_max=None, num_temp_points=None, sz=None, symmetry=None, ...)` | The canonical finite-temperature entry point. Routes to `mTPQ` / `cTPQ` / `FTLM` / `LTLM` via the `method=` kwarg. |
+| `thermal(H, *, method="mTPQ", num_samples=None, target_beta=None, T_min=None, T_max=None, num_T=None, sz=None, symmetry=None, ...)` | The canonical finite-temperature entry point. Routes to `mTPQ` / `cTPQ` / `FTLM` / `LTLM` via the `method=` kwarg. |
 | `spectral(directory, *, T=None, omega=None, method=None, ...)` | The canonical structure-factor entry point. The `(T, omega)` truth table selects `single_expectation` / `ground_state_dssf` / `static_thermal` / `dynamical_thermal` automatically. |
 | `compute_thermodynamics_from_spectrum` | Post-process a **given** energy list into thermodynamic curves. |
 | **Orchestrator internals** | |

@@ -331,6 +331,10 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::ThermalOptions::e_min_override)
         .def_readwrite("e_max_override",
                        &ed::workflows::ThermalOptions::e_max_override)
+        // mTPQ expert override of the (L*I - H) large value. ``0.0`` ->
+        // auto-tune from a Lanczos spectral-bound estimate.
+        .def_readwrite("energy_shift",
+                       &ed::workflows::ThermalOptions::energy_shift)
         .def_readwrite("kpm_num_moments",
                        &ed::workflows::ThermalOptions::kpm_num_moments)
         .def_readwrite("kpm_num_random_vectors",

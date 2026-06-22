@@ -825,6 +825,10 @@ if(BUILD_ED_TESTS)
     # in-memory and the directory overloads.
     ed_add_test(test_auto_thermal               tests/unit/test_auto_thermal.cpp USE_CATCH2)
     target_link_libraries(test_auto_thermal PRIVATE ed_input)
+    # Numerical accuracy: all finite-T methods vs full dense-diag reference,
+    # across all backends (CPU, GPU), all symmetry modes (none, Sz, spatial,
+    # Sz+spatial), multiple random seeds.
+    ed_add_test(test_thermal_dense_ref          tests/unit/test_thermal_dense_ref.cpp USE_CATCH2)
     # Smoke-test the unified spectral entry point
     # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.

@@ -13,8 +13,8 @@ Usage::
 
     import qed
     res = qed.thermal(H, method="FTLM", T_min=0.05, T_max=5.0, num_T=64)
-    res.thermo.energy        # full-Hilbert <H>(T)
-    res.thermo.specific_heat # full-Hilbert C_v(T)
+    res.energy               # full-Hilbert <H>(T)
+    res.specific_heat        # full-Hilbert C_v(T)
     res.per_sector           # one entry per Sz sector that was run
 
 For a Hamiltonian on disk (with optional ``automorphism_results/`` for
@@ -118,7 +118,16 @@ def _ed_params_to_thermal_options(
         # was not set (defensive: both should be in lockstep today).
         steps = int(getattr(params, "tpq_max_steps", 0) or 0)
         if steps <= 0:
-            steps = int(getattr(params, "max_iterations", 1000) or 1000)
+            mi = getattr(params, "max_iterations", 0)
+            steps = int(mi) if mi else 0
+        if steps <= 0 and method == DiagonalizationMethod.cTPQ:
+            # cTPQ uses ``krylov_dim`` as a CAP on the number of Taylor
+            # steps; keep the historical default so an unset call does
+            # not run the full beta_max/delta_beta ladder.
+            steps = 1000
+        # mTPQ: ``steps == 0`` reaches the orchestrator as the auto
+        # sentinel -> it sizes the iteration count from the spectral
+        # bounds to bracket beta_max = 1/T_min.
         opts.krylov_dim = steps
     else:
         opts.krylov_dim = 100
@@ -143,6 +152,12 @@ def _ed_params_to_thermal_options(
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
+    # mTPQ expert override: a positive ``tpq_energy_shift`` pins the
+    # (L*I - H) large value L; 0.0 (default) keeps the orchestrator's
+    # Lanczos-based auto-tune. Previously this knob was silently dropped
+    # for the mTPQ lane.
+    if hasattr(opts, "energy_shift"):
+        opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # probe-beta list for mTPQ/cTPQ state-vector snapshots.
     pb = list(getattr(params, "tpq_probe_betas", []) or [])
@@ -492,7 +507,7 @@ def thermal(
     ftlm_krylov_dim: Optional[int] = None,
     ltlm_krylov_dim: Optional[int] = None,
     tolerance: float = 1e-10,
-    max_iterations: int = 1000,
+    max_iterations: Optional[int] = None,
     random_seed: int = 0,
     use_symmetry_if_available: bool = False,
     use_sz_if_conserved: bool = True,
@@ -663,8 +678,13 @@ def thermal(
     # here and merged with the user's own `extra_params`. The merge
     # order is: defaults < method-specific < explicit `extra_params`.
     # ------------------------------------------------------------------
+    # ``max_iterations=None`` (default) is the clean "let the solver
+    # decide" sentinel: for mTPQ the orchestrator auto-sizes the step
+    # count from the spectral bounds so the requested coldest T is
+    # reached. ``0`` is the wire encoding of that sentinel; any positive
+    # value is respected exactly downstream.
     method_extra: dict[str, Any] = {
-        "max_iterations": int(max_iterations),
+        "max_iterations": int(max_iterations) if max_iterations is not None else 0,
     }
     if method_enum == DiagonalizationMethod.KPM_DOS:
         method_extra.update(
@@ -691,6 +711,13 @@ def thermal(
             tpq_taylor_order=int(tpq_taylor_order),
             tpq_measurement_interval=int(tpq_measurement_interval),
             tpq_energy_shift=float(tpq_energy_shift),
+            # Mirror the iteration budget into ``tpq_max_steps`` so the
+            # sentinel is a single source of truth across every dispatch
+            # path (in-memory, per-sector qed.solve, streaming directory).
+            # The EDParameters default (10000) would otherwise mask the
+            # ``max_iterations=None`` auto request on paths that read
+            # ``tpq_max_steps`` directly. ``0`` => auto-size (mTPQ).
+            tpq_max_steps=int(max_iterations) if max_iterations is not None else 0,
         )
         # Pillar 1: probe-beta list for state-vector snapshots.
         # Empty/None => no snapshots; the orchestrator persists only
@@ -857,6 +884,12 @@ def thermal(
             if max_iterations is not None:
                 p.max_iterations = int(max_iterations)
                 p.tpq_max_steps  = int(max_iterations)
+            else:
+                # Auto sentinel: 0 tells the orchestrator's mTPQ lane to
+                # size the iteration count from the spectral bounds. The
+                # EDParameters default (10000) would otherwise pin a fixed
+                # budget and defeat the auto-reach.
+                p.tpq_max_steps  = 0
             if random_seed:
                 p.ftlm_seed = int(random_seed)
                 p.ltlm_seed = int(random_seed)
