@@ -92,16 +92,16 @@ def main() -> int:
     # ------------------------------------------------------------------
     # 5. Discover and override niche simulation parameters.
     # ------------------------------------------------------------------
-    print("\n--- (f) overriding ARPACK parameters via extra_params ---")
-    print("  Run qed.list_diag_parameters('arpack') to see every ARPACK")
-    print("  knob; here we just override a couple for the demo.")
+    print("\n--- (f) overriding Lanczos parameters via extra_params ---")
+    print("  ARPACK was removed in May 2026; the retained Krylov solvers are")
+    print("  LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, and FULL.")
     res_arp = qed.solve(
         H, num_eigenvalues=2,
-        solver="ARPACK_ADVANCED", device="cpu",
+        solver="LANCZOS", device="cpu",
         verbose=False,
         extra_params={
-            "arpack_which": "SA",      # smallest algebraic eigenvalue
-            "arpack_max_restarts": 5,
+            "tolerance": 1e-12,
+            "max_iterations": 500,
         },
     )
     print(f"  E0 = {sorted(res_arp.eigenvalues)[0]:.10f}")
