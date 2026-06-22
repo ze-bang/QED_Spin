@@ -220,6 +220,65 @@ std::size_t auto_max_iter(std::uint64_t global_dim,
     return std::max(floor_iters, cap_iters);
 }
 
+// ---------------------------------------------------------------------------
+// Exact canonical thermodynamics from a complete eigenspectrum.
+//
+// Used as a small-sector fallback for mTPQ / cTPQ: when the Hilbert-space
+// dimension is small (D <= SMALL_THERMAL_DIM), the stochastic mTPQ / cTPQ
+// estimator has large per-sample variance (no algorithmic bug — the inherent
+// limitation is that TPQ needs D >> num_samples for good typicality). For
+// the sz_spatial symmetry mode on N=8, the (n_up, k) sub-sectors have
+// D ≈ 1–9, which causes dE failures of ~0.12 even with 20 samples.
+//
+// Math:
+//   Z(β) = Σ_j exp(-β E_j)
+//   F(T)  = −T ln Z(β)     ← includes the ln(D) baseline automatically
+//   E(T)  = Σ_j E_j w_j,   w_j = exp(−β E_j)/Z
+//   Cv(T) = β² (Σ_j E_j² w_j − E(T)²)
+//   S(T)  = β (E − F)
+//
+// The absolute free energy (F carries ln(D) at high T) is exactly what
+// combine_sector_thermodynamics expects for the per-sector Boltzmann weight.
+// ---------------------------------------------------------------------------
+constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
+
+static ThermodynamicData compute_canonical_thermo_from_eigs(
+    const std::vector<double>& eigs,
+    const std::vector<double>& temperatures)
+{
+    ThermodynamicData td;
+    if (eigs.empty() || temperatures.empty()) return td;
+    const std::size_t nT = temperatures.size();
+    td.temperatures = temperatures;
+    td.energy.assign(nT, 0.0);
+    td.specific_heat.assign(nT, 0.0);
+    td.free_energy.assign(nT, 0.0);
+    td.entropy.assign(nT, 0.0);
+
+    const double E0 = *std::min_element(eigs.begin(), eigs.end());
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double T = temperatures[t];
+        if (!(T > 0.0)) continue;
+        const double beta = 1.0 / T;
+        double Z = 0.0, ZE = 0.0, ZE2 = 0.0;
+        for (const double E : eigs) {
+            const double w = std::exp(-beta * (E - E0));
+            Z   += w;
+            ZE  += w * E;
+            ZE2 += w * E * E;
+        }
+        if (!(Z > 0.0)) continue;
+        const double E_avg  = ZE  / Z;
+        const double E2_avg = ZE2 / Z;
+        const double lnZ    = std::log(Z) - beta * E0;
+        td.energy[t]        = E_avg;
+        td.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+        td.free_energy[t]   = -lnZ / beta;
+        td.entropy[t]       = beta * (E_avg - td.free_energy[t]);
+    }
+    return td;
+}
+
 template <typename Backend>
 GroundStateResult solve_on(Backend& be,
                            const LinearOperator& H,
@@ -782,6 +841,39 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         }
     }
     const auto t0 = std::chrono::steady_clock::now();
+
+    // -----------------------------------------------------------------------
+    // Small-sector exact-thermal fallback for mTPQ / cTPQ.
+    //
+    // mTPQ and cTPQ are stochastic methods that need D >> num_samples for
+    // good typicality. For small sectors (D <= SMALL_THERMAL_DIM), the
+    // per-sample variance is too high for the dE tolerance even with 20+
+    // samples. The primary symptom is the sz_spatial mTPQ failure: within an
+    // n_up block, translation k-sectors have D ≈ 1–9 for N=8, giving a
+    // statistical error of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    //
+    // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
+    // canonical partition function directly. The resulting ThermodynamicData
+    // uses the same absolute free-energy convention (F includes ln(D) at
+    // high T) as compute_tpq_thermo_from_trajectories, so it plugs in
+    // correctly to combine_sector_thermodynamics for Sz/spatial recombination.
+    // -----------------------------------------------------------------------
+    const bool is_tpq_method = (opts.method == ThermalOptions::Method::mTPQ ||
+                                 opts.method == ThermalOptions::Method::cTPQ);
+    if (is_tpq_method &&
+        H.geometry().global_dim > 0 &&
+        H.geometry().global_dim <= SMALL_THERMAL_DIM &&
+        !R.thermo.temperatures.empty()) {
+        const std::uint64_t D = H.geometry().global_dim;
+        std::vector<double> eigs;
+        full_diagonalization(H, D, D, eigs, /*dir=*/"", /*compute_eigenvectors=*/false);
+        if (!eigs.empty()) {
+            R.thermo = compute_canonical_thermo_from_eigs(
+                eigs, R.thermo.temperatures);
+            R.ground_state_energy = eigs.front();
+            return R;
+        }
+    }
 
     if (opts.method == ThermalOptions::Method::mTPQ) {
         std::visit([&](auto& backend_uptr) {
