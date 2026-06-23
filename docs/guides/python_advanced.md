@@ -268,7 +268,7 @@ result = qed.thermal(
     method="mTPQ",
     num_samples=8,
     target_beta=20.0,
-    num_temp_points=200,
+    num_T=200,
     device="gpu",
 )
 ```
@@ -392,11 +392,11 @@ ftlm = qed.thermal(
     op,
     method="FTLM",
     num_samples=32,
-    temp_min=0.05, temp_max=5.0, num_temp_points=80,
+    T_min=0.05, T_max=5.0, num_T=80,
     extra_params={"ftlm_krylov_dim": 80},
 )
-T = ftlm.thermo_data.temperatures
-Cv = ftlm.thermo_data.specific_heat
+T = ftlm.temperatures
+Cv = ftlm.specific_heat
 print("FTLM Cv at T=1:", Cv[len(T) // 2])
 
 # 3. Symmetry-projected solve.

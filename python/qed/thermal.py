@@ -13,8 +13,8 @@ Usage::
 
     import qed
     res = qed.thermal(H, method="FTLM", T_min=0.05, T_max=5.0, num_T=64)
-    res.thermo.energy        # full-Hilbert <H>(T)
-    res.thermo.specific_heat # full-Hilbert C_v(T)
+    res.energy               # full-Hilbert <H>(T)
+    res.specific_heat        # full-Hilbert C_v(T)
     res.per_sector           # one entry per Sz sector that was run
 
 For a Hamiltonian on disk (with optional ``automorphism_results/`` for
