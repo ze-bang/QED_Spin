@@ -473,10 +473,55 @@ struct DeviceRepSymmetryBasisPolicy {
     // Look up the destination orbit index AND the projection phase for a
     // connected computational state ``state`` in ONE shot, regenerating both
     // from the group action on the fly (no orbit table).
+    //
+    // Fix (GPU, mirrors CPU Fix 1): precompute all |G| permuted images into a
+    // thread-local array (CUDA local memory, L1-cached for sequential access).
+    // The representative (min image) and the character accumulation both read
+    // from ``images[]`` — halving apply_perm call count vs the prior two-pass
+    // approach.  For large N where apply_perm costs N scalar iterations, the
+    // savings dominate over the local-memory latency.
+    //
+    // kMaxGGpu = 64 covers 4×4 lattices with C4v symmetry (|G|=64); groups
+    // larger than 64 fall back to the original two-pass algorithm at runtime
+    // so correctness is never sacrificed.
     __device__ inline std::uint64_t
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
         if (__popcll(state) != n_up) return kDeviceNotFound;
-        // Pass 1: representative r_b = min_g g(state).
+
+        // kMaxGGpu = 256 covers all realistic lattice automorphism groups
+        // (full D4h on 4×8 N=32 lattice: |G|=256; D6h on hexagonal: |G|=12×6=72).
+        // At N=32, apply_perm costs N~32 cycles; precomputing images[] saves the
+        // second pass (~N×|G| instructions). images[256] goes to CUDA local memory
+        // (L1-cached for sequential g=0..G-1 access); L1 hit ~1 cycle vs
+        // apply_perm ~N cycles — unambiguous win for N≥8.
+        static constexpr int kMaxGGpu = 256;
+
+        if (group_size <= kMaxGGpu) {
+            // Optimized path: one scan to compute images and find the min.
+            std::uint64_t images[kMaxGGpu];
+            std::uint64_t rb = state;
+            for (int g = 0; g < group_size; ++g) {
+                images[g] = apply_perm(state, g);
+                if (images[g] < rb) rb = images[g];
+            }
+            const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
+            const std::int32_t k = rep_index_of_rank[r];
+            if (k < 0) return kDeviceNotFound;
+            // Accumulate from precomputed images — no more apply_perm here.
+            cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+            for (int h = 0; h < group_size; ++h) {
+                if (images[h] == rb) {
+                    const cuDoubleComplex c = characters[h];
+                    acc.x += cuCreal(c);   // conj: +real
+                    acc.y -= cuCimag(c);   //       -imag
+                }
+            }
+            const double s = inv_norms[k];
+            proj_out = make_cuDoubleComplex(acc.x * s, acc.y * s);
+            return static_cast<std::uint64_t>(k);
+        }
+
+        // Fallback for |G| > kMaxGGpu: original two-pass approach.
         std::uint64_t rb = state;
         for (int g = 1; g < group_size; ++g) {
             const std::uint64_t img = apply_perm(state, g);
@@ -485,13 +530,12 @@ struct DeviceRepSymmetryBasisPolicy {
         const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
         const std::int32_t k = rep_index_of_rank[r];
         if (k < 0) return kDeviceNotFound;
-        // Pass 2: conj(beta_state) = sum_{h: h(state)==r_b} conj(chi_k(h)).
         cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
         for (int h = 0; h < group_size; ++h) {
             if (apply_perm(state, h) == rb) {
                 const cuDoubleComplex c = characters[h];
-                acc.x += cuCreal(c);   // conj: +real
-                acc.y -= cuCimag(c);   //       -imag
+                acc.x += cuCreal(c);
+                acc.y -= cuCimag(c);
             }
         }
         const double s = inv_norms[k];

@@ -46,7 +46,8 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
+// <unordered_map> removed: compute_orbit_for_state uses a stack flat-array
+// accumulator (Fix 6) that is faster for |G|<=256 with zero heap allocation.
 #include <utility>
 #include <variant>
 #include <vector>
@@ -109,42 +110,48 @@ inline void compute_orbit_for_state(
     std::vector<Complex>&            orbit_coefficients,
     double&                          norm_sq)
 {
-    // Same accumulator the legacy paths use. Keyed by ``g.s`` so
-    // duplicate orbit elements (e.g. fixed-point states under a
-    // non-trivial g) sum coherently.
-    std::unordered_map<std::uint64_t, Complex> coeff_map;
+    // Fix 6: Replace std::unordered_map with a stack-allocated flat accumulator.
+    // An orbit has at most |G| distinct elements. For all realistic lattice
+    // symmetry groups |G| <= 256; a plain linear-dedup pass over a small
+    // stack buffer is faster than hash-map construction + destruction for
+    // orbit sizes up to ~200 (zero heap allocation, CPU-cache resident).
+    // Stack cost: 256 × 24 bytes = 6 KB per call — comfortably within any thread.
+    // The outer callers pre-allocate ``orbit_elements`` / ``orbit_coefficients``
+    // so the only allocation here is the fixed-size stack array.
+    struct OrbElem { std::uint64_t state; Complex coeff; };
+    constexpr std::size_t kMaxOrbit = 256;  // covers any realistic lattice group
+    OrbElem buf[kMaxOrbit];
+    std::size_t n_buf = 0;
+
     const auto& info = projector.group_info();
     const std::size_t G = info.max_clique.size();
 
-    // Apply every group element. The character composition is the
-    // verbatim Bloch-convention product chi(g) = product_k pf[k]^p[k].
-    // We accumulate conj(chi(g)).
     for (std::size_t g = 0; g < G; ++g) {
         const auto& powers = info.power_representation[g];
         Complex character(1.0, 0.0);
         for (std::size_t k = 0; k < powers.size(); ++k) {
             const Complex phase = phase_factors[k];
-            for (int p = 0; p < powers[k]; ++p) {
-                character *= phase;
-            }
+            for (int p = 0; p < powers[k]; ++p) character *= phase;
         }
         const std::uint64_t permuted = projector.apply(basis, g);
-        // Subspace::index_of returns -1 when the state is not in the
-        // chosen subspace; full-space accepts every length-N
-        // bitstring so this is a no-op for FullSpaceSubspace (the
-        // compiler should elide the check for that specialisation).
         if (subspace.index_of(permuted) < 0) continue;
-        coeff_map[permuted] += std::conj(character);
+        const Complex c = std::conj(character);
+        // Linear dedup: the orbit is tiny (≤|G|) so O(|G|²) beats hash overhead.
+        bool found = false;
+        for (std::size_t j = 0; j < n_buf; ++j) {
+            if (buf[j].state == permuted) { buf[j].coeff += c; found = true; break; }
+        }
+        if (!found) buf[n_buf++] = {permuted, c};
     }
 
     orbit_elements.clear();
     orbit_coefficients.clear();
     norm_sq = 0.0;
-    for (const auto& [state, coeff] : coeff_map) {
-        if (std::abs(coeff) > kOrbitCoefficientEpsilon) {
-            orbit_elements.push_back(state);
-            orbit_coefficients.push_back(coeff);
-            norm_sq += std::norm(coeff);
+    for (std::size_t j = 0; j < n_buf; ++j) {
+        if (std::abs(buf[j].coeff) > kOrbitCoefficientEpsilon) {
+            orbit_elements.push_back(buf[j].state);
+            orbit_coefficients.push_back(buf[j].coeff);
+            norm_sq += std::norm(buf[j].coeff);
         }
     }
     if (G > 0) norm_sq /= static_cast<double>(G);

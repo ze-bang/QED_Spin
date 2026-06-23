@@ -320,6 +320,11 @@ public:
             && rep_rank_table_enabled(rep_data_.rank_table_entries())) {
             rep_data_.build_rank_table();
         }
+        // N≤32 apply_perm LUT: byte-decomposition table (4 lookups vs N iters).
+        // No-op when n_sites > 32 or already built.
+        if (rep_data_.usable() && rep_data_.perm_lut_data.empty()) {
+            rep_data_.build_perm_lut();
+        }
         return rep_data_;
     }
 
