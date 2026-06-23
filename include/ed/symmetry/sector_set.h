@@ -43,8 +43,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
+
+#include <omp.h>
 
 #include <ed/core/basis_utils.h>          // generateFixedSzBasis, LinIndexTable, applyPermutation
 #include <ed/symmetry/symmetry_sector_data.h>  // SymmetrySector
@@ -340,6 +343,10 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     std::vector<std::unique_ptr<SectorOperator>> ops;
     ops.reserve(num_sectors);
 
+    // Fix 4: Compute perms_flat once; reuse across all sectors.
+    const std::vector<int> shared_perms_flat =
+        flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+
     std::vector<std::uint64_t> elems;
     std::vector<Complex>       coeffs;
 
@@ -377,7 +384,7 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
         if (!info_sp->power_representation.empty() && !phase.empty()) {
             rd.characters = sector_characters_from(*info_sp, phase);
         }
-        rd.perms_flat = flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+        rd.perms_flat = shared_perms_flat;  // Fix 4: reuse pre-computed copy
 
         bool is_real = true;
         for (const auto& c : rd.characters) {
@@ -412,6 +419,198 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
         if (out_sector_ids) out_sector_ids->push_back(s);
     }
     return ops;
+}
+
+// ---------------------------------------------------------------------------
+// build_all_sz_sector_operators: one-pass all-Sz lazy builder.
+//
+// Calls ``enumerate_full_orbit_reps`` ONCE (O(2^N × |G|)), partitions the
+// reps by popcount (site permutations preserve Sz), then runs the same
+// CSR-free "Pass 1.5" as ``build_fixed_sz_sector_operators_lazy`` for every
+// (n_up, irrep) sector in [n_up_min, n_up_max].
+//
+// The orbit CSR is deferred via ``configureRepLazy`` so that:
+//   * The build phase is O(2^N × |G|) -- a single full-space scan instead
+//     of N+1 fixed-Sz scans.
+//   * The CSR is materialised on the first ``apply()`` call per sector,
+//     which happens inside the (possibly OMP-parallel) thermal/solve loop,
+//     so CSR data is in L1/L2 cache immediately when the Krylov iteration
+//     starts.
+//
+// ``out_n_up_sector_ids`` receives (n_up, raw_irrep_index) pairs in the same
+// order as the returned operators so callers can attach SectorTags.
+// ---------------------------------------------------------------------------
+template <class TermBuilder>
+[[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
+build_all_sz_sector_operators(
+    std::uint64_t            n_bits,
+    float                    spin_l,
+    const SymmetryGroupInfo& info,
+    TermBuilder&&            terms,
+    std::int64_t             n_up_min = 0,
+    std::int64_t             n_up_max = -1,
+    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr)
+{
+    if (n_up_max < 0) n_up_max = static_cast<std::int64_t>(n_bits);
+    n_up_min = std::max<std::int64_t>(0, n_up_min);
+    n_up_max = std::min<std::int64_t>(
+        n_up_max, static_cast<std::int64_t>(n_bits));
+
+    // Co-own the group info for all deferred CSR provider lambdas.
+    auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
+
+    // One-pass full-space orbit rep enumeration. Site permutations preserve
+    // popcount (lattice automorphisms, not spin flips), so every orbit image
+    // of a fixed-Sz state has the same n_up. Partitioning by popcount gives
+    // exactly the fixed-Sz reps for each n_up without N+1 separate scans.
+    {
+        const std::vector<std::uint64_t> all_reps =
+            enumerate_full_orbit_reps(*info_sp, n_bits);
+        // (populated into per-n_up rep lists below)
+        std::vector<std::vector<std::uint64_t>> reps_by_n_up(
+            static_cast<std::size_t>(n_bits + 1));
+        for (std::uint64_t r : all_reps) {
+            const auto pc =
+                static_cast<std::size_t>(__builtin_popcountll(r));
+            if (pc < reps_by_n_up.size())
+                reps_by_n_up[pc].push_back(r);
+        }
+
+        const SpatialProjector projector(*info_sp);
+        const std::size_t group_size = info_sp->max_clique.size();
+        const std::size_t num_irreps = info_sp->sectors.size();
+
+        std::vector<std::unique_ptr<SectorOperator>> ops;
+        ops.reserve(
+            static_cast<std::size_t>(n_up_max - n_up_min + 1) * num_irreps);
+
+        // Fix 4: Compute the group permutation table once for all sectors.
+        // All (n_up, irrep) sectors share the same group, so the 156 separate
+        // flatten_group_perms() calls (each allocating |G|*N ints) collapse to
+        // one allocation.  Each RepSectorData still owns its own copy (required
+        // by RepSymmetryBasisPolicy::perms raw-pointer), but the source is only
+        // computed once.
+        const std::vector<int> shared_perms_flat =
+            flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+
+        for (std::int64_t n_up = n_up_min; n_up <= n_up_max; ++n_up) {
+            const auto nu = static_cast<std::size_t>(n_up);
+            if (nu >= reps_by_n_up.size() || reps_by_n_up[nu].empty())
+                continue;
+
+            // Co-own per-n_up basis + Lin table for deferred CSR providers.
+            // ``FixedSzSubspace::view`` takes stable heap references, so we
+            // heap-allocate both and share them via shared_ptr.
+            auto basis_sp = std::make_shared<std::vector<std::uint64_t>>(
+                generateFixedSzBasis(n_bits, n_up));
+            auto lin_sp = std::make_shared<LinIndexTable>();
+            lin_sp->build(n_bits, n_up, *basis_sp);
+            auto reps_sp = std::make_shared<std::vector<std::uint64_t>>(
+                reps_by_n_up[nu]);
+
+            const FixedSzSubspace subspace =
+                FixedSzSubspace::view(n_bits, n_up, *basis_sp, *lin_sp);
+
+            // Fix 3: Parallelize the irrep loop.
+            // Each irrep s is independent: orbit walks read only shared
+            // read-only data (subspace, projector, phase_factors, reps_sp)
+            // and write to a thread-private SectorOperator slot.
+            // Thread-private scratch avoids contention on elems/coeffs.
+            // Results are collected into a slot array; gaps (empty sectors)
+            // are filled with nullptr and skipped in the collection pass.
+            const auto ns = static_cast<std::ptrdiff_t>(num_irreps);
+            std::vector<std::unique_ptr<SectorOperator>> slot(
+                static_cast<std::size_t>(ns));
+            std::vector<std::pair<int, std::size_t>> slot_ids(
+                static_cast<std::size_t>(ns), {-1, 0});
+
+            #pragma omp parallel for schedule(dynamic) if(ns > 1)
+            for (std::ptrdiff_t si = 0; si < ns; ++si) {
+                const std::size_t s = static_cast<std::size_t>(si);
+                const std::vector<Complex>& phase =
+                    info_sp->sectors[s].phase_factors;
+
+                // Pass 1.5: CSR-free per-sector dimension + RepSectorData.
+                // Walk each rep's orbit, keep only (rep, 1/norm) for the
+                // survivors. Identical to build_fixed_sz_sector_operators_lazy.
+                // Thread-private scratch vectors eliminate contention.
+                std::vector<std::uint64_t> elems;
+                std::vector<Complex>       coeffs;
+                RepSectorData rd;
+                rd.n_sites    = static_cast<int>(n_bits);
+                rd.group_size = static_cast<int>(group_size);
+                rd.reps.reserve(reps_sp->size());
+                rd.inv_norms.reserve(reps_sp->size());
+                int  sec_n_up = -1;
+                bool uniform  = true;
+
+                for (std::uint64_t rep : *reps_sp) {
+                    double norm_sq = 0.0;
+                    compute_orbit_for_state(subspace, projector, rep, phase,
+                                            elems, coeffs, norm_sq);
+                    if (elems.empty() ||
+                        norm_sq <= SectorBasis::kOrbitNormSqEpsilon)
+                        continue;
+                    rd.reps.push_back(rep);
+                    rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+                    const int pc = __builtin_popcountll(rep);
+                    if (sec_n_up < 0) sec_n_up = pc;
+                    else if (pc != sec_n_up) uniform = false;
+                }
+                if (rd.reps.empty()) continue;
+
+                rd.n_up = uniform ? sec_n_up : -1;
+                if (!info_sp->power_representation.empty() && !phase.empty())
+                    rd.characters = sector_characters_from(*info_sp, phase);
+                // Fix 4: Use pre-computed perms_flat (one copy per sector,
+                // no recomputation of the |G|*N loop for every sector).
+                rd.perms_flat = shared_perms_flat;
+
+                bool is_real = true;
+                for (const auto& c : rd.characters) {
+                    if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+                }
+
+                const std::uint64_t dim =
+                    static_cast<std::uint64_t>(rd.reps.size());
+                auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+
+                auto op = std::make_unique<SectorOperator>(
+                    n_bits, spin_l, SectorBasis{});
+                terms(*op);
+                op->configureRepLazy(
+                    dim, group_size, is_real,
+                    /*rep_provider=*/[rep_sp]() { return *rep_sp; },
+                    /*csr_provider=*/
+                    [basis_sp, lin_sp, reps_sp, info_sp, n_bits, n_up, s]()
+                        -> ::SymmetrySector {
+                        // First CPU apply: rebuild orbit CSR for this sector.
+                        const FixedSzSubspace sub =
+                            FixedSzSubspace::view(n_bits, n_up,
+                                                  *basis_sp, *lin_sp);
+                        const SpatialProjector proj(*info_sp);
+                        return SectorBasis::build(
+                                   sub, proj,
+                                   info_sp->sectors[s].quantum_numbers,
+                                   info_sp->sectors[s].phase_factors,
+                                   *reps_sp, /*sector_id=*/s)
+                            .sector();
+                    });
+
+                slot[s]     = std::move(op);
+                slot_ids[s] = {static_cast<int>(n_up), s};
+            }
+
+            // Collect surviving sectors in (n_up, s) order.
+            for (std::size_t s = 0; s < num_irreps; ++s) {
+                if (!slot[s]) continue;
+                if (out_n_up_sector_ids)
+                    out_n_up_sector_ids->push_back(slot_ids[s]);
+                ops.push_back(std::move(slot[s]));
+            }
+        }
+        return ops;
+    }
 }
 
 } // namespace ed::symmetry

@@ -98,6 +98,11 @@ rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
         p.rep_index_of_rank = rd.rep_index_of_rank.data();
         p.binom             = &rd.binom;
     }
+    // N≤32 fast apply_perm: byte-decomposition LUT (4 lookups vs N iters).
+    if (!rd.perm_lut_data.empty()) {
+        p.perm_lut     = rd.perm_lut_data.data();
+        p.perm_lut_bpw = rd.perm_lut_bpw;
+    }
     return p;
 }
 

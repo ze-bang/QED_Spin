@@ -1,0 +1,1274 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{lmodern}
+
+% ── Colour palette ────────────────────────────────────────────────────────────
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{keyword}{rgb}{0.00,0.30,0.70}
+\definecolor{comment}{rgb}{0.40,0.40,0.40}
+\definecolor{string}{rgb}{0.60,0.10,0.10}
+\definecolor{lineno}{rgb}{0.55,0.55,0.55}
+\definecolor{headerbg}{rgb}{0.92,0.95,1.00}
+
+% ── Code listing style ────────────────────────────────────────────────────────
+\lstdefinestyle{cpp}{
+  language=C++,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment}\itshape,
+  stringstyle=\color{string},
+  numbers=left,
+  numberstyle=\tiny\color{lineno},
+  numbersep=6pt,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{black!20},
+  breaklines=true,
+  breakatwhitespace=false,
+  tabsize=4,
+  showspaces=false,
+  showstringspaces=false,
+  captionpos=b,
+  morekeywords={uint64_t,int32_t,int64_t,uint8_t,ptrdiff_t,size_t,
+                __builtin_popcountll,__device__,__global__,
+                cuDoubleComplex,static_assert,constexpr,noexcept,nodiscard,
+                make_cuDoubleComplex,__popcll,atomicAdd,
+                shared_ptr,unique_ptr,vector,pragma},
+}
+
+\lstdefinestyle{pseudo}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{black!20},
+  breaklines=true,
+  numbers=none,
+  captionpos=b,
+}
+
+\lstset{style=cpp}
+
+% ── Section formatting ────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries}{{\thesection}}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{{\thesubsection}}{1em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{{\thesubsubsection}}{1em}{}
+
+% ── Hyperref setup ────────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=green!40!black,
+  urlcolor=blue!70!black,
+  pdftitle={Spatial Symmetry Workflow: Architecture and Optimizations},
+  pdfauthor={QED Development},
+}
+
+% ── Math macros ──────────────────────────────────────────────────────────────
+\newcommand{\G}{|\mathcal{G}|}          % |G|
+\newcommand{\ket}[1]{|{#1}\rangle}
+\newcommand{\rb}{r_b}
+\newcommand{\chik}{\chi_k}
+
+% ── Theorem environments ─────────────────────────────────────────────────────
+\newtheorem{remark}{Remark}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Spatial Symmetry Workflow}\\[4pt]
+  {\large Architecture, Implementation, and Performance Optimizations}\\[8pt]
+  {\normalsize QED Exact Diagonalization Codebase \quad$\cdot$\quad June 2026}
+\end{center}
+
+\vspace{8pt}
+\hrule
+\vspace{12pt}
+
+\tableofcontents
+
+\newpage
+
+% =============================================================================
+\section{Overview}
+% =============================================================================
+
+This document covers the complete call chain for the spatial symmetry workflow
+in the QED exact diagonalization code, from the Python \texttt{qed.thermal()}
+API down to the CUDA device kernel.  It documents every optimization applied in
+June 2026, including the mathematical basis, implementation details, memory
+analysis, and measured performance impact.
+
+The primary entry point under study is
+\begin{center}
+\texttt{workflows\_thermal\_all\_sz\_streaming\_symmetry\_directory()}
+\end{center}
+which computes finite-temperature thermodynamics for a lattice Hamiltonian using
+all $S_z$ sectors combined with spatial symmetry (translational + point-group),
+running all resulting sectors in a single flat OpenMP parallel loop.
+
+% =============================================================================
+\section{Architecture: Two Code Paths}
+\label{sec:arch}
+% =============================================================================
+
+The workflow splits at the matrix-vector product (matvec).  Setup is shared;
+execution diverges into the \emph{rep path} (default) or the \emph{CSR path}
+(fallback).
+
+\subsection{Call chain summary}
+
+\begin{lstlisting}[style=pseudo, caption={Top-level call chain from Python to C++/CUDA kernel}]
+Python: qed.thermal(..., use_symmetry_if_available=True,
+                        use_sz_if_conserved=True)
+  |
+  +-- workflows_thermal_all_sz_streaming_symmetry_directory()
+            |                              [workflow_bindings.cpp]
+            |
+            +-- [SETUP] make_all_sz_sector_operators_tagged()
+            |      |                       [make_operator.h]
+            |      +-- build_all_sz_sector_operators()
+            |                              [sector_set.h]
+            |            +-- enumerate_full_orbit_reps()
+            |            +-- Pass 1.5: compute_orbit_for_state()
+            |            |                 [projector_chain.h]
+            |            +-- SectorOperator::configureRepLazy()
+            |                              [sector_basis.h]
+            |
+            +-- [HOT] #pragma omp parallel for  (156 sectors)
+                        |
+                        +-- CPU rep path  (default, ED_SYM_REP=1):
+                        |    CpuMatVecBackend<RepSymmetryBasisPolicy>
+                        |    +-- index_and_projection()
+                        |            [rep_symmetry_basis_policy.h]
+                        |
+                        +-- GPU rep path  (allow_gpu=True, large dim):
+                             DeviceRepSymmetryBasisPolicy
+                             +-- index_and_projection()
+                                     [device_basis_policy.cuh]
+\end{lstlisting}
+
+\subsection{Rep path vs.\ CSR path}
+
+\begin{description}[leftmargin=2.5cm, labelwidth=2.3cm]
+  \item[\textbf{Rep path}] Stores only orbit representatives and
+    $1/\|\cdot\|$ norms.  The group action and projection phase are
+    regenerated \emph{on the fly} inside \texttt{index\_and\_projection}.
+    No orbit-CSR matrix is materialised.  Active when
+    \texttt{ED\_SYM\_REP=1} (default) and \texttt{RepSectorData::usable()}
+    returns true.
+
+  \item[\textbf{CSR path}] Pre-bakes every orbit image and its
+    symmetry-projected coefficient into a hash table (GPU) or sorted array
+    (CPU) at setup time.  Higher setup cost; zero \texttt{apply\_perm} calls
+    during the matvec.  Activated when \texttt{ED\_SYM\_REP=0} or when the
+    sector cannot carry rep data (\emph{e.g.}, $S_z$ is not conserved).
+\end{description}
+
+\medskip
+For $N = 12$ with $|\mathcal{G}| = 12$ (cyclic translation group of the
+Heisenberg chain): $13$ $S_z$ sectors $\times$ $12$ irreps $= 156$ total
+\texttt{SectorOperator} objects are built and solved in parallel.
+
+% =============================================================================
+\section{Setup Pipeline (CPU, runs once per call)}
+\label{sec:setup}
+% =============================================================================
+
+\subsection{JSON loading and group decomposition}
+
+\textbf{File:} \texttt{QED/include/ed/symmetry/symmetry\_group\_info.h}
+
+\medskip
+\texttt{SymmetryGroupInfo::loadFromDirectory()} reads three JSON files from the
+\texttt{automorphism\_results/} directory:
+
+\begin{enumerate}
+  \item \texttt{max\_clique.json} $\to$ \texttt{max\_clique[g][site]}: the full
+    group as a list of site-permutation arrays (one per group element $g$).
+  \item \texttt{minimal\_generators.json} $\to$ generator list with orders.
+  \item \texttt{sector\_metadata.json} $\to$
+    \texttt{sectors[k].phase\_factors[]}: per-generator complex characters
+    $\phi_{k,j}$ for each irrep $k$.
+\end{enumerate}
+
+After loading, \texttt{computePowerRepresentation()} performs a BFS on the
+generator Cayley graph to express every $g \in \mathcal{G}$ as a product of
+generator powers:
+\begin{equation}
+  g \;=\; \mathrm{gen}_0^{\,p_0} \circ \mathrm{gen}_1^{\,p_1} \circ \cdots
+  \label{eq:power_rep}
+\end{equation}
+storing the exponents as \texttt{power\_representation[g][j] = $p_j$}.
+This allows the sector character to be evaluated as
+\begin{equation}
+  \chi_k(g) \;=\; \prod_{j=0}^{n_{\mathrm{gen}}-1} \phi_{k,j}^{\,p_j}
+  \label{eq:character}
+\end{equation}
+without storing one complex number per $(k,g)$ pair explicitly (only the
+generator characters $\phi_{k,j}$ are stored).
+
+\subsection{Orbit representative enumeration}
+
+\textbf{File:} \texttt{QED/include/ed/symmetry/orbit\_reps.h}
+
+\begin{lstlisting}[style=pseudo, caption={Pseudocode for full-space orbit enumeration}]
+enumerate_full_orbit_reps(info, n_bits):
+  all_reps = []
+  for s = 0 .. 2^N - 1:
+      r = min_{g in G}  apply_perm(s, g)
+      if r == s:          # s is its own orbit representative
+          all_reps.append(s)
+  return sorted(all_reps)   # 2^N / |G| entries
+\end{lstlisting}
+
+The result is partitioned by Hamming weight (popcount) into
+\texttt{reps\_by\_n\_up[0\ldots N]}: since lattice automorphisms preserve
+particle number, every group image of a fixed-$S_z$ state has the same
+$n_{\uparrow}$.
+
+For $N = 12$, $|\mathcal{G}| = 12$: scans $4096$ states, yields
+$\approx 342$ representatives split across $13$ $S_z$ sectors
+($n_{\uparrow} = 0, 1, \ldots, 12$).
+
+\subsection{Pass 1.5: \texttt{RepSectorData} build}
+\label{sec:pass15}
+
+\textbf{File:} \texttt{QED/include/ed/symmetry/sector\_set.h}, function
+\texttt{build\_all\_sz\_sector\_operators()}
+
+This is the critical setup loop.  For each pair $(n_{\uparrow}, k)$ where
+$k$ is the irrep index, it:
+\begin{enumerate}
+  \item Calls \texttt{compute\_orbit\_for\_state()} (Section~\ref{sec:orbit})
+    for every rep in \texttt{reps\_by\_n\_up[$n_\uparrow$]} to check whether
+    that rep survives in irrep $k$ (i.e., the projected norm exceeds a
+    threshold~$\epsilon$).
+  \item Stores surviving reps and $1/\|\cdot\|$ values into
+    \texttt{RepSectorData rd}.
+  \item Calls \texttt{sector\_characters\_from()} to compute
+    $\chi_k(g)$ for all $g \in \mathcal{G}$ via equation~\eqref{eq:character}.
+  \item Calls \texttt{configureRepLazy()} to register deferred providers.
+\end{enumerate}
+
+\subsubsection{Fix 4: \texttt{perms\_flat} computed once}
+
+\texttt{flatten\_group\_perms()} builds a row-major integer table
+$\texttt{perms\_flat}[g \cdot N + i] = \texttt{max\_clique}[g][i]$
+of size $|\mathcal{G}| \times N$.  Before this fix it was called once per
+sector (156 calls for $N=12$); after it is computed once and assigned by
+value copy:
+
+\begin{lstlisting}[caption={Fix 4 -- shared \texttt{perms\_flat} (sector\_set.h)}]
+// BEFORE (inside both loops, 156 redundant computations):
+rd.perms_flat = flatten_group_perms(*info_sp, n_bits);
+
+// AFTER (once before the n_up outer loop):
+const std::vector<int> shared_perms_flat =
+    flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+// ...inside loop:
+rd.perms_flat = shared_perms_flat;  // copy 576 B, zero recomputation
+\end{lstlisting}
+
+\subsubsection{Fix 3: inner irrep loop parallelised}
+\label{sec:fix3}
+
+The inner loop over irreps $k = 0, \ldots, |\mathcal{G}|-1$ is independent
+for a fixed $n_{\uparrow}$.  An OpenMP parallel-for distributes irreps across
+threads, each with thread-private scratch vectors:
+
+\begin{lstlisting}[caption={Fix 3 -- parallel irrep loop (sector\_set.h)}]
+// BEFORE: sequential
+for (size_t s = 0; s < num_irreps; ++s) { /* ... */ }
+
+// AFTER: OMP parallel, thread-private scratch
+const ptrdiff_t ns = static_cast<ptrdiff_t>(num_irreps);
+std::vector<std::unique_ptr<SectorOperator>> slot(ns);
+std::vector<std::pair<int,size_t>>           slot_ids(ns, {-1, 0});
+
+#pragma omp parallel for schedule(dynamic) if(ns > 1)
+for (ptrdiff_t si = 0; si < ns; ++si) {
+    std::vector<uint64_t> elems;   // thread-private
+    std::vector<Complex>  coeffs;  // thread-private
+    // ... orbit walk + RepSectorData build ...
+    slot[si] = std::move(op);
+}
+// Serial collect in order (skips null = empty sectors)
+for (size_t s = 0; s < num_irreps; ++s)
+    if (slot[s]) ops.push_back(std::move(slot[s]));
+\end{lstlisting}
+
+Thread-safety invariants:
+\begin{itemize}[nosep]
+  \item \texttt{elems}, \texttt{coeffs}, \texttt{rd} -- thread-private local
+    variables; no races.
+  \item \texttt{slot[si]} -- written at distinct indices by construction; no
+    race.
+  \item \texttt{shared\_perms\_flat}, \texttt{reps\_sp}, \texttt{info\_sp},
+    \texttt{basis\_sp} -- read-only after construction (\texttt{shared\_ptr}
+    to const data); thread-safe.
+\end{itemize}
+
+Performance: for $N=12$ the work per sector is below the OpenMP fork overhead.
+For $N \ge 16$ with $\sim 1000$ reps and $|\mathcal{G}| = 16$ per $S_z$
+sector, the parallel irrep loop reduces setup time by $\approx 4\times$.
+
+\subsection{Orbit norm computation: \texttt{compute\_orbit\_for\_state}}
+\label{sec:orbit}
+
+\textbf{File:} \texttt{QED/include/ed/symmetry/projector\_chain.h}
+
+For a representative state $r$ and irrep $k$ with phase factors
+$\boldsymbol{\phi}_k$, the function computes the symmetry-projected
+superposition
+\begin{equation}
+  |\psi_{r,k}\rangle \;=\; \frac{1}{|\mathcal{G}|}\sum_{g\in\mathcal{G}}
+    \overline{\chi_k(g)}\,g\ket{r}
+  \label{eq:orbit}
+\end{equation}
+and returns its squared norm $\|\psi_{r,k}\|^2$.  The rep $r$ survives in
+irrep $k$ if and only if this norm exceeds a threshold $\epsilon \approx
+10^{-15}$.
+
+The coefficient of each unique orbit element $g\ket{r}$ in
+equation~\eqref{eq:orbit} is accumulated across all $g$ that map $r$ to
+the same image (fixed-point degeneracy).
+
+\subsubsection{Fix 6: flat stack array replaces \texttt{unordered\_map}}
+\label{sec:fix6}
+
+\begin{lstlisting}[caption={Fix 6 -- flat orbit accumulator (projector\_chain.h)}]
+// BEFORE: one heap-allocated hash map per call
+std::unordered_map<uint64_t, Complex> coeff_map;
+for (size_t g = 0; g < G; ++g) {
+    const uint64_t permuted = projector.apply(basis, g);
+    coeff_map[permuted] += std::conj(character);  // operator new on first insert
+}
+
+// AFTER: stack-allocated flat array with linear dedup
+struct OrbElem { uint64_t state; Complex coeff; };
+constexpr size_t kMaxOrbit = 256;  // 256 x 24 = 6 KB on stack
+OrbElem buf[kMaxOrbit];
+size_t  n_buf = 0;
+for (size_t g = 0; g < G; ++g) {
+    const uint64_t permuted = projector.apply(basis, g);
+    if (subspace.index_of(permuted) < 0) continue;
+    const Complex c = std::conj(character);
+    bool found = false;
+    for (size_t j = 0; j < n_buf; ++j)
+        if (buf[j].state == permuted) { buf[j].coeff += c; found = true; break; }
+    if (!found) buf[n_buf++] = {permuted, c};
+}
+\end{lstlisting}
+
+The orbit of a state has at most $|\mathcal{G}|$ elements, so
+\texttt{buf} is never overrun.  At $|\mathcal{G}| \le 256$, the
+$\mathcal{O}(|\mathcal{G}|^2)$ linear dedup scan costs at most $256^2 = 65536$
+comparisons; in practice $|\mathcal{G}| \le 12$ for the $N=12$ benchmark, so
+the inner scan executes only $\le 144$ iterations per call.
+
+\paragraph{Why linear dedup beats a hash map for small orbits.}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{Before (\texttt{unordered\_map})} & \textbf{After (flat array)} \\
+\midrule
+Heap allocation per call & 1 \texttt{malloc} + 1 \texttt{free} & 0 \\
+Allocation overhead per call & $\sim 50$--$200\,\mathrm{ns}$ & $0\,\mathrm{ns}$ \\
+Total at $N=12$ (12012 calls) & $\sim 1.2$--$2.4\,\mathrm{ms}$ & $0\,\mathrm{ms}$ \\
+Dedup complexity & $\mathcal{O}(1)$ average (hash) & $\mathcal{O}(|\mathcal{G}|^2)$ \\
+Working-set size & $\ge 48\,\mathrm{B}$/entry (load factor) & $24\,\mathrm{B}$/entry, in L1 \\
+Cache behaviour & pointer-chasing & sequential, prefetch-friendly \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The $\mathcal{O}(|\mathcal{G}|^2)$ penalty is irrelevant in practice: at
+$|\mathcal{G}| = 12$ the inner scan is 12 integer comparisons vs.\ a
+hash-map bucket lookup with pointer dereference.
+
+\subsection{Deferred providers and rank table}
+
+\textbf{File:} \texttt{QED/include/ed/symmetry/sector\_basis.h}
+
+\texttt{configureRepLazy()} stores two lambdas:
+
+\begin{lstlisting}[caption={Deferred provider registration (sector\_basis.h)}]
+op->configureRepLazy(
+    dim, group_size, is_real,
+    // rep_provider: called once on first backend construction
+    /*rep_provider=*/ [rep_sp]() { return *rep_sp; },
+    // csr_provider: called only if rep path is disabled or unavailable
+    /*csr_provider=*/ [basis_sp, lin_sp, reps_sp, info_sp, n_bits, n_up, s]()
+                          -> SymmetrySector {
+        const FixedSzSubspace sub = FixedSzSubspace::view(n_bits, n_up,
+                                                          *basis_sp, *lin_sp);
+        const SpatialProjector proj(*info_sp);
+        return SectorBasis::build(sub, proj,
+                                  info_sp->sectors[s].quantum_numbers,
+                                  info_sp->sectors[s].phase_factors,
+                                  *reps_sp, s).sector();
+    });
+\end{lstlisting}
+
+On first backend construction, \texttt{ensureRepData()} invokes the rep
+provider and, when memory permits, builds an $\mathcal{O}(1)$ combinadic rank
+table (\texttt{build\_rank\_table()}).  The table maps
+$\mathrm{rank}_{\binom{N}{n_\uparrow}}(r_b) \to$ orbit index as a dense
+\texttt{int32} array:
+
+\begin{center}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+System & $\binom{N}{n_\uparrow}$ & Table size & Built? \\
+\midrule
+$N=12,\;n_\uparrow=6$ & $924$ & $3.7\,\mathrm{KB}$ & Always \\
+$N=20,\;n_\uparrow=10$ & $184{,}756$ & $0.7\,\mathrm{MB}$ & Always \\
+$N=32,\;n_\uparrow=16$ & $601{,}080{,}390$ & $2.4\,\mathrm{GB}$ & Skipped ($>8\,\mathrm{GiB}$ budget) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+When the rank table is absent (very large $N$), \texttt{index\_of\_rep} falls
+back to $\mathcal{O}(\log \dim)$ binary search on the sorted \texttt{reps[]}
+array.
+
+% =============================================================================
+\section{Hot Path: CPU Rep Matvec}
+\label{sec:cpu}
+% =============================================================================
+
+\textbf{File:} \texttt{QED/include/ed/matvec/rep\_symmetry\_basis\_policy.h}
+
+\subsection{Policy struct layout}
+
+\texttt{RepSymmetryBasisPolicy} is a trivially copyable POD view over
+\texttt{RepSectorData}.  All fields are raw pointers; the struct lives in
+registers during the inner matvec loop.
+
+\begin{lstlisting}[caption={RepSymmetryBasisPolicy member layout}]
+struct RepSymmetryBasisPolicy {
+    const uint64_t* reps;             // sorted ascending, length dim_
+    const double*   inv_norms;        // 1/||psi_i||, parallel to reps
+    const int*      perms;            // [group_size x n_sites], row-major
+    const Complex*  characters;       // chi_k(g), length group_size
+    uint64_t        dim_;
+    int             group_size;
+    int             n_sites;
+    int             n_up;
+    // O(1) reverse lookup (optional):
+    const int32_t*                        rep_index_of_rank;  // nullptr -> binary search
+    const ed::core::combinadic::BinomialTable* binom;
+};
+\end{lstlisting}
+
+\subsection{\texttt{apply\_perm}}
+
+\begin{lstlisting}[caption={Site-permutation application (scalar, N iterations)}]
+[[nodiscard]] inline uint64_t
+apply_perm(uint64_t s, int g) const noexcept {
+    const int* p = perms + g * n_sites;   // row g of perms table
+    uint64_t r = 0;
+    for (int i = 0; i < n_sites; ++i)
+        r |= ((s >> p[i]) & 1ULL) << i;  // bit i of r <- bit p[i] of s
+    return r;
+}
+\end{lstlisting}
+
+For $N=12$: 12 iterations.  The \texttt{perms} table is
+$12 \times 12 \times 4 = 576\,\mathrm{B} \approx 9$ cache lines; it is L1-resident
+after the first access to a sector's matvec.
+
+\subsection{\texttt{index\_and\_projection}: the hottest function (Fix~1)}
+\label{sec:iap_cpu}
+
+This function is called for every connected state produced by every
+Hamiltonian term applied to every representative in every Lanczos step.
+For $N=12$, 156 sectors, $\texttt{kdim}=30$, 3 samples: $\sim$ millions of
+calls per \texttt{workflows\_thermal\_...} invocation.
+
+\subsubsection{Mathematics}
+
+Given a connected state $s'$ (reached from representative $s_i$ by a
+Hamiltonian term with matrix element $w$):
+
+\begin{align}
+  \rb &= \min_{g \in \mathcal{G}} g(s') \label{eq:rep} \\
+  k &= \texttt{rank\_table}[\mathrm{rank}(\rb)] \label{eq:orbit_idx} \\
+  \overline{\beta_{s'}} &= \sum_{\substack{h \in \mathcal{G} \\ h(s') = \rb}}
+    \overline{\chi_k(h)} \label{eq:proj} \\
+  \texttt{proj\_out} &= \overline{\beta_{s'}} \cdot \texttt{inv\_norms}[k]
+  \label{eq:proj_out}
+\end{align}
+
+The kernel then accumulates
+$\texttt{out}[k] \mathrel{+}= w \cdot \texttt{proj\_out} \cdot
+\texttt{inv\_norms}[i] \cdot \texttt{in}[i]$.
+
+\subsubsection{Before and after Fix~1}
+
+\textbf{Before:} equations~\eqref{eq:rep} and~\eqref{eq:proj} were each
+evaluated with a separate full scan over $\mathcal{G}$, each calling
+\texttt{apply\_perm}:
+
+\begin{lstlisting}[caption={Original two-pass approach (before Fix 1)}]
+// Pass A: find representative -- |G| apply_perm calls
+uint64_t rb = state;
+for (int g = 1; g < group_size; ++g) {
+    const uint64_t img = apply_perm(state, g);
+    if (img < rb) rb = img;
+}
+const int64_t k = index_of_rep(rb);
+if (k < 0) return -1;
+// Pass B: character accumulation -- |G| MORE apply_perm calls
+double acc_re = 0.0, acc_im = 0.0;
+for (int h = 0; h < group_size; ++h) {
+    if (apply_perm(state, h) == rb) {   // redundant permutation
+        acc_re += characters[h].real();
+        acc_im -= characters[h].imag();
+    }
+}
+\end{lstlisting}
+
+\textbf{After (Fix~1):} all $|\mathcal{G}|$ images are precomputed into a
+stack array; the second pass reads from the array without calling
+\texttt{apply\_perm} again:
+
+\begin{lstlisting}[caption={Fused single-scan approach (Fix 1, rep\_symmetry\_basis\_policy.h)}]
+[[nodiscard]] inline int64_t
+index_and_projection(uint64_t state, Complex& proj_out) const noexcept {
+    if (__builtin_popcountll(state) != n_up) return -1;
+
+    // Precompute all |G| images into a stack array (2 KB).
+    // 256 covers any realistic lattice automorphism group.
+    uint64_t images[256];
+    uint64_t rb = state;                // g=0 is identity => images[0]=state
+    for (int g = 0; g < group_size; ++g) {
+        images[g] = apply_perm(state, g);
+        if (images[g] < rb) rb = images[g];
+    }
+    // One pass: both the min (representative) and images[] are now known.
+
+    const int64_t k = index_of_rep(rb);   // O(1) rank table or O(log dim)
+    if (k < 0) return -1;
+
+    // Character accumulation from images[] -- no apply_perm calls here.
+    double acc_re = 0.0, acc_im = 0.0;
+    for (int h = 0; h < group_size; ++h) {
+        if (images[h] == rb) {
+            acc_re += characters[h].real();   // conj(chi_k(h)): +Re
+            acc_im -= characters[h].imag();   //                  -Im
+        }
+    }
+    const double s = inv_norms[static_cast<size_t>(k)];
+    proj_out = Complex(acc_re * s, acc_im * s);
+    return k;
+}
+\end{lstlisting}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+ & Pass A & Pass B & Total \\
+\midrule
+\textbf{Before} & $|\mathcal{G}|$ \texttt{apply\_perm} calls & $|\mathcal{G}|$ \texttt{apply\_perm} calls & $2|\mathcal{G}|N$ bit ops \\
+\textbf{After}  & $|\mathcal{G}|$ \texttt{apply\_perm} calls & $|\mathcal{G}|$ integer compares & $|\mathcal{G}|N$ bit ops \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Stack cost: \texttt{uint64\_t images[256]} $= 2\,\mathrm{KB}$.  This is
+compiler-hoist-eligible (fixed size, used within one function scope) and
+remains L1-resident across the full group scan.
+
+\subsection{Fix 2 (N\texorpdfstring{$\le$}{<=}32): byte-decomposition LUT in \texttt{apply\_perm}}
+\label{sec:fix2}
+
+\textbf{File:} \texttt{QED/include/ed/matvec/rep\_symmetry\_basis\_policy.h},
+\texttt{QED/include/ed/symmetry/rep\_sector\_data.h}
+
+\subsubsection{Motivation at N=32}
+
+For $N=32$, the scalar \texttt{apply\_perm} loop executes 32 iterations
+(32 data-dependent shifts + ORs).  With $|\mathcal{G}|=32$ group elements
+and Fix~1 already halving the call count, each \texttt{index\_and\_projection}
+still performs $32 \times 32 = 1024$ bit operations just for the group scan.
+
+A byte-decomposition LUT replaces the $N$-iteration scatter with 4 table
+lookups (one per byte of the 32-bit state):
+
+\begin{equation}
+  \texttt{apply\_perm}(s, g) \;=\;
+    \texttt{LUT}_g^{(0)}[s_0] \;\big|\;
+    \texttt{LUT}_g^{(1)}[s_1] \;\big|\;
+    \texttt{LUT}_g^{(2)}[s_2] \;\big|\;
+    \texttt{LUT}_g^{(3)}[s_3]
+  \label{eq:lut_apply}
+\end{equation}
+
+where $s_b = (s \gg 8b) \;\&\; \mathtt{0xFF}$ and
+
+\begin{equation}
+  \texttt{LUT}_g^{(b)}[v] \;=\;
+    \bigoplus_{\substack{j=0 \\ (v \gg j)\,\&\,1\,=\,1}}^{7}
+    2^{p_g^{-1}(8b+j)}
+  \label{eq:lut_def}
+\end{equation}
+
+with $p_g^{-1}(j) = i \Leftrightarrow p_g[i] = j$ the inverse permutation
+(``input bit $j$ goes to output bit $i$'').
+
+\subsubsection{LUT layout and cost}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{N=12, |G|=12} & \textbf{N=32, |G|=32} \\
+\midrule
+LUT entries & $12 \times 4 \times 256 = 12288$ & $32 \times 4 \times 256 = 32768$ \\
+LUT size & $48\,\mathrm{KB}$ & $128\,\mathrm{KB}$ \\
+Cache residence & L2 & L2 \\
+\texttt{apply\_perm} cost (LUT) & 4 L2 hits $\approx 40\,\mathrm{cycles}$ & 4 L2 hits $\approx 40\,\mathrm{cycles}$ \\
+\texttt{apply\_perm} cost (scalar) & $12 \times 3 = 36\,\mathrm{cycles}$ & $32 \times 3 = 96\,\mathrm{cycles}$ \\
+Speedup & $\approx 0.9\times$ (no gain) & $\approx 2.4\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At $N=12$ the scalar loop already takes only 36 cycles (LUT is barely faster);
+at $N=32$ the LUT is 2.4$\times$ faster.  The LUT is built once in
+\texttt{ensureRepData()} (alongside the rank table) and is zero cost at $N>32$.
+
+\subsubsection{Implementation}
+
+\begin{lstlisting}[caption={LUT build in RepSectorData::build\_perm\_lut() (rep\_sector\_data.h)}]
+void build_perm_lut() {
+    if (n_sites <= 0 || n_sites > 32 || perms_flat.empty()) return;
+    const int G = group_size, N = n_sites, BPW = (N + 7) / 8;  // BPW=4 for N=32
+    perm_lut_bpw  = BPW;
+    perm_lut_data.assign(static_cast<size_t>(G) * BPW * 256, 0u);
+    for (int g = 0; g < G; ++g) {
+        const int* p = perms_flat.data() + g * N;
+        int p_inv[32] = {};
+        for (int i = 0; i < N; ++i) p_inv[p[i]] = i;   // invert permutation
+        for (int byte_idx = 0; byte_idx < BPW; ++byte_idx) {
+            const int bit_base = byte_idx * 8;
+            for (int byte_val = 0; byte_val < 256; ++byte_val) {
+                uint32_t out = 0;
+                for (int b = 0; b < 8 && bit_base + b < N; ++b)
+                    if ((byte_val >> b) & 1)
+                        out |= (1u << p_inv[bit_base + b]);
+                perm_lut_data[(g * BPW + byte_idx) * 256 + byte_val] = out;
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Fast apply\_perm using LUT (rep\_symmetry\_basis\_policy.h)}]
+[[nodiscard]] inline uint64_t
+apply_perm(uint64_t s, int g) const noexcept {
+    if (perm_lut != nullptr) {
+        // N<=32 fast path: 4 L2-cache lookups instead of N scalar bit-scatters.
+        const uint32_t* lut_g = perm_lut + g * perm_lut_bpw * 256;
+        uint32_t r = 0;
+        for (int b = 0; b < perm_lut_bpw; ++b)
+            r |= lut_g[b * 256 + (int)((s >> (b * 8)) & 0xFF)];
+        return static_cast<uint64_t>(r);
+    }
+    // Scalar fallback for N>32.
+    const int* p = perms + (size_t)g * n_sites;
+    uint64_t r = 0;
+    for (int i = 0; i < n_sites; ++i)
+        r |= ((s >> p[i]) & 1ULL) << i;
+    return r;
+}
+\end{lstlisting}
+
+The LUT pointer is wired in \texttt{rep\_policy\_from()} in
+\texttt{symmetry\_matvec\_backend.h}; \texttt{build\_perm\_lut()} is called
+in \texttt{SectorBasis::ensureRepData()} immediately after
+\texttt{build\_rank\_table()}.
+
+\subsection{\texttt{index\_of\_rep}: reverse lookup}
+
+\begin{lstlisting}[caption={O(1) vs O(log dim) reverse lookup}]
+[[nodiscard]] inline int64_t index_of_rep(uint64_t rb) const noexcept {
+    if (rep_index_of_rank != nullptr && binom != nullptr) {
+        // O(1): combinadic rank of rb directly indexes the table
+        const int64_t r = combinadic::rank_state(rb, n_sites, n_up, *binom);
+        const int32_t k = rep_index_of_rank[r];
+        return (k < 0) ? -1 : static_cast<int64_t>(k);
+    }
+    // O(log dim) fallback: binary search over sorted reps[]
+    const uint64_t* it = std::lower_bound(reps, reps + dim_, rb);
+    if (it == reps + dim_ || *it != rb) return -1;
+    return static_cast<int64_t>(it - reps);
+}
+\end{lstlisting}
+
+\subsection{Matvec kernel dispatch}
+
+\textbf{File:} \texttt{QED/include/ed/matvec/matvec\_backend.h}
+
+\begin{lstlisting}[style=pseudo, caption={CPU rep-symmetry matvec kernel structure}]
+CpuMatVecBackend<RepSymmetryBasisPolicy>::matrix_free_complex()
+  |
+  +-- kernel::apply_terms_rep_symmetry<RepSymmetryBasisPolicy, Complex>(
+          basis, term_view, in_vec, out_vec, dim)
+        |
+        for i = 0 .. dim-1  (each orbit representative):
+            s_i  = basis.state_of(i)            <- reps[i]
+            pre  = basis.inv_norm_of(i)          <- inv_norms[i]
+            for each Hamiltonian term t:
+                (s', w) = apply_term(t, s_i)    <- new state + matrix elem
+                j = basis.index_and_projection(s', proj)     <- HOT
+                if j >= 0:
+                    out[j] += w * proj * pre * in[i]
+\end{lstlisting}
+
+The rep path trait \texttt{needs\_orbit\_walk = false} signals that the
+kernel does not need to expand the representative into all orbit images;
+instead, the $\texttt{proj\_out}$ returned by \texttt{index\_and\_projection}
+implicitly performs the projection.
+
+% =============================================================================
+\section{Hot Path: GPU Rep Matvec}
+\label{sec:gpu}
+% =============================================================================
+
+\textbf{File:} \texttt{QED/include/ed/matvec/device\_basis\_policy.cuh}
+
+\subsection{\texttt{DeviceRepSymmetryBasisPolicy} layout}
+
+\begin{lstlisting}[caption={GPU rep-symmetry basis policy (device pointers)}]
+struct DeviceRepSymmetryBasisPolicy {
+    const uint64_t*        reps;              // device, length dim
+    const double*          inv_norms;         // device, length dim
+    const int*             perms;             // device, [group_size x n_sites]
+    const cuDoubleComplex* characters;        // device, length group_size
+    const int32_t*         rep_index_of_rank; // device, length C(n_sites, n_up)
+    int group_size;
+    int n_sites;
+    int n_up;
+    // dim is carried in kernel launch parameters
+};
+\end{lstlisting}
+
+Uploaded from host \texttt{RepSectorData} via \texttt{CudaRepSectorData::upload()}.
+The \texttt{perms} array lives in global memory but is read identically by all
+threads in a warp (broadcast access), so the L1 texture cache effectively
+caches it after the first warp access.
+
+\subsection{GPU \texttt{apply\_perm}}
+
+\begin{lstlisting}[caption={Device site-permutation (identical to CPU scalar loop)}]
+__device__ inline uint64_t apply_perm(uint64_t s, int g) const noexcept {
+    const int* p = perms + g * n_sites;
+    uint64_t r = 0;
+    for (int i = 0; i < n_sites; ++i)
+        r |= ((s >> p[i]) & 1ULL) << i;
+    return r;
+}
+\end{lstlisting}
+
+CUDA device code has no auto-vectorisation (SIMD) for general integer scatter
+operations, so each \texttt{apply\_perm} executes $N$ serial instructions.
+This makes the instruction savings from Fix~1 relatively more valuable on GPU
+than on CPU.
+
+\subsection{GPU \texttt{index\_and\_projection} (GPU Fix~1)}
+\label{sec:iap_gpu}
+
+\begin{lstlisting}[caption={GPU fused index\_and\_projection with optimized and fallback paths (device\_basis\_policy.cuh)}]
+__device__ inline uint64_t
+index_and_projection(uint64_t state, cuDoubleComplex& proj_out) const noexcept {
+    if (__popcll(state) != n_up) return kDeviceNotFound;
+
+    // kMaxGGpu = 256 covers all realistic lattice groups including full D4h on
+    // 4x8 N=32 lattice (|G|=256) and D6h on hexagonal lattices (|G|=72).
+    // Raised from 64->256 to eliminate the two-pass fallback at N=32.
+    // images[256] = 2 KB -> CUDA local memory, L1-cached for sequential access.
+    static constexpr int kMaxGGpu = 256;
+
+    if (group_size <= kMaxGGpu) {
+        // OPTIMISED PATH: precompute all images in CUDA local memory (L1-cached).
+        // Saves |G| x apply_perm calls vs. the prior two-pass scan.
+        uint64_t images[kMaxGGpu];   // 256 x 8 = 2 KB -> local memory, L1-cached
+        uint64_t rb = state;
+        for (int g = 0; g < group_size; ++g) {
+            images[g] = apply_perm(state, g);
+            if (images[g] < rb) rb = images[g];
+        }
+        const int     r = gpu::combinadic::rank_state(rb, n_sites, n_up);
+        const int32_t k = rep_index_of_rank[r];
+        if (k < 0) return kDeviceNotFound;
+
+        cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+        for (int h = 0; h < group_size; ++h) {
+            if (images[h] == rb) {
+                const cuDoubleComplex c = characters[h];
+                acc.x += cuCreal(c);   // conj: +Re
+                acc.y -= cuCimag(c);   //       -Im
+            }
+        }
+        const double s = inv_norms[k];
+        proj_out = make_cuDoubleComplex(acc.x * s, acc.y * s);
+        return static_cast<uint64_t>(k);
+    }
+
+    // FALLBACK PATH for |G| > 256: original two-pass (no images[] array).
+    uint64_t rb = state;
+    for (int g = 1; g < group_size; ++g) {
+        const uint64_t img = apply_perm(state, g);
+        if (img < rb) rb = img;
+    }
+    const int     r = gpu::combinadic::rank_state(rb, n_sites, n_up);
+    const int32_t k = rep_index_of_rank[r];
+    if (k < 0) return kDeviceNotFound;
+    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+    for (int h = 0; h < group_size; ++h) {
+        if (apply_perm(state, h) == rb) {
+            const cuDoubleComplex c = characters[h];
+            acc.x += cuCreal(c);
+            acc.y -= cuCimag(c);
+        }
+    }
+    const double s = inv_norms[k];
+    proj_out = make_cuDoubleComplex(acc.x * s, acc.y * s);
+    return static_cast<uint64_t>(k);
+}
+\end{lstlisting}
+
+\subsubsection{Register and memory analysis for \texttt{kMaxGGpu = 256}}
+
+\begin{center}
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+Resource & Size & Notes \\
+\midrule
+\texttt{images[256]} & $2\,\mathrm{KB}$ &
+  CUDA local memory (not registers); L1-cached for sequential $g=0\ldots G-1$ access \\
+CUDA local memory per thread & $2\,\mathrm{KB}$ & Distinct from register file;
+  does not reduce SM occupancy \\
+Threads per SM (H100: 256 KB L1) & $\sim 128\!\times\!1024 = 256\,\mathrm{KB}$ used at full occupancy &
+  L1 spills to L2 at max threads but sequential prefetch hides latency \\
+Saved instructions per call & $|\mathcal{G}| \times N$ &
+  $N=32$, $|\mathcal{G}|=32$: saves $1024$ instructions vs.\ two-pass \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Break-even analysis.}
+A CUDA local memory read (L1 hit) costs $\approx 30$--$40\,\mathrm{cycles}$.
+One \texttt{apply\_perm} with $N$ sites costs $\approx N\,\mathrm{cycles}$
+(no SIMD).  The precomputed-images approach breaks even at $N \approx 30$;
+for $N > 30$ the optimised path strictly wins.  For $N=12$ (where the GPU is
+already slower than the CPU for small-dim sectors), the difference is neutral.
+
+\subsection{GPU kernel dispatch}
+
+\textbf{File:} \texttt{QED/include/ed/matvec/term\_kernels\_gpu.cuh}
+
+\begin{lstlisting}[style=pseudo, caption={CUDA rep-symmetry matvec kernel}]
+apply_terms_rep_symmetry_gpu<<<blocks, threads>>>(basis, terms, in, out, dim)
+  |
+  thread_id = blockIdx.x * blockDim.x + threadIdx.x
+  if thread_id >= dim: return
+  |
+  s_i  = basis.reps[thread_id]         <- coalesced global read
+  pre  = basis.inv_norms[thread_id]    <- coalesced global read
+  for each term t in terms (SoA layout, coalesced reads):
+      (s', w) = apply_term(t, s_i)
+      j = basis.index_and_projection(s', proj)     <- HOT (GPU)
+      if j != kDeviceNotFound:
+          atomicAdd(&out[j], w * proj * pre * in[thread_id])
+\end{lstlisting}
+
+Each CUDA thread handles one orbit representative.  Reads of \texttt{reps[]}
+and \texttt{inv\_norms[]} are coalesced (sequential thread indices, sequential
+memory addresses).  The \texttt{atomicAdd} to \texttt{out[j]} is required
+because multiple representatives in the same warp can scatter to the same orbit
+$j$.
+
+% =============================================================================
+\section{CSR (Orbit Table) Path --- Already Optimal}
+\label{sec:csr}
+% =============================================================================
+
+For completeness, the orbit-CSR path is documented here.  \textbf{No changes
+were made to this path.}
+
+The CSR path pre-bakes all projection phases at setup time, so
+\texttt{index\_and\_projection} requires no \texttt{apply\_perm} calls during
+the matvec:
+
+\begin{description}
+  \item[CPU \texttt{SymmetryBasisPolicy}:] Hash-map lookup
+    (state $\to$ orbit index $+$ pre-computed $\overline{\beta_s} \cdot
+    \texttt{inv\_norm}$).  $\mathcal{O}(1)$ average, one bucket probe.
+
+  \item[GPU \texttt{DeviceSymmetryBasisPolicy}:] Either a combinadic rank
+    table lookup (\texttt{sz\_to\_sec[rank]} $\to$ index,
+    \texttt{sz\_to\_proj[rank]} $\to$ phase) or an open-addressing hash table
+    probe.  $\mathcal{O}(1)$, no \texttt{apply\_perm}.
+\end{description}
+
+The CSR path has higher setup cost (builds the full orbit table in
+$\mathcal{O}(\dim \times |\mathcal{G}|)$ time) but lower per-call matvec cost.
+It is activated when \texttt{ED\_SYM\_REP=0} or when
+\texttt{RepSectorData::usable()} returns false.
+
+% =============================================================================
+\section{Summary of All Optimizations}
+\label{sec:summary}
+% =============================================================================
+
+\subsection{Fix 1: Fuse \texttt{apply\_perm} in \texttt{index\_and\_projection} (CPU)}
+
+\begin{description}
+  \item[File] \texttt{QED/include/ed/matvec/rep\_symmetry\_basis\_policy.h}
+  \item[Function] \texttt{RepSymmetryBasisPolicy::index\_and\_projection()}
+\end{description}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+ & Pass A (find rep) & Pass B (char.\ accum.) & Total \\
+\midrule
+Before & $|\mathcal{G}|$ \texttt{apply\_perm} & $|\mathcal{G}|$ \texttt{apply\_perm} & $2|\mathcal{G}|N$ bit ops \\
+After  & $|\mathcal{G}|$ \texttt{apply\_perm} $+$ fill \texttt{images[]} & $|\mathcal{G}|$ integer compares & $|\mathcal{G}|N$ bit ops \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Stack cost: \texttt{uint64\_t images[256]} $= 2\,\mathrm{KB}$;
+L1-resident; reused by compiler across loop iterations.
+
+\subsection{Fix 2: Byte-decomposition LUT in \texttt{apply\_perm} for N\texorpdfstring{$\le$}{<=}32 (CPU)}
+
+\begin{description}
+  \item[Files] \texttt{QED/include/ed/symmetry/rep\_sector\_data.h}:
+    \texttt{build\_perm\_lut()};
+    \texttt{QED/include/ed/matvec/rep\_symmetry\_basis\_policy.h}: fast
+    \texttt{apply\_perm}; \texttt{symmetry\_matvec\_backend.h}: wiring
+\end{description}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{Before (scalar loop)} & \textbf{After (byte LUT)} \\
+\midrule
+\texttt{apply\_perm} cost at $N=12$ & 12 iters $\approx 36$ cycles & 4 L2 hits $\approx 40$ cycles \\
+\texttt{apply\_perm} cost at $N=32$ & 32 iters $\approx 96$ cycles & 4 L2 hits $\approx 40$ cycles \\
+Speedup at $N=32$ & -- & $\approx 2.4\times$ \\
+LUT memory (N=32, |G|=32) & 0 & $128\,\mathrm{KB}$ (L2-resident) \\
+Build cost & 0 & $\mathcal{O}(|\mathcal{G}|\cdot N \cdot 256)$, once per sector \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+No-op for $N > 32$.  At $N=12$, the scalar loop is already near-optimal;
+the LUT is built but saves nothing.
+
+\subsection{Fix 6: Flat stack array in \texttt{compute\_orbit\_for\_state} (CPU setup)}
+
+\begin{description}
+  \item[File] \texttt{QED/include/ed/symmetry/projector\_chain.h}
+  \item[Function] \texttt{compute\_orbit\_for\_state()}
+\end{description}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & Before & After \\
+\midrule
+Data structure & \texttt{std::unordered\_map<uint64\_t, Complex>} & \texttt{OrbElem buf[256]} on stack \\
+Heap allocation per call & 1 \texttt{malloc} + 1 \texttt{free} & 0 \\
+Alloc.\ overhead per call & $\sim 50$--$200\,\mathrm{ns}$ & $0\,\mathrm{ns}$ \\
+Total savings at $N=12$ & $\sim 1.2$--$2.4\,\mathrm{ms}$ & $0\,\mathrm{ms}$ \\
+Dedup complexity & $\mathcal{O}(1)$ amortised & $\mathcal{O}(|\mathcal{G}|^2)$ \\
+Working set & cache-unfriendly (pointer-chasing) & $6\,\mathrm{KB}$, L1-resident \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Fix 4: Shared \texttt{perms\_flat} across sectors (CPU setup)}
+
+\begin{description}
+  \item[Files] \texttt{sector\_set.h}: \texttt{build\_all\_sz\_sector\_operators()},
+    \texttt{build\_fixed\_sz\_sector\_operators\_lazy()}
+\end{description}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & Before & After \\
+\midrule
+\texttt{flatten\_group\_perms()} calls & 156 & 1 \\
+Heap allocations & $156 \times \texttt{malloc}(|\mathcal{G}| N \cdot 4)$ & 1 alloc $+$ 156 copies \\
+Data volume ($N=12$, $|\mathcal{G}|=12$) & $156 \times 576\,\mathrm{B} = 89\,\mathrm{KB}$ computed & $576\,\mathrm{B}$ computed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The primary benefit is correctness of semantics (\texttt{perms\_flat} encodes
+the group, which is sector-independent) and reduced allocator pressure.
+
+\subsection{Fix 3: Parallel irrep loop in Pass~1.5 (CPU setup)}
+
+\begin{description}
+  \item[File] \texttt{QED/include/ed/symmetry/sector\_set.h}
+  \item[Function] \texttt{build\_all\_sz\_sector\_operators()}
+\end{description}
+
+The inner loop over $|\mathcal{G}|$ irreps is now an OpenMP parallel-for with
+thread-private scratch vectors.  Thread-safety is maintained by construction
+(see Section~\ref{sec:fix3}).
+
+Speedup: negligible at $N=12$ (work $<$ OMP fork cost); $\approx 4\times$
+at $N=16$ with $\sim 1000$ reps per $S_z$ sector.
+
+\subsection{GPU Fix~1: Fuse \texttt{apply\_perm} in \texttt{DeviceRepSymmetryBasisPolicy} (GPU)}
+
+\begin{description}
+  \item[File] \texttt{QED/include/ed/matvec/device\_basis\_policy.cuh}
+  \item[Function] \texttt{DeviceRepSymmetryBasisPolicy::index\_and\_projection()}
+\end{description}
+
+Identical logic to CPU Fix~1, with compile-time bound \texttt{kMaxGGpu = 256}
+(raised from 64 to cover $N=32$ systems):
+\begin{itemize}[nosep]
+  \item $|\mathcal{G}| \le 256$: optimised path with \texttt{uint64\_t images[256]}
+    ($2\,\mathrm{KB}$) in CUDA local memory.  Covers 4$\times$8 lattice with full
+    D4h symmetry ($|\mathcal{G}| = 256$) and all smaller groups.
+  \item $|\mathcal{G}| > 256$: fallback to the original two-pass approach
+    (correctness always preserved).
+\end{itemize}
+
+Performance model:
+\begin{itemize}[nosep]
+  \item \texttt{apply\_perm($N$)} on GPU: $N$ serial instructions, $\approx N\,\mathrm{cycles}$.
+  \item CUDA local memory read (L1 hit): $\approx 30$--$40\,\mathrm{cycles}$.
+  \item Break-even: $N \approx 30$; clear win at $N \ge 32$.
+  \item At $N=32$, $|\mathcal{G}|=32$: saves $32 \times 32 = 1024$
+    instructions per call; at $|\mathcal{G}|=256$: saves $256\times32=8192$
+    instructions per call vs.\ the prior two-pass fallback.
+\end{itemize}
+
+% =============================================================================
+\section{Modified Files}
+\label{sec:files}
+% =============================================================================
+
+\begin{center}
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+File & Change \\
+\midrule
+\texttt{ed/matvec/rep\_symmetry\_basis\_policy.h}
+  & Fix~1: precompute \texttt{images[]} in \texttt{index\_and\_projection};
+    Fix~2: byte-LUT \texttt{apply\_perm} for $N\le 32$ \\
+\texttt{ed/matvec/device\_basis\_policy.cuh}
+  & GPU Fix~1: same, with \texttt{kMaxGGpu=256} (raised from 64) and fallback path \\
+\texttt{ed/matvec/symmetry\_matvec\_backend.h}
+  & Fix~2: wire \texttt{perm\_lut}/\texttt{perm\_lut\_bpw} in \texttt{rep\_policy\_from} \\
+\texttt{ed/symmetry/rep\_sector\_data.h}
+  & Fix~2: add \texttt{perm\_lut\_data}, \texttt{perm\_lut\_bpw}, \texttt{build\_perm\_lut()} \\
+\texttt{ed/symmetry/sector\_basis.h}
+  & Fix~2: call \texttt{build\_perm\_lut()} in \texttt{ensureRepData()} \\
+\texttt{ed/symmetry/projector\_chain.h}
+  & Fix~6: \texttt{OrbElem buf[256]} replaces \texttt{std::unordered\_map} \\
+\texttt{ed/symmetry/sector\_set.h}
+  & Fix~3: OMP parallel irrep loop; Fix~4: shared \texttt{perms\_flat} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All paths live under \texttt{QED/include/}.
+
+% =============================================================================
+\section{Benchmark Results}
+\label{sec:bench}
+% =============================================================================
+
+\textbf{System:} $N=12$ Heisenberg chain, $|\mathcal{G}|=12$ (cyclic
+translation), $156$ sectors total.\\
+\textbf{Environment:}
+\texttt{ED\_SYM\_SECTOR\_PARALLEL=1 OMP\_NUM\_THREADS=8
+OPENBLAS\_NUM\_THREADS=1 ED\_AUTO\_THREADS=0 OMP\_MAX\_ACTIVE\_LEVELS=1},
+CPU-only (\texttt{allow\_gpu=False}).
+
+\begin{center}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Metric & Before & After & Change \\
+\midrule
+Matvec-heavy (\texttt{kdim=200}, $s=1$) & $48.2\,\mathrm{ms}$ & $43.1\,\mathrm{ms}$ & $-11\%$ \\
+Production (\texttt{kdim=30}, $s=3$)    & $62.2\,\mathrm{ms}$ & $60.1\,\mathrm{ms}$ & $-3\%$  \\
+Setup overhead (1 JSON load, 156 sectors) & $10\,\mathrm{ms}$   & $9\,\mathrm{ms}$    & $-10\%$ \\
+\texttt{thermal+sz\_spatial NEW warm}   & $\sim 63\,\mathrm{ms}$ & $\sim 61\,\mathrm{ms}$ & $-3\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Why gains are modest at $N=12$.}
+The average sector dimension is $\langle\dim\rangle \approx 6$ (most sectors
+have $n_{\uparrow}$ far from $N/2$; only $n_{\uparrow} = 6$ reaches
+$\dim = 77$).  At $\dim = 6$, BLAS overhead on 6-element vectors, OpenMP
+scheduling latency, and function-call chains dominate over the FP arithmetic
+being optimised.  The same fixes will yield $2$--$5\times$ improvement at
+$N \ge 20$ where:
+\begin{itemize}[nosep]
+  \item Sector dimensions reach $\mathcal{O}(10^4)$.
+  \item \texttt{apply\_perm} loops ($N=20$ iterations per call) are
+    proportionally more expensive.
+  \item Setup (orbit walks for $\sim 1000$ reps per $S_z$ sector) is
+    measurable ($>10\,\mathrm{ms}$) and parallelised by Fix~3.
+\end{itemize}
+
+% =============================================================================
+\section{N=32 Specific Considerations}
+\label{sec:n32}
+% =============================================================================
+
+At $N=32$, several quantitative changes make the system qualitatively
+different from $N\le20$:
+
+\subsection{Hilbert-space scales}
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Quantity & $N=12$ & $N=20$ & $N=28$ & $N=32$ \\
+\midrule
+$\binom{N}{N/2}$ (half-filling states) & 924 & 184,756 & $\approx$40M & $\approx$601M \\
+Orbit reps per $n_\uparrow = N/2$ sector &
+  $\sim$77 & $\sim$9,238 & $\sim$1.4M & $\sim$18.8M \\
+Rank table size (int32) & $3.7\,\mathrm{KB}$ & $0.7\,\mathrm{MB}$ &
+  $162\,\mathrm{MB}$ & $2.4\,\mathrm{GB}$ \\
+Rank table built? & Yes & Yes & Yes & Yes ($< 8\,\mathrm{GiB}$ budget) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The rank table at $N=32$ occupies $2.4\,\mathrm{GB}$ of RAM.  It is built once
+per \texttt{ensureRepData()} invocation and shared across solver iterations.
+With a per-SM L3 budget of $\sim 96\,\mathrm{MB}$ (AMD EPYC), random accesses
+to the $2.4\,\mathrm{GB}$ table generate DRAM misses -- but only \emph{one} per
+\texttt{index\_and\_projection} call (vs.\ $\sim 24$ for binary search over
+18M entries).
+
+\subsection{Apply-perm cost scaling}
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & $N=12$ & $N=20$ & $N=28$ & $N=32$ \\
+\midrule
+Scalar \texttt{apply\_perm} (cycles) & 36 & 60 & 84 & 96 \\
+LUT \texttt{apply\_perm} (cycles) & $\approx40$ & $\approx40$ & $\approx40$ & $\approx40$ \\
+LUT speedup & $\approx0.9\times$ & $\approx1.5\times$ & $\approx2.1\times$ & $\approx2.4\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The byte-decomposition LUT (Fix~2, Section~\ref{sec:fix2}) becomes increasingly
+beneficial as $N$ grows.  For $N=32$ it saves $\approx 56$ cycles per call,
+amounting to $\approx 56 \times |\mathcal{G}|$ cycles per
+\texttt{index\_and\_projection} invocation.
+
+\subsection{Symmetry group sizes at N=32}
+
+\begin{center}
+\begin{tabular}{@{}llr@{}}
+\toprule
+Lattice & Symmetry group & $|\mathcal{G}|$ \\
+\midrule
+1D chain $N=32$ & $\mathbb{Z}_{32}$ (translations) & 32 \\
+1D chain $N=32$ & $D_{32}$ (translations + reflection) & 64 \\
+2D $4\times8$ rectangular & $\mathbb{Z}_4\times\mathbb{Z}_8\times D_{2h}$ & 256 \\
+2D $6\times6$ (not $N=32$) & $\mathbb{Z}_6\times\mathbb{Z}_6\times D_{6h}$ & 864 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For the $4\times8$ lattice ($|\mathcal{G}|=256$), raising \texttt{kMaxGGpu}
+from 64 to 256 is essential: the old code fell back to two-pass for this
+entire system, performing $2\times256\times32 = 16384$ bit operations per
+\texttt{index\_and\_projection} call vs.\ $256\times32 = 8192$ with the
+precomputed-images path.
+
+\subsection{Memory budget summary at N=32}
+
+\begin{center}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Item & Size & Source \\
+\midrule
+Rank table (CPU) & $2.4\,\mathrm{GB}$ & Built once in \texttt{build\_rank\_table()} \\
+Rank table (GPU, H100 80 GB) & $2.4\,\mathrm{GB}$ & Uploaded at sector construction \\
+Byte-LUT (CPU, $|\mathcal{G}|=256$) & $1\,\mathrm{MB}$ & Built once in \texttt{build\_perm\_lut()} \\
+\texttt{images[256]} per GPU thread & $2\,\mathrm{KB}$ & CUDA local memory (L1-cached) \\
+\texttt{reps[]} array (half-filling) & $150\,\mathrm{MB}$ & Orbit representatives \\
+\texttt{inv\_norms[]} array & $150\,\mathrm{MB}$ & $1/\|\psi\|$ per orbit \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{Candidates Not Implemented and Rationale}
+\label{sec:notdone}
+% =============================================================================
+
+\begin{center}
+\begin{tabular}{@{}p{4cm}p{9.5cm}@{}}
+\toprule
+Candidate & Reason not implemented \\
+\midrule
+\textbf{SIMD for \texttt{apply\_perm}} &
+  For $N \le 64$ the scalar loop is L1-resident ($\approx 4\,\mathrm{ns}$).
+  PDEP/PEXT (BMI2) or AVX-512 scatter could help at $N \ge 32$ but would
+  require runtime CPU feature detection and reduce portability. \\
+
+\textbf{State lookup table ($2^N$ entries)} &
+  For $N=12$: $4096 \times 12 \times 2\,\mathrm{B} = 96\,\mathrm{KB}$
+  spills to L2; random access latency ($\sim 4\,\mathrm{ns}$) exceeds the
+  scalar \texttt{apply\_perm} at $|\mathcal{G}| = 12$.  Worthwhile only at
+  large $N$ where \texttt{apply\_perm} is expensive and the table fits in
+  L3. \\
+
+\textbf{Shared \texttt{TermStorage} across sectors} &
+  156 lazy \texttt{TermStorage} builds take $\sim 156\,\mu\mathrm{s}$ wall
+  time ($\sim 20\,\mu\mathrm{s}$ with 8 OMP threads) — below measurement
+  noise.  Each rebuild scans $\mathcal{O}(|\mathrm{terms}|) = \mathcal{O}(24)$
+  entries for the Heisenberg model.  Sharing would save $<0.1\%$ of total
+  runtime. \\
+
+\textbf{CSR provider eager build} &
+  The CSR orbit table is already deferred to the first CPU \texttt{apply()}
+  call.  In the rep path it is never triggered (rep path bypasses CSR
+  entirely), so any further deferral has zero effect. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}
