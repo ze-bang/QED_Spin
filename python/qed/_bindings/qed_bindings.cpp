@@ -724,6 +724,72 @@ PYBIND11_MODULE(_core, m) {
           "(`block_irrep_dim`, `block_size`), and group info. Reduces by the FULL "
           "group including 2-D+ irreps.");
 
+    // Finite-temperature thermodynamics via the symmetry-reduced spectrum
+    // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
+    m.def("symmetry_adapted_thermodynamics",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             const std::vector<double>& temperatures, int n_up) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              ed::symmetry::ConnectFn connect =
+                  [&op](std::uint64_t s,
+                        const std::function<void(std::uint64_t, Complex)>& emit) {
+                      op.for_each_connected_state(s, emit);
+                  };
+              auto td = ed::symmetry::symmetry_adapted_thermodynamics(
+                  connect, gi, max_clique, n_sites, temperatures, n_up);
+              py::dict d;
+              d["temperatures"] = td.temperatures;
+              d["energy"]       = td.energy;
+              d["specific_heat"]= td.specific_heat;
+              d["entropy"]      = td.entropy;
+              d["free_energy"]  = td.free_energy;
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("temperatures"),
+          py::arg("n_up") = -1,
+          "Exact canonical thermodynamics (E, C, S, F vs T) of a Hamiltonian "
+          "reduced by the (possibly non-abelian) point group, with optional "
+          "fixed-Sz restriction (n_up>=0). Diagonalises the small per-irrep "
+          "blocks and weights eigenvalues by d_Γ.");
+
+    // Ground-state dynamical structure factor S(ω) = Σ_n |<n|O|0>|² L(ω-(E_n-E0)),
+    // symmetry-reduced. `observable` supplies O via its term list (any O, incl.
+    // Sz-changing — final states over the full reduced spectrum).
+    m.def("symmetry_adapted_dssf",
+          [](const Operator& H, const Operator& O,
+             const std::vector<std::vector<int>>& generators,
+             double omega_min, double omega_max, int n_omega, double broadening) {
+              const int n_sites = static_cast<int>(H.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              ed::symmetry::ConnectFn h_connect =
+                  [&H](std::uint64_t s,
+                       const std::function<void(std::uint64_t, Complex)>& emit) {
+                      H.for_each_connected_state(s, emit);
+                  };
+              ed::symmetry::ConnectFn o_connect =
+                  [&O](std::uint64_t s,
+                       const std::function<void(std::uint64_t, Complex)>& emit) {
+                      O.for_each_connected_state(s, emit);
+                  };
+              auto r = ed::symmetry::symmetry_adapted_ground_state_dssf(
+                  h_connect, o_connect, gi, max_clique, n_sites,
+                  omega_min, omega_max, n_omega, broadening);
+              py::dict d;
+              d["omega"]         = r.omega;
+              d["spectral"]      = r.spectral;
+              d["ground_energy"] = r.ground_energy;
+              d["total_weight"]  = r.total_weight;
+              return d;
+          },
+          py::arg("hamiltonian"), py::arg("observable"), py::arg("generators"),
+          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
+          py::arg("broadening"),
+          "Symmetry-reduced ground-state dynamical structure factor S(ω) for the "
+          "observable `O`. Correct for any O (Sz-conserving or -changing).");
+
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.
 

@@ -219,3 +219,94 @@ TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-bloc
     }
     REQUIRE(check_total == (1LL << N));                    // Σ over Sz sectors == 2^N
 }
+
+TEST_CASE("symmetry-adapted finite-T == exact canonical thermo (D6 ring)",
+          "[symmetry_adapted][thermal][nonabelian]") {
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    const std::vector<double> temps{0.1, 0.3, 0.7, 1.5, 4.0};
+    auto td = ed::symmetry::symmetry_adapted_thermodynamics(connect, gi, Gp, N, temps);
+
+    // Reference: exact canonical thermo from the full 2^N spectrum.
+    const auto& ev = ref.eigenvalues();
+    const double E0 = ev(0);
+    for (std::size_t i = 0; i < temps.size(); ++i) {
+        const double beta = 1.0 / temps[i];
+        double Z = 0, E = 0, E2 = 0;
+        for (int n = 0; n < ev.size(); ++n) {
+            const double w = std::exp(-beta * (ev(n) - E0));
+            Z += w; E += w * ev(n); E2 += w * ev(n) * ev(n);
+        }
+        const double Eavg = E / Z, Cv = beta * beta * (E2 / Z - Eavg * Eavg);
+        REQUIRE(std::abs(td.energy[i] - Eavg) < 1e-9);
+        REQUIRE(std::abs(td.specific_heat[i] - Cv) < 1e-9);
+    }
+}
+
+TEST_CASE("symmetry-adapted GS DSSF == brute-force Lehmann (S^z_0 on D6 ring)",
+          "[symmetry_adapted][dssf][nonabelian]") {
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+
+    // Observable O = S^z at site 0 (diagonal). <0|O†O|0> = 1/4 (sum rule).
+    const std::uint64_t dim = std::uint64_t{1} << N;
+    Eigen::MatrixXcd O = Eigen::MatrixXcd::Zero(dim, dim);
+    for (std::uint64_t b = 0; b < dim; ++b) O(b, b) = ((b >> 0) & 1) ? 0.5 : -0.5;
+
+    auto mk_connect = [](const Eigen::MatrixXcd& M) {
+        return ed::symmetry::ConnectFn(
+            [&M](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+                for (int sp = 0; sp < M.rows(); ++sp) {
+                    const Complex h = M(sp, static_cast<Eigen::Index>(st));
+                    if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+                }
+            });
+    };
+
+    const double wmin = -1.0, wmax = 8.0, eta = 0.05;
+    const int nw = 200;
+    auto r = ed::symmetry::symmetry_adapted_ground_state_dssf(
+        mk_connect(H), mk_connect(O), gi, Gp, N, wmin, wmax, nw, eta);
+
+    // Brute-force Lehmann reference.
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(H);
+    const Eigen::VectorXcd gsv = es.eigenvectors().col(0);
+    const double E0 = es.eigenvalues()(0);
+    const Eigen::VectorXcd chi = O * gsv;
+    std::vector<double> ref_S(static_cast<std::size_t>(nw), 0.0);
+    double ref_weight = 0.0;
+    for (int n = 0; n < es.eigenvalues().size(); ++n) {
+        const Complex ov = es.eigenvectors().col(n).adjoint() * chi;
+        const double w = std::norm(ov);
+        ref_weight += w;
+        const double de = es.eigenvalues()(n) - E0;
+        for (int i = 0; i < nw; ++i) {
+            const double x = (wmin + (wmax - wmin) / (nw - 1) * i) - de;
+            ref_S[static_cast<std::size_t>(i)] += w * (eta / M_PI) / (x * x + eta * eta);
+        }
+    }
+
+    REQUIRE(std::abs(r.ground_energy - E0) < 1e-9);
+    REQUIRE(std::abs(r.total_weight - 0.25) < 1e-9);            // sum rule <(S^z)^2>=1/4
+    REQUIRE(std::abs(r.total_weight - ref_weight) < 1e-9);
+    for (int i = 0; i < nw; ++i)
+        REQUIRE(std::abs(r.spectral[static_cast<std::size_t>(i)] - ref_S[static_cast<std::size_t>(i)]) < 1e-7);
+}

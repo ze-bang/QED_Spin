@@ -26,8 +26,10 @@
 #include <complex>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
+#include <ed/core/thermal_types.h>   // ThermodynamicData
 #include <ed/symmetry/irreps.h>
 
 namespace ed::symmetry {
@@ -53,7 +55,8 @@ build_sab_partition0(const GroupIrreps&                    gi,
                      const std::vector<std::vector<int>>&  max_clique,
                      int                                   irrep_index,
                      int                                   n_sites,
-                     int                                   n_up = -1);
+                     int                                   n_up   = -1,
+                     int                                   partner = 0);
 
 /// Full symmetry-adapted spectrum of a Hamiltonian `H_full` (a 2^n_sites
 /// matvec, `H_full(in, out, dim)`) under the group `gi` / `max_clique`,
@@ -100,5 +103,50 @@ symmetry_adapted_spectrum_terms(
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,
     int                                   n_up = -1);
+
+// ---------------------------------------------------------------------------
+// Consumer 2 — FINITE TEMPERATURE. Exact canonical thermodynamics of the
+// symmetry-reduced spectrum: build the (small) per-irrep blocks H_Γ, take ALL
+// their eigenvalues with multiplicity d_Γ, and evaluate Z/E/C/S(β) exactly on
+// `temperatures`. (Optimal for symmetry blocks, which are dim/|G| — a dense
+// per-block eigensolve beats stochastic FTLM here and is exact.) `n_up ≥ 0`
+// restricts to the fixed-Sz sector (combined reduction).
+// ---------------------------------------------------------------------------
+[[nodiscard]] ThermodynamicData
+symmetry_adapted_thermodynamics(
+    const ConnectFn&                      connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    const std::vector<double>&            temperatures,
+    int                                   n_up = -1);
+
+// ---------------------------------------------------------------------------
+// Consumer 3 — GROUND-STATE DSSF. S(ω) = Σ_n |<n|O|0>|² · Lorentzian(ω-(E_n-E0)).
+// Builds the symmetry blocks over the FULL Hilbert space (so every final state
+// |n> is captured even when O changes the irrep / Sz), takes the global ground
+// state |0>, applies O via `o_connect` (same row-enumerator contract as H's
+// `connect`: o_connect(s, emit) → emit(s', <s'|O|s>)), and Lehmann-sums over
+// all symmetry-block eigenstates. Correct for any (Sz-conserving or -changing)
+// observable.
+// ---------------------------------------------------------------------------
+struct SymDSSFResult {
+    std::vector<double> omega;
+    std::vector<double> spectral;     ///< S(ω)
+    double              ground_energy = 0.0;
+    double              total_weight  = 0.0;  ///< Σ_n |<n|O|0>|² = <0|O†O|0> (sum rule)
+};
+
+[[nodiscard]] SymDSSFResult
+symmetry_adapted_ground_state_dssf(
+    const ConnectFn&                      h_connect,
+    const ConnectFn&                      o_connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    double                                omega_min,
+    double                                omega_max,
+    int                                   n_omega,
+    double                                broadening);
 
 }  // namespace ed::symmetry
