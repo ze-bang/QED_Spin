@@ -1174,6 +1174,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_ltlm_static_connected_qh   tests/unit/test_ltlm_static_connected_qh.cpp USE_CATCH2)
     # Capability-aware execution planner (system probe + task cost model)
     ed_add_test(test_execution_planner          tests/unit/test_execution_planner.cpp USE_CATCH2)
+    # Streaming/tableless basis construction (Gosper enum + membership subspace)
+    ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
