@@ -25,6 +25,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include <ed/symmetry/irreps.h>
@@ -46,5 +47,30 @@ build_sab_partition0(const GroupIrreps&                    gi,
                      const std::vector<std::vector<int>>&  max_clique,
                      int                                   irrep_index,
                      int                                   n_sites);
+
+/// Full symmetry-adapted spectrum of a Hamiltonian `H_full` (a 2^n_sites
+/// matvec, `H_full(in, out, dim)`) under the group `gi` / `max_clique`,
+/// correct for ANY (abelian or non-abelian) point group. For each irrep Γ it
+/// builds the partner-0 SAB, materialises the small block H_Γ = Φ_Γ† H Φ_Γ via
+/// the matvec, diagonalises it, and emits each eigenvalue with its physical
+/// degeneracy d_Γ. Returns the sorted full spectrum (length 2^n_sites). H must
+/// commute with the group (else throws on a non-Hermitian block).
+///
+/// This is the correct reference solver; it embeds SAB vectors in the full 2^n
+/// space (so it is O(2^n) memory — a moderate-N convenience, not the at-scale
+/// rep-path matvec).
+struct SymAdaptedSpectrum {
+    std::vector<double> eigenvalues;   ///< sorted, with d_Γ multiplicities
+    std::vector<int>    block_irrep_dim;  ///< d_Γ of each non-empty block
+    std::vector<int>    block_size;       ///< n_Γ (# SAB partner-0 vectors) per block
+};
+
+[[nodiscard]] SymAdaptedSpectrum
+symmetry_adapted_spectrum(
+    const std::function<void(const std::complex<double>*,
+                             std::complex<double>*, std::uint64_t)>& H_full,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites);
 
 }  // namespace ed::symmetry

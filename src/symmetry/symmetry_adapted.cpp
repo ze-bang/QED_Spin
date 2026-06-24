@@ -7,10 +7,12 @@
 #include <ed/core/basis_utils.h>   // applyPermutation
 
 #include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
 
 #include <algorithm>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 namespace ed::symmetry {
@@ -88,6 +90,56 @@ build_sab_partition0(const GroupIrreps&                   gi,
     }
 
     (void)d;  // d only enters the (dropped) projector prefactor + degeneracy bookkeeping
+    return out;
+}
+
+SymAdaptedSpectrum symmetry_adapted_spectrum(
+    const std::function<void(const Complex*, Complex*, std::uint64_t)>& H_full,
+    const GroupIrreps&                   gi,
+    const std::vector<std::vector<int>>& max_clique,
+    int                                  n_sites)
+{
+    const std::uint64_t full = std::uint64_t{1} << n_sites;
+    SymAdaptedSpectrum out;
+
+    std::vector<Complex> embed(full), happ(full);
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        const int d = gi.irreps[g].dim;
+        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites);
+        if (sab.empty()) continue;
+        const int nb = static_cast<int>(sab.size());
+
+        // H_Γ[k][j] = <φ_k| H |φ_j>, built one column at a time via the matvec.
+        Eigen::MatrixXcd Hg(nb, nb);
+        for (int j = 0; j < nb; ++j) {
+            std::fill(embed.begin(), embed.end(), Complex(0.0, 0.0));
+            const auto& vj = sab[static_cast<std::size_t>(j)];
+            for (std::size_t t = 0; t < vj.states.size(); ++t)
+                embed[vj.states[t]] = vj.coeffs[t];
+            H_full(embed.data(), happ.data(), full);
+            for (int k = 0; k < nb; ++k) {
+                const auto& vk = sab[static_cast<std::size_t>(k)];
+                Complex acc(0.0, 0.0);
+                for (std::size_t t = 0; t < vk.states.size(); ++t)
+                    acc += std::conj(vk.coeffs[t]) * happ[vk.states[t]];
+                Hg(k, j) = acc;
+            }
+        }
+
+        if ((Hg - Hg.adjoint()).norm() > 1e-8 * std::max(1.0, Hg.norm()))
+            throw std::runtime_error(
+                "symmetry_adapted_spectrum: H_Γ not Hermitian — the Hamiltonian "
+                "does not commute with the supplied symmetry group");
+
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hg);
+        for (int e = 0; e < es.eigenvalues().size(); ++e)
+            for (int rep = 0; rep < d; ++rep)            // physical d_Γ degeneracy
+                out.eigenvalues.push_back(es.eigenvalues()(e));
+        out.block_irrep_dim.push_back(d);
+        out.block_size.push_back(nb);
+    }
+
+    std::sort(out.eigenvalues.begin(), out.eigenvalues.end());
     return out;
 }
 

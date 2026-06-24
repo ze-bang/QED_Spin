@@ -29,6 +29,7 @@ using ed::sym::generate_group;
 using ed::sym::Permutation;
 using ed::symmetry::build_sab_partition0;
 using ed::symmetry::decompose_irreps;
+using ed::symmetry::symmetry_adapted_spectrum;
 using Complex = std::complex<double>;
 
 namespace {
@@ -105,4 +106,41 @@ TEST_CASE("non-abelian SAB: C4v Heisenberg square == brute force (with d_Γ dege
     REQUIRE(recombined.size() == brute.size());
     for (std::size_t i = 0; i < brute.size(); ++i)
         REQUIRE(std::abs(recombined[i] - brute[i]) < 1e-9);        // spectrum match
+}
+
+TEST_CASE("non-abelian SAB: symmetry_adapted_spectrum on D6 ring (matvec API)",
+          "[symmetry_adapted][nonabelian][matvec]") {
+    // 6-site periodic Heisenberg ring with full dihedral group D6 (order 12,
+    // genuinely non-abelian: TWO 2-D irreps; Σ d² = 4·1 + 2·4 = 12).
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};   // translation
+    const Permutation s{0, 5, 4, 3, 2, 1};   // reflection
+    auto Gp = generate_group({t, s});
+    REQUIRE(Gp.size() == 12);
+
+    auto gi = decompose_irreps(Gp, N);
+    REQUIRE(gi.num_classes == 6);            // D6 has 6 classes / 6 irreps
+    int n2d = 0; for (const auto& ir : gi.irreps) if (ir.dim == 2) ++n2d;
+    REQUIRE(n2d == 2);
+
+    const Eigen::MatrixXcd H = heisenberg_square(N);   // periodic ring of N sites
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+
+    // Drive the production function through a matvec closure over the dense H.
+    auto H_mv = [&H](const Complex* in, Complex* out, std::uint64_t dim) {
+        Eigen::Map<const Eigen::VectorXcd> v(in, dim);
+        Eigen::Map<Eigen::VectorXcd> o(out, dim);
+        o.noalias() = H * v;
+    };
+    auto spec = symmetry_adapted_spectrum(H_mv, gi, Gp, N);
+
+    // Completeness: blocks (weighted by d_Γ) span the full space.
+    long long total = 0;
+    for (std::size_t i = 0; i < spec.block_size.size(); ++i)
+        total += static_cast<long long>(spec.block_irrep_dim[i]) * spec.block_size[i];
+    REQUIRE(total == (1LL << N));
+    REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
+
+    for (int i = 0; i < ref.eigenvalues().size(); ++i)
+        REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
 }
