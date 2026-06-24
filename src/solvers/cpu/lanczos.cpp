@@ -354,113 +354,77 @@ int build_lanczos_tridiagonal_with_basis(
     }
 
     // ------------------------------------------------------------------
-    // Legacy path: no full reorth, OR full reorth requested without a
-    // basis-storage destination (we emit the same warning as before and
-    // run the 3-term recurrence).
+    // Non-full-reorth / no-basis path. Krylov-unification (Jun 2026): this
+    // used to be a hand-rolled three-term recurrence. It now routes through
+    // the SAME `ed::krylov::lanczos_kernel<CpuBackend>` as the fast path
+    // above, mapping the legacy ABI flags onto a `ReorthPolicy`:
+    //
+    //   * full_reorth && basis==nullptr  -> None  (reorth impossible without
+    //         a stored basis; legacy warned once and ran the bare recurrence)
+    //   * !full_reorth && reorth_freq>0 && basis!=nullptr -> PeriodicCGS2
+    //         (the legacy threshold-MGS periodic reorth, upgraded to CGS2 to
+    //          match the fast path's numerics)
+    //   * otherwise                       -> None  (pure three-term)
+    //
+    // The legacy `tol` is a Ritz-convergence parameter that the old body
+    // (incorrectly) reused as a ||w||<tol breakdown threshold; we preserve
+    // that exact termination by routing `tol` to `breakdown_tol` here. (The
+    // fast path above leaves breakdown at its ~exact-zero default, matching
+    // its own historical "run to max_iter" behaviour.)
     // ------------------------------------------------------------------
-    alpha.clear();
-    beta.clear();
-    beta.push_back(0.0); // β_0 is not used
-    
-    // Working vectors
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Normalize initial vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    // Store basis vectors if requested
-    if (basis_vectors != nullptr) {
-        basis_vectors->clear();
-        basis_vectors->reserve(max_iter);
-        basis_vectors->push_back(v_current);
-    }
-    
-    max_iter = std::min(N, max_iter);
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (full_reorth) {
-            // Full reorthogonalization against all previous vectors
-            if (basis_vectors != nullptr) {
-                for (int k = 0; k <= j; k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
-                }
-            } else {
-                // Cannot reorthogonalize without stored basis vectors
-                if (j == 0) {
-                    std::cerr << "Warning: full_reorthogonalization requested but "
-                              << "basis_vectors == nullptr. Reorthogonalization "
-                              << "will be silently skipped — eigenvalues may have "
-                              << "spurious duplicates." << std::endl;
-                }
-            }
-        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
-            // Periodic reorthogonalization
-            if (basis_vectors != nullptr) {
-                for (int k = 0; k <= j; k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > tol) {
-                        Complex neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
-                    }
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for convergence/breakdown
-        if (norm < tol) {
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}. Phase 6 #4: swap-rotate to avoid the
-        // O(N) memcpy of std::copy(w -> v_next).
-        std::swap(w, v_next);
-        Complex inv_norm(1.0 / norm, 0.0);
-        cblas_zscal(N, &inv_norm, v_next.data(), 1);
+    {
+        using ed::krylov::ReorthPolicy;
+        ed::krylov::LanczosKernelOptions opts;
+        opts.max_iter   = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
+        opts.keep_basis = (basis_vectors != nullptr);
+        opts.breakdown_tol = tol;
 
-        // Store next basis vector if requested
-        if (basis_vectors != nullptr && j < max_iter - 1) {
-            basis_vectors->push_back(v_next);
+        if (full_reorth) {
+            // basis_vectors == nullptr here (the full_reorth+basis case took
+            // the fast path above and returned).
+            std::cerr << "Warning: full_reorthogonalization requested but "
+                      << "basis_vectors == nullptr. Reorthogonalization "
+                      << "will be silently skipped — eigenvalues may have "
+                      << "spurious duplicates." << std::endl;
+            opts.reorth = ReorthPolicy::None;
+        } else if (reorth_freq > 0 && basis_vectors != nullptr) {
+            opts.reorth      = ReorthPolicy::PeriodicCGS2;
+            opts.reorth_freq = static_cast<std::size_t>(reorth_freq);
+        } else {
+            opts.reorth = ReorthPolicy::None;
         }
-        
-        // Update for next iteration: 3-way swap-rotate.
-        std::swap(v_prev, v_current);
-        std::swap(v_current, v_next);
+
+        const auto& be = ed::matvec::default_cpu_backend();
+        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+            H(in, out, static_cast<int>(n));
+        };
+        auto result = ed::krylov::lanczos_kernel(
+            be, matvec, static_cast<std::size_t>(N), v0.data(), opts);
+
+        alpha = std::move(result.alpha);
+        beta  = std::move(result.beta);
+
+        if (basis_vectors != nullptr) {
+            // Pool-aware translate-back (mirrors the fast path): reuse the
+            // overlapping prefix's heap allocations, append the remainder.
+            const std::size_t need = result.basis.size();
+            if (basis_vectors->size() > need) basis_vectors->resize(need);
+            basis_vectors->reserve(need);
+            const std::size_t reuse = std::min(basis_vectors->size(), need);
+            for (std::size_t i = 0; i < reuse; ++i) {
+                (*basis_vectors)[i].resize(static_cast<std::size_t>(N));
+                std::memcpy((*basis_vectors)[i].data(), result.basis[i].get(),
+                            static_cast<std::size_t>(N) * sizeof(Complex));
+            }
+            for (std::size_t i = reuse; i < need; ++i) {
+                ComplexVector v(static_cast<std::size_t>(N));
+                std::memcpy(v.data(), result.basis[i].get(),
+                            static_cast<std::size_t>(N) * sizeof(Complex));
+                basis_vectors->emplace_back(std::move(v));
+            }
+        }
+        return static_cast<int>(alpha.size());
     }
-    
-    return alpha.size();
 }
 
 // Helper function to solve tridiagonal eigenvalue problem

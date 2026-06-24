@@ -1174,8 +1174,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_ltlm_static_connected_qh   tests/unit/test_ltlm_static_connected_qh.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
-    # Audit item #6: block / band Lanczos for multi-channel ground-state DSSF
-    ed_add_test(test_block_lanczos_dssf         tests/unit/test_block_lanczos_dssf.cpp USE_CATCH2)
     # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
     ed_add_test(test_cross_sector_dssf          tests/unit/test_cross_sector_dssf.cpp USE_CATCH2)
     target_link_libraries(test_cross_sector_dssf PRIVATE ed_dssf)

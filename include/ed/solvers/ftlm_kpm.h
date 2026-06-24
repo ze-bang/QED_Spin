@@ -177,31 +177,9 @@ struct KPMResult {
 // Core API
 // ---------------------------------------------------------------------------
 
-/// Compute S_{O1,O2}(ω, β) via LTLM outer Lanczos + KPM inner Chebyshev.
-///
-/// Single random outer Lanczos → K lowest Ritz states {|n⟩, E_n}.
-/// For each |n⟩: Chebyshev recursion computes moments μₖ = ⟨O1|n|Tₖ(H_sc)|O2|n⟩.
-/// Multi-temperature accumulation is free (moments are β-independent).
-///
-/// @param H         Hamiltonian MatVec.
-/// @param O1        Left operator (O1† in the formula).
-/// @param O2        Right operator.
-/// @param dim       Hilbert-space dimension.
-/// @param omega_min Minimum output frequency (transfer energy).
-/// @param omega_max Maximum output frequency.
-/// @param n_omega   Number of output frequency points.
-/// @param betas     Inverse temperatures at which S is evaluated.
-/// @param params    KPM control parameters.
-KPMResult compute_kpm_ltlm(
-    MatVec H,
-    MatVec O1,
-    MatVec O2,
-    std::uint64_t dim,
-    double omega_min,
-    double omega_max,
-    int n_omega,
-    const std::vector<double>& betas,
-    const KPMParameters& params = {});
+// compute_kpm_ltlm (random-state self-window KPM driver) was retired in the
+// Gen-1 Lanczos-unification cleanup (Jun 2026): no callers anywhere. Use
+// compute_kpm_ltlm_from_states (the orchestrator's live KPM path).
 
 /// Compute S_{O1,O2}(ω, β) from pre-computed exact eigenstates.
 ///
