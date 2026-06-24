@@ -39,14 +39,21 @@ struct SABVector {
     std::vector<std::complex<double>> coeffs;
 };
 
-/// All partner-0 SAB vectors for irrep `irrep_index` over the full 2^n_sites
-/// Hilbert space (handles non-abelian multiplicity). `max_clique` is the closed
-/// permutation group (as passed to `decompose_irreps`, same indexing as `gi`).
+/// All partner-0 SAB vectors for irrep `irrep_index` (handles non-abelian
+/// multiplicity). `max_clique` is the closed permutation group (as passed to
+/// `decompose_irreps`, same indexing as `gi`).
+///
+/// `n_up`: if < 0, enumerate over the full 2^n_sites Hilbert space. If ≥ 0,
+/// restrict to the fixed-Sz subspace (states of popcount n_up) — the combined
+/// U(1)×G reduction. Since site permutations preserve popcount, every orbit of
+/// a fixed-Sz state stays in that Sz sector, so the projector / multiplicity
+/// math is unchanged; only the enumeration source differs.
 [[nodiscard]] std::vector<SABVector>
 build_sab_partition0(const GroupIrreps&                    gi,
                      const std::vector<std::vector<int>>&  max_clique,
                      int                                   irrep_index,
-                     int                                   n_sites);
+                     int                                   n_sites,
+                     int                                   n_up = -1);
 
 /// Full symmetry-adapted spectrum of a Hamiltonian `H_full` (a 2^n_sites
 /// matvec, `H_full(in, out, dim)`) under the group `gi` / `max_clique`,
@@ -65,13 +72,17 @@ struct SymAdaptedSpectrum {
     std::vector<int>    block_size;       ///< n_Γ (# SAB partner-0 vectors) per block
 };
 
+/// `n_up < 0` → full Hilbert space; `n_up ≥ 0` → the combined fixed-Sz × group
+/// reduction (only states of popcount n_up; the block spectrum is that of H
+/// restricted to the Sz sector, by symmetry sub-blocks Γ).
 [[nodiscard]] SymAdaptedSpectrum
 symmetry_adapted_spectrum(
     const std::function<void(const std::complex<double>*,
                              std::complex<double>*, std::uint64_t)>& H_full,
     const GroupIrreps&                    gi,
     const std::vector<std::vector<int>>&  max_clique,
-    int                                   n_sites);
+    int                                   n_sites,
+    int                                   n_up = -1);
 
 /// `connect(s, emit)` must invoke `emit(s', h)` for every state s' connected to
 /// s by a Hamiltonian term (h = <s'|H|s>). Such a sparse single-state row
@@ -87,6 +98,7 @@ symmetry_adapted_spectrum_terms(
     const ConnectFn&                      connect,
     const GroupIrreps&                    gi,
     const std::vector<std::vector<int>>&  max_clique,
-    int                                   n_sites);
+    int                                   n_sites,
+    int                                   n_up = -1);
 
 }  // namespace ed::symmetry

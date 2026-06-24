@@ -173,3 +173,49 @@ TEST_CASE("non-abelian SAB: on-the-fly term builder == brute force (D6 ring)",
     for (int i = 0; i < ref.eigenvalues().size(); ++i)
         REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
 }
+
+TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-block diag",
+          "[symmetry_adapted][nonabelian][sz]") {
+    // Combined U(1)×D6 reduction: restrict to the popcount-n_up sector AND
+    // project onto the spatial irreps. Reference = H restricted to that Sz block.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    long long check_total = 0;
+    for (int n_up = 0; n_up <= N; ++n_up) {
+        // Reference: dense H restricted to the popcount-n_up computational states.
+        std::vector<int> states;
+        for (int b = 0; b < (1 << N); ++b)
+            if (__builtin_popcount(static_cast<unsigned>(b)) == n_up) states.push_back(b);
+        const int dsz = static_cast<int>(states.size());
+        Eigen::MatrixXcd Hsz(dsz, dsz);
+        for (int a = 0; a < dsz; ++a)
+            for (int bb = 0; bb < dsz; ++bb) Hsz(a, bb) = H(states[a], states[bb]);
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> refsz(Hsz);
+
+        auto spec = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N, n_up);
+
+        long long block_total = 0;
+        for (std::size_t i = 0; i < spec.block_size.size(); ++i)
+            block_total += static_cast<long long>(spec.block_irrep_dim[i]) * spec.block_size[i];
+        REQUIRE(block_total == dsz);                       // completeness within the Sz sector
+        check_total += block_total;
+
+        REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(dsz));
+        for (int i = 0; i < refsz.eigenvalues().size(); ++i)
+            REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - refsz.eigenvalues()(i)) < 1e-9);
+    }
+    REQUIRE(check_total == (1LL << N));                    // Σ over Sz sectors == 2^N
+}

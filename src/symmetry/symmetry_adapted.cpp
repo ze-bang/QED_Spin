@@ -5,12 +5,14 @@
 #include <ed/symmetry/symmetry_adapted.h>
 
 #include <ed/core/basis_utils.h>   // applyPermutation
+#include <ed/symmetry/gosper.h>    // next_bit_permutation (fixed-popcount enumeration)
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <unordered_map>
@@ -24,10 +26,10 @@ std::vector<SABVector>
 build_sab_partition0(const GroupIrreps&                   gi,
                      const std::vector<std::vector<int>>& max_clique,
                      int                                  irrep_index,
-                     int                                  n_sites)
+                     int                                  n_sites,
+                     int                                  n_up)
 {
     const IrrepData& ir = gi.irreps[static_cast<std::size_t>(irrep_index)];
-    const int        d  = ir.dim;
     const int        G  = gi.order;
 
     // Partner-0 diagonal matrix element D^Γ_{00}(g) for every group element.
@@ -36,17 +38,17 @@ build_sab_partition0(const GroupIrreps&                   gi,
         D00[static_cast<std::size_t>(g)] =
             ir.matrices[static_cast<std::size_t>(g)][0];  // (0,0) of a d×d row-major
 
-    const std::uint64_t full = std::uint64_t{1} << n_sites;
     std::vector<SABVector> out;
 
-    for (std::uint64_t s = 0; s < full; ++s) {
-        // Process orbit representatives only (orbit minimum).
+    // Per-orbit-representative SAB construction (independent of which subspace
+    // the rep was enumerated from — orbits of fixed-popcount states stay in the
+    // Sz sector because permutations preserve popcount).
+    auto process_rep = [&](std::uint64_t s) {
         std::uint64_t rep = s;
         for (int g = 0; g < G; ++g)
             rep = std::min(rep, applyPermutation(s, max_clique[static_cast<std::size_t>(g)]));
-        if (rep != s) continue;
+        if (rep != s) return;  // only orbit minima
 
-        // Distinct orbit states + coordinate index.
         std::map<std::uint64_t, int> coord;
         std::vector<std::uint64_t>   orbit;
         for (int g = 0; g < G; ++g) {
@@ -55,24 +57,20 @@ build_sab_partition0(const GroupIrreps&                   gi,
         }
         const int M = static_cast<int>(orbit.size());
 
-        // Candidate matrix: column k = P^Γ_{00} |orbit[k]>  over orbit coords.
-        //   P^Γ_{00}|x> = Σ_g conj(D00(g)) |perm_g(x)>   (constant d_Γ/|G| dropped;
-        //   the SVD column basis is gauge/scale invariant).
+        // Column k = P^Γ_{00}|orbit[k]> = Σ_g conj(D00(g)) |perm_g(orbit[k])>
+        // (constant d_Γ/|G| dropped; SVD column basis is gauge/scale invariant).
         Eigen::MatrixXcd A = Eigen::MatrixXcd::Zero(M, M);
-        for (int k = 0; k < M; ++k) {
+        for (int k = 0; k < M; ++k)
             for (int g = 0; g < G; ++g) {
                 const std::uint64_t t =
                     applyPermutation(orbit[static_cast<std::size_t>(k)],
                                      max_clique[static_cast<std::size_t>(g)]);
                 A(coord[t], k) += std::conj(D00[static_cast<std::size_t>(g)]);
             }
-        }
 
-        // Orthonormal column-space basis = the m_Γ(O) partner-0 SAB vectors.
-        // A = (|G|/d_Γ)·P^Γ_{00} with P an orthogonal projector, so the genuine
-        // singular values are |G|/d_Γ = O(1) while an ABSENT irrep gives A≈0
-        // (~1e-14 noise). Use an ABSOLUTE threshold (genuine σ_min ≥ |G|/d_max ≥
-        // √|G| ≫ tol) so absent irreps contribute zero vectors.
+        // Orthonormal column space = the m_Γ(O) partner-0 SAB vectors. Genuine
+        // singular values are |G|/d_Γ = O(1); an ABSENT irrep gives A≈0 (~1e-14),
+        // so an ABSOLUTE threshold contributes zero spurious vectors.
         Eigen::JacobiSVD<Eigen::MatrixXcd> svd(A, Eigen::ComputeThinU);
         const auto& sv = svd.singularValues();
         const double tol = 1e-8 * static_cast<double>(G);
@@ -80,17 +78,35 @@ build_sab_partition0(const GroupIrreps&                   gi,
             if (sv(i) <= tol) continue;
             SABVector v;
             const Eigen::VectorXcd u = svd.matrixU().col(i);  // unit-norm
-            for (int c = 0; c < M; ++c) {
+            for (int c = 0; c < M; ++c)
                 if (std::abs(u(c)) > 1e-12) {
                     v.states.push_back(orbit[static_cast<std::size_t>(c)]);
                     v.coeffs.push_back(u(c));
                 }
-            }
             out.push_back(std::move(v));
         }
-    }
+    };
 
-    (void)d;  // d only enters the (dropped) projector prefactor + degeneracy bookkeeping
+    if (n_up < 0) {
+        const std::uint64_t full = std::uint64_t{1} << n_sites;
+        for (std::uint64_t s = 0; s < full; ++s) process_rep(s);
+    } else if (n_up <= n_sites) {
+        // Fixed-Sz: enumerate states of popcount n_up via Gosper's hack.
+        if (n_up == 0) {
+            process_rep(0);
+        } else {
+            const std::uint64_t lim =
+                (n_sites < 64) ? (std::uint64_t{1} << n_sites)
+                               : std::numeric_limits<std::uint64_t>::max();
+            std::uint64_t s = (std::uint64_t{1} << n_up) - 1;
+            while (s < lim) {
+                process_rep(s);
+                const std::uint64_t nxt = next_bit_permutation(s);
+                if (nxt <= s) break;  // wrap-around / end of sequence
+                s = nxt;
+            }
+        }
+    }
     return out;
 }
 
@@ -98,7 +114,8 @@ SymAdaptedSpectrum symmetry_adapted_spectrum(
     const std::function<void(const Complex*, Complex*, std::uint64_t)>& H_full,
     const GroupIrreps&                   gi,
     const std::vector<std::vector<int>>& max_clique,
-    int                                  n_sites)
+    int                                  n_sites,
+    int                                  n_up)
 {
     const std::uint64_t full = std::uint64_t{1} << n_sites;
     SymAdaptedSpectrum out;
@@ -106,7 +123,7 @@ SymAdaptedSpectrum symmetry_adapted_spectrum(
     std::vector<Complex> embed(full), happ(full);
     for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
         const int d = gi.irreps[g].dim;
-        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites);
+        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites, n_up);
         if (sab.empty()) continue;
         const int nb = static_cast<int>(sab.size());
 
@@ -148,13 +165,14 @@ SymAdaptedSpectrum symmetry_adapted_spectrum_terms(
     const ConnectFn&                     connect,
     const GroupIrreps&                   gi,
     const std::vector<std::vector<int>>& max_clique,
-    int                                  n_sites)
+    int                                  n_sites,
+    int                                  n_up)
 {
     SymAdaptedSpectrum out;
 
     for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
         const int d = gi.irreps[g].dim;
-        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites);
+        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites, n_up);
         if (sab.empty()) continue;
         const int nb = static_cast<int>(sab.size());
 
