@@ -219,6 +219,28 @@ inline void validate(const Permutation& g, int n_sites) {
 [[nodiscard]] std::vector<Permutation>
 generate_group(const std::vector<Permutation>& generators);
 
+/// True iff the generators pairwise commute (`g_i o g_j == g_j o g_i`). A
+/// group is abelian iff its generators pairwise commute, so this single check
+/// decides abelianness without expanding the full group.
+[[nodiscard]] bool is_abelian(const std::vector<Permutation>& generators);
+
+/// A generating set of a MAXIMAL ABELIAN subgroup of the group whose elements
+/// are `group_elements` (typically `generate_group(generators)`). Greedy: it
+/// keeps adding an element as a new generator whenever it commutes with every
+/// already-selected generator (which guarantees the generated subgroup stays
+/// abelian) and is not already in the subgroup. `preferred` elements (e.g. the
+/// translations) are tried first so the retained subgroup keeps them.
+///
+/// Why this exists: the symmetry-projection layer only implements 1-D (abelian)
+/// irreps. Reducing by a NON-abelian group while projecting onto 1-D characters
+/// drops the d>=2 irrep content -> incomplete spectrum. Restricting to a maximal
+/// abelian subgroup yields a COMPLETE, correct reduction (just a coarser factor
+/// `|A|` instead of `|G|`). See `group_from_generators`.
+[[nodiscard]] std::vector<Permutation>
+maximal_abelian_subgroup_generators(
+    const std::vector<Permutation>& preferred,
+    const std::vector<Permutation>& group_elements);
+
 /// Build a fully-populated `SymmetryGroupInfo` from `generators`.
 ///
 /// The returned struct is ready to be assigned to

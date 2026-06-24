@@ -1224,6 +1224,8 @@ if(BUILD_ED_TESTS)
     # the Hilbert space (full) / fixed-Sz subspace and whose min ground state is the
     # Bethe-ansatz GS (Heisenberg Z_N, N=6) -- the SectorView fan-out replacement.
     ed_add_test(test_sector_set                 tests/unit/test_sector_set.cpp USE_CATCH2)
+    # Non-abelian safety guard (restrict to maximal abelian subgroup)
+    ed_add_test(test_nonabelian_guard           tests/unit/test_nonabelian_guard.cpp USE_CATCH2)
     # Operator-collapse refactor (Phase C, Jun 2026): the production cutover --
     # StreamingSymmetryHandle::sector(k) routes through the standalone
     # SectorOperator (collapse target); the legacy SectorView and the
