@@ -446,6 +446,7 @@ set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_symmetry STATIC
     ${SYMMETRY_DIR}/group.cpp
+    ${SYMMETRY_DIR}/irreps.cpp
 )
 target_include_directories(ed_symmetry PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_symmetry PUBLIC ed_core)
