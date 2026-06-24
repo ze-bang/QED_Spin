@@ -308,8 +308,8 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.10 `include/ed/solvers/`
 
-- `block_lanczos_dssf.h`, `dynamics.h`, `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`,
-  `kpm_dos.h`, `lanczos.h`, `ltlm.h`, `observables.h`, `TPQ.h`, `tpq_dynamical.h`,
+- `dynamics.h`, `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`,
+  `kpm_dos.h`, `lanczos.h`, `ltlm.h`, `observables.h`, `TPQ.h`,
   `tpq_seeding.h`
 
 ### 5.11 `include/ed/symmetry/`
@@ -392,9 +392,8 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.21 `src/solvers/cpu/`
 
-- `block_lanczos_dssf.cpp`, `dynamics.cpp`, `ftlm.cpp`, `ftlm_kpm.cpp`,
-  `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `TPQ.cpp`,
-  `tpq_dynamical.cpp`
+- `dynamics.cpp`, `ftlm.cpp`, `ftlm_kpm.cpp`,
+  `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `TPQ.cpp`
 
 ### 5.22 `src/solvers/gpu/`
 

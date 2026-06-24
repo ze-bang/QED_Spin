@@ -284,7 +284,7 @@ void finalise_kpm_result(
 }
 
 // ---------------------------------------------------------------------------
-// LTLM-KPM core loop (used by both compute_kpm_ltlm and from_states path).
+// LTLM-KPM core loop (used by the compute_kpm_ltlm_from_states path).
 // Processes K outer states, each with energy E_n and state vector ritz_n.
 //
 // On input:
@@ -398,84 +398,11 @@ std::vector<double> make_linspace(double lo, double hi, int N) {
 // Public API
 // =============================================================================
 
-KPMResult compute_kpm_ltlm(
-    MatVec H,
-    MatVec O1,
-    MatVec O2,
-    std::uint64_t dim,
-    double omega_min,
-    double omega_max,
-    int n_omega,
-    const std::vector<double>& betas,
-    const KPMParameters& params)
-{
-    if (dim == 0)    throw std::invalid_argument("kpm: dim must be > 0");
-    if (n_omega < 2) throw std::invalid_argument("kpm: n_omega must be >= 2");
-    if (params.num_moments < 1)
-        throw std::invalid_argument("kpm: num_moments must be >= 1");
-
-    // ------------------------------------------------------------------
-    // Step 1: outer Lanczos to get K lowest Ritz states and energy window.
-    // ------------------------------------------------------------------
-    std::mt19937 gen;
-    if (params.random_seed == 0) {
-        std::random_device rd; gen.seed(rd());
-    } else {
-        gen.seed(static_cast<std::uint32_t>(params.random_seed));
-    }
-    ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
-
-    std::vector<double> alpha_o, beta_o;
-    std::vector<ComplexVector> V_outer;
-    const int M_lanc = build_lanczos_tridiagonal_with_basis(
-        H, v0, dim, params.outer_krylov_dim,
-        params.tolerance, params.full_reorthogonalization,
-        params.reorth_frequency, alpha_o, beta_o, &V_outer);
-
-    if (M_lanc == 0)
-        throw std::runtime_error("kpm: outer Lanczos produced 0 iterations");
-
-    std::vector<double> E_out, w_dummy, U_outer;
-    diagonalize_tridiagonal_ritz(alpha_o, beta_o, E_out, w_dummy, &U_outer);
-    if (E_out.empty())
-        throw std::runtime_error("kpm: outer Ritz returned 0 eigenpairs");
-
-    const std::size_t K = std::min(
-        static_cast<std::size_t>(params.num_lowest_states), E_out.size());
-
-    // ------------------------------------------------------------------
-    // Step 2: determine KPM energy window.
-    // ------------------------------------------------------------------
-    const double E_min  = E_out.front();
-    const double E_max  = E_out.back();
-    const double BW     = E_max - E_min;
-    const double buffer = params.spectral_bound_buffer * BW;
-    const double kpm_lo = E_min - buffer;
-    const double kpm_hi = E_max + buffer;
-    const double a      = (kpm_hi - kpm_lo) / 2.0;
-    const double b      = (kpm_hi + kpm_lo) / 2.0;
-
-    const double energy_shift = (std::abs(params.energy_shift) > 0.0)
-        ? params.energy_shift : E_min;
-
-    // ------------------------------------------------------------------
-    // Step 3: build kernel and frequency grid.
-    // ------------------------------------------------------------------
-    const int M = params.num_moments;
-    const std::vector<double> kernel = params.use_jackson_kernel
-        ? make_jackson_kernel(M) : make_lorentz_kernel(M, params.lorentz_lambda);
-
-    const std::vector<double> omega_grid = make_linspace(omega_min, omega_max, n_omega);
-
-    KPMResult out;
-    run_kpm_outer_loop(H, O1, O2, dim, dim,
-                       energy_shift, a, b, betas, omega_grid, kernel,
-                       &V_outer, &U_outer, &E_out, K,
-                       nullptr, nullptr,
-                       out);
-    out.jackson_kernel_used = params.use_jackson_kernel;
-    return out;
-}
+// compute_kpm_ltlm (the random-state self-window KPM driver) was retired in
+// the Gen-1 Lanczos-unification cleanup (Jun 2026): it had no callers in the
+// library, bindings, CLI, or tests. The live KPM path is
+// `compute_kpm_ltlm_from_states` below, used by the orchestrator. The shared
+// `run_kpm_outer_loop` helper is retained for that consumer.
 
 KPMResult compute_kpm_ltlm_from_states(
     MatVec H_inner,
