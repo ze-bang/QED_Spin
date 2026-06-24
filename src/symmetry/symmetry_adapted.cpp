@@ -198,9 +198,12 @@ block_hamiltonian(const ConnectFn& connect, const std::vector<SABVector>& sab) {
     return Hg;
 }
 
+}  // namespace
+
 // Exact canonical thermodynamics from a full eigenvalue list (multiplicities
 // already folded in). Z(β)=Σ e^{-βE}; reference-shifted by E0 for stability.
-[[nodiscard]] ThermodynamicData
+// Public so the GPU consumer reuses the identical reduction.
+ThermodynamicData
 canonical_thermo_from_eigs(const std::vector<double>& eigs,
                            const std::vector<double>& T) {
     ThermodynamicData td;
@@ -227,8 +230,6 @@ canonical_thermo_from_eigs(const std::vector<double>& eigs,
     }
     return td;
 }
-
-}  // namespace
 
 SymAdaptedSpectrum symmetry_adapted_spectrum_terms(
     const ConnectFn&                     connect,
@@ -284,6 +285,30 @@ SymAdaptedSpectrum symmetry_adapted_spectrum_terms(
 
     std::sort(out.eigenvalues.begin(), out.eigenvalues.end());
     return out;
+}
+
+SymBlocksPacked build_symmetry_blocks_packed(
+    const ConnectFn&                     connect,
+    const GroupIrreps&                   gi,
+    const std::vector<std::vector<int>>& max_clique,
+    int                                  n_sites,
+    int                                  n_up)
+{
+    SymBlocksPacked P;
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites, n_up);
+        if (sab.empty()) continue;
+        const Eigen::MatrixXcd Hg = block_hamiltonian(connect, sab);
+        const int nb = static_cast<int>(sab.size());
+        P.offset.push_back(P.data.size());
+        P.block_dim.push_back(nb);
+        P.block_irrep_dim.push_back(gi.irreps[g].dim);
+        // Column-major pack (cuSOLVER / LAPACK convention).
+        for (int col = 0; col < nb; ++col)
+            for (int row = 0; row < nb; ++row)
+                P.data.push_back(Hg(row, col));
+    }
+    return P;
 }
 
 ThermodynamicData symmetry_adapted_thermodynamics(

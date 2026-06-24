@@ -122,6 +122,58 @@ symmetry_adapted_thermodynamics(
     int                                   n_up = -1);
 
 // ---------------------------------------------------------------------------
+// Packed symmetry blocks — the GPU hand-off boundary. Builds every non-empty
+// per-irrep block H_Γ on the HOST (the irregular orbit/SAB work is cheap,
+// O(reduced·|G|)), packed COLUMN-MAJOR and concatenated, so the GPU eigensolver
+// uploads the whole batch in ONE transfer and runs a multi-stream batched
+// Hermitian eigensolve. (`n_up ≥ 0` → fixed-Sz; partner = 0, i.e. eigenvalues —
+// pass partner blocks separately for the DSSF eigenvector path.)
+// ---------------------------------------------------------------------------
+/// Exact canonical Z/E/C/S(β) from a full eigenvalue list (multiplicities folded
+/// in). Shared by the CPU and GPU finite-T consumers.
+[[nodiscard]] ThermodynamicData
+canonical_thermo_from_eigs(const std::vector<double>& eigenvalues,
+                           const std::vector<double>& temperatures);
+
+struct SymBlocksPacked {
+    std::vector<int>                  block_dim;        ///< n_Γ per block
+    std::vector<int>                  block_irrep_dim;  ///< d_Γ per block
+    std::vector<std::size_t>          offset;           ///< start of each block in `data`
+    std::vector<std::complex<double>> data;             ///< concatenated column-major H_Γ
+};
+
+[[nodiscard]] SymBlocksPacked
+build_symmetry_blocks_packed(
+    const ConnectFn&                      connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    int                                   n_up = -1);
+
+// ---------------------------------------------------------------------------
+// GPU consumers (defined in src/solvers/gpu/symmetry_adapted_gpu.cu; only
+// linked in WITH_CUDA builds). Same results as the CPU functions; the batched
+// dense eigensolve of the symmetry blocks runs on the device. Host builds the
+// blocks; one upload, multi-stream cuSOLVER eigensolve, one download.
+// ---------------------------------------------------------------------------
+[[nodiscard]] SymAdaptedSpectrum
+symmetry_adapted_spectrum_gpu(
+    const ConnectFn&                      connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    int                                   n_up = -1);
+
+[[nodiscard]] ThermodynamicData
+symmetry_adapted_thermodynamics_gpu(
+    const ConnectFn&                      connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    const std::vector<double>&            temperatures,
+    int                                   n_up = -1);
+
+// ---------------------------------------------------------------------------
 // Consumer 3 — GROUND-STATE DSSF. S(ω) = Σ_n |<n|O|0>|² · Lorentzian(ω-(E_n-E0)).
 // Builds the symmetry blocks over the FULL Hilbert space (so every final state
 // |n> is captured even when O changes the irrep / Sz), takes the global ground

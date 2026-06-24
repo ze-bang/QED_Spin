@@ -220,6 +220,42 @@ TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-bloc
     REQUIRE(check_total == (1LL << N));                    // Σ over Sz sectors == 2^N
 }
 
+#ifdef WITH_CUDA
+TEST_CASE("symmetry-adapted GPU batched eigensolve == CPU (D6 ring, all cases)",
+          "[symmetry_adapted][gpu][nonabelian]") {
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+    for (int n_up : {-1, 3}) {
+        auto cpu = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N, n_up);
+        auto gpu = ed::symmetry::symmetry_adapted_spectrum_gpu(connect, gi, Gp, N, n_up);
+        REQUIRE(gpu.eigenvalues.size() == cpu.eigenvalues.size());
+        std::sort(cpu.eigenvalues.begin(), cpu.eigenvalues.end());
+        std::sort(gpu.eigenvalues.begin(), gpu.eigenvalues.end());
+        for (std::size_t i = 0; i < cpu.eigenvalues.size(); ++i)
+            REQUIRE(std::abs(gpu.eigenvalues[i] - cpu.eigenvalues[i]) < 1e-9);
+    }
+    // finite-T GPU == CPU
+    const std::vector<double> temps{0.2, 0.5, 1.0, 3.0};
+    auto tc = ed::symmetry::symmetry_adapted_thermodynamics(connect, gi, Gp, N, temps);
+    auto tg = ed::symmetry::symmetry_adapted_thermodynamics_gpu(connect, gi, Gp, N, temps);
+    for (std::size_t i = 0; i < temps.size(); ++i) {
+        REQUIRE(std::abs(tg.energy[i] - tc.energy[i]) < 1e-9);
+        REQUIRE(std::abs(tg.specific_heat[i] - tc.specific_heat[i]) < 1e-9);
+    }
+}
+#endif  // WITH_CUDA
+
 TEST_CASE("symmetry-adapted finite-T == exact canonical thermo (D6 ring)",
           "[symmetry_adapted][thermal][nonabelian]") {
     const int N = 6;
