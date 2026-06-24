@@ -78,6 +78,7 @@
 #endif
 
 #include <ed/core/basis_utils.h>      // popcount()
+#include <ed/planner/csr_policy_hook.h>  // capability-aware CSR override (leaf)
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
@@ -289,6 +290,13 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
     } else {
         t.csr_force = read_force(env_use_legacy);
     }
+    // Capability-aware planner override (env force above takes precedence):
+    // when no env has forced the decision, the active ExecutionPlan -- if any --
+    // dictates CSR vs matrix-free, replacing the static dim cutoff entirely.
+    if (t.csr_force == -1) {
+        const int ovr = ed::planner::csr_override();
+        if (ovr == 0 || ovr == 1) t.csr_force = ovr;
+    }
 
     // Wave 7 (May 2026, "Unify all 16 matvec cells" plan): ``ED_SYM_CSR_DIM_MAX``
     // is the symmetry-specific override. When a SymmetryBasisPolicy-backed
@@ -351,6 +359,11 @@ inline MatVecTunables read_symmetry_tunables(
 
     int force = read_force("ED_CSR_FORCE");
     t.csr_force = force;  // -1 if unset -> use cutoff
+    // Capability-aware planner override (env force above takes precedence).
+    if (t.csr_force == -1) {
+        const int ovr = ed::planner::csr_override();
+        if (ovr == 0 || ovr == 1) t.csr_force = ovr;
+    }
 
     // Symmetry-specific cutoff: ED_SYM_CSR_DIM_MAX overrides
     // ED_CSR_DIM_MAX overrides the caller default.
