@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <complex>
+#include <functional>
 #include <vector>
 
 using ed::sym::generate_group;
@@ -141,6 +142,34 @@ TEST_CASE("non-abelian SAB: symmetry_adapted_spectrum on D6 ring (matvec API)",
     REQUIRE(total == (1LL << N));
     REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
 
+    for (int i = 0; i < ref.eigenvalues().size(); ++i)
+        REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
+}
+
+TEST_CASE("non-abelian SAB: on-the-fly term builder == brute force (D6 ring)",
+          "[symmetry_adapted][nonabelian][terms]") {
+    // Exercises the at-scale path: H_Γ built by applying H term-by-term over the
+    // orbit support (no 2^N vector). Here the 'connect' enumerator is synthesised
+    // from the dense H so we can check it against brute force.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    auto spec = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N);
+    REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
     for (int i = 0; i < ref.eigenvalues().size(); ++i)
         REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
 }

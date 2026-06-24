@@ -546,6 +546,24 @@ public:
     }
 
     // -----------------------------------------------------------------
+    // Sparse single-state row enumerator: invoke ``emit(s_prime, h)`` for every
+    // computational state ``s_prime`` connected to ``s`` by a Hamiltonian term,
+    // with ``h = <s_prime|H|s>`` (terms emitting the same ``s_prime`` are
+    // delivered separately; the caller accumulates). O(num_terms), no 2^N
+    // vector — used by the symmetry-adapted block builder to apply H over an
+    // orbit support without touching the full Hilbert space.
+    // -----------------------------------------------------------------
+    template <class Emit>
+    void for_each_connected_state(std::uint64_t s, Emit&& emit) const {
+        const auto tv = term_view_();
+        ed::matvec::kernel::apply_term_to_state<Complex>(
+            s, tv.spin_l,
+            *tv.diag_one, *tv.offdiag_one, *tv.diag_two, *tv.mixed_two,
+            *tv.offdiag_two, *tv.three_body,
+            std::forward<Emit>(emit));
+    }
+
+    // -----------------------------------------------------------------
     // Wave 1.1 of the SOTA Performance rollout (May 2026): expose the
     // real-Hermitian fast path through ``LinearOperator``'s virtuals so
     // ``ed::workflows::solve`` can dispatch to ``lanczos_real``.

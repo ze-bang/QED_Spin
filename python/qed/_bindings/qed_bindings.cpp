@@ -692,11 +692,15 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              auto H_full = [&op](const Complex* in, Complex* out, std::uint64_t dim) {
-                  op.apply(in, out, static_cast<std::size_t>(dim));
-              };
-              auto spec = ed::symmetry::symmetry_adapted_spectrum(
-                  H_full, gi, max_clique, n_sites);
+              // At-scale path: apply H term-by-term over each orbit support via
+              // the operator's sparse row enumerator -- no 2^N vector / matvec.
+              ed::symmetry::ConnectFn connect =
+                  [&op](std::uint64_t s,
+                        const std::function<void(std::uint64_t, Complex)>& emit) {
+                      op.for_each_connected_state(s, emit);
+                  };
+              auto spec = ed::symmetry::symmetry_adapted_spectrum_terms(
+                  connect, gi, max_clique, n_sites);
               py::dict d;
               d["eigenvalues"]     = spec.eigenvalues;
               d["block_irrep_dim"] = spec.block_irrep_dim;

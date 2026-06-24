@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <map>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace ed::symmetry {
@@ -134,6 +135,61 @@ SymAdaptedSpectrum symmetry_adapted_spectrum(
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hg);
         for (int e = 0; e < es.eigenvalues().size(); ++e)
             for (int rep = 0; rep < d; ++rep)            // physical d_Γ degeneracy
+                out.eigenvalues.push_back(es.eigenvalues()(e));
+        out.block_irrep_dim.push_back(d);
+        out.block_size.push_back(nb);
+    }
+
+    std::sort(out.eigenvalues.begin(), out.eigenvalues.end());
+    return out;
+}
+
+SymAdaptedSpectrum symmetry_adapted_spectrum_terms(
+    const ConnectFn&                     connect,
+    const GroupIrreps&                   gi,
+    const std::vector<std::vector<int>>& max_clique,
+    int                                  n_sites)
+{
+    SymAdaptedSpectrum out;
+
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        const int d = gi.irreps[g].dim;
+        const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites);
+        if (sab.empty()) continue;
+        const int nb = static_cast<int>(sab.size());
+
+        // state s' -> [(basis index k, coeff c^k_{s'})] over THIS irrep's SAB.
+        std::unordered_map<std::uint64_t, std::vector<std::pair<int, Complex>>> bystate;
+        for (int k = 0; k < nb; ++k) {
+            const auto& vk = sab[static_cast<std::size_t>(k)];
+            for (std::size_t t = 0; t < vk.states.size(); ++t)
+                bystate[vk.states[t]].emplace_back(k, vk.coeffs[t]);
+        }
+
+        // H_Γ[k][j] = Σ_{s∈φ_j} c^j_s Σ_{s': <s'|H|s>} h Σ_{k: s'∈φ_k} conj(c^k_{s'})
+        // -- apply H term-by-term over the orbit support only (no 2^n vector).
+        Eigen::MatrixXcd Hg = Eigen::MatrixXcd::Zero(nb, nb);
+        for (int j = 0; j < nb; ++j) {
+            const auto& vj = sab[static_cast<std::size_t>(j)];
+            for (std::size_t t = 0; t < vj.states.size(); ++t) {
+                const Complex cjs = vj.coeffs[t];
+                connect(vj.states[t], [&](std::uint64_t sprime, Complex h) {
+                    auto it = bystate.find(sprime);
+                    if (it == bystate.end()) return;
+                    for (const auto& kc : it->second)
+                        Hg(kc.first, j) += std::conj(kc.second) * h * cjs;
+                });
+            }
+        }
+
+        if ((Hg - Hg.adjoint()).norm() > 1e-8 * std::max(1.0, Hg.norm()))
+            throw std::runtime_error(
+                "symmetry_adapted_spectrum_terms: H_Γ not Hermitian — the "
+                "Hamiltonian does not commute with the supplied symmetry group");
+
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hg);
+        for (int e = 0; e < es.eigenvalues().size(); ++e)
+            for (int rep = 0; rep < d; ++rep)
                 out.eigenvalues.push_back(es.eigenvalues()(e));
         out.block_irrep_dim.push_back(d);
         out.block_size.push_back(nb);

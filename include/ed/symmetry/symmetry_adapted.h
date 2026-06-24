@@ -73,4 +73,20 @@ symmetry_adapted_spectrum(
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites);
 
+/// `connect(s, emit)` must invoke `emit(s', h)` for every state s' connected to
+/// s by a Hamiltonian term (h = <s'|H|s>). Such a sparse single-state row
+/// enumerator (e.g. `Operator::for_each_connected_state`) lets this build each
+/// block H_Γ by applying H over the orbit support only -- NO 2^n_sites vector
+/// and no full-space matvec. The at-scale non-abelian path.
+using ConnectFn = std::function<void(
+    std::uint64_t,
+    const std::function<void(std::uint64_t, std::complex<double>)>&)>;
+
+[[nodiscard]] SymAdaptedSpectrum
+symmetry_adapted_spectrum_terms(
+    const ConnectFn&                      connect,
+    const GroupIrreps&                    gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites);
+
 }  // namespace ed::symmetry
