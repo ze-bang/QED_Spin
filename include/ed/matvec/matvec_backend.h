@@ -943,6 +943,33 @@ make_cpu_fixed_sz_backend(const std::vector<std::uint64_t>& basis_states,
         "CpuFixedSz(dim=" + std::to_string(basis_states.size()) + ")");
 }
 
+// Tableless combinadic fixed-Sz backend. Same CpuMatVecBackend<FixedSzBasisPolicy>
+// type as make_cpu_fixed_sz_backend (so no extra template instantiation), but the
+// policy is in combinadic mode: the C(N,n_up) basis vector + Lin table are never
+// allocated; lookups go through the O(N) combinadic rank/unrank over ``binom``.
+template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
+          class OffDiagTwo, class ThreeBody>
+[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
+make_cpu_combinadic_fixed_sz_backend(
+    int                                        n_bits,
+    int                                        n_up,
+    const ed::core::combinadic::BinomialTable& binom,
+    std::uint64_t                              dim,
+    std::uint64_t default_csr_cutoff = (1ULL << 22))
+{
+    using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
+                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
+                                     OffDiagTwo, ThreeBody>;
+    auto tunables = detail::read_tunables(
+        default_csr_cutoff,
+        "ED_FIXED_SZ_USE_SPARSE",
+        "ED_FIXED_SZ_SPARSE_DIM_MAX");
+    return std::make_unique<Backend>(
+        basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim),
+        tunables,
+        "CpuCombinadicFixedSz(dim=" + std::to_string(dim) + ")");
+}
+
 // ---------------------------------------------------------------------------
 // P6 (operator-collapse): extern-template declarations for the two trivial-
 // basis host cells of the Operator<BasisPolicy, MemSpace> grid, over the

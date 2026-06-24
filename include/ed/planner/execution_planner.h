@@ -58,6 +58,10 @@ struct ExecutionPlan {
     ed::krylov::ReorthPolicy reorth = ed::krylov::ReorthPolicy::LocalDGKS3;
     int            krylov_dim_cap = 0;   ///< 0 -> solver default
     BasisStrategy  basis    = BasisStrategy::FullDense;
+    /// Fixed-Sz (no-symmetry) lane: use the tableless combinadic basis (only an
+    /// O(N^2) BinomialTable) instead of the materialized C(N,n_up) basis vector
+    /// + Lin table. Set when the materialized basis would not fit the budget.
+    bool           tableless_fixed_sz = false;
 
     bool                     feasible = true;
     std::string              bottleneck = "ok";  // ok|memory|basis_construction|build|kernel
@@ -84,5 +88,11 @@ struct ExecutionPlan {
 // destruction it restores the previous override. Device / reorth are applied
 // by the orchestrator at their own call sites.
 void apply_csr_decision(const ExecutionPlan& plan);
+
+// Push the plan's fixed-Sz basis decision into the operator builder (via
+// basis_policy_hook), so a subsequently-constructed FixedSzOperator picks the
+// tableless combinadic basis when the plan says so. Consumed by both the GS and
+// finite-temperature lanes (they share the fixed-Sz operator construction).
+void apply_basis_decision(const ExecutionPlan& plan);
 
 }  // namespace ed::planner

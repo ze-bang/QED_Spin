@@ -79,6 +79,7 @@
 #include <vector>
 
 #include <ed/core/basis_utils.h>  // LinIndexTable
+#include <ed/core/combinadic.h>   // BinomialTable, rank_state/unrank_to_state (tableless mode)
 
 namespace ed::matvec::basis {
 
@@ -144,13 +145,32 @@ struct FixedSzBasisPolicy {
     const LinIndexTable*         lin_index;     // Lin (1990) lookup
     uint64_t                     dim_;          // cached basis_states->size()
 
+    // Tableless combinadic mode (Track A, Jun 2026). When ``binom != nullptr``
+    // the basis is represented IMPLICITLY by (n_bits_, n_up_) + a small O(N^2)
+    // BinomialTable instead of the materialized ``basis_states`` vector +
+    // ``lin_index`` table -- the per-element lookup becomes O(N) combinadic
+    // rank/unrank rather than an O(1) table read, but the C(N,n_up)-sized basis
+    // vector (the ~72 GB wall at N=36) and the Lin table are never allocated.
+    // The colex combinadic rank coincides with the ascending-sorted index, so
+    // the two modes are index-compatible and produce identical matvecs.
+    const ed::core::combinadic::BinomialTable* binom = nullptr;
+    int                          n_bits_ = 0;
+    int                          n_up_   = 0;
+
     [[nodiscard]] inline uint64_t dim() const noexcept {
         return dim_;
     }
     [[nodiscard]] inline uint64_t state_of(uint64_t idx) const noexcept {
-        return (*basis_states)[idx];
+        return binom
+            ? ed::core::combinadic::unrank_to_state(idx, n_bits_, n_up_, *binom)
+            : (*basis_states)[idx];
     }
     [[nodiscard]] inline int64_t index_of(uint64_t state) const noexcept {
+        if (binom) {
+            return (__builtin_popcountll(state) == n_up_)
+                ? ed::core::combinadic::rank_state(state, n_bits_, n_up_, *binom)
+                : int64_t{-1};
+        }
         return lin_index->lookup(state);
     }
 
@@ -194,6 +214,24 @@ struct FixedSzBasisPolicy {
     return FixedSzBasisPolicy{
         &basis_states, &lin_index, basis_states.size()
     };
+}
+
+// Tableless combinadic fixed-Sz basis view. ``binom`` must be sized for at
+// least ``n_bits`` and outlive the returned policy. ``dim`` is C(n_bits,n_up).
+[[nodiscard]] inline FixedSzBasisPolicy make_combinadic_fixed_sz_basis(
+    int                                        n_bits,
+    int                                        n_up,
+    const ed::core::combinadic::BinomialTable& binom,
+    uint64_t                                   dim) noexcept
+{
+    FixedSzBasisPolicy p{};
+    p.basis_states = nullptr;
+    p.lin_index    = nullptr;
+    p.dim_         = dim;
+    p.binom        = &binom;
+    p.n_bits_      = n_bits;
+    p.n_up_        = n_up;
+    return p;
 }
 
 } // namespace ed::matvec::basis

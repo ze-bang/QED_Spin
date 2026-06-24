@@ -7,6 +7,7 @@
 #include <ed/planner/execution_planner.h>
 
 #include <ed/planner/csr_policy_hook.h>
+#include <ed/planner/basis_policy_hook.h>
 
 #include <algorithm>
 #include <cmath>
@@ -109,6 +110,7 @@ std::string ExecutionPlan::summary() const {
        << "\n  reorth  : " << reorth_str()
        << (krylov_dim_cap > 0 ? "  krylov_cap=" + std::to_string(krylov_dim_cap) : "")
        << "\n  basis   : " << basis_str()
+       << (tableless_fixed_sz ? " (tableless fixed-Sz)" : "")
        << "\n  memory  : ~" << est_memory_gb << " GB"
        << "\n  time    : ~" << est_seconds << " s\n";
     for (const auto& n : notes) os << "  note: " << n << "\n";
@@ -248,6 +250,24 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
         }
     }
 
+    // ---- Fixed-Sz (no-symmetry) tableless-basis decision --------------------
+    // The materialized fixed-Sz basis is a C(N,n_up)-entry vector (8 B/state)
+    // plus a small Lin table. When that vector would tip the run over the
+    // memory budget, switch to the tableless combinadic basis (only an O(N^2)
+    // BinomialTable; O(N) lookup). Consumed identically by GS and finite-T.
+    if (task.kind == BasisKind::Sz) {
+        const double basis_vec_gb =
+            static_cast<double>(task.basis_dim) * 8.0 / kGiB
+            / std::max(1, p.n_ranks);
+        if (basis_vec_gb + working_gb > budget) {
+            p.tableless_fixed_sz = true;
+            p.notes.push_back("fixed-Sz basis vector " + std::to_string(basis_vec_gb)
+                + " GB + working " + std::to_string(working_gb)
+                + " GB exceeds budget " + std::to_string(budget)
+                + " GB -> tableless combinadic basis");
+        }
+    }
+
     // ---- Memory feasibility verdict (working set) ---------------------------
     if (p.feasible && working_gb > budget) {
         p.feasible = false;
@@ -272,6 +292,11 @@ void apply_csr_decision(const ExecutionPlan& plan) {
     set_csr_override(plan.matvec == MatvecStrategy::Csr
                          ? CsrOverride::Csr
                          : CsrOverride::MatrixFree);
+}
+
+void apply_basis_decision(const ExecutionPlan& plan) {
+    set_basis_repr(plan.tableless_fixed_sz ? BasisRepr::Tableless
+                                           : BasisRepr::Materialized);
 }
 
 }  // namespace ed::planner
