@@ -19,9 +19,31 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace ed::planner {
+
+// Saturating uint64 multiply: huge basis dims must NOT silently wrap (a wrapped
+// byte count would make an impossible problem look feasible). Saturating to
+// UINT64_MAX instead yields ~1.7e10 GB downstream -> correctly infeasible.
+[[nodiscard]] inline std::uint64_t sat_mul(std::uint64_t a, std::uint64_t b) noexcept {
+    if (a == 0 || b == 0) return 0;
+    if (a > std::numeric_limits<std::uint64_t>::max() / b)
+        return std::numeric_limits<std::uint64_t>::max();
+    return a * b;
+}
+
+// Clamp a (possibly out-of-range / non-finite) double to a valid uint64. A
+// direct cast of a double >= 2^64 (or NaN) to uint64 is UB; this keeps the
+// planner well-defined for adversarial sizes.
+[[nodiscard]] inline std::uint64_t clamp_to_u64(double x) noexcept {
+    if (!(x > 0.0)) return 0;  // also catches NaN
+    // Largest double strictly < 2^64 that is exactly representable.
+    constexpr double kU64Max = 18446744073709549568.0;
+    return x >= kU64Max ? std::numeric_limits<std::uint64_t>::max()
+                        : static_cast<std::uint64_t>(x);
+}
 
 // ns per (term, basis-element) for an SpMV. Matches feasibility.py.
 inline constexpr double kSpmvNsPerTermElemCpu = 100.0;
@@ -125,13 +147,12 @@ struct TaskCost {
                                                  bool on_gpu) {
     TaskCost c;
     c.vector_count      = resident_vector_count(t);
-    c.working_set_bytes = c.vector_count * t.basis_dim *
-                          static_cast<std::uint64_t>(kBytesPerComplex);
+    c.working_set_bytes = sat_mul(sat_mul(c.vector_count, t.basis_dim),
+                                  static_cast<std::uint64_t>(kBytesPerComplex));
 
     // CSR footprint: roughly (n_offdiag + 1 diagonal) nonzeros per row.
-    c.csr_nnz   = t.basis_dim * (t.n_offdiag + 1);
-    c.csr_bytes = static_cast<std::uint64_t>(
-        static_cast<double>(c.csr_nnz) * kCsrBytesPerNnz);
+    c.csr_nnz   = sat_mul(t.basis_dim, t.n_offdiag + 1);
+    c.csr_bytes = clamp_to_u64(static_cast<double>(c.csr_nnz) * kCsrBytesPerNnz);
     c.csr_build_seconds = static_cast<double>(c.csr_nnz) * kCsrBuildNsPerNnz * 1e-9;
 
     c.matvec_count = expected_matvec_count(t);
@@ -157,10 +178,10 @@ struct TaskCost {
         const std::uint64_t sz_dim =
             (t.N > 0 && t.n_up >= 0) ? binom_u64(t.N, t.n_up) : t.basis_dim;
         // reps array: post-reduction dim of sorted 64-bit representatives.
-        c.reps_array_bytes = t.basis_dim * 8u;
+        c.reps_array_bytes = sat_mul(t.basis_dim, 8u);
         // Optional dense combinadic O(1) rank table: C(N,n_up) int32.
         c.rank_table_bytes = (t.N > 0 && t.n_up >= 0)
-            ? binom_u64(t.N, t.n_up) * 4u : 0;
+            ? sat_mul(binom_u64(t.N, t.n_up), 4u) : 0;
         // Enumeration: walk the Sz subspace; symmetry costs ~|G| ops/state.
         const double per_state_ns =
             (t.kind == BasisKind::SymSz)
@@ -169,10 +190,12 @@ struct TaskCost {
         c.enumeration_seconds =
             static_cast<double>(sz_dim) * per_state_ns * 1e-9;
     } else if (t.kind == BasisKind::Symm) {
-        c.reps_array_bytes = t.basis_dim * 8u;
+        c.reps_array_bytes = sat_mul(t.basis_dim, 8u);
         c.rank_table_bytes = 0;  // full-space rank table not used for pure symm
-        const std::uint64_t full_dim = (t.N > 0)
-            ? (std::uint64_t{1} << t.N) : t.basis_dim * t.group_size;
+        // (1u64 << N) is UB for N >= 64; fall back to dim*|G| outside the safe range.
+        const std::uint64_t full_dim = (t.N > 0 && t.N < 64)
+            ? (std::uint64_t{1} << t.N)
+            : sat_mul(t.basis_dim, std::max<std::uint64_t>(1, t.group_size));
         c.enumeration_seconds = static_cast<double>(full_dim) *
             10.0 * static_cast<double>(std::max<std::uint64_t>(1, t.group_size)) * 1e-9;
     }
