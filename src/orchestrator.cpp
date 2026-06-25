@@ -539,8 +539,14 @@ GroundStateResult solve_on(Backend& be,
             }
             R.eigenvectors = std::move(evref);
         }
-        R.krylov.iters_done = kres.blocks_built;
-        R.krylov.converged  = kres.converged;
+        R.krylov.iters_done    = kres.blocks_built;
+        R.krylov.converged     = kres.converged;
+        R.krylov.ritz_residuals = kres.residuals;
+        R.krylov.n_converged   = kres.n_converged;
+        R.krylov.resid_history = kres.resid_history;
+        if (!kres.residuals.empty())
+            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
+                                                       kres.residuals.end());
     } else if (method == SolveMethod::BlockKrylovSchur) {
         ed::krylov::BlockKrylovSchurOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
@@ -563,8 +569,14 @@ GroundStateResult solve_on(Backend& be,
             }
             R.eigenvectors = std::move(evref);
         }
-        R.krylov.iters_done = kres.restarts;
-        R.krylov.converged  = kres.converged;
+        R.krylov.iters_done    = kres.restarts;
+        R.krylov.converged     = kres.converged;
+        R.krylov.ritz_residuals = kres.residuals;
+        R.krylov.n_converged   = kres.n_converged;
+        R.krylov.resid_history = kres.resid_history;
+        if (!kres.residuals.empty())
+            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
+                                                       kres.residuals.end());
     } else if (method == SolveMethod::KrylovSchur) {
         ed::krylov::KrylovSchurOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
@@ -722,9 +734,13 @@ GroundStateResult solve_on(Backend& be,
                     cpu_matvec(in, out, static_cast<std::size_t>(n));
                 };
             std::vector<double> eigs;
+            // Hv is the CPU-bound matvec (H.bind_cpu() above) -- reentrant after
+            // one warm-up call (only the diagonal cache is built lazily), so the
+            // dense column build can run in parallel (one column per thread).
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
-                                 opts.compute_vectors);
+                                 opts.compute_vectors,
+                                 /*parallel_construct=*/true);
             if (!opts.output_dir.empty()
                     && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
                 R.hdf5_path = opts.output_dir + "/ed_results.h5";

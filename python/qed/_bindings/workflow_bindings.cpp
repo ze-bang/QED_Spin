@@ -242,6 +242,8 @@ void bind_workflows(py::module_& m) {
         .def_readonly("iters_done",     &ed::KrylovDiagnostics::iters_done)
         .def_readonly("residual_norm",  &ed::KrylovDiagnostics::residual_norm)
         .def_readonly("ritz_residuals", &ed::KrylovDiagnostics::ritz_residuals)
+        .def_readonly("n_converged",    &ed::KrylovDiagnostics::n_converged)
+        .def_readonly("resid_history",  &ed::KrylovDiagnostics::resid_history)
         .def_readonly("converged",      &ed::KrylovDiagnostics::converged);
 
     py::class_<ed::EigenvectorRef>(m, "EigenvectorRef")

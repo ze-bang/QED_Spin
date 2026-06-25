@@ -148,6 +148,35 @@ TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity
         REQUIRE(std::abs(res.eigenvalues[i] - ref[static_cast<long>(i)]) < 1e-7);
 }
 
+TEST_CASE("krylov::block diagnostics: per-eigenvalue residuals + n_converged",
+          "[kernel-facade][diagnostics]") {
+    constexpr std::uint64_t N   = 6;
+    constexpr std::size_t   dim = std::size_t{1} << N;
+    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
+    ed::matvec::CpuBackend backend;
+    MatvecCallable apply{H.get()};
+
+    SECTION("block Lanczos reports residuals aligned with eigenvalues") {
+        ed::krylov::BlockLanczosOptions o;
+        o.num_eigs = 4; o.block_size = 4; o.max_iter = 30; o.tolerance = 1e-10;
+        auto r = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, o);
+        REQUIRE(r.residuals.size() == r.eigenvalues.size());
+        REQUIRE(r.n_converged >= 1);                       // GS at least
+        REQUIRE(r.n_converged <= r.eigenvalues.size());
+        for (std::size_t i = 0; i < r.n_converged; ++i)
+            REQUIRE(r.residuals[i] <= 1e-9);               // converged => tiny residual
+        REQUIRE_FALSE(r.resid_history.empty());            // convergence curve captured
+    }
+    SECTION("block Krylov-Schur: locked == converged, residuals below tol") {
+        ed::krylov::BlockKrylovSchurOptions o;
+        o.num_eigs = 4; o.block_size = 4; o.tolerance = 1e-10; o.max_restarts = 200;
+        auto r = ed::krylov::block_krylov_schur_kernel(backend, apply, dim, dim, o);
+        REQUIRE(r.residuals.size() == r.eigenvalues.size());
+        REQUIRE(r.n_converged == r.eigenvalues.size());
+        for (double rho : r.residuals) REQUIRE(rho <= 1e-10);
+    }
+}
+
 TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
           "[kernel-facade][krylov-schur][phase6]") {
     constexpr std::uint64_t N   = 6;

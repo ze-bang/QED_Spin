@@ -94,6 +94,14 @@ struct BlockLanczosResult {
     std::vector<ed::matvec::Backend::UniqueVec>      eigenvectors;
     std::size_t                                      blocks_built = 0;
     bool                                             converged    = false;
+    // ---- convergence diagnostics ----
+    /// Per-eigenvalue residual estimate ‖B_last · y_lastblock‖ ≈ ‖H xᵢ − θᵢ xᵢ‖,
+    /// aligned with `eigenvalues`.
+    std::vector<double>                              residuals;
+    /// How many of the returned eigenvalues met `tolerance`.
+    std::size_t                                      n_converged  = 0;
+    /// Lowest target-window residual after each block built (convergence curve).
+    std::vector<double>                              resid_history;
 };
 
 namespace detail {
@@ -228,6 +236,8 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     std::vector<Complex> Aj_host(b * b);
     std::vector<Complex> Bj_host(b * b);
     std::vector<Complex> Bprev_host(b * b, Complex(0.0, 0.0));
+    std::vector<Complex> last_B(b * b, Complex(0.0, 0.0));  // most recent QR coupling
+    std::vector<double>  resid_hist;                        // convergence curve
 
     const Complex one(1.0, 0.0), zero(0.0, 0.0), neg_one(-1.0, 0.0);
     bool converged = false;
@@ -339,6 +349,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
 
         // QR(W) -> V_next, B_j. `qr_thin` overwrites W with Q.
         backend.qr_thin(W.get(), N, b, Bj_host.data());
+        last_B = Bj_host;   // coupling beyond the current last block (residual)
 
         // Breakdown check on min |diag(B_j)|.
         double min_diag = std::numeric_limits<double>::max();
@@ -362,6 +373,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                 const bool have_next_block = (min_diag > breakdown)
                                           && (j + 1 < max_blocks);
                 std::size_t ok = 0;
+                double max_resid = 0.0;
                 std::vector<Complex> res_block(b);
                 for (std::size_t kk = 0; kk < target_eigs; ++kk) {
                     if (!have_next_block) { ok = target_eigs; break; }
@@ -371,8 +383,12 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                                 Bj_host.data(), b,
                                 &T_mat[(total_blocks - 1) * b + kk * total_dim], 1,
                                 &zero, res_block.data(), 1);
-                    if (cblas_dznrm2(b, res_block.data(), 1) <= conv_tol) ++ok;
+                    const double rk = cblas_dznrm2(b, res_block.data(), 1);
+                    max_resid = std::max(max_resid, rk);
+                    if (rk <= conv_tol) ++ok;
                 }
+                // Convergence curve: worst residual across the target window.
+                if (have_next_block) resid_hist.push_back(max_resid);
                 if (ok >= target_eigs) {
                     converged = true;
                     break;
@@ -400,7 +416,9 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     detail::build_projected_matrix(alpha_blocks, beta_blocks, b, T_mat);
 
     std::vector<double> evals(total);
-    const char jobz = opts.compute_vectors ? 'V' : 'N';
+    // Always compute the (small) block-tridiagonal eigenvectors: needed for the
+    // per-eigenvalue residual estimate even when full eigenvectors aren't wanted.
+    const char jobz = 'V';
     const auto info = LAPACKE_zheevd(LAPACK_COL_MAJOR, jobz, 'U',
         static_cast<lapack_int>(total),
         reinterpret_cast<lapack_complex_double*>(T_mat.data()),
@@ -414,6 +432,23 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     out.eigenvalues.assign(evals.begin(), evals.begin() + output_eigs);
     out.blocks_built = m_built;
     out.converged    = converged;
+
+    // ---- per-eigenvalue residual diagnostics ----
+    // residual_i = ||B_last * Y[last block, i]|| ~= ||H xᵢ − θᵢ xᵢ||.
+    out.resid_history = std::move(resid_hist);
+    out.residuals.assign(output_eigs, 0.0);
+    {
+        std::vector<Complex> rb(b);
+        for (std::size_t kk = 0; kk < output_eigs; ++kk) {
+            cblas_zgemv(CblasColMajor, CblasNoTrans, b, b, &one,
+                        last_B.data(), b,
+                        &T_mat[(m_built - 1) * b + kk * total], 1,
+                        &zero, rb.data(), 1);
+            out.residuals[kk] =
+                cblas_dznrm2(static_cast<int>(b), rb.data(), 1);
+            if (out.residuals[kk] <= conv_tol) ++out.n_converged;
+        }
+    }
 
     if (opts.compute_vectors) {
         // Each eigenvector v_k = sum_{blk} V_{blk} * Y_{blk,k}, where

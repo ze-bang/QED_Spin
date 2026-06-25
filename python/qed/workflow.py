@@ -241,10 +241,11 @@ def _ed_params_to_solve_options(
     opts.backend.allow_mpi = bool(use_mpi)
 
     method_map = {
-        DiagonalizationMethod.LANCZOS:       _core.SolveMethod.Lanczos,
-        DiagonalizationMethod.BLOCK_LANCZOS: _core.SolveMethod.BlockLanczos,
-        DiagonalizationMethod.KRYLOV_SCHUR:  _core.SolveMethod.KrylovSchur,
-        DiagonalizationMethod.FULL:          _core.SolveMethod.FullDiag,
+        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
+        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
+        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
+        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
+        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
     }
     opts.method = method_map.get(method, _core.SolveMethod.Auto)
 
@@ -280,6 +281,15 @@ def _ed_result_from_gs_result(
     _tags = getattr(gs_result, "sector_tags", None)
     if _tags:
         out.sector_tags = list(_tags)
+    # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
+    # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
+    _kry = getattr(gs_result, "krylov", None)
+    if _kry is not None:
+        out.converged       = bool(getattr(_kry, "converged", False))
+        out.iterations      = int(getattr(_kry, "iters_done", 0))
+        out.residuals       = list(getattr(_kry, "ritz_residuals", []) or [])
+        out.n_converged     = int(getattr(_kry, "n_converged", 0))
+        out.residual_history = list(getattr(_kry, "resid_history", []) or [])
     return out
 
 

@@ -59,6 +59,14 @@ struct BlockKrylovSchurResult {
     std::vector<ed::matvec::Backend::UniqueVec> eigenvectors;  ///< if compute_vectors
     std::size_t                                 restarts  = 0;
     bool                                        converged = false;
+    // ---- convergence diagnostics ----
+    /// Per-eigenvalue residual ‖B_last · y_lastblock‖ ≈ ‖H xᵢ − θᵢ xᵢ‖ at lock
+    /// time, aligned with `eigenvalues`.
+    std::vector<double>                         residuals;
+    /// Number of returned eigenvalues that met `tolerance` (locked == converged).
+    std::size_t                                 n_converged = 0;
+    /// Best (lowest) not-yet-locked residual after each restart cycle.
+    std::vector<double>                         resid_history;
 };
 
 template <typename Backend, typename MatvecFn>
@@ -98,6 +106,7 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
     // ---- locked (converged) eigenpairs -------------------------------------
     std::vector<ed::matvec::Backend::UniqueVec> locked_vecs;  // one N-vector each
     std::vector<double>                          locked_evals;
+    std::vector<double>                          locked_resid; // residual at lock time
 
     // Deflate a single N-column (device) against the whole locked set (CGS2).
     auto deflate_against_locked = [&](Complex* col) {
@@ -233,7 +242,8 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
         // ---- lock the converged contiguous prefix from the bottom -----------
         std::size_t newly = 0;
         for (std::size_t i = 0; i < total && newly < need; ++i) {
-            if (ritz_residual(i) > tol) break;          // stop at first unconverged
+            const double rho = ritz_residual(i);
+            if (rho > tol) break;                       // stop at first unconverged
             auto phi = be.make_zero_vector(N);
             reconstruct(i, phi.get());
             deflate_against_locked(phi.get());
@@ -241,9 +251,13 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
             if (nrm < 1e-13) continue;
             be.scale(Complex(1.0 / nrm, 0.0), phi.get(), N);
             locked_evals.push_back(theta[i]);
+            locked_resid.push_back(rho);
             locked_vecs.emplace_back(std::move(phi));
             ++newly;
         }
+        // Convergence curve: residual of the first not-yet-converged Ritz pair
+        // (those below it were locked this cycle).
+        if (newly < total) R.resid_history.push_back(ritz_residual(newly));
 
         if (locked_evals.size() >= k) { converged = true; break; }
 
@@ -268,12 +282,18 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
               [&](std::size_t a, std::size_t c) { return locked_evals[a] < locked_evals[c]; });
     const std::size_t out_k = std::min<std::size_t>(k, locked_evals.size());
     R.eigenvalues.reserve(out_k);
-    for (std::size_t i = 0; i < out_k; ++i) R.eigenvalues.push_back(locked_evals[ord[i]]);
+    R.residuals.reserve(out_k);
+    for (std::size_t i = 0; i < out_k; ++i) {
+        R.eigenvalues.push_back(locked_evals[ord[i]]);
+        R.residuals.push_back(locked_resid[ord[i]]);
+    }
     if (opts.compute_vectors) {
         R.eigenvectors.reserve(out_k);
         for (std::size_t i = 0; i < out_k; ++i)
             R.eigenvectors.emplace_back(std::move(locked_vecs[ord[i]]));
     }
+    // Every returned (locked) eigenvalue passed the residual test by construction.
+    R.n_converged = out_k;
     R.converged = converged || (locked_evals.size() >= k);
     return R;
 }
