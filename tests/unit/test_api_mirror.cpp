@@ -418,12 +418,15 @@ TEST_CASE("ed::find_symmetries('translation') builds Z_N",
     REQUIRE(info.generators.size() == 1);
 }
 
-TEST_CASE("ed::find_symmetries('translation+reflection') builds D_N",
+TEST_CASE("ed::find_symmetries('translation+reflection') is restricted to its abelian subgroup",
           "[api-mirror][symmetries]") {
     const int N = 6;
+    // translation+reflection generates the NON-abelian dihedral group D_N (|G|=2N).
+    // The projection layer is abelian-only, so group_from_generators restricts to a
+    // maximal abelian subgroup (the Z_N translations, |A|=N) -- a complete & correct,
+    // if coarser, reduction. See the non-abelian guard in src/symmetry/group.cpp.
     auto info = ed::find_symmetries(N, "translation+reflection");
-    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(2 * N));
-    REQUIRE(info.generators.size() == 2);
+    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(N));   // |A| = N, not 2N
 }
 
 TEST_CASE("ed::estimate_resources reports a sensible basis dim",

@@ -303,15 +303,10 @@ public:
                  "STRUCTURAL_AUDIT.md S2 #29.")]]
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
-    /// SoA-binned term cache. Returns a const reference after rebuilding
-    /// from the canonical AoS storage if stale.
-    ///
-    /// DEPRECATION (audit S2 #29, May 2026): in-tree callers read
-    /// ``terms_`` directly after ``commitPendingTransforms()``.
-    /// Scheduled for removal in the next operator-API rev.
-    [[deprecated("Operator::getTerms has no in-tree callers; call "
-                 "``commitPendingTransforms()`` and read ``terms_`` "
-                 "directly. See STRUCTURAL_AUDIT.md S2 #29.")]]
+    /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
+    /// Public so an alternative-basis matvec backend (e.g. a non-abelian
+    /// symmetry sector via NonAbelianSymmetryBasisPolicy) can be built over the
+    /// SAME terms as the operator's own matvec.
     const ed::matvec::TermStorage& getTerms() const {
         commitPendingTransforms();
         return terms_;
@@ -543,6 +538,24 @@ public:
         ensure_backend_();
         const auto tv = term_view_();  // rebuilds SoA cache if stale
         backend_->apply_real(&tv, in, out, size);
+    }
+
+    // -----------------------------------------------------------------
+    // Sparse single-state row enumerator: invoke ``emit(s_prime, h)`` for every
+    // computational state ``s_prime`` connected to ``s`` by a Hamiltonian term,
+    // with ``h = <s_prime|H|s>`` (terms emitting the same ``s_prime`` are
+    // delivered separately; the caller accumulates). O(num_terms), no 2^N
+    // vector — used by the symmetry-adapted block builder to apply H over an
+    // orbit support without touching the full Hilbert space.
+    // -----------------------------------------------------------------
+    template <class Emit>
+    void for_each_connected_state(std::uint64_t s, Emit&& emit) const {
+        const auto tv = term_view_();
+        ed::matvec::kernel::apply_term_to_state<Complex>(
+            s, tv.spin_l,
+            *tv.diag_one, *tv.offdiag_one, *tv.diag_two, *tv.mixed_two,
+            *tv.offdiag_two, *tv.three_body,
+            std::forward<Emit>(emit));
     }
 
     // -----------------------------------------------------------------

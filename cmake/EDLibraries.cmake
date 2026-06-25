@@ -222,6 +222,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
+    ${SOLVERS_CPU_DIR}/symmetry_adapted_solve.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
     # Phase A of the "mirror examples" plan (May 2026): Python-named
@@ -232,6 +233,11 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/api/build_introspection.cpp
     ${SRC_DIR}/api/symmetry_helpers.cpp
     ${SRC_DIR}/api/feasibility.cpp
+    # Capability-aware execution planner (system probe + task cost model +
+    # CSR/device/reorth/basis decision). Header-light; one probe .cpp + one
+    # decision .cpp.
+    ${SRC_DIR}/planner/system_capabilities.cpp
+    ${SRC_DIR}/planner/execution_planner.cpp
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
@@ -441,6 +447,8 @@ set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_symmetry STATIC
     ${SYMMETRY_DIR}/group.cpp
+    ${SYMMETRY_DIR}/irreps.cpp
+    ${SYMMETRY_DIR}/symmetry_adapted.cpp
 )
 target_include_directories(ed_symmetry PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_symmetry PUBLIC ed_core)
@@ -648,12 +656,17 @@ if(WITH_CUDA)
         # that were their only callers. The production GPU paths now run off
         # the unified host operators' bind_cuda() device matvec (CudaBackend /
         # CudaMatVecBackend) and a directly-constructed GPUFTLMSolver.
-        ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
+        # gpu_lanczos.cu (the Gen-1 hand-rolled GPULanczos class) was retired:
+        # runGPULanczos routes entirely through gpu_lanczos_kernel_facade.cu
+        # (lanczos_kernel<CudaBackend>). The one capability it uniquely held --
+        # on-disk basis spill for oversized-basis eigenvector runs -- is now a
+        # clear facade error rather than a separate hand-rolled solver.
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
+        ${SOLVERS_GPU_DIR}/symmetry_adapted_gpu.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for
         # StreamingSymmetryOperator + FixedSz variant. Lives here (and

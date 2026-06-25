@@ -170,7 +170,14 @@ sector_characters_from(const GroupInfoT&                        info,
                        const std::vector<std::complex<double>>& phase_factors) {
     const std::size_t G = info.max_clique.size();
     std::vector<std::complex<double>> chi(G, std::complex<double>(1.0, 0.0));
+    // phase_factors: PER-ELEMENT (length |G|, χ(max_clique[g]) directly) or
+    // PER-GENERATOR (length num_generators, reconstruct via power_representation).
+    const bool per_element = (phase_factors.size() == G);
     for (std::size_t g = 0; g < G; ++g) {
+        if (per_element) {
+            chi[g] = phase_factors[g];
+            continue;
+        }
         const auto& powers = info.power_representation[g];
         std::complex<double> c(1.0, 0.0);
         for (std::size_t k = 0; k < powers.size(); ++k) {

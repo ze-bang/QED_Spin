@@ -59,6 +59,7 @@
 #include <Eigen/Sparse>
 
 #include <ed/core/operator.h>
+#include <ed/planner/basis_policy_hook.h>   // prefer_tableless_fixed_sz()
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/memory_space.h>
@@ -107,10 +108,14 @@ public:
     /// for the ``n_up`` magnetisation sector.
     SubspaceOperator(std::uint64_t n_bits, float spin_l, std::int64_t n_up)
         : Operator(n_bits, spin_l),
-          producer_(Producer::build(n_bits, n_up)) {
+          producer_(ed::planner::prefer_tableless_fixed_sz()
+                        ? Producer::build_tableless(n_bits, n_up)
+                        : Producer::build(n_bits, n_up)) {
         std::cout << "Fixed Sz basis: n_bits=" << n_bits
                   << ", n_up=" << n_up
-                  << ", dimension=" << producer_.dim() << std::endl;
+                  << ", dimension=" << producer_.dim()
+                  << (producer_.is_tableless() ? " (tableless combinadic)" : "")
+                  << std::endl;
     }
 
     /// Symmetry lane: adopt an owning producer (SectorBasis) carrying this
@@ -294,24 +299,25 @@ public:
             throw std::invalid_argument(
                 "projectToFixedSz: input vector size mismatch with full dimension");
         }
-        const auto& states = producer_.basis_states();
-        std::vector<Complex> fixed_sz_vec(states.size(), Complex(0.0, 0.0));
-        for (std::size_t i = 0; i < states.size(); ++i) {
-            fixed_sz_vec[i] = full_vec[states[i]];
+        // Mode-agnostic: producer_.state_of(i) is combinadic in tableless mode.
+        const std::uint64_t d = producer_.dim();
+        std::vector<Complex> fixed_sz_vec(d, Complex(0.0, 0.0));
+        for (std::uint64_t i = 0; i < d; ++i) {
+            fixed_sz_vec[i] = full_vec[producer_.state_of(i)];
         }
         return fixed_sz_vec;
     }
 
     std::vector<Complex> embedToFull(const std::vector<Complex>& fixed_sz_vec) const {
-        const auto& states = producer_.basis_states();
-        if (fixed_sz_vec.size() != states.size()) {
+        const std::uint64_t d = producer_.dim();
+        if (fixed_sz_vec.size() != static_cast<std::size_t>(d)) {
             throw std::invalid_argument(
                 "embedToFull: input vector size mismatch with fixed-Sz dimension");
         }
         const std::uint64_t full_dim = 1ULL << this->getNumBits();
         std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
-        for (std::size_t i = 0; i < states.size(); ++i) {
-            full_vec[states[i]] = fixed_sz_vec[i];
+        for (std::uint64_t i = 0; i < d; ++i) {
+            full_vec[producer_.state_of(i)] = fixed_sz_vec[i];
         }
         return full_vec;
     }
@@ -321,15 +327,13 @@ public:
     void buildFixedSzMatrix() const {
         if (fixed_sz_matrix_built_) return;
         this->commitPendingTransforms();
-        const auto& states = producer_.basis_states();
-        const std::uint64_t d = states.size();
+        const std::uint64_t d = producer_.dim();
         fixed_sz_matrix_.resize(d, d);
 
         std::vector<Eigen::Triplet<Complex>> triplets;
         if (!this->transform_data_.empty() || !this->three_body_data_.empty()) {
-            ed::matvec::basis::FixedSzBasisPolicy basis_pol =
-                ed::matvec::basis::make_fixed_sz_basis(
-                    producer_.basis_states(), producer_.lin_index());
+            // producer_.policy() is combinadic in tableless mode.
+            ed::matvec::basis::FixedSzBasisPolicy basis_pol = producer_.policy();
             ed::matvec::kernel::emit_term_triplets<
                 ed::matvec::basis::FixedSzBasisPolicy, Complex>(
                     basis_pol, static_cast<double>(this->getSpin()),

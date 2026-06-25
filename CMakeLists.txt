@@ -1172,6 +1172,14 @@ if(BUILD_ED_TESTS)
     #                              stays; covered by test_kpm_dos)
     # The dynamical-correlator coverage moves to Phase 6 primitives.
     ed_add_test(test_ltlm_static_connected_qh   tests/unit/test_ltlm_static_connected_qh.cpp USE_CATCH2)
+    # Capability-aware execution planner (system probe + task cost model)
+    ed_add_test(test_execution_planner          tests/unit/test_execution_planner.cpp USE_CATCH2)
+    # Streaming/tableless basis construction (Gosper enum + membership subspace)
+    ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
+    # Numerical irrep decomposition (non-abelian symmetry engine)
+    ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
+    # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)
+    ed_add_test(test_symmetry_adapted           tests/unit/test_symmetry_adapted.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
@@ -1220,6 +1228,8 @@ if(BUILD_ED_TESTS)
     # the Hilbert space (full) / fixed-Sz subspace and whose min ground state is the
     # Bethe-ansatz GS (Heisenberg Z_N, N=6) -- the SectorView fan-out replacement.
     ed_add_test(test_sector_set                 tests/unit/test_sector_set.cpp USE_CATCH2)
+    # Non-abelian safety guard (restrict to maximal abelian subgroup)
+    ed_add_test(test_nonabelian_guard           tests/unit/test_nonabelian_guard.cpp USE_CATCH2)
     # Operator-collapse refactor (Phase C, Jun 2026): the production cutover --
     # StreamingSymmetryHandle::sector(k) routes through the standalone
     # SectorOperator (collapse target); the legacy SectorView and the

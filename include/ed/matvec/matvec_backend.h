@@ -78,6 +78,7 @@
 #endif
 
 #include <ed/core/basis_utils.h>      // popcount()
+#include <ed/planner/csr_policy_hook.h>  // capability-aware CSR override (leaf)
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
@@ -289,6 +290,13 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
     } else {
         t.csr_force = read_force(env_use_legacy);
     }
+    // Capability-aware planner override (env force above takes precedence):
+    // when no env has forced the decision, the active ExecutionPlan -- if any --
+    // dictates CSR vs matrix-free, replacing the static dim cutoff entirely.
+    if (t.csr_force == -1) {
+        const int ovr = ed::planner::csr_override();
+        if (ovr == 0 || ovr == 1) t.csr_force = ovr;
+    }
 
     // Wave 7 (May 2026, "Unify all 16 matvec cells" plan): ``ED_SYM_CSR_DIM_MAX``
     // is the symmetry-specific override. When a SymmetryBasisPolicy-backed
@@ -351,6 +359,11 @@ inline MatVecTunables read_symmetry_tunables(
 
     int force = read_force("ED_CSR_FORCE");
     t.csr_force = force;  // -1 if unset -> use cutoff
+    // Capability-aware planner override (env force above takes precedence).
+    if (t.csr_force == -1) {
+        const int ovr = ed::planner::csr_override();
+        if (ovr == 0 || ovr == 1) t.csr_force = ovr;
+    }
 
     // Symmetry-specific cutoff: ED_SYM_CSR_DIM_MAX overrides
     // ED_CSR_DIM_MAX overrides the caller default.
@@ -422,9 +435,11 @@ public:
         // Full / FixedSz policies (needs_orbit_walk == false).
         if constexpr (BasisPolicy::needs_orbit_walk
                       || detail::policy_is_rep_v<BasisPolicy>) {
-            // GATHER (default) overwrites every row; only the SCATTER fallback
-            // needs a pre-zeroed accumulator.
-            if (tunables_.matvec_scatter) std::fill(out, out + n, Complex{});
+            // GATHER (default) overwrites every row; the SCATTER fallback and the
+            // multi-target (non-abelian) path accumulate, so they pre-zero.
+            if (tunables_.matvec_scatter
+                || kernel::policy_multi_target_v<BasisPolicy>)
+                std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
             return;
         } else {
@@ -473,37 +488,50 @@ public:
                     std::size_t   n) override
     {
         const auto& terms = *static_cast<const term_view_t*>(tv);
-        if (!terms.is_real) {
+        if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
+            // The non-abelian SAB projection is complex (D^Γ), so the effective
+            // matrix is complex even for real terms; the real fast path would
+            // drop the imaginary part. Force callers onto apply_complex. The
+            // `else` wraps the whole real body so `matrix_free_real` (and its
+            // real symmetry gather, which needs has_coeff_modifier) is NOT
+            // instantiated for this policy.
+            (void)terms; (void)in; (void)out; (void)n;
             throw std::runtime_error(
-                "MatVecBackend::apply_real: operator has complex couplings");
-        }
-        check_size(n);
-
-        // Symmetry policies must skip the assembled-CSR path (the assemble
-        // kernel performs no orbit walk). The real matrix-free kernel is
-        // valid here only because apply_real is reached solely when the
-        // owning operator reports a real effective matrix (real terms AND
-        // real momentum phases); coeff_modifier<double> is then exact.
-        // Compiled out for Full / FixedSz (needs_orbit_walk == false).
-        if constexpr (BasisPolicy::needs_orbit_walk
-                      || detail::policy_is_rep_v<BasisPolicy>) {
-            // GATHER (default) overwrites every row; only the SCATTER fallback
-            // needs a pre-zeroed accumulator.
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
-            return;
+                "MatVecBackend::apply_real: multi-target (non-abelian) symmetry "
+                "policy is complex-only; use apply_complex");
         } else {
-            const bool use_csr = detail::csr_eligible(
-                tunables_, basis_.dim(), csr_real_built_);
-
-            if (use_csr) {
-                ensure_csr_real(terms);
-                csr_spmv_real(in, out, n);
-                return;
+            if (!terms.is_real) {
+                throw std::runtime_error(
+                    "MatVecBackend::apply_real: operator has complex couplings");
             }
+            check_size(n);
 
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
+            // Symmetry policies must skip the assembled-CSR path (the assemble
+            // kernel performs no orbit walk). The real matrix-free kernel is
+            // valid here only because apply_real is reached solely when the
+            // owning operator reports a real effective matrix (real terms AND
+            // real momentum phases); coeff_modifier<double> is then exact.
+            // Compiled out for Full / FixedSz (needs_orbit_walk == false).
+            if constexpr (BasisPolicy::needs_orbit_walk
+                          || detail::policy_is_rep_v<BasisPolicy>) {
+                // GATHER (default) overwrites every row; only the SCATTER fallback
+                // needs a pre-zeroed accumulator.
+                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+                matrix_free_real(terms, in, out);
+                return;
+            } else {
+                const bool use_csr = detail::csr_eligible(
+                    tunables_, basis_.dim(), csr_real_built_);
+
+                if (use_csr) {
+                    ensure_csr_real(terms);
+                    csr_spmv_real(in, out, n);
+                    return;
+                }
+
+                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+                matrix_free_real(terms, in, out);
+            }
         }
     }
 
@@ -548,7 +576,18 @@ private:
             }
         } else if constexpr (BasisPolicy::needs_orbit_walk) {
             // Orbit-walk symmetry lane.
-            if (tunables_.matvec_scatter) {
+            if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
+                // Non-abelian (multiplicity): only the SCATTER kernel emits to the
+                // multiple SAB targets per state. The GATHER kernel assumes a
+                // single dst (and static_asserts has_coeff_modifier). Caller
+                // pre-zeroed ``out``.
+                ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else if (tunables_.matvec_scatter) {
                 // Bisection fallback: orbit-walk SCATTER (caller pre-zeroed).
                 ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
                     basis_, t.spin_l,
@@ -928,6 +967,33 @@ make_cpu_fixed_sz_backend(const std::vector<std::uint64_t>& basis_states,
         basis::make_fixed_sz_basis(basis_states, lin_index),
         tunables,
         "CpuFixedSz(dim=" + std::to_string(basis_states.size()) + ")");
+}
+
+// Tableless combinadic fixed-Sz backend. Same CpuMatVecBackend<FixedSzBasisPolicy>
+// type as make_cpu_fixed_sz_backend (so no extra template instantiation), but the
+// policy is in combinadic mode: the C(N,n_up) basis vector + Lin table are never
+// allocated; lookups go through the O(N) combinadic rank/unrank over ``binom``.
+template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
+          class OffDiagTwo, class ThreeBody>
+[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
+make_cpu_combinadic_fixed_sz_backend(
+    int                                        n_bits,
+    int                                        n_up,
+    const ed::core::combinadic::BinomialTable& binom,
+    std::uint64_t                              dim,
+    std::uint64_t default_csr_cutoff = (1ULL << 22))
+{
+    using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
+                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
+                                     OffDiagTwo, ThreeBody>;
+    auto tunables = detail::read_tunables(
+        default_csr_cutoff,
+        "ED_FIXED_SZ_USE_SPARSE",
+        "ED_FIXED_SZ_SPARSE_DIM_MAX");
+    return std::make_unique<Backend>(
+        basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim),
+        tunables,
+        "CpuCombinadicFixedSz(dim=" + std::to_string(dim) + ")");
 }
 
 // ---------------------------------------------------------------------------

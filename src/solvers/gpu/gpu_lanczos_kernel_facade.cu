@@ -22,19 +22,16 @@
 //      axpys on the retained Krylov basis and copy them to host
 //      (the "eigenpairs" entry point).
 //
-// The legacy `GPULanczos::run` class remains the path for callers that
-// need any of:
+// The Gen-1 `GPULanczos::run` class has been RETIRED; these facade entry
+// points are the only GPU Lanczos path. The eigenvalues path uses windowed
+// LocalDGKS3 reorth, so it needs no full basis; the eigenpairs path keeps the
+// basis resident for Ritz reconstruction and throws a clear error if it
+// exceeds device memory (the old on-disk basis spill is not reimplemented).
 //
-//   * a windowed reorthogonalisation regime (device-memory pressure),
-//   * the on-disk basis spill,
-//   * the early-eigenvalue-convergence early-exit.
-//
-// `runGPULanczos(...)` dispatches between the facade entry points and
-// the legacy class on the combination of (`eigenvectors`, available
-// device memory). All current callers (the orchestrator's GPU lane
-// in ``ed::workflows::solve`` and the streaming-symmetry GPU kernels)
-// go through `runGPULanczos`, so they pick up the unified-kernel
-// path automatically.
+// `runGPULanczos(...)` dispatches to one of the two facade entry points on
+// `eigenvectors`. All callers (the orchestrator's GPU lane in
+// ``ed::workflows::solve`` and the streaming-symmetry GPU kernels) go through
+// `runGPULanczos`, so they all run the unified kernel.
 // =============================================================================
 
 #ifdef WITH_CUDA

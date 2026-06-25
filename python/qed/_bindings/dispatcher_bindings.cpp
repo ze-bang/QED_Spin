@@ -53,12 +53,16 @@
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/operator.h>
+#include <ed/planner/execution_planner.h>   // capability-aware planner
+#include <ed/planner/system_capabilities.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/results.h>          // ThermodynamicData + FTLMResults (legacy envelope)
 
 #include <complex>
 #include <cstdint>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <vector>
 
 namespace py = pybind11;
@@ -426,4 +430,119 @@ void bind_dispatcher(py::module_& m) {
         "use the standalone ``mpiexec ed_distributed_main ...`` binary "
         "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
         "solvers.");
+
+    // ------------------------------------------------------------------------
+    // 7. Capability-aware execution planner (system probe + task cost model
+    //    + CSR/device/reorth/basis decision). Returns plain dicts so the
+    //    Python feasibility advisor can consume them without registering
+    //    C++ classes.
+    // ------------------------------------------------------------------------
+    namespace pl = ed::planner;
+
+    m.def("probe_system", [](bool refresh) {
+        const pl::SystemCapabilities c = pl::probe_system(refresh);
+        py::dict d;
+        d["ram_total_gb"]  = c.ram_total_gb();
+        d["ram_avail_gb"]  = c.ram_avail_gb();
+        d["n_cores"]       = c.n_cores;
+        d["n_gpus"]        = c.n_gpus;
+        d["vram_avail_gb"] = c.vram_avail_gb();
+        d["n_mpi_ranks"]   = c.n_mpi_ranks;
+        d["has_cuda_build"] = c.has_cuda_build;
+        d["has_mpi_build"]  = c.has_mpi_build;
+        d["has_nccl_build"] = c.has_nccl_build;
+        d["notes"]         = c.notes;
+        return d;
+    }, py::arg("refresh") = false,
+        "Probe the host (RAM/VRAM/cores/MPI-ranks/build-flags) for the "
+        "execution planner. Honors QED_HOST_* env overrides. Cached unless "
+        "refresh=True.");
+
+    m.def("plan_execution", [](std::uint64_t basis_dim,
+                               std::uint64_t n_terms,
+                               std::uint64_t n_offdiag,
+                               const std::string& method,
+                               int num_eigs, int krylov_dim, int n_samples,
+                               bool compute_vectors,
+                               const std::string& kind,
+                               int N, int n_up, std::uint64_t group_size,
+                               const std::string& device,
+                               const std::string& matvec,
+                               int n_ranks, double memory_safety,
+                               py::object host_caps) {
+        pl::TaskDescriptor t;
+        t.basis_dim = basis_dim;
+        t.n_terms = std::max<std::uint64_t>(1, n_terms);
+        t.n_offdiag = n_offdiag;
+        auto m_lc = method;
+        std::transform(m_lc.begin(), m_lc.end(), m_lc.begin(), ::tolower);
+        if      (m_lc.find("ltlm") != std::string::npos) t.method = pl::Method::LTLM;
+        else if (m_lc.find("ftlm") != std::string::npos) t.method = pl::Method::FTLM;
+        else if (m_lc.find("tpq")  != std::string::npos) t.method = pl::Method::TPQ;
+        else if (m_lc.find("kpm")  != std::string::npos) t.method = pl::Method::KPM;
+        else if (m_lc.find("block")!= std::string::npos) t.method = pl::Method::BlockLanczos;
+        else if (m_lc.find("krylov_schur")!=std::string::npos) t.method = pl::Method::KrylovSchur;
+        else if (m_lc.find("full") != std::string::npos) t.method = pl::Method::Full;
+        else t.method = pl::Method::Lanczos;
+        t.num_eigs = num_eigs;
+        t.krylov_dim = krylov_dim;
+        t.n_samples = n_samples;
+        t.compute_vectors = compute_vectors;
+        if      (kind == "sz")     t.kind = pl::BasisKind::Sz;
+        else if (kind == "symm")   t.kind = pl::BasisKind::Symm;
+        else if (kind == "sym+sz") t.kind = pl::BasisKind::SymSz;
+        else                       t.kind = pl::BasisKind::Full;
+        t.N = N; t.n_up = n_up; t.group_size = std::max<std::uint64_t>(1, group_size);
+
+        pl::SystemCapabilities caps = pl::probe_system(false);
+        if (!host_caps.is_none()) {
+            py::dict hc = host_caps.cast<py::dict>();
+            auto getf = [&](const char* k, double dflt) {
+                return hc.contains(k) ? hc[k].cast<double>() : dflt;
+            };
+            auto geti = [&](const char* k, int dflt) {
+                return hc.contains(k) ? hc[k].cast<int>() : dflt;
+            };
+            constexpr double GiB = 1024.0*1024.0*1024.0;
+            caps.ram_total_bytes = (std::uint64_t)(getf("ram_total_gb", caps.ram_total_gb()) * GiB);
+            caps.ram_avail_bytes = (std::uint64_t)(getf("ram_avail_gb", caps.ram_avail_gb()) * GiB);
+            caps.vram_avail_bytes = (std::uint64_t)(getf("vram_avail_gb", caps.vram_avail_gb()) * GiB);
+            caps.n_gpus = geti("n_gpus", caps.n_gpus);
+            caps.n_cores = geti("n_cores", caps.n_cores);
+            caps.n_mpi_ranks = geti("n_mpi_ranks", caps.n_mpi_ranks);
+        }
+
+        pl::UserConstraints uc;
+        uc.device = device; uc.matvec = matvec;
+        uc.n_ranks = n_ranks; uc.memory_safety = memory_safety;
+
+        const pl::ExecutionPlan p = pl::plan_execution(t, caps, uc);
+        py::dict d;
+        d["matvec"] = p.matvec_str();
+        d["device"] = p.device_str();
+        d["n_ranks"] = p.n_ranks;
+        d["reorth"] = p.reorth_str();
+        d["krylov_dim_cap"] = p.krylov_dim_cap;
+        d["basis"] = p.basis_str();
+        d["tableless_fixed_sz"] = p.tableless_fixed_sz;
+        d["sym_orbit_csr"] = p.sym_orbit_csr;
+        d["feasible"] = p.feasible;
+        d["bottleneck"] = p.bottleneck;
+        d["est_memory_gb"] = p.est_memory_gb;
+        d["est_seconds"] = p.est_seconds;
+        d["notes"] = p.notes;
+        d["suggestions"] = p.suggestions;
+        return d;
+    },
+        py::arg("basis_dim"), py::arg("n_terms"), py::arg("n_offdiag"),
+        py::arg("method") = "LANCZOS",
+        py::arg("num_eigs") = 1, py::arg("krylov_dim") = 0, py::arg("n_samples") = 1,
+        py::arg("compute_vectors") = false,
+        py::arg("kind") = "full",
+        py::arg("N") = 0, py::arg("n_up") = -1, py::arg("group_size") = 1,
+        py::arg("device") = "auto", py::arg("matvec") = "auto",
+        py::arg("n_ranks") = 0, py::arg("memory_safety") = 0.8,
+        py::arg("host_caps") = py::none(),
+        "Capability-aware execution plan (matvec strategy / device / reorth / "
+        "basis strategy) for one ED task. Returns a dict.");
 }

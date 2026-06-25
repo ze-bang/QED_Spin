@@ -778,21 +778,45 @@ void bind_workflows(py::module_& m) {
                   // first lane is authoritative.
                   std::string sector_lane;
                   std::size_t sector_mpi_size = 1;
-                  for (std::size_t k : iter_sectors) {
+
+                  // Phase 2: sector-parallel solve. Same ED_SYM_SECTOR_PARALLEL
+                  // gate as the Phase-1 Lanczos scan above (the gate variable
+                  // was already read into sector_parallel). Pre-index result
+                  // storage to avoid push_back data races in the parallel body.
+                  const long n_iter_sec =
+                      static_cast<long>(iter_sectors.size());
+                  std::vector<ed::GroundStateResult> solve_results_p2(
+                      static_cast<std::size_t>(n_iter_sec));
+
+                  #pragma omp parallel for schedule(dynamic, 1) \
+                      if(sector_parallel)
+                  for (long ii = 0; ii < n_iter_sec; ++ii) {
+                      const std::size_t k =
+                          iter_sectors[static_cast<std::size_t>(ii)];
                       auto sec = handle.sector(k);
                       if (!sec || sec->dim() == 0) continue;
                       ed::workflows::SolveOptions sopts = opts;
                       sopts.num_eigs = std::min<std::size_t>(
                           opts.num_eigs ? opts.num_eigs : 1, sec->dim());
-                      // Avoid recursing into the streaming loop when
-                      // the orchestrator is invoked on a SectorView.
                       sopts.selected_sectors.clear();
                       sopts.use_symmetry = false;
                       if (need_per_sector_outdir) {
                           sopts.output_dir = opts.output_dir
                               + "/sector_k_" + std::to_string(k);
                       }
-                      auto sr = ed::workflows::solve(*sec, sopts);
+                      solve_results_p2[static_cast<std::size_t>(ii)] =
+                          ed::workflows::solve(*sec, sopts);
+                  }
+
+                  // Serial collection: preserve iter_sectors ordering for
+                  // the eigenvalue merge and sector-tag attribution below.
+                  for (long ii = 0; ii < n_iter_sec; ++ii) {
+                      const std::size_t k =
+                          iter_sectors[static_cast<std::size_t>(ii)];
+                      auto sec = handle.sector(k);
+                      if (!sec || sec->dim() == 0) continue;
+                      auto& sr =
+                          solve_results_p2[static_cast<std::size_t>(ii)];
                       if (sector_lane.empty()
                           && !sr.backend.lane.empty()) {
                           sector_lane     = sr.backend.lane;
@@ -1106,7 +1130,40 @@ void bind_workflows(py::module_& m) {
                   std::string sector_lane;
                   std::size_t sector_mpi_size = 1;
 
-                  for (std::size_t k : sector_indices) {
+                  // Sector-level OMP parallelism: every irrep sector's
+                  // thermal call is independent (distinct Krylov workspace,
+                  // distinct random state, distinct output path). On
+                  // many-core machines (>=32 cores) this is the dominant
+                  // speedup lever — typical symmetry-projected sectors have
+                  // dim ~100-10k, far too small to saturate the CPU with a
+                  // single-sector BLAS team, so the right unit of work is
+                  // the sector itself.
+                  //
+                  // Enable with ED_SYM_SECTOR_PARALLEL=1. To prevent inner
+                  // BLAS / OMP nesting from oversubscribing:
+                  //   OMP_MAX_ACTIVE_LEVELS=1     (serialise nested OMP teams)
+                  //   OPENBLAS_NUM_THREADS=1       (or MKL_NUM_THREADS=1)
+                  //   ED_AUTO_THREADS=0            (disable ThreadBudgetScope)
+                  // OMP_NUM_THREADS should be set to the machine core count.
+                  bool thermal_sector_parallel = false;
+                  if (const char* env =
+                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
+                      thermal_sector_parallel = (env[0] == '1');
+                  }
+
+                  // Pre-allocate indexed result storage so the parallel
+                  // fill is race-free (each slot ii is written by exactly
+                  // one thread; no push_back races).
+                  const long n_sec_th =
+                      static_cast<long>(sector_indices.size());
+                  std::vector<ed::ThermalResult> sec_results_th(
+                      static_cast<std::size_t>(n_sec_th));
+
+                  #pragma omp parallel for schedule(dynamic, 1) \
+                      if(thermal_sector_parallel)
+                  for (long ii = 0; ii < n_sec_th; ++ii) {
+                      const std::size_t k =
+                          sector_indices[static_cast<std::size_t>(ii)];
                       auto sec = handle.sector(k);
                       if (!sec || sec->dim() == 0) continue;
                       ed::workflows::ThermalOptions topts = opts;
@@ -1115,58 +1172,51 @@ void bind_workflows(py::module_& m) {
                           topts.output_dir = opts.output_dir
                               + "/sector_k_" + std::to_string(k);
                       } else {
-                          // No user-supplied output_dir -- keep the
-                          // per-sector call silent on disk.
                           topts.output_dir.clear();
                       }
-                      // Phase E of the "Close CPU/GPU Gaps" plan
-                      // (May 2026): FTLM now dispatches on Backend
-                      // internally (see ``ftlm_kernel.h``) and
-                      // accepts both ``CpuBackend`` and ``CudaBackend``,
-                      // so the previous FTLM-specific demotion has
-                      // been removed. All thermal methods now stay on
-                      // the caller's chosen backend through the
-                      // streaming-symmetry SectorView's lazy GPU
-                      // mirror.
-                      // Wave B3: inject shared spectral bounds when
-                      // the binding-level estimator succeeded.
                       if (std::isfinite(shared_e_min)
                           && std::isfinite(shared_e_max)) {
                           topts.e_min_override = shared_e_min;
                           topts.e_max_override = shared_e_max;
                       }
-                      auto tr = ed::workflows::thermal(*sec, topts);
+                      sec_results_th[static_cast<std::size_t>(ii)] =
+                          ed::workflows::thermal(*sec, topts);
+                  }
+
+                  // Serial post-processing: collect results in
+                  // sector_indices order. The same dim==0 guard filters
+                  // sectors that the parallel loop skipped (their result
+                  // slots are default-constructed and safely ignored).
+                  for (long ii = 0; ii < n_sec_th; ++ii) {
+                      const std::size_t k =
+                          sector_indices[static_cast<std::size_t>(ii)];
+                      auto sec = handle.sector(k);
+                      if (!sec || sec->dim() == 0) continue;
+                      auto& tr =
+                          sec_results_th[static_cast<std::size_t>(ii)];
                       if (sector_lane.empty()
                           && !tr.backend.lane.empty()) {
                           sector_lane     = tr.backend.lane;
                           sector_mpi_size = tr.backend.mpi_size;
                       }
-
                       if (tr.thermo.temperatures.empty()) {
-                          // Method (e.g. raw TPQ) did not populate
-                          // ThermodynamicData; skip the sector for
-                          // recombination but record the GS energy.
                           if (std::isfinite(tr.ground_state_energy)) {
                               gs_E = std::min(gs_E, tr.ground_state_energy);
                           }
                           continue;
                       }
-
                       ed::SectorTag tag = handle.sector_tag(k);
                       per_sector_thermo.push_back(tr.thermo);
                       per_sector_dims.push_back(tag.sector_dim);
-
                       ed::ThermalSectorEntry entry;
                       entry.sz_index            = tag.n_up;
                       entry.ground_state_energy = tr.ground_state_energy;
                       entry.thermo              = tr.thermo;
                       entry.tag                 = tag;
                       per_sector.push_back(std::move(entry));
-
                       if (need_per_sector_outdir && !tr.hdf5_path.empty()) {
                           sector_hdf5_paths.push_back(tr.hdf5_path);
                       }
-
                       if (std::isfinite(tr.ground_state_energy)) {
                           gs_E = std::min(gs_E, tr.ground_state_energy);
                       }
@@ -1309,23 +1359,52 @@ void bind_workflows(py::module_& m) {
                   std::size_t gs_sector_idx = 0;
                   double      gs_energy     = std::numeric_limits<double>::infinity();
                   bool        any_solved    = false;
-                  for (std::size_t k : sector_indices) {
-                      auto sec = handle.sector(k);
-                      if (!sec || sec->dim() == 0) continue;
-                      ed::workflows::SolveOptions sopts;
-                      sopts.num_eigs        = 1;
-                      sopts.tolerance       = 1e-12;
-                      sopts.backend         = opts.backend;
-                      sopts.method          = ed::workflows::SolveMethod::Lanczos;
-                      sopts.compute_vectors = false;
-                      auto sr = ed::workflows::solve(*sec, sopts);
-                      if (sr.eigenvalues.empty()) continue;
-                      const double E_k = sr.eigenvalues.front();
-                      if (E_k < gs_energy) {
-                          gs_energy     = E_k;
-                          gs_sector_idx = k;
+                  {
+                      // Pass 1: GS sector scan. Independent per-sector
+                      // Lanczos calls (1 eig, no vectors) — embarrassingly
+                      // parallel. Reuses the ED_SYM_SECTOR_PARALLEL gate.
+                      bool sp_spectral = false;
+                      if (const char* env =
+                              std::getenv("ED_SYM_SECTOR_PARALLEL")) {
+                          sp_spectral = (env[0] == '1');
                       }
-                      any_solved = true;
+                      const long n_sp =
+                          static_cast<long>(sector_indices.size());
+                      // (gs_energy, sector_idx) per slot; sector_idx=SIZE_MAX
+                      // means "no eigenvalue".
+                      std::vector<std::pair<double, std::size_t>>
+                          sp_results(static_cast<std::size_t>(n_sp),
+                              {std::numeric_limits<double>::infinity(),
+                               std::size_t(-1)});
+
+                      #pragma omp parallel for schedule(dynamic, 1) \
+                          if(sp_spectral)
+                      for (long ii = 0; ii < n_sp; ++ii) {
+                          const std::size_t k =
+                              sector_indices[static_cast<std::size_t>(ii)];
+                          auto sec = handle.sector(k);
+                          if (!sec || sec->dim() == 0) continue;
+                          ed::workflows::SolveOptions sopts;
+                          sopts.num_eigs        = 1;
+                          sopts.tolerance       = 1e-12;
+                          sopts.backend         = opts.backend;
+                          sopts.method =
+                              ed::workflows::SolveMethod::Lanczos;
+                          sopts.compute_vectors = false;
+                          auto sr = ed::workflows::solve(*sec, sopts);
+                          if (!sr.eigenvalues.empty()) {
+                              sp_results[static_cast<std::size_t>(ii)] =
+                                  {sr.eigenvalues.front(), k};
+                          }
+                      }
+                      for (const auto& [E_k, k] : sp_results) {
+                          if (k == std::size_t(-1)) continue;
+                          any_solved = true;
+                          if (E_k < gs_energy) {
+                              gs_energy     = E_k;
+                              gs_sector_idx = k;
+                          }
+                      }
                   }
                   if (!any_solved) {
                       throw std::runtime_error(
@@ -2871,5 +2950,269 @@ void bind_workflows(py::module_& m) {
             distinguishes the multi-T payload). The Python wrapper
             ``qed.spectral`` unpacks this and surfaces a clean
             ``{T -> S(omega)}`` dict to the user.
+    )pbdoc");
+
+    // -----------------------------------------------------------------
+    // All-Sz flat-pool thermal binding (Jun 2026).
+    //
+    // Replaces the Python ThreadPoolExecutor n_up outer loop with a
+    // single C++ call that:
+    //   1. Loads the Hamiltonian + symmetry group info ONCE.
+    //   2. Enumerates orbit reps ONCE via enumerate_full_orbit_reps
+    //      (O(2^N × |G|)), partitions by popcount into per-n_up buckets.
+    //   3. Builds ALL (n_up, irrep) sector operators in one nested loop.
+    //   4. Runs a single flat #pragma omp parallel for over the entire
+    //      (n_up × irrep) sector set simultaneously (ED_SYM_SECTOR_PARALLEL=1).
+    //   5. Does one combine_sector_thermodynamics call across all sectors.
+    //
+    // Eliminates N+1 cold-start overhead (JSON loads + orbit rep scans)
+    // present when calling workflows_thermal_streaming_symmetry_directory
+    // once per n_up from a Python ThreadPoolExecutor.
+    // -----------------------------------------------------------------
+    m.def("workflows_thermal_all_sz_streaming_symmetry_directory",
+          [](const std::string& directory,
+             std::uint64_t num_sites,
+             double spin_l,
+             ed::workflows::ThermalOptions opts,
+             int n_up_min,
+             int n_up_max) {
+              ed::ThermalResult agg;
+              {
+                  py::gil_scoped_release release;
+
+                  ed::OperatorSpec spec;
+                  spec.source             = ed::DirectoryPath{directory};
+                  spec.num_sites          = num_sites;
+                  spec.spin_l             = static_cast<float>(spin_l);
+                  spec.streaming_symmetry = true;
+                  // No fixed_sz: build_all_sz_sector_operators covers all n_up.
+
+                  // Build ALL (n_up, irrep) sector operators in a single pass.
+                  ed::SectorOperatorSet set =
+                      ed::make_all_sz_sector_operators_tagged(
+                          spec, n_up_min, n_up_max);
+
+                  const long n_ops =
+                      static_cast<long>(set.operators.size());
+                  if (n_ops == 0) {
+                      throw std::runtime_error(
+                          "workflows_thermal_all_sz_streaming_symmetry_"
+                          "directory: no sectors found; check n_up range "
+                          "and automorphism_results/ directory.");
+                  }
+
+                  // Pre-build the beta grid once (same logic as the
+                  // per-n_up binding but shared across ALL sectors).
+                  if (opts.betas.empty() && opts.num_temp_bins > 0
+                      && opts.temp_min > 0.0
+                      && opts.temp_max > opts.temp_min) {
+                      opts.betas.reserve(opts.num_temp_bins);
+                      const double t_lo = opts.temp_min;
+                      const double t_hi = opts.temp_max;
+                      const std::size_t n = opts.num_temp_bins;
+                      for (std::size_t i = 0; i < n; ++i) {
+                          const double T = (n == 1)
+                              ? t_lo
+                              : t_lo + (t_hi - t_lo)
+                                * static_cast<double>(i)
+                                / static_cast<double>(n - 1);
+                          opts.betas.push_back(
+                              T > 0.0 ? 1.0 / T : 1.0 / 1e-300);
+                      }
+                  }
+
+                  // Lock random seed once: deterministic + lower variance.
+                  if (opts.random_seed == 0) {
+                      opts.random_seed = std::random_device{}();
+                  }
+
+                  // Wave B3: for KPM-DOS, estimate spectral bounds on the
+                  // globally largest sector and share across all sectors.
+                  double shared_e_min =
+                      std::numeric_limits<double>::quiet_NaN();
+                  double shared_e_max =
+                      std::numeric_limits<double>::quiet_NaN();
+                  if (opts.method ==
+                          ed::workflows::ThermalOptions::Method::KpmDos
+                      && !(std::isfinite(opts.e_min_override)
+                           && std::isfinite(opts.e_max_override))
+                      && n_ops > 1) {
+                      std::size_t best_i   = 0;
+                      std::uint64_t best_dim = 0;
+                      for (std::size_t i = 0;
+                           i < static_cast<std::size_t>(n_ops); ++i) {
+                          if (set.operators[i] &&
+                              set.operators[i]->dim() > best_dim) {
+                              best_dim = set.operators[i]->dim();
+                              best_i   = i;
+                          }
+                      }
+                      auto* best_sec = set.operators[best_i].get();
+                      if (best_sec && best_sec->dim() > 0) {
+                          try {
+                              std::mt19937 gen(opts.random_seed
+                                                   ? opts.random_seed
+                                                   : 0xdeadbeefULL);
+                              double lo = 0.0, hi = 0.0;
+                              ed::kpm_dos::MatVec H_mv =
+                                  [best_sec](const Complex* in, Complex* out,
+                                              int n) {
+                                      best_sec->apply(in, out,
+                                          static_cast<std::size_t>(n));
+                                  };
+                              ed::kpm_dos::estimate_spectral_bounds(
+                                  H_mv, best_sec->dim(),
+                                  /*krylov_dim=*/80,
+                                  /*full_reorth=*/true,
+                                  /*reorth_freq=*/10,
+                                  /*tol=*/1e-10,
+                                  gen, lo, hi);
+                              shared_e_min = lo;
+                              shared_e_max = hi;
+                          } catch (...) {}
+                      }
+                  }
+
+                  const bool need_per_sector_outdir =
+                      !opts.output_dir.empty()
+                      && !HDF5IO::isDisabledOutputPath(opts.output_dir);
+
+                  // Sector-level OMP parallelism gate (same as the per-n_up
+                  // binding). With this binding, the parallel region covers
+                  // ALL (n_up, irrep) sectors simultaneously, giving better
+                  // load balancing than two nested loops.
+                  bool sector_parallel = false;
+                  if (const char* env =
+                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
+                      sector_parallel = (env[0] == '1');
+                  }
+
+                  // Pre-indexed result storage: each OMP thread writes to its
+                  // own slot ii -- no push_back races.
+                  std::vector<ed::ThermalResult> all_results(
+                      static_cast<std::size_t>(n_ops));
+
+                  #pragma omp parallel for schedule(dynamic, 1) \
+                      if(sector_parallel)
+                  for (long ii = 0; ii < n_ops; ++ii) {
+                      const std::size_t i = static_cast<std::size_t>(ii);
+                      auto* op = set.operators[i].get();
+                      if (!op || op->dim() == 0) continue;
+                      ed::workflows::ThermalOptions topts = opts;
+                      topts.selected_sectors.clear();
+                      if (need_per_sector_outdir) {
+                          const auto& tag = set.tags[i];
+                          topts.output_dir = opts.output_dir
+                              + "/sz_" + std::to_string(tag.n_up)
+                              + "_sector_k_"
+                              + std::to_string(tag.sector_index);
+                      } else {
+                          topts.output_dir.clear();
+                      }
+                      if (std::isfinite(shared_e_min)
+                          && std::isfinite(shared_e_max)) {
+                          topts.e_min_override = shared_e_min;
+                          topts.e_max_override = shared_e_max;
+                      }
+                      all_results[i] = ed::workflows::thermal(*op, topts);
+                  }
+
+                  // Serial collection: flat combine across ALL (n_up, irrep).
+                  std::vector<ThermodynamicData>      per_sector_thermo;
+                  std::vector<std::uint64_t>          per_sector_dims;
+                  std::vector<ed::ThermalSectorEntry> per_sector;
+                  double gs_E = std::numeric_limits<double>::infinity();
+                  std::string sector_lane;
+                  std::size_t sector_mpi_size = 1;
+
+                  for (long ii = 0; ii < n_ops; ++ii) {
+                      const std::size_t i = static_cast<std::size_t>(ii);
+                      auto* op = set.operators[i].get();
+                      if (!op || op->dim() == 0) continue;
+                      auto& tr = all_results[i];
+                      if (sector_lane.empty()
+                          && !tr.backend.lane.empty()) {
+                          sector_lane     = tr.backend.lane;
+                          sector_mpi_size = tr.backend.mpi_size;
+                      }
+                      if (tr.thermo.temperatures.empty()) {
+                          if (std::isfinite(tr.ground_state_energy))
+                              gs_E = std::min(gs_E, tr.ground_state_energy);
+                          continue;
+                      }
+                      const auto& tag = set.tags[i];
+                      per_sector_thermo.push_back(tr.thermo);
+                      per_sector_dims.push_back(tag.sector_dim);
+                      ed::ThermalSectorEntry entry;
+                      entry.sz_index            = tag.n_up;
+                      entry.ground_state_energy = tr.ground_state_energy;
+                      entry.thermo              = tr.thermo;
+                      entry.tag                 = tag;
+                      per_sector.push_back(std::move(entry));
+                      if (std::isfinite(tr.ground_state_energy))
+                          gs_E = std::min(gs_E, tr.ground_state_energy);
+                  }
+
+                  if (!per_sector_thermo.empty()) {
+                      agg.thermo = ed::core::combine_sector_thermodynamics(
+                          per_sector_thermo, per_sector_dims);
+                  }
+                  agg.per_sector          = std::move(per_sector);
+                  agg.ground_state_energy = std::isfinite(gs_E) ? gs_E : 0.0;
+                  if (!sector_lane.empty()) {
+                      agg.backend.lane     = sector_lane;
+                      agg.backend.mpi_size = sector_mpi_size;
+                  }
+              }
+              return agg;
+          },
+          py::arg("directory"),
+          py::arg("num_sites"),
+          py::arg("spin_l")    = 0.5,
+          py::arg("opts")      = ed::workflows::ThermalOptions{},
+          py::arg("n_up_min")  = 0,
+          py::arg("n_up_max")  = -1,
+          R"pbdoc(
+        All-Sz flat-pool finite-T workflow (Jun 2026 architecture).
+
+        Replaces the Python-level ``ThreadPoolExecutor`` n_up outer loop with
+        a single C++ call. Internally:
+
+        1. Loads the Hamiltonian and symmetry group info **once**.
+        2. Calls ``enumerate_full_orbit_reps`` **once** (O(2^N × |G|)),
+           partitions reps by popcount to get per-n_up fixed-Sz reps.
+        3. Builds ALL ``(n_up, irrep)`` sector operators in one pass over
+           the range ``[n_up_min, n_up_max]``.
+        4. Runs a single ``#pragma omp parallel for`` (gate:
+           ``ED_SYM_SECTOR_PARALLEL=1``) over the full flat sector list,
+           giving the scheduler unobstructed access to all (n_up × irrep)
+           sectors simultaneously.
+        5. Combines all per-sector thermodynamics in one
+           ``combine_sector_thermodynamics`` call.
+
+        Eliminates the N+1 cold-start penalty (JSON + orbit rep scan per
+        n_up) that the per-n_up Python loop incurs.
+
+        Parameters
+        ----------
+        directory : str
+            Hamiltonian directory (must contain ``automorphism_results/``).
+        num_sites : int
+            Number of lattice sites.
+        spin_l : float, optional
+            Local spin magnitude (default 0.5).
+        opts : ThermalOptions, optional
+            Shared finite-T options for all sectors.
+        n_up_min : int, optional
+            Minimum n_up (default 0).
+        n_up_max : int, optional
+            Maximum n_up (-1 = num_sites, the default).
+
+        Returns
+        -------
+        ThermalResult
+            ``thermo`` carries Z-weighted combined thermodynamics over ALL
+            (n_up, irrep) sectors; ``per_sector`` lists every sector with
+            ``tag.n_up`` and ``tag.sector_index`` set.
     )pbdoc");
 }

@@ -1,0 +1,108 @@
+{
+  "config": {
+    "N": 12,
+    "ftlm_samples": 3,
+    "ftlm_kdim": 30,
+    "parallel": true,
+    "OMP_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "1",
+    "QED_SZ_WORKERS": null
+  },
+  "timings": [
+    {
+      "label": "thermal+none     [single workflows_thermal]",
+      "tag": "thermal_none",
+      "seconds": 0.5549
+    },
+    {
+      "label": "thermal+sz       [qed.thermal, TPool\u00d713 n_up workers]",
+      "tag": "thermal_sz",
+      "seconds": 0.0422
+    },
+    {
+      "label": "thermal+spatial  [12 full-space sectors, CPU, OMP if ED_SYM_SECTOR_PARALLEL]",
+      "tag": "thermal_spatial",
+      "seconds": 0.2899
+    },
+    {
+      "label": "thermal+sz_spatial OLD  [13 calls \u00d7 streaming_symm_dir, each loads JSON + orbit scan]",
+      "tag": "thermal_szsym_old",
+      "seconds": 5.123
+    },
+    {
+      "label": "thermal+sz_spatial NEW cold  [1 call, GPU-default, cold OMP start]",
+      "tag": "thermal_szsym_new_cold",
+      "seconds": 0.054
+    },
+    {
+      "label": "thermal+sz_spatial NEW warm  [1 call, CPU, warm OMP team]",
+      "tag": "thermal_szsym_new_warm",
+      "seconds": 0.0586
+    },
+    {
+      "label": "thermal+sz_spatial API  [qed.thermal \u2192 new flat-pool, CPU, warm]",
+      "tag": "thermal_szsym_api",
+      "seconds": 0.0587
+    },
+    {
+      "label": "thermal+sz_spatial SINGLE n_up=6  [12 irrep sectors only]",
+      "tag": "thermal_szsym_single_nup",
+      "seconds": 0.7549
+    },
+    {
+      "label": "solve+none       [single workflows_solve, full Hilbert]",
+      "tag": "solve_none",
+      "seconds": 5.1377
+    },
+    {
+      "label": "solve+sz         [workflows_solve, FixedSz n_up=6  dim=924]",
+      "tag": "solve_sz",
+      "seconds": 0.0732
+    },
+    {
+      "label": "solve+spatial    [12 full-space sectors, dim\u2248341, two-phase scan]",
+      "tag": "solve_spatial",
+      "seconds": 1.6626
+    },
+    {
+      "label": "solve+sz_spatial [n_up=6, 12 sectors dim\u224877, two-phase scan]",
+      "tag": "solve_szsym",
+      "seconds": 0.1144
+    },
+    {
+      "label": "solve+sz_spatial API [qed.solve(symmetry=Z_12, sz=6)]",
+      "tag": "solve_szsym_api",
+      "seconds": 0.1809
+    },
+    {
+      "label": "solve+spatial    API [qed.solve(symmetry=Z_12, sz=None) \u2192 full-space sectors]",
+      "tag": "solve_spatial_api",
+      "seconds": 0.093
+    },
+    {
+      "label": "overhead: spatial  [1 call, 12 sectors, 1 orbit scan]",
+      "tag": "oh_spatial",
+      "seconds": 0.0142
+    },
+    {
+      "label": "overhead: sz_spatial OLD  [13 calls, 13 JSON loads + orbit scans]",
+      "tag": "oh_szsym_old",
+      "seconds": 0.0202
+    },
+    {
+      "label": "overhead: sz_spatial NEW  [1 call, 1 JSON load + orbit scan]",
+      "tag": "oh_szsym_new",
+      "seconds": 0.0086
+    },
+    {
+      "label": "overhead: sz_spatial single n_up  [1 call, 1 orbit scan, n_up=6]",
+      "tag": "oh_szsym_one",
+      "seconds": 0.0033
+    },
+    {
+      "label": "full_spectrum OLD [13 calls \u00d7 streaming_symm_dir, GS per sector]",
+      "tag": "fullspec_old",
+      "seconds": 0.5519
+    }
+  ]
+}

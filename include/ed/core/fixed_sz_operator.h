@@ -39,6 +39,18 @@ template <>
 inline std::unique_ptr<ed::matvec::MatVecBackendBase>
 SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
                  ed::matvec::MemorySpace::Host>::make_backend_() const {
+    // Tableless combinadic lane (no materialized C(N,n_up) basis / Lin table)
+    // when the producer was built tableless (planner / ED_FIXED_SZ_TABLELESS).
+    if (producer_.is_tableless()) {
+        return ed::matvec::make_cpu_combinadic_fixed_sz_backend<
+            DiagonalOneBody, OffDiagonalOneBody,
+            DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
+            ThreeBodyTransformData>(
+                static_cast<int>(producer_.n_bits()),
+                static_cast<int>(producer_.n_up()),
+                producer_.binom(),
+                producer_.dim());
+    }
     return ed::matvec::make_cpu_fixed_sz_backend<
         DiagonalOneBody, OffDiagonalOneBody,
         DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,

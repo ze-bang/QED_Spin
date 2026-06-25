@@ -1,0 +1,523 @@
+\documentclass[11pt]{article}
+
+% =============================================================================
+% layer_to_layer_architecture.tex
+%
+% Layer-to-layer architecture of the QED exact-diagonalization library, from the
+% top-level Python API down to the rudimentary matvec kernels and backends.
+% Reflects the post-"symmetry-on-the-engine" state (branch
+% lanczos-unification-gen1-retire): one matvec engine, three orthogonal axes.
+% =============================================================================
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+
+\definecolor{kw}{rgb}{0.13,0.29,0.53}
+\definecolor{cm}{rgb}{0.30,0.50,0.30}
+\definecolor{ty}{rgb}{0.55,0.20,0.50}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{ty},
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible,
+  language=C++,
+  morekeywords={constexpr,override,noexcept,nullptr,uint64_t,std,template,typename,struct,class,using},
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{black!25},
+  backgroundcolor=\color{black!2},
+}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\file}[1]{\texttt{\footnotesize #1}}
+
+\title{\textbf{QED Exact Diagonalization:\\ Layer-to-Layer Architecture}\\[4pt]
+\large From the Python API down to the matvec kernels}
+\author{Architecture reference}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the QED exact-diagonalization (ED) library
+layer by layer, from the top-level Python entry points down to the
+rudimentary sparse matrix--vector (SpMV) kernels and the linear-algebra
+backends. The central organizing principle is that an ED computation is
+one point in a \emph{three-axis cube}---\textbf{reduction} (which basis
+the Hamiltonian acts on) $\times$ \textbf{method} (which eigensolver)
+$\times$ \textbf{deployment} (which hardware backend)---and that these
+three axes compose independently above a single seam, the
+\code{MatVecOperator}. We trace each axis to its concrete code, show the
+contracts between adjacent layers, and present the rudimentary
+implementations: the term SoA, the gather/scatter SpMV kernels, the
+basis policies (including the multi-target generalization that lets
+non-abelian symmetry ride the same engine as everything else), and the
+symmetry reduction (group closure, numerical irrep decomposition, and
+the symmetry-adapted basis).
+\end{abstract}
+
+\tableofcontents
+
+% =============================================================================
+\section{The organizing model: three orthogonal axes}
+% =============================================================================
+
+A solve is fully specified by a point in
+\[
+\underbrace{\text{Full} \mid \text{Sz} \mid \text{abelian} \mid \text{non-abelian} \mid \text{Sz}\!\times\!\text{sym}}_{\textbf{A: reduction (basis)}}
+\;\times\;
+\underbrace{\text{dense} \mid \text{Lanczos} \mid \text{Krylov--Schur} \mid \text{FTLM/TPQ} \mid \text{cf-DSSF}}_{\textbf{B: method}}
+\;\times\;
+\underbrace{\text{CPU} \mid \text{GPU} \mid \text{MPI}}_{\textbf{C: deployment}}.
+\]
+The library realizes this cube so that the axes are independent: a
+reduction is a \emph{basis policy}, a method is a \emph{kernel
+consuming a matvec}, and a deployment is a \emph{backend template
+parameter}. The one seam they meet at is the abstract operator
+interface \code{ed::matvec::MatVecOperator}, which exposes only
+$v \mapsto Hv$ and the dimension. Everything above that seam is
+symmetry-blind; everything below it is method-blind.
+
+% =============================================================================
+\section{Physical layering: the static libraries}
+% =============================================================================
+
+The build is a small DAG of static libraries
+(\file{cmake/EDLibraries.cmake}). Arrows mean ``links / depends on'';
+lower is more fundamental.
+
+\begin{center}
+\begin{lstlisting}[language=,basicstyle=\ttfamily\scriptsize]
+ _core   (pybind11 module: python/qed/_bindings/qed_bindings.cpp) -- links everything
+   |
+   +-- ed_cli        ed_solvers_gpu        ed_distributed     ed_input
+   |    (verbs)      (CUDA: facade lanczos  (MPI/NCCL)        (HamiltonianBuilder)
+   |                  kernel<CudaBackend>,
+   |                  gpu_ftlm, kpm,
+   |                  symmetry_adapted_gpu)
+   |                       | PUBLIC
+   v                       v
+   +------------>  ed_solvers_cpu  (lanczos_kernel consumers, planner, thermal,
+   |                |   |   |        ftlm, symmetry_adapted_solve)
+   |                |   |   +--> ed_symmetry  (group, irreps, SAB/sector builders)
+   |                |   +------> ed_matvec    (backends + basis policies + kernels)
+   v                v
+ ed_dssf          ed_core  (Operator, SubspaceOperator, FixedSzOperator, term SoA)
+                    |
+                  ed_io --> ed_parallel  (OpenMP / pthreads)
+\end{lstlisting}
+\end{center}
+
+Two edges are load-bearing:
+\begin{itemize}[nosep]
+  \item \code{ed\_solvers\_cpu} $\to$ \code{ed\_symmetry} is one-way. Hence
+  the symmetry reduction (which builds the basis) lives in
+  \code{ed\_symmetry}, but anything that \emph{solves} (calls the Krylov
+  kernel) lives one layer up in \code{ed\_solvers\_cpu}.
+  \item \code{ed\_matvec} and \code{ed\_symmetry} are siblings (both
+  $\to$ \code{ed\_core}). The basis \emph{policies} live in
+  \code{ed\_matvec}; the group/irrep/SAB \emph{construction} lives in
+  \code{ed\_symmetry}.
+\end{itemize}
+
+% =============================================================================
+\section{Logical layering and the inter-layer contracts}
+% =============================================================================
+
+\begin{center}
+\begin{lstlisting}[language=,basicstyle=\ttfamily\scriptsize]
+ L0  Frontend     python/qed/*.py            solve / thermal / dssf / symmetry_adapted_*
+ L1  Bindings     qed_bindings.cpp           Python<->C++; use_gpu, n_up, method
+ ----------------------------------------------------------------------------------
+ L2  Consumers    solvers/, thermal/, dssf/  loop sectors -> pick method -> recombine x d_G
+ L3  Method       krylov/, lanczos.cpp       dense / Lanczos / FTLM / cf-DSSF
+ ===== SEAM:  MatVecOperator :  apply(in,out,n) , dim() =============================
+ L4  Operator     CpuMatVecBackend<Policy>   the matvec engine (CSR | matrix-free)
+                  CudaMatVecBackend<Policy>
+ ===== SEAM:  BasisPolicy : index_of, iter_orbit, coeff_modifier, traits ============
+ L5  Basis        Full / FixedSz / Rep /     reduced basis: state -> (index, amplitude)
+                  Symmetry / NonAbelianSymmetry
+ L6  Sym build    group.cpp, irreps.cpp,     group closure, irrep matrices D^G(g), SAB,
+                  symmetry_adapted.cpp        sector packing
+ ----------------------------------------------------------------------------------
+ L7  Core         core/operator.h            Operator (term SoA), for_each_connected_state
+ L8  Compute      term_kernels*, backends/   SpMV kernels; CpuBackend / CudaBackend (BLAS-like)
+\end{lstlisting}
+\end{center}
+
+The contracts at each seam (Table~\ref{tab:contracts}) are the spine of
+the design: every layer talks to its neighbours through exactly one of
+these.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Seam & Contract & Implementors \\
+\midrule
+L7$\to$L6 & \code{ConnectFn}: \code{connect(s, emit)} $\Rightarrow$ \code{emit(s', $\langle s'|H|s\rangle$)} & \code{Operator::for\_each\_connected\_state} \\
+L6$\to$L5 & \code{GroupIrreps} + \code{::SymmetrySector} & \code{decompose\_irreps}, \code{build\_..\_sector} \\
+L5$\to$L4 & \code{BasisPolicy} concept (compile-time) & \code{Full/FixedSz/Rep/Symmetry/NonAbelian} \\
+L4$\to$L3 & \code{MatVecOperator}: \code{apply}, \code{dim} & \code{CpuMatVecBackend}, \code{CudaMatVecBackend} \\
+L3$\to$L2 & method takes \code{const MatVecOperator\&} & \code{lanczos}, \code{full\_diagonalization}, \dots \\
+\bottomrule
+\end{tabular}
+\caption{The five inter-layer contracts.}
+\label{tab:contracts}
+\end{table}
+
+% =============================================================================
+\section{L7 -- Core: the Hamiltonian as a term SoA and a row enumerator}
+% =============================================================================
+
+A Hamiltonian is an \code{Operator} (\file{include/ed/core/operator.h}),
+which stores terms in a struct-of-arrays (SoA) binned by type
+(\file{include/ed/matvec/term\_storage.h}):
+\begin{lstlisting}
+struct TermStorage {
+  std::vector<DiagOneBody>    diag_one_body;     // Sz_i
+  std::vector<OffDiagOneBody> offdiag_one_body;  // S+/S-_i
+  std::vector<DiagTwoBody>    diag_two_body;     // Sz_i Sz_j
+  std::vector<MixedTwoBody>   mixed_two_body;    // Sz_i S+/-_j
+  std::vector<OffDiagTwoBody> offdiag_two_body;  // S+/-_i S+/-_j
+  std::vector<ThreeBody>      three_body;        // general 3-site
+  bool is_real;
+};
+\end{lstlisting}
+The SoA is exposed as a non-owning view \code{TermViewT} (pointers to
+the six bins $+$ \code{spin\_l}, \code{is\_real}). Two consumers read it:
+\begin{enumerate}[nosep]
+  \item the matvec kernels (Section~\ref{sec:kernels}), which apply the
+  terms to a basis state;
+  \item the \emph{row enumerator}
+\begin{lstlisting}
+template <class Emit>
+void Operator::for_each_connected_state(uint64_t s, Emit&& emit) const;
+// invokes emit(s', <s'|H|s>) for every s' connected to s by a term.
+\end{lstlisting}
+  This is the \code{ConnectFn} contract: a sparse, single-state row of
+  $H$ with no $2^N$ vector. The symmetry reduction (L6) uses it to build
+  the symmetry-adapted basis, decoupled from how $H$ is stored.
+\end{enumerate}
+
+% =============================================================================
+\section{L8 -- The rudimentary SpMV kernels}
+\label{sec:kernels}
+% =============================================================================
+
+The lowest compute layer is a single templated kernel family
+(\file{include/ed/matvec/term\_kernels.h} and \code{\_gather.h}),
+parameterized on a \code{BasisPolicy} and a \code{Scalar}
+(\code{complex<double>} or \code{double}). The structure is: walk a
+source column, apply each term type to get a connected state $s'$, and
+\emph{emit} the contribution to its destination index. The
+\code{emit} lambda is the single funnel where the basis policy enters:
+
+\begin{lstlisting}
+auto emit = [&](uint64_t j_idx, uint64_t s_prime, const Scalar& base_contrib) {
+  if constexpr (policy_multi_target_v<BasisPolicy>) {
+    // Non-abelian: s' belongs to several SAB vectors (multiplicity d_G).
+    basis.for_each_target(s_prime, [&](uint64_t k, std::complex<double> w) {
+      local_buffer.push_back({k, base_contrib * coerce_coeff<Scalar>(w)});
+    });
+  } else if constexpr (BasisPolicy::has_coeff_modifier) {
+    // Abelian symmetry: one destination, projection phase conj(beta)*group_norm/norm.
+    const Scalar mod = basis.template coeff_modifier<Scalar>(basis_state, s_prime, i, j_idx);
+    local_buffer.push_back({j_idx, base_contrib * mod});
+  } else {
+    // Full / FixedSz: identity projection.
+    local_buffer.push_back({j_idx, base_contrib});
+  }
+};
+\end{lstlisting}
+
+\noindent
+The three branches are selected at compile time by policy traits, so a
+policy pays for exactly the work it needs:
+\begin{itemize}[nosep]
+  \item \textbf{Full / FixedSz}: \code{has\_coeff\_modifier=false},
+  \code{multi\_target=false} $\Rightarrow$ the bare push; identical to a
+  hand-written SpMV.
+  \item \textbf{abelian symmetry} (\code{Rep}/\code{Symmetry}):
+  \code{has\_coeff\_modifier=true} $\Rightarrow$ a scalar projection
+  phase; one destination per $s'$ (orbits partition the space).
+  \item \textbf{non-abelian symmetry}: \code{multi\_target=true}
+  $\Rightarrow$ $s'$ maps to \emph{many} destinations (the $d_\Gamma$
+  multiplicity copies), enumerated by \code{for\_each\_target}.
+\end{itemize}
+The detector \code{policy\_multi\_target\_v<P>} defaults to false, so all
+pre-existing policies are byte-identical---the multi-target branch is
+discarded for them.
+
+There are two kernel forms with identical math: a lock-free row
+\textbf{gather} (default; overwrites the output, Hermitian-transpose of
+the orbit walk) and a \textbf{scatter} with a radix-sorted accumulation
+buffer. The backend chooses; the non-abelian (multi-target) path uses the
+scatter form because gather assumes a single destination.
+
+The innermost vector primitives (\code{axpy}, \code{dot}, \code{nrm2})
+are a \code{Backend}: \code{CpuBackend} (BLAS) or \code{CudaBackend}
+(cuBLAS). This is axis~C in its purest form.
+
+% =============================================================================
+\section{L5 -- Basis policies: the reduction as a compile-time policy}
+% =============================================================================
+
+A \code{BasisPolicy} maps the full Hilbert space onto a reduced basis.
+The contract (a compile-time concept, not an inheritance hierarchy) is:
+\code{dim()}, \code{state\_of(i)}, \code{index\_of(s)}, optionally
+\code{iter\_orbit} / \code{coeff\_modifier} / \code{for\_each\_target},
+plus the boolean traits \code{needs\_orbit\_walk},
+\code{has\_coeff\_modifier}, \code{may\_leave\_basis}, \code{multi\_target}.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Policy & Reduction & Projection \\
+\midrule
+\code{FullBasisPolicy}        & none ($2^N$)          & identity (bitstring = index) \\
+\code{FixedSzBasisPolicy}     & U(1) / fixed $S^z$    & combinadic rank/unrank \\
+\code{RepSymmetryBasisPolicy} & abelian spatial       & scalar $\chi_k(g)$, regenerated arithmetically \\
+\code{SymmetryBasisPolicy}    & abelian orbit-CSR     & stored orbit coefficients \\
+\code{NonAbelianSymmetryBasisPolicy} & non-abelian SAB & stored $D^\Gamma$ amplitudes, multi-target \\
+\bottomrule
+\end{tabular}
+\caption{The five basis policies. All feed the same \code{CpuMatVecBackend}.}
+\end{table}
+
+The non-abelian policy
+(\file{include/ed/matvec/nonabelian\_symmetry\_basis\_policy.h}) is the
+$d_\Gamma\!\ge\!2$ generalization of the abelian one. It views a
+\code{::SymmetrySector} of symmetry-adapted basis vectors plus a
+multi-target lookup:
+\begin{lstlisting}
+struct NonAbelianSymmetryBasisPolicy {
+  const ::SymmetrySector*      sector;   // SAB vectors (orbit_elements + coeffs)
+  const NonAbelianMultiLookup* lookup;   // state -> [basis indices containing it]
+
+  static constexpr bool needs_orbit_walk  = true;
+  static constexpr bool has_coeff_modifier = false;  // superseded by for_each_target
+  static constexpr bool multi_target      = true;
+
+  int64_t index_of(uint64_t s) const;            // any target, or -1 (in-sector gate)
+  template<class Cb> void iter_orbit(uint64_t i, Cb&& cb) const;       // source walk
+  template<class Cb> void for_each_target(uint64_t s', Cb&& cb) const; // -> (k, conj(c_k(s')))
+};
+\end{lstlisting}
+Because the SAB is orthonormal ($\text{norm}=1$, $\text{group\_norm}=1$),
+the abelian projection formula reduces exactly to $\overline{c_k(s')}$,
+so the policy reuses the existing weighting verbatim; only the lookup
+becomes multi-valued.
+
+% =============================================================================
+\section{L4 -- The matvec engine}
+% =============================================================================
+
+\code{CpuMatVecBackend<BasisPolicy, ...terms>}
+(\file{include/ed/matvec/matvec\_backend.h}) is the single matvec
+engine and a \code{MatVecOperator}. Its \code{apply\_complex(tv, in,
+out, n)} dispatches at compile time:
+\begin{itemize}[nosep]
+  \item \code{needs\_orbit\_walk} (symmetry): always the matrix-free
+  orbit-walk kernel. Multi-target $\Rightarrow$ scatter; abelian
+  $\Rightarrow$ gather (default) or scatter.
+  \item otherwise (Full/FixedSz): \code{csr\_eligible(dim)} chooses an
+  assembled CSR SpMV vs.\ a matrix-free SpMV. The choice is made by the
+  execution planner (\file{include/ed/planner/}) from a system probe and
+  a task cost model, not a hard-coded threshold.
+\end{itemize}
+\code{CudaMatVecBackend} is the same template specialized for device
+memory; it is the axis-C twin.
+
+% =============================================================================
+\section{L3 -- Methods: symmetry-blind eigensolvers}
+% =============================================================================
+
+Every method consumes only a \code{const MatVecOperator\&}
+(\file{include/ed/solvers/lanczos.h}):
+\begin{lstlisting}
+inline void lanczos(const ed::matvec::MatVecOperator& H, uint64_t N, ...);
+inline void full_diagonalization(const ed::matvec::MatVecOperator& H, ...);
+inline void krylov_schur(const ed::matvec::MatVecOperator& H, ...);
+inline void block_lanczos(const ed::matvec::MatVecOperator& H, ...);
+\end{lstlisting}
+CPU and GPU Lanczos are the \emph{same} body,
+\code{ed::krylov::lanczos\_kernel<Backend>}
+(\file{include/ed/krylov/lanczos\_kernel.h}), instantiated with
+\code{CpuBackend} or \code{CudaBackend}; the reorthogonalization policy
+(None / LocalDGKS3 / PeriodicCGS2 / FullCGS2) is a runtime option. No
+method mentions symmetry.
+
+% =============================================================================
+\section{L6 -- The symmetry reduction, bottom to top}
+% =============================================================================
+
+\subsection{Group closure}
+\code{ed::sym::generate\_group(generators)} (\file{src/symmetry/group.cpp})
+BFS-closes a set of site permutations into the full group
+\code{max\_clique}. A non-abelian guard restricts the abelian-only
+\emph{projection} path to a maximal abelian subgroup unless the full
+non-abelian machinery is used.
+
+\subsection{Numerical irrep decomposition}
+\code{decompose\_irreps(max\_clique, n\_sites)}
+(\file{src/symmetry/irreps.cpp}) returns \code{GroupIrreps}: for each
+irrep $\Gamma$, the dimension $d_\Gamma$, character $\chi_\Gamma(g)$, and
+the $d_\Gamma\!\times\!d_\Gamma$ matrices $D^\Gamma(g)$. The method is a
+numerical regular-representation decomposition: form a random Hermitian
+element of the group algebra $M=\sum_h c_h R(h)$ (with
+$c_{h^{-1}}=\overline{c_h}$), eigendecompose, and read the irreducible
+blocks off the eigenspaces. The group product convention
+$(g\!\cdot\!h)[i]=\text{perm}_h[\text{perm}_g[i]]$ matches
+$U(g)\,|s\rangle = |\,\text{perm}_g(s)\rangle$ so $D^\Gamma$ is matvec-ready.
+
+\subsection{Symmetry-adapted basis (SAB)}
+For an irrep $\Gamma$ and partner $p$, the Wigner projector
+\[
+P^\Gamma_{pp} = \frac{d_\Gamma}{|G|}\sum_{g\in G} \overline{D^\Gamma_{pp}(g)}\,U(g)
+\]
+applied to an orbit yields $m_\Gamma(O)$ orthonormal partner-$p$ vectors
+(\code{build\_sab\_partition0}, \file{src/symmetry/symmetry\_adapted.cpp}),
+obtained as the SVD column basis of the projected orbit (absolute
+threshold $10^{-8}|G|$ so absent irreps contribute nothing). For a free
+orbit, $m_\Gamma=d_\Gamma$, so several SAB vectors share an orbit---this
+is the multiplicity that forces the multi-target lookup.
+
+\subsection{Packing into the production sector}
+\code{build\_symmetry\_adapted\_sector} packs the partner-$p$ SAB into the
+\emph{same} \code{::SymmetrySector} / \code{::SymBasisState} structure
+the abelian path uses (\code{orbit\_elements} $=$ states,
+\code{orbit\_coefficients} $=$ coeffs, $\text{norm}=1$). An SAB vector
+\emph{is} a \code{SymBasisState}; no parallel basis type exists.
+
+% =============================================================================
+\section{L2 -- The symmetry-reduced consumers (one engine)}
+% =============================================================================
+
+Because each irrep block $H_\Gamma$ is now a \code{MatVecOperator}, the
+consumers are thin. \code{ed::solvers::build\_nonabelian\_sector\_matvec}
+(\file{src/solvers/cpu/symmetry\_adapted\_solve.cpp}) wraps the sector +
+the operator's terms into a \code{CpuMatVecBackend<NonAbelianSymmetry\-BasisPolicy>}
+exposed as a \code{MatVecOperator}. The consumers then either feed it to a
+method or sample it on the unit columns to materialize $H_\Gamma$ densely:
+\begin{lstlisting}
+Eigen::MatrixXcd materialize(const MatVecOperator& mv) {  // dense H_Gamma
+  const int n = mv.dim();  Eigen::MatrixXcd H(n,n);
+  std::vector<Complex> e(n,0), col(n);
+  for (int j=0;j<n;++j){ e[j]=1; mv.apply(e.data(),col.data(),n);
+    for(int i=0;i<n;++i) H(i,j)=col[i]; e[j]=0; }
+  return H;   // one matvec engine, sampled -- not a second materializer
+}
+\end{lstlisting}
+On this base:
+\begin{itemize}[nosep]
+  \item \code{symmetry\_adapted\_lowest\_eigenvalues} -- per block, dense
+  (small) or Lanczos / Krylov--Schur (large) on the engine; the
+  \code{BlockMethod} selector makes ``method'' an explicit free choice.
+  \item \code{symmetry\_adapted\_full\_spectrum} -- materialize + dense
+  eigensolve per block, recombine $\times d_\Gamma$.
+  \item \code{symmetry\_adapted\_thermodynamics} -- full spectrum
+  $\to$ exact canonical $Z/E/C/S(\beta)$.
+  \item \code{symmetry\_adapted\_ground\_state\_dssf} -- per (irrep,
+  partner) materialize, eigensolve with eigenvectors, expand to the
+  computational basis via the sector, and Lehmann-sum
+  $S(\omega)=\sum_n|\langle n|O|0\rangle|^2 L(\omega-(E_n-E_0))$. All
+  $d_\Gamma$ partners are summed for completeness.
+  \item \code{symmetry\_adapted\_blocks\_packed} -- materialize each block
+  column-major and concatenate, for the GPU batched eigensolver.
+\end{itemize}
+
+\subsection{GPU}
+\code{symmetry\_adapted\_spectrum\_gpu} / \code{\_thermodynamics\_gpu}
+(\file{src/solvers/gpu/symmetry\_adapted\_gpu.cu}) take the
+\code{::Operator}, materialize the blocks on the host via the CPU engine
+(\code{symmetry\_adapted\_blocks\_packed}), upload all blocks in one
+transfer, run a multi-stream \code{cusolverDnZheevd} batched eigensolve,
+and download the eigenvalues---two host\,$\leftrightarrow$\,device
+transfers regardless of block count.
+
+% =============================================================================
+\section{End-to-end vertical traces}
+% =============================================================================
+
+\paragraph{Ground state, fixed-$S^z$, CPU (production iterative).}
+\begin{lstlisting}[language=,basicstyle=\ttfamily\scriptsize]
+qed.solve(op, sz=k)                                  python/qed/workflow.py
+ -> planner picks matrix-free                        ed/planner/execution_planner.h
+ -> lanczos_kernel<CpuBackend>(reorth=FullCGS2)       ed/krylov/lanczos_kernel.h
+ -> CpuMatVecBackend<FixedSzBasisPolicy>              ed/matvec/matvec_backend.h
+ -> apply_terms over FixedSzOperator term SoA         ed/matvec/term_kernels.h
+\end{lstlisting}
+
+\paragraph{Ground state, non-abelian, Krylov--Schur, CPU.}
+\begin{lstlisting}[language=,basicstyle=\ttfamily\scriptsize]
+qed._core.symmetry_adapted_lowest(op, gens, method)  qed_bindings.cpp
+ -> symmetry_adapted_lowest_eigenvalues               ed/solvers/symmetry_adapted_solve.*
+      decompose_irreps(generate_group(gens))          ed/symmetry/irreps.cpp, group.cpp
+      build_symmetry_adapted_sector                   ed/symmetry/symmetry_adapted.cpp
+      CpuMatVecBackend<NonAbelianSymmetryBasisPolicy>  ed/matvec/matvec_backend.h  (= engine)
+      krylov_schur(mv, n_G, ...)                       ed/solvers/lanczos.h
+       -> apply_terms (scatter, multi-target emit)     ed/matvec/term_kernels.h
+\end{lstlisting}
+
+\paragraph{Finite-$T$, non-abelian, GPU.}
+\begin{lstlisting}[language=,basicstyle=\ttfamily\scriptsize]
+qed._core.symmetry_adapted_thermodynamics(op,gens,T,use_gpu=True)
+ -> symmetry_adapted_thermodynamics_gpu(op,...)        symmetry_adapted_gpu.cu
+      symmetry_adapted_blocks_packed(op,...)           (CPU engine materializes blocks)
+      upload -> multi-stream cusolverDnZheevd -> down  (GPU batched eigensolve)
+      canonical_thermo_from_eigs                       ed/symmetry/symmetry_adapted.cpp
+\end{lstlisting}
+
+% =============================================================================
+\section{Coverage matrix (verified)}
+% =============================================================================
+
+Every cell below is validated against brute-force full diagonalization
+(or, for GPU, against the CPU engine) to $\sim 10^{-15}$ on the $N=6$
+Heisenberg ring (\file{tests/unit/test\_symmetry\_adapted.cpp} and the
+Python end-to-end harness).
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Reduction & dense & Lanczos / KS & finite-$T$ & DSSF \\
+\midrule
+Full / Sz            & CPU            & CPU$\cdot$GPU$\cdot$MPI & CPU$\cdot$GPU & CPU \\
+abelian spatial      & CPU            & CPU$\cdot$GPU$\cdot$MPI & CPU & CPU \\
+non-abelian          & CPU$\cdot$GPU  & CPU            & CPU$\cdot$GPU & CPU \\
+$S^z\times$ symmetry & CPU$\cdot$GPU  & CPU            & CPU$\cdot$GPU & CPU \\
+\bottomrule
+\end{tabular}
+\caption{Reduction $\times$ method $\times$ deployment. All cells run on the
+single \code{CpuMatVecBackend} / \code{CudaMatVecBackend} engine.}
+\end{table}
+
+% =============================================================================
+\section{Summary}
+% =============================================================================
+
+The architecture is one engine and three orthogonal axes. A Hamiltonian
+is a term SoA with a row enumerator (L7). A reduction is a basis policy
+(L5) built by the group/irrep/SAB machinery (L6). The engine
+\code{CpuMatVecBackend<Policy>} (L4) turns (terms $+$ policy) into a
+\code{MatVecOperator}. A method (L3) consumes that operator, and a
+backend (L8) supplies the vector primitives---CPU, GPU, or MPI. Non-abelian
+symmetry, historically a parallel subsystem, is now just another basis
+policy on the same engine: the only thing it needed beyond the abelian
+case was a multi-valued lookup ($s' \mapsto$ several SAB vectors), added
+as a single compile-time-gated branch in the SpMV \code{emit}.
+
+\end{document}
