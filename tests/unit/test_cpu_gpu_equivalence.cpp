@@ -33,7 +33,6 @@
 #ifdef WITH_CUDA
 
 #include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_lanczos.cuh>
 #include <ed/gpu/gpu_solvers.h>      // Phase 4: MatVecOperator& GPU overloads
 #include <ed/matvec/matvec.h>
 #include <ed/solvers/lanczos.h>
@@ -153,14 +152,12 @@ TEST_CASE("CPU/GPU equivalence: 8-site Heisenberg ground state eigenvalue "
             cpu_eigs, /*dir=*/"", /*eigenvectors=*/false);
     REQUIRE(!cpu_eigs.empty());
 
-    // ------ GPU -----------------------------------------------------------
+    // ------ GPU (unified lanczos_kernel<CudaBackend> facade) ---------------
     auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100,
-                           /*tolerance=*/1e-12);
     std::vector<double> gpu_eigs;
-    std::vector<std::vector<Complex>> gpu_vecs;  // unused
-    gpu_lanczos.run(/*num_eigenvalues=*/1, gpu_eigs, gpu_vecs,
-                    /*compute_vectors=*/false);
+    ed::matvec::gpu::lanczos(*gpu_op, /*N=*/static_cast<int>(dim),
+                             /*max_iter=*/100, /*num_eigs=*/1, /*tol=*/1e-12,
+                             gpu_eigs, /*dir=*/"", /*eigenvectors=*/false);
     REQUIRE(!gpu_eigs.empty());
 
     INFO("dim=" << dim
@@ -184,7 +181,7 @@ TEST_CASE("CPU/GPU equivalence: 8-site Heisenberg ground state eigenvalue "
 // ============================================================================
 
 TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(GPUOperator&) "
-          "matches the GPULanczos class on 8-site Heisenberg",
+          "matches the CPU lanczos reference on 8-site Heisenberg",
           "[cpu_gpu_eq][matvec_phase4]") {
     if (!gpu_available()) {
         SKIP("No CUDA device available -- skipping Phase 4 GPU overload test.");
@@ -194,12 +191,14 @@ TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(GPUOperator&) "
     const uint64_t dim = 1ULL << N;
     auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
 
-    // Legacy class-based API (used as the reference)
-    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100, /*tolerance=*/1e-12);
+    // CPU lanczos is the ground-truth reference (GPULanczos retired).
+    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    auto Hv = [&](const Complex* in, Complex* out, int n) {
+        cpu_op->apply(in, out, static_cast<size_t>(n));
+    };
     std::vector<double> ref_eigs;
-    std::vector<std::vector<Complex>> ref_vecs;
-    gpu_lanczos.run(/*num_eigenvalues=*/1, ref_eigs, ref_vecs,
-                    /*compute_vectors=*/false);
+    lanczos(Hv, dim, /*max_iter=*/100, /*exct=*/1, /*tol=*/1e-12,
+            ref_eigs, /*dir=*/"", /*eigenvectors=*/false);
     REQUIRE(!ref_eigs.empty());
 
     // Phase 4 type-safe overload
@@ -216,7 +215,7 @@ TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(GPUOperator&) "
 }
 
 TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(MatVecOperator&) "
-          "polymorphic overload matches the GPULanczos class",
+          "polymorphic overload matches the CPU lanczos reference",
           "[cpu_gpu_eq][matvec_phase4]") {
     if (!gpu_available()) {
         SKIP("No CUDA device available -- skipping Phase 4 GPU overload test.");
@@ -226,11 +225,14 @@ TEST_CASE("Phase 4 GPU: ed::matvec::gpu::lanczos(MatVecOperator&) "
     const uint64_t dim = 1ULL << N;
     auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
 
-    // Reference
-    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100, /*tolerance=*/1e-12);
+    // CPU lanczos is the ground-truth reference (GPULanczos retired).
+    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    auto Hv = [&](const Complex* in, Complex* out, int n) {
+        cpu_op->apply(in, out, static_cast<size_t>(n));
+    };
     std::vector<double> ref_eigs;
-    std::vector<std::vector<Complex>> ref_vecs;
-    gpu_lanczos.run(1, ref_eigs, ref_vecs, false);
+    lanczos(Hv, dim, /*max_iter=*/100, /*exct=*/1, /*tol=*/1e-12,
+            ref_eigs, /*dir=*/"", /*eigenvectors=*/false);
     REQUIRE(!ref_eigs.empty());
 
     // Phase 4 polymorphic overload -- pass through MatVecOperator&

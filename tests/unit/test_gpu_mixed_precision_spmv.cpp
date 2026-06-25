@@ -30,7 +30,7 @@
 
 #include <ed/gpu/gpu_mixed_precision.h>
 #include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_lanczos.cuh>
+#include <ed/gpu/gpu_solvers.h>   // ed::matvec::gpu::lanczos (facade-routed)
 
 #include <cuda_runtime.h>
 
@@ -185,12 +185,12 @@ TEST_CASE("GPU mixed-precision Lanczos ground state matches dense reference",
     REQUIRE(ed::gpu::gpu_mixed_precision_spmv_enabled());
 
     auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-    GPULanczos gpu_lanczos(gpu_op.get(), /*max_iter=*/100,
-                           /*tolerance=*/1e-12);
+    // Facade-routed GPU Lanczos (lanczos_kernel<CudaBackend>). The mixed-precision
+    // SpMV is a property of gpu_op's matvec (env-gated above), so it stays active.
     std::vector<double> eigs;
-    std::vector<std::vector<Complex>> vecs;
-    gpu_lanczos.run(/*num_eigenvalues=*/1, eigs, vecs,
-                    /*compute_vectors=*/false);
+    ed::matvec::gpu::lanczos(*gpu_op, /*N=*/static_cast<int>(dim),
+                             /*max_iter=*/100, /*num_eigs=*/1, /*tol=*/1e-12,
+                             eigs, /*dir=*/"", /*eigenvectors=*/false);
     REQUIRE_FALSE(eigs.empty());
 
     INFO("dim=" << dim

@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <ctime>
 #include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_lanczos.cuh>
 
 // ============================================================================
 // GPUEDWrapper live surface (operator-collapse Phase 2b, Jun 2026).
@@ -96,35 +95,24 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
     GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
 
     // -----------------------------------------------------------------
-    // Both branches (eigvals only / eigvals+eigvecs) now route through
-    // the unified `lanczos_kernel<CudaBackend>` facade (May 2026).
-    // The legacy `GPULanczos::run` is kept ONLY as a defensive fallback
-    // if the facade throws -- e.g. if the basis won't fit in device
-    // memory and the kernel's `keep_basis = true` assertion fires.
-    // The fallback path uses the legacy class's windowed-reorth +
-    // on-disk basis-spill regime, which the unified kernel doesn't
-    // implement yet.
+    // Both branches (eigvals only / eigvals+eigvecs) route through the
+    // unified `lanczos_kernel<CudaBackend>` facade. The Gen-1 `GPULanczos`
+    // class was fully retired; the only capability it uniquely held was
+    // on-disk basis spill for EIGENVECTOR runs whose Krylov basis exceeds
+    // device memory. The facade surfaces that case as a clear error (the
+    // eigenvalues path needs no full basis: it uses windowed LocalDGKS3
+    // reorth). Recover by lowering max_iter, requesting fewer eigenvectors,
+    // or using the CPU eigenvector path.
     // -----------------------------------------------------------------
     std::vector<std::vector<std::complex<double>>> eigvecs;
-    bool used_facade = false;
-    try {
-        if (eigenvectors) {
-            ed::matvec::gpu::run_lanczos_eigenpairs_kernel_facade(
-                *gpu_op, N, max_iter, num_eigs, tol, seed,
-                eigenvalues, eigvecs);
-        } else {
-            ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-                *gpu_op, N, max_iter, num_eigs, tol, seed, eigenvalues);
-        }
-        used_facade = true;
-    } catch (const std::exception& e) {
-        std::cerr << "GPU Lanczos kernel-facade path failed ("
-                  << e.what()
-                  << "); falling back to legacy GPULanczos.\n";
-        GPULanczos lanczos_legacy(gpu_op, max_iter, tol);
-        lanczos_legacy.setSeed(seed);
-        lanczos_legacy.run(num_eigs, eigenvalues, eigvecs,
-                           /*compute_vectors=*/eigenvectors);
+    const bool used_facade = true;
+    if (eigenvectors) {
+        ed::matvec::gpu::run_lanczos_eigenpairs_kernel_facade(
+            *gpu_op, N, max_iter, num_eigs, tol, seed,
+            eigenvalues, eigvecs);
+    } else {
+        ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
+            *gpu_op, N, max_iter, num_eigs, tol, seed, eigenvalues);
     }
 
     if (!dir.empty()) {

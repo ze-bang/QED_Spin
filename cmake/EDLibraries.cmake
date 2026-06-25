@@ -655,7 +655,11 @@ if(WITH_CUDA)
         # that were their only callers. The production GPU paths now run off
         # the unified host operators' bind_cuda() device matvec (CudaBackend /
         # CudaMatVecBackend) and a directly-constructed GPUFTLMSolver.
-        ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
+        # gpu_lanczos.cu (the Gen-1 hand-rolled GPULanczos class) was retired:
+        # runGPULanczos routes entirely through gpu_lanczos_kernel_facade.cu
+        # (lanczos_kernel<CudaBackend>). The one capability it uniquely held --
+        # on-disk basis spill for oversized-basis eigenvector runs -- is now a
+        # clear facade error rather than a separate hand-rolled solver.
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
