@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -34,6 +35,43 @@ build_sab_partition0(const GroupIrreps&                   gi,
     const IrrepData& ir = gi.irreps[static_cast<std::size_t>(irrep_index)];
     const int        G  = gi.order;
     const int        d  = ir.dim;
+
+    // ----- Scale guard --------------------------------------------------------
+    // The symmetry-adapted-basis engine is a MODERATE-N reference: it ENUMERATES
+    // the sector (2^n_sites, or C(n_sites,n_up) for fixed-Sz) and STORES the SAB
+    // amplitudes + a state->index map. It does NOT scale like the matrix-free
+    // abelian rep walk (RepSymmetryBasisPolicy), which holds only the orbit-rep
+    // list and regenerates the projection arithmetically. Refuse to silently
+    // OOM / hang on large problems and point the caller at the scalable path.
+    {
+        long double enum_sz;
+        if (n_up < 0) {
+            enum_sz = std::ldexp(1.0L, n_sites);                 // 2^n_sites
+        } else {
+            enum_sz = 1.0L;                                      // C(n_sites,n_up)
+            const int kk = std::min(n_up, n_sites - n_up);
+            for (int i = 0; i < kk; ++i)
+                enum_sz = enum_sz * (n_sites - i) / (i + 1);
+        }
+        std::uint64_t cap = std::uint64_t{1} << 22;              // ~4.2M default
+        if (const char* e = std::getenv("ED_SYM_SAB_MAX_DIM")) {
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(e, &end, 10);
+            if (end != e && v > 0) cap = static_cast<std::uint64_t>(v);
+        }
+        if (enum_sz > static_cast<long double>(cap)) {
+            throw std::runtime_error(
+                "build_sab_partition0: symmetry-adapted-basis enumeration size (~"
+                + std::to_string(static_cast<unsigned long long>(enum_sz))
+                + ") exceeds the moderate-N cap (" + std::to_string(cap)
+                + "). The non-abelian SAB engine stores the reduced basis and does "
+                  "not scale to this size. Use the matrix-free ABELIAN rep path "
+                  "(qed.solve / qed.thermal / qed.full_spectrum with an abelian "
+                  "generator set), reduce n_sites/restrict n_up, or raise "
+                  "ED_SYM_SAB_MAX_DIM if the machine can hold the basis. A "
+                  "matrix-free NON-abelian engine is not yet implemented.");
+        }
+    }
 
     // Partner-`partner` diagonal element D^Γ_{pp}(g) for every group element.
     // Summing eigenstates over ALL partners p = 0..d-1 spans the full isotypic

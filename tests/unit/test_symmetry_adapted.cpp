@@ -27,6 +27,7 @@
 #include <complex>
 #include <functional>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using ed::sym::generate_group;
@@ -122,6 +123,22 @@ TEST_CASE("non-abelian SAB: C4v Heisenberg square == brute force (with d_Γ dege
     REQUIRE(recombined.size() == brute.size());
     for (std::size_t i = 0; i < brute.size(); ++i)
         REQUIRE(std::abs(recombined[i] - brute[i]) < 1e-9);        // spectrum match
+}
+
+TEST_CASE("symmetry-adapted scale guard: SAB refuses large N (use the abelian rep path)",
+          "[symmetry_adapted][guard]") {
+    // The SAB engine is moderate-N (enumerates + stores the basis). It must throw
+    // a clear error rather than silently OOM/hang when the enumeration exceeds the
+    // cap, steering large-N callers to the matrix-free abelian rep path.
+    const int N = 28;                                  // 2^28 >> 2^22 default cap
+    Permutation t(static_cast<std::size_t>(N));
+    for (int i = 0; i < N; ++i) t[static_cast<std::size_t>(i)] = (i + 1) % N;  // translation
+    auto Gp = generate_group({t});                     // Z_28 (cheap: acts on the group, not 2^N)
+    auto gi = decompose_irreps(Gp, N);
+    REQUIRE_THROWS_AS(build_sab_partition0(gi, Gp, /*irrep=*/0, N), std::runtime_error);
+    // Fixed-Sz half-filling at N=28: C(28,14) ~ 4e7 also exceeds the cap.
+    REQUIRE_THROWS_AS(build_sab_partition0(gi, Gp, /*irrep=*/0, N, /*n_up=*/14),
+                      std::runtime_error);
 }
 
 TEST_CASE("non-abelian engine: full reduced spectrum == brute force (D6 ring)",
