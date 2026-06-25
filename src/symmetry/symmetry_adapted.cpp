@@ -117,6 +117,36 @@ build_sab_partition0(const GroupIrreps&                   gi,
     return out;
 }
 
+::SymmetrySector build_symmetry_adapted_sector(
+    const GroupIrreps&                   gi,
+    const std::vector<std::vector<int>>& max_clique,
+    int                                  irrep_index,
+    int                                  n_sites,
+    int                                  n_up)
+{
+    ::SymmetrySector sec;
+    sec.sector_id        = static_cast<std::uint64_t>(irrep_index);
+    sec.quantum_numbers  = {irrep_index};
+    const auto sab = build_sab_partition0(gi, max_clique, irrep_index, n_sites, n_up);
+    sec.basis_states.reserve(sab.size());
+    for (const auto& v : sab) {
+        ::SymBasisState bs;
+        bs.orbit_elements     = v.states;
+        bs.orbit_coefficients = v.coeffs;
+        bs.quantum_numbers    = {irrep_index};
+        // SAB vectors are orthonormal: norm = 1, and the matvec uses group_norm = 1
+        // (no 1/|G|), so SymmetryBasisPolicy's coeff_modifier reduces to conj(c_{s'}).
+        bs.norm     = 1.0;
+        bs.inv_norm = 1.0;
+        bs.orbit_rep = v.states.empty()
+            ? 0ULL
+            : *std::min_element(v.states.begin(), v.states.end());
+        bs.sortOrbit();   // sort orbit_elements (+ parallel coeffs) for findCoeff; refreshes inv_norm
+        sec.basis_states.push_back(std::move(bs));
+    }
+    return sec;
+}
+
 SymAdaptedSpectrum symmetry_adapted_spectrum(
     const std::function<void(const Complex*, Complex*, std::uint64_t)>& H_full,
     const GroupIrreps&                   gi,

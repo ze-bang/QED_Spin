@@ -33,6 +33,7 @@
 
 #include <ed/core/thermal_types.h>   // ThermodynamicData
 #include <ed/symmetry/irreps.h>
+#include <ed/symmetry/symmetry_sector_data.h>  // ::SymmetrySector, ::SymBasisState
 
 namespace ed::symmetry {
 
@@ -59,6 +60,23 @@ build_sab_partition0(const GroupIrreps&                    gi,
                      int                                   n_sites,
                      int                                   n_up   = -1,
                      int                                   partner = 0);
+
+// ---------------------------------------------------------------------------
+// Pack the partner-0 SAB of one irrep into the PRODUCTION sector data structure
+// (::SymmetrySector / ::SymBasisState), so non-abelian reduction reuses the same
+// representation as abelian/Sz instead of a parallel one. Each SAB vector becomes
+// one SymBasisState (orbit_elements = states, orbit_coefficients = coeffs); the
+// SAB is already orthonormal, so norm = 1 (and the matvec uses group_norm = 1),
+// which makes SymmetryBasisPolicy's coeff_modifier/iter_orbit reproduce the SAB
+// matvec verbatim. The ONE difference from abelian is multiplicity: several SAB
+// vectors share an orbit, so a state maps to MANY basis indices (handled by the
+// multi-target lookup, not here). `n_up >= 0` restricts to the fixed-Sz sector.
+[[nodiscard]] ::SymmetrySector
+build_symmetry_adapted_sector(const GroupIrreps&                   gi,
+                              const std::vector<std::vector<int>>& max_clique,
+                              int                                  irrep_index,
+                              int                                  n_sites,
+                              int                                  n_up = -1);
 
 /// Full symmetry-adapted spectrum of a Hamiltonian `H_full` (a 2^n_sites
 /// matvec, `H_full(in, out, dim)`) under the group `gi` / `max_clique`,

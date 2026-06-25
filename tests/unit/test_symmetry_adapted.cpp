@@ -214,6 +214,37 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
     REQUIRE(std::abs(iter.eigenvalues.front() - dense.eigenvalues.front()) < 1e-9);
 }
 
+TEST_CASE("migration: SAB packs faithfully into the production SymmetrySector",
+          "[symmetry_adapted][nonabelian][sector][migration]") {
+    // Proves the data-structure reuse: an SAB vector IS a SymBasisState
+    // (orbit_elements/coefficients), so non-abelian needs no parallel basis type.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+
+    std::size_t total = 0;
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        const auto sab = build_sab_partition0(gi, Gp, static_cast<int>(g), N);
+        const auto sec = ed::symmetry::build_symmetry_adapted_sector(gi, Gp, static_cast<int>(g), N);
+        REQUIRE(sec.basis_states.size() == sab.size());
+        total += sec.basis_states.size();
+        for (std::size_t k = 0; k < sab.size(); ++k) {
+            const auto& bs = sec.basis_states[k];
+            REQUIRE(bs.orbit_elements.size() == sab[k].states.size());
+            REQUIRE(bs.norm == 1.0);           // SAB orthonormal -> group_norm/norm = 1
+            REQUIRE(bs.inv_norm == 1.0);
+            // findCoeff (the matvec lookup) returns the SAB coefficient for each state.
+            for (std::size_t i = 0; i < sab[k].states.size(); ++i) {
+                const Complex c = bs.findCoeff(sab[k].states[i]);
+                REQUIRE(std::abs(c - sab[k].coeffs[i]) < 1e-14);
+            }
+        }
+    }
+    REQUIRE(total > 0);
+}
+
 TEST_CASE("non-abelian on the rails: reduction × {dense, Lanczos, Krylov-Schur} all == brute force",
           "[symmetry_adapted][nonabelian][iterative][methods]") {
     // Stage D payoff: the non-abelian block is a MatVecOperator, so the SAME
