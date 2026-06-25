@@ -14,6 +14,7 @@
 #include "common/catch2_harness.h"
 
 #include <ed/core/basis_utils.h>          // applyPermutation
+#include <ed/solvers/symmetry_adapted_solve.h>  // symmetry_adapted_lowest_eigenvalues
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/symmetry_adapted.h>
@@ -172,6 +173,82 @@ TEST_CASE("non-abelian SAB: on-the-fly term builder == brute force (D6 ring)",
     REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
     for (int i = 0; i < ref.eigenvalues().size(); ++i)
         REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
+}
+
+TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (D6 ring)",
+          "[symmetry_adapted][nonabelian][iterative]") {
+    // The headline of the symmetry-as-basis refactor: the SAME non-abelian
+    // reduction solved by Lanczos on the reduced matvec (forced via
+    // dense_max_dim=0) reproduces the dense reduction AND brute force.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    auto dense = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N);
+    // Force every block with n_Γ > 2 onto the Lanczos path (dense_max_dim=0).
+    auto iter = ed::solvers::symmetry_adapted_lowest_eigenvalues(
+        connect, gi, Gp, N, /*k=*/4, /*n_up=*/-1, /*dense_max_dim=*/0);
+
+    // At least one block must be large enough to actually exercise Lanczos.
+    REQUIRE(*std::max_element(iter.block_size.begin(), iter.block_size.end()) > 2);
+
+    // The ground state is the robust Lanczos guarantee and the headline of the
+    // refactor: the non-abelian reduction's GS via Lanczos on the reduced matvec
+    // == the dense reduction == brute force. (Higher low-lying states from a
+    // local-reorth Lanczos can carry ghosts on tiny blocks; for a full low-lying
+    // spectrum use the dense path or a full-reorth Krylov method — that choice is
+    // orthogonal to the symmetry reduction, which is exactly the point.)
+    REQUIRE(std::abs(iter.eigenvalues.front() - ref.eigenvalues()(0)) < 1e-8);
+    REQUIRE(std::abs(iter.eigenvalues.front() - dense.eigenvalues.front()) < 1e-9);
+}
+
+TEST_CASE("SymAdaptedBlockOp: apply (matvec) == materialize (dense column)",
+          "[symmetry_adapted][nonabelian][matvec]") {
+    // Pins the reduced operator: the matvec `apply` and the dense `materialize`
+    // are the SAME operator (apply(e_j) == column j of the dense H_Γ), for every
+    // block size. This is what lets symmetry compose with ANY method.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        auto sab = build_sab_partition0(gi, Gp, static_cast<int>(g), N);
+        if (sab.empty()) continue;
+        ed::symmetry::SymAdaptedBlockOp op(connect, sab);
+        const int nb = op.dim();
+        const std::vector<Complex> cm = op.materialize_colmajor();   // col-major nb×nb
+        std::vector<Complex> e(nb, Complex(0, 0)), y(nb);
+        for (int j = 0; j < nb; ++j) {
+            std::fill(e.begin(), e.end(), Complex(0, 0));
+            e[static_cast<std::size_t>(j)] = Complex(1, 0);
+            op.apply(e.data(), y.data());
+            for (int k = 0; k < nb; ++k)
+                REQUIRE(std::abs(y[static_cast<std::size_t>(k)]
+                                 - cm[static_cast<std::size_t>(j) * nb + k]) < 1e-12);
+        }
+    }
 }
 
 TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-block diag",

@@ -168,33 +168,68 @@ SymAdaptedSpectrum symmetry_adapted_spectrum(
     return out;
 }
 
-namespace {
+// --- SymAdaptedBlockOp: the reduced operator H_Γ = Φ† H Φ -------------------
+// One construction (state -> (row, amplitude) map), then either `apply` (matvec)
+// or `materialize_colmajor` (dense). Both walk H over the orbit support via
+// `connect`; the only difference is whether the source weight is x_in[j] (matvec)
+// or 1 for column j (dense), so the two forms are the same operator by build.
+SymAdaptedBlockOp::SymAdaptedBlockOp(ConnectFn connect, std::vector<SABVector> sab)
+    : connect_(std::move(connect)), sab_(std::move(sab)),
+      nb_(static_cast<int>(sab_.size()))
+{
+    for (int k = 0; k < nb_; ++k)
+        for (std::size_t t = 0; t < sab_[static_cast<std::size_t>(k)].states.size(); ++t)
+            bystate_[sab_[static_cast<std::size_t>(k)].states[t]]
+                .emplace_back(k, sab_[static_cast<std::size_t>(k)].coeffs[t]);
+}
 
-// Build the dense block Hamiltonian H_Γ = Φ† H Φ over a set of SAB vectors,
-// applying H term-by-term over the orbit support via `connect` (no 2^N vector).
-// Shared by the spectrum / thermodynamics / DSSF consumers.
-[[nodiscard]] Eigen::MatrixXcd
-block_hamiltonian(const ConnectFn& connect, const std::vector<SABVector>& sab) {
-    const int nb = static_cast<int>(sab.size());
-    std::unordered_map<std::uint64_t, std::vector<std::pair<int, Complex>>> bystate;
-    for (int k = 0; k < nb; ++k)
-        for (std::size_t t = 0; t < sab[static_cast<std::size_t>(k)].states.size(); ++t)
-            bystate[sab[static_cast<std::size_t>(k)].states[t]]
-                .emplace_back(k, sab[static_cast<std::size_t>(k)].coeffs[t]);
-
-    Eigen::MatrixXcd Hg = Eigen::MatrixXcd::Zero(nb, nb);
-    for (int j = 0; j < nb; ++j) {
-        const auto& vj = sab[static_cast<std::size_t>(j)];
+void SymAdaptedBlockOp::apply(const Complex* x_in, Complex* y_out) const {
+    for (int k = 0; k < nb_; ++k) y_out[k] = Complex(0.0, 0.0);
+    for (int j = 0; j < nb_; ++j) {
+        const Complex xj = x_in[j];
+        if (xj == Complex(0.0, 0.0)) continue;
+        const auto& vj = sab_[static_cast<std::size_t>(j)];
         for (std::size_t t = 0; t < vj.states.size(); ++t) {
-            const Complex cjs = vj.coeffs[t];
-            connect(vj.states[t], [&](std::uint64_t sprime, Complex h) {
-                auto it = bystate.find(sprime);
-                if (it == bystate.end()) return;
+            const Complex amp = xj * vj.coeffs[t];   // x_j · c^j_s
+            connect_(vj.states[t], [&](std::uint64_t sprime, Complex h) {
+                auto it = bystate_.find(sprime);
+                if (it == bystate_.end()) return;
                 for (const auto& kc : it->second)
-                    Hg(kc.first, j) += std::conj(kc.second) * h * cjs;
+                    y_out[kc.first] += std::conj(kc.second) * h * amp;
             });
         }
     }
+}
+
+std::vector<Complex> SymAdaptedBlockOp::materialize_colmajor() const {
+    std::vector<Complex> H(static_cast<std::size_t>(nb_) * nb_, Complex(0.0, 0.0));
+    for (int j = 0; j < nb_; ++j) {
+        const auto& vj = sab_[static_cast<std::size_t>(j)];
+        for (std::size_t t = 0; t < vj.states.size(); ++t) {
+            const Complex cjs = vj.coeffs[t];
+            connect_(vj.states[t], [&](std::uint64_t sprime, Complex h) {
+                auto it = bystate_.find(sprime);
+                if (it == bystate_.end()) return;
+                for (const auto& kc : it->second)
+                    H[static_cast<std::size_t>(j) * nb_ + kc.first] +=
+                        std::conj(kc.second) * h * cjs;   // column-major (row=kc.first)
+            });
+        }
+    }
+    return H;
+}
+
+namespace {
+
+// Dense block Hamiltonian H_Γ as an Eigen matrix, via the reduced operator.
+[[nodiscard]] Eigen::MatrixXcd
+block_hamiltonian(const ConnectFn& connect, const std::vector<SABVector>& sab) {
+    SymAdaptedBlockOp op(connect, sab);
+    const int nb = op.dim();
+    const std::vector<Complex> cm = op.materialize_colmajor();
+    Eigen::MatrixXcd Hg(nb, nb);
+    if (nb > 0)
+        Hg = Eigen::Map<const Eigen::MatrixXcd>(cm.data(), nb, nb);   // col-major match
     return Hg;
 }
 

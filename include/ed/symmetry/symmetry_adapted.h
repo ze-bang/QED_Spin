@@ -27,6 +27,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <ed/core/thermal_types.h>   // ThermodynamicData
@@ -103,6 +105,42 @@ symmetry_adapted_spectrum_terms(
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,
     int                                   n_up = -1);
+
+// ---------------------------------------------------------------------------
+// The reduced (per-irrep) block operator H_Γ = Φ_Γ† H Φ_Γ as a LINEAR OPERATOR,
+// decoupled from how it is solved. This is the seam that makes the symmetry
+// reduction orthogonal to the eigensolver: `apply` is the symmetry-reduced
+// matvec (consumed by any iterative method — Lanczos / FTLM / cf-DSSF), and
+// `materialize_colmajor` is the dense form (the same action sampled on unit
+// columns; consumed by dense / batched eigensolvers). Both share the orbit
+// support and the SAB amplitudes, so they cannot diverge.
+//
+// Construction is one-time (build the state→(row,amplitude) map); `apply` is
+// O(orbit support · terms) per call. Lives in ed_symmetry (depends only on the
+// Hamiltonian's `connect` row enumerator) — NOT on any solver, so iterative
+// consumers live one layer up in ed_solvers and feed `apply` to the kernel.
+// ---------------------------------------------------------------------------
+class SymAdaptedBlockOp {
+public:
+    SymAdaptedBlockOp(ConnectFn connect, std::vector<SABVector> sab);
+
+    [[nodiscard]] int dim() const noexcept { return nb_; }
+
+    /// y_out[0..dim) = H_Γ · x_in[0..dim)  (the symmetry-reduced matvec).
+    void apply(const std::complex<double>* x_in, std::complex<double>* y_out) const;
+
+    /// Dense H_Γ, column-major dim×dim (Eigen-free; dense / batched eigensolvers
+    /// map this directly). Equivalent to `apply` on the unit columns.
+    [[nodiscard]] std::vector<std::complex<double>> materialize_colmajor() const;
+
+private:
+    ConnectFn              connect_;
+    std::vector<SABVector> sab_;
+    int                    nb_ = 0;
+    // state s' -> [(SAB row k, coeff c^k_{s'})]  over this block's SAB.
+    std::unordered_map<std::uint64_t,
+                       std::vector<std::pair<int, std::complex<double>>>> bystate_;
+};
 
 // ---------------------------------------------------------------------------
 // Consumer 2 — FINITE TEMPERATURE. Exact canonical thermodynamics of the
