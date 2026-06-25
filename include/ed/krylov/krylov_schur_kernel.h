@@ -81,9 +81,18 @@ namespace detail {
 
 inline std::size_t ks_subspace_size(std::size_t k, std::size_t max_iter,
                                     std::size_t global_dim) {
-    // Match the legacy heuristic: m = min(2k+20, max_iter, global_dim).
+    // Per-cycle Krylov subspace. Floor at 2k+20 (enough room to resolve k
+    // eigenvalues) but let `max_iter` GROW it. The previous heuristic
+    // `min(2k+20, max_iter)` capped the subspace at 2k+20 regardless of
+    // max_iter, so on a large sector with a tightly-clustered low spectrum
+    // (e.g. a frustrated lattice) a single 28-dim cycle converged only the
+    // ground state and the thick restart failed to pick up the near-degenerate
+    // excited states -- KS then returned FEWER than k eigenvalues (the missing
+    // slots surfaced downstream as spurious zeros). Letting the subspace grow
+    // with the user's iteration budget restores convergence for num_eigs > 1
+    // and makes `max_iterations` actually meaningful for Krylov-Schur.
     std::size_t m = 2 * k + 20;
-    if (m > max_iter) m = max_iter;
+    if (max_iter > m) m = max_iter;
     if (global_dim > 0 && m > global_dim) m = global_dim;
     if (m < k + 1) m = k + 1;
     return m;
