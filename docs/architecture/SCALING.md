@@ -54,6 +54,20 @@ orphan: true
 > `ED_SYM_REP=0` keeps the CPU on the CSR walk even in the lazy regime
 > (bisection); `ED_GPU_SYMMETRY_REP=0` restores the GPU orbit-CSR mirror.
 
+> **Update (2026-06): the regime is planner-decided, and non-abelian symmetry
+> has a hard scale ceiling.** The rep-walk-vs-orbit-CSR choice above is now made
+> by [`ed::planner`](../../include/ed/planner/execution_planner.h) (orbit-CSR
+> footprint `~dim·|G|·24 B` vs the probed memory budget), published through the
+> `sym_matvec_repr` hook; the `ED_SYM_REP` / `ED_SYM_LAZY_SECTORS` knobs are now
+> the fallback when the planner has not run. The cost model is overflow-hardened,
+> so an over-budget sector is reported *infeasible* rather than wrapping.
+>
+> **Non-abelian** point groups (`d_Γ ≥ 2`) use the symmetry-adapted-basis engine,
+> which *enumerates and stores* the reduced basis — it is **moderate-N only** and
+> refuses enumerations above `ED_SYM_SAB_MAX_DIM` (default `2^22`). It is **not** a
+> path to the 36-site regime; at that scale only the matrix-free **abelian** rep
+> walk applies. A matrix-free non-abelian engine is future work.
+
 This document tells you, for a given system size N:
 
 1. how much memory one Lanczos / FTLM / TPQ vector costs,

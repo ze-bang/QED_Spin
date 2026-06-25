@@ -98,6 +98,38 @@
 > (whole spectrum keyed by topology+options) plus the in-process spatial-
 > generator cache, so no separate per-sector rep HDF5 cache is wired.
 
+> **Update (2026-06): non-abelian symmetry + planner-driven matvec regime.**
+>
+> **Non-abelian point groups are now supported.** A numerical irrep engine
+> (regular-representation Hermitian-commutant decomposition,
+> [`include/ed/symmetry/irreps.h`](../../include/ed/symmetry/irreps.h)) produces
+> the `d_Γ`-dimensional irrep matrices; the abelian (scalar-character) path is the
+> `d_Γ = 1` special case. The symmetry-adapted basis (Wigner projector + SVD,
+> [`build_sab_partition0`](../../src/symmetry/symmetry_adapted.cpp)) rides the
+> **same** production `CpuMatVecBackend` / `CudaMatVecBackend` as everything else
+> via a `multi_target` basis policy
+> ([`include/ed/matvec/nonabelian_symmetry_basis_policy.h`](../../include/ed/matvec/nonabelian_symmetry_basis_policy.h));
+> the old parallel `symmetry_adapted_*` matvec subsystem is gone. Reduction ⟂
+> method: GS (dense / Lanczos / Krylov-Schur), exact finite-T, and DSSF all consume
+> Sz / abelian / non-abelian / Sz+spatial, verified vs brute force to ~1e-15 on CPU
+> and GPU.
+>
+> **Scale class (important).** This SAB engine *enumerates and stores* the reduced
+> basis, so it is **moderate-N only**. `build_sab_partition0` refuses enumerations
+> above a cap (`2^22` default, override `ED_SYM_SAB_MAX_DIM`) with an error pointing
+> here. For large N use the **matrix-free abelian rep path** (`RepSymmetryBasisPolicy`),
+> which holds only `reps[]` and regenerates the projection arithmetically — that is
+> the at-scale machinery. A matrix-free *non-abelian* engine is not yet implemented.
+>
+> **The rep-walk-vs-orbit-CSR regime is now planner-driven.** The execution planner
+> ([`ed::planner::plan_execution`](../../include/ed/planner/execution_planner.h))
+> compares the orbit-CSR footprint (`~dim·|G|·24 B`) against the probed memory budget
+> and publishes the choice through the `sym_matvec_repr` hook
+> ([`include/ed/planner/sym_matvec_policy_hook.h`](../../include/ed/planner/sym_matvec_policy_hook.h)):
+> `OrbitCsr` when it fits (faster apply), else `Rep` (the scalable matrix-free walk).
+> The `ED_SYM_REP` / `lazy_sectors_enabled()` heuristic in the env table above is now
+> the **`Auto` fallback**, used only when the planner has not published a decision.
+
 > **Update (2026-05-26): Orthogonal symmetry composition lands.**
 >
 > The four-mode taxonomy (`none` / `Sz` / `Symm` / `Sz+Symm`) is now

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Non-abelian spatial symmetry + capability-aware execution planner (Jun 2026)
+
+- **Non-abelian spatial symmetry.** A numerical irrep engine (regular-representation
+  Hermitian-commutant decomposition) yields the `d_Γ`-dimensional irrep matrices;
+  abelian symmetry is now just the `d_Γ = 1` special case. The non-abelian
+  symmetry-adapted basis (Wigner projector + SVD column basis) rides the production
+  `CpuMatVecBackend` / `CudaMatVecBackend` through a `multi_target` basis policy —
+  no parallel matvec. Verified against brute-force full diagonalization to ~1e-15
+  across ground state (dense / Lanczos / Krylov-Schur), exact finite-T, and DSSF,
+  on both CPU and GPU. Combined **Sz × spatial** works for abelian and non-abelian
+  point groups.
+- **Scale guard for the moderate-N SAB engine.** The symmetry-adapted-basis engine
+  *enumerates and stores* the reduced basis, so it does not scale. `build_sab_partition0`
+  now refuses enumerations above a cap (default `2^22`, override `ED_SYM_SAB_MAX_DIM`)
+  with a clear error pointing to the matrix-free abelian rep path, instead of silently
+  OOM-ing. A matrix-free *non-abelian* engine is not yet implemented; abelian symmetry
+  is matrix-free and scales today.
+- **Capability-aware execution planner** (`ed::planner::plan_execution`): a system
+  probe + task cost model choose device lane / matvec strategy / reorth / basis
+  representation, published via process-global lazy hooks:
+  - `csr_override` — assembled-CSR vs matrix-free (Full / fixed-Sz),
+  - `basis_repr` — materialized vs tableless combinadic basis (fixed-Sz),
+  - `sym_matvec_repr` — **rep walk vs materialized orbit-CSR for symmetry sectors**,
+    replacing `ED_SYM_REP` / `rep_lazy()` as the arbiter (now only the `Auto` fallback).
+
+  The cost model is hardened against overflow / UB (saturating byte products, clamped
+  `double`→`uint64`, guarded `1 << N`) so astronomically large dimensions report
+  *infeasible* rather than wrapping to a tiny footprint. A stress / fuzz suite covers
+  degenerate and adversarial inputs.
+- **Engine + solver unification.** Retired the parallel `symmetry_adapted_*` matvec
+  subsystem and the Gen-1 `GPULanczos`; all CPU Lanczos run on
+  `ed::krylov::lanczos_kernel`. One `MatVecOperator` seam spans
+  reduction × method × deployment.
+- **Thermal.** One-pass all-Sz streaming-symmetry sector factory
+  (`make_all_sz_sector_operators_tagged`) builds every `(n_up, irrep)` sector from a
+  single orbit-rep enumeration, and `default_cpu_backend()` is now `thread_local` so
+  the sector-parallel loop (`ED_SYM_SECTOR_PARALLEL`) is race-free.
+
 ### Symmetry / Sz+symmetry SpMV brought to optimality (CPU + GPU) (Jun 2026)
 
 The symmetry and Sz+symmetry matrix-vector lanes now match the Full / Fixed-Sz

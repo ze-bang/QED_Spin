@@ -178,6 +178,35 @@ Term storage and matvec kernel dispatch happen on the compile-time
 `ed/matvec/basis_policy.h` (separate from the deleted runtime
 hierarchy), which is the path the SpMV code actually consumes.
 
+#### Basis policies (the compile-time matvec axis)
+
+The SpMV kernel is parameterized on a **basis policy**, the single point where the
+reduction axis enters. All policies feed the same `CpuMatVecBackend<Policy>` /
+`CudaMatVecBackend<Policy>`:
+
+| Policy | Reduction | Representation |
+|--------|-----------|----------------|
+| `FullBasisPolicy`               | full Hilbert space | identity |
+| `FixedSzBasisPolicy`            | fixed total Sz     | combinadic (Gosper / colex rank) |
+| `RepSymmetryBasisPolicy`        | abelian spatial (+Sz) | **matrix-free** rep walk: `reps[]` only, projection regenerated arithmetically — the at-scale path |
+| `SymmetryBasisPolicy`           | abelian spatial (+Sz) | materialized per-sector orbit-CSR (faster apply, heavier memory) |
+| `NonAbelianSymmetryBasisPolicy` | non-abelian spatial | stored symmetry-adapted amplitudes, `multi_target = true` (moderate-N, scale-guarded) |
+
+Abelian symmetry is the `d_Γ = 1` special case of non-abelian; both ride the
+production engine, so reduction and method are orthogonal.
+
+#### Execution planner (the decision layer)
+
+[`ed::planner::plan_execution`](../../include/ed/planner/execution_planner.h) turns a
+`(task, system-capabilities)` pair into a recipe — device lane, matvec strategy,
+reorth, basis representation — from a system probe + a task cost model, published via
+process-global lazy hooks the backends read on first `apply()`:
+`csr_override` (assembled-CSR vs matrix-free), `basis_repr` (materialized vs tableless
+combinadic), and `sym_matvec_repr` (rep walk vs orbit-CSR for symmetry sectors). Each
+is a "materialize if it fits the probed budget, else stay matrix-free" decision; the
+cost model is overflow/UB-hardened so huge dimensions report *infeasible* rather than
+wrapping.
+
 ### Backends
 
 | Backend           | Header                                    | Memory space            |
