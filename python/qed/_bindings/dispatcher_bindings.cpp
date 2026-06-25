@@ -525,6 +525,7 @@ void bind_dispatcher(py::module_& m) {
         d["krylov_dim_cap"] = p.krylov_dim_cap;
         d["basis"] = p.basis_str();
         d["tableless_fixed_sz"] = p.tableless_fixed_sz;
+        d["sym_orbit_csr"] = p.sym_orbit_csr;
         d["feasible"] = p.feasible;
         d["bottleneck"] = p.bottleneck;
         d["est_memory_gb"] = p.est_memory_gb;

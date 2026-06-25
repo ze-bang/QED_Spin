@@ -24,6 +24,7 @@
 
 #include <ed/core/subspace_operator.h>
 #include <ed/matvec/symmetry_basis_policy.h>
+#include <ed/planner/sym_matvec_policy_hook.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
@@ -78,7 +79,15 @@ template <>
 inline std::unique_ptr<ed::matvec::MatVecBackendBase>
 SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
                  ed::matvec::MemorySpace::Host>::make_backend_() const {
-    if (producer_.rep_lazy() && ed::symmetry::cpu_rep_symmetry_enabled()) {
+    // Planner decides rep walk vs orbit-CSR (sym_matvec_policy_hook). When unset
+    // (Auto) fall back to the producer's rep_lazy() heuristic, so behaviour is
+    // unchanged unless the planner ran. OrbitCsr forces the materialized path.
+    const int  sym_repr = ed::planner::sym_matvec_repr();
+    const bool want_rep =
+        (sym_repr == static_cast<int>(ed::planner::SymMatvecRepr::Rep)) ||
+        (sym_repr == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
+         && producer_.rep_lazy());
+    if (want_rep && ed::symmetry::cpu_rep_symmetry_enabled()) {
         const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
         if (rd.usable()) {
             return ed::matvec::make_cpu_rep_symmetry_backend<

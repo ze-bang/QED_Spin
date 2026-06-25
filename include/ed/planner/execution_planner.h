@@ -62,6 +62,11 @@ struct ExecutionPlan {
     /// O(N^2) BinomialTable) instead of the materialized C(N,n_up) basis vector
     /// + Lin table. Set when the materialized basis would not fit the budget.
     bool           tableless_fixed_sz = false;
+    /// Symmetry lane (Symm / SymSz): materialize the per-sector orbit-CSR
+    /// (faster apply) instead of the matrix-free rep walk (O(#reps) memory).
+    /// Set only when the orbit-CSR estimate fits the budget; the rep walk is the
+    /// scalable default. Consumed via sym_matvec_policy_hook.
+    bool           sym_orbit_csr = false;
 
     bool                     feasible = true;
     std::string              bottleneck = "ok";  // ok|memory|basis_construction|build|kernel
@@ -94,5 +99,10 @@ void apply_csr_decision(const ExecutionPlan& plan);
 // tableless combinadic basis when the plan says so. Consumed by both the GS and
 // finite-temperature lanes (they share the fixed-Sz operator construction).
 void apply_basis_decision(const ExecutionPlan& plan);
+
+// Push the plan's symmetry matvec decision into the symmetry backend builder
+// (via sym_matvec_policy_hook): rep walk vs materialized orbit-CSR. Consumed by
+// SubspaceOperator<SymmetryBasisPolicy>::make_backend_.
+void apply_sym_matvec_decision(const ExecutionPlan& plan);
 
 }  // namespace ed::planner

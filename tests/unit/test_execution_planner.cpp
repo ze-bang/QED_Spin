@@ -95,6 +95,42 @@ TEST_CASE("planner: 36-site sz+sym on modest RAM -> matrix-free + tableless reps
     REQUIRE(p.matvec == MatvecStrategy::MatrixFree);   // CSR ~37 GB doesn't fit
     REQUIRE(p.basis == BasisStrategy::BinarySearchReps);  // 36 GB rank table skipped
     REQUIRE(p.feasible);                               // working set (~1.3 GB) fits
+    // orbit-CSR ~ 21e6 * 432 * 24 B ~= 203 GB does NOT fit 32 GB -> rep walk.
+    REQUIRE_FALSE(p.sym_orbit_csr);
+}
+
+TEST_CASE("planner: symmetry rep-walk vs orbit-CSR is memory-gated", "[planner]") {
+    // Large 36-site SymSz sector on a 2 TB node: orbit-CSR (~203 GB) fits the
+    // budget, so the planner materializes it (faster apply).
+    {
+        auto t = task_36_symsz(/*dim*/21'000'000ull);
+        auto caps = make_caps(/*ram*/2048, 0, 0, 1, false, false, false);
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE(p.sym_orbit_csr);
+    }
+    // Same sector on 32 GB: orbit-CSR can't fit -> matrix-free rep walk.
+    {
+        auto t = task_36_symsz(/*dim*/21'000'000ull);
+        auto caps = make_caps(/*ram*/32, 0, 0, 1, false, false, false);
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE_FALSE(p.sym_orbit_csr);
+    }
+    // A small symmetry sector fits orbit-CSR even on a modest box.
+    {
+        auto t = task_36_symsz(/*dim*/50'000ull);     // 50k * 432 * 24 B ~= 0.5 GB
+        auto caps = make_caps(/*ram*/8, 0, 0, 1, false, false, false);
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE(p.sym_orbit_csr);
+    }
+    // The non-symmetry lane never sets the symmetry flag.
+    {
+        TaskDescriptor t;
+        t.basis_dim = 4096; t.n_terms = 20; t.n_offdiag = 12;
+        t.method = Method::Lanczos; t.num_eigs = 1; t.kind = BasisKind::Full;
+        auto caps = make_caps(/*ram*/256, 0, 0, 1, false, false, false);
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE_FALSE(p.sym_orbit_csr);
+    }
 }
 
 TEST_CASE("planner: 36-site sz-only on modest CPU RAM is memory-infeasible",

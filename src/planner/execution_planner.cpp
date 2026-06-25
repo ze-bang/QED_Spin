@@ -8,6 +8,7 @@
 
 #include <ed/planner/csr_policy_hook.h>
 #include <ed/planner/basis_policy_hook.h>
+#include <ed/planner/sym_matvec_policy_hook.h>
 
 #include <algorithm>
 #include <cmath>
@@ -268,6 +269,33 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
         }
     }
 
+    // ---- Symmetry matvec: rep walk vs materialized orbit-CSR ----------------
+    // The orbit-CSR (SymmetryBasisPolicy) stores, per orbit element, the
+    // computational state (u64) + its coefficient (complex) ~= 24 B; a sector of
+    // `basis_dim` reps with average orbit ~|G| therefore costs
+    // ~basis_dim*group_size*24 B on top of the working set. It is faster per
+    // apply (no per-emit projection regeneration), so prefer it WHEN IT FITS the
+    // budget; otherwise fall back to the matrix-free rep walk (O(#reps), the
+    // scalable default). Mirrors the csr / tableless "materialize if it fits".
+    if (task.kind == BasisKind::Symm || task.kind == BasisKind::SymSz) {
+        const double orbit_csr_gb =
+            static_cast<double>(task.basis_dim)
+            * static_cast<double>(std::max<std::uint64_t>(1, task.group_size))
+            * 24.0 / kGiB / std::max(1, p.n_ranks);
+        if (orbit_csr_gb + working_gb <= budget) {
+            p.sym_orbit_csr = true;
+            p.notes.push_back("symmetry orbit-CSR " + std::to_string(orbit_csr_gb)
+                + " GB + working " + std::to_string(working_gb)
+                + " GB fits budget " + std::to_string(budget)
+                + " GB -> materialized orbit-CSR (faster apply)");
+        } else {
+            p.notes.push_back("symmetry orbit-CSR " + std::to_string(orbit_csr_gb)
+                + " GB + working " + std::to_string(working_gb)
+                + " GB exceeds budget " + std::to_string(budget)
+                + " GB -> matrix-free rep walk");
+        }
+    }
+
     // ---- Memory feasibility verdict (working set) ---------------------------
     if (p.feasible && working_gb > budget) {
         p.feasible = false;
@@ -297,6 +325,11 @@ void apply_csr_decision(const ExecutionPlan& plan) {
 void apply_basis_decision(const ExecutionPlan& plan) {
     set_basis_repr(plan.tableless_fixed_sz ? BasisRepr::Tableless
                                            : BasisRepr::Materialized);
+}
+
+void apply_sym_matvec_decision(const ExecutionPlan& plan) {
+    set_sym_matvec_repr(plan.sym_orbit_csr ? SymMatvecRepr::OrbitCsr
+                                           : SymMatvecRepr::Rep);
 }
 
 }  // namespace ed::planner
