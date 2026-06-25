@@ -86,6 +86,38 @@ TEST_CASE("nonabelian: is_abelian + maximal_abelian_subgroup", "[symmetry][nonab
     REQUIRE(std::find(asub.begin(), asub.end(), T) != asub.end());
 }
 
+TEST_CASE("nonabelian: abelian restriction returns the MAXIMUM-cardinality "
+          "subgroup, not a smaller maximal-by-inclusion one (Z3^2 > Z2^k trap)",
+          "[symmetry][nonabelian]") {
+    // 3x3 toroidal grid: two independent order-3 translations T1,T2 (Z3 x Z3,
+    // order 9) and the transpose reflection R (swaps the two Z3 factors). The
+    // full group (Z3 x Z3) :| Z2 is non-abelian (|G| = 18); its MAXIMUM abelian
+    // subgroup is the order-9 translation group. This reproduces the 3x3
+    // periodic-kagome failure where a plain greedy committed to commuting
+    // involutions and returned a SMALLER maximal-by-inclusion subgroup.
+    const int n = 9;
+    Permutation T1(n), T2(n), R(n);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            T1[3 * r + c] = 3 * ((r + 1) % 3) + c;     // shift rows  (order 3, fpf)
+            T2[3 * r + c] = 3 * r + ((c + 1) % 3);     // shift cols  (order 3, fpf)
+            R[3 * r + c]  = 3 * c + r;                 // transpose   (order 2)
+        }
+    REQUIRE(ed::sym::is_abelian({T1, T2}));            // translations commute
+    REQUIRE_FALSE(ed::sym::is_abelian({T1, T2, R}));   // ... but R swaps them
+    const auto full = ed::sym::generate_group({T1, T2, R});
+    REQUIRE(full.size() == 18u);
+
+    // Adversarial `preferred`: lead with the reflection (an involution). The old
+    // greedy then committed to a small commuting subgroup (e.g. <R, T1T2> = Z6)
+    // and never reached the larger translation group. The robust default
+    // restarts from every element and keeps the MAXIMUM, so it must recover the
+    // order-9 Z3 x Z3.
+    const auto agens = ed::sym::maximal_abelian_subgroup_generators({R}, full);
+    REQUIRE(ed::sym::is_abelian(agens));
+    REQUIRE(ed::sym::generate_group(agens).size() >= 9u);
+}
+
 TEST_CASE("nonabelian: group_from_generators auto-restricts to abelian",
           "[symmetry][nonabelian]") {
     const int N = 6;

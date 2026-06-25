@@ -112,25 +112,55 @@ maximal_abelian_subgroup_generators(
     const int n = static_cast<int>(group_elements.front().size());
     const Permutation id = identity_internal(static_cast<std::size_t>(n));
 
-    std::vector<Permutation> gens;          // selected generators (pairwise commute)
-    std::set<Permutation> closure{ id };    // <gens> so far
-
-    auto try_add = [&](const Permutation& c) {
-        if (c == id) return;
-        if (closure.count(c)) return;        // already in the subgroup
-        for (const auto& g : gens) {         // must commute with every selected gen
-            if (compose(c, g) != compose(g, c)) return;
-        }
-        gens.push_back(c);
-        closure.clear();
-        for (const auto& e : generate_group(gens)) closure.insert(e);
+    // A plain greedy returns a subgroup maximal *by inclusion*, which need NOT
+    // be maximal *by cardinality*: committing to a few commuting involutions
+    // gives e.g. Z2^3 (order 8) and blocks the strictly larger pure-translation
+    // subgroup Z3^2 (order 9) on a 3x3 periodic kagome cluster. We fix this two
+    // ways: (1) sweep candidates translation-first -- fixed-point-free (lattice
+    // translations have no fixed site) and higher group-order before low-order
+    // involutions; (2) restart the greedy from every element and keep the
+    // abelian subgroup of MAXIMUM order. |G| (an automorphism group) is small,
+    // so the O(|G|^2) restart sweep is cheap and runs once at setup.
+    auto fixed_point_free = [&](const Permutation& p) {
+        for (int i = 0; i < n; ++i)
+            if (p[static_cast<std::size_t>(i)] == i) return false;
+        return true;
     };
 
-    // Try the caller's preferred elements (translations) first so the retained
-    // abelian subgroup keeps them, then sweep the rest of the group.
-    for (const auto& c : preferred)      try_add(c);
-    for (const auto& c : group_elements) try_add(c);
-    return gens;
+    std::vector<Permutation> sweep = group_elements;
+    std::stable_sort(sweep.begin(), sweep.end(),
+        [&](const Permutation& a, const Permutation& bb) {
+            const bool fa = fixed_point_free(a), fb = fixed_point_free(bb);
+            if (fa != fb) return fa;                 // translations (fpf) first
+            return order(a) > order(bb);             // then higher order first
+        });
+
+    // Greedy build from a seed list (then the ordered sweep); returns the
+    // selected generators and the order of the abelian subgroup they span.
+    auto build = [&](const std::vector<Permutation>& seed)
+            -> std::pair<std::vector<Permutation>, std::size_t> {
+        std::vector<Permutation> gens;
+        std::set<Permutation>    closure{ id };
+        auto try_add = [&](const Permutation& c) {
+            if (c == id || closure.count(c)) return;
+            for (const auto& g : gens)
+                if (compose(c, g) != compose(g, c)) return;
+            gens.push_back(c);
+            closure.clear();
+            for (const auto& e : generate_group(gens)) closure.insert(e);
+        };
+        for (const auto& c : seed)  try_add(c);
+        for (const auto& c : sweep) try_add(c);
+        return { gens, closure.size() };
+    };
+
+    auto best = build(preferred);                    // honor the caller's set first
+    for (const auto& s : sweep) {                    // ... then restart from each
+        if (s == id) continue;
+        auto cand = build({ s });
+        if (cand.second > best.second) best = std::move(cand);
+    }
+    return best.first;
 }
 
 namespace {
