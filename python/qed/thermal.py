@@ -44,6 +44,7 @@ thermodynamics plus a per-sector breakdown for diagnostics.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import math
 import os
@@ -66,6 +67,12 @@ from ._core import (
 )
 from .workflow import solve as _solve  # per-sector dispatcher
 from .workflow import _resolve_device   # (use_gpu, use_mpi) device picker
+from .workflow import (                 # in-memory symmetry -> temp directory
+    _write_operator_directory as _write_operator_directory,
+    _write_symmetry_directory as _write_symmetry_directory,
+    _normalize_symmetry_info as _normalize_symmetry_info,
+    SymmetryArg as SymmetryArg,
+)
 
 __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
 
@@ -186,6 +193,40 @@ def _ed_result_from_thermal_result(
     out.eigenvectors_computed = bool(h5_path)
     out.eigenvectors_path     = h5_path
     return out
+
+
+def _thermal_via_workflows_all_sz_streaming_symmetry(
+    directory: str,
+    num_sites: int,
+    spin_l: float,
+    method: DiagonalizationMethod,
+    params: EDParameters,
+    n_up_min: int,
+    n_up_max: int,
+    *,
+    use_gpu: bool = False,
+    use_mpi: bool = False,
+) -> "_core.ThermalResult":
+    """Single C++ call covering ALL (n_up, irrep) sectors simultaneously.
+
+    Calls ``workflows_thermal_all_sz_streaming_symmetry_directory``, which:
+      1. Loads Hamiltonian + symmetry group info once.
+      2. Runs ``enumerate_full_orbit_reps`` once (O(2^N × |G|)).
+      3. Partitions reps by n_up and builds all (n_up, irrep) sectors.
+      4. Runs a single flat OMP pool over all sectors
+         (gate: ``ED_SYM_SECTOR_PARALLEL=1``).
+      5. Returns a single ``ThermalResult`` with fully-combined thermo.
+
+    Eliminates the N+1 cold-start overhead (JSON loads + orbit rep scans)
+    from calling ``workflows_thermal_streaming_symmetry_directory`` once
+    per n_up from a Python ThreadPoolExecutor.
+    """
+    opts = _ed_params_to_thermal_options(params, method)
+    opts.backend.allow_gpu = bool(use_gpu)
+    opts.backend.allow_mpi = bool(use_mpi)
+    return _core.workflows_thermal_all_sz_streaming_symmetry_directory(
+        directory, int(num_sites), float(spin_l), opts,
+        int(n_up_min), int(n_up_max))
 
 
 def _can_use_workflows_thermal(
@@ -502,6 +543,7 @@ def thermal(
     num_T: int = 24,
     sz_min: Optional[int] = None,
     sz_max: Optional[int] = None,
+    symmetry: "SymmetryArg" = None,
     num_samples: int = 40,
     krylov_dim: Optional[int] = None,
     ftlm_krylov_dim: Optional[int] = None,
@@ -641,8 +683,32 @@ def thermal(
         res = qed.thermal(H, T_min=0.05, T_max=2.0, num_T=64,
                           sz_min=N//2 - 1, sz_max=N//2 + 1)
     """
+    _all_params = dict(locals())   # capture every parameter for the symmetry recursion
     method_enum = _coerce_method(method)
     is_directory = isinstance(H, (str, os.PathLike))
+
+    # In-memory operator + explicit spatial `symmetry=`: materialise a temp
+    # directory (operator + automorphism_results/) and re-dispatch as the
+    # directory form, which runs the per-(Sz, irrep) stochastic lanes and
+    # Z-recombines. This makes the spatial-symmetry sectors available to the
+    # in-memory API. (A non-abelian generator set is reduced by its maximal
+    # abelian subgroup here -- a complete, correct, coarser reduction; for the
+    # FULL non-abelian reduction use qed._core.symmetry_adapted_thermodynamics.)
+    if symmetry is not None and not is_directory:
+        _N = int(H.num_sites)
+        _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
+        try:
+            _write_operator_directory(H, _tmp)
+            _info = _normalize_symmetry_info(H, symmetry)
+            if _info is not None:
+                _write_symmetry_directory(_tmp, _info)
+            _fwd = {k: v for k, v in _all_params.items() if k != "H"}
+            _fwd["num_sites"] = _N
+            _fwd["use_symmetry_if_available"] = True
+            _fwd["symmetry"] = None
+            return thermal(_tmp, **_fwd)
+        finally:
+            shutil.rmtree(_tmp, ignore_errors=True)
 
     if is_directory and num_sites is None:
         raise ValueError(
@@ -864,7 +930,8 @@ def thermal(
                 p.output_dir = _alloc_scratch(n_up_val)
             elif output_dir and n_up_val is not None:
                 p.output_dir = _persistent_sector_outdir(output_dir, n_up_val)
-                os.makedirs(p.output_dir, exist_ok=True)
+                if not p.output_dir.startswith("/dev/null"):
+                    os.makedirs(p.output_dir, exist_ok=True)
             else:
                 p.output_dir = output_dir
             if krylov_dim is not None:
@@ -967,78 +1034,144 @@ def thermal(
             )
 
         try:
-            for n_up in range(lo, hi + 1):
-                sec_dim = math.comb(N, n_up)
-                if sec_dim == 0:
-                    continue
+            # Validate method support once before spawning threads.
+            if not _can_use_workflows_thermal(method_enum, has_sym):
+                raise NotImplementedError(
+                    f"qed.thermal: method={method!r} has no "
+                    f"orchestrator binding; supported methods are "
+                    f"{sorted(_THERMAL_METHOD_MAP.keys())!r}."
+                )
+
+            if has_sym:
+                # Fast path (Jun 2026): single C++ call builds ALL
+                # (n_up, irrep) sectors in one orbit-rep pass and runs
+                # a flat OMP pool. Eliminates N+1 cold-start overhead
+                # from the per-n_up ThreadPoolExecutor loop.
+                # _make_dir_params(None) → output_dir is the parent dir;
+                # C++ manages per-sector subdirs internally
+                # (sz_<n_up>_sector_k_<k>/). For needs_scratch the
+                # scratch dir has no n_up suffix.
+                p = _make_dir_params(None)
+                tr = _thermal_via_workflows_all_sz_streaming_symmetry(
+                    directory, N, float(spin), method_enum, p,
+                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi)
+                td = tr.thermo
+                if not td or not td.temperatures:
+                    raise RuntimeError(
+                        "qed.thermal: all-Sz binding returned no "
+                        "thermodynamic data.")
+                temps = np.array(td.temperatures)
+                E     = np.array(td.energy)
+                Cv    = np.array(td.specific_heat)
+                S     = np.array(td.entropy)
+                F     = np.array(td.free_energy)
+                gs_E  = float(tr.ground_state_energy)
+                h5_path_multi = str(getattr(tr, "hdf5_path", "") or "")
+                for s in (tr.per_sector or []):
+                    if not (hasattr(s, "thermo") and s.thermo.temperatures):
+                        continue
+                    n_up_s = (int(s.sz_index)
+                              if hasattr(s, "sz_index")
+                              and s.sz_index is not None else None)
+                    sec_dim_s = (int(s.tag.sector_dim)
+                                 if hasattr(s, "tag") else 0)
+                    per_sector_records.append(ThermalSectorEntry(
+                        n_up=n_up_s,
+                        sector_dim=sec_dim_s,
+                        temperatures=np.array(s.thermo.temperatures),
+                        energy=np.array(s.thermo.energy),
+                        specific_heat=np.array(s.thermo.specific_heat),
+                        entropy=np.array(s.thermo.entropy),
+                        free_energy=np.array(s.thermo.free_energy),
+                    ))
                 if verbose:
-                    print(f"  [n_up={n_up}] dim={sec_dim}")
-                p = _make_dir_params(n_up)
-                if not _can_use_workflows_thermal(method_enum, has_sym):
-                    raise NotImplementedError(
-                        f"qed.thermal: method={method!r} has no "
-                        f"orchestrator binding; supported methods are "
-                        f"{sorted(_THERMAL_METHOD_MAP.keys())!r}."
-                    )
-                if has_sym:
-                    res = _thermal_via_workflows_streaming_symmetry(
-                        directory, N, float(spin),
-                        method_enum, p,
-                        use_gpu=_use_gpu, use_mpi=_use_mpi,
-                    )
-                else:
+                    print(
+                        f"[qed.thermal] all-Sz flat-pool: "
+                        f"{len(per_sector_records)} (n_up, irrep) sectors "
+                        f"recombined in one C++ call")
+            else:
+                # Parallel Sz outer loop. The C++ bindings release the GIL
+                # so Python threads run concurrently. Each n_up call is
+                # fully independent: it reads from the same (read-only)
+                # directory, builds its own SectorOperatorSet, and writes to
+                # a dedicated per-n_up scratch/output subdirectory.
+                # For maximum throughput on many-core machines combine with
+                # ED_SYM_SECTOR_PARALLEL=1 in the C++ inner loop. The
+                # recommended thread budget for that combination is:
+                #   QED_SZ_WORKERS = ceil(N_cores / N_irreps)
+                #   OMP_NUM_THREADS = N_cores / QED_SZ_WORKERS
+                #   OPENBLAS_NUM_THREADS = same; OMP_MAX_ACTIVE_LEVELS=1
+                # For the default (no QED_SZ_WORKERS set) we pick one worker
+                # per Sz sector so all n_up values run simultaneously with
+                # the remaining parallelism absorbed by the inner OMP loop.
+                _n_up_values = [
+                    n for n in range(lo, hi + 1)
+                    if math.comb(N, n) > 0
+                ]
+                _sz_workers = len(_n_up_values)
+                if (env_w := os.environ.get("QED_SZ_WORKERS")):
+                    try:
+                        _sz_workers = max(1, int(env_w))
+                    except ValueError:
+                        pass
+
+                def _run_n_up(n_up: int):
+                    sec_dim = math.comb(N, n_up)
+                    p = _make_dir_params(n_up)
                     res = _thermal_via_workflows_thermal(
                         H_op, method_enum, p,
                         use_gpu=_use_gpu, use_mpi=_use_mpi,
                     )
-                thermo = _sector_thermo_arrays(res)
-                if thermo is None:
-                    if verbose:
-                        print("    (no thermo data; skipping)")
-                    continue
-                temps, E, Cv, S, F = thermo
-                per_sector_blocks.append((temps, E, Cv, S, F))
-                per_sector_records.append(
-                    ThermalSectorEntry(
-                        n_up=n_up, sector_dim=sec_dim,
-                        temperatures=temps, energy=E,
-                        specific_heat=Cv, entropy=S, free_energy=F,
-                    )
-                )
-                if len(res.eigenvalues) > 0:
-                    gs_E = min(gs_E, float(res.eigenvalues[0]))
-                # Save & DSSF Upgrades follow-up (May 2026): record the
-                # per-sector HDF5 file so callers can reload state
-                # vectors per Sz sector. With the per-sector
-                # subdirectory layout the file lives at
-                # ``<output_dir>/n_up_<n_up>/ed_results.h5``.
-                _sec_h5 = str(getattr(res, "eigenvectors_path", "") or "")
-                if _sec_h5:
-                    sector_hdf5_paths[n_up] = _sec_h5
+                    return n_up, sec_dim, res
 
-            if not per_sector_blocks:
-                raise RuntimeError(
-                    "qed.thermal: no Sz sector in the requested window "
-                    "produced thermodynamic data."
-                )
-            temps, E, Cv, S, F = _combine_sector_thermodynamics(
-                per_sector_blocks)
-            # Save & DSSF Upgrades follow-up (May 2026): with the
-            # per-sector subdirectory layout each sector now has its
-            # own ``ed_results.h5``. Surface the user-supplied parent
-            # ``output_dir`` here (the per-sector files live underneath)
-            # and expose the per-sector path map via
-            # ``ThermalResult.sector_hdf5_paths``.
-            h5_path_multi = output_dir if output_dir else ""
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=_sz_workers) as _pool:
+                    _futures = {
+                        _pool.submit(_run_n_up, n_up): n_up
+                        for n_up in _n_up_values
+                    }
+                    for _fut in concurrent.futures.as_completed(_futures):
+                        n_up, sec_dim, res = _fut.result()
+                        if verbose:
+                            print(f"  [n_up={n_up}] dim={sec_dim} done")
+                        thermo = _sector_thermo_arrays(res)
+                        if thermo is None:
+                            if verbose:
+                                print(
+                                    f"    (n_up={n_up}: no thermo data; "
+                                    f"skipping)"
+                                )
+                            continue
+                        temps, E, Cv, S, F = thermo
+                        per_sector_blocks.append((temps, E, Cv, S, F))
+                        per_sector_records.append(
+                            ThermalSectorEntry(
+                                n_up=n_up, sector_dim=sec_dim,
+                                temperatures=temps, energy=E,
+                                specific_heat=Cv, entropy=S, free_energy=F,
+                            )
+                        )
+                        if len(res.eigenvalues) > 0:
+                            gs_E = min(gs_E, float(res.eigenvalues[0]))
+                        _sec_h5 = str(
+                            getattr(res, "eigenvectors_path", "") or "")
+                        if _sec_h5:
+                            sector_hdf5_paths[n_up] = _sec_h5
+
+                if not per_sector_blocks:
+                    raise RuntimeError(
+                        "qed.thermal: no Sz sector in the requested window "
+                        "produced thermodynamic data."
+                    )
+                temps, E, Cv, S, F = _combine_sector_thermodynamics(
+                    per_sector_blocks)
+                h5_path_multi = output_dir if output_dir else ""
         finally:
             _cleanup_scratch()
-        if verbose:
-            sym_used = has_sym and method_enum not in _TPQ_METHODS
+        if verbose and not has_sym:
             print(
                 f"[qed.thermal] Z-recombined {len(per_sector_blocks)} "
                 f"Sz sectors"
-                + (" (each sector irrep-recombined internally)"
-                   if sym_used else "")
             )
         return ThermalResult(
             temperatures=temps, energy=E, specific_heat=Cv, entropy=S,
@@ -1075,7 +1208,8 @@ def thermal(
             _resolved_outdir = _alloc_scratch(n_up_val)
         elif output_dir and n_up_val is not None:
             _resolved_outdir = _persistent_sector_outdir(output_dir, n_up_val)
-            os.makedirs(_resolved_outdir, exist_ok=True)
+            if not _resolved_outdir.startswith("/dev/null"):
+                os.makedirs(_resolved_outdir, exist_ok=True)
         else:
             _resolved_outdir = output_dir
 
