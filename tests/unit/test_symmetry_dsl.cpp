@@ -139,38 +139,27 @@ TEST_CASE("ed::sym group_from_generators populates SymmetryGroupInfo",
     }
 }
 
-TEST_CASE("ed::sym dihedral group enumerates the abelian projection",
+TEST_CASE("ed::sym dihedral group is restricted to its abelian (Z_N) subgroup",
           "[symmetry][p2-11][dsl]") {
     using namespace ed::sym;
 
     const int N = 4;
     auto info = translation_group_with_reflection_1d(N);
 
-    // |D_N| = 2N
-    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(2 * N));
+    // D_N (|G|=2N) is NON-abelian, but the projection layer is abelian-only.
+    // The non-abelian guard (group.cpp) restricts the input to a maximal abelian
+    // subgroup -- the Z_N translations (|A|=N) -- which is a complete & correct
+    // reduction (orbits AND characters agree), just coarser than the full 2N.
+    // This replaces the previous (incomplete) "enumerate D_N then take the 8
+    // one-dimensional Z_4 x Z_2 sectors" behavior, which silently dropped the
+    // 2-dimensional irrep content.
+    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(N));   // |A| = N, not 2N
 
-    // The legacy `filterInvalidSectors` only removes sectors whose
-    // generator-power signature `T^a R^b` *itself* multiplies out to the
-    // identity. D_4 has no such non-trivial relation in the canonical
-    // ordered product `T^a R^b` (only (0, 0)), so the full Z_4 x Z_2
-    // abelian projection -- all 8 (q_T, q_R) tuples -- is kept. The
-    // residual non-abelian structure of D_4 (it has 4 one-dimensional
-    // irreps + 1 two-dimensional irrep, not 8 one-dimensional ones)
-    // is absorbed by the orbit-representative machinery downstream.
-    REQUIRE(info.sectors.size() == static_cast<std::size_t>(2 * N));
-
-    std::set<std::pair<int,int>> got;
-    for (const auto& s : info.sectors) {
-        got.insert({s.quantum_numbers.at(0), s.quantum_numbers.at(1)});
-    }
-    const std::set<std::pair<int,int>> expected = {
-        {0,0}, {1,0}, {2,0}, {3,0}, {0,1}, {1,1}, {2,1}, {3,1}
-    };
-    REQUIRE(got == expected);
-
-    // generator_orders matches (T order N, R order 2).
-    REQUIRE(info.generator_orders ==
-            std::vector<int>{N, 2});
+    // Z_N has exactly N one-dimensional irreps -> N momentum sectors {0..N-1}.
+    REQUIRE(info.sectors.size() == static_cast<std::size_t>(N));
+    std::set<int> got;
+    for (const auto& s : info.sectors) got.insert(s.quantum_numbers.at(0));
+    REQUIRE(got == std::set<int>{0, 1, 2, 3});
 }
 
 TEST_CASE("ed::sym filterInvalidSectors prunes phantom irreps",

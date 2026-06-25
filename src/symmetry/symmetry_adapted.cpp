@@ -299,6 +299,13 @@ SymBlocksPacked build_symmetry_blocks_packed(
         const auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites, n_up);
         if (sab.empty()) continue;
         const Eigen::MatrixXcd Hg = block_hamiltonian(connect, sab);
+        // Same guard as the CPU spectrum path: a non-Hermitian block means H does
+        // not commute with the supplied group. Catch it HERE (host) so the GPU
+        // eigensolver never silently diagonalises a wrong (one-triangle) matrix.
+        if ((Hg - Hg.adjoint()).norm() > 1e-8 * std::max(1.0, Hg.norm()))
+            throw std::runtime_error(
+                "build_symmetry_blocks_packed: H_Γ not Hermitian — the "
+                "Hamiltonian does not commute with the supplied symmetry group");
         const int nb = static_cast<int>(sab.size());
         P.offset.push_back(P.data.size());
         P.block_dim.push_back(nb);
