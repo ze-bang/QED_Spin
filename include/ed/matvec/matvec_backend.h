@@ -435,9 +435,11 @@ public:
         // Full / FixedSz policies (needs_orbit_walk == false).
         if constexpr (BasisPolicy::needs_orbit_walk
                       || detail::policy_is_rep_v<BasisPolicy>) {
-            // GATHER (default) overwrites every row; only the SCATTER fallback
-            // needs a pre-zeroed accumulator.
-            if (tunables_.matvec_scatter) std::fill(out, out + n, Complex{});
+            // GATHER (default) overwrites every row; the SCATTER fallback and the
+            // multi-target (non-abelian) path accumulate, so they pre-zero.
+            if (tunables_.matvec_scatter
+                || kernel::policy_multi_target_v<BasisPolicy>)
+                std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
             return;
         } else {
@@ -486,6 +488,14 @@ public:
                     std::size_t   n) override
     {
         const auto& terms = *static_cast<const term_view_t*>(tv);
+        if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
+            // The non-abelian SAB projection is complex (D^Γ), so the effective
+            // matrix is complex even for real terms; the real fast path would
+            // drop the imaginary part. Force callers onto apply_complex.
+            throw std::runtime_error(
+                "MatVecBackend::apply_real: multi-target (non-abelian) symmetry "
+                "policy is complex-only; use apply_complex");
+        }
         if (!terms.is_real) {
             throw std::runtime_error(
                 "MatVecBackend::apply_real: operator has complex couplings");
@@ -561,7 +571,18 @@ private:
             }
         } else if constexpr (BasisPolicy::needs_orbit_walk) {
             // Orbit-walk symmetry lane.
-            if (tunables_.matvec_scatter) {
+            if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
+                // Non-abelian (multiplicity): only the SCATTER kernel emits to the
+                // multiple SAB targets per state. The GATHER kernel assumes a
+                // single dst (and static_asserts has_coeff_modifier). Caller
+                // pre-zeroed ``out``.
+                ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
+                    basis_, t.spin_l,
+                    *t.diag_one, *t.offdiag_one,
+                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
+                    *t.three_body,
+                    in, out);
+            } else if (tunables_.matvec_scatter) {
                 // Bisection fallback: orbit-walk SCATTER (caller pre-zeroed).
                 ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
                     basis_, t.spin_l,

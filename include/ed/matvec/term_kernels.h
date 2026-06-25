@@ -83,6 +83,22 @@ inline constexpr uint8_t kOpSMinus = 1;
 inline constexpr uint8_t kOpSz     = 2;
 
 // ---------------------------------------------------------------------------
+// Multi-target detector. A connected state s' maps to ONE basis index for the
+// abelian/Sz policies (orbits partition the space). A non-abelian policy with
+// `static constexpr bool multi_target = true` instead provides
+// `for_each_target(s', cb)` enumerating the d_Γ multiplicity copies. The
+// detector defaults to false, so every existing policy is byte-identical
+// (the `if constexpr (multi_target)` branch in `emit` is discarded).
+// ---------------------------------------------------------------------------
+template <class P, class = void>
+struct policy_multi_target : std::false_type {};
+template <class P>
+struct policy_multi_target<P, std::void_t<decltype(P::multi_target)>>
+    : std::bool_constant<P::multi_target> {};
+template <class P>
+inline constexpr bool policy_multi_target_v = policy_multi_target<P>::value;
+
+// ---------------------------------------------------------------------------
 // Internal: convert a (complex) coefficient to the chosen Scalar kernel
 // type. For Scalar==Complex we just return it; for Scalar==double we drop
 // the imaginary part (the surrounding code is required to verify that all
@@ -321,7 +337,18 @@ inline void apply_terms(
 
                     auto emit = [&](uint64_t j_idx, uint64_t s_prime,
                                     const Scalar& base_contrib) {
-                        if constexpr (BasisPolicy::has_coeff_modifier) {
+                        if constexpr (policy_multi_target_v<BasisPolicy>) {
+                            // Non-abelian: s' belongs to several SAB vectors
+                            // (multiplicity). The single index `j_idx` (used as
+                            // the in-sector gate by the caller) is ignored; emit
+                            // to every target weighted by conj(c_k(s')).
+                            (void)j_idx;
+                            basis.for_each_target(
+                                s_prime, [&](uint64_t k, std::complex<double> w) {
+                                    local_buffer.push_back(
+                                        {k, base_contrib * coerce_coeff<Scalar>(w)});
+                                });
+                        } else if constexpr (BasisPolicy::has_coeff_modifier) {
                             const Scalar mod =
                                 basis.template coeff_modifier<Scalar>(
                                     basis_state, s_prime, i, j_idx);

@@ -1,8 +1,9 @@
 // =============================================================================
 // benchmarks/bench_gpu_lanczos_ground_state.cpp
 //
-// Micro-benchmark for the GPU `GPULanczos::run()` ground-state path. The
-// companion to bench_lanczos_ground_state.cpp on the CPU side.
+// Micro-benchmark for the GPU ground-state Lanczos path (the unified
+// lanczos_kernel<CudaBackend> facade). The companion to
+// bench_lanczos_ground_state.cpp on the CPU side.
 //
 // What we measure
 // ---------------
@@ -10,9 +11,9 @@
 //   * Cost of one full ground-state Lanczos run (build + iterate +
 //     tridiagonal solve), excluding I/O.
 //
-// Each benchmark iteration creates a fresh GPULanczos instance on top of
-// the same operator so the cuSPARSE CSR cache is reused. The op is built
-// once outside the timed loop and cached inside the GPUOperator instance.
+// Each benchmark iteration runs a fresh ground-state Lanczos on top of the
+// same operator so the cuSPARSE CSR cache is reused. The op is built once
+// outside the timed loop and cached inside the GPUOperator instance.
 //
 // Audit ref: GPU SOTA follow-up.
 // =============================================================================
@@ -22,7 +23,7 @@
 #ifdef WITH_CUDA
 
 #include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_lanczos.cuh>
+#include <ed/gpu/gpu_solvers.h>   // ed::matvec::gpu::lanczos (facade-routed)
 #include <cuda_runtime.h>
 
 #include <complex>
@@ -85,10 +86,11 @@ void BM_GPULanczosGroundState(benchmark::State& state) {
     }
 
     for (auto _ : state) {
-        GPULanczos solver(op.get(), /*max_iter=*/100, /*tol=*/1e-12);
+        // Facade-routed GPU Lanczos (lanczos_kernel<CudaBackend>); GPULanczos retired.
         std::vector<double> eigs;
-        std::vector<std::vector<Complex>> evecs;
-        solver.run(/*num_eigenvalues=*/1, eigs, evecs, /*compute_vectors=*/false);
+        ed::matvec::gpu::lanczos(*op, /*N=*/static_cast<int>(dim),
+                                 /*max_iter=*/100, /*num_eigs=*/1, /*tol=*/1e-12,
+                                 eigs, /*dir=*/"", /*eigenvectors=*/false);
         cudaDeviceSynchronize();
         benchmark::DoNotOptimize(eigs);
         benchmark::ClobberMemory();
