@@ -21,10 +21,40 @@
 #include <ed/planner/execution_planner.h>
 #include <ed/planner/system_capabilities.h>
 #include <ed/planner/csr_policy_hook.h>
+#include <ed/planner/sym_matvec_policy_hook.h>
+
+#include <cmath>
+#include <limits>
+#include <string>
 
 using namespace ed::planner;
 
 namespace {
+
+// Invariants every plan must satisfy regardless of how adversarial the input is.
+// A "goofy" planner (NaN/inf estimates, wrapped byte counts that flip an
+// impossible problem to feasible, negative rank counts, inconsistent
+// feasibility, garbage enum strings, or a crash) trips one of these.
+void require_sane(const ExecutionPlan& p) {
+    REQUIRE(std::isfinite(p.est_memory_gb));
+    REQUIRE(p.est_memory_gb >= 0.0);
+    REQUIRE(std::isfinite(p.est_seconds));
+    REQUIRE(p.est_seconds >= 0.0);
+    REQUIRE(p.n_ranks >= 1);
+    // enum -> string accessors return a known, non-empty token (no fallthrough).
+    REQUIRE(std::string(p.matvec_str()) != std::string());
+    REQUIRE(std::string(p.device_str()) != std::string());
+    REQUIRE(std::string(p.basis_str())  != std::string());
+    REQUIRE(std::string(p.reorth_str()) != std::string());
+    REQUIRE_FALSE(p.summary().empty());
+    // Feasibility must be self-consistent.
+    if (!p.feasible) {
+        REQUIRE(p.bottleneck != std::string("ok"));
+        REQUIRE_FALSE(p.suggestions.empty());
+    } else {
+        REQUIRE(p.bottleneck == std::string("ok"));
+    }
+}
 
 SystemCapabilities make_caps(double ram_gb, int n_gpus, double vram_gb,
                              int n_ranks, bool cuda, bool mpi, bool nccl) {
@@ -202,4 +232,196 @@ TEST_CASE("planner: probe_system returns sane values", "[planner]") {
     REQUIRE(c.ram_total_bytes > 0);
     REQUIRE(c.ram_avail_bytes > 0);
     REQUIRE(c.n_mpi_ranks >= 1);
+}
+
+// ============================ stress / fuzz =================================
+
+TEST_CASE("planner stress: degenerate dimensions stay sane", "[planner][stress]") {
+    auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);
+    for (std::uint64_t dim : {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{2},
+                              std::uint64_t{1023}, std::uint64_t{1024}}) {
+        TaskDescriptor t;
+        t.basis_dim = dim; t.n_terms = 10; t.n_offdiag = 6;
+        t.method = Method::Lanczos; t.kind = BasisKind::Full;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+        REQUIRE_FALSE(p.sym_orbit_csr);   // Full lane never sets it
+    }
+}
+
+TEST_CASE("planner stress: astronomically large dims do NOT wrap to feasible",
+          "[planner][stress]") {
+    // The headline anti-goofy guard: a 2^62 basis must be reported infeasible on
+    // a finite node, not silently wrapped (overflow) into a tiny working set.
+    auto caps = make_caps(/*ram*/256, 0, 0, 1, false, false, false);
+    for (std::uint64_t dim : {std::uint64_t{1} << 50, std::uint64_t{1} << 62,
+                              std::numeric_limits<std::uint64_t>::max() / 32}) {
+        TaskDescriptor t;
+        t.basis_dim = dim; t.n_terms = 100; t.n_offdiag = 64;
+        t.method = Method::Lanczos; t.kind = BasisKind::Sz; t.N = 36; t.n_up = 18;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+        REQUIRE_FALSE(p.feasible);                 // must NOT claim feasible
+        REQUIRE(p.est_memory_gb > 1.0);            // working set is genuinely huge
+        REQUIRE(p.matvec == MatvecStrategy::MatrixFree);  // CSR can't fit either
+    }
+}
+
+TEST_CASE("planner stress: N>=64 / N=0 do not invoke UB shifts", "[planner][stress]") {
+    auto caps = make_caps(/*ram*/128, 0, 0, 1, false, false, false);
+    for (int N : {0, 32, 63, 64, 100, -4}) {
+        for (auto kind : {BasisKind::Symm, BasisKind::SymSz}) {
+            TaskDescriptor t;
+            t.basis_dim = 1u << 16; t.n_terms = 20; t.n_offdiag = 12;
+            t.method = Method::Lanczos; t.kind = kind;
+            t.N = N; t.n_up = (kind == BasisKind::SymSz ? std::max(0, N / 2) : -1);
+            t.group_size = 48;
+            auto p = plan_execution(t, caps, UserConstraints{});
+            require_sane(p);
+        }
+    }
+}
+
+TEST_CASE("planner stress: degenerate symmetry params (group 0 / huge)",
+          "[planner][stress]") {
+    auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);
+    // group_size = 0 must not divide-by-zero; treated as >=1.
+    {
+        TaskDescriptor t;
+        t.basis_dim = 1u << 16; t.n_terms = 20; t.n_offdiag = 12;
+        t.method = Method::Lanczos; t.kind = BasisKind::Symm; t.N = 20;
+        t.group_size = 0;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+    }
+    // Absurd group_size with a small dim must NOT overflow sym_orbit_csr to true:
+    // orbit-CSR estimate ~ dim*group*24 is astronomically large -> rep walk.
+    {
+        TaskDescriptor t;
+        t.basis_dim = 4096; t.n_terms = 20; t.n_offdiag = 12;
+        t.method = Method::Lanczos; t.kind = BasisKind::SymSz; t.N = 24; t.n_up = 12;
+        t.group_size = std::uint64_t{1} << 50;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+        REQUIRE_FALSE(p.sym_orbit_csr);            // does not fit -> rep walk
+    }
+}
+
+TEST_CASE("planner stress: degenerate n_up (out of range / boundary)",
+          "[planner][stress]") {
+    auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);
+    for (int n_up : {-5, 0, 18, 36, 50}) {     // 50 > N=36 is invalid
+        TaskDescriptor t;
+        t.basis_dim = 1u << 18; t.n_terms = 40; t.n_offdiag = 24;
+        t.method = Method::FTLM; t.n_samples = 8;
+        t.kind = BasisKind::SymSz; t.N = 36; t.n_up = n_up; t.group_size = 48;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+    }
+}
+
+TEST_CASE("planner stress: extreme memory_safety / RAM / rank constraints",
+          "[planner][stress]") {
+    TaskDescriptor t;
+    t.basis_dim = 1u << 20; t.n_terms = 40; t.n_offdiag = 24;
+    t.method = Method::Lanczos; t.kind = BasisKind::Full;
+
+    // memory_safety at the extremes (0 -> budget 0; large -> budget huge).
+    for (double ms : {0.0, 1e-9, 1.0, 8.0}) {
+        auto caps = make_caps(/*ram*/16, 0, 0, 1, false, false, false);
+        UserConstraints uc; uc.memory_safety = ms;
+        auto p = plan_execution(t, caps, uc);
+        require_sane(p);
+    }
+    // Zero / tiny RAM node: budget floors at >=0, never negative, no crash.
+    {
+        auto caps = make_caps(/*ram*/0, 0, 0, 1, false, false, false);
+        auto p = plan_execution(t, caps, UserConstraints{});
+        require_sane(p);
+    }
+    // Negative / zero requested rank count must not yield n_ranks < 1.
+    {
+        auto caps = make_caps(/*ram*/128, 0, 0, /*ranks*/8, false, true, false);
+        UserConstraints uc; uc.device = "mpi"; uc.n_ranks = -3;
+        auto p = plan_execution(t, caps, uc);
+        require_sane(p);
+    }
+}
+
+TEST_CASE("planner stress: unknown/unsupported device requests fall back sanely",
+          "[planner][stress]") {
+    TaskDescriptor t;
+    t.basis_dim = 1u << 16; t.n_terms = 20; t.n_offdiag = 12;
+    t.method = Method::Lanczos; t.kind = BasisKind::Full;
+    auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);  // no GPU/MPI build
+
+    for (const char* dev : {"gpu", "mpi", "mpi_gpu", "banana", "", "CPU"}) {
+        UserConstraints uc; uc.device = dev;
+        auto p = plan_execution(t, caps, uc);
+        require_sane(p);
+        // With no CUDA/MPI build, no plan may end up on a GPU/MPI lane.
+        REQUIRE(p.device == DeviceLane::Cpu);
+    }
+}
+
+TEST_CASE("planner stress: every method x basis-kind combination is sane",
+          "[planner][stress]") {
+    auto caps = make_caps(/*ram*/128, 0, 0, 1, false, false, false);
+    const Method methods[] = {Method::Lanczos, Method::KrylovSchur,
+                              Method::BlockLanczos, Method::FTLM, Method::LTLM,
+                              Method::TPQ, Method::KPM, Method::Full};
+    const BasisKind kinds[] = {BasisKind::Full, BasisKind::Sz,
+                               BasisKind::Symm, BasisKind::SymSz};
+    for (auto m : methods) {
+        for (auto k : kinds) {
+            TaskDescriptor t;
+            t.basis_dim = 1u << 17; t.n_terms = 30; t.n_offdiag = 18;
+            t.method = m; t.num_eigs = 4; t.n_samples = 4; t.compute_vectors = true;
+            t.kind = k; t.N = 24;
+            t.n_up = (k == BasisKind::Sz || k == BasisKind::SymSz) ? 12 : -1;
+            t.group_size = (k == BasisKind::Symm || k == BasisKind::SymSz) ? 48 : 1;
+            auto p = plan_execution(t, caps, UserConstraints{});
+            require_sane(p);
+            if (k == BasisKind::Full || k == BasisKind::Sz)
+                REQUIRE_FALSE(p.sym_orbit_csr);  // symmetry flag is symm-only
+        }
+    }
+}
+
+TEST_CASE("planner stress: forced matvec is honored even when it cannot fit",
+          "[planner][stress]") {
+    // A user force is a directive, not a suggestion: CSR forced on a problem
+    // whose CSR clearly won't fit must still report CSR (intended, not goofy).
+    TaskDescriptor t;
+    t.basis_dim = 9'075'135'300ull; t.n_terms = 108; t.n_offdiag = 72;
+    t.method = Method::Lanczos; t.kind = BasisKind::Sz; t.N = 36; t.n_up = 18;
+    auto caps = make_caps(/*ram*/16, 0, 0, 1, false, false, false);
+    UserConstraints uc; uc.matvec = "csr";
+    auto p = plan_execution(t, caps, uc);
+    require_sane(p);
+    REQUIRE(p.matvec == MatvecStrategy::Csr);
+}
+
+TEST_CASE("planner stress: sym_matvec_policy_hook round-trips + scoped guard",
+          "[planner][stress]") {
+    clear_sym_matvec_repr();
+    REQUIRE(sym_matvec_repr() == -1);              // Auto
+
+    ExecutionPlan p;
+    p.sym_orbit_csr = true;
+    apply_sym_matvec_decision(p);
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitCsr));
+
+    p.sym_orbit_csr = false;
+    apply_sym_matvec_decision(p);
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::Rep));
+
+    {
+        ScopedSymMatvecRepr guard(SymMatvecRepr::OrbitCsr);
+        REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitCsr));
+    }
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::Rep));  // restored
+
+    clear_sym_matvec_repr();
+    REQUIRE(sym_matvec_repr() == -1);
 }
