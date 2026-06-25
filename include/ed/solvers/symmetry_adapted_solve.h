@@ -13,20 +13,60 @@
 // The non-abelian reduction is therefore no longer welded to dense.
 // =============================================================================
 
+#include <complex>
+#include <string>
+#include <utility>
 #include <vector>
 
-#include <ed/symmetry/symmetry_adapted.h>  // SymAdaptedSpectrum, ConnectFn, GroupIrreps
+#include <ed/matvec/matvec.h>              // MatVecOperator, MemorySpace
+#include <ed/symmetry/symmetry_adapted.h>  // SymAdaptedSpectrum, SymAdaptedBlockOp, ...
 
 namespace ed::solvers {
 
+// ---------------------------------------------------------------------------
+// The non-abelian symmetry-reduced block H_Γ as a first-class MatVecOperator.
+// This is the unification seam (campaign Stage D): once the reduced block is a
+// MatVecOperator, it rides EVERY method that takes one (lanczos, block_lanczos,
+// full_diagonalization, krylov_schur, FTLM, cf-DSSF) — so the symmetry reduction
+// (Axis A) is orthogonal to the eigensolver (Axis B) at the operator boundary,
+// without forcing the SAB through the abelian orbit-representative gather kernel.
+// Host-resident; `apply` is the reduced matvec from ed_symmetry's SymAdaptedBlockOp.
+// ---------------------------------------------------------------------------
+class SymAdaptedBlockMatVec final : public ed::matvec::MatVecOperator {
+public:
+    explicit SymAdaptedBlockMatVec(ed::symmetry::SymAdaptedBlockOp op)
+        : op_(std::move(op)) {}
+
+    void apply(const std::complex<double>* in,
+               std::complex<double>*       out,
+               std::size_t /*size*/) const override { op_.apply(in, out); }
+
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(op_.dim());
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::Host;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override {
+        return "SymAdaptedBlock(H_Gamma)";
+    }
+
+private:
+    ed::symmetry::SymAdaptedBlockOp op_;
+};
+
+/// Per-block eigensolver method for the symmetry reduction. `Auto` = dense for
+/// n_Γ <= dense_max_dim, else Lanczos. The others FORCE that method per block
+/// (with a dense fallback for n_Γ <= 2, where iterative methods are degenerate),
+/// demonstrating that the reduction composes with any method.
+enum class BlockMethod { Auto, Dense, Lanczos, KrylovSchur };
+
 /// Lowest-`k` eigenvalues of H under the (Sz / abelian / non-abelian spatial /
 /// combined) symmetry reduction, recombined with each block's d_Γ multiplicity
-/// and returned sorted. For every irrep block H_Γ of reduced dimension n_Γ:
-///   * n_Γ <= dense_max_dim  -> dense eigensolve (optimal for small blocks);
-///   * n_Γ >  dense_max_dim  -> Lanczos on SymAdaptedBlockOp::apply (the reduced
-///                              matvec), so large non-abelian blocks are tractable.
-/// Both paths consume the SAME reduced matvec. `n_up >= 0` restricts to the
-/// fixed-Sz sector. `k` is the number of lowest eigenvalues per block.
+/// and returned sorted. Each irrep block H_Γ is wrapped as a SymAdaptedBlockMatVec
+/// and solved through the STANDARD MatVecOperator& method overloads selected by
+/// `method`. `n_up >= 0` restricts to the fixed-Sz sector.
 [[nodiscard]] ed::symmetry::SymAdaptedSpectrum
 symmetry_adapted_lowest_eigenvalues(
     const ed::symmetry::ConnectFn&        connect,
@@ -34,7 +74,8 @@ symmetry_adapted_lowest_eigenvalues(
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,
     int                                   k,
-    int                                   n_up         = -1,
-    int                                   dense_max_dim = 512);
+    int                                   n_up          = -1,
+    int                                   dense_max_dim = 512,
+    BlockMethod                           method        = BlockMethod::Auto);
 
 }  // namespace ed::solvers

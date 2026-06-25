@@ -214,6 +214,39 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
     REQUIRE(std::abs(iter.eigenvalues.front() - dense.eigenvalues.front()) < 1e-9);
 }
 
+TEST_CASE("non-abelian on the rails: reduction × {dense, Lanczos, Krylov-Schur} all == brute force",
+          "[symmetry_adapted][nonabelian][iterative][methods]") {
+    // Stage D payoff: the non-abelian block is a MatVecOperator, so the SAME
+    // reduction is solved by ANY method through the standard overloads. All three
+    // must give the same ground state == brute force (method ⟂ reduction).
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+    const double gs = ref.eigenvalues()(0);
+
+    ed::symmetry::ConnectFn connect =
+        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            for (int sp = 0; sp < H.rows(); ++sp) {
+                const Complex h = H(sp, static_cast<Eigen::Index>(st));
+                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
+            }
+        };
+
+    using ed::solvers::BlockMethod;
+    using ed::solvers::symmetry_adapted_lowest_eigenvalues;
+    // dense_max_dim=0 forces the iterative methods onto every block with n_Γ > 2.
+    for (BlockMethod m : {BlockMethod::Dense, BlockMethod::Lanczos, BlockMethod::KrylovSchur}) {
+        auto spec = symmetry_adapted_lowest_eigenvalues(connect, gi, Gp, N, /*k=*/4,
+                                                        /*n_up=*/-1, /*dense_max_dim=*/0, m);
+        REQUIRE(*std::max_element(spec.block_size.begin(), spec.block_size.end()) > 2);
+        REQUIRE(std::abs(spec.eigenvalues.front() - gs) < 1e-8);
+    }
+}
+
 TEST_CASE("SymAdaptedBlockOp: apply (matvec) == materialize (dense column)",
           "[symmetry_adapted][nonabelian][matvec]") {
     // Pins the reduced operator: the matvec `apply` and the dense `materialize`

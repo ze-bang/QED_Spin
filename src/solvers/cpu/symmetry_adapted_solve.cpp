@@ -28,7 +28,8 @@ symmetry_adapted_lowest_eigenvalues(
     int                                  n_sites,
     int                                  k,
     int                                  n_up,
-    int                                  dense_max_dim)
+    int                                  dense_max_dim,
+    BlockMethod                          method)
 {
     using namespace ed::symmetry;
     SymAdaptedSpectrum out;
@@ -38,35 +39,34 @@ symmetry_adapted_lowest_eigenvalues(
         auto sab = build_sab_partition0(gi, max_clique, static_cast<int>(g), n_sites, n_up);
         if (sab.empty()) continue;
 
-        SymAdaptedBlockOp op(connect, std::move(sab));
-        const int nb   = op.dim();
-        const int want = std::max(1, std::min(k, nb));
+        // The reduced block H_Γ as a first-class MatVecOperator — fed UNCHANGED
+        // to the standard method overloads, so the reduction is method-agnostic.
+        SymAdaptedBlockMatVec mv{SymAdaptedBlockOp(connect, std::move(sab))};
+        const std::uint64_t nb   = mv.dim();
+        const std::uint64_t want = std::max<std::uint64_t>(
+            1u, std::min<std::uint64_t>(static_cast<std::uint64_t>(k), nb));
+        const std::uint64_t max_it = std::min<std::uint64_t>(
+            nb, std::max<std::uint64_t>(2u * want + 40u, want + 1u));
 
-        // The reduced matvec — the ONLY thing either solver sees.
-        auto Hv = [&op](const Complex* in, Complex* o, int /*n*/) { op.apply(in, o); };
+        // Iterative methods are degenerate on tiny blocks -> always dense there.
+        const bool use_dense = (method == BlockMethod::Dense) ||
+                               (method == BlockMethod::Auto && nb <= static_cast<std::uint64_t>(dense_max_dim)) ||
+                               nb <= 2;
 
         std::vector<double> bev;
-        if (nb <= dense_max_dim || nb <= 2) {
-            // Small block: exact dense eigensolve (driven by the same matvec).
-            ::full_diagonalization(Hv, static_cast<std::uint64_t>(nb),
-                                   static_cast<std::uint64_t>(want), bev,
-                                   /*dir=*/"", /*compute_eigenvectors=*/false);
-        } else {
-            // Large block: Lanczos on the reduced matvec.
-            const std::uint64_t max_it = std::min<std::uint64_t>(
-                static_cast<std::uint64_t>(nb),
-                std::max<std::uint64_t>(2u * static_cast<std::uint64_t>(want) + 40u,
-                                        static_cast<std::uint64_t>(want) + 1u));
-            ::lanczos(Hv, static_cast<std::uint64_t>(nb), max_it,
-                      static_cast<std::uint64_t>(want), /*tol=*/1e-12, bev,
-                      /*dir=*/"", /*eigenvectors=*/false);
+        if (use_dense) {
+            ::full_diagonalization(mv, nb, want, bev, /*dir=*/"", /*eigvecs=*/false);
+        } else if (method == BlockMethod::KrylovSchur) {
+            ::krylov_schur(mv, nb, max_it, want, /*tol=*/1e-12, bev, "", false);
+        } else {  // Lanczos, or Auto on a large block
+            ::lanczos(mv, nb, max_it, want, /*tol=*/1e-12, bev, "", false);
         }
 
         std::sort(bev.begin(), bev.end());
         for (double e : bev)
             for (int r = 0; r < d; ++r)         // physical d_Γ degeneracy
                 out.eigenvalues.push_back(e);
-        out.block_size.push_back(nb);
+        out.block_size.push_back(static_cast<int>(nb));
         out.block_irrep_dim.push_back(d);
     }
 
