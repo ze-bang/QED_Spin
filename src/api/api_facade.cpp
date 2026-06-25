@@ -48,6 +48,9 @@ parse_solve_method(std::string_view name) {
         return ed::workflows::SolveMethod::Lanczos;
     if (ieq(t, "BLOCK_LANCZOS")  || ieq(t, "BlockLanczos") || ieq(t, "block_lanczos"))
         return ed::workflows::SolveMethod::BlockLanczos;
+    if (ieq(t, "BLOCK_KRYLOV_SCHUR") || ieq(t, "BlockKrylovSchur")
+        || ieq(t, "block_krylov_schur"))
+        return ed::workflows::SolveMethod::BlockKrylovSchur;
     if (ieq(t, "KRYLOV_SCHUR")   || ieq(t, "KrylovSchur")  || ieq(t, "krylov_schur"))
         return ed::workflows::SolveMethod::KrylovSchur;
     if (ieq(t, "FULL")           || ieq(t, "FullDiag")     || ieq(t, "full_diag")
@@ -165,7 +168,7 @@ to_legacy(const SolveOptions& opts, std::uint64_t dim_hint) {
             throw std::invalid_argument(
                 "ed::api::solve: unknown solver token '" + opts.solver +
                 "'. Accepts 'LANCZOS', 'BLOCK_LANCZOS', 'KRYLOV_SCHUR', "
-                "'FULL', 'auto'.");
+                "'BLOCK_KRYLOV_SCHUR', 'FULL', 'auto'.");
         }
     }
     wf.backend = device_constraints(opts.device, dim_hint);

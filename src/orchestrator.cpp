@@ -27,6 +27,7 @@
 
 #include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
 #include <ed/krylov/block_lanczos_kernel.h>
+#include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
@@ -529,6 +530,30 @@ GroundStateResult solve_on(Backend& be,
             R.eigenvectors = std::move(evref);
         }
         R.krylov.iters_done = kres.blocks_built;
+        R.krylov.converged  = kres.converged;
+    } else if (method == SolveMethod::BlockKrylovSchur) {
+        ed::krylov::BlockKrylovSchurOptions kopts;
+        kopts.num_eigs        = opts.num_eigs;
+        kopts.block_size      = opts.block_size;
+        kopts.max_iter        = max_iter;
+        kopts.tolerance       = opts.tolerance;
+        kopts.compute_vectors = opts.compute_vectors;
+        kopts.output_dir      = opts.output_dir;
+        kopts.global_n        = geom.global_dim;
+        auto kres = ed::krylov::block_krylov_schur_kernel(be, matvec,
+            geom.local_dim, geom.global_dim, kopts);
+        R.eigenvalues = std::move(kres.eigenvalues);
+        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
+            EigenvectorRef evref;
+            evref.host.reserve(kres.eigenvectors.size());
+            std::vector<Complex> tmp(geom.local_dim);
+            for (auto& v : kres.eigenvectors) {
+                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
+                evref.host.push_back(tmp);
+            }
+            R.eigenvectors = std::move(evref);
+        }
+        R.krylov.iters_done = kres.restarts;
         R.krylov.converged  = kres.converged;
     } else if (method == SolveMethod::KrylovSchur) {
         ed::krylov::KrylovSchurOptions kopts;

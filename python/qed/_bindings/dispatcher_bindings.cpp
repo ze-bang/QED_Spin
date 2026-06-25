@@ -190,6 +190,7 @@ void bind_dispatcher(py::module_& m) {
         .value("LANCZOS",                  DiagonalizationMethod::LANCZOS)
         .value("BLOCK_LANCZOS",            DiagonalizationMethod::BLOCK_LANCZOS)
         .value("KRYLOV_SCHUR",             DiagonalizationMethod::KRYLOV_SCHUR)
+        .value("BLOCK_KRYLOV_SCHUR",       DiagonalizationMethod::BLOCK_KRYLOV_SCHUR)
         .value("FULL",                     DiagonalizationMethod::FULL)
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)

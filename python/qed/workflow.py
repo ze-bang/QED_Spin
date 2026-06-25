@@ -89,6 +89,7 @@ _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.LANCZOS,
     DiagonalizationMethod.BLOCK_LANCZOS,
     DiagonalizationMethod.KRYLOV_SCHUR,
+    DiagonalizationMethod.BLOCK_KRYLOV_SCHUR,
     DiagonalizationMethod.FULL,
 })
 

@@ -810,6 +810,8 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "lanczos")        return DiagonalizationMethod::LANCZOS;
     if (lower == "block_lanczos")  return DiagonalizationMethod::BLOCK_LANCZOS;
     if (lower == "krylov_schur")   return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "block_krylov_schur" || lower == "blockkrylovschur")
+        return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
     if (lower == "full")           return DiagonalizationMethod::FULL;
 
     if (lower == "mtpq")           return DiagonalizationMethod::mTPQ;
@@ -829,6 +831,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::LANCZOS:       return "LANCZOS";
         case DiagonalizationMethod::BLOCK_LANCZOS: return "BLOCK_LANCZOS";
         case DiagonalizationMethod::KRYLOV_SCHUR:  return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
         case DiagonalizationMethod::FULL:          return "FULL";
         case DiagonalizationMethod::mTPQ:          return "mTPQ";
         case DiagonalizationMethod::cTPQ:          return "cTPQ";

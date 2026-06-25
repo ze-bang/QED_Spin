@@ -17,6 +17,7 @@
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/block_lanczos_kernel.h>
+#include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/ltlm_kernel.h>
@@ -30,6 +31,10 @@
 #include <ed/observables/kpm_dynamical.h>
 #include <ed/observables/time_evolution.h>
 
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <memory>
@@ -76,6 +81,43 @@ TEST_CASE("krylov::block_lanczos_kernel matches the legacy block_lanczos",
     // bound and that the kernel returned monotone eigenvalues.
     REQUIRE(res.eigenvalues[0] <  0.0);
     REQUIRE(res.eigenvalues[0] <= res.eigenvalues[1] + 1e-10);
+}
+
+TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity",
+          "[kernel-facade][block-krylov-schur]") {
+    // Heisenberg chain has SU(2)-degenerate levels -- the discriminating test
+    // for a block method: it must return the k lowest eigenvalues *counting
+    // multiplicity*, where single-vector Lanczos/Krylov-Schur miss copies.
+    constexpr std::uint64_t N   = 6;
+    constexpr std::size_t   dim = std::size_t{1} << N;
+    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
+
+    ed::matvec::CpuBackend backend;
+    MatvecCallable apply{H.get()};
+
+    // Dense reference: materialize H by applying it to each unit column.
+    Eigen::MatrixXcd M(dim, dim);
+    std::vector<Complex> e(dim), col(dim);
+    for (std::size_t c = 0; c < dim; ++c) {
+        std::fill(e.begin(), e.end(), Complex(0.0, 0.0));
+        e[c] = Complex(1.0, 0.0);
+        apply(e.data(), col.data(), dim);
+        for (std::size_t r = 0; r < dim; ++r) M(static_cast<long>(r), static_cast<long>(c)) = col[r];
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+    const auto ref = es.eigenvalues();   // ascending, with multiplicity
+
+    ed::krylov::BlockKrylovSchurOptions opts;
+    opts.num_eigs     = 6;
+    opts.block_size   = 4;
+    opts.tolerance    = 1e-10;
+    opts.max_restarts = 200;
+    auto res = ed::krylov::block_krylov_schur_kernel(
+        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+
+    REQUIRE(res.eigenvalues.size() == opts.num_eigs);
+    for (std::size_t i = 0; i < opts.num_eigs; ++i)
+        REQUIRE(std::abs(res.eigenvalues[i] - ref[static_cast<long>(i)]) < 1e-7);
 }
 
 TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",

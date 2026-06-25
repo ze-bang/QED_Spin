@@ -198,6 +198,7 @@ void bind_workflows(py::module_& m) {
         .value("Auto",        ed::workflows::SolveMethod::Auto)
         .value("Lanczos",     ed::workflows::SolveMethod::Lanczos)
         .value("BlockLanczos",ed::workflows::SolveMethod::BlockLanczos)
+        .value("BlockKrylovSchur", ed::workflows::SolveMethod::BlockKrylovSchur)
         .value("KrylovSchur", ed::workflows::SolveMethod::KrylovSchur)
         .value("FullDiag",    ed::workflows::SolveMethod::FullDiag)
         .export_values();

@@ -48,6 +48,7 @@ enum class DiagonalizationMethod {
     LANCZOS,                  // Standard Lanczos
     BLOCK_LANCZOS,            // Block Lanczos
     KRYLOV_SCHUR,             // Krylov-Schur (thick-restart Lanczos)
+    BLOCK_KRYLOV_SCHUR,       // Block Krylov-Schur (thick-restart block Lanczos)
     FULL,                     // Full diagonalization (LAPACK D&C)
 
     // ===== Thermal =====

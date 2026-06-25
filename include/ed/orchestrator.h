@@ -67,6 +67,7 @@ enum class SolveMethod : std::uint8_t {
     BlockLanczos = 2,
     KrylovSchur = 3,
     FullDiag = 4,
+    BlockKrylovSchur = 5,   ///< thick-restart block Lanczos (degenerate/clustered)
 };
 
 struct SolveOptions {
