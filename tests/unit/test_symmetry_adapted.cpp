@@ -33,7 +33,6 @@ using ed::sym::generate_group;
 using ed::sym::Permutation;
 using ed::symmetry::build_sab_partition0;
 using ed::symmetry::decompose_irreps;
-using ed::symmetry::symmetry_adapted_spectrum;
 using Complex = std::complex<double>;
 
 namespace {
@@ -125,10 +124,12 @@ TEST_CASE("non-abelian SAB: C4v Heisenberg square == brute force (with d_Γ dege
         REQUIRE(std::abs(recombined[i] - brute[i]) < 1e-9);        // spectrum match
 }
 
-TEST_CASE("non-abelian SAB: symmetry_adapted_spectrum on D6 ring (matvec API)",
-          "[symmetry_adapted][nonabelian][matvec]") {
-    // 6-site periodic Heisenberg ring with full dihedral group D6 (order 12,
-    // genuinely non-abelian: TWO 2-D irreps; Σ d² = 4·1 + 2·4 = 12).
+TEST_CASE("non-abelian engine: full reduced spectrum == brute force (D6 ring)",
+          "[symmetry_adapted][nonabelian][engine]") {
+    // 6-site periodic Heisenberg ring, full dihedral D6 (order 12, genuinely
+    // non-abelian: TWO 2-D irreps; Σ d² = 4·1 + 2·4 = 12). The reduced spectrum
+    // via the PRODUCTION engine (CpuMatVecBackend<NonAbelianSymmetryBasisPolicy>)
+    // matches brute force, and the blocks (×d_Γ) span the full space.
     const int N = 6;
     const Permutation t{1, 2, 3, 4, 5, 0};   // translation
     const Permutation s{0, 5, 4, 3, 2, 1};   // reflection
@@ -142,14 +143,8 @@ TEST_CASE("non-abelian SAB: symmetry_adapted_spectrum on D6 ring (matvec API)",
 
     const Eigen::MatrixXcd H = heisenberg_square(N);   // periodic ring of N sites
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
-
-    // Drive the production function through a matvec closure over the dense H.
-    auto H_mv = [&H](const Complex* in, Complex* out, std::uint64_t dim) {
-        Eigen::Map<const Eigen::VectorXcd> v(in, dim);
-        Eigen::Map<Eigen::VectorXcd> o(out, dim);
-        o.noalias() = H * v;
-    };
-    auto spec = symmetry_adapted_spectrum(H_mv, gi, Gp, N);
+    auto op = heisenberg_operator(N);
+    auto spec = ed::solvers::symmetry_adapted_full_spectrum(op, gi, Gp, N);
 
     // Completeness: blocks (weighted by d_Γ) span the full space.
     long long total = 0;
@@ -158,34 +153,6 @@ TEST_CASE("non-abelian SAB: symmetry_adapted_spectrum on D6 ring (matvec API)",
     REQUIRE(total == (1LL << N));
     REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
 
-    for (int i = 0; i < ref.eigenvalues().size(); ++i)
-        REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
-}
-
-TEST_CASE("non-abelian SAB: on-the-fly term builder == brute force (D6 ring)",
-          "[symmetry_adapted][nonabelian][terms]") {
-    // Exercises the at-scale path: H_Γ built by applying H term-by-term over the
-    // orbit support (no 2^N vector). Here the 'connect' enumerator is synthesised
-    // from the dense H so we can check it against brute force.
-    const int N = 6;
-    const Permutation t{1, 2, 3, 4, 5, 0};
-    const Permutation s{0, 5, 4, 3, 2, 1};
-    auto Gp = generate_group({t, s});
-    auto gi = decompose_irreps(Gp, N);
-
-    const Eigen::MatrixXcd H = heisenberg_square(N);
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
-
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
-
-    auto spec = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N);
-    REQUIRE(spec.eigenvalues.size() == static_cast<std::size_t>(1LL << N));
     for (int i = 0; i < ref.eigenvalues().size(); ++i)
         REQUIRE(std::abs(spec.eigenvalues[static_cast<std::size_t>(i)] - ref.eigenvalues()(i)) < 1e-9);
 }
@@ -202,18 +169,10 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
     auto gi = decompose_irreps(Gp, N);
     const Eigen::MatrixXcd H = heisenberg_square(N);
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
-
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
-
-    auto dense = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N);
-    // Force every block with n_Γ > 2 onto the Lanczos path (dense_max_dim=0).
     auto op = heisenberg_operator(N);
+
+    auto dense = ed::solvers::symmetry_adapted_full_spectrum(op, gi, Gp, N);
+    // Force every block with n_Γ > 2 onto the Lanczos path (dense_max_dim=0).
     auto iter = ed::solvers::symmetry_adapted_lowest_eigenvalues(
         op, gi, Gp, N, /*k=*/4, /*n_up=*/-1, /*dense_max_dim=*/0);
 
@@ -228,71 +187,6 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
     // orthogonal to the symmetry reduction, which is exactly the point.)
     REQUIRE(std::abs(iter.eigenvalues.front() - ref.eigenvalues()(0)) < 1e-8);
     REQUIRE(std::abs(iter.eigenvalues.front() - dense.eigenvalues.front()) < 1e-9);
-}
-
-TEST_CASE("migration: non-abelian on the PRODUCTION engine == reference matvec == brute force",
-          "[symmetry_adapted][nonabelian][engine][migration]") {
-    // The crux: CpuMatVecBackend<NonAbelianSymmetryBasisPolicy> over the operator's
-    // own terms reproduces (a) the reference SymAdaptedBlockOp matvec exactly and
-    // (b) the brute-force ground state. Non-abelian now rides the SAME engine as
-    // abelian/Sz — no parallel matvec.
-    const int N = 6;
-    const Permutation t{1, 2, 3, 4, 5, 0};
-    const Permutation s{0, 5, 4, 3, 2, 1};
-    auto Gp = generate_group({t, s});
-    auto gi = decompose_irreps(Gp, N);
-
-    // A real ::Operator Heisenberg ring (S·S), matching heisenberg_square(N).
-    ::Operator op(static_cast<std::uint64_t>(N), 0.5f);
-    for (int i = 0; i < N; ++i) {
-        const int j = (i + 1) % N;
-        op.addTwoBodyTerm(2, i, 2, j, Complex(1.0, 0.0));
-        op.addTwoBodyTerm(0, i, 1, j, Complex(0.5, 0.0));
-        op.addTwoBodyTerm(1, i, 0, j, Complex(0.5, 0.0));
-    }
-    ed::symmetry::ConnectFn connect =
-        [&op](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            op.for_each_connected_state(st, emit);
-        };
-
-    const Eigen::MatrixXcd H = heisenberg_square(N);
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
-
-    std::mt19937_64 rng(12345);
-    std::uniform_real_distribution<double> uni(-1.0, 1.0);
-    bool exercised_multi = false;
-    double engine_gs = 1e300;
-
-    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
-        auto sab = build_sab_partition0(gi, Gp, static_cast<int>(g), N);
-        if (sab.empty()) continue;
-        const int nb = static_cast<int>(sab.size());
-
-        // Production engine operator (multi-target policy on CpuMatVecBackend).
-        auto eng = ed::solvers::build_nonabelian_sector_matvec(op, gi, Gp, static_cast<int>(g), N);
-        REQUIRE(eng->dim() == static_cast<std::size_t>(nb));
-        // Reference matvec (the soon-to-be-deleted SymAdaptedBlockOp).
-        ed::symmetry::SymAdaptedBlockOp refblk(connect, sab);
-
-        if (nb >= 2) exercised_multi = true;
-        std::vector<Complex> x(nb), ye(nb), yr(nb);
-        for (int rep = 0; rep < 3; ++rep) {
-            for (int a = 0; a < nb; ++a) x[a] = Complex(uni(rng), uni(rng));
-            eng->apply(x.data(), ye.data(), static_cast<std::size_t>(nb));
-            refblk.apply(x.data(), yr.data());
-            for (int a = 0; a < nb; ++a)
-                REQUIRE(std::abs(ye[a] - yr[a]) < 1e-10);   // ENGINE matvec == reference
-        }
-
-        // Block GS via Lanczos on the engine operator -> contributes to global GS.
-        std::vector<double> bev;
-        const std::uint64_t want = 1, mit = static_cast<std::uint64_t>(nb);
-        if (nb <= 2) ::full_diagonalization(*eng, nb, want, bev, "", false);
-        else         ::lanczos(*eng, nb, mit, want, 1e-12, bev, "", false);
-        if (!bev.empty()) engine_gs = std::min(engine_gs, bev.front());
-    }
-    REQUIRE(exercised_multi);
-    REQUIRE(std::abs(engine_gs - ref.eigenvalues()(0)) < 1e-8);   // engine GS == brute force
 }
 
 TEST_CASE("migration: SAB packs faithfully into the production SymmetrySector",
@@ -353,43 +247,6 @@ TEST_CASE("non-abelian on the rails: reduction × {dense, Lanczos, Krylov-Schur}
     }
 }
 
-TEST_CASE("SymAdaptedBlockOp: apply (matvec) == materialize (dense column)",
-          "[symmetry_adapted][nonabelian][matvec]") {
-    // Pins the reduced operator: the matvec `apply` and the dense `materialize`
-    // are the SAME operator (apply(e_j) == column j of the dense H_Γ), for every
-    // block size. This is what lets symmetry compose with ANY method.
-    const int N = 6;
-    const Permutation t{1, 2, 3, 4, 5, 0};
-    const Permutation s{0, 5, 4, 3, 2, 1};
-    auto Gp = generate_group({t, s});
-    auto gi = decompose_irreps(Gp, N);
-    const Eigen::MatrixXcd H = heisenberg_square(N);
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
-
-    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
-        auto sab = build_sab_partition0(gi, Gp, static_cast<int>(g), N);
-        if (sab.empty()) continue;
-        ed::symmetry::SymAdaptedBlockOp op(connect, sab);
-        const int nb = op.dim();
-        const std::vector<Complex> cm = op.materialize_colmajor();   // col-major nb×nb
-        std::vector<Complex> e(nb, Complex(0, 0)), y(nb);
-        for (int j = 0; j < nb; ++j) {
-            std::fill(e.begin(), e.end(), Complex(0, 0));
-            e[static_cast<std::size_t>(j)] = Complex(1, 0);
-            op.apply(e.data(), y.data());
-            for (int k = 0; k < nb; ++k)
-                REQUIRE(std::abs(y[static_cast<std::size_t>(k)]
-                                 - cm[static_cast<std::size_t>(j) * nb + k]) < 1e-12);
-        }
-    }
-}
-
 TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-block diag",
           "[symmetry_adapted][nonabelian][sz]") {
     // Combined U(1)×D6 reduction: restrict to the popcount-n_up sector AND
@@ -400,14 +257,7 @@ TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-bloc
     auto Gp = generate_group({t, s});
     auto gi = decompose_irreps(Gp, N);
     const Eigen::MatrixXcd H = heisenberg_square(N);
-
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
+    auto op = heisenberg_operator(N);
 
     long long check_total = 0;
     for (int n_up = 0; n_up <= N; ++n_up) {
@@ -421,7 +271,7 @@ TEST_CASE("combined Sz + non-abelian point group: D6 ring, fixed n_up == Sz-bloc
             for (int bb = 0; bb < dsz; ++bb) Hsz(a, bb) = H(states[a], states[bb]);
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> refsz(Hsz);
 
-        auto spec = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N, n_up);
+        auto spec = ed::solvers::symmetry_adapted_full_spectrum(op, gi, Gp, N, n_up);
 
         long long block_total = 0;
         for (std::size_t i = 0; i < spec.block_size.size(); ++i)
@@ -445,16 +295,10 @@ TEST_CASE("symmetry-adapted GPU batched eigensolve == CPU (D6 ring, all cases)",
     auto Gp = generate_group({t, s});
     auto gi = decompose_irreps(Gp, N);
     const Eigen::MatrixXcd H = heisenberg_square(N);
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
+    auto op = heisenberg_operator(N);
     for (int n_up : {-1, 3}) {
-        auto cpu = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N, n_up);
-        auto gpu = ed::symmetry::symmetry_adapted_spectrum_gpu(connect, gi, Gp, N, n_up);
+        auto cpu = ed::solvers::symmetry_adapted_full_spectrum(op, gi, Gp, N, n_up);
+        auto gpu = ed::symmetry::symmetry_adapted_spectrum_gpu(op, gi, Gp, N, n_up);
         REQUIRE(gpu.eigenvalues.size() == cpu.eigenvalues.size());
         std::sort(cpu.eigenvalues.begin(), cpu.eigenvalues.end());
         std::sort(gpu.eigenvalues.begin(), gpu.eigenvalues.end());
@@ -463,8 +307,8 @@ TEST_CASE("symmetry-adapted GPU batched eigensolve == CPU (D6 ring, all cases)",
     }
     // finite-T GPU == CPU
     const std::vector<double> temps{0.2, 0.5, 1.0, 3.0};
-    auto tc = ed::symmetry::symmetry_adapted_thermodynamics(connect, gi, Gp, N, temps);
-    auto tg = ed::symmetry::symmetry_adapted_thermodynamics_gpu(connect, gi, Gp, N, temps);
+    auto tc = ed::solvers::symmetry_adapted_thermodynamics(op, gi, Gp, N, temps);
+    auto tg = ed::symmetry::symmetry_adapted_thermodynamics_gpu(op, gi, Gp, N, temps);
     for (std::size_t i = 0; i < temps.size(); ++i) {
         REQUIRE(std::abs(tg.energy[i] - tc.energy[i]) < 1e-9);
         REQUIRE(std::abs(tg.specific_heat[i] - tc.specific_heat[i]) < 1e-9);
@@ -481,17 +325,10 @@ TEST_CASE("symmetry-adapted finite-T == exact canonical thermo (D6 ring)",
     auto gi = decompose_irreps(Gp, N);
     const Eigen::MatrixXcd H = heisenberg_square(N);
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
-
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
+    auto op = heisenberg_operator(N);
 
     const std::vector<double> temps{0.1, 0.3, 0.7, 1.5, 4.0};
-    auto td = ed::symmetry::symmetry_adapted_thermodynamics(connect, gi, Gp, N, temps);
+    auto td = ed::solvers::symmetry_adapted_thermodynamics(op, gi, Gp, N, temps);
 
     // Reference: exact canonical thermo from the full 2^N spectrum.
     const auto& ev = ref.eigenvalues();
@@ -523,20 +360,14 @@ TEST_CASE("symmetry-adapted GS DSSF == brute-force Lehmann (S^z_0 on D6 ring)",
     Eigen::MatrixXcd O = Eigen::MatrixXcd::Zero(dim, dim);
     for (std::uint64_t b = 0; b < dim; ++b) O(b, b) = ((b >> 0) & 1) ? 0.5 : -0.5;
 
-    auto mk_connect = [](const Eigen::MatrixXcd& M) {
-        return ed::symmetry::ConnectFn(
-            [&M](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-                for (int sp = 0; sp < M.rows(); ++sp) {
-                    const Complex h = M(sp, static_cast<Eigen::Index>(st));
-                    if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-                }
-            });
-    };
+    auto opH = heisenberg_operator(N);
+    ::Operator opO(static_cast<std::uint64_t>(N), 0.5f);
+    opO.addOneBodyTerm(2, 0, Complex(1.0, 0.0));   // S^z_0
 
     const double wmin = -1.0, wmax = 8.0, eta = 0.05;
     const int nw = 200;
-    auto r = ed::symmetry::symmetry_adapted_ground_state_dssf(
-        mk_connect(H), mk_connect(O), gi, Gp, N, wmin, wmax, nw, eta);
+    auto r = ed::solvers::symmetry_adapted_ground_state_dssf(
+        opH, opO, gi, Gp, N, wmin, wmax, nw, eta);
 
     // Brute-force Lehmann reference.
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(H);

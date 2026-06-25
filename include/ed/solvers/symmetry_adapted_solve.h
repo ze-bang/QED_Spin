@@ -62,4 +62,55 @@ symmetry_adapted_lowest_eigenvalues(
     int                                   dense_max_dim = 512,
     BlockMethod                           method        = BlockMethod::Auto);
 
+// ---------------------------------------------------------------------------
+// Full symmetry-reduced consumers, ALL backed by the production engine (each
+// per-irrep block H_Γ is materialised by applying NonAbelianSectorMatVec to the
+// unit columns — no SymAdaptedBlockOp, no parallel matvec). These replace the
+// retired ed::symmetry::symmetry_adapted_{spectrum_terms,thermodynamics,
+// ground_state_dssf} / build_symmetry_blocks_packed. `n_up >= 0` -> fixed-Sz.
+// ---------------------------------------------------------------------------
+
+/// Full reduced spectrum (every eigenvalue, each ×d_Γ), sorted.
+[[nodiscard]] ed::symmetry::SymAdaptedSpectrum
+symmetry_adapted_full_spectrum(
+    const ::Operator&                     op,
+    const ed::symmetry::GroupIrreps&      gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    int                                   n_up = -1);
+
+/// Exact canonical thermodynamics from the full reduced spectrum.
+[[nodiscard]] ThermodynamicData
+symmetry_adapted_thermodynamics(
+    const ::Operator&                     op,
+    const ed::symmetry::GroupIrreps&      gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    const std::vector<double>&            temperatures,
+    int                                   n_up = -1);
+
+/// Ground-state DSSF S(ω) = Σ_n |<n|O|0>|² Lorentzian, summing all d_Γ partners
+/// (completeness). H from `op_h`, the observable O from `op_o`.
+[[nodiscard]] ed::symmetry::SymDSSFResult
+symmetry_adapted_ground_state_dssf(
+    const ::Operator&                     op_h,
+    const ::Operator&                     op_o,
+    const ed::symmetry::GroupIrreps&      gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    double                                omega_min,
+    double                                omega_max,
+    int                                   n_omega,
+    double                                broadening);
+
+/// Per-irrep blocks H_Γ packed column-major (engine-materialised) for the GPU
+/// batched eigensolver.
+[[nodiscard]] ed::symmetry::SymBlocksPacked
+symmetry_adapted_blocks_packed(
+    const ::Operator&                     op,
+    const ed::symmetry::GroupIrreps&      gi,
+    const std::vector<std::vector<int>>&  max_clique,
+    int                                   n_sites,
+    int                                   n_up = -1);
+
 }  // namespace ed::solvers

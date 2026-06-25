@@ -694,23 +694,18 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              // At-scale path: apply H term-by-term over each orbit support via
-              // the operator's sparse row enumerator -- no 2^N vector / matvec.
-              // n_up >= 0 restricts to the fixed-Sz sector (combined U(1)×G).
-              ed::symmetry::ConnectFn connect =
-                  [&op](std::uint64_t s,
-                        const std::function<void(std::uint64_t, Complex)>& emit) {
-                      op.for_each_connected_state(s, emit);
-                  };
+              // Full reduced spectrum via the production engine (CpuMatVecBackend
+              // over op's terms); on GPU the host materialises the blocks and the
+              // device runs the batched cuSOLVER eigensolve. n_up >= 0 -> fixed-Sz.
               ed::symmetry::SymAdaptedSpectrum spec;
 #ifdef WITH_CUDA
               if (use_gpu)
                   spec = ed::symmetry::symmetry_adapted_spectrum_gpu(
-                      connect, gi, max_clique, n_sites, n_up);
+                      op, gi, max_clique, n_sites, n_up);
               else
 #endif
-                  spec = ed::symmetry::symmetry_adapted_spectrum_terms(
-                      connect, gi, max_clique, n_sites, n_up);
+                  spec = ed::solvers::symmetry_adapted_full_spectrum(
+                      op, gi, max_clique, n_sites, n_up);
               (void)use_gpu;
               py::dict d;
               d["eigenvalues"]     = spec.eigenvalues;
@@ -775,20 +770,15 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              ed::symmetry::ConnectFn connect =
-                  [&op](std::uint64_t s,
-                        const std::function<void(std::uint64_t, Complex)>& emit) {
-                      op.for_each_connected_state(s, emit);
-                  };
               ThermodynamicData td;
 #ifdef WITH_CUDA
               if (use_gpu)
                   td = ed::symmetry::symmetry_adapted_thermodynamics_gpu(
-                      connect, gi, max_clique, n_sites, temperatures, n_up);
+                      op, gi, max_clique, n_sites, temperatures, n_up);
               else
 #endif
-                  td = ed::symmetry::symmetry_adapted_thermodynamics(
-                      connect, gi, max_clique, n_sites, temperatures, n_up);
+                  td = ed::solvers::symmetry_adapted_thermodynamics(
+                      op, gi, max_clique, n_sites, temperatures, n_up);
               (void)use_gpu;
               py::dict d;
               d["temperatures"] = td.temperatures;
@@ -815,18 +805,8 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(H.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              ed::symmetry::ConnectFn h_connect =
-                  [&H](std::uint64_t s,
-                       const std::function<void(std::uint64_t, Complex)>& emit) {
-                      H.for_each_connected_state(s, emit);
-                  };
-              ed::symmetry::ConnectFn o_connect =
-                  [&O](std::uint64_t s,
-                       const std::function<void(std::uint64_t, Complex)>& emit) {
-                      O.for_each_connected_state(s, emit);
-                  };
-              auto r = ed::symmetry::symmetry_adapted_ground_state_dssf(
-                  h_connect, o_connect, gi, max_clique, n_sites,
+              auto r = ed::solvers::symmetry_adapted_ground_state_dssf(
+                  H, O, gi, max_clique, n_sites,
                   omega_min, omega_max, n_omega, broadening);
               py::dict d;
               d["omega"]         = r.omega;

@@ -17,6 +17,8 @@
 // =============================================================================
 
 #include <ed/symmetry/symmetry_adapted.h>
+#include <ed/solvers/symmetry_adapted_solve.h>  // ed::solvers::symmetry_adapted_blocks_packed
+#include <ed/core/operator.h>                    // ::Operator
 
 #include <cuComplex.h>
 #include <cuda_runtime.h>
@@ -173,14 +175,16 @@ std::vector<double> full_spectrum_from_blocks(const SymBlocksPacked& P,
 }  // namespace
 
 SymAdaptedSpectrum symmetry_adapted_spectrum_gpu(
-    const ConnectFn&                     connect,
+    const ::Operator&                    op,
     const GroupIrreps&                   gi,
     const std::vector<std::vector<int>>& max_clique,
     int                                  n_sites,
     int                                  n_up)
 {
+    // Blocks materialised by the production CPU engine (NonAbelianSymmetryBasisPolicy
+    // over op's terms); the GPU only does the batched eigensolve.
     const SymBlocksPacked P =
-        build_symmetry_blocks_packed(connect, gi, max_clique, n_sites, n_up);
+        ed::solvers::symmetry_adapted_blocks_packed(op, gi, max_clique, n_sites, n_up);
     const std::vector<double> block_eigs = batched_block_eigenvalues_gpu(P);
 
     SymAdaptedSpectrum out;
@@ -192,7 +196,7 @@ SymAdaptedSpectrum symmetry_adapted_spectrum_gpu(
 }
 
 ThermodynamicData symmetry_adapted_thermodynamics_gpu(
-    const ConnectFn&                     connect,
+    const ::Operator&                    op,
     const GroupIrreps&                   gi,
     const std::vector<std::vector<int>>& max_clique,
     int                                  n_sites,
@@ -200,7 +204,7 @@ ThermodynamicData symmetry_adapted_thermodynamics_gpu(
     int                                  n_up)
 {
     const SymBlocksPacked P =
-        build_symmetry_blocks_packed(connect, gi, max_clique, n_sites, n_up);
+        ed::solvers::symmetry_adapted_blocks_packed(op, gi, max_clique, n_sites, n_up);
     const std::vector<double> block_eigs = batched_block_eigenvalues_gpu(P);
     const std::vector<double> full = full_spectrum_from_blocks(P, block_eigs);
     return canonical_thermo_from_eigs(full, temperatures);  // identical reduction to CPU
