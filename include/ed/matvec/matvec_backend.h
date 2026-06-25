@@ -491,42 +491,47 @@ public:
         if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
             // The non-abelian SAB projection is complex (D^Γ), so the effective
             // matrix is complex even for real terms; the real fast path would
-            // drop the imaginary part. Force callers onto apply_complex.
+            // drop the imaginary part. Force callers onto apply_complex. The
+            // `else` wraps the whole real body so `matrix_free_real` (and its
+            // real symmetry gather, which needs has_coeff_modifier) is NOT
+            // instantiated for this policy.
+            (void)terms; (void)in; (void)out; (void)n;
             throw std::runtime_error(
                 "MatVecBackend::apply_real: multi-target (non-abelian) symmetry "
                 "policy is complex-only; use apply_complex");
-        }
-        if (!terms.is_real) {
-            throw std::runtime_error(
-                "MatVecBackend::apply_real: operator has complex couplings");
-        }
-        check_size(n);
-
-        // Symmetry policies must skip the assembled-CSR path (the assemble
-        // kernel performs no orbit walk). The real matrix-free kernel is
-        // valid here only because apply_real is reached solely when the
-        // owning operator reports a real effective matrix (real terms AND
-        // real momentum phases); coeff_modifier<double> is then exact.
-        // Compiled out for Full / FixedSz (needs_orbit_walk == false).
-        if constexpr (BasisPolicy::needs_orbit_walk
-                      || detail::policy_is_rep_v<BasisPolicy>) {
-            // GATHER (default) overwrites every row; only the SCATTER fallback
-            // needs a pre-zeroed accumulator.
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
-            return;
         } else {
-            const bool use_csr = detail::csr_eligible(
-                tunables_, basis_.dim(), csr_real_built_);
-
-            if (use_csr) {
-                ensure_csr_real(terms);
-                csr_spmv_real(in, out, n);
-                return;
+            if (!terms.is_real) {
+                throw std::runtime_error(
+                    "MatVecBackend::apply_real: operator has complex couplings");
             }
+            check_size(n);
 
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
+            // Symmetry policies must skip the assembled-CSR path (the assemble
+            // kernel performs no orbit walk). The real matrix-free kernel is
+            // valid here only because apply_real is reached solely when the
+            // owning operator reports a real effective matrix (real terms AND
+            // real momentum phases); coeff_modifier<double> is then exact.
+            // Compiled out for Full / FixedSz (needs_orbit_walk == false).
+            if constexpr (BasisPolicy::needs_orbit_walk
+                          || detail::policy_is_rep_v<BasisPolicy>) {
+                // GATHER (default) overwrites every row; only the SCATTER fallback
+                // needs a pre-zeroed accumulator.
+                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+                matrix_free_real(terms, in, out);
+                return;
+            } else {
+                const bool use_csr = detail::csr_eligible(
+                    tunables_, basis_.dim(), csr_real_built_);
+
+                if (use_csr) {
+                    ensure_csr_real(terms);
+                    csr_spmv_real(in, out, n);
+                    return;
+                }
+
+                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+                matrix_free_real(terms, in, out);
+            }
         }
     }
 

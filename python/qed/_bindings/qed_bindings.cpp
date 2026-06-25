@@ -744,13 +744,10 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              ed::symmetry::ConnectFn connect =
-                  [&op](std::uint64_t s,
-                        const std::function<void(std::uint64_t, Complex)>& emit) {
-                      op.for_each_connected_state(s, emit);
-                  };
+              // Drives the production engine (CpuMatVecBackend over op's terms via
+              // NonAbelianSymmetryBasisPolicy) per block — no parallel matvec.
               auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
-                  connect, gi, max_clique, n_sites, k, n_up, dense_max_dim);
+                  op, gi, max_clique, n_sites, k, n_up, dense_max_dim);
               py::dict d;
               d["eigenvalues"]     = spec.eigenvalues;
               d["block_irrep_dim"] = spec.block_irrep_dim;

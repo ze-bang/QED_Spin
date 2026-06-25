@@ -303,15 +303,10 @@ public:
                  "STRUCTURAL_AUDIT.md S2 #29.")]]
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
-    /// SoA-binned term cache. Returns a const reference after rebuilding
-    /// from the canonical AoS storage if stale.
-    ///
-    /// DEPRECATION (audit S2 #29, May 2026): in-tree callers read
-    /// ``terms_`` directly after ``commitPendingTransforms()``.
-    /// Scheduled for removal in the next operator-API rev.
-    [[deprecated("Operator::getTerms has no in-tree callers; call "
-                 "``commitPendingTransforms()`` and read ``terms_`` "
-                 "directly. See STRUCTURAL_AUDIT.md S2 #29.")]]
+    /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
+    /// Public so an alternative-basis matvec backend (e.g. a non-abelian
+    /// symmetry sector via NonAbelianSymmetryBasisPolicy) can be built over the
+    /// SAME terms as the operator's own matvec.
     const ed::matvec::TermStorage& getTerms() const {
         commitPendingTransforms();
         return terms_;

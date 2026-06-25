@@ -14,14 +14,30 @@
 // =============================================================================
 
 #include <complex>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <ed/matvec/matvec.h>              // MatVecOperator, MemorySpace
+#include <ed/core/operator.h>              // ed::Operator (complete: subspace_operator.h needs it)
 #include <ed/symmetry/symmetry_adapted.h>  // SymAdaptedSpectrum, SymAdaptedBlockOp, ...
 
 namespace ed::solvers {
+
+// Build the non-abelian symmetry-reduced block H_Γ of one irrep as a
+// MatVecOperator backed by the PRODUCTION engine: CpuMatVecBackend over a
+// NonAbelianSymmetryBasisPolicy (the SAB packed into a ::SymmetrySector, norm=1)
+// applied to the operator's own term SoA. This is the SAME engine the abelian/Sz
+// reductions use — non-abelian is just another BasisPolicy — replacing the
+// bespoke SymAdaptedBlockOp matvec. `n_up >= 0` restricts to the fixed-Sz sector.
+[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
+build_nonabelian_sector_matvec(const ::Operator&                    op,
+                               const ed::symmetry::GroupIrreps&     gi,
+                               const std::vector<std::vector<int>>& max_clique,
+                               int                                  irrep_index,
+                               int                                  n_sites,
+                               int                                  n_up = -1);
 
 // ---------------------------------------------------------------------------
 // The non-abelian symmetry-reduced block H_Γ as a first-class MatVecOperator.
@@ -69,7 +85,7 @@ enum class BlockMethod { Auto, Dense, Lanczos, KrylovSchur };
 /// `method`. `n_up >= 0` restricts to the fixed-Sz sector.
 [[nodiscard]] ed::symmetry::SymAdaptedSpectrum
 symmetry_adapted_lowest_eigenvalues(
-    const ed::symmetry::ConnectFn&        connect,
+    const ::Operator&                     op,
     const ed::symmetry::GroupIrreps&      gi,
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,

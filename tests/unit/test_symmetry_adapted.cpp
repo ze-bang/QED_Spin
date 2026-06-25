@@ -14,6 +14,7 @@
 #include "common/catch2_harness.h"
 
 #include <ed/core/basis_utils.h>          // applyPermutation
+#include <ed/solvers/lanczos.h>           // ::lanczos, ::full_diagonalization
 #include <ed/solvers/symmetry_adapted_solve.h>  // symmetry_adapted_lowest_eigenvalues
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <complex>
 #include <functional>
+#include <random>
 #include <vector>
 
 using ed::sym::generate_group;
@@ -53,6 +55,19 @@ Eigen::MatrixXcd heisenberg_square(int N) {
         }
     }
     return H;
+}
+
+// Same Heisenberg ring as a real ::Operator (term SoA), for the production-engine
+// consumer (which reads op's terms). Matches heisenberg_square(N).
+::Operator heisenberg_operator(int N) {
+    ::Operator op(static_cast<std::uint64_t>(N), 0.5f);
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, Complex(1.0, 0.0));  // Sz Sz
+        op.addTwoBodyTerm(0, i, 1, j, Complex(0.5, 0.0));  // S+ S-
+        op.addTwoBodyTerm(1, i, 0, j, Complex(0.5, 0.0));  // S- S+
+    }
+    return op;
 }
 
 }  // namespace
@@ -198,8 +213,9 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
 
     auto dense = ed::symmetry::symmetry_adapted_spectrum_terms(connect, gi, Gp, N);
     // Force every block with n_Γ > 2 onto the Lanczos path (dense_max_dim=0).
+    auto op = heisenberg_operator(N);
     auto iter = ed::solvers::symmetry_adapted_lowest_eigenvalues(
-        connect, gi, Gp, N, /*k=*/4, /*n_up=*/-1, /*dense_max_dim=*/0);
+        op, gi, Gp, N, /*k=*/4, /*n_up=*/-1, /*dense_max_dim=*/0);
 
     // At least one block must be large enough to actually exercise Lanczos.
     REQUIRE(*std::max_element(iter.block_size.begin(), iter.block_size.end()) > 2);
@@ -212,6 +228,71 @@ TEST_CASE("non-abelian via Lanczos: iterative lowest-k == dense == brute force (
     // orthogonal to the symmetry reduction, which is exactly the point.)
     REQUIRE(std::abs(iter.eigenvalues.front() - ref.eigenvalues()(0)) < 1e-8);
     REQUIRE(std::abs(iter.eigenvalues.front() - dense.eigenvalues.front()) < 1e-9);
+}
+
+TEST_CASE("migration: non-abelian on the PRODUCTION engine == reference matvec == brute force",
+          "[symmetry_adapted][nonabelian][engine][migration]") {
+    // The crux: CpuMatVecBackend<NonAbelianSymmetryBasisPolicy> over the operator's
+    // own terms reproduces (a) the reference SymAdaptedBlockOp matvec exactly and
+    // (b) the brute-force ground state. Non-abelian now rides the SAME engine as
+    // abelian/Sz — no parallel matvec.
+    const int N = 6;
+    const Permutation t{1, 2, 3, 4, 5, 0};
+    const Permutation s{0, 5, 4, 3, 2, 1};
+    auto Gp = generate_group({t, s});
+    auto gi = decompose_irreps(Gp, N);
+
+    // A real ::Operator Heisenberg ring (S·S), matching heisenberg_square(N).
+    ::Operator op(static_cast<std::uint64_t>(N), 0.5f);
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1) % N;
+        op.addTwoBodyTerm(2, i, 2, j, Complex(1.0, 0.0));
+        op.addTwoBodyTerm(0, i, 1, j, Complex(0.5, 0.0));
+        op.addTwoBodyTerm(1, i, 0, j, Complex(0.5, 0.0));
+    }
+    ed::symmetry::ConnectFn connect =
+        [&op](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
+            op.for_each_connected_state(st, emit);
+        };
+
+    const Eigen::MatrixXcd H = heisenberg_square(N);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
+
+    std::mt19937_64 rng(12345);
+    std::uniform_real_distribution<double> uni(-1.0, 1.0);
+    bool exercised_multi = false;
+    double engine_gs = 1e300;
+
+    for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
+        auto sab = build_sab_partition0(gi, Gp, static_cast<int>(g), N);
+        if (sab.empty()) continue;
+        const int nb = static_cast<int>(sab.size());
+
+        // Production engine operator (multi-target policy on CpuMatVecBackend).
+        auto eng = ed::solvers::build_nonabelian_sector_matvec(op, gi, Gp, static_cast<int>(g), N);
+        REQUIRE(eng->dim() == static_cast<std::size_t>(nb));
+        // Reference matvec (the soon-to-be-deleted SymAdaptedBlockOp).
+        ed::symmetry::SymAdaptedBlockOp refblk(connect, sab);
+
+        if (nb >= 2) exercised_multi = true;
+        std::vector<Complex> x(nb), ye(nb), yr(nb);
+        for (int rep = 0; rep < 3; ++rep) {
+            for (int a = 0; a < nb; ++a) x[a] = Complex(uni(rng), uni(rng));
+            eng->apply(x.data(), ye.data(), static_cast<std::size_t>(nb));
+            refblk.apply(x.data(), yr.data());
+            for (int a = 0; a < nb; ++a)
+                REQUIRE(std::abs(ye[a] - yr[a]) < 1e-10);   // ENGINE matvec == reference
+        }
+
+        // Block GS via Lanczos on the engine operator -> contributes to global GS.
+        std::vector<double> bev;
+        const std::uint64_t want = 1, mit = static_cast<std::uint64_t>(nb);
+        if (nb <= 2) ::full_diagonalization(*eng, nb, want, bev, "", false);
+        else         ::lanczos(*eng, nb, mit, want, 1e-12, bev, "", false);
+        if (!bev.empty()) engine_gs = std::min(engine_gs, bev.front());
+    }
+    REQUIRE(exercised_multi);
+    REQUIRE(std::abs(engine_gs - ref.eigenvalues()(0)) < 1e-8);   // engine GS == brute force
 }
 
 TEST_CASE("migration: SAB packs faithfully into the production SymmetrySector",
@@ -259,19 +340,13 @@ TEST_CASE("non-abelian on the rails: reduction × {dense, Lanczos, Krylov-Schur}
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ref(H);
     const double gs = ref.eigenvalues()(0);
 
-    ed::symmetry::ConnectFn connect =
-        [&H](std::uint64_t st, const std::function<void(std::uint64_t, Complex)>& emit) {
-            for (int sp = 0; sp < H.rows(); ++sp) {
-                const Complex h = H(sp, static_cast<Eigen::Index>(st));
-                if (std::abs(h) > 1e-15) emit(static_cast<std::uint64_t>(sp), h);
-            }
-        };
+    auto op = heisenberg_operator(N);
 
     using ed::solvers::BlockMethod;
     using ed::solvers::symmetry_adapted_lowest_eigenvalues;
     // dense_max_dim=0 forces the iterative methods onto every block with n_Γ > 2.
     for (BlockMethod m : {BlockMethod::Dense, BlockMethod::Lanczos, BlockMethod::KrylovSchur}) {
-        auto spec = symmetry_adapted_lowest_eigenvalues(connect, gi, Gp, N, /*k=*/4,
+        auto spec = symmetry_adapted_lowest_eigenvalues(op, gi, Gp, N, /*k=*/4,
                                                         /*n_up=*/-1, /*dense_max_dim=*/0, m);
         REQUIRE(*std::max_element(spec.block_size.begin(), spec.block_size.end()) > 2);
         REQUIRE(std::abs(spec.eigenvalues.front() - gs) < 1e-8);
