@@ -52,6 +52,7 @@
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/symmetry_adapted.h>
+#include <ed/solvers/symmetry_adapted_solve.h>
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -732,6 +733,42 @@ PYBIND11_MODULE(_core, m) {
           "a dict with `eigenvalues` (correct d_Γ degeneracies), per-block "
           "(`block_irrep_dim`, `block_size`), and group info. Reduces by the FULL "
           "group including 2-D+ irreps.");
+
+    // Lowest-k eigenvalues via the symmetry reduction, solved per block by a
+    // DENSE eigensolve (small blocks) or LANCZOS on the reduced matvec (large
+    // blocks) -- the method is chosen by block size, decoupled from the
+    // reduction. Use for ground state / low-lying of large non-abelian sectors.
+    m.def("symmetry_adapted_lowest",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             int k, int n_up, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              ed::symmetry::ConnectFn connect =
+                  [&op](std::uint64_t s,
+                        const std::function<void(std::uint64_t, Complex)>& emit) {
+                      op.for_each_connected_state(s, emit);
+                  };
+              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
+                  connect, gi, max_clique, n_sites, k, n_up, dense_max_dim);
+              py::dict d;
+              d["eigenvalues"]     = spec.eigenvalues;
+              d["block_irrep_dim"] = spec.block_irrep_dim;
+              d["block_size"]      = spec.block_size;
+              d["group_order"]     = gi.order;
+              d["is_abelian"]      = gi.is_abelian();
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          "Lowest-`k` eigenvalues (per irrep block, recombined with d_Γ "
+          "multiplicity, sorted) of a Hamiltonian under the (possibly non-abelian) "
+          "point group from `generators`. Each block H_Γ is solved by a dense "
+          "eigensolve when its reduced dimension n_Γ <= `dense_max_dim`, otherwise "
+          "by Lanczos on the reduced matvec -- so the symmetry reduction is solved "
+          "by EITHER method, chosen by block size. `n_up >= 0` adds the fixed-Sz "
+          "restriction. Ground state is the robust output; for a full low-lying "
+          "spectrum prefer `symmetry_adapted_eigenvalues` (dense).");
 
     // Finite-temperature thermodynamics via the symmetry-reduced spectrum
     // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
