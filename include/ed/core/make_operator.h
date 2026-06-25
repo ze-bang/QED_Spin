@@ -446,6 +446,80 @@ make_sector_operators(const OperatorSpec& spec) {
 }
 
 // ---------------------------------------------------------------------------
+// make_all_sz_sector_operators_tagged: one-pass all-Sz sector factory.
+//
+// Unlike calling ``make_sector_operators_tagged`` once per n_up (which reads
+// the automorphism directory, parses the symmetry JSON, and runs an orbit-rep
+// scan for each Sz sector independently), this function:
+//   1. Loads the Hamiltonian and symmetry group metadata ONCE.
+//   2. Calls ``enumerate_full_orbit_reps`` ONCE (O(2^N × |G|)).
+//   3. Partitions reps by n_up and builds all (n_up, irrep) sectors in one
+//      nested loop.
+//
+// The returned SectorOperatorSet covers every (n_up, irrep) sector in the
+// window [n_up_min, n_up_max]. tags[i].n_up carries the Sz sector; tags[i].
+// sector_index carries the raw irrep index within that Sz sector. A single
+// flat parallel loop over the set replaces the nested (n_up outer, irrep
+// inner) double loop, removing all per-n_up cold-start overhead.
+//
+// Designed for the thermal use-case on many-core machines: build once, run all
+// (n_up, irrep) sectors in one ``#pragma omp parallel for``.
+// ---------------------------------------------------------------------------
+inline SectorOperatorSet
+make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
+                                    int n_up_min = 0,
+                                    int n_up_max = -1) {
+    if (!spec.streaming_symmetry) {
+        throw std::runtime_error(
+            "ed::make_all_sz_sector_operators_tagged: requires "
+            "streaming_symmetry = true.");
+    }
+    const std::string& dir = detail::require_directory(spec);
+    const std::uint64_t n_bits = static_cast<std::uint64_t>(spec.num_sites);
+    if (n_up_max < 0)
+        n_up_max = static_cast<int>(n_bits);
+
+    // Load operator terms + symmetry group info ONCE.
+    auto base = detail::build_base_op(spec);
+    detail::load_terms_into(*base, spec);
+    base->symmetry_info.loadFromDirectory(dir);
+
+    auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
+        op.transform_data_  = base->transform_data_;
+        op.three_body_data_ = base->three_body_data_;
+    };
+
+    std::vector<std::pair<int, std::size_t>> n_up_sector_ids;
+    std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> operators =
+        ed::symmetry::build_all_sz_sector_operators(
+            n_bits, spec.spin_l, base->symmetry_info, term_builder,
+            static_cast<std::int64_t>(n_up_min),
+            static_cast<std::int64_t>(n_up_max),
+            &n_up_sector_ids);
+
+    SectorOperatorSet set;
+    set.num_raw_sectors = base->symmetry_info.sectors.size();
+    set.all_quantum_numbers.reserve(set.num_raw_sectors);
+    for (const auto& s : base->symmetry_info.sectors)
+        set.all_quantum_numbers.push_back(s.quantum_numbers);
+    set.operators = std::move(operators);
+    set.tags.reserve(set.operators.size());
+    for (std::size_t i = 0; i < set.operators.size(); ++i) {
+        const auto& [n_up, raw_s] = n_up_sector_ids[i];
+        ed::SectorTag tag;
+        tag.n_up         = n_up;
+        tag.sector_index = raw_s;
+        tag.sector_dim   = static_cast<std::uint64_t>(
+            set.operators[i]->dim());
+        if (raw_s < base->symmetry_info.sectors.size())
+            tag.quantum_numbers =
+                base->symmetry_info.sectors[raw_s].quantum_numbers;
+        set.tags.push_back(std::move(tag));
+    }
+    return set;
+}
+
+// ---------------------------------------------------------------------------
 // Streaming-symmetry lane (single LinearOperator).
 //
 // Operator-collapse Phase 3 (Jun 2026): the StreamingSymmetryOperator /
