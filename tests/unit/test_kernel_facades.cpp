@@ -39,6 +39,7 @@
 #include <complex>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using Complex = std::complex<double>;
@@ -81,6 +82,33 @@ TEST_CASE("krylov::block_lanczos_kernel matches the legacy block_lanczos",
     // bound and that the kernel returned monotone eigenvalues.
     REQUIRE(res.eigenvalues[0] <  0.0);
     REQUIRE(res.eigenvalues[0] <= res.eigenvalues[1] + 1e-10);
+}
+
+TEST_CASE("krylov::block_lanczos_kernel lean reorth (keep_basis=false) matches full",
+          "[kernel-facade][block-lanczos][lean]") {
+    constexpr std::uint64_t N   = 6;
+    constexpr std::size_t   dim = std::size_t{1} << N;
+    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
+    ed::matvec::CpuBackend backend;
+    MatvecCallable apply{H.get()};
+
+    ed::krylov::BlockLanczosOptions full;
+    full.num_eigs = 4; full.block_size = 4; full.max_iter = 20; full.tolerance = 1e-10;
+    auto rf = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, full);
+
+    ed::krylov::BlockLanczosOptions lean = full;
+    lean.keep_basis = false;                       // lean: local reorth, no stored basis
+    auto rl = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, lean);
+
+    REQUIRE(rl.eigenvalues.size() == rf.eigenvalues.size());
+    for (std::size_t i = 0; i < rf.eigenvalues.size(); ++i)
+        REQUIRE(std::abs(rl.eigenvalues[i] - rf.eigenvalues[i]) < 1e-8);
+
+    // Lean mode cannot return eigenvectors (no stored basis).
+    lean.compute_vectors = true;
+    REQUIRE_THROWS_AS(
+        ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, lean),
+        std::invalid_argument);
 }
 
 TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity",

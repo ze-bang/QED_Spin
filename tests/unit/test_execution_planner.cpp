@@ -236,6 +236,35 @@ TEST_CASE("planner: probe_system returns sane values", "[planner]") {
 
 // ============================ stress / fuzz =================================
 
+TEST_CASE("planner: block-Lanczos memory accounts for block_size + recommends lean",
+          "[planner]") {
+    // 20M-dim sector, Block Lanczos, block_size=8, ~80 iterations. The stored
+    // basis is ~80*8*20M*16B ~= 192 GiB -- the OLD estimate (ignoring block_size)
+    // mis-reported ~32 GiB and let it OOM. On a 64 GB node:
+    auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);
+    TaskDescriptor t;
+    t.basis_dim = 20'000'000ull; t.n_terms = 100; t.n_offdiag = 64;
+    t.method = Method::BlockLanczos; t.num_eigs = 8; t.krylov_dim = 80;
+    t.block_size = 8; t.kind = BasisKind::Sz; t.N = 36; t.n_up = 18;
+
+    SECTION("eigenvalues-only -> lean recommended (and feasible lean)") {
+        t.compute_vectors = false;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE(p.block_lanczos_lean);                 // full basis doesn't fit -> lean
+        REQUIRE(p.est_memory_gb < 50.0);               // lean footprint is small
+    }
+    SECTION("eigenvectors -> cannot go lean; steer to Block Krylov-Schur") {
+        t.compute_vectors = true;
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE_FALSE(p.block_lanczos_lean);
+        REQUIRE_FALSE(p.feasible);                     // ~192 GiB basis can't fit 64 GB
+        bool mentions_bks = false;
+        for (const auto& s : p.suggestions)
+            if (s.find("BLOCK_KRYLOV_SCHUR") != std::string::npos) mentions_bks = true;
+        REQUIRE(mentions_bks);
+    }
+}
+
 TEST_CASE("planner stress: degenerate dimensions stay sane", "[planner][stress]") {
     auto caps = make_caps(/*ram*/64, 0, 0, 1, false, false, false);
     for (std::uint64_t dim : {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{2},

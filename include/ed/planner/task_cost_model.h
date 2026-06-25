@@ -74,6 +74,7 @@ struct TaskDescriptor {
     int           N     = 0;         ///< site count (for rank-table sizing)
     int           n_up  = -1;        ///< magnetization sector (Sz / SymSz)
     std::uint64_t group_size = 1;    ///< symmetry group order (Symm / SymSz)
+    std::size_t   block_size = 1;    ///< Block-Lanczos block width (else 1)
 };
 
 // Number of resident dim-sized complex vectors. Mirrors feasibility.py's
@@ -87,7 +88,13 @@ struct TaskDescriptor {
     switch (t.method) {
         case Method::Full:         v = 0; break;  // dense: handled separately
         case Method::KrylovSchur:  v = t.compute_vectors ? ms + 4 : 4; break;
-        case Method::BlockLanczos: v = ms + 2 * nev + 3; break;
+        // Block Lanczos (FULL reorth) stores the WHOLE block-Krylov basis:
+        // ~max_blocks * block_size resident vectors, where max_blocks ~ ms. The
+        // old `ms + 2*nev + 3` ignored block_size entirely and under-counted by
+        // ~block_size x (a 20M x block-8 x 80-iter run is ~192 GiB, not ~32).
+        // block_size defaults to 1, so single-vector callers are unaffected.
+        case Method::BlockLanczos:
+            v = ms * std::max<std::uint64_t>(1, t.block_size) + 2 * nev + 3; break;
         case Method::Lanczos:      v = t.compute_vectors ? ms + 4 : 4; break;
         case Method::FTLM:
         case Method::LTLM:         v = ms + 4; break;  // inner basis + scratch

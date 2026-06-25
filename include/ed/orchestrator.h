@@ -76,6 +76,11 @@ struct SolveOptions {
     std::size_t block_size     = 4;
     double      tolerance      = 1e-10;
     bool        compute_vectors = false;
+    /// Block Lanczos: keep the full block-Krylov basis (full reorth + eigenvectors)
+    /// vs lean local-reorth (eigenvalues-only, bounded memory). The planner sets
+    /// this false for large-N eigenvalue runs whose full basis exceeds the budget;
+    /// env ED_BLOCK_LANCZOS_LEAN=1 forces lean. Ignored when compute_vectors=true.
+    bool        block_lanczos_keep_basis = true;
     /// Output directory for HDF5 results (legacy behaviour). Empty
     /// means "do not write".
     std::string output_dir;

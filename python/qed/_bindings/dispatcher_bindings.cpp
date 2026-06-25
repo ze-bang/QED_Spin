@@ -470,6 +470,7 @@ void bind_dispatcher(py::module_& m) {
                                const std::string& device,
                                const std::string& matvec,
                                int n_ranks, double memory_safety,
+                               std::size_t block_size,
                                py::object host_caps) {
         pl::TaskDescriptor t;
         t.basis_dim = basis_dim;
@@ -494,6 +495,7 @@ void bind_dispatcher(py::module_& m) {
         else if (kind == "sym+sz") t.kind = pl::BasisKind::SymSz;
         else                       t.kind = pl::BasisKind::Full;
         t.N = N; t.n_up = n_up; t.group_size = std::max<std::uint64_t>(1, group_size);
+        t.block_size = std::max<std::size_t>(1, block_size);
 
         pl::SystemCapabilities caps = pl::probe_system(false);
         if (!host_caps.is_none()) {
@@ -527,6 +529,7 @@ void bind_dispatcher(py::module_& m) {
         d["basis"] = p.basis_str();
         d["tableless_fixed_sz"] = p.tableless_fixed_sz;
         d["sym_orbit_csr"] = p.sym_orbit_csr;
+        d["block_lanczos_lean"] = p.block_lanczos_lean;
         d["feasible"] = p.feasible;
         d["bottleneck"] = p.bottleneck;
         d["est_memory_gb"] = p.est_memory_gb;
@@ -543,6 +546,7 @@ void bind_dispatcher(py::module_& m) {
         py::arg("N") = 0, py::arg("n_up") = -1, py::arg("group_size") = 1,
         py::arg("device") = "auto", py::arg("matvec") = "auto",
         py::arg("n_ranks") = 0, py::arg("memory_safety") = 0.8,
+        py::arg("block_size") = 1,
         py::arg("host_caps") = py::none(),
         "Capability-aware execution plan (matvec strategy / device / reorth / "
         "basis strategy) for one ED task. Returns a dict.");

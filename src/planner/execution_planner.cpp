@@ -146,10 +146,37 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     }
     const double budget = budget_gb * uc.memory_safety;
 
-    const double working_gb = static_cast<double>(cost.working_set_bytes) / kGiB
-                              / std::max(1, p.n_ranks);
+    double working_gb = static_cast<double>(cost.working_set_bytes) / kGiB
+                        / std::max(1, p.n_ranks);
     const double csr_gb     = static_cast<double>(cost.csr_bytes) / kGiB
                               / std::max(1, p.n_ranks);
+
+    // Block Lanczos in FULL-reorth mode stores the whole block-Krylov basis
+    // (~ms*block_size resident vectors), which can dwarf the budget at large N.
+    // If it would not fit AND we only need eigenvalues, recommend the LEAN
+    // (local-reorth, no stored basis) profile: a rolling window + the output
+    // vectors. Eigenvectors are unavailable lean, so a compute-vectors run that
+    // overflows is steered to Block Krylov-Schur instead.
+    if (task.method == Method::BlockLanczos && working_gb > budget) {
+        const std::uint64_t lean_vecs =
+            4u * std::max<std::uint64_t>(1, task.block_size)
+            + 2u * static_cast<std::uint64_t>(std::max(1, task.num_eigs));
+        const double lean_gb = static_cast<double>(lean_vecs)
+            * static_cast<double>(task.basis_dim) * 16.0 / kGiB
+            / std::max(1, p.n_ranks);
+        if (!task.compute_vectors && lean_gb <= budget) {
+            p.block_lanczos_lean = true;
+            p.notes.push_back("block-Lanczos full basis " + std::to_string(working_gb)
+                + " GB exceeds budget " + std::to_string(budget)
+                + " GB -> LEAN reorth (local-only, eigenvalues; " + std::to_string(lean_gb)
+                + " GB)");
+            working_gb = lean_gb;
+        } else if (task.compute_vectors) {
+            p.suggestions.push_back("block-Lanczos eigenvectors need the full basis ("
+                + std::to_string(working_gb) + " GB > budget); use "
+                "BLOCK_KRYLOV_SCHUR for bounded-memory eigenvectors");
+        }
+    }
     p.est_memory_gb = working_gb;
 
     // ---- Reorth (per-method default, downgrade if full-reorth won't fit) ----

@@ -74,6 +74,17 @@ struct BlockLanczosOptions {
     std::uint64_t global_n      = 0;
     /// Periodic full reorthogonalisation interval (every K iterations).
     std::size_t reorth_period   = 3;
+    /// Reorthogonalisation strategy / memory profile (mirrors single-vector
+    /// Lanczos's keep_basis). When true (default) the kernel stores EVERY block
+    /// (O(max_iter * block_size * N)) for periodic FULL reorth + one-pass
+    /// eigenvector reconstruction. When false ("lean"), only a rolling window of
+    /// blocks is kept (O(block_size * N)) and reorth is LOCAL-only: eigenvalues
+    /// come from the tiny block-tridiagonal so they stay bounded, but accuracy
+    /// degrades past ~30 blocks (ghosts) and EIGENVECTORS are unavailable
+    /// (set keep_basis=true, or use Block Krylov-Schur for bounded-memory
+    /// eigenvectors). The planner flips this off for large-N eigenvalue runs
+    /// whose full basis would not fit the memory budget.
+    bool        keep_basis      = true;
 };
 
 struct BlockLanczosResult {
@@ -221,11 +232,24 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     const Complex one(1.0, 0.0), zero(0.0, 0.0), neg_one(-1.0, 0.0);
     bool converged = false;
 
+    // Lean mode: no stored basis -> local reorth only, eigenvalues only.
+    const bool keep_basis = opts.keep_basis;
+    if (!keep_basis && opts.compute_vectors) {
+        throw std::invalid_argument(
+            "block_lanczos_kernel: keep_basis=false (lean reorth) cannot return "
+            "eigenvectors -- the N-dimensional basis is not stored. Set "
+            "keep_basis=true, or use block_krylov_schur_kernel for "
+            "bounded-memory eigenvectors.");
+    }
+
     for (std::size_t j = 0; j < max_blocks; ++j) {
-        // Snapshot V_curr into the basis storage for restart / reconstruction.
-        auto V_j_keep = backend.make_zero_vector(N * b);
-        backend.copy(V_curr.get(), V_j_keep.get(), N * b);
-        basis.emplace_back(std::move(V_j_keep));
+        // Snapshot V_curr into the basis storage (only when we keep it: full
+        // reorth + eigenvector reconstruction need it; lean mode does not).
+        if (keep_basis) {
+            auto V_j_keep = backend.make_zero_vector(N * b);
+            backend.copy(V_curr.get(), V_j_keep.get(), N * b);
+            basis.emplace_back(std::move(V_j_keep));
+        }
 
         // W = H * V_curr  (column-by-column).
         for (std::size_t c = 0; c < b; ++c) {
@@ -260,7 +284,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
         // (gem) every `reorth_period` iterations. Cheap on GPU because the
         // gemms stay on device.
         const bool do_full_reorth =
-            (opts.reorth_period > 0) &&
+            keep_basis && (opts.reorth_period > 0) &&
             (j > 0) && (j % opts.reorth_period == 0);
         if (do_full_reorth) {
             for (int pass = 0; pass < 2; ++pass) {

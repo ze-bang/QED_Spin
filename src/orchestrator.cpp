@@ -516,6 +516,16 @@ GroundStateResult solve_on(Backend& be,
         kopts.tolerance       = opts.tolerance;
         kopts.compute_vectors = opts.compute_vectors;
         kopts.output_dir      = opts.output_dir;
+        // Reorth profile: full (stored basis) vs lean (local-only, eigenvalues).
+        // Eigenvectors force full; otherwise honor the caller/planner choice, with
+        // ED_BLOCK_LANCZOS_LEAN=1 as an explicit override.
+        kopts.keep_basis = opts.block_lanczos_keep_basis;
+        if (!opts.compute_vectors) {
+            if (const char* e = std::getenv("ED_BLOCK_LANCZOS_LEAN"))
+                kopts.keep_basis = !(e[0] == '1' && e[1] == '\0');
+        } else {
+            kopts.keep_basis = true;   // eigenvectors require the stored basis
+        }
         auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);

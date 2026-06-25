@@ -67,6 +67,10 @@ struct ExecutionPlan {
     /// Set only when the orbit-CSR estimate fits the budget; the rep walk is the
     /// scalable default. Consumed via sym_matvec_policy_hook.
     bool           sym_orbit_csr = false;
+    /// Block-Lanczos: drop the stored block-Krylov basis (local reorth only,
+    /// eigenvalues-only) when the full basis would not fit the memory budget.
+    /// Consumed as BlockLanczosOptions::keep_basis = !block_lanczos_lean.
+    bool           block_lanczos_lean = false;
 
     bool                     feasible = true;
     std::string              bottleneck = "ok";  // ok|memory|basis_construction|build|kernel
