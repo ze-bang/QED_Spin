@@ -134,7 +134,9 @@ struct RepSymmetryBasisPolicy {
     }
 
     [[nodiscard]] inline std::int64_t index_of(std::uint64_t state) const noexcept {
-        if (__builtin_popcountll(state) != n_up) return -1;
+        // n_up < 0 marks the full 2^N space (no Sz constraint) -- skip the
+        // popcount membership filter (every state is in-subspace).
+        if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
         return index_of_rep(representative(state));
     }
 
@@ -150,7 +152,7 @@ struct RepSymmetryBasisPolicy {
     // separate scan). group_size is bounded by realistic lattice groups (≤256).
     [[nodiscard]] inline std::int64_t
     index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
-        if (__builtin_popcountll(state) != n_up) return -1;
+        if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
 
         // Compute all |G| images once; find the minimum (= representative).
         // 256 covers any realistic lattice automorphism group.

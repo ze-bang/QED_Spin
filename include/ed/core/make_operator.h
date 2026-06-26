@@ -313,6 +313,27 @@ inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
     return est_bytes > static_cast<long double>(budget);
 }
 
+// Full-space (no Sz) twin of ``fixed_sz_sectors_should_be_lazy``: the eager full
+// builder materializes an orbit CSR over the 2^N space, so route to the
+// CSR-free rep-walk lane once that would exceed the budget. Same env knobs.
+inline bool full_sectors_should_be_lazy(std::uint64_t            n_bits,
+                                        const SymmetryGroupInfo& info) {
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS")) {
+        if (e[0] == '1') return true;
+        if (e[0] == '0') return false;
+    }
+    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
+        try { budget = std::stoull(e); } catch (...) {}
+    }
+    long double dim = 1.0L;                            // 2^n_bits
+    for (std::uint64_t i = 0; i < n_bits; ++i) dim *= 2.0L;
+    const long double num_sectors =
+        static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
+    const long double est_bytes = dim * num_sectors * 40.0L;
+    return est_bytes > static_cast<long double>(budget);
+}
+
 }  // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -524,10 +545,20 @@ make_sector_operators_tagged(const OperatorSpec& spec,
                 mpi_rank, mpi_size, owner_ptr);
         }
     } else {
-        set.operators = ed::symmetry::build_full_sector_operators(
-            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-            base->symmetry_info, term_builder, &sector_ids,
-            mpi_rank, mpi_size, owner_ptr);
+        // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
+        // (memory-bounded, stabilizer-fused construction); small N stays eager.
+        if (detail::full_sectors_should_be_lazy(
+                static_cast<std::uint64_t>(spec.num_sites), base->symmetry_info)) {
+            set.operators = ed::symmetry::build_full_sector_operators_lazy(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
+        } else {
+            set.operators = ed::symmetry::build_full_sector_operators(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
+        }
     }
     if (time_ctor) {
         const double ms = std::chrono::duration<double, std::milli>(

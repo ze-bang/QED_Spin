@@ -636,6 +636,120 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
 }
 
 // ---------------------------------------------------------------------------
+// build_full_sector_operators_lazy: CSR-free rep-walk twin of
+// ``build_full_sector_operators`` for the FULL 2^N space (no Sz restriction).
+//
+// Mirrors ``build_fixed_sz_sector_operators_lazy`` but over ``FullSpaceSubspace``
+// + ``enumerate_full_orbit_reps``: O(#reps) memory (no materialized orbit CSR),
+// the same stabilizer-fused Pass 1.5 via the shared rep_projection primitive, and
+// a deferred CSR provider. This is the memory-bounded, ≈|G|×-fast construction
+// lane for PURE SPATIAL symmetry on non-Sz-conserving (or Sz-unrestricted) models
+// at large N -- the case the eager full builder cannot reach (it materializes the
+// orbit CSR over the full 2^N space). ``rd.n_up`` is forced to -1 so the rep-walk
+// policy applies NO popcount filter (every state lives in the full space; a
+// non-conserving term may connect different popcounts).
+//
+// Closed-form precondition holds: every G-orbit image of a full-space state is
+// itself in the full space, so no image is ever dropped (parity-tested in
+// tests/unit/test_rep_projection.cpp, full-space case).
+// ---------------------------------------------------------------------------
+template <class TermBuilder>
+[[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
+build_full_sector_operators_lazy(std::uint64_t            n_bits,
+                                 float                    spin_l,
+                                 const SymmetryGroupInfo& info,
+                                 TermBuilder&&            terms,
+                                 std::vector<std::size_t>* out_sector_ids = nullptr,
+                                 int                      mpi_rank = 0,
+                                 int                      mpi_size = 1,
+                                 const std::vector<int>*  sector_owner = nullptr)
+{
+    auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
+    const FullSpaceSubspace subspace(n_bits);
+    auto reps_sp = std::make_shared<std::vector<std::uint64_t>>(
+        enumerate_full_orbit_reps(*info_sp, n_bits));
+
+    const SpatialProjector projector(*info_sp);
+    const std::size_t group_size  = info_sp->max_clique.size();
+    const std::size_t num_sectors = info_sp->sectors.size();
+
+    std::vector<std::unique_ptr<SectorOperator>> ops;
+    ops.reserve(num_sectors);
+    const std::vector<int> shared_perms_flat =
+        flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+    std::vector<std::uint64_t> elems;
+    std::vector<Complex>       coeffs;
+
+    const bool fused = sym_fused_pass15_enabled();
+    const OrbitStabilizers stabs =
+        fused ? build_orbit_stabilizers(*reps_sp, projector) : OrbitStabilizers{};
+
+    for (std::size_t s = 0; s < num_sectors; ++s) {
+        if (mpi_size > 1) {
+            const int owner_r = sector_owner ? (*sector_owner)[s]
+                : static_cast<int>(s % static_cast<std::size_t>(mpi_size));
+            if (owner_r != mpi_rank) continue;
+        }
+        const std::vector<Complex>& phase = info_sp->sectors[s].phase_factors;
+        RepSectorData rd;
+        rd.n_sites    = static_cast<int>(n_bits);
+        rd.group_size = static_cast<int>(group_size);
+        rd.reps.reserve(reps_sp->size());
+        rd.inv_norms.reserve(reps_sp->size());
+        const std::vector<Complex> chi =
+            fused ? sector_characters_from(*info_sp, phase) : std::vector<Complex>{};
+        for (std::size_t i = 0; i < reps_sp->size(); ++i) {
+            const std::uint64_t rep = (*reps_sp)[i];
+            double norm_sq;
+            if (fused) {
+                norm_sq = projected_norm_sq(stabs, i, chi);
+                if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
+            } else {
+                norm_sq = 0.0;
+                compute_orbit_for_state(subspace, projector, rep, phase,
+                                        elems, coeffs, norm_sq);
+                if (elems.empty() ||
+                    norm_sq <= SectorBasis::kOrbitNormSqEpsilon)
+                    continue;
+            }
+            rd.reps.push_back(rep);
+            rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+        }
+        if (rd.reps.empty()) continue;
+
+        rd.n_up = -1;   // full space: NO popcount filter in the rep-walk policy
+        if (!info_sp->power_representation.empty() && !phase.empty())
+            rd.characters = fused ? chi : sector_characters_from(*info_sp, phase);
+        rd.perms_flat = shared_perms_flat;
+
+        bool is_real = true;
+        for (const auto& c : rd.characters)
+            if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+
+        const std::uint64_t dim = static_cast<std::uint64_t>(rd.reps.size());
+        auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+        auto op = std::make_unique<SectorOperator>(n_bits, spin_l, SectorBasis{});
+        terms(*op);
+        op->configureRepLazy(
+            dim, group_size, is_real,
+            /*rep_provider=*/[rep_sp]() { return *rep_sp; },
+            /*csr_provider=*/[reps_sp, info_sp, n_bits, s]() -> ::SymmetrySector {
+                const FullSpaceSubspace sub(n_bits);
+                const SpatialProjector  proj(*info_sp);
+                return SectorBasis::build(
+                           sub, proj,
+                           info_sp->sectors[s].quantum_numbers,
+                           info_sp->sectors[s].phase_factors,
+                           *reps_sp, /*sector_id=*/s)
+                    .sector();
+            });
+        ops.push_back(std::move(op));
+        if (out_sector_ids) out_sector_ids->push_back(s);
+    }
+    return ops;
+}
+
+// ---------------------------------------------------------------------------
 // build_all_sz_sector_operators: one-pass all-Sz lazy builder.
 //
 // Calls ``enumerate_full_orbit_reps`` ONCE (O(2^N × |G|)), partitions the
