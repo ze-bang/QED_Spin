@@ -132,7 +132,24 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
         ? (uc.n_ranks > 0 ? uc.n_ranks : std::max(1, caps.n_mpi_ranks))
         : 1;
 
-    const TaskCost cost = estimate_task_cost(task, on_gpu);
+    // Decide the eigensolver FIRST (needs only basis_dim / num_eigs), so the cost
+    // model and every method-gated decision below use the method we will ACTUALLY
+    // run. An explicit task.method is respected (the planner still optimizes the
+    // rest for it); only `Auto` lets the planner pick.
+    {
+        const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, task.num_eigs));
+        if (task.method != Method::Auto)          p.solver = task.method;
+        else if (task.basis_dim <= (1ULL << 12))  p.solver = Method::Full;
+        else if (nev == 1)                        p.solver = Method::Lanczos;
+        else if (nev <= 8)                         p.solver = Method::BlockLanczos;
+        else                                       p.solver = Method::KrylovSchur;
+    }
+    // `t` is the task as the planner will run it (decided method); use it for the
+    // cost model and all downstream gates.
+    TaskDescriptor t = task;
+    t.method = p.solver;
+
+    const TaskCost cost = estimate_task_cost(t, on_gpu);
 
     // ---- Memory budget (per rank, on the chosen lane) -----------------------
     double budget_gb;
@@ -152,11 +169,7 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     // else by num_eigs. Iteration budget and the memory-bounded Krylov subspace
     // are decided here too, so the kernel/orchestrator never re-derive them.
     {
-        const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, task.num_eigs));
-        if (task.basis_dim <= (1ULL << 12))      p.solver = Method::Full;
-        else if (nev == 1)                       p.solver = Method::Lanczos;
-        else if (nev <= 8)                       p.solver = Method::BlockLanczos;
-        else                                     p.solver = Method::KrylovSchur;
+        const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, t.num_eigs));
         // Iteration budget (mirrors the old auto_max_iter floor).
         const std::size_t floor_iters = static_cast<std::size_t>(2 * nev + 30);
         p.max_iter = std::min<std::size_t>(
@@ -180,7 +193,7 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     // (local-reorth, no stored basis) profile: a rolling window + the output
     // vectors. Eigenvectors are unavailable lean, so a compute-vectors run that
     // overflows is steered to Block Krylov-Schur instead.
-    if (task.method == Method::BlockLanczos && working_gb > budget) {
+    if (p.solver == Method::BlockLanczos && working_gb > budget) {
         const std::uint64_t lean_vecs =
             4u * std::max<std::uint64_t>(1, task.block_size)
             + 2u * static_cast<std::uint64_t>(std::max(1, task.num_eigs));
@@ -206,7 +219,7 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     // ACTUAL footprint is bounded -- not the uncapped worst case the cost model
     // assumed. Re-estimate working_gb with the SAME capped subspace the kernel
     // will use, so the plan reports reality (coordination, not a 50x miss).
-    if (task.method == Method::KrylovSchur && working_gb > budget) {
+    if (p.solver == Method::KrylovSchur && working_gb > budget) {
         const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, task.num_eigs));
         const std::uint64_t ms  = (task.krylov_dim > 0)
             ? static_cast<std::uint64_t>(task.krylov_dim)

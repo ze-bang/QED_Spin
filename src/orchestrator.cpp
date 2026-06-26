@@ -35,6 +35,7 @@
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
 #include <ed/planner/execution_planner.h>   // THE dictator: plan_execution
 #include <ed/planner/system_capabilities.h> // probe_system
+#include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (apply CSR decision)
 #include <ed/core/operator.h>               // Operator introspection (term SoA, N)
 
 #include <fstream>   // /proc/meminfo
@@ -242,6 +243,19 @@ make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
     else if (opts.use_fixed_sz)                      t.kind = ed::planner::BasisKind::Sz;
     else                                             t.kind = ed::planner::BasisKind::Full;
 
+    // Pin the planner to the caller's explicit method so its matvec / subspace /
+    // memory choices match what solve_on will run; Auto lets the planner pick.
+    switch (opts.method) {
+        case SolveMethod::FullDiag:         t.method = ed::planner::Method::Full;         break;
+        case SolveMethod::Lanczos:          t.method = ed::planner::Method::Lanczos;      break;
+        case SolveMethod::KrylovSchur:      t.method = ed::planner::Method::KrylovSchur;  break;
+        case SolveMethod::BlockLanczos:     t.method = ed::planner::Method::BlockLanczos; break;
+        // No BlockKrylovSchur in the planner cost model; block-Lanczos is the
+        // closest memory footprint (it stores the full block-Krylov basis).
+        case SolveMethod::BlockKrylovSchur: t.method = ed::planner::Method::BlockLanczos; break;
+        case SolveMethod::Auto:             t.method = ed::planner::Method::Auto;         break;
+    }
+
     // Real term structure from the concrete spin Operator (every Full / Sz /
     // symmetry operator derives from it). Diagonal bins stay on the same state;
     // the rest are off-diagonal (drive CSR nnz and the connectivity model).
@@ -343,6 +357,17 @@ GroundStateResult solve_on(Backend& be,
         (opts.max_iter > 0) ? opts.max_iter
                             : (plan.max_iter > 0 ? plan.max_iter : 2 * opts.num_eigs + 30);
     const std::uint64_t subspace_cap_vectors = plan.max_subspace_vectors;
+
+    // Apply the planner's matvec decision (CSR vs matrix-free) for this solve.
+    // The planner chooses CSR only when csr_bytes + working set FIT the budget AND
+    // assembly amortizes -- so this is "fastest-that-fits" and cannot OOM, and it
+    // supersedes the static dim-cutoff (which could pick a too-big CSR). Scoped:
+    // the previous override is restored on return. Symmetry lanes compile CSR out
+    // and ignore this, so it is a no-op there. (Consumed lazily at first matvec.)
+    const ed::planner::ScopedCsrOverride csr_guard(
+        plan.matvec == ed::planner::MatvecStrategy::Csr
+            ? ed::planner::CsrOverride::Csr
+            : ed::planner::CsrOverride::MatrixFree);
 
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -566,14 +591,16 @@ GroundStateResult solve_on(Backend& be,
         kopts.compute_vectors = opts.compute_vectors;
         kopts.output_dir      = opts.output_dir;
         // Reorth profile: full (stored basis) vs lean (local-only, eigenvalues).
-        // Eigenvectors force full; otherwise honor the caller/planner choice, with
-        // ED_BLOCK_LANCZOS_LEAN=1 as an explicit override.
-        kopts.keep_basis = opts.block_lanczos_keep_basis;
-        if (!opts.compute_vectors) {
+        // Eigenvectors force full; else the planner's lean recommendation (the
+        // full block basis would not fit the budget) OR the caller's opt forces
+        // lean; ED_BLOCK_LANCZOS_LEAN=1 is the explicit override. The planner
+        // path is what makes block-Lanczos memory-bounded (guarantee completion).
+        if (opts.compute_vectors) {
+            kopts.keep_basis = true;   // eigenvectors require the stored basis
+        } else {
+            kopts.keep_basis = opts.block_lanczos_keep_basis && !plan.block_lanczos_lean;
             if (const char* e = std::getenv("ED_BLOCK_LANCZOS_LEAN"))
                 kopts.keep_basis = !(e[0] == '1' && e[1] == '\0');
-        } else {
-            kopts.keep_basis = true;   // eigenvectors require the stored basis
         }
         auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);

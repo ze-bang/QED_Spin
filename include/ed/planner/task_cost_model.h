@@ -59,14 +59,19 @@ inline constexpr double kCsrBytesPerNnz = 24.0;
 // Rough CSR assembly cost: ns per nonzero written (sort + dedupe + fill).
 inline constexpr double kCsrBuildNsPerNnz = 50.0;
 
-enum class Method  : std::uint8_t { Lanczos, KrylovSchur, BlockLanczos, FTLM, LTLM, TPQ, KPM, Full };
+// `Auto` (last, so existing values are unchanged) means "the caller did not pin
+// a method -- let plan_execution pick the eigensolver". Any other value is an
+// explicit request the planner RESPECTS (still optimizing matvec / subspace /
+// memory FOR that method). plan_execution resolves `Auto` to a concrete solver
+// before the cost model runs, so the switches below never see `Auto`.
+enum class Method  : std::uint8_t { Lanczos, KrylovSchur, BlockLanczos, FTLM, LTLM, TPQ, KPM, Full, Auto };
 enum class BasisKind : std::uint8_t { Full, Sz, Symm, SymSz };
 
 struct TaskDescriptor {
     std::uint64_t basis_dim = 0;     ///< working basis dimension (post-reduction)
     std::uint64_t n_terms   = 1;     ///< total Hamiltonian terms (per row)
     std::uint64_t n_offdiag = 1;     ///< off-diagonal terms (drives CSR nnz/row)
-    Method        method    = Method::Lanczos;
+    Method        method    = Method::Auto;   ///< Auto -> planner picks the solver
     int           num_eigs  = 1;
     int           krylov_dim = 0;    ///< 0 -> heuristic default
     int           n_samples  = 1;    ///< FTLM/LTLM/TPQ outer samples
@@ -110,6 +115,7 @@ struct TaskDescriptor {
         case Method::LTLM:         v = ms + 4; break;  // inner basis + scratch
         case Method::TPQ:          v = 5; break;
         case Method::KPM:          v = 6; break;
+        case Method::Auto:         break;  // never reached (resolved upstream)
     }
     return v;
 }
