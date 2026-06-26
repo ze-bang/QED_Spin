@@ -36,7 +36,9 @@
 #include <ed/planner/execution_planner.h>   // THE dictator: plan_execution
 #include <ed/planner/system_capabilities.h> // probe_system
 #include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (apply CSR decision)
+#include <ed/planner/sym_matvec_policy_hook.h> // ScopedSymMatvecRepr (apply sym decision)
 #include <ed/core/operator.h>               // Operator introspection (term SoA, N)
+#include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
 
 #include <fstream>   // /proc/meminfo
 #include <string>
@@ -289,6 +291,19 @@ make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
     // Real term structure from the concrete spin Operator (diagonal bins stay on
     // the same state; the rest are off-diagonal -> CSR nnz / connectivity model).
     fill_operator_terms(t, H);
+
+    // Symmetry group order |G| for the orbit-CSR-vs-rep decision: read it from the
+    // symmetry sector operator's producer (rep walk is O(#reps) memory; orbit-CSR
+    // is ~dim*|G|*24 B). A pre-built symmetry operator may not have set the
+    // opts.use_symmetry CLI flag, so detect it from the type and fix the kind too.
+    if (const auto* so = dynamic_cast<const ed::symmetry::SectorOperator*>(&H)) {
+        t.group_size = std::max<std::uint64_t>(1, so->producer().group_size());
+        if (t.kind != ed::planner::BasisKind::Symm &&
+            t.kind != ed::planner::BasisKind::SymSz) {
+            t.kind = opts.use_fixed_sz ? ed::planner::BasisKind::SymSz
+                                       : ed::planner::BasisKind::Symm;
+        }
+    }
     return t;
 }
 
@@ -397,6 +412,15 @@ GroundStateResult solve_on(Backend& be,
         plan.matvec == ed::planner::MatvecStrategy::Csr
             ? ed::planner::CsrOverride::Csr
             : ed::planner::CsrOverride::MatrixFree);
+
+    // Apply the planner's symmetry-matvec decision (orbit-CSR vs rep walk),
+    // consumed lazily by SectorOperator::make_backend_. The planner picks
+    // orbit-CSR only when dim*|G|*24 B + working set FIT the budget (faster
+    // apply, materialized on demand); otherwise the O(#reps) rep walk (CSR-free,
+    // cannot OOM). Scoped (restored on return); a no-op for non-symmetry ops.
+    const ed::planner::ScopedSymMatvecRepr sym_guard(
+        plan.sym_orbit_csr ? ed::planner::SymMatvecRepr::OrbitCsr
+                           : ed::planner::SymMatvecRepr::Rep);
 
     const auto t0 = std::chrono::steady_clock::now();
 
