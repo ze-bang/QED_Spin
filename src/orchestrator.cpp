@@ -734,13 +734,14 @@ GroundStateResult solve_on(Backend& be,
                     cpu_matvec(in, out, static_cast<std::size_t>(n));
                 };
             std::vector<double> eigs;
-            // Hv is the CPU-bound matvec (H.bind_cpu() above) -- reentrant after
-            // one warm-up call (only the diagonal cache is built lazily), so the
-            // dense column build can run in parallel (one column per thread).
+            // NOTE: the dense column build stays SEQUENTIAL. The CPU matvec is
+            // NOT reentrant (the backend owns shared CSR / scratch buffers), so
+            // building columns concurrently via H races and yields
+            // nondeterministic eigenvalues (verified). H parallelizes each
+            // column internally instead.
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
-                                 opts.compute_vectors,
-                                 /*parallel_construct=*/true);
+                                 opts.compute_vectors);
             if (!opts.output_dir.empty()
                     && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
                 R.hdf5_path = opts.output_dir + "/ed_results.h5";
