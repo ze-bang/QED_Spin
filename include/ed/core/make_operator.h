@@ -56,6 +56,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -370,6 +371,82 @@ struct SectorOperatorSet {
     std::vector<std::vector<int>>                              all_quantum_numbers;
 };
 
+namespace detail {
+
+// |Fix(g)| -- number of basis states left invariant by site-permutation ``perm``
+// (one element of ``max_clique``), restricted to popcount ``n_up`` (``n_up < 0``
+// => full 2^N space). A state fixed by g is constant on each cycle of g, so it is
+// chosen by one bit per cycle; restricting to popcount n_up counts the subsets of
+// cycles whose lengths sum to n_up (full space: 2^#cycles).
+inline std::uint64_t num_fixed_states(const std::vector<int>& perm, int n_up) {
+    const int N = static_cast<int>(perm.size());
+    std::vector<char> seen(static_cast<std::size_t>(N), 0);
+    std::vector<int>  cyc_len;
+    for (int i = 0; i < N; ++i) {
+        if (seen[static_cast<std::size_t>(i)]) continue;
+        int len = 0, j = i;
+        while (!seen[static_cast<std::size_t>(j)]) {
+            seen[static_cast<std::size_t>(j)] = 1; j = perm[static_cast<std::size_t>(j)]; ++len;
+        }
+        cyc_len.push_back(len);
+    }
+    if (n_up < 0) return std::uint64_t(1) << cyc_len.size();   // 2^#cycles
+    std::vector<std::uint64_t> dp(static_cast<std::size_t>(n_up) + 1, 0);
+    dp[0] = 1;
+    for (int L : cyc_len)
+        for (int k = n_up; k >= L; --k)
+            dp[static_cast<std::size_t>(k)] += dp[static_cast<std::size_t>(k - L)];
+    return dp[static_cast<std::size_t>(n_up)];
+}
+
+// Exact per-RAW-sector dimensions via the Burnside / character (Molien) formula
+//   dim(chi_s) = (1/|G|) * Re sum_g chi_s(g) |Fix(g)|
+// (the multiplicity of the 1-D irrep chi_s in the fixed-Sz permutation
+// representation). Cheap -- O(|G|^2) total -- and needs NO orbit walk, so it can
+// drive the across-sector load balance BEFORE the expensive build.
+inline std::vector<std::uint64_t>
+sector_dims_burnside(const ::SymmetryGroupInfo& info, int n_up) {
+    const std::size_t G = info.max_clique.size();
+    std::vector<std::uint64_t> fix(G);
+    for (std::size_t g = 0; g < G; ++g)
+        fix[g] = num_fixed_states(info.max_clique[g], n_up);
+    std::vector<std::uint64_t> dims(info.sectors.size(), 0);
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        const auto chi = ed::symmetry::sector_characters_from(
+            info, info.sectors[s].phase_factors);
+        double acc = 0.0;
+        for (std::size_t g = 0; g < G; ++g)
+            acc += (chi[g] * static_cast<double>(fix[g])).real();
+        const long long d = std::llround(acc / static_cast<double>(G));
+        dims[s] = d > 0 ? static_cast<std::uint64_t>(d) : 0;
+    }
+    return dims;
+}
+
+// Greedy longest-processing-time bin-packing: hand each raw sector (largest dim
+// first) to the currently least-loaded rank. Deterministic, so every rank
+// computes the IDENTICAL ``owner[raw_s] = rank`` map. Solve + construction cost
+// both scale ~linearly with sector dim, so dim is the load proxy.
+inline std::vector<int>
+greedy_sector_owner(const std::vector<std::uint64_t>& dims, int nranks) {
+    std::vector<std::size_t> order(dims.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return dims[a] > dims[b]; });
+    std::vector<std::uint64_t> load(static_cast<std::size_t>(nranks), 0);
+    std::vector<int>           owner(dims.size(), 0);
+    for (std::size_t s : order) {
+        int best = 0;
+        for (int r = 1; r < nranks; ++r)
+            if (load[static_cast<std::size_t>(r)] < load[static_cast<std::size_t>(best)]) best = r;
+        owner[s] = best;
+        load[static_cast<std::size_t>(best)] += (dims[s] > 0 ? dims[s] : 1);
+    }
+    return owner;
+}
+
+}  // namespace detail
+
 inline SectorOperatorSet
 make_sector_operators_tagged(const OperatorSpec& spec,
                              int mpi_rank = 0, int mpi_size = 1) {
@@ -398,6 +475,29 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     SectorOperatorSet set;
     std::vector<std::size_t> sector_ids;
 
+    // Across-sector MPI load balance: pre-compute exact per-sector dims via the
+    // Burnside/character formula (cheap, no orbit walk) and greedy-pack them onto
+    // ranks. owner[raw_s] = owning rank; nullptr (single-rank) => build all.
+    std::vector<int> sector_owner;
+    const std::vector<int>* owner_ptr = nullptr;
+    if (mpi_size > 1) {
+        const int n_up_for_dims = spec.fixed_sz.has_value()
+            ? static_cast<int>(*spec.fixed_sz) : -1;
+        const auto dims =
+            detail::sector_dims_burnside(base->symmetry_info, n_up_for_dims);
+        sector_owner = detail::greedy_sector_owner(dims, mpi_size);
+        owner_ptr = &sector_owner;
+        if (std::getenv("ED_DEBUG_BALANCE") && mpi_rank == 0) {
+            std::vector<std::uint64_t> load(static_cast<std::size_t>(mpi_size), 0);
+            for (std::size_t s = 0; s < dims.size(); ++s) load[static_cast<std::size_t>(sector_owner[s])] += dims[s];
+            fprintf(stderr, "[BALANCE] burnside dims:");
+            for (auto d : dims) fprintf(stderr, " %llu", (unsigned long long)d);
+            fprintf(stderr, "\n[BALANCE] per-rank load:");
+            for (auto l : load) fprintf(stderr, " %llu", (unsigned long long)l);
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
+    }
+
     if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
         // fixed-Sz mTPQ): hand out operators that know their dim up-front and
@@ -412,19 +512,19 @@ make_sector_operators_tagged(const OperatorSpec& spec,
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size);
+                mpi_rank, mpi_size, owner_ptr);
         } else {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size);
+                mpi_rank, mpi_size, owner_ptr);
         }
     } else {
         set.operators = ed::symmetry::build_full_sector_operators(
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
             base->symmetry_info, term_builder, &sector_ids,
-            mpi_rank, mpi_size);
+            mpi_rank, mpi_size, owner_ptr);
     }
 
     set.num_raw_sectors = base->symmetry_info.sectors.size();
