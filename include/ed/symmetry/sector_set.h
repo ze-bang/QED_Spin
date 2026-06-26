@@ -302,7 +302,9 @@ build_full_sector_operators(std::uint64_t            n_bits,
                             float                    spin_l,
                             const SymmetryGroupInfo& info,
                             TermBuilder&&            terms,
-                            std::vector<std::size_t>* out_sector_ids = nullptr)
+                            std::vector<std::size_t>* out_sector_ids = nullptr,
+                            int                      mpi_rank = 0,
+                            int                      mpi_size = 1)
 {
     const FullSpaceSubspace full(n_bits);
     const SpatialProjector  projector(info);
@@ -312,6 +314,13 @@ build_full_sector_operators(std::uint64_t            n_bits,
     std::vector<std::unique_ptr<SectorOperator>> ops;
     ops.reserve(info.sectors.size());
     for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        // Across-sector MPI (Level 1): build the orbit basis only for raw
+        // sectors assigned to this rank, distributing the O(dim*|G|) walk and
+        // its per-sector memory. Partition by RAW index so it is consistent
+        // across ranks without first knowing which irreps cancel.
+        if (mpi_size > 1 &&
+            s % static_cast<std::size_t>(mpi_size) != static_cast<std::size_t>(mpi_rank))
+            continue;
         SectorBasis sb = SectorBasis::build(
             full, projector,
             info.sectors[s].quantum_numbers,
@@ -341,7 +350,9 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
                                 std::int64_t             n_up,
                                 const SymmetryGroupInfo& info,
                                 TermBuilder&&            terms,
-                                std::vector<std::size_t>* out_sector_ids = nullptr)
+                                std::vector<std::size_t>* out_sector_ids = nullptr,
+                                int                      mpi_rank = 0,
+                                int                      mpi_size = 1)
 {
     const SpatialProjector projector(info);
 
@@ -354,6 +365,11 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
         std::vector<std::unique_ptr<SectorOperator>> ops;
         ops.reserve(info.sectors.size());
         for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+            // Across-sector MPI: build only this rank's raw sectors (see
+            // build_full_sector_operators for the rationale).
+            if (mpi_size > 1 &&
+                s % static_cast<std::size_t>(mpi_size) != static_cast<std::size_t>(mpi_rank))
+                continue;
             SectorBasis sb = SectorBasis::build(
                 subspace, projector,
                 info.sectors[s].quantum_numbers,
@@ -458,7 +474,9 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
                                      std::int64_t             n_up,
                                      const SymmetryGroupInfo& info,
                                      TermBuilder&&            terms,
-                                     std::vector<std::size_t>* out_sector_ids = nullptr)
+                                     std::vector<std::size_t>* out_sector_ids = nullptr,
+                                     int                      mpi_rank = 0,
+                                     int                      mpi_size = 1)
 {
     // Streaming construction (Jun 2026): the orbit expansion uses a tableless
     // popcount-membership subspace -- bit-identical to ``FixedSzSubspace`` here
@@ -499,6 +517,12 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     std::vector<Complex>       coeffs;
 
     for (std::size_t s = 0; s < num_sectors; ++s) {
+        // Across-sector MPI: run the per-sector Pass 1.5 orbit walk only for
+        // this rank's raw sectors (distributes the walk + the per-sector
+        // RepSectorData memory). The shared rep enumeration above stays per-rank.
+        if (mpi_size > 1 &&
+            s % static_cast<std::size_t>(mpi_size) != static_cast<std::size_t>(mpi_rank))
+            continue;
         const std::vector<Complex>& phase = info_sp->sectors[s].phase_factors;
 
         // Pass 1.5: CSR-free per-sector dimension + RepSectorData. Walk each

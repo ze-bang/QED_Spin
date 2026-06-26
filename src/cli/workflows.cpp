@@ -724,14 +724,26 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     // without materialising any orbit CSR). The returned operators are
     // self-contained (no external carrier to keep alive).
     EDResults results;
-    ed::SectorOperatorSet sector_set = ed::make_sector_operators_tagged(spec);
+    // Across-sector MPI (Level 1, SectorDistributor): the factory partitions the
+    // |G| irrep sectors by RAW index across ranks, so each rank BUILDS (orbit
+    // walk + per-sector RepSectorData) and SOLVES only its own sectors -- both
+    // construction time AND per-rank memory distribute. The merged spectrum is
+    // Allgatherv'd after the loop. The sectors are independent eigenproblems
+    // reusing the existing single-node solve, so the distributed result is
+    // bit-identical to the single-rank run.
+    const auto [mpi_rank, mpi_size] = get_mpi_rank_size_safe();
+    ed::SectorOperatorSet sector_set =
+        ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size);
 
-    if (sector_set.operators.empty()) {
+    if (mpi_size == 1 && sector_set.operators.empty()) {
         throw std::runtime_error(
             "run_streaming_symmetry_workflow: make_sector_operators_tagged "
             "returned no symmetry sectors. Check the automorphism_results/ "
             "directory and the InterAll.dat deck.");
     }
+    // Under across-sector MPI a rank may legitimately own zero sectors (e.g.
+    // more ranks than surviving irreps); it simply contributes nothing to the
+    // Allgatherv below. The empty-deck error is only meaningful single-rank.
 
     // ``selected_sectors`` filters by RAW irrep index (the tag's
     // ``sector_index``), matching the legacy ``filter_sectors`` semantics:
@@ -740,18 +752,14 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     const std::set<std::size_t> selected_set(opts.selected_sectors.begin(),
                                              opts.selected_sectors.end());
 
-    // Across-sector MPI (Level 1, SectorDistributor): each rank solves a
-    // disjoint round-robin subset of the |G| irrep sectors; the merged spectrum
-    // is Allgatherv'd after the loop. The sectors are independent eigenproblems
-    // reusing the existing single-node solve, so the distributed result is
-    // bit-identical to the single-rank run. CRUCIAL: the inner per-sector path
-    // must be free of cross-rank MPI collectives -- ranks process DIFFERENT
-    // sectors, so any collective on MPI_COMM_WORLD (notably the per-sector
-    // ``create_directory_mpi_safe`` and the orchestrator's HDF5 directory setup)
-    // would mismatch and deadlock. We therefore disable per-sector on-disk
-    // output under multi-rank and emit only the merged result from rank 0.
-    const auto [mpi_rank, mpi_size] = get_mpi_rank_size_safe();
-
+    // The factory already handed this rank only its assigned sectors (raw-index
+    // partition), so the loop simply solves every sector in the local set. The
+    // inner per-sector path must stay free of cross-rank MPI collectives: ranks
+    // own DIFFERENT sectors, so any collective on MPI_COMM_WORLD (the per-sector
+    // ``create_directory_mpi_safe`` / orchestrator HDF5 setup, or an MpiBackend
+    // dot/nrm2) would mismatch and deadlock. We therefore force the inner solve
+    // rank-local (allow_mpi=false) and suppress per-sector on-disk output under
+    // multi-rank, emitting only the merged result from rank 0.
     std::vector<double>                      all_eigs;
     std::vector<ed::SectorTag>               touched_tags;
     std::vector<std::vector<double>>         eigs_per_sector;
@@ -759,10 +767,6 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
         const ed::SectorTag& tag = sector_set.tags[i];
         if (!keep_all_sectors && selected_set.count(tag.sector_index) == 0) {
             continue;
-        }
-        if (mpi_size > 1 &&
-            static_cast<int>(i % static_cast<std::size_t>(mpi_size)) != mpi_rank) {
-            continue;   // this irrep sector belongs to another rank
         }
         auto& sec = sector_set.operators[i];
         if (!sec || sec->dim() == 0) continue;

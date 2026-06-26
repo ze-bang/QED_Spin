@@ -371,7 +371,8 @@ struct SectorOperatorSet {
 };
 
 inline SectorOperatorSet
-make_sector_operators_tagged(const OperatorSpec& spec) {
+make_sector_operators_tagged(const OperatorSpec& spec,
+                             int mpi_rank = 0, int mpi_size = 1) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_sector_operators: requires "
@@ -410,17 +411,20 @@ make_sector_operators_tagged(const OperatorSpec& spec) {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids);
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size);
         } else {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids);
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size);
         }
     } else {
         set.operators = ed::symmetry::build_full_sector_operators(
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-            base->symmetry_info, term_builder, &sector_ids);
+            base->symmetry_info, term_builder, &sector_ids,
+            mpi_rank, mpi_size);
     }
 
     set.num_raw_sectors = base->symmetry_info.sectors.size();
