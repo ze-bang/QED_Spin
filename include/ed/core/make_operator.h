@@ -281,7 +281,15 @@ inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
         if (e[0] == '1') return true;
         if (e[0] == '0') return false;
     }
-    std::size_t budget = 4ULL * 1024ULL * 1024ULL * 1024ULL;  // 4 GiB
+    // Default budget = 64 MiB (was 4 GiB). The "eager" orbit-CSR lane is NOT
+    // actually faster for non-trivial sectors: its reverse lookup falls back to
+    // an O(log dim) SortedUint64Index binary search (the O(1) dense lookup is
+    // never built on this path), making its symmetry SpMV ~14x slower than the
+    // matrix-free rep walk -- which is ALSO O(#reps) memory instead of O(dim).
+    // So we only stay eager for genuinely tiny sectors (where construction is
+    // instant); everything larger uses the rep walk. Measured (XXZ ring, |G|=N):
+    // N=21 eager 44s -> rep walk 3.2s; N=24 eager >90s -> rep walk 7.5s.
+    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
     if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
         try { budget = std::stoull(e); } catch (...) {}
     }
