@@ -36,6 +36,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -95,10 +97,18 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
     const std::size_t k = std::max<std::size_t>(1, std::min<std::size_t>(opts.num_eigs, N));
     const double      tol       = (opts.tolerance <= 0.0) ? 1e-12 : opts.tolerance;
     constexpr double  breakdown = 1e-12;
-    // Blocks per cycle: enough to host k eigenvalues plus headroom, capped by N/b.
+    // Blocks per cycle. The per-cycle Krylov subspace is m_blocks*b vectors; it
+    // must be large enough to converge k eigenvalues, or every cycle locks
+    // nothing and the thick restart makes no progress (returns 0 eigenvalues on
+    // a large sector -- the block analogue of the single-vector KS subspace-cap
+    // bug). So we size it like single-vector KS: a 2k+20-vector floor, GROWN by
+    // the user's `max_iter` budget (interpreted in Krylov-vector units, divided
+    // by the block width), and only then capped by N/b. `max_iter` thus GROWS
+    // the subspace rather than only shrinking it.
     const std::size_t max_blocks_dim = (N + b - 1) / b;
-    std::size_t m_blocks = std::max<std::size_t>(2, (k + 2 * b) / b + 2);
-    if (opts.max_iter > 0) m_blocks = std::min(m_blocks, std::max<std::size_t>(2, opts.max_iter));
+    const std::size_t floor_dim = 2 * k + 20;                // ~ single-vector KS
+    const std::size_t want_dim  = std::max<std::size_t>(floor_dim, opts.max_iter);
+    std::size_t m_blocks = std::max<std::size_t>(2, (want_dim + b - 1) / b);
     m_blocks = std::min(m_blocks, max_blocks_dim);
 
     const Complex one(1.0, 0.0), zero(0.0, 0.0), neg_one(-1.0, 0.0);
@@ -260,6 +270,16 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
         if (newly < total) R.resid_history.push_back(ritz_residual(newly));
 
         if (locked_evals.size() >= k) { converged = true; break; }
+
+        // Adaptive subspace growth: the simple re-seed thick restart can STALL
+        // (the residual estimate plateaus above tol) on a tight-gap spectrum, so
+        // a fixed small per-cycle subspace would never lock anything. When a
+        // cycle locks nothing, grow the per-cycle block count so the next cycle
+        // explores a larger Krylov space; capped by N/b (full space => exact),
+        // which guarantees eventual convergence without the caller hand-tuning
+        // max_iter. Geometric growth keeps the total work bounded.
+        if (newly == 0) m_blocks = std::min(m_blocks + m_blocks / 2 + 1,
+                                            max_blocks_dim);
 
         // ---- thick restart: re-seed V0 with the lowest non-locked Ritz block.
         be.fill_zero(V_seed.get(), N * b);
