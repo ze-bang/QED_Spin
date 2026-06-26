@@ -190,7 +190,9 @@ public:
             // build -- where each matvec re-walks every orbit and recomputes the
             // projection -- with a single O(|G|*nnz) assembly pass. The emitted
             // value is byte-for-byte what the gather kernel accumulates (pinned
-            // by test_reduced_symmetry_csr: CSR*v == gather*v).
+            // by the "lazy rep-walk dense-assembly lane == full reference" case in
+            // tests/integration/test_make_sector_operators_e2e.cpp: the FullDiag
+            // sector union equals the full-Hilbert dense spectrum).
             if (static_cast<std::size_t>(producer_.dim()) != N) return false;
             this->commitPendingTransforms();
             producer_.ensureHostCsr();   // materialise sector orbits for policy()
