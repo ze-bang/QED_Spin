@@ -83,6 +83,7 @@
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/matvec/reduced_symmetry_csr.h>
 #include <ed/matvec/term_kernels_gather.h>  // SOTA lock-free row-gather SpMV
 #include <ed/matvec/term_storage.h>   // canonical term-view record types
                                       // (named only by the extern template
@@ -103,6 +104,18 @@ using Complex = std::complex<double>;
 // ``apply_terms``.
 // ---------------------------------------------------------------------------
 namespace detail {
+// Skeleton lane gate: materialize the reduced sector matrix (O(1) SpMV) instead
+// of the per-iteration O(|G|) rep walk. Opt-in via ED_SYM_REDUCED_CSR=1; the
+// planner will drive this once the memory cost model is wired. Process-global
+// env read is cached on first call.
+inline bool reduced_csr_enabled() noexcept {
+    static const bool on = [] {
+        const char* e = std::getenv("ED_SYM_REDUCED_CSR");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return on;
+}
+
 template <class P, class = void>
 struct policy_is_rep : std::false_type {};
 template <class P>
@@ -595,6 +608,16 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
+            } else if (detail::reduced_csr_enabled()
+                       && detail::policy_is_rep_v<BasisPolicy>) {
+                // Skeleton lane: materialize the reduced sector matrix ONCE
+                // (same coeff_modifier as the gather) then O(1)-per-nnz SpMV.
+                if (!rep_csr_cplx_.built())
+                    rep_csr_cplx_ = build_reduced_symmetry_csr<BasisPolicy, Complex>(
+                        basis_, t.spin_l,
+                        *t.diag_one, *t.offdiag_one, *t.diag_two,
+                        *t.mixed_two, *t.offdiag_two, *t.three_body);
+                rep_csr_cplx_.spmv(in, out);
             } else {
                 // DEFAULT: lock-free row GATHER (Hermitian transpose of the
                 // orbit walk). Overwrites ``out`` (no pre-zero needed).
@@ -654,6 +677,14 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
+            } else if (detail::reduced_csr_enabled()
+                       && detail::policy_is_rep_v<BasisPolicy>) {
+                if (!rep_csr_real_.built())
+                    rep_csr_real_ = build_reduced_symmetry_csr<BasisPolicy, double>(
+                        basis_, t.spin_l,
+                        *t.diag_one, *t.offdiag_one, *t.diag_two,
+                        *t.mixed_two, *t.offdiag_two, *t.three_body);
+                rep_csr_real_.spmv(in, out);
             } else {
                 ed::matvec::kernel::apply_terms_gather_symmetry<BasisPolicy, double>(
                     basis_, t.spin_l,
@@ -918,6 +949,12 @@ private:
     mutable std::vector<double>  diag_real_{};
     mutable bool diag_cplx_built_ = false;
     mutable bool diag_real_built_ = false;
+
+    // Reduced-CSR "skeleton" lane (rep symmetry only; ED_SYM_REDUCED_CSR=1). Built
+    // once on first apply from the same coeff_modifier as the gather, then reused
+    // as an O(1)-per-nnz SpMV across all solver iterations.
+    mutable ReducedSymmetryCsr<Complex> rep_csr_cplx_{};
+    mutable ReducedSymmetryCsr<double>  rep_csr_real_{};
 
     // Persistent scratch for the real-input/complex-output fast path.
     std::vector<double> real_in_buf_;
