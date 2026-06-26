@@ -199,9 +199,14 @@ def test_estimate_time_gpu_faster_than_cpu():
 
 
 def test_estimate_time_thermal_scales_with_samples():
+    # Wall-time now comes from the ed::planner cost model (one source of truth):
+    # FTLM time = n_samples * (2 * max_iter matvecs) + a ONE-TIME enumeration cost,
+    # so it scales ~linearly with samples but is slightly below an exact 8x (the
+    # fixed enumeration term is counted once, not eight times).
     t1, _ = fea.estimate_time_s(1 << 12, 36, "FTLM", n_samples=1)
     t8, _ = fea.estimate_time_s(1 << 12, 36, "FTLM", n_samples=8)
-    assert t8 == pytest.approx(8.0 * t1, rel=1e-9)
+    assert t1 < t8 <= 8.0 * t1 + 1e-9              # monotone, bounded by exact 8x
+    assert t8 == pytest.approx(8.0 * t1, rel=0.1)  # ~8x (enumeration is a small fixed share)
 
 
 # ---------------------------------------------------------------------------

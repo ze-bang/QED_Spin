@@ -431,59 +431,11 @@ def _normalize_method_name(method: Union[str, DiagonalizationMethod]) -> str:
     return str(method).upper()
 
 
-def _vector_count_for(
-    method_name: str,
-    *,
-    num_eigenvalues: int,
-    max_iterations: Optional[int],
-    n_samples: Optional[int],
-    compute_eigenvectors: bool,
-    block_size: Optional[int],
-) -> tuple[int, str]:
-    """Number of dim-sized complex vectors the chosen kernel keeps live.
-
-    Returns (count, rationale). ``count`` is the **resident** working set;
-    sequential samples (TPQ / FTLM outer loop) are NOT multiplied in.
-    """
-    name = method_name.upper()
-    nev = max(1, num_eigenvalues)
-    # Approximate Krylov subspace dimension: this used to be the dedicated
-    # ``max_subspace`` parameter; the minimalist architecture rev folded
-    # that into ``max_iterations``.
-    ms = max_iterations if (max_iterations and max_iterations > 0) else \
-        max(80, 4 * nev + 40)
-    bs = max(1, int(block_size or 1))
-
-    # Eigenvalue solvers ----------------------------------------------------
-    if "FULL" in name:
-        # Dense H + dense eigvecs: 2 * dim^2 doubles. We model this as
-        # "vector count = dim" so the planner sees dim * dim memory.
-        return -1, "FULL dense LAPACK: ~2 * dim^2 complex<double>"
-    if "KRYLOV_SCHUR" in name:
-        if compute_eigenvectors:
-            return ms + 4, f"KRYLOV_SCHUR: thick-restart basis (~max_iterations={ms})"
-        return 4, "KRYLOV_SCHUR: 3 working vectors (basis regenerated)"
-    if "BLOCK_LANCZOS" in name:
-        return ms + bs * 2 + 3, (
-            f"BLOCK_LANCZOS: max_iterations={ms} + 2*block_size={bs}")
-    if "LANCZOS" in name:
-        if compute_eigenvectors:
-            return ms + 4, (
-                f"LANCZOS w/ eigenvectors: stored basis (~max_iterations={ms})")
-        return 4, "LANCZOS: ~4 working vectors (regenerated 2-pass)"
-
-    # Thermal solvers (sequential outer loop -> no n_samples multiplier) ----
-    if "TPQ" in name:
-        return 5, "TPQ: |psi> + term + Hterm + result + Hpsi (one sample at a time)"
-    if "FTLM" in name or "LTLM" in name:
-        # Inner Lanczos basis (regen 2-pass) + observable scratch.
-        return ms + 4, (
-            f"FTLM/LTLM: inner Lanczos basis (~max_iterations={ms}) + observable scratch")
-    if "KPM" in name:
-        return 6, "KPM_DOS: 3 Chebyshev recurrence vectors + 3 scratch"
-
-    # Unknown -> conservative default
-    return ms + 4, f"unknown solver: defaulting to max_iterations={ms} + 4"
+# NOTE: the Python resident-vector cost model `_vector_count_for` was RETIRED --
+# it duplicated (and drifted from) the C++ ed::planner task cost model. Its
+# `KRYLOV_SCHUR -> 4` line was the 50x underestimate behind the Krylov-Schur OOM.
+# estimate_memory_gb / estimate_time_s now defer to `_core.plan_execution`, so the
+# Python advisor and the actual run share ONE cost model.
 
 
 def estimate_memory_gb(
@@ -504,36 +456,45 @@ def estimate_memory_gb(
     matrix-free SpMV doesn't store H, so memory == vectors.
     """
     method_name = _normalize_method_name(method)
-    vec_count, rationale = _vector_count_for(
-        method_name,
-        num_eigenvalues=num_eigenvalues,
-        max_iterations=max_iterations,
-        n_samples=n_samples,
-        compute_eigenvectors=compute_eigenvectors,
-        block_size=block_size,
-    )
     n_ranks = max(1, int(n_ranks))
 
-    if vec_count < 0:
-        # Dense path: memory is dim * dim, replicated across ranks.
+    if "FULL" in method_name:
+        # Dense path: dim*dim, replicated across ranks. The C++ cost model sizes
+        # resident VECTORS, not the dense matrix, so this trivial formula stays.
         bytes_total = 2.0 * (dim ** 2) * BYTES_PER_COMPLEX
         per_rank = bytes_total / n_ranks
         return (
             per_rank / (1024.0 ** 3),
             bytes_total / (1024.0 ** 3),
-            f"{rationale}; total = 2 * {dim}^2 * 16 B "
+            f"FULL (dense): 2 * {dim}^2 * 16 B "
             f"= {bytes_total / (1024.0 ** 3):.1f} GB",
         )
 
-    # Iterative path: vectors are slabbed across ranks.
-    total_bytes = float(vec_count) * float(dim) * BYTES_PER_COMPLEX
-    per_rank = total_bytes / n_ranks
+    # Iterative path: defer to the ONE cost model -- ed::planner's task cost model
+    # via plan_execution. `est_memory_gb` is the per-rank resident-vector working
+    # set (incl. the memory-bounded Krylov-Schur subspace), so this advisor and
+    # the actual run agree (no second, drifting vector-count model).
+    # n_ranks=1 so the planner returns the FULL working set (it only slabs on the
+    # MPI lane); we apply the balanced 1-D slab across n_ranks ourselves, matching
+    # the historical memory model -- but with the C++ resident-vector count.
+    plan = _core.plan_execution(
+        int(dim), 1, 0,
+        method=method_name,
+        num_eigs=int(max(1, num_eigenvalues)),
+        krylov_dim=int(max_iterations or 0),
+        n_samples=int(n_samples or 1),
+        compute_vectors=bool(compute_eigenvectors),
+        block_size=int(block_size or 1),
+        n_ranks=1,
+        device="cpu",
+    )
+    total = float(plan.get("est_memory_gb", 0.0))
+    per_rank = total / n_ranks
     return (
-        per_rank / (1024.0 ** 3),
-        total_bytes / (1024.0 ** 3),
-        f"{rationale}; per vector = {dim:_d} * 16 B = "
-        f"{(dim * BYTES_PER_COMPLEX) / (1024.0 ** 3):.2f} GB; "
-        f"resident vectors = {vec_count}",
+        per_rank, total,
+        f"{method_name}: resident-vector working set from the ed::planner cost "
+        f"model = {total:.2f} GB total, {per_rank:.2f} GB/rank across {n_ranks} "
+        f"rank{'s' if n_ranks != 1 else ''}",
     )
 
 
@@ -558,12 +519,9 @@ def estimate_time_s(
     """
     method_name = _normalize_method_name(method)
     nev = max(1, num_eigenvalues)
-    max_iter = max_iterations if (max_iterations and max_iterations > 0) \
-        else max(200, 8 * nev + 80)
     n_samples = max(1, int(n_samples))
     n_ranks = max(1, int(n_ranks))
 
-    # SpMV count per call (number of H * v inside the kernel).
     if "FULL" in method_name:
         # LAPACK zheev: ~ (8/3) * dim^3 flops; rough wall-time at 100 GFLOPs
         flops = (8.0 / 3.0) * (dim ** 3)
@@ -572,52 +530,23 @@ def estimate_time_s(
             f"FULL: ~(8/3) dim^3 flops at ~100 GFLOPS dense = "
             f"{seconds:.2g} s")
 
-    if "TPQ" in method_name:
-        # n_samples * n_betas * delta_betas/step * taylor_order
-        n_spmv_per_sample = max_iter
-        n_spmv = n_samples * n_spmv_per_sample
-        rationale_extra = (
-            f"TPQ: {n_samples} sample(s) * ~{n_spmv_per_sample} SpMV (delta-beta * Taylor)")
-    elif "FTLM" in method_name or "LTLM" in method_name:
-        # Two-pass Lanczos (basis + reproject) per sample
-        n_spmv_per_sample = 2 * max_iter
-        n_spmv = n_samples * n_spmv_per_sample
-        rationale_extra = (
-            f"FTLM/LTLM: {n_samples} sample(s) * 2 * {max_iter} = {n_spmv} SpMV")
-    elif "KPM" in method_name:
-        n_spmv = max(1, int(n_samples)) * max_iter
-        rationale_extra = (
-            f"KPM_DOS: {n_samples} random vector(s) * {max_iter} moments "
-            f"= {n_spmv} SpMV")
-    elif "BLOCK" in method_name:
-        bs = max(1, int(block_size or nev))
-        n_spmv = max_iter * bs
-        rationale_extra = (
-            f"BLOCK_*: {max_iter} iter * block_size={bs} = {n_spmv} SpMV")
-    else:
-        # Lanczos / Krylov-Schur family: 2-pass when eigenvectors are kept;
-        # we conservatively use 2x.
-        n_spmv = 2 * max_iter
-        rationale_extra = (
-            f"LANCZOS/KRYLOV_SCHUR: 2 * {max_iter} = {n_spmv} SpMV")
-
-    if device in ("gpu", "mpi_gpu"):
-        ns_per_elem = SPMV_NS_PER_TERM_ELEMENT_GPU
-        # mpi_gpu: each rank holds dim / n_ranks elements
-        per_rank_dim = dim // max(1, n_ranks)
-        per_spmv_s = n_terms * per_rank_dim * ns_per_elem * 1e-9
-        device_label = f"GPU ({SPMV_NS_PER_TERM_ELEMENT_GPU} ns/elem)"
-    else:
-        ns_per_elem = SPMV_NS_PER_TERM_ELEMENT_CPU
-        per_rank_dim = dim // max(1, n_ranks)
-        per_spmv_s = n_terms * per_rank_dim * ns_per_elem * 1e-9
-        device_label = f"CPU ({SPMV_NS_PER_TERM_ELEMENT_CPU} ns/elem)"
-
-    seconds = n_spmv * per_spmv_s
-    rationale = (
-        f"{rationale_extra} on {device_label} with n_terms={n_terms} and "
-        f"per-rank dim={per_rank_dim:_d}: total ~{seconds:.2g} s")
-    return seconds, rationale
+    # Iterative path: defer to the ONE cost model -- ed::planner's est_seconds
+    # (matvec count * per-matvec, device-aware, incl. CSR build + enumeration), so
+    # this advisor and the actual run share the same wall-time model.
+    plan = _core.plan_execution(
+        int(dim), int(max(1, n_terms)), int(max(1, n_terms)),
+        method=method_name,
+        num_eigs=int(nev),
+        krylov_dim=int(max_iterations or 0),
+        n_samples=int(n_samples),
+        block_size=int(block_size or 1),
+        n_ranks=int(n_ranks),
+        device=device,
+    )
+    seconds = float(plan.get("est_seconds", 0.0))
+    return seconds, (
+        f"{method_name}: wall-time from the ed::planner cost model "
+        f"(device={device}, n_terms={n_terms}, dim={dim:_d}) ~{seconds:.2g} s")
 
 
 # =============================================================================
