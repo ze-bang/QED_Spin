@@ -211,6 +211,7 @@ def _ed_result_from_thermal_result(
 def _ed_params_to_solve_options(
     params: EDParameters,
     method: DiagonalizationMethod,
+    auto_method: bool = False,
 ) -> "_core.SolveOptions":
     """Translate `EDParameters` + `DiagonalizationMethod` into a
     `_core.SolveOptions` for the orchestrator.
@@ -247,7 +248,11 @@ def _ed_params_to_solve_options(
         DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
         DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
     }
-    opts.method = method_map.get(method, _core.SolveMethod.Auto)
+    # When the user did not name a solver (auto_method), defer the eigensolver
+    # choice to the C++ dictator (ed::planner) by passing Auto -- Python no longer
+    # picks the ground-state method itself.
+    opts.method = (_core.SolveMethod.Auto if auto_method
+                   else method_map.get(method, _core.SolveMethod.Auto))
 
     opts.use_fixed_sz          = bool(params.use_fixed_sz)
     opts.use_symmetry          = bool(params.use_symmetry)
@@ -297,6 +302,7 @@ def _diag_via_workflows_solve(
     operator: Operator,
     method: DiagonalizationMethod,
     params: EDParameters,
+    auto_method: bool = False,
 ) -> EDResults:
     """Route an in-memory `Operator` through the unified orchestrator.
 
@@ -307,7 +313,7 @@ def _diag_via_workflows_solve(
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
-        opts = _ed_params_to_solve_options(params, method)
+        opts = _ed_params_to_solve_options(params, method, auto_method)
         # The orchestrator's `workflows_solve` accepts an `Operator&`;
         # if the caller already projected to a fixed-Sz sector we hand
         # it the `FixedSzOperator` directly (it derives from `Operator`).
@@ -1261,7 +1267,10 @@ def solve(
     #     structs (e.g. ``FtlmKernelOptions``); the surface-unification
     #     collapse retired the cross-cutting ``ed/auto/diag_tune.h``.
     # ------------------------------------------------------------------
-    if auto_tune:
+    # Ground-state methods are now planned by the C++ dictator (ed::planner);
+    # Python no longer tunes solver/iterations for them. Thermal methods
+    # (FTLM/LTLM/mTPQ/cTPQ/KPM) still need their physics knobs tuned here.
+    if auto_tune and not _is_ground_state_method(method):
         from . import auto_tune as _at
         try:
             from . import has_cuda_build, has_mpi_build  # type: ignore
@@ -1368,7 +1377,10 @@ def solve(
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
 
-    return _diag_via_workflows_solve(op_to_use, method, params)
+    # solver=None => let the C++ dictator (ed::planner) pick the ground-state
+    # eigensolver, instead of the old Python _resolve_solver heuristic.
+    return _diag_via_workflows_solve(op_to_use, method, params,
+                                     auto_method=(solver is None))
 
 
 # ---------------------------------------------------------------------------
@@ -1946,19 +1958,12 @@ def _resolve_solver(
         raise TypeError(f"solver must be str or DiagonalizationMethod, "
                         f"got {type(solver).__name__}")
 
-    # Auto-pick:
-    # * Tiny matrices: dense LAPACK is end-to-end faster (no Krylov
-    #   warmup, single BLAS call).
-    # * Many eigenvalues + mid/large matrices: Krylov-Schur converges
-    #   far better than naive Lanczos for the upper end of a small
-    #   subspace request.
-    # * Otherwise: standard Lanczos.
-    if dim <= 2048 and num_eigenvalues >= max(8, dim // 4):
-        return DiagonalizationMethod.FULL
-    if dim <= 1024:
-        return DiagonalizationMethod.FULL
-    if num_eigenvalues >= 16:
-        return DiagonalizationMethod.KRYLOV_SCHUR
+    # solver is None: the ground-state eigensolver is chosen by the C++ dictator
+    # (ed::planner); qed.solve passes SolveMethod::Auto (auto_method=True). This
+    # value is only a ROUTING placeholder so the caller dispatches to the
+    # ground-state lane (workflows_solve) rather than the thermal lane. The old
+    # dim/num_eigs heuristic here DISAGREED with the planner (it never picked
+    # BlockLanczos), so it was removed -- one dictator.
     return DiagonalizationMethod.LANCZOS
 
 
