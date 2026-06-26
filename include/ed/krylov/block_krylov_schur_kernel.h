@@ -31,6 +31,7 @@
 // =============================================================================
 
 #include <ed/krylov/block_lanczos_kernel.h>   // detail helpers + Complex + LAPACKE
+#include <ed/krylov/subspace_policy.h>        // krylov_subspace_dim (shared sizing)
 #include <ed/matvec/backend.h>
 
 #include <algorithm>
@@ -54,6 +55,10 @@ struct BlockKrylovSchurOptions {
     std::string   output_dir;
     std::uint64_t global_n        = 0;
     std::size_t   reorth_period   = 1;    ///< full reorth every K blocks (1 = always)
+    /// Memory cap on the per-cycle subspace, in resident length-N vectors
+    /// (m_blocks*block_size). 0 = no cap. Set by the orchestrator from available
+    /// RAM/VRAM so the footprint is predictable. See krylov_subspace_dim.
+    std::uint64_t max_subspace_vectors = 0;
 };
 
 struct BlockKrylovSchurResult {
@@ -106,8 +111,11 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
     // by the block width), and only then capped by N/b. `max_iter` thus GROWS
     // the subspace rather than only shrinking it.
     const std::size_t max_blocks_dim = (N + b - 1) / b;
-    const std::size_t floor_dim = 2 * k + 20;                // ~ single-vector KS
-    const std::size_t want_dim  = std::max<std::size_t>(floor_dim, opts.max_iter);
+    // Memory-bounded subspace (shared with KS + the orchestrator + the planner):
+    // floor 2k+20, grown by max_iter, CAPPED by the memory budget so m_blocks*b
+    // vectors cannot OOM. Then round up to whole blocks and clamp to N/b.
+    const std::size_t want_dim = ed::krylov::krylov_subspace_dim(
+        k, opts.max_iter, static_cast<std::uint64_t>(N), opts.max_subspace_vectors);
     std::size_t m_blocks = std::max<std::size_t>(2, (want_dim + b - 1) / b);
     m_blocks = std::min(m_blocks, max_blocks_dim);
 
@@ -282,9 +290,14 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
         // cap is generous enough to converge typical gaps; harder cases return
         // the converged prefix (>= the ground state) rather than hang. Use
         // BLOCK_LANCZOS for the efficient degeneracy solve.
+        // ``2k+20`` is the base subspace floor (matching krylov_subspace_dim's
+        // floor before the max_iter growth); 8x its block count is a generous
+        // growth ceiling. (Was ``floor_dim`` before that local was folded into
+        // krylov_subspace_dim.)
+        const std::size_t floor_blocks = (2 * k + 20 + b - 1) / b;
         const std::size_t grow_cap =
             std::min(max_blocks_dim,
-                     std::max<std::size_t>(8 * ((floor_dim + b - 1) / b), 128));
+                     std::max<std::size_t>(8 * floor_blocks, 128));
         if (newly == 0 && m_blocks < grow_cap)
             m_blocks = std::min(m_blocks + m_blocks / 2 + 1, grow_cap);
         // Early-out: once at the cap, a few more no-lock cycles will not help the
