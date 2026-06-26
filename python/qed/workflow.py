@@ -1065,6 +1065,7 @@ def solve(
     elif fixed_sz_input and verbose:
         print(f"[qed.solve] FixedSzOperator supplied: dim={H.dimension}.")
     elif (sz is None and not fixed_sz_input and auto_sz
+          and symmetry is None
           and H.conserves_sz()
           and not (isinstance(device, str)
                    and device.lower() in ("mpi", "mpi_gpu"))):
@@ -1075,6 +1076,14 @@ def solve(
         # i.e. a sqrt(pi N/2)x speedup over the full 2^N Hilbert space
         # at no accuracy cost. Pass ``auto_sz=False`` to keep the full
         # Hilbert space, or ``sz=k`` to pick a different sector.
+        #
+        # IMPORTANT: skipped when ``symmetry=`` is explicitly given. Otherwise
+        # "pure spatial" (symmetry, no sz) would silently become sz+spatial in
+        # the n_up=N//2 sector -- an INCOMPLETE spectrum, and the WRONG ground
+        # state for any model whose GS is not at half-filling (the "no accuracy
+        # cost" claim holds only for the Heisenberg-AFM GS). With an explicit
+        # spatial symmetry, that symmetry IS the reduction; add ``sz=`` if you
+        # also want a magnetisation sector.
         #
         # MPI / MPI+GPU lanes are excluded from auto-Sz: the standalone
         # ed_distributed_main binary loads from full-Hilbert .dat files

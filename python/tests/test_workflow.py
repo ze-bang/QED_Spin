@@ -194,6 +194,38 @@ def test_diag_with_explicit_z6_translation_generator():
     assert math.isclose(eigs[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
+def test_diag_pure_spatial_spans_full_hilbert_space():
+    """Pure spatial symmetry (symmetry=, no sz=) must reduce the FULL Hilbert
+    space, NOT silently project onto the n_up=N//2 Sz sector.
+
+    Regression: auto_sz=True (the default) used to impose sz=N//2 even when an
+    explicit spatial symmetry was supplied -> 'pure spatial' became sz+spatial
+    in one sector: an INCOMPLETE spectrum, and the WRONG ground state for any
+    model whose GS is not at half-filling.
+    """
+    H = _heisenberg_ring()
+    T = [(i + 1) % N_SITES for i in range(N_SITES)]
+    z6 = qed.GeneratorSet(name="Z6_translation", description="Z6 translation",
+                          generators=[T], orders=[6], group_size=6)
+    full_dim = 2 ** N_SITES
+
+    truth = np.sort(np.array(qed.solve(
+        H, num_eigenvalues=full_dim, solver="FULL",
+        auto_sz=False, verbose=False).eigenvalues))
+
+    # Default auto_sz: an explicit spatial symmetry must still span all 2^N states.
+    ps = np.sort(np.array(qed.solve(
+        H, num_eigenvalues=full_dim, solver="FULL",
+        symmetry=z6, verbose=False).eigenvalues))
+    assert len(ps) == full_dim                       # NOT C(N, N//2)
+    assert np.allclose(ps, truth, atol=1e-8)         # complete spectrum
+
+    # sz=k + symmetry still restricts to that one magnetisation sector.
+    szsp = qed.solve(H, num_eigenvalues=full_dim, solver="FULL",
+                     symmetry=z6, sz=N_SITES // 2, verbose=False)
+    assert len(szsp.eigenvalues) == math.comb(N_SITES, N_SITES // 2)
+
+
 def test_diag_with_full_set_from_find_symmetries():
     H = _heisenberg_ring()
     report = qed.find_symmetries(H, verbose=False)
