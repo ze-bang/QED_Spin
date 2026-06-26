@@ -133,19 +133,48 @@ def test_group_from_generators_mirrors_translation_group_1d():
                       expected_sectors=4)
 
 
-def test_group_from_generators_explicit_sectors_only():
+def test_group_from_generators_explicit_sectors_abelian():
+    # Explicit per-generator sector labels are well-defined only for an abelian
+    # (commuting) generator set. Translation on 6 sites is Z6; pick 2 of its 6
+    # momentum sectors explicitly.
     t = sym.translation(6, 1)
-    r = sym.reflection_1d(6)
     info = sym.group_from_generators(
         n_sites=6,
-        generators=[t, r],
-        sector_quantum_numbers=[[0, 0], [3, 0]],
+        generators=[t],
+        sector_quantum_numbers=[[0], [3]],
     )
-    assert info["num_generators"] == 2
-    assert info["generator_orders"] == [6, 2]
-    assert len(info["max_clique"]) == 12
+    assert info["num_generators"] == 1
+    assert info["generator_orders"] == [6]
+    assert len(info["max_clique"]) == 6
     assert len(info["sectors"]) == 2
-    assert {tuple(s["quantum_numbers"]) for s in info["sectors"]} == {(0, 0), (3, 0)}
+    assert {tuple(s["quantum_numbers"]) for s in info["sectors"]} == {(0,), (3,)}
+
+
+def test_group_from_generators_nonabelian_explicit_sectors_rejected():
+    # translation + reflection generate the (non-abelian) dihedral group D6. The
+    # projection layer is abelian-only, so the group is restricted to a maximal
+    # abelian subgroup -- after which per-generator sector labels are ambiguous.
+    # Explicit sector_quantum_numbers must therefore be rejected (the non-abelian
+    # guard: pass commuting generators, or omit the labels to auto-enumerate).
+    t = sym.translation(6, 1)
+    r = sym.reflection_1d(6)
+    with pytest.raises(ValueError):
+        sym.group_from_generators(
+            n_sites=6,
+            generators=[t, r],
+            sector_quantum_numbers=[[0, 0], [3, 0]],
+        )
+
+
+def test_group_from_generators_nonabelian_auto_restricts_to_abelian():
+    # Without explicit sectors a non-abelian set is restricted to a maximal
+    # abelian subgroup (complete + correct reduction, just coarser: |A|=6 < |G|=12
+    # for D6 -- the translation subgroup), and its sectors are auto-enumerated.
+    t = sym.translation(6, 1)
+    r = sym.reflection_1d(6)
+    info = sym.group_from_generators(n_sites=6, generators=[t, r])
+    assert len(info["max_clique"]) == 6
+    assert len(info["sectors"]) == 6
 
 
 # ---------------------------------------------------------------------------
