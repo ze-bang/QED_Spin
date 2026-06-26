@@ -1387,9 +1387,10 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 
 
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs, 
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir,
-                       bool compute_eigenvectors) {
+                       bool compute_eigenvectors,
+                       const ed::matvec::MatVecOperator* op_for_dense) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
 
     // Phase 6.1: dim-aware OMP+BLAS thread cap. Full diag is BLAS-3 dense
@@ -1454,44 +1455,53 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         
         std::cout << "Constructing dense matrix..." << std::endl;
 
-        // Construct full matrix from operator function with progress reporting
-        // NOTE: We use sequential loop here because H may internally use OpenMP.
-        // Nested parallelism causes thread-safety issues with some BLAS/LAPACK backends.
-        const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);  // Report progress every 1%
-        
-        for (uint64_t j = 0; j < N; j++) {
-            // Create unit vector e_j
-            std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
-            unit_vec[j] = Complex(1.0, 0.0);
-            
-            // Compute H * e_j to get column j
-            std::vector<Complex> col_j(N);
-            H(unit_vec.data(), col_j.data(), N);
-            
-            // Store column in dense matrix (use column-major order for LAPACK)
-            for (uint64_t i = 0; i < N; i++) {
-                dense_matrix[j*N + i] = col_j[i];
-            }
-            
-            // Progress reporting with ASCII progress bar
-            if (j % chunk_size == 0 || j == N-1) {
-                double percentage = 100.0 * j / N;
-                uint64_t barWidth = 50;
-                uint64_t pos = barWidth * j / N;
-                
-                std::cout << "\rProgress: [";
-                for (uint64_t k = 0; k < barWidth; ++k) {
-                    if (k < pos) std::cout << "=";
-                    else if (k == pos) std::cout << ">";
-                    else std::cout << " ";
+        // FAST PATH: assemble the matrix directly from the operator's sparse term
+        // structure -- O(nnz), reentrant, parallel over columns -- instead of N
+        // full matvecs (O(dim*nnz)). Supported by the full-space / fixed-Sz lanes;
+        // symmetry lanes (and distributed/GPU callers with no operator handle)
+        // return false and fall through to the matvec column build below.
+        bool built_direct =
+            (op_for_dense != nullptr) &&
+            op_for_dense->try_build_dense_columns(dense_matrix.data(), N);
+
+        if (!built_direct) {
+            // Fallback: build column j = H * e_j. SEQUENTIAL outer loop -- the CPU
+            // matvec is NOT reentrant (the backend owns shared CSR/scratch), so it
+            // cannot be called concurrently; H parallelizes each column internally.
+            const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);
+            for (uint64_t j = 0; j < N; j++) {
+                std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
+                unit_vec[j] = Complex(1.0, 0.0);
+                std::vector<Complex> col_j(N);
+                H(unit_vec.data(), col_j.data(), N);
+                for (uint64_t i = 0; i < N; i++) {
+                    dense_matrix[j*N + i] = col_j[i];
                 }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                
-                if (j == N-1) std::cout << std::endl;
+                if (j % chunk_size == 0 || j == N-1) {
+                    double percentage = 100.0 * j / N;
+                    uint64_t barWidth = 50;
+                    uint64_t pos = barWidth * j / N;
+                    std::cout << "\rProgress: [";
+                    for (uint64_t k = 0; k < barWidth; ++k) {
+                        if (k < pos) std::cout << "=";
+                        else if (k == pos) std::cout << ">";
+                        else std::cout << " ";
+                    }
+                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                    if (j == N-1) std::cout << std::endl;
+                }
             }
         }
         std::cout << "Dense matrix constructed" << std::endl;
-        
+
+        // The enclosing ThreadBudgetScope soft-caps threads at ~8 (tuned for
+        // bandwidth-bound Lanczos SpMV / BLAS-1). The dense LAPACK eigensolve
+        // below is compute-bound and scales to all cores (zheevd/zheevr), so
+        // lift the cap for it -- otherwise it runs ~3-4x slower than the BLAS
+        // backend can (measured: 9 s vs 2.6 s at dim 3432). ThreadBudgetScope
+        // clamps the request to the hardware maximum and restores on scope exit.
+        ed::parallel::ThreadBudgetScope dense_solve_budget(1 << 20);
+
         // Allocate array for eigenvalues
         std::vector<double> evals(N);
         lapack_int info;

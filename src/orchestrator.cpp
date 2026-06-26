@@ -734,14 +734,15 @@ GroundStateResult solve_on(Backend& be,
                     cpu_matvec(in, out, static_cast<std::size_t>(n));
                 };
             std::vector<double> eigs;
-            // NOTE: the dense column build stays SEQUENTIAL. The CPU matvec is
-            // NOT reentrant (the backend owns shared CSR / scratch buffers), so
-            // building columns concurrently via H races and yields
-            // nondeterministic eigenvalues (verified). H parallelizes each
-            // column internally instead.
+            // Pass &H so the dense matrix is assembled DIRECTLY from the sparse
+            // term structure in O(nnz) (full-space / fixed-Sz lanes) instead of N
+            // full matvecs. Symmetry lanes (and any operator without direct
+            // support) return false and fall back to the Hv column build, which
+            // stays SEQUENTIAL because the CPU matvec is not reentrant.
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
-                                 opts.compute_vectors);
+                                 opts.compute_vectors,
+                                 /*op_for_dense=*/&H);
             if (!opts.output_dir.empty()
                     && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
                 R.hdf5_path = opts.output_dir + "/ed_results.h5";

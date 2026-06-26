@@ -76,6 +76,21 @@ public:
     }
     [[nodiscard]] virtual bool is_hermitian() const { return true; }
 
+    // -------------------------------------------------------------------
+    // Optional fast dense assembly. When supported, fill the `dim()` x `dim()`
+    // matrix `dense` (COLUMN-MAJOR, pre-zeroed by the caller) directly from the
+    // operator's sparse term structure -- O(nnz) total, vs O(dim) full matvecs
+    // (= O(dim * nnz)) when the caller instead builds columns via `apply`. This
+    // is REENTRANT (it reads only const term data + does const basis lookups; no
+    // backend CSR/scratch is touched), so implementations may parallelize over
+    // columns. Returns true if it built the matrix; false (the default) tells
+    // the caller to fall back to the matvec column build. Only the lanes whose
+    // basis lookups are pure (full space, fixed-Sz) implement it today.
+    [[nodiscard]] virtual bool try_build_dense_columns(Complex* /*dense*/,
+                                                       std::size_t /*N*/) const {
+        return false;
+    }
+
     // Human-readable type tag for diagnostics / dispatch printouts.
     // Defaulted so subclasses can omit it; ours all override.
     [[nodiscard]] virtual std::string description() const {

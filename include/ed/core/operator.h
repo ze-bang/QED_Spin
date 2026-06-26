@@ -558,6 +558,24 @@ public:
             std::forward<Emit>(emit));
     }
 
+    // Fast dense assembly for the FULL Hilbert space (index == state). Fills
+    // column `j` directly from the sparse term enumerator -- O(nnz) instead of
+    // O(dim) full matvecs. Reentrant (term reads only) -> parallel over columns.
+    // SubspaceOperator overrides this for the reduced lanes (fixed-Sz mapping;
+    // symmetry returns false).
+    [[nodiscard]] bool try_build_dense_columns(Complex* dense,
+                                               std::size_t N) const override {
+        const std::uint64_t D = static_cast<std::uint64_t>(dim());
+        if (static_cast<std::size_t>(D) != N) return false;
+        #pragma omp parallel for schedule(static)
+        for (std::uint64_t j = 0; j < D; ++j) {
+            for_each_connected_state(j, [&](std::uint64_t sp, Complex h) {
+                dense[static_cast<std::size_t>(sp) + static_cast<std::size_t>(j) * N] += h;
+            });
+        }
+        return true;
+    }
+
     // -----------------------------------------------------------------
     // Wave 1.1 of the SOTA Performance rollout (May 2026): expose the
     // real-Hermitian fast path through ``LinearOperator``'s virtuals so

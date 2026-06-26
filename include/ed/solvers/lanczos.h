@@ -185,10 +185,18 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
                    uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
                    std::string dir = "", bool compute_eigenvectors = false);
 
-// Full diagonalization algorithm optimized for sparse matrices
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs, 
+// Full diagonalization algorithm optimized for sparse matrices.
+//
+// `op_for_dense` (optional): when non-null AND it supports it
+// (`try_build_dense_columns`), the dense matrix is assembled DIRECTLY from the
+// operator's sparse term structure in O(nnz) -- vs the O(dim) full matvecs (=
+// O(dim*nnz)) of the `H` column build, which dominates for large sparse H. Pass
+// the LinearOperator being solved; nullptr keeps the matvec column build (used
+// by distributed / GPU / wrapped-matvec callers that have no operator handle).
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir = "",
-                       bool compute_eigenvectors = true);
+                       bool compute_eigenvectors = true,
+                       const ed::matvec::MatVecOperator* op_for_dense = nullptr);
 
 // Krylov-Schur algorithm implementation
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 

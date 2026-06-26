@@ -148,6 +148,41 @@ public:
         return static_cast<std::size_t>(producer_.dim());
     }
 
+    // Fast dense assembly. Fixed-Sz: map column index -> state via the (combinadic
+    // or table) basis policy, enumerate H|state> with for_each_connected_state,
+    // and map each connected state back to a row index -- O(nnz), reentrant
+    // (pure term reads + pure basis lookups), so parallel over columns. The
+    // symmetry lanes return false (their reduced matrix elements carry SAB /
+    // projection coefficients, not bare <s'|H|s>), so the caller falls back to
+    // the matvec column build.
+    [[nodiscard]] bool try_build_dense_columns(Complex* dense,
+                                               std::size_t N) const override {
+        if constexpr (is_fixed_sz_) {
+            if (static_cast<std::size_t>(producer_.dim()) != N) return false;
+            // Reuse the proven, matvec-consistent term assembler (the same kernel
+            // buildFixedSzMatrix uses): it emits (row, col, <row|H|col>) triplets
+            // in the projected fixed-Sz basis -- O(nnz), pure term reads. Scatter
+            // them into the column-major dense buffer (duplicates accumulate).
+            this->commitPendingTransforms();
+            ed::matvec::basis::FixedSzBasisPolicy basis_pol = producer_.policy();
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            ed::matvec::kernel::emit_term_triplets<
+                ed::matvec::basis::FixedSzBasisPolicy, Complex>(
+                    basis_pol, static_cast<double>(this->getSpin()),
+                    this->terms_.diag_one_body, this->terms_.offdiag_one_body,
+                    this->terms_.diag_two_body, this->terms_.mixed_two_body,
+                    this->terms_.offdiag_two_body, this->terms_.three_body,
+                    triplets);
+            for (const auto& t : triplets)
+                dense[static_cast<std::size_t>(t.row())
+                      + static_cast<std::size_t>(t.col()) * N] += t.value();
+            return true;
+        } else {
+            (void)dense; (void)N;
+            return false;
+        }
+    }
+
     [[nodiscard]] std::string description() const override {
         if constexpr (is_fixed_sz_) {
             return "FixedSzOperator(n_bits=" + std::to_string(this->getNumBits())
