@@ -302,6 +302,24 @@ def _ed_result_from_gs_result(
         out.residuals       = list(getattr(_kry, "ritz_residuals", []) or [])
         out.n_converged     = int(getattr(_kry, "n_converged", 0))
         out.residual_history = list(getattr(_kry, "resid_history", []) or [])
+        # Warn-not-fail (completion contract): the run COMPLETED but the
+        # eigensolver did not converge every requested eigenpair (e.g. the
+        # planner memory-capped the Krylov subspace, or max_iterations was hit).
+        # The contract guarantees COMPLETION, not convergence -- so surface a
+        # warning and return the best-effort result instead of raising.
+        if not out.converged:
+            want = int(getattr(params, "num_eigenvalues", 1) or 1)
+            rmax = max(out.residuals) if out.residuals else float("nan")
+            warnings.warn(
+                f"qed.solve: eigensolver did not fully converge "
+                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
+                f"residual {rmax:.2e} after {out.iterations} iterations). "
+                f"Returning the best-effort result. Raise max_iterations / "
+                f"tolerance, or give the run more memory so the Krylov subspace "
+                f"need not be capped.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return out
 
 
