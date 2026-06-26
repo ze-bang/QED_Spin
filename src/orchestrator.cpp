@@ -35,6 +35,7 @@
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
 #include <ed/planner/execution_planner.h>   // THE dictator: plan_execution
 #include <ed/planner/system_capabilities.h> // probe_system
+#include <ed/core/operator.h>               // Operator introspection (term SoA, N)
 
 #include <fstream>   // /proc/meminfo
 #include <string>
@@ -219,6 +220,43 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
     }
 }
 
+// Build the planner's TaskDescriptor from the operator + solve options
+// (consolidation Stage A). Feeds the REAL Hamiltonian term structure (n_terms,
+// n_offdiag, N) and the reduction (kind, n_up) so plan_execution's CSR / basis /
+// symmetry decisions are trustworthy -- they are consumed from Stage B onward.
+// No behavior change here: solve_on still applies only method/iterations/subspace.
+// `group_size` (the orbit-CSR-vs-rep input) is left at 1 until the symmetry
+// matvec decision is wired in Stage B.
+[[nodiscard]] ed::planner::TaskDescriptor
+make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
+    ed::planner::TaskDescriptor t;
+    t.basis_dim       = H.global_dim();
+    t.num_eigs        = static_cast<int>(opts.num_eigs);
+    t.block_size      = opts.block_size;
+    t.compute_vectors = opts.compute_vectors;
+    t.krylov_dim      = static_cast<int>(opts.max_iter);   // user hint, if any
+    t.n_up            = opts.n_up;
+
+    if      (opts.use_symmetry && opts.use_fixed_sz) t.kind = ed::planner::BasisKind::SymSz;
+    else if (opts.use_symmetry)                      t.kind = ed::planner::BasisKind::Symm;
+    else if (opts.use_fixed_sz)                      t.kind = ed::planner::BasisKind::Sz;
+    else                                             t.kind = ed::planner::BasisKind::Full;
+
+    // Real term structure from the concrete spin Operator (every Full / Sz /
+    // symmetry operator derives from it). Diagonal bins stay on the same state;
+    // the rest are off-diagonal (drive CSR nnz and the connectivity model).
+    if (const auto* op = dynamic_cast<const Operator*>(&H)) {
+        t.N = static_cast<int>(op->getNumBits());
+        const auto& ts = op->getTerms();
+        const std::uint64_t diag = ts.diag_one_body.size() + ts.diag_two_body.size();
+        const std::uint64_t off  = ts.offdiag_one_body.size() + ts.mixed_two_body.size()
+                                 + ts.offdiag_two_body.size() + ts.three_body.size();
+        t.n_terms   = std::max<std::uint64_t>(1, diag + off);
+        t.n_offdiag = off;
+    }
+    return t;
+}
+
 // ---------------------------------------------------------------------------
 // Exact canonical thermodynamics from a complete eigenspectrum.
 //
@@ -294,12 +332,7 @@ GroundStateResult solve_on(Backend& be,
     // orchestrator no longer has its own auto-heuristics -- it just applies the
     // plan. (An explicit opts.method / opts.max_iter still overrides the plan.)
     // -----------------------------------------------------------------------
-    ed::planner::TaskDescriptor task;
-    task.basis_dim       = geom.global_dim;
-    task.num_eigs        = static_cast<int>(opts.num_eigs);
-    task.block_size      = opts.block_size;
-    task.compute_vectors = opts.compute_vectors;
-    task.krylov_dim      = static_cast<int>(opts.max_iter);   // user hint, if any
+    const ed::planner::TaskDescriptor task = make_task_descriptor(H, opts);
     const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
         task, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
 
