@@ -41,6 +41,23 @@ inline void clear_basis_repr() noexcept { set_basis_repr(BasisRepr::Default); }
     return detail::basis_repr_slot().load(std::memory_order_relaxed);
 }
 
+/// Scoped override: set the basis representation for the lifetime of the token
+/// (e.g. across one FixedSzOperator construction) and restore the previous value
+/// on destruction. Mirrors ScopedCsrOverride / ScopedSymMatvecRepr.
+class ScopedBasisRepr {
+public:
+    explicit ScopedBasisRepr(BasisRepr r) noexcept : prev_(basis_repr()) {
+        set_basis_repr(r);
+    }
+    ~ScopedBasisRepr() {
+        detail::basis_repr_slot().store(prev_, std::memory_order_relaxed);
+    }
+    ScopedBasisRepr(const ScopedBasisRepr&)            = delete;
+    ScopedBasisRepr& operator=(const ScopedBasisRepr&) = delete;
+private:
+    int prev_;
+};
+
 /// Resolve whether a fixed-Sz operator should use the tableless combinadic
 /// basis. Env overrides the planner override, which overrides the default.
 [[nodiscard]] inline bool prefer_tableless_fixed_sz() noexcept {

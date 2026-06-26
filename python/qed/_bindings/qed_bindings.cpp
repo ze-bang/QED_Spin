@@ -38,6 +38,9 @@
 
 #include <ed/core/construct_ham.h>
 #include <ed/dssf/operator_spec.h>
+#include <ed/planner/execution_planner.h>   // plan the fixed-Sz basis decision
+#include <ed/planner/system_capabilities.h> // probe_system
+#include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ltlm.h>
@@ -289,6 +292,21 @@ py::list op_iter_three_body(const Operator& op) {
 // `transform_data_` / `three_body_data_` straight from `Operator`, so a
 // member-wise copy gets us a fully working sector-restricted operator
 // without having to re-add each term.
+// C(n, k), overflow-clamped to UINT64_MAX (a basis that large is astronomically
+// infeasible -> the clamp correctly drives the tableless / refuse decision).
+[[nodiscard]] inline std::uint64_t binom_u64(unsigned n, unsigned k) {
+    if (k > n) return 0;
+    k = std::min(k, n - k);
+    std::uint64_t r = 1;
+    for (unsigned i = 0; i < k; ++i) {
+        const std::uint64_t num = n - i;
+        if (r > (std::numeric_limits<std::uint64_t>::max)() / num)
+            return (std::numeric_limits<std::uint64_t>::max)();
+        r = r * num / (i + 1);   // exact in this multiplicative order
+    }
+    return r;
+}
+
 std::unique_ptr<FixedSzOperator>
 op_make_fixed_sz(const Operator& op, int64_t n_up) {
     if (n_up < 0 || n_up > static_cast<int64_t>(op.getNumBits())) {
@@ -296,6 +314,37 @@ op_make_fixed_sz(const Operator& op, int64_t n_up) {
             "n_up = " + std::to_string(n_up) +
             " out of range [0, num_sites=" + std::to_string(op.getNumBits()) + "]");
     }
+
+    // Planner-driven fixed-Sz basis representation (completion guarantee). The
+    // FixedSzOperator ctor reads the basis hook (prefer_tableless_fixed_sz); set
+    // it from the plan BEFORE construction so that, when the materialized
+    // C(N,n_up) basis array would not fit the memory budget, we build the
+    // tableless combinadic basis instead (O(N^2) BinomialTable). This closes a
+    // construction-time OOM that the orchestrator's gate -- which runs later, on
+    // the already-built operator -- cannot catch. Scoped so it does not leak onto
+    // unrelated later constructions; env ED_FIXED_SZ_TABLELESS still wins.
+    ed::planner::TaskDescriptor t;
+    t.basis_dim = binom_u64(static_cast<unsigned>(op.getNumBits()),
+                            static_cast<unsigned>(n_up));
+    t.N         = static_cast<int>(op.getNumBits());
+    t.n_up      = static_cast<int>(n_up);
+    t.kind      = ed::planner::BasisKind::Sz;
+    t.num_eigs  = 1;
+    t.method    = ed::planner::Method::Lanczos;   // conservative working-set proxy
+    {
+        const auto& ts = op.getTerms();
+        const std::uint64_t diag = ts.diag_one_body.size() + ts.diag_two_body.size();
+        const std::uint64_t off  = ts.offdiag_one_body.size() + ts.mixed_two_body.size()
+                                 + ts.offdiag_two_body.size() + ts.three_body.size();
+        t.n_terms   = std::max<std::uint64_t>(1, diag + off);
+        t.n_offdiag = off;
+    }
+    const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
+        t, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
+    const ed::planner::ScopedBasisRepr basis_guard(
+        plan.tableless_fixed_sz ? ed::planner::BasisRepr::Tableless
+                                : ed::planner::BasisRepr::Default);
+
     auto fop = std::make_unique<FixedSzOperator>(
         op.getNumBits(), op.getSpin(), n_up);
     fop->transform_data_  = op.transform_data_;
