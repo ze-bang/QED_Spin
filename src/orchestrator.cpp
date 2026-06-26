@@ -32,6 +32,11 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
+#include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
+
+#include <fstream>   // /proc/meminfo
+#include <string>
+#include <unistd.h>  // sysconf
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/observables/cf_dynamical.h>
 #include <ed/observables/cf_spectral_kernel.h>
@@ -198,6 +203,30 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
     }
 }
 
+// Best-effort available host RAM in bytes (/proc/meminfo MemAvailable, else
+// sysconf available pages). Used to memory-bound the Krylov-Schur per-cycle
+// subspace so its basis cannot silently OOM regardless of the iteration budget.
+[[nodiscard]] std::uint64_t host_available_bytes() {
+    {
+        std::ifstream mi("/proc/meminfo");
+        std::string key;
+        while (mi >> key) {
+            if (key == "MemAvailable:") {
+                std::uint64_t kb = 0;
+                mi >> kb;
+                return kb * 1024ull;
+            }
+            std::string rest;
+            std::getline(mi, rest);
+        }
+    }
+    const long pages = sysconf(_SC_AVPHYS_PAGES);
+    const long ps    = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && ps > 0)
+        return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(ps);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Default heuristics for "method == Auto".
 // ---------------------------------------------------------------------------
@@ -291,6 +320,13 @@ GroundStateResult solve_on(Backend& be,
     GroundStateResult R;
     const std::size_t max_iter = auto_max_iter(
         geom.global_dim, opts.num_eigs, opts.max_iter);
+    // Memory-bound the Krylov-Schur / block-KS per-cycle subspace: cap it at the
+    // resident-vector budget derived from available host RAM, so the basis
+    // footprint is PREDICTABLE (m_max * local_dim * 16 B <= ~50% RAM) regardless
+    // of the (auto-tuned) iteration count. 0 host RAM reading => no cap.
+    const std::uint64_t subspace_cap_vectors = ed::krylov::krylov_vector_budget(
+        host_available_bytes(), static_cast<std::uint64_t>(geom.local_dim),
+        /*safety=*/0.5);
     const SolveMethod method = (opts.method == SolveMethod::Auto)
         ? auto_solve_method(geom.global_dim, opts.num_eigs)
         : opts.method;
@@ -556,6 +592,7 @@ GroundStateResult solve_on(Backend& be,
         kopts.compute_vectors = opts.compute_vectors;
         kopts.output_dir      = opts.output_dir;
         kopts.global_n        = geom.global_dim;
+        kopts.max_subspace_vectors = subspace_cap_vectors;
         auto kres = ed::krylov::block_krylov_schur_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
@@ -585,6 +622,7 @@ GroundStateResult solve_on(Backend& be,
         kopts.compute_vectors = opts.compute_vectors;
         kopts.global_n        = geom.global_dim;
         kopts.output_dir      = opts.output_dir;
+        kopts.max_subspace_vectors = subspace_cap_vectors;
         auto kres = ed::krylov::krylov_schur_kernel(be, matvec,
             geom.local_dim, seed, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);

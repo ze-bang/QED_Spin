@@ -177,6 +177,31 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
                 "BLOCK_KRYLOV_SCHUR for bounded-memory eigenvectors");
         }
     }
+
+    // Krylov-Schur / block-KS: the kernel memory-caps the per-cycle subspace to
+    // the budget (ed::krylov::krylov_subspace_dim with a vector budget), so the
+    // ACTUAL footprint is bounded -- not the uncapped worst case the cost model
+    // assumed. Re-estimate working_gb with the SAME capped subspace the kernel
+    // will use, so the plan reports reality (coordination, not a 50x miss).
+    if (task.method == Method::KrylovSchur && working_gb > budget) {
+        const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, task.num_eigs));
+        const std::uint64_t ms  = (task.krylov_dim > 0)
+            ? static_cast<std::uint64_t>(task.krylov_dim)
+            : std::max<std::uint64_t>(80, 4 * nev + 40);
+        const std::uint64_t budget_vecs = ed::krylov::krylov_vector_budget(
+            static_cast<std::uint64_t>(budget * kGiB), task.basis_dim, /*safety=*/1.0);
+        const std::size_t m = ed::krylov::krylov_subspace_dim(
+            nev, ms, task.basis_dim, budget_vecs);
+        const double capped_gb = static_cast<double>(m + 2 * nev + 4)
+            * static_cast<double>(task.basis_dim) * 16.0 / kGiB
+            / std::max(1, p.n_ranks);
+        p.notes.push_back("Krylov-Schur subspace memory-capped to fit budget: "
+            + std::to_string(working_gb) + " GB (uncapped) -> "
+            + std::to_string(capped_gb) + " GB (m=" + std::to_string(m)
+            + " vectors); convergence may degrade if the cap is tight");
+        working_gb = capped_gb;
+    }
+
     p.est_memory_gb = working_gb;
 
     // ---- Reorth (per-method default, downgrade if full-reorth won't fit) ----

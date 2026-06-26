@@ -17,6 +17,8 @@
 // lane and to flag OOM, not to predict wall-time exactly.
 // =============================================================================
 
+#include <ed/krylov/subspace_policy.h>   // krylov_subspace_dim (shared with kernels)
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -87,7 +89,15 @@ struct TaskDescriptor {
     std::uint64_t v = 5;
     switch (t.method) {
         case Method::Full:         v = 0; break;  // dense: handled separately
-        case Method::KrylovSchur:  v = t.compute_vectors ? ms + 4 : 4; break;
+        // Krylov-Schur stores the FULL per-cycle Krylov basis (m vectors) in the
+        // inner Lanczos regardless of compute_vectors -- NOT 4. m is sized by the
+        // SAME shared policy the kernel/orchestrator use (floor 2k+20, grown by
+        // the iteration budget `ms`), so the planner's estimate matches the run.
+        // Uncapped here (worst case); plan_execution re-applies the memory cap.
+        case Method::KrylovSchur:
+            v = ed::krylov::krylov_subspace_dim(nev, ms, t.basis_dim, 0)
+                + 2 * nev + 4;
+            break;
         // Block Lanczos (FULL reorth) stores the WHOLE block-Krylov basis:
         // ~max_blocks * block_size resident vectors, where max_blocks ~ ms. The
         // old `ms + 2*nev + 3` ignored block_size entirely and under-counted by
