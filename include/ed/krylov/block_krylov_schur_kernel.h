@@ -144,6 +144,7 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
 
     BlockKrylovSchurResult R;
     bool converged = false;
+    std::size_t stall_cycles = 0;   // consecutive no-lock cycles at the growth cap
 
     for (std::size_t restart = 0; restart < opts.max_restarts; ++restart) {
         R.restarts = restart + 1;
@@ -275,11 +276,23 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
         // (the residual estimate plateaus above tol) on a tight-gap spectrum, so
         // a fixed small per-cycle subspace would never lock anything. When a
         // cycle locks nothing, grow the per-cycle block count so the next cycle
-        // explores a larger Krylov space; capped by N/b (full space => exact),
-        // which guarantees eventual convergence without the caller hand-tuning
-        // max_iter. Geometric growth keeps the total work bounded.
-        if (newly == 0) m_blocks = std::min(m_blocks + m_blocks / 2 + 1,
-                                            max_blocks_dim);
+        // explores a larger Krylov space. The growth is CAPPED (not at full N/b)
+        // because the per-cycle cost is O(m_blocks^2) with reorth_period=1; an
+        // uncapped grow-to-full-dim is pathologically slow on small sectors. The
+        // cap is generous enough to converge typical gaps; harder cases return
+        // the converged prefix (>= the ground state) rather than hang. Use
+        // BLOCK_LANCZOS for the efficient degeneracy solve.
+        const std::size_t grow_cap =
+            std::min(max_blocks_dim,
+                     std::max<std::size_t>(8 * ((floor_dim + b - 1) / b), 128));
+        if (newly == 0 && m_blocks < grow_cap)
+            m_blocks = std::min(m_blocks + m_blocks / 2 + 1, grow_cap);
+        // Early-out: once at the cap, a few more no-lock cycles will not help the
+        // weak thick restart -- stop and return the converged prefix (the lowest
+        // eigenvalues, including the ground state) rather than burning the full
+        // max_restarts on slow large-subspace cycles.
+        if (newly == 0 && m_blocks >= grow_cap) { if (++stall_cycles >= 3) break; }
+        else stall_cycles = 0;
 
         // ---- thick restart: re-seed V0 with the lowest non-locked Ritz block.
         be.fill_zero(V_seed.get(), N * b);
