@@ -146,6 +146,29 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     }
     const double budget = budget_gb * uc.memory_safety;
 
+    // ---- Ground-state eigensolver + iteration budget + subspace cap ---------
+    // THE single decision (formerly split across the orchestrator's
+    // auto_solve_method/auto_max_iter and Python auto_tune). Dense below 2^12;
+    // else by num_eigs. Iteration budget and the memory-bounded Krylov subspace
+    // are decided here too, so the kernel/orchestrator never re-derive them.
+    {
+        const std::uint64_t nev = static_cast<std::uint64_t>(std::max(1, task.num_eigs));
+        if (task.basis_dim <= (1ULL << 12))      p.solver = Method::Full;
+        else if (nev == 1)                       p.solver = Method::Lanczos;
+        else if (nev <= 8)                       p.solver = Method::BlockLanczos;
+        else                                     p.solver = Method::KrylovSchur;
+        // Iteration budget (mirrors the old auto_max_iter floor).
+        const std::size_t floor_iters = static_cast<std::size_t>(2 * nev + 30);
+        p.max_iter = std::min<std::size_t>(
+            floor_iters, static_cast<std::size_t>(
+                std::min<std::uint64_t>(task.basis_dim, 2000)));
+        if (p.max_iter < floor_iters) p.max_iter = floor_iters;
+        // Memory-bounded Krylov subspace cap (the per-cycle basis must fit the
+        // budget) -- shared policy with the kernels (krylov_vector_budget).
+        p.max_subspace_vectors = ed::krylov::krylov_vector_budget(
+            static_cast<std::uint64_t>(budget * kGiB), task.basis_dim, /*safety=*/0.5);
+    }
+
     double working_gb = static_cast<double>(cost.working_set_bytes) / kGiB
                         / std::max(1, p.n_ranks);
     const double csr_gb     = static_cast<double>(cost.csr_bytes) / kGiB

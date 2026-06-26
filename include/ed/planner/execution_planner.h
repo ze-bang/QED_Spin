@@ -58,6 +58,15 @@ struct ExecutionPlan {
     ed::krylov::ReorthPolicy reorth = ed::krylov::ReorthPolicy::LocalDGKS3;
     int            krylov_dim_cap = 0;   ///< 0 -> solver default
     BasisStrategy  basis    = BasisStrategy::FullDense;
+    // ---- ground-state eigensolver decision (the planner is the DICTATOR) ----
+    /// Chosen eigensolver for a ground-state solve. The orchestrator maps this
+    /// onto its SolveMethod and runs it; it no longer has its own auto-heuristic.
+    Method         solver   = Method::Lanczos;
+    /// Iteration budget (0 = solver default). Decided here, not in the kernel.
+    std::size_t    max_iter = 0;
+    /// Memory cap on the Krylov per-cycle subspace, in resident length-N vectors
+    /// (see ed::krylov::krylov_subspace_dim). Keeps the basis footprint bounded.
+    std::uint64_t  max_subspace_vectors = 0;
     /// Fixed-Sz (no-symmetry) lane: use the tableless combinadic basis (only an
     /// O(N^2) BinomialTable) instead of the materialized C(N,n_up) basis vector
     /// + Lin table. Set when the materialized basis would not fit the budget.

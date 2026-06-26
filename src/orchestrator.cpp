@@ -33,6 +33,8 @@
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
+#include <ed/planner/execution_planner.h>   // THE dictator: plan_execution
+#include <ed/planner/system_capabilities.h> // probe_system
 
 #include <fstream>   // /proc/meminfo
 #include <string>
@@ -203,51 +205,18 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
     }
 }
 
-// Best-effort available host RAM in bytes (/proc/meminfo MemAvailable, else
-// sysconf available pages). Used to memory-bound the Krylov-Schur per-cycle
-// subspace so its basis cannot silently OOM regardless of the iteration budget.
-[[nodiscard]] std::uint64_t host_available_bytes() {
-    {
-        std::ifstream mi("/proc/meminfo");
-        std::string key;
-        while (mi >> key) {
-            if (key == "MemAvailable:") {
-                std::uint64_t kb = 0;
-                mi >> kb;
-                return kb * 1024ull;
-            }
-            std::string rest;
-            std::getline(mi, rest);
-        }
+// Map the planner's eigensolver decision (ed::planner::Method) onto the
+// orchestrator's SolveMethod. The planner is the single authority for the
+// ground-state method; this is the only translation needed. (The planner never
+// auto-picks BlockKrylovSchur -- that stays an explicit user choice.)
+[[nodiscard]] SolveMethod map_planner_method(ed::planner::Method m) {
+    switch (m) {
+        case ed::planner::Method::Full:         return SolveMethod::FullDiag;
+        case ed::planner::Method::Lanczos:      return SolveMethod::Lanczos;
+        case ed::planner::Method::BlockLanczos: return SolveMethod::BlockLanczos;
+        case ed::planner::Method::KrylovSchur:  return SolveMethod::KrylovSchur;
+        default:                                return SolveMethod::Lanczos;
     }
-    const long pages = sysconf(_SC_AVPHYS_PAGES);
-    const long ps    = sysconf(_SC_PAGE_SIZE);
-    if (pages > 0 && ps > 0)
-        return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(ps);
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Default heuristics for "method == Auto".
-// ---------------------------------------------------------------------------
-SolveMethod auto_solve_method(std::uint64_t global_dim,
-                              std::size_t   num_eigs) {
-    // Full diag below 2^12 is competitive.
-    if (global_dim <= (1ULL << 12)) return SolveMethod::FullDiag;
-    if (num_eigs == 1) return SolveMethod::Lanczos;
-    if (num_eigs <= 8)  return SolveMethod::BlockLanczos;
-    return SolveMethod::KrylovSchur;
-}
-
-std::size_t auto_max_iter(std::uint64_t global_dim,
-                          std::size_t   num_eigs,
-                          std::size_t   user_max_iter) {
-    if (user_max_iter > 0) return user_max_iter;
-    const std::size_t floor_iters = 2 * num_eigs + 30;
-    const std::size_t cap_iters   = std::min<std::size_t>(
-        floor_iters, static_cast<std::size_t>(std::min<std::uint64_t>(
-            global_dim, 2000)));
-    return std::max(floor_iters, cap_iters);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,18 +287,29 @@ GroundStateResult solve_on(Backend& be,
     auto matvec = H.template bind<Backend>();
 
     GroundStateResult R;
-    const std::size_t max_iter = auto_max_iter(
-        geom.global_dim, opts.num_eigs, opts.max_iter);
-    // Memory-bound the Krylov-Schur / block-KS per-cycle subspace: cap it at the
-    // resident-vector budget derived from available host RAM, so the basis
-    // footprint is PREDICTABLE (m_max * local_dim * 16 B <= ~50% RAM) regardless
-    // of the (auto-tuned) iteration count. 0 host RAM reading => no cap.
-    const std::uint64_t subspace_cap_vectors = ed::krylov::krylov_vector_budget(
-        host_available_bytes(), static_cast<std::uint64_t>(geom.local_dim),
-        /*safety=*/0.5);
-    const SolveMethod method = (opts.method == SolveMethod::Auto)
-        ? auto_solve_method(geom.global_dim, opts.num_eigs)
-        : opts.method;
+
+    // -----------------------------------------------------------------------
+    // ONE DICTATOR: ed::planner::plan_execution decides the eigensolver method,
+    // the iteration budget, and the memory-bounded Krylov subspace cap. The
+    // orchestrator no longer has its own auto-heuristics -- it just applies the
+    // plan. (An explicit opts.method / opts.max_iter still overrides the plan.)
+    // -----------------------------------------------------------------------
+    ed::planner::TaskDescriptor task;
+    task.basis_dim       = geom.global_dim;
+    task.num_eigs        = static_cast<int>(opts.num_eigs);
+    task.block_size      = opts.block_size;
+    task.compute_vectors = opts.compute_vectors;
+    task.krylov_dim      = static_cast<int>(opts.max_iter);   // user hint, if any
+    const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
+        task, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
+
+    const SolveMethod method = (opts.method != SolveMethod::Auto)
+        ? opts.method
+        : map_planner_method(plan.solver);
+    const std::size_t max_iter =
+        (opts.max_iter > 0) ? opts.max_iter
+                            : (plan.max_iter > 0 ? plan.max_iter : 2 * opts.num_eigs + 30);
+    const std::uint64_t subspace_cap_vectors = plan.max_subspace_vectors;
 
     const auto t0 = std::chrono::steady_clock::now();
 
