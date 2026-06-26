@@ -350,6 +350,22 @@ GroundStateResult solve_on(Backend& be,
     const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
         task, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
 
+    // COMPLETION GUARANTEE: refuse cleanly, BEFORE any large allocation (basis /
+    // Krylov vectors), when the plan does not fit the memory budget -- so a
+    // dispatched run can never OOM/crash mid-flight. The Python qed.solve
+    // pre-flight enforces the same verdict earlier; this is the safety net for
+    // direct C++ / CLI / api_facade callers. opts.allow_infeasible (force) opts
+    // out (dispatch anyway, accepting the OOM risk).
+    if (!plan.feasible && !opts.allow_infeasible) {
+        std::string msg = "ed::solve refused: the execution plan does not fit the "
+            "memory budget (bottleneck: " + plan.bottleneck + "; est " +
+            std::to_string(plan.est_memory_gb) + " GB). The run would not complete.";
+        for (const auto& s : plan.suggestions) msg += "\n  - suggestion: " + s;
+        msg += "\n  (set SolveOptions.allow_infeasible / qed.solve(force=True) to "
+               "dispatch anyway.)";
+        throw std::runtime_error(msg);
+    }
+
     const SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
         : map_planner_method(plan.solver);

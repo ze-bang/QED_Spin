@@ -87,6 +87,16 @@ struct SolveOptions {
     SolveMethod method         = SolveMethod::Auto;
     BackendConstraints backend;
 
+    /// Completion guarantee (planner-as-dictator). When false (default), a solve
+    /// whose ExecutionPlan is infeasible (working set / basis construction would
+    /// exceed the memory budget) is REFUSED cleanly -- the orchestrator throws
+    /// with the bottleneck + ranked suggestions BEFORE any large allocation, so
+    /// the run can never OOM/crash mid-flight. Set true to dispatch anyway (the
+    /// manual escape hatch; the Python lane maps `force=True` onto this). The
+    /// Python `qed.solve` pre-flight enforces the same verdict before this point;
+    /// this gate is the safety net for direct C++ / CLI / api_facade callers.
+    bool        allow_infeasible = false;
+
     // -----------------------------------------------------------------
     // CLI parity knobs (Wave A5 -- Full unified-interface collapse,
     // May 2026). These extend SolveOptions so the CLI migration

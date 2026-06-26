@@ -212,6 +212,7 @@ def _ed_params_to_solve_options(
     params: EDParameters,
     method: DiagonalizationMethod,
     auto_method: bool = False,
+    allow_infeasible: bool = False,
 ) -> "_core.SolveOptions":
     """Translate `EDParameters` + `DiagonalizationMethod` into a
     `_core.SolveOptions` for the orchestrator.
@@ -257,6 +258,12 @@ def _ed_params_to_solve_options(
     opts.use_fixed_sz          = bool(params.use_fixed_sz)
     opts.use_symmetry          = bool(params.use_symmetry)
     opts.n_up                  = int(params.n_up)
+    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
+    # throw before allocation) unless this is set. The qed.solve pre-flight is the
+    # Python gate (honors force=True); mirror its decision here so a forced
+    # dispatch isn't re-blocked by the C++ safety net. Other callers default off.
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible  = bool(allow_infeasible)
     # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
     # knobs that may not be bound on the Python `EDParameters` (the
     # in-process pybind11 surface only exposes what `qed.solve` consumes
@@ -303,6 +310,7 @@ def _diag_via_workflows_solve(
     method: DiagonalizationMethod,
     params: EDParameters,
     auto_method: bool = False,
+    allow_infeasible: bool = False,
 ) -> EDResults:
     """Route an in-memory `Operator` through the unified orchestrator.
 
@@ -313,7 +321,7 @@ def _diag_via_workflows_solve(
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
-        opts = _ed_params_to_solve_options(params, method, auto_method)
+        opts = _ed_params_to_solve_options(params, method, auto_method, allow_infeasible)
         # The orchestrator's `workflows_solve` accepts an `Operator&`;
         # if the caller already projected to a fixed-Sz sector we hand
         # it the `FixedSzOperator` directly (it derives from `Operator`).
@@ -1380,7 +1388,8 @@ def solve(
     # solver=None => let the C++ dictator (ed::planner) pick the ground-state
     # eigensolver, instead of the old Python _resolve_solver heuristic.
     return _diag_via_workflows_solve(op_to_use, method, params,
-                                     auto_method=(solver is None))
+                                     auto_method=(solver is None),
+                                     allow_infeasible=bool(force))
 
 
 # ---------------------------------------------------------------------------

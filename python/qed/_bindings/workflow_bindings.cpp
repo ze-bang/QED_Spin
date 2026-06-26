@@ -319,6 +319,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("compute_vectors", &ed::workflows::SolveOptions::compute_vectors)
         .def_readwrite("output_dir",      &ed::workflows::SolveOptions::output_dir)
         .def_readwrite("method",          &ed::workflows::SolveOptions::method)
+        .def_readwrite("allow_infeasible",&ed::workflows::SolveOptions::allow_infeasible)
         .def_readwrite("backend",         &ed::workflows::SolveOptions::backend)
         // Wave A5 (Full unified-interface collapse, May 2026): CLI parity knobs.
         .def_readwrite("use_fixed_sz",
