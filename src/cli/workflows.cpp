@@ -724,13 +724,13 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     // without materialising any orbit CSR). The returned operators are
     // self-contained (no external carrier to keep alive).
     EDResults results;
-    // Across-sector MPI (Level 1, SectorDistributor): the factory partitions the
-    // |G| irrep sectors by RAW index across ranks, so each rank BUILDS (orbit
-    // walk + per-sector RepSectorData) and SOLVES only its own sectors -- both
-    // construction time AND per-rank memory distribute. The merged spectrum is
-    // Allgatherv'd after the loop. The sectors are independent eigenproblems
-    // reusing the existing single-node solve, so the distributed result is
-    // bit-identical to the single-rank run.
+    // Across-sector MPI (Level 1, SectorDistributor): the factory dim-balances
+    // the |G| irrep sectors across ranks (Burnside dims + greedy packing), so
+    // each rank BUILDS (orbit walk + per-sector RepSectorData) and SOLVES only
+    // its own sectors -- both construction time AND per-rank memory distribute.
+    // The merged spectrum is Allgatherv'd after the loop. The sectors are
+    // independent eigenproblems reusing the existing single-node solve, so the
+    // distributed result is bit-identical to the single-rank run.
     const auto [mpi_rank, mpi_size] = get_mpi_rank_size_safe();
     ed::SectorOperatorSet sector_set =
         ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size);
