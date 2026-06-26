@@ -415,6 +415,37 @@ static inline std::pair<int, int> get_mpi_rank_size_safe() {
     return {rank, size};
 }
 
+/// Across-sector MPI (Level 1, SectorDistributor): gather variable-length
+/// per-rank double vectors into the full vector on EVERY rank. No-op when
+/// single-rank. The |G| irrep sectors are independent eigenproblems, so each
+/// rank solves a disjoint subset and this Allgatherv is the exact (bit-identical)
+/// recombination of the single-node sector loop.
+static inline std::vector<double>
+mpi_allgatherv_doubles(const std::vector<double>& local) {
+#ifdef WITH_MPI
+    int inited = 0;
+    MPI_Initialized(&inited);
+    if (inited) {
+        int size = 1;
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+        if (size > 1) {
+            const int n = static_cast<int>(local.size());
+            std::vector<int> counts(static_cast<std::size_t>(size));
+            MPI_Allgather(&n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+            std::vector<int> displs(static_cast<std::size_t>(size));
+            int total = 0;
+            for (int i = 0; i < size; ++i) { displs[i] = total; total += counts[i]; }
+            std::vector<double> global(static_cast<std::size_t>(total));
+            MPI_Allgatherv(local.data(), n, MPI_DOUBLE,
+                           global.data(), counts.data(), displs.data(),
+                           MPI_DOUBLE, MPI_COMM_WORLD);
+            return global;
+        }
+    }
+#endif
+    return local;
+}
+
 /// Bundles every piece of Hamiltonian state the compute_*_workflow
 /// drivers need: the concrete operator (full or fixed-Sz), the sector
 /// dimension, and an apply lambda. The lambda dispatches via the
@@ -709,6 +740,18 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     const std::set<std::size_t> selected_set(opts.selected_sectors.begin(),
                                              opts.selected_sectors.end());
 
+    // Across-sector MPI (Level 1, SectorDistributor): each rank solves a
+    // disjoint round-robin subset of the |G| irrep sectors; the merged spectrum
+    // is Allgatherv'd after the loop. The sectors are independent eigenproblems
+    // reusing the existing single-node solve, so the distributed result is
+    // bit-identical to the single-rank run. CRUCIAL: the inner per-sector path
+    // must be free of cross-rank MPI collectives -- ranks process DIFFERENT
+    // sectors, so any collective on MPI_COMM_WORLD (notably the per-sector
+    // ``create_directory_mpi_safe`` and the orchestrator's HDF5 directory setup)
+    // would mismatch and deadlock. We therefore disable per-sector on-disk
+    // output under multi-rank and emit only the merged result from rank 0.
+    const auto [mpi_rank, mpi_size] = get_mpi_rank_size_safe();
+
     std::vector<double>                      all_eigs;
     std::vector<ed::SectorTag>               touched_tags;
     std::vector<std::vector<double>>         eigs_per_sector;
@@ -716,6 +759,10 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
         const ed::SectorTag& tag = sector_set.tags[i];
         if (!keep_all_sectors && selected_set.count(tag.sector_index) == 0) {
             continue;
+        }
+        if (mpi_size > 1 &&
+            static_cast<int>(i % static_cast<std::size_t>(mpi_size)) != mpi_rank) {
+            continue;   // this irrep sector belongs to another rank
         }
         auto& sec = sector_set.operators[i];
         if (!sec || sec->dim() == 0) continue;
@@ -728,7 +775,21 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
         sopts.use_symmetry = false;
         // Per-sector HDF5 save: `sector_<idx>/ed_results.h5`. This is
         // the canonical layout that the symmetrized CLI workflow emits.
-        if (!opts.output_dir.empty()) {
+        // Under across-sector MPI it is suppressed (collective I/O would
+        // deadlock when ranks own different sectors -- see note above);
+        // the inner solve's output_dir is cleared so it does no I/O.
+        if (mpi_size > 1) {
+            // Force the inner per-sector solve RANK-LOCAL: select_backend would
+            // otherwise pick MpiBackend under MPI_COMM_WORLD (its ctor does
+            // MPI_Comm_dup, its dot/nrm2 do MPI_Allreduce -- all COMM_WORLD
+            // collectives). With ranks owning DIFFERENT sectors those collectives
+            // mismatch and deadlock. Pinning to the Cpu (or single-rank Cuda)
+            // backend keeps each sector solve independent; the only cross-rank
+            // step is the final Allgatherv of the spectrum.
+            sopts.backend.allow_mpi     = false;
+            sopts.backend.allow_mpi_gpu = false;
+            sopts.output_dir.clear();
+        } else if (!opts.output_dir.empty()) {
             sopts.output_dir =
                 opts.output_dir + "/sector_" + std::to_string(tag.sector_index);
         }
@@ -758,6 +819,9 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
             }
         }
     }
+    // Across-sector MPI: recombine the per-rank sub-spectra into the full merged
+    // spectrum on every rank (exact union of the independent sector solves).
+    all_eigs = mpi_allgatherv_doubles(all_eigs);
     std::sort(all_eigs.begin(), all_eigs.end());
     // Note: the merged eigenvalue list is NOT truncated at
     // `params.num_eigenvalues`; each sector contributes its own
@@ -795,7 +859,9 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     }
 
     // Top-level merged HDF5 save (matches the legacy global summary).
-    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+    // Under across-sector MPI only rank 0 writes -- every rank holds the same
+    // Allgatherv'd spectrum, so a single writer avoids a file-write race.
+    if (mpi_rank == 0 && !params.output_dir.empty() && !results.eigenvalues.empty()) {
         try {
             std::string h5_path = HDF5IO::createOrOpenFile(params.output_dir);
             HDF5IO::saveEigenvalues(h5_path, results.eigenvalues);
