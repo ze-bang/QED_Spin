@@ -245,6 +245,11 @@ struct ThermalOptions {
     // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
     // -----------------------------------------------------------------
     std::vector<double> probe_betas;
+
+    /// Completion guarantee: when false (default), a thermal run whose plan would
+    /// not fit the memory budget (kernel working set) is REFUSED cleanly before
+    /// any allocation. Set true (Python force=True) to dispatch anyway.
+    bool        allow_infeasible = false;
 };
 
 struct SpectralOptions {
@@ -353,6 +358,11 @@ struct SpectralOptions {
     // it as the seed.
     // -----------------------------------------------------------------
     std::vector<std::complex<double>> initial_state;
+
+    /// Completion guarantee: when false (default), a spectral run whose plan would
+    /// not fit the memory budget is REFUSED cleanly before any allocation. Set
+    /// true (Python force=True) to dispatch anyway.
+    bool        allow_infeasible = false;
 };
 
 // ---------------------------------------------------------------------------

@@ -111,6 +111,7 @@ def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
 def _ed_params_to_thermal_options(
     params: EDParameters,
     method: DiagonalizationMethod,
+    allow_infeasible: bool = False,
 ) -> "_core.ThermalOptions":
     """Translate the legacy `EDParameters` bag + a thermal
     `DiagonalizationMethod` enumerator into a fresh
@@ -174,6 +175,10 @@ def _ed_params_to_thermal_options(
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
+    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
+    # throw before allocating the kernel working set) unless this is set.
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible = bool(allow_infeasible)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
     # the user-supplied probe-betas for mTPQ/cTPQ state-vector
     # snapshots. Empty list -> the kernel runs the standard path with no
@@ -346,7 +351,7 @@ def _diag_via_workflows_solve(
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
     if method in _THERMAL_METHOD_TO_CORE:
-        opts = _ed_params_to_thermal_options(params, method)
+        opts = _ed_params_to_thermal_options(params, method, allow_infeasible)
         tr = _core.workflows_thermal(operator, opts)
         return _ed_result_from_thermal_result(tr)
     raise ValueError(

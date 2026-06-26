@@ -228,6 +228,36 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
 // No behavior change here: solve_on still applies only method/iterations/subspace.
 // `group_size` (the orbit-CSR-vs-rep input) is left at 1 until the symmetry
 // matvec decision is wired in Stage B.
+// Fill the operator-derived fields (N, n_terms, n_offdiag) of a TaskDescriptor
+// from the concrete spin Operator (every Full / Sz / symmetry op derives from
+// it). Shared by the solve, thermal, and spectral task builders.
+void fill_operator_terms(ed::planner::TaskDescriptor& t, const LinearOperator& H) {
+    if (const auto* op = dynamic_cast<const Operator*>(&H)) {
+        t.N = static_cast<int>(op->getNumBits());
+        const auto& ts = op->getTerms();
+        const std::uint64_t diag = ts.diag_one_body.size() + ts.diag_two_body.size();
+        const std::uint64_t off  = ts.offdiag_one_body.size() + ts.mixed_two_body.size()
+                                 + ts.offdiag_two_body.size() + ts.three_body.size();
+        t.n_terms   = std::max<std::uint64_t>(1, diag + off);
+        t.n_offdiag = off;
+    }
+}
+
+// COMPLETION GUARANTEE (shared by solve / thermal / spectral): refuse cleanly --
+// throw BEFORE any large allocation -- when the plan does not fit the memory
+// budget, so a dispatched run can never OOM/crash mid-flight. `allow_infeasible`
+// (the force escape) dispatches anyway, accepting the OOM risk.
+void enforce_feasible(const ed::planner::ExecutionPlan& plan,
+                      bool allow_infeasible, const char* what) {
+    if (plan.feasible || allow_infeasible) return;
+    std::string msg = std::string(what) + " refused: the execution plan does not "
+        "fit the memory budget (bottleneck: " + plan.bottleneck + "; est " +
+        std::to_string(plan.est_memory_gb) + " GB). The run would not complete.";
+    for (const auto& s : plan.suggestions) msg += "\n  - suggestion: " + s;
+    msg += "\n  (set allow_infeasible / force=True to dispatch anyway.)";
+    throw std::runtime_error(msg);
+}
+
 [[nodiscard]] ed::planner::TaskDescriptor
 make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
     ed::planner::TaskDescriptor t;
@@ -256,18 +286,9 @@ make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
         case SolveMethod::Auto:             t.method = ed::planner::Method::Auto;         break;
     }
 
-    // Real term structure from the concrete spin Operator (every Full / Sz /
-    // symmetry operator derives from it). Diagonal bins stay on the same state;
-    // the rest are off-diagonal (drive CSR nnz and the connectivity model).
-    if (const auto* op = dynamic_cast<const Operator*>(&H)) {
-        t.N = static_cast<int>(op->getNumBits());
-        const auto& ts = op->getTerms();
-        const std::uint64_t diag = ts.diag_one_body.size() + ts.diag_two_body.size();
-        const std::uint64_t off  = ts.offdiag_one_body.size() + ts.mixed_two_body.size()
-                                 + ts.offdiag_two_body.size() + ts.three_body.size();
-        t.n_terms   = std::max<std::uint64_t>(1, diag + off);
-        t.n_offdiag = off;
-    }
+    // Real term structure from the concrete spin Operator (diagonal bins stay on
+    // the same state; the rest are off-diagonal -> CSR nnz / connectivity model).
+    fill_operator_terms(t, H);
     return t;
 }
 
@@ -356,15 +377,7 @@ GroundStateResult solve_on(Backend& be,
     // pre-flight enforces the same verdict earlier; this is the safety net for
     // direct C++ / CLI / api_facade callers. opts.allow_infeasible (force) opts
     // out (dispatch anyway, accepting the OOM risk).
-    if (!plan.feasible && !opts.allow_infeasible) {
-        std::string msg = "ed::solve refused: the execution plan does not fit the "
-            "memory budget (bottleneck: " + plan.bottleneck + "; est " +
-            std::to_string(plan.est_memory_gb) + " GB). The run would not complete.";
-        for (const auto& s : plan.suggestions) msg += "\n  - suggestion: " + s;
-        msg += "\n  (set SolveOptions.allow_infeasible / qed.solve(force=True) to "
-               "dispatch anyway.)";
-        throw std::runtime_error(msg);
-    }
+    enforce_feasible(plan, opts.allow_infeasible, "ed::solve");
 
     const SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
@@ -953,6 +966,31 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
     auto variant = select_backend(H.geometry(), opts.backend);
 
+    // COMPLETION GUARANTEE (thermal lane). The operator's basis is already built,
+    // so the binding constraint is the kernel WORKING SET: FTLM / LTLM keep a
+    // krylov_dim window of length-N vectors; TPQ / KPM a handful. Plan it and
+    // refuse cleanly if it would not fit, before allocating those vectors. The
+    // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
+    // passes. allow_infeasible (force) opts out.
+    {
+        ed::planner::TaskDescriptor t;
+        t.basis_dim  = H.global_dim();
+        t.krylov_dim = static_cast<int>(opts.krylov_dim);
+        t.n_samples  = static_cast<int>(opts.num_samples);
+        t.num_eigs   = 1;
+        switch (opts.method) {
+            case ThermalOptions::Method::FTLM:   t.method = ed::planner::Method::FTLM; break;
+            case ThermalOptions::Method::LTLM:   t.method = ed::planner::Method::LTLM; break;
+            case ThermalOptions::Method::mTPQ:
+            case ThermalOptions::Method::cTPQ:   t.method = ed::planner::Method::TPQ;  break;
+            case ThermalOptions::Method::KpmDos: t.method = ed::planner::Method::KPM;  break;
+        }
+        fill_operator_terms(t, H);
+        const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
+            t, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
+        enforce_feasible(plan, opts.allow_infeasible, "ed::thermal");
+    }
+
     // Surface unification follow-up (May 2026): when the caller does
     // not supply an explicit ``opts.betas`` grid, construct one from
     // the temperature-scan knobs (``temp_min``, ``temp_max``,
@@ -1010,7 +1048,11 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     if (is_tpq_method &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
-        !R.thermo.temperatures.empty()) {
+        !R.thermo.temperatures.empty() &&
+        // When the caller requested TPQ state snapshots (probe_betas), the exact
+        // fallback cannot produce them -- run the real TPQ trajectory instead
+        // (accepting the small-sector variance the user implicitly opted into).
+        opts.probe_betas.empty()) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
         full_diagonalization(H, D, D, eigs, /*dir=*/"", /*compute_eigenvectors=*/false);
@@ -1018,6 +1060,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             R.thermo = compute_canonical_thermo_from_eigs(
                 eigs, R.thermo.temperatures);
             R.ground_state_energy = eigs.front();
+            // The exact fallback ran on the selected backend lane; label it like
+            // the normal return path (this early return previously left lane
+            // unset, failing the lane-metadata assertions).
+            R.backend.lane = ed::lane_label_from_variant(variant);
             return R;
         }
     }
@@ -1579,6 +1625,31 @@ SpectralResult spectral(const LinearOperator&                      H,
     ed::parallel::pin_omp_threads_once();
 
     auto variant = select_backend(H.geometry(), opts.backend);
+
+    // COMPLETION GUARANTEE (spectral lane). Working set: GroundStateCF runs an
+    // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window;
+    // the dynamical lanes keep an FTLM / KPM window. Plan it + refuse cleanly if
+    // it would not fit, before allocating. allow_infeasible (force) opts out.
+    {
+        ed::planner::TaskDescriptor t;
+        t.basis_dim  = H.global_dim();
+        t.krylov_dim = static_cast<int>(opts.krylov_dim);
+        t.n_samples  = static_cast<int>(opts.num_samples);
+        t.num_eigs   = 1;
+        switch (opts.method) {
+            case SpectralOptions::Method::GroundStateCF:
+                t.method = ed::planner::Method::Lanczos;
+                t.compute_vectors = true;   // GS eigenvector + CF window
+                break;
+            case SpectralOptions::Method::FtlmDynamical: t.method = ed::planner::Method::FTLM; break;
+            case SpectralOptions::Method::KpmDynamical:   t.method = ed::planner::Method::KPM;  break;
+        }
+        fill_operator_terms(t, H);
+        const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
+            t, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
+        enforce_feasible(plan, opts.allow_infeasible, "ed::spectral");
+    }
+
     SpectralResult R;
     const auto t0 = std::chrono::steady_clock::now();
 
