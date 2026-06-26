@@ -51,6 +51,7 @@
 // =============================================================================
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -498,6 +499,8 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         }
     }
 
+    const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
+    const auto ctor_t0 = std::chrono::steady_clock::now();
     if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
         // fixed-Sz mTPQ): hand out operators that know their dim up-front and
@@ -525,6 +528,13 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
             base->symmetry_info, term_builder, &sector_ids,
             mpi_rank, mpi_size, owner_ptr);
+    }
+    if (time_ctor) {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - ctor_t0).count();
+        fprintf(stderr, "[CONSTRUCTION] sector build: %.1f ms  (|G|=%zu, sectors_built=%zu)\n",
+                ms, base->symmetry_info.max_clique.size(), set.operators.size());
+        fflush(stderr);
     }
 
     set.num_raw_sectors = base->symmetry_info.sectors.size();

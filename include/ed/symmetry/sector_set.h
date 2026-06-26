@@ -46,6 +46,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 #include <omp.h>
@@ -239,6 +240,16 @@ enumerate_fixed_sz_orbit_reps_streaming(std::uint64_t            n_bits,
 /// Default (unset or any non-"0") uses the streaming enumerator above.
 [[nodiscard]] inline bool sym_streaming_enum_enabled() noexcept {
     const char* v = std::getenv("ED_SYM_STREAMING_ENUM");
+    return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+}
+
+/// Env gate: ED_SYM_FUSED_PASS15=0 forces the legacy per-(sector,rep) orbit
+/// walk. Default uses the stabilizer-fused Pass 1.5 -- the per-sector projected
+/// norm of a rep is |Σ_{k∈Stab(rep)} χ_s(k)|² / |Stab(rep)| (1-D irreps), so the
+/// O(|G|·N) orbit walk is done ONCE per rep (to find the stabilizer) instead of
+/// once per (sector, rep) -- a ≈num_sectors× (≈|G|×) construction speedup.
+[[nodiscard]] inline bool sym_fused_pass15_enabled() noexcept {
+    const char* v = std::getenv("ED_SYM_FUSED_PASS15");
     return !(v != nullptr && v[0] == '0' && v[1] == '\0');
 }
 
@@ -523,6 +534,54 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     std::vector<std::uint64_t> elems;
     std::vector<Complex>       coeffs;
 
+    // Stabilizer-fused Pass 1.5 (sym_fused_pass15_enabled, default on):
+    // precompute, ONCE for the shared rep set, each rep's stabilizer size
+    // |Stab(rep)| = #{g : g(rep)=rep} and -- only for the rare non-trivial reps
+    // (|Stab|>1) -- the stabilizer's group-element indices. The per-sector
+    // projected norm is then |Σ_{k∈Stab} χ_s(k)|² / |Stab| (1-D irreps), a cheap
+    // O(|Stab|) sum instead of a fresh O(|G|·N) orbit walk per (sector, rep).
+    // Generic reps have |Stab|=1 (norm²=1, always survive). This replaces the
+    // dominant ≈|G|× redundant orbit walk in the per-sector loop below.
+    const bool fused = sym_fused_pass15_enabled();
+    const std::size_t nreps = reps_sp->size();
+    std::vector<std::uint16_t> stab_size;                       // per rep, capped
+    std::unordered_map<std::size_t, std::vector<int>> stab_map; // non-trivial only
+    if (fused) {
+        stab_size.assign(nreps, 1);
+        int nth = 1;
+#ifdef _OPENMP
+        nth = std::max(1, omp_get_max_threads());
+#endif
+        std::vector<std::unordered_map<std::size_t, std::vector<int>>> tls(
+            static_cast<std::size_t>(nth));
+#ifdef _OPENMP
+#       pragma omp parallel num_threads(nth)
+#endif
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            auto& lm = tls[static_cast<std::size_t>(tid)];
+#ifdef _OPENMP
+#           pragma omp for schedule(static)
+#endif
+            for (long long ii = 0; ii < static_cast<long long>(nreps); ++ii) {
+                const std::size_t i = static_cast<std::size_t>(ii);
+                const std::uint64_t r = (*reps_sp)[i];
+                std::vector<int> st;
+                for (std::size_t g = 0; g < group_size; ++g)
+                    if (projector.apply(r, g) == r)
+                        st.push_back(static_cast<int>(g));
+                stab_size[i] = static_cast<std::uint16_t>(
+                    std::min<std::size_t>(st.size(), 65535));
+                if (st.size() > 1) lm.emplace(i, std::move(st));
+            }
+        }
+        for (auto& lm : tls)
+            for (auto& kv : lm) stab_map.emplace(kv.first, std::move(kv.second));
+    }
+
     for (std::size_t s = 0; s < num_sectors; ++s) {
         // Across-sector MPI: run the per-sector Pass 1.5 orbit walk only for
         // this rank's raw sectors (distributes the walk + the per-sector
@@ -545,13 +604,34 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
         rd.inv_norms.reserve(reps_sp->size());
         int  sec_n_up = -1;
         bool uniform  = true;
-        for (std::uint64_t rep : *reps_sp) {
-            double norm_sq = 0.0;
-            compute_orbit_for_state(subspace, projector, rep, phase,
-                                    elems, coeffs, norm_sq);
-            if (elems.empty() ||
-                norm_sq <= SectorBasis::kOrbitNormSqEpsilon) {
-                continue;  // orbit fully cancels in this irrep
+        // χ_s(g) over the group (used both for the fused norm and stored on rd
+        // below); computed once per sector here so the fused rep loop is O(1) per
+        // generic rep and O(|Stab|) for the rare non-trivial-stabilizer reps.
+        const std::vector<Complex> chi =
+            fused ? sector_characters_from(*info_sp, phase) : std::vector<Complex>{};
+        for (std::size_t i = 0; i < reps_sp->size(); ++i) {
+            const std::uint64_t rep = (*reps_sp)[i];
+            double norm_sq;
+            if (fused) {
+                // Projected norm² = |Σ_{k∈Stab} χ_s(k)|² / |Stab| (1-D irrep).
+                const std::uint16_t ss = stab_size[i];
+                if (ss == 1 || chi.empty()) {
+                    norm_sq = 1.0;  // trivial stabilizer -> survives in every irrep
+                } else {
+                    Complex sum(0.0, 0.0);
+                    const auto it = stab_map.find(i);
+                    for (int g : it->second) sum += chi[static_cast<std::size_t>(g)];
+                    norm_sq = std::norm(sum) / static_cast<double>(ss);
+                }
+                if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
+            } else {
+                norm_sq = 0.0;
+                compute_orbit_for_state(subspace, projector, rep, phase,
+                                        elems, coeffs, norm_sq);
+                if (elems.empty() ||
+                    norm_sq <= SectorBasis::kOrbitNormSqEpsilon) {
+                    continue;  // orbit fully cancels in this irrep
+                }
             }
             rd.reps.push_back(rep);
             rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
@@ -563,7 +643,7 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
 
         rd.n_up = uniform ? sec_n_up : -1;
         if (!info_sp->power_representation.empty() && !phase.empty()) {
-            rd.characters = sector_characters_from(*info_sp, phase);
+            rd.characters = fused ? chi : sector_characters_from(*info_sp, phase);
         }
         rd.perms_flat = shared_perms_flat;  // Fix 4: reuse pre-computed copy
 
