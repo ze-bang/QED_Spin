@@ -65,6 +65,7 @@
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/matvec/reduced_symmetry_csr.h>    // build_reduced_symmetry_csr (orbit-walk dense assembly)
 #include <ed/symmetry/subspace.h>               // FixedSzSubspace (FixedSz producer)
 #include <ed/symmetry/symmetry_sector_data.h>   // SymmetrySector (symmetry forwarders)
 #include <ed/symmetry/rep_sector_data.h>        // RepSectorData (symmetry forwarders)
@@ -176,6 +177,50 @@ public:
             for (const auto& t : triplets)
                 dense[static_cast<std::size_t>(t.row())
                       + static_cast<std::size_t>(t.col()) * N] += t.value();
+            return true;
+        } else if constexpr (Producer::needs_orbit_walk
+                             && Producer::has_coeff_modifier) {
+            // Orbit-walk symmetry lane (abelian spatial group, possibly without
+            // fixed Sz). The reduced matrix element is NOT the bare <s'|H|s> but
+            // the projection-weighted conj(base_contrib * coeff_modifier); we
+            // enumerate each reduced row ONCE via ``rep_symmetry_row_for_each``
+            // (the same per-row walk ``build_reduced_symmetry_csr`` and the
+            // gather matvec share) and write the element straight into the
+            // column-major dense buffer. This replaces the O(dim)-matvec column
+            // build -- where each matvec re-walks every orbit and recomputes the
+            // projection -- with a single O(|G|*nnz) assembly pass. The emitted
+            // value is byte-for-byte what the gather kernel accumulates (pinned
+            // by test_reduced_symmetry_csr: CSR*v == gather*v).
+            if (static_cast<std::size_t>(producer_.dim()) != N) return false;
+            this->commitPendingTransforms();
+            producer_.ensureHostCsr();   // materialise sector orbits for policy()
+            auto basis_pol = producer_.policy();
+            using PolicyT = decltype(basis_pol);
+            static_assert(!ed::matvec::kernel::policy_multi_target_v<PolicyT>,
+                          "orbit-walk dense assembly is single-target only "
+                          "(non-abelian d_G>=2 goes through the SAB solver)");
+            const double spin    = static_cast<double>(this->getSpin());
+            const double spin_sq = spin * spin;
+            // Serial assembly (O(|G|*nnz), cheap next to the dense eigensolve):
+            // reuse the SAME parity-tested per-row enumerator that
+            // build_reduced_symmetry_csr drives, writing each projected element
+            // conj(base_contrib*coeff_modifier) straight into the column-major
+            // dense buffer. Done single-threaded on purpose -- the matrix-free
+            // gather backend is the parallel hot path; this one-shot build is
+            // off the critical path, and a serial walk keeps the per-emit sector
+            // reads trivially data-race-free (the parallel CSR builder is only
+            // exercised for the rep policy).
+            for (std::uint64_t r = 0; r < N; ++r) {
+                ed::matvec::detail::rep_symmetry_row_for_each<PolicyT, Complex>(
+                    r, basis_pol, spin, spin_sq,
+                    this->terms_.diag_one_body, this->terms_.offdiag_one_body,
+                    this->terms_.diag_two_body, this->terms_.mixed_two_body,
+                    this->terms_.offdiag_two_body, this->terms_.three_body,
+                    [&](std::uint64_t dst, const Complex& v) {
+                        dense[static_cast<std::size_t>(r)
+                              + static_cast<std::size_t>(dst) * N] += v;
+                    });
+            }
             return true;
         } else {
             (void)dense; (void)N;
