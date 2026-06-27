@@ -181,12 +181,26 @@ struct TaskCost {
     c.matvec_count = expected_matvec_count(t);
 
     const double ns_elem = on_gpu ? kSpmvNsPerTermElemGpu : kSpmvNsPerTermElemCpu;
-    // Matrix-free: cost scales with term count. Symmetry orbit-walk adds a
-    // per-element representative-lookup factor (~log dim for the binary-search
-    // path); model it as a modest multiplier so the planner still prefers it
-    // at scale where CSR cannot fit.
+    // Matrix-free: cost scales with term count.
+    //
+    // Symmetry (rep-walk) cost per SpMV: for each of basis_dim orbit
+    // representatives, apply n_terms H operators; for each output state call
+    // index_and_projection which applies all |G| permutations (O(|G|) via a
+    // byte-LUT for N≤32) plus a binary search over reps.
+    //   Cost ≈ basis_dim × n_terms × group_size
+    //        = (full_Sz_dim / group_size) × n_terms × group_size
+    //        = full_Sz_dim × n_terms          (same as no-symmetry SpMV)
+    //
+    // sym_factor = group_size captures this: the sector is group_size× smaller
+    // but each output requires group_size× more work, so total ≈ no-sym cost.
+    // Running all sectors sequentially = group_size× more total work than a
+    // single no-sym solve, so symmetry does NOT reduce wall-time for generic
+    // random-starting-vector solvers. The benefit is in memory (|G|× smaller
+    // vectors fit in cache) and in independent sector convergence.
     const double sym_factor =
-        (t.kind == BasisKind::Symm || t.kind == BasisKind::SymSz) ? 2.0 : 1.0;
+        (t.kind == BasisKind::Symm || t.kind == BasisKind::SymSz)
+        ? static_cast<double>(std::max<std::uint64_t>(1, t.group_size))
+        : 1.0;
     c.matvec_seconds_mf = static_cast<double>(t.n_terms) *
                           static_cast<double>(t.basis_dim) *
                           ns_elem * sym_factor * 1e-9;

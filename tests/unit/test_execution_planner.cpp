@@ -155,18 +155,18 @@ TEST_CASE("planner: symmetry matvec strategy is one memory-gated ordinal",
         auto p = plan_execution(t, caps, UserConstraints{});
         REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepReducedCsr));
     }
-    // Small group + many off-diagonal terms: orbit-CSR (dim*|G|*24) is SMALLER
-    // than reduced-CSR (dim*n_offdiag*20), so when reduced-CSR overflows but
-    // orbit-CSR fits, the planner picks the materialized orbit-walk tier.
+    // When reduced-CSR doesn't fit, planner falls back to matrix-free rep-walk
+    // (RepStream) — NOT orbit-walk, since orbit-walk costs group_size× more per
+    // SpMV than rep-walk and is never auto-selected.
     {
         TaskDescriptor t;
-        t.basis_dim = 10'000'000ull;  // reduced ~ 10e6*72*20 ~= 13.4 GB
-        t.n_terms = 108; t.n_offdiag = 72; t.group_size = 8;  // orbit ~ 10e6*8*24 ~= 1.8 GB
+        t.basis_dim = 10'000'000ull;  // reduced ~ 10e6*72*20 ~= 13.4 GB (> budget)
+        t.n_terms = 108; t.n_offdiag = 72; t.group_size = 8;
         t.method = Method::Lanczos; t.num_eigs = 1;
         t.kind = BasisKind::SymSz; t.N = 36; t.n_up = 18;
         auto caps = make_caps(/*ram*/8, 0, 0, 1, false, false, false);  // budget ~4.8 GB
         auto p = plan_execution(t, caps, UserConstraints{});
-        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::OrbitMaterialized));
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepStream));
     }
     // The non-symmetry lane never sets a symmetry strategy (stays Auto).
     {

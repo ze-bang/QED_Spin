@@ -5,12 +5,16 @@
 // Planner -> symmetry-backend hook for the rep-walk vs orbit-CSR decision.
 //
 // A symmetry sector can be applied two ways:
-//   * REP WALK (RepSymmetryBasisPolicy): hold only the orbit-rep list
+//   * REP WALK (RepSymmetryBasisPolicy, DEFAULT): hold only the orbit-rep list
 //     (O(#reps) memory) and regenerate the projection arithmetically per emit
-//     (~|G| group ops, mitigated by the N<=32 perm-LUT + dense rank table).
-//   * ORBIT-CSR (SymmetryBasisPolicy): materialize the per-sector orbit basis
-//     (orbit elements + stored coefficients, ~dim*|orbit|*24 B) and run a
-//     plain stored-coefficient matvec -- faster per apply, much heavier memory.
+//     (~|G| group ops via the N<=32 perm-LUT). Cost per SpMV:
+//     sector_dim × n_terms × group_size  (= full-Sz no-sym SpMV cost).
+//   * ORBIT-CSR (SymmetryBasisPolicy, user-override only): materialize the
+//     per-sector orbit basis (orbit elements + stored coefficients,
+//     ~dim*|orbit|*24 B). Applies H to all |G| orbit elements per rep;
+//     each output state still requires find_representative (O(|G|) ops).
+//     Cost per SpMV: sector_dim × group_size × n_terms × group_size
+//     = group_size× MORE expensive than rep-walk. Not auto-selected.
 //
 // This is the symmetry analogue of csr_policy_hook's matrix-free-vs-CSR choice.
 // The planner cost model picks orbit-CSR when it fits the probed memory budget

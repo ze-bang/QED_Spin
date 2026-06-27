@@ -12,24 +12,31 @@ try:
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
-def generate_kagome_cluster(dim1, dim2, use_pbc=False):
+def generate_kagome_cluster(dim1, dim2, use_pbc=False,
+                            pbc_dim1=None, pbc_dim2=None):
     """
     Generate a kagome lattice cluster
-    
+
     The kagome lattice has 3 sites per unit cell arranged in a corner-sharing triangle pattern.
     Unit cell basis vectors:
     - a1 = (1, 0)
     - a2 = (0.5, sqrt(3)/2)
-    
+
     Site positions within unit cell:
     - Site 0: (0, 0)
     - Site 1: (0.5, 0)
     - Site 2: (0.25, sqrt(3)/4)
-    
+
     Args:
         dim1, dim2: Dimensions of the lattice (number of unit cells)
-        use_pbc: Whether to use periodic boundary conditions
-        
+        use_pbc:   Uniform PBC flag (both directions). Overridden by pbc_dim1/pbc_dim2.
+        pbc_dim1:  PBC along the a1 (dim1) direction only. Defaults to use_pbc.
+        pbc_dim2:  PBC along the a2 (dim2) direction only. Defaults to use_pbc.
+
+    Cylindrical BC example:
+        pbc_dim1=True, pbc_dim2=False  →  tube along a1, open along a2
+        pbc_dim1=False, pbc_dim2=True  →  open along a1, tube along a2
+
     Returns:
         vertices: Dictionary of {vertex_id: (x, y)}
         edges: List of (vertex1, vertex2) tuples for nearest neighbors
@@ -38,28 +45,33 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
         node_mapping: Dictionary mapping original IDs to matrix indices
         vertex_to_cell: Map vertex_id to (i, j, site_idx)
     """
+    if pbc_dim1 is None:
+        pbc_dim1 = use_pbc
+    if pbc_dim2 is None:
+        pbc_dim2 = use_pbc
+
     # Unit cell lattice vectors
     a1 = np.array([1.0, 0.0])
     a2 = np.array([0.5, np.sqrt(3)/2])
-    
+
     # Site positions within unit cell (relative to unit cell origin)
     site_offsets = np.array([
         [0.0, 0.0],                    # Site 0
         [0.5, 0.0],                    # Site 1
         [0.25, np.sqrt(3)/4]           # Site 2
     ])
-    
+
     # Generate vertices
     vertices = {}
     vertex_id = 0
     vertex_to_cell = {}  # Map vertex_id to (i, j, site_idx)
     cell_to_vertex = {}  # Map (i, j, site_idx) to vertex_id
-    
+
     for i in range(dim1):
         for j in range(dim2):
             # Unit cell position
             unit_cell_pos = i * a1 + j * a2
-            
+
             # For each site in the unit cell
             for site_idx in range(3):
                 position = unit_cell_pos + site_offsets[site_idx]
@@ -67,20 +79,24 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
                 vertex_to_cell[vertex_id] = (i, j, site_idx)
                 cell_to_vertex[(i, j, site_idx)] = vertex_id
                 vertex_id += 1
-    
-    # Helper function to get vertex id with PBC
+
+    # Helper function to get vertex id with per-axis PBC
     def get_vertex_with_pbc(i, j, site_idx):
-        if use_pbc:
-            i, j = i % dim1, j % dim2
-        elif i < 0 or i >= dim1 or j < 0 or j >= dim2:
+        if pbc_dim1:
+            i = i % dim1
+        elif i < 0 or i >= dim1:
+            return None
+        if pbc_dim2:
+            j = j % dim2
+        elif j < 0 or j >= dim2:
             return None
         return cell_to_vertex.get((i, j, site_idx), None)
-    
+
     def add_bond(edge_list, v1, v2):
         """Add a bond to edge list if v2 is valid and not a self-loop"""
         if v2 is not None and v1 != v2:
             edge_list.append(tuple(sorted([v1, v2])))
-    
+
     # ==========================================================================
     # Bond connectivity tables for kagome lattice
     # Each entry: (source_sublattice, di, dj, target_sublattice)

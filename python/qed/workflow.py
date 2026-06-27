@@ -1835,9 +1835,13 @@ def _translation_autos_from_lattice(
     nonzero_lat = [v for v in lat_vectors if np.linalg.norm(v) > 1e-12]
     cluster_dims = _infer_cluster_dims(positions, nonzero_lat)
 
-    # Trim the position arrays to the lattice dimensionality so the
-    # legacy filter's S_inv = inv(S) is well-defined.
+    # Trim the position arrays AND lattice vectors to the lattice
+    # dimensionality so the legacy filter's S_inv = inv(S) is well-defined.
+    # (Kagome and other 2D lattices embed in 3D, so each non-zero lattice
+    # vector has 3 components but only 2 are non-trivial; filter requires
+    # a square matrix: num_vectors == vector_dimension.)
     lat_dim = len(nonzero_lat)
+    nonzero_lat = [v[:lat_dim] for v in nonzero_lat]
     for i in sites:
         sites[i]["position"] = sites[i]["position"][:lat_dim]
 

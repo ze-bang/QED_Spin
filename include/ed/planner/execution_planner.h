@@ -74,9 +74,10 @@ struct ExecutionPlan {
     /// Symmetry lane (Symm / SymSz): the chosen symmetry-matvec strategy, as a
     /// SymMatvecRepr ordinal (int to keep this header free of the hook include):
     /// RepStream(0) = O(#reps) rep walk (scalable floor); RepReducedCsr(1) =
-    /// rep + build-once reduced-CSR SpMV (fast tier); OrbitMaterialized(2) =
-    /// materialized orbit-walk. Decided by the cost model (fastest that fits) and
-    /// consumed via sym_matvec_policy_hook. Default -1 = Auto (no plan / heuristic).
+    /// rep + build-once reduced-CSR SpMV (fast tier, auto-selected when it fits).
+    /// OrbitMaterialized(2) = materialized orbit-walk (user override only —
+    /// orbit-walk costs group_size× more per SpMV than rep-walk and is never
+    /// auto-selected). Default -1 = Auto (no plan / heuristic).
     int            sym_matvec = -1;
     /// Block-Lanczos: drop the stored block-Krylov basis (local reorth only,
     /// eigenvalues-only) when the full basis would not fit the memory budget.

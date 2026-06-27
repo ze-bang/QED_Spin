@@ -510,12 +510,20 @@ def estimate_time_s(
     device: str = "cpu",
     n_ranks: int = 1,
     n_gpus_per_rank: int = 1,
+    kind: str = "full",
+    group_size: int = 1,
 ) -> tuple[float, str]:
     """Very rough wall-time estimate (seconds). Returns (seconds, rationale).
 
     Model: time = (cost_per_spmv) * (num_spmv_total) where
     ``cost_per_spmv ≈ n_terms * (dim / n_workers) * NS_PER_TERM_ELEMENT``.
     The number of SpMVs is solver-dependent (heuristic table).
+
+    ``kind`` and ``group_size`` are forwarded to the C++ cost model so that
+    symmetry SpMV overhead (O(|G|) find_representative per output state) is
+    correctly accounted for.  Without them the estimate treats a symmetry
+    sector as a plain Full-space sector of equal size, which underestimates
+    the cost by a factor of ``group_size``.
     """
     method_name = _normalize_method_name(method)
     nev = max(1, num_eigenvalues)
@@ -542,11 +550,15 @@ def estimate_time_s(
         block_size=int(block_size or 1),
         n_ranks=int(n_ranks),
         device=device,
+        kind=kind,
+        group_size=int(max(1, group_size)),
     )
     seconds = float(plan.get("est_seconds", 0.0))
     return seconds, (
         f"{method_name}: wall-time from the ed::planner cost model "
-        f"(device={device}, n_terms={n_terms}, dim={dim:_d}) ~{seconds:.2g} s")
+        f"(device={device}, n_terms={n_terms}, dim={dim:_d}"
+        f"{f', group_size={group_size}' if group_size > 1 else ''}"
+        f") ~{seconds:.2g} s")
 
 
 # =============================================================================
@@ -670,6 +682,10 @@ def estimate_resources(
     # ------------------------------------------------------------------
     # Memory + time estimates.
     # ------------------------------------------------------------------
+    # Pass kind/group_size to the C++ cost model so symmetry overhead
+    # (O(|G|) find_representative per output state) is correctly accounted for.
+    _sym_group_size = _symmetry_group_size(symmetry) if symmetry is not None else 1
+    _basis_kind = basis.kind  # "full" | "sz" | "symm" | "sym+sz"
     per_rank_gb, total_gb, mem_rationale = estimate_memory_gb(
         basis.dim, solver,
         num_eigenvalues=num_eigenvalues,
@@ -688,6 +704,8 @@ def estimate_resources(
         device=device_lc,
         n_ranks=nr,
         n_gpus_per_rank=1,
+        kind=_basis_kind,
+        group_size=_sym_group_size,
     )
     notes.append(mem_rationale)
     notes.append(time_rationale)

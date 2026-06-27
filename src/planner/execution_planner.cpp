@@ -358,43 +358,39 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
     }
 
     // ---- Symmetry matvec strategy (ONE ordinal, fastest that fits) ----------
-    // Three representations on the memory<->speed frontier, picked by the same
-    // "materialize if it fits, else stream" rule as csr / tableless:
-    //   * RepReducedCsr  -- rep policy + build the reduced sector matrix ONCE,
-    //     then plain O(1)/nnz SpMV. ~dim*nnz*20 B (col u32 + val complex16) on
-    //     top of the O(#reps) rep data. Fastest apply (no |G| scan, no per-emit
-    //     projection); the preferred fast tier (it dominates orbit-walk).
-    //   * OrbitMaterialized -- SymmetryBasisPolicy: stored orbit lists,
-    //     ~dim*|G|*24 B. Kept as the alternative materialized form.
-    //   * RepStream -- regenerate per matvec, O(#reps) memory; the scalable floor
-    //     that can never OOM.
+    // Two representations on the memory<->speed frontier; orbit-walk is never
+    // auto-selected because it costs group_size× more per SpMV than rep-walk:
+    //
+    //   RepReducedCsr  -- rep policy + build the reduced sector matrix ONCE,
+    //     then plain O(nnz) SpMV. ~dim*n_offdiag*20 B (col u32 + val complex16).
+    //     Fastest apply (no |G| scan per emit); auto-selected when it fits.
+    //
+    //   RepStream -- matrix-free rep-walk: for each rep apply n_terms H ops;
+    //     each output calls index_and_projection (O(|G|) via the N≤32 LUT).
+    //     Cost ≈ dim × n_terms × |G|  (= full-Sz no-sym SpMV cost; see
+    //     task_cost_model.h). O(#reps) memory; the scalable floor.
+    //
+    //   OrbitMaterialized (SymmetryBasisPolicy) -- kept for user override only;
+    //     costs dim × |G| × n_terms × |G| = group_size× MORE than RepStream.
     if (task.kind == BasisKind::Symm || task.kind == BasisKind::SymSz) {
         const double per_rank = 1.0 / std::max(1, p.n_ranks);
         const double reduced_csr_gb =
             static_cast<double>(task.basis_dim)
             * static_cast<double>(std::max<std::uint64_t>(1, task.n_offdiag))
             * 20.0 / kGiB * per_rank;
-        const double orbit_csr_gb =
-            static_cast<double>(task.basis_dim)
-            * static_cast<double>(std::max<std::uint64_t>(1, task.group_size))
-            * 24.0 / kGiB * per_rank;
         if (reduced_csr_gb + working_gb <= budget) {
             p.sym_matvec = static_cast<int>(SymMatvecRepr::RepReducedCsr);
             p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
                 + " GB + working " + std::to_string(working_gb)
                 + " GB fits budget " + std::to_string(budget)
                 + " GB -> rep + build-once reduced-CSR SpMV (fastest)");
-        } else if (orbit_csr_gb + working_gb <= budget) {
-            p.sym_matvec = static_cast<int>(SymMatvecRepr::OrbitMaterialized);
-            p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
-                + " GB exceeds budget; orbit-CSR " + std::to_string(orbit_csr_gb)
-                + " GB + working fits -> materialized orbit-walk");
         } else {
             p.sym_matvec = static_cast<int>(SymMatvecRepr::RepStream);
             p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
-                + " GB / orbit-CSR " + std::to_string(orbit_csr_gb)
-                + " GB exceed budget " + std::to_string(budget)
-                + " GB -> matrix-free rep walk (scalable)");
+                + " GB exceeds budget " + std::to_string(budget)
+                + " GB -> matrix-free rep-walk (scalable; orbit-walk is "
+                + std::to_string(task.group_size)
+                + "x more expensive and is never auto-selected)");
         }
     }
 

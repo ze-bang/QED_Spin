@@ -392,6 +392,7 @@ if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
         ed_distributed
         CUDA::cudart
         CUDA::cublas
+        CUDA::cusolver
         ${NCCL_LIBRARIES}
         ${ED_COMMON_LINK_LIBS}
     )
