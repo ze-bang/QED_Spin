@@ -71,11 +71,13 @@ struct ExecutionPlan {
     /// O(N^2) BinomialTable) instead of the materialized C(N,n_up) basis vector
     /// + Lin table. Set when the materialized basis would not fit the budget.
     bool           tableless_fixed_sz = false;
-    /// Symmetry lane (Symm / SymSz): materialize the per-sector orbit-CSR
-    /// (faster apply) instead of the matrix-free rep walk (O(#reps) memory).
-    /// Set only when the orbit-CSR estimate fits the budget; the rep walk is the
-    /// scalable default. Consumed via sym_matvec_policy_hook.
-    bool           sym_orbit_csr = false;
+    /// Symmetry lane (Symm / SymSz): the chosen symmetry-matvec strategy, as a
+    /// SymMatvecRepr ordinal (int to keep this header free of the hook include):
+    /// RepStream(0) = O(#reps) rep walk (scalable floor); RepReducedCsr(1) =
+    /// rep + build-once reduced-CSR SpMV (fast tier); OrbitMaterialized(2) =
+    /// materialized orbit-walk. Decided by the cost model (fastest that fits) and
+    /// consumed via sym_matvec_policy_hook. Default -1 = Auto (no plan / heuristic).
+    int            sym_matvec = -1;
     /// Block-Lanczos: drop the stored block-Krylov basis (local reorth only,
     /// eigenvalues-only) when the full basis would not fit the memory budget.
     /// Consumed as BlockLanczosOptions::keep_basis = !block_lanczos_lean.

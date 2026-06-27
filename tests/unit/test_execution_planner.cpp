@@ -125,41 +125,57 @@ TEST_CASE("planner: 36-site sz+sym on modest RAM -> matrix-free + tableless reps
     REQUIRE(p.matvec == MatvecStrategy::MatrixFree);   // CSR ~37 GB doesn't fit
     REQUIRE(p.basis == BasisStrategy::BinarySearchReps);  // 36 GB rank table skipped
     REQUIRE(p.feasible);                               // working set (~1.3 GB) fits
-    // orbit-CSR ~ 21e6 * 432 * 24 B ~= 203 GB does NOT fit 32 GB -> rep walk.
-    REQUIRE_FALSE(p.sym_orbit_csr);
+    // reduced-CSR ~ 21e6*72*20 ~= 28 GB and orbit-CSR ~203 GB both exceed the
+    // ~24 GB budget -> matrix-free rep walk (the scalable floor).
+    REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepStream));
 }
 
-TEST_CASE("planner: symmetry rep-walk vs orbit-CSR is memory-gated", "[planner]") {
-    // Large 36-site SymSz sector on a 2 TB node: orbit-CSR (~203 GB) fits the
-    // budget, so the planner materializes it (faster apply).
+TEST_CASE("planner: symmetry matvec strategy is one memory-gated ordinal",
+          "[planner]") {
+    // Large 36-site SymSz sector on a 2 TB node: reduced-CSR (~28 GB) fits the
+    // budget, so the planner picks the fast tier (rep + build-once reduced-CSR).
     {
-        auto t = task_36_symsz(/*dim*/21'000'000ull);
+        auto t = task_36_symsz(/*dim*/21'000'000ull);   // n_offdiag=72, |G|=432
         auto caps = make_caps(/*ram*/2048, 0, 0, 1, false, false, false);
         auto p = plan_execution(t, caps, UserConstraints{});
-        REQUIRE(p.sym_orbit_csr);
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepReducedCsr));
     }
-    // Same sector on 32 GB: orbit-CSR can't fit -> matrix-free rep walk.
+    // Same sector on 32 GB: neither reduced-CSR (~28 GB) nor orbit-CSR (~203 GB)
+    // fits -> matrix-free rep walk (scalable, can't OOM).
     {
         auto t = task_36_symsz(/*dim*/21'000'000ull);
         auto caps = make_caps(/*ram*/32, 0, 0, 1, false, false, false);
         auto p = plan_execution(t, caps, UserConstraints{});
-        REQUIRE_FALSE(p.sym_orbit_csr);
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepStream));
     }
-    // A small symmetry sector fits orbit-CSR even on a modest box.
+    // A small symmetry sector fits the fast reduced-CSR tier even on a modest box.
     {
-        auto t = task_36_symsz(/*dim*/50'000ull);     // 50k * 432 * 24 B ~= 0.5 GB
+        auto t = task_36_symsz(/*dim*/50'000ull);     // reduced ~ 50k*72*20 ~= 72 MB
         auto caps = make_caps(/*ram*/8, 0, 0, 1, false, false, false);
         auto p = plan_execution(t, caps, UserConstraints{});
-        REQUIRE(p.sym_orbit_csr);
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepReducedCsr));
     }
-    // The non-symmetry lane never sets the symmetry flag.
+    // Small group + many off-diagonal terms: orbit-CSR (dim*|G|*24) is SMALLER
+    // than reduced-CSR (dim*n_offdiag*20), so when reduced-CSR overflows but
+    // orbit-CSR fits, the planner picks the materialized orbit-walk tier.
+    {
+        TaskDescriptor t;
+        t.basis_dim = 10'000'000ull;  // reduced ~ 10e6*72*20 ~= 13.4 GB
+        t.n_terms = 108; t.n_offdiag = 72; t.group_size = 8;  // orbit ~ 10e6*8*24 ~= 1.8 GB
+        t.method = Method::Lanczos; t.num_eigs = 1;
+        t.kind = BasisKind::SymSz; t.N = 36; t.n_up = 18;
+        auto caps = make_caps(/*ram*/8, 0, 0, 1, false, false, false);  // budget ~4.8 GB
+        auto p = plan_execution(t, caps, UserConstraints{});
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::OrbitMaterialized));
+    }
+    // The non-symmetry lane never sets a symmetry strategy (stays Auto).
     {
         TaskDescriptor t;
         t.basis_dim = 4096; t.n_terms = 20; t.n_offdiag = 12;
         t.method = Method::Lanczos; t.num_eigs = 1; t.kind = BasisKind::Full;
         auto caps = make_caps(/*ram*/256, 0, 0, 1, false, false, false);
         auto p = plan_execution(t, caps, UserConstraints{});
-        REQUIRE_FALSE(p.sym_orbit_csr);
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::Auto));
     }
 }
 
@@ -274,7 +290,7 @@ TEST_CASE("planner stress: degenerate dimensions stay sane", "[planner][stress]"
         t.method = Method::Lanczos; t.kind = BasisKind::Full;
         auto p = plan_execution(t, caps, UserConstraints{});
         require_sane(p);
-        REQUIRE_FALSE(p.sym_orbit_csr);   // Full lane never sets it
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::Auto));  // Full lane never sets it
     }
 }
 
@@ -323,8 +339,11 @@ TEST_CASE("planner stress: degenerate symmetry params (group 0 / huge)",
         auto p = plan_execution(t, caps, UserConstraints{});
         require_sane(p);
     }
-    // Absurd group_size with a small dim must NOT overflow sym_orbit_csr to true:
-    // orbit-CSR estimate ~ dim*group*24 is astronomically large -> rep walk.
+    // Absurd group_size with a small dim must not break the decision. The
+    // reduced-CSR estimate (dim*n_offdiag*20, INDEPENDENT of |G|) is tiny and
+    // fits, so the planner picks the fast RepReducedCsr tier; the pathological
+    // |G| only bloats the lower-priority orbit-CSR estimate (no overflow to a
+    // bad pick, no UB).
     {
         TaskDescriptor t;
         t.basis_dim = 4096; t.n_terms = 20; t.n_offdiag = 12;
@@ -332,7 +351,7 @@ TEST_CASE("planner stress: degenerate symmetry params (group 0 / huge)",
         t.group_size = std::uint64_t{1} << 50;
         auto p = plan_execution(t, caps, UserConstraints{});
         require_sane(p);
-        REQUIRE_FALSE(p.sym_orbit_csr);            // does not fit -> rep walk
+        REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::RepReducedCsr));
     }
 }
 
@@ -412,7 +431,7 @@ TEST_CASE("planner stress: every method x basis-kind combination is sane",
             auto p = plan_execution(t, caps, UserConstraints{});
             require_sane(p);
             if (k == BasisKind::Full || k == BasisKind::Sz)
-                REQUIRE_FALSE(p.sym_orbit_csr);  // symmetry flag is symm-only
+                REQUIRE(p.sym_matvec == static_cast<int>(SymMatvecRepr::Auto));  // symm-only
         }
     }
 }
@@ -437,19 +456,19 @@ TEST_CASE("planner stress: sym_matvec_policy_hook round-trips + scoped guard",
     REQUIRE(sym_matvec_repr() == -1);              // Auto
 
     ExecutionPlan p;
-    p.sym_orbit_csr = true;
+    p.sym_matvec = static_cast<int>(SymMatvecRepr::OrbitMaterialized);
     apply_sym_matvec_decision(p);
-    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitCsr));
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitMaterialized));
 
-    p.sym_orbit_csr = false;
+    p.sym_matvec = static_cast<int>(SymMatvecRepr::RepReducedCsr);
     apply_sym_matvec_decision(p);
-    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::Rep));
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::RepReducedCsr));
 
     {
-        ScopedSymMatvecRepr guard(SymMatvecRepr::OrbitCsr);
-        REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitCsr));
+        ScopedSymMatvecRepr guard(SymMatvecRepr::OrbitMaterialized);
+        REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::OrbitMaterialized));
     }
-    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::Rep));  // restored
+    REQUIRE(sym_matvec_repr() == static_cast<int>(SymMatvecRepr::RepReducedCsr));  // restored
 
     clear_sym_matvec_repr();
     REQUIRE(sym_matvec_repr() == -1);

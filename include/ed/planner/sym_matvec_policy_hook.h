@@ -22,13 +22,32 @@
 // =============================================================================
 
 #include <atomic>
+#include <cstdlib>
 
 namespace ed::planner {
 
-/// Symmetry matvec representation override. -1 = no override (use the producer's
-/// rep_lazy() heuristic / ED_SYM_REP env), 0 = force the rep walk, 1 = force the
-/// materialized orbit-CSR.
-enum class SymMatvecRepr : int { Auto = -1, Rep = 0, OrbitCsr = 1 };
+/// Symmetry matvec strategy -- ONE planner-owned ordinal (memory up, apply-speed
+/// up). Replaces the old rep-vs-orbit bool PLUS the independent ED_SYM_REDUCED_CSR
+/// env gate, so the planner is the single chooser and env vars are overrides only.
+///   * RepStream         -- RepSymmetryBasisPolicy, regenerate the projection per
+///                          matvec (~|G| ops/emit). O(#reps) memory; the scalable
+///                          floor that can never OOM.
+///   * RepReducedCsr     -- rep policy + build the reduced sector matrix ONCE,
+///                          then plain O(1)/nnz SpMV. Fast tier; +O(dim*nnz) mem.
+///   * OrbitMaterialized -- SymmetryBasisPolicy: materialized orbit lists
+///                          (~dim*|orbit|*24 B) walked with stored coeffs. Kept
+///                          for back-compat; also the representation the
+///                          observable/DSSF lane reuses.
+///   * Auto              -- no plan ran -> the producer's rep_lazy() heuristic.
+/// `Rep` / `OrbitCsr` are kept as aliases for pre-ordinal call sites.
+enum class SymMatvecRepr : int {
+    Auto              = -1,
+    RepStream         =  0,
+    RepReducedCsr     =  1,
+    OrbitMaterialized =  2,
+    Rep               =  0,   ///< deprecated alias == RepStream
+    OrbitCsr          =  2,   ///< deprecated alias == OrbitMaterialized
+};
 
 namespace detail {
 inline std::atomic<int>& sym_matvec_repr_slot() noexcept {
@@ -48,9 +67,29 @@ inline void clear_sym_matvec_repr() noexcept {
     set_sym_matvec_repr(SymMatvecRepr::Auto);
 }
 
-/// Read the active override. Returns -1 / 0 / 1 (see SymMatvecRepr).
+/// Read the raw planner slot (no env folding). Returns a SymMatvecRepr value.
 [[nodiscard]] inline int sym_matvec_repr() noexcept {
     return detail::sym_matvec_repr_slot().load(std::memory_order_relaxed);
+}
+
+/// Resolve the EFFECTIVE strategy with precedence: env override -> planner slot
+/// -> Auto. The env knobs are the manual escape hatch (cached process-globally,
+/// matching the legacy gates): ``ED_SYM_REP=0`` forces OrbitMaterialized (the old
+/// "disable rep" switch) and takes precedence; ``ED_SYM_REDUCED_CSR=1`` forces
+/// RepReducedCsr. Consumed by SectorOperator::make_backend_ (rep-vs-orbit policy)
+/// and CpuMatVecBackend (the reduced-CSR sub-choice).
+[[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
+    static const int env_override = [] {
+        if (const char* e = std::getenv("ED_SYM_REP"))
+            if (e[0] == '0' && e[1] == '\0')
+                return static_cast<int>(SymMatvecRepr::OrbitMaterialized);
+        if (const char* e = std::getenv("ED_SYM_REDUCED_CSR"))
+            if (e[0] == '1' && e[1] == '\0')
+                return static_cast<int>(SymMatvecRepr::RepReducedCsr);
+        return static_cast<int>(SymMatvecRepr::Auto);
+    }();
+    if (env_override != static_cast<int>(SymMatvecRepr::Auto)) return env_override;
+    return sym_matvec_repr();
 }
 
 /// RAII guard: set the override for a scope, restore the previous value on exit.

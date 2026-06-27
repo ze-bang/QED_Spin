@@ -528,7 +528,13 @@ void bind_dispatcher(py::module_& m) {
         d["krylov_dim_cap"] = p.krylov_dim_cap;
         d["basis"] = p.basis_str();
         d["tableless_fixed_sz"] = p.tableless_fixed_sz;
-        d["sym_orbit_csr"] = p.sym_orbit_csr;
+        // Symmetry-matvec strategy ordinal (SymMatvecRepr): 0 rep_stream /
+        // 1 rep_reduced_csr / 2 orbit_materialized / -1 auto.
+        d["sym_matvec"] = p.sym_matvec;
+        d["sym_matvec_str"] = (p.sym_matvec == 1) ? "rep_reduced_csr"
+                            : (p.sym_matvec == 2) ? "orbit_materialized"
+                            : (p.sym_matvec == 0) ? "rep_stream" : "auto";
+        d["sym_orbit_csr"] = (p.sym_matvec == 2);  // back-compat: orbit-walk only
         d["block_lanczos_lean"] = p.block_lanczos_lean;
         d["feasible"] = p.feasible;
         d["bottleneck"] = p.bottleneck;

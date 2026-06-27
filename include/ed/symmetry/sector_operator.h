@@ -79,15 +79,19 @@ template <>
 inline std::unique_ptr<ed::matvec::MatVecBackendBase>
 SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
                  ed::matvec::MemorySpace::Host>::make_backend_() const {
-    // Planner decides rep walk vs orbit-CSR (sym_matvec_policy_hook). When unset
-    // (Auto) fall back to the producer's rep_lazy() heuristic, so behaviour is
-    // unchanged unless the planner ran. OrbitCsr forces the materialized path.
-    const int  sym_repr = ed::planner::sym_matvec_repr();
+    // The planner owns the symmetry-matvec strategy (sym_matvec_policy_hook).
+    // resolved_sym_matvec_repr() folds the env overrides (ED_SYM_REP=0 ->
+    // OrbitMaterialized, ED_SYM_REDUCED_CSR=1 -> RepReducedCsr) and falls back to
+    // the producer's rep_lazy() heuristic when Auto (no plan ran). Both rep tiers
+    // (RepStream / RepReducedCsr) use the rep policy here; the reduced-CSR
+    // sub-choice is then made inside CpuMatVecBackend per reduced_csr_enabled().
+    const int  sym = ed::planner::resolved_sym_matvec_repr();
     const bool want_rep =
-        (sym_repr == static_cast<int>(ed::planner::SymMatvecRepr::Rep)) ||
-        (sym_repr == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
+        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepStream)     ||
+        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr) ||
+        (sym == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
          && producer_.rep_lazy());
-    if (want_rep && ed::symmetry::cpu_rep_symmetry_enabled()) {
+    if (want_rep) {
         const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
         if (rd.usable()) {
             return ed::matvec::make_cpu_rep_symmetry_backend<
@@ -96,8 +100,8 @@ SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
                 ThreeBodyTransformData>(rd);
         }
     }
-    // Legacy orbit-CSR path. In CSR-free lazy mode the host CSR has not been
-    // built yet -- materialise it now (once).
+    // Orbit-CSR path (OrbitMaterialized, or rep data unusable). In CSR-free lazy
+    // mode the host orbit CSR has not been built yet -- materialise it now (once).
     producer_.ensureHostCsr();
     return ed::matvec::make_cpu_symmetry_backend<
         DiagonalOneBody, OffDiagonalOneBody,

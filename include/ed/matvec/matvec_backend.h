@@ -79,6 +79,7 @@
 
 #include <ed/core/basis_utils.h>      // popcount()
 #include <ed/planner/csr_policy_hook.h>  // capability-aware CSR override (leaf)
+#include <ed/planner/sym_matvec_policy_hook.h>  // symmetry-matvec strategy (leaf)
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
@@ -105,15 +106,13 @@ using Complex = std::complex<double>;
 // ---------------------------------------------------------------------------
 namespace detail {
 // Skeleton lane gate: materialize the reduced sector matrix (O(1) SpMV) instead
-// of the per-iteration O(|G|) rep walk. Opt-in via ED_SYM_REDUCED_CSR=1; the
-// planner will drive this once the memory cost model is wired. Process-global
-// env read is cached on first call.
+// of the per-iteration O(|G|) rep walk. The PLANNER now drives this (cost model
+// picks RepReducedCsr when it fits); ED_SYM_REDUCED_CSR=1 is folded in as a
+// manual override by resolved_sym_matvec_repr(). The `&& policy_is_rep_v` guard
+// at the call sites keeps reduced-CSR rep-policy-only.
 inline bool reduced_csr_enabled() noexcept {
-    static const bool on = [] {
-        const char* e = std::getenv("ED_SYM_REDUCED_CSR");
-        return e != nullptr && e[0] == '1' && e[1] == '\0';
-    }();
-    return on;
+    return ed::planner::resolved_sym_matvec_repr()
+           == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr);
 }
 
 template <class P, class = void>

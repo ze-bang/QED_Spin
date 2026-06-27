@@ -419,8 +419,7 @@ GroundStateResult solve_on(Backend& be,
     // apply, materialized on demand); otherwise the O(#reps) rep walk (CSR-free,
     // cannot OOM). Scoped (restored on return); a no-op for non-symmetry ops.
     const ed::planner::ScopedSymMatvecRepr sym_guard(
-        plan.sym_orbit_csr ? ed::planner::SymMatvecRepr::OrbitCsr
-                           : ed::planner::SymMatvecRepr::Rep);
+        static_cast<ed::planner::SymMatvecRepr>(plan.sym_matvec));
 
     const auto t0 = std::chrono::steady_clock::now();
 

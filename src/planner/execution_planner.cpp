@@ -357,30 +357,44 @@ ExecutionPlan plan_execution(const TaskDescriptor&     task,
         }
     }
 
-    // ---- Symmetry matvec: rep walk vs materialized orbit-CSR ----------------
-    // The orbit-CSR (SymmetryBasisPolicy) stores, per orbit element, the
-    // computational state (u64) + its coefficient (complex) ~= 24 B; a sector of
-    // `basis_dim` reps with average orbit ~|G| therefore costs
-    // ~basis_dim*group_size*24 B on top of the working set. It is faster per
-    // apply (no per-emit projection regeneration), so prefer it WHEN IT FITS the
-    // budget; otherwise fall back to the matrix-free rep walk (O(#reps), the
-    // scalable default). Mirrors the csr / tableless "materialize if it fits".
+    // ---- Symmetry matvec strategy (ONE ordinal, fastest that fits) ----------
+    // Three representations on the memory<->speed frontier, picked by the same
+    // "materialize if it fits, else stream" rule as csr / tableless:
+    //   * RepReducedCsr  -- rep policy + build the reduced sector matrix ONCE,
+    //     then plain O(1)/nnz SpMV. ~dim*nnz*20 B (col u32 + val complex16) on
+    //     top of the O(#reps) rep data. Fastest apply (no |G| scan, no per-emit
+    //     projection); the preferred fast tier (it dominates orbit-walk).
+    //   * OrbitMaterialized -- SymmetryBasisPolicy: stored orbit lists,
+    //     ~dim*|G|*24 B. Kept as the alternative materialized form.
+    //   * RepStream -- regenerate per matvec, O(#reps) memory; the scalable floor
+    //     that can never OOM.
     if (task.kind == BasisKind::Symm || task.kind == BasisKind::SymSz) {
+        const double per_rank = 1.0 / std::max(1, p.n_ranks);
+        const double reduced_csr_gb =
+            static_cast<double>(task.basis_dim)
+            * static_cast<double>(std::max<std::uint64_t>(1, task.n_offdiag))
+            * 20.0 / kGiB * per_rank;
         const double orbit_csr_gb =
             static_cast<double>(task.basis_dim)
             * static_cast<double>(std::max<std::uint64_t>(1, task.group_size))
-            * 24.0 / kGiB / std::max(1, p.n_ranks);
-        if (orbit_csr_gb + working_gb <= budget) {
-            p.sym_orbit_csr = true;
-            p.notes.push_back("symmetry orbit-CSR " + std::to_string(orbit_csr_gb)
+            * 24.0 / kGiB * per_rank;
+        if (reduced_csr_gb + working_gb <= budget) {
+            p.sym_matvec = static_cast<int>(SymMatvecRepr::RepReducedCsr);
+            p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
                 + " GB + working " + std::to_string(working_gb)
                 + " GB fits budget " + std::to_string(budget)
-                + " GB -> materialized orbit-CSR (faster apply)");
+                + " GB -> rep + build-once reduced-CSR SpMV (fastest)");
+        } else if (orbit_csr_gb + working_gb <= budget) {
+            p.sym_matvec = static_cast<int>(SymMatvecRepr::OrbitMaterialized);
+            p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
+                + " GB exceeds budget; orbit-CSR " + std::to_string(orbit_csr_gb)
+                + " GB + working fits -> materialized orbit-walk");
         } else {
-            p.notes.push_back("symmetry orbit-CSR " + std::to_string(orbit_csr_gb)
-                + " GB + working " + std::to_string(working_gb)
-                + " GB exceeds budget " + std::to_string(budget)
-                + " GB -> matrix-free rep walk");
+            p.sym_matvec = static_cast<int>(SymMatvecRepr::RepStream);
+            p.notes.push_back("symmetry reduced-CSR " + std::to_string(reduced_csr_gb)
+                + " GB / orbit-CSR " + std::to_string(orbit_csr_gb)
+                + " GB exceed budget " + std::to_string(budget)
+                + " GB -> matrix-free rep walk (scalable)");
         }
     }
 
@@ -416,8 +430,7 @@ void apply_basis_decision(const ExecutionPlan& plan) {
 }
 
 void apply_sym_matvec_decision(const ExecutionPlan& plan) {
-    set_sym_matvec_repr(plan.sym_orbit_csr ? SymMatvecRepr::OrbitCsr
-                                           : SymMatvecRepr::Rep);
+    set_sym_matvec_repr(static_cast<SymMatvecRepr>(plan.sym_matvec));
 }
 
 }  // namespace ed::planner
