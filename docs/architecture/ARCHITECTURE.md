@@ -195,17 +195,29 @@ reduction axis enters. All policies feed the same `CpuMatVecBackend<Policy>` /
 Abelian symmetry is the `d_Γ = 1` special case of non-abelian; both ride the
 production engine, so reduction and method are orthogonal.
 
-#### Execution planner (the decision layer)
+#### Method & policy defaults (no planner)
 
-[`ed::planner::plan_execution`](../../include/ed/planner/execution_planner.h) turns a
-`(task, system-capabilities)` pair into a recipe — device lane, matvec strategy,
-reorth, basis representation — from a system probe + a task cost model, published via
-process-global lazy hooks the backends read on first `apply()`:
-`csr_override` (assembled-CSR vs matrix-free), `basis_repr` (materialized vs tableless
-combinadic), and `sym_matvec_repr` (rep walk vs orbit-CSR for symmetry sectors). Each
-is a "materialize if it fits the probed budget, else stay matrix-free" decision; the
-cost model is overflow/UB-hardened so huge dimensions report *infeasible* rather than
-wrapping.
+There is **no** execution-planner / cost-model / feasibility layer — it was
+removed in favour of **sensible defaults plus leaf policy hooks**. The
+orchestrator ([`src/orchestrator.cpp`](../../src/orchestrator.cpp)) chooses the
+method from the problem size alone (`default_method_for`: full diagonalization
+for `dim ≤ 1024`, Lanczos otherwise) and guards the dominant allocation with
+[`ed::core::guard_working_set`](../../include/ed/core/mem_guard.h) — a clean
+error instead of an OOM kill (bypass with `ED_MEM_GUARD_OFF`).
+
+The only representation choices live in three process-global lazy hooks the
+backends read on first `apply()`. Each is a static default with an env override —
+no probe, no cost model:
+
+| Hook              | Header                                | Default                                                          | Override |
+|-------------------|---------------------------------------|-----------------------------------------------------------------|----------|
+| `sym_matvec_repr` | `ed/planner/sym_matvec_policy_hook.h` | `RepReducedCsr` — build the reduced sector matrix once, O(1) SpMV | `ED_SYM_REDUCED_CSR=0` → rep walk; `ED_SYM_REP=0` → orbit-materialized |
+| `csr_override`    | `ed/planner/csr_policy_hook.h`        | matrix-free vs assembled-CSR by size                            | env      |
+| `basis_repr`      | `ed/planner/basis_policy_hook.h`      | tableless combinadic vs materialized                            | env      |
+
+The `ed/planner/` directory now holds only these three hook headers;
+`execution_planner.h`, the feasibility advisor, and the TPQ/solve autotuner are
+gone.
 
 ### Backends
 

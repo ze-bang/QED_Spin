@@ -98,7 +98,7 @@
 > (whole spectrum keyed by topology+options) plus the in-process spatial-
 > generator cache, so no separate per-sector rep HDF5 cache is wired.
 
-> **Update (2026-06): non-abelian symmetry + planner-driven matvec regime.**
+> **Update (2026-06): non-abelian symmetry + reduced-CSR default matvec regime.**
 >
 > **Non-abelian point groups are now supported.** A numerical irrep engine
 > (regular-representation Hermitian-commutant decomposition,
@@ -121,14 +121,22 @@
 > which holds only `reps[]` and regenerates the projection arithmetically — that is
 > the at-scale machinery. A matrix-free *non-abelian* engine is not yet implemented.
 >
-> **The rep-walk-vs-orbit-CSR regime is now planner-driven.** The execution planner
-> ([`ed::planner::plan_execution`](../../include/ed/planner/execution_planner.h))
-> compares the orbit-CSR footprint (`~dim·|G|·24 B`) against the probed memory budget
-> and publishes the choice through the `sym_matvec_repr` hook
-> ([`include/ed/planner/sym_matvec_policy_hook.h`](../../include/ed/planner/sym_matvec_policy_hook.h)):
-> `OrbitCsr` when it fits (faster apply), else `Rep` (the scalable matrix-free walk).
-> The `ED_SYM_REP` / `lazy_sectors_enabled()` heuristic in the env table above is now
-> the **`Auto` fallback**, used only when the planner has not published a decision.
+> **The sym-matvec regime is a default, not a planner decision.** There is no
+> execution planner; the strategy comes from the `sym_matvec_repr` leaf hook
+> ([`include/ed/planner/sym_matvec_policy_hook.h`](../../include/ed/planner/sym_matvec_policy_hook.h)),
+> a static default with env overrides (`resolved_sym_matvec_repr()`):
+> * **`RepReducedCsr` (default)** — rep policy, but build the reduced sector
+>   matrix **once** and reuse it for every `apply()` (O(1) SpMV per matvec). This
+>   is the build-once orbit-walk CSR (`include/ed/matvec/reduced_symmetry_csr.h`,
+>   OpenMP-parallel build + SpMV); ~5× over the rep walk at 18 sites.
+> * **`Rep`** (`ED_SYM_REDUCED_CSR=0`) — regenerate the projection arithmetically
+>   each matvec; CSR-free, lowest memory, the at-scale fallback.
+> * **`OrbitMaterialized`** (`ED_SYM_REP=0`) — eager per-sector orbit-CSR.
+>
+> All three are numerically identical; the choice is memory-vs-speed only. The
+> distributed sector operator (`DistributedSymmetryOperator`) builds its
+> rank-local matrix with the same orbit-walk (linear, OpenMP-parallel) — see
+> [`SCALING.md`](SCALING.md).
 
 > **Update (2026-05-26): Orthogonal symmetry composition lands.**
 >

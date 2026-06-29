@@ -29,14 +29,12 @@ end-to-end. The most common entry points are:
   low-level access to the dense LAPACK and Lanczos drivers.
 * :func:`qed.find_symmetries` — symmetry discovery returning
   :class:`qed.SymmetryReport` + :class:`qed.GeneratorSet` candidates.
-* :func:`qed.estimate_resources`, :func:`qed.suggest_workflow` —
-  pre-flight planner; returns :class:`qed.HostResources`.
 * :func:`qed.has_cuda_build`, :func:`qed.has_mpi_build`,
   :func:`qed.has_nccl_build`, :func:`qed.has_scalapack_build` — build
   introspection.
 
 The helper classes (:class:`qed.Operator`, :class:`qed.FixedSzOperator`,
-:class:`qed.GeneratorSet`, :class:`qed.HostResources`,
+:class:`qed.GeneratorSet`,
 :class:`qed.SymmetryReport`, …) are re-exported from their canonical
 sub-modules; see the per-submodule sections below for full member
 listings.
@@ -119,33 +117,16 @@ permutations) consumed via the ``symmetry=`` kwarg of
 Auto-tuner (``qed.auto_tune``)
 ------------------------------
 
-Pure-Python heuristics for solver / device / Krylov-dim / broadening
-selection. Consulted automatically by the three orchestrator verbs;
-exposed standalone for inspection and integration into custom
-schedulers.
+Pure-Python heuristics for spectral broadening (η), the ω-grid, random-vector
+count, and Krylov dimension. Consumed by :func:`qed.spectral` when
+``auto_tune=True`` (see :func:`qed.auto_tune.tune_dssf`); exposed standalone for
+inspection. (There is no pre-flight planner / feasibility module — it was
+removed in favour of sensible defaults plus a runtime memory guard.)
 
 .. automodule:: qed.auto_tune
    :members:
    :undoc-members:
    :show-inheritance:
-
-Pre-flight planner (``qed.feasibility``)
-----------------------------------------
-
-Resource estimation and ranked workflow suggestions
-(:func:`qed.estimate_resources`, :func:`qed.suggest_workflow`,
-``ResourceError``).
-
-.. automodule:: qed.feasibility
-   :members:
-   :undoc-members:
-   :show-inheritance:
-   :exclude-members: HostResources
-
-.. autoclass:: qed.feasibility.HostResources
-   :members:
-   :undoc-members:
-   :no-index:
 
 MPI launcher helper (``qed.mpi``)
 ---------------------------------

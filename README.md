@@ -31,7 +31,7 @@ The same shape is exposed in Python as
 | Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
 | Symmetry projection: U(1) Sz × **abelian** spatial point group × translations | production, matrix-free at scale (rep walk) |
 | Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF, moderate-N (scale-guarded SAB engine) |
-| Capability-aware execution planner (CSR vs matrix-free, rep vs orbit-CSR, device lane) | production (`ed::planner`) |
+| Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
 | Symmetry projection: spin-flip Z₂, time-reversal, SU(2) total-S | seam open, implementation deferred |
 | CPU (OpenMP), single-GPU (cuBLAS / cuSPARSE), multi-rank MPI, multi-GPU NCCL | production |
 | First-class Python bindings (`import qed`) | production |
