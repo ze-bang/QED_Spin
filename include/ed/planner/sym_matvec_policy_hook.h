@@ -87,13 +87,22 @@ inline void clear_sym_matvec_repr() noexcept {
         if (const char* e = std::getenv("ED_SYM_REP"))
             if (e[0] == '0' && e[1] == '\0')
                 return static_cast<int>(SymMatvecRepr::OrbitMaterialized);
-        if (const char* e = std::getenv("ED_SYM_REDUCED_CSR"))
+        if (const char* e = std::getenv("ED_SYM_REDUCED_CSR")) {
             if (e[0] == '1' && e[1] == '\0')
                 return static_cast<int>(SymMatvecRepr::RepReducedCsr);
+            if (e[0] == '0' && e[1] == '\0')
+                return static_cast<int>(SymMatvecRepr::RepStream);  // CSR-free rep walk
+        }
         return static_cast<int>(SymMatvecRepr::Auto);
     }();
     if (env_override != static_cast<int>(SymMatvecRepr::Auto)) return env_override;
-    return sym_matvec_repr();
+    const int slot = sym_matvec_repr();
+    if (slot != static_cast<int>(SymMatvecRepr::Auto)) return slot;
+    // DEFAULT (no env, no plan): reduced-CSR -- typically group_size x faster
+    // than the rep walk (the 27-site BFG benchmark measured the rep walk at
+    // ~19-42 s/matvec vs reduced-CSR at ~0.2-0.4 s/matvec). Memory-bound large
+    // systems can opt out with ED_SYM_REDUCED_CSR=0 (CSR-free rep walk).
+    return static_cast<int>(SymMatvecRepr::RepReducedCsr);
 }
 
 /// RAII guard: set the override for a scope, restore the previous value on exit.

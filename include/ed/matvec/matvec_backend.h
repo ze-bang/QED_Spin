@@ -106,11 +106,17 @@ using Complex = std::complex<double>;
 // ---------------------------------------------------------------------------
 namespace detail {
 // Skeleton lane gate: materialize the reduced sector matrix (O(1) SpMV) instead
-// of the per-iteration O(|G|) rep walk. The PLANNER now drives this (cost model
-// picks RepReducedCsr when it fits); ED_SYM_REDUCED_CSR=1 is folded in as a
-// manual override by resolved_sym_matvec_repr(). The `&& policy_is_rep_v` guard
-// at the call sites keeps reduced-CSR rep-policy-only.
+// of the per-iteration O(|G|) rep walk. Reduced-CSR is now the DEFAULT in the
+// rep lazy regime -- it is typically group_size x faster than the rep walk (the
+// 27-site BFG benchmark measured the rep walk at ~19-42 s/matvec vs reduced-CSR
+// at ~0.2-0.4 s/matvec). The rep walk is CSR-free and cannot OOM, so for very
+// large systems where the reduced sector matrix would not fit, opt out with
+// ED_SYM_REDUCED_CSR=0 (falls back to the rep walk). ED_SYM_REDUCED_CSR=1 and
+// ED_SYM_REP are still honoured via resolved_sym_matvec_repr(); the
+// `&& policy_is_rep_v` guard at the call sites keeps this rep-policy-only.
 inline bool reduced_csr_enabled() noexcept {
+    // resolved_sym_matvec_repr() now DEFAULTS to RepReducedCsr (opt out with
+    // ED_SYM_REDUCED_CSR=0 / ED_SYM_REP), so this is the reduced-CSR sub-choice.
     return ed::planner::resolved_sym_matvec_repr()
            == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr);
 }
