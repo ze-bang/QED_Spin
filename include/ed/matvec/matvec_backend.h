@@ -105,15 +105,17 @@ using Complex = std::complex<double>;
 // ``apply_terms``.
 // ---------------------------------------------------------------------------
 namespace detail {
-// Skeleton lane gate: materialize the reduced sector matrix (O(1) SpMV) instead
-// of the per-iteration O(|G|) rep walk. Reduced-CSR is now the DEFAULT in the
-// rep lazy regime -- it is typically group_size x faster than the rep walk (the
-// 27-site BFG benchmark measured the rep walk at ~19-42 s/matvec vs reduced-CSR
-// at ~0.2-0.4 s/matvec). The rep walk is CSR-free and cannot OOM, so for very
-// large systems where the reduced sector matrix would not fit, opt out with
-// ED_SYM_REDUCED_CSR=0 (falls back to the rep walk). ED_SYM_REDUCED_CSR=1 and
-// ED_SYM_REP are still honoured via resolved_sym_matvec_repr(); the
-// `&& policy_is_rep_v` guard at the call sites keeps this rep-policy-only.
+// Gate for the reduced-CSR symmetry matvec: assemble the reduced sector matrix
+// ONCE (via the ORBIT policy's iter_orbit / coeff_modifier) then do an O(1)-per-
+// nnz SpMV every matvec, instead of the per-matvec orbit/rep walk. This is the
+// DEFAULT (RepReducedCsr). It lives in the orbit-policy branch of matrix_free_*
+// (the rep policy lacks iter_orbit, so RepReducedCsr is routed to the orbit
+// policy by SectorOperator::make_backend_). It cannot run on the rep policy, so
+// the call sites are NOT guarded by policy_is_rep_v. The reduced sector matrix
+// materialises (~dim x nnz/row), so for very large sectors that would not fit,
+// opt out with ED_SYM_REDUCED_CSR=0 -> RepStream (CSR-free rep walk, cannot OOM).
+// Measured net win at 27-site sz+spatial: converged GS 238 s vs 452 s rep-walk;
+// FTLM rep-walk did not finish in 70 min vs ~31 min reduced-CSR.
 inline bool reduced_csr_enabled() noexcept {
     // resolved_sym_matvec_repr() now DEFAULTS to RepReducedCsr (opt out with
     // ED_SYM_REDUCED_CSR=0 / ED_SYM_REP), so this is the reduced-CSR sub-choice.
