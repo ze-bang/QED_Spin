@@ -11,6 +11,8 @@
 
 // Pulls in the full Operator + SymmetryGroupInfo definitions.
 #include <ed/core/construct_ham.h>
+// Single-state term emitter for the orbit-walk matrix build.
+#include <ed/matvec/term_kernels.h>
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +28,7 @@
 #endif
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ed::distributed {
@@ -339,67 +342,146 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
     // determine that only after computing the row's nonzero pattern.)
     std::set<std::size_t> needed_orbits;
 
-    std::vector<Complex> tilde_j(dim, Complex(0.0, 0.0));
-    std::vector<Complex> H_tilde_j(dim, Complex(0.0, 0.0));
-
-    // Precompute 1/sqrt(N_i) for the projection normalisation step.
+    // Precompute 1/sqrt(N_i) for the projection normalisation (both paths).
     std::vector<double> inv_sqrt_N(n_orbits, 0.0);
     for (std::size_t i = 0; i < n_orbits; ++i) {
         inv_sqrt_N[i] = 1.0 / std::sqrt(orbit_norms_sq_[i]);
     }
 
-    // Per-column scratch: accumulated <~|i | H | ~|j>> for every orbit i.
-    std::vector<Complex> col_proj(n_orbits, Complex(0.0, 0.0));
+    // Default path: parallel orbit-walk. For each orbit j we walk its member
+    // states, emit the reachable <s'|H|s> via apply_term_to_state, and project
+    // s' back onto its orbit i -- O(dim * num_terms) total, vs the legacy dense
+    // probe's O(n_orbits * dim). Set ED_DISTRIBUTED_LEGACY_PROBE to fall back to
+    // the dense probe (kept as a numerical cross-check reference).
+    const bool use_legacy_probe =
+        std::getenv("ED_DISTRIBUTED_LEGACY_PROBE") != nullptr;
 
-    for (std::size_t j = 0; j < n_orbits; ++j) {
-        // Build dense ~|j>.
-        std::fill(tilde_j.begin(), tilde_j.end(), Complex(0.0, 0.0));
-        // Iterate states in orbit j.  We don't have an explicit orbit
-        // membership list, but we have state_to_orbit, so we can either
-        // (a) walk all states (O(dim) per column -- already paid for the
-        //     apply, so order-of-magnitude same), or
-        // (b) regenerate the orbit via BFS (O(|orbit| * |gen|)). Both
-        //     are bounded; (a) is simpler and lets the compiler vectorise.
-        // Use (a) for code simplicity.
-        for (std::uint64_t b = 0; b < dim; ++b) {
-            if (state_to_orbit[b] == static_cast<std::int64_t>(j)) {
-                tilde_j[b] = phi[b];
+    if (use_legacy_probe) {
+        std::vector<Complex> tilde_j(dim, Complex(0.0, 0.0));
+        std::vector<Complex> H_tilde_j(dim, Complex(0.0, 0.0));
+        std::vector<Complex> col_proj(n_orbits, Complex(0.0, 0.0));
+        for (std::size_t j = 0; j < n_orbits; ++j) {
+            std::fill(tilde_j.begin(), tilde_j.end(), Complex(0.0, 0.0));
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                if (state_to_orbit[b] == static_cast<std::int64_t>(j)) {
+                    tilde_j[b] = phi[b];
+                }
+            }
+            op_->apply(tilde_j.data(), H_tilde_j.data(),
+                       static_cast<size_t>(dim));
+            std::fill(col_proj.begin(), col_proj.end(), Complex(0.0, 0.0));
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                const std::int64_t i = state_to_orbit[b];
+                if (i == kNoOrbit) continue;
+                if (std::abs(H_tilde_j[b]) < 1e-300) continue;
+                col_proj[static_cast<std::size_t>(i)]
+                    += std::conj(phi[b]) * H_tilde_j[b];
+            }
+            const double norm_j = inv_sqrt_N[j];
+            for (std::size_t i = 0; i < n_orbits; ++i) {
+                const Complex H_ij = col_proj[i] * (inv_sqrt_N[i] * norm_j);
+                if (std::abs(H_ij) < kSparsityTolerance) continue;
+                if (partition_.owner_rank(i) != rank_) continue;
+                const std::size_t local_row = partition_.owner_local_index(i);
+                row_col_idx_[local_row].push_back(j);
+                row_coeff_[local_row].push_back(H_ij);
+                const bool j_local = (partition_.owner_rank(j) == rank_);
+                row_is_local_[local_row].push_back(j_local ? 1u : 0u);
+                if (!j_local) needed_orbits.insert(j);
+            }
+        }
+    } else {
+        // Orbit membership lists (one O(dim) pass).
+        std::vector<std::vector<std::uint64_t>> orbit_members(n_orbits);
+        {
+            std::vector<std::size_t> cnt(n_orbits, 0);
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                const std::int64_t i = state_to_orbit[b];
+                if (i != kNoOrbit) cnt[static_cast<std::size_t>(i)]++;
+            }
+            for (std::size_t i = 0; i < n_orbits; ++i)
+                orbit_members[i].reserve(cnt[i]);
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                const std::int64_t i = state_to_orbit[b];
+                if (i != kNoOrbit)
+                    orbit_members[static_cast<std::size_t>(i)].push_back(b);
             }
         }
 
-        // Apply H: H_tilde_j = H * tilde_j.
-        op_->apply(tilde_j.data(), H_tilde_j.data(), static_cast<size_t>(dim));
+        const double spin_l = static_cast<double>(op_->getSpin());
+        const auto&  T      = op_->getTerms();
+        int nthr = 1;
+#ifdef _OPENMP
+        nthr = omp_get_max_threads();
+#endif
+        if (nthr < 1) nthr = 1;
 
-        // Project onto every orbit i: col_proj[i] = sum_{b in orbit i}
-        //   conj(phi[b]) * H_tilde_j[b].
-        std::fill(col_proj.begin(), col_proj.end(), Complex(0.0, 0.0));
-        for (std::uint64_t b = 0; b < dim; ++b) {
-            const std::int64_t i = state_to_orbit[b];
-            if (i == kNoOrbit) continue;
-            if (std::abs(H_tilde_j[b]) < 1e-300) continue;
-            col_proj[static_cast<std::size_t>(i)]
-                += std::conj(phi[b]) * H_tilde_j[b];
+        struct Triplet {
+            std::size_t  local_row;
+            std::size_t  j;
+            Complex      h;
+            std::uint8_t j_local;
+        };
+        std::vector<std::vector<Triplet>>  tl_trip(static_cast<std::size_t>(nthr));
+        std::vector<std::set<std::size_t>> tl_need(static_cast<std::size_t>(nthr));
+
+#ifdef _OPENMP
+#       pragma omp parallel num_threads(nthr)
+#endif
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            auto& trips = tl_trip[static_cast<std::size_t>(tid)];
+            auto& need  = tl_need[static_cast<std::size_t>(tid)];
+            std::unordered_map<std::size_t, Complex> col_acc;
+#ifdef _OPENMP
+#           pragma omp for schedule(dynamic, 16)
+#endif
+            for (long long jj = 0; jj < static_cast<long long>(n_orbits); ++jj) {
+                const std::size_t j          = static_cast<std::size_t>(jj);
+                const double      norm_j_inv = inv_sqrt_N[j];
+                const bool        j_local    =
+                    (partition_.owner_rank(j) == rank_);
+                col_acc.clear();
+                for (const std::uint64_t s_src : orbit_members[j]) {
+                    const Complex pre = phi[s_src] * norm_j_inv;
+                    if (std::abs(pre) < 1e-300) continue;
+                    ed::matvec::kernel::apply_term_to_state<Complex>(
+                        s_src, spin_l,
+                        T.diag_one_body, T.offdiag_one_body, T.diag_two_body,
+                        T.mixed_two_body, T.offdiag_two_body, T.three_body,
+                        [&](std::uint64_t s_dst, Complex h) {
+                            const std::int64_t i = state_to_orbit[s_dst];
+                            if (i == kNoOrbit) return;
+                            col_acc[static_cast<std::size_t>(i)] +=
+                                std::conj(phi[s_dst])
+                                * inv_sqrt_N[static_cast<std::size_t>(i)]
+                                * h * pre;
+                        });
+                }
+                for (const auto& kv : col_acc) {
+                    const std::size_t i = kv.first;
+                    if (partition_.owner_rank(i) != rank_) continue;
+                    if (std::abs(kv.second) < kSparsityTolerance) continue;
+                    trips.push_back({partition_.owner_local_index(i), j,
+                                     kv.second,
+                                     static_cast<std::uint8_t>(j_local ? 1 : 0)});
+                    if (!j_local) need.insert(j);
+                }
+            }
         }
 
-        // Normalise + record local-row entries.
-        const double norm_j = inv_sqrt_N[j];
-        for (std::size_t i = 0; i < n_orbits; ++i) {
-            const Complex H_ij = col_proj[i] * (inv_sqrt_N[i] * norm_j);
-            if (std::abs(H_ij) < kSparsityTolerance) continue;
-
-            const int owner = partition_.owner_rank(i);
-            if (owner != rank_) continue;
-            const std::size_t local_row = partition_.owner_local_index(i);
-
-            row_col_idx_[local_row].push_back(j);
-            row_coeff_[local_row].push_back(H_ij);
-            // is_local resolved after we know which j are remote.
-            const int j_owner = partition_.owner_rank(j);
-            const bool j_local = (j_owner == rank_);
-            row_is_local_[local_row].push_back(j_local ? 1u : 0u);
-            if (!j_local) {
-                needed_orbits.insert(j);
+        // Serial merge of the thread-local triplets into per-row storage.
+        for (int t = 0; t < nthr; ++t) {
+            for (const auto& tr : tl_trip[static_cast<std::size_t>(t)]) {
+                row_col_idx_[tr.local_row].push_back(tr.j);
+                row_coeff_[tr.local_row].push_back(tr.h);
+                row_is_local_[tr.local_row].push_back(tr.j_local);
             }
+            needed_orbits.insert(tl_need[static_cast<std::size_t>(t)].begin(),
+                                 tl_need[static_cast<std::size_t>(t)].end());
         }
     }
 
