@@ -125,9 +125,9 @@ jobs:
         run: |
           python -m pip install -v .
 
-      - name: Run pytest
+      - name: Run pytest (unit + integration; slow guards deselected)
         run: |
-          python -m pytest python/tests -v
+          python -m pytest python/tests tests/integration -v
 
   # ---------------------------------------------------------------------------
   # Examples smoke lane: build the CPU-lane per-cell example tree
