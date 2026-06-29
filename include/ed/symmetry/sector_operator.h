@@ -82,13 +82,16 @@ SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
     // The planner owns the symmetry-matvec strategy (sym_matvec_policy_hook).
     // resolved_sym_matvec_repr() folds the env overrides (ED_SYM_REP=0 ->
     // OrbitMaterialized, ED_SYM_REDUCED_CSR=1 -> RepReducedCsr) and falls back to
-    // the producer's rep_lazy() heuristic when Auto (no plan ran). Both rep tiers
-    // (RepStream / RepReducedCsr) use the rep policy here; the reduced-CSR
-    // sub-choice is then made inside CpuMatVecBackend per reduced_csr_enabled().
+    // the producer's rep_lazy() heuristic when Auto (no plan ran).
+    //   * RepStream      -> rep policy (CSR-free on-the-fly rep walk, lean).
+    //   * RepReducedCsr  -> ORBIT policy: assembling the reduced sector matrix
+    //                       needs iter_orbit / coeff_modifier, which the rep
+    //                       policy does not expose. The orbit backend builds the
+    //                       CSR once, gated by reduced_csr_enabled().
+    //   * OrbitMaterialized / Auto-eager -> orbit policy (orbit-walk gather).
     const int  sym = ed::planner::resolved_sym_matvec_repr();
     const bool want_rep =
         sym == static_cast<int>(ed::planner::SymMatvecRepr::RepStream)     ||
-        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr) ||
         (sym == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
          && producer_.rep_lazy());
     if (want_rep) {

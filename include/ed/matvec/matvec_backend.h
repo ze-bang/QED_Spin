@@ -613,8 +613,7 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()
-                       && detail::policy_is_rep_v<BasisPolicy>) {
+            } else if (detail::reduced_csr_enabled()) {
                 // Skeleton lane: materialize the reduced sector matrix ONCE
                 // (same coeff_modifier as the gather) then O(1)-per-nnz SpMV.
                 if (!rep_csr_cplx_.built())
@@ -682,8 +681,7 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()
-                       && detail::policy_is_rep_v<BasisPolicy>) {
+            } else if (detail::reduced_csr_enabled()) {
                 if (!rep_csr_real_.built())
                     rep_csr_real_ = build_reduced_symmetry_csr<BasisPolicy, double>(
                         basis_, t.spin_l,
