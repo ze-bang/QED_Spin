@@ -14,8 +14,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+#include <chrono>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <queue>
 #include <set>
 #ifdef _OPENMP
@@ -118,6 +121,8 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
     //   (each rep is visited exactly when we first encounter it via BFS from
     //   `b == rep`).
     // -------------------------------------------------------------------------
+    const bool        _tcon = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
+    const auto        _t0   = std::chrono::steady_clock::now();
     const std::size_t n_group = info.max_clique.size();
 
     // Per-group-element character: chi_q(max_clique[g]) = phase_factors[g].
@@ -237,6 +242,7 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
     }
 
     const std::size_t n_orbits = orbit_reps_.size();
+    const auto _t_enum = std::chrono::steady_clock::now();
 
     // -------------------------------------------------------------------------
     // Step 3: Build the LPT orbit partition. Weight = orbit size (proxy for
@@ -395,6 +401,20 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
                 needed_orbits.insert(j);
             }
         }
+    }
+
+    if (_tcon && rank_ == 0) {
+        const auto _t_mat = std::chrono::steady_clock::now();
+        const double enum_s = std::chrono::duration<double>(_t_enum - _t0).count();
+        const double mat_s  = std::chrono::duration<double>(_t_mat - _t_enum).count();
+        int _thr = 1;
+#ifdef _OPENMP
+        _thr = omp_get_max_threads();
+#endif
+        std::cout << "[dsym-construct] threads=" << _thr
+                  << " n_orbits=" << n_orbits
+                  << " enum_s=" << enum_s
+                  << " matbuild_s=" << mat_s << std::endl;
     }
 
     // -------------------------------------------------------------------------
