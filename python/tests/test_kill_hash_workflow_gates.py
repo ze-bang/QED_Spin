@@ -178,7 +178,6 @@ def test_phase_d_gs_lanczos_gpu():
             num_eigenvalues=1,
             solver="lanczos",
             device="gpu",
-            plan=False,
             verbose=False,
         )
     res, _ = _time_and_check(go, "GS-Lanczos")
@@ -193,7 +192,6 @@ def test_phase_d_gs_lanczos_gpu():
             num_eigenvalues=1,
             solver="lanczos",
             device="cpu",
-            plan=False,
             verbose=False,
         )
     res_cpu, _ = _time_and_check(go_cpu, "GS-Lanczos[CPU]")
@@ -219,7 +217,7 @@ def test_phase_d_kpm_dos_gpu(tmp_path):
             kpm_num_random_vectors=2,
             use_sz_if_conserved=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "kpm_dos"),
         )
     res, _ = _time_and_check(go, "KPM_DOS")
@@ -241,7 +239,7 @@ def test_phase_d_ftlm_gpu(tmp_path):
             num_samples=1, ftlm_krylov_dim=20,
             use_sz_if_conserved=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "ftlm"),
         )
     res, _ = _time_and_check(go, "FTLM")
@@ -262,7 +260,7 @@ def test_phase_d_ltlm_gpu(tmp_path):
             num_samples=1, ltlm_krylov_dim=20,
             use_sz_if_conserved=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "ltlm"),
         )
     res, _ = _time_and_check(go, "LTLM")
@@ -288,7 +286,7 @@ def test_phase_d_mtpq_gpu(tmp_path):
             num_samples=1, max_iterations=20,
             use_sz_if_conserved=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "mtpq"),
         )
     res, _ = _time_and_check(go, "mTPQ")

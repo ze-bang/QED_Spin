@@ -832,7 +832,7 @@ class TestDeviceMatrix:
         # dispatch routing here, not resource accounting.
         qed.solve(H, solver="LANCZOS", device="gpu",
                         num_eigenvalues=1, auto_sz=False,
-                        verbose=False, plan=False)
+                        verbose=False)
         assert called == {"workflows_solve": 1}, (
             f"GPU path failed to hit `_core.workflows_solve`: {called}"
         )
@@ -859,7 +859,7 @@ class TestDeviceMatrix:
         monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
         qed.solve(H, solver="LANCZOS", num_eigenvalues=1,
-                 verbose=False, plan=False)
+                 verbose=False)
         assert called == {"workflows_solve": 1}, (
             f"CPU+no-symmetry path took the wrong dispatcher: {called}. "
             "Expected the unified `workflows_solve` route."
@@ -918,7 +918,6 @@ class TestDeviceMatrix:
             # plan=False: dispatch routing test, not feasibility -- the CI
             # host typically has no NCCL build, so the planner would
             # (correctly) refuse mpi_gpu without it.
-            plan=False,
             verbose=False,
         )
         expected_mode = {
@@ -1022,8 +1021,7 @@ class TestDeviceMatrix:
         res = qed.solve(
             H, solver=solver, device=device,
             symmetry=symm,
-            target_beta=2.0, num_samples=1, mpi_n_ranks=2,
-            plan=False, verbose=False,
+            target_beta=2.0, num_samples=1, mpi_n_ranks=2, verbose=False,
         )
 
         # Phase H invariant 1: at least 2 distinct sectors were
@@ -1122,8 +1120,7 @@ class TestDeviceMatrix:
         res = qed.solve(
             H, solver="FTLM", device=device,
             symmetry=symm, sector=[0],
-            target_beta=2.0, num_samples=1, mpi_n_ranks=2,
-            plan=False, verbose=False,
+            target_beta=2.0, num_samples=1, mpi_n_ranks=2, verbose=False,
         )
 
         assert n_calls["n"] == 1, (

@@ -553,8 +553,6 @@ def thermal(
     random_seed: int = 0,
     use_symmetry_if_available: bool = False,
     use_sz_if_conserved: bool = True,
-    auto_tune: bool = True,
-    level: str = "balanced",
     output_dir: str = "",
     verbose: bool = True,
     # Phase C of the "Backend x Symmetries x Workflows" plan
@@ -633,8 +631,8 @@ def thermal(
         directory-form auto-detection.
     use_sz_if_conserved : bool, optional
         Force-off toggle for the Sz auto-iteration. Default True.
-    auto_tune, level : optional
-        Phase-9.3 auto-tuner. ``level`` is one of ``"conservative"``,
+    _unused_doc : optional
+        (auto-tuner removed; thermal knobs use struct defaults). ``level`` was one of ``"conservative"``,
         ``"balanced"``, ``"aggressive"``.
     output_dir : str, optional
         Where to write per-sector HDF5 sinks; default ``""`` means
@@ -1222,10 +1220,7 @@ def thermal(
             "temp_min": T_min,
             "temp_max": T_max,
             "output_dir": _resolved_outdir,
-            "auto_tune": auto_tune,
-            "level": level,
             "verbose": False,
-            "plan": False,
             # Phase C of the "Backend x Symmetries x Workflows" plan
             # (May 2026): forward the device selector to every
             # per-sector solver call so the in-memory thermal path

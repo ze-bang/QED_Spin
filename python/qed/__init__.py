@@ -50,7 +50,6 @@ Submodules
   ed_distributed_main`` binary.
 * :mod:`qed.auto_tune` -- internal heuristic tuner (used by
   :func:`qed.spectral` when ``auto_tune=True``).
-* :mod:`qed.feasibility` -- pre-flight planner.
 """
 
 from __future__ import annotations
@@ -104,20 +103,7 @@ from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
 from . import spectral as _spectral_module  # one canonical spectral entry point
 from .spectral import spectral  # noqa: E402
 
-from . import feasibility  # pre-flight planner
-from .feasibility import (  # noqa: E402
-    BasisChoice,
-    FeasibilityReport,
-    HostResources,
-    OperatorMetadata,
-    ResourceError,
-    WorkflowCandidate,
-    WorkflowSuggestion,
-    estimate_resources,
-    inspect_operator,
-    probe_host,
-    suggest_workflow,
-)
+# (feasibility / pre-flight planner removed: sensible defaults instead.)
 
 __version__: Final[str] = "0.3.0"
 
@@ -165,22 +151,10 @@ __all__ = [
     "mpi",
     "helpers",
     "workflow",
-    # Helpers and feasibility planner
+    # Helpers
     "list_diag_parameters",
     "solver_device_support",
     "load_mpi_eigenvector",
     "load_mpi_eigenvectors",
-    "feasibility",
-    "estimate_resources",
-    "suggest_workflow",
-    "probe_host",
-    "inspect_operator",
-    "FeasibilityReport",
-    "WorkflowSuggestion",
-    "WorkflowCandidate",
-    "ResourceError",
-    "HostResources",
-    "OperatorMetadata",
-    "BasisChoice",
     "__version__",
 ]

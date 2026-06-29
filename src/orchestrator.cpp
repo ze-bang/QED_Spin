@@ -33,10 +33,11 @@
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
-#include <ed/planner/execution_planner.h>   // THE dictator: plan_execution
-#include <ed/planner/system_capabilities.h> // probe_system
-#include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (apply CSR decision)
-#include <ed/planner/sym_matvec_policy_hook.h> // ScopedSymMatvecRepr (apply sym decision)
+// Execution planner / feasibility "dictator" removed (sensible defaults +
+// env-override leaf hooks instead). The matvec/symmetry leaf policy hooks
+// (csr_policy_hook, sym_matvec_policy_hook, basis_policy_hook) still provide
+// the default + env-override behaviour, consumed lazily inside the operator
+// backends; the orchestrator no longer overrides them.
 #include <ed/core/operator.h>               // Operator introspection (term SoA, N)
 #include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
 
@@ -209,102 +210,11 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
     }
 }
 
-// Map the planner's eigensolver decision (ed::planner::Method) onto the
-// orchestrator's SolveMethod. The planner is the single authority for the
-// ground-state method; this is the only translation needed. (The planner never
-// auto-picks BlockKrylovSchur -- that stays an explicit user choice.)
-[[nodiscard]] SolveMethod map_planner_method(ed::planner::Method m) {
-    switch (m) {
-        case ed::planner::Method::Full:         return SolveMethod::FullDiag;
-        case ed::planner::Method::Lanczos:      return SolveMethod::Lanczos;
-        case ed::planner::Method::BlockLanczos: return SolveMethod::BlockLanczos;
-        case ed::planner::Method::KrylovSchur:  return SolveMethod::KrylovSchur;
-        default:                                return SolveMethod::Lanczos;
-    }
-}
-
-// Build the planner's TaskDescriptor from the operator + solve options
-// (consolidation Stage A). Feeds the REAL Hamiltonian term structure (n_terms,
-// n_offdiag, N) and the reduction (kind, n_up) so plan_execution's CSR / basis /
-// symmetry decisions are trustworthy -- they are consumed from Stage B onward.
-// No behavior change here: solve_on still applies only method/iterations/subspace.
-// `group_size` (the orbit-CSR-vs-rep input) is left at 1 until the symmetry
-// matvec decision is wired in Stage B.
-// Fill the operator-derived fields (N, n_terms, n_offdiag) of a TaskDescriptor
-// from the concrete spin Operator (every Full / Sz / symmetry op derives from
-// it). Shared by the solve, thermal, and spectral task builders.
-void fill_operator_terms(ed::planner::TaskDescriptor& t, const LinearOperator& H) {
-    if (const auto* op = dynamic_cast<const Operator*>(&H)) {
-        t.N = static_cast<int>(op->getNumBits());
-        const auto& ts = op->getTerms();
-        const std::uint64_t diag = ts.diag_one_body.size() + ts.diag_two_body.size();
-        const std::uint64_t off  = ts.offdiag_one_body.size() + ts.mixed_two_body.size()
-                                 + ts.offdiag_two_body.size() + ts.three_body.size();
-        t.n_terms   = std::max<std::uint64_t>(1, diag + off);
-        t.n_offdiag = off;
-    }
-}
-
-// COMPLETION GUARANTEE (shared by solve / thermal / spectral): refuse cleanly --
-// throw BEFORE any large allocation -- when the plan does not fit the memory
-// budget, so a dispatched run can never OOM/crash mid-flight. `allow_infeasible`
-// (the force escape) dispatches anyway, accepting the OOM risk.
-void enforce_feasible(const ed::planner::ExecutionPlan& plan,
-                      bool allow_infeasible, const char* what) {
-    if (plan.feasible || allow_infeasible) return;
-    std::string msg = std::string(what) + " refused: the execution plan does not "
-        "fit the memory budget (bottleneck: " + plan.bottleneck + "; est " +
-        std::to_string(plan.est_memory_gb) + " GB). The run would not complete.";
-    for (const auto& s : plan.suggestions) msg += "\n  - suggestion: " + s;
-    msg += "\n  (set allow_infeasible / force=True to dispatch anyway.)";
-    throw std::runtime_error(msg);
-}
-
-[[nodiscard]] ed::planner::TaskDescriptor
-make_task_descriptor(const LinearOperator& H, const SolveOptions& opts) {
-    ed::planner::TaskDescriptor t;
-    t.basis_dim       = H.global_dim();
-    t.num_eigs        = static_cast<int>(opts.num_eigs);
-    t.block_size      = opts.block_size;
-    t.compute_vectors = opts.compute_vectors;
-    t.krylov_dim      = static_cast<int>(opts.max_iter);   // user hint, if any
-    t.n_up            = opts.n_up;
-
-    if      (opts.use_symmetry && opts.use_fixed_sz) t.kind = ed::planner::BasisKind::SymSz;
-    else if (opts.use_symmetry)                      t.kind = ed::planner::BasisKind::Symm;
-    else if (opts.use_fixed_sz)                      t.kind = ed::planner::BasisKind::Sz;
-    else                                             t.kind = ed::planner::BasisKind::Full;
-
-    // Pin the planner to the caller's explicit method so its matvec / subspace /
-    // memory choices match what solve_on will run; Auto lets the planner pick.
-    switch (opts.method) {
-        case SolveMethod::FullDiag:         t.method = ed::planner::Method::Full;         break;
-        case SolveMethod::Lanczos:          t.method = ed::planner::Method::Lanczos;      break;
-        case SolveMethod::KrylovSchur:      t.method = ed::planner::Method::KrylovSchur;  break;
-        case SolveMethod::BlockLanczos:     t.method = ed::planner::Method::BlockLanczos; break;
-        // No BlockKrylovSchur in the planner cost model; block-Lanczos is the
-        // closest memory footprint (it stores the full block-Krylov basis).
-        case SolveMethod::BlockKrylovSchur: t.method = ed::planner::Method::BlockLanczos; break;
-        case SolveMethod::Auto:             t.method = ed::planner::Method::Auto;         break;
-    }
-
-    // Real term structure from the concrete spin Operator (diagonal bins stay on
-    // the same state; the rest are off-diagonal -> CSR nnz / connectivity model).
-    fill_operator_terms(t, H);
-
-    // Symmetry group order |G| for the orbit-CSR-vs-rep decision: read it from the
-    // symmetry sector operator's producer (rep walk is O(#reps) memory; orbit-CSR
-    // is ~dim*|G|*24 B). A pre-built symmetry operator may not have set the
-    // opts.use_symmetry CLI flag, so detect it from the type and fix the kind too.
-    if (const auto* so = dynamic_cast<const ed::symmetry::SectorOperator*>(&H)) {
-        t.group_size = std::max<std::uint64_t>(1, so->producer().group_size());
-        if (t.kind != ed::planner::BasisKind::Symm &&
-            t.kind != ed::planner::BasisKind::SymSz) {
-            t.kind = opts.use_fixed_sz ? ed::planner::BasisKind::SymSz
-                                       : ed::planner::BasisKind::Symm;
-        }
-    }
-    return t;
+// Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full
+// diagonalization for tiny spaces, Lanczos otherwise. (Replaces the planner's
+// cost-model method choice.)
+[[nodiscard]] SolveMethod default_method_for(const LinearOperator& H) {
+    return (H.global_dim() <= 1024) ? SolveMethod::FullDiag : SolveMethod::Lanczos;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,49 +287,19 @@ GroundStateResult solve_on(Backend& be,
     GroundStateResult R;
 
     // -----------------------------------------------------------------------
-    // ONE DICTATOR: ed::planner::plan_execution decides the eigensolver method,
-    // the iteration budget, and the memory-bounded Krylov subspace cap. The
-    // orchestrator no longer has its own auto-heuristics -- it just applies the
-    // plan. (An explicit opts.method / opts.max_iter still overrides the plan.)
+    // Sensible defaults (planner removed). The caller's explicit method /
+    // max_iter win; otherwise a simple dim-based default. No memory-budget
+    // pre-flight refusal, and no CSR / symmetry-matvec override -- the leaf
+    // policy hooks (csr_policy_hook / sym_matvec_policy_hook / basis_policy_hook)
+    // keep their default + env-override behaviour, consumed lazily at first
+    // matvec.
     // -----------------------------------------------------------------------
-    const ed::planner::TaskDescriptor task = make_task_descriptor(H, opts);
-    const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
-        task, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
-
-    // COMPLETION GUARANTEE: refuse cleanly, BEFORE any large allocation (basis /
-    // Krylov vectors), when the plan does not fit the memory budget -- so a
-    // dispatched run can never OOM/crash mid-flight. The Python qed.solve
-    // pre-flight enforces the same verdict earlier; this is the safety net for
-    // direct C++ / CLI / api_facade callers. opts.allow_infeasible (force) opts
-    // out (dispatch anyway, accepting the OOM risk).
-    enforce_feasible(plan, opts.allow_infeasible, "ed::solve");
-
     const SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
-        : map_planner_method(plan.solver);
+        : default_method_for(H);
     const std::size_t max_iter =
-        (opts.max_iter > 0) ? opts.max_iter
-                            : (plan.max_iter > 0 ? plan.max_iter : 2 * opts.num_eigs + 30);
-    const std::uint64_t subspace_cap_vectors = plan.max_subspace_vectors;
-
-    // Apply the planner's matvec decision (CSR vs matrix-free) for this solve.
-    // The planner chooses CSR only when csr_bytes + working set FIT the budget AND
-    // assembly amortizes -- so this is "fastest-that-fits" and cannot OOM, and it
-    // supersedes the static dim-cutoff (which could pick a too-big CSR). Scoped:
-    // the previous override is restored on return. Symmetry lanes compile CSR out
-    // and ignore this, so it is a no-op there. (Consumed lazily at first matvec.)
-    const ed::planner::ScopedCsrOverride csr_guard(
-        plan.matvec == ed::planner::MatvecStrategy::Csr
-            ? ed::planner::CsrOverride::Csr
-            : ed::planner::CsrOverride::MatrixFree);
-
-    // Apply the planner's symmetry-matvec decision (orbit-CSR vs rep walk),
-    // consumed lazily by SectorOperator::make_backend_. The planner picks
-    // orbit-CSR only when dim*|G|*24 B + working set FIT the budget (faster
-    // apply, materialized on demand); otherwise the O(#reps) rep walk (CSR-free,
-    // cannot OOM). Scoped (restored on return); a no-op for non-symmetry ops.
-    const ed::planner::ScopedSymMatvecRepr sym_guard(
-        static_cast<ed::planner::SymMatvecRepr>(plan.sym_matvec));
+        (opts.max_iter > 0) ? opts.max_iter : 2 * opts.num_eigs + 30;
+    const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
 
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -650,7 +530,9 @@ GroundStateResult solve_on(Backend& be,
         if (opts.compute_vectors) {
             kopts.keep_basis = true;   // eigenvectors require the stored basis
         } else {
-            kopts.keep_basis = opts.block_lanczos_keep_basis && !plan.block_lanczos_lean;
+            // Planner removed: honour the caller's flag; ED_BLOCK_LANCZOS_LEAN=1
+            // is the explicit lean override.
+            kopts.keep_basis = opts.block_lanczos_keep_basis;
             if (const char* e = std::getenv("ED_BLOCK_LANCZOS_LEAN"))
                 kopts.keep_basis = !(e[0] == '1' && e[1] == '\0');
         }
@@ -995,24 +877,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // refuse cleanly if it would not fit, before allocating those vectors. The
     // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
     // passes. allow_infeasible (force) opts out.
-    {
-        ed::planner::TaskDescriptor t;
-        t.basis_dim  = H.global_dim();
-        t.krylov_dim = static_cast<int>(opts.krylov_dim);
-        t.n_samples  = static_cast<int>(opts.num_samples);
-        t.num_eigs   = 1;
-        switch (opts.method) {
-            case ThermalOptions::Method::FTLM:   t.method = ed::planner::Method::FTLM; break;
-            case ThermalOptions::Method::LTLM:   t.method = ed::planner::Method::LTLM; break;
-            case ThermalOptions::Method::mTPQ:
-            case ThermalOptions::Method::cTPQ:   t.method = ed::planner::Method::TPQ;  break;
-            case ThermalOptions::Method::KpmDos: t.method = ed::planner::Method::KPM;  break;
-        }
-        fill_operator_terms(t, H);
-        const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
-            t, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
-        enforce_feasible(plan, opts.allow_infeasible, "ed::thermal");
-    }
+    // (planner feasibility pre-flight removed: sensible defaults, no refusal)
 
     // Surface unification follow-up (May 2026): when the caller does
     // not supply an explicit ``opts.betas`` grid, construct one from
@@ -1653,25 +1518,7 @@ SpectralResult spectral(const LinearOperator&                      H,
     // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window;
     // the dynamical lanes keep an FTLM / KPM window. Plan it + refuse cleanly if
     // it would not fit, before allocating. allow_infeasible (force) opts out.
-    {
-        ed::planner::TaskDescriptor t;
-        t.basis_dim  = H.global_dim();
-        t.krylov_dim = static_cast<int>(opts.krylov_dim);
-        t.n_samples  = static_cast<int>(opts.num_samples);
-        t.num_eigs   = 1;
-        switch (opts.method) {
-            case SpectralOptions::Method::GroundStateCF:
-                t.method = ed::planner::Method::Lanczos;
-                t.compute_vectors = true;   // GS eigenvector + CF window
-                break;
-            case SpectralOptions::Method::FtlmDynamical: t.method = ed::planner::Method::FTLM; break;
-            case SpectralOptions::Method::KpmDynamical:   t.method = ed::planner::Method::KPM;  break;
-        }
-        fill_operator_terms(t, H);
-        const ed::planner::ExecutionPlan plan = ed::planner::plan_execution(
-            t, ed::planner::probe_system(/*refresh=*/false), ed::planner::UserConstraints{});
-        enforce_feasible(plan, opts.allow_infeasible, "ed::spectral");
-    }
+    // (planner feasibility pre-flight removed: sensible defaults, no refusal)
 
     SpectralResult R;
     const auto t0 = std::chrono::steady_clock::now();

@@ -857,17 +857,7 @@ def solve(
     mpi_binary: Optional[str] = None,
     mpi_launcher: str = "mpiexec",
     mpi_launcher_binary: Optional[str] = None,
-    # Pre-flight planner (Phase 9 / Layer 6).
-    plan: bool = True,
-    dry_run: bool = False,
-    force: bool = False,
     verbose: bool = True,
-    # Auto-tuner -- picks FTLM/LTLM Krylov dim, mTPQ taylor order +
-    # delta_beta, tolerance level, and # thermal samples from sector
-    # dim, num_eigenvalues, and Hamiltonian bandwidth. Anything
-    # explicitly set on this call (or via ``extra_params``) wins.
-    auto_tune: bool = True,
-    level: str = "balanced",
     full_spectrum: bool = False,
     extra_params: Optional[dict[str, Any]] = None,
 ) -> EDResults:
@@ -970,26 +960,6 @@ def solve(
         Useful for niche flags (``tpq_*``, ``ltlm_*``, ``kpm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
-
-    plan : bool, optional
-        If True (default), run the pre-flight planner
-        (:func:`qed.estimate_resources`) before dispatch and
-        emit a one-line "FEASIBLE / INFEASIBLE" verdict (verbose mode
-        prints the full report). When the planner judges the request
-        infeasible (memory / build / kernel), :exc:`ResourceError`
-        is raised with a list of cheaper alternatives -- override
-        with ``force=True``.
-    dry_run : bool, optional
-        If True, run the planner only and **do not** dispatch the
-        kernel. Returns the report on the (raised) ``ResourceError``
-        but, if feasible, raises :exc:`SystemExit` with code 0 after
-        printing. Useful for "would this run?" CI checks. Default
-        False.
-    force : bool, optional
-        If True, ignore ``ResourceError`` from the planner and
-        dispatch anyway. Use this when you trust the host has more
-        resources than the planner detected (e.g. when running under
-        a job scheduler the planner cannot see). Default False.
 
     Returns
     -------
@@ -1211,52 +1181,10 @@ def solve(
               f"num_eigenvalues={num_eigenvalues}  "
               f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
 
-    # ------------------------------------------------------------------
-    # 3.5. Pre-flight planner. Estimate memory + wall-time for the
-    #     resolved (solver, device, basis, n_ranks) plan; abort with a
-    #     ResourceError + ranked suggestions when the plan won't fit on
-    #     the host. dry_run=True returns after printing the report.
-    # ------------------------------------------------------------------
-    if plan or dry_run:
-        from .feasibility import estimate_resources, ResourceError
-        if use_mpi and use_gpu:
-            planned_device = "mpi_gpu"
-        elif use_mpi:
-            planned_device = "mpi"
-        elif use_gpu:
-            planned_device = "gpu"
-        else:
-            planned_device = "cpu"
-        report = estimate_resources(
-            op_to_use,
-            solver=method,
-            device=planned_device,
-            sz=sz if (sz is not None and not fixed_sz_input) else None,
-            symmetry=symmetry,
-            num_eigenvalues=num_eigenvalues,
-            n_samples=num_samples,
-            n_ranks=mpi_n_ranks,
-            max_iterations=max_iterations,
-            block_size=block_size,
-            compute_eigenvectors=compute_eigenvectors,
-            sector_size_estimate=sector_dim if symmetry is not None else None,
-        )
-        if verbose or dry_run or not report.feasible:
-            for line in report.summary().splitlines():
-                print(line)
-        if dry_run:
-            return EDResults()  # planner-only mode; no kernel dispatch
-        if not report.feasible and not force:
-            raise ResourceError(
-                f"qed.solve planner judged the request infeasible: "
-                f"bottleneck={report.bottleneck}. See the report above for "
-                "ranked suggestions, or pass force=True to dispatch anyway "
-                "(at your own risk).",
-                report=report,
-            )
+    # (Pre-flight planner removed: sensible defaults, no feasibility refusal.)
 
     # ------------------------------------------------------------------
-    # 4. Build EDParameters with auto-tuned Krylov / thermal sizes.
+    # 4. Build EDParameters with sensible default Krylov / thermal sizes.
     # ------------------------------------------------------------------
     params = _make_params(
         num_sites=num_sites,
@@ -1297,68 +1225,8 @@ def solve(
     #     of these heuristics lives in the kernel-specific options
     #     structs (e.g. ``FtlmKernelOptions``); the surface-unification
     #     collapse retired the cross-cutting ``ed/auto/diag_tune.h``.
-    # ------------------------------------------------------------------
-    # Ground-state methods are now planned by the C++ dictator (ed::planner);
-    # Python no longer tunes solver/iterations for them. Thermal methods
-    # (FTLM/LTLM/mTPQ/cTPQ/KPM) still need their physics knobs tuned here.
-    if auto_tune and not _is_ground_state_method(method):
-        from . import auto_tune as _at
-        try:
-            from . import has_cuda_build, has_mpi_build  # type: ignore
-            _has_cuda, _has_mpi = bool(has_cuda_build()), bool(has_mpi_build())
-        except Exception:  # pragma: no cover  -- standalone Python build
-            _has_cuda, _has_mpi = False, False
-        method_name = method.name if hasattr(method, "name") else str(method)
-        explicit = set(extra_params or {})
-        tuned = _at.tune_diag(
-            operator=op_to_use,
-            sector_dim=sector_dim,
-            num_eigenvalues=int(num_eigenvalues),
-            solver=method_name,
-            device=("mpi_gpu" if (use_mpi and use_gpu)
-                    else "mpi" if use_mpi
-                    else "gpu" if use_gpu else "cpu"),
-            has_cuda_build=_has_cuda,
-            has_mpi_build=_has_mpi,
-            level=level,
-            tolerance=tolerance if "tolerance" not in explicit else
-                      extra_params["tolerance"],
-            max_iterations=max_iterations,
-            block_size=block_size,
-        )
-        # Fill only sentinel-defaulted fields. Each entry maps an
-        # EDParameters field to its struct default (matching
-        # include/ed/core/ed_parameters.h).
-        _SENTINELS: dict[str, object] = {
-            "ftlm_krylov_dim":    100,
-            "ltlm_krylov_dim":    200,
-            "ltlm_ground_krylov": 100,
-            "tpq_taylor_order":   100,
-            "tpq_delta_beta":     1e-2,
-        }
-        _TUNED_VALUES = {
-            "ftlm_krylov_dim":    tuned.ftlm_krylov_dim,
-            "ltlm_krylov_dim":    tuned.ltlm_krylov_dim,
-            "ltlm_ground_krylov": tuned.ltlm_ground_krylov,
-            "tpq_taylor_order":   tuned.tpq_taylor_order,
-            "tpq_delta_beta":     tuned.tpq_delta_beta,
-        }
-        for fname, sentinel in _SENTINELS.items():
-            if fname in explicit:
-                continue  # caller wins
-            if not hasattr(params, fname):
-                continue  # build-time skipped field
-            current = getattr(params, fname)
-            if current == sentinel:
-                setattr(params, fname, _TUNED_VALUES[fname])
-        if verbose:
-            print(f"[qed.solve] auto-tune (level={tuned.level}): "
-                  f"tol={params.tolerance:g} max_iter={params.max_iterations} "
-                  f"ftlm_M={params.ftlm_krylov_dim} "
-                  f"ltlm_M={params.ltlm_krylov_dim} "
-                  f"tpq_p={params.tpq_taylor_order} "
-                  f"tpq_dbeta={params.tpq_delta_beta:g} "
-                  f"bandwidth≈{tuned.bandwidth:g}")
+    # (Auto-tuner removed: thermal/eigensolver knobs use the EDParameters
+    # struct defaults; override per-call via kwargs or extra_params.)
 
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:
@@ -1408,11 +1276,10 @@ def solve(
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
 
-    # solver=None => let the C++ dictator (ed::planner) pick the ground-state
-    # eigensolver, instead of the old Python _resolve_solver heuristic.
+    # solver=None => let the orchestrator pick the ground-state eigensolver
+    # default (full diag for tiny dims, Lanczos otherwise).
     return _diag_via_workflows_solve(op_to_use, method, params,
-                                     auto_method=(solver is None),
-                                     allow_infeasible=bool(force))
+                                     auto_method=(solver is None))
 
 
 # ---------------------------------------------------------------------------
@@ -2111,17 +1978,17 @@ def _make_params(
             p.temp_max = float(temp_max)
             p.tpq_measure_beta_min = 1.0 / float(temp_max) if temp_max > 0 \
                 else p.tpq_measure_beta_min
-        # Auto-cap tpq_max_steps: enough Taylor iterations to reach
-        # target_beta with the default delta_beta. This is tiny for
-        # small target_beta, big for low temperatures.
+        # TPQ imaginary-time step count: honour an explicit max_iterations /
+        # tpq_max_steps, else a BOUNDED default. (The old code derived
+        # target_beta/delta_beta, which exploded to ~1e5 steps for a low-T
+        # grid and timed out at large dimension. Raise max_iterations for
+        # deeper/finer cooling.)
+        DEFAULT_TPQ_STEPS = 1000
         if max_iterations is not None:
             p.tpq_max_steps = int(max_iterations)
             p.max_iterations = int(max_iterations)
         else:
-            steps = max(
-                1000,
-                int(p.tpq_target_beta / max(p.tpq_delta_beta, 1e-12)) + 200,
-            )
+            steps = int(getattr(p, "tpq_max_steps", 0) or 0) or DEFAULT_TPQ_STEPS
             p.tpq_max_steps = steps
             p.max_iterations = steps
         if sector is not None:

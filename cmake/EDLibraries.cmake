@@ -232,12 +232,8 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/api/api_facade.cpp
     ${SRC_DIR}/api/build_introspection.cpp
     ${SRC_DIR}/api/symmetry_helpers.cpp
-    ${SRC_DIR}/api/feasibility.cpp
-    # Capability-aware execution planner (system probe + task cost model +
-    # CSR/device/reorth/basis decision). Header-light; one probe .cpp + one
-    # decision .cpp.
-    ${SRC_DIR}/planner/system_capabilities.cpp
-    ${SRC_DIR}/planner/execution_planner.cpp
+    # (execution-planner "dictator" + feasibility advisor removed: sensible
+    #  defaults + env-override leaf policy hooks instead.)
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})

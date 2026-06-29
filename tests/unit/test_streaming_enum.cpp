@@ -17,7 +17,6 @@
 #include <ed/core/basis_utils.h>
 #include <ed/core/combinadic.h>
 #include <ed/planner/basis_policy_hook.h>
-#include <ed/planner/execution_planner.h>
 #include <ed/symmetry/fixed_sz_membership.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/projector_chain.h>
@@ -191,29 +190,4 @@ TEST_CASE("Track A: tableless combinadic fixed-Sz matvec == materialized matvec"
         for (std::size_t i = 0; i < d; ++i)
             REQUIRE(std::abs(ym[i] - yt[i]) < 1e-12);
     }
-}
-
-TEST_CASE("Track A: planner selects tableless fixed-Sz when basis won't fit",
-          "[streaming][planner]") {
-    using namespace ed::planner;
-    // 30-site Sz=0: C(30,15) ~ 1.55e8 -> basis vector ~1.2 GB, working set bigger.
-    TaskDescriptor t;
-    t.basis_dim = binom_u64(30, 15);
-    t.n_terms = 90; t.n_offdiag = 60;
-    t.method = Method::Lanczos;
-    t.kind = BasisKind::Sz; t.N = 30; t.n_up = 15;
-
-    SystemCapabilities tight;   // ~4 GB budget after baseline
-    tight.ram_total_bytes = std::uint64_t{6} << 30;
-    tight.ram_avail_bytes = std::uint64_t{6} << 30;
-    tight.n_cores = 8; tight.n_mpi_ranks = 1;
-    const auto p = plan_execution(t, tight, UserConstraints{});
-    REQUIRE(p.tableless_fixed_sz);
-
-    SystemCapabilities huge;    // 2 TB -> materialized fits
-    huge.ram_total_bytes = std::uint64_t{2048} << 30;
-    huge.ram_avail_bytes = std::uint64_t{2048} << 30;
-    huge.n_cores = 8; huge.n_mpi_ranks = 1;
-    const auto p2 = plan_execution(t, huge, UserConstraints{});
-    REQUIRE_FALSE(p2.tableless_fixed_sz);
 }
