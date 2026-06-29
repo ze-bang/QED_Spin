@@ -26,6 +26,7 @@
 #include <ed/orchestrator.h>
 
 #include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
+#include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
 #include <ed/krylov/block_lanczos_kernel.h>
 #include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
@@ -300,6 +301,29 @@ GroundStateResult solve_on(Backend& be,
     const std::size_t max_iter =
         (opts.max_iter > 0) ? opts.max_iter : 2 * opts.num_eigs + 30;
     const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
+
+    // Leaf memory guard: throw cleanly before the dominant allocation rather
+    // than OOM-crash. H.global_dim() is the actual working dimension (full /
+    // fixed-Sz block / symmetry sector). Coarse: dense matrix for full diag;
+    // stored Krylov basis (~max_iter vectors, x block_size) when eigenvectors
+    // are kept; a handful of work vectors otherwise.
+    {
+        const std::uint64_t D = H.global_dim();
+        constexpr std::uint64_t CX = 16;  // sizeof(complex<double>)
+        std::uint64_t est;
+        if (method == SolveMethod::FullDiag) {
+            est = D * D * CX;
+        } else if (opts.compute_vectors) {
+            std::uint64_t vecs = std::max<std::uint64_t>(max_iter, 4);
+            if (method == SolveMethod::BlockLanczos ||
+                method == SolveMethod::BlockKrylovSchur)
+                vecs *= std::max<std::size_t>(1, opts.block_size);
+            est = D * vecs * CX;
+        } else {
+            est = D * 8ull * CX;  // eigenvalues-only: ring-buffer work vectors
+        }
+        ed::core::guard_working_set(est, "ed::solve");
+    }
 
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -877,7 +901,24 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // refuse cleanly if it would not fit, before allocating those vectors. The
     // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
     // passes. allow_infeasible (force) opts out.
-    // (planner feasibility pre-flight removed: sensible defaults, no refusal)
+    // Leaf memory guard (planner feasibility pre-flight removed): throw cleanly
+    // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
+    // is the per-call working dim (symmetry iterates sectors a level up, so this
+    // is the sector dim there). LTLM stores GS + excitation bases (~2x krylov);
+    // FTLM one sample's basis at a time; TPQ/KPM are O(1) state vectors.
+    {
+        const std::uint64_t D = H.global_dim();
+        std::uint64_t vecs;
+        switch (opts.method) {
+            case ThermalOptions::Method::LTLM:
+                vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
+            case ThermalOptions::Method::FTLM:
+                vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
+            default:  // mTPQ / cTPQ / KpmDos: a handful of state vectors
+                vecs = 8; break;
+        }
+        ed::core::guard_working_set(D * vecs * 16ull, "ed::thermal");
+    }
 
     // Surface unification follow-up (May 2026): when the caller does
     // not supply an explicit ``opts.betas`` grid, construct one from
@@ -1518,7 +1559,14 @@ SpectralResult spectral(const LinearOperator&                      H,
     // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window;
     // the dynamical lanes keep an FTLM / KPM window. Plan it + refuse cleanly if
     // it would not fit, before allocating. allow_infeasible (force) opts out.
-    // (planner feasibility pre-flight removed: sensible defaults, no refusal)
+    // Leaf memory guard (planner feasibility pre-flight removed): GS-CF stores
+    // the GS eigenvector + a continued-fraction Krylov window; the dynamical
+    // lanes keep an FTLM/KPM window (~2x krylov, per-sector dim for symmetry).
+    {
+        const std::uint64_t D = H.global_dim();
+        const std::uint64_t vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4);
+        ed::core::guard_working_set(D * vecs * 16ull, "ed::spectral");
+    }
 
     SpectralResult R;
     const auto t0 = std::chrono::steady_clock::now();
