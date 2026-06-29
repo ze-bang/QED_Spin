@@ -79,6 +79,45 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # CPU + MPI lane: build the distributed tree (WITH_MPI=ON) and run a 2-rank
+  # mpiexec smoke. CI never built the MPI config before, which is how the
+  # distributed path was free to rot; this keeps it compiling + running.
+  # ---------------------------------------------------------------------------
+  linux-mpi:
+    name: Linux / GCC / OpenMPI (CPU+MPI build + mpiexec smoke)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libopenblas-dev liblapacke-dev libeigen3-dev \
+            openmpi-bin libopenmpi-dev libhdf5-openmpi-dev
+
+      - name: Configure (WITH_MPI=ON, CPU)
+        run: |
+          cmake -S . -B build-mpi -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBLAS_PROFILE=OPENBLAS \
+            -DWITH_MPI=ON -DWITH_CUDA=OFF -DBUILD_ED_TESTS=OFF \
+            -DHDF5_PREFER_PARALLEL=ON
+
+      - name: Build ed_distributed_main
+        run: cmake --build build-mpi --target ed_distributed_main -- -j$(nproc)
+
+      - name: MPI smoke (mpiexec -n 2, built-in Heisenberg chain)
+        run: |
+          set -o pipefail
+          mpiexec --oversubscribe -n 2 ./build-mpi/ed_distributed_main \
+            --mode lanczos --N 12 --J 1 --periodic 1 --exct 1 --max-iter 100 \
+            | tee mpi_smoke.out
+          grep -qE "eig\[0\]=" mpi_smoke.out
+
+  # ---------------------------------------------------------------------------
   # Python lane: install the wheel via scikit-build-core (which builds the
   # pybind11 extension against the C++ ed_solvers_cpu library) and run the
   # pytest smoke suite. This is independent of the C++-only lane above so a
