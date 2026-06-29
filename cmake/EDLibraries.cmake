@@ -218,7 +218,9 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/lanczos.cpp
     ${SOLVERS_CPU_DIR}/dynamics.cpp
     ${SOLVERS_CPU_DIR}/TPQ.cpp
+    ${SOLVERS_CPU_DIR}/tpq_io.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
+    ${SOLVERS_CPU_DIR}/ftlm_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
