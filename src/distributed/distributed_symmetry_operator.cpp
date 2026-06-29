@@ -18,6 +18,9 @@
 #include <cstdint>
 #include <queue>
 #include <set>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -121,33 +124,72 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
     // (See src/symmetry/group.cpp L221-230 for the build-time formula.)
     const std::vector<Complex>& chi = sector.phase_factors;
 
-    // Per-state orbit id (-1 = state not in any kept orbit OR not yet visited).
+    // Per-state orbit id (-1 = not in any kept orbit) and projection coeff
+    // (~|orbit(rep)>_b; 0 in a zero-norm orbit). Written directly (no raw_*
+    // scratch): orbits are disjoint, so the parallel build below is race-free.
     std::vector<std::int64_t> state_to_orbit(dim, kNoOrbit);
+    std::vector<Complex>      phi(dim, Complex(0.0, 0.0));
 
-    // Per-state projection coefficient (~|orbit(rep)>_b). 0 if state is in
-    // a zero-norm orbit.
-    std::vector<Complex> phi(dim, Complex(0.0, 0.0));
+    // ---- Step 1 (parallel) --------------------------------------------------
+    // Phase A: parallel lex-min representative scan. A state is its orbit's
+    // canonical rep iff it is the numeric minimum over all group images. Skip
+    // popcount-mismatched orbits entirely (a whole orbit shares popcount, so it
+    // is not in this Sz sector). Per-thread ascending chunks concatenated in
+    // thread order keep `reps` globally ascending. O(#reps) extra memory.
+    std::vector<std::uint64_t> reps;
+    {
+        int nthreads = 1;
+#ifdef _OPENMP
+        nthreads = omp_get_max_threads();
+#endif
+        if (dim < (std::uint64_t{1} << 14)) nthreads = 1;
+        if (nthreads < 1) nthreads = 1;
+        std::vector<std::vector<std::uint64_t>> local(
+            static_cast<std::size_t>(nthreads));
+#ifdef _OPENMP
+#       pragma omp parallel num_threads(nthreads)
+#endif
+        {
+            int tid = 0, nt = 1;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+            nt  = omp_get_num_threads();
+#endif
+            const std::uint64_t chunk = dim / static_cast<std::uint64_t>(nt);
+            const std::uint64_t rem   = dim % static_cast<std::uint64_t>(nt);
+            const std::uint64_t b0 = static_cast<std::uint64_t>(tid) * chunk +
+                std::min<std::uint64_t>(static_cast<std::uint64_t>(tid), rem);
+            const std::uint64_t cnt = chunk +
+                (static_cast<std::uint64_t>(tid) < rem ? 1u : 0u);
+            auto& out = local[static_cast<std::size_t>(tid)];
+            for (std::uint64_t i = 0; i < cnt; ++i) {
+                const std::uint64_t s = b0 + i;
+                if (info.n_up >= 0 &&
+                    static_cast<int>(__builtin_popcountll(s)) != info.n_up) continue;
+                bool is_rep = true;
+                for (std::size_t g = 0; g < n_group; ++g)
+                    if (applyPermutation(s, info.max_clique[g]) < s) { is_rep = false; break; }
+                if (is_rep) out.push_back(s);
+            }
+        }
+        std::size_t tot = 0; for (const auto& v : local) tot += v.size();
+        reps.reserve(tot);
+        for (auto& v : local) reps.insert(reps.end(), v.begin(), v.end());
+    }
 
-    // Temporary per-state orbit-id assignment BEFORE filtering zero-norm
-    // orbits (so we can purge state_to_orbit for filtered orbits).
-    std::vector<std::int64_t> raw_state_to_orbit(dim, kNoOrbit);
-    std::vector<Complex>      raw_phi(dim, Complex(0.0, 0.0));
-
-    std::vector<std::uint64_t> raw_orbit_reps;
-    std::vector<std::uint64_t> raw_orbit_sizes;
-    std::vector<double>        raw_orbit_norms_sq;
-    raw_orbit_reps.reserve(dim / std::max<std::size_t>(n_group, 1) + 16);
-    raw_orbit_sizes.reserve(raw_orbit_reps.capacity());
-    raw_orbit_norms_sq.reserve(raw_orbit_reps.capacity());
-
-    for (std::uint64_t b = 0; b < dim; ++b) {
-        if (raw_state_to_orbit[b] != kNoOrbit) continue;  // already assigned
-
-        // BFS from b via generators to get the full orbit.
-        std::set<std::uint64_t> orbit;
-        orbit.insert(b);
-        std::queue<std::uint64_t> q;
-        q.push(b);
+    // Phase B: parallel per-rep orbit build. Orbits are DISJOINT, so concurrent
+    // writes to state_to_orbit[s]/phi[s] for different reps never collide.
+    // oid = index in the ascending `reps` list.
+    const std::size_t n_raw = reps.size();
+    std::vector<std::uint64_t> raw_orbit_sizes(n_raw, 0);
+    std::vector<double>        raw_orbit_norms_sq(n_raw, 0.0);
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(dynamic, 64)
+#endif
+    for (long long oidx = 0; oidx < static_cast<long long>(n_raw); ++oidx) {
+        const std::uint64_t rep = reps[static_cast<std::size_t>(oidx)];
+        std::set<std::uint64_t> orbit; orbit.insert(rep);
+        std::queue<std::uint64_t> q; q.push(rep);
         while (!q.empty()) {
             const std::uint64_t cur = q.front(); q.pop();
             for (const auto& gen : info.generators) {
@@ -155,100 +197,44 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
                 if (orbit.insert(nxt).second) q.push(nxt);
             }
         }
-
-        // Lex-min representative.
-        const std::uint64_t rep = *orbit.begin();
-        const std::int64_t  oid =
-            static_cast<std::int64_t>(raw_orbit_reps.size());
-
-        // Phase F: optional Sz-quantum-number filter. Site permutations
-        // preserve popcount, so every state in this orbit shares
-        // popcount(rep). When `info.n_up >= 0` and that popcount does
-        // not match, push a zero-norm placeholder orbit so Step 2's
-        // filter drops it (and so future b's in the same orbit hit
-        // the `raw_state_to_orbit[b] != kNoOrbit` short-circuit).
-        if (info.n_up >= 0 &&
-            static_cast<int>(__builtin_popcountll(rep)) != info.n_up) {
-            for (std::uint64_t s : orbit) {
-                raw_state_to_orbit[s] = oid;
-            }
-            raw_orbit_reps.push_back(rep);
-            raw_orbit_sizes.push_back(static_cast<std::uint64_t>(orbit.size()));
-            raw_orbit_norms_sq.push_back(0.0);
-            continue;
-        }
-
-        // Project: ~|i>_s = sum_{g: g(rep) = s} chi_q(g)*
-        // For each group element g, accumulate chi_q(g)* into
-        // raw_phi[g(rep)].
-        // (Reset per-orbit projection scratch.)
-        for (std::uint64_t s : orbit) {
-            raw_phi[s] = Complex(0.0, 0.0);
-        }
-        for (std::size_t g = 0; g < n_group; ++g) {
-            const std::uint64_t s = applyPermutation(rep, info.max_clique[g]);
-            raw_phi[s] += std::conj(chi[g]);
-        }
-
-        // Compute N_i = sum_{s in orbit} |raw_phi[s]|^2.
+        // Project: phi[g(rep)] += conj(chi_q(g)) over all group elements g.
+        for (std::size_t g = 0; g < n_group; ++g)
+            phi[applyPermutation(rep, info.max_clique[g])] += std::conj(chi[g]);
         double N_i = 0.0;
         for (std::uint64_t s : orbit) {
-            N_i += std::norm(raw_phi[s]);
-            raw_state_to_orbit[s] = oid;
+            N_i += std::norm(phi[s]);
+            state_to_orbit[s] = oidx;
         }
-
-        raw_orbit_reps.push_back(rep);
-        raw_orbit_sizes.push_back(static_cast<std::uint64_t>(orbit.size()));
-        raw_orbit_norms_sq.push_back(N_i);
+        raw_orbit_sizes[static_cast<std::size_t>(oidx)] =
+            static_cast<std::uint64_t>(orbit.size());
+        raw_orbit_norms_sq[static_cast<std::size_t>(oidx)] = N_i;
     }
 
-    // -------------------------------------------------------------------------
-    // Step 2: Filter out zero-norm orbits (phantom orbits for this sector).
-    //
-    // Renumber the surviving orbits 0..n_orbits-1 so the partition / halo
-    // plan / row arrays use the dense index space.
-    // -------------------------------------------------------------------------
-    const std::size_t n_raw = raw_orbit_reps.size();
+    // ---- Step 2: drop zero-norm orbits + renumber dense --------------------
     std::vector<std::int64_t> raw_to_dense(n_raw, kNoOrbit);
-    orbit_reps_.clear();
-    orbit_sizes_.clear();
-    orbit_norms_sq_.clear();
+    orbit_reps_.clear(); orbit_sizes_.clear(); orbit_norms_sq_.clear();
     orbit_reps_.reserve(n_raw);
     orbit_sizes_.reserve(n_raw);
     orbit_norms_sq_.reserve(n_raw);
     for (std::size_t i = 0; i < n_raw; ++i) {
         if (raw_orbit_norms_sq[i] > kZeroNormTolerance) {
             raw_to_dense[i] = static_cast<std::int64_t>(orbit_reps_.size());
-            orbit_reps_.push_back(raw_orbit_reps[i]);
+            orbit_reps_.push_back(reps[i]);
             orbit_sizes_.push_back(raw_orbit_sizes[i]);
             orbit_norms_sq_.push_back(raw_orbit_norms_sq[i]);
         }
     }
-
-    // Build the dense per-state lookup tables (state_to_orbit + phi).
-    for (std::uint64_t b = 0; b < dim; ++b) {
-        const std::int64_t raw = raw_state_to_orbit[b];
+    // Renumber state_to_orbit into the dense space (parallel; zero filtered).
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+    for (long long b = 0; b < static_cast<long long>(dim); ++b) {
+        const std::int64_t raw = state_to_orbit[static_cast<std::size_t>(b)];
         if (raw == kNoOrbit) continue;
-        const std::int64_t dense = raw_to_dense[raw];
-        if (dense == kNoOrbit) {
-            state_to_orbit[b] = kNoOrbit;
-            phi[b] = Complex(0.0, 0.0);
-        } else {
-            state_to_orbit[b] = dense;
-            phi[b] = raw_phi[b];
-        }
+        const std::int64_t dense = raw_to_dense[static_cast<std::size_t>(raw)];
+        state_to_orbit[static_cast<std::size_t>(b)] = dense;
+        if (dense == kNoOrbit) phi[static_cast<std::size_t>(b)] = Complex(0.0, 0.0);
     }
-    // raw_* scratch no longer needed.
-    raw_orbit_reps.clear();
-    raw_orbit_reps.shrink_to_fit();
-    raw_orbit_sizes.clear();
-    raw_orbit_sizes.shrink_to_fit();
-    raw_orbit_norms_sq.clear();
-    raw_orbit_norms_sq.shrink_to_fit();
-    raw_phi.clear();
-    raw_phi.shrink_to_fit();
-    raw_state_to_orbit.clear();
-    raw_state_to_orbit.shrink_to_fit();
 
     const std::size_t n_orbits = orbit_reps_.size();
 
