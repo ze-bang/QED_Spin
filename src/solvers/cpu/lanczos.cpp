@@ -1506,7 +1506,68 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::vector<double> evals(N);
         lapack_int info;
         
-        if (use_partial_solver) {
+        // Real-matrix fast path: the assembled sector matrix is real whenever the
+        // Hamiltonian is real and the sector carries no complex Bloch phase --
+        // every no-symmetry / fixed-Sz block (real Heisenberg / XXZ) and the k=0
+        // / k=pi momentum sectors. Real LAPACK (dsyevd / dsyevr) is ~2x faster and
+        // uses half the working memory of the complex driver, with identical
+        // eigenvalues. Detect once (O(N^2), trivial next to the O(N^3) solve).
+        // ED_FULLDIAG_FORCE_COMPLEX forces the complex driver (A/B timing +
+        // real-vs-complex equivalence checks).
+        bool matrix_is_real = (std::getenv("ED_FULLDIAG_FORCE_COMPLEX") == nullptr);
+        for (size_t i = 0; i < matrix_size && matrix_is_real; ++i)
+            if (std::abs(dense_matrix[i].imag()) > 1e-12) matrix_is_real = false;
+
+        if (matrix_is_real) {
+            std::cout << "Matrix is real -> real LAPACK fast path ("
+                      << (use_partial_solver ? "dsyevr" : "dsyevd") << ")" << std::endl;
+            std::vector<double> rdense(matrix_size);
+            for (size_t i = 0; i < matrix_size; ++i) rdense[i] = dense_matrix[i].real();
+            std::vector<Complex>().swap(dense_matrix);  // free complex buffer (half mem)
+            if (use_partial_solver) {
+                std::vector<double> revecs;
+                if (compute_eigenvectors) revecs.resize(static_cast<size_t>(actual_num_eigs) * N);
+                lapack_int m_found;
+                std::vector<lapack_int> isuppz(2 * actual_num_eigs);
+                info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
+                                      'I', 'U', N, rdense.data(), N, 0.0, 0.0,
+                                      1, actual_num_eigs, LAPACKE_dlamch('S'), &m_found,
+                                      evals.data(),
+                                      compute_eigenvectors ? revecs.data() : nullptr,
+                                      N, isuppz.data());
+                if (info != 0) { std::cerr << "LAPACKE_dsyevr failed with error code " << info << std::endl; return; }
+                std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
+                eigenvalues.resize(m_found);
+                for (lapack_int i = 0; i < m_found; ++i) eigenvalues[i] = evals[i];
+                if (compute_eigenvectors && !dir.empty()) {
+                    std::vector<std::vector<Complex>> eigenvector_list(m_found);
+                    for (lapack_int i = 0; i < m_found; ++i) {
+                        eigenvector_list[i].resize(N);
+                        for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(revecs[static_cast<size_t>(i) * N + j], 0.0);
+                    }
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial, real)");
+                } else if (!dir.empty()) {
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial, real)");
+                }
+            } else {
+                info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
+                                      'U', N, rdense.data(), N, evals.data());
+                if (info != 0) { std::cerr << "LAPACKE_dsyevd failed with error code " << info << std::endl; return; }
+                std::cout << "Eigenvalue decomposition completed (divide-and-conquer, real)" << std::endl;
+                eigenvalues.resize(actual_num_eigs);
+                for (size_t i = 0; i < actual_num_eigs; ++i) eigenvalues[i] = evals[i];
+                if (compute_eigenvectors && !dir.empty()) {
+                    std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
+                    for (size_t i = 0; i < actual_num_eigs; ++i) {
+                        eigenvector_list[i].resize(N);
+                        for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(rdense[i * N + j], 0.0);
+                    }
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (real)");
+                } else if (!dir.empty()) {
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (real)");
+                }
+            }
+        } else if (use_partial_solver) {
             // ===== Memory-efficient partial eigenvalue computation using zheevr =====
             // zheevr uses the Relatively Robust Representations (RRR) algorithm
             // and can compute a subset of eigenvalues much more efficiently

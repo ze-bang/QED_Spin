@@ -112,6 +112,17 @@ int auto_threads_for_dim(std::uint64_t dim) {
 
 ThreadBudgetScope::ThreadBudgetScope(int threads) {
     if (threads <= 0) return;
+    // Clamp to hardware concurrency. Callers pass a large sentinel (e.g. 1<<20)
+    // to mean "use all cores"; without this, omp_set_num_threads(1<<20) asks the
+    // runtime to spawn ~1e6 threads -> pthread_create EAGAIN ("Resource
+    // temporarily unavailable") on a cgroup / RLIMIT_NPROC-bounded node. The
+    // doc comment at the call sites always claimed this clamp happened here.
+#ifdef _OPENMP
+    {
+        const int hw = omp_get_num_procs();
+        if (hw > 0 && threads > hw) threads = hw;
+    }
+#endif
     requested_ = threads;
 
 #ifdef _OPENMP
