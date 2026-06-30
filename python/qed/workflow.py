@@ -3013,6 +3013,14 @@ def full_spectrum(
         return res
 
     tmpdir = tempfile.mkdtemp(prefix="qed_fullspec_")
+    # full_spectrum is the many-small-sectors regime: turn on the C++ sector-
+    # parallel FULL loop so independent (Sz, irrep) blocks are dense-diagonalised
+    # across cores. Each sector's eigensolve runs single-threaded (see
+    # full_diagonalization's omp_in_parallel guard) to avoid N_sectors x P
+    # oversubscription. An explicit user ED_SYM_SECTOR_PARALLEL is honoured.
+    _prev_sector_parallel = os.environ.get("ED_SYM_SECTOR_PARALLEL")
+    if _prev_sector_parallel is None:
+        os.environ["ED_SYM_SECTOR_PARALLEL"] = "1"
     try:
         _write_operator_directory(operator, tmpdir)
         _write_symmetry_directory(tmpdir, info)
@@ -3082,6 +3090,10 @@ def full_spectrum(
         return out
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if _prev_sector_parallel is None:
+            os.environ.pop("ED_SYM_SECTOR_PARALLEL", None)
+        else:
+            os.environ["ED_SYM_SECTOR_PARALLEL"] = _prev_sector_parallel
 
 
 # Internal alias so :func:`solve` can call the helper without colliding

@@ -10,6 +10,9 @@
 #include <ed/parallel/fused_blas1.h>
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -1500,7 +1503,17 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // lift the cap for it -- otherwise it runs ~3-4x slower than the BLAS
         // backend can (measured: 9 s vs 2.6 s at dim 3432). ThreadBudgetScope
         // clamps the request to the hardware maximum and restores on scope exit.
-        ed::parallel::ThreadBudgetScope dense_solve_budget(1 << 20);
+        //
+        // Nesting-aware: when this runs INSIDE a sector-parallel region (the
+        // streaming-symmetry FULL loop spreads independent sectors across cores
+        // via `omp parallel for if(ED_SYM_SECTOR_PARALLEL)`), keep the eigensolve
+        // single-threaded -- otherwise N_sectors x P_cores oversubscribes. A
+        // standalone FULL solve takes all cores.
+        int dense_threads = 1 << 20;
+#ifdef _OPENMP
+        if (omp_in_parallel()) dense_threads = 1;
+#endif
+        ed::parallel::ThreadBudgetScope dense_solve_budget(dense_threads);
 
         // Allocate array for eigenvalues
         std::vector<double> evals(N);
