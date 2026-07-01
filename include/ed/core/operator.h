@@ -303,15 +303,10 @@ public:
                  "STRUCTURAL_AUDIT.md S2 #29.")]]
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
-    /// SoA-binned term cache. Returns a const reference after rebuilding
-    /// from the canonical AoS storage if stale.
-    ///
-    /// DEPRECATION (audit S2 #29, May 2026): in-tree callers read
-    /// ``terms_`` directly after ``commitPendingTransforms()``.
-    /// Scheduled for removal in the next operator-API rev.
-    [[deprecated("Operator::getTerms has no in-tree callers; call "
-                 "``commitPendingTransforms()`` and read ``terms_`` "
-                 "directly. See STRUCTURAL_AUDIT.md S2 #29.")]]
+    /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
+    /// Public so an alternative-basis matvec backend (e.g. a non-abelian
+    /// symmetry sector via NonAbelianSymmetryBasisPolicy) can be built over the
+    /// SAME terms as the operator's own matvec.
     const ed::matvec::TermStorage& getTerms() const {
         commitPendingTransforms();
         return terms_;
@@ -378,6 +373,25 @@ public:
         return bind_cuda_full_impl_();
 #else
         return bind_cpu();
+#endif
+    }
+
+    // fp32 device matvec (memory-halving mTPQ lane). Same inline-override /
+    // non-virtual-helper split as bind_cuda() so Operator's vtable stays weak.
+    [[nodiscard]] bool supports_cuda_f32() const noexcept override {
+#ifdef WITH_CUDA
+        return cuda_mirror_available_();
+#else
+        return false;
+#endif
+    }
+    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
+    bind_cuda_f32() const override {
+#ifdef WITH_CUDA
+        return bind_cuda_f32_impl_();
+#else
+        throw std::runtime_error(
+            "Operator::bind_cuda_f32: built without WITH_CUDA");
 #endif
     }
 
@@ -543,6 +557,42 @@ public:
         ensure_backend_();
         const auto tv = term_view_();  // rebuilds SoA cache if stale
         backend_->apply_real(&tv, in, out, size);
+    }
+
+    // -----------------------------------------------------------------
+    // Sparse single-state row enumerator: invoke ``emit(s_prime, h)`` for every
+    // computational state ``s_prime`` connected to ``s`` by a Hamiltonian term,
+    // with ``h = <s_prime|H|s>`` (terms emitting the same ``s_prime`` are
+    // delivered separately; the caller accumulates). O(num_terms), no 2^N
+    // vector — used by the symmetry-adapted block builder to apply H over an
+    // orbit support without touching the full Hilbert space.
+    // -----------------------------------------------------------------
+    template <class Emit>
+    void for_each_connected_state(std::uint64_t s, Emit&& emit) const {
+        const auto tv = term_view_();
+        ed::matvec::kernel::apply_term_to_state<Complex>(
+            s, tv.spin_l,
+            *tv.diag_one, *tv.offdiag_one, *tv.diag_two, *tv.mixed_two,
+            *tv.offdiag_two, *tv.three_body,
+            std::forward<Emit>(emit));
+    }
+
+    // Fast dense assembly for the FULL Hilbert space (index == state). Fills
+    // column `j` directly from the sparse term enumerator -- O(nnz) instead of
+    // O(dim) full matvecs. Reentrant (term reads only) -> parallel over columns.
+    // SubspaceOperator overrides this for the reduced lanes (fixed-Sz mapping;
+    // symmetry returns false).
+    [[nodiscard]] bool try_build_dense_columns(Complex* dense,
+                                               std::size_t N) const override {
+        const std::uint64_t D = static_cast<std::uint64_t>(dim());
+        if (static_cast<std::size_t>(D) != N) return false;
+        #pragma omp parallel for schedule(static)
+        for (std::uint64_t j = 0; j < D; ++j) {
+            for_each_connected_state(j, [&](std::uint64_t sp, Complex h) {
+                dense[static_cast<std::size_t>(sp) + static_cast<std::size_t>(j) * N] += h;
+            });
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------
@@ -838,6 +888,10 @@ protected:
     // -------------------------------------------------------------------
     [[nodiscard]] static bool cuda_mirror_available_() noexcept;
     [[nodiscard]] ed::LinearOperator::MatvecFn bind_cuda_full_impl_() const;
+    // fp32 twin (memory-halving mTPQ lane). Weak fallback in operator_gpu.cpp
+    // (throws), strong definition in operator_gpu.cu (reuses cuda_backend_).
+    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
+    bind_cuda_f32_impl_() const;
 #endif
 
     /**

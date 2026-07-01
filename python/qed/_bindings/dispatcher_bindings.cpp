@@ -59,6 +59,8 @@
 #include <complex>
 #include <cstdint>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <vector>
 
 namespace py = pybind11;
@@ -186,6 +188,7 @@ void bind_dispatcher(py::module_& m) {
         .value("LANCZOS",                  DiagonalizationMethod::LANCZOS)
         .value("BLOCK_LANCZOS",            DiagonalizationMethod::BLOCK_LANCZOS)
         .value("KRYLOV_SCHUR",             DiagonalizationMethod::KRYLOV_SCHUR)
+        .value("BLOCK_KRYLOV_SCHUR",       DiagonalizationMethod::BLOCK_KRYLOV_SCHUR)
         .value("FULL",                     DiagonalizationMethod::FULL)
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)
@@ -193,6 +196,7 @@ void bind_dispatcher(py::module_& m) {
         .value("FTLM",                     DiagonalizationMethod::FTLM)
         .value("LTLM",                     DiagonalizationMethod::LTLM)
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
+        .value("OFTLM",                    DiagonalizationMethod::OFTLM)
         .export_values();
 
     // (``HamiltonianFileFormat`` enum was deleted alongside the
@@ -236,6 +240,7 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("tpq_max_steps",            &EDParameters::tpq_max_steps)
         .def_readwrite("tpq_measurement_interval", &EDParameters::tpq_measurement_interval)
         .def_readwrite("tpq_energy_shift",         &EDParameters::tpq_energy_shift)
+        .def_readwrite("tpq_fp32",                 &EDParameters::tpq_fp32)
         .def_readwrite("tpq_beta_max",             &EDParameters::tpq_beta_max)
         .def_readwrite("tpq_delta_beta",           &EDParameters::tpq_delta_beta)
         .def_readwrite("tpq_taylor_order",         &EDParameters::tpq_taylor_order)
@@ -426,4 +431,7 @@ void bind_dispatcher(py::module_& m) {
         "use the standalone ``mpiexec ed_distributed_main ...`` binary "
         "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
         "solvers.");
+
+    // (capability-aware execution planner removed: sensible defaults +
+    //  env-override leaf hooks; no probe_system / plan_execution surface)
 }

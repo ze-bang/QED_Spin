@@ -74,6 +74,17 @@ struct BlockLanczosOptions {
     std::uint64_t global_n      = 0;
     /// Periodic full reorthogonalisation interval (every K iterations).
     std::size_t reorth_period   = 3;
+    /// Reorthogonalisation strategy / memory profile (mirrors single-vector
+    /// Lanczos's keep_basis). When true (default) the kernel stores EVERY block
+    /// (O(max_iter * block_size * N)) for periodic FULL reorth + one-pass
+    /// eigenvector reconstruction. When false ("lean"), only a rolling window of
+    /// blocks is kept (O(block_size * N)) and reorth is LOCAL-only: eigenvalues
+    /// come from the tiny block-tridiagonal so they stay bounded, but accuracy
+    /// degrades past ~30 blocks (ghosts) and EIGENVECTORS are unavailable
+    /// (set keep_basis=true, or use Block Krylov-Schur for bounded-memory
+    /// eigenvectors). The planner flips this off for large-N eigenvalue runs
+    /// whose full basis would not fit the memory budget.
+    bool        keep_basis      = true;
 };
 
 struct BlockLanczosResult {
@@ -83,6 +94,14 @@ struct BlockLanczosResult {
     std::vector<ed::matvec::Backend::UniqueVec>      eigenvectors;
     std::size_t                                      blocks_built = 0;
     bool                                             converged    = false;
+    // ---- convergence diagnostics ----
+    /// Per-eigenvalue residual estimate ‖B_last · y_lastblock‖ ≈ ‖H xᵢ − θᵢ xᵢ‖,
+    /// aligned with `eigenvalues`.
+    std::vector<double>                              residuals;
+    /// How many of the returned eigenvalues met `tolerance`.
+    std::size_t                                      n_converged  = 0;
+    /// Lowest target-window residual after each block built (convergence curve).
+    std::vector<double>                              resid_history;
 };
 
 namespace detail {
@@ -217,15 +236,30 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     std::vector<Complex> Aj_host(b * b);
     std::vector<Complex> Bj_host(b * b);
     std::vector<Complex> Bprev_host(b * b, Complex(0.0, 0.0));
+    std::vector<Complex> last_B(b * b, Complex(0.0, 0.0));  // most recent QR coupling
+    std::vector<double>  resid_hist;                        // convergence curve
 
     const Complex one(1.0, 0.0), zero(0.0, 0.0), neg_one(-1.0, 0.0);
     bool converged = false;
 
+    // Lean mode: no stored basis -> local reorth only, eigenvalues only.
+    const bool keep_basis = opts.keep_basis;
+    if (!keep_basis && opts.compute_vectors) {
+        throw std::invalid_argument(
+            "block_lanczos_kernel: keep_basis=false (lean reorth) cannot return "
+            "eigenvectors -- the N-dimensional basis is not stored. Set "
+            "keep_basis=true, or use block_krylov_schur_kernel for "
+            "bounded-memory eigenvectors.");
+    }
+
     for (std::size_t j = 0; j < max_blocks; ++j) {
-        // Snapshot V_curr into the basis storage for restart / reconstruction.
-        auto V_j_keep = backend.make_zero_vector(N * b);
-        backend.copy(V_curr.get(), V_j_keep.get(), N * b);
-        basis.emplace_back(std::move(V_j_keep));
+        // Snapshot V_curr into the basis storage (only when we keep it: full
+        // reorth + eigenvector reconstruction need it; lean mode does not).
+        if (keep_basis) {
+            auto V_j_keep = backend.make_zero_vector(N * b);
+            backend.copy(V_curr.get(), V_j_keep.get(), N * b);
+            basis.emplace_back(std::move(V_j_keep));
+        }
 
         // W = H * V_curr  (column-by-column).
         for (std::size_t c = 0; c < b; ++c) {
@@ -260,7 +294,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
         // (gem) every `reorth_period` iterations. Cheap on GPU because the
         // gemms stay on device.
         const bool do_full_reorth =
-            (opts.reorth_period > 0) &&
+            keep_basis && (opts.reorth_period > 0) &&
             (j > 0) && (j % opts.reorth_period == 0);
         if (do_full_reorth) {
             for (int pass = 0; pass < 2; ++pass) {
@@ -315,6 +349,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
 
         // QR(W) -> V_next, B_j. `qr_thin` overwrites W with Q.
         backend.qr_thin(W.get(), N, b, Bj_host.data());
+        last_B = Bj_host;   // coupling beyond the current last block (residual)
 
         // Breakdown check on min |diag(B_j)|.
         double min_diag = std::numeric_limits<double>::max();
@@ -338,6 +373,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                 const bool have_next_block = (min_diag > breakdown)
                                           && (j + 1 < max_blocks);
                 std::size_t ok = 0;
+                double max_resid = 0.0;
                 std::vector<Complex> res_block(b);
                 for (std::size_t kk = 0; kk < target_eigs; ++kk) {
                     if (!have_next_block) { ok = target_eigs; break; }
@@ -347,8 +383,12 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                                 Bj_host.data(), b,
                                 &T_mat[(total_blocks - 1) * b + kk * total_dim], 1,
                                 &zero, res_block.data(), 1);
-                    if (cblas_dznrm2(b, res_block.data(), 1) <= conv_tol) ++ok;
+                    const double rk = cblas_dznrm2(b, res_block.data(), 1);
+                    max_resid = std::max(max_resid, rk);
+                    if (rk <= conv_tol) ++ok;
                 }
+                // Convergence curve: worst residual across the target window.
+                if (have_next_block) resid_hist.push_back(max_resid);
                 if (ok >= target_eigs) {
                     converged = true;
                     break;
@@ -376,7 +416,9 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     detail::build_projected_matrix(alpha_blocks, beta_blocks, b, T_mat);
 
     std::vector<double> evals(total);
-    const char jobz = opts.compute_vectors ? 'V' : 'N';
+    // Always compute the (small) block-tridiagonal eigenvectors: needed for the
+    // per-eigenvalue residual estimate even when full eigenvectors aren't wanted.
+    const char jobz = 'V';
     const auto info = LAPACKE_zheevd(LAPACK_COL_MAJOR, jobz, 'U',
         static_cast<lapack_int>(total),
         reinterpret_cast<lapack_complex_double*>(T_mat.data()),
@@ -390,6 +432,23 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     out.eigenvalues.assign(evals.begin(), evals.begin() + output_eigs);
     out.blocks_built = m_built;
     out.converged    = converged;
+
+    // ---- per-eigenvalue residual diagnostics ----
+    // residual_i = ||B_last * Y[last block, i]|| ~= ||H xᵢ − θᵢ xᵢ||.
+    out.resid_history = std::move(resid_hist);
+    out.residuals.assign(output_eigs, 0.0);
+    {
+        std::vector<Complex> rb(b);
+        for (std::size_t kk = 0; kk < output_eigs; ++kk) {
+            cblas_zgemv(CblasColMajor, CblasNoTrans, b, b, &one,
+                        last_B.data(), b,
+                        &T_mat[(m_built - 1) * b + kk * total], 1,
+                        &zero, rb.data(), 1);
+            out.residuals[kk] =
+                cblas_dznrm2(static_cast<int>(b), rb.data(), 1);
+            if (out.residuals[kk] <= conv_tol) ++out.n_converged;
+        }
+    }
 
     if (opts.compute_vectors) {
         // Each eigenvector v_k = sum_{blk} V_{blk} * Y_{blk,k}, where

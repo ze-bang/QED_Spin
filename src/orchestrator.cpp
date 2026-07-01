@@ -26,11 +26,25 @@
 #include <ed/orchestrator.h>
 
 #include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
+#include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
 #include <ed/krylov/block_lanczos_kernel.h>
+#include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
+#include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
+// Execution planner / feasibility "dictator" removed (sensible defaults +
+// env-override leaf hooks instead). The matvec/symmetry leaf policy hooks
+// (csr_policy_hook, sym_matvec_policy_hook, basis_policy_hook) still provide
+// the default + env-override behaviour, consumed lazily inside the operator
+// backends; the orchestrator no longer overrides them.
+#include <ed/core/operator.h>               // Operator introspection (term SoA, N)
+#include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
+
+#include <fstream>   // /proc/meminfo
+#include <string>
+#include <unistd.h>  // sysconf
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/observables/cf_dynamical.h>
 #include <ed/observables/cf_spectral_kernel.h>
@@ -41,9 +55,12 @@
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
+#include <ed/thermal/oftlm_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
 #include <ed/thermal/ltlm_kernel.h>
+#include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
+#include <ed/thermal/mtpq_f32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -197,27 +214,11 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Default heuristics for "method == Auto".
-// ---------------------------------------------------------------------------
-SolveMethod auto_solve_method(std::uint64_t global_dim,
-                              std::size_t   num_eigs) {
-    // Full diag below 2^12 is competitive.
-    if (global_dim <= (1ULL << 12)) return SolveMethod::FullDiag;
-    if (num_eigs == 1) return SolveMethod::Lanczos;
-    if (num_eigs <= 8)  return SolveMethod::BlockLanczos;
-    return SolveMethod::KrylovSchur;
-}
-
-std::size_t auto_max_iter(std::uint64_t global_dim,
-                          std::size_t   num_eigs,
-                          std::size_t   user_max_iter) {
-    if (user_max_iter > 0) return user_max_iter;
-    const std::size_t floor_iters = 2 * num_eigs + 30;
-    const std::size_t cap_iters   = std::min<std::size_t>(
-        floor_iters, static_cast<std::size_t>(std::min<std::uint64_t>(
-            global_dim, 2000)));
-    return std::max(floor_iters, cap_iters);
+// Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full
+// diagonalization for tiny spaces, Lanczos otherwise. (Replaces the planner's
+// cost-model method choice.)
+[[nodiscard]] SolveMethod default_method_for(const LinearOperator& H) {
+    return (H.global_dim() <= 1024) ? SolveMethod::FullDiag : SolveMethod::Lanczos;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,11 +289,44 @@ GroundStateResult solve_on(Backend& be,
     auto matvec = H.template bind<Backend>();
 
     GroundStateResult R;
-    const std::size_t max_iter = auto_max_iter(
-        geom.global_dim, opts.num_eigs, opts.max_iter);
-    const SolveMethod method = (opts.method == SolveMethod::Auto)
-        ? auto_solve_method(geom.global_dim, opts.num_eigs)
-        : opts.method;
+
+    // -----------------------------------------------------------------------
+    // Sensible defaults (planner removed). The caller's explicit method /
+    // max_iter win; otherwise a simple dim-based default. No memory-budget
+    // pre-flight refusal, and no CSR / symmetry-matvec override -- the leaf
+    // policy hooks (csr_policy_hook / sym_matvec_policy_hook / basis_policy_hook)
+    // keep their default + env-override behaviour, consumed lazily at first
+    // matvec.
+    // -----------------------------------------------------------------------
+    const SolveMethod method = (opts.method != SolveMethod::Auto)
+        ? opts.method
+        : default_method_for(H);
+    const std::size_t max_iter =
+        (opts.max_iter > 0) ? opts.max_iter : 2 * opts.num_eigs + 30;
+    const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
+
+    // Leaf memory guard: throw cleanly before the dominant allocation rather
+    // than OOM-crash. H.global_dim() is the actual working dimension (full /
+    // fixed-Sz block / symmetry sector). Coarse: dense matrix for full diag;
+    // stored Krylov basis (~max_iter vectors, x block_size) when eigenvectors
+    // are kept; a handful of work vectors otherwise.
+    {
+        const std::uint64_t D = H.global_dim();
+        constexpr std::uint64_t CX = 16;  // sizeof(complex<double>)
+        std::uint64_t est;
+        if (method == SolveMethod::FullDiag) {
+            est = D * D * CX;
+        } else if (opts.compute_vectors) {
+            std::uint64_t vecs = std::max<std::uint64_t>(max_iter, 4);
+            if (method == SolveMethod::BlockLanczos ||
+                method == SolveMethod::BlockKrylovSchur)
+                vecs *= std::max<std::size_t>(1, opts.block_size);
+            est = D * vecs * CX;
+        } else {
+            est = D * 8ull * CX;  // eigenvalues-only: ring-buffer work vectors
+        }
+        ed::core::guard_working_set(est, "ed::solve");
+    }
 
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -515,6 +549,20 @@ GroundStateResult solve_on(Backend& be,
         kopts.tolerance       = opts.tolerance;
         kopts.compute_vectors = opts.compute_vectors;
         kopts.output_dir      = opts.output_dir;
+        // Reorth profile: full (stored basis) vs lean (local-only, eigenvalues).
+        // Eigenvectors force full; else the planner's lean recommendation (the
+        // full block basis would not fit the budget) OR the caller's opt forces
+        // lean; ED_BLOCK_LANCZOS_LEAN=1 is the explicit override. The planner
+        // path is what makes block-Lanczos memory-bounded (guarantee completion).
+        if (opts.compute_vectors) {
+            kopts.keep_basis = true;   // eigenvectors require the stored basis
+        } else {
+            // Planner removed: honour the caller's flag; ED_BLOCK_LANCZOS_LEAN=1
+            // is the explicit lean override.
+            kopts.keep_basis = opts.block_lanczos_keep_basis;
+            if (const char* e = std::getenv("ED_BLOCK_LANCZOS_LEAN"))
+                kopts.keep_basis = !(e[0] == '1' && e[1] == '\0');
+        }
         auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
@@ -528,8 +576,45 @@ GroundStateResult solve_on(Backend& be,
             }
             R.eigenvectors = std::move(evref);
         }
-        R.krylov.iters_done = kres.blocks_built;
-        R.krylov.converged  = kres.converged;
+        R.krylov.iters_done    = kres.blocks_built;
+        R.krylov.converged     = kres.converged;
+        R.krylov.ritz_residuals = kres.residuals;
+        R.krylov.n_converged   = kres.n_converged;
+        R.krylov.resid_history = kres.resid_history;
+        if (!kres.residuals.empty())
+            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
+                                                       kres.residuals.end());
+    } else if (method == SolveMethod::BlockKrylovSchur) {
+        ed::krylov::BlockKrylovSchurOptions kopts;
+        kopts.num_eigs        = opts.num_eigs;
+        kopts.block_size      = opts.block_size;
+        kopts.max_iter        = max_iter;
+        kopts.tolerance       = opts.tolerance;
+        kopts.compute_vectors = opts.compute_vectors;
+        kopts.output_dir      = opts.output_dir;
+        kopts.global_n        = geom.global_dim;
+        kopts.max_subspace_vectors = subspace_cap_vectors;
+        auto kres = ed::krylov::block_krylov_schur_kernel(be, matvec,
+            geom.local_dim, geom.global_dim, kopts);
+        R.eigenvalues = std::move(kres.eigenvalues);
+        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
+            EigenvectorRef evref;
+            evref.host.reserve(kres.eigenvectors.size());
+            std::vector<Complex> tmp(geom.local_dim);
+            for (auto& v : kres.eigenvectors) {
+                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
+                evref.host.push_back(tmp);
+            }
+            R.eigenvectors = std::move(evref);
+        }
+        R.krylov.iters_done    = kres.restarts;
+        R.krylov.converged     = kres.converged;
+        R.krylov.ritz_residuals = kres.residuals;
+        R.krylov.n_converged   = kres.n_converged;
+        R.krylov.resid_history = kres.resid_history;
+        if (!kres.residuals.empty())
+            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
+                                                       kres.residuals.end());
     } else if (method == SolveMethod::KrylovSchur) {
         ed::krylov::KrylovSchurOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
@@ -538,6 +623,7 @@ GroundStateResult solve_on(Backend& be,
         kopts.compute_vectors = opts.compute_vectors;
         kopts.global_n        = geom.global_dim;
         kopts.output_dir      = opts.output_dir;
+        kopts.max_subspace_vectors = subspace_cap_vectors;
         auto kres = ed::krylov::krylov_schur_kernel(be, matvec,
             geom.local_dim, seed, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
@@ -687,9 +773,15 @@ GroundStateResult solve_on(Backend& be,
                     cpu_matvec(in, out, static_cast<std::size_t>(n));
                 };
             std::vector<double> eigs;
+            // Pass &H so the dense matrix is assembled DIRECTLY from the sparse
+            // term structure in O(nnz) (full-space / fixed-Sz lanes) instead of N
+            // full matvecs. Symmetry lanes (and any operator without direct
+            // support) return false and fall back to the Hv column build, which
+            // stays SEQUENTIAL because the CPU matvec is not reentrant.
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
-                                 opts.compute_vectors);
+                                 opts.compute_vectors,
+                                 /*op_for_dense=*/&H);
             if (!opts.output_dir.empty()
                     && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
                 R.hdf5_path = opts.output_dir + "/ed_results.h5";
@@ -804,7 +896,69 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
     ed::parallel::pin_omp_threads_once();
 
-    auto variant = select_backend(H.geometry(), opts.backend);
+    BackendVariant variant;
+#ifdef WITH_CUDA
+    // fp32 single-GPU mTPQ fits one H100 (2 x complex<float> = 68.7 GB at
+    // 2^32). The default gpu_mem_fits() estimate uses complex<double> x fudge 8
+    // (= 549 GB) and would REJECT the GPU, falling to the CPU lane -- whose
+    // 2^32 spectral-bound Lanczos auto-tune then OOM-kills the host. Force the
+    // GPU lane here; the fp32 driver manages its own (fitting) device memory.
+    if (opts.mtpq_fp32
+        && opts.method == ThermalOptions::Method::mTPQ
+        && H.supports_cuda_f32()
+        && ed::have_cuda()) {
+        variant = BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
+    } else
+#endif
+    {
+        variant = select_backend(H.geometry(), opts.backend);
+    }
+
+    // COMPLETION GUARANTEE (thermal lane). The operator's basis is already built,
+    // so the binding constraint is the kernel WORKING SET: FTLM / LTLM keep a
+    // krylov_dim window of length-N vectors; TPQ / KPM a handful. Plan it and
+    // refuse cleanly if it would not fit, before allocating those vectors. The
+    // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
+    // passes. allow_infeasible (force) opts out.
+    // Leaf memory guard (planner feasibility pre-flight removed): throw cleanly
+    // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
+    // is the per-call working dim (symmetry iterates sectors a level up, so this
+    // is the sector dim there). LTLM stores GS + excitation bases (~2x krylov);
+    // FTLM one sample's basis at a time; TPQ/KPM are O(1) state vectors.
+    {
+        const std::uint64_t D = H.global_dim();
+        std::uint64_t vecs;
+        std::uint64_t elem = 16ull;  // complex<double>
+        bool fp32_lane = false;
+#ifdef WITH_CUDA
+        // fp32 single-GPU mTPQ lane: the lean driver keeps just two
+        // complex<float> device vectors (psi + w), so the working set is
+        // D * 2 * 8 bytes (68.7 GB at 2^32), a quarter of the double estimate
+        // -- otherwise this guard's 8-vector complex<double> estimate (549 GB
+        // at 2^32) would refuse the run before the driver ever allocates.
+        fp32_lane = opts.mtpq_fp32
+                 && opts.method == ThermalOptions::Method::mTPQ
+                 && H.supports_cuda_f32();
+#endif
+        if (fp32_lane) {
+            vecs = 2;
+            elem = 8ull;  // complex<float>
+        } else {
+            switch (opts.method) {
+                case ThermalOptions::Method::LTLM:
+                    vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
+                case ThermalOptions::Method::FTLM:
+                    vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
+                case ThermalOptions::Method::OFTLM:
+                    // per-sample Krylov basis + the exact-eigenpair Lanczos basis
+                    vecs = std::max<std::size_t>(opts.krylov_dim, 4)
+                         + 2 * opts.num_exact + 34; break;
+                default:  // mTPQ / cTPQ / KpmDos: a handful of state vectors
+                    vecs = 8; break;
+            }
+        }
+        ed::core::guard_working_set(D * vecs * elem, "ed::thermal");
+    }
 
     // Surface unification follow-up (May 2026): when the caller does
     // not supply an explicit ``opts.betas`` grid, construct one from
@@ -863,7 +1017,11 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     if (is_tpq_method &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
-        !R.thermo.temperatures.empty()) {
+        !R.thermo.temperatures.empty() &&
+        // When the caller requested TPQ state snapshots (probe_betas), the exact
+        // fallback cannot produce them -- run the real TPQ trajectory instead
+        // (accepting the small-sector variance the user implicitly opted into).
+        opts.probe_betas.empty()) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
         full_diagonalization(H, D, D, eigs, /*dir=*/"", /*compute_eigenvectors=*/false);
@@ -871,6 +1029,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             R.thermo = compute_canonical_thermo_from_eigs(
                 eigs, R.thermo.temperatures);
             R.ground_state_energy = eigs.front();
+            // The exact fallback ran on the selected backend lane; label it like
+            // the normal return path (this early return previously left lane
+            // unset, failing the lane-metadata assertions).
+            R.backend.lane = ed::lane_label_from_variant(variant);
             return R;
         }
     }
@@ -1004,9 +1166,28 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? std::max<std::size_t>(std::min(reach_iters, MTPQ_HARD_CAP), 1)
                 : opts.krylov_dim;
 
-            auto kres = ed::thermal::mtpq_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
+            ed::thermal::MtpqResult kres;
+#ifdef WITH_CUDA
+            // fp32 single-GPU lane: half-footprint state vectors let the full
+            // 2^32 Hilbert space run mTPQ on one 80 GB H100. Reuses the L /
+            // max_iter auto-tune computed above (kopts); the driver manages its
+            // own device memory (bypasses the double CudaBackend vectors).
+            if (std::getenv("ED_MTPQ_VERBOSE")) {
+                std::fprintf(stderr,
+                    "[mtpq-lane] mtpq_fp32=%d supports_cuda_f32=%d -> %s\n",
+                    (int)opts.mtpq_fp32, (int)H.supports_cuda_f32(),
+                    (opts.mtpq_fp32 && H.supports_cuda_f32()) ? "FP32-GPU"
+                                                              : "double");
+            }
+            if (opts.mtpq_fp32 && H.supports_cuda_f32()) {
+                kres = ed::thermal::mtpq_f32(H, kopts);
+            } else
+#endif
+            {
+                kres = ed::thermal::mtpq_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+            }
             R.ground_state_energy = kres.energies.empty()
                 ? 0.0 : *std::min_element(kres.energies.begin(),
                                           kres.energies.end());
@@ -1166,6 +1347,29 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? 0.0
                 : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
         }, variant);
+    } else if (opts.method == ThermalOptions::Method::OFTLM) {
+        // OFTLM (Morita-Tohyama): FTLM + N_V exact low-lying states + random
+        // vectors orthogonalized against them. CPU-only lane -- consumes the
+        // host term-matvec directly (see oftlm_kernel.h).
+        auto host_mv = H.bind_cpu();
+        auto apply_H = [&host_mv](const Complex* in, Complex* out, int n) {
+            host_mv(in, out, static_cast<std::size_t>(n));
+        };
+        ed::thermal::OftlmOptions kopts;
+        kopts.num_samples = opts.num_samples;
+        kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
+        kopts.num_exact   = opts.num_exact;
+        kopts.betas       = opts.betas;
+        kopts.random_seed = opts.random_seed;
+        kopts.output_dir  = opts.output_dir;
+        auto kres = ed::thermal::oftlm_cpu(
+            apply_H, H.geometry().global_dim, kopts);
+        R.thermo.energy        = std::move(kres.energy);
+        R.thermo.specific_heat = std::move(kres.heat_capacity);
+        R.thermo.entropy       = std::move(kres.entropy);
+        R.ground_state_energy = R.thermo.energy.empty()
+            ? 0.0
+            : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
     } else if (opts.method == ThermalOptions::Method::LTLM) {
         // Phase E2 of the "Backend x Symmetries x Workflows" plan
         // (May 2026): the LTLM kernel now dispatches on Backend type
@@ -1432,6 +1636,20 @@ SpectralResult spectral(const LinearOperator&                      H,
     ed::parallel::pin_omp_threads_once();
 
     auto variant = select_backend(H.geometry(), opts.backend);
+
+    // COMPLETION GUARANTEE (spectral lane). Working set: GroundStateCF runs an
+    // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window;
+    // the dynamical lanes keep an FTLM / KPM window. Plan it + refuse cleanly if
+    // it would not fit, before allocating. allow_infeasible (force) opts out.
+    // Leaf memory guard (planner feasibility pre-flight removed): GS-CF stores
+    // the GS eigenvector + a continued-fraction Krylov window; the dynamical
+    // lanes keep an FTLM/KPM window (~2x krylov, per-sector dim for symmetry).
+    {
+        const std::uint64_t D = H.global_dim();
+        const std::uint64_t vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4);
+        ed::core::guard_working_set(D * vecs * 16ull, "ed::spectral");
+    }
+
     SpectralResult R;
     const auto t0 = std::chrono::steady_clock::now();
 

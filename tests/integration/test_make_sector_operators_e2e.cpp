@@ -216,6 +216,57 @@ TEST_CASE("make_sector_operators: full lane solves to Bethe GS + matches legacy"
 }
 
 // -----------------------------------------------------------------------------
+// Pins the CSR-free rep-walk DENSE-ASSEMBLY lane (SubspaceOperator::assembleDense
+// for `needs_orbit_walk && has_coeff_modifier` producers -- the "orbit-walk
+// symmetry dense-assembly lane"). Forcing ED_SYM_LAZY_SECTORS=1 routes
+// make_sector_operators to the lazy rep-walk producers, so a FullDiag solve
+// assembles each sector densely *through that lane* (vs the eager orbit-CSR path
+// the N=6 default would otherwise take). The sector union must still reproduce
+// the full-Hilbert dense reference -- byte-for-byte the same physics as the
+// gather matvec, now built in one O(|G|*nnz) pass.
+TEST_CASE("make_sector_operators: lazy rep-walk dense-assembly lane == full reference",
+          "[make_operator][sector_set][e2e][dense][lazy][N6]") {
+    const int N = 6;
+    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);  // force rep-walk producers
+
+    std::string dir = make_scratch_dir("make_sector_ops", "lazydense_full_N6");
+    write_zN_translation_fixtures(dir, N);
+    write_heisenberg_directory(dir, N, 1.0);
+
+    // Symmetry sectors via the LAZY rep-walk producer; each FullDiag goes through
+    // the dense-assembly lane under test.
+    auto ops = ed::make_sector_operators(heisenberg_spec(dir, N));
+    REQUIRE_FALSE(ops.empty());
+    std::vector<double> sym_spectrum;
+    for (const auto& op : ops) {
+        REQUIRE(op->dim() > 0);
+        auto e = solve_full_spectrum(*op);    // FullDiag -> assembleDense (the lane)
+        sym_spectrum.insert(sym_spectrum.end(), e.begin(), e.end());
+    }
+    std::sort(sym_spectrum.begin(), sym_spectrum.end());
+
+    // Reference: same Hamiltonian on the full 2^N space, dense-diagonalised.
+    ed::OperatorSpec full_spec;
+    full_spec.source             = ed::DirectoryPath{dir};
+    full_spec.num_sites          = static_cast<std::uint64_t>(N);
+    full_spec.spin_l             = 0.5f;
+    full_spec.streaming_symmetry = false;
+    auto full_op = ed::make_operator(std::move(full_spec));
+    std::vector<double> ref_spectrum = solve_full_spectrum(*full_op);
+
+    unsetenv("ED_SYM_LAZY_SECTORS");
+
+    REQUIRE(sym_spectrum.size() == ref_spectrum.size());
+    REQUIRE(sym_spectrum.size() == (1ULL << N));
+    double max_diff = 0.0;
+    for (std::size_t i = 0; i < sym_spectrum.size(); ++i)
+        max_diff = std::max(max_diff,
+                            std::abs(sym_spectrum[i] - ref_spectrum[i]));
+    INFO("max |E_lazy_dense - E_full| = " << max_diff);
+    REQUIRE(max_diff < 1e-9);
+}
+
+// -----------------------------------------------------------------------------
 TEST_CASE("make_sector_operators: fixed-Sz lane tiles half-filling + Bethe GS",
           "[make_operator][sector_set][e2e][fixedsz][N6]") {
     const int N = 6;

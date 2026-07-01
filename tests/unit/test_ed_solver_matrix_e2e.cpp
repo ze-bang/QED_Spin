@@ -30,6 +30,9 @@
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/orchestrator.h>
 
+#include <algorithm>
+#include <cmath>
+#include <complex>
 #include <memory>
 #include <vector>
 
@@ -77,6 +80,39 @@ TEST_CASE("workflows::solve e2e: Auto on the 8-site chain lands FullDiag and "
     auto res = ed::workflows::solve(*f.H_full, opts);
     REQUIRE(res.eigenvalues.size() >= 1);
     REQUIRE(std::abs(res.eigenvalues[0] - f.ref.eigs[0]) < kTolEnergy);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Direct dense assembly (try_build_dense_columns, O(nnz) from the term
+//     structure) must produce EXACTLY the same matrix as the O(dim)-matvec
+//     column build, for both the full-space and fixed-Sz lanes. This is what the
+//     FullDiag path now uses to skip the slow N-matvec construction.
+// ---------------------------------------------------------------------------
+TEST_CASE("dense assembly: try_build_dense_columns == matvec column build",
+          "[workflows][dense][assembly]") {
+    auto f = make_fixture();
+    using C = std::complex<double>;
+
+    auto check = [](const ed::matvec::MatVecOperator& op, std::size_t N) {
+        std::vector<C> direct(N * N, C(0.0, 0.0));
+        REQUIRE(op.try_build_dense_columns(direct.data(), N));   // lane supports it
+
+        std::vector<C> via_mv(N * N, C(0.0, 0.0));
+        std::vector<C> e(N), col(N);
+        for (std::size_t j = 0; j < N; ++j) {
+            std::fill(e.begin(), e.end(), C(0.0, 0.0));
+            e[j] = C(1.0, 0.0);
+            op.apply(e.data(), col.data(), N);
+            for (std::size_t i = 0; i < N; ++i) via_mv[i + j * N] = col[i];
+        }
+        double maxdiff = 0.0;
+        for (std::size_t k = 0; k < N * N; ++k)
+            maxdiff = std::max(maxdiff, std::abs(direct[k] - via_mv[k]));
+        REQUIRE(maxdiff < 1e-12);
+    };
+
+    check(*f.H_full, kFullDim);     // full Hilbert space (index == state)
+    check(*f.H_sz,   kSzGsDim);     // fixed-Sz (combinadic index <-> state)
 }
 
 // ---------------------------------------------------------------------------

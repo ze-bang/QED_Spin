@@ -93,9 +93,14 @@ WITH_MPI = "OFF"
 # Tooling: ruff (linter) + pytest defaults.
 # -----------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["python/tests"]
+testpaths = ["python/tests", "tests/integration"]
 python_files = ["test_*.py"]
-addopts = "-q"
+# Skip the long-running perf/scale guards by default (run them in the nightly
+# benchmarks lane with `-m slow`). The fast integration suite still runs.
+addopts = "-q -m 'not slow'"
+markers = [
+    "slow: long-running performance / scale guard (deselected by default; run in nightly with -m slow)",
+]
 
 [tool.ruff]
 line-length = 100

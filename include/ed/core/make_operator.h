@@ -51,11 +51,13 @@
 // =============================================================================
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -281,7 +283,15 @@ inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
         if (e[0] == '1') return true;
         if (e[0] == '0') return false;
     }
-    std::size_t budget = 4ULL * 1024ULL * 1024ULL * 1024ULL;  // 4 GiB
+    // Default budget = 64 MiB (was 4 GiB). The "eager" orbit-CSR lane is NOT
+    // actually faster for non-trivial sectors: its reverse lookup falls back to
+    // an O(log dim) SortedUint64Index binary search (the O(1) dense lookup is
+    // never built on this path), making its symmetry SpMV ~14x slower than the
+    // matrix-free rep walk -- which is ALSO O(#reps) memory instead of O(dim).
+    // So we only stay eager for genuinely tiny sectors (where construction is
+    // instant); everything larger uses the rep walk. Measured (XXZ ring, |G|=N):
+    // N=21 eager 44s -> rep walk 3.2s; N=24 eager >90s -> rep walk 7.5s.
+    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
     if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
         try { budget = std::stoull(e); } catch (...) {}
     }
@@ -297,6 +307,27 @@ inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
                 / static_cast<long double>(i + 1);
         }
     }
+    const long double num_sectors =
+        static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
+    const long double est_bytes = dim * num_sectors * 40.0L;
+    return est_bytes > static_cast<long double>(budget);
+}
+
+// Full-space (no Sz) twin of ``fixed_sz_sectors_should_be_lazy``: the eager full
+// builder materializes an orbit CSR over the 2^N space, so route to the
+// CSR-free rep-walk lane once that would exceed the budget. Same env knobs.
+inline bool full_sectors_should_be_lazy(std::uint64_t            n_bits,
+                                        const SymmetryGroupInfo& info) {
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS")) {
+        if (e[0] == '1') return true;
+        if (e[0] == '0') return false;
+    }
+    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
+    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
+        try { budget = std::stoull(e); } catch (...) {}
+    }
+    long double dim = 1.0L;                            // 2^n_bits
+    for (std::uint64_t i = 0; i < n_bits; ++i) dim *= 2.0L;
     const long double num_sectors =
         static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
     const long double est_bytes = dim * num_sectors * 40.0L;
@@ -362,8 +393,85 @@ struct SectorOperatorSet {
     std::vector<std::vector<int>>                              all_quantum_numbers;
 };
 
+namespace detail {
+
+// |Fix(g)| -- number of basis states left invariant by site-permutation ``perm``
+// (one element of ``max_clique``), restricted to popcount ``n_up`` (``n_up < 0``
+// => full 2^N space). A state fixed by g is constant on each cycle of g, so it is
+// chosen by one bit per cycle; restricting to popcount n_up counts the subsets of
+// cycles whose lengths sum to n_up (full space: 2^#cycles).
+inline std::uint64_t num_fixed_states(const std::vector<int>& perm, int n_up) {
+    const int N = static_cast<int>(perm.size());
+    std::vector<char> seen(static_cast<std::size_t>(N), 0);
+    std::vector<int>  cyc_len;
+    for (int i = 0; i < N; ++i) {
+        if (seen[static_cast<std::size_t>(i)]) continue;
+        int len = 0, j = i;
+        while (!seen[static_cast<std::size_t>(j)]) {
+            seen[static_cast<std::size_t>(j)] = 1; j = perm[static_cast<std::size_t>(j)]; ++len;
+        }
+        cyc_len.push_back(len);
+    }
+    if (n_up < 0) return std::uint64_t(1) << cyc_len.size();   // 2^#cycles
+    std::vector<std::uint64_t> dp(static_cast<std::size_t>(n_up) + 1, 0);
+    dp[0] = 1;
+    for (int L : cyc_len)
+        for (int k = n_up; k >= L; --k)
+            dp[static_cast<std::size_t>(k)] += dp[static_cast<std::size_t>(k - L)];
+    return dp[static_cast<std::size_t>(n_up)];
+}
+
+// Exact per-RAW-sector dimensions via the Burnside / character (Molien) formula
+//   dim(chi_s) = (1/|G|) * Re sum_g chi_s(g) |Fix(g)|
+// (the multiplicity of the 1-D irrep chi_s in the fixed-Sz permutation
+// representation). Cheap -- O(|G|^2) total -- and needs NO orbit walk, so it can
+// drive the across-sector load balance BEFORE the expensive build.
+inline std::vector<std::uint64_t>
+sector_dims_burnside(const ::SymmetryGroupInfo& info, int n_up) {
+    const std::size_t G = info.max_clique.size();
+    std::vector<std::uint64_t> fix(G);
+    for (std::size_t g = 0; g < G; ++g)
+        fix[g] = num_fixed_states(info.max_clique[g], n_up);
+    std::vector<std::uint64_t> dims(info.sectors.size(), 0);
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        const auto chi = ed::symmetry::sector_characters_from(
+            info, info.sectors[s].phase_factors);
+        double acc = 0.0;
+        for (std::size_t g = 0; g < G; ++g)
+            acc += (chi[g] * static_cast<double>(fix[g])).real();
+        const long long d = std::llround(acc / static_cast<double>(G));
+        dims[s] = d > 0 ? static_cast<std::uint64_t>(d) : 0;
+    }
+    return dims;
+}
+
+// Greedy longest-processing-time bin-packing: hand each raw sector (largest dim
+// first) to the currently least-loaded rank. Deterministic, so every rank
+// computes the IDENTICAL ``owner[raw_s] = rank`` map. Solve + construction cost
+// both scale ~linearly with sector dim, so dim is the load proxy.
+inline std::vector<int>
+greedy_sector_owner(const std::vector<std::uint64_t>& dims, int nranks) {
+    std::vector<std::size_t> order(dims.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return dims[a] > dims[b]; });
+    std::vector<std::uint64_t> load(static_cast<std::size_t>(nranks), 0);
+    std::vector<int>           owner(dims.size(), 0);
+    for (std::size_t s : order) {
+        int best = 0;
+        for (int r = 1; r < nranks; ++r)
+            if (load[static_cast<std::size_t>(r)] < load[static_cast<std::size_t>(best)]) best = r;
+        owner[s] = best;
+        load[static_cast<std::size_t>(best)] += (dims[s] > 0 ? dims[s] : 1);
+    }
+    return owner;
+}
+
+}  // namespace detail
+
 inline SectorOperatorSet
-make_sector_operators_tagged(const OperatorSpec& spec) {
+make_sector_operators_tagged(const OperatorSpec& spec,
+                             int mpi_rank = 0, int mpi_size = 1) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_sector_operators: requires "
@@ -389,6 +497,31 @@ make_sector_operators_tagged(const OperatorSpec& spec) {
     SectorOperatorSet set;
     std::vector<std::size_t> sector_ids;
 
+    // Across-sector MPI load balance: pre-compute exact per-sector dims via the
+    // Burnside/character formula (cheap, no orbit walk) and greedy-pack them onto
+    // ranks. owner[raw_s] = owning rank; nullptr (single-rank) => build all.
+    std::vector<int> sector_owner;
+    const std::vector<int>* owner_ptr = nullptr;
+    if (mpi_size > 1) {
+        const int n_up_for_dims = spec.fixed_sz.has_value()
+            ? static_cast<int>(*spec.fixed_sz) : -1;
+        const auto dims =
+            detail::sector_dims_burnside(base->symmetry_info, n_up_for_dims);
+        sector_owner = detail::greedy_sector_owner(dims, mpi_size);
+        owner_ptr = &sector_owner;
+        if (std::getenv("ED_DEBUG_BALANCE") && mpi_rank == 0) {
+            std::vector<std::uint64_t> load(static_cast<std::size_t>(mpi_size), 0);
+            for (std::size_t s = 0; s < dims.size(); ++s) load[static_cast<std::size_t>(sector_owner[s])] += dims[s];
+            fprintf(stderr, "[BALANCE] burnside dims:");
+            for (auto d : dims) fprintf(stderr, " %llu", (unsigned long long)d);
+            fprintf(stderr, "\n[BALANCE] per-rank load:");
+            for (auto l : load) fprintf(stderr, " %llu", (unsigned long long)l);
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
+    }
+
+    const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
+    const auto ctor_t0 = std::chrono::steady_clock::now();
     if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
         // fixed-Sz mTPQ): hand out operators that know their dim up-front and
@@ -402,17 +535,37 @@ make_sector_operators_tagged(const OperatorSpec& spec) {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids);
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
         } else {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids);
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
         }
     } else {
-        set.operators = ed::symmetry::build_full_sector_operators(
-            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-            base->symmetry_info, term_builder, &sector_ids);
+        // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
+        // (memory-bounded, stabilizer-fused construction); small N stays eager.
+        if (detail::full_sectors_should_be_lazy(
+                static_cast<std::uint64_t>(spec.num_sites), base->symmetry_info)) {
+            set.operators = ed::symmetry::build_full_sector_operators_lazy(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
+        } else {
+            set.operators = ed::symmetry::build_full_sector_operators(
+                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+                base->symmetry_info, term_builder, &sector_ids,
+                mpi_rank, mpi_size, owner_ptr);
+        }
+    }
+    if (time_ctor) {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - ctor_t0).count();
+        fprintf(stderr, "[CONSTRUCTION] sector build: %.1f ms  (|G|=%zu, sectors_built=%zu)\n",
+                ms, base->symmetry_info.max_clique.size(), set.operators.size());
+        fflush(stderr);
     }
 
     set.num_raw_sectors = base->symmetry_info.sectors.size();
@@ -443,6 +596,80 @@ make_sector_operators_tagged(const OperatorSpec& spec) {
 inline std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>
 make_sector_operators(const OperatorSpec& spec) {
     return make_sector_operators_tagged(spec).operators;
+}
+
+// ---------------------------------------------------------------------------
+// make_all_sz_sector_operators_tagged: one-pass all-Sz sector factory.
+//
+// Unlike calling ``make_sector_operators_tagged`` once per n_up (which reads
+// the automorphism directory, parses the symmetry JSON, and runs an orbit-rep
+// scan for each Sz sector independently), this function:
+//   1. Loads the Hamiltonian and symmetry group metadata ONCE.
+//   2. Calls ``enumerate_full_orbit_reps`` ONCE (O(2^N × |G|)).
+//   3. Partitions reps by n_up and builds all (n_up, irrep) sectors in one
+//      nested loop.
+//
+// The returned SectorOperatorSet covers every (n_up, irrep) sector in the
+// window [n_up_min, n_up_max]. tags[i].n_up carries the Sz sector; tags[i].
+// sector_index carries the raw irrep index within that Sz sector. A single
+// flat parallel loop over the set replaces the nested (n_up outer, irrep
+// inner) double loop, removing all per-n_up cold-start overhead.
+//
+// Designed for the thermal use-case on many-core machines: build once, run all
+// (n_up, irrep) sectors in one ``#pragma omp parallel for``.
+// ---------------------------------------------------------------------------
+inline SectorOperatorSet
+make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
+                                    int n_up_min = 0,
+                                    int n_up_max = -1) {
+    if (!spec.streaming_symmetry) {
+        throw std::runtime_error(
+            "ed::make_all_sz_sector_operators_tagged: requires "
+            "streaming_symmetry = true.");
+    }
+    const std::string& dir = detail::require_directory(spec);
+    const std::uint64_t n_bits = static_cast<std::uint64_t>(spec.num_sites);
+    if (n_up_max < 0)
+        n_up_max = static_cast<int>(n_bits);
+
+    // Load operator terms + symmetry group info ONCE.
+    auto base = detail::build_base_op(spec);
+    detail::load_terms_into(*base, spec);
+    base->symmetry_info.loadFromDirectory(dir);
+
+    auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
+        op.transform_data_  = base->transform_data_;
+        op.three_body_data_ = base->three_body_data_;
+    };
+
+    std::vector<std::pair<int, std::size_t>> n_up_sector_ids;
+    std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> operators =
+        ed::symmetry::build_all_sz_sector_operators(
+            n_bits, spec.spin_l, base->symmetry_info, term_builder,
+            static_cast<std::int64_t>(n_up_min),
+            static_cast<std::int64_t>(n_up_max),
+            &n_up_sector_ids);
+
+    SectorOperatorSet set;
+    set.num_raw_sectors = base->symmetry_info.sectors.size();
+    set.all_quantum_numbers.reserve(set.num_raw_sectors);
+    for (const auto& s : base->symmetry_info.sectors)
+        set.all_quantum_numbers.push_back(s.quantum_numbers);
+    set.operators = std::move(operators);
+    set.tags.reserve(set.operators.size());
+    for (std::size_t i = 0; i < set.operators.size(); ++i) {
+        const auto& [n_up, raw_s] = n_up_sector_ids[i];
+        ed::SectorTag tag;
+        tag.n_up         = n_up;
+        tag.sector_index = raw_s;
+        tag.sector_dim   = static_cast<std::uint64_t>(
+            set.operators[i]->dim());
+        if (raw_s < base->symmetry_info.sectors.size())
+            tag.quantum_numbers =
+                base->symmetry_info.sectors[raw_s].quantum_numbers;
+        set.tags.push_back(std::move(tag));
+    }
+    return set;
 }
 
 // ---------------------------------------------------------------------------

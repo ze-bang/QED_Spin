@@ -24,7 +24,6 @@
 #include "common/catch2_harness.h"
 
 #include <ed/api.h>
-#include <ed/api/feasibility.h>
 #include <ed/api/symmetry_helpers.h>
 #include <ed/core/operator.h>
 #include <ed/orchestrator.h>
@@ -418,41 +417,13 @@ TEST_CASE("ed::find_symmetries('translation') builds Z_N",
     REQUIRE(info.generators.size() == 1);
 }
 
-TEST_CASE("ed::find_symmetries('translation+reflection') builds D_N",
+TEST_CASE("ed::find_symmetries('translation+reflection') is restricted to its abelian subgroup",
           "[api-mirror][symmetries]") {
     const int N = 6;
+    // translation+reflection generates the NON-abelian dihedral group D_N (|G|=2N).
+    // The projection layer is abelian-only, so group_from_generators restricts to a
+    // maximal abelian subgroup (the Z_N translations, |A|=N) -- a complete & correct,
+    // if coarser, reduction. See the non-abelian guard in src/symmetry/group.cpp.
     auto info = ed::find_symmetries(N, "translation+reflection");
-    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(2 * N));
-    REQUIRE(info.generators.size() == 2);
-}
-
-TEST_CASE("ed::estimate_resources reports a sensible basis dim",
-          "[api-mirror][feasibility]") {
-    ed::OperatorSpec spec;
-    spec.source    = ed::FilePaths{};  // immaterial; estimate doesn't load
-    spec.num_sites = 12;
-    auto est = ed::estimate_resources(spec, {});
-    REQUIRE(est.basis_dim == (std::uint64_t{1} << 12));
-    REQUIRE(est.per_rank_gb >= 0.0);
-
-    ed::OperatorSpec spec_sz;
-    spec_sz.source    = ed::FilePaths{};
-    spec_sz.num_sites = 12;
-    spec_sz.fixed_sz  = 6;
-    auto est_sz = ed::estimate_resources(spec_sz, {});
-    REQUIRE(est_sz.basis_dim == 924);  // C(12, 6)
-}
-
-TEST_CASE("ed::suggest_workflow picks the right verb for each intent",
-          "[api-mirror][feasibility]") {
-    ed::OperatorSpec spec;
-    spec.source    = ed::FilePaths{};
-    spec.num_sites = 8;
-    auto gs = ed::suggest_workflow(spec, ed::Intent::GroundState);
-    REQUIRE(gs.verb == "solve");
-    auto ft = ed::suggest_workflow(spec, ed::Intent::FiniteTemperature);
-    REQUIRE(ft.verb == "thermal");
-    REQUIRE(ft.method == "FTLM");
-    auto sp = ed::suggest_workflow(spec, ed::Intent::Spectral);
-    REQUIRE(sp.verb == "spectral");
+    REQUIRE(info.max_clique.size() == static_cast<std::size_t>(N));   // |A| = N, not 2N
 }

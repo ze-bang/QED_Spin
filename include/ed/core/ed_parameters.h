@@ -49,7 +49,19 @@ struct EDParameters {
     // ========== TPQ-Specific Parameters ==========
     uint64_t tpq_max_steps = 10000;
     uint64_t tpq_measurement_interval = 100;
-    double tpq_energy_shift = 1e5;
+    // mTPQ LargeValue L in |psi_{k+1}> = (L*I - H)|psi_k>. 0.0 = AUTO: the
+    // orchestrator derives a sensible L from the spectral bounds/bandwidth
+    // (L_auto). A finite POSITIVE value is the HPhi-style expert override that
+    // pins L. (Was 1e5, which always pinned L huge -> the step is ~L*I, so
+    // mTPQ barely cooled -- it stayed near infinite temperature regardless of
+    // step count. Default to AUTO so mTPQ actually reaches low T.)
+    double tpq_energy_shift = 0.0;
+
+    // fp32 single-GPU mTPQ (memory-halving lane). When true and the operator
+    // supports the fp32 device matvec (full-Hilbert Operator on a WITH_CUDA
+    // build), mTPQ runs in complex<float> so the full 2^32 Hilbert space fits
+    // two vectors on one 80 GB H100. Maps to ThermalOptions::mtpq_fp32.
+    bool tpq_fp32 = false;
 
     double tpq_beta_max = 20.0;
     double tpq_delta_beta = 1e-2;

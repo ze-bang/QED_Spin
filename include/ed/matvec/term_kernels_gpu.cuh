@@ -114,6 +114,15 @@ atomic_add_complex(double* dst, double val) {
     atomicAdd(dst, val);
 }
 
+// Single-precision complex atomicAdd (fp32 mTPQ lane). Same split-into-two
+// strategy as the double overload; float atomicAdd is available on all
+// targeted architectures (>= SM 2.0).
+__device__ __forceinline__ void
+atomic_add_complex(cuFloatComplex* dst, cuFloatComplex val) {
+    atomicAdd(&reinterpret_cast<float*>(dst)[0], cuCrealf(val));
+    atomicAdd(&reinterpret_cast<float*>(dst)[1], cuCimagf(val));
+}
+
 // ---------------------------------------------------------------------------
 // Scalar helpers (templated on Scalar = cuDoubleComplex or double).
 // ---------------------------------------------------------------------------
@@ -141,6 +150,38 @@ struct ScalarTraits<cuDoubleComplex> {
     }
     __device__ static inline double abs2(cuDoubleComplex a) {
         return cuCreal(a) * cuCreal(a) + cuCimag(a) * cuCimag(a);
+    }
+};
+
+// Single-precision complex lane (fp32 mTPQ). Term coefficients are stored /
+// uploaded as cuDoubleComplex; ``from_coeff`` narrows them to fp32 once,
+// per emit. Vectors (in/out) are cuFloatComplex, halving the device
+// footprint so the full 2^32 Hilbert space fits two vectors on one H100.
+template <>
+struct ScalarTraits<cuFloatComplex> {
+    using device_t = cuFloatComplex;
+    __device__ static inline cuFloatComplex zero() {
+        return make_cuFloatComplex(0.0f, 0.0f);
+    }
+    __device__ static inline cuFloatComplex from_coeff(cuDoubleComplex c) {
+        return make_cuFloatComplex(static_cast<float>(cuCreal(c)),
+                                   static_cast<float>(cuCimag(c)));
+    }
+    __device__ static inline cuFloatComplex from_real(double r) {
+        return make_cuFloatComplex(static_cast<float>(r), 0.0f);
+    }
+    __device__ static inline cuFloatComplex mul(cuFloatComplex a, cuFloatComplex b) {
+        return cuCmulf(a, b);
+    }
+    __device__ static inline cuFloatComplex mul_real(cuFloatComplex a, double r) {
+        const float rf = static_cast<float>(r);
+        return make_cuFloatComplex(cuCrealf(a) * rf, cuCimagf(a) * rf);
+    }
+    __device__ static inline cuFloatComplex add(cuFloatComplex a, cuFloatComplex b) {
+        return cuCaddf(a, b);
+    }
+    __device__ static inline float abs2(cuFloatComplex a) {
+        return cuCrealf(a) * cuCrealf(a) + cuCimagf(a) * cuCimagf(a);
     }
 };
 

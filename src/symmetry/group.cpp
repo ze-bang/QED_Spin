@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -90,6 +92,84 @@ std::vector<int> represent_as_generator_powers(
 
 } // namespace
 
+bool is_abelian(const std::vector<Permutation>& generators) {
+    for (std::size_t i = 0; i < generators.size(); ++i) {
+        for (std::size_t j = i + 1; j < generators.size(); ++j) {
+            if (compose(generators[i], generators[j]) !=
+                compose(generators[j], generators[i])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::vector<Permutation>
+maximal_abelian_subgroup_generators(
+        const std::vector<Permutation>& preferred,
+        const std::vector<Permutation>& group_elements) {
+    if (group_elements.empty()) return {};
+    const int n = static_cast<int>(group_elements.front().size());
+    const Permutation id = identity_internal(static_cast<std::size_t>(n));
+
+    // A plain greedy returns a subgroup maximal *by inclusion*, which need NOT
+    // be maximal *by cardinality*: committing to a few commuting involutions
+    // gives e.g. Z2^3 (order 8) and blocks the strictly larger pure-translation
+    // subgroup Z3^2 (order 9) on a 3x3 periodic kagome cluster. We fix this two
+    // ways: (1) sweep candidates translation-first -- fixed-point-free (lattice
+    // translations have no fixed site) and higher group-order before low-order
+    // involutions; (2) restart the greedy from every element and keep the
+    // abelian subgroup of MAXIMUM order. |G| (an automorphism group) is small,
+    // so the O(|G|^2) restart sweep is cheap and runs once at setup.
+    auto fixed_point_free = [&](const Permutation& p) {
+        for (int i = 0; i < n; ++i)
+            if (p[static_cast<std::size_t>(i)] == i) return false;
+        return true;
+    };
+
+    std::vector<Permutation> sweep = group_elements;
+    std::stable_sort(sweep.begin(), sweep.end(),
+        [&](const Permutation& a, const Permutation& bb) {
+            const bool fa = fixed_point_free(a), fb = fixed_point_free(bb);
+            if (fa != fb) return fa;                 // translations (fpf) first
+            return order(a) > order(bb);             // then higher order first
+        });
+
+    // Greedy build from a seed list (then the ordered sweep); returns the
+    // selected generators and the order of the abelian subgroup they span.
+    auto build = [&](const std::vector<Permutation>& seed)
+            -> std::pair<std::vector<Permutation>, std::size_t> {
+        std::vector<Permutation> gens;
+        std::set<Permutation>    closure{ id };
+        auto try_add = [&](const Permutation& c) {
+            if (c == id || closure.count(c)) return;
+            for (const auto& g : gens)
+                if (compose(c, g) != compose(g, c)) return;
+            gens.push_back(c);
+            closure.clear();
+            for (const auto& e : generate_group(gens)) closure.insert(e);
+        };
+        for (const auto& c : seed)  try_add(c);
+        for (const auto& c : sweep) try_add(c);
+        return { gens, closure.size() };
+    };
+
+    auto best = build(preferred);                    // honor the caller's set first
+    for (const auto& s : sweep) {                    // ... then restart from each
+        if (s == id) continue;
+        auto cand = build({ s });
+        if (cand.second > best.second) best = std::move(cand);
+    }
+    return best.first;
+}
+
+namespace {
+[[nodiscard]] bool require_abelian_env() {
+    const char* v = std::getenv("ED_SYM_REQUIRE_ABELIAN");
+    return v != nullptr && v[0] == '1' && v[1] == '\0';
+}
+} // namespace
+
 std::vector<Permutation>
 generate_group(const std::vector<Permutation>& generators) {
     if (generators.empty()) {
@@ -139,6 +219,50 @@ SymmetryGroupInfo group_from_generators(
     }
     for (const auto& g : generators) {
         validate(g, n_sites);
+    }
+
+    // ---------------------------------------------------------------------
+    // Non-abelian safety guard. The sector/projection layer below only
+    // implements 1-D (abelian) irreps. If the generators do NOT pairwise
+    // commute, reducing by the full non-abelian group while projecting onto
+    // 1-D characters would DROP the d>=2 irrep content -> an incomplete,
+    // silently-wrong spectrum. We instead restrict to a maximal abelian
+    // subgroup (a COMPLETE, correct reduction by a coarser factor |A|<=|G|),
+    // unless the caller opts into a hard error via ED_SYM_REQUIRE_ABELIAN=1.
+    // ---------------------------------------------------------------------
+    if (!is_abelian(generators)) {
+        const auto full = generate_group(generators);
+        if (require_abelian_env()) {
+            throw std::invalid_argument(
+                "ed::sym::group_from_generators: the supplied generators do NOT "
+                "commute (the generated group is non-abelian, |G|=" +
+                std::to_string(full.size()) + "). The symmetry-projection layer "
+                "only supports 1-D (abelian) irreps, so the d>=2 irreps would be "
+                "dropped. Supply a commuting (abelian) generator set, or unset "
+                "ED_SYM_REQUIRE_ABELIAN to auto-restrict to a maximal abelian "
+                "subgroup.");
+        }
+        if (!sector_quantum_numbers.empty()) {
+            throw std::invalid_argument(
+                "ed::sym::group_from_generators: explicit sector_quantum_numbers "
+                "were given for a NON-abelian generator set. Per-generator sector "
+                "labels are not well-defined after the maximal-abelian-subgroup "
+                "restriction; pass commuting generators, or omit "
+                "sector_quantum_numbers to auto-enumerate the abelian sectors.");
+        }
+        const auto abelian_gens =
+            maximal_abelian_subgroup_generators(generators, full);
+        const auto abelian_size = generate_group(abelian_gens).size();
+        std::cerr << "WARNING: ed::sym::group_from_generators: non-abelian "
+                     "generators (|G|=" << full.size() << "); the projection "
+                     "layer is abelian-only, so restricting to a maximal abelian "
+                     "subgroup (|A|=" << abelian_size << "). The reduction factor "
+                     "drops from " << full.size() << " to " << abelian_size
+                  << " but the result is complete and correct. Set "
+                     "ED_SYM_REQUIRE_ABELIAN=1 to error instead."
+                  << std::endl;
+        // Recurse with the abelian generators (now is_abelian => no restriction).
+        return group_from_generators(n_sites, abelian_gens, {});
     }
 
     std::vector<int> generator_orders;
@@ -210,6 +334,11 @@ SymmetryGroupInfo group_from_generators(
     }
 
     // Build SectorMetadata: phase_factors[a] = prod_k exp(-2 pi i q_k * p_{a,k} / o_k)
+    // = χ_q(max_clique[a]). This is the PER-ELEMENT layout (length |G|) that the
+    // distributed-symmetry path requires; the CPU consumers
+    // (``compute_orbit_for_state`` / ``sector_characters_from``) detect this
+    // length and read χ(g) directly (vs the per-generator JSON layout, length
+    // num_generators, which they reconstruct via power_representation).
     constexpr double kTwoPi = 6.283185307179586476925286766559;
     std::vector<SectorMetadata> sectors;
     sectors.reserve(sector_quantum_numbers.size());

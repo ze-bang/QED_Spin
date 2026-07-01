@@ -73,11 +73,10 @@ the operator size, the build flags (`qed.has_cuda_build()`,
 * **Broadening** (`eta`), Krylov dim (`krylov_dim`), number of random
   vectors (`num_samples`) — auto-tuned by `qed.auto_tune.*`.
 
-Override any of them via the explicit kwarg of the same name. The
-pre-flight planner refuses jobs that don't fit on the host with
-ranked, copy-pasteable suggestions (`qed.estimate_resources`,
-`qed.suggest_workflow`); pass `dry_run=True` to see the verdict
-without dispatching, `force=True` to override.
+Override any of them via the explicit kwarg of the same name. There is no
+pre-flight planner; instead, a memory guard checks the dominant allocation
+against available RAM and raises a clean error (rather than OOM-killing the
+host) if it won't fit. Bypass with `ED_MEM_GUARD_OFF=1`.
 
 ## Symmetries — orthogonal composition
 
@@ -189,7 +188,7 @@ The helper builds the right `mpiexec` argv for
 * [`one_call_api.md`](one_call_api.md) — full reference for
   `qed.solve` / `qed.thermal` / `qed.spectral`.
 * [`workflow.md`](workflow.md) — end-to-end recipes (symmetry
-  discovery, half-filling sweep, mTPQ trajectory, pre-flight planner).
+  discovery, half-filling sweep, mTPQ trajectory, memory guard).
 * [`python_advanced.md`](python_advanced.md) — every advanced pattern
   (device pinning, in-process symmetry round-trip, every
   `EDParameters` knob).

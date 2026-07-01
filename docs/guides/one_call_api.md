@@ -63,9 +63,9 @@ What `qed.solve` decides for you (override any of these via kwargs):
   For the per-cell minimal twins see `examples/solve/lanczos/`,
   `examples/solve/full/`, etc. (Python kwargs are mirrored 1:1 in C++ via
   the new `ed::api::*` facade in [`include/ed/api.h`](../../include/ed/api.h)).
-* **Pre-flight planner** (`plan=True`): runs
-  `qed.estimate_resources(...)` and refuses to dispatch infeasible
-  jobs. Override with `force=True`.
+* **Memory guard** (no pre-flight planner): the workflow checks the dominant
+  allocation against available RAM at the point of use and raises a clean error
+  instead of OOM-killing the host. Bypass with `ED_MEM_GUARD_OFF=1`.
 
 For finite-temperature trajectories, use `qed.thermal(...)` (next
 section); `qed.solve` is for eigenvalue solvers only.

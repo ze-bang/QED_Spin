@@ -225,6 +225,7 @@ toSolveOptions(const EDParameters& params,
         case ::DiagonalizationMethod::LANCZOS:        opts.method = SM::Lanczos; break;
         case ::DiagonalizationMethod::BLOCK_LANCZOS:  opts.method = SM::BlockLanczos; break;
         case ::DiagonalizationMethod::KRYLOV_SCHUR:   opts.method = SM::KrylovSchur; break;
+        case ::DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: opts.method = SM::BlockKrylovSchur; break;
         case ::DiagonalizationMethod::FULL:           opts.method = SM::FullDiag; break;
         default:                                      opts.method = SM::Auto; break;
     }

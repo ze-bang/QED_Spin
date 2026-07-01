@@ -89,11 +89,13 @@ _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.LANCZOS,
     DiagonalizationMethod.BLOCK_LANCZOS,
     DiagonalizationMethod.KRYLOV_SCHUR,
+    DiagonalizationMethod.BLOCK_KRYLOV_SCHUR,
     DiagonalizationMethod.FULL,
 })
 
 _THERMAL_METHOD_TO_CORE = {
     DiagonalizationMethod.FTLM:    "FTLM",
+    DiagonalizationMethod.OFTLM:   "OFTLM",
     DiagonalizationMethod.LTLM:    "LTLM",
     DiagonalizationMethod.mTPQ:    "mTPQ",
     DiagonalizationMethod.cTPQ:    "cTPQ",
@@ -110,6 +112,7 @@ def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
 def _ed_params_to_thermal_options(
     params: EDParameters,
     method: DiagonalizationMethod,
+    allow_infeasible: bool = False,
 ) -> "_core.ThermalOptions":
     """Translate the legacy `EDParameters` bag + a thermal
     `DiagonalizationMethod` enumerator into a fresh
@@ -145,6 +148,11 @@ def _ed_params_to_thermal_options(
     # for the TPQ lanes and never honoured the user's request.
     if method == DiagonalizationMethod.FTLM:
         opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+    elif method == DiagonalizationMethod.OFTLM:
+        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+        _nv = getattr(params, "oftlm_num_exact", None)
+        if _nv is not None:
+            opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
     elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
@@ -170,9 +178,16 @@ def _ed_params_to_thermal_options(
     # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
     if hasattr(opts, "energy_shift"):
         opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
+    # fp32 single-GPU mTPQ (memory-halving lane).
+    if hasattr(opts, "mtpq_fp32"):
+        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
+    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
+    # throw before allocating the kernel working set) unless this is set.
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible = bool(allow_infeasible)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
     # the user-supplied probe-betas for mTPQ/cTPQ state-vector
     # snapshots. Empty list -> the kernel runs the standard path with no
@@ -210,6 +225,8 @@ def _ed_result_from_thermal_result(
 def _ed_params_to_solve_options(
     params: EDParameters,
     method: DiagonalizationMethod,
+    auto_method: bool = False,
+    allow_infeasible: bool = False,
 ) -> "_core.SolveOptions":
     """Translate `EDParameters` + `DiagonalizationMethod` into a
     `_core.SolveOptions` for the orchestrator.
@@ -240,16 +257,27 @@ def _ed_params_to_solve_options(
     opts.backend.allow_mpi = bool(use_mpi)
 
     method_map = {
-        DiagonalizationMethod.LANCZOS:       _core.SolveMethod.Lanczos,
-        DiagonalizationMethod.BLOCK_LANCZOS: _core.SolveMethod.BlockLanczos,
-        DiagonalizationMethod.KRYLOV_SCHUR:  _core.SolveMethod.KrylovSchur,
-        DiagonalizationMethod.FULL:          _core.SolveMethod.FullDiag,
+        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
+        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
+        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
+        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
+        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
     }
-    opts.method = method_map.get(method, _core.SolveMethod.Auto)
+    # When the user did not name a solver (auto_method), defer the eigensolver
+    # choice to the C++ dictator (ed::planner) by passing Auto -- Python no longer
+    # picks the ground-state method itself.
+    opts.method = (_core.SolveMethod.Auto if auto_method
+                   else method_map.get(method, _core.SolveMethod.Auto))
 
     opts.use_fixed_sz          = bool(params.use_fixed_sz)
     opts.use_symmetry          = bool(params.use_symmetry)
     opts.n_up                  = int(params.n_up)
+    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
+    # throw before allocation) unless this is set. The qed.solve pre-flight is the
+    # Python gate (honors force=True); mirror its decision here so a forced
+    # dispatch isn't re-blocked by the C++ safety net. Other callers default off.
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible  = bool(allow_infeasible)
     # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
     # knobs that may not be bound on the Python `EDParameters` (the
     # in-process pybind11 surface only exposes what `qed.solve` consumes
@@ -279,6 +307,33 @@ def _ed_result_from_gs_result(
     _tags = getattr(gs_result, "sector_tags", None)
     if _tags:
         out.sector_tags = list(_tags)
+    # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
+    # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
+    _kry = getattr(gs_result, "krylov", None)
+    if _kry is not None:
+        out.converged       = bool(getattr(_kry, "converged", False))
+        out.iterations      = int(getattr(_kry, "iters_done", 0))
+        out.residuals       = list(getattr(_kry, "ritz_residuals", []) or [])
+        out.n_converged     = int(getattr(_kry, "n_converged", 0))
+        out.residual_history = list(getattr(_kry, "resid_history", []) or [])
+        # Warn-not-fail (completion contract): the run COMPLETED but the
+        # eigensolver did not converge every requested eigenpair (e.g. the
+        # planner memory-capped the Krylov subspace, or max_iterations was hit).
+        # The contract guarantees COMPLETION, not convergence -- so surface a
+        # warning and return the best-effort result instead of raising.
+        if not out.converged:
+            want = int(getattr(params, "num_eigenvalues", 1) or 1)
+            rmax = max(out.residuals) if out.residuals else float("nan")
+            warnings.warn(
+                f"qed.solve: eigensolver did not fully converge "
+                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
+                f"residual {rmax:.2e} after {out.iterations} iterations). "
+                f"Returning the best-effort result. Raise max_iterations / "
+                f"tolerance, or give the run more memory so the Krylov subspace "
+                f"need not be capped.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return out
 
 
@@ -286,6 +341,8 @@ def _diag_via_workflows_solve(
     operator: Operator,
     method: DiagonalizationMethod,
     params: EDParameters,
+    auto_method: bool = False,
+    allow_infeasible: bool = False,
 ) -> EDResults:
     """Route an in-memory `Operator` through the unified orchestrator.
 
@@ -296,14 +353,14 @@ def _diag_via_workflows_solve(
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
-        opts = _ed_params_to_solve_options(params, method)
+        opts = _ed_params_to_solve_options(params, method, auto_method, allow_infeasible)
         # The orchestrator's `workflows_solve` accepts an `Operator&`;
         # if the caller already projected to a fixed-Sz sector we hand
         # it the `FixedSzOperator` directly (it derives from `Operator`).
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
     if method in _THERMAL_METHOD_TO_CORE:
-        opts = _ed_params_to_thermal_options(params, method)
+        opts = _ed_params_to_thermal_options(params, method, allow_infeasible)
         tr = _core.workflows_thermal(operator, opts)
         return _ed_result_from_thermal_result(tr)
     raise ValueError(
@@ -809,17 +866,7 @@ def solve(
     mpi_binary: Optional[str] = None,
     mpi_launcher: str = "mpiexec",
     mpi_launcher_binary: Optional[str] = None,
-    # Pre-flight planner (Phase 9 / Layer 6).
-    plan: bool = True,
-    dry_run: bool = False,
-    force: bool = False,
     verbose: bool = True,
-    # Auto-tuner -- picks FTLM/LTLM Krylov dim, mTPQ taylor order +
-    # delta_beta, tolerance level, and # thermal samples from sector
-    # dim, num_eigenvalues, and Hamiltonian bandwidth. Anything
-    # explicitly set on this call (or via ``extra_params``) wins.
-    auto_tune: bool = True,
-    level: str = "balanced",
     full_spectrum: bool = False,
     extra_params: Optional[dict[str, Any]] = None,
 ) -> EDResults:
@@ -922,26 +969,6 @@ def solve(
         Useful for niche flags (``tpq_*``, ``ltlm_*``, ``kpm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
-
-    plan : bool, optional
-        If True (default), run the pre-flight planner
-        (:func:`qed.estimate_resources`) before dispatch and
-        emit a one-line "FEASIBLE / INFEASIBLE" verdict (verbose mode
-        prints the full report). When the planner judges the request
-        infeasible (memory / build / kernel), :exc:`ResourceError`
-        is raised with a list of cheaper alternatives -- override
-        with ``force=True``.
-    dry_run : bool, optional
-        If True, run the planner only and **do not** dispatch the
-        kernel. Returns the report on the (raised) ``ResourceError``
-        but, if feasible, raises :exc:`SystemExit` with code 0 after
-        printing. Useful for "would this run?" CI checks. Default
-        False.
-    force : bool, optional
-        If True, ignore ``ResourceError`` from the planner and
-        dispatch anyway. Use this when you trust the host has more
-        resources than the planner detected (e.g. when running under
-        a job scheduler the planner cannot see). Default False.
 
     Returns
     -------
@@ -1054,6 +1081,7 @@ def solve(
     elif fixed_sz_input and verbose:
         print(f"[qed.solve] FixedSzOperator supplied: dim={H.dimension}.")
     elif (sz is None and not fixed_sz_input and auto_sz
+          and symmetry is None
           and H.conserves_sz()
           and not (isinstance(device, str)
                    and device.lower() in ("mpi", "mpi_gpu"))):
@@ -1064,6 +1092,14 @@ def solve(
         # i.e. a sqrt(pi N/2)x speedup over the full 2^N Hilbert space
         # at no accuracy cost. Pass ``auto_sz=False`` to keep the full
         # Hilbert space, or ``sz=k`` to pick a different sector.
+        #
+        # IMPORTANT: skipped when ``symmetry=`` is explicitly given. Otherwise
+        # "pure spatial" (symmetry, no sz) would silently become sz+spatial in
+        # the n_up=N//2 sector -- an INCOMPLETE spectrum, and the WRONG ground
+        # state for any model whose GS is not at half-filling (the "no accuracy
+        # cost" claim holds only for the Heisenberg-AFM GS). With an explicit
+        # spatial symmetry, that symmetry IS the reduction; add ``sz=`` if you
+        # also want a magnetisation sector.
         #
         # MPI / MPI+GPU lanes are excluded from auto-Sz: the standalone
         # ed_distributed_main binary loads from full-Hilbert .dat files
@@ -1139,11 +1175,12 @@ def solve(
             print(f"[qed.solve] thermal solver: writing trajectory + "
                   f"thermodynamic data to {effective_output!r} "
                   "(pass output_dir=... to choose explicitly).")
-    elif is_thermal and output_dir:
+    elif is_thermal and output_dir and not output_dir.startswith("/dev/null"):
         # Surface-unification follow-up (May 2026): the orchestrator's
         # `_core.workflows_thermal` does NOT mkdir its `output_dir`.
         # We mirror the historical mkdir-then-write behaviour here so
         # callers can pass a fresh path without manual mkdir.
+        # Skip the mkdir for the /dev/null sentinel (benchmarking / testing).
         os.makedirs(output_dir, exist_ok=True)
 
     if verbose:
@@ -1153,52 +1190,10 @@ def solve(
               f"num_eigenvalues={num_eigenvalues}  "
               f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
 
-    # ------------------------------------------------------------------
-    # 3.5. Pre-flight planner. Estimate memory + wall-time for the
-    #     resolved (solver, device, basis, n_ranks) plan; abort with a
-    #     ResourceError + ranked suggestions when the plan won't fit on
-    #     the host. dry_run=True returns after printing the report.
-    # ------------------------------------------------------------------
-    if plan or dry_run:
-        from .feasibility import estimate_resources, ResourceError
-        if use_mpi and use_gpu:
-            planned_device = "mpi_gpu"
-        elif use_mpi:
-            planned_device = "mpi"
-        elif use_gpu:
-            planned_device = "gpu"
-        else:
-            planned_device = "cpu"
-        report = estimate_resources(
-            op_to_use,
-            solver=method,
-            device=planned_device,
-            sz=sz if (sz is not None and not fixed_sz_input) else None,
-            symmetry=symmetry,
-            num_eigenvalues=num_eigenvalues,
-            n_samples=num_samples,
-            n_ranks=mpi_n_ranks,
-            max_iterations=max_iterations,
-            block_size=block_size,
-            compute_eigenvectors=compute_eigenvectors,
-            sector_size_estimate=sector_dim if symmetry is not None else None,
-        )
-        if verbose or dry_run or not report.feasible:
-            for line in report.summary().splitlines():
-                print(line)
-        if dry_run:
-            return EDResults()  # planner-only mode; no kernel dispatch
-        if not report.feasible and not force:
-            raise ResourceError(
-                f"qed.solve planner judged the request infeasible: "
-                f"bottleneck={report.bottleneck}. See the report above for "
-                "ranked suggestions, or pass force=True to dispatch anyway "
-                "(at your own risk).",
-                report=report,
-            )
+    # (Pre-flight planner removed: sensible defaults, no feasibility refusal.)
 
     # ------------------------------------------------------------------
-    # 4. Build EDParameters with auto-tuned Krylov / thermal sizes.
+    # 4. Build EDParameters with sensible default Krylov / thermal sizes.
     # ------------------------------------------------------------------
     params = _make_params(
         num_sites=num_sites,
@@ -1239,65 +1234,8 @@ def solve(
     #     of these heuristics lives in the kernel-specific options
     #     structs (e.g. ``FtlmKernelOptions``); the surface-unification
     #     collapse retired the cross-cutting ``ed/auto/diag_tune.h``.
-    # ------------------------------------------------------------------
-    if auto_tune:
-        from . import auto_tune as _at
-        try:
-            from . import has_cuda_build, has_mpi_build  # type: ignore
-            _has_cuda, _has_mpi = bool(has_cuda_build()), bool(has_mpi_build())
-        except Exception:  # pragma: no cover  -- standalone Python build
-            _has_cuda, _has_mpi = False, False
-        method_name = method.name if hasattr(method, "name") else str(method)
-        explicit = set(extra_params or {})
-        tuned = _at.tune_diag(
-            operator=op_to_use,
-            sector_dim=sector_dim,
-            num_eigenvalues=int(num_eigenvalues),
-            solver=method_name,
-            device=("mpi_gpu" if (use_mpi and use_gpu)
-                    else "mpi" if use_mpi
-                    else "gpu" if use_gpu else "cpu"),
-            has_cuda_build=_has_cuda,
-            has_mpi_build=_has_mpi,
-            level=level,
-            tolerance=tolerance if "tolerance" not in explicit else
-                      extra_params["tolerance"],
-            max_iterations=max_iterations,
-            block_size=block_size,
-        )
-        # Fill only sentinel-defaulted fields. Each entry maps an
-        # EDParameters field to its struct default (matching
-        # include/ed/core/ed_parameters.h).
-        _SENTINELS: dict[str, object] = {
-            "ftlm_krylov_dim":    100,
-            "ltlm_krylov_dim":    200,
-            "ltlm_ground_krylov": 100,
-            "tpq_taylor_order":   100,
-            "tpq_delta_beta":     1e-2,
-        }
-        _TUNED_VALUES = {
-            "ftlm_krylov_dim":    tuned.ftlm_krylov_dim,
-            "ltlm_krylov_dim":    tuned.ltlm_krylov_dim,
-            "ltlm_ground_krylov": tuned.ltlm_ground_krylov,
-            "tpq_taylor_order":   tuned.tpq_taylor_order,
-            "tpq_delta_beta":     tuned.tpq_delta_beta,
-        }
-        for fname, sentinel in _SENTINELS.items():
-            if fname in explicit:
-                continue  # caller wins
-            if not hasattr(params, fname):
-                continue  # build-time skipped field
-            current = getattr(params, fname)
-            if current == sentinel:
-                setattr(params, fname, _TUNED_VALUES[fname])
-        if verbose:
-            print(f"[qed.solve] auto-tune (level={tuned.level}): "
-                  f"tol={params.tolerance:g} max_iter={params.max_iterations} "
-                  f"ftlm_M={params.ftlm_krylov_dim} "
-                  f"ltlm_M={params.ltlm_krylov_dim} "
-                  f"tpq_p={params.tpq_taylor_order} "
-                  f"tpq_dbeta={params.tpq_delta_beta:g} "
-                  f"bandwidth≈{tuned.bandwidth:g}")
+    # (Auto-tuner removed: thermal/eigensolver knobs use the EDParameters
+    # struct defaults; override per-call via kwargs or extra_params.)
 
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:
@@ -1347,7 +1285,10 @@ def solve(
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
 
-    return _diag_via_workflows_solve(op_to_use, method, params)
+    # solver=None => let the orchestrator pick the ground-state eigensolver
+    # default (full diag for tiny dims, Lanczos otherwise).
+    return _diag_via_workflows_solve(op_to_use, method, params,
+                                     auto_method=(solver is None))
 
 
 # ---------------------------------------------------------------------------
@@ -1427,6 +1368,7 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
 }
@@ -1770,9 +1712,13 @@ def _translation_autos_from_lattice(
     nonzero_lat = [v for v in lat_vectors if np.linalg.norm(v) > 1e-12]
     cluster_dims = _infer_cluster_dims(positions, nonzero_lat)
 
-    # Trim the position arrays to the lattice dimensionality so the
-    # legacy filter's S_inv = inv(S) is well-defined.
+    # Trim the position arrays AND lattice vectors to the lattice
+    # dimensionality so the legacy filter's S_inv = inv(S) is well-defined.
+    # (Kagome and other 2D lattices embed in 3D, so each non-zero lattice
+    # vector has 3 components but only 2 are non-trivial; filter requires
+    # a square matrix: num_vectors == vector_dimension.)
     lat_dim = len(nonzero_lat)
+    nonzero_lat = [v[:lat_dim] for v in nonzero_lat]
     for i in sites:
         sites[i]["position"] = sites[i]["position"][:lat_dim]
 
@@ -1925,19 +1871,12 @@ def _resolve_solver(
         raise TypeError(f"solver must be str or DiagonalizationMethod, "
                         f"got {type(solver).__name__}")
 
-    # Auto-pick:
-    # * Tiny matrices: dense LAPACK is end-to-end faster (no Krylov
-    #   warmup, single BLAS call).
-    # * Many eigenvalues + mid/large matrices: Krylov-Schur converges
-    #   far better than naive Lanczos for the upper end of a small
-    #   subspace request.
-    # * Otherwise: standard Lanczos.
-    if dim <= 2048 and num_eigenvalues >= max(8, dim // 4):
-        return DiagonalizationMethod.FULL
-    if dim <= 1024:
-        return DiagonalizationMethod.FULL
-    if num_eigenvalues >= 16:
-        return DiagonalizationMethod.KRYLOV_SCHUR
+    # solver is None: the ground-state eigensolver is chosen by the C++ dictator
+    # (ed::planner); qed.solve passes SolveMethod::Auto (auto_method=True). This
+    # value is only a ROUTING placeholder so the caller dispatches to the
+    # ground-state lane (workflows_solve) rather than the thermal lane. The old
+    # dim/num_eigs heuristic here DISAGREED with the planner (it never picked
+    # BlockLanczos), so it was removed -- one dictator.
     return DiagonalizationMethod.LANCZOS
 
 
@@ -2049,17 +1988,17 @@ def _make_params(
             p.temp_max = float(temp_max)
             p.tpq_measure_beta_min = 1.0 / float(temp_max) if temp_max > 0 \
                 else p.tpq_measure_beta_min
-        # Auto-cap tpq_max_steps: enough Taylor iterations to reach
-        # target_beta with the default delta_beta. This is tiny for
-        # small target_beta, big for low temperatures.
+        # TPQ imaginary-time step count: honour an explicit max_iterations /
+        # tpq_max_steps, else a BOUNDED default. (The old code derived
+        # target_beta/delta_beta, which exploded to ~1e5 steps for a low-T
+        # grid and timed out at large dimension. Raise max_iterations for
+        # deeper/finer cooling.)
+        DEFAULT_TPQ_STEPS = 1000
         if max_iterations is not None:
             p.tpq_max_steps = int(max_iterations)
             p.max_iterations = int(max_iterations)
         else:
-            steps = max(
-                1000,
-                int(p.tpq_target_beta / max(p.tpq_delta_beta, 1e-12)) + 200,
-            )
+            steps = int(getattr(p, "tpq_max_steps", 0) or 0) or DEFAULT_TPQ_STEPS
             p.tpq_max_steps = steps
             p.max_iterations = steps
         if sector is not None:
@@ -2974,6 +2913,39 @@ def _normalize_symmetry_info(
     )
 
 
+def _raw_generators(symmetry: SymmetryArg) -> Optional[list[list[int]]]:
+    """The UNRESTRICTED site-permutation generators of ``symmetry`` (before
+    the abelian-subgroup guard in ``group_from_generators``). Used to decide
+    whether the spatial group is non-abelian and to feed the SAB engine."""
+    if symmetry is None:
+        return None
+    if isinstance(symmetry, GeneratorSet):
+        gens = symmetry.generators
+    elif isinstance(symmetry, (list, tuple)):
+        gens = symmetry
+    elif isinstance(symmetry, dict):
+        gens = symmetry.get("generators")
+    else:
+        return None
+    return [list(map(int, p)) for p in gens] if gens else None
+
+
+def _generators_nonabelian(gens: list[list[int]]) -> bool:
+    """True iff the group generated by ``gens`` is non-abelian. A group
+    generated by pairwise-commuting elements is abelian, so checking the
+    generators pairwise suffices (composition convention is immaterial for
+    a commutativity test)."""
+    if not gens or len(gens) < 2:
+        return False
+    def comp(a: list[int], b: list[int]) -> list[int]:
+        return [a[b[i]] for i in range(len(b))]
+    for i in range(len(gens)):
+        for j in range(i + 1, len(gens)):
+            if comp(gens[i], gens[j]) != comp(gens[j], gens[i]):
+                return True
+    return False
+
+
 def full_spectrum(
     operator: Operator,
     *,
@@ -3021,6 +2993,24 @@ def full_spectrum(
         sz_conserved = _operator_conserves_sz(operator)
     use_gpu = isinstance(device, str) and device.lower() in ("gpu", "cuda")
 
+    # NON-ABELIAN spatial group: the streaming-symmetry rep path below only
+    # handles abelian (1-D irrep) projection and would silently restrict to a
+    # maximal abelian subgroup. Route to the symmetry-adapted (SAB) engine,
+    # which reduces by the FULL group including d_G>=2 irreps. n_up=-1 reduces
+    # the whole Hilbert space, so the complete spectrum (every Sz) comes out in
+    # one call. This is the dense full diagonalisation benefiting from the full
+    # non-abelian symmetry machinery.
+    _gens = _raw_generators(symmetry)
+    if _gens is not None and _generators_nonabelian(_gens):
+        if verbose:
+            print("[qed.full_spectrum] non-abelian group -> SAB engine "
+                  "(full d_G reduction)")
+        spec = _core.symmetry_adapted_eigenvalues(
+            operator, _gens, n_up=-1, use_gpu=use_gpu)
+        out = EDResults()
+        out.eigenvalues = sorted(float(e) for e in spec["eigenvalues"])
+        return out
+
     # No spatial symmetry: a plain dense full diagonalisation already
     # returns every eigenvalue. (Sz-block looping without a spatial group
     # buys nothing for the spectrum multiset, so keep it simple.)
@@ -3033,6 +3023,14 @@ def full_spectrum(
         return res
 
     tmpdir = tempfile.mkdtemp(prefix="qed_fullspec_")
+    # full_spectrum is the many-small-sectors regime: turn on the C++ sector-
+    # parallel FULL loop so independent (Sz, irrep) blocks are dense-diagonalised
+    # across cores. Each sector's eigensolve runs single-threaded (see
+    # full_diagonalization's omp_in_parallel guard) to avoid N_sectors x P
+    # oversubscription. An explicit user ED_SYM_SECTOR_PARALLEL is honoured.
+    _prev_sector_parallel = os.environ.get("ED_SYM_SECTOR_PARALLEL")
+    if _prev_sector_parallel is None:
+        os.environ["ED_SYM_SECTOR_PARALLEL"] = "1"
     try:
         _write_operator_directory(operator, tmpdir)
         _write_symmetry_directory(tmpdir, info)
@@ -3102,6 +3100,10 @@ def full_spectrum(
         return out
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if _prev_sector_parallel is None:
+            os.environ.pop("ED_SYM_SECTOR_PARALLEL", None)
+        else:
+            os.environ["ED_SYM_SECTOR_PARALLEL"] = _prev_sector_parallel
 
 
 # Internal alias so :func:`solve` can call the helper without colliding

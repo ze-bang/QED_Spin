@@ -39,6 +39,7 @@
 #include <vector>
 
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim (shared sizing)
 #include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag_with_eigenvectors (MPI-free)
 #include <ed/matvec/backend.h>
 
@@ -65,6 +66,12 @@ struct KrylovSchurOptions {
     /// Breakdown threshold passed to the per-cycle `lanczos_kernel`.
     /// 1e-13 matches the historical Krylov-Schur restart body.
     double      breakdown_tol   = 1e-13;
+    /// Memory cap on the per-cycle Krylov subspace, in resident length-N
+    /// vectors (the basis held during each restart cycle is the dominant cost).
+    /// 0 = no cap. The orchestrator sets this from available RAM/VRAM so the
+    /// footprint is PREDICTABLE: m_max <= max_subspace_vectors regardless of
+    /// max_iter. See ed::krylov::krylov_subspace_dim.
+    std::uint64_t max_subspace_vectors = 0;
 };
 
 struct KrylovSchurResult {
@@ -79,14 +86,14 @@ struct KrylovSchurResult {
 
 namespace detail {
 
+// Thin back-compat shim (no memory cap). The real, memory-bounded sizing lives
+// in ed::krylov::krylov_subspace_dim (subspace_policy.h) and is what the kernel,
+// orchestrator, and planner all use so they AGREE on the footprint.
 inline std::size_t ks_subspace_size(std::size_t k, std::size_t max_iter,
                                     std::size_t global_dim) {
-    // Match the legacy heuristic: m = min(2k+20, max_iter, global_dim).
-    std::size_t m = 2 * k + 20;
-    if (m > max_iter) m = max_iter;
-    if (global_dim > 0 && m > global_dim) m = global_dim;
-    if (m < k + 1) m = k + 1;
-    return m;
+    return ed::krylov::krylov_subspace_dim(k, max_iter,
+                                           static_cast<std::uint64_t>(global_dim),
+                                           /*max_vectors=*/0);
 }
 
 }  // namespace detail
@@ -114,8 +121,10 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         (opts.global_n > 0) ? opts.global_n
                             : static_cast<std::uint64_t>(local_n);
     const std::size_t   k_target = std::max<std::size_t>(1, opts.num_eigs);
-    const std::size_t   m_max    = detail::ks_subspace_size(
-        k_target, opts.max_iter, static_cast<std::size_t>(global_dim));
+    // Per-cycle subspace: grown by max_iter, but CAPPED by the memory budget
+    // (max_subspace_vectors) so the basis footprint is predictable / cannot OOM.
+    const std::size_t   m_max    = ed::krylov::krylov_subspace_dim(
+        k_target, opts.max_iter, global_dim, opts.max_subspace_vectors);
 
     // --- locked Ritz set (in backend memory) ---------------------------
     std::vector<ed::matvec::Backend::UniqueVec> locked_vecs;

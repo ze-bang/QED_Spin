@@ -72,7 +72,17 @@ ed::SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
     // (measured N=24: rep 4.8 s vs CSR-mirror 18.2 s end-to-end). So the GPU
     // takes the rep path in BOTH regimes whenever it is usable; only the CPU
     // reserves it for the lazy regime (see ``make_backend_``).
-    if (rep_path_enabled()) {
+    // Unified decision: the planner can force the orbit-CSR mirror by setting the
+    // strategy SLOT to OrbitMaterialized; otherwise the GPU prefers the rep path
+    // in both regimes (faster than the mirror). We read the RAW slot (not the
+    // env-folded resolver) on purpose: the CPU env knobs (ED_SYM_REP /
+    // ED_SYM_REDUCED_CSR) are CPU-lane overrides; the GPU's own override is
+    // ED_GPU_SYMMETRY_REP (rep_path_enabled). (RepStream / RepReducedCsr both ->
+    // GPU rep; the CPU-only reduced-CSR sub-choice does not apply on device.)
+    const bool planner_forces_orbit =
+        ed::planner::sym_matvec_repr()
+        == static_cast<int>(ed::planner::SymMatvecRepr::OrbitMaterialized);
+    if (rep_path_enabled() && !planner_forces_orbit) {
         const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
         if (rd.usable()) {
             return ed::symmetry::make_sector_matvec_gpu_rep(

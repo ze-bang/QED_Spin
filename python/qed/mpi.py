@@ -274,57 +274,9 @@ def run_distributed(
 
 
 def _maybe_print_mpi_cost_note(binary_args, *, n_ranks, method, use_gpu):
-    """Print a per-rank memory ballpark when --num-sites can be parsed.
-
-    Best-effort: silently bails on parse failures or when the planner
-    can't be imported. Never raises.
-    """
-    try:
-        N: int = -1
-        # Accept the canonical `--num-sites N` and the legacy `--N N`.
-        prev = ""
-        for tok in binary_args:
-            if prev in ("--num-sites", "--N"):
-                try:
-                    N = int(tok)
-                except ValueError:
-                    pass
-                break
-            prev = tok
-        if N <= 0 or N > 60:
-            return
-        from .feasibility import (   # noqa: WPS433  (avoid circular at import time)
-            estimate_memory_gb,
-            probe_host,
-        )
-        # Map the binary's --mode token to a workflow solver name so the
-        # planner picks the right vector-count model.
-        mode = method.lower()
-        solver = {
-            "lanczos":      "LANCZOS",
-            "krylov_schur": "KRYLOV_SCHUR",
-            "ftlm":         "FTLM",
-            "tpq":          "cTPQ",
-        }.get(mode, "LANCZOS")
-        per_rank_gb, total_gb, _ = estimate_memory_gb(
-            1 << N, solver, n_ranks=max(1, n_ranks),
-        )
-        host = probe_host()
-        backend = "GPU" if use_gpu else "CPU"
-        avail = host.gpu_memory_gb if use_gpu else (
-            host.cpu_memory_gb / max(1, n_ranks))
-        verdict = "OK" if per_rank_gb <= max(0.0, avail - 0.5) else "WARN"
-        print(f"[qed.mpi.run_distributed planner] N={N} mode={method} "
-              f"n_ranks={n_ranks} backend={backend}: "
-              f"~{per_rank_gb:.2f} GB/rank (total {total_gb:.2f} GB), "
-              f"~{avail:.2f} GB available -> {verdict}")
-        if verdict == "WARN":
-            print("  hint: raise n_ranks (per-rank memory scales as 1/n_ranks "
-                  "for the iterative solvers), or cut the basis with "
-                  "--use-symmetry / fixed-Sz on the binary side.")
-    except Exception:
-        # Planner is informational only; never fail the launch.
-        pass
+    """No-op (the feasibility planner / cost note was removed in favour of
+    sensible defaults). Kept as a stable hook so call sites don't change."""
+    return
 
 
 __all__ = ["MPI_METHODS", "run_distributed"]

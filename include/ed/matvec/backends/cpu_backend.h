@@ -351,11 +351,13 @@ private:
     mutable std::vector<double> scratch_partial_im_;
 };
 
-// Singleton accessor. The CPU backend is stateless so a single static
-// instance is fine; we hand out references rather than ownership so
-// callers don't keep allocating it.
+// Thread-local accessor. CpuBackend holds mutable scratch buffers in
+// dot_many() that are not safe to share across concurrent callers. Using
+// thread_local gives each thread its own instance so the outer sector-
+// parallel loop (ED_SYM_SECTOR_PARALLEL=1) can call lanczos_tridiag from
+// multiple OMP threads simultaneously without racing on the scratch storage.
 [[nodiscard]] inline CpuBackend& default_cpu_backend() {
-    static CpuBackend instance;
+    static thread_local CpuBackend instance;
     return instance;
 }
 

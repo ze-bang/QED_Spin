@@ -41,21 +41,13 @@ print(qed.solve(H, num_eigenvalues=4,
                symmetry=report.full_set,
                sz=N // 2).eigenvalues)
 
-# 6. "Will my N=32 FTLM job fit on this host?" -- the pre-flight planner
-#    is now ALWAYS on; it raises qed.ResourceError with ranked
-#    suggestions when the answer is no. dry_run prints + exits.
-qed.solve(H_big, solver="FTLM", sz=16, dry_run=True)
-# [qed.solve.planner] verdict: INFEASIBLE (memory)
-#   basis     : sz=n_up=16 sector dim=601_080_390
-#   memory    : per-rank 752.37 GB / avail 123.02 GB
-#   wall-time : ~106.86 d
-#   suggestions:
-#     - pass symmetry=qed.find_symmetries(H).full_set ...
-#     - switch to device='mpi' with mpi_n_ranks>=7
-#     - drop compute_eigenvectors=True ...
-
-# 7. Goal-oriented planner: rank candidate workflows for a given intent.
-print(qed.suggest_workflow(H_big, intent="thermal", n_samples=8).summary())
+# 6. Memory safety: there is no pre-flight planner. If the dominant
+#    allocation would not fit in available RAM, the workflow raises a
+#    clean error (naming the workflow + estimated vs available bytes)
+#    instead of OOM-killing the process. Shrink dim with sz + symmetry,
+#    or distribute with device='mpi'. Bypass with ED_MEM_GUARD_OFF=1.
+qed.solve(H_big, solver="FTLM", sz=16,
+          symmetry=qed.find_symmetries(H_big).full_set)
 ```
 
 That's it. Everything below explains the knobs that the function picks
@@ -227,10 +219,8 @@ qed.solve(H,
          mpi_binary=None,          # ed_distributed_main path override
          mpi_launcher="mpiexec",   # 'srun' on SLURM, etc.
          mpi_launcher_binary=None,
-         # Pre-flight planner (Phase 9 / Layer 6):
-         plan=True,                # always run the planner before dispatch
-         dry_run=False,            # planner-only; do not run the kernel
-         force=False,              # ignore ResourceError on infeasibility
+         # (no pre-flight planner: a memory guard catches over-budget
+         #  allocations at the point of use; ED_MEM_GUARD_OFF=1 bypasses)
          verbose=True,
          extra_params=None)        # forwarded to EDParameters as setattr
 ```
@@ -602,79 +592,29 @@ Each cell carries `kernel` (does the C++ side have the code at all),
 `available` (is *this* build wired for it), and a `note` string with
 the rebuild flag to flip when `available=False`.
 
-## Pre-flight planner — `qed.estimate_resources` / `qed.suggest_workflow`
+## No pre-flight planner — sensible defaults + a memory guard
 
-Before any kernel runs, `qed.solve` always asks the planner *"will this
-fit on the host, and if not, what should I run instead?"*. The planner:
+There is **no** pre-flight planner — `qed.estimate_resources`,
+`qed.suggest_workflow`, `qed.ResourceError`, and the `plan` / `dry_run` /
+`force` arguments were all removed in favour of **sensible defaults**.
+`qed.solve` / `qed.thermal` / `qed.spectral` pick the method from the problem
+size (full diagonalization for `dim ≤ 1024`, Lanczos otherwise) and the
+representation from static leaf-policy hooks (reduced-CSR symmetry matvec by
+default; override with `ED_SYM_REDUCED_CSR` / `ED_SYM_REP`).
 
-* counts the resident dim-sized vectors the chosen kernel keeps live,
-  per the (solver, num\_eigenvalues, max\_subspace, block\_size,
-  compute\_eigenvectors) tuple;
-* multiplies by `dim * 16 B` for the chosen basis (full / sz / symm /
-  sym+sz) and divides by `n_ranks` for the MPI / multi-GPU cells;
-* probes the host (psutil + nvidia-smi, with `QED_HOST_*` env-var
-  overrides) to learn how much CPU RAM / VRAM / MPI ranks are
-  available;
-* compares the two and emits a one-line **FEASIBLE** / **INFEASIBLE
-  (memory|build|kernel)** verdict with a wall-time ballpark.
+Instead of *predicting* feasibility, the orchestrator **guards the actual
+allocation**: `ed::core::guard_working_set` checks the dominant working set
+against available RAM (`/proc/meminfo` `MemAvailable`) immediately before it is
+allocated and throws a clear error — naming the workflow and the estimated vs
+available bytes — rather than letting the host OOM-kill the process. Set
+`ED_MEM_GUARD_OFF=1` to bypass it (e.g. when the scheduler reserved more than
+`/proc/meminfo` reports).
 
-If the verdict is **INFEASIBLE**, `qed.solve` raises a
-`qed.ResourceError` whose `.report` carries ranked, copy-pasteable
-suggestions ("pass `sz=N//2` to cut dim 10×", "switch to
-`device='mpi'` with `mpi_n_ranks≥7`", "the FULL dense path scales as
-dim²; switch to `solver='LANCZOS'`", …). Pass `force=True` to ignore
-the planner (e.g. when the planner can't see your scheduler-allocated
-RAM), `dry_run=True` to print the report and stop, or `plan=False`
-to skip the planner entirely.
-
-```python
-# 1. Predictive: "would this run? how big? how long?"
-report = qed.estimate_resources(H, solver="FTLM", device="mpi",
-                                 sz=N // 2, num_eigenvalues=1,
-                                 n_samples=8, n_ranks=8)
-print(report.summary())
-# [qed.solve.planner] verdict: FEASIBLE
-#   basis     : sz=n_up=16 sector dim=601_080_390
-#   solver    : FTLM
-#   device    : mpi  (n_ranks=8)
-#   memory    : per-rank 94.05 GB / avail 14.0 GB    (total 752.4 GB across 8 ranks)
-#   wall-time : ~26.7 h  (rough order of magnitude)
-
-# 2. Goal-oriented: "I want X, what's my best shot on this host?"
-sug = qed.suggest_workflow(H, intent="thermal", n_samples=8)
-print(sug.summary(top=5))
-print("Recommended:", sug.best().call_signature() if sug.best() else
-      "no feasible plan; pass available_devices=[…] or scale up")
-
-# 3. dry_run: planner-only mode (no kernel dispatch).
-qed.solve(H, solver="FTLM", sz=N // 2, dry_run=True)
-
-# 4. force=True: dispatch even when the planner says no.
-res = qed.solve(H, solver="LANCZOS", device="mpi_gpu",
-               mpi_n_ranks=4, force=True)
-```
-
-The verdict is also useful **after the fact** — `report.suggestions`
-is a list of strings ranked by impact, so you can show them in a UI
-or feed them to a notebook help cell.
-
-### Honest scope
-
-The planner is a feasibility filter, not a perf oracle. The wall-time
-estimates use rough constants (100 ns / term-element for the CPU
-SpMV, 5 ns for the GPU SpMV, AllReduce latency floor of 50 µs) tuned
-from the Phase 6 / Phase 3c bake-offs. Memory estimates are
-deliberately conservative — the planner exists to keep you from
-OOM'ing, not to forecast within ±10 %. If you have a job script
-that allocates more RAM than the planner detected (Slurm / PBS /
-container limits), use `force=True` and trust the scheduler.
-
-| host probe | source | override |
-| --- | --- | --- |
-| CPU RAM | `psutil.virtual_memory().total` -> `/proc/meminfo` -> 16 GB default | `QED_HOST_MEMORY_GB` |
-| GPU VRAM | `nvidia-smi --query-gpu=memory.total` (smallest visible device) | `QED_HOST_GPU_MEMORY_GB`, `QED_HOST_N_GPUS` |
-| MPI ranks | `SLURM_NTASKS` -> `PBS_NP` -> `OMPI_COMM_WORLD_SIZE` -> CPU count | `QED_HOST_N_MPI_RANKS` |
-| build flags | `qed._core.has_{cuda,mpi,nccl}_build()` | (rebuild) |
+To size a job yourself: a dim-sized complex vector is `dim · 16 B`; Lanczos
+keeps a handful live (plus the `m`-vector basis when `compute_eigenvectors=True`),
+FTLM / TPQ keep O(few) per sample. Cut `dim` with `sz=N//2` (≈10× at half
+filling) and `symmetry=qed.find_symmetries(H).full_set` (≈`|G|×`), or distribute
+with `device='mpi'`.
 
 ---
 
@@ -855,9 +795,7 @@ honoured by `lanczos` (`distributed_lanczos_gpu`) and `tpq`
 | `mpiexec ed_distributed_main --mode tpq --gpu` for thermal | `qed.solve(H, solver='cTPQ', device='mpi_gpu', mpi_n_ranks=N, ...)` |
 | Reassemble distributed eigenvectors by hand from rank_*.h5 | `qed.load_mpi_eigenvector(eigvec_dir, k)` (single) / `qed.load_mpi_eigenvectors(eigvec_dir)` (all) |
 | Look in `ed_method_traits.h` for solver/device wiring      | `qed.solver_device_support()` (build-aware (solver, device) matrix) |
-| Compute "will this fit?" with back-of-envelope dim²/sample math | `qed.estimate_resources(H, solver=..., device=..., ...)` (FeasibilityReport with ranked suggestions) |
-| "Which solver/device is best on this host for goal X?"     | `qed.suggest_workflow(H, intent="ground_state"/"low_lying"/"thermal"/"spectral")` (ranked candidates) |
-| Run the kernel just to check it OOMs                       | `qed.solve(H, ..., dry_run=True)` (planner-only; no kernel dispatch) |
+| Compute "will this fit?" before running                    | size it by hand (`dim · 16 B` per vector); the workflow itself raises a clean error if the dominant allocation won't fit (no planner) |
 
 The legacy entry points stay supported — they share the same C++
 backend so behaviour is identical — but new code is encouraged to use
@@ -907,11 +845,11 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    │      → params.use_symmetry = True                   │
    │      → routes through streaming-symmetry kernel     │
    ├─────────────────────────────────────────────────────┤
-   │ 5. Pre-flight planner                               │
-   │    plan=True (default): estimate_resources(...)     │
-   │      → raises ResourceError if infeasible           │
-   │      → force=True overrides; dry_run=True returns   │
-   │        the report and skips dispatch.               │
+   │ 5. Memory guard (no planner)                        │
+   │    guard_working_set(...) checks the dominant        │
+   │      allocation vs available RAM at the point of use │
+   │      → raises a clear error instead of OOM-killing   │
+   │      → ED_MEM_GUARD_OFF=1 bypasses                   │
    ├─────────────────────────────────────────────────────┤
    │ 6. Thermal-method bookkeeping                       │
    │    if solver ∈ {mTPQ, cTPQ, FTLM, LTLM, KPM_DOS}:   │
@@ -1128,9 +1066,8 @@ For the distributed variant, switch to `solver="cTPQ"` and
 | change `arpack_ncv`, `tpq_taylor_order`, `ftlm_seed`, …  | `qed.solve(…, extra_params={…})` |
 | swap the **whole** parameter struct (e.g. copy from CLI) | `qed.solve(H, method, params)` |
 | list every knob and which family it belongs to           | `qed.list_diag_parameters()` (or `('arpack')`, `('tpq')`, …) |
-| ask "would this fit on this host?" without running       | `qed.solve(H, …, dry_run=True)` |
 | inspect what the auto-pilot decided                      | `qed.solve(H, …, verbose=True)` (default) |
-| force a kernel through despite an `INFEASIBLE` verdict   | `qed.solve(H, …, force=True)` |
+| keep an over-budget job from OOM-killing the host        | automatic (memory guard); `ED_MEM_GUARD_OFF=1` to bypass |
 | chain low-level kernels yourself (Lanczos → CG → …)      | the dedicated solver modules in `qed.*` (see `python_advanced.md`) |
 
 

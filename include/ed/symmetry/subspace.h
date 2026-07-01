@@ -50,6 +50,7 @@
 #include <vector>
 
 #include <ed/core/basis_utils.h>   // LinIndexTable, generateFixedSzBasis
+#include <ed/core/combinadic.h>    // BinomialTable (tableless fixed-Sz mode)
 #include <ed/matvec/basis_policy.h>
 
 namespace ed::symmetry {
@@ -144,21 +145,28 @@ public:
     // ------------------------------------------------------------------
     FixedSzSubspace(const FixedSzSubspace& o)
         : n_bits_(o.n_bits_), n_up_(o.n_up_),
-          owned_basis_(o.owned_basis_), owned_lin_(o.owned_lin_) {
+          tableless_(o.tableless_), tableless_dim_(o.tableless_dim_),
+          owned_basis_(o.owned_basis_), owned_lin_(o.owned_lin_),
+          owned_binom_(o.owned_binom_) {
         rehome_from_(o);
     }
     FixedSzSubspace(FixedSzSubspace&& o) noexcept
         : n_bits_(o.n_bits_), n_up_(o.n_up_),
+          tableless_(o.tableless_), tableless_dim_(o.tableless_dim_),
           owned_basis_(std::move(o.owned_basis_)),
-          owned_lin_(std::move(o.owned_lin_)) {
+          owned_lin_(std::move(o.owned_lin_)),
+          owned_binom_(std::move(o.owned_binom_)) {
         rehome_from_(o);
     }
     FixedSzSubspace& operator=(const FixedSzSubspace& o) {
         if (this != &o) {
             n_bits_      = o.n_bits_;
             n_up_        = o.n_up_;
+            tableless_   = o.tableless_;
+            tableless_dim_ = o.tableless_dim_;
             owned_basis_ = o.owned_basis_;
             owned_lin_   = o.owned_lin_;
+            owned_binom_ = o.owned_binom_;
             rehome_from_(o);
         }
         return *this;
@@ -167,8 +175,11 @@ public:
         if (this != &o) {
             n_bits_      = o.n_bits_;
             n_up_        = o.n_up_;
+            tableless_   = o.tableless_;
+            tableless_dim_ = o.tableless_dim_;
             owned_basis_ = std::move(o.owned_basis_);
             owned_lin_   = std::move(o.owned_lin_);
+            owned_binom_ = std::move(o.owned_binom_);
             rehome_from_(o);
         }
         return *this;
@@ -197,6 +208,31 @@ public:
         return s;
     }
 
+    /// Tableless combinadic build (Track A): no C(N,n_up) basis vector and no
+    /// Lin table -- only an O(N^2) BinomialTable. ``state_of`` / ``index_of`` /
+    /// ``policy`` go through combinadic rank/unrank. Use when the materialized
+    /// basis would not fit (the planner selects this). ``basis_states()`` /
+    /// ``lin_index()`` MUST NOT be called in this mode (no materialized arrays).
+    [[nodiscard]] static FixedSzSubspace
+    build_tableless(std::uint64_t n_bits, std::int64_t n_up) {
+        if (n_bits >= 64) {
+            throw std::invalid_argument(
+                "FixedSzSubspace: n_bits >= 64 is not supported.");
+        }
+        if (n_up < 0 || n_up > static_cast<std::int64_t>(n_bits)) {
+            throw std::invalid_argument(
+                "FixedSzSubspace: n_up must satisfy 0 <= n_up <= n_bits.");
+        }
+        FixedSzSubspace s;
+        s.n_bits_        = n_bits;
+        s.n_up_          = n_up;
+        s.tableless_     = true;
+        s.owned_binom_.resize(static_cast<int>(n_bits));
+        s.tableless_dim_ = s.owned_binom_.at(static_cast<int>(n_bits),
+                                             static_cast<int>(n_up));
+        return s;
+    }
+
     /// Non-owning view: ``basis`` + ``lin`` must outlive this subspace.
     /// Used by ``FixedSzOperator::subspace()`` so the operator keeps
     /// ownership of its tables and the Subspace abstraction is a thin
@@ -218,15 +254,30 @@ public:
     [[nodiscard]] std::uint64_t n_bits() const noexcept { return n_bits_; }
     [[nodiscard]] std::int64_t  n_up()   const noexcept { return n_up_;   }
 
+    [[nodiscard]] bool is_tableless() const noexcept { return tableless_; }
+    [[nodiscard]] const ed::core::combinadic::BinomialTable& binom() const noexcept {
+        return owned_binom_;
+    }
+
     [[nodiscard]] std::uint64_t dim() const noexcept {
+        if (tableless_) return tableless_dim_;
         return basis_ptr_ != nullptr ? basis_ptr_->size() : 0;
     }
 
     [[nodiscard]] std::uint64_t state_of(std::uint64_t idx) const noexcept {
+        if (tableless_)
+            return ed::core::combinadic::unrank_to_state(
+                idx, static_cast<int>(n_bits_), static_cast<int>(n_up_), owned_binom_);
         return (*basis_ptr_)[idx];
     }
 
     [[nodiscard]] std::int64_t index_of(std::uint64_t state) const noexcept {
+        if (tableless_) {
+            return (__builtin_popcountll(state) == static_cast<int>(n_up_))
+                ? ed::core::combinadic::rank_state(
+                      state, static_cast<int>(n_bits_), static_cast<int>(n_up_), owned_binom_)
+                : std::int64_t{-1};
+        }
         return lin_ptr_->lookup(state);
     }
 
@@ -243,6 +294,11 @@ public:
     /// the caller guaranteed at construction (or that this object owns
     /// when built via ``build``).
     [[nodiscard]] ed::matvec::basis::FixedSzBasisPolicy policy() const noexcept {
+        if (tableless_) {
+            return ed::matvec::basis::make_combinadic_fixed_sz_basis(
+                static_cast<int>(n_bits_), static_cast<int>(n_up_),
+                owned_binom_, tableless_dim_);
+        }
         return ed::matvec::basis::make_fixed_sz_basis(*basis_ptr_, *lin_ptr_);
     }
 
@@ -267,10 +323,15 @@ private:
 
     std::uint64_t n_bits_ = 0;
     std::int64_t  n_up_   = 0;
+    // Tableless combinadic mode (build_tableless): no materialized basis/Lin
+    // table, just owned_binom_ + the cached sector dimension.
+    bool          tableless_     = false;
+    std::uint64_t tableless_dim_ = 0;
     // Owned tables (populated only by ``build``); viewers initialize
     // these as empty and set the pointers below to external storage.
     std::vector<std::uint64_t> owned_basis_;
     LinIndexTable              owned_lin_;
+    ed::core::combinadic::BinomialTable owned_binom_;  // tableless mode only
     // Non-owning observations -- always set to ``&owned_*`` for built
     // subspaces and to external storage for view-only ones.
     const std::vector<std::uint64_t>* basis_ptr_ = nullptr;

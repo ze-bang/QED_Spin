@@ -54,6 +54,23 @@ orphan: true
 > `ED_SYM_REP=0` keeps the CPU on the CSR walk even in the lazy regime
 > (bisection); `ED_GPU_SYMMETRY_REP=0` restores the GPU orbit-CSR mirror.
 
+> **Update (2026-06): the regime is a default, not planner-decided; non-abelian
+> symmetry has a hard scale ceiling.** There is no execution planner. The
+> rep-walk-vs-CSR choice above is the `sym_matvec_repr` leaf hook
+> ([`include/ed/planner/sym_matvec_policy_hook.h`](../../include/ed/planner/sym_matvec_policy_hook.h)),
+> which defaults to **`RepReducedCsr`** (build the reduced sector matrix once,
+> O(1) SpMV) and falls back to the matrix-free rep walk under
+> `ED_SYM_REDUCED_CSR=0` (or orbit-materialized under `ED_SYM_REP=0`). All three
+> are numerically identical — the choice is memory-vs-speed, with no cost model or
+> feasibility check (an over-budget allocation is caught at the point of use by
+> `guard_working_set`, not predicted).
+>
+> **Non-abelian** point groups (`d_Γ ≥ 2`) use the symmetry-adapted-basis engine,
+> which *enumerates and stores* the reduced basis — it is **moderate-N only** and
+> refuses enumerations above `ED_SYM_SAB_MAX_DIM` (default `2^22`). It is **not** a
+> path to the 36-site regime; at that scale only the matrix-free **abelian** rep
+> walk applies. A matrix-free non-abelian engine is future work.
+
 This document tells you, for a given system size N:
 
 1. how much memory one Lanczos / FTLM / TPQ vector costs,
@@ -220,6 +237,22 @@ precision.
   `run_disk_streaming_workflow`); the MPI path is faster, works on
   arbitrary cluster sizes, and is matvec-unification first-class
   (`DistributedHost` memory space tag on `DistributedOperator`).
+  * **Construction cost is linear.** `DistributedSymmetryOperator` builds its
+    rank-local matrix with the **orbit-walk** (`src/distributed/distributed_symmetry_operator.cpp`):
+    for each orbit it walks the member states and emits `<s'|H|s>` via
+    `ed::matvec::kernel::apply_term_to_state`, projecting back onto orbits —
+    **O(dim·num_terms)**, the same complexity as the streaming SpMV. (The earlier
+    dense per-orbit H-probe was O(dim²/|G|); it survives behind
+    `ED_DISTRIBUTED_LEGACY_PROBE` only as a numerical cross-check.) The orbit-walk
+    is ~**410×** faster than the probe at 18 sites (46.4 s → 0.11 s, sector 0, one
+    rank) and scales ~linearly in `dim` thereafter. Both the enumeration and the
+    matrix build are OpenMP-parallel, but the speedup is **memory-bandwidth-bound**
+    (random access into `state_to_orbit`/`phi`), so it is sublinear: at N=24 the
+    matbuild is 17.9 s on 1 thread → 4.5 s on 8 → 3.7 s on 32. **You must launch
+    the MPI ranks with `--bind-to none`** (or `--map-by …:PE=$OMP_NUM_THREADS`),
+    otherwise OpenMPI pins each rank — and all its OpenMP threads — to a single
+    core and construction stays serial. This build is workflow-agnostic — ground
+    state (Lanczos / Krylov-Schur) and finite-T (FTLM / TPQ) share it.
 * **Wallclock**: hours, not days. GPU path (`LANCZOS_GPU` with
   `BLOCK_LANCZOS_GPU` for nev=5) is 3–10× faster.
 * **Honesty**: this is well-trodden territory. Multiple groups have

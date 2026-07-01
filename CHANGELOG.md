@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planner removed; defaults, memory guard, linear distributed symmetry build (Jun 2026)
+
+- **Execution planner / autotuner removed.** The capability-aware planner, the
+  feasibility advisor, and the TPQ/solve autotuner (added earlier this cycle, see
+  below) are gone — replaced by **sensible defaults plus three leaf policy hooks**.
+  The orchestrator picks the method from problem size alone (`default_method_for`:
+  full diagonalization for `dim ≤ 1024`, Lanczos otherwise); the only representation
+  choices are static defaults with env overrides in `ed/planner/{sym_matvec,csr,basis}_policy_hook.h`
+  (`execution_planner.h` and the feasibility/autotuner sources deleted).
+- **Reduced-CSR is the default symmetry matvec.** `resolved_sym_matvec_repr()`
+  defaults to `RepReducedCsr` — build the reduced sector matrix once
+  (`include/ed/matvec/reduced_symmetry_csr.h`, OpenMP-parallel build + SpMV), O(1)
+  per matvec (~5× over the rep walk at 18 sites). `ED_SYM_REDUCED_CSR=0` → matrix-free
+  rep walk; `ED_SYM_REP=0` → orbit-materialized. All three are numerically identical.
+- **Working-set memory guard.** `ed::core::guard_working_set` (`include/ed/core/mem_guard.h`)
+  checks the dominant allocation against available RAM and throws a clean error
+  instead of an OOM kill (bypass `ED_MEM_GUARD_OFF`).
+- **Linear distributed symmetry construction.** `DistributedSymmetryOperator`'s
+  rank-local matrix build was O(n_orbits·dim) ≈ O(dim²/|G|), serial (a dense
+  per-orbit H-probe). Replaced with the **orbit-walk**: for each orbit, walk its
+  member states and emit `<s'|H|s>` via `ed::matvec::kernel::apply_term_to_state`,
+  projecting back onto orbits — **O(dim·num_terms), linear**, OpenMP-parallel. ~410×
+  at 18 sites (46.4 s → 0.11 s); the legacy probe is retained behind
+  `ED_DISTRIBUTED_LEGACY_PROBE` as a numerical cross-check. Orbit enumeration
+  (Step 1) is likewise parallelized. This build is shared by **all distributed
+  symmetry workflows** — ground state (Lanczos / Krylov-Schur) and finite-T
+  (FTLM / TPQ). (DSSF has no distributed mode; it runs in-process, where the build
+  was already linear.)
+- **mTPQ cooling fix.** `tpq_energy_shift` now defaults to `0.0` (AUTO → the
+  orchestrator's spectral-bound `L_auto`); the old `1e5` default pinned the
+  LargeValue so high that `(L−H)|ψ⟩ ≈ L·|ψ⟩` and the trajectory never cooled below
+  ~infinite temperature.
+- **Monolith splits + test net.** `ftlm.cpp` / `TPQ.cpp` split into core +
+  dynamical / IO units; new integration suite (exact-ED, 3-way sym-matvec
+  equivalence, mem-guard, TPQ-cooling) and a CPU+MPI CI lane.
+
+### Non-abelian spatial symmetry + capability-aware execution planner (Jun 2026)
+
+- **Non-abelian spatial symmetry.** A numerical irrep engine (regular-representation
+  Hermitian-commutant decomposition) yields the `d_Γ`-dimensional irrep matrices;
+  abelian symmetry is now just the `d_Γ = 1` special case. The non-abelian
+  symmetry-adapted basis (Wigner projector + SVD column basis) rides the production
+  `CpuMatVecBackend` / `CudaMatVecBackend` through a `multi_target` basis policy —
+  no parallel matvec. Verified against brute-force full diagonalization to ~1e-15
+  across ground state (dense / Lanczos / Krylov-Schur), exact finite-T, and DSSF,
+  on both CPU and GPU. Combined **Sz × spatial** works for abelian and non-abelian
+  point groups.
+- **Scale guard for the moderate-N SAB engine.** The symmetry-adapted-basis engine
+  *enumerates and stores* the reduced basis, so it does not scale. `build_sab_partition0`
+  now refuses enumerations above a cap (default `2^22`, override `ED_SYM_SAB_MAX_DIM`)
+  with a clear error pointing to the matrix-free abelian rep path, instead of silently
+  OOM-ing. A matrix-free *non-abelian* engine is not yet implemented; abelian symmetry
+  is matrix-free and scales today.
+- **Capability-aware execution planner** (`ed::planner::plan_execution`): a system
+  probe + task cost model choose device lane / matvec strategy / reorth / basis
+  representation, published via process-global lazy hooks:
+  - `csr_override` — assembled-CSR vs matrix-free (Full / fixed-Sz),
+  - `basis_repr` — materialized vs tableless combinadic basis (fixed-Sz),
+  - `sym_matvec_repr` — **rep walk vs materialized orbit-CSR for symmetry sectors**,
+    replacing `ED_SYM_REP` / `rep_lazy()` as the arbiter (now only the `Auto` fallback).
+
+  The cost model is hardened against overflow / UB (saturating byte products, clamped
+  `double`→`uint64`, guarded `1 << N`) so astronomically large dimensions report
+  *infeasible* rather than wrapping to a tiny footprint. A stress / fuzz suite covers
+  degenerate and adversarial inputs.
+- **Engine + solver unification.** Retired the parallel `symmetry_adapted_*` matvec
+  subsystem and the Gen-1 `GPULanczos`; all CPU Lanczos run on
+  `ed::krylov::lanczos_kernel`. One `MatVecOperator` seam spans
+  reduction × method × deployment.
+- **Thermal.** One-pass all-Sz streaming-symmetry sector factory
+  (`make_all_sz_sector_operators_tagged`) builds every `(n_up, irrep)` sector from a
+  single orbit-rep enumeration, and `default_cpu_backend()` is now `thread_local` so
+  the sector-parallel loop (`ED_SYM_SECTOR_PARALLEL`) is race-free.
+
 ### Symmetry / Sz+symmetry SpMV brought to optimality (CPU + GPU) (Jun 2026)
 
 The symmetry and Sz+symmetry matrix-vector lanes now match the Full / Fixed-Sz

@@ -67,6 +67,7 @@ enum class SolveMethod : std::uint8_t {
     BlockLanczos = 2,
     KrylovSchur = 3,
     FullDiag = 4,
+    BlockKrylovSchur = 5,   ///< thick-restart block Lanczos (degenerate/clustered)
 };
 
 struct SolveOptions {
@@ -75,11 +76,26 @@ struct SolveOptions {
     std::size_t block_size     = 4;
     double      tolerance      = 1e-10;
     bool        compute_vectors = false;
+    /// Block Lanczos: keep the full block-Krylov basis (full reorth + eigenvectors)
+    /// vs lean local-reorth (eigenvalues-only, bounded memory). The planner sets
+    /// this false for large-N eigenvalue runs whose full basis exceeds the budget;
+    /// env ED_BLOCK_LANCZOS_LEAN=1 forces lean. Ignored when compute_vectors=true.
+    bool        block_lanczos_keep_basis = true;
     /// Output directory for HDF5 results (legacy behaviour). Empty
     /// means "do not write".
     std::string output_dir;
     SolveMethod method         = SolveMethod::Auto;
     BackendConstraints backend;
+
+    /// Completion guarantee (planner-as-dictator). When false (default), a solve
+    /// whose ExecutionPlan is infeasible (working set / basis construction would
+    /// exceed the memory budget) is REFUSED cleanly -- the orchestrator throws
+    /// with the bottleneck + ranked suggestions BEFORE any large allocation, so
+    /// the run can never OOM/crash mid-flight. Set true to dispatch anyway (the
+    /// manual escape hatch; the Python lane maps `force=True` onto this). The
+    /// Python `qed.solve` pre-flight enforces the same verdict before this point;
+    /// this gate is the safety net for direct C++ / CLI / api_facade callers.
+    bool        allow_infeasible = false;
 
     // -----------------------------------------------------------------
     // CLI parity knobs (Wave A5 -- Full unified-interface collapse,
@@ -129,7 +145,7 @@ struct SolveOptions {
 struct ThermalOptions {
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos,
+        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos, OFTLM,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -144,6 +160,7 @@ struct ThermalOptions {
     // ---------------------------------------------------------------
     std::size_t num_samples    = 40;   ///< Python default (was 30).
     std::size_t krylov_dim     = 100;
+    std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
     std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
     double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ/cTPQ imag-time step.
@@ -197,6 +214,16 @@ struct ThermalOptions {
     double      energy_shift   = 0.0;
 
     // -----------------------------------------------------------------
+    // fp32 single-GPU mTPQ (memory-halving lane, July 2026). When true AND
+    // the operator advertises ``supports_cuda_f32()`` (full-Hilbert Operator
+    // on a WITH_CUDA build) AND the method is mTPQ, the orchestrator routes
+    // to ``ed::thermal::mtpq_f32``: state vectors + matvec in complex<float>
+    // (half the footprint, so the full 2^32 Hilbert space fits two vectors on
+    // one 80 GB H100), reductions accumulated in double. Ignored otherwise.
+    // -----------------------------------------------------------------
+    bool        mtpq_fp32      = false;
+
+    // -----------------------------------------------------------------
     // KPM-DOS knobs (closing-the-symmetry-gap follow-up, May 2026).
     //
     // Prior to this revision ``ThermalOptions`` carried no
@@ -229,6 +256,11 @@ struct ThermalOptions {
     // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
     // -----------------------------------------------------------------
     std::vector<double> probe_betas;
+
+    /// Completion guarantee: when false (default), a thermal run whose plan would
+    /// not fit the memory budget (kernel working set) is REFUSED cleanly before
+    /// any allocation. Set true (Python force=True) to dispatch anyway.
+    bool        allow_infeasible = false;
 };
 
 struct SpectralOptions {
@@ -337,6 +369,11 @@ struct SpectralOptions {
     // it as the seed.
     // -----------------------------------------------------------------
     std::vector<std::complex<double>> initial_state;
+
+    /// Completion guarantee: when false (default), a spectral run whose plan would
+    /// not fit the memory budget is REFUSED cleanly before any allocation. Set
+    /// true (Python force=True) to dispatch anyway.
+    bool        allow_infeasible = false;
 };
 
 // ---------------------------------------------------------------------------

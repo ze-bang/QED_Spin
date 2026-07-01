@@ -38,6 +38,7 @@
 
 #include <ed/core/construct_ham.h>
 #include <ed/dssf/operator_spec.h>
+#include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr / prefer_tableless_fixed_sz (leaf)
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ltlm.h>
@@ -50,6 +51,9 @@
 #include <ed/bfg/topology.h>
 #include <ed/bfg/wavefunction_io.h>
 #include <ed/symmetry/group.h>
+#include <ed/symmetry/irreps.h>
+#include <ed/symmetry/symmetry_adapted.h>
+#include <ed/solvers/symmetry_adapted_solve.h>
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -286,6 +290,21 @@ py::list op_iter_three_body(const Operator& op) {
 // `transform_data_` / `three_body_data_` straight from `Operator`, so a
 // member-wise copy gets us a fully working sector-restricted operator
 // without having to re-add each term.
+// C(n, k), overflow-clamped to UINT64_MAX (a basis that large is astronomically
+// infeasible -> the clamp correctly drives the tableless / refuse decision).
+[[nodiscard]] inline std::uint64_t binom_u64(unsigned n, unsigned k) {
+    if (k > n) return 0;
+    k = std::min(k, n - k);
+    std::uint64_t r = 1;
+    for (unsigned i = 0; i < k; ++i) {
+        const std::uint64_t num = n - i;
+        if (r > (std::numeric_limits<std::uint64_t>::max)() / num)
+            return (std::numeric_limits<std::uint64_t>::max)();
+        r = r * num / (i + 1);   // exact in this multiplicative order
+    }
+    return r;
+}
+
 std::unique_ptr<FixedSzOperator>
 op_make_fixed_sz(const Operator& op, int64_t n_up) {
     if (n_up < 0 || n_up > static_cast<int64_t>(op.getNumBits())) {
@@ -293,6 +312,16 @@ op_make_fixed_sz(const Operator& op, int64_t n_up) {
             "n_up = " + std::to_string(n_up) +
             " out of range [0, num_sites=" + std::to_string(op.getNumBits()) + "]");
     }
+
+    // Planner removed: pick the fixed-Sz basis representation from the
+    // basis_policy_hook leaf -- env ED_FIXED_SZ_TABLELESS wins, otherwise the
+    // materialized C(N,n_up) default. (The cost-model "completion guarantee"
+    // pre-flight is gone; set ED_FIXED_SZ_TABLELESS=1 for the tableless
+    // combinadic basis when the materialized array would not fit.)
+    const ed::planner::ScopedBasisRepr basis_guard(
+        ed::planner::prefer_tableless_fixed_sz() ? ed::planner::BasisRepr::Tableless
+                                                 : ed::planner::BasisRepr::Default);
+
     auto fop = std::make_unique<FixedSzOperator>(
         op.getNumBits(), op.getSpin(), n_up);
     fop->transform_data_  = op.transform_data_;
@@ -677,6 +706,146 @@ PYBIND11_MODULE(_core, m) {
              "with ``n_up`` up spins. Equivalent to ``FixedSzOperator(...)`` "
              "+ replaying every ``add_one_body`` / ``add_two_body`` call, "
              "but routed through a single C++ copy of the term arrays.");
+
+    // ------------------------------------------------------------------------
+    // Non-abelian symmetry-adapted spectrum. Reduces by the FULL point group
+    // (including d≥2 irreps) and returns the complete spectrum with the correct
+    // physical degeneracies. `generators` is a list of site permutations
+    // (length num_sites each). Correct for any group; reference-grade (works in
+    // the full 2^num_sites space, so moderate sizes).
+    // ------------------------------------------------------------------------
+    m.def("symmetry_adapted_eigenvalues",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             int n_up, bool use_gpu) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              // Full reduced spectrum via the production engine (CpuMatVecBackend
+              // over op's terms); on GPU the host materialises the blocks and the
+              // device runs the batched cuSOLVER eigensolve. n_up >= 0 -> fixed-Sz.
+              ed::symmetry::SymAdaptedSpectrum spec;
+#ifdef WITH_CUDA
+              if (use_gpu)
+                  spec = ed::symmetry::symmetry_adapted_spectrum_gpu(
+                      op, gi, max_clique, n_sites, n_up);
+              else
+#endif
+                  spec = ed::solvers::symmetry_adapted_full_spectrum(
+                      op, gi, max_clique, n_sites, n_up);
+              (void)use_gpu;
+              py::dict d;
+              d["eigenvalues"]     = spec.eigenvalues;
+              d["block_irrep_dim"] = spec.block_irrep_dim;
+              d["block_size"]      = spec.block_size;
+              d["group_order"]     = gi.order;
+              d["num_irreps"]      = static_cast<int>(gi.irreps.size());
+              std::vector<int> dims; for (const auto& ir : gi.irreps) dims.push_back(ir.dim);
+              d["irrep_dims"]      = dims;
+              d["is_abelian"]      = gi.is_abelian();
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("n_up") = -1,
+          py::arg("use_gpu") = false,
+          "Symmetry-adapted spectrum of a Hamiltonian under the (possibly "
+          "non-abelian) point group generated by `generators` (a list of site "
+          "permutations). With `n_up >= 0`, additionally restricts to the "
+          "fixed-Sz sector of that many up-spins (combined U(1)×point-group "
+          "reduction); `n_up = -1` (default) uses the full Hilbert space. Returns "
+          "a dict with `eigenvalues` (correct d_Γ degeneracies), per-block "
+          "(`block_irrep_dim`, `block_size`), and group info. Reduces by the FULL "
+          "group including 2-D+ irreps.");
+
+    // Lowest-k eigenvalues via the symmetry reduction, solved per block by a
+    // DENSE eigensolve (small blocks) or LANCZOS on the reduced matvec (large
+    // blocks) -- the method is chosen by block size, decoupled from the
+    // reduction. Use for ground state / low-lying of large non-abelian sectors.
+    m.def("symmetry_adapted_lowest",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             int k, int n_up, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              // Drives the production engine (CpuMatVecBackend over op's terms via
+              // NonAbelianSymmetryBasisPolicy) per block — no parallel matvec.
+              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
+                  op, gi, max_clique, n_sites, k, n_up, dense_max_dim);
+              py::dict d;
+              d["eigenvalues"]     = spec.eigenvalues;
+              d["block_irrep_dim"] = spec.block_irrep_dim;
+              d["block_size"]      = spec.block_size;
+              d["group_order"]     = gi.order;
+              d["is_abelian"]      = gi.is_abelian();
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          "Lowest-`k` eigenvalues (per irrep block, recombined with d_Γ "
+          "multiplicity, sorted) of a Hamiltonian under the (possibly non-abelian) "
+          "point group from `generators`. Each block H_Γ is solved by a dense "
+          "eigensolve when its reduced dimension n_Γ <= `dense_max_dim`, otherwise "
+          "by Lanczos on the reduced matvec -- so the symmetry reduction is solved "
+          "by EITHER method, chosen by block size. `n_up >= 0` adds the fixed-Sz "
+          "restriction. Ground state is the robust output; for a full low-lying "
+          "spectrum prefer `symmetry_adapted_eigenvalues` (dense).");
+
+    // Finite-temperature thermodynamics via the symmetry-reduced spectrum
+    // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
+    m.def("symmetry_adapted_thermodynamics",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             const std::vector<double>& temperatures, int n_up, bool use_gpu) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              ThermodynamicData td;
+#ifdef WITH_CUDA
+              if (use_gpu)
+                  td = ed::symmetry::symmetry_adapted_thermodynamics_gpu(
+                      op, gi, max_clique, n_sites, temperatures, n_up);
+              else
+#endif
+                  td = ed::solvers::symmetry_adapted_thermodynamics(
+                      op, gi, max_clique, n_sites, temperatures, n_up);
+              (void)use_gpu;
+              py::dict d;
+              d["temperatures"] = td.temperatures;
+              d["energy"]       = td.energy;
+              d["specific_heat"]= td.specific_heat;
+              d["entropy"]      = td.entropy;
+              d["free_energy"]  = td.free_energy;
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("temperatures"),
+          py::arg("n_up") = -1, py::arg("use_gpu") = false,
+          "Exact canonical thermodynamics (E, C, S, F vs T) of a Hamiltonian "
+          "reduced by the (possibly non-abelian) point group, with optional "
+          "fixed-Sz restriction (n_up>=0). Diagonalises the small per-irrep "
+          "blocks and weights eigenvalues by d_Γ.");
+
+    // Ground-state dynamical structure factor S(ω) = Σ_n |<n|O|0>|² L(ω-(E_n-E0)),
+    // symmetry-reduced. `observable` supplies O via its term list (any O, incl.
+    // Sz-changing — final states over the full reduced spectrum).
+    m.def("symmetry_adapted_dssf",
+          [](const Operator& H, const Operator& O,
+             const std::vector<std::vector<int>>& generators,
+             double omega_min, double omega_max, int n_omega, double broadening) {
+              const int n_sites = static_cast<int>(H.getNumBits());
+              auto max_clique = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
+              auto r = ed::solvers::symmetry_adapted_ground_state_dssf(
+                  H, O, gi, max_clique, n_sites,
+                  omega_min, omega_max, n_omega, broadening);
+              py::dict d;
+              d["omega"]         = r.omega;
+              d["spectral"]      = r.spectral;
+              d["ground_energy"] = r.ground_energy;
+              d["total_weight"]  = r.total_weight;
+              return d;
+          },
+          py::arg("hamiltonian"), py::arg("observable"), py::arg("generators"),
+          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
+          py::arg("broadening"),
+          "Symmetry-reduced ground-state dynamical structure factor S(ω) for the "
+          "observable `O`. Correct for any O (Sz-conserving or -changing).");
 
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.

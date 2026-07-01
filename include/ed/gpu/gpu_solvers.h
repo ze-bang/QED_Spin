@@ -129,10 +129,11 @@ inline void lanczos(const GPUOperator& op,
 // Both implementations live in
 // `src/solvers/gpu/gpu_lanczos_kernel_facade.cu`. `runGPULanczos(...)`
 // in `gpu_ed_wrapper.cu` dispatches to one of the two based on
-// `eigenvectors`, so every existing call site picks up the new path
-// without a source change. The legacy `GPULanczos::run` is kept only
-// for the windowed-reorth / on-disk basis-spill regime (when the
-// basis won't fit in device memory).
+// `eigenvectors`; it is now the ONLY GPU Lanczos path (the Gen-1
+// hand-rolled `GPULanczos` class was retired). The eigenvalues path uses
+// windowed LocalDGKS3 reorth (no full basis); the eigenpairs path keeps the
+// basis resident for Ritz reconstruction and reports a clear error if it
+// exceeds device memory.
 // ---------------------------------------------------------------------------
 void run_lanczos_eigenvalues_kernel_facade(
     GPUOperator& gpu_op,

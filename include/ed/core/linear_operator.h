@@ -146,6 +146,28 @@ public:
     [[nodiscard]] virtual MatvecFn bind_mpi_cuda() const { return bind_cpu(); }
 
     // -------------------------------------------------------------------
+    // Single-precision (fp32) CUDA device matvec binding --- the memory-
+    // halving lane that lets the full 2^32 Hilbert space fit two vectors
+    // on one 80 GB H100 for mTPQ. The in/out pointers are
+    // ``cuFloatComplex*`` in DEVICE memory, erased to ``void*`` so this
+    // header (consumed by CPU-only TUs too) need not include
+    // ``<cuComplex.h>``. Only ``Operator`` (full-Hilbert) overrides it;
+    // every other operator reports ``supports_cuda_f32() == false`` and
+    // the default binding throws. Consumed by ``ed::thermal::mtpq_f32``.
+    // -------------------------------------------------------------------
+    using Fp32DeviceMatvecFn =
+        std::function<void(const void*, void*, std::size_t)>;
+
+    [[nodiscard]] virtual bool supports_cuda_f32() const noexcept {
+        return false;
+    }
+    [[nodiscard]] virtual Fp32DeviceMatvecFn bind_cuda_f32() const {
+        throw std::runtime_error(
+            "LinearOperator::bind_cuda_f32: this operator has no fp32 "
+            "device matvec (only the full-Hilbert Operator supports it)");
+    }
+
+    // -------------------------------------------------------------------
     // Wave 1.1 of the SOTA Performance rollout (May 2026): orchestrator
     // real-Hermitian fast-path dispatch.
     //

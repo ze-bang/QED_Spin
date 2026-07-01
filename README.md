@@ -29,7 +29,9 @@ The same shape is exposed in Python as
 | Ground state / low-lying spectrum (Lanczos, Block-Lanczos, Krylov-Schur, dense LAPACK) | production |
 | Finite-temperature thermodynamics (FTLM, LTLM, mTPQ, cTPQ, KPM-DOS) | production |
 | Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
-| Symmetry projection: U(1) Sz × spatial point group × translations | production (orthogonal `Subspace × ProjectorChain`) |
+| Symmetry projection: U(1) Sz × **abelian** spatial point group × translations | production, matrix-free at scale (rep walk) |
+| Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF, moderate-N (scale-guarded SAB engine) |
+| Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
 | Symmetry projection: spin-flip Z₂, time-reversal, SU(2) total-S | seam open, implementation deferred |
 | CPU (OpenMP), single-GPU (cuBLAS / cuSPARSE), multi-rank MPI, multi-GPU NCCL | production |
 | First-class Python bindings (`import qed`) | production |

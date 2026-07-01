@@ -10,6 +10,9 @@
 #include <ed/parallel/fused_blas1.h>
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -354,113 +357,77 @@ int build_lanczos_tridiagonal_with_basis(
     }
 
     // ------------------------------------------------------------------
-    // Legacy path: no full reorth, OR full reorth requested without a
-    // basis-storage destination (we emit the same warning as before and
-    // run the 3-term recurrence).
+    // Non-full-reorth / no-basis path. Krylov-unification (Jun 2026): this
+    // used to be a hand-rolled three-term recurrence. It now routes through
+    // the SAME `ed::krylov::lanczos_kernel<CpuBackend>` as the fast path
+    // above, mapping the legacy ABI flags onto a `ReorthPolicy`:
+    //
+    //   * full_reorth && basis==nullptr  -> None  (reorth impossible without
+    //         a stored basis; legacy warned once and ran the bare recurrence)
+    //   * !full_reorth && reorth_freq>0 && basis!=nullptr -> PeriodicCGS2
+    //         (the legacy threshold-MGS periodic reorth, upgraded to CGS2 to
+    //          match the fast path's numerics)
+    //   * otherwise                       -> None  (pure three-term)
+    //
+    // The legacy `tol` is a Ritz-convergence parameter that the old body
+    // (incorrectly) reused as a ||w||<tol breakdown threshold; we preserve
+    // that exact termination by routing `tol` to `breakdown_tol` here. (The
+    // fast path above leaves breakdown at its ~exact-zero default, matching
+    // its own historical "run to max_iter" behaviour.)
     // ------------------------------------------------------------------
-    alpha.clear();
-    beta.clear();
-    beta.push_back(0.0); // β_0 is not used
-    
-    // Working vectors
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Normalize initial vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    // Store basis vectors if requested
-    if (basis_vectors != nullptr) {
-        basis_vectors->clear();
-        basis_vectors->reserve(max_iter);
-        basis_vectors->push_back(v_current);
-    }
-    
-    max_iter = std::min(N, max_iter);
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (full_reorth) {
-            // Full reorthogonalization against all previous vectors
-            if (basis_vectors != nullptr) {
-                for (int k = 0; k <= j; k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
-                }
-            } else {
-                // Cannot reorthogonalize without stored basis vectors
-                if (j == 0) {
-                    std::cerr << "Warning: full_reorthogonalization requested but "
-                              << "basis_vectors == nullptr. Reorthogonalization "
-                              << "will be silently skipped — eigenvalues may have "
-                              << "spurious duplicates." << std::endl;
-                }
-            }
-        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
-            // Periodic reorthogonalization
-            if (basis_vectors != nullptr) {
-                for (int k = 0; k <= j; k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > tol) {
-                        Complex neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
-                    }
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for convergence/breakdown
-        if (norm < tol) {
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}. Phase 6 #4: swap-rotate to avoid the
-        // O(N) memcpy of std::copy(w -> v_next).
-        std::swap(w, v_next);
-        Complex inv_norm(1.0 / norm, 0.0);
-        cblas_zscal(N, &inv_norm, v_next.data(), 1);
+    {
+        using ed::krylov::ReorthPolicy;
+        ed::krylov::LanczosKernelOptions opts;
+        opts.max_iter   = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
+        opts.keep_basis = (basis_vectors != nullptr);
+        opts.breakdown_tol = tol;
 
-        // Store next basis vector if requested
-        if (basis_vectors != nullptr && j < max_iter - 1) {
-            basis_vectors->push_back(v_next);
+        if (full_reorth) {
+            // basis_vectors == nullptr here (the full_reorth+basis case took
+            // the fast path above and returned).
+            std::cerr << "Warning: full_reorthogonalization requested but "
+                      << "basis_vectors == nullptr. Reorthogonalization "
+                      << "will be silently skipped — eigenvalues may have "
+                      << "spurious duplicates." << std::endl;
+            opts.reorth = ReorthPolicy::None;
+        } else if (reorth_freq > 0 && basis_vectors != nullptr) {
+            opts.reorth      = ReorthPolicy::PeriodicCGS2;
+            opts.reorth_freq = static_cast<std::size_t>(reorth_freq);
+        } else {
+            opts.reorth = ReorthPolicy::None;
         }
-        
-        // Update for next iteration: 3-way swap-rotate.
-        std::swap(v_prev, v_current);
-        std::swap(v_current, v_next);
+
+        const auto& be = ed::matvec::default_cpu_backend();
+        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+            H(in, out, static_cast<int>(n));
+        };
+        auto result = ed::krylov::lanczos_kernel(
+            be, matvec, static_cast<std::size_t>(N), v0.data(), opts);
+
+        alpha = std::move(result.alpha);
+        beta  = std::move(result.beta);
+
+        if (basis_vectors != nullptr) {
+            // Pool-aware translate-back (mirrors the fast path): reuse the
+            // overlapping prefix's heap allocations, append the remainder.
+            const std::size_t need = result.basis.size();
+            if (basis_vectors->size() > need) basis_vectors->resize(need);
+            basis_vectors->reserve(need);
+            const std::size_t reuse = std::min(basis_vectors->size(), need);
+            for (std::size_t i = 0; i < reuse; ++i) {
+                (*basis_vectors)[i].resize(static_cast<std::size_t>(N));
+                std::memcpy((*basis_vectors)[i].data(), result.basis[i].get(),
+                            static_cast<std::size_t>(N) * sizeof(Complex));
+            }
+            for (std::size_t i = reuse; i < need; ++i) {
+                ComplexVector v(static_cast<std::size_t>(N));
+                std::memcpy(v.data(), result.basis[i].get(),
+                            static_cast<std::size_t>(N) * sizeof(Complex));
+                basis_vectors->emplace_back(std::move(v));
+            }
+        }
+        return static_cast<int>(alpha.size());
     }
-    
-    return alpha.size();
 }
 
 // Helper function to solve tridiagonal eigenvalue problem
@@ -1423,9 +1390,10 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 
 
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs, 
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir,
-                       bool compute_eigenvectors) {
+                       bool compute_eigenvectors,
+                       const ed::matvec::MatVecOperator* op_for_dense) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
 
     // Phase 6.1: dim-aware OMP+BLAS thread cap. Full diag is BLAS-3 dense
@@ -1490,49 +1458,129 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         
         std::cout << "Constructing dense matrix..." << std::endl;
 
-        // Construct full matrix from operator function with progress reporting
-        // NOTE: We use sequential loop here because H may internally use OpenMP.
-        // Nested parallelism causes thread-safety issues with some BLAS/LAPACK backends.
-        const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);  // Report progress every 1%
-        
-        for (uint64_t j = 0; j < N; j++) {
-            // Create unit vector e_j
-            std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
-            unit_vec[j] = Complex(1.0, 0.0);
-            
-            // Compute H * e_j to get column j
-            std::vector<Complex> col_j(N);
-            H(unit_vec.data(), col_j.data(), N);
-            
-            // Store column in dense matrix (use column-major order for LAPACK)
-            for (uint64_t i = 0; i < N; i++) {
-                dense_matrix[j*N + i] = col_j[i];
-            }
-            
-            // Progress reporting with ASCII progress bar
-            if (j % chunk_size == 0 || j == N-1) {
-                double percentage = 100.0 * j / N;
-                uint64_t barWidth = 50;
-                uint64_t pos = barWidth * j / N;
-                
-                std::cout << "\rProgress: [";
-                for (uint64_t k = 0; k < barWidth; ++k) {
-                    if (k < pos) std::cout << "=";
-                    else if (k == pos) std::cout << ">";
-                    else std::cout << " ";
+        // FAST PATH: assemble the matrix directly from the operator's sparse term
+        // structure -- O(nnz), reentrant, parallel over columns -- instead of N
+        // full matvecs (O(dim*nnz)). Supported by the full-space / fixed-Sz lanes;
+        // symmetry lanes (and distributed/GPU callers with no operator handle)
+        // return false and fall through to the matvec column build below.
+        bool built_direct =
+            (op_for_dense != nullptr) &&
+            op_for_dense->try_build_dense_columns(dense_matrix.data(), N);
+
+        if (!built_direct) {
+            // Fallback: build column j = H * e_j. SEQUENTIAL outer loop -- the CPU
+            // matvec is NOT reentrant (the backend owns shared CSR/scratch), so it
+            // cannot be called concurrently; H parallelizes each column internally.
+            const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);
+            for (uint64_t j = 0; j < N; j++) {
+                std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
+                unit_vec[j] = Complex(1.0, 0.0);
+                std::vector<Complex> col_j(N);
+                H(unit_vec.data(), col_j.data(), N);
+                for (uint64_t i = 0; i < N; i++) {
+                    dense_matrix[j*N + i] = col_j[i];
                 }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                
-                if (j == N-1) std::cout << std::endl;
+                if (j % chunk_size == 0 || j == N-1) {
+                    double percentage = 100.0 * j / N;
+                    uint64_t barWidth = 50;
+                    uint64_t pos = barWidth * j / N;
+                    std::cout << "\rProgress: [";
+                    for (uint64_t k = 0; k < barWidth; ++k) {
+                        if (k < pos) std::cout << "=";
+                        else if (k == pos) std::cout << ">";
+                        else std::cout << " ";
+                    }
+                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                    if (j == N-1) std::cout << std::endl;
+                }
             }
         }
         std::cout << "Dense matrix constructed" << std::endl;
-        
+
+        // The enclosing ThreadBudgetScope soft-caps threads at ~8 (tuned for
+        // bandwidth-bound Lanczos SpMV / BLAS-1). The dense LAPACK eigensolve
+        // below is compute-bound and scales to all cores (zheevd/zheevr), so
+        // lift the cap for it -- otherwise it runs ~3-4x slower than the BLAS
+        // backend can (measured: 9 s vs 2.6 s at dim 3432). ThreadBudgetScope
+        // clamps the request to the hardware maximum and restores on scope exit.
+        //
+        // Nesting-aware: when this runs INSIDE a sector-parallel region (the
+        // streaming-symmetry FULL loop spreads independent sectors across cores
+        // via `omp parallel for if(ED_SYM_SECTOR_PARALLEL)`), keep the eigensolve
+        // single-threaded -- otherwise N_sectors x P_cores oversubscribes. A
+        // standalone FULL solve takes all cores.
+        int dense_threads = 1 << 20;
+#ifdef _OPENMP
+        if (omp_in_parallel()) dense_threads = 1;
+#endif
+        ed::parallel::ThreadBudgetScope dense_solve_budget(dense_threads);
+
         // Allocate array for eigenvalues
         std::vector<double> evals(N);
         lapack_int info;
         
-        if (use_partial_solver) {
+        // Real-matrix fast path: the assembled sector matrix is real whenever the
+        // Hamiltonian is real and the sector carries no complex Bloch phase --
+        // every no-symmetry / fixed-Sz block (real Heisenberg / XXZ) and the k=0
+        // / k=pi momentum sectors. Real LAPACK (dsyevd / dsyevr) is ~2x faster and
+        // uses half the working memory of the complex driver, with identical
+        // eigenvalues. Detect once (O(N^2), trivial next to the O(N^3) solve).
+        // ED_FULLDIAG_FORCE_COMPLEX forces the complex driver (A/B timing +
+        // real-vs-complex equivalence checks).
+        bool matrix_is_real = (std::getenv("ED_FULLDIAG_FORCE_COMPLEX") == nullptr);
+        for (size_t i = 0; i < matrix_size && matrix_is_real; ++i)
+            if (std::abs(dense_matrix[i].imag()) > 1e-12) matrix_is_real = false;
+
+        if (matrix_is_real) {
+            std::cout << "Matrix is real -> real LAPACK fast path ("
+                      << (use_partial_solver ? "dsyevr" : "dsyevd") << ")" << std::endl;
+            std::vector<double> rdense(matrix_size);
+            for (size_t i = 0; i < matrix_size; ++i) rdense[i] = dense_matrix[i].real();
+            std::vector<Complex>().swap(dense_matrix);  // free complex buffer (half mem)
+            if (use_partial_solver) {
+                std::vector<double> revecs;
+                if (compute_eigenvectors) revecs.resize(static_cast<size_t>(actual_num_eigs) * N);
+                lapack_int m_found;
+                std::vector<lapack_int> isuppz(2 * actual_num_eigs);
+                info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
+                                      'I', 'U', N, rdense.data(), N, 0.0, 0.0,
+                                      1, actual_num_eigs, LAPACKE_dlamch('S'), &m_found,
+                                      evals.data(),
+                                      compute_eigenvectors ? revecs.data() : nullptr,
+                                      N, isuppz.data());
+                if (info != 0) { std::cerr << "LAPACKE_dsyevr failed with error code " << info << std::endl; return; }
+                std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
+                eigenvalues.resize(m_found);
+                for (lapack_int i = 0; i < m_found; ++i) eigenvalues[i] = evals[i];
+                if (compute_eigenvectors && !dir.empty()) {
+                    std::vector<std::vector<Complex>> eigenvector_list(m_found);
+                    for (lapack_int i = 0; i < m_found; ++i) {
+                        eigenvector_list[i].resize(N);
+                        for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(revecs[static_cast<size_t>(i) * N + j], 0.0);
+                    }
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial, real)");
+                } else if (!dir.empty()) {
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial, real)");
+                }
+            } else {
+                info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
+                                      'U', N, rdense.data(), N, evals.data());
+                if (info != 0) { std::cerr << "LAPACKE_dsyevd failed with error code " << info << std::endl; return; }
+                std::cout << "Eigenvalue decomposition completed (divide-and-conquer, real)" << std::endl;
+                eigenvalues.resize(actual_num_eigs);
+                for (size_t i = 0; i < actual_num_eigs; ++i) eigenvalues[i] = evals[i];
+                if (compute_eigenvectors && !dir.empty()) {
+                    std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
+                    for (size_t i = 0; i < actual_num_eigs; ++i) {
+                        eigenvector_list[i].resize(N);
+                        for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(rdense[i * N + j], 0.0);
+                    }
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (real)");
+                } else if (!dir.empty()) {
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (real)");
+                }
+            }
+        } else if (use_partial_solver) {
             // ===== Memory-efficient partial eigenvalue computation using zheevr =====
             // zheevr uses the Relatively Robust Representations (RRR) algorithm
             // and can compute a subset of eigenvalues much more efficiently

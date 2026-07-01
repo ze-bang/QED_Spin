@@ -629,7 +629,7 @@ DistributedFtlmResult ftlm_gpu_impl(
         // requirement for D2-correct re-orth on the distributed-GPU path).
         // Note: the kernel applies one initial normalisation pass; the seed
         // may be sub-unit-norm here, that is fine.
-        auto matvec = [&](const Complex* in, Complex* out) {
+        auto matvec = [&](const Complex* in, Complex* out, std::size_t /*n*/) {
             gop.apply(gpu_comm, in, out, /*stream=*/nullptr);
         };
         ed::krylov::LanczosKernelOptions kopts;

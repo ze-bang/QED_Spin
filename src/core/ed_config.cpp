@@ -438,6 +438,15 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             // FTLM options
             else if (arg.find("--ftlm-krylov=") == 0) config.thermal.ftlm_krylov_dim = std::stoi(parse_value("--ftlm-krylov="));
             else if (arg == "--ftlm-full-reorth") config.thermal.ftlm_full_reorth = true;
+            // Textbook large-N FTLM: no reorthogonalisation, no basis storage,
+            // O(D) memory. Sets full_reorth=false AND reorth_freq=0 in one shot
+            // (so the GPU kernel's store_basis_ = full_reorth || reorth_freq>0
+            // short-circuits to false). Required for dim >= O(1e7). The
+            // Cullum-Willoughby ghost filter keeps the thermodynamics correct.
+            else if (arg == "--ftlm-no-reorth") {
+                config.thermal.ftlm_full_reorth = false;
+                config.thermal.ftlm_reorth_freq = 0;
+            }
             else if (arg.find("--ftlm-reorth-freq=") == 0) config.thermal.ftlm_reorth_freq = std::stoi(parse_value("--ftlm-reorth-freq="));
             else if (arg.find("--ftlm-seed=") == 0) config.thermal.ftlm_seed = std::stoul(parse_value("--ftlm-seed="));
             else if (arg == "--ftlm-store-samples") config.thermal.ftlm_store_samples = true;
@@ -810,6 +819,8 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "lanczos")        return DiagonalizationMethod::LANCZOS;
     if (lower == "block_lanczos")  return DiagonalizationMethod::BLOCK_LANCZOS;
     if (lower == "krylov_schur")   return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "block_krylov_schur" || lower == "blockkrylovschur")
+        return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
     if (lower == "full")           return DiagonalizationMethod::FULL;
 
     if (lower == "mtpq")           return DiagonalizationMethod::mTPQ;
@@ -829,6 +840,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::LANCZOS:       return "LANCZOS";
         case DiagonalizationMethod::BLOCK_LANCZOS: return "BLOCK_LANCZOS";
         case DiagonalizationMethod::KRYLOV_SCHUR:  return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
         case DiagonalizationMethod::FULL:          return "FULL";
         case DiagonalizationMethod::mTPQ:          return "mTPQ";
         case DiagonalizationMethod::cTPQ:          return "cTPQ";

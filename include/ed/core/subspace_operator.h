@@ -59,11 +59,13 @@
 #include <Eigen/Sparse>
 
 #include <ed/core/operator.h>
+#include <ed/planner/basis_policy_hook.h>   // prefer_tableless_fixed_sz()
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
+#include <ed/matvec/reduced_symmetry_csr.h>    // build_reduced_symmetry_csr (orbit-walk dense assembly)
 #include <ed/symmetry/subspace.h>               // FixedSzSubspace (FixedSz producer)
 #include <ed/symmetry/symmetry_sector_data.h>   // SymmetrySector (symmetry forwarders)
 #include <ed/symmetry/rep_sector_data.h>        // RepSectorData (symmetry forwarders)
@@ -107,10 +109,14 @@ public:
     /// for the ``n_up`` magnetisation sector.
     SubspaceOperator(std::uint64_t n_bits, float spin_l, std::int64_t n_up)
         : Operator(n_bits, spin_l),
-          producer_(Producer::build(n_bits, n_up)) {
+          producer_(ed::planner::prefer_tableless_fixed_sz()
+                        ? Producer::build_tableless(n_bits, n_up)
+                        : Producer::build(n_bits, n_up)) {
         std::cout << "Fixed Sz basis: n_bits=" << n_bits
                   << ", n_up=" << n_up
-                  << ", dimension=" << producer_.dim() << std::endl;
+                  << ", dimension=" << producer_.dim()
+                  << (producer_.is_tableless() ? " (tableless combinadic)" : "")
+                  << std::endl;
     }
 
     /// Symmetry lane: adopt an owning producer (SectorBasis) carrying this
@@ -141,6 +147,87 @@ public:
 
     [[nodiscard]] std::size_t dim() const override {
         return static_cast<std::size_t>(producer_.dim());
+    }
+
+    // Fast dense assembly. Fixed-Sz: map column index -> state via the (combinadic
+    // or table) basis policy, enumerate H|state> with for_each_connected_state,
+    // and map each connected state back to a row index -- O(nnz), reentrant
+    // (pure term reads + pure basis lookups), so parallel over columns. The
+    // symmetry lanes return false (their reduced matrix elements carry SAB /
+    // projection coefficients, not bare <s'|H|s>), so the caller falls back to
+    // the matvec column build.
+    [[nodiscard]] bool try_build_dense_columns(Complex* dense,
+                                               std::size_t N) const override {
+        if constexpr (is_fixed_sz_) {
+            if (static_cast<std::size_t>(producer_.dim()) != N) return false;
+            // Reuse the proven, matvec-consistent term assembler (the same kernel
+            // buildFixedSzMatrix uses): it emits (row, col, <row|H|col>) triplets
+            // in the projected fixed-Sz basis -- O(nnz), pure term reads. Scatter
+            // them into the column-major dense buffer (duplicates accumulate).
+            this->commitPendingTransforms();
+            ed::matvec::basis::FixedSzBasisPolicy basis_pol = producer_.policy();
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            ed::matvec::kernel::emit_term_triplets<
+                ed::matvec::basis::FixedSzBasisPolicy, Complex>(
+                    basis_pol, static_cast<double>(this->getSpin()),
+                    this->terms_.diag_one_body, this->terms_.offdiag_one_body,
+                    this->terms_.diag_two_body, this->terms_.mixed_two_body,
+                    this->terms_.offdiag_two_body, this->terms_.three_body,
+                    triplets);
+            for (const auto& t : triplets)
+                dense[static_cast<std::size_t>(t.row())
+                      + static_cast<std::size_t>(t.col()) * N] += t.value();
+            return true;
+        } else if constexpr (Producer::needs_orbit_walk
+                             && Producer::has_coeff_modifier) {
+            // Orbit-walk symmetry lane (abelian spatial group, possibly without
+            // fixed Sz). The reduced matrix element is NOT the bare <s'|H|s> but
+            // the projection-weighted conj(base_contrib * coeff_modifier); we
+            // enumerate each reduced row ONCE via ``rep_symmetry_row_for_each``
+            // (the same per-row walk ``build_reduced_symmetry_csr`` and the
+            // gather matvec share) and write the element straight into the
+            // column-major dense buffer. This replaces the O(dim)-matvec column
+            // build -- where each matvec re-walks every orbit and recomputes the
+            // projection -- with a single O(|G|*nnz) assembly pass. The emitted
+            // value is byte-for-byte what the gather kernel accumulates (pinned
+            // by the "lazy rep-walk dense-assembly lane == full reference" case in
+            // tests/integration/test_make_sector_operators_e2e.cpp: the FullDiag
+            // sector union equals the full-Hilbert dense spectrum).
+            if (static_cast<std::size_t>(producer_.dim()) != N) return false;
+            this->commitPendingTransforms();
+            producer_.ensureHostCsr();   // materialise sector orbits for policy()
+            auto basis_pol = producer_.policy();
+            using PolicyT = decltype(basis_pol);
+            static_assert(!ed::matvec::kernel::policy_multi_target_v<PolicyT>,
+                          "orbit-walk dense assembly is single-target only "
+                          "(non-abelian d_G>=2 goes through the SAB solver)");
+            const double spin    = static_cast<double>(this->getSpin());
+            const double spin_sq = spin * spin;
+            // Serial assembly (O(|G|*nnz), cheap next to the dense eigensolve):
+            // reuse the SAME parity-tested per-row enumerator that
+            // build_reduced_symmetry_csr drives, writing each projected element
+            // conj(base_contrib*coeff_modifier) straight into the column-major
+            // dense buffer. Done single-threaded on purpose -- the matrix-free
+            // gather backend is the parallel hot path; this one-shot build is
+            // off the critical path, and a serial walk keeps the per-emit sector
+            // reads trivially data-race-free (the parallel CSR builder is only
+            // exercised for the rep policy).
+            for (std::uint64_t r = 0; r < N; ++r) {
+                ed::matvec::detail::rep_symmetry_row_for_each<PolicyT, Complex>(
+                    r, basis_pol, spin, spin_sq,
+                    this->terms_.diag_one_body, this->terms_.offdiag_one_body,
+                    this->terms_.diag_two_body, this->terms_.mixed_two_body,
+                    this->terms_.offdiag_two_body, this->terms_.three_body,
+                    [&](std::uint64_t dst, const Complex& v) {
+                        dense[static_cast<std::size_t>(r)
+                              + static_cast<std::size_t>(dst) * N] += v;
+                    });
+            }
+            return true;
+        } else {
+            (void)dense; (void)N;
+            return false;
+        }
     }
 
     [[nodiscard]] std::string description() const override {
@@ -294,24 +381,25 @@ public:
             throw std::invalid_argument(
                 "projectToFixedSz: input vector size mismatch with full dimension");
         }
-        const auto& states = producer_.basis_states();
-        std::vector<Complex> fixed_sz_vec(states.size(), Complex(0.0, 0.0));
-        for (std::size_t i = 0; i < states.size(); ++i) {
-            fixed_sz_vec[i] = full_vec[states[i]];
+        // Mode-agnostic: producer_.state_of(i) is combinadic in tableless mode.
+        const std::uint64_t d = producer_.dim();
+        std::vector<Complex> fixed_sz_vec(d, Complex(0.0, 0.0));
+        for (std::uint64_t i = 0; i < d; ++i) {
+            fixed_sz_vec[i] = full_vec[producer_.state_of(i)];
         }
         return fixed_sz_vec;
     }
 
     std::vector<Complex> embedToFull(const std::vector<Complex>& fixed_sz_vec) const {
-        const auto& states = producer_.basis_states();
-        if (fixed_sz_vec.size() != states.size()) {
+        const std::uint64_t d = producer_.dim();
+        if (fixed_sz_vec.size() != static_cast<std::size_t>(d)) {
             throw std::invalid_argument(
                 "embedToFull: input vector size mismatch with fixed-Sz dimension");
         }
         const std::uint64_t full_dim = 1ULL << this->getNumBits();
         std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
-        for (std::size_t i = 0; i < states.size(); ++i) {
-            full_vec[states[i]] = fixed_sz_vec[i];
+        for (std::uint64_t i = 0; i < d; ++i) {
+            full_vec[producer_.state_of(i)] = fixed_sz_vec[i];
         }
         return full_vec;
     }
@@ -321,15 +409,13 @@ public:
     void buildFixedSzMatrix() const {
         if (fixed_sz_matrix_built_) return;
         this->commitPendingTransforms();
-        const auto& states = producer_.basis_states();
-        const std::uint64_t d = states.size();
+        const std::uint64_t d = producer_.dim();
         fixed_sz_matrix_.resize(d, d);
 
         std::vector<Eigen::Triplet<Complex>> triplets;
         if (!this->transform_data_.empty() || !this->three_body_data_.empty()) {
-            ed::matvec::basis::FixedSzBasisPolicy basis_pol =
-                ed::matvec::basis::make_fixed_sz_basis(
-                    producer_.basis_states(), producer_.lin_index());
+            // producer_.policy() is combinadic in tableless mode.
+            ed::matvec::basis::FixedSzBasisPolicy basis_pol = producer_.policy();
             ed::matvec::kernel::emit_term_triplets<
                 ed::matvec::basis::FixedSzBasisPolicy, Complex>(
                     basis_pol, static_cast<double>(this->getSpin()),

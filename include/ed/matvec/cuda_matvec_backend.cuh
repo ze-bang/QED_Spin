@@ -241,6 +241,24 @@ public:
         launch_real_(d_in, d_out, n);
     }
 
+    // Single-precision complex device apply (fp32 mTPQ lane). The in/out
+    // vectors are cuFloatComplex device pointers (passed as void* through the
+    // host-only base signature); the term SoA on the device stays
+    // cuDoubleComplex and is narrowed per-emit by ScalarTraits<cuFloatComplex>.
+    // Same "terms already uploaded" contract as apply_complex_device.
+    void apply_complex_device_f32(const void* d_in,
+                                  void*       d_out,
+                                  std::size_t n) override {
+        check_size(n);
+        if (terms_dirty_) {
+            throw std::runtime_error(
+                "CudaMatVecBackend::apply_complex_device_f32: terms not "
+                "uploaded (call upload_terms before the first device apply)");
+        }
+        launch_complex_f32_(static_cast<const cuFloatComplex*>(d_in),
+                            static_cast<cuFloatComplex*>(d_out), n);
+    }
+
 private:
     // Launch the complex SpMV on DEVICE pointers (gather when the policy
     // supports it, else the validated atomic-scatter). Synchronises before
@@ -271,6 +289,33 @@ private:
                       "launch (complex)");
         }
         cd::check(cudaDeviceSynchronize(), "sync (complex)");
+    }
+
+    // fp32 twin of launch_complex_. Same gather-vs-scatter selection; the
+    // kernel templates are instantiated at cuFloatComplex.
+    void launch_complex_f32_(const cuFloatComplex* d_in,
+                             cuFloatComplex*       d_out,
+                             std::size_t           n) {
+        namespace cd = cuda_matvec_detail;
+        bool did_gather = false;
+        if constexpr (kGatherCapable) {
+            if (!use_scatter_) {
+                cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu_gather<
+                              DevicePolicy, cuFloatComplex>(
+                              basis_, spin_l_, device_terms_(), d_in, d_out),
+                          "launch gather (complex f32)");
+                did_gather = true;
+            }
+        }
+        if (!did_gather) {
+            cd::check(cudaMemset(d_out, 0, n * sizeof(cuFloatComplex)),
+                      "memset out (f32)");
+            cd::check(ed::matvec::kernel::gpu::launch_apply_terms_gpu<
+                          DevicePolicy, cuFloatComplex>(
+                          basis_, spin_l_, device_terms_(), d_in, d_out),
+                      "launch (complex f32)");
+        }
+        cd::check(cudaDeviceSynchronize(), "sync (complex f32)");
     }
 
     void launch_real_(const double* d_in, double* d_out, std::size_t n) {

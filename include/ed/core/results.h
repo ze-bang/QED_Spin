@@ -60,6 +60,11 @@ struct KrylovDiagnostics {
     double              residual_norm = 0.0;
     /// Per-Ritz-value residual estimates `|beta_last * y[m-1, k]|`.
     std::vector<double> ritz_residuals;
+    /// How many returned eigenvalues met the tolerance (<= eigenvalues.size()).
+    std::size_t         n_converged   = 0;
+    /// Convergence curve: residual of the worst target / first unconverged Ritz
+    /// pair after each iteration (block Lanczos) / restart (block Krylov-Schur).
+    std::vector<double> resid_history;
     /// Did the kernel converge to the requested tolerance?
     bool                converged     = false;
 };

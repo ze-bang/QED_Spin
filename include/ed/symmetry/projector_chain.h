@@ -126,12 +126,22 @@ inline void compute_orbit_for_state(
     const auto& info = projector.group_info();
     const std::size_t G = info.max_clique.size();
 
+    // ``phase_factors`` comes in two layouts: PER-ELEMENT (length |G|, value
+    // χ(max_clique[g]) -- the group_from_generators / distributed convention) or
+    // PER-GENERATOR (length num_generators -- the JSON convention, from which
+    // χ(g) is reconstructed via power_representation). Detect by length.
+    const bool per_element = (phase_factors.size() == G);
+
     for (std::size_t g = 0; g < G; ++g) {
-        const auto& powers = info.power_representation[g];
         Complex character(1.0, 0.0);
-        for (std::size_t k = 0; k < powers.size(); ++k) {
-            const Complex phase = phase_factors[k];
-            for (int p = 0; p < powers[k]; ++p) character *= phase;
+        if (per_element) {
+            character = phase_factors[g];
+        } else {
+            const auto& powers = info.power_representation[g];
+            for (std::size_t k = 0; k < powers.size(); ++k) {
+                const Complex phase = phase_factors[k];
+                for (int p = 0; p < powers[k]; ++p) character *= phase;
+            }
         }
         const std::uint64_t permuted = projector.apply(basis, g);
         if (subspace.index_of(permuted) < 0) continue;
