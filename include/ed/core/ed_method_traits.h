@@ -36,9 +36,14 @@ constexpr bool is_kpm_dos_method(DiagonalizationMethod m) noexcept {
     return m == DiagonalizationMethod::KPM_DOS;
 }
 
+constexpr bool is_oftlm_method(DiagonalizationMethod m) noexcept {
+    return m == DiagonalizationMethod::OFTLM;
+}
+
 constexpr bool is_thermal_method(DiagonalizationMethod m) noexcept {
     return is_tpq_method(m) || is_ftlm_method(m) ||
-           is_ltlm_method(m) || is_kpm_dos_method(m);
+           is_ltlm_method(m) || is_kpm_dos_method(m) ||
+           is_oftlm_method(m);
 }
 
 // ----------------------------------------------------------------------------

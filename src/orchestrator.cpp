@@ -55,9 +55,12 @@
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
+#include <ed/thermal/oftlm_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
 #include <ed/thermal/ltlm_kernel.h>
+#include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
+#include <ed/thermal/mtpq_f32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -893,7 +896,23 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
     ed::parallel::pin_omp_threads_once();
 
-    auto variant = select_backend(H.geometry(), opts.backend);
+    BackendVariant variant;
+#ifdef WITH_CUDA
+    // fp32 single-GPU mTPQ fits one H100 (2 x complex<float> = 68.7 GB at
+    // 2^32). The default gpu_mem_fits() estimate uses complex<double> x fudge 8
+    // (= 549 GB) and would REJECT the GPU, falling to the CPU lane -- whose
+    // 2^32 spectral-bound Lanczos auto-tune then OOM-kills the host. Force the
+    // GPU lane here; the fp32 driver manages its own (fitting) device memory.
+    if (opts.mtpq_fp32
+        && opts.method == ThermalOptions::Method::mTPQ
+        && H.supports_cuda_f32()
+        && ed::have_cuda()) {
+        variant = BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
+    } else
+#endif
+    {
+        variant = select_backend(H.geometry(), opts.backend);
+    }
 
     // COMPLETION GUARANTEE (thermal lane). The operator's basis is already built,
     // so the binding constraint is the kernel WORKING SET: FTLM / LTLM keep a
@@ -909,15 +928,36 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     {
         const std::uint64_t D = H.global_dim();
         std::uint64_t vecs;
-        switch (opts.method) {
-            case ThermalOptions::Method::LTLM:
-                vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
-            case ThermalOptions::Method::FTLM:
-                vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
-            default:  // mTPQ / cTPQ / KpmDos: a handful of state vectors
-                vecs = 8; break;
+        std::uint64_t elem = 16ull;  // complex<double>
+        bool fp32_lane = false;
+#ifdef WITH_CUDA
+        // fp32 single-GPU mTPQ lane: the lean driver keeps just two
+        // complex<float> device vectors (psi + w), so the working set is
+        // D * 2 * 8 bytes (68.7 GB at 2^32), a quarter of the double estimate
+        // -- otherwise this guard's 8-vector complex<double> estimate (549 GB
+        // at 2^32) would refuse the run before the driver ever allocates.
+        fp32_lane = opts.mtpq_fp32
+                 && opts.method == ThermalOptions::Method::mTPQ
+                 && H.supports_cuda_f32();
+#endif
+        if (fp32_lane) {
+            vecs = 2;
+            elem = 8ull;  // complex<float>
+        } else {
+            switch (opts.method) {
+                case ThermalOptions::Method::LTLM:
+                    vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
+                case ThermalOptions::Method::FTLM:
+                    vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
+                case ThermalOptions::Method::OFTLM:
+                    // per-sample Krylov basis + the exact-eigenpair Lanczos basis
+                    vecs = std::max<std::size_t>(opts.krylov_dim, 4)
+                         + 2 * opts.num_exact + 34; break;
+                default:  // mTPQ / cTPQ / KpmDos: a handful of state vectors
+                    vecs = 8; break;
+            }
         }
-        ed::core::guard_working_set(D * vecs * 16ull, "ed::thermal");
+        ed::core::guard_working_set(D * vecs * elem, "ed::thermal");
     }
 
     // Surface unification follow-up (May 2026): when the caller does
@@ -1126,9 +1166,28 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? std::max<std::size_t>(std::min(reach_iters, MTPQ_HARD_CAP), 1)
                 : opts.krylov_dim;
 
-            auto kres = ed::thermal::mtpq_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
+            ed::thermal::MtpqResult kres;
+#ifdef WITH_CUDA
+            // fp32 single-GPU lane: half-footprint state vectors let the full
+            // 2^32 Hilbert space run mTPQ on one 80 GB H100. Reuses the L /
+            // max_iter auto-tune computed above (kopts); the driver manages its
+            // own device memory (bypasses the double CudaBackend vectors).
+            if (std::getenv("ED_MTPQ_VERBOSE")) {
+                std::fprintf(stderr,
+                    "[mtpq-lane] mtpq_fp32=%d supports_cuda_f32=%d -> %s\n",
+                    (int)opts.mtpq_fp32, (int)H.supports_cuda_f32(),
+                    (opts.mtpq_fp32 && H.supports_cuda_f32()) ? "FP32-GPU"
+                                                              : "double");
+            }
+            if (opts.mtpq_fp32 && H.supports_cuda_f32()) {
+                kres = ed::thermal::mtpq_f32(H, kopts);
+            } else
+#endif
+            {
+                kres = ed::thermal::mtpq_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+            }
             R.ground_state_energy = kres.energies.empty()
                 ? 0.0 : *std::min_element(kres.energies.begin(),
                                           kres.energies.end());
@@ -1288,6 +1347,29 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? 0.0
                 : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
         }, variant);
+    } else if (opts.method == ThermalOptions::Method::OFTLM) {
+        // OFTLM (Morita-Tohyama): FTLM + N_V exact low-lying states + random
+        // vectors orthogonalized against them. CPU-only lane -- consumes the
+        // host term-matvec directly (see oftlm_kernel.h).
+        auto host_mv = H.bind_cpu();
+        auto apply_H = [&host_mv](const Complex* in, Complex* out, int n) {
+            host_mv(in, out, static_cast<std::size_t>(n));
+        };
+        ed::thermal::OftlmOptions kopts;
+        kopts.num_samples = opts.num_samples;
+        kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
+        kopts.num_exact   = opts.num_exact;
+        kopts.betas       = opts.betas;
+        kopts.random_seed = opts.random_seed;
+        kopts.output_dir  = opts.output_dir;
+        auto kres = ed::thermal::oftlm_cpu(
+            apply_H, H.geometry().global_dim, kopts);
+        R.thermo.energy        = std::move(kres.energy);
+        R.thermo.specific_heat = std::move(kres.heat_capacity);
+        R.thermo.entropy       = std::move(kres.entropy);
+        R.ground_state_energy = R.thermo.energy.empty()
+            ? 0.0
+            : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
     } else if (opts.method == ThermalOptions::Method::LTLM) {
         // Phase E2 of the "Backend x Symmetries x Workflows" plan
         // (May 2026): the LTLM kernel now dispatches on Backend type

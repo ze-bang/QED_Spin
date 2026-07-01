@@ -376,6 +376,25 @@ public:
 #endif
     }
 
+    // fp32 device matvec (memory-halving mTPQ lane). Same inline-override /
+    // non-virtual-helper split as bind_cuda() so Operator's vtable stays weak.
+    [[nodiscard]] bool supports_cuda_f32() const noexcept override {
+#ifdef WITH_CUDA
+        return cuda_mirror_available_();
+#else
+        return false;
+#endif
+    }
+    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
+    bind_cuda_f32() const override {
+#ifdef WITH_CUDA
+        return bind_cuda_f32_impl_();
+#else
+        throw std::runtime_error(
+            "Operator::bind_cuda_f32: built without WITH_CUDA");
+#endif
+    }
+
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {
         if (n_bits >= 64) {
             throw std::runtime_error("Operator: n_bits = " + std::to_string(n_bits)
@@ -869,6 +888,10 @@ protected:
     // -------------------------------------------------------------------
     [[nodiscard]] static bool cuda_mirror_available_() noexcept;
     [[nodiscard]] ed::LinearOperator::MatvecFn bind_cuda_full_impl_() const;
+    // fp32 twin (memory-halving mTPQ lane). Weak fallback in operator_gpu.cpp
+    // (throws), strong definition in operator_gpu.cu (reuses cuda_backend_).
+    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
+    bind_cuda_f32_impl_() const;
 #endif
 
     /**

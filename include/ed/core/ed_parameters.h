@@ -57,6 +57,12 @@ struct EDParameters {
     // step count. Default to AUTO so mTPQ actually reaches low T.)
     double tpq_energy_shift = 0.0;
 
+    // fp32 single-GPU mTPQ (memory-halving lane). When true and the operator
+    // supports the fp32 device matvec (full-Hilbert Operator on a WITH_CUDA
+    // build), mTPQ runs in complex<float> so the full 2^32 Hilbert space fits
+    // two vectors on one 80 GB H100. Maps to ThermalOptions::mtpq_fp32.
+    bool tpq_fp32 = false;
+
     double tpq_beta_max = 20.0;
     double tpq_delta_beta = 1e-2;
     uint64_t tpq_taylor_order = 100;

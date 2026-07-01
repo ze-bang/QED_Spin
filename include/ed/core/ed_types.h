@@ -57,6 +57,7 @@ enum class DiagonalizationMethod {
     FTLM,                     // Finite Temperature Lanczos Method
     LTLM,                     // Low-Temperature Lanczos Method
     KPM_DOS,                  // Kernel Polynomial Method DOS + thermo
+    OFTLM,                    // Orthogonalized Finite-Temperature Lanczos Method
 };
 
 }  // namespace ed

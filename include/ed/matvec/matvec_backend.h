@@ -238,6 +238,20 @@ public:
             "MatVecBackendBase::apply_real_device: this backend has "
             "no device-pointer matvec");
     }
+
+    // Single-precision complex device apply (fp32 mTPQ lane). The in/out
+    // pointers are ``cuFloatComplex*`` in DEVICE memory, erased to ``void*``
+    // so this host-only header need not include ``<cuComplex.h>``. Only
+    // ``CudaMatVecBackend`` (full / fixed-Sz) overrides it; every other
+    // backend throws. Consumed by ``LinearOperator::bind_cuda_f32()`` /
+    // ``ed::thermal::mtpq_f32``.
+    virtual void apply_complex_device_f32(const void* /*d_in*/,
+                                          void*       /*d_out*/,
+                                          std::size_t /*n*/) {
+        throw std::runtime_error(
+            "MatVecBackendBase::apply_complex_device_f32: this backend has "
+            "no fp32 device-pointer matvec");
+    }
 };
 
 // ---------------------------------------------------------------------------

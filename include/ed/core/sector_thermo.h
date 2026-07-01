@@ -195,6 +195,7 @@ combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_therm
 inline bool method_produces_sector_thermo(DiagonalizationMethod method) {
     switch (method) {
         case DiagonalizationMethod::FTLM:
+        case DiagonalizationMethod::OFTLM:
         case DiagonalizationMethod::LTLM:
         case DiagonalizationMethod::KPM_DOS:
         case DiagonalizationMethod::mTPQ:

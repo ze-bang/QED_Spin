@@ -89,6 +89,7 @@ def _suppress_legacy_dispatch_warning():
 
 _THERMAL_METHOD_MAP = {
     DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
+    DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
     DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
     DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
     DiagonalizationMethod.cTPQ:    _core.ThermalMethod.cTPQ,
@@ -116,6 +117,13 @@ def _ed_params_to_thermal_options(
     # for the TPQ lanes and never honoured the user's request.
     if method == DiagonalizationMethod.FTLM:
         opts.krylov_dim = int(params.ftlm_krylov_dim)
+    elif method == DiagonalizationMethod.OFTLM:
+        opts.krylov_dim = int(params.ftlm_krylov_dim)
+        # N_V (# exactly-treated low-lying states): honour an explicit
+        # params.oftlm_num_exact, else keep the C++ ThermalOptions default (8).
+        _nv = getattr(params, "oftlm_num_exact", None)
+        if _nv is not None:
+            opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim)
     elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
@@ -165,6 +173,10 @@ def _ed_params_to_thermal_options(
     # for the mTPQ lane.
     if hasattr(opts, "energy_shift"):
         opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
+    # fp32 single-GPU mTPQ (memory-halving lane): complex<float> state vectors
+    # let the full 2^32 Hilbert space run mTPQ on one 80 GB H100.
+    if hasattr(opts, "mtpq_fp32"):
+        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # probe-beta list for mTPQ/cTPQ state-vector snapshots.
     pb = list(getattr(params, "tpq_probe_betas", []) or [])
@@ -375,6 +387,7 @@ class ThermalResult:
 # ---------------------------------------------------------------------------
 _THERMAL_METHODS = {
     "FTLM": DiagonalizationMethod.FTLM,
+    "OFTLM": DiagonalizationMethod.OFTLM,
     "LTLM": DiagonalizationMethod.LTLM,
     "KPM_DOS": DiagonalizationMethod.KPM_DOS,
     "MTPQ": DiagonalizationMethod.mTPQ,

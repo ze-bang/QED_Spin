@@ -196,6 +196,7 @@ void bind_dispatcher(py::module_& m) {
         .value("FTLM",                     DiagonalizationMethod::FTLM)
         .value("LTLM",                     DiagonalizationMethod::LTLM)
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
+        .value("OFTLM",                    DiagonalizationMethod::OFTLM)
         .export_values();
 
     // (``HamiltonianFileFormat`` enum was deleted alongside the
@@ -239,6 +240,7 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("tpq_max_steps",            &EDParameters::tpq_max_steps)
         .def_readwrite("tpq_measurement_interval", &EDParameters::tpq_measurement_interval)
         .def_readwrite("tpq_energy_shift",         &EDParameters::tpq_energy_shift)
+        .def_readwrite("tpq_fp32",                 &EDParameters::tpq_fp32)
         .def_readwrite("tpq_beta_max",             &EDParameters::tpq_beta_max)
         .def_readwrite("tpq_delta_beta",           &EDParameters::tpq_delta_beta)
         .def_readwrite("tpq_taylor_order",         &EDParameters::tpq_taylor_order)

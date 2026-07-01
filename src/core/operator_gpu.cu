@@ -74,6 +74,26 @@ ed::LinearOperator::MatvecFn Operator::bind_cuda_full_impl_() const {
     };
 }
 
+// fp32 device matvec (memory-halving mTPQ lane). Reuses the same lazily-built
+// CudaMatVecBackend + uploaded (cuDoubleComplex) term SoA as bind_cuda_full;
+// only the in/out vectors are cuFloatComplex (passed as void*).
+ed::LinearOperator::Fp32DeviceMatvecFn Operator::bind_cuda_f32_impl_() const {
+    if (!cuda_backend_) {
+        cuda_backend_ = ed::matvec::make_cuda_full_backend<
+            DiagonalOneBody, OffDiagonalOneBody,
+            DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
+            ThreeBodyTransformData>(n_bits_, static_cast<double>(spin_l_));
+    }
+    const auto tv = term_view_();
+    cuda_backend_->invalidate_caches();
+    cuda_backend_->upload_terms(&tv);
+
+    auto backend = cuda_backend_;
+    return [backend](const void* in, void* out, std::size_t n) {
+        backend->apply_complex_device_f32(in, out, n);
+    };
+}
+
 // Operator-collapse Phase 4: FixedSzOperator is now the alias
 // SubspaceOperator<FixedSzBasisPolicy, Host>; this strong definition of its
 // bind_cuda_impl_ member specialization replaces the legacy
@@ -99,5 +119,10 @@ ed::SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
         backend->apply_complex_device(in, out, n);
     };
 }
+
+// Strong definition of ed::thermal::mtpq_f32 (co-located here so it rides the
+// same reliable archive-pull as the Operator GPU-mirror hooks above). See the
+// header banner for why a standalone .cu would not be pulled.
+#include "mtpq_f32_impl.cuh"
 
 #endif  // WITH_CUDA

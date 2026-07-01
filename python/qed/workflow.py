@@ -95,6 +95,7 @@ _GROUND_STATE_METHODS = frozenset({
 
 _THERMAL_METHOD_TO_CORE = {
     DiagonalizationMethod.FTLM:    "FTLM",
+    DiagonalizationMethod.OFTLM:   "OFTLM",
     DiagonalizationMethod.LTLM:    "LTLM",
     DiagonalizationMethod.mTPQ:    "mTPQ",
     DiagonalizationMethod.cTPQ:    "cTPQ",
@@ -147,6 +148,11 @@ def _ed_params_to_thermal_options(
     # for the TPQ lanes and never honoured the user's request.
     if method == DiagonalizationMethod.FTLM:
         opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+    elif method == DiagonalizationMethod.OFTLM:
+        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+        _nv = getattr(params, "oftlm_num_exact", None)
+        if _nv is not None:
+            opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
     elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
@@ -172,6 +178,9 @@ def _ed_params_to_thermal_options(
     # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
     if hasattr(opts, "energy_shift"):
         opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
+    # fp32 single-GPU mTPQ (memory-halving lane).
+    if hasattr(opts, "mtpq_fp32"):
+        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)
     opts.num_temp_bins = int(params.num_temp_bins)
@@ -1359,6 +1368,7 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
 }

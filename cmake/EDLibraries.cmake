@@ -224,6 +224,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
+    ${SOLVERS_CPU_DIR}/oftlm.cpp
     ${SOLVERS_CPU_DIR}/symmetry_adapted_solve.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp

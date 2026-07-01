@@ -145,7 +145,7 @@ struct SolveOptions {
 struct ThermalOptions {
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos,
+        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos, OFTLM,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -160,6 +160,7 @@ struct ThermalOptions {
     // ---------------------------------------------------------------
     std::size_t num_samples    = 40;   ///< Python default (was 30).
     std::size_t krylov_dim     = 100;
+    std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
     std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
     double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ/cTPQ imag-time step.
@@ -211,6 +212,16 @@ struct ThermalOptions {
     // "auto". Ignored by every non-mTPQ lane.
     // -----------------------------------------------------------------
     double      energy_shift   = 0.0;
+
+    // -----------------------------------------------------------------
+    // fp32 single-GPU mTPQ (memory-halving lane, July 2026). When true AND
+    // the operator advertises ``supports_cuda_f32()`` (full-Hilbert Operator
+    // on a WITH_CUDA build) AND the method is mTPQ, the orchestrator routes
+    // to ``ed::thermal::mtpq_f32``: state vectors + matvec in complex<float>
+    // (half the footprint, so the full 2^32 Hilbert space fits two vectors on
+    // one 80 GB H100), reductions accumulated in double. Ignored otherwise.
+    // -----------------------------------------------------------------
+    bool        mtpq_fp32      = false;
 
     // -----------------------------------------------------------------
     // KPM-DOS knobs (closing-the-symmetry-gap follow-up, May 2026).

@@ -407,6 +407,7 @@ void bind_workflows(py::module_& m) {
         .value("mTPQ",   ed::workflows::ThermalOptions::Method::mTPQ)
         .value("cTPQ",   ed::workflows::ThermalOptions::Method::cTPQ)
         .value("KpmDos", ed::workflows::ThermalOptions::Method::KpmDos)
+        .value("OFTLM",  ed::workflows::ThermalOptions::Method::OFTLM)
         .export_values();
 
     py::class_<ed::workflows::ThermalOptions>(m, "ThermalOptions")
@@ -415,6 +416,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("allow_infeasible", &ed::workflows::ThermalOptions::allow_infeasible)
         .def_readwrite("num_samples",  &ed::workflows::ThermalOptions::num_samples)
         .def_readwrite("krylov_dim",   &ed::workflows::ThermalOptions::krylov_dim)
+        .def_readwrite("num_exact",    &ed::workflows::ThermalOptions::num_exact)
         .def_readwrite("taylor_order", &ed::workflows::ThermalOptions::taylor_order)
         .def_readwrite("betas",        &ed::workflows::ThermalOptions::betas)
         .def_readwrite("delta_beta",   &ed::workflows::ThermalOptions::delta_beta)
@@ -447,6 +449,10 @@ void bind_workflows(py::module_& m) {
         // auto-tune from a Lanczos spectral-bound estimate.
         .def_readwrite("energy_shift",
                        &ed::workflows::ThermalOptions::energy_shift)
+        // fp32 single-GPU mTPQ (memory-halving lane): complex<float> state
+        // vectors so the full 2^32 Hilbert space runs mTPQ on one 80 GB H100.
+        .def_readwrite("mtpq_fp32",
+                       &ed::workflows::ThermalOptions::mtpq_fp32)
         .def_readwrite("kpm_num_moments",
                        &ed::workflows::ThermalOptions::kpm_num_moments)
         .def_readwrite("kpm_num_random_vectors",
