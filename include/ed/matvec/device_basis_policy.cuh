@@ -106,9 +106,8 @@ struct DeviceFixedSzBasisPolicy {
     std::uint64_t        dim_         = 0;
 
     // Open-addressing hash table for state -> idx lookup. Empty slot
-    // marked by key == UINT64_MAX. Same layout as
-    // ``GPUFixedSzOperator::GPUStateLookupEntry`` so a Phase 1b port
-    // can reuse the existing build helper.
+    // marked by key == UINT64_MAX. (16-byte entry: key 8 + value 4 +
+    // pad 4, naturally aligned for 64-bit loads.)
     struct HashEntry {
         std::uint64_t key;
         std::uint32_t value;
