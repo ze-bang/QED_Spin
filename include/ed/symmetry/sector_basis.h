@@ -69,6 +69,7 @@
 #include <ed/symmetry/projector_chain.h>
 #include <ed/symmetry/rep_sector_data.h>      // RepSectorData (CSR-free rep path)
 #include <ed/symmetry/subspace.h>
+#include <ed/symmetry/sym_profile.h>       // SymPhaseTimer (ED_SYM_PROFILE=1)
 
 namespace ed::symmetry {
 
@@ -173,6 +174,7 @@ public:
           const std::vector<std::uint64_t>& orbit_reps,
           std::uint64_t                     sector_id = 0)
     {
+        SymPhaseTimer prof("pass2 sector-basis build (eager orbit CSR, one irrep)");
         SectorBasis sb;
         sb.group_size_ = projector.group_info().max_clique.size();
 
@@ -206,6 +208,7 @@ public:
         }
 
         sb.rebuild_lookup_();
+        prof.set_items(sec.basis_states.size());
         return sb;
     }
 

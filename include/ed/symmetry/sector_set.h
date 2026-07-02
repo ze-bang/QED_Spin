@@ -53,7 +53,9 @@
 
 #include <ed/core/basis_utils.h>          // generateFixedSzBasis, LinIndexTable, applyPermutation
 #include <ed/core/combinadic.h>           // BinomialTable, unrank_to_state (streaming partition)
+#include <ed/symmetry/compiled_group.h>   // CompiledGroup (Stage 1, SymmetryEngine v2)
 #include <ed/symmetry/gosper.h>           // next_bit_permutation (streaming enumeration)
+#include <ed/symmetry/sym_profile.h>      // SymPhaseTimer (ED_SYM_PROFILE=1)
 #include <ed/symmetry/fixed_sz_membership.h>  // FixedSzMembershipSubspace (tableless)
 #include <ed/symmetry/symmetry_sector_data.h>  // SymmetrySector
 #include <ed/symmetry/projector.h>
@@ -63,6 +65,20 @@
 #include <ed/symmetry/subspace.h>
 
 namespace ed::symmetry {
+
+// ---------------------------------------------------------------------------
+// Stage 1 (SymmetryEngine v2): compile the group's site permutations to the
+// byte-LUT form once per construction entry point. Empty-safe: an empty
+// max_clique yields an empty CompiledGroup and the enumeration loops below
+// degenerate to "every state is its own rep", matching the legacy scalar
+// path.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline CompiledGroup
+compile_spatial_group(const SymmetryGroupInfo& info) {
+    if (info.max_clique.empty()) return {};
+    return CompiledGroup::from_permutations(
+        info.max_clique, static_cast<int>(info.max_clique[0].size()));
+}
 
 // ---------------------------------------------------------------------------
 // Orbit-rep enumeration (reusable; bit-identical to the legacy Pass 1).
@@ -75,9 +91,11 @@ namespace ed::symmetry {
 [[nodiscard]] inline std::vector<std::uint64_t>
 enumerate_full_orbit_reps(const SymmetryGroupInfo& info, std::uint64_t n_bits)
 {
+    SymPhaseTimer prof("pass1 rep-scan (full)");
     std::vector<std::uint64_t> reps;
     const std::uint64_t dim = (1ULL << n_bits);
     const std::size_t   G   = info.max_clique.size();
+    const CompiledGroup cg  = compile_spatial_group(info);
 
     // Parallel orbit-min scan over [0, 2^N). Each thread scans a contiguous
     // ascending range and collects its local reps; concatenating chunks in
@@ -114,7 +132,7 @@ enumerate_full_orbit_reps(const SymmetryGroupInfo& info, std::uint64_t n_bits)
             const std::uint64_t s = begin + i;
             bool is_rep = true;
             for (std::size_t g = 0; g < G; ++g) {
-                if (applyPermutation(s, info.max_clique[g]) < s) { is_rep = false; break; }
+                if (cg.apply(s, g) < s) { is_rep = false; break; }
             }
             if (is_rep) out.push_back(s);
         }
@@ -124,6 +142,7 @@ enumerate_full_orbit_reps(const SymmetryGroupInfo& info, std::uint64_t n_bits)
     for (const auto& v : local) tot += v.size();
     reps.reserve(tot);
     for (auto& v : local) reps.insert(reps.end(), v.begin(), v.end());
+    prof.set_items(reps.size());
     return reps;
 }
 
@@ -143,11 +162,13 @@ enumerate_fixed_sz_orbit_reps(const FixedSzSubspace& sub,
     // ``index_of`` guard is kept for defensive parity with the legacy loop.
     // Sorted-vector output (ascending) replaces the old ``std::set`` insert
     // (O(n log n) once vs O(n log n) with per-insert tree allocations).
+    SymPhaseTimer prof("pass1 rep-scan (fixed-Sz, materialized)");
+    const CompiledGroup cg = compile_spatial_group(info);
     std::vector<std::uint64_t> reps;
     for (std::uint64_t s : sub.basis_states()) {
         bool is_rep = true;
         for (std::size_t g = 0; g < info.max_clique.size(); ++g) {
-            const std::uint64_t img = applyPermutation(s, info.max_clique[g]);
+            const std::uint64_t img = cg.apply(s, g);
             if (sub.index_of(img) >= 0 && img < s) { is_rep = false; break; }
         }
         if (is_rep) reps.push_back(s);
@@ -184,10 +205,12 @@ enumerate_fixed_sz_orbit_reps_streaming(std::uint64_t            n_bits,
         binom.at(static_cast<int>(n_bits), n_up);
     if (total == 0) return reps;
 
-    const std::size_t G = info.max_clique.size();
+    SymPhaseTimer prof("pass1 rep-scan (fixed-Sz, streaming)");
+    const std::size_t   G  = info.max_clique.size();
+    const CompiledGroup cg = compile_spatial_group(info);
     auto is_rep = [&](std::uint64_t s) -> bool {
         for (std::size_t g = 0; g < G; ++g) {
-            if (applyPermutation(s, info.max_clique[g]) < s) return false;
+            if (cg.apply(s, g) < s) return false;
         }
         return true;
     };
@@ -234,6 +257,7 @@ enumerate_fixed_sz_orbit_reps_streaming(std::uint64_t            n_bits,
     for (const auto& v : local) tot += v.size();
     reps.reserve(tot);
     for (auto& v : local) reps.insert(reps.end(), v.begin(), v.end());
+    prof.set_items(reps.size());
     return reps;  // already globally ascending (thread chunks are ascending)
 }
 

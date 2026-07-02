@@ -331,16 +331,16 @@ state, which also makes chain order irrelevant by construction.
 
 ## 4. Migration plan (each stage independently landable + testable)
 
-| Stage | Deliverable | Guard |
-|---|---|---|
-| 0 | Construction-phase timers surfaced on `GroundStateResult`/`ThermalResult` (`backend.construction_seconds`) | makes the cost visible; no behavior change |
-| 1 | `CompiledGroup` (LUT/PDEP perms) swapped into existing enumerators + norms + rep walk | bit-identical reps/norms vs current (unit test over N≤16 exhaustive, N=24 sampled) |
-| 2 | `OrbitTable` + `IrrepView`; `SectorBasis::build` becomes a derived-CSR adapter; per-irrep loop parallelized | sector dims + Burnside sum rule Σ_k dim_k = C(N,n_up); eigenvalues vs current at N≤14 all irreps, machine precision |
-| 3 | `SymmetryCache` + in-process registry; `basis_cache_dir` consumed; `precompute_basis_only` wired | cold/warm parity; hash-invalidation test |
-| 4 | Global rank table + survivor prefix-sums; device rep policy reads the same | CPU/GPU SpMV parity tests (existing harness) |
-| 5 | Spin-flip element + `SectorTransporter`; auto commutation check | half-filling: dim halves & spectra match unprojected; transported sectors match brute solves at N≤12 |
-| 6 | `AntiunitaryPairing`: k-pair skipping + `is_real` routing to the real lane | paired-sector spectra equality at N≤14; real-lane eigenvalue parity |
-| 7 | Little-group / induced-rep non-abelian lane on the OrbitTable | vs current SAB engine at moderate N; vs dense diag with degeneracy multiplets |
+| Stage | Deliverable | Guard | Status |
+|---|---|---|---|
+| 0 | Construction-phase timers (`ED_SYM_PROFILE=1`, `sym_profile.h`) on pass1 / pass1.5 / pass2 | makes the cost visible; no behavior change | **done (Jul 2026)** — result-struct field form deferred |
+| 1 | `CompiledGroup` (byte-LUT perms + flip masks + content hash, `compiled_group.h`) swapped into the three rep enumerators + `build_orbit_stabilizers` | bit-identical reps/stabilizers vs scalar reference (`test_compiled_group.cpp`, 17k assertions); ~1.9× on the early-exit scan at N=30 | **done (Jul 2026)** — SpMV rep walk + `compute_orbit_for_state` swap folded into Stage 2 |
+| 2 | `OrbitTable` + `IrrepView`; `SectorBasis::build` becomes a derived-CSR adapter; per-irrep loop parallelized | sector dims + Burnside sum rule Σ_k dim_k = C(N,n_up); eigenvalues vs current at N≤14 all irreps, machine precision | |
+| 3 | `SymmetryCache` + in-process registry; `basis_cache_dir` consumed; `precompute_basis_only` wired | cold/warm parity; hash-invalidation test | |
+| 4 | Global rank table + survivor prefix-sums; device rep policy reads the same | CPU/GPU SpMV parity tests (existing harness) | |
+| 5 | Spin-flip element + `SectorTransporter`; auto commutation check | half-filling: dim halves & spectra match unprojected; transported sectors match brute solves at N≤12 | |
+| 6 | `AntiunitaryPairing`: k-pair skipping + `is_real` routing to the real lane | paired-sector spectra equality at N≤14; real-lane eigenvalue parity | |
+| 7 | Little-group / induced-rep non-abelian lane on the OrbitTable | vs current SAB engine at moderate N; vs dense diag with degeneracy multiplets | |
 
 Stages 1–4 remove the wall (and are pure consolidations — no new
 physics). Stages 5–7 add the new symmetry axes on the *same* artifact,

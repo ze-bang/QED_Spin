@@ -1177,6 +1177,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
     # Closed-form orbit-projected norm primitive (shared by every sector builder)
     ed_add_test(test_rep_projection             tests/unit/test_rep_projection.cpp USE_CATCH2)
+    # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
+    ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)
