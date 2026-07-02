@@ -181,7 +181,13 @@ def test_mtpq_converges_with_more_iterations():
     the asymptotic limit as max_iter grows. Locks in the
     ``max_iterations`` -> ``tpq_max_steps`` Python pipe fix (the legacy
     adapter hardcoded 100 iterations for the TPQ lanes)."""
-    H = _ring()
+    # NOTE: needs dim > SMALL_THERMAL_DIM (512): below that the
+    # orchestrator routes thermal() through the exact small-sector
+    # fallback, where max_iterations legitimately has no effect. A
+    # 12-site ring (dim 4096) keeps the stochastic mTPQ lane engaged.
+    b = qed.input.HamiltonianBuilder(12)
+    b.heisenberg([(i, (i + 1) % 12) for i in range(12)], J=1.0)
+    H = b.to_operator()
     Es = []
     for max_iter in (200, 1000, 5000):
         r = qed.thermal(
@@ -190,7 +196,7 @@ def test_mtpq_converges_with_more_iterations():
             use_sz_if_conserved=False, random_seed=42, verbose=False,
         )
         Es.append(r.energy[0])
-    # Each step closer to (or equal to) the asymptote E_gs ~ -3.65.
+    # Each step closer to (or equal to) the asymptote E_gs ~ -5.39.
     # Allow weak monotonicity (sample noise can push a single bin
     # slightly above its predecessor) but the trend must be downward.
     assert Es[-1] <= Es[0] + 1e-2, (

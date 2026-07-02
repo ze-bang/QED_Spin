@@ -45,6 +45,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lanczos_kernel<CpuBackend>` since Phase 2.1); `lanczos_real` is documented
   as the one intentional hand-rolled remnant. Stale `#if 0`-archaeology
   comments removed; `generateOrthogonalVector` deleted (zero callers).
+  CODEMAP / ARCHITECTURE / api docs no longer list the Gen-1 GPU bodies
+  (`gpu_lanczos.cu`, `gpu_tpq.cu`, `gpu_block_lanczos.cu`,
+  `gpu_krylov_schur.cu`, ...) that were retired in Jun 2026, and the
+  one-call-API guide reflects the planner-era `auto_tune=`/`plan=`
+  kwargs being gone.
+- **CI repaired.** `.github/workflows/ci.yml` had two jobs both named
+  `linux-mpi` (introduced 2026-06-29); the duplicate YAML key made the
+  workflow unparseable, so **every CI run since then failed with zero
+  jobs** and the lanes went blind. The smoke job is renamed
+  `linux-mpi-smoke`. The stale tests that accumulated behind the outage
+  are fixed: removed the planner-era `plan=` / `auto_tune=` kwargs
+  (test_auto_sz, test_universal_save, test_kill_hash_workflow_gates_symmetry,
+  test_workflow), moved the multi-generator `GeneratorSet` tests onto a
+  2x4 torus (the Jun-2026 generator-detection fix correctly returns a
+  single Z6 generator for the 6-ring -- any abelian group of order 6 is
+  cyclic), and moved `test_mtpq_converges_with_more_iterations` to a
+  12-site ring (dim 4096) because dim <= 512 now routes through the
+  exact small-sector fallback where `max_iterations` legitimately has
+  no effect. Full pytest suite: 385 passed / 0 failed.
 
 ### Planner removed; defaults, memory guard, linear distributed symmetry build (Jun 2026)
 

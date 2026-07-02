@@ -553,8 +553,7 @@ def test_solve_full_diag_gpu_emits_loud_fallback_warning(tmp_path):
         warnings.simplefilter("always")
         r = qed.solve(
             H, num_eigenvalues=1,
-            solver="full", device="gpu",
-            plan=False, verbose=False,
+            solver="full", device="gpu", verbose=False,
         )
     msgs = [str(w.message) for w in ws
             if issubclass(w.category, RuntimeWarning)
@@ -583,7 +582,7 @@ def test_thermal_ftlm_gpu_no_loud_fallback_warning(tmp_path):
             H, method="ftlm",
             num_samples=1, ftlm_krylov_dim=20,
             num_T=2, T_min=0.5, T_max=4.0,
-            device="gpu", verbose=False, auto_tune=False,
+            device="gpu", verbose=False,
             output_dir=str(tmp_path / "ftlm_gpu"),
         )
     bad = [str(w.message) for w in ws
@@ -670,7 +669,7 @@ def test_thermal_mtpq_gpu_no_loud_fallback_warning(tmp_path):
             H, method="mtpq",
             num_samples=1, max_iterations=20,
             num_T=2, T_min=0.5, T_max=4.0,
-            device="gpu", verbose=False, auto_tune=False,
+            device="gpu", verbose=False,
             output_dir=str(tmp_path / "mtpq_gpu"),
         )
     bad = [str(w.message) for w in ws
@@ -689,8 +688,7 @@ def test_solve_lanczos_gpu_no_loud_fallback_warning(tmp_path):
         warnings.simplefilter("always")
         _ = qed.solve(
             H, num_eigenvalues=1,
-            solver="lanczos", device="gpu",
-            plan=False, verbose=False,
+            solver="lanczos", device="gpu", verbose=False,
         )
     bad = [str(w.message) for w in ws
            if issubclass(w.category, RuntimeWarning)

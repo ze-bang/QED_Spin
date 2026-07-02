@@ -32,7 +32,7 @@ def test_solve_auto_sz_default_projects_to_half_filling():
     assert H.conserves_sz()
 
     res = qed.solve(H, num_eigenvalues=1, solver="LANCZOS",
-                    tolerance=1e-12, verbose=False, plan=False)
+                    tolerance=1e-12, verbose=False)
     # 6-site periodic Heisenberg ring ground state in the Sz=3 sector:
     # E0 = -2.802775637731...  (Bethe-ansatz / exact diagonalisation).
     expected = -2.8027756377319952
@@ -46,7 +46,7 @@ def test_solve_auto_sz_off_uses_full_hilbert():
 
     res = qed.solve(H, num_eigenvalues=1, solver="LANCZOS",
                     tolerance=1e-12, auto_sz=False,
-                    verbose=False, plan=False)
+                    verbose=False)
     expected = -2.8027756377319952
     # Same ground state -- auto-Sz is a speedup, not a different physics.
     assert math.isclose(res.eigenvalues[0], expected, rel_tol=0, abs_tol=1e-8)
@@ -58,7 +58,7 @@ def test_solve_explicit_sz_overrides_auto_sz():
     H = _build_heisenberg_chain(N, pbc=True)
     # Sz = 0 sector (n_up = 0) is a single product state |down*N>.
     res = qed.solve(H, num_eigenvalues=1, solver="FULL",
-                    sz=0, verbose=False, plan=False)
+                    sz=0, verbose=False)
     # All down: <H> = sum_<ij> S^z_i S^z_j = N/4 * (#bonds) -- for the
     # periodic 6-site ring there are 6 bonds, so <H>_FM = 6/4 = 1.5.
     assert math.isclose(res.eigenvalues[0], 1.5, abs_tol=1e-10)
@@ -85,7 +85,7 @@ def test_solve_auto_sz_skipped_when_sz_not_conserved():
     # auto_sz=True is benign when Sz is not conserved -- solve must
     # work on the full Hilbert space without trying to project.
     res = qed.solve(H, num_eigenvalues=1, solver="LANCZOS",
-                    tolerance=1e-10, verbose=False, plan=False)
+                    tolerance=1e-10, verbose=False)
     assert len(res.eigenvalues) >= 1
     # Sanity: ground state is finite.
     assert math.isfinite(res.eigenvalues[0])

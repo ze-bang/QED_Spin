@@ -79,11 +79,15 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # CPU + MPI lane: build the distributed tree (WITH_MPI=ON) and run a 2-rank
-  # mpiexec smoke. CI never built the MPI config before, which is how the
-  # distributed path was free to rot; this keeps it compiling + running.
+  # CPU + MPI smoke lane: build the distributed tree (WITH_MPI=ON) and run a
+  # 2-rank mpiexec smoke on the CLI binary. Complements the full ``linux-mpi``
+  # ctest lane below (this one exercises the ed_distributed_main entry point
+  # itself). NOTE: this job was originally also named ``linux-mpi`` -- the
+  # duplicate YAML key made the whole workflow unparseable (every CI run from
+  # 2026-06-29 onward failed with zero jobs). Renamed in the Jul-2026 debt
+  # cleanup.
   # ---------------------------------------------------------------------------
-  linux-mpi:
+  linux-mpi-smoke:
     name: Linux / GCC / OpenMPI (CPU+MPI build + mpiexec smoke)
     runs-on: ubuntu-22.04
     timeout-minutes: 30

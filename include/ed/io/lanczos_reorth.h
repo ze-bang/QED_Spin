@@ -6,7 +6,7 @@
 //
 // At N=36 with full point-group + Sz symmetry the Krylov basis spills to disk
 // (ED_LANCZOS_DISK=1). Today the periodic-full and selective re-orth passes in
-// `lanczos_selective_reorth` random-access that on-disk basis ONE vector at a
+// the legacy reorth loop random-accessed that on-disk basis ONE vector at a
 // time: at iteration j ≈ 200 they trigger ~200 file open + 16N-byte read +
 // BLAS-1 zdotc + BLAS-1 zaxpy operations PER iteration. The per-call file
 // open dominates, then the BLAS-1 cost is itself bandwidth-bound on a

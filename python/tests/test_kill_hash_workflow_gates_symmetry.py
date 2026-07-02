@@ -115,7 +115,6 @@ def _solve_sym_sz_cpu(H, generator, sz):
         device="cpu",
         symmetry=generator,
         sz=sz,
-        plan=False,
         verbose=False,
     )
 
@@ -260,7 +259,6 @@ def test_phase_e2_gs_lanczos_gpu_sym(sym_directory):
             device="gpu",
             symmetry=_zn_generator(N_SITES_TEST),
             sz=N_UP_TEST,
-            plan=False,
             verbose=False,
         )
 
@@ -277,7 +275,6 @@ def test_phase_e2_gs_lanczos_gpu_sym(sym_directory):
             device="cpu",
             symmetry=_zn_generator(N_SITES_TEST),
             sz=N_UP_TEST,
-            plan=False,
             verbose=False,
         )
 
@@ -330,7 +327,7 @@ def test_phase_e2_ftlm_gpu_sym(sym_directory, tmp_path):
             num_samples=1, ftlm_krylov_dim=20,
             use_symmetry_if_available=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "ftlm_sym"),
         )
 
@@ -357,7 +354,7 @@ def test_phase_e2_ltlm_gpu_sym(sym_directory, tmp_path):
             num_samples=1, ltlm_krylov_dim=20,
             use_symmetry_if_available=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "ltlm_sym"),
         )
 
@@ -382,7 +379,7 @@ def test_phase_e2_mtpq_gpu_sym(sym_directory, tmp_path):
             num_samples=1, max_iterations=20,
             use_symmetry_if_available=True,
             device="gpu",
-            verbose=False, auto_tune=False,
+            verbose=False,
             output_dir=str(tmp_path / "mtpq_sym"),
         )
 

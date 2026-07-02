@@ -108,7 +108,7 @@ void first_touch_bytes(void* data, std::size_t bytes);
 /// is a silent no-op.
 ///
 /// Safe to call from anywhere -- typically invoked at the top of
-/// `lanczos()` / `lanczos_selective_reorth()` / FTLM samplers, just
+/// `lanczos()` / FTLM samplers, just
 /// before the first big OpenMP region.
 void pin_omp_threads_once();
 
