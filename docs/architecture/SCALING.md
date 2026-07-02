@@ -193,8 +193,6 @@ them in your run script, not mid-run.
 | Env var | Default | What it does |
 |---|---|---|
 | `ED_LANCZOS_COMPLEX_SEED` | `0` (real seed) | If `1`, Lanczos starts from a fully complex random vector. Default is real-only so the operator can take the real-CSR / `apply_real` fast path for the entire Krylov space when H is real. Flip to `1` only when you specifically need to exercise complex spectra. |
-| `ED_CTPQ_PROPAGATOR` | `taylor` | `krylov` switches canonical-TPQ imaginary-time evolution to the Lanczos-projected `expm(−Δτ T_m)` propagator added in Batch 2. Stable for larger Δτ; falls back to Taylor on Krylov breakdown. |
-| `ED_CTPQ_KRYLOV_M` | `30` | Krylov subspace size for the cTPQ propagator above. |
 | `ED_GPU_ALLOW_DROPPED_THREEBODY` | `0` | The GPU operator now hard-fails if `InterAll` contains 3-body terms (Batch 1, P0-8). Set to `1` only if you understand you're dropping those terms on GPU paths. |
 
 ### Parallelism
@@ -303,9 +301,9 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 * **TPQ at N=36**: cheaper per sample than FTLM (no per-(β) stratification),
   but **does not benefit from `ED_LANCZOS_DISK`** the same way (TPQ is a
   long evolution, not a Krylov basis). Imaginary-time evolution is
-  `2 × N_τ` SpMV per sample (Taylor) or `m × N_τ` SpMV (Krylov, set
-  `ED_CTPQ_PROPAGATOR=krylov`). For canonical TPQ at very low T, prefer
-  Krylov — it's stable for Δτ ~ 0.1 instead of the ~ 0.01 Taylor needs.
+  `2 × N_τ` SpMV per sample (Taylor propagator, `taylor_order`-truncated;
+  the legacy `ED_CTPQ_PROPAGATOR=krylov` lane was deleted with the
+  monolithic cTPQ driver in the Jul-2026 debt cleanup).
 * **N=32 mTPQ on a single large GPU, Sz + symmetry**: this is the
   motivating case for the **on-the-fly representative SpMV**
   (`ED_GPU_SYMMETRY_REP`, default on). Working in one k-sector reduces the
