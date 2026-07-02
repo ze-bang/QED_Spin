@@ -1179,6 +1179,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_rep_projection             tests/unit/test_rep_projection.cpp USE_CATCH2)
     # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
+    # Stage-2 SymmetryEngine v2: fused OrbitTable + prefiltered parallel sector build
+    ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)
