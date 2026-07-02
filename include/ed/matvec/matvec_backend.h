@@ -261,13 +261,13 @@ namespace detail {
 
 struct MatVecTunables {
     // Below this projected-basis dim we prefer assembled-CSR; above it we
-    // stick with matrix-free. The default mirrors the legacy thresholds:
+    // stick with matrix-free. Defaults:
     //   - full Hilbert space    : 1<<20  (~1M states, ~16 MB / Lanczos vec)
     //   - fixed-Sz / symmetry   : 1<<22  (~4M states; CSR amortises well)
-    // Override at runtime with ED_CSR_DIM_MAX (preferred) or the legacy
-    // ED_USE_SPARSE / ED_SPARSE_DIM_MAX (full only) / ED_FIXED_SZ_USE_SPARSE
-    // / ED_FIXED_SZ_SPARSE_DIM_MAX (Sz only). Read ONCE at construction so
-    // the hot path doesn't pay a getenv() per matvec.
+    // Override at runtime with ED_CSR_DIM_MAX / ED_CSR_FORCE (the legacy
+    // ED_USE_SPARSE / ED_SPARSE_DIM_MAX / ED_FIXED_SZ_* aliases were retired
+    // in the Jul-2026 debt cleanup). Read ONCE at construction so the hot
+    // path doesn't pay a getenv() per matvec.
     std::uint64_t csr_cutoff_dim = 0;
     // false: never assemble CSR (matrix-free always). true: always assemble.
     // tri-state via the env vars: -1 means "use cutoff", 0 means "off",
@@ -292,9 +292,7 @@ inline bool read_matvec_scatter() noexcept {
     return v && v[0] == '1';
 }
 
-inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
-                                    const char*   env_use_legacy,
-                                    const char*   env_dim_legacy) noexcept
+inline MatVecTunables read_tunables(std::uint64_t default_cutoff) noexcept
 {
     MatVecTunables t;
     t.csr_cutoff_dim = default_cutoff;
@@ -315,15 +313,7 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
         return static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
     };
 
-    // Unified env vars take precedence over the legacy per-basis ones, so
-    // a single ED_CSR_DIM_MAX can control both the full and the fixed-Sz
-    // operator caches.
-    int unified_force = read_force("ED_CSR_FORCE");
-    if (unified_force != -1) {
-        t.csr_force = unified_force;
-    } else {
-        t.csr_force = read_force(env_use_legacy);
-    }
+    t.csr_force = read_force("ED_CSR_FORCE");
     // Capability-aware planner override (env force above takes precedence):
     // when no env has forced the decision, the active ExecutionPlan -- if any --
     // dictates CSR vs matrix-free, replacing the static dim cutoff entirely.
@@ -339,12 +329,7 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff,
     // sectors (where orbit-walk amortizes more across matvecs) than on
     // the full-Hilbert lane. The follow-up patch wires SectorView
     // through a backend instance that pays attention to it.
-    std::uint64_t unified_cutoff = read_cutoff("ED_CSR_DIM_MAX", 0);
-    if (unified_cutoff != 0) {
-        t.csr_cutoff_dim = unified_cutoff;
-    } else {
-        t.csr_cutoff_dim = read_cutoff(env_dim_legacy, default_cutoff);
-    }
+    t.csr_cutoff_dim = read_cutoff("ED_CSR_DIM_MAX", default_cutoff);
     t.matvec_scatter = read_matvec_scatter();
     return t;
 }
@@ -997,8 +982,7 @@ make_cpu_full_basis_backend(std::uint64_t n_bits,
     using Backend = CpuMatVecBackend<basis::FullBasisPolicy,
                                      DiagOne, OffDiagOne, DiagTwo, MixedTwo,
                                      OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_tunables(
-        default_csr_cutoff, "ED_USE_SPARSE", "ED_SPARSE_DIM_MAX");
+    auto tunables = detail::read_tunables(default_csr_cutoff);
     return std::make_unique<Backend>(
         basis::make_full_basis(n_bits),
         tunables,
@@ -1015,10 +999,7 @@ make_cpu_fixed_sz_backend(const std::vector<std::uint64_t>& basis_states,
     using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
                                      DiagOne, OffDiagOne, DiagTwo, MixedTwo,
                                      OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_tunables(
-        default_csr_cutoff,
-        "ED_FIXED_SZ_USE_SPARSE",
-        "ED_FIXED_SZ_SPARSE_DIM_MAX");
+    auto tunables = detail::read_tunables(default_csr_cutoff);
     return std::make_unique<Backend>(
         basis::make_fixed_sz_basis(basis_states, lin_index),
         tunables,
@@ -1042,10 +1023,7 @@ make_cpu_combinadic_fixed_sz_backend(
     using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
                                      DiagOne, OffDiagOne, DiagTwo, MixedTwo,
                                      OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_tunables(
-        default_csr_cutoff,
-        "ED_FIXED_SZ_USE_SPARSE",
-        "ED_FIXED_SZ_SPARSE_DIM_MAX");
+    auto tunables = detail::read_tunables(default_csr_cutoff);
     return std::make_unique<Backend>(
         basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim),
         tunables,
