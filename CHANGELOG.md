@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Debt-cleanup sweep: dead code deletion + single-source kernels (Jul 2026)
+
+~4,900 LOC deleted with zero functional change to any live lane
+(404/404 tests green after every stage).
+
+- **Legacy GPU kernels deleted.** The retired `GPUFixedSzOperator`'s device
+  kernels had zero launch sites and were still compiled: all three fixed-Sz
+  matvec lookup generations (linear, open-addressing hash incl.
+  `buildStateHashKernel`/`GPUStateLookupEntry`, combinadic rank), the three
+  fixed-Sz branch-free kernels, `generateFixedSzBasisKernel`, and the
+  `matVecSymmetrized` hash-scatter island (`GPUHashEntry`/`hashLookup`/
+  `findBasisState`). The combinadic `rank/unrank_combination_dev` pair
+  survives for the `test_gpu_fixed_sz_rank` diagnostic harness. The vestigial
+  `cudaTextureObject_t` parameter was dropped from `matVecKernelOptimized`.
+- **Legacy TPQ driver stack deleted.** `microcanonical_tpq` / `canonical_tpq`
+  (the 25–30-parameter monoliths), both `MatVecOperator` overloads, the
+  imaginary-time Taylor/Krylov evolvers (incl. the `ED_CTPQ_PROPAGATOR` /
+  `ED_CTPQ_KRYLOV_M` env gates, which only the dead body read), the SS_rand /
+  HDF5 sidecar writers, the per-site observable helpers, and all of
+  `tpq_io.cpp` had **zero callers** — every live lane goes through the
+  backend-templated `mtpq_kernel` / `ctpq_kernel` since the May-2026
+  collapse. `TPQ.h` now exposes exactly two symbols: `tpq_per_sample_seed`
+  and `compute_tpq_thermo_from_trajectories`.
+- **FTLM dynamical correlation single-sourced.** The single-pair
+  `..._multi_sample_multi_temperature_impl` was a byte-for-byte `P == 1`
+  specialisation of the multi-operator core (same per-sample seeding,
+  Lehmann weights, Lorentzian accumulation, MPI reductions, and error
+  estimation); it is now a 30-line delegation, so the FTLM Lehmann machinery
+  has exactly one implementation.
+- **Legacy CSR env aliases retired.** `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
+  `ED_FIXED_SZ_USE_SPARSE`, `ED_FIXED_SZ_SPARSE_DIM_MAX` are gone;
+  `ED_CSR_FORCE` + `ED_CSR_DIM_MAX` (+ `ED_SYM_CSR_DIM_MAX`) are the single
+  knobs.
+- **Docs synced to reality.** The compute-plane scoreboard no longer marks the
+  `lanczos()` body migration as deferred (it has been a thin orchestrator over
+  `lanczos_kernel<CpuBackend>` since Phase 2.1); `lanczos_real` is documented
+  as the one intentional hand-rolled remnant. Stale `#if 0`-archaeology
+  comments removed; `generateOrthogonalVector` deleted (zero callers).
+
 ### Planner removed; defaults, memory guard, linear distributed symmetry build (Jun 2026)
 
 - **Execution planner / autotuner removed.** The capability-aware planner, the
