@@ -1,0 +1,363 @@
+# SymmetryEngine v2 — one construction layer for U(1) × space group × internal symmetries
+
+Status: **design** (Jul 2026). Companion to [SYMMETRY.md](SYMMETRY.md)
+(current implementation) and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## 0. Why: measured diagnosis of the N > 27 construction wall
+
+The user-visible symptom: for N > 27 sites, symmetry construction
+dominates wall time in **every** workflow (GS / thermal / spectral),
+and it repeats on every call.
+
+Direct measurement (this repo, ring + Z_N translations, 16 threads,
+`scratchpad/bench_symconstruct.cpp` methodology):
+
+| Phase | N=24 (dim 2.7M, |G|=24) | N=28 (dim 40M, |G|=28) | N=32 extrapolated (dim 601M, |G|=32) |
+|---|---|---|---|
+| Pass 1 rep scan (streaming Gosper, early-exit) | 0.01 s | 0.13 s | ~3 s |
+| Pass 1.5 stabilizers (once per rep) | <0.01 s | 0.02 s | ~0.5 s |
+| Rank table, one sector | 0.01 s | 0.09 s | ~2 s (2.4 GiB) |
+
+**The group-theory math is not the problem.** The wall comes from five
+engineering sinks, all verified in the current tree:
+
+1. **Eager per-irrep orbit materialization.**
+   `SectorBasis::build` (`include/ed/symmetry/sector_basis.h`) walks
+   every rep's full orbit **serially**, allocates two heap vectors
+   (`orbit_elements`, `orbit_coefficients`) plus a `sortOrbit()` per
+   surviving state, and does this **once per irrep**. Total:
+   O(dim_Sz · |G|) work and O(dim_Sz) memory *per sector set*, with
+   ~#reps · |G| small allocations. At N=32 half-filling that is ~19G
+   scalar permutation applications + ~600M allocations, serial. The
+   eager footprint is ~190 GB (the `ED_SYM_LAZY_SECTORS` auto-lazy
+   exists precisely because of this — but the lazy path defers, it does
+   not remove, the cost for CPU consumers).
+2. **Scalar permutation primitive in construction.**
+   Every construction loop calls `applyPermutation` — an O(N)
+   bit-by-bit scatter (`include/ed/core/basis_utils.h:200`). The
+   byte-LUT fast path (4 table lookups at N≤32, ~60% instruction
+   saving) exists **only** inside `RepSymmetryBasisPolicy` for the
+   SpMV; enumeration never sees it.
+3. **Per-sector reverse-lookup tables.**
+   `RepSectorData::rep_index_of_rank` is C(N, n_up) × int32 **per
+   sector** (2.4 GiB at N=32 half-filling) even though the rep list is
+   shared across irreps and only the survivor set differs.
+4. **The cache that never was.**
+   `SolveOptions::basis_cache_dir` is plumbed through the orchestrator
+   options, the CLI (`--basis-cache-dir=`), `EDConfig`, and the Python
+   bindings — and **no code consumes it** (grep: zero readers outside
+   the option-struct plumbing; `is_symmetry_cache_valid` in
+   `system_utils.h` has no callers). Every `qed.solve/thermal/spectral`
+   call reconstructs from scratch. For parameter sweeps (field scans,
+   J-scans: hundreds of calls on the *same lattice and group*) this
+   multiplies the entire construction cost by the sweep length.
+5. **Three parallel representations of one dataset.**
+   The same mathematical object (the symmetry-adapted basis) exists as
+   (a) `SymmetrySector` orbit-CSR, (b) `RepSectorData` (CSR-free), and
+   (c) `ReducedSymmetryCsr`, built at different times by different code
+   paths with different lifetimes. Consolidating on ONE canonical form
+   with the others derived-on-demand removes both redundant build cost
+   and the consistency risk.
+
+## 1. Design principles
+
+* **P1 — Group-level work exactly once.** Orbit representatives and
+  stabilizers depend only on (subspace, group), *not* on the irrep.
+  Everything per-irrep must be O(#reps) derived data, never a second
+  orbit walk.
+* **P2 — Never materialize O(dim) per sector.** The rep-compact form
+  (reps + stabilizer ids + characters) is the canonical basis; the
+  orbit-CSR and reduced-CSR are optional, derived caches.
+* **P3 — One unitary-group abstraction.** Every *unitary* symmetry this
+  package will ever project on — translations, arbitrary point groups
+  (abelian or not), spin-flip Z₂, and their products — is a group of
+  elements acting as `s ↦ permute(s) XOR flip_mask` with a scalar (or,
+  non-abelian, matrix) character. One compiled representation serves
+  them all. U(1) Sz stays a **Subspace** (it changes which states
+  exist, not how they map). Time reversal is **antiunitary** and is
+  *not* a projector (see P5).
+* **P4 — Construction is content-addressed and persistent.** The basis
+  depends only on (N, subspace, group elements, engine version). Hash
+  that; cache the result; a parameter sweep pays construction once.
+* **P5 — Antiunitary symmetries give pairing + reality, not sectors.**
+  T (and any antiunitary element) cannot enter `P = (1/|G|) Σ χ*(g) g`.
+  Its correct exploitation is (a) sector pairing k ↔ −k (solve half),
+  (b) reality detection (real-symmetric Lanczos lane), (c) Kramers
+  bookkeeping. The existing `AntiunitaryProjector` placeholder has the
+  wrong shape and is superseded by this design.
+
+## 2. The layer, bottom-up
+
+### 2.1 `SymmetryElement` + `CompiledGroup`
+
+```cpp
+struct SymmetryElement {              // immutable value
+    std::vector<int> perm;            // site permutation (identity allowed)
+    std::uint64_t    flip_mask = 0;   // XOR mask (0 = none; all-ones = global spin flip)
+    // action: s' = permute_bits(s, perm) ^ flip_mask
+};
+
+class CompiledGroup {                 // built once per (lattice, symmetry choice)
+    // per element: byte-LUT permutation tables (N<=32: 4 lookups;
+    // 32<N<=64: 8) with the flip folded into the last LUT plane,
+    // BMI2 PDEP/PEXT variant selected at build when available;
+    std::vector<CompiledElement> elems_;   // elems_[0] == identity
+    MultTable                    mult_;    // |G|^2 uint16 (|G| <= a few hundred)
+    std::uint64_t                content_hash_;  // canonical serialized elements
+public:
+    std::uint64_t apply(std::uint64_t s, std::size_t g) const;  // ~4-8 loads
+    bool preserves_popcount() const;   // false iff any flip_mask has odd popcount asymmetry
+    ...
+};
+```
+
+Design notes:
+
+* **Spin flip is just an element with `flip_mask = (1<<N)-1`.** It
+  composes with the spatial elements inside the same group (the
+  semidirect/direct product is captured by the multiplication table).
+  `preserves_popcount()` is false for it except at half filling — the
+  builder uses that to decide *project vs pair* (§2.5).
+* **Arbitrary point group**: the group is whatever element set the
+  caller provides (from `find_symmetries` automorphisms, from a
+  space-group generator file, or hand-written). Abelian vs non-abelian
+  is a *property detected from the mult table*, not an input switch.
+* The compiled LUT permutation replaces `applyPermutation` in **all**
+  construction loops (enumeration, stabilizers, norms, SpMV rep walk).
+  This is Stage-1 of the migration and is bit-identical by definition.
+
+### 2.2 `OrbitTable` — the single group-level artifact (P1)
+
+```cpp
+struct OrbitTable {                    // per (Subspace, CompiledGroup); irrep-INDEPENDENT
+    std::vector<std::uint64_t> reps;        // canonical (min-image) reps, ascending
+    std::vector<std::uint16_t> stab_id;     // per rep: index into stab_masks
+    std::vector<StabMask>      stab_masks;  // deduped stabilizer subgroup bitmasks
+                                            // (|distinct stabilizers| is tiny: ~1-100)
+    std::uint64_t              subspace_dim;   // C(N,n_up) or 2^N
+    std::uint64_t              content_hash;   // (group, subspace, version)
+};
+```
+
+Built by the existing streaming Gosper scan (already parallel, already
+O(#reps) memory) upgraded with compiled elements, and fused with the
+stabilizer pass: a state that survives the early-exit min-image test
+has, as a byproduct, already computed which elements fix it. One pass,
+one output. Optional CUDA kernel for the scan (embarrassingly parallel;
+the host cost is seconds at N=32, so GPU is a nicety not a necessity —
+gate it behind size).
+
+**Everything downstream reads this table. Nothing downstream ever walks
+an orbit again.**
+
+### 2.3 `IrrepView` — O(#reps) per irrep (P1, P2)
+
+For a 1-D irrep χ (abelian case — translations × abelian PG × Z₂
+flip):
+
+```
+norm²(rep) = |Σ_{h ∈ Stab(rep)} χ(h)|² / |Stab(rep)|     (closed form, already
+                                                          proven in rep_projection.h)
+```
+
+Since `stab_id` dedupes stabilizers, the norm² per (stab_mask, irrep)
+pair is computed **once per distinct stabilizer** (≤ ~100 numbers), and
+the per-rep pass is a table lookup + prefix-sum:
+
+```cpp
+struct IrrepView {                     // derived; ~10 bytes/rep; milliseconds to build
+    const OrbitTable*        table;
+    std::vector<Complex>     characters;      // chi(g), |G| entries
+    std::vector<std::uint32_t> survivor_prefix; // exclusive prefix-sum of "norm2 > eps"
+                                              // -> sector index = prefix[rep_i]
+    std::vector<float>       inv_norm;        // per surviving rep (float is enough:
+                                              // enters as a multiplicative weight)
+    bool                     is_real;         // all chi real && TR-even -> real lane
+};
+```
+
+The `(OrbitTable, IrrepView)` pair **is** the sector basis. It plugs
+into the existing `RepSymmetryBasisPolicy` / device twin directly
+(reps, inv_norms, perms, characters — same POD fields). The
+`SymmetrySector` orbit-CSR becomes a derived cache built only when a
+consumer explicitly profits (none of the production matvec lanes need
+it: CPU default is reduced-CSR built from the gather enumeration, GPU
+default is the rep walk).
+
+For a **non-abelian** irrep Γ with d_Γ > 1 (arbitrary point group,
+P3): the same OrbitTable serves. Two regimes:
+
+* **Space-group factorization (the scalable path).** When the group is
+  T ⋊ P (translations normal), use the standard little-group / induced
+  representation construction: enumerate the momentum star {k}, take
+  the little co-group P_k ⊂ P, and project with the (small) irreps of
+  P_k on top of the abelian T-sector. Every projection is again a sum
+  over ≤ |P_k| elements with scalar or small-matrix characters, and the
+  per-rep data still derives from `stab_id` in O(1). This replaces the
+  current "maximal abelian clique" compromise in `find_symmetries`
+  (which discards the non-abelian structure entirely, e.g. returning
+  Z6 ⊂ D6 for a hexagon) *and* the scale-guarded SAB amplitude storage
+  (which is O(dim · d_Γ) and is exactly what the guard protects
+  against).
+* **Generic SAB (moderate N, existing engine).** Kept as-is for groups
+  with no exploitable normal abelian subgroup; the guard stays.
+
+### 2.4 Shared reverse lookup (P2)
+
+One **global** table per (N, n_up):
+
+```
+global_rank_table : combinadic rank -> rep index in OrbitTable   (C(N,n_up) × int32, built once)
+```
+
+Per irrep, the sector-local index is `survivor_prefix[rep_index]` —
+an O(#reps × 4 B) array instead of a second dim-sized table. At N=32
+half-filling this collapses reverse-lookup memory from
+32 sectors × 2.4 GiB to **one** 2.4 GiB table + 32 × ~76 MB, and the
+build from 32 passes to one. (The binary-search fallback remains for
+memory-tight nodes, unchanged.)
+
+### 2.5 U(1), spin flip, and the SectorTransporter
+
+* **U(1) Sz** remains the `FixedSzSubspace` axis (combinadic; already
+  tableless-capable). Nothing changes except that the OrbitTable is
+  keyed by it.
+* **Spin flip Z₂** (`flip_mask = all-ones`) has two regimes, chosen
+  automatically by `preserves_popcount()` against the active subspace:
+  * `n_up == N/2`: a genuine extra group element → joins the
+    CompiledGroup, doubling |G| and halving the half-filling sector —
+    the biggest single sector in every thermal sweep. (Requires
+    H-commutation: auto-verified against the term list — any Zeeman /
+    odd-Sz term disables it with a logged reason.)
+  * `n_up != N/2`: **SectorTransporter** — no projection; instead the
+    engine records the pairing (n_up, k) ↔ (N−n_up, k̄) and the sector
+    loop *solves one member and transports the result*: thermal copies
+    Z_s(β) verbatim, GS/spectral map eigenpairs through the (cheap,
+    O(dim) per vector) flip-permutation. Workflow-level: the Sz loop
+    shrinks by ~2×.
+* Generalization for free: any **internal Z₂ with a sublattice mask**
+  (e.g. flip on one sublattice for XY-type models) is the same element
+  type with a different mask; `internal_symmetries.json` in the lattice
+  fixture declares candidates and the engine keeps those that commute
+  with H.
+
+### 2.6 Time reversal — `AntiunitaryPairing` (P5)
+
+TR (T = K at integer-spin-like bases; T = (Π iσʸ)K for spin-1/2,
+T² = (−1)^N) is exploited as **metadata on the sector set**, never as a
+projector:
+
+```cpp
+struct AntiunitaryPairing {
+    // per sector: either self-conjugate (=> matrix can be made REAL in the
+    // adapted basis) or paired with the conjugate sector k -> -k.
+    std::vector<std::int32_t> conj_partner;   // -1 = self-conjugate
+    bool kramers;                              // T^2 = -1 (odd # spin-1/2): degeneracy tags
+};
+```
+
+Workflow integration:
+
+* **Pairing**: the sector loop solves only one of each (k, −k) pair and
+  mirrors eigenvalues / Z_s / S(Q,ω) → S(−Q,ω)* to the partner. For a
+  generic momentum grid this halves the irrep loop *on top of* the
+  spin-flip halving — and it needs no new math in the solvers, only
+  loop bookkeeping. Note this pairing is valid whenever H is TR-even
+  (real couplings), which covers every Hamiltonian this package's
+  `isReal()` fast path already detects.
+* **Reality**: self-conjugate sectors (k ∈ {0, π-type}) with real χ
+  route to the existing `lanczos_real` / real-CSR lane — 2× memory and
+  BLAS-1 traffic. Today that lane is only reachable for trivial
+  symmetry; `IrrepView::is_real` extends it to symmetry sectors.
+* **Kramers**: with T² = −1 the engine tags guaranteed degeneracies so
+  Lanczos convergence checks ask for the right multiplicity instead of
+  fighting ghost-vs-true degeneracy.
+
+### 2.7 `SymmetryCache` — implement `basis_cache_dir` for real (P4)
+
+```
+<basis_cache_dir>/sym_v2/<content_hash>.h5
+  /reps        (delta-encoded varint or raw u64, chunked, gzip-1)
+  /stab_id     (u16)
+  /stab_masks  (u64)
+  /meta        (N, n_up, group serialization, engine version, dims per irrep)
+```
+
+* Key = `OrbitTable::content_hash` =
+  H(canonical group elements, N, n_up, subspace kind, engine version).
+  Hamiltonian *couplings do not enter the key* — the basis depends only
+  on the group, which is why sweeps hit the cache.
+* Default location: `<lattice_dir>/basis_cache/` (matching the
+  documented-but-dead behavior); `ED_SYM_CACHE=0` opts out;
+  `precompute_basis_only` finally does what its docstring says.
+* Load path is mmap-friendly (reps array read straight into the
+  OrbitTable). Rank tables and IrrepViews are *not* cached — they
+  rebuild in seconds/milliseconds from the cached table and would
+  dominate the file size.
+* Process-level: a keyed registry (weak_ptr map) so
+  `solve`+`thermal`+`spectral` in one process share one OrbitTable —
+  today each call rebuilds even in-process.
+
+### 2.8 What the workflows see
+
+No public-surface change. `make_sector_operators_tagged` /
+`SectorSetView` / `StreamingSymmetryHandle` keep their signatures but
+are backed by `(OrbitTable, IrrepView)`:
+
+```
+CompiledGroup  (once per lattice+symmetry choice, cached by hash)
+   └─ OrbitTable per (n_up)          (once, disk-cached, seconds)
+        ├─ IrrepView per irrep       (milliseconds, O(#reps))
+        │    └─ RepSymmetryBasisPolicy / DeviceRepSymmetryBasisPolicy  (existing SpMV)
+        │    └─ ReducedSymmetryCsr   (existing, derived on demand)
+        │    └─ SymmetrySector CSR   (legacy consumers only, derived on demand)
+        ├─ SectorTransporter pairs   (spin flip across Sz)
+        └─ AntiunitaryPairing        (k <-> -k, reality flags)
+```
+
+`ProjectorChain` remains the composition surface — a chain now compiles
+into ONE CompiledGroup (product group) instead of being walked per
+state, which also makes chain order irrelevant by construction.
+
+## 3. Cost accounting (N = 32, half filling, |G| = 32 → 64 with flip)
+
+| Quantity | today (eager) | today (lazy/GPU) | v2 |
+|---|---|---|---|
+| Orbit walks | O(dim·|G|) per sector × |G| sectors, serial | deferred, still O(dim·|G|) per touched sector | **one** O(dim·⟨early-exit⟩) scan, parallel, LUT perms |
+| Construction wall time (est.) | hours + allocator churn | minutes per touched sector | **~5–10 s cold, ~1 s warm-cache, ~0 amortized in sweeps** |
+| Sector-basis memory | ~190 GB eager / ~24 GB per sector | ~600 MB reps + 2.4 GiB rank table *per sector* | ~200 MB table + **one** 2.4 GiB rank table + 76 MB/irrep |
+| Irrep loop length | |G| sectors | |G| | ~|G|/4 solved (flip ×2, TR pairing ×2), rest transported |
+| Re-run in a 200-point field sweep | ×200 | ×200 | ×1 (+199 cache hits) |
+
+## 4. Migration plan (each stage independently landable + testable)
+
+| Stage | Deliverable | Guard |
+|---|---|---|
+| 0 | Construction-phase timers surfaced on `GroundStateResult`/`ThermalResult` (`backend.construction_seconds`) | makes the cost visible; no behavior change |
+| 1 | `CompiledGroup` (LUT/PDEP perms) swapped into existing enumerators + norms + rep walk | bit-identical reps/norms vs current (unit test over N≤16 exhaustive, N=24 sampled) |
+| 2 | `OrbitTable` + `IrrepView`; `SectorBasis::build` becomes a derived-CSR adapter; per-irrep loop parallelized | sector dims + Burnside sum rule Σ_k dim_k = C(N,n_up); eigenvalues vs current at N≤14 all irreps, machine precision |
+| 3 | `SymmetryCache` + in-process registry; `basis_cache_dir` consumed; `precompute_basis_only` wired | cold/warm parity; hash-invalidation test |
+| 4 | Global rank table + survivor prefix-sums; device rep policy reads the same | CPU/GPU SpMV parity tests (existing harness) |
+| 5 | Spin-flip element + `SectorTransporter`; auto commutation check | half-filling: dim halves & spectra match unprojected; transported sectors match brute solves at N≤12 |
+| 6 | `AntiunitaryPairing`: k-pair skipping + `is_real` routing to the real lane | paired-sector spectra equality at N≤14; real-lane eigenvalue parity |
+| 7 | Little-group / induced-rep non-abelian lane on the OrbitTable | vs current SAB engine at moderate N; vs dense diag with degeneracy multiplets |
+
+Stages 1–4 remove the wall (and are pure consolidations — no new
+physics). Stages 5–7 add the new symmetry axes on the *same* artifact,
+which is the point of the design: **once the OrbitTable is the single
+source of truth, each additional symmetry is a new element type or a
+new piece of sector metadata — never a new construction pipeline.**
+
+## 5. Validation contract
+
+1. **Bit-identity** (stages 1–2): reps, dims, norms equal to the
+   current engine on the full N≤16 grid × every lattice fixture in
+   `tests/fixtures`, sampled parity at N=24/28.
+2. **Sum rules** on every build: Σ_sectors dim = subspace dim
+   (Burnside); Σ_sectors Z_s(β) consistency in thermal recombination.
+3. **Physics parity**: dense-diag cross-checks for every axis
+   combination {Sz} × {trans} × {PG} × {flip} × {TR} at N≤12, the
+   existing 404-test suite, and the CPU/GPU SpMV equivalence harness.
+4. **Perf gates in CI-benchmarks**: construction time at N=24 ring +
+   N=24 kagome fixture tracked nightly (`benchmarks.yml`), regression
+   threshold 1.5×.
