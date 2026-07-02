@@ -381,10 +381,13 @@ declarations only and never gained production consumers.
 | GPU          | **kernel**    | hand-rolled†  | **kernel**    | hand-rolled†  |
 | GPU + MPI    | **kernel**    | **kernel**    | **kernel**    | n/a           |
 
-\* `src/solvers/cpu/lanczos.cpp::lanczos()` body migration is **deferred**
-pending LocalDGKS3 reorth policy + kernel resume support; the on_step
-hook is in place (Phase 4.1). FTLM / LTLM CPU drivers consume
-`ed::krylov::lanczos_tridiag` (Phase 5).
+\* `src/solvers/cpu/lanczos.cpp::lanczos()` is a thin orchestrator over
+`lanczos_kernel<CpuBackend>` (Phase 2.1: LocalDGKS3 ring reorth, resume
+via `LanczosResumeState`, disk-basis + checkpoint I/O through the
+`on_step` hook). FTLM / LTLM CPU drivers consume
+`ed::krylov::lanczos_tridiag` (Phase 5). The only intentionally
+hand-rolled CPU Lanczos left is `lanczos_real` (real-arithmetic
+BLAS-1-halving fast path for real H, eigenvalues only).
 
 † GPU `gpu_krylov_schur.cu` and `gpu_block_lanczos.cu` remain
 hand-rolled. Both depend on a contiguous-device-basis layout (for

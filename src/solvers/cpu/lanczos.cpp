@@ -126,32 +126,9 @@ ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     return v;
 }
 
-// Generate a random complex vector that is orthogonal to all vectors in the provided set
-ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& vectors, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
-    ComplexVector result(N);
-    
-    // Generate a random vector
-    result = generateRandomVector(N, gen, dist);
-    
-    // Orthogonalize against all provided vectors using Gram-Schmidt
-    for (const auto& v : vectors) {
-        // Calculate projection: <v, result>
-        Complex projection;
-        cblas_zdotc_sub(N, v.data(), 1, result.data(), 1, &projection);
-        
-        // Subtract projection: result -= projection * v
-        Complex neg_projection = -projection;
-        cblas_zaxpy(N, &neg_projection, v.data(), 1, result.data(), 1);
-    }
-    
-    // Check if the resulting vector has sufficient magnitude
-    double norm = cblas_dznrm2(N, result.data(), 1);
-    
-    // Normalize
-    Complex scale = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, result.data(), 1);
-    return result;
-}
+// generateOrthogonalVector (random vector Gram-Schmidt-orthogonalized
+// against a provided set) was deleted in the debt-cleanup sweep
+// (Jul 2026): zero callers.
 
 // Helper function to refine a single eigenvector with CG
 // refine_eigenvector_with_cg and refine_degenerate_eigenvectors were
@@ -1030,11 +1007,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     }
 }
 
-// The pre-Phase-2.1 hand-rolled body is replaced; the canonical
-// implementation now lives entirely in `ed::krylov::lanczos_kernel`
-// + the orchestrator above. The legacy body below is kept under a
-// `#if 0 // pre-2026-05 lanczos body` block purely for diff-readability
-// during bisection; the compiler ignores it.
+// The pre-Phase-2.1 hand-rolled body is gone; the canonical
+// implementation lives entirely in `ed::krylov::lanczos_kernel`
+// + the orchestrator above (consult git history for the legacy body).
 
 // =============================================================================
 // lanczos_real -- real-storage / real-arithmetic Lanczos for eigenvalues only.
@@ -1337,9 +1312,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     // RAM via `Backend::UniqueVec`s rather than the legacy on-disk
     // `BasisBufferScope` --- block_size is small in practice (b=4..8)
     // so the m*b*N footprint is comparable to the single-vector
-    // Lanczos basis the disk path was originally introduced for. The
-    // legacy hand-rolled body is preserved below in `#if 0` for
-    // archaeology.
+    // Lanczos basis the disk path was originally introduced for.
     std::cout << "Starting Block Lanczos algorithm" << std::endl;
     eigenvalues.clear();
 

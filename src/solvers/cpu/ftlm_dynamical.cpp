@@ -747,7 +747,6 @@ DynamicalResponseResults compute_dynamical_correlation_state_cf(
     double energy_shift
 ) {
     // Phase 2.5 orchestrator over `ed::observables::cf_spectral_kernel<CpuBackend>`.
-    // The legacy hand-rolled body is preserved below in `#if 0` for archaeology.
     const bool verbose = ed_dssf_verbose();
     if (verbose) {
         std::cout << "\n==========================================\n";
