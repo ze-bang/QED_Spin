@@ -106,14 +106,15 @@ using Complex = std::complex<double>;
 // ---------------------------------------------------------------------------
 namespace detail {
 // Gate for the reduced-CSR symmetry matvec: assemble the reduced sector matrix
-// ONCE (via the ORBIT policy's iter_orbit / coeff_modifier) then do an O(1)-per-
-// nnz SpMV every matvec, instead of the per-matvec orbit/rep walk. This is the
-// DEFAULT (RepReducedCsr). It lives in the orbit-policy branch of matrix_free_*
-// (the rep policy lacks iter_orbit, so RepReducedCsr is routed to the orbit
-// policy by SectorOperator::make_backend_). It cannot run on the rep policy, so
-// the call sites are NOT guarded by policy_is_rep_v. The reduced sector matrix
-// materialises (~dim x nnz/row), so for very large sectors that would not fit,
-// opt out with ED_SYM_REDUCED_CSR=0 -> RepStream (CSR-free rep walk, cannot OOM).
+// ONCE then do an O(1)-per-nnz SpMV every matvec, instead of the per-matvec
+// orbit/rep walk. This is the DEFAULT (RepReducedCsr). Stage 2b (SymmetryEngine
+// v2, Jul 2026): BOTH policy branches of matrix_free_* honor it -- the rep
+// branch assembles via ``build_reduced_symmetry_csr_rep`` (index_and_projection,
+// no orbit CSR ever materialized -- the lane the hook always documented), the
+// orbit branch via the iter_orbit/coeff_modifier builder. The reduced sector
+// matrix materialises (~dim x nnz/row), so for very large sectors that would
+// not fit, opt out with ED_SYM_REDUCED_CSR=0 -> RepStream (CSR-free rep walk,
+// cannot OOM).
 // Measured net win at 27-site sz+spatial: converged GS 238 s vs 452 s rep-walk;
 // FTLM rep-walk did not finish in 70 min vs ~31 min reduced-CSR.
 inline bool reduced_csr_enabled() noexcept {
@@ -582,9 +583,19 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
+            } else if (detail::reduced_csr_enabled()) {
+                // Stage 2b: reduced sector matrix assembled straight from the
+                // rep policy (index_and_projection) -- no orbit CSR, then
+                // O(1)-per-nnz SpMV.
+                if (!rep_csr_cplx_.built())
+                    rep_csr_cplx_ = build_reduced_symmetry_csr_rep<BasisPolicy, Complex>(
+                        basis_, t.spin_l,
+                        *t.diag_one, *t.offdiag_one, *t.diag_two,
+                        *t.mixed_two, *t.offdiag_two, *t.three_body);
+                rep_csr_cplx_.spmv(in, out);
             } else {
-                // DEFAULT: SOTA lock-free row GATHER + precomputed rep diagonal.
-                // Overwrites ``out`` (no pre-zero needed).
+                // RepStream: SOTA lock-free row GATHER + precomputed rep
+                // diagonal. Overwrites ``out`` (no pre-zero needed).
                 ensure_diag_complex(t);
                 ed::matvec::kernel::apply_terms_rep_symmetry_gather<BasisPolicy, Complex>(
                     basis_, t.spin_l,
@@ -665,6 +676,15 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
+            } else if (detail::reduced_csr_enabled()) {
+                // Stage 2b: rep-assembled reduced sector matrix (see the
+                // complex twin above).
+                if (!rep_csr_real_.built())
+                    rep_csr_real_ = build_reduced_symmetry_csr_rep<BasisPolicy, double>(
+                        basis_, t.spin_l,
+                        *t.diag_one, *t.offdiag_one, *t.diag_two,
+                        *t.mixed_two, *t.offdiag_two, *t.three_body);
+                rep_csr_real_.spmv(in, out);
             } else {
                 ensure_diag_real(t);
                 ed::matvec::kernel::apply_terms_rep_symmetry_gather<BasisPolicy, double>(

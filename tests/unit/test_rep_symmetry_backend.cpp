@@ -328,6 +328,25 @@ void run_parity_case(int N, std::int64_t n_up) {
             }
             INFO("O(1) vs O(log) GATHER sector " << s << " diff " << tab_diff);
             REQUIRE(tab_diff < 1e-13 * (1.0 + scale));
+
+            // Stage 2b (SymmetryEngine v2): the rep-assembled reduced CSR
+            // (build_reduced_symmetry_csr_rep, no orbit CSR) must reproduce
+            // the rep-walk GATHER on the same vectors.
+            const auto rep_csr = ed::matvec::build_reduced_symmetry_csr_rep<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                pol_bs, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+                soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+                soa.three_body);
+            REQUIRE(rep_csr.built());
+            REQUIRE(rep_csr.dim == sd);
+            std::vector<Complex> y_csr(sd, Complex(0.0, 0.0));
+            rep_csr.spmv(x.data(), y_csr.data());
+            double csr_diff = 0.0;
+            for (std::size_t i = 0; i < sd; ++i) {
+                csr_diff = std::max(csr_diff, std::abs(y_csr[i] - y_gather[i]));
+            }
+            INFO("rep-CSR vs GATHER sector " << s << " diff " << csr_diff);
+            REQUIRE(csr_diff < 1e-12 * (1.0 + scale));
         }
     }
 }

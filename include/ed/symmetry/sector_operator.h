@@ -84,14 +84,17 @@ SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
     // OrbitMaterialized, ED_SYM_REDUCED_CSR=1 -> RepReducedCsr) and falls back to
     // the producer's rep_lazy() heuristic when Auto (no plan ran).
     //   * RepStream      -> rep policy (CSR-free on-the-fly rep walk, lean).
-    //   * RepReducedCsr  -> ORBIT policy: assembling the reduced sector matrix
-    //                       needs iter_orbit / coeff_modifier, which the rep
-    //                       policy does not expose. The orbit backend builds the
-    //                       CSR once, gated by reduced_csr_enabled().
-    //   * OrbitMaterialized / Auto-eager -> orbit policy (orbit-walk gather).
+    //   * RepReducedCsr  -> rep policy TOO (Stage 2b, SymmetryEngine v2): the
+    //                       reduced sector matrix is assembled straight from
+    //                       ``index_and_projection`` inside the rep backend
+    //                       (build_reduced_symmetry_csr_rep), so the per-sector
+    //                       orbit CSR is never materialized on the default lane.
+    //   * OrbitMaterialized / Auto-eager -> orbit policy (orbit-walk gather;
+    //                       ED_SYM_REP=0 is the bisection escape back to it).
     const int  sym = ed::planner::resolved_sym_matvec_repr();
     const bool want_rep =
         sym == static_cast<int>(ed::planner::SymMatvecRepr::RepStream)     ||
+        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr) ||
         (sym == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
          && producer_.rep_lazy());
     if (want_rep) {

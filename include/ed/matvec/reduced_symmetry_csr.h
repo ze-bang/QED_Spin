@@ -218,4 +218,84 @@ template <class BasisPolicy, class Scalar,
     return csr;
 }
 
+// ---------------------------------------------------------------------------
+// build_reduced_symmetry_csr_rep -- Stage 2b of the SymmetryEngine v2 plan
+// (docs/architecture/SYMMETRY_V2_DESIGN.md): assemble the reduced sector
+// matrix from the CSR-FREE representative policy
+// (``RepSymmetryBasisPolicy``), so the default ``RepReducedCsr`` CPU lane
+// never materializes the per-sector orbit CSR (O(dim_Sz) images +
+// coefficients, ~24 GiB/sector at N=32) that the orbit-policy builder above
+// requires.
+//
+// Element math mirrors ``apply_terms_rep_symmetry_gather`` verbatim (the
+// single source of the rep-walk matrix element): row r applies H to the one
+// representative ``rep_r = state_of(r)``; each connected computational
+// state ``s'`` resolves to its source column ``j`` + projection ``proj``
+// via ``index_and_projection``, contributing
+//
+//     A[r, j] += inv_norm[r] * conj(h(s') * proj(s'))
+//
+// (all six term bins enumerated, so the diagonal lands in the CSR
+// naturally). CSR * v therefore equals the rep-walk gather to machine
+// precision -- pinned by tests/unit/test_reduced_symmetry_csr.cpp.
+// ---------------------------------------------------------------------------
+template <class RepPolicy, class Scalar,
+          class D1, class O1, class D2, class M2, class O2, class T3>
+[[nodiscard]] inline ReducedSymmetryCsr<Scalar> build_reduced_symmetry_csr_rep(
+    RepPolicy basis, double spin_l,
+    const D1& diag_one_body, const O1& offdiag_one_body,
+    const D2& diag_two_body, const M2& mixed_two_body,
+    const O2& offdiag_two_body, const T3& three_body)
+{
+    const std::uint64_t dim = basis.dim();
+
+    ReducedSymmetryCsr<Scalar> csr;
+    csr.dim = dim;
+    csr.row_ptr.assign(dim + 1, 0);
+
+    std::vector<std::vector<std::pair<std::uint32_t, Scalar>>> rows(dim);
+#ifdef _OPENMP
+    const std::uint64_t par = static_cast<std::uint64_t>(omp_get_max_threads()) * 256ULL;
+#else
+    const std::uint64_t par = std::numeric_limits<std::uint64_t>::max();
+#endif
+    #pragma omp parallel for schedule(dynamic, 256) if(dim > par)
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+        const std::uint64_t r     = static_cast<std::uint64_t>(ir);
+        const std::uint64_t rep_r = basis.state_of(r);
+        const Scalar inv_norm_r = kernel::coerce_coeff<Scalar>(
+            std::complex<double>(basis.inv_norm_of(r), 0.0));
+        std::unordered_map<std::uint32_t, Scalar> acc;
+        kernel::apply_term_to_state<Scalar>(
+            rep_r, spin_l,
+            diag_one_body, offdiag_one_body, diag_two_body,
+            mixed_two_body, offdiag_two_body, three_body,
+            [&](std::uint64_t s_prime, const Scalar& h) {
+                std::complex<double> proj;
+                const std::int64_t j = basis.index_and_projection(s_prime, proj);
+                if (j < 0) return;
+                acc[static_cast<std::uint32_t>(j)] +=
+                    inv_norm_r * kernel::conj_scalar<Scalar>(
+                        h * kernel::coerce_coeff<Scalar>(proj));
+            });
+        auto& dstrow = rows[r];
+        dstrow.reserve(acc.size());
+        for (const auto& kv : acc)
+            if (std::abs(kv.second) > 0.0) dstrow.emplace_back(kv.first, kv.second);
+        std::sort(dstrow.begin(), dstrow.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
+
+    for (std::uint64_t r = 0; r < dim; ++r)
+        csr.row_ptr[r + 1] = csr.row_ptr[r] + rows[r].size();
+    const std::uint64_t total = csr.row_ptr[dim];
+    csr.col_idx.resize(total);
+    csr.val.resize(total);
+    for (std::uint64_t r = 0; r < dim; ++r) {
+        std::uint64_t e = csr.row_ptr[r];
+        for (const auto& cv : rows[r]) { csr.col_idx[e] = cv.first; csr.val[e] = cv.second; ++e; }
+    }
+    return csr;
+}
+
 }  // namespace ed::matvec
