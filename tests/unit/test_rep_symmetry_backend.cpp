@@ -347,6 +347,45 @@ void run_parity_case(int N, std::int64_t n_up) {
             }
             INFO("rep-CSR vs GATHER sector " << s << " diff " << csr_diff);
             REQUIRE(csr_diff < 1e-12 * (1.0 + scale));
+
+            // Stage 4 (SymmetryEngine v2): the two-level shared-rank lookup
+            // (one dense table per (N, n_up) + per-sector local remap) must
+            // reproduce the binary-search GATHER exactly (same lookup result
+            // -> identical arithmetic).
+            ed::symmetry::RepSectorData rd_two =
+                ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+            rd_two.shared_rank = ed::symmetry::make_shared_rank_lookup(
+                reps, N, static_cast<int>(n_up));
+            REQUIRE(rd_two.shared_rank != nullptr);
+            rd_two.local_of_shared.assign(reps.size(), std::int32_t{-1});
+            {
+                std::size_t local = 0;
+                for (std::size_t gi = 0; gi < reps.size(); ++gi) {
+                    if (local < rd_two.reps.size() &&
+                        rd_two.reps[local] == reps[gi]) {
+                        rd_two.local_of_shared[gi] =
+                            static_cast<std::int32_t>(local++);
+                    }
+                }
+                REQUIRE(local == rd_two.reps.size());
+            }
+            REQUIRE(rd_two.has_two_level());
+            const auto pol_two = ed::matvec::rep_policy_from(rd_two);
+            REQUIRE(pol_two.shared_rank_of != nullptr);
+
+            std::vector<Complex> y_two(sd, Complex(0.0, 0.0));
+            ed::matvec::kernel::apply_terms_rep_symmetry_gather<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                pol_two, 0.5, soa.diag_one_body, soa.offdiag_one_body,
+                soa.diag_two_body, soa.mixed_two_body, soa.offdiag_two_body,
+                soa.three_body, x.data(), y_two.data(), nullptr);
+            double two_diff = 0.0;
+            for (std::size_t i = 0; i < sd; ++i) {
+                two_diff = std::max(two_diff, std::abs(y_two[i] - y_gather[i]));
+            }
+            INFO("two-level vs binary-search GATHER sector " << s
+                 << " diff " << two_diff);
+            REQUIRE(two_diff == 0.0);
         }
     }
 }

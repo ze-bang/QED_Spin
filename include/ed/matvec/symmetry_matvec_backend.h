@@ -115,9 +115,14 @@ rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
     p.group_size = rd.group_size;
     p.n_sites    = rd.n_sites;
     p.n_up       = rd.n_up;
-    // Phase A: when the sector carries the dense rank table, wire it in for the
-    // O(1) reverse lookup (index_of_rep falls back to binary search when null).
-    if (rd.has_rank_table()) {
+    // Stage 4 two-level lookup takes precedence: shared rank table (one per
+    // (N, n_up)) + per-sector local remap. Then the legacy dense per-sector
+    // table; index_of_rep falls back to binary search when neither is set.
+    if (rd.has_two_level()) {
+        p.shared_rank_of  = rd.shared_rank->shared_of_rank.data();
+        p.local_of_shared = rd.local_of_shared.data();
+        p.binom           = &rd.shared_rank->binom;
+    } else if (rd.has_rank_table()) {
         p.rep_index_of_rank = rd.rep_index_of_rank.data();
         p.binom             = &rd.binom;
     }

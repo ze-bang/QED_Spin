@@ -407,6 +407,7 @@ public:
         // RepSymmetryBasisPolicy consumes it transparently (binary-search
         // fallback when absent), so this only ever speeds the reverse lookup.
         if (rep_data_.usable() && !rep_data_.has_rank_table()
+            && !rep_data_.has_two_level()  // Stage 4: shared table already wired
             && rep_rank_table_enabled(rep_data_.rank_table_entries())) {
             rep_data_.build_rank_table();
         }

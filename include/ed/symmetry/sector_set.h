@@ -631,6 +631,21 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
         stabs = build_orbit_stabilizers(*reps_sp, projector);
     }
 
+    // Stage 4: ONE shared rank table per (N, n_up) -- every irrep sector
+    // co-owns it and carries only the small local remap, replacing the
+    // per-sector C(N,n_up) x int32 dense tables. Budget-gated like the
+    // legacy per-sector build (rep_rank_table_enabled).
+    std::shared_ptr<const SharedRankLookup> srl;
+    {
+        ed::core::combinadic::BinomialTable b(static_cast<int>(n_bits));
+        if (rep_rank_table_enabled(
+                b.at(static_cast<int>(n_bits), static_cast<int>(n_up)))) {
+            SymPhaseTimer prof("stage4 shared rank table (one per n_up)");
+            srl = make_shared_rank_lookup(
+                *reps_sp, static_cast<int>(n_bits), static_cast<int>(n_up));
+        }
+    }
+
     // Fix 4: Compute perms_flat once; reuse across all sectors.
     const std::vector<int> shared_perms_flat =
         flatten_group_perms(*info_sp, static_cast<int>(n_bits));
@@ -666,6 +681,10 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
         rd.group_size = static_cast<int>(group_size);
         rd.reps.reserve(reps_sp->size());
         rd.inv_norms.reserve(reps_sp->size());
+        if (srl) {  // Stage 4: per-sector local remap over the shared reps
+            rd.shared_rank = srl;
+            rd.local_of_shared.assign(reps_sp->size(), std::int32_t{-1});
+        }
         int  sec_n_up = -1;
         bool uniform  = true;
         // χ_s(g) over the group (used both for the fused norm and stored on rd
@@ -692,6 +711,10 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
             }
             rd.reps.push_back(rep);
             rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+            if (srl) {
+                rd.local_of_shared[i] =
+                    static_cast<std::int32_t>(rd.reps.size() - 1);
+            }
             const int pc = __builtin_popcountll(rep);
             if (sec_n_up < 0) sec_n_up = pc;
             else if (pc != sec_n_up) uniform = false;
@@ -987,6 +1010,19 @@ build_all_sz_sector_operators(
             // holds); each irrep below reads its norm straight from them.
             const std::vector<std::uint16_t>& stab_ids = stabid_by_n_up[nu];
 
+            // Stage 4: one shared rank table per n_up, co-owned by all
+            // |G| irrep sectors of this Sz block (budget-gated).
+            std::shared_ptr<const SharedRankLookup> srl;
+            {
+                ed::core::combinadic::BinomialTable b(static_cast<int>(n_bits));
+                if (rep_rank_table_enabled(b.at(static_cast<int>(n_bits),
+                                                static_cast<int>(n_up)))) {
+                    srl = make_shared_rank_lookup(
+                        *reps_sp, static_cast<int>(n_bits),
+                        static_cast<int>(n_up));
+                }
+            }
+
             // Fix 3: Parallelize the irrep loop.
             // Each irrep s is independent: orbit walks read only shared
             // read-only data (subspace, projector, phase_factors, reps_sp)
@@ -1017,6 +1053,11 @@ build_all_sz_sector_operators(
                 rd.group_size = static_cast<int>(group_size);
                 rd.reps.reserve(reps_sp->size());
                 rd.inv_norms.reserve(reps_sp->size());
+                if (srl) {  // Stage 4: local remap over the per-n_up reps
+                    rd.shared_rank = srl;
+                    rd.local_of_shared.assign(reps_sp->size(),
+                                              std::int32_t{-1});
+                }
                 int  sec_n_up = -1;
                 bool uniform  = true;
                 const std::vector<Complex> chi =
@@ -1040,6 +1081,10 @@ build_all_sz_sector_operators(
                     }
                     rd.reps.push_back(rep);
                     rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+                    if (srl) {
+                        rd.local_of_shared[i] =
+                            static_cast<std::int32_t>(rd.reps.size() - 1);
+                    }
                     const int pc = __builtin_popcountll(rep);
                     if (sec_n_up < 0) sec_n_up = pc;
                     else if (pc != sec_n_up) uniform = false;
