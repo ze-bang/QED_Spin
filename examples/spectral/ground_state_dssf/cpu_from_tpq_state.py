@@ -100,9 +100,9 @@ rank0_print(f"S(w= 5.0) = {sres.S_real[-1]:.6f}")
 # === Expected output (smoke-tested by the CI harness; non-zero spectral weight ===
 # === at finite omega confirms the TPQ-to-CF pipeline ran end-to-end.) =============
 # tpq.hdf5_path = ed_tpq_to_cf_demo/ed_results.h5
-# reloaded snapshot       = beta_1.003320
+# reloaded snapshot       = beta_0.993528
 # |psi_beta|.shape        = (64,)
-# S(w=-5.0) = 0.000730
-# S(w= 0.0) = 0.621470
-# S(w= 5.0) = 0.003358
+# S(w=-5.0) = 0.000731
+# S(w= 0.0) = 0.617431
+# S(w= 5.0) = 0.003386
 # ===========================================================================

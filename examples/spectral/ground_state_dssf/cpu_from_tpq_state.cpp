@@ -122,10 +122,10 @@ int main(int argc, char** argv) {
     // tpq.hdf5_path = ed_tpq_to_cf_demo/ed_results.h5
     // loadTPQState ok       = 1
     // |psi_beta| dim        = 64
-    // nearest snapshot beta = 1.006
-    // S(w=-5.0) = 0.000729
-    // S(w= 0.0) = 0.623659
-    // S(w= 5.0) = 0.003318
+    // nearest snapshot beta = 0.9935
+    // S(w=-5.0) = 0.000731
+    // S(w= 0.0) = 0.617431
+    // S(w= 5.0) = 0.003386
     // ===========================================================================
     return 0;
 }
