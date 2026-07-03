@@ -25,6 +25,7 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/time_reversal.h>
 #include <ed/symmetry/sym_profile.h>
 #include <ed/core/operator.h>
 #include <ed/core/results.h>
@@ -3219,6 +3220,75 @@ void bind_workflows(py::module_& m) {
                           "and automorphism_results/ directory.");
                   }
 
+                  // ---------------------------------------------------------
+                  // Stage 6 (SymmetryEngine v2): time-reversal sector pairing.
+                  // For real-coefficient H, conjugation maps irrep k -> -k
+                  // with an identical spectrum / Z_s(beta), so solve one
+                  // member of each conjugate pair and copy to the partner.
+                  // Composes with the 5a Sz transporter (runs within each
+                  // solved Sz block) and 5b (synthetic flip indices pair as
+                  // k + p*nirr -> conj(k) + p*nirr: conjugation commutes with
+                  // the flip and keeps the parity). ED_SYM_TIME_REVERSAL=0
+                  // disables.
+                  // ---------------------------------------------------------
+                  const std::size_t n_raw = set.num_raw_sectors;
+                  std::vector<std::int32_t> tr_partner;   // raw k -> conj k
+                  bool tr_pair = false;
+                  if (ed::symmetry::time_reversal_pairing_enabled()
+                      && n_raw > 0) {
+                      auto probe_tr = ed::detail::build_base_op(spec);
+                      ed::detail::load_terms_into(*probe_tr, spec);
+                      ed::matvec::TermStorage soa_tr;
+                      ed::matvec::TermStorage::classify_route(
+                          soa_tr, probe_tr->transform_data_,
+                          probe_tr->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      if (ed::symmetry::hamiltonian_is_real(soa_tr)) {
+                          probe_tr->symmetry_info.loadFromDirectory(directory);
+                          tr_partner = ed::symmetry::conjugate_sector_pairing(
+                              probe_tr->symmetry_info);
+                          tr_pair = !tr_partner.empty();
+                      }
+                  }
+                  // Skip mask: entry i is a NON-canonical conjugate partner
+                  // (partner exists in the set for the same n_up with equal
+                  // dim, and has a strictly smaller synthetic index).
+                  std::vector<char> tr_skip(
+                      static_cast<std::size_t>(n_ops), 0);
+                  if (tr_pair) {
+                      // (n_up, raw index) -> op index for partner lookup.
+                      std::map<std::pair<int, std::size_t>, std::size_t> where;
+                      for (std::size_t i = 0;
+                           i < set.tags.size(); ++i) {
+                          where[{set.tags[i].n_up,
+                                 set.tags[i].sector_index}] = i;
+                      }
+                      std::size_t n_skip = 0;
+                      for (std::size_t i = 0; i < set.tags.size(); ++i) {
+                          const auto& tag = set.tags[i];
+                          const std::size_t k = tag.sector_index % n_raw;
+                          const std::int32_t pk = tr_partner[k];
+                          if (pk < 0) continue;              // malformed: solve
+                          const std::size_t praw =
+                              static_cast<std::size_t>(pk)
+                              + (tag.sector_index / n_raw) * n_raw;
+                          if (praw >= tag.sector_index) continue;  // canonical
+                          const auto it = where.find({tag.n_up, praw});
+                          if (it == where.end()) continue;   // partner absent
+                          if (set.tags[it->second].sector_dim
+                              != tag.sector_dim) continue;   // paranoia: solve
+                          tr_skip[i] = 1;
+                          ++n_skip;
+                      }
+                      if (n_skip == 0) tr_pair = false;
+                      else if (ed::symmetry::sym_profile_enabled()) {
+                          std::fprintf(stderr,
+                              "[sym-profile] time-reversal pairing: skipping "
+                              "%zu of %ld conjugate sectors\n",
+                              n_skip, n_ops);
+                      }
+                  }
+
                   // Pre-build the beta grid once (same logic as the
                   // per-n_up binding but shared across ALL sectors).
                   if (opts.betas.empty() && opts.num_temp_bins > 0
@@ -3316,6 +3386,7 @@ void bind_workflows(py::module_& m) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
+                      if (tr_skip[i]) continue;  // Stage 6: copy from partner
                       ed::workflows::ThermalOptions topts = opts;
                       topts.selected_sectors.clear();
                       if (need_per_sector_outdir) {
@@ -3343,10 +3414,30 @@ void bind_workflows(py::module_& m) {
                   std::string sector_lane;
                   std::size_t sector_mpi_size = 1;
 
+                  // Stage 6: (n_up, raw) -> op index of the SOLVED canonical
+                  // member, for sourcing the skipped conjugate partners.
+                  std::map<std::pair<int, std::size_t>, std::size_t> tr_where;
+                  if (tr_pair) {
+                      for (std::size_t i = 0; i < set.tags.size(); ++i)
+                          if (!tr_skip[i])
+                              tr_where[{set.tags[i].n_up,
+                                        set.tags[i].sector_index}] = i;
+                  }
+
                   for (long ii = 0; ii < n_ops; ++ii) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
+                      if (tr_skip[i]) {
+                          const auto& tag = set.tags[i];
+                          const std::size_t k  = tag.sector_index % n_raw;
+                          const std::size_t praw =
+                              static_cast<std::size_t>(tr_partner[k])
+                              + (tag.sector_index / n_raw) * n_raw;
+                          const auto it = tr_where.find({tag.n_up, praw});
+                          if (it != tr_where.end())
+                              all_results[i] = all_results[it->second];
+                      }
                       auto& tr = all_results[i];
                       if (sector_lane.empty()
                           && !tr.backend.lane.empty()) {

@@ -131,3 +131,55 @@ def test_flip_projection_thermal_parity_cpu():
     assert sum(d_proj) == sum(d_base)
     assert len(d_proj) > len(d_base)
     assert max(d_proj) < max(d_base)   # the biggest sector genuinely halved
+
+
+def test_time_reversal_pairing_thermal_parity():
+    """Stage 6: conjugate-sector (k <-> -k) pairing must reproduce the
+    full solve to machine precision (real H), composing with the 5a/5b
+    flip machinery on the CPU lane."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def run():
+        return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=12,
+                           symmetry=gen, random_seed=3, device="cpu",
+                           verbose=False)
+
+    r_on = run()
+    r_off = _with_env("ED_SYM_TIME_REVERSAL", "0", run)
+
+    np.testing.assert_allclose(r_on.energy, r_off.energy,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(r_on.entropy, r_off.entropy,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(r_on.specific_heat, r_off.specific_heat,
+                               rtol=0, atol=1e-9)
+    # Identical sector coverage (skipped partners are copied, not dropped).
+    assert sorted((e.n_up, e.sector_dim) for e in r_on.per_sector) == \
+           sorted((e.n_up, e.sector_dim) for e in r_off.per_sector)
+
+
+def test_time_reversal_declines_complex_hamiltonian():
+    """Negative control: an imaginary coupling (DM-like S+S- phase) makes
+    H complex in the computational basis; the pairing gate must decline
+    and the run must equal the gate-off baseline trivially."""
+    b = qed.input.HamiltonianBuilder(N_SITES)
+    b.heisenberg([(i, (i + 1) % N_SITES) for i in range(N_SITES)], J=1.0)
+    # Sz-conserving but complex: c * S+_0 S-_1 + conj(c) * S-_0 S+_1
+    Op = qed.input.Op
+    b.add_two_body(Op.Sp, 0, Op.Sm, 1, 0.15j)
+    b.add_two_body(Op.Sm, 0, Op.Sp, 1, -0.15j)
+    H = b.to_operator()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def run():
+        return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=10,
+                           symmetry=gen, random_seed=5, device="cpu",
+                           verbose=False)
+
+    r_on = run()
+    r_off = _with_env("ED_SYM_TIME_REVERSAL", "0", run)
+    np.testing.assert_allclose(r_on.energy, r_off.energy,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(r_on.entropy, r_off.entropy,
+                               rtol=0, atol=1e-10)

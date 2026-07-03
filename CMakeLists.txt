@@ -1187,6 +1187,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
     # Stage-5b SymmetryEngine v2: in-sector flip projection ((k,+/-) spectrum union)
     ed_add_test(test_flip_projection            tests/unit/test_flip_projection.cpp USE_CATCH2)
+    # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
+    ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)
