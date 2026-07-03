@@ -92,8 +92,31 @@ qed.solve(H, symmetry=gens)             # (FullSpace, [Spatial])
 qed.solve(H, sz=N//2, symmetry=gens)    # (FixedSz,   [Spatial])
 ```
 
-The same kwargs work on `qed.thermal` and `qed.spectral`. Discover
-generators automatically:
+The same kwargs work on `qed.thermal` and `qed.spectral`. The
+shortest path is `symmetry="auto"` -- the automorphism search runs
+internally and the maximal commuting generator set is used:
+
+```python
+res = qed.solve(H, num_eigenvalues=4, sz=N // 2, symmetry="auto")
+```
+
+Two more discrete symmetries auto-compose on top: the global spin
+flip (transport n_up -> N - n_up + the (k, +/-) projection at half
+filling) and time reversal (solve k, copy the spectrum to -k). Each
+has a four-state toggle -- `spin_flip=` / `time_reversal=` in
+{"auto", "on", "off", "require"} -- where `"on"` REPORTS: it confirms
+the detection, or warns and continues without the symmetry when your
+Hamiltonian lacks it (a Zeeman field breaks the flip, complex
+couplings break TR):
+
+```python
+res = qed.solve(H, sz=N // 2, symmetry="auto",
+                spin_flip="on", time_reversal="on")
+print(qed._core.detect_hamiltonian_symmetries(H))
+# {'spin_flip': True, 'time_reversal': True}
+```
+
+To inspect / pick groups explicitly:
 
 ```python
 report = qed.find_symmetries(H, verbose=False)
@@ -104,7 +127,7 @@ res = qed.solve(H, num_eigenvalues=4,
                 symmetry=report.full_set)
 ```
 
-End-to-end demo of all four cells: [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).
+Knob-complete walkthroughs: [`examples/tour/`](../../examples/tour/).
 Per-cell minimal twins live under
 [`examples/solve/lanczos/`](../../examples/solve/lanczos/),
 [`examples/solve/full/`](../../examples/solve/full/),

@@ -36,9 +36,13 @@ print(qed.solve(H).eigenvalues[0])               # -5.387390917...
 print(qed.solve(H, num_eigenvalues=4, sz=N // 2).eigenvalues)
 
 # 5. Bottom of the spectrum projected onto the full automorphism group +
-#    Sz=0 sector. The streaming symmetry kernel runs under the hood.
+#    Sz=0 sector. symmetry="auto" runs the search internally (pass a
+#    GeneratorSet to pick a subgroup yourself); the spin-flip and
+#    time-reversal mechanisms auto-compose on top, with per-call
+#    toggles spin_flip= / time_reversal= in {"auto","on","off","require"}
+#    ("on" = exploit + report, warn-and-continue when H lacks it).
 print(qed.solve(H, num_eigenvalues=4,
-               symmetry=report.full_set,
+               symmetry="auto",
                sz=N // 2).eigenvalues)
 
 # 6. Memory safety: there is no pre-flight planner. If the dominant
@@ -46,8 +50,7 @@ print(qed.solve(H, num_eigenvalues=4,
 #    clean error (naming the workflow + estimated vs available bytes)
 #    instead of OOM-killing the process. Shrink dim with sz + symmetry,
 #    or distribute with device='mpi'. Bypass with ED_MEM_GUARD_OFF=1.
-qed.solve(H_big, solver="FTLM", sz=16,
-          symmetry=qed.find_symmetries(H_big).full_set)
+qed.solve(H_big, solver="FTLM", sz=16, symmetry="auto")
 ```
 
 That's it. Everything below explains the knobs that the function picks

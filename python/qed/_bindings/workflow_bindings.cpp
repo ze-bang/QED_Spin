@@ -607,6 +607,40 @@ void bind_workflows(py::module_& m) {
     // -----------------------------------------------------------------
     // The three entry points.
     // -----------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // Symmetry detection for the Python toggle surface (Stage 8e):
+    // term-level checks of the discrete symmetries the composition
+    // layer can exploit, so qed.solve/thermal/spectral can REPORT
+    // which symmetries the Hamiltonian actually carries and degrade
+    // gracefully when a requested one is absent.
+    // -----------------------------------------------------------------
+    m.def("detect_hamiltonian_symmetries",
+          [](const Operator& op) {
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op.transform_data_, op.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              py::dict out;
+              out["spin_flip"] =
+                  ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+              out["time_reversal"] = ed::symmetry::hamiltonian_is_real(soa);
+              return out;
+          },
+          py::arg("op"),
+          R"pbdoc(
+            Term-level discrete-symmetry detection.
+
+            Returns ``{"spin_flip": bool, "time_reversal": bool}``:
+            whether ``[H, prod_i sigma^x_i] == 0`` (global spin flip)
+            and whether every coefficient is real in the computational
+            basis (time reversal / conjugation pairing). These are the
+            same checks the C++ composition layer
+            (``ed::symmetry::resolve_symmetry_composition``) runs; the
+            Python binding exists so the toggle surface can *report*
+            the detection outcome and warn on a requested-but-absent
+            symmetry instead of failing later.
+          )pbdoc");
+
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
               // GPU lane (operator-collapse Phase 2a): the host Operator /

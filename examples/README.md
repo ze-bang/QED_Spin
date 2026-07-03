@@ -1,10 +1,27 @@
-# `examples/` — one example per ONLINE cell
+# `examples/` — start with the tour
 
-The tree under this directory is the canonical reference for how to
-drive the unified ED API after the May 2026 *mirror examples* overhaul.
-Every cell is the smallest viable program that exercises a single
-`(backend × symmetry × method)` triple, and every C++ binary has a
-Python twin that prints the same numbers.
+**New here? Read `tour/` first.** Four heavily-commented scripts cover
+every real knob the library exposes, one verb per file:
+
+| script | verb | what it covers |
+|---|---|---|
+| [`tour/01_ground_state.py`](tour/01_ground_state.py) | `qed.solve` | `symmetry="auto"`, per-symmetry toggles (`spin_flip=`/`time_reversal=` with auto/on/off/require), solvers, devices, per-sector attribution, eigenvectors |
+| [`tour/02_finite_temperature.py`](tour/02_finite_temperature.py) | `qed.thermal` | mTPQ/cTPQ/FTLM/LTLM/KPM, the flat sector pool + flip/TR copies, Sz windows, seeds, devices |
+| [`tour/03_dynamics_dssf.py`](tour/03_dynamics_dssf.py) | `qed.spectral` | momentum-resolved probes (S^z_Q / S^±_Q), GS + finite-T DSSF through the sector machinery, selection rules, broadening/Krylov knobs |
+| [`tour/04_symmetry_toolkit.py`](tour/04_symmetry_toolkit.py) | — | `find_symmetries`, explicit generator sets, sector selection, the four-state toggles, env escapes |
+
+Each script runs standalone in a few seconds:
+`python3 examples/tour/01_ground_state.py`.
+
+## The compatibility grid (`solve/`, `thermal/`, `spectral/`)
+
+The per-cell tree below the tour is a *compatibility grid*, not a
+tutorial: every cell is the smallest viable program that exercises a
+single `(backend × symmetry × method)` triple, and every C++ binary has
+a Python twin that prints the same numbers. CI runs the CPU lane of
+this grid against pinned expected outputs to guard the API surface
+against drift — treat it as executable reference material when you
+need the exact spelling for one specific combination.
 
 ## Layout
 

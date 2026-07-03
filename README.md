@@ -114,33 +114,61 @@ the operator geometry and the build flags; pin manually with
 
 ---
 
-## Symmetries — orthogonal composition
+## Symmetries — auto mode and per-symmetry toggles
 
-Symmetry projection is **orthogonal**: a sector is described by one
-`Subspace` (which computational basis states are enumerated) and one
-ordered `ProjectorChain` (zero or more group representations applied
-on top). The public Python kwargs encode the two axes directly:
+`symmetry="auto"` finds the maximal block diagonalisation for the
+Hamiltonian you pass in: the automorphism search runs internally, the
+largest commuting spatial group is used, and it composes with the
+independently auto-detected U(1) Sz axis, the spin-flip
+transporter/projector and the time-reversal sector pairing. Works on
+all three verbs and every backend:
 
 ```python
-# (Subspace, ProjectorChain)              Public kwargs
-# ----------------------------            -------------
-# (FullSpaceSubspace, [])                 qed.solve(H)
-# (FixedSzSubspace,   [])                 qed.solve(H, sz=N//2)
-# (FullSpaceSubspace, [Spatial])          qed.solve(H, symmetry=gens)
-# (FixedSzSubspace,   [Spatial])          qed.solve(H, sz=N//2, symmetry=gens)
+qed.solve(H,  symmetry="auto", sz=N//2)               # GS
+qed.thermal(H, method="mTPQ", symmetry="auto")        # finite T
+qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
+             sz=N//2, momentum_transfer=[0.5])        # DSSF
 ```
 
-The headers live at
-[`include/ed/symmetry/subspace.h`](include/ed/symmetry/subspace.h),
-[`include/ed/symmetry/projector.h`](include/ed/symmetry/projector.h),
-and
-[`include/ed/symmetry/projector_chain.h`](include/ed/symmetry/projector_chain.h).
-Future axes (spin-flip Z₂, time-reversal antiunitary, SU(2) total-S)
-extend the chain or add new Subspace specialisations *without* touching
-the operator hierarchy. Full design discussion:
-[`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6.
-Copy-pasteable end-to-end demo:
-[`examples/_legacy/16_python_orthogonal_symmetry.py`](examples/_legacy/16_python_orthogonal_symmetry.py).
+Each discrete symmetry has its own four-state toggle, so you can mix
+and match — and the library tells you what your Hamiltonian actually
+has:
+
+| value | meaning |
+|---|---|
+| `"auto"` (default) | exploit the symmetry when H carries it, silently skip otherwise |
+| `"on"` | same, but REPORT: confirms detection, **warns and continues without it** when H lacks the symmetry |
+| `"off"` | never exploit it |
+| `"require"` | hard contract: throw when H lacks the symmetry |
+
+```python
+qed.solve(H, symmetry="auto", sz=N//2,
+          spin_flip="on", time_reversal="on")
+# [qed] symmetry='auto': U(1) Sz conserved; using generator set
+#       'full_automorphism' (|G| = 8).
+# [qed] spin_flip: Hamiltonian carries it -> exploiting.
+# [qed] time_reversal: Hamiltonian carries it -> exploiting.
+
+qed.solve(H_with_field, spin_flip="on", ...)
+# RuntimeWarning: spin_flip='on' requested but the Hamiltonian does
+# not carry this symmetry ([H, prod sigma^x] != 0 -- e.g. a Zeeman
+# field ...); running without it.
+```
+
+`qed._core.detect_hamiltonian_symmetries(H)` exposes the same
+term-level detection directly
+(`{"spin_flip": bool, "time_reversal": bool}`);
+`qed.find_symmetries(H)` reports the U(1) and spatial axes.
+
+Under the hood a sector is one `Subspace` (which computational basis
+states are enumerated) x one `ProjectorChain` (group representations
+applied on top); the composition layer
+([`include/ed/symmetry/sector_plan.h`](include/ed/symmetry/sector_plan.h))
+plans which sectors to build, which to solve, and which to copy from a
+partner (flip transport / mirror, time-reversal pairing). Full design:
+[`docs/architecture/SYMMETRY_V2_DESIGN.md`](docs/architecture/SYMMETRY_V2_DESIGN.md);
+measured speedups: [`docs/perf/`](docs/perf/) and
+`benchmarks/bench_auto_symmetry.py`.
 
 ---
 

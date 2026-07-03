@@ -71,6 +71,7 @@ from .workflow import (                 # in-memory symmetry -> temp directory
     _write_operator_directory as _write_operator_directory,
     _write_symmetry_directory as _write_symmetry_directory,
     _normalize_symmetry_info as _normalize_symmetry_info,
+    resolve_auto_symmetry as _resolve_auto_symmetry,
     SymmetryArg as SymmetryArg,
 )
 
@@ -207,18 +208,12 @@ def _ed_result_from_thermal_result(
     return out
 
 
-def _sym_toggle_int(value, name: str) -> int:
+def _sym_toggle_int(value, name: str, operator=None, verbose=True) -> int:
     """Map a spin_flip / time_reversal kwarg to the C++ toggle int:
-    -1 = auto (commutation check + env gate), 0 = off, 1 = require."""
-    if value is None or value == "auto":
-        return -1
-    if value in (False, "off", 0):
-        return 0
-    if value in (True, "require", 1):
-        return 1
-    raise ValueError(
-        f"{name} must be one of 'auto'|'off'|'require' (or None/bool), "
-        f"got {value!r}")
+    -1 auto / 0 off / 1 require, with 'on' = auto + detection report.
+    Delegates to :func:`qed.workflow.resolve_discrete_toggle`."""
+    from .workflow import resolve_discrete_toggle
+    return resolve_discrete_toggle(operator, value, name, verbose=verbose)
 
 
 def _thermal_via_workflows_all_sz_streaming_symmetry(
@@ -725,6 +720,13 @@ def thermal(
     # in-memory API. (A non-abelian generator set is reduced by its maximal
     # abelian subgroup here -- a complete, correct, coarser reduction; for the
     # FULL non-abelian reduction use qed._core.symmetry_adapted_thermodynamics.)
+    if not is_directory:
+        # symmetry='auto' -> maximal spatial generator set (or None);
+        # 'on' toggles -> detection-checked ints (report + degrade).
+        symmetry = _resolve_auto_symmetry(H, symmetry, verbose=verbose)
+        spin_flip = _sym_toggle_int(spin_flip, "spin_flip", H, verbose)
+        time_reversal = _sym_toggle_int(
+            time_reversal, "time_reversal", H, verbose)
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
@@ -737,6 +739,8 @@ def thermal(
             _fwd["num_sites"] = _N
             _fwd["use_symmetry_if_available"] = True
             _fwd["symmetry"] = None
+            _fwd["spin_flip"] = spin_flip          # already resolved ints
+            _fwd["time_reversal"] = time_reversal
             return thermal(_tmp, **_fwd)
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)

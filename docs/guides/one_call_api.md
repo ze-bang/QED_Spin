@@ -46,17 +46,21 @@ What `qed.solve` decides for you (override any of these via kwargs):
 * **Auto Sz** (`auto_sz=True` by default): if `H.conserves_sz()` and you
   didn't pass `sz=`, projects to the half-filled Sz=N/2 sector
   automatically (set `auto_sz=False` to keep the full Hilbert space).
-* **Symmetry**: pass `symmetry=` (a `GeneratorSet` or the dict from
-  `qed.symmetry.group_from_generators`) to dispatch through the
-  streaming-symmetry kernel. Symmetry projection is strictly opt-in.
-  Internally the `sz=` and `symmetry=` kwargs are orthogonal —
-  they map onto the `(Subspace, ProjectorChain)` decomposition
-  introduced in May 2026:
+* **Symmetry**: `symmetry="auto"` runs the automorphism search
+  internally and uses the maximal commuting spatial group; or pass a
+  `GeneratorSet` / permutation list / the dict from
+  `qed.symmetry.group_from_generators` explicitly (`"off"` / `None`
+  disables). The spatial sectors compose with two more discrete axes,
+  each with its own four-state toggle `spin_flip=` / `time_reversal=`
+  in {"auto", "on", "off", "require"}: `"on"` confirms the detection
+  or warns-and-continues when H lacks the symmetry; `"require"`
+  throws. `qed._core.detect_hamiltonian_symmetries(H)` exposes the
+  term-level detection directly. Internally the kwargs map onto the
+  `(Subspace, ProjectorChain)` decomposition:
   `sz=` selects between `FullSpaceSubspace` and `FixedSzSubspace`,
-  `symmetry=` populates a `ProjectorChain` with the spatial
-  projector. Future axes (global spin-flip Z_2, time-reversal
-  antiunitary, SU(2) total-S Casimir) extend the chain through the
-  same public surface. See
+  `symmetry=` populates a `ProjectorChain` with the spatial projector,
+  and the flip/TR mechanisms act at the sector-plan level
+  ([`sector_plan.h`](../../include/ed/symmetry/sector_plan.h)). See
   [`docs/architecture/SYMMETRY.md`](../architecture/SYMMETRY.md) §6
   and
   [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).

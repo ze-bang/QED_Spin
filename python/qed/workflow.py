@@ -37,6 +37,7 @@ __all__ = [
     "GeneratorSet",
     "SymmetryReport",
     "find_symmetries",
+    "resolve_auto_symmetry",
     "solve",
     "full_spectrum",
     "list_diag_parameters",
@@ -836,6 +837,123 @@ def find_symmetries(
 # ---------------------------------------------------------------------------
 
 
+def resolve_auto_symmetry(
+    operator: Operator,
+    symmetry: Any,
+    *,
+    verbose: bool = True,
+) -> Any:
+    """Normalise the string forms of ``symmetry=``.
+
+    * ``"auto"`` -- run :func:`find_symmetries` on ``operator`` and use
+      the largest commuting generator set found (``None`` -- i.e. no
+      spatial projection -- when the automorphism group is trivial or
+      when the optional ``pynauty``/``networkx`` dependencies are
+      missing). This is the "maximal block diagonalisation" switch: the
+      spatial sectors compose with the U(1) Sz axis (``sz=`` /
+      ``auto_sz``), the spin-flip transporter/projector and the
+      time-reversal pairing, each of which independently auto-detects.
+    * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
+    * anything else (GeneratorSet, permutation list, dict, None) is
+      returned unchanged.
+    """
+    if not isinstance(symmetry, str):
+        return symmetry
+    key = symmetry.strip().lower()
+    if key in ("off", "none", ""):
+        return None
+    if key != "auto":
+        raise ValueError(
+            f"symmetry={symmetry!r}: string forms are 'auto' or 'off' "
+            "(or pass a GeneratorSet / permutation list / dict)."
+        )
+    try:
+        report = find_symmetries(operator, verbose=False)
+    except ImportError as exc:
+        warnings.warn(
+            f"symmetry='auto': automorphism search unavailable ({exc}); "
+            "running without spatial symmetry. Install pynauty + "
+            "networkx to enable it.",
+            RuntimeWarning, stacklevel=3)
+        return None
+    gen = report.full_set
+    u1 = ("U(1) Sz conserved" if report.has_u1_sz
+          else "U(1) Sz NOT conserved")
+    if gen is None or not getattr(gen, "generators", None):
+        if verbose:
+            print(f"[qed] symmetry='auto': {u1}; trivial automorphism "
+                  "group -- no spatial projection (flip/TR still "
+                  "auto-detect).")
+        return None
+    if verbose:
+        print(f"[qed] symmetry='auto': {u1}; using generator set "
+              f"{gen.name!r} (|G| = {gen.group_size}).")
+    return gen
+
+
+def resolve_discrete_toggle(
+    operator: Optional[Operator],
+    value: Any,
+    which: str,
+    *,
+    verbose: bool = True,
+) -> int:
+    """Map a ``spin_flip=`` / ``time_reversal=`` kwarg to the C++
+    toggle int (-1 auto / 0 off / 1 require), with detection reporting.
+
+    * ``"auto"`` / ``None`` / ``-1`` -- exploit the symmetry when the
+      Hamiltonian carries it, silently skip when it does not.
+    * ``"on"`` / ``True`` -- same as auto, but REPORT: confirms the
+      detection when the symmetry is present, warns (and continues
+      without it) when it is absent. Never fails.
+    * ``"off"`` / ``False`` / ``0`` -- never exploit it.
+    * ``"require"`` / ``1`` -- hard contract: the run throws when the
+      Hamiltonian does not carry the symmetry.
+
+    ``which`` is ``"spin_flip"`` or ``"time_reversal"``. ``operator``
+    may be None (directory-form callers); ``"on"`` then defers to auto
+    with a note, since the term-level detection needs the in-memory
+    operator.
+    """
+    if value is None or value == "auto" or value == -1:
+        return -1
+    if value is False or value == "off" or value == 0:
+        return 0
+    if value == "require" or value == 1:
+        return 1
+    if value is True or value == "on":
+        det = None
+        if operator is not None:
+            try:
+                det = bool(
+                    _core.detect_hamiltonian_symmetries(operator)[which])
+            except Exception:
+                det = None
+        if det is None:
+            if verbose:
+                print(f"[qed] {which}='on': detection needs the "
+                      "in-memory operator here; deferring to auto "
+                      "(the C++ layer engages it only when present).")
+            return -1
+        if det:
+            if verbose:
+                print(f"[qed] {which}: Hamiltonian carries it -> "
+                      "exploiting.")
+            return -1
+        warnings.warn(
+            f"{which}='on' requested but the Hamiltonian does not carry "
+            f"this symmetry"
+            + (" ([H, prod sigma^x] != 0 -- e.g. a Zeeman field or "
+               "unpaired S+/S- terms)" if which == "spin_flip" else
+               " (complex matrix elements in the computational basis)")
+            + "; running without it.",
+            RuntimeWarning, stacklevel=3)
+        return 0
+    raise ValueError(
+        f"{which} must be one of 'auto'|'on'|'off'|'require' "
+        f"(or None / bool), got {value!r}")
+
+
 def solve(
     H: Union[Operator, FixedSzOperator],
     *,
@@ -1250,6 +1368,7 @@ def solve(
     #     * CPU + no-symmetry → orchestrator with the CPU lane
     #       (the fastest path, no I/O).
     # ------------------------------------------------------------------
+    symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose)
     if symmetry is not None:
         if use_mpi:
             return _diag_via_mpi(
@@ -2846,17 +2965,13 @@ def _diag_with_symmetry(
         # FULL) -- the original behaviour.
         opts = _ed_params_to_solve_options(params, method)
         opts.use_symmetry = True
-        # Stage 8 composition toggles: -1 auto / 0 off / 1 require.
-        _sf = spin_flip
-        opts.spin_flip = (
-            0 if _sf in (False, "off", 0)
-            else 1 if _sf in (True, "require", 1)
-            else -1)
-        _tr = time_reversal
-        opts.time_reversal = (
-            0 if _tr in (False, "off", 0)
-            else 1 if _tr in (True, "require", 1)
-            else -1)
+        # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
+        # with 'on' = auto + detection report (warn-and-continue when
+        # the Hamiltonian lacks the symmetry).
+        opts.spin_flip = resolve_discrete_toggle(
+            operator, spin_flip, "spin_flip", verbose=verbose)
+        opts.time_reversal = resolve_discrete_toggle(
+            operator, time_reversal, "time_reversal", verbose=verbose)
         if fixed_sz_n_up is not None:
             opts.use_fixed_sz = True
             opts.n_up         = fixed_sz_n_up
