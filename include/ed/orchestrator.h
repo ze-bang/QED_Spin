@@ -277,7 +277,7 @@ struct ThermalOptions {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     // user-supplied probe-betas for TPQ state-vector snapshots. The
     // orchestrator passes this through to ``MtpqOptions::probe_betas``
-    // / ``CtpqOptions::probe_betas``. Empty (default) -> no snapshots
+    // Empty (default) -> no snapshots
     // are taken. Ignored by FTLM / LTLM / KPM-DOS (which never have
     // a meaningful TPQ state to snapshot). Combine with
     // ``output_dir`` to land the saved states on disk under

@@ -63,9 +63,8 @@ What `qed.solve` decides for you (override any of these via kwargs):
   ([`sector_plan.h`](../../include/ed/symmetry/sector_plan.h)). See
   [`docs/architecture/SYMMETRY.md`](../architecture/SYMMETRY.md) §6
   and
-  [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).
-  For the per-cell minimal twins see `examples/solve/lanczos/`,
-  `examples/solve/full/`, etc. (Python kwargs are mirrored 1:1 in C++ via
+  [`examples/tour/04_symmetry_toolkit.py`](../../examples/tour/04_symmetry_toolkit.py).
+  (Python kwargs are mirrored 1:1 in C++ via
   the new `ed::api::*` facade in [`include/ed/api.h`](../../include/ed/api.h)).
 * **Memory guard** (no pre-flight planner): the workflow checks the dominant
   allocation against available RAM at the point of use and raises a clean error

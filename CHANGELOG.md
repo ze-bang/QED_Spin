@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-07-03 — auto-symmetry consolidation, tour examples, cTPQ removal
+
+* `symmetry="auto"` (maximal block diagonalisation) on all three verbs;
+  `symmetry="translation"` (+ `lattice=`) for the pure-translation
+  projector with the whole point group as isospectral stars.
+* Per-symmetry four-state toggles everywhere: `spin_flip=` /
+  `time_reversal=` / `point_group=` in {auto, on, off, require}; "on"
+  reports the detection and degrades gracefully.
+* Stage 7a point-group STAR REDUCTION: the non-abelian residue of the
+  automorphism group folds momentum sectors into isospectral orbits —
+  solve one representative per star, copy the spectrum (composes with
+  flip projection + TR pairing in one union-find).
+  `GeneratorSet.describe()` reports the precise group structure.
+* Verified capability matrix (`benchmarks/bench_capability_matrix.py`,
+  `docs/perf/capability_matrix_2026-07-03.md`): every keyable
+  composition × {GS, mTPQ, FTLM, LTLM, DSSF} × {CPU, GPU} against full
+  dense diagonalization, with GPU backend-lane assertions.
+* **Removed: cTPQ** (method enum, kernel, orchestrator branch, CLI,
+  Python surface, examples, tests — mTPQ + the exact small-block
+  fallback covers it; the MPI-distributed thermal lane keeps its
+  internal canonical propagator).
+* **Removed: the per-cell example grid** (~150 files) + `_legacy` +
+  codegen. `examples/tour/` (six knob-complete scripts, incl. the new
+  `05_tpq_dssf.py` finite-T DSSF from mTPQ states) is the canonical
+  usage documentation, CI-guarded by the new `linux-tour` lane.
+* Removed dead headers: `ed_logging.h`, `ed_method_traits.h`,
+  `distributed_basis_policy.h` (+ the permanently-skipped
+  canonicalize-method test).
+
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

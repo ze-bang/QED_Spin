@@ -178,14 +178,13 @@ jobs:
           python -m pytest python/tests tests/integration -v
 
   # ---------------------------------------------------------------------------
-  # Examples smoke lane: build the CPU-lane per-cell example tree
-  # (examples/{solve,thermal,spectral}/) and run each Python + C++ twin
-  # through `scripts/check_examples_output.py`. This guards the
-  # newly-introduced API mirror (see PR-1 + PR-2/3/4 of the May 2026
-  # "mirror examples" plan) against silent surface drift.
+  # Tour lane: build the wheel and run every examples/tour/ script
+  # end-to-end. The tour is the canonical usage documentation (one
+  # knob-complete script per verb + the TPQ-state DSSF pipeline); this
+  # lane guards it against API drift.
   # ---------------------------------------------------------------------------
-  linux-examples-smoke:
-    name: Linux / Examples smoke (CPU lane)
+  linux-tour:
+    name: Linux / Examples tour (CPU)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -212,38 +211,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Upgrade pip + install build tooling
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy
-
-      - name: Configure with examples on
-        run: |
-          cmake -S . -B build-examples \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_ED_TESTS=OFF \
-            -DED_BUILD_EXAMPLES=ON \
-            -DWITH_CUDA=OFF \
-            -DWITH_MPI=OFF \
-            -DBLAS_PROFILE=OPENBLAS
-
-      - name: Build CPU-lane example smoke set
-        run: cmake --build build-examples --target ed_examples_smoke -- -j$(nproc)
-
-      - name: Build qed wheel (for Python twins)
+      - name: Build wheel
         env:
           CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=OPENBLAS"
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy h5py networkx pynauty
           python -m pip install -v .
 
-      - name: Run examples smoke harness
+      - name: Run the tour
         run: |
-          python scripts/check_examples_output.py \
-            --build-dir build-examples \
-            --family all \
-            --lane-prefix cpu_ \
-            --sig-figs 4
+          for f in examples/tour/*.py; do
+            echo "== $f =="
+            python "$f"
+          done
 
   # ---------------------------------------------------------------------------
   # Clang Debug lane: catch UB / signed-overflow / strict-aliasing issues that

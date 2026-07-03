@@ -49,7 +49,6 @@ cd QED
 
 cmake -B build \
       -DWITH_CUDA=ON -DWITH_MPI=ON \
-      -DED_BUILD_EXAMPLES=ON \
       -DED_BUILD_BENCHMARKS=ON
 cmake --build build -j
 
@@ -221,51 +220,23 @@ docs/
 
 ## Examples
 
-The canonical example tree is **one file per ONLINE
-`(backend × symmetry × method)` cell**, organised by family / method:
+[`examples/tour/`](examples/tour/) is the canonical usage
+documentation: six short, heavily-commented scripts that cover every
+real knob, one verb per file --
 
-```
-examples/
-├── solve/{lanczos,block_lanczos,krylov_schur,full}/<lane>_<sym>.{cpp,py}     # 48 cells
-├── thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}/<lane>_<sym>.{cpp,py}               # 62 cells
-└── spectral/{single_expectation,ground_state_dssf,static_thermal,
-              dynamical_thermal}/<lane>_<sym>.{cpp,py}                       # 38 cells
-```
+| script | covers |
+|---|---|
+| [`01_ground_state.py`](examples/tour/01_ground_state.py) | `qed.solve`: `symmetry="auto"`, per-symmetry toggles, solvers, devices, per-sector attribution |
+| [`02_finite_temperature.py`](examples/tour/02_finite_temperature.py) | `qed.thermal`: mTPQ/FTLM/LTLM/KPM, the sector pool + flip/TR/star copies, Sz windows |
+| [`03_dynamics_dssf.py`](examples/tour/03_dynamics_dssf.py) | `qed.spectral`: S^z_Q / S^±_Q probes, GS + finite-T DSSF through the sector machinery |
+| [`04_symmetry_toolkit.py`](examples/tour/04_symmetry_toolkit.py) | `find_symmetries`, `GeneratorSet.describe()`, sector selection, env escapes |
+| [`05_tpq_dssf.py`](examples/tour/05_tpq_dssf.py) | finite-temperature DSSF from persisted mTPQ states (`initial_state=` seeding) |
 
-where `<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`} and
-`<sym>` ∈ {`none`, `sz`, `spatial`, `sz_spatial`}. **Every C++ cell has
-a Python twin that reads line-for-line identical at the API surface
-and prints the same numbers.** The full per-cell index, naming
-convention, expected-output schema, and smoke-test recipe live in
-[`examples/README.md`](examples/README.md).
-
-Quick examples (CPU lane, `examples/solve/lanczos/`):
-
-| Cell                                                                | What it does                                  |
-|---------------------------------------------------------------------|-----------------------------------------------|
-| [`solve/lanczos/cpu_none.py`](examples/solve/lanczos/cpu_none.py)   | Lanczos ground state, full Hilbert (N=8)      |
-| [`solve/lanczos/cpu_sz.py`](examples/solve/lanczos/cpu_sz.py)       | Lanczos in the half-filled Sz=0 sector        |
-| [`solve/lanczos/cpu_spatial.py`](examples/solve/lanczos/cpu_spatial.py) | Lanczos + cyclic-translation Z₈ symmetry     |
-| [`solve/lanczos/cpu_sz_spatial.py`](examples/solve/lanczos/cpu_sz_spatial.py) | Sz × translation joint symmetry      |
-| [`solve/full/cpu_none.py`](examples/solve/full/cpu_none.py)         | Dense diagonalisation, five lowest E[k]       |
-| [`thermal/ftlm/cpu_sz.py`](examples/thermal/ftlm/cpu_sz.py)         | FTLM E(T), Cv(T) with Sz auto-decomposition   |
-| [`thermal/ltlm/cpu_none.py`](examples/thermal/ltlm/cpu_none.py)     | LTLM low-T thermodynamics                     |
-| [`spectral/ground_state_dssf/cpu_none.py`](examples/spectral/ground_state_dssf/cpu_none.py) | T=0 S(ω) via CF resolvent      |
-| [`spectral/dynamical_thermal/cpu_none.py`](examples/spectral/dynamical_thermal/cpu_none.py) | Finite-T S(ω) via FTLM dynamical |
-
-The C++ twins live in the same directories with `.cpp` suffix; build
-them with `-DED_BUILD_EXAMPLES=ON` (the default is off):
-
-```bash
-cmake -B build -DED_BUILD_EXAMPLES=ON ...
-cmake --build build --target ed_examples_smoke      # CPU-only "smoke" subset
-cmake --build build --target ed_examples            # everything that's compilable
-```
-
-The previous, pre-mirror tutorials (the numbered `00_..16_*` files)
-are frozen under [`examples/_legacy/`](examples/_legacy/) -- they
-still build and run, but new tutorials only land in the new tree.
-
+Each runs standalone in seconds (`python3 examples/tour/01_ground_state.py`)
+and the `linux-tour` CI lane executes all of them on every push.
+Exhaustive per-configuration coverage lives in the test suites and the
+dense-verified capability matrix
+([`docs/perf/capability_matrix_2026-07-03.md`](docs/perf/capability_matrix_2026-07-03.md)).
 ---
 
 ## Performance

@@ -128,12 +128,6 @@ res = qed.solve(H, num_eigenvalues=4,
 ```
 
 Knob-complete walkthroughs: [`examples/tour/`](../../examples/tour/).
-Per-cell minimal twins live under
-[`examples/solve/lanczos/`](../../examples/solve/lanczos/),
-[`examples/solve/full/`](../../examples/solve/full/),
-[`examples/thermal/ftlm/`](../../examples/thermal/ftlm/), and
-[`examples/spectral/ground_state_dssf/`](../../examples/spectral/ground_state_dssf/)
-(each cell ships a `.py` *and* a line-for-line C++ `.cpp` twin).
 
 ## Hamiltonian builder DSL
 

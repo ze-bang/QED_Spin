@@ -645,14 +645,6 @@ if(ED_BUILD_BENCHMARKS)
 endif()
 
 # -----------------------------------------------------------------------------
-# Runnable use-case examples under examples/. Off by default; opt in via
-# `-DED_BUILD_EXAMPLES=ON`. See examples/README.md for the full index.
-# -----------------------------------------------------------------------------
-option(ED_BUILD_EXAMPLES "Build the runnable C++ examples in examples/" OFF)
-if(ED_BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
-
 if(BUILD_ED_TESTS)
     enable_testing()
 

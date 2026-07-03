@@ -21,7 +21,7 @@
 //         GS limit: same input vector -> same output).
 //
 // The TPQ-to-CF integration test is the companion example pair
-// (`examples/spectral/ground_state_dssf/cpu_from_tpq_state.{cpp,py}`);
+// (`examples/tour/05_tpq_dssf.py`);
 // here we pin the kernel-level contract.
 // =============================================================================
 

@@ -227,7 +227,7 @@ struct ThermalResult {
     // FTLM / LTLM / KPM-DOS.
     //
     // The trajectory fields are mirror-images of
-    // ``MtpqResult::sample_*`` / ``CtpqResult::sample_*`` --
+    // ``MtpqResult::sample_*`` --
     // outer index = sample, inner index = kernel step. The orchestrator
     // copies them into ``R`` after the visit so the uniform finalizer
     // can persist them via ``HDF5IO::appendTPQThermodynamics``.
