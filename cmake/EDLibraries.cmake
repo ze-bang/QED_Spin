@@ -167,6 +167,16 @@ target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_core PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
+if(WITH_CUDA)
+    # Host-compiled TUs of ed_core include <cuComplex.h>/<cublas_v2.h>
+    # transitively (linear_operator.h -> cuda_backend.cuh under WITH_CUDA).
+    # On NVIDIA-repo toolkit installs the headers live under
+    # /usr/local/cuda-*/include, NOT the default compiler search path
+    # (Ubuntu's nvidia-cuda-toolkit package masks this locally by dropping
+    # them into /usr/include). Surface them explicitly; PUBLIC so every
+    # downstream host target inheriting these headers compiles too.
+    target_include_directories(ed_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+endif()
 target_compile_options(ed_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
