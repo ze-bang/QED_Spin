@@ -587,6 +587,7 @@ struct GpuRepSectorMirror {
     thrust::device_vector<double>          d_inv_norms;
     thrust::device_vector<int>             d_perms;
     thrust::device_vector<cuDoubleComplex> d_characters;
+    thrust::device_vector<std::uint64_t>   d_flips;   // Stage 8b: flip masks
     thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
 
     int           group_size = 1;
@@ -608,6 +609,8 @@ struct GpuRepSectorMirror {
         v.inv_norms         = thrust::raw_pointer_cast(d_inv_norms.data());
         v.perms             = thrust::raw_pointer_cast(d_perms.data());
         v.characters        = thrust::raw_pointer_cast(d_characters.data());
+        v.flips             = d_flips.empty()
+            ? nullptr : thrust::raw_pointer_cast(d_flips.data());
         v.rep_index_of_rank = thrust::raw_pointer_cast(d_rep_index_of_rank.data());
         v.dim_              = dim;
         v.group_size        = group_size;
@@ -728,6 +731,9 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     mirror->d_inv_norms         = data.inv_norms;
     mirror->d_perms             = data.perms_flat;
     mirror->d_characters        = h_characters;
+    if (data.has_flips()) {   // Stage 8b: flip-extended sector
+        mirror->d_flips         = data.flip_masks;
+    }
     mirror->d_rep_index_of_rank = h_rep_index_of_rank;
 
     mirror->d_diag_one_body    = terms.diag_one_body;

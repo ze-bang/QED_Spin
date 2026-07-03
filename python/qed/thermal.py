@@ -207,6 +207,20 @@ def _ed_result_from_thermal_result(
     return out
 
 
+def _sym_toggle_int(value, name: str) -> int:
+    """Map a spin_flip / time_reversal kwarg to the C++ toggle int:
+    -1 = auto (commutation check + env gate), 0 = off, 1 = require."""
+    if value is None or value == "auto":
+        return -1
+    if value in (False, "off", 0):
+        return 0
+    if value in (True, "require", 1):
+        return 1
+    raise ValueError(
+        f"{name} must be one of 'auto'|'off'|'require' (or None/bool), "
+        f"got {value!r}")
+
+
 def _thermal_via_workflows_all_sz_streaming_symmetry(
     directory: str,
     num_sites: int,
@@ -218,6 +232,8 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     *,
     use_gpu: bool = False,
     use_mpi: bool = False,
+    spin_flip: int = -1,
+    time_reversal: int = -1,
 ) -> "_core.ThermalResult":
     """Single C++ call covering ALL (n_up, irrep) sectors simultaneously.
 
@@ -236,6 +252,8 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts = _ed_params_to_thermal_options(params, method)
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
+    opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
+    opts.time_reversal = int(time_reversal)
     return _core.workflows_thermal_all_sz_streaming_symmetry_directory(
         directory, int(num_sites), float(spin_l), opts,
         int(n_up_min), int(n_up_max))
@@ -566,6 +584,8 @@ def thermal(
     random_seed: int = 0,
     use_symmetry_if_available: bool = False,
     use_sz_if_conserved: bool = True,
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
     output_dir: str = "",
     verbose: bool = True,
     # Phase C of the "Backend x Symmetries x Workflows" plan
@@ -1065,7 +1085,10 @@ def thermal(
                 p = _make_dir_params(None)
                 tr = _thermal_via_workflows_all_sz_streaming_symmetry(
                     directory, N, float(spin), method_enum, p,
-                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi)
+                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
+                    time_reversal=_sym_toggle_int(time_reversal,
+                                                  "time_reversal"))
                 td = tr.thermo
                 if not td or not td.temperatures:
                     raise RuntimeError(

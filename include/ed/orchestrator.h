@@ -128,6 +128,15 @@ struct SolveOptions {
     /// `basis_cache/` HDF5 files here.
     std::string basis_cache_dir;
 
+    /// Stage 8 (SymmetryEngine v2) composition toggles, per call:
+    /// -1 = auto (commutation check + env gate), 0 = off,
+    ///  1 = require (throw when H does not carry the symmetry).
+    /// Consumed by the streaming-symmetry sector loops (spin-flip
+    /// transport/projection across Sz blocks; time-reversal k <-> -k
+    /// sector pairing).
+    int spin_flip     = -1;
+    int time_reversal = -1;
+
     /// If true, generate the symmetry basis + the sector-block
     /// Hamiltonians and exit without diagonalising. Used by the CLI's
     /// `precompute_basis_only` mode to pre-warm the cache on a single
@@ -143,6 +152,11 @@ struct SolveOptions {
 };
 
 struct ThermalOptions {
+    /// Stage 8 (SymmetryEngine v2) composition toggles, per call:
+    /// -1 = auto, 0 = off, 1 = require. See SolveOptions for semantics.
+    int spin_flip     = -1;
+    int time_reversal = -1;
+
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
         FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos, OFTLM,

@@ -570,6 +570,17 @@ make_sector_operator_adopt(const ::Operator& host,
 // ``SectorBasis::build`` the eager lane uses -- so a GPU-only run never
 // allocates the host orbit CSR.
 // ---------------------------------------------------------------------------
+// Forward declaration (defined below): the fixed-Sz lazy builder delegates
+// its Stage-8c flip-projected half-filling case to the all-Sz builder.
+template <class TermBuilder>
+[[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
+build_all_sz_sector_operators(
+    std::uint64_t n_bits, float spin_l, const SymmetryGroupInfo& info,
+    TermBuilder&& terms, std::int64_t n_up_min = 0,
+    std::int64_t n_up_max = -1,
+    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr,
+    const std::string& cache_dir = {}, bool flip_project_half = false);
+
 template <class TermBuilder>
 [[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
 build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
@@ -581,8 +592,32 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
                                      int                      mpi_rank = 0,
                                      int                      mpi_size = 1,
                                      const std::vector<int>*  sector_owner = nullptr,
-                                     const std::string&       cache_dir = {})
+                                     const std::string&       cache_dir = {},
+                                     bool                     flip_project_half = false)
 {
+    // Stage 8c (SymmetryEngine v2): flip-projected half-filling block for
+    // the SINGLE-Sz lane (GS solve). Delegates to the all-Sz builder's
+    // proven (k, +/-) machinery restricted to this one n_up. Single-rank
+    // only (the all-Sz builder carries no MPI sector ownership); callers
+    // gate on eigenvalues-only workloads upstream (the flip-projected
+    // eigenvectors live in the projected basis and the orbit-CSR
+    // reconstruction lane is not flip-aware).
+    if (flip_project_half && mpi_size == 1
+        && n_up * 2 == static_cast<std::int64_t>(n_bits)
+        && sym_fused_pass15_enabled() && sym_streaming_enum_enabled()) {
+        std::vector<std::pair<int, std::size_t>> ids;
+        auto ops = build_all_sz_sector_operators(
+            n_bits, spin_l, info, std::forward<TermBuilder>(terms),
+            n_up, n_up, &ids, cache_dir, /*flip_project_half=*/true);
+        if (out_sector_ids) {
+            out_sector_ids->clear();
+            for (const auto& [nu, idx] : ids) {
+                (void)nu;
+                out_sector_ids->push_back(idx);
+            }
+        }
+        return ops;
+    }
     // Streaming construction (Jun 2026): the orbit expansion uses a tableless
     // popcount-membership subspace -- bit-identical to ``FixedSzSubspace`` here
     // because every site-permutation image of a fixed-Sz state preserves
@@ -926,11 +961,11 @@ build_all_sz_sector_operators(
     float                    spin_l,
     const SymmetryGroupInfo& info,
     TermBuilder&&            terms,
-    std::int64_t             n_up_min = 0,
-    std::int64_t             n_up_max = -1,
-    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr,
-    const std::string&       cache_dir = {},
-    bool                     flip_project_half = false)
+    std::int64_t             n_up_min,
+    std::int64_t             n_up_max,
+    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids,
+    const std::string&       cache_dir,
+    bool                     flip_project_half)
 {
     if (n_up_max < 0) n_up_max = static_cast<std::int64_t>(n_bits);
     n_up_min = std::max<std::int64_t>(0, n_up_min);

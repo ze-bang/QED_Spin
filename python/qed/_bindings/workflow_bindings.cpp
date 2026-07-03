@@ -25,6 +25,7 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/sector_plan.h>
 #include <ed/symmetry/time_reversal.h>
 #include <ed/symmetry/sym_profile.h>
 #include <ed/core/operator.h>
@@ -333,6 +334,10 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::SolveOptions::n_up)
         .def_readwrite("basis_cache_dir",
                        &ed::workflows::SolveOptions::basis_cache_dir)
+        .def_readwrite("spin_flip",
+                       &ed::workflows::SolveOptions::spin_flip)
+        .def_readwrite("time_reversal",
+                       &ed::workflows::SolveOptions::time_reversal)
         .def_readwrite("precompute_basis_only",
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
@@ -425,6 +430,10 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("delta_beta",   &ed::workflows::ThermalOptions::delta_beta)
         .def_readwrite("beta_max",     &ed::workflows::ThermalOptions::beta_max)
         .def_readwrite("random_seed",  &ed::workflows::ThermalOptions::random_seed)
+        .def_readwrite("spin_flip",
+                       &ed::workflows::ThermalOptions::spin_flip)
+        .def_readwrite("time_reversal",
+                       &ed::workflows::ThermalOptions::time_reversal)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -732,6 +741,56 @@ void bind_workflows(py::module_& m) {
                   // irrep index). No monolithic streaming operator is
                   // materialised; the CSR-free lazy-rep memory optimisation
                   // is preserved by the tagged factory's lazy regime.
+                  // -----------------------------------------------------
+                  // Stage 8 + 8c (SymmetryEngine v2): symmetry composition
+                  // for the GS lane.
+                  //   * time-reversal PAIRING: for real H, spec(k) ==
+                  //     spec(-k); solve one member of each conjugate pair
+                  //     and DUPLICATE its eigenvalue list under the
+                  //     partner's tag (duplication -- not deduplication --
+                  //     keeps pooled degeneracy multiplicities correct).
+                  //   * spin-flip TRANSPORT: [H, X] == 0 makes the fixed-Sz
+                  //     blocks n_up and N - n_up isospectral; solve the
+                  //     smaller-n_up block and re-tag.
+                  //   * spin-flip PROJECTION: at n_up == N/2 split into
+                  //     (k, +/-) sectors (eigenvalues-only workloads; the
+                  //     projected eigenvectors are not orbit-reconstructable
+                  //     through the flip-unaware CSR lane).
+                  // Per-call toggles on SolveOptions (auto/off/require);
+                  // ED_SYM_SPIN_FLIP[_PROJECT] / ED_SYM_TIME_REVERSAL are
+                  // the env escapes for the Auto defaults.
+                  // -----------------------------------------------------
+                  ed::symmetry::SymmetryComposition comp;
+                  {
+                      auto probe = ed::detail::build_base_op(spec);
+                      ed::detail::load_terms_into(*probe, spec);
+                      ed::matvec::TermStorage soa;
+                      ed::matvec::TermStorage::classify_route(
+                          soa, probe->transform_data_, probe->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      probe->symmetry_info.loadFromDirectory(directory);
+                      comp = ed::symmetry::resolve_symmetry_composition(
+                          soa, probe->symmetry_info, opts.backend.allow_gpu,
+                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                          ed::symmetry::sym_toggle_from_int(
+                              opts.time_reversal));
+                  }
+                  // Requested n_up before any transport re-target; -1 when
+                  // the fixed-Sz axis is off. Used to restore the caller's
+                  // n_up on the emitted sector tags.
+                  const int requested_n_up =
+                      spec.fixed_sz ? *spec.fixed_sz : -1;
+                  if (comp.flip_transport && spec.fixed_sz
+                      && *spec.fixed_sz * 2
+                             > static_cast<int>(num_sites)) {
+                      spec.fixed_sz = static_cast<int>(num_sites)
+                                      - *spec.fixed_sz;
+                  }
+                  if (comp.flip_project && spec.fixed_sz
+                      && *spec.fixed_sz * 2 == static_cast<int>(num_sites)
+                      && !opts.compute_vectors) {
+                      spec.flip_project_half = true;
+                  }
                   ed::core::SectorSetView handle(
                       ed::make_sector_operators_tagged(spec));
 
@@ -744,9 +803,49 @@ void bind_workflows(py::module_& m) {
                           "automorphism_results/ directory.");
                   }
 
-                  const std::vector<std::size_t> sector_indices =
+                  const std::vector<std::size_t> sector_indices_all =
                       ed::core::filter_sectors(num_sectors,
                                                opts.selected_sectors);
+
+                  std::vector<std::size_t> sector_indices;
+                  // (skipped_k, canonical_k): emit skipped_k's eigenvalues
+                  // as a copy of canonical_k's after the solve loop.
+                  std::vector<std::pair<std::size_t, std::size_t>> tr_mirrors;
+                  // Flip projection doubles the sector count with the
+                  // synthetic index convention k + parity * num_raw; the
+                  // conjugation map acts on the raw irrep index and
+                  // preserves flip parity, so pair within parity blocks.
+                  const std::size_t tr_num_raw = comp.tr_partner.size();
+                  if (comp.tr_pairing && tr_num_raw > 0
+                      && num_sectors % tr_num_raw == 0) {
+                      std::vector<char> in_sel(num_sectors, 0);
+                      for (std::size_t k : sector_indices_all) in_sel[k] = 1;
+                      for (std::size_t k : sector_indices_all) {
+                          const std::int32_t pk =
+                              comp.tr_partner[k % tr_num_raw];
+                          const std::size_t psy =
+                              pk < 0 ? k
+                                     : static_cast<std::size_t>(pk)
+                                       + (k / tr_num_raw) * tr_num_raw;
+                          if (pk >= 0 && psy < k && in_sel[psy]
+                              && handle.sector_tag(k).sector_dim ==
+                                 handle.sector_tag(psy).sector_dim) {
+                              tr_mirrors.emplace_back(k, psy);
+                              continue;  // skip solving k
+                          }
+                          sector_indices.push_back(k);
+                      }
+                      if (!tr_mirrors.empty()
+                          && ed::symmetry::sym_profile_enabled()) {
+                          std::fprintf(stderr,
+                              "[sym-profile] time-reversal pairing (GS): "
+                              "solving %zu of %zu sectors\n",
+                              sector_indices.size(),
+                              sector_indices_all.size());
+                      }
+                  } else {
+                      sector_indices = sector_indices_all;
+                  }
 
                   // Per-sector storage we accumulate into so that the
                   // final ``GroundStateResult`` carries both the
@@ -953,6 +1052,41 @@ void bind_workflows(py::module_& m) {
                                       sr.eigenvalues.end());
                       if (need_per_sector_outdir && !sr.hdf5_path.empty()) {
                           sector_hdf5_paths.push_back(sr.hdf5_path);
+                      }
+                  }
+
+                  // Stage 8 TR mirror emission: duplicate each solved
+                  // canonical sector's eigenvalue list under its conjugate
+                  // partner's tag (identical spectrum; keeps pooled
+                  // degeneracy multiplicities correct).
+                  for (const auto& [skipped_k, src_k] : tr_mirrors) {
+                      std::size_t src_slot = touched_tags.size();
+                      for (std::size_t t = 0; t < touched_tags.size(); ++t) {
+                          if (touched_tags[t].sector_index == src_k) {
+                              src_slot = t;
+                              break;
+                          }
+                      }
+                      if (src_slot == touched_tags.size()) continue;
+                      // (canonical pruned by the two-phase scan or empty:
+                      // the partner shares its spectrum, so skipping both
+                      // is consistent)
+                      std::vector<double> copy_eigs = eigs_per_sector[src_slot];
+                      touched_idx.push_back(touched_tags.size());
+                      touched_tags.push_back(handle.sector_tag(skipped_k));
+                      all_eigs.insert(all_eigs.end(),
+                                      copy_eigs.begin(), copy_eigs.end());
+                      eigs_per_sector.push_back(std::move(copy_eigs));
+                  }
+
+                  // Stage 8c: when spin-flip transport re-targeted the
+                  // solve to N - n_up, restore the caller's requested n_up
+                  // on the emitted tags (the two blocks are isospectral;
+                  // the tag should describe the sector the caller asked
+                  // for, not the one physics let us solve instead).
+                  if (requested_n_up >= 0) {
+                      for (auto& tag : touched_tags) {
+                          if (tag.n_up >= 0) tag.n_up = requested_n_up;
                       }
                   }
 
@@ -3152,64 +3286,54 @@ void bind_workflows(py::module_& m) {
                   spec.streaming_symmetry = true;
                   // No fixed_sz: build_all_sz_sector_operators covers all n_up.
 
-                  // Stage 5 (SymmetryEngine v2) SectorTransporter: the global
-                  // spin flip X commutes with every site permutation, so when
-                  // [H, X] == 0 the (n_up, k) and (N - n_up, SAME k) sectors
-                  // have identical spectra and Z_s(beta). Solve only
-                  // n_up <= N/2 and mirror the thermodynamic entries below.
-                  // ED_SYM_SPIN_FLIP=0 disables (read per call).
+                  // ---------------------------------------------------------
+                  // Stage 8 (SymmetryEngine v2): unified symmetry composition.
+                  // One SectorPlan resolution drives all three mechanisms
+                  // (spin-flip transport across Sz, spin-flip projection of
+                  // the half-filling block, time-reversal k <-> -k pairing);
+                  // see include/ed/symmetry/sector_plan.h. Per-call toggles
+                  // on ThermalOptions (auto/off/require) override the env
+                  // gates.
+                  // ---------------------------------------------------------
                   const int N_sites = static_cast<int>(num_sites);
                   const int req_lo  = std::max(0, n_up_min);
                   const int req_hi  = (n_up_max < 0) ? N_sites
                                                      : std::min(n_up_max, N_sites);
-                  bool flip_transport = false;
-                  if (ed::symmetry::spin_flip_transport_enabled()) {
+                  ed::symmetry::SymmetryComposition comp;
+                  {
                       auto probe = ed::detail::build_base_op(spec);
                       ed::detail::load_terms_into(*probe, spec);
                       ed::matvec::TermStorage soa;
                       ed::matvec::TermStorage::classify_route(
                           soa, probe->transform_data_, probe->three_body_data_,
                           [](const std::complex<double>& c) { return c; });
-                      flip_transport =
-                          ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+                      probe->symmetry_info.loadFromDirectory(directory);
+                      comp = ed::symmetry::resolve_symmetry_composition(
+                          soa, probe->symmetry_info, opts.backend.allow_gpu,
+                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                          ed::symmetry::sym_toggle_from_int(opts.time_reversal));
                   }
-                  int build_lo = req_lo, build_hi = req_hi;
-                  if (flip_transport) {
-                      build_lo = std::max(0, std::min(req_lo, N_sites - req_hi));
-                      build_hi = std::min(build_hi, N_sites / 2);
-                      if (build_hi < build_lo) {  // degenerate request window
-                          flip_transport = false;
-                          build_lo = req_lo;
-                          build_hi = req_hi;
-                      } else if (ed::symmetry::sym_profile_enabled()) {
+                  const ed::symmetry::BuildWindow win =
+                      ed::symmetry::plan_build_window(
+                          comp, req_lo, req_hi, N_sites);
+                  const bool flip_transport = win.flip_transport;
+                  const bool flip_project   = win.flip_project_half;
+                  if (ed::symmetry::sym_profile_enabled()) {
+                      if (flip_transport)
                           std::fprintf(stderr,
                               "[sym-profile] spin-flip transport: solving "
                               "n_up [%d, %d] for requested [%d, %d]\n",
-                              build_lo, build_hi, req_lo, req_hi);
-                      }
-                  }
-
-                  // Stage 5b: in-sector flip projection of the half-filling
-                  // block (k -> (k, +/-), halving the biggest sector). CPU rep
-                  // lane only -- the device policy is not flip-aware yet.
-                  // Sub-gate ED_SYM_SPIN_FLIP_PROJECT=0 keeps the transporter
-                  // but skips the projection.
-                  const bool flip_project = [&] {
-                      if (!flip_transport) return false;
-                      if (opts.backend.allow_gpu) return false;
-                      const char* v = std::getenv("ED_SYM_SPIN_FLIP_PROJECT");
-                      return !(v != nullptr && v[0] == '0' && v[1] == '\0');
-                  }();
-                  if (flip_project && ed::symmetry::sym_profile_enabled()) {
-                      std::fprintf(stderr,
-                          "[sym-profile] spin-flip projection: half-filling "
-                          "block split into (k, +/-) sectors\n");
+                              win.lo, win.hi, req_lo, req_hi);
+                      if (flip_project)
+                          std::fprintf(stderr,
+                              "[sym-profile] spin-flip projection: half-filling "
+                              "block split into (k, +/-) sectors\n");
                   }
 
                   // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, build_lo, build_hi, flip_project);
+                          spec, win.lo, win.hi, flip_project);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());
@@ -3220,73 +3344,15 @@ void bind_workflows(py::module_& m) {
                           "and automorphism_results/ directory.");
                   }
 
-                  // ---------------------------------------------------------
-                  // Stage 6 (SymmetryEngine v2): time-reversal sector pairing.
-                  // For real-coefficient H, conjugation maps irrep k -> -k
-                  // with an identical spectrum / Z_s(beta), so solve one
-                  // member of each conjugate pair and copy to the partner.
-                  // Composes with the 5a Sz transporter (runs within each
-                  // solved Sz block) and 5b (synthetic flip indices pair as
-                  // k + p*nirr -> conj(k) + p*nirr: conjugation commutes with
-                  // the flip and keeps the parity). ED_SYM_TIME_REVERSAL=0
-                  // disables.
-                  // ---------------------------------------------------------
                   const std::size_t n_raw = set.num_raw_sectors;
-                  std::vector<std::int32_t> tr_partner;   // raw k -> conj k
-                  bool tr_pair = false;
-                  if (ed::symmetry::time_reversal_pairing_enabled()
-                      && n_raw > 0) {
-                      auto probe_tr = ed::detail::build_base_op(spec);
-                      ed::detail::load_terms_into(*probe_tr, spec);
-                      ed::matvec::TermStorage soa_tr;
-                      ed::matvec::TermStorage::classify_route(
-                          soa_tr, probe_tr->transform_data_,
-                          probe_tr->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      if (ed::symmetry::hamiltonian_is_real(soa_tr)) {
-                          probe_tr->symmetry_info.loadFromDirectory(directory);
-                          tr_partner = ed::symmetry::conjugate_sector_pairing(
-                              probe_tr->symmetry_info);
-                          tr_pair = !tr_partner.empty();
-                      }
-                  }
-                  // Skip mask: entry i is a NON-canonical conjugate partner
-                  // (partner exists in the set for the same n_up with equal
-                  // dim, and has a strictly smaller synthetic index).
-                  std::vector<char> tr_skip(
-                      static_cast<std::size_t>(n_ops), 0);
-                  if (tr_pair) {
-                      // (n_up, raw index) -> op index for partner lookup.
-                      std::map<std::pair<int, std::size_t>, std::size_t> where;
-                      for (std::size_t i = 0;
-                           i < set.tags.size(); ++i) {
-                          where[{set.tags[i].n_up,
-                                 set.tags[i].sector_index}] = i;
-                      }
-                      std::size_t n_skip = 0;
-                      for (std::size_t i = 0; i < set.tags.size(); ++i) {
-                          const auto& tag = set.tags[i];
-                          const std::size_t k = tag.sector_index % n_raw;
-                          const std::int32_t pk = tr_partner[k];
-                          if (pk < 0) continue;              // malformed: solve
-                          const std::size_t praw =
-                              static_cast<std::size_t>(pk)
-                              + (tag.sector_index / n_raw) * n_raw;
-                          if (praw >= tag.sector_index) continue;  // canonical
-                          const auto it = where.find({tag.n_up, praw});
-                          if (it == where.end()) continue;   // partner absent
-                          if (set.tags[it->second].sector_dim
-                              != tag.sector_dim) continue;   // paranoia: solve
-                          tr_skip[i] = 1;
-                          ++n_skip;
-                      }
-                      if (n_skip == 0) tr_pair = false;
-                      else if (ed::symmetry::sym_profile_enabled()) {
-                          std::fprintf(stderr,
-                              "[sym-profile] time-reversal pairing: skipping "
-                              "%zu of %ld conjugate sectors\n",
-                              n_skip, n_ops);
-                      }
+                  const ed::symmetry::TrActionPlan tr_plan =
+                      ed::symmetry::plan_tr_actions(set.tags, n_raw, comp);
+                  if (tr_plan.active()
+                      && ed::symmetry::sym_profile_enabled()) {
+                      std::fprintf(stderr,
+                          "[sym-profile] time-reversal pairing: skipping "
+                          "%zu of %ld conjugate sectors\n",
+                          tr_plan.n_skipped, n_ops);
                   }
 
                   // Pre-build the beta grid once (same logic as the
@@ -3386,7 +3452,7 @@ void bind_workflows(py::module_& m) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
-                      if (tr_skip[i]) continue;  // Stage 6: copy from partner
+                      if (tr_plan.skip[i]) continue;  // TR: copy from partner
                       ed::workflows::ThermalOptions topts = opts;
                       topts.selected_sectors.clear();
                       if (need_per_sector_outdir) {
@@ -3414,29 +3480,13 @@ void bind_workflows(py::module_& m) {
                   std::string sector_lane;
                   std::size_t sector_mpi_size = 1;
 
-                  // Stage 6: (n_up, raw) -> op index of the SOLVED canonical
-                  // member, for sourcing the skipped conjugate partners.
-                  std::map<std::pair<int, std::size_t>, std::size_t> tr_where;
-                  if (tr_pair) {
-                      for (std::size_t i = 0; i < set.tags.size(); ++i)
-                          if (!tr_skip[i])
-                              tr_where[{set.tags[i].n_up,
-                                        set.tags[i].sector_index}] = i;
-                  }
-
                   for (long ii = 0; ii < n_ops; ++ii) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
-                      if (tr_skip[i]) {
-                          const auto& tag = set.tags[i];
-                          const std::size_t k  = tag.sector_index % n_raw;
-                          const std::size_t praw =
-                              static_cast<std::size_t>(tr_partner[k])
-                              + (tag.sector_index / n_raw) * n_raw;
-                          const auto it = tr_where.find({tag.n_up, praw});
-                          if (it != tr_where.end())
-                              all_results[i] = all_results[it->second];
+                      if (tr_plan.skip[i]) {
+                          // TR pairing: source the conjugate partner's result.
+                          all_results[i] = all_results[tr_plan.source[i]];
                       }
                       auto& tr = all_results[i];
                       if (sector_lane.empty()

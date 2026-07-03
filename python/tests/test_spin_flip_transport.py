@@ -183,3 +183,159 @@ def test_time_reversal_declines_complex_hamiltonian():
                                rtol=0, atol=1e-10)
     np.testing.assert_allclose(r_on.entropy, r_off.entropy,
                                rtol=0, atol=1e-10)
+
+
+def test_per_call_toggles_compose():
+    """Stage 8: per-call kwargs override the env gates on both verbs."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    # thermal: spin_flip="off" must equal the env-off baseline exactly.
+    def t(**kw):
+        return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=10,
+                           symmetry=gen, random_seed=3, device="cpu",
+                           verbose=False, **kw)
+
+    r_kw  = t(spin_flip="off", time_reversal="off")
+    r_env = _with_env("ED_SYM_SPIN_FLIP", "0",
+                      lambda: _with_env("ED_SYM_TIME_REVERSAL", "0", t))
+    np.testing.assert_allclose(r_kw.energy, r_env.energy, rtol=0, atol=1e-12)
+    assert sorted((e.n_up, e.sector_dim) for e in r_kw.per_sector) == \
+           sorted((e.n_up, e.sector_dim) for e in r_env.per_sector)
+
+    # "require" on a Hamiltonian WITH the symmetry: fine, same physics.
+    r_req = t(spin_flip="require", time_reversal="require")
+    np.testing.assert_allclose(r_req.energy, r_kw.energy, rtol=0, atol=1e-10)
+
+    # "require" on a Hamiltonian WITHOUT the symmetry: loud error.
+    Hz = _ring(hz=0.4)
+    genz = qed.find_symmetries(Hz, verbose=False).full_set
+    with pytest.raises(RuntimeError, match="spin_flip"):
+        qed.thermal(Hz, method="mTPQ", T_min=0.5, T_max=5.0, num_T=6,
+                    symmetry=genz, device="cpu", verbose=False,
+                    spin_flip="require")
+
+
+def test_gs_time_reversal_pairing_parity():
+    """Stage 8: GS lane TR pairing -- pooled spectrum INCLUDING
+    degeneracy multiplicities must match the TR-off baseline."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def run(**kw):
+        return qed.solve(H, symmetry=gen, sz=N_SITES // 2,
+                         num_eigenvalues=8, verbose=False, **kw)
+
+    r_on = run(time_reversal="auto")
+    r_off = run(time_reversal="off")
+    a = np.asarray(r_on.eigenvalues)
+    b = np.asarray(r_off.eigenvalues)
+    assert len(a) == len(b)
+    np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
+
+
+def _cuda_available() -> bool:
+    if not getattr(qed, "has_cuda_build", lambda: False)():
+        return False
+    try:
+        import subprocess
+        rc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).returncode
+        return rc == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _pooled(r):
+    return np.sort(np.concatenate(
+        [np.asarray(e) for e in r.eigenvalues_per_sector]))
+
+
+def test_gs_flip_projection_halffill_parity():
+    """Stage 8c: GS lane flip projection at n_up = N/2. The FULL sector
+    spectra (exact dense per-sector solves; the iterative lane's higher
+    Ritz values are not converged, so they cannot be compared) must
+    match the flip-off baseline eigenvalue-for-eigenvalue, while the
+    projected run visibly splits the half-filling irreps into (k, +/-)
+    sectors (biggest block halves, total reduced dim is conserved)."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def run(**kw):
+        return qed.solve(H, symmetry=gen, sz=N_SITES // 2, solver="full",
+                         num_eigenvalues=70, device="cpu",
+                         verbose=False, **kw)
+
+    r_on = run(spin_flip="auto", time_reversal="off")
+    r_off = _with_env("ED_SYM_SPIN_FLIP", "0",
+                      lambda: run(spin_flip="off", time_reversal="off"))
+
+    a, b = _pooled(r_on), _pooled(r_off)
+    assert len(a) == len(b)
+    np.testing.assert_allclose(a, b, rtol=0, atol=1e-10)
+
+    dims_on = [t.sector_dim for t in (r_on.sector_tags or [])]
+    dims_off = [t.sector_dim for t in (r_off.sector_tags or [])]
+    assert dims_on and dims_off
+    assert sum(dims_on) == sum(dims_off)      # same reduced space
+    assert max(dims_on) < max(dims_off)       # biggest irrep block split
+    assert len(dims_on) > len(dims_off)       # (k, +/-) doubling
+
+
+def test_gs_flip_transport_mirrors_high_sz():
+    """Stage 8c: for sz > N/2 the GS lane solves the isospectral
+    N - n_up block and re-tags. Exact per-sector spectra and reported
+    n_up must match the flip-off direct solve."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    n_up = N_SITES // 2 + 1   # 5: transport solves n_up = 3 instead
+
+    def run(**kw):
+        return qed.solve(H, symmetry=gen, sz=n_up, solver="full",
+                         num_eigenvalues=56, device="cpu",
+                         verbose=False, **kw)
+
+    r_on = run(spin_flip="auto", time_reversal="off")
+    r_off = _with_env("ED_SYM_SPIN_FLIP", "0",
+                      lambda: run(spin_flip="off", time_reversal="off"))
+
+    a, b = _pooled(r_on), _pooled(r_off)
+    assert len(a) == len(b)
+    np.testing.assert_allclose(a, b, rtol=0, atol=1e-10)
+
+    # Tags must describe the sector the CALLER asked for.
+    ups = {t.n_up for t in (r_on.sector_tags or [])}
+    assert ups == {n_up}
+
+
+@pytest.mark.skipif(not _cuda_available(),
+                    reason="Requires a CUDA-enabled qed build and a "
+                           "visible NVIDIA device.")
+def test_flip_projection_thermal_parity_gpu():
+    """Stage 8b: flip PROJECTION on the GPU lane (device flip masks in
+    DeviceRepSymmetryBasisPolicy). GPU flip-on thermal traces must match
+    the flip-off baseline on the same device."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def t():
+        return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0,
+                           num_T=10, symmetry=gen, random_seed=3,
+                           device="gpu", verbose=False)
+
+    r_on = t()
+    r_off = _with_flip_disabled(t)
+    np.testing.assert_allclose(r_on.energy, r_off.energy,
+                               rtol=0, atol=1e-10)
+    np.testing.assert_allclose(r_on.specific_heat, r_off.specific_heat,
+                               rtol=0, atol=1e-9)
+    # Projection really engaged: the half-filling block is split.
+    dims_on = sorted(e.sector_dim for e in r_on.per_sector
+                     if e.n_up == N_SITES // 2)
+    dims_off = sorted(e.sector_dim for e in r_off.per_sector
+                      if e.n_up == N_SITES // 2)
+    assert sum(dims_on) == sum(dims_off)
+    assert max(dims_on) < max(dims_off)

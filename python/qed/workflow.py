@@ -848,6 +848,8 @@ def solve(
     sector: Optional[Sequence[int]] = None,
     sz: Optional[int] = None,
     auto_sz: bool = True,
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
     output_dir: str = "",
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
@@ -1266,6 +1268,8 @@ def solve(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
             verbose=verbose,
+            spin_flip=spin_flip,
+            time_reversal=time_reversal,
         )
 
     if use_mpi:
@@ -2729,6 +2733,8 @@ def _diag_with_symmetry(
     *,
     sz: Optional[int],
     verbose: bool,
+    spin_flip="auto",
+    time_reversal="auto",
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -2840,6 +2846,17 @@ def _diag_with_symmetry(
         # FULL) -- the original behaviour.
         opts = _ed_params_to_solve_options(params, method)
         opts.use_symmetry = True
+        # Stage 8 composition toggles: -1 auto / 0 off / 1 require.
+        _sf = spin_flip
+        opts.spin_flip = (
+            0 if _sf in (False, "off", 0)
+            else 1 if _sf in (True, "require", 1)
+            else -1)
+        _tr = time_reversal
+        opts.time_reversal = (
+            0 if _tr in (False, "off", 0)
+            else 1 if _tr in (True, "require", 1)
+            else -1)
         if fixed_sz_n_up is not None:
             opts.use_fixed_sz = True
             opts.n_up         = fixed_sz_n_up

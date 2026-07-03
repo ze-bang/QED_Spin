@@ -432,6 +432,11 @@ struct DeviceRepSymmetryBasisPolicy {
     const int*              perms             = nullptr;  // group_size * n_sites
     const cuDoubleComplex*  characters        = nullptr;  // length group_size, chi_k(g)
     const std::int32_t*     rep_index_of_rank = nullptr;  // length C(n_sites,n_up)
+    // Stage 8b (SymmetryEngine v2): per-element XOR flip masks for
+    // flip-extended groups (element action = perm THEN xor). nullptr =
+    // pure permutations (every pre-8b sector). Mirrors the host
+    // RepSymmetryBasisPolicy::flips field.
+    const std::uint64_t*    flips             = nullptr;  // length group_size
     std::uint64_t           dim_              = 0;
     int                     group_size        = 1;
     int                     n_sites           = 0;
@@ -450,7 +455,7 @@ struct DeviceRepSymmetryBasisPolicy {
         for (int i = 0; i < n_sites; ++i) {
             r |= ((s >> p[i]) & 1ULL) << i;
         }
-        return r;
+        return (flips != nullptr) ? (r ^ flips[g]) : r;
     }
 
     __device__ inline std::uint64_t state_of(std::uint64_t idx) const noexcept {

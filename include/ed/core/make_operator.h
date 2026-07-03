@@ -152,6 +152,12 @@ struct OperatorSpec {
     /// `SectorView`s.)
     std::optional<std::size_t> sector_index;
 
+    /// Stage 8c (SymmetryEngine v2): split the half-filling Sz block into
+    /// flip-parity (k, +/-) sectors when the fixed-Sz streaming lane builds
+    /// n_up == num_sites/2 (caller must have verified [H, X] == 0 and an
+    /// eigenvalues-only workload). Forces the lazy builder variant.
+    bool                  flip_project_half = false;
+
     /// Stage 3 (SymmetryEngine v2): explicit OrbitTable disk-cache
     /// directory. Empty = auto (``ED_SYM_CACHE_DIR`` override, else
     /// ``<lattice_dir>/basis_cache`` for directory sources; registry-only
@@ -537,7 +543,8 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         // defer the per-sector orbit CSR / GPU RepSectorData. Small/moderate
         // systems stay eager (fast precomputed-CSR matvec). Same budget knobs
         // as the streaming operator so both production paths agree.
-        if (detail::fixed_sz_sectors_should_be_lazy(
+        if (spec.flip_project_half
+            || detail::fixed_sz_sectors_should_be_lazy(
                 static_cast<std::uint64_t>(spec.num_sites),
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info)) {
@@ -545,7 +552,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir);
+                mpi_rank, mpi_size, owner_ptr, cache_dir, spec.flip_project_half);
         } else {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
@@ -753,14 +760,20 @@ namespace ed::core {
 class SectorSetView {
 public:
     explicit SectorSetView(ed::SectorOperatorSet set)
-        : set_(std::make_shared<ed::SectorOperatorSet>(std::move(set))) {
+        : set_(std::make_shared<ed::SectorOperatorSet>(std::move(set))),
+          index_space_(set_->num_raw_sectors) {
         for (std::size_t i = 0; i < set_->tags.size(); ++i) {
             raw_to_pos_[set_->tags[i].sector_index] = i;
+            // Stage 8c: flip-projected sets carry SYNTHETIC indices
+            // k + parity * num_raw beyond the raw irrep count; widen the
+            // iteration space so per-sector loops reach the (k, -) blocks.
+            index_space_ = std::max(index_space_,
+                                    set_->tags[i].sector_index + 1);
         }
     }
 
     [[nodiscard]] std::size_t num_sectors() const noexcept {
-        return set_->num_raw_sectors;
+        return index_space_;
     }
 
     /// Non-owning pointer to the persistent per-sector operator for the RAW
@@ -793,6 +806,7 @@ public:
 
 private:
     std::shared_ptr<ed::SectorOperatorSet>       set_;
+    std::size_t                                  index_space_ = 0;
     std::unordered_map<std::size_t, std::size_t> raw_to_pos_;
 };
 
