@@ -1221,7 +1221,9 @@ def solve(
         return full_spectrum_compute(
             H, symmetry=symmetry,
             sz_conserved=(None if auto_sz else False),
-            spin_length=spin_l, device=_dev, verbose=verbose)
+            spin_length=spin_l, device=_dev,
+            spin_flip=spin_flip, time_reversal=time_reversal,
+            point_group=point_group, lattice=lattice, verbose=verbose)
 
     fixed_sz_input = isinstance(H, FixedSzOperator)
     num_sites = int(H.num_sites)
@@ -3165,6 +3167,10 @@ def full_spectrum(
     sz_conserved: Optional[bool] = None,
     spin_length: float = 0.5,
     device: str = "cpu",
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
+    lattice: Optional[Any] = None,
     verbose: bool = False,
 ) -> EDResults:
     """Compute the COMPLETE eigenvalue spectrum of ``operator`` decomposed
@@ -3200,10 +3206,26 @@ def full_spectrum(
     import math
 
     N = int(operator.num_sites)
+    symmetry = resolve_auto_symmetry(operator, symmetry, verbose=verbose,
+                                     lattice=lattice)
     info = _normalize_symmetry_info(operator, symmetry)
     if sz_conserved is None:
         sz_conserved = _operator_conserves_sz(operator)
     use_gpu = isinstance(device, str) and device.lower() in ("gpu", "cuda")
+    _sf = resolve_discrete_toggle(operator, spin_flip, "spin_flip",
+                                  verbose=verbose)
+    _tr = resolve_discrete_toggle(operator, time_reversal, "time_reversal",
+                                  verbose=verbose)
+    # Flip transport for the COMPLETE spectrum: [H, X] == 0 makes the
+    # n_up and N - n_up magnetisation blocks isospectral, so the dense
+    # sweep only diagonalises n_up <= N/2 and mirrors the spectra.
+    _flip_transport = False
+    if _sf != 0 and sz_conserved:
+        try:
+            _flip_transport = bool(
+                _core.detect_hamiltonian_symmetries(operator)["spin_flip"])
+        except Exception:
+            _flip_transport = False
 
     # NON-ABELIAN spatial group: the streaming-symmetry rep path below only
     # handles abelian (1-D irrep) projection and would silently restrict to a
@@ -3213,14 +3235,47 @@ def full_spectrum(
     # one call. This is the dense full diagonalisation benefiting from the full
     # non-abelian symmetry machinery.
     _gens = _raw_generators(symmetry)
+    _star = list(getattr(symmetry, "star_perms", None) or []) \
+        if symmetry is not None else []
+    gens_full = None
     if _gens is not None and _generators_nonabelian(_gens):
+        gens_full = [list(g) for g in _gens]     # explicit non-abelian input
+    elif (_gens is not None and _star
+          and point_group not in (False, 0, "off", "none")):
+        cand = [list(g) for g in _gens] + [list(p) for p in _star]
+        if _generators_nonabelian(cand):
+            gens_full = cand                     # clique + residue = full group
+    if gens_full is not None:
+        # SAB engine: FULL-group projection including d_G >= 2 irreps --
+        # the strongest dense reduction (blocks ~ dim / |G|). The point
+        # group is inside the projection here, so star reduction is
+        # subsumed; the flip transport still halves the Sz sweep.
         if verbose:
             print("[qed.full_spectrum] non-abelian group -> SAB engine "
-                  "(full d_G reduction)")
-        spec = _core.symmetry_adapted_eigenvalues(
-            operator, _gens, n_up=-1, use_gpu=use_gpu)
+                  "(full d_G reduction)"
+                  + (", flip transport halves the Sz sweep"
+                     if _flip_transport else ""))
+        eigs: list[float] = []
+        if sz_conserved:
+            top = N // 2 if _flip_transport else N
+            for n_up in range(top + 1):
+                spec = _core.symmetry_adapted_eigenvalues(
+                    operator, gens_full, n_up=int(n_up), use_gpu=use_gpu)
+                block = [float(e) for e in spec["eigenvalues"]]
+                eigs.extend(block)
+                if _flip_transport and n_up * 2 != N:
+                    eigs.extend(block)           # isospectral N - n_up mirror
+                if verbose:
+                    print(f"[qed.full_spectrum]   SAB n_up={n_up} "
+                          f"got={len(block)}"
+                          + (" (mirrored)" if _flip_transport
+                             and n_up * 2 != N else ""))
+        else:
+            spec = _core.symmetry_adapted_eigenvalues(
+                operator, gens_full, n_up=-1, use_gpu=use_gpu)
+            eigs = [float(e) for e in spec["eigenvalues"]]
         out = EDResults()
-        out.eigenvalues = sorted(float(e) for e in spec["eigenvalues"])
+        out.eigenvalues = sorted(eigs)
         return out
 
     # No spatial symmetry: a plain dense full diagonalisation already
@@ -3248,7 +3303,15 @@ def full_spectrum(
         _write_symmetry_directory(tmpdir, info)
 
         sz_values: list[Optional[int]] = (
-            list(range(N + 1)) if sz_conserved else [None])
+            (list(range(N // 2 + 1)) if _flip_transport
+             else list(range(N + 1)))
+            if sz_conserved else [None])
+        # Stage 7a star maps for the per-Sz sector loops.
+        _star_maps = None
+        if _star and point_group not in (False, 0, "off", "none") \
+                and info is not None:
+            from .star_reduction import star_maps_from_info
+            _star_maps = star_maps_from_info(info, _star) or None
         if verbose:
             print(f"[qed.full_spectrum] N={N} |G|="
                   f"{len(info.get('max_clique', []))} "
@@ -3271,12 +3334,20 @@ def full_spectrum(
             opts = _ed_params_to_solve_options(
                 params, DiagonalizationMethod.FULL)
             opts.use_symmetry = True
+            opts.spin_flip = _sf
+            opts.time_reversal = _tr
+            if _star_maps:
+                opts.star_maps = _star_maps
             if n_up is not None:
                 opts.use_fixed_sz = True
                 opts.n_up = int(n_up)
             gs = _core.workflows_solve_streaming_symmetry_directory(
                 tmpdir, N, float(spin_length), opts, n_up)
             eigs.extend(gs.eigenvalues)
+            if (_flip_transport and n_up is not None
+                    and int(n_up) * 2 != N):
+                # Isospectral N - n_up mirror of the whole Sz block.
+                eigs.extend(gs.eigenvalues)
             _eps = getattr(gs, "eigenvalues_per_sector", None)
             if _eps:
                 eigs_per_sector.extend([list(s) for s in _eps])

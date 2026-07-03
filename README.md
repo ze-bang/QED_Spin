@@ -127,6 +127,8 @@ qed.solve(H,  symmetry="auto", sz=N//2)               # GS
 qed.thermal(H, method="mTPQ", symmetry="auto")        # finite T
 qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
              sz=N//2, momentum_transfer=[0.5])        # DSSF
+qed.full_spectrum(H, symmetry="auto")                 # complete dense spectrum
+                                                      # (non-abelian SAB route)
 ```
 
 Each discrete symmetry has its own four-state toggle, so you can mix

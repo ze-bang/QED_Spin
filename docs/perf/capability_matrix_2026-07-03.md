@@ -116,6 +116,22 @@ Sector route ~5 orders tighter than the full-Hilbert continued
 fraction. Flip/TR/star are not yet consumed by the spectral lanes
 (Stage 8d); `"require"` still validates the Hamiltonian.
 
+## Complete spectrum (dense) — all 4096 eigenvalues vs numpy
+
+| route | device | multiset max dev | t [s] |
+|---|---|---|---|
+| SAB (full D₁₂, d≥2 irreps) + flip-halved Sz sweep | cpu | 9.0e−14 | 0.1 |
+| SAB + flip-halved sweep | gpu (batched cuSOLVER) | 8.6e−14 | 0.9 |
+| abelian streaming (U(1)×irreps×flip-proj×TR) | cpu | 9.2e−14 | 2.0 |
+
+`qed.full_spectrum(H, symmetry="auto")` now composes everything: the
+automorphism search resolves the group, the NON-ABELIAN full group
+routes to the SAB engine (blocks ~ dim/|G| including d≥2 irreps — the
+strongest dense reduction, 20× faster than the abelian path here), and
+spin-flip transport halves the magnetisation sweep on both routes. The
+same toggles apply (`spin_flip=` / `time_reversal=` / `point_group=`);
+`point_group="off"` pins the abelian streaming path.
+
 ## GPU parity and optimization status
 
 * Every composition runs the SAME plan on both devices — flip masks
