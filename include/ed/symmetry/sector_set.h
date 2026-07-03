@@ -929,7 +929,8 @@ build_all_sz_sector_operators(
     std::int64_t             n_up_min = 0,
     std::int64_t             n_up_max = -1,
     std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr,
-    const std::string&       cache_dir = {})
+    const std::string&       cache_dir = {},
+    bool                     flip_project_half = false)
 {
     if (n_up_max < 0) n_up_max = static_cast<std::int64_t>(n_bits);
     n_up_min = std::max<std::int64_t>(0, n_up_min);
@@ -992,6 +993,151 @@ build_all_sz_sector_operators(
             const auto nu = static_cast<std::size_t>(n_up);
             if (nu >= reps_by_n_up.size() || reps_by_n_up[nu].empty())
                 continue;
+
+            // -----------------------------------------------------------------
+            // Stage 5b (SymmetryEngine v2): flip-projected half-filling block.
+            // At n_up == N/2 the global spin flip F preserves the subspace, so
+            // the group extends to G' = G x Z2 (F commutes with every site
+            // permutation). Each spatial irrep k splits into (k, +) and (k, -)
+            // with chi' = (chi_k, +/-chi_k), halving the LARGEST Sz block's
+            // sector dims. CPU rep lane only (the caller gates on that); the
+            // orbit-CSR fallback is unsupported for flip sectors and throws.
+            // -----------------------------------------------------------------
+            if (flip_project_half && fused
+                && n_up * 2 == static_cast<std::int64_t>(n_bits)) {
+                const CompiledGroup cg_flip =
+                    make_flip_extended_group(*info_sp, n_bits);
+                const std::size_t G2 = cg_flip.size();      // 2 |G| (or 2)
+                const std::size_t Gs = G2 / 2;              // spatial half
+                auto flip_tab = acquire_orbit_table_fixed_sz_compiled(
+                    n_bits, static_cast<int>(n_up), cg_flip, cache_dir);
+                auto reps_fp = std::shared_ptr<const std::vector<std::uint64_t>>(
+                    flip_tab, &flip_tab->reps);
+
+                std::shared_ptr<const SharedRankLookup> srl_f;
+                {
+                    ed::core::combinadic::BinomialTable b(
+                        static_cast<int>(n_bits));
+                    if (rep_rank_table_enabled(b.at(static_cast<int>(n_bits),
+                                                    static_cast<int>(n_up)))) {
+                        srl_f = make_shared_rank_lookup(
+                            *reps_fp, static_cast<int>(n_bits),
+                            static_cast<int>(n_up));
+                    }
+                }
+
+                // Doubled element tables: permutation part repeats; the
+                // second half carries the all-ones flip mask.
+                std::vector<int> perms2;
+                if (info_sp->max_clique.empty()) {   // trivial spatial group
+                    perms2.resize(2 * n_bits);
+                    for (std::uint64_t i = 0; i < n_bits; ++i) {
+                        perms2[i]           = static_cast<int>(i);
+                        perms2[n_bits + i]  = static_cast<int>(i);
+                    }
+                } else {
+                    perms2 = shared_perms_flat;
+                    perms2.insert(perms2.end(), shared_perms_flat.begin(),
+                                  shared_perms_flat.end());
+                }
+                const std::uint64_t all_ones =
+                    (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
+                std::vector<std::uint64_t> flips2(G2, 0ULL);
+                for (std::size_t g = Gs; g < G2; ++g) flips2[g] = all_ones;
+
+                const std::size_t n_flip_secs =
+                    2 * std::max<std::size_t>(num_irreps, 1);
+                std::vector<std::unique_ptr<SectorOperator>> fslot(n_flip_secs);
+                std::vector<std::pair<int, std::size_t>> fslot_ids(
+                    n_flip_secs, {-1, 0});
+
+                #pragma omp parallel for schedule(dynamic) if(n_flip_secs > 1)
+                for (std::ptrdiff_t si = 0;
+                     si < static_cast<std::ptrdiff_t>(n_flip_secs); ++si) {
+                    const std::size_t idx    = static_cast<std::size_t>(si);
+                    const std::size_t k      = idx % std::max<std::size_t>(num_irreps, 1);
+                    const int         parity = (idx < std::max<std::size_t>(num_irreps, 1)) ? +1 : -1;
+
+                    // chi' over G': spatial characters then +/- copies.
+                    std::vector<Complex> chi2(G2, Complex(1.0, 0.0));
+                    if (num_irreps > 0) {
+                        const std::vector<Complex> chi_k =
+                            sector_characters_from(
+                                *info_sp, info_sp->sectors[k].phase_factors);
+                        for (std::size_t g = 0; g < Gs; ++g) {
+                            chi2[g]      = chi_k[g];
+                            chi2[Gs + g] = static_cast<double>(parity) * chi_k[g];
+                        }
+                    } else {
+                        chi2[1] = Complex(static_cast<double>(parity), 0.0);
+                    }
+
+                    RepSectorData rd;
+                    rd.n_sites    = static_cast<int>(n_bits);
+                    rd.group_size = static_cast<int>(G2);
+                    rd.reps.reserve(reps_fp->size());
+                    rd.inv_norms.reserve(reps_fp->size());
+                    if (srl_f) {
+                        rd.shared_rank = srl_f;
+                        rd.local_of_shared.assign(reps_fp->size(),
+                                                  std::int32_t{-1});
+                    }
+                    for (std::size_t i = 0; i < reps_fp->size(); ++i) {
+                        const double norm_sq = projected_norm_sq_stab(
+                            flip_tab->stabilizer_of(i), chi2);
+                        if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon)
+                            continue;
+                        rd.reps.push_back((*reps_fp)[i]);
+                        rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+                        if (srl_f) {
+                            rd.local_of_shared[i] =
+                                static_cast<std::int32_t>(rd.reps.size() - 1);
+                        }
+                    }
+                    if (rd.reps.empty()) continue;
+
+                    rd.n_up       = static_cast<int>(n_up);
+                    rd.characters = chi2;
+                    rd.perms_flat = perms2;
+                    rd.flip_masks = flips2;
+
+                    bool is_real = true;
+                    for (const auto& c : rd.characters) {
+                        if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+                    }
+                    const std::uint64_t dim =
+                        static_cast<std::uint64_t>(rd.reps.size());
+                    auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+
+                    auto op = std::make_unique<SectorOperator>(
+                        n_bits, spin_l, SectorBasis{});
+                    terms(*op);
+                    op->configureRepLazy(
+                        dim, G2, is_real,
+                        /*rep_provider=*/[rep_sp]() { return *rep_sp; },
+                        /*csr_provider=*/[]() -> ::SymmetrySector {
+                            throw std::runtime_error(
+                                "flip-projected sector: the orbit-CSR lane is "
+                                "not flip-aware. Keep the default rep lane "
+                                "(unset ED_SYM_REP=0) or disable the in-sector "
+                                "flip projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
+                        });
+
+                    fslot[idx]     = std::move(op);
+                    // Synthetic raw index k + parity*num_irreps keeps output
+                    // paths distinct; tag.quantum_numbers lookup is bounds-
+                    // guarded upstream.
+                    fslot_ids[idx] = {static_cast<int>(n_up), idx};
+                }
+
+                for (std::size_t idx = 0; idx < n_flip_secs; ++idx) {
+                    if (!fslot[idx]) continue;
+                    if (out_n_up_sector_ids)
+                        out_n_up_sector_ids->push_back(fslot_ids[idx]);
+                    ops.push_back(std::move(fslot[idx]));
+                }
+                continue;   // plain (unprojected) N/2 block replaced
+            }
 
             // Tableless popcount-membership subspace for the orbit expansion
             // (bit-identical to FixedSzSubspace for fixed-Sz; no materialized

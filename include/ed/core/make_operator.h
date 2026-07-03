@@ -630,7 +630,8 @@ make_sector_operators(const OperatorSpec& spec) {
 inline SectorOperatorSet
 make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
                                     int n_up_min = 0,
-                                    int n_up_max = -1) {
+                                    int n_up_max = -1,
+                                    bool flip_project_half = false) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_all_sz_sector_operators_tagged: requires "
@@ -659,7 +660,7 @@ make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
             n_bits, spec.spin_l, base->symmetry_info, term_builder,
             static_cast<std::int64_t>(n_up_min),
             static_cast<std::int64_t>(n_up_max),
-            &n_up_sector_ids, cache_dir);
+            &n_up_sector_ids, cache_dir, flip_project_half);
 
     SectorOperatorSet set;
     set.num_raw_sectors = base->symmetry_info.sectors.size();

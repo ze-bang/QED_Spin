@@ -299,6 +299,24 @@ acquire_orbit_table_fixed_sz(std::uint64_t n_bits, int n_up,
         [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, info); });
 }
 
+/// Stage 5b: acquire with a caller-supplied CompiledGroup (flip-extended
+/// lanes). Same key formula as the info-based fixed-Sz path, so the disk
+/// cache + registry work identically (the flip elements change the group
+/// hash and therefore the key).
+[[nodiscard]] inline std::shared_ptr<const OrbitTable>
+acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
+                                      int                  n_up,
+                                      const CompiledGroup& cg,
+                                      const std::string&   cache_dir = {}) {
+    const std::uint64_t key = cg.content_hash()
+        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+        ^ (n_bits * 0x2545F4914F6CDD1DULL)
+        ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
+    return detail::acquire_impl(
+        key, cache_dir,
+        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); });
+}
+
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_full(std::uint64_t n_bits,
                          const SymmetryGroupInfo& info,

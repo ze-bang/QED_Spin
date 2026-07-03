@@ -104,6 +104,21 @@ struct RepSectorData {
     std::vector<std::int32_t>          rep_index_of_rank;
     ed::core::combinadic::BinomialTable binom;
 
+    // Stage 5b (SymmetryEngine v2): per-element XOR masks for flip-extended
+    // groups (element action = permute_bits(s, perm) ^ flip_masks[g]).
+    // Empty = pure permutations (every pre-5b group). When non-empty the
+    // length must equal ``group_size`` and ``perms_flat`` carries the
+    // permutation part of every element (the flip half repeats the spatial
+    // permutations). The device mirror does NOT support flips yet -- the
+    // builders only emit flip-extended sectors on the CPU lane.
+    std::vector<std::uint64_t> flip_masks;
+
+    [[nodiscard]] bool has_flips() const noexcept {
+        for (std::uint64_t m : flip_masks)
+            if (m != 0) return true;
+        return false;
+    }
+
     // Byte-decomposition lookup table for fast apply_perm on N≤32 systems.
     // Replaces the N-iteration scalar bit-scatter loop with 4 table lookups,
     // saving ~60% of instruction count at N=32 (4 L2 hits vs 32 scalar ops).

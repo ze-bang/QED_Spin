@@ -3188,10 +3188,27 @@ void bind_workflows(py::module_& m) {
                       }
                   }
 
+                  // Stage 5b: in-sector flip projection of the half-filling
+                  // block (k -> (k, +/-), halving the biggest sector). CPU rep
+                  // lane only -- the device policy is not flip-aware yet.
+                  // Sub-gate ED_SYM_SPIN_FLIP_PROJECT=0 keeps the transporter
+                  // but skips the projection.
+                  const bool flip_project = [&] {
+                      if (!flip_transport) return false;
+                      if (opts.backend.allow_gpu) return false;
+                      const char* v = std::getenv("ED_SYM_SPIN_FLIP_PROJECT");
+                      return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+                  }();
+                  if (flip_project && ed::symmetry::sym_profile_enabled()) {
+                      std::fprintf(stderr,
+                          "[sym-profile] spin-flip projection: half-filling "
+                          "block split into (k, +/-) sectors\n");
+                  }
+
                   // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, build_lo, build_hi);
+                          spec, build_lo, build_hi, flip_project);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());

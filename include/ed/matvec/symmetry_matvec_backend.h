@@ -131,6 +131,10 @@ rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
         p.perm_lut     = rd.perm_lut_data.data();
         p.perm_lut_bpw = rd.perm_lut_bpw;
     }
+    // Stage 5b: flip-extended elements (perm THEN xor).
+    if (!rd.flip_masks.empty()) {
+        p.flips = rd.flip_masks.data();
+    }
     return p;
 }
 

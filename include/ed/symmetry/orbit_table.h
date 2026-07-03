@@ -150,10 +150,15 @@ inline bool visit_state(std::uint64_t                s,
 /// Gosper walk; no C(N,n_up) basis materialization). ``reps`` ascending,
 /// bit-identical to ``enumerate_fixed_sz_orbit_reps_streaming``;
 /// ``stab_elems`` content-identical to ``build_orbit_stabilizers``.
+/// Compiled-group core: the caller supplies the (possibly flip-extended)
+/// CompiledGroup. PRECONDITION for flip elements: every element must
+/// preserve the popcount of every subspace state (the all-ones spin flip
+/// does exactly at half filling, n_up == N/2) -- otherwise the min-image
+/// convention and the closed-form norms are invalid.
 [[nodiscard]] inline OrbitTable
-build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
-                                     int                      n_up,
-                                     const SymmetryGroupInfo& info) {
+build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
+                                     int                  n_up,
+                                     const CompiledGroup& cg) {
     SymPhaseTimer prof("pass1+1.5 fused orbit-table (fixed-Sz, streaming)");
     OrbitTable tab;
     if (n_up < 0 || static_cast<std::uint64_t>(n_up) > n_bits) return tab;
@@ -163,11 +168,7 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
     tab.subspace_dim = total;
     if (total == 0) return tab;
 
-    const std::size_t G = info.max_clique.size();
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    const std::size_t G = cg.size();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)
@@ -253,6 +254,43 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
     tab.stab_elems = std::move(global.sets);
     prof.set_items(tab.reps.size());
     return tab;
+}
+
+/// SymmetryGroupInfo convenience wrapper (pure site permutations).
+[[nodiscard]] inline OrbitTable
+build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
+                                     int                      n_up,
+                                     const SymmetryGroupInfo& info) {
+    const CompiledGroup cg = info.max_clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg);
+}
+
+/// Stage 5b: the flip-extended group G' = G x Z2 -- elements
+/// [g_0..g_{|G|-1}, g_0*F, .., g_{|G|-1}*F] with F = XOR all-ones
+/// (the global spin flip; it commutes with every site permutation, so
+/// this IS the direct product). Only meaningful on the half-filling
+/// subspace, where F preserves popcount.
+[[nodiscard]] inline CompiledGroup
+make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
+    std::vector<std::vector<int>> perms = info.max_clique;
+    if (perms.empty()) {  // trivial spatial group: identity + flip
+        std::vector<int> ident(static_cast<std::size_t>(n_bits));
+        for (std::size_t i = 0; i < ident.size(); ++i)
+            ident[i] = static_cast<int>(i);
+        perms.push_back(ident);
+    }
+    const std::size_t Gs = perms.size();
+    const std::uint64_t all_ones =
+        (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
+    std::vector<std::vector<int>> perms2 = perms;
+    perms2.insert(perms2.end(), perms.begin(), perms.end());
+    std::vector<std::uint64_t> flips(2 * Gs, 0ULL);
+    for (std::size_t g = Gs; g < 2 * Gs; ++g) flips[g] = all_ones;
+    return CompiledGroup::from_elements(perms2, flips,
+                                        static_cast<int>(n_bits));
 }
 
 /// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``

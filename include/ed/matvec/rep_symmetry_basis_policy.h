@@ -66,6 +66,12 @@ struct RepSymmetryBasisPolicy {
     const std::int32_t*                       rep_index_of_rank = nullptr;
     const ed::core::combinadic::BinomialTable* binom            = nullptr;
 
+    // Stage 5b (SymmetryEngine v2): per-element XOR flip masks (nullptr =
+    // pure permutations). Applied AFTER the permutation; for the global
+    // spin flip (all-ones mask) the order is immaterial since the mask is
+    // permutation-invariant.
+    const std::uint64_t* flips = nullptr;
+
     // Stage 4 (SymmetryEngine v2) two-level O(1) lookup, preferred when set:
     // rank -> SHARED rep index (one dense table per (N, n_up), shared across
     // every irrep sector) -> this sector's local index via the small
@@ -98,20 +104,21 @@ struct RepSymmetryBasisPolicy {
     // instruction count vs the scalar loop (4 L2 hits vs 32 iterations×3 ops).
     [[nodiscard]] inline std::uint64_t
     apply_perm(std::uint64_t s, int g) const noexcept {
+        const std::uint64_t flip = (flips != nullptr) ? flips[g] : 0ULL;
         if (perm_lut != nullptr) {
             const std::uint32_t* lut_g = perm_lut
                 + static_cast<std::size_t>(g) * perm_lut_bpw * 256;
             std::uint32_t r = 0;
             for (int b = 0; b < perm_lut_bpw; ++b)
                 r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
-            return static_cast<std::uint64_t>(r);
+            return static_cast<std::uint64_t>(r) ^ flip;
         }
         // Scalar fallback for N>32 (or when LUT not built).
         const int* p = perms + static_cast<std::size_t>(g) * n_sites;
         std::uint64_t r = 0;
         for (int i = 0; i < n_sites; ++i)
             r |= ((s >> p[i]) & 1ULL) << i;
-        return r;
+        return r ^ flip;
     }
 
     // Representative of ``state``: numeric minimum over the orbit.
