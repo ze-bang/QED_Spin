@@ -137,6 +137,13 @@ struct SolveOptions {
     int spin_flip     = -1;
     int time_reversal = -1;
 
+    /// Stage 7a: raw-irrep image maps under the non-abelian residue of
+    /// the spatial group (one vector per coset representative;
+    /// star_maps[c][k] = image irrep of k under p_c, -1 = unresolved).
+    /// Isospectral orbit members are solved once and copied. Computed
+    /// by the Python automorphism pipeline; empty = no star reduction.
+    std::vector<std::vector<int>> star_maps;
+
     /// If true, generate the symmetry basis + the sector-block
     /// Hamiltonians and exit without diagonalising. Used by the CLI's
     /// `precompute_basis_only` mode to pre-warm the cache on a single
@@ -156,6 +163,13 @@ struct ThermalOptions {
     /// -1 = auto, 0 = off, 1 = require. See SolveOptions for semantics.
     int spin_flip     = -1;
     int time_reversal = -1;
+
+    /// Stage 7a: raw-irrep image maps under the non-abelian residue of
+    /// the spatial group (one vector per coset representative;
+    /// star_maps[c][k] = image irrep of k under p_c, -1 = unresolved).
+    /// Isospectral orbit members are solved once and copied. Computed
+    /// by the Python automorphism pipeline; empty = no star reduction.
+    std::vector<std::vector<int>> star_maps;
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {

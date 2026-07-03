@@ -229,6 +229,7 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     use_mpi: bool = False,
     spin_flip: int = -1,
     time_reversal: int = -1,
+    star_maps: Optional[list] = None,
 ) -> "_core.ThermalResult":
     """Single C++ call covering ALL (n_up, irrep) sectors simultaneously.
 
@@ -249,6 +250,8 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts.backend.allow_mpi = bool(use_mpi)
     opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
     opts.time_reversal = int(time_reversal)
+    if star_maps:
+        opts.star_maps = [[int(x) for x in m] for m in star_maps]
     return _core.workflows_thermal_all_sz_streaming_symmetry_directory(
         directory, int(num_sites), float(spin_l), opts,
         int(n_up_min), int(n_up_max))
@@ -581,6 +584,8 @@ def thermal(
     use_sz_if_conserved: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
+    star_maps: Optional[list] = None,
     output_dir: str = "",
     verbose: bool = True,
     # Phase C of the "Backend x Symmetries x Workflows" plan
@@ -727,6 +732,19 @@ def thermal(
         spin_flip = _sym_toggle_int(spin_flip, "spin_flip", H, verbose)
         time_reversal = _sym_toggle_int(
             time_reversal, "time_reversal", H, verbose)
+        # Stage 7a: star reduction -- non-abelian residue folds the
+        # irrep sectors into isospectral orbits (solve one per star).
+        _star = getattr(symmetry, "star_perms", None) or []
+        if (star_maps is None and _star
+                and point_group not in (False, 0, "off", "none")):
+            _info_s = _normalize_symmetry_info(H, symmetry)
+            if _info_s is not None:
+                from .star_reduction import star_maps_from_info
+                star_maps = star_maps_from_info(_info_s, _star) or None
+                if star_maps and verbose:
+                    print(f"[qed] point group: {len(star_maps)} residue "
+                          "automorphisms fold the irrep sectors into "
+                          "isospectral stars (solve one per star).")
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
@@ -741,6 +759,7 @@ def thermal(
             _fwd["symmetry"] = None
             _fwd["spin_flip"] = spin_flip          # already resolved ints
             _fwd["time_reversal"] = time_reversal
+            _fwd["star_maps"] = star_maps
             return thermal(_tmp, **_fwd)
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)
@@ -1092,7 +1111,8 @@ def thermal(
                     lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi,
                     spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
                     time_reversal=_sym_toggle_int(time_reversal,
-                                                  "time_reversal"))
+                                                  "time_reversal"),
+                    star_maps=star_maps)
                 td = tr.thermo
                 if not td or not td.temperatures:
                     raise RuntimeError(

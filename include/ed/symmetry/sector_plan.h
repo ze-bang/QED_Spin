@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -76,6 +77,17 @@ struct SymmetryComposition {
     // tr_pairing. partner[k] == -1 marks malformed metadata for k
     // (that sector is always solved).
     std::vector<std::int32_t> tr_partner;
+
+    // Stage 7a (star reduction): raw-irrep -> raw-irrep images under
+    // the NON-ABELIAN residue of the spatial group (one entry vector
+    // per coset representative p: star_maps[c][k] = index of the
+    // T-irrep chi_k^p, or -1 when p's action on k could not be
+    // resolved). Sectors on one star are isospectral (U_p maps the
+    // blocks onto each other), so only one representative per orbit
+    // needs a solve. Computed upstream (Python: the automorphism
+    // pipeline retains the full group; the abelian clique is what the
+    // projector uses) and passed through Solve/ThermalOptions.
+    std::vector<std::vector<std::int32_t>> star_maps;
 };
 
 /// Resolve which mechanisms apply. All three mechanisms are
@@ -202,6 +214,41 @@ struct TrActionPlan {
     [[nodiscard]] bool active() const noexcept { return n_skipped > 0; }
 };
 
+/// Union of all isospectrality relations on the RAW irrep index:
+/// time-reversal conjugation (k <-> -k) plus every star map (k <->
+/// p(k)). Returns canonical[k] = smallest raw index on k's orbit.
+[[nodiscard]] inline std::vector<std::int32_t>
+sector_orbit_canonical(std::size_t num_raw, const SymmetryComposition& comp)
+{
+    std::vector<std::int32_t> root(num_raw);
+    for (std::size_t k = 0; k < num_raw; ++k)
+        root[k] = static_cast<std::int32_t>(k);
+    std::function<std::int32_t(std::int32_t)> find =
+        [&](std::int32_t x) {
+            while (root[x] != x) { root[x] = root[root[x]]; x = root[x]; }
+            return x;
+        };
+    auto unite = [&](std::size_t a, std::size_t b) {
+        const std::int32_t ra = find(static_cast<std::int32_t>(a));
+        const std::int32_t rb = find(static_cast<std::int32_t>(b));
+        if (ra != rb) root[std::max(ra, rb)] = std::min(ra, rb);
+    };
+    if (comp.tr_pairing && comp.tr_partner.size() == num_raw) {
+        for (std::size_t k = 0; k < num_raw; ++k)
+            if (comp.tr_partner[k] >= 0)
+                unite(k, static_cast<std::size_t>(comp.tr_partner[k]));
+    }
+    for (const auto& m : comp.star_maps) {
+        if (m.size() != num_raw) continue;
+        for (std::size_t k = 0; k < num_raw; ++k)
+            if (m[k] >= 0) unite(k, static_cast<std::size_t>(m[k]));
+    }
+    std::vector<std::int32_t> canon(num_raw);
+    for (std::size_t k = 0; k < num_raw; ++k)
+        canon[k] = find(static_cast<std::int32_t>(k));
+    return canon;
+}
+
 template <class Tags>
 [[nodiscard]] TrActionPlan
 plan_tr_actions(const Tags& tags, std::size_t num_raw,
@@ -210,9 +257,14 @@ plan_tr_actions(const Tags& tags, std::size_t num_raw,
     TrActionPlan plan;
     plan.skip.assign(tags.size(), 0);
     plan.source.assign(tags.size(), 0);
-    if (!comp.tr_pairing || num_raw == 0 || comp.tr_partner.empty()) {
+    const bool has_tr =
+        comp.tr_pairing && !comp.tr_partner.empty();
+    const bool has_star = !comp.star_maps.empty();
+    if ((!has_tr && !has_star) || num_raw == 0) {
         return plan;
     }
+    const std::vector<std::int32_t> canon =
+        sector_orbit_canonical(num_raw, comp);
 
     std::map<std::pair<int, std::size_t>, std::size_t> where;
     for (std::size_t i = 0; i < tags.size(); ++i) {
@@ -221,10 +273,12 @@ plan_tr_actions(const Tags& tags, std::size_t num_raw,
     for (std::size_t i = 0; i < tags.size(); ++i) {
         const auto& tag = tags[i];
         const std::size_t k = tag.sector_index % num_raw;
-        const std::int32_t pk = comp.tr_partner[k];
-        if (pk < 0) continue;                       // malformed: solve
+        const std::size_t ck = static_cast<std::size_t>(canon[k]);
+        // Canonical partner carries the same flip parity block; canon
+        // is the orbit minimum, so praw == sector_index marks the
+        // canonical member (kept below).
         const std::size_t praw =
-            static_cast<std::size_t>(pk) + (tag.sector_index / num_raw) * num_raw;
+            ck + (tag.sector_index / num_raw) * num_raw;
         if (praw >= tag.sector_index) continue;     // canonical member
         const auto it = where.find({tag.n_up, praw});
         if (it == where.end()) continue;            // partner absent: solve

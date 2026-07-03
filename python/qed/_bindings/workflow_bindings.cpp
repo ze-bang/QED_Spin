@@ -338,6 +338,7 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::SolveOptions::spin_flip)
         .def_readwrite("time_reversal",
                        &ed::workflows::SolveOptions::time_reversal)
+        .def_readwrite("star_maps", &ed::workflows::SolveOptions::star_maps)
         .def_readwrite("precompute_basis_only",
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
@@ -434,6 +435,7 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::ThermalOptions::spin_flip)
         .def_readwrite("time_reversal",
                        &ed::workflows::ThermalOptions::time_reversal)
+        .def_readwrite("star_maps", &ed::workflows::ThermalOptions::star_maps)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -808,6 +810,14 @@ void bind_workflows(py::module_& m) {
                           ed::symmetry::sym_toggle_from_int(opts.spin_flip),
                           ed::symmetry::sym_toggle_from_int(
                               opts.time_reversal));
+                      // Stage 7a: star maps (non-abelian residue) join
+                      // the isospectral-orbit relation alongside TR.
+                      const std::size_t nsec =
+                          probe->symmetry_info.sectors.size();
+                      for (const auto& m : opts.star_maps) {
+                          if (m.size() != nsec) continue;
+                          comp.star_maps.emplace_back(m.begin(), m.end());
+                      }
                   }
                   // Requested n_up before any transport re-target; -1 when
                   // the fixed-Sz axis is off. Used to restore the caller's
@@ -847,21 +857,26 @@ void bind_workflows(py::module_& m) {
                   std::vector<std::pair<std::size_t, std::size_t>> tr_mirrors;
                   // Flip projection doubles the sector count with the
                   // synthetic index convention k + parity * num_raw; the
-                  // conjugation map acts on the raw irrep index and
-                  // preserves flip parity, so pair within parity blocks.
-                  const std::size_t tr_num_raw = comp.tr_partner.size();
-                  if (comp.tr_pairing && tr_num_raw > 0
-                      && num_sectors % tr_num_raw == 0) {
+                  // TR conjugation AND the point-group star maps act on
+                  // the raw irrep index and preserve flip parity, so
+                  // canonicalise within parity blocks. One union-find
+                  // over both relations (sector_orbit_canonical).
+                  const std::size_t tr_num_raw =
+                      !comp.tr_partner.empty() ? comp.tr_partner.size()
+                      : !comp.star_maps.empty() ? comp.star_maps[0].size()
+                                                : 0;
+                  if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0) {
+                      const std::vector<std::int32_t> canon =
+                          ed::symmetry::sector_orbit_canonical(
+                              tr_num_raw, comp);
                       std::vector<char> in_sel(num_sectors, 0);
                       for (std::size_t k : sector_indices_all) in_sel[k] = 1;
                       for (std::size_t k : sector_indices_all) {
-                          const std::int32_t pk =
-                              comp.tr_partner[k % tr_num_raw];
+                          const std::size_t ck = static_cast<std::size_t>(
+                              canon[k % tr_num_raw]);
                           const std::size_t psy =
-                              pk < 0 ? k
-                                     : static_cast<std::size_t>(pk)
-                                       + (k / tr_num_raw) * tr_num_raw;
-                          if (pk >= 0 && psy < k && in_sel[psy]
+                              ck + (k / tr_num_raw) * tr_num_raw;
+                          if (psy < k && in_sel[psy]
                               && handle.sector_tag(k).sector_dim ==
                                  handle.sector_tag(psy).sector_dim) {
                               tr_mirrors.emplace_back(k, psy);
@@ -3354,6 +3369,14 @@ void bind_workflows(py::module_& m) {
                           soa, probe->symmetry_info, opts.backend.allow_gpu,
                           ed::symmetry::sym_toggle_from_int(opts.spin_flip),
                           ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+                      // Stage 7a: point-group star maps join the
+                      // isospectral-orbit relation alongside TR.
+                      const std::size_t nsec =
+                          probe->symmetry_info.sectors.size();
+                      for (const auto& m : opts.star_maps) {
+                          if (m.size() != nsec) continue;
+                          comp.star_maps.emplace_back(m.begin(), m.end());
+                      }
                   }
                   const ed::symmetry::BuildWindow win =
                       ed::symmetry::plan_build_window(

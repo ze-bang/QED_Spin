@@ -432,6 +432,20 @@ class GeneratorSet:
     generators: list[Permutation] = field(default_factory=list)
     orders: list[int] = field(default_factory=list)
     group_size: int = 1
+    # Stage 7a: automorphisms of the FULL (possibly non-abelian) group
+    # that lie outside the abelian subgroup spanned by ``generators``.
+    # The projector cannot use them, but the star-reduction plan can:
+    # they permute the abelian irreps, making related sectors
+    # isospectral (solve one per orbit, copy the rest).
+    star_perms: list[Permutation] = field(default_factory=list)
+
+    def describe(self) -> str:
+        """Precise group structure: abelian invariant factors,
+        generator permutations, residue conjugation relations and
+        common-case recognition (dihedral / direct product)."""
+        from .star_reduction import describe_group
+        return describe_group(self.generators, self.orders,
+                              self.star_perms, name=self.name)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return (
@@ -792,6 +806,14 @@ def find_symmetries(
                     "automorphism group."
                 ),
             )
+            # Stage 7a: retain the non-abelian residue (automorphisms
+            # outside the abelian clique) for star reduction and group
+            # structure reporting.
+            _clique_keys = {tuple(pp) for pp in clique}
+            full_set.star_perms = [
+                list(pp) for pp in all_automorphisms
+                if tuple(pp) not in _clique_keys
+            ]
             if (
                 translation_set is None
                 or _generators_equal(full_set.generators,
@@ -968,6 +990,7 @@ def solve(
     auto_sz: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
     output_dir: str = "",
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
@@ -1389,6 +1412,7 @@ def solve(
             verbose=verbose,
             spin_flip=spin_flip,
             time_reversal=time_reversal,
+            point_group=point_group,
         )
 
     if use_mpi:
@@ -2854,6 +2878,7 @@ def _diag_with_symmetry(
     verbose: bool,
     spin_flip="auto",
     time_reversal="auto",
+    point_group="auto",
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -2972,6 +2997,20 @@ def _diag_with_symmetry(
             operator, spin_flip, "spin_flip", verbose=verbose)
         opts.time_reversal = resolve_discrete_toggle(
             operator, time_reversal, "time_reversal", verbose=verbose)
+        # Stage 7a: star reduction. The non-abelian residue of the
+        # spatial group permutes the abelian irreps; related sectors
+        # are isospectral, so the C++ plan solves one representative
+        # per orbit and copies the spectrum to its partners.
+        _star = getattr(symmetry, "star_perms", None) or []
+        if _star and point_group not in (False, 0, "off", "none"):
+            from .star_reduction import star_maps_from_info
+            _maps = star_maps_from_info(info, _star)
+            if _maps:
+                opts.star_maps = _maps
+                if verbose:
+                    print(f"[qed] point group: {len(_maps)} residue "
+                          "automorphisms fold the irrep sectors into "
+                          "isospectral stars (solve one per star).")
         if fixed_sz_n_up is not None:
             opts.use_fixed_sz = True
             opts.n_up         = fixed_sz_n_up
