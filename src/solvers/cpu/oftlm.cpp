@@ -134,10 +134,19 @@ FtlmResult oftlm_cpu(
         if (!(vn > 0.0)) continue;   // degenerate (v fell entirely in the exact span)
         for (auto& c : v) c /= vn;
 
+        // Plain three-term recurrence, DELIBERATELY without
+        // reorthogonalization: storing the M-vector basis needed for reorth
+        // costs M*N*16 bytes (~50 GB at N = 2^25), and standard FTLM
+        // practice (Jaklic-Prelovsek; Schnack-Richter-Steinigeweg PRR 2,
+        // 013186) runs the stochastic samples bare -- ghost Ritz duplicates
+        // redistribute the sample weight but leave the trace estimator
+        // consistent. (Previously this passed full_reorth=true with a null
+        // basis, which the legacy shim silently downgraded to None while
+        // printing a spurious per-sample warning.)
         std::vector<double> alpha, beta;
         build_lanczos_tridiagonal_with_basis(
             apply_H, v, N, M, /*tol=*/1e-10,
-            /*full_reorth=*/true, /*reorth_freq=*/1,
+            /*full_reorth=*/false, /*reorth_freq=*/0,
             alpha, beta, /*basis=*/nullptr);
 
         SampleSpectrum sp;
