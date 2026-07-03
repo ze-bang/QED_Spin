@@ -192,7 +192,6 @@ void bind_dispatcher(py::module_& m) {
         .value("FULL",                     DiagonalizationMethod::FULL)
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)
-        .value("cTPQ",                     DiagonalizationMethod::cTPQ)
         .value("FTLM",                     DiagonalizationMethod::FTLM)
         .value("LTLM",                     DiagonalizationMethod::LTLM)
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)

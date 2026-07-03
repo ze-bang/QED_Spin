@@ -12,7 +12,7 @@
 #     their original names: `ex00_unified_interface`, `ex01_cpp_ground_state`,
 #     ...
 #   * New per-cell tree under `solve/{lanczos,block_lanczos,krylov_schur,full}/`
-#     (PR-2), `thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}/` (PR-3), and
+#     (PR-2), `thermal/{ftlm,ltlm,mtpq,kpm_dos}/` (PR-3), and
 #     `spectral/{single_expectation,ground_state_dssf,static_thermal,
 #     dynamical_thermal}/` (PR-4). Each cell file is dispatched to the
 #     correct link list based on its filename prefix:

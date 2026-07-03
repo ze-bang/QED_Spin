@@ -3,7 +3,7 @@
 //
 // Phase-6 lockdown for the unified algorithm-kernel facades. Each
 // kernel header is a thin Backend-templated wrapper over an existing
-// CPU body (Lanczos / FTLM / LTLM / mTPQ / cTPQ / KPM-DOS /
+// CPU body (Lanczos / FTLM / LTLM / mTPQ / KPM-DOS /
 // block-Lanczos / Krylov-Schur). The tests prove the new headers
 // actually compile, link, and produce the same numbers as the legacy
 // entry points on small Heisenberg chains.
@@ -22,7 +22,6 @@
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/ltlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
-#include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
 
 #include <ed/observables/expectation.h>
@@ -299,28 +298,6 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
     opts.large_value  = 50.0;
 
     auto res = ed::thermal::mtpq_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
-
-    REQUIRE_FALSE(res.energies.empty());
-}
-
-TEST_CASE("thermal::ctpq_kernel runs end-to-end on a small Heisenberg chain",
-          "[kernel-facade][ctpq][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    MatvecCallable apply{H.get()};
-
-    ed::thermal::CtpqOptions opts;
-    opts.num_samples = 1;
-    opts.beta_max    = 1.0;
-    opts.delta_beta  = 0.1;
-    opts.taylor_order = 16;
-
-    auto res = ed::thermal::ctpq_kernel(
         backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
 
     REQUIRE_FALSE(res.energies.empty());

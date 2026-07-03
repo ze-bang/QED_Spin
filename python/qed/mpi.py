@@ -86,7 +86,6 @@ MPI_METHODS = (
 _METHOD_ALIASES = {
     "ks":             ("krylov_schur", False),
     "mtpq":           ("tpq",          False),
-    "ctpq":           ("tpq",          False),
 }
 
 
@@ -139,7 +138,7 @@ def run_distributed(
         One of :data:`MPI_METHODS` (``"lanczos"``, ``"ftlm"``, ``"tpq"``).
         Common aliases from ``qed.solve(solver=...)`` are also accepted:
         ``"ks"`` maps to ``"krylov_schur"`` (real distributed kernel
-        since Phase 9), and ``"mtpq"`` / ``"ctpq"`` map to ``"tpq"``.
+        since Phase 9), and ``"mtpq"`` maps to ``"tpq"``.
     n_ranks : int
         Number of MPI ranks. Forwarded to the launcher as ``-n N``.
     use_gpu : bool, optional

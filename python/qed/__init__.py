@@ -7,7 +7,7 @@ The public surface is intentionally small: **three verbs**:
   automatically; opt-out via the matching kwargs.
 
 * :func:`qed.thermal(H, ...) <qed.thermal>` -- finite-temperature
-  thermodynamics (FTLM / LTLM / mTPQ / cTPQ / KPM-DOS). Iterates the
+  thermodynamics (FTLM / LTLM / mTPQ / KPM-DOS). Iterates the
   Sz axis automatically when Sz is conserved.
 
 * :func:`qed.spectral(H, observables, ...) <qed.spectral>` --

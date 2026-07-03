@@ -20,8 +20,7 @@ namespace ed {
 // ----------------------------------------------------------------------------
 
 constexpr bool is_tpq_method(DiagonalizationMethod m) noexcept {
-    return m == DiagonalizationMethod::mTPQ ||
-           m == DiagonalizationMethod::cTPQ;
+    return m == DiagonalizationMethod::mTPQ;
 }
 
 constexpr bool is_ftlm_method(DiagonalizationMethod m) noexcept {

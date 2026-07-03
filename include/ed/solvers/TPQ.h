@@ -6,7 +6,7 @@
 // imaginary-time Taylor/Krylov evolvers) were deleted in the
 // debt-cleanup sweep (Jul 2026): they had zero callers. The live TPQ
 // path is the backend-templated kernels in
-// ``include/ed/thermal/{tpq,mtpq,ctpq}_kernel.h`` (plus the fp32 GPU
+// ``include/ed/thermal/{tpq,mtpq}_kernel.h`` (plus the fp32 GPU
 // lane in ``include/ed/thermal/mtpq_f32.h``), driven by the
 // orchestrator's ``ed::workflows::thermal``. This header keeps only:
 //
@@ -31,10 +31,10 @@ using ed::tpq_per_sample_seed;
  * @brief Aggregate per-sample TPQ trajectories into ThermodynamicData
  *        on a user-supplied temperature grid (in-memory variant).
  *
- * Consumed by the unified mTPQ/cTPQ kernels in
- * ``include/ed/thermal/{mtpq,ctpq}_kernel.h`` and the fp32 GPU mTPQ
+ * Consumed by the unified mTPQ kernel in
+ * ``include/ed/thermal/mtpq_kernel.h`` and the fp32 GPU mTPQ
  * lane, which emit per-step (beta_k, E_k, var_k) trajectories directly
- * (no HDF5 / text-file round trip). The orchestrator's mTPQ/cTPQ
+ * (no HDF5 / text-file round trip). The orchestrator's mTPQ
  * branches in ``ed::workflows::thermal`` call this to populate
  * ``ThermalResult::thermo``.
  *

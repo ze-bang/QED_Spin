@@ -222,6 +222,47 @@ def run_thermal(H, n, gen, lat, device, truth, rows):
                                        default=(1 << n))))
 
 
+def run_thermal_methods(H, n, gen, device, truth, rows):
+    """Beyond mTPQ: FTLM / LTLM through the fully composed lane
+    (star+flip+TR) vs the unsymmetrised lane. Both are stochastic --
+    the check is that the composed lane's deviation is comparable to
+    (not worse than) the unsymmetrised lane's own sampling error.
+    (LTLM's absolute accuracy at these sizes/defaults is poor in BOTH
+    lanes -- a method-regime property, reported as-is.)"""
+    t_lo, t_hi, n_t = T_GRID
+    for m in ("FTLM", "LTLM"):
+        devs = {}
+        for label, kw in (
+            ("none", dict(symmetry=None, use_sz_if_conserved=False)),
+            ("U(1)+spatial+flip+TR+star",
+             dict(symmetry=gen, spin_flip="require",
+                  time_reversal="require", point_group="auto")),
+        ):
+            t, r = timed(lambda: qed.thermal(
+                H, method=m, T_min=t_lo, T_max=t_hi, num_T=n_t,
+                device=device, random_seed=7, verbose=False, **kw))
+            temps = np.asarray(getattr(r, "temperatures", None)
+                               if getattr(r, "temperatures", None)
+                               is not None else r.temperature)
+            E = np.asarray(r.energy)
+            exE = np.array([truth["thermo"](T)[0] for T in temps])
+            scale = max(1.0, float(np.max(np.abs(exE))))
+            dev = float(np.max(np.abs(E - exE)) / scale)
+            devs[label] = dev
+            i05 = int(np.argmin(np.abs(temps - 0.5)))
+            rows.append(dict(verb=f"thermal ({m})", config=label,
+                             device=device, E_T05=float(E[i05]),
+                             C_T05=float(np.asarray(r.specific_heat)[i05]),
+                             E_T20=None, C_T20=None,
+                             exact_E_T05=float(exE[i05]),
+                             exact_C_T05=None,
+                             dev=dev, t=t, blocks=None, max_block=None))
+        # stochastic: composed must not be qualitatively worse
+        assert (devs["U(1)+spatial+flip+TR+star"]
+                < 5.0 * max(devs["none"], 1e-3)), \
+            f"{m} composed lane inconsistent: {devs}"
+
+
 def run_dssf(H, n, gen, device, omega, truth, rows):
     probe = build_probe(n)
     configs = [
@@ -263,6 +304,7 @@ def main():
     for dev in devices:
         run_gs(H, n, gen, lat, dev, truth, rows)
         run_thermal(H, n, gen, lat, dev, truth, rows)
+        run_thermal_methods(H, n, gen, dev, truth, rows)
         run_dssf(H, n, gen, dev, omega, truth, rows)
 
     # ---- markdown ----
@@ -290,6 +332,18 @@ def main():
     ex05 = [r for r in rows if r["verb"] == "thermal"][0]
     print(f"\nexact: E(0.5) = {ex05['exact_E_T05']:.6f}, "
           f"C(0.5) = {ex05['exact_C_T05']:.6f}")
+
+    print("\n## Other finite-T methods (fully composed vs none)\n")
+    print("| method | composition | device | E(0.5) | C(0.5) "
+          "| max rel dev E(T) | t [s] |")
+    print("|---|---|---|---|---|---|---|")
+    for r in rows:
+        if not (r["verb"].startswith("thermal (")
+                and r["verb"] != "thermal (mTPQ)"):
+            continue
+        print(f"| {r['verb'][9:-1]} | {r['config']} | {r['device']} "
+              f"| {r['E_T05']:.6f} | {r['C_T05']:.6f} "
+              f"| {r['dev']:.1e} | {r['t']:.3f} |")
 
     print("\n## DSSF S^z_{Q=pi}(omega) (vs dense Lehmann sum)\n")
     print("| composition | device | peak S | peak omega | max |dS| | t [s] |")

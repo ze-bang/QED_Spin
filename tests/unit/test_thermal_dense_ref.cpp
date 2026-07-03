@@ -7,7 +7,7 @@
 // Coverage matrix
 // ---------------
 //
-//   Methods   : FTLM, LTLM, mTPQ, cTPQ, KpmDos
+//   Methods   : FTLM, LTLM, mTPQ, KpmDos
 //   Symmetry  : none (full Hilbert),
 //               U(1)/Sz (per-Sz-sector recombination),
 //               spatial (Z_N translation + combine_sector_thermodynamics),
@@ -46,7 +46,6 @@
 //             For sector-combination tests the free-energy weighting
 //             also uses this biased F, so only E is checked after combine.
 //
-//   cTPQ    : canonical TPQ via Taylor expansion.  With delta_beta=0.1
 //             and krylov_dim=20 the expansion reaches β=2 > β_target=1.
 //             Same entropy limitation as mTPQ.  E and Cv tested.
 //             Sector combine: only E tested.
@@ -57,7 +56,7 @@
 // Temperature grids
 // -----------------
 //   T_BROAD : [1.0, 10.0], 15 log-spaced points — FTLM, KpmDos.
-//   T_HIGH  : [3.0, 10.0], 10 log-spaced points — mTPQ, cTPQ (TPQ variance
+//   T_HIGH  : [3.0, 10.0], 10 log-spaced points — mTPQ (TPQ variance
 //             shrinks at higher T; trajectory reaches β=0.33 in 200 steps).
 //   T_LOW   : [0.01, 0.06], 8 log-spaced points — LTLM (GS-biased; valid
 //             only where E(T)≈E_GS and S(T)≈0, both within tol).
@@ -117,13 +116,13 @@ constexpr uint64_t N_SITES = 6;
 constexpr double   J       = 1.0;
 
 // "Broad" T range: valid for FTLM, KpmDos.
-//   mTPQ and cTPQ use T_HIGH_MIN (see below).
+//   mTPQ uses T_HIGH_MIN (see below).
 constexpr double T_BROAD_MIN = 1.0;
 constexpr double T_BROAD_MAX = 10.0;
 constexpr uint64_t N_BROAD   = 15;
 
-// "High" T range: valid for mTPQ/cTPQ — avoids both the mTPQ
-// asymptotic under-reach (β_200 < β_target) and the cTPQ endpoint noise.
+// "High" T range: valid for mTPQ — avoids both the mTPQ
+// asymptotic under-reach (β_200 < β_target) and TPQ endpoint noise.
 constexpr double T_HIGH_MIN  = 3.0;
 constexpr double T_HIGH_MAX  = 10.0;
 constexpr uint64_t N_HIGH    = 10;
@@ -280,24 +279,6 @@ ThermalOptions make_mtpq_opts(uint64_t seed, bool allow_gpu = false) {
     return o;
 }
 
-ThermalOptions make_ctpq_opts(uint64_t seed, bool allow_gpu = false) {
-    ThermalOptions o;
-    o.method        = ThermalOptions::Method::cTPQ;
-    // 50 samples for same reason as mTPQ.
-    o.num_samples   = 50;
-    // After the Δβ/2 kernel fix: 20 steps × Δβ=0.1 → β_max_recorded=2.0.
-    // Coldest comparison at β=1/3.0≈0.333 << 2.0 → well within trajectory.
-    o.krylov_dim    = 20;
-    o.delta_beta    = 0.1;
-    o.beta_max      = 15.0;
-    o.taylor_order  = 20;
-    o.betas         = BETAS_HIGH;
-    o.temp_min      = T_HIGH_MIN;
-    o.random_seed   = seed;
-    o.backend.allow_gpu = allow_gpu;
-    return o;
-}
-
 ThermalOptions make_kpm_opts(uint64_t seed, bool allow_gpu = false) {
     ThermalOptions o;
     o.method                 = ThermalOptions::Method::KpmDos;
@@ -315,7 +296,6 @@ ThermalOptions opts_for(ThermalOptions::Method m, uint64_t seed,
         case ThermalOptions::Method::FTLM:   return make_ftlm_opts(seed, allow_gpu);
         case ThermalOptions::Method::LTLM:   return make_ltlm_opts(seed, allow_gpu);
         case ThermalOptions::Method::mTPQ:   return make_mtpq_opts(seed, allow_gpu);
-        case ThermalOptions::Method::cTPQ:   return make_ctpq_opts(seed, allow_gpu);
         case ThermalOptions::Method::KpmDos: return make_kpm_opts(seed,  allow_gpu);
         default: throw std::logic_error("unknown method");
     }
@@ -326,7 +306,6 @@ std::string method_name(ThermalOptions::Method m) {
         case ThermalOptions::Method::FTLM:   return "FTLM";
         case ThermalOptions::Method::LTLM:   return "LTLM";
         case ThermalOptions::Method::mTPQ:   return "mTPQ";
-        case ThermalOptions::Method::cTPQ:   return "cTPQ";
         case ThermalOptions::Method::KpmDos: return "KpmDos";
         default: return "??";
     }
@@ -334,11 +313,10 @@ std::string method_name(ThermalOptions::Method m) {
 
 // Which observables are reliable for each method?
 bool method_compare_entropy(ThermalOptions::Method m) {
-    // mTPQ/cTPQ integrate S from 0 at T_MIN (no ln(D) baseline).
+    // mTPQ integrates S from 0 at T_MIN (no ln(D) baseline).
     // LTLM is a GS-biased estimator and gives S=0 (Z≈1, E≈E_GS), so its
     // entropy is only ~correct in the T→0 limit where S_true→0 too.
     return m != ThermalOptions::Method::mTPQ
-        && m != ThermalOptions::Method::cTPQ
         && m != ThermalOptions::Method::LTLM;
 }
 
@@ -350,14 +328,14 @@ bool method_compare_cv(ThermalOptions::Method m) {
 std::pair<double,double> t_range_for(ThermalOptions::Method m) {
     if (m == ThermalOptions::Method::LTLM)
         return {T_LOW_MIN, T_LOW_MAX};
-    if (m == ThermalOptions::Method::mTPQ || m == ThermalOptions::Method::cTPQ)
+    if (m == ThermalOptions::Method::mTPQ)
         return {T_HIGH_MIN, T_HIGH_MAX};
     return {T_BROAD_MIN, T_BROAD_MAX};
 }
 
 uint64_t n_temp_for(ThermalOptions::Method m) {
     if (m == ThermalOptions::Method::LTLM) return N_LOW;
-    if (m == ThermalOptions::Method::mTPQ || m == ThermalOptions::Method::cTPQ)
+    if (m == ThermalOptions::Method::mTPQ)
         return N_HIGH;
     return N_BROAD;
 }
@@ -449,11 +427,11 @@ void add_heisen_pbc_terms(ed::symmetry::SectorOperator& op, uint64_t N, double J
 }
 
 // For sector-combination tests: whether to compare entropy or just E+Cv
-// after combining.  mTPQ/cTPQ have biased F → biased combination weights →
+// after combining.  mTPQ has biased F → biased combination weights →
 // only E should be tested post-combination.
 bool method_combine_reliable(ThermalOptions::Method m) {
     return m != ThermalOptions::Method::mTPQ
-        && m != ThermalOptions::Method::cTPQ;
+;
 }
 
 #ifdef WITH_CUDA
@@ -503,15 +481,6 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
                       "mTPQ/no-sym");
     }
 
-    // cTPQ: same caveat as mTPQ (bias-free at T ≥ T_HIGH_MIN after β/2 fix).
-    SECTION("cTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        auto H = make_full_heisen();
-        for (uint64_t seed : SEEDS)
-            run_trial(*H, ThermalOptions::Method::cTPQ, seed, ref,
-                      "cTPQ/no-sym");
-    }
-
     SECTION("KpmDos") {
         const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
         auto H = make_full_heisen();
@@ -527,7 +496,7 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
 //    For each n_up ∈ [0, N] run thermal on the corresponding FixedSzOperator,
 //    then combine via `ed::core::combine_sector_thermodynamics`.
 //
-//    Note: for mTPQ/cTPQ the combination uses the TPQ free-energy (which has
+//    Note: for mTPQ the combination uses the TPQ free-energy (which has
 //    a biased integration constant) as the sector weight.  Only the combined
 //    energy E_combined is tested for those methods (using wider tolerance);
 //    Cv and S are omitted because the weighting bias can distort them.
@@ -562,7 +531,7 @@ void sz_trial(ThermalOptions::Method m, uint64_t seed,
                        method_name(m) + "/sz seed=" + std::to_string(seed),
                        full_compare && method_compare_entropy(m));
     if (!full_compare) {
-        // For mTPQ/cTPQ: only energy is checked above; also confirm Cv is
+        // For mTPQ: only energy is checked above; also confirm Cv is
         // finite and non-negative as a sanity guard.
         for (auto cv : combined.specific_heat) REQUIRE(std::isfinite(cv));
     }
@@ -592,13 +561,6 @@ TEST_CASE("thermal methods vs dense reference: U(1)/Sz symmetry",
         const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
         for (uint64_t seed : SEEDS)
             sz_trial(ThermalOptions::Method::mTPQ, seed, ref,
-                     /*tol_E_combo=*/0.5);
-    }
-
-    SECTION("cTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        for (uint64_t seed : SEEDS)
-            sz_trial(ThermalOptions::Method::cTPQ, seed, ref,
                      /*tol_E_combo=*/0.5);
     }
 
@@ -680,13 +642,6 @@ TEST_CASE("thermal methods vs dense reference: spatial Z_N translation symmetry"
         const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
         for (uint64_t seed : SEEDS)
             spatial_trial(ThermalOptions::Method::mTPQ, seed, sym_root, ref,
-                          /*tol_E_combo=*/0.5);
-    }
-
-    SECTION("cTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        for (uint64_t seed : SEEDS)
-            spatial_trial(ThermalOptions::Method::cTPQ, seed, sym_root, ref,
                           /*tol_E_combo=*/0.5);
     }
 
@@ -786,13 +741,6 @@ TEST_CASE("thermal methods vs dense reference: Sz + spatial (U(1) × Z_N)",
                              /*tol_E_combo=*/0.5);
     }
 
-    SECTION("cTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        for (uint64_t seed : seeds2)
-            sz_spatial_trial(ThermalOptions::Method::cTPQ, seed, sym_root, ref,
-                             /*tol_E_combo=*/0.5);
-    }
-
     SECTION("KpmDos") {
         const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
         for (uint64_t seed : seeds2)
@@ -851,16 +799,6 @@ TEST_CASE("thermal GPU lane vs dense reference",
         check_thermo_close(R.thermo, ref_high,
                            TOL_E, TOL_CV, TOL_S,
                            "mTPQ/gpu",
-                           /*compare_entropy=*/false);
-    }
-
-    SECTION("cTPQ GPU") {
-        auto opts = make_ctpq_opts(GPU_SEED, true);
-        auto R    = ed::workflows::thermal(*H, opts);
-        REQUIRE((R.backend.lane == "gpu" || R.backend.lane == "cpu"));
-        check_thermo_close(R.thermo, ref_high,
-                           TOL_E, TOL_CV, TOL_S,
-                           "cTPQ/gpu",
                            /*compare_entropy=*/false);
     }
 

@@ -1,4 +1,4 @@
-"""mTPQ / cTPQ must cool to the ground state at low T.
+"""mTPQ must cool to the ground state at low T.
 
 Guards the auto-LargeValue default: with tpq_energy_shift pinned huge (the old
 1e5 default), the mTPQ step (L-H)|psi> ~ L*I barely cooled and the trajectory
@@ -23,7 +23,7 @@ def _q(fn):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("solver", ["mTPQ", "cTPQ"])
+@pytest.mark.parametrize("solver", ["mTPQ"])
 def test_tpq_reaches_ground_state(solver):
     N = 10
     lat = L.chain(N, pbc=True); nn = [(b.i, b.j) for b in lat.nn_bonds]

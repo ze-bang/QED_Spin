@@ -2,7 +2,7 @@
 // test_auto_thermal  (Catch2 v3)
 //
 // Smoke-tests the unified `ed::workflows::thermal(H, opts)` orchestrator.
-// Covers the mTPQ / cTPQ paths that the orchestrator currently routes
+// Covers the mTPQ path that the orchestrator currently routes
 // through `tpq_kernel<Backend>` (Phase 4.2 / 4.3 of the Minimalist ED
 // Collapse). The FTLM / LTLM / KPM_DOS lanes are intentionally NOT
 // covered here --- they remain on the legacy CPU-only path until Phase 6
@@ -72,34 +72,6 @@ TEST_CASE("workflows::thermal mTPQ produces a finite ground-state estimate "
     // mTPQ at finite sample count is noisy but must land at or above
     // the true GS within an O(1) tolerance for this tiny system.
     REQUIRE(res.ground_state_energy >= gs.eigenvalues[0] - 1e-6);
-}
-
-TEST_CASE("workflows::thermal cTPQ produces a finite ground-state estimate",
-          "[workflows][thermal][ctpq]") {
-    auto H = build_heisen();
-
-    ThermalOptions opts;
-    opts.method       = ThermalOptions::Method::cTPQ;
-    opts.num_samples  = 4;
-    opts.beta_max     = 8.0;
-    opts.delta_beta   = 0.1;
-    opts.taylor_order = 30;
-    opts.random_seed  = 9999;
-    opts.backend.allow_gpu = false;  // CPU-lane smoke test (see mTPQ case above)
-
-    auto res = ed::workflows::thermal(*H, opts);
-
-    REQUIRE(std::isfinite(res.ground_state_energy));
-    REQUIRE(res.backend.lane == "cpu");
-
-    // cTPQ at high beta should approach the true ground-state energy.
-    SolveOptions sopts;
-    sopts.num_eigs = 1;
-    auto gs = ed::workflows::solve(*H, sopts);
-    REQUIRE(gs.eigenvalues.size() >= 1);
-
-    // Loose absolute tolerance: 4-site Heisenberg + few samples is noisy.
-    REQUIRE(std::abs(res.ground_state_energy - gs.eigenvalues[0]) < 0.5);
 }
 
 TEST_CASE("workflows::thermal FTLM / LTLM / KpmDos lanes are wired",

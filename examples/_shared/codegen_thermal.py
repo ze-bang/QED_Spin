@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """examples/_shared/codegen_thermal.py
 
-Generator for the ``examples/thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}/``
+Generator for the ``examples/thermal/{ftlm,ltlm,mtpq,kpm_dos}/``
 cell tree. Emits 62 cells x 2 langs = 124 files from the templates
 below. Run once at PR-3 time and commit the output; if a template needs
 a tweak, edit it here and re-run.
@@ -65,16 +65,6 @@ THERMAL_METHODS = {
         skip_cells=set(),
         title="mTPQ",
         comment="Micro-canonical Thermal Pure Quantum (Taylor truncation)",
-        num_samples=4,
-        krylov_dim=0,
-    ),
-    "ctpq": dict(
-        py_method="cTPQ",
-        cpp_method="cTPQ",
-        backends=BACKENDS_FULL,
-        skip_cells=set(),
-        title="cTPQ",
-        comment="Canonical Thermal Pure Quantum (Krylov imaginary-time)",
         num_samples=4,
         krylov_dim=0,
     ),

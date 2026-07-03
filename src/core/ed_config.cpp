@@ -824,7 +824,6 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "full")           return DiagonalizationMethod::FULL;
 
     if (lower == "mtpq")           return DiagonalizationMethod::mTPQ;
-    if (lower == "ctpq")           return DiagonalizationMethod::cTPQ;
     if (lower == "ftlm")           return DiagonalizationMethod::FTLM;
     if (lower == "ltlm")           return DiagonalizationMethod::LTLM;
     if (lower == "kpm_dos" || lower == "kpmdos" || lower == "kpm")
@@ -843,7 +842,6 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
         case DiagonalizationMethod::FULL:          return "FULL";
         case DiagonalizationMethod::mTPQ:          return "mTPQ";
-        case DiagonalizationMethod::cTPQ:          return "cTPQ";
         case DiagonalizationMethod::FTLM:          return "FTLM";
         case DiagonalizationMethod::LTLM:          return "LTLM";
         case DiagonalizationMethod::KPM_DOS:       return "KPM_DOS";
@@ -856,7 +854,6 @@ EDConfig defaultConfigFor(DiagonalizationMethod method) {
 
     switch (method) {
         case DiagonalizationMethod::mTPQ:
-        case DiagonalizationMethod::cTPQ:
             config.thermal.num_samples = 10;
             config.workflow.compute_thermo = true;
             break;
@@ -898,7 +895,6 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
         case DiagonalizationMethod::FTLM:
         case DiagonalizationMethod::LTLM:
         case DiagonalizationMethod::mTPQ:
-        case DiagonalizationMethod::cTPQ:
         case DiagonalizationMethod::KPM_DOS:
             info << "Finite-temperature solver. Common knobs:\n"
                  << "  --samples=<n>       number of random samples\n"

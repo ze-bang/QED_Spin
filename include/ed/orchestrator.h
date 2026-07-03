@@ -8,7 +8,7 @@
 //                       Block-Lanczos / full diag), one of the four
 //                       Backend lanes auto-selected via select_backend.
 //     ed::thermal   -- finite-temperature workflows (FTLM / LTLM / mTPQ /
-//                       cTPQ / KPM-DOS).
+//                       KPM-DOS).
 //     ed::spectral  -- dynamical correlators (DSSF ground state /
 //                       finite-T) via continued-fraction Lanczos.
 //
@@ -173,7 +173,7 @@ struct ThermalOptions {
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos, OFTLM,
+        FTLM = 0, LTLM, mTPQ, KpmDos = 4, OFTLM,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -191,7 +191,7 @@ struct ThermalOptions {
     std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
     std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
-    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ/cTPQ imag-time step.
+    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ imag-time step.
     double      beta_max       = 1000.0;
     std::uint64_t random_seed  = 0;
     std::string output_dir;

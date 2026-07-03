@@ -10,7 +10,7 @@
 //     KRYLOV_SCHUR / FULL).
 //   * `ed::api::ThermalOptions` <-> `ed::workflows::ThermalOptions`
 //     translation (verb=thermal, method=FTLM / mTPQ / KPM_DOS;
-//     LTLM / cTPQ piggyback on the same `to_legacy` translator and
+//     LTLM piggybacks on the same `to_legacy` translator and
 //     are covered by build-only compile checks).
 //   * `ed::api::SpectralOptions` <-> `ed::workflows::SpectralOptions`
 //     translation (verb=spectral, method=GroundStateCF).
@@ -72,7 +72,6 @@ TEST_CASE("ed::api::parse_thermal_method accepts Python + C++ spellings",
     REQUIRE(ed::api::parse_thermal_method("LTLM").value()    == TM::LTLM);
     REQUIRE(ed::api::parse_thermal_method("mTPQ").value()    == TM::mTPQ);
     REQUIRE(ed::api::parse_thermal_method("mtpq").value()    == TM::mTPQ);
-    REQUIRE(ed::api::parse_thermal_method("cTPQ").value()    == TM::cTPQ);
     REQUIRE(ed::api::parse_thermal_method("KPM_DOS").value() == TM::KpmDos);
     REQUIRE(ed::api::parse_thermal_method("KpmDos").value()  == TM::KpmDos);
     REQUIRE_FALSE(ed::api::parse_thermal_method("xyz").has_value());

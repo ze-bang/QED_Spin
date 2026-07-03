@@ -30,7 +30,7 @@
 //   * future `ed::thermal()` orchestrator in Phase 4.2
 //
 // Phase 2.4 of the Minimalist ED Collapse (May 2026): see
-// `ed/thermal/mtpq_kernel.h` and `ed/thermal/ctpq_kernel.h` for the
+// `ed/thermal/mtpq_kernel.h` for the
 // thin facade headers that the test_kernel_facades test consumes.
 // =============================================================================
 
@@ -86,7 +86,7 @@ struct TpqStepInfo {
     const Complex* psi;        ///< current state, backend memory, length local_n
     std::size_t    local_n;
     std::size_t    step;       ///< 0-based step counter
-    double         beta;       ///< current inverse temperature (cTPQ) or 0 (mTPQ)
+    double         beta;       ///< current inverse temperature or 0 (mTPQ)
     double         norm_before_normalize;
 };
 

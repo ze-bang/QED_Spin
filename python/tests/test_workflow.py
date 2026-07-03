@@ -588,8 +588,6 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     ("mTPQ", "mTPQ"),         # exact case
     ("mtpq", "mTPQ"),         # lower
     ("MTPQ", "mTPQ"),         # upper (would fail the old .upper() lookup)
-    ("cTPQ", "cTPQ"),
-    ("CTPQ", "cTPQ"),
     ("FTLM", "FTLM"),
     ("ltlm", "LTLM"),
     ("FULL", "FULL"),
@@ -1030,7 +1028,7 @@ class TestDeviceMatrix:
                 f.create_dataset("/betas", data=betas)
                 f.create_dataset("/energy", data=energy_q)
                 f.create_dataset("/Z", data=z_q)
-                # Mirror the cTPQ binary post self-consistent-Z fix
+                # Mirror the canonical-TPQ binary post self-consistent-Z fix
                 # by also publishing /lnZ; the aggregator prefers the
                 # log-space recombination when present. For FTLM (which
                 # only emits /Z) we leave /lnZ off to keep coverage of
@@ -1077,7 +1075,7 @@ class TestDeviceMatrix:
     def test_aggregate_thermal_sectors_rejects_missing_Z(
         self, tmp_path,
     ):
-        """Regression for the silent-NaN bug: prior to the cTPQ
+        """Regression for the silent-NaN bug: prior to the canonical-TPQ
         self-consistent-Z fix the TPQ binary wrote ``/energy`` but no
         ``/Z``, and the aggregator silently produced NaN energies. The
         guard must instead raise loudly so the broken result is never

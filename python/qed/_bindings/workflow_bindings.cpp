@@ -226,7 +226,7 @@ inline bool will_use_full_diag(const ed::LinearOperator& op,
 /// The thermal lane has uneven GPU coverage:
 ///   * FTLM         : CPU only (orchestrator throws on CUDA).
 ///   * LTLM, KpmDos : CPU or CUDA.
-///   * mTPQ, cTPQ   : any backend.
+///   * mTPQ         : any backend.
 ///
 /// As of Phase E of the "Close CPU/GPU Gaps" plan (May 2026), the
 /// FTLM facade dispatches on Backend internally (see
@@ -238,8 +238,7 @@ inline bool thermal_method_supports_gpu(
     return m == M::FTLM
         || m == M::LTLM
         || m == M::KpmDos
-        || m == M::mTPQ
-        || m == M::cTPQ;
+        || m == M::mTPQ;
 }
 
 /// Spectral lanes after Phases F + G of the "Close CPU/GPU Gaps"
@@ -279,7 +278,7 @@ inline void warn_silent_cpu_fallback(const char* what,
                   "implementation in the orchestrator. Falling back to the "
                   "CPU lane. Pass device='cpu' to silence this warning, or "
                   "switch to a GPU-clean method (Lanczos/BlockLanczos/"
-                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ/cTPQ for "
+                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ for "
                   "thermal; GroundStateCF for spectral).",
             py::module_::import("builtins").attr("RuntimeWarning"),
             py::arg("stacklevel") = 2);
@@ -414,7 +413,6 @@ void bind_workflows(py::module_& m) {
         .value("FTLM",   ed::workflows::ThermalOptions::Method::FTLM)
         .value("LTLM",   ed::workflows::ThermalOptions::Method::LTLM)
         .value("mTPQ",   ed::workflows::ThermalOptions::Method::mTPQ)
-        .value("cTPQ",   ed::workflows::ThermalOptions::Method::cTPQ)
         .value("KpmDos", ed::workflows::ThermalOptions::Method::KpmDos)
         .value("OFTLM",  ed::workflows::ThermalOptions::Method::OFTLM)
         .export_values();
@@ -472,7 +470,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("kpm_num_random_vectors",
                        &ed::workflows::ThermalOptions::kpm_num_random_vectors)
         // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-        // user-supplied probe-betas for mTPQ/cTPQ state-vector
+        // user-supplied probe-betas for mTPQ state-vector
         // snapshots. Empty list (default) means "no state vectors are
         // saved"; the trajectory is always saved when ``output_dir``
         // is set.
@@ -678,7 +676,7 @@ void bind_workflows(py::module_& m) {
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
               // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
-              // every thermal method (FTLM / LTLM / mTPQ / cTPQ /
+              // every thermal method (FTLM / LTLM / mTPQ /
               // KpmDos) dispatches on Backend internally and accepts both
               // ``CpuBackend`` and ``CudaBackend``, so the host operator's
               // lazy CudaMatVecBackend mirror (operator-collapse Phase 2a)
@@ -697,7 +695,7 @@ void bind_workflows(py::module_& m) {
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
           "Run the unified finite-temperature workflow (FTLM / LTLM / mTPQ / "
-          "cTPQ / KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
+          "KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
           "routes the matvec through the host operator's lazy "
           "CudaMatVecBackend device mirror without manual conversion.");
 
@@ -1633,7 +1631,7 @@ void bind_workflows(py::module_& m) {
         spin_l : float, optional
             Spin magnitude (0.5 for spin-1/2, the default).
         opts : ThermalOptions, optional
-            Per-sector finite-T options (FTLM / LTLM / mTPQ / cTPQ /
+            Per-sector finite-T options (FTLM / LTLM / mTPQ /
             KPM-DOS). ``selected_sectors`` filters the loop.
         fixed_sz_n_up : int or None, optional
             If set, project to a fixed-Sz sector with this ``n_up``

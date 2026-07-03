@@ -83,7 +83,7 @@ def _suppress_legacy_dispatch_warning():
 # ---------------------------------------------------------------------------
 
 # Ground-state methods the orchestrator's `workflows_solve` handles.
-# Thermal methods (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) route through
+# Thermal methods (FTLM / LTLM / mTPQ / KPM_DOS) route through
 # `_core.workflows_thermal` instead -- the dispatch is decided by the
 # helper `_diag_via_workflows_solve` below.
 _GROUND_STATE_METHODS = frozenset({
@@ -99,7 +99,6 @@ _THERMAL_METHOD_TO_CORE = {
     DiagonalizationMethod.OFTLM:   "OFTLM",
     DiagonalizationMethod.LTLM:    "LTLM",
     DiagonalizationMethod.mTPQ:    "mTPQ",
-    DiagonalizationMethod.cTPQ:    "cTPQ",
     DiagonalizationMethod.KPM_DOS: "KpmDos",
 }
 
@@ -142,8 +141,7 @@ def _ed_params_to_thermal_options(
     opts.backend.allow_mpi = bool(use_mpi)
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
     # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations; cTPQ uses it as the cap on the
-    # number of Taylor steps. For mTPQ/cTPQ we map the user's
+    # the number of (L - H) iterations. For mTPQ we map the user's
     # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
     # closes a gap where the legacy adapter hardcoded 100 iterations
     # for the TPQ lanes and never honoured the user's request.
@@ -156,15 +154,11 @@ def _ed_params_to_thermal_options(
             opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
-    elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+    elif method == DiagonalizationMethod.mTPQ:
         steps = int(getattr(params, "tpq_max_steps", 0) or 0)
         if steps <= 0:
             mi = getattr(params, "max_iterations", 0)
             steps = int(mi) if mi else 0
-        if steps <= 0 and method == DiagonalizationMethod.cTPQ:
-            # cTPQ uses ``krylov_dim`` as a Taylor-step CAP; preserve the
-            # historical default for an unset call.
-            steps = 1000
         # mTPQ: ``steps == 0`` -> orchestrator auto-sizes the iteration
         # count from the spectral bounds to bracket beta_max = 1/T_min.
         opts.krylov_dim = steps
@@ -190,7 +184,7 @@ def _ed_params_to_thermal_options(
     if hasattr(opts, "allow_infeasible"):
         opts.allow_infeasible = bool(allow_infeasible)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
-    # the user-supplied probe-betas for mTPQ/cTPQ state-vector
+    # the user-supplied probe-betas for mTPQ state-vector
     # snapshots. Empty list -> the kernel runs the standard path with no
     # state-vector copies and the orchestrator persists only the
     # thermo trajectory.
@@ -213,7 +207,7 @@ def _ed_result_from_thermal_result(
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # the thermal orchestrator now persists ``ed_results.h5`` when
     # ``output_dir`` is set (FTLM/LTLM/KPM_DOS: aggregated thermo;
-    # mTPQ/cTPQ: trajectory + state-vector snapshots at probe_betas).
+    # mTPQ: trajectory + state-vector snapshots at probe_betas).
     # Mirror the saved path through the legacy ``eigenvectors_path``
     # field so downstream consumers see the same envelope shape used
     # by ``qed.solve``.
@@ -355,7 +349,7 @@ def _diag_via_workflows_solve(
 
     Ground-state methods (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL)
     go through ``_core.workflows_solve``. Thermal methods (FTLM / LTLM
-    / mTPQ / cTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
+    / mTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
     No legacy fallback remains: the C++ ``exact_diagonalization_*``
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
@@ -374,7 +368,7 @@ def _diag_via_workflows_solve(
         f"_diag_via_workflows_solve: unsupported DiagonalizationMethod "
         f"{method!r}. Supported: ground-state "
         f"(LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL) and thermal "
-        f"(FTLM / LTLM / mTPQ / cTPQ / KPM_DOS)."
+        f"(FTLM / LTLM / mTPQ / KPM_DOS)."
     )
 
 
@@ -1042,7 +1036,7 @@ def solve(
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
     # Thermal-method first-class shortcuts (only consulted for
-    # mTPQ / cTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
+    # mTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
     # the relevant knob is num_eigenvalues + max_iterations).
     num_samples: Optional[int] = None,
     target_beta: Optional[float] = None,
@@ -1094,7 +1088,7 @@ def solve(
         * thermal (returns ``EDResults`` with the imaginary-time
           trajectory in ``eigenvalues`` and the post-processed
           thermodynamic curve on disk in ``output_dir``):
-          ``mTPQ``, ``cTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
+          ``mTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"`` /
         ``"mpi"`` / ``"mpi_gpu"``. ``None`` (default) means ``"auto"``.
@@ -1333,7 +1327,7 @@ def solve(
     # Allow this combination through to `_diag_via_mpi`.
     if symmetry is not None and is_tpq and not use_mpi:
         raise ValueError(
-            "qed.solve(H, solver='mTPQ'/'cTPQ', symmetry=..., "
+            "qed.solve(H, solver='mTPQ', symmetry=..., "
             "device='cpu'/'gpu') is not supported: TPQ acts on a "
             "single random state across the whole sector and per-"
             "symmetry-block diagonalisation does not factor through "
@@ -1561,7 +1555,6 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
@@ -2013,7 +2006,6 @@ def _thermal_method_names() -> set[str]:
     """
     return {
         "mTPQ",
-        "cTPQ",
         "FTLM",
         "LTLM",
         "KPM_DOS",
@@ -2037,7 +2029,7 @@ def _resolve_solver(
 
     String lookup is case-insensitive: ``"lanczos"`` / ``"LANCZOS"`` /
     ``"Lanczos"`` all resolve to ``DiagonalizationMethod.LANCZOS``. The
-    TPQ enum names are mixed-case in C++ (``mTPQ``, ``cTPQ``); we
+    TPQ enum names are mixed-case in C++ (``mTPQ``); we
     accept them in any case so users don't have to memorise the
     spelling.
     """
@@ -2053,7 +2045,7 @@ def _resolve_solver(
             if upper in members:
                 return members[upper]
             # Build a case-folded lookup for the rest (handles "mtpq",
-            # "ctpq_gpu", etc. against the mixed-case enum keys).
+            # etc. against the mixed-case enum keys).
             folded = {name.casefold(): name for name in members}
             key = solver.casefold()
             if key in folded:
@@ -2812,8 +2804,9 @@ def _aggregate_thermal_sectors(
             "_aggregate_thermal_sectors: the following per-sector "
             f"result files are missing the /Z dataset (or its length "
             f"disagrees with /betas) and cannot be combined: {missing}. "
-            "If the underlying binary is canonical-TPQ, ensure it was "
-            "built after the cTPQ self-consistent-Z fix."
+            "If the underlying binary is canonical-TPQ (the MPI "
+            "distributed lane), ensure it was built after the "
+            "self-consistent-Z fix."
         )
 
     have_lnz = all(len(lnz) == n_beta for _, _, _, lnz in raw)
@@ -3001,7 +2994,7 @@ def _diag_with_symmetry(
         # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
         #
         # Phase B of the "Backend x Symmetries x Workflows" plan
-        # (May 2026): thermal methods (FTLM / LTLM / mTPQ / cTPQ /
+        # (May 2026): thermal methods (FTLM / LTLM / mTPQ /
         # KPM_DOS) now route through the matching
         # ``workflows_thermal_streaming_symmetry_directory`` binding,
         # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.

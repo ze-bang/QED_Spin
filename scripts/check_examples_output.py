@@ -49,13 +49,11 @@ NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 # Families that are RNG-driven and not bit-stable across reruns:
 #   * thermal/ftlm    -- random Krylov starting vector
 #   * thermal/mtpq    -- random pure state
-#   * thermal/ctpq    -- random pure state
 #   * thermal/kpm_dos -- random Chebyshev moment averaging
 #   * solve/block_lanczos with spatial symmetry  -- random starting block
 KNOWN_FLAKY_METHOD_PREFIXES = (
     "thermal/ftlm/",
     "thermal/mtpq/",
-    "thermal/ctpq/",
     "thermal/kpm_dos/",
     # spectral methods that use random Krylov vectors:
     "spectral/dynamical_thermal/",

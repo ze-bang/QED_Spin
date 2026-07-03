@@ -25,7 +25,7 @@
 // (no HDF5/text round-trip) and interpolates onto the caller's
 // temperature grid.
 // Called by the unified ``ed::workflows::thermal`` orchestrator for the
-// mTPQ / cTPQ lanes -- closes the long-standing gap where the unified
+// mTPQ lane -- closes the long-standing gap where the unified
 // TPQ kernels populated only ``ground_state_energy`` and left the
 // ThermodynamicData arrays empty.
 // ============================================================================
@@ -82,7 +82,7 @@ ThermodynamicData compute_tpq_thermo_from_trajectories(
     //   * target_beta > beta_max_traj (asked colder than the trajectory
     //     reaches): clamp to the last trajectory point. For mTPQ this
     //     is the asymptotic ground-state-projected state, which is the
-    //     correct extrapolation for T < T_min_traj. For cTPQ this is
+    //     correct extrapolation for T < T_min_traj. For canonical trajectories this is
     //     the deepest beta the Taylor evolution reached.
     //   * target_beta < beta_min_traj (asked warmer than beta=0): use
     //     the first trajectory point (which is the beta=0 baseline,

@@ -6,7 +6,7 @@ every real knob the library exposes, one verb per file:
 | script | verb | what it covers |
 |---|---|---|
 | [`tour/01_ground_state.py`](tour/01_ground_state.py) | `qed.solve` | `symmetry="auto"`, per-symmetry toggles (`spin_flip=`/`time_reversal=` with auto/on/off/require), solvers, devices, per-sector attribution, eigenvectors |
-| [`tour/02_finite_temperature.py`](tour/02_finite_temperature.py) | `qed.thermal` | mTPQ/cTPQ/FTLM/LTLM/KPM, the flat sector pool + flip/TR copies, Sz windows, seeds, devices |
+| [`tour/02_finite_temperature.py`](tour/02_finite_temperature.py) | `qed.thermal` | mTPQ/FTLM/LTLM/KPM, the flat sector pool + flip/TR copies, Sz windows, seeds, devices |
 | [`tour/03_dynamics_dssf.py`](tour/03_dynamics_dssf.py) | `qed.spectral` | momentum-resolved probes (S^z_Q / S^±_Q), GS + finite-T DSSF through the sector machinery, selection rules, broadening/Krylov knobs |
 | [`tour/04_symmetry_toolkit.py`](tour/04_symmetry_toolkit.py) | — | `find_symmetries`, explicit generator sets, sector selection, the four-state toggles, env escapes |
 
@@ -44,7 +44,6 @@ examples/
 │   ├── ftlm/...                    (full grid minus gpu+none, gpu+sz)
 │   ├── ltlm/...                    (cpu, gpu only)
 │   ├── mtpq/...                    (full grid)
-│   ├── ctpq/...                    (full grid)
 │   └── kpm_dos/...                 (cpu, gpu only)
 ├── spectral/                        # dynamical / static cells (38 ONLINE)
 │   ├── single_expectation/...       (cpu_none, cpu_sz, gpu_*, mpi_*, mpi_gpu_*)
@@ -159,7 +158,7 @@ The values are populated by
 [`examples/_shared/refresh_expected_output.py`](_shared/refresh_expected_output.py),
 which runs each CPU cell once and writes its actual stdout into the
 comment block. The numbers are deterministic for Lanczos / Krylov-Schur
-/ FullDiag / LTLM; the randomized methods (FTLM / mTPQ / cTPQ /
+/ FullDiag / LTLM; the randomized methods (FTLM / mTPQ /
 KPM_DOS) print stable expected output too but the upstream solver does
 not currently honour `random_seed=0` end-to-end, so reruns may
 disagree at the 2–3 sig-fig level. The smoke harness
@@ -199,7 +198,7 @@ Pillar 1 of the May 2026 "Save and DSSF Upgrades" plan extends the
 
 - FTLM / LTLM / KPM\_DOS: aggregated thermodynamic curves
   (`/ftlm/averaged/{temperatures,energy,specific_heat,entropy,free_energy}`).
-- mTPQ / cTPQ: full per-sample trajectory rows at
+- mTPQ: full per-sample trajectory rows at
   `/tpq/samples/sample_<s>/thermodynamics` (one row per kernel step:
   `beta, energy, variance, doublon, step`). When
   `probe_betas=[beta_1, beta_2, ...]` is also passed, host-side state

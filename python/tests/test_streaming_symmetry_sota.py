@@ -16,7 +16,7 @@ What this file pins (May 2026 SOTA upgrade)
     single irrep without falsely missing the global minimum.
 
 3.  **Thermal + spatial symmetry no longer raises**: the FTLM /
-    LTLM / KPM_DOS / mTPQ / cTPQ lanes that used to bail with
+    LTLM / KPM_DOS / mTPQ lanes that used to bail with
     ``NotImplementedError`` when handed an ``automorphism_results/``
     directory now route through
     ``_core.workflows_thermal_streaming_symmetry_directory`` and

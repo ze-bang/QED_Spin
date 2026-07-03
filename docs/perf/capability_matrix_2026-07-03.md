@@ -77,6 +77,32 @@ than the unsymmetrised stochastic run whose 1–2 % rows are honest
 mTPQ sampling error. Flip splits the pool 134 → 146 blocks (max dim
 80 → 66); TR and star drop solves without changing any number.
 
+## Other finite-T methods (fully composed vs none)
+
+| method | composition | device | E(0.5) | C(0.5) | max rel dev E(T) | t [s] |
+|---|---|---|---|---|---|---|
+| FTLM | none | cpu | −4.306562 | 4.170578 | 1.8e−03 | 2.87 |
+| FTLM | U(1)+spatial+flip+TR+star | cpu | −4.341584 | 4.178737 | 8.6e−03 | 0.60 |
+| LTLM | none | cpu | −5.387391 | −0.000000 | 9.5e−01 | 0.62 |
+| LTLM | U(1)+spatial+flip+TR+star | cpu | −4.625620 | 1.770994 | 4.6e−01 | 0.05 |
+| FTLM | none | gpu | −4.301863 | 4.283484 | 1.9e−03 | 2.05 |
+| FTLM | U(1)+spatial+flip+TR+star | gpu | −4.290482 | 4.153979 | 4.3e−03 | 23.5 |
+| LTLM | none | gpu | −5.387391 | −0.000000 | 9.5e−01 | 0.49 |
+| LTLM | U(1)+spatial+flip+TR+star | gpu | −4.625620 | 1.770994 | 4.6e−01 | 1.89 |
+
+FTLM is stochastic in both lanes; the composed run's sampling error is
+comparable to the unsymmetrised run's (the benchmark asserts it can't
+be qualitatively worse) and 4.8× faster on CPU. **LTLM's accuracy at
+N=12 with default knobs is poor in BOTH lanes** (the unsymmetrised run
+collapses to the ground state at every T) — a method-regime property
+reported as-is, not a composition artifact (the composed lane is
+actually closer). FTLM-composed on GPU pays per-sector kernel-launch
+overhead across 146 tiny sectors × samples — use the CPU lane at
+small block dims. **cTPQ has been removed from the package** (July
+2026): mTPQ + the exact small-block fallback covers its use cases;
+the MPI-distributed thermal lane keeps its internal canonical
+propagator.
+
 ## DSSF S^z_{Q=π}(ω) — dense Lehmann peak 2.588236 at ω = 0.370
 
 | composition | device | peak S | peak omega | max |dS| | t [s] |
