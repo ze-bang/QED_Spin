@@ -987,7 +987,15 @@ void bind_workflows(py::module_& m) {
                                     return a.first < b.first;
                                 });
                       double cutoff_E;
-                      if (phase1_min.size() <= target_num_eigs) {
+                      const bool phase1_has_nonfinite = std::any_of(
+                          phase1_min.begin(), phase1_min.end(),
+                          [](const auto& p) { return !std::isfinite(p.first); });
+                      if (phase1_min.size() <= target_num_eigs
+                          || phase1_has_nonfinite) {
+                          // Too few estimates, or a phase-1 solve threw
+                          // (recorded as -inf): the cutoff arithmetic
+                          // below would produce inf/NaN and silently
+                          // select NOTHING. Fail safe: solve everything.
                           cutoff_E = std::numeric_limits<double>::infinity();
                       } else {
                           const double best_E = phase1_min.front().first;

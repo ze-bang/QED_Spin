@@ -43,6 +43,7 @@
 
 #include <ed/core/symmetry_metadata.h>
 #include <ed/matvec/term_storage.h>
+#include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/time_reversal.h>
 
@@ -114,6 +115,11 @@ resolve_symmetry_composition(const ed::matvec::TermStorage& soa,
     if (c.flip_transport) {
         const char* v = std::getenv("ED_SYM_SPIN_FLIP_PROJECT");
         c.flip_project = !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        // Projection exists only on the CSR-free rep lane: a
+        // flip-projected sector has no orbit-CSR form (that provider
+        // throws by design), so when the user pinned the legacy orbit
+        // lane (ED_SYM_REP=0) the plan must not select it.
+        if (!cpu_rep_symmetry_enabled()) c.flip_project = false;
     }
 
     // ---- time reversal ----
