@@ -586,6 +586,7 @@ def thermal(
     time_reversal: Union[str, bool, int, None] = "auto",
     point_group: Union[str, bool, None] = "auto",
     star_maps: Optional[list] = None,
+    lattice: Optional[Any] = None,
     output_dir: str = "",
     verbose: bool = True,
     # Phase C of the "Backend x Symmetries x Workflows" plan
@@ -728,7 +729,8 @@ def thermal(
     if not is_directory:
         # symmetry='auto' -> maximal spatial generator set (or None);
         # 'on' toggles -> detection-checked ints (report + degrade).
-        symmetry = _resolve_auto_symmetry(H, symmetry, verbose=verbose)
+        symmetry = _resolve_auto_symmetry(H, symmetry, verbose=verbose,
+                                          lattice=lattice)
         spin_flip = _sym_toggle_int(spin_flip, "spin_flip", H, verbose)
         time_reversal = _sym_toggle_int(
             time_reversal, "time_reversal", H, verbose)

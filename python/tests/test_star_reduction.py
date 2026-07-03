@@ -99,3 +99,100 @@ def test_thermal_star_reduction_parity():
                                rtol=0, atol=1e-12)
     np.testing.assert_allclose(r_on.specific_heat, r_off.specific_heat,
                                rtol=0, atol=1e-11)
+
+
+def _cuda_available() -> bool:
+    if not getattr(qed, "has_cuda_build", lambda: False)():
+        return False
+    try:
+        import subprocess
+        rc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).returncode
+        return rc == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+_REQUIRES_GPU = pytest.mark.skipif(
+    not _cuda_available(),
+    reason="Requires a CUDA-enabled qed build and a visible NVIDIA device.")
+
+
+def test_translation_mode_matches_auto():
+    """symmetry='translation' (+ lattice) projects with the pure
+    translation subgroup and keeps the whole point group as star
+    residue; physics must equal both 'auto' and 'off'."""
+    from qed.input import lattice as L
+    lat = L.chain(N_SITES, pbc=True)
+    H = _ring()
+
+    def run(sym, **kw):
+        return qed.solve(H, symmetry=sym, sz=N_SITES // 2,
+                         num_eigenvalues=2, device="cpu",
+                         verbose=False, **kw)
+
+    e_t = run("translation", lattice=lat).eigenvalues[0]
+    e_a = run("auto").eigenvalues[0]
+    e_o = run("off").eigenvalues[0]
+    assert abs(e_t - E0_DENSE) < 1e-9
+    assert abs(e_t - e_a) < 1e-10 and abs(e_t - e_o) < 1e-8
+
+    # Without a lattice the mode fails loudly, not silently.
+    with pytest.raises(ValueError, match="lattice"):
+        run("translation")
+
+    # The translation set retains the point group as star residue.
+    # (On a 2D lattice: the 1D chain's geometric translation filter
+    # also admits the reflection, leaving no residue there.)
+    from qed.input import lattice as L2
+    lat_k = L2.kagome(2, 2, pbc=True)
+    nn = [(bd.i, bd.j) for bd in lat_k.nn_bonds]
+    Hk = qed.input.HamiltonianBuilder(lat_k.num_sites).xxz(
+        nn, -1.0, 1.0).to_operator()
+    gen_t = qed.find_symmetries(Hk, lattice=lat_k,
+                                verbose=False).translation_set
+    assert len(gen_t.star_perms) > 0
+
+
+@_REQUIRES_GPU
+def test_gs_star_reduction_parity_gpu():
+    """Star reduction on the GPU lane: same orbit plan, per-sector
+    solves on the device; spectrum union parity vs star-off."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def run(pg):
+        return qed.solve(H, symmetry=gen, sz=N_SITES // 2,
+                         num_eigenvalues=8, device="gpu",
+                         spin_flip="off", time_reversal="off",
+                         point_group=pg, verbose=False)
+
+    r_on, r_off = run("auto"), run("off")
+    assert getattr(r_on.backend, "lane", "") == "gpu"
+    np.testing.assert_allclose(r_on.eigenvalues[:1], r_off.eigenvalues[:1],
+                               rtol=0, atol=1e-9)
+    assert abs(float(r_on.eigenvalues[0]) - E0_DENSE) < 1e-8
+
+
+@_REQUIRES_GPU
+def test_thermal_composed_parity_gpu():
+    """All mechanisms composed on the GPU thermal flat pool == the
+    everything-off baseline (exact fallback blocks => 1e-12)."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    def t(**kw):
+        return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0,
+                           num_T=10, symmetry=gen, random_seed=3,
+                           device="gpu", verbose=False, **kw)
+
+    r_all = t(spin_flip="require", time_reversal="require",
+              point_group="auto")
+    r_off = t(spin_flip="off", time_reversal="off", point_group="off")
+    np.testing.assert_allclose(r_all.energy, r_off.energy,
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(r_all.specific_heat, r_off.specific_heat,
+                               rtol=0, atol=1e-11)

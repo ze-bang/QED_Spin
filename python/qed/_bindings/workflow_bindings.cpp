@@ -865,7 +865,12 @@ void bind_workflows(py::module_& m) {
                       !comp.tr_partner.empty() ? comp.tr_partner.size()
                       : !comp.star_maps.empty() ? comp.star_maps[0].size()
                                                 : 0;
-                  if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0) {
+                  // Spectrum copies are not eigenVECTOR copies: a
+                  // skipped sector has no states to return or save, so
+                  // the orbit skip only runs on eigenvalue-only
+                  // workloads (TR pairing and star reduction alike).
+                  if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0
+                      && !opts.compute_vectors) {
                       const std::vector<std::int32_t> canon =
                           ed::symmetry::sector_orbit_canonical(
                               tr_num_raw, comp);

@@ -308,6 +308,12 @@ def _ed_result_from_gs_result(
     _tags = getattr(gs_result, "sector_tags", None)
     if _tags:
         out.sector_tags = list(_tags)
+    # Truthful backend lane ("gpu"/"cpu"/"mpi"): the C++ aggregate
+    # carries it; surface it so callers (and the capability-matrix
+    # benchmark's GPU-row assertion) can verify which lane really ran.
+    _bk = getattr(gs_result, "backend", None)
+    if _bk is not None:
+        out.backend = _bk
     # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
     # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
     _kry = getattr(gs_result, "krylov", None)
@@ -787,6 +793,14 @@ def find_symmetries(
                     "modulo the supercell)."
                 ),
             )
+            # Stage 7a: the ENTIRE point group is this set's residue --
+            # translations project, the point group folds the k sectors
+            # into isospectral stars (the textbook space-group split).
+            _t_keys = {tuple(pp) for pp in translation_autos}
+            translation_set.star_perms = [
+                list(pp) for pp in all_automorphisms
+                if tuple(pp) not in _t_keys
+            ]
             generator_sets.append(translation_set)
 
     # 3b. Full automorphism (max clique → minimal generators) when not
@@ -864,6 +878,7 @@ def resolve_auto_symmetry(
     symmetry: Any,
     *,
     verbose: bool = True,
+    lattice: Optional[Any] = None,
 ) -> Any:
     """Normalise the string forms of ``symmetry=``.
 
@@ -884,10 +899,41 @@ def resolve_auto_symmetry(
     key = symmetry.strip().lower()
     if key in ("off", "none", ""):
         return None
+    if key in ("translation", "translations"):
+        if lattice is None:
+            raise ValueError(
+                "symmetry='translation' needs lattice=... (positions + "
+                "lattice vectors identify which automorphisms are pure "
+                "translations). Pass the qed.input.Lattice the "
+                "Hamiltonian was built on."
+            )
+        try:
+            report = find_symmetries(operator, lattice=lattice,
+                                     verbose=False)
+        except ImportError as exc:
+            warnings.warn(
+                f"symmetry='translation': automorphism search "
+                f"unavailable ({exc}); running without spatial "
+                "symmetry.", RuntimeWarning, stacklevel=3)
+            return None
+        gen = report.translation_set
+        if gen is None or not getattr(gen, "generators", None):
+            if verbose:
+                print("[qed] symmetry='translation': no lattice "
+                      "translations commute with H -- no spatial "
+                      "projection.")
+            return None
+        if verbose:
+            print(f"[qed] symmetry='translation': |T| = "
+                  f"{gen.group_size}; point-group residue retained "
+                  f"({len(gen.star_perms)} automorphisms -> star "
+                  "reduction).")
+        return gen
     if key != "auto":
         raise ValueError(
-            f"symmetry={symmetry!r}: string forms are 'auto' or 'off' "
-            "(or pass a GeneratorSet / permutation list / dict)."
+            f"symmetry={symmetry!r}: string forms are 'auto', "
+            "'translation' or 'off' (or pass a GeneratorSet / "
+            "permutation list / dict)."
         )
     try:
         report = find_symmetries(operator, verbose=False)
@@ -991,6 +1037,7 @@ def solve(
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
     point_group: Union[str, bool, None] = "auto",
+    lattice: Optional[Any] = None,
     output_dir: str = "",
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
@@ -1391,7 +1438,8 @@ def solve(
     #     * CPU + no-symmetry → orchestrator with the CPU lane
     #       (the fastest path, no I/O).
     # ------------------------------------------------------------------
-    symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose)
+    symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose,
+                                     lattice=lattice)
     if symmetry is not None:
         if use_mpi:
             return _diag_via_mpi(
