@@ -24,6 +24,8 @@
 #include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
+#include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/sym_profile.h>
 #include <ed/core/operator.h>
 #include <ed/core/results.h>
 #include <ed/core/sector_loop.h>          // filter_sectors + resolve_target_sector
@@ -3149,10 +3151,47 @@ void bind_workflows(py::module_& m) {
                   spec.streaming_symmetry = true;
                   // No fixed_sz: build_all_sz_sector_operators covers all n_up.
 
-                  // Build ALL (n_up, irrep) sector operators in a single pass.
+                  // Stage 5 (SymmetryEngine v2) SectorTransporter: the global
+                  // spin flip X commutes with every site permutation, so when
+                  // [H, X] == 0 the (n_up, k) and (N - n_up, SAME k) sectors
+                  // have identical spectra and Z_s(beta). Solve only
+                  // n_up <= N/2 and mirror the thermodynamic entries below.
+                  // ED_SYM_SPIN_FLIP=0 disables (read per call).
+                  const int N_sites = static_cast<int>(num_sites);
+                  const int req_lo  = std::max(0, n_up_min);
+                  const int req_hi  = (n_up_max < 0) ? N_sites
+                                                     : std::min(n_up_max, N_sites);
+                  bool flip_transport = false;
+                  if (ed::symmetry::spin_flip_transport_enabled()) {
+                      auto probe = ed::detail::build_base_op(spec);
+                      ed::detail::load_terms_into(*probe, spec);
+                      ed::matvec::TermStorage soa;
+                      ed::matvec::TermStorage::classify_route(
+                          soa, probe->transform_data_, probe->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      flip_transport =
+                          ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+                  }
+                  int build_lo = req_lo, build_hi = req_hi;
+                  if (flip_transport) {
+                      build_lo = std::max(0, std::min(req_lo, N_sites - req_hi));
+                      build_hi = std::min(build_hi, N_sites / 2);
+                      if (build_hi < build_lo) {  // degenerate request window
+                          flip_transport = false;
+                          build_lo = req_lo;
+                          build_hi = req_hi;
+                      } else if (ed::symmetry::sym_profile_enabled()) {
+                          std::fprintf(stderr,
+                              "[sym-profile] spin-flip transport: solving "
+                              "n_up [%d, %d] for requested [%d, %d]\n",
+                              build_lo, build_hi, req_lo, req_hi);
+                      }
+                  }
+
+                  // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, n_up_min, n_up_max);
+                          spec, build_lo, build_hi);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());
@@ -3313,6 +3352,39 @@ void bind_workflows(py::module_& m) {
                       per_sector.push_back(std::move(entry));
                       if (std::isfinite(tr.ground_state_energy))
                           gs_E = std::min(gs_E, tr.ground_state_energy);
+                  }
+
+                  // Stage 5 mirror pass: duplicate every solved n_up < N/2
+                  // block into its flip partner N - n_up (same irrep, same
+                  // spectrum, same dim), then keep only entries inside the
+                  // originally requested window (the clamp may have solved
+                  // mirror-only blocks below req_lo).
+                  if (flip_transport) {
+                      const std::size_t solved = per_sector.size();
+                      for (std::size_t e = 0; e < solved; ++e) {
+                          const int n = per_sector[e].tag.n_up;
+                          const int m = N_sites - n;
+                          if (m == n || m < req_lo || m > req_hi) continue;
+                          ed::ThermalSectorEntry mirror = per_sector[e];
+                          mirror.sz_index  = m;
+                          mirror.tag.n_up  = m;
+                          per_sector_thermo.push_back(mirror.thermo);
+                          per_sector_dims.push_back(mirror.tag.sector_dim);
+                          per_sector.push_back(std::move(mirror));
+                      }
+                      std::vector<ThermodynamicData>      f_thermo;
+                      std::vector<std::uint64_t>          f_dims;
+                      std::vector<ed::ThermalSectorEntry> f_sector;
+                      for (std::size_t e = 0; e < per_sector.size(); ++e) {
+                          const int n = per_sector[e].tag.n_up;
+                          if (n < req_lo || n > req_hi) continue;
+                          f_thermo.push_back(std::move(per_sector_thermo[e]));
+                          f_dims.push_back(per_sector_dims[e]);
+                          f_sector.push_back(std::move(per_sector[e]));
+                      }
+                      per_sector_thermo = std::move(f_thermo);
+                      per_sector_dims   = std::move(f_dims);
+                      per_sector        = std::move(f_sector);
                   }
 
                   if (!per_sector_thermo.empty()) {
