@@ -55,6 +55,7 @@
 #include <ed/core/combinadic.h>           // BinomialTable, unrank_to_state (streaming partition)
 #include <ed/symmetry/compiled_group.h>   // CompiledGroup (Stage 1, SymmetryEngine v2)
 #include <ed/symmetry/orbit_table.h>      // OrbitTable, fused pass1+1.5 (Stage 2)
+#include <ed/symmetry/symmetry_cache.h>   // acquire_orbit_table_* (Stage 3 cache)
 #include <ed/symmetry/gosper.h>           // next_bit_permutation (streaming enumeration)
 #include <ed/symmetry/sym_profile.h>      // SymPhaseTimer (ED_SYM_PROFILE=1)
 #include <ed/symmetry/fixed_sz_membership.h>  // FixedSzMembershipSubspace (tableless)
@@ -342,7 +343,8 @@ build_full_sector_operators(std::uint64_t            n_bits,
                             std::vector<std::size_t>* out_sector_ids = nullptr,
                             int                      mpi_rank = 0,
                             int                      mpi_size = 1,
-                            const std::vector<int>*  sector_owner = nullptr)
+                            const std::vector<int>*  sector_owner = nullptr,
+                            const std::string&       cache_dir = {})
 {
     const FullSpaceSubspace full(n_bits);
     const SpatialProjector  projector(info);
@@ -352,11 +354,11 @@ build_full_sector_operators(std::uint64_t            n_bits,
     // survivors only. ``ED_SYM_FUSED_PASS15=0`` restores the legacy serial
     // per-(irrep, rep) walk for bisection.
     const bool fused = sym_fused_pass15_enabled();
-    OrbitTable                 otab;
+    std::shared_ptr<const OrbitTable> otab_sp;   // Stage 3: registry/disk-cached
     std::vector<std::uint64_t> reps_plain;
-    if (fused) otab = build_orbit_table_full(n_bits, info);
+    if (fused) otab_sp = acquire_orbit_table_full(n_bits, info, cache_dir);
     else       reps_plain = enumerate_full_orbit_reps(info, n_bits);
-    const std::vector<std::uint64_t>& reps = fused ? otab.reps : reps_plain;
+    const std::vector<std::uint64_t>& reps = fused ? otab_sp->reps : reps_plain;
 
     std::vector<std::unique_ptr<SectorOperator>> ops;
     ops.reserve(info.sectors.size());
@@ -379,7 +381,7 @@ build_full_sector_operators(std::uint64_t            n_bits,
             #pragma omp parallel for schedule(static)
             for (long long i = 0; i < static_cast<long long>(reps.size()); ++i)
                 prefilter[static_cast<std::size_t>(i)] = projected_norm_sq(
-                    otab, static_cast<std::size_t>(i), chi);
+                    *otab_sp, static_cast<std::size_t>(i), chi);
             sb = SectorBasis::build_prefiltered(
                 full, projector,
                 info.sectors[s].quantum_numbers,
@@ -419,7 +421,8 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
                                 std::vector<std::size_t>* out_sector_ids = nullptr,
                                 int                      mpi_rank = 0,
                                 int                      mpi_size = 1,
-                                const std::vector<int>*  sector_owner = nullptr)
+                                const std::vector<int>*  sector_owner = nullptr,
+                                const std::string&       cache_dir = {})
 {
     const SpatialProjector projector(info);
 
@@ -486,9 +489,10 @@ build_fixed_sz_sector_operators(std::uint64_t            n_bits,
     if (sym_streaming_enum_enabled()) {
         const FixedSzMembershipSubspace membership(n_bits, static_cast<int>(n_up));
         if (sym_fused_pass15_enabled()) {
-            const OrbitTable otab = build_orbit_table_fixed_sz_streaming(
-                n_bits, static_cast<int>(n_up), info);
-            return run(membership, otab.reps, &otab);
+            const std::shared_ptr<const OrbitTable> otab_sp =
+                acquire_orbit_table_fixed_sz(
+                    n_bits, static_cast<int>(n_up), info, cache_dir);
+            return run(membership, otab_sp->reps, otab_sp.get());
         }
         return run(membership,
                    enumerate_fixed_sz_orbit_reps_streaming(
@@ -576,7 +580,8 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
                                      std::vector<std::size_t>* out_sector_ids = nullptr,
                                      int                      mpi_rank = 0,
                                      int                      mpi_size = 1,
-                                     const std::vector<int>*  sector_owner = nullptr)
+                                     const std::vector<int>*  sector_owner = nullptr,
+                                     const std::string&       cache_dir = {})
 {
     // Streaming construction (Jun 2026): the orbit expansion uses a tableless
     // popcount-membership subspace -- bit-identical to ``FixedSzSubspace`` here
@@ -599,14 +604,17 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     const bool streaming = sym_streaming_enum_enabled();
     const bool use_otab  = fused && streaming;
 
-    std::shared_ptr<std::vector<std::uint64_t>> reps_sp;
-    OrbitTable       otab;   // fused lane: stab arrays (reps moved into reps_sp)
+    // Stage 3: the fused lane acquires the (registry/disk-cached) shared
+    // table; ``reps_sp`` is an ALIASING shared_ptr into it, so the deferred
+    // CSR providers co-own the whole immutable table with zero copies.
+    std::shared_ptr<const std::vector<std::uint64_t>> reps_sp;
+    std::shared_ptr<const OrbitTable> otab_sp;
     OrbitStabilizers stabs;  // legacy fused fallback (materialized enumerator)
     if (use_otab) {
-        otab = build_orbit_table_fixed_sz_streaming(
-            n_bits, static_cast<int>(n_up), *info_sp);
-        reps_sp = std::make_shared<std::vector<std::uint64_t>>(
-            std::move(otab.reps));
+        otab_sp = acquire_orbit_table_fixed_sz(
+            n_bits, static_cast<int>(n_up), *info_sp, cache_dir);
+        reps_sp = std::shared_ptr<const std::vector<std::uint64_t>>(
+            otab_sp, &otab_sp->reps);
     } else if (streaming) {
         reps_sp = std::make_shared<std::vector<std::uint64_t>>(
             enumerate_fixed_sz_orbit_reps_streaming(
@@ -670,7 +678,7 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
             double norm_sq;
             if (fused) {
                 norm_sq = use_otab
-                    ? projected_norm_sq_stab(otab.stabilizer_of(i), chi)
+                    ? projected_norm_sq_stab(otab_sp->stabilizer_of(i), chi)
                     : projected_norm_sq(stabs, i, chi);
                 if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
             } else {
@@ -763,7 +771,8 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
                                  std::vector<std::size_t>* out_sector_ids = nullptr,
                                  int                      mpi_rank = 0,
                                  int                      mpi_size = 1,
-                                 const std::vector<int>*  sector_owner = nullptr)
+                                 const std::vector<int>*  sector_owner = nullptr,
+                                 const std::string&       cache_dir = {})
 {
     auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
     const FullSpaceSubspace subspace(n_bits);
@@ -772,13 +781,13 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
     // Pass 1.5 loop. ``ED_SYM_FUSED_PASS15=0`` retains the legacy two-pass
     // variant for bisection.
     const bool fused = sym_fused_pass15_enabled();
-    std::shared_ptr<std::vector<std::uint64_t>> reps_sp;
-    OrbitTable       otab;
+    std::shared_ptr<const std::vector<std::uint64_t>> reps_sp;
+    std::shared_ptr<const OrbitTable> otab_sp;
     OrbitStabilizers stabs;
     if (fused) {
-        otab = build_orbit_table_full(n_bits, *info_sp);
-        reps_sp = std::make_shared<std::vector<std::uint64_t>>(
-            std::move(otab.reps));
+        otab_sp = acquire_orbit_table_full(n_bits, *info_sp, cache_dir);
+        reps_sp = std::shared_ptr<const std::vector<std::uint64_t>>(
+            otab_sp, &otab_sp->reps);
     } else {
         reps_sp = std::make_shared<std::vector<std::uint64_t>>(
             enumerate_full_orbit_reps(*info_sp, n_bits));
@@ -815,7 +824,7 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
             const std::uint64_t rep = (*reps_sp)[i];
             double norm_sq;
             if (fused) {
-                norm_sq = projected_norm_sq_stab(otab.stabilizer_of(i), chi);
+                norm_sq = projected_norm_sq_stab(otab_sp->stabilizer_of(i), chi);
                 if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
             } else {
                 norm_sq = 0.0;
@@ -896,7 +905,8 @@ build_all_sz_sector_operators(
     TermBuilder&&            terms,
     std::int64_t             n_up_min = 0,
     std::int64_t             n_up_max = -1,
-    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr)
+    std::vector<std::pair<int, std::size_t>>* out_n_up_sector_ids = nullptr,
+    const std::string&       cache_dir = {})
 {
     if (n_up_max < 0) n_up_max = static_cast<std::int64_t>(n_bits);
     n_up_min = std::max<std::int64_t>(0, n_up_min);
@@ -917,12 +927,12 @@ build_all_sz_sector_operators(
         // the full-space stabilizer ids partition by popcount alongside the
         // reps, and the per-n_up ``build_orbit_stabilizers`` rebuilds vanish.
         const bool fused = sym_fused_pass15_enabled();
-        OrbitTable otab_full;
+        std::shared_ptr<const OrbitTable> otab_full_sp;
         std::vector<std::uint64_t> all_reps_plain;
-        if (fused) otab_full = build_orbit_table_full(n_bits, *info_sp);
+        if (fused) otab_full_sp = acquire_orbit_table_full(n_bits, *info_sp, cache_dir);
         else       all_reps_plain = enumerate_full_orbit_reps(*info_sp, n_bits);
         const std::vector<std::uint64_t>& all_reps =
-            fused ? otab_full.reps : all_reps_plain;
+            fused ? otab_full_sp->reps : all_reps_plain;
         // (populated into per-n_up rep + stab-id lists below)
         std::vector<std::vector<std::uint64_t>> reps_by_n_up(
             static_cast<std::size_t>(n_bits + 1));
@@ -934,7 +944,7 @@ build_all_sz_sector_operators(
                 static_cast<std::size_t>(__builtin_popcountll(r));
             if (pc < reps_by_n_up.size()) {
                 reps_by_n_up[pc].push_back(r);
-                if (fused) stabid_by_n_up[pc].push_back(otab_full.stab_id[k]);
+                if (fused) stabid_by_n_up[pc].push_back(otab_full_sp->stab_id[k]);
             }
         }
 
@@ -1018,7 +1028,7 @@ build_all_sz_sector_operators(
                     double norm_sq;
                     if (fused) {
                         norm_sq = projected_norm_sq_stab(
-                            otab_full.stab_elems[stab_ids[i]], chi);
+                            otab_full_sp->stab_elems[stab_ids[i]], chi);
                         if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
                     } else {
                         norm_sq = 0.0;

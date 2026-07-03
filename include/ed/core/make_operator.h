@@ -152,6 +152,13 @@ struct OperatorSpec {
     /// `SectorView`s.)
     std::optional<std::size_t> sector_index;
 
+    /// Stage 3 (SymmetryEngine v2): explicit OrbitTable disk-cache
+    /// directory. Empty = auto (``ED_SYM_CACHE_DIR`` override, else
+    /// ``<lattice_dir>/basis_cache`` for directory sources; registry-only
+    /// for in-memory sources). ``ED_SYM_CACHE=0`` disables the disk layer
+    /// entirely. See ed::symmetry::resolve_sym_cache_dir.
+    std::string           basis_cache_dir;
+
 #ifdef WITH_MPI
     /// MPI communicator for the distributed lanes. Defaults to
     /// `MPI_COMM_WORLD`. Single-rank communicators are accepted (the
@@ -480,6 +487,8 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             "fixed-Sz / distributed lanes).");
     }
     const std::string& dir = detail::require_directory(spec);
+    const std::string cache_dir =
+        ed::symmetry::resolve_sym_cache_dir(spec.basis_cache_dir, dir);
 
     // Carrier operator: load the Hamiltonian term list + the symmetry group
     // metadata exactly once. The terms are copied verbatim into every sector
@@ -536,13 +545,13 @@ make_sector_operators_tagged(const OperatorSpec& spec,
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr);
+                mpi_rank, mpi_size, owner_ptr, cache_dir);
         } else {
             set.operators = ed::symmetry::build_fixed_sz_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 static_cast<std::int64_t>(*spec.fixed_sz),
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr);
+                mpi_rank, mpi_size, owner_ptr, cache_dir);
         }
     } else {
         // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
@@ -552,12 +561,12 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             set.operators = ed::symmetry::build_full_sector_operators_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr);
+                mpi_rank, mpi_size, owner_ptr, cache_dir);
         } else {
             set.operators = ed::symmetry::build_full_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr);
+                mpi_rank, mpi_size, owner_ptr, cache_dir);
         }
     }
     if (time_ctor) {
@@ -642,13 +651,15 @@ make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
         op.three_body_data_ = base->three_body_data_;
     };
 
+    const std::string cache_dir =
+        ed::symmetry::resolve_sym_cache_dir(spec.basis_cache_dir, dir);
     std::vector<std::pair<int, std::size_t>> n_up_sector_ids;
     std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> operators =
         ed::symmetry::build_all_sz_sector_operators(
             n_bits, spec.spin_l, base->symmetry_info, term_builder,
             static_cast<std::int64_t>(n_up_min),
             static_cast<std::int64_t>(n_up_max),
-            &n_up_sector_ids);
+            &n_up_sector_ids, cache_dir);
 
     SectorOperatorSet set;
     set.num_raw_sectors = base->symmetry_info.sectors.size();

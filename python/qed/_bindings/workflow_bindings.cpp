@@ -714,6 +714,7 @@ void bind_workflows(py::module_& m) {
               spec.num_sites          = num_sites;
               spec.spin_l             = static_cast<float>(spin_l);
               spec.streaming_symmetry = true;
+              spec.basis_cache_dir    = opts.basis_cache_dir;  // Stage 3
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
               }
