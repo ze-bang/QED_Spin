@@ -60,10 +60,18 @@ def test_gs_full_group_with_degeneracies(dense):
     gen = qed.find_symmetries(H, verbose=False).full_set
     assert len(gen.star_perms) > 0        # non-abelian residue present
 
-    r = qed.solve(H, symmetry=gen, num_eigenvalues=6,
+    # Full space (auto_sz=False): includes the d=2-irrep triplet at the
+    # first excited level (all three S=1 partners).
+    r = qed.solve(H, symmetry=gen, num_eigenvalues=6, auto_sz=False,
                   point_group="full", verbose=False)
-    # Includes the d=2-irrep triplet at the first excited level.
     np.testing.assert_allclose(r.eigenvalues, w[:6], rtol=0, atol=1e-8)
+
+    # Default (auto_sz): the diagonal axis composes automatically --
+    # fixed n_up = N/2 for this U(1)-conserving H, so the ground state
+    # matches and the blocks shrink by the U(1) factor.
+    r2 = qed.solve(H, symmetry=gen, num_eigenvalues=1,
+                   point_group="full", verbose=False)
+    assert abs(r2.eigenvalues[0] - w[0]) < 1e-8
 
 
 def test_thermal_full_group_exact(dense):

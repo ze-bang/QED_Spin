@@ -38,7 +38,8 @@ build_nonabelian_sector_matvec(const ::Operator&                    op,
                                const std::vector<std::vector<int>>& max_clique,
                                int                                  irrep_index,
                                int                                  n_sites,
-                               int                                  n_up = -1);
+                               int                                  n_up = -1,
+                               int                                  sz_parity = -1);
 
 /// Per-block eigensolver method for the symmetry reduction. `Auto` = dense for
 /// n_Γ <= dense_max_dim, else Lanczos. The others FORCE that method per block
@@ -60,7 +61,8 @@ symmetry_adapted_lowest_eigenvalues(
     int                                   k,
     int                                   n_up          = -1,
     int                                   dense_max_dim = 512,
-    BlockMethod                           method        = BlockMethod::Auto);
+    BlockMethod                           method        = BlockMethod::Auto,
+    int                                   sz_parity     = -1);
 
 // ---------------------------------------------------------------------------
 // Full symmetry-reduced consumers, ALL backed by the production engine (each
@@ -77,7 +79,8 @@ symmetry_adapted_full_spectrum(
     const ed::symmetry::GroupIrreps&      gi,
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,
-    int                                   n_up = -1);
+    int                                   n_up = -1,
+    int                                   sz_parity = -1);
 
 /// Exact canonical thermodynamics from the full reduced spectrum.
 [[nodiscard]] ThermodynamicData
@@ -87,7 +90,8 @@ symmetry_adapted_thermodynamics(
     const std::vector<std::vector<int>>&  max_clique,
     int                                   n_sites,
     const std::vector<double>&            temperatures,
-    int                                   n_up = -1);
+    int                                   n_up = -1,
+    int                                   sz_parity = -1);
 
 /// Ground-state DSSF S(ω) = Σ_n |<n|O|0>|² Lorentzian, summing all d_Γ partners
 /// (completeness). H from `op_h`, the observable O from `op_o`.

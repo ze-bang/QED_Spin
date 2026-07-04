@@ -30,7 +30,8 @@ build_sab_partition0(const GroupIrreps&                   gi,
                      int                                  irrep_index,
                      int                                  n_sites,
                      int                                  n_up,
-                     int                                  partner)
+                     int                                  partner,
+                     int                                  sz_parity)
 {
     const IrrepData& ir = gi.irreps[static_cast<std::size_t>(irrep_index)];
     const int        G  = gi.order;
@@ -45,7 +46,9 @@ build_sab_partition0(const GroupIrreps&                   gi,
     // OOM / hang on large problems and point the caller at the scalable path.
     {
         long double enum_sz;
-        if (n_up < 0) {
+        if (n_up < 0 && sz_parity >= 0) {
+            enum_sz = std::pow(2.0L, static_cast<long double>(n_sites - 1));
+        } else if (n_up < 0) {
             enum_sz = std::ldexp(1.0L, n_sites);                 // 2^n_sites
         } else {
             enum_sz = 1.0L;                                      // C(n_sites,n_up)
@@ -132,7 +135,14 @@ build_sab_partition0(const GroupIrreps&                   gi,
         }
     };
 
-    if (n_up < 0) {
+    if (n_up < 0 && sz_parity >= 0) {
+        // Sz-parity half: popcount(s) mod 2 == sz_parity.
+        const std::uint64_t full = (1ULL << n_sites);
+        for (std::uint64_t s2 = 0; s2 < full; ++s2) {
+            if ((static_cast<int>(__builtin_popcountll(s2)) & 1) == sz_parity)
+                process_rep(s2);
+        }
+    } else if (n_up < 0) {
         const std::uint64_t full = std::uint64_t{1} << n_sites;
         for (std::uint64_t s = 0; s < full; ++s) process_rep(s);
     } else if (n_up <= n_sites) {
@@ -161,12 +171,13 @@ build_sab_partition0(const GroupIrreps&                   gi,
     int                                  irrep_index,
     int                                  n_sites,
     int                                  n_up,
-    int                                  partner)
+    int                                  partner,
+    int                                  sz_parity)
 {
     ::SymmetrySector sec;
     sec.sector_id        = static_cast<std::uint64_t>(irrep_index);
     sec.quantum_numbers  = {irrep_index};
-    const auto sab = build_sab_partition0(gi, max_clique, irrep_index, n_sites, n_up, partner);
+    const auto sab = build_sab_partition0(gi, max_clique, irrep_index, n_sites, n_up, partner, sz_parity);
     sec.basis_states.reserve(sab.size());
     for (const auto& v : sab) {
         ::SymBasisState bs;

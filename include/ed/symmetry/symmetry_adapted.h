@@ -61,7 +61,8 @@ build_sab_partition0(const GroupIrreps&                    gi,
                      int                                   irrep_index,
                      int                                   n_sites,
                      int                                   n_up   = -1,
-                     int                                   partner = 0);
+                     int                                   partner = 0,
+                     int                                   sz_parity = -1);
 
 // ---------------------------------------------------------------------------
 // Pack the partner-0 SAB of one irrep into the PRODUCTION sector data structure
@@ -79,7 +80,8 @@ build_symmetry_adapted_sector(const GroupIrreps&                   gi,
                               int                                  irrep_index,
                               int                                  n_sites,
                               int                                  n_up    = -1,
-                              int                                  partner = 0);
+                              int                                  partner = 0,
+                              int                                  sz_parity = -1);
 
 /// Result of a symmetry-adapted spectrum: sorted eigenvalues with d_Γ
 /// multiplicities + per-block (n_Γ, d_Γ). Filled by the ed_solvers engine

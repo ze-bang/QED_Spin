@@ -331,12 +331,11 @@ def run_nonabelian_section(n, truth, H, gen, rows):
     w = truth["spectrum"]
     t_lo, t_hi, n_t = T_GRID
 
-    t, r = timed(lambda: qed.solve(H, symmetry=gen, num_eigenvalues=6,
+    t, r = timed(lambda: qed.solve(H, symmetry=gen, num_eigenvalues=1,
                                    point_group="full", verbose=False))
-    rows.append(dict(verb="GS/na", config="nonabelian-full(d>=2)",
+    rows.append(dict(verb="GS/na", config="nonabelian-full+U(1)",
                      device="cpu", E0=float(r.eigenvalues[0]),
-                     dev=float(np.max(np.abs(
-                         np.asarray(r.eigenvalues) - w[:6]))),
+                     dev=abs(float(r.eigenvalues[0]) - float(w[0])),
                      t=t, blocks=None, max_block=None))
 
     t, r = timed(lambda: qed.thermal(
@@ -406,13 +405,13 @@ def run_broken_section(n, devices, rows):
                                            default=dim)))
         if dev == "cpu":
             t, r = timed(lambda: qed.solve(
-                H, symmetry=gen, num_eigenvalues=6,
+                H, symmetry=gen, num_eigenvalues=1,
                 point_group="full", verbose=False))
             rows.append(dict(verb="GS[U(1)-broken]",
-                             config="nonabelian-full(d>=2)", device=dev,
+                             config="nonabelian-full+parity", device=dev,
                              E0=float(r.eigenvalues[0]),
-                             dev=float(np.max(np.abs(
-                                 np.asarray(r.eigenvalues) - w[:6]))),
+                             dev=abs(float(r.eigenvalues[0])
+                                     - float(w[0])),
                              t=t, blocks=None, max_block=None))
         t, r = timed(lambda: qed.thermal(
             H, method="mTPQ", T_min=t_lo, T_max=t_hi, num_T=n_t,

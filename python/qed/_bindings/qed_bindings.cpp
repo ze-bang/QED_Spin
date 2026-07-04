@@ -792,12 +792,13 @@ PYBIND11_MODULE(_core, m) {
     // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
     m.def("symmetry_adapted_lowest_eigenvalues",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             int k, int n_up, int dense_max_dim) {
+             int k, int n_up, int dense_max_dim, int sz_parity) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto group = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(group, n_sites);
               auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
-                  op, gi, group, n_sites, k, n_up);
+                  op, gi, group, n_sites, k, n_up, dense_max_dim,
+                  ed::solvers::BlockMethod::Auto, sz_parity);
               py::dict d;
               d["eigenvalues"]     = spec.eigenvalues;
               d["block_irrep_dim"] = spec.block_irrep_dim;
@@ -807,6 +808,7 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("operator"), py::arg("generators"), py::arg("k"),
           py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          py::arg("sz_parity") = -1,
           R"pbdoc(
             Lowest-k eigenvalues under the FULL (possibly non-abelian)
             group reduction: each irrep block runs the production
@@ -844,7 +846,8 @@ PYBIND11_MODULE(_core, m) {
 
     m.def("symmetry_adapted_thermodynamics",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             const std::vector<double>& temperatures, int n_up, bool use_gpu) {
+             const std::vector<double>& temperatures, int n_up, bool use_gpu,
+             int sz_parity) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
@@ -856,7 +859,7 @@ PYBIND11_MODULE(_core, m) {
               else
 #endif
                   td = ed::solvers::symmetry_adapted_thermodynamics(
-                      op, gi, max_clique, n_sites, temperatures, n_up);
+                      op, gi, max_clique, n_sites, temperatures, n_up, sz_parity);
               (void)use_gpu;
               py::dict d;
               d["temperatures"] = td.temperatures;
@@ -868,6 +871,7 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("operator"), py::arg("generators"), py::arg("temperatures"),
           py::arg("n_up") = -1, py::arg("use_gpu") = false,
+          py::arg("sz_parity") = -1,
           "Exact canonical thermodynamics (E, C, S, F vs T) of a Hamiltonian "
           "reduced by the (possibly non-abelian) point group, with optional "
           "fixed-Sz restriction (n_up>=0). Diagonalises the small per-irrep "

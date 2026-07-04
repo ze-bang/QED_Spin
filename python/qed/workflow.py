@@ -1485,8 +1485,39 @@ def solve(
                     "from find_symmetries).")
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
-            spec = _core.symmetry_adapted_lowest_eigenvalues(
-                op_to_use, gens_full, _k, _nu)
+            _sp = -1
+            if _sz_parity_str is not None:
+                _sp = int(_sz_parity_str)
+            elif _nu < 0 and auto_sz:
+                # Compose the diagonal axis automatically: fixed Sz for
+                # U(1)-conserving H (GS at half filling), the parity
+                # half otherwise when the Z2 remnant survives.
+                if op_to_use.conserves_sz():
+                    _nu = num_sites // 2
+                else:
+                    try:
+                        if bool(_core.detect_hamiltonian_symmetries(
+                                op_to_use)["sz_parity"]):
+                            _sp = 2
+                    except Exception:
+                        _sp = -1
+            if _sp == 2:
+                spec0 = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, -1, sz_parity=0)
+                spec1 = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, -1, sz_parity=1)
+                spec = dict(spec0)
+                spec["eigenvalues"] = (list(spec0["eigenvalues"])
+                                       + list(spec1["eigenvalues"]))
+                spec["block_size"] = (list(spec0["block_size"])
+                                      + list(spec1["block_size"]))
+                spec["block_irrep_dim"] = (
+                    list(spec0["block_irrep_dim"])
+                    + list(spec1["block_irrep_dim"]))
+            else:
+                spec = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, _nu,
+                    sz_parity=(_sp if _sp in (0, 1) else -1))
             out = EDResults()
             out.eigenvalues = sorted(
                 float(e) for e in spec["eigenvalues"])[:_k]

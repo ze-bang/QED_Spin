@@ -148,7 +148,7 @@ cell = complete 4096-state multiset vs dense `eigvalsh`:
 | GS | parity+spatial | cpu | 7.6e−14 | 24 | 180 | 0.29 |
 | GS | parity+spatial+flip | cpu | 7.2e−14 | 48 | 94 | 0.14 |
 | GS | parity+flip+TR+star | cpu | 7.2e−14 | 48 | 94 | **0.072 (136×)** |
-| GS | nonabelian-full (d≥2) | cpu | 2.9e−14 | — | — | 1.19 |
+| GS | nonabelian-full+parity (d≥2) | cpu | 1.4e−14 | — | — | 0.23 |
 | thermal (mTPQ) | parity(auto)+flip | cpu | 1.3e−14 | — | — | 0.36 |
 | full dense | parity(auto)+flip | cpu | 7.7e−14 | — | — | 0.11 |
 | GS | parity+flip+TR+star | gpu | 7.2e−14 | 48 | 94 | 0.34 |
@@ -156,9 +156,14 @@ cell = complete 4096-state multiset vs dense `eigvalsh`:
 | full dense | parity(auto)+flip | gpu | 7.7e−14 | — | — | 0.10 |
 
 Non-abelian `point_group="full"` cells on the U(1)-conserving ring
-(D₁₂, d≥2 irreps): GS lowest-6 incl. the d=2 triplet at 2.1e−14
-(0.82 s); exact thermodynamics at 1.8e−13 (0.31 s); GS DSSF vs the
-dense Lehmann sum at 8.9e−13 (5.3 s).
+(D₁₂, d≥2 irreps), now COMPOSED with the diagonal axis automatically
+(auto_sz → n_up = N/2 for U(1) H, the parity half otherwise):
+GS at **0.034 s** (2.7e−15) — was 0.82 s uncomposed, now on par with
+the best abelian rows, as blocks ~ dim/(\|G\|·C) predict; exact
+thermodynamics 1.8e−13 (0.26 s); GS DSSF vs the dense Lehmann sum
+8.9e−13 (4.5 s, full-space — the DSSF consumer does not compose the
+diagonal axis yet). `auto_sz=False` pins the full-space treatment
+(the d=2 triplet degeneracy check).
 
 Ladder reading: each Z₂ multiplies — spatial ÷12, ×∏σˣ ÷2, ×parity ÷2
 (48 blocks, max dim 94 vs 4096), TR+star then cut the solve count.
