@@ -887,23 +887,26 @@ void bind_workflows(py::module_& m) {
                   // workloads (TR pairing and star reduction alike).
                   if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0
                       && !opts.compute_vectors) {
-                      const std::vector<std::int32_t> canon =
-                          ed::symmetry::sector_orbit_canonical(
-                              tr_num_raw, comp);
-                      std::vector<char> in_sel(num_sectors, 0);
-                      for (std::size_t k : sector_indices_all) in_sel[k] = 1;
-                      for (std::size_t k : sector_indices_all) {
-                          const std::size_t ck = static_cast<std::size_t>(
-                              canon[k % tr_num_raw]);
-                          const std::size_t psy =
-                              ck + (k / tr_num_raw) * tr_num_raw;
-                          if (psy < k && in_sel[psy]
-                              && handle.sector_tag(k).sector_dim ==
-                                 handle.sector_tag(psy).sector_dim) {
-                              tr_mirrors.emplace_back(k, psy);
-                              continue;  // skip solving k
+                      // Structural consolidation (Jul 2026): the GS lane
+                      // consumes the SAME orbit plan the thermal flat
+                      // pool uses (plan_tr_actions over the selected
+                      // tags) instead of a hand-rolled twin of it.
+                      std::vector<ed::SectorTag> sel_tags;
+                      sel_tags.reserve(sector_indices_all.size());
+                      for (std::size_t k : sector_indices_all)
+                          sel_tags.push_back(handle.sector_tag(k));
+                      const auto plan = ed::symmetry::plan_tr_actions(
+                          sel_tags, tr_num_raw, comp);
+                      for (std::size_t i = 0;
+                           i < sector_indices_all.size(); ++i) {
+                          if (plan.skip[i]) {
+                              tr_mirrors.emplace_back(
+                                  sector_indices_all[i],
+                                  sector_indices_all[plan.source[i]]);
+                          } else {
+                              sector_indices.push_back(
+                                  sector_indices_all[i]);
                           }
-                          sector_indices.push_back(k);
                       }
                       if (!tr_mirrors.empty()
                           && ed::symmetry::sym_profile_enabled()) {

@@ -550,6 +550,35 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         }
     }
 
+    // Structural consolidation (Jul 2026): ONE decode of the sector-mode
+    // flags with the illegal combinations rejected up front (they were
+    // previously caught -- or not -- deep inside the builders).
+    //   diagonal axis: fixed_sz XOR sz_parity XOR none
+    //   flip split   : flip_project_half (fixed-Sz N/2 only) or
+    //                  flip_sectors_full (full space / parity halves;
+    //                  parity requires even N by the closure rule)
+    if (spec.fixed_sz && spec.sz_parity) {
+        throw std::invalid_argument(
+            "OperatorSpec: fixed_sz and sz_parity are mutually exclusive "
+            "diagonal axes.");
+    }
+    if (spec.flip_project_half && !spec.fixed_sz) {
+        throw std::invalid_argument(
+            "OperatorSpec: flip_project_half is the fixed-Sz N/2 variant; "
+            "use flip_sectors_full for full-space / parity sectors.");
+    }
+    if (spec.flip_sectors_full && spec.fixed_sz) {
+        throw std::invalid_argument(
+            "OperatorSpec: flip_sectors_full does not apply to a fixed-Sz "
+            "block (use flip_project_half at n_up == N/2).");
+    }
+    if (spec.flip_sectors_full && spec.sz_parity
+        && spec.num_sites % 2 != 0) {
+        throw std::invalid_argument(
+            "OperatorSpec: the all-ones flip only preserves Sz parity for "
+            "even N (closure rule).");
+    }
+
     const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
     const auto ctor_t0 = std::chrono::steady_clock::now();
     if (spec.sz_parity.has_value()) {

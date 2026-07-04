@@ -4,6 +4,8 @@
 
 #include <ed/symmetry/symmetry_adapted.h>
 
+#include <mutex>
+
 #include <ed/core/basis_utils.h>   // applyPermutation
 #include <ed/symmetry/gosper.h>    // next_bit_permutation (fixed-popcount enumeration)
 
@@ -174,6 +176,32 @@ build_sab_partition0(const GroupIrreps&                   gi,
     int                                  partner,
     int                                  sz_parity)
 {
+    // Structural consolidation (Jul 2026): the SAB basis is a pure
+    // function of (group, irrep, subspace) -- NOT of the operator's
+    // terms -- so cache it content-keyed like the abelian orbit
+    // tables. Kills the per-call reconstruction that dominated the
+    // non-abelian lane's fixed costs (solve/thermal/DSSF on the same
+    // model re-derived identical bases every call).
+    static std::mutex sab_cache_mtx;
+    static std::vector<std::pair<std::uint64_t, ::SymmetrySector>>
+        sab_cache;                                // small FIFO
+    std::uint64_t key = 0xcbf29ce484222325ULL;
+    auto mix = [&key](std::uint64_t v) {
+        key ^= v; key *= 0x100000001b3ULL;
+    };
+    for (const auto& p : max_clique)
+        for (int site : p) mix(static_cast<std::uint64_t>(site) + 0x9E37ULL);
+    mix(static_cast<std::uint64_t>(irrep_index) + 1);
+    mix(static_cast<std::uint64_t>(n_sites) + 0x51ULL);
+    mix(static_cast<std::uint64_t>(n_up + 2));
+    mix(static_cast<std::uint64_t>(partner + 2));
+    mix(static_cast<std::uint64_t>(sz_parity + 2));
+    {
+        std::lock_guard<std::mutex> lk(sab_cache_mtx);
+        for (const auto& e : sab_cache)
+            if (e.first == key) return e.second;
+    }
+
     ::SymmetrySector sec;
     sec.sector_id        = static_cast<std::uint64_t>(irrep_index);
     sec.quantum_numbers  = {irrep_index};
@@ -193,6 +221,13 @@ build_sab_partition0(const GroupIrreps&                   gi,
             : *std::min_element(v.states.begin(), v.states.end());
         bs.sortOrbit();   // sort orbit_elements (+ parallel coeffs) for findCoeff; refreshes inv_norm
         sec.basis_states.push_back(std::move(bs));
+    }
+    {
+        std::lock_guard<std::mutex> lk(sab_cache_mtx);
+        constexpr std::size_t kCap = 64;          // ~one model's irreps
+        if (sab_cache.size() >= kCap)
+            sab_cache.erase(sab_cache.begin());
+        sab_cache.emplace_back(key, sec);
     }
     return sec;
 }
