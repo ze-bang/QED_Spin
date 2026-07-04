@@ -195,6 +195,11 @@ public:
             // sector union equals the full-Hilbert dense spectrum).
             if (static_cast<std::size_t>(producer_.dim()) != N) return false;
             this->commitPendingTransforms();
+            // Stage 8c: flip-projected (k, +/-) sectors have no orbit-CSR
+            // form (their csr_provider throws by design); decline so the
+            // caller falls back to the matvec column build, which runs the
+            // flip-aware rep gather backend.
+            if (producer_.ensureRepData().has_flips()) return false;
             producer_.ensureHostCsr();   // materialise sector orbits for policy()
             auto basis_pol = producer_.policy();
             using PolicyT = decltype(basis_pol);

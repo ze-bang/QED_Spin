@@ -8,7 +8,7 @@
 //                       Block-Lanczos / full diag), one of the four
 //                       Backend lanes auto-selected via select_backend.
 //     ed::thermal   -- finite-temperature workflows (FTLM / LTLM / mTPQ /
-//                       cTPQ / KPM-DOS).
+//                       KPM-DOS).
 //     ed::spectral  -- dynamical correlators (DSSF ground state /
 //                       finite-T) via continued-fraction Lanczos.
 //
@@ -128,6 +128,22 @@ struct SolveOptions {
     /// `basis_cache/` HDF5 files here.
     std::string basis_cache_dir;
 
+    /// Stage 8 (SymmetryEngine v2) composition toggles, per call:
+    /// -1 = auto (commutation check + env gate), 0 = off,
+    ///  1 = require (throw when H does not carry the symmetry).
+    /// Consumed by the streaming-symmetry sector loops (spin-flip
+    /// transport/projection across Sz blocks; time-reversal k <-> -k
+    /// sector pairing).
+    int spin_flip     = -1;
+    int time_reversal = -1;
+
+    /// Stage 7a: raw-irrep image maps under the non-abelian residue of
+    /// the spatial group (one vector per coset representative;
+    /// star_maps[c][k] = image irrep of k under p_c, -1 = unresolved).
+    /// Isospectral orbit members are solved once and copied. Computed
+    /// by the Python automorphism pipeline; empty = no star reduction.
+    std::vector<std::vector<int>> star_maps;
+
     /// If true, generate the symmetry basis + the sector-block
     /// Hamiltonians and exit without diagonalising. Used by the CLI's
     /// `precompute_basis_only` mode to pre-warm the cache on a single
@@ -143,9 +159,21 @@ struct SolveOptions {
 };
 
 struct ThermalOptions {
+    /// Stage 8 (SymmetryEngine v2) composition toggles, per call:
+    /// -1 = auto, 0 = off, 1 = require. See SolveOptions for semantics.
+    int spin_flip     = -1;
+    int time_reversal = -1;
+
+    /// Stage 7a: raw-irrep image maps under the non-abelian residue of
+    /// the spatial group (one vector per coset representative;
+    /// star_maps[c][k] = image irrep of k under p_c, -1 = unresolved).
+    /// Isospectral orbit members are solved once and copied. Computed
+    /// by the Python automorphism pipeline; empty = no star reduction.
+    std::vector<std::vector<int>> star_maps;
+
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, LTLM, mTPQ, cTPQ, KpmDos, OFTLM,
+        FTLM = 0, LTLM, mTPQ, KpmDos = 4, OFTLM,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -163,7 +191,7 @@ struct ThermalOptions {
     std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
     std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
-    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ/cTPQ imag-time step.
+    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ imag-time step.
     double      beta_max       = 1000.0;
     std::uint64_t random_seed  = 0;
     std::string output_dir;
@@ -249,7 +277,7 @@ struct ThermalOptions {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     // user-supplied probe-betas for TPQ state-vector snapshots. The
     // orchestrator passes this through to ``MtpqOptions::probe_betas``
-    // / ``CtpqOptions::probe_betas``. Empty (default) -> no snapshots
+    // Empty (default) -> no snapshots
     // are taken. Ignored by FTLM / LTLM / KPM-DOS (which never have
     // a meaningful TPQ state to snapshot). Combine with
     // ``output_dir`` to land the saved states on disk under

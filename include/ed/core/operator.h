@@ -520,9 +520,8 @@ public:
     //                           is dim-based heuristic)
     //   ED_CSR_DIM_MAX    N     CSR cutoff dim (default 1<<20 for full
     //                           basis, 1<<22 for fixed-Sz)
-    //   Legacy aliases ED_USE_SPARSE / ED_SPARSE_DIM_MAX (full) and
-    //   ED_FIXED_SZ_USE_SPARSE / ED_FIXED_SZ_SPARSE_DIM_MAX (fixed-Sz)
-    //   continue to work; the unified vars take precedence.
+    //   (The legacy ED_USE_SPARSE / ED_SPARSE_DIM_MAX / ED_FIXED_SZ_*
+    //   aliases were retired in the Jul-2026 debt cleanup.)
     // ========================================================================
     void apply(const Complex* in, Complex* out, std::size_t size) const override {
         const std::uint64_t dim = 1ULL << n_bits_;

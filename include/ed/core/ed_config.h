@@ -41,7 +41,7 @@ struct DiagonalizationConfig {
 /**
  * @brief Thermal calculation parameters
  * 
- * Unified thermal parameters for all methods: TPQ (mTPQ, cTPQ), FTLM, LTLM, Hybrid.
+ * Unified thermal parameters for all methods: TPQ (mTPQ), FTLM, LTLM, Hybrid.
  * 
  * Naming convention for TPQ parameters:
  * - Old name -> New name (use new names in new code)
@@ -66,9 +66,9 @@ struct ThermalConfig {
     uint64_t tpq_measurement_interval = 100; // Interval between measurements (in steps)
     double tpq_energy_shift = 1e5;         // Large energy shift for mTPQ
     
-    // cTPQ (canonical) parameters  
+    // Imaginary-time evolution parameters (mTPQ + the distributed canonical propagator)
     double tpq_beta_max = 20.0;            // Maximum inverse temperature (1/T_min)
-    double tpq_delta_beta = 1e-2;          // Imaginary-time step for cTPQ evolution
+    double tpq_delta_beta = 1e-2;          // Imaginary-time step for TPQ evolution
     uint64_t tpq_taylor_order = 100;       // Taylor expansion order for e^{-delta_beta*H}
     
     // Continue quenching options

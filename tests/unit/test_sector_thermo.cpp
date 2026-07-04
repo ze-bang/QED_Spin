@@ -12,7 +12,7 @@
 //      for the finite-T methods that populate `EDResults::thermo_data`.
 //
 // The streaming-symmetry kernel calls (1) automatically after the
-// per-sector loop for FTLM / LTLM / HYBRID / KPM_DOS / mTPQ / cTPQ, so a
+// per-sector loop for FTLM / LTLM / HYBRID / KPM_DOS / mTPQ, so a
 // correct combiner is necessary for
 // ``ed::exact_diagonalization(method=FTLM, use_symmetry=true)`` to
 // produce the same thermo as the full-Hilbert FTLM call.
@@ -182,7 +182,6 @@ TEST_CASE("method_produces_sector_thermo: classifies the finite-T methods "
     REQUIRE(method_produces_sector_thermo(DiagonalizationMethod::LTLM));
     REQUIRE(method_produces_sector_thermo(DiagonalizationMethod::KPM_DOS));
     REQUIRE(method_produces_sector_thermo(DiagonalizationMethod::mTPQ));
-    REQUIRE(method_produces_sector_thermo(DiagonalizationMethod::cTPQ));
 
     // Ground-state methods -- thermo block stays empty, no recombination.
     REQUIRE_FALSE(method_produces_sector_thermo(DiagonalizationMethod::FULL));

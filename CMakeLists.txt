@@ -645,14 +645,6 @@ if(ED_BUILD_BENCHMARKS)
 endif()
 
 # -----------------------------------------------------------------------------
-# Runnable use-case examples under examples/. Off by default; opt in via
-# `-DED_BUILD_EXAMPLES=ON`. See examples/README.md for the full index.
-# -----------------------------------------------------------------------------
-option(ED_BUILD_EXAMPLES "Build the runnable C++ examples in examples/" OFF)
-if(ED_BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
-
 if(BUILD_ED_TESTS)
     enable_testing()
 
@@ -1177,6 +1169,20 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
     # Closed-form orbit-projected norm primitive (shared by every sector builder)
     ed_add_test(test_rep_projection             tests/unit/test_rep_projection.cpp USE_CATCH2)
+    # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
+    ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
+    # Stage-2 SymmetryEngine v2: fused OrbitTable + prefiltered parallel sector build
+    ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp USE_CATCH2)
+    # Stage-3 SymmetryEngine v2: content-addressed OrbitTable cache (registry + disk)
+    ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp USE_CATCH2)
+    # Stage-5 SymmetryEngine v2: spin-flip commutation check (SectorTransporter gate)
+    ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
+    # Stage-5b SymmetryEngine v2: in-sector flip projection ((k,+/-) spectrum union)
+    ed_add_test(test_flip_projection            tests/unit/test_flip_projection.cpp USE_CATCH2)
+    # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
+    ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
+    # Stage-8 SymmetryEngine v2: composition planning (toggles, windows, TR actions)
+    ed_add_test(test_sector_plan                tests/unit/test_sector_plan.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)

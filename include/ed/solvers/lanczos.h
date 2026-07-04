@@ -53,8 +53,8 @@ ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_d
  */
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
 
-// Generate a random complex vector that is orthogonal to all vectors in the provided set
-ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& vectors, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
+// generateOrthogonalVector was deleted in the debt-cleanup sweep
+// (Jul 2026): zero callers.
 
 // refine_eigenvector_with_cg / refine_degenerate_eigenvectors were
 // retired together with orthogonalize_degenerate_subspace in the

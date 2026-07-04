@@ -202,6 +202,169 @@ def _extract_transforms(observable: Any) -> list:
     )
 
 
+def _infer_delta_n_up(transforms: list) -> int:
+    """Infer the Sz selection rule of a probe from its transform tuples.
+
+    In this codebase the fixed-Sz axis counts SET bits, and a set bit
+    is the state S- creates (verified against the plain full-Hilbert
+    lane at 1e-11): an S- probe (op_type 1) RAISES the sector''s n_up
+    by 1, S+ (op_type 0) lowers it, Sz / paired two-body combinations
+    conserve it. A probe mixing S+ and S- one-body terms has no single
+    selection rule; the caller must pass ``delta_n_up`` explicitly
+    (dict form) in that case.
+    """
+    deltas = set()
+    for (op1, _s1, _c, is2, op2, _s2) in transforms:
+        if is2:
+            d = (-1 if op1 == 0 else 1 if op1 == 1 else 0) \
+                + (-1 if op2 == 0 else 1 if op2 == 1 else 0)
+        else:
+            d = -1 if op1 == 0 else 1 if op1 == 1 else 0
+        deltas.add(d)
+    if len(deltas) == 1:
+        return deltas.pop()
+    raise ValueError(
+        "qed.spectral symmetry: the observable mixes terms with "
+        f"different Sz selection rules ({sorted(deltas)}); pass the "
+        "directory form with symmetry={'delta_n_up': ...} to pick one."
+    )
+
+
+def _spectral_in_memory_with_symmetry(
+    H,
+    observables,
+    *,
+    symmetry,
+    sz,
+    T,
+    omega,
+    method,
+    eta,
+    krylov_dim,
+    num_random_vectors,
+    energy_shift,
+    momentum_transfer,
+    momentum_tolerance,
+    selected_sectors,
+    output_dir,
+    observable_type,
+    spin_l,
+    verbose,
+):
+    """Route an IN-MEMORY spectral call through the streaming-symmetry
+    machinery: resolve ``symmetry`` (including ``"auto"``), export the
+    operator + automorphism metadata to a temp directory, extract each
+    observable's transform tuples, and dispatch to the cross-irrep
+    GS-CF (T is None) or FTLM (finite T) C++ binding.
+
+    Returns ``NotImplemented`` when the request cannot be routed (no
+    spatial symmetry found, an observable without ``transform_tuples``,
+    an unsupported method) -- the caller then falls back to the plain
+    in-memory lane.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    from .workflow import (
+        resolve_auto_symmetry as _resolve_auto,
+        _write_operator_directory as _write_op_dir,
+        _write_symmetry_directory as _write_sym_dir,
+        _normalize_symmetry_info as _norm_sym_info,
+    )
+
+    if isinstance(symmetry, dict):
+        raise TypeError(
+            "qed.spectral(H, observables, symmetry=dict) is a "
+            "directory-form spec; for an in-memory operator pass "
+            "symmetry='auto', a GeneratorSet, or a permutation list."
+        )
+    gen = _resolve_auto(H, symmetry, verbose=verbose)
+    if gen is None:
+        return NotImplemented          # trivial group: plain lane
+    m_norm = (method or "ground_state_cf").lower().replace("-", "_")
+    if T is None and m_norm not in ("ground_state_cf",
+                                    "ground_state_dssf"):
+        if verbose:
+            print(f"[qed.spectral] symmetry with method={method!r} is "
+                  "not routed through the sector machinery yet; "
+                  "running the plain in-memory lane.")
+        return NotImplemented
+    if omega is None:
+        return NotImplemented
+    if momentum_transfer is None:
+        if verbose:
+            print("[qed.spectral] symmetry= with an in-memory operator "
+                  "needs momentum_transfer=[...] to pick the destination "
+                  "irrep of the probe (e.g. the Q you built into the "
+                  "observable's phases); running the plain in-memory "
+                  "lane instead.")
+        return NotImplemented
+
+    transforms_per_obs = []
+    for obs in observables:
+        try:
+            tuples = _extract_transforms(obs)
+        except TypeError:
+            return NotImplemented
+        if not tuples:
+            return NotImplemented
+        transforms_per_obs.append(tuples)
+
+    tmpdir = _tempfile.mkdtemp(prefix="qed_spectral_sym_")
+    try:
+        _write_op_dir(H, tmpdir)
+        info = _norm_sym_info(H, gen)
+        if info is None:
+            return NotImplemented
+        _write_sym_dir(tmpdir, info)
+
+        results = []
+        for tuples in transforms_per_obs:
+            delta = _infer_delta_n_up(tuples)
+            if T is None:
+                results.append(
+                    _spectral_streaming_symmetry_cross_irrep_directory(
+                        tmpdir,
+                        num_sites=int(H.num_sites),
+                        spin_l=float(spin_l),
+                        fixed_sz_n_up=(int(sz) if sz is not None else None),
+                        omega=omega, eta=eta, krylov_dim=krylov_dim,
+                        energy_shift=energy_shift,
+                        momentum_transfer=momentum_transfer,
+                        momentum_tolerance=momentum_tolerance,
+                        selected_sectors=selected_sectors,
+                        observable_transforms=tuples,
+                        delta_n_up=delta,
+                        output_dir=output_dir,
+                        observable_type=observable_type,
+                        verbose=verbose,
+                    ))
+            else:
+                Ts_list = T if isinstance(T, (list, tuple)) else [T]
+                results.append(
+                    _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
+                        tmpdir,
+                        num_sites=int(H.num_sites),
+                        spin_l=float(spin_l),
+                        fixed_sz_n_up=(int(sz) if sz is not None else None),
+                        omega=omega, eta=eta, krylov_dim=krylov_dim,
+                        momentum_transfer=momentum_transfer,
+                        momentum_tolerance=momentum_tolerance,
+                        selected_sectors=selected_sectors,
+                        observable_transforms=tuples,
+                        delta_n_up=delta,
+                        temperatures=list(Ts_list),
+                        num_samples=int(num_random_vectors or 30),
+                        random_seed=0,
+                        output_dir=output_dir,
+                        observable_type=observable_type,
+                        verbose=verbose,
+                    ))
+        return results[0] if len(results) == 1 else results
+    finally:
+        _shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _spectral_streaming_symmetry_cross_irrep_directory(
     directory: str,
     *,
@@ -732,6 +895,13 @@ def spectral(
     momentum_transfer: Optional[Sequence[float]] = None,
     momentum_tolerance: float = 1e-6,
     selected_sectors: Optional[Sequence[int]] = None,
+    # Stage 8e (SymmetryEngine v2): per-symmetry toggles. The spectral
+    # solver exploits the U(1) x spatial sector machinery; the discrete
+    # spin-flip / time-reversal mechanisms are NOT consumed by the
+    # spectral lanes yet (Stage 8d), so these kwargs only DETECT and
+    # REPORT: 'on' confirms or warns, 'require' throws when absent.
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
     # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026) --------
     initial_state: Optional[Any] = None,
 ):
@@ -1108,6 +1278,49 @@ def spectral(
             "For directory-form runs, pass the directory path as the "
             "first argument."
         )
+    if spin_flip not in (None, "auto", -1) or \
+            time_reversal not in (None, "auto", -1):
+        from .workflow import resolve_discrete_toggle
+        sf_i = resolve_discrete_toggle(
+            H_or_directory, spin_flip, "spin_flip", verbose=verbose)
+        tr_i = resolve_discrete_toggle(
+            H_or_directory, time_reversal, "time_reversal",
+            verbose=verbose)
+        if sf_i == 1 or tr_i == 1:
+            det = _core.detect_hamiltonian_symmetries(H_or_directory)
+            if sf_i == 1 and not det["spin_flip"]:
+                raise RuntimeError(
+                    "qed.spectral: spin_flip='require' but "
+                    "[H, prod sigma^x] != 0 at the term level.")
+            if tr_i == 1 and not det["time_reversal"]:
+                raise RuntimeError(
+                    "qed.spectral: time_reversal='require' but H has "
+                    "complex matrix elements.")
+        if verbose and (sf_i != 0 or tr_i != 0):
+            print("[qed.spectral] note: spin-flip / time-reversal are "
+                  "not exploited by the spectral lanes yet (they only "
+                  "affect solve/thermal); the U(1) x spatial sector "
+                  "machinery is used when symmetry= is given.")
+    if symmetry is not None:
+        routed = _spectral_in_memory_with_symmetry(
+            H_or_directory, observables,
+            symmetry=symmetry, sz=sz, T=T, omega=omega, method=method,
+            eta=eta, krylov_dim=krylov_dim,
+            num_random_vectors=num_random_vectors,
+            energy_shift=energy_shift,
+            momentum_transfer=momentum_transfer,
+            momentum_tolerance=momentum_tolerance,
+            selected_sectors=selected_sectors,
+            output_dir=output_dir, observable_type=observable_type,
+            spin_l=spin_l, verbose=verbose)
+        if routed is not NotImplemented:
+            return routed
+        if verbose:
+            print("[qed.spectral] symmetry= requested but the call "
+                  "could not be routed through the sector machinery "
+                  "(trivial group / non-transform observable / "
+                  "unsupported method); running the plain in-memory "
+                  "lane.")
     return _spectral_in_memory(
         H_or_directory,
         observables,

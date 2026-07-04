@@ -1,11 +1,99 @@
 # Changelog
 
+## 2026-07-03 — auto-symmetry consolidation, tour examples, cTPQ removal
+
+* `symmetry="auto"` (maximal block diagonalisation) on all three verbs;
+  `symmetry="translation"` (+ `lattice=`) for the pure-translation
+  projector with the whole point group as isospectral stars.
+* Per-symmetry four-state toggles everywhere: `spin_flip=` /
+  `time_reversal=` / `point_group=` in {auto, on, off, require}; "on"
+  reports the detection and degrades gracefully.
+* Stage 7a point-group STAR REDUCTION: the non-abelian residue of the
+  automorphism group folds momentum sectors into isospectral orbits —
+  solve one representative per star, copy the spectrum (composes with
+  flip projection + TR pairing in one union-find).
+  `GeneratorSet.describe()` reports the precise group structure.
+* Verified capability matrix (`benchmarks/bench_capability_matrix.py`,
+  `docs/perf/capability_matrix_2026-07-03.md`): every keyable
+  composition × {GS, mTPQ, FTLM, LTLM, DSSF} × {CPU, GPU} against full
+  dense diagonalization, with GPU backend-lane assertions.
+* **Removed: cTPQ** (method enum, kernel, orchestrator branch, CLI,
+  Python surface, examples, tests — mTPQ + the exact small-block
+  fallback covers it; the MPI-distributed thermal lane keeps its
+  internal canonical propagator).
+* **Removed: the per-cell example grid** (~150 files) + `_legacy` +
+  codegen. `examples/tour/` (six knob-complete scripts, incl. the new
+  `05_tpq_dssf.py` finite-T DSSF from mTPQ states) is the canonical
+  usage documentation, CI-guarded by the new `linux-tour` lane.
+* Removed dead headers: `ed_logging.h`, `ed_method_traits.h`,
+  `distributed_basis_policy.h` (+ the permanently-skipped
+  canonicalize-method test).
+
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Debt-cleanup sweep: dead code deletion + single-source kernels (Jul 2026)
+
+~4,900 LOC deleted with zero functional change to any live lane
+(404/404 tests green after every stage).
+
+- **Legacy GPU kernels deleted.** The retired `GPUFixedSzOperator`'s device
+  kernels had zero launch sites and were still compiled: all three fixed-Sz
+  matvec lookup generations (linear, open-addressing hash incl.
+  `buildStateHashKernel`/`GPUStateLookupEntry`, combinadic rank), the three
+  fixed-Sz branch-free kernels, `generateFixedSzBasisKernel`, and the
+  `matVecSymmetrized` hash-scatter island (`GPUHashEntry`/`hashLookup`/
+  `findBasisState`). The combinadic `rank/unrank_combination_dev` pair
+  survives for the `test_gpu_fixed_sz_rank` diagnostic harness. The vestigial
+  `cudaTextureObject_t` parameter was dropped from `matVecKernelOptimized`.
+- **Legacy TPQ driver stack deleted.** `microcanonical_tpq` / `canonical_tpq`
+  (the 25–30-parameter monoliths), both `MatVecOperator` overloads, the
+  imaginary-time Taylor/Krylov evolvers (incl. the `ED_CTPQ_PROPAGATOR` /
+  `ED_CTPQ_KRYLOV_M` env gates, which only the dead body read), the SS_rand /
+  HDF5 sidecar writers, the per-site observable helpers, and all of
+  `tpq_io.cpp` had **zero callers** — every live lane goes through the
+  backend-templated `mtpq_kernel` / `ctpq_kernel` since the May-2026
+  collapse. `TPQ.h` now exposes exactly two symbols: `tpq_per_sample_seed`
+  and `compute_tpq_thermo_from_trajectories`.
+- **FTLM dynamical correlation single-sourced.** The single-pair
+  `..._multi_sample_multi_temperature_impl` was a byte-for-byte `P == 1`
+  specialisation of the multi-operator core (same per-sample seeding,
+  Lehmann weights, Lorentzian accumulation, MPI reductions, and error
+  estimation); it is now a 30-line delegation, so the FTLM Lehmann machinery
+  has exactly one implementation.
+- **Legacy CSR env aliases retired.** `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
+  `ED_FIXED_SZ_USE_SPARSE`, `ED_FIXED_SZ_SPARSE_DIM_MAX` are gone;
+  `ED_CSR_FORCE` + `ED_CSR_DIM_MAX` (+ `ED_SYM_CSR_DIM_MAX`) are the single
+  knobs.
+- **Docs synced to reality.** The compute-plane scoreboard no longer marks the
+  `lanczos()` body migration as deferred (it has been a thin orchestrator over
+  `lanczos_kernel<CpuBackend>` since Phase 2.1); `lanczos_real` is documented
+  as the one intentional hand-rolled remnant. Stale `#if 0`-archaeology
+  comments removed; `generateOrthogonalVector` deleted (zero callers).
+  CODEMAP / ARCHITECTURE / api docs no longer list the Gen-1 GPU bodies
+  (`gpu_lanczos.cu`, `gpu_tpq.cu`, `gpu_block_lanczos.cu`,
+  `gpu_krylov_schur.cu`, ...) that were retired in Jun 2026, and the
+  one-call-API guide reflects the planner-era `auto_tune=`/`plan=`
+  kwargs being gone.
+- **CI repaired.** `.github/workflows/ci.yml` had two jobs both named
+  `linux-mpi` (introduced 2026-06-29); the duplicate YAML key made the
+  workflow unparseable, so **every CI run since then failed with zero
+  jobs** and the lanes went blind. The smoke job is renamed
+  `linux-mpi-smoke`. The stale tests that accumulated behind the outage
+  are fixed: removed the planner-era `plan=` / `auto_tune=` kwargs
+  (test_auto_sz, test_universal_save, test_kill_hash_workflow_gates_symmetry,
+  test_workflow), moved the multi-generator `GeneratorSet` tests onto a
+  2x4 torus (the Jun-2026 generator-detection fix correctly returns a
+  single Z6 generator for the 6-ring -- any abelian group of order 6 is
+  cyclic), and moved `test_mtpq_converges_with_more_iterations` to a
+  12-site ring (dim 4096) because dim <= 512 now routes through the
+  exact small-sector fallback where `max_iterations` legitimately has
+  no effect. Full pytest suite: 385 passed / 0 failed.
 
 ### Planner removed; defaults, memory guard, linear distributed symmetry build (Jun 2026)
 

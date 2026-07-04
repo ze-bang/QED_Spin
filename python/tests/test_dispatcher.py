@@ -22,7 +22,7 @@ every ``_GPU`` / ``_MPI`` enum suffix; those axes are now flags on
 ``EDParameters`` (``use_gpu`` / ``use_mpi`` / ``use_fixed_sz`` /
 ``use_symmetry``). The retained backends are ``LANCZOS``,
 ``BLOCK_LANCZOS``, ``KRYLOV_SCHUR``, ``FULL``, ``FTLM``, ``LTLM``,
-``mTPQ``, ``cTPQ``, ``KPM_DOS``.
+``mTPQ``, ``KPM_DOS``.
 
 The reference ground-state energy of the periodic 6-site spin-1/2
 Heisenberg ring with J = 1 is E0 = -2.802775637731995 (Bethe ansatz
@@ -98,7 +98,6 @@ def test_diagonalization_method_enum_has_canonical_values():
         "FTLM",
         "LTLM",
         "mTPQ",
-        "cTPQ",
         "KPM_DOS",
     }
     available = set(DM.__members__.keys())
@@ -131,7 +130,7 @@ def test_diagonalization_method_enum_does_not_carry_retired_axes():
         "HYBRID",
         "LANCZOS_GPU", "LANCZOS_GPU_FIXED_SZ",
         "FULL_GPU",
-        "mTPQ_GPU", "cTPQ_GPU", "FTLM_GPU",
+        "mTPQ_GPU", "FTLM_GPU",
         "BLOCK_LANCZOS_GPU", "KRYLOV_SCHUR_GPU", "BLOCK_KRYLOV_SCHUR_GPU",
         "DAVIDSON_GPU", "LOBPCG_GPU",
         "LANCZOS_SELECTIVE", "LANCZOS_NO_ORTHO",

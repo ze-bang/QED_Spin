@@ -45,7 +45,9 @@
 #include <omp.h>
 #endif
 
+#include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/projector.h>
+#include <ed/symmetry/sym_profile.h>
 
 namespace ed::symmetry {
 
@@ -65,8 +67,16 @@ struct OrbitStabilizers {
 [[nodiscard]] inline OrbitStabilizers
 build_orbit_stabilizers(const std::vector<std::uint64_t>& reps,
                         const SpatialProjector&           projector) {
+    SymPhaseTimer prof("pass1.5 stabilizers");
     const std::size_t G     = projector.size();
     const std::size_t nreps = reps.size();
+    // Stage 1 (SymmetryEngine v2): compiled byte-LUT group action instead of
+    // the O(N) scalar bit scatter. Bit-identical images by construction.
+    const auto& clique = projector.group_info().max_clique;
+    const CompiledGroup cg = clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              clique, static_cast<int>(clique[0].size()));
 
     OrbitStabilizers tab;
     tab.stab_size.assign(nreps, 1);
@@ -95,7 +105,7 @@ build_orbit_stabilizers(const std::vector<std::uint64_t>& reps,
             const std::uint64_t r = reps[i];
             std::vector<int> st;
             for (std::size_t g = 0; g < G; ++g)
-                if (projector.apply(r, g) == r) st.push_back(static_cast<int>(g));
+                if (cg.apply(r, g) == r) st.push_back(static_cast<int>(g));
             tab.stab_size[i] =
                 static_cast<std::uint16_t>(std::min<std::size_t>(st.size(), 65535));
             if (st.size() > 1) lm.emplace(i, std::move(st));
@@ -103,6 +113,7 @@ build_orbit_stabilizers(const std::vector<std::uint64_t>& reps,
     }
     for (auto& lm : tls)
         for (auto& kv : lm) tab.nontrivial.emplace(kv.first, std::move(kv.second));
+    prof.set_items(nreps);
     return tab;
 }
 

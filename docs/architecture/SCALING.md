@@ -176,16 +176,16 @@ them in your run script, not mid-run.
 | Env var | Default | What it does |
 |---|---|---|
 | `ED_LANCZOS_DISK` | `0` (in-memory) | If `1`/`true`/`yes`, the Krylov basis is spilled to a per-call working directory instead of registering in `lanczos_io::register_basis_buffer`. **Required for N≥36.** Costs disk I/O bandwidth per re-orth sweep; pair with NVMe. |
-| `ED_USE_SPARSE` | unset (auto) | `0` forces matrix-free SpMV always; `1` forces CSR assembly. The auto threshold is `dim ≤ 2²⁰` (~1 M states), see `Operator::apply`. **Never set `=1` for N≥28** — assembling a 10⁸-row CSR will OOM you. |
+| `ED_CSR_FORCE` | unset (auto) | `0` forces matrix-free SpMV always; `1` forces CSR assembly. The auto threshold is `dim ≤ 2²⁰` (~1 M states, full basis) / `2²²` (fixed-Sz), see `Operator::apply`. **Never set `=1` for N≥28** — assembling a 10⁸-row CSR will OOM you. |
 | `ED_SYM_LAZY_SECTORS` | unset (auto) | Controls whether the streaming-symmetry build materializes **all** per-sector orbit CSRs + reverse indices eagerly (Pass 2) or lazily one sector at a time (LRU-1, built at solve/bind time). `1` forces lazy, `0` forces eager. **Auto-lazy when the estimated all-sector footprint exceeds `ED_SYM_LAZY_SECTORS_BYTES_MAX`** — at N=32 half-filling the eager footprint is ~190 GB, so lazy auto-engages. The lazy path keeps only the deduped orbit-rep list (~600 MB at N=32) + the fixed-Sz basis resident; this is the **cleanest N=32 symmetry setup** and is the default. **On the GPU lane the orbit-CSR streaming this knob governs is superseded by the on-the-fly representative SpMV (`ED_GPU_SYMMETRY_REP`, default on)** — that path never materializes the per-sector orbit CSR at all, so the lazy↔eager distinction is moot for the GPU 32-site Sz+Symm matvec. |
 | `ED_SYM_LAZY_SECTORS_BYTES_MAX` | `4 GiB` | Eager→lazy crossover for the symmetry-sector build above. Lower it (e.g. `2147483648` for 2 GiB) on a tight node to force lazy earlier; raise it only if you have the RAM for every sector's orbit CSR at once and want the fastest repeated matvec. |
 | `ED_SYM_DENSE_LOOKUP_BYTES_MAX` | `512 MB` | Total budget (across all sectors) for the optional dense `int32_t` state→basis side-table that makes the SpMV reverse lookup O(1). Above this the operator stays on the compact `SortedUint64Index` (O(log N) binary search). Raise on a fat node for faster matvec; lower to save RAM. |
 | `ED_GPU_SYMMETRY_REP` | `1` (on) | **On-the-fly representative GPU SpMV** for fixed-Sz + symmetry sectors (`SectorOperator::bind_cuda`). Instead of uploading the per-sector **orbit CSR** (≈`dim_Sz` images + character coefficients, ~14 GiB at N=32) and an O(`dim_Sz`) projection table (~10 GiB), it keeps only the representatives + `1/norm` + the `|G|` group permutations + the per-sector characters resident, and **regenerates the group action + projection arithmetically on the device** (`min_g g(s')` + combinadic rank + a `C(N,n_up)` rep→index table). Working set drops from ~30+ GiB to ~6 GiB at N=32 and per-SpMV traffic becomes just the in/out vectors — the genuine ÷\|G\| win. **This same gate also drives the host sector loop**: `StreamingSymmetryHandle::sector(k)` returns a CSR-free *lazy* `SectorOperator` (`make_rep_sector_operator_lazy`) that defers the per-sector host orbit CSR (~24 GiB at N=32: orbit images/coefficients + reverse-lookup index) — the GPU path never builds it; a CPU `apply` lazily materializes it only as a fallback. Set `=0` to opt back into the legacy orbit-CSR mirror **and** the eager host materialization (diagnostics / bisection). Only fixed-Sz sectors take this path; sym-only full-Hilbert sectors always use the orbit-CSR mirror. |
-| `ED_SPARSE_DIM_MAX` | `1<<20` | Custom dim cutoff for the sparse-vs-matrix-free dispatch. Raise carefully. |
+| `ED_CSR_DIM_MAX` | `1<<20` full / `1<<22` fixed-Sz | Custom dim cutoff for the CSR-vs-matrix-free dispatch (all lanes; `ED_SYM_CSR_DIM_MAX` refines symmetry sectors). Raise carefully. |
 | `ED_LANCZOS_CHECKPOINT_DIR` | unset (off) | Directory for atomic Krylov-state checkpoints (Phase 3a #1, see `include/ed/io/lanczos_checkpoint.h`). When set, the default `lanczos()` writes `lanczos_checkpoint.h5` every `ED_LANCZOS_CHECKPOINT_INTERVAL` iterations and on the final iteration. Atomic write-then-rename, so a SIGKILL mid-write leaves the previous checkpoint intact. |
 | `ED_LANCZOS_CHECKPOINT_INTERVAL` | `100` | Iterations between checkpoint writes. Lower for faster crash recovery, higher to amortize HDF5 I/O on long runs (each write is ~22 N complex doubles). |
 | `ED_LANCZOS_RESUME` | `0` | If `1` and `ED_LANCZOS_CHECKPOINT_DIR` contains a checkpoint, `lanczos()` skips its random-vector init and resumes from `(α[0..k], β[0..k], v_{k-1}, v_k, ring buffer)`. **Eigenvalue-only mode** (`eigenvectors=false`) — eigenvector reconstruction needs the early basis vectors which a resumed run lacks; resuming with `eigenvectors=true` throws. |
-| `ED_LANCZOS_REORTH_TILE` | `16` | Tile size `B` (in basis vectors) for the blocked-CGS reorthogonalization in `lanczos` and `lanczos_selective_reorth` (Phase 3a #2, see `include/ed/io/lanczos_reorth.h`). Each tile collapses `B` BLAS-1 `zdotc` + `zaxpy` pairs into two BLAS-2 `zgemv` calls, cutting per-iter file-open overhead by `B×` in disk mode. Clamped to `[1, 256]`; raise on machines with large L2/L3 (working set is `B × N` complex doubles), drop to `1` for the legacy per-vector behaviour. |
+| `ED_LANCZOS_REORTH_TILE` | `16` | Tile size `B` (in basis vectors) for the blocked-CGS reorthogonalization in `lanczos` (Phase 3a #2, see `include/ed/io/lanczos_reorth.h`). Each tile collapses `B` BLAS-1 `zdotc` + `zaxpy` pairs into two BLAS-2 `zgemv` calls, cutting per-iter file-open overhead by `B×` in disk mode. Clamped to `[1, 256]`; raise on machines with large L2/L3 (working set is `B × N` complex doubles), drop to `1` for the legacy per-vector behaviour. |
 | `ED_GPU_MIXED_PRECISION_SPMV` | unset (off) | If `1`/`true`/`yes`, `GPUOperator::applyCusparse` runs the cuSPARSE SpMV in FP32 (`CUDA_C_32F`) instead of FP64 (Phase 3a #3, see `include/ed/gpu/gpu_mixed_precision.h`). Halves the value-array bandwidth on memory-bound matvec; outer Lanczos / FTLM dot / normalize / axpy stay in FP64 so orthogonality is preserved. Only takes effect on the CSR pathway (`N ≥ ED_GPU_CUSPARSE_MIN_DIM`); matrix-free pathways and symmetrized / fixed-Sz operators silently stay FP64. |
 
 ### Numerics
@@ -193,8 +193,6 @@ them in your run script, not mid-run.
 | Env var | Default | What it does |
 |---|---|---|
 | `ED_LANCZOS_COMPLEX_SEED` | `0` (real seed) | If `1`, Lanczos starts from a fully complex random vector. Default is real-only so the operator can take the real-CSR / `apply_real` fast path for the entire Krylov space when H is real. Flip to `1` only when you specifically need to exercise complex spectra. |
-| `ED_CTPQ_PROPAGATOR` | `taylor` | `krylov` switches canonical-TPQ imaginary-time evolution to the Lanczos-projected `expm(−Δτ T_m)` propagator added in Batch 2. Stable for larger Δτ; falls back to Taylor on Krylov breakdown. |
-| `ED_CTPQ_KRYLOV_M` | `30` | Krylov subspace size for the cTPQ propagator above. |
 | `ED_GPU_ALLOW_DROPPED_THREEBODY` | `0` | The GPU operator now hard-fails if `InterAll` contains 3-body terms (Batch 1, P0-8). Set to `1` only if you understand you're dropping those terms on GPU paths. |
 
 ### Parallelism
@@ -204,7 +202,7 @@ them in your run script, not mid-run.
 | `ED_FTLM_PARALLEL` | `0` (serial) | Enables OpenMP over FTLM samples (Batch 2, P1-4). **Opt-in** because the default `Operator` is not guaranteed thread-safe — concurrent `apply()` calls can corrupt shared scratch. Safe with the per-sector-CSR Operator. Validate against the serial run before trusting averaged thermodynamics. (The chunked-symmetry Operator was retired in matvec-unification Phase 7.2 and is no longer available as a thread-safe alternative.) |
 | `ED_GPU_TIMING` | `0` | If `1`, GPU fixed-Sz matvec calls insert `cudaDeviceSynchronize()` and record per-call timings. Off by default for performance (Batch 2, P1-6). |
 | `ED_NUMA_FIRST_TOUCH` | unset (off) | If `1`/`true`/`yes`, basis-sized work vectors (Lanczos `v_curr` / `v_prev` / `v_next` / `w`, the blocked-reorth tile) are parallel-zero-touched after allocation so each OpenMP thread owns the chunk of pages it will later read in `cblas_zaxpy` / `zdotc` / `zgemv` (Phase 3a #4, see `include/ed/parallel/numa.h`). On a multi-socket box this is the difference between every SpMV pulling its operand vector across the inter-socket link vs. straight from local DRAM (typically 2-4× SpMV bandwidth). No-op below a 256 KB threshold; never changes numerical results. Pair with `ED_NUMA_PIN_THREADS=1` so the thread-to-page assignment is stable across iterations. |
-| `ED_NUMA_PIN_THREADS` | unset (off) | If `1`/`true`/`yes`, OpenMP worker threads are pinned compactly via `pthread_setaffinity_np` (thread `t` → CPU `t mod ncpus`) on first call into `lanczos` / `lanczos_selective_reorth` (Phase 3a #4). Idempotent within a process. Pairs with `ED_NUMA_FIRST_TOUCH=1` so each thread keeps owning the same page range across iterations; without pinning the kernel is free to migrate threads between cores and socket-local DRAM access is no longer guaranteed. Honour `OMP_PROC_BIND` / `OMP_PLACES` for non-compact layouts. |
+| `ED_NUMA_PIN_THREADS` | unset (off) | If `1`/`true`/`yes`, OpenMP worker threads are pinned compactly via `pthread_setaffinity_np` (thread `t` → CPU `t mod ncpus`) on first call into `lanczos` (Phase 3a #4). Idempotent within a process. Pairs with `ED_NUMA_FIRST_TOUCH=1` so each thread keeps owning the same page range across iterations; without pinning the kernel is free to migrate threads between cores and socket-local DRAM access is no longer guaranteed. Honour `OMP_PROC_BIND` / `OMP_PLACES` for non-compact layouts. |
 
 ### Diagnostics
 
@@ -303,9 +301,9 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 * **TPQ at N=36**: cheaper per sample than FTLM (no per-(β) stratification),
   but **does not benefit from `ED_LANCZOS_DISK`** the same way (TPQ is a
   long evolution, not a Krylov basis). Imaginary-time evolution is
-  `2 × N_τ` SpMV per sample (Taylor) or `m × N_τ` SpMV (Krylov, set
-  `ED_CTPQ_PROPAGATOR=krylov`). For canonical TPQ at very low T, prefer
-  Krylov — it's stable for Δτ ~ 0.1 instead of the ~ 0.01 Taylor needs.
+  `2 × N_τ` SpMV per sample (Taylor propagator, `taylor_order`-truncated;
+  the legacy `ED_CTPQ_PROPAGATOR=krylov` lane was deleted with the
+  monolithic cTPQ driver in the Jul-2026 debt cleanup).
 * **N=32 mTPQ on a single large GPU, Sz + symmetry**: this is the
   motivating case for the **on-the-fly representative SpMV**
   (`ED_GPU_SYMMETRY_REP`, default on). Working in one k-sector reduces the
@@ -355,7 +353,7 @@ publication-grade-fast on GPU.
    `tests/unit/test_lanczos_checkpoint.cpp`.
 2. **Out-of-core blocked-tile reorthogonalization. — DONE (Phase 3a #2).**
    The periodic-full and selective re-orth passes in
-   `lanczos_selective_reorth` (and the default `lanczos`) now walk the
+   The default `lanczos` reorthogonalization now walks the
    Krylov basis in tiles of `B` vectors. Per tile we issue two BLAS-2
    `zgemv` calls (`overlaps = V^H w`; `w := w − V * overlaps`) instead of
    `B` BLAS-1 `zdotc` + `zaxpy` pairs. The selective branch runs CGS2
@@ -368,9 +366,8 @@ publication-grade-fast on GPU.
    `src/io/lanczos_reorth.cpp`; covered by seven lockdown tests in
    `tests/unit/test_lanczos_reorth.cpp` (CGS-vs-MGS correctness on
    orthonormal V, threshold filter, skip predicate, in-memory and
-   on-disk tile loading, end-to-end tile-size invariance for
-   `lanczos_selective_reorth` across `B ∈ {1, 4, 16}`, and knob
-   clamping).
+   on-disk tile loading, end-to-end tile-size invariance across
+   `B ∈ {1, 4, 16}`, and knob clamping).
 3. **Mixed-precision SpMV (FP32 matvec + FP64 dot/normalize) on GPU. —
    DONE (Phase 3a #3).** When `ED_GPU_MIXED_PRECISION_SPMV=1` is set and
    the cuSPARSE CSR pathway is selected (`N ≥ ED_GPU_CUSPARSE_MIN_DIM`,
@@ -404,8 +401,7 @@ publication-grade-fast on GPU.
    given (page-aligned static schedule, so the same OMP thread later
    reads the chunk it just wrote), and `ED_NUMA_PIN_THREADS=1` calls
    `pthread_setaffinity_np` once per process to pin OMP workers
-   compactly across logical cores. The Lanczos entry points
-   (`lanczos`, `lanczos_selective_reorth`, `lanczos_no_ortho`) and the
+   compactly across logical cores. The `lanczos` entry point and the
    blocked-reorth tile loader (`load_basis_tile`) call into the helpers
    right after their basis-sized allocations. No libnuma dependency
    (works on any Linux + glibc + OpenMP); explicit `numa_alloc_onnode`

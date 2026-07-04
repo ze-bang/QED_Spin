@@ -26,19 +26,15 @@
 // gives the same scatter semantics as the CPU radix-sort + flush;
 // modulo atomic ordering the result is bit-identical.
 //
-// Retirement path for the legacy bespoke kernels:
-//   * ``matVecKernelOptimized`` + 5 per-bin scatter kernels
-//     (``matVec{Diagonal,OffDiagonal,Mixed}{OneBody,TwoBody}``) are
-//     replaced by this single template (Phase 1a).
-//   * Fixed-Sz variants ({matVecFixedSzTransformParallel, ...}Hash and
-//     ``matVecFixedSzKernelOptimized{,Hash}``) are likewise subsumed
-//     (Phase 1b).
-//   * ``matVecSymmetrized`` is the Phase 1c port.
-//   * cuSPARSE-assembled and ``matVecWarpReductionFused`` remain as
-//     auto-gated fast paths in ``GPUOperator::selectKernelPathway``.
-//
-// Until ED_GPU_UNIFIED_KERNEL=1 is set, the legacy kernels remain in
-// place; the unified path is opt-in for one release for bisection.
+// Legacy-kernel status (debt-cleanup sweep, Jul 2026):
+//   * The fixed-Sz matvec generations (linear / hash / rank), the
+//     fixed-Sz branch-free kernels, and ``matVecSymmetrized`` were
+//     DELETED from ``gpu_kernels.cu`` -- this template family plus the
+//     rep-walk kernels below are the only symmetry/fixed-Sz device path.
+//   * ``matVecKernelOptimized``, the 5 full-Hilbert per-bin scatter
+//     kernels, cuSPARSE-assembled CSR, and ``matVecWarpReductionFused``
+//     remain as auto-gated fast paths in
+//     ``GPUOperator::selectKernelPathway`` for the full-Hilbert lane.
 // =============================================================================
 
 #ifdef WITH_CUDA

@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
+#include <unistd.h>
 #include <iomanip>
 #include <random>
 #include <string>
@@ -84,8 +85,13 @@ std::string write_zN(const std::string& base, int N) {
 }
 
 SymmetryGroupInfo load_zN(int N) {
+    // Per-PROCESS fixture dir: multiple test binaries in a parallel ctest
+    // run call load_zN concurrently; a shared path races one binary's
+    // rewrite against another's read (observed on CI as "attempting to
+    // parse an empty input" for sector_metadata.json).
     const std::string base =
-        (std::filesystem::temp_directory_path() / "qed_stream_enum").string();
+        (std::filesystem::temp_directory_path() /
+         ("qed_stream_enum_" + std::to_string(::getpid()))).string();
     const std::string dir = write_zN(base, N);
     SymmetryGroupInfo info;
     info.loadFromDirectory(dir);

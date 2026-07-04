@@ -66,7 +66,6 @@ parse_thermal_method(std::string_view name) {
     if (ieq(t, "FTLM"))                                 return M::FTLM;
     if (ieq(t, "LTLM"))                                 return M::LTLM;
     if (ieq(t, "mTPQ") || ieq(t, "MTPQ") || ieq(t, "mtpq")) return M::mTPQ;
-    if (ieq(t, "cTPQ") || ieq(t, "CTPQ") || ieq(t, "ctpq")) return M::cTPQ;
     if (ieq(t, "KPM_DOS") || ieq(t, "KpmDos") || ieq(t, "kpm_dos") || ieq(t, "KPMDOS"))
         return M::KpmDos;
     return std::nullopt;
@@ -184,7 +183,7 @@ to_legacy(const ThermalOptions& opts, std::uint64_t dim_hint) {
         } else {
             throw std::invalid_argument(
                 "ed::api::thermal: unknown method token '" + opts.method +
-                "'. Accepts 'FTLM', 'LTLM', 'mTPQ', 'cTPQ', 'KPM_DOS'.");
+                "'. Accepts 'FTLM', 'LTLM', 'mTPQ', 'KPM_DOS'.");
         }
     }
     wf.num_samples         = opts.num_samples;

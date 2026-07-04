@@ -49,6 +49,28 @@ def _heisenberg_ring(num_sites: int = N_SITES):
     return builder.to_operator()
 
 
+def _heisenberg_2x4_torus():
+    """2x4 periodic Heisenberg ladder (8 sites, idx = row*4 + col).
+
+    Its maximal abelian automorphism subgroup is NON-cyclic (order 8,
+    three order-2 minimal generators), so ``find_symmetries`` returns a
+    multi-generator ``full_set``. The 6-site ring stopped being usable
+    for the multi-generator tests when the Jun-2026 generator-detection
+    fix started returning the truly minimal decomposition: any abelian
+    group of order 6 is cyclic, so the ring's full set is a single Z6
+    generator.
+    """
+    bonds = []
+    for r in range(2):
+        for c in range(4):
+            bonds.append((r * 4 + c, r * 4 + (c + 1) % 4))  # periodic row
+    for c in range(4):
+        bonds.append((c, 4 + c))                            # rung
+    builder = qed.input.HamiltonianBuilder(8)
+    builder.heisenberg(bonds, J=1.0)
+    return builder.to_operator()
+
+
 # ---------------------------------------------------------------------------
 # Surface-unification negative test: the legacy
 # ``exact_diagonalization_*`` Python forwarder family was deleted in
@@ -394,12 +416,16 @@ def test_diag_results_match_explicit_workflows_solve_call():
 
 
 def test_generator_set_supports_len_and_indexing():
-    H = _heisenberg_ring()
+    H = _heisenberg_2x4_torus()
     report = qed.find_symmetries(H, verbose=False)
     full = report.full_set
     assert full is not None
-    # 6-site ring -> Z2 x Z3 minimal generators (orders [2, 3]).
-    assert len(full) == 2
+    # 2x4 torus -> non-cyclic maximal abelian subgroup, so the minimal
+    # generator decomposition has more than one generator. (Exact count
+    # / orders depend on which maximal clique nauty surfaces; assert the
+    # structural invariants, not the tie-break.)
+    assert len(full) >= 2
+    assert math.prod(full.orders) == full.group_size
 
     sub_first = full[0]
     assert isinstance(sub_first, qed.GeneratorSet)
@@ -409,21 +435,21 @@ def test_generator_set_supports_len_and_indexing():
 
     sub_slice = full[:2]
     assert len(sub_slice.generators) == 2
-    assert sub_slice.orders == full.orders
-    assert sub_slice.group_size == full.group_size
+    assert sub_slice.orders == full.orders[:2]
+    assert sub_slice.group_size == full.orders[0] * full.orders[1]
 
 
 def test_generator_set_subgroup_by_indices():
-    H = _heisenberg_ring()
+    H = _heisenberg_2x4_torus()
     report = qed.find_symmetries(H, verbose=False)
     full = report.full_set
     assert full is not None
+    assert len(full) >= 2
 
-    # Pick generator index 1 (the order-3 rotation): yields a Z3
-    # subgroup of group_size 3.
-    z3 = full.subgroup([1])
-    assert z3.group_size == full.orders[1]
-    assert z3.orders == [full.orders[1]]
+    # A single-generator subgroup is the cyclic group of that generator.
+    sub = full.subgroup([1])
+    assert sub.group_size == full.orders[1]
+    assert sub.orders == [full.orders[1]]
 
     # Negative indices behave like Python list semantics.
     z_last = full.subgroup([-1])
@@ -451,13 +477,15 @@ def test_find_symmetries_emits_per_generator_subgroup_entries():
     """When the full set has > 1 generator, find_symmetries() should
     add one named single-generator subgroup per generator so users can
     browse them via report.get('full_automorphism[0]') etc."""
-    H = _heisenberg_ring()
+    H = _heisenberg_2x4_torus()
     report = qed.find_symmetries(H, verbose=False)
     names = {gs.name for gs in report.generator_sets}
     assert "full_automorphism" in names
-    # With 2 generators we expect 2 single-generator subgroup entries.
-    assert "full_automorphism[0]" in names
-    assert "full_automorphism[1]" in names
+    # One single-generator subgroup entry per generator.
+    n_gen = len(report.full_set)
+    assert n_gen >= 2
+    for k in range(n_gen):
+        assert f"full_automorphism[{k}]" in names
 
     # And `report.get(...)` lookup works.
     sub = report.get("full_automorphism[1]")
@@ -467,15 +495,18 @@ def test_find_symmetries_emits_per_generator_subgroup_entries():
 def test_diag_with_single_generator_subgroup_matches_full_group():
     """A single-generator subgroup must still recover the same ground
     state energy (just with fewer / larger sectors)."""
-    H = _heisenberg_ring()
+    H = _heisenberg_2x4_torus()
     report = qed.find_symmetries(H, verbose=False)
-    sub = report.full_set.subgroup([1])  # the order-3 rotation alone
+    sub = report.full_set.subgroup([1])  # one generator alone
 
+    res_ref = qed.solve(H, num_eigenvalues=2, verbose=False)
     res_sub = qed.solve(
         H, num_eigenvalues=2, symmetry=sub, verbose=False,
     )
-    eigs = sorted(res_sub.eigenvalues)
-    assert math.isclose(eigs[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
+    assert math.isclose(
+        sorted(res_sub.eigenvalues)[0], sorted(res_ref.eigenvalues)[0],
+        abs_tol=1e-9,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +588,6 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     ("mTPQ", "mTPQ"),         # exact case
     ("mtpq", "mTPQ"),         # lower
     ("MTPQ", "mTPQ"),         # upper (would fail the old .upper() lookup)
-    ("cTPQ", "cTPQ"),
-    ("CTPQ", "cTPQ"),
     ("FTLM", "FTLM"),
     ("ltlm", "LTLM"),
     ("FULL", "FULL"),
@@ -827,9 +856,8 @@ class TestDeviceMatrix:
         from qed import _core as _qcore
         monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
-        # plan=False bypasses the pre-flight planner (which would correctly
-        # refuse to dispatch to GPU on a no-GPU CI host); we're testing
-        # dispatch routing here, not resource accounting.
+        # Dispatch-routing test (the workflows_solve call is monkeypatched,
+        # so no GPU is actually needed on the CI host).
         qed.solve(H, solver="LANCZOS", device="gpu",
                         num_eigenvalues=1, auto_sz=False,
                         verbose=False)
@@ -915,9 +943,6 @@ class TestDeviceMatrix:
             H, solver=solver, device=device,
             num_eigenvalues=1, target_beta=5.0,
             num_samples=1, mpi_n_ranks=2,
-            # plan=False: dispatch routing test, not feasibility -- the CI
-            # host typically has no NCCL build, so the planner would
-            # (correctly) refuse mpi_gpu without it.
             verbose=False,
         )
         expected_mode = {
@@ -1003,7 +1028,7 @@ class TestDeviceMatrix:
                 f.create_dataset("/betas", data=betas)
                 f.create_dataset("/energy", data=energy_q)
                 f.create_dataset("/Z", data=z_q)
-                # Mirror the cTPQ binary post self-consistent-Z fix
+                # Mirror the canonical-TPQ binary post self-consistent-Z fix
                 # by also publishing /lnZ; the aggregator prefers the
                 # log-space recombination when present. For FTLM (which
                 # only emits /Z) we leave /lnZ off to keep coverage of
@@ -1050,7 +1075,7 @@ class TestDeviceMatrix:
     def test_aggregate_thermal_sectors_rejects_missing_Z(
         self, tmp_path,
     ):
-        """Regression for the silent-NaN bug: prior to the cTPQ
+        """Regression for the silent-NaN bug: prior to the canonical-TPQ
         self-consistent-Z fix the TPQ binary wrote ``/energy`` but no
         ``/Z``, and the aggregator silently produced NaN energies. The
         guard must instead raise loudly so the broken result is never

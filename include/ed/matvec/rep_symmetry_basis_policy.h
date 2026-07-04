@@ -66,6 +66,19 @@ struct RepSymmetryBasisPolicy {
     const std::int32_t*                       rep_index_of_rank = nullptr;
     const ed::core::combinadic::BinomialTable* binom            = nullptr;
 
+    // Stage 5b (SymmetryEngine v2): per-element XOR flip masks (nullptr =
+    // pure permutations). Applied AFTER the permutation; for the global
+    // spin flip (all-ones mask) the order is immaterial since the mask is
+    // permutation-invariant.
+    const std::uint64_t* flips = nullptr;
+
+    // Stage 4 (SymmetryEngine v2) two-level O(1) lookup, preferred when set:
+    // rank -> SHARED rep index (one dense table per (N, n_up), shared across
+    // every irrep sector) -> this sector's local index via the small
+    // ``local_of_shared`` remap (-1 = orbit cancels in this irrep).
+    const std::int32_t* shared_rank_of  = nullptr;  // C(N,n_up) entries, shared
+    const std::int32_t* local_of_shared = nullptr;  // per sector, shared-rep count
+
     // Optional byte-decomposition LUT for fast apply_perm (N≤32).
     // When non-null, replaces the N-iteration scalar bit-scatter loop with
     // ``perm_lut_bpw`` table lookups (~4 for N=32). Pointer into
@@ -91,20 +104,21 @@ struct RepSymmetryBasisPolicy {
     // instruction count vs the scalar loop (4 L2 hits vs 32 iterations×3 ops).
     [[nodiscard]] inline std::uint64_t
     apply_perm(std::uint64_t s, int g) const noexcept {
+        const std::uint64_t flip = (flips != nullptr) ? flips[g] : 0ULL;
         if (perm_lut != nullptr) {
             const std::uint32_t* lut_g = perm_lut
                 + static_cast<std::size_t>(g) * perm_lut_bpw * 256;
             std::uint32_t r = 0;
             for (int b = 0; b < perm_lut_bpw; ++b)
                 r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
-            return static_cast<std::uint64_t>(r);
+            return static_cast<std::uint64_t>(r) ^ flip;
         }
         // Scalar fallback for N>32 (or when LUT not built).
         const int* p = perms + static_cast<std::size_t>(g) * n_sites;
         std::uint64_t r = 0;
         for (int i = 0; i < n_sites; ++i)
             r |= ((s >> p[i]) & 1ULL) << i;
-        return r;
+        return r ^ flip;
     }
 
     // Representative of ``state``: numeric minimum over the orbit.
@@ -119,6 +133,15 @@ struct RepSymmetryBasisPolicy {
 
     // Orbit index of a representative ``rb`` (-1 if not a surviving rep).
     [[nodiscard]] inline std::int64_t index_of_rep(std::uint64_t rb) const noexcept {
+        if (shared_rank_of != nullptr && local_of_shared != nullptr
+            && binom != nullptr) {
+            const std::int64_t r =
+                ed::core::combinadic::rank_state(rb, n_sites, n_up, *binom);
+            const std::int32_t g = shared_rank_of[r];
+            if (g < 0) return -1;
+            const std::int32_t k = local_of_shared[g];
+            return (k < 0) ? -1 : static_cast<std::int64_t>(k);
+        }
         if (rep_index_of_rank != nullptr && binom != nullptr) {
             const std::int64_t r =
                 ed::core::combinadic::rank_state(rb, n_sites, n_up, *binom);

@@ -101,17 +101,10 @@ have to touch `subprocess` themselves; the helpers accept `binary=` /
 `launcher=` overrides for non-default install paths and forward
 arbitrary `extra_args` so the full CLI surface remains accessible.
 
-For C++ snippet templates of every cell marked "yes" above, see the
-per-cell tree under
-[`examples/solve/`](../../examples/solve/),
-[`examples/thermal/`](../../examples/thermal/), and
-[`examples/spectral/`](../../examples/spectral/) (one file per
-ONLINE `(backend × symmetry × method)` combination). The pre-mirror
-single-file walkthrough lives at
-[`examples/_legacy/00_unified_interface.cpp`](../../examples/_legacy/00_unified_interface.cpp)
-(the full `OperatorSpec` → `ed::make_operator` →
-`ed::workflows::*` walkthrough across in-memory / file / directory
-sources) and the canonical kernel headers in
+The C++ mirror of every cell marked "yes" above is exercised by the
+unit/integration suites under `tests/`; the Python-first usage
+documentation is [`examples/tour/`](../../examples/tour/). The
+canonical kernel headers live in
 [`include/ed/krylov/`](../../include/ed/krylov/),
 [`include/ed/thermal/`](../../include/ed/thermal/), and
 [`include/ed/observables/`](../../include/ed/observables/).

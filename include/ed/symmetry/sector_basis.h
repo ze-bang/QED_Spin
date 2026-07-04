@@ -69,6 +69,7 @@
 #include <ed/symmetry/projector_chain.h>
 #include <ed/symmetry/rep_sector_data.h>      // RepSectorData (CSR-free rep path)
 #include <ed/symmetry/subspace.h>
+#include <ed/symmetry/sym_profile.h>       // SymPhaseTimer (ED_SYM_PROFILE=1)
 
 namespace ed::symmetry {
 
@@ -173,6 +174,7 @@ public:
           const std::vector<std::uint64_t>& orbit_reps,
           std::uint64_t                     sector_id = 0)
     {
+        SymPhaseTimer prof("pass2 sector-basis build (eager orbit CSR, one irrep)");
         SectorBasis sb;
         sb.group_size_ = projector.group_info().max_clique.size();
 
@@ -206,6 +208,94 @@ public:
         }
 
         sb.rebuild_lookup_();
+        prof.set_items(sec.basis_states.size());
+        return sb;
+    }
+
+    // -----------------------------------------------------------------
+    // build_prefiltered: Stage-2 (SymmetryEngine v2) parallel twin of
+    // ``build``. The caller supplies the closed-form projected norm² per
+    // rep (rep_projection.h / orbit_table.h -- |Σ_{h∈Stab}χ(h)|²/|Stab|),
+    // which decides survival WITHOUT walking the orbit; only survivors
+    // pay the O(|G|) ``compute_orbit_for_state`` walk, and the walk runs
+    // OpenMP-parallel over reps (each survivor writes its pre-assigned
+    // slot, so the output ordering -- ascending rep order -- and every
+    // stored orbit/norm are bit-identical to the serial ``build``).
+    //
+    // PRECONDITION (same as the closed form): the full G-orbit of every
+    // rep lies inside ``subspace`` (full space / popcount-preserving
+    // fixed-Sz). A disagreement between the prefilter and the walk means
+    // the precondition was violated; this throws rather than silently
+    // producing a mis-indexed basis.
+    // -----------------------------------------------------------------
+    template <class SubspaceT>
+    [[nodiscard]] static SectorBasis
+    build_prefiltered(const SubspaceT&                  subspace,
+                      const SpatialProjector&           projector,
+                      const std::vector<int>&           quantum_numbers,
+                      const std::vector<Complex>&       phase_factors,
+                      const std::vector<std::uint64_t>& orbit_reps,
+                      const std::vector<double>&        prefilter_norm_sq,
+                      std::uint64_t                     sector_id = 0)
+    {
+        SymPhaseTimer prof("pass2 sector-basis build (prefiltered parallel, one irrep)");
+        SectorBasis sb;
+        sb.group_size_ = projector.group_info().max_clique.size();
+
+        SymmetrySector& sec = sb.sector_;
+        sec.sector_id       = sector_id;
+        sec.quantum_numbers = quantum_numbers;
+        sec.phase_factors   = phase_factors;
+
+        // Survivor prefix-sum: slot[i] = output index of rep i (valid only
+        // when the prefilter says it survives).
+        const std::size_t n = orbit_reps.size();
+        std::vector<std::uint32_t> slot(n);
+        std::size_t n_surv = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            slot[i] = static_cast<std::uint32_t>(n_surv);
+            if (prefilter_norm_sq[i] > kOrbitNormSqEpsilon) ++n_surv;
+        }
+        sec.basis_states.resize(n_surv);
+
+        bool precondition_violated = false;
+#ifdef _OPENMP
+#       pragma omp parallel
+#endif
+        {
+            std::vector<std::uint64_t> elems;
+            std::vector<Complex>       coeffs;
+#ifdef _OPENMP
+#           pragma omp for schedule(dynamic, 256)
+#endif
+            for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+                const std::size_t i = static_cast<std::size_t>(ii);
+                if (prefilter_norm_sq[i] <= kOrbitNormSqEpsilon) continue;
+                double norm_sq = 0.0;
+                compute_orbit_for_state(subspace, projector, orbit_reps[i],
+                                        phase_factors, elems, coeffs, norm_sq);
+                if (elems.empty() || norm_sq <= kOrbitNormSqEpsilon) {
+                    precondition_violated = true;  // benign race: only ever set true
+                    continue;
+                }
+                SymBasisState st(orbit_reps[i], quantum_numbers,
+                                 std::sqrt(norm_sq));
+                st.orbit_elements     = elems;
+                st.orbit_coefficients = coeffs;
+                st.sortOrbit();
+                sec.basis_states[slot[i]] = std::move(st);
+            }
+        }
+        if (precondition_violated) {
+            throw std::runtime_error(
+                "SectorBasis::build_prefiltered: closed-form prefilter and "
+                "orbit walk disagree on survival -- the subspace drops orbit "
+                "images (closed-form precondition violated). Use "
+                "SectorBasis::build for this subspace.");
+        }
+
+        sb.rebuild_lookup_();
+        prof.set_items(sec.basis_states.size());
         return sb;
     }
 
@@ -317,6 +407,7 @@ public:
         // RepSymmetryBasisPolicy consumes it transparently (binary-search
         // fallback when absent), so this only ever speeds the reverse lookup.
         if (rep_data_.usable() && !rep_data_.has_rank_table()
+            && !rep_data_.has_two_level()  // Stage 4: shared table already wired
             && rep_rank_table_enabled(rep_data_.rank_table_entries())) {
             rep_data_.build_rank_table();
         }

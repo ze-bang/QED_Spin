@@ -30,11 +30,60 @@
 
 #include <complex>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include <ed/core/combinadic.h>  // BinomialTable + rank_state (O(1) reverse lookup)
 
 namespace ed::symmetry {
+
+// ---------------------------------------------------------------------------
+// SharedRankLookup -- Stage 4 of the SymmetryEngine v2 plan
+// (docs/architecture/SYMMETRY_V2_DESIGN.md): ONE dense
+// ``combinadic rank -> shared-rep-index`` table per (n_sites, n_up),
+// shared across every irrep sector of that subspace, replacing the
+// per-sector C(N,n_up) x int32 tables (2.4 GiB EACH at N=32
+// half-filling). Each sector then carries only the small
+// ``local_of_shared`` remap (int32 x #reps, ~76 MB at N=32).
+// ---------------------------------------------------------------------------
+struct SharedRankLookup {
+    std::vector<std::int32_t>           shared_of_rank;  // rank -> shared idx, -1
+    ed::core::combinadic::BinomialTable binom;
+    int                                 n_sites = 0;
+    int                                 n_up    = -1;
+};
+
+[[nodiscard]] inline std::shared_ptr<const SharedRankLookup>
+make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
+                        int n_sites, int n_up)
+{
+    if (n_up < 0 || n_sites <= 0) return nullptr;
+    auto srl = std::make_shared<SharedRankLookup>();
+    srl->n_sites = n_sites;
+    srl->n_up    = n_up;
+    srl->binom.resize(n_sites);
+    const std::uint64_t dim_full_sz = srl->binom.at(n_sites, n_up);
+    if (dim_full_sz == 0) return nullptr;
+    srl->shared_of_rank.assign(static_cast<std::size_t>(dim_full_sz),
+                               std::int32_t{-1});
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (long long i = 0; i < static_cast<long long>(shared_reps.size()); ++i) {
+        const std::int64_t r = ed::core::combinadic::rank_state(
+            shared_reps[static_cast<std::size_t>(i)], n_sites, n_up,
+            srl->binom);
+        if (r >= 0 && static_cast<std::uint64_t>(r) < dim_full_sz) {
+            srl->shared_of_rank[static_cast<std::size_t>(r)] =
+                static_cast<std::int32_t>(i);
+        }
+    }
+    return srl;
+}
 
 struct RepSectorData {
     std::vector<std::uint64_t>        reps;        // representative per orbit index
@@ -54,6 +103,21 @@ struct RepSectorData {
     // iteration. Cost: C(n_sites, n_up) * 4 B (~2.4 GiB at N=32, n_up=16).
     std::vector<std::int32_t>          rep_index_of_rank;
     ed::core::combinadic::BinomialTable binom;
+
+    // Stage 5b (SymmetryEngine v2): per-element XOR masks for flip-extended
+    // groups (element action = permute_bits(s, perm) ^ flip_masks[g]).
+    // Empty = pure permutations (every pre-5b group). When non-empty the
+    // length must equal ``group_size`` and ``perms_flat`` carries the
+    // permutation part of every element (the flip half repeats the spatial
+    // permutations). The device mirror does NOT support flips yet -- the
+    // builders only emit flip-extended sectors on the CPU lane.
+    std::vector<std::uint64_t> flip_masks;
+
+    [[nodiscard]] bool has_flips() const noexcept {
+        for (std::uint64_t m : flip_masks)
+            if (m != 0) return true;
+        return false;
+    }
 
     // Byte-decomposition lookup table for fast apply_perm on N≤32 systems.
     // Replaces the N-iteration scalar bit-scatter loop with 4 table lookups,
@@ -75,6 +139,17 @@ struct RepSectorData {
 
     [[nodiscard]] bool has_rank_table() const noexcept {
         return !rep_index_of_rank.empty();
+    }
+
+    // Stage 4 two-level reverse lookup: the SHARED per-(N,n_up) rank table
+    // (co-owned across all irrep sectors) + this sector's small
+    // shared-idx -> local-idx remap. Preferred over the dense per-sector
+    // table when present (rep_policy_from / ensureRepData honor it).
+    std::shared_ptr<const SharedRankLookup> shared_rank;
+    std::vector<std::int32_t>               local_of_shared;  // -1 = cancelled here
+
+    [[nodiscard]] bool has_two_level() const noexcept {
+        return shared_rank != nullptr && !local_of_shared.empty();
     }
 
     // Number of int32 entries a full rank table would need for this sector

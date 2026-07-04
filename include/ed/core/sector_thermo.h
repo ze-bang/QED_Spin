@@ -13,7 +13,7 @@
 // For ground-state methods (LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, ...)
 // it is enough to collect the per-sector eigenvalues into a global
 // pool and sort. For finite-temperature methods (FTLM, LTLM, KPM_DOS,
-// mTPQ, cTPQ) we *also* need to recombine thermodynamic observables
+// mTPQ) we *also* need to recombine thermodynamic observables
 // across sectors --- otherwise the result for ``ed::workflows::thermal``
 // with ``method=FTLM`` and ``use_symmetry=true`` would be just the
 // thermodynamics of the last sector touched, which is wrong.
@@ -188,7 +188,7 @@ combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_therm
  *        recombination in the streaming-symmetry kernel.
  *
  * Returns true exactly for the finite-temperature methods that populate
- * ``EDResults::thermo_data`` --- FTLM, LTLM, KPM_DOS, mTPQ, cTPQ.
+ * ``EDResults::thermo_data`` --- FTLM, LTLM, KPM_DOS, mTPQ.
  * The streaming-symmetry kernel uses this to decide whether to invoke
  * ``combine_sector_thermodynamics`` after the per-sector loop.
  */
@@ -199,7 +199,6 @@ inline bool method_produces_sector_thermo(DiagonalizationMethod method) {
         case DiagonalizationMethod::LTLM:
         case DiagonalizationMethod::KPM_DOS:
         case DiagonalizationMethod::mTPQ:
-        case DiagonalizationMethod::cTPQ:
             return true;
         default:
             return false;

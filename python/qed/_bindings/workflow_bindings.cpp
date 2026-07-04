@@ -24,6 +24,10 @@
 #include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
+#include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/sector_plan.h>
+#include <ed/symmetry/time_reversal.h>
+#include <ed/symmetry/sym_profile.h>
 #include <ed/core/operator.h>
 #include <ed/core/results.h>
 #include <ed/core/sector_loop.h>          // filter_sectors + resolve_target_sector
@@ -222,7 +226,7 @@ inline bool will_use_full_diag(const ed::LinearOperator& op,
 /// The thermal lane has uneven GPU coverage:
 ///   * FTLM         : CPU only (orchestrator throws on CUDA).
 ///   * LTLM, KpmDos : CPU or CUDA.
-///   * mTPQ, cTPQ   : any backend.
+///   * mTPQ         : any backend.
 ///
 /// As of Phase E of the "Close CPU/GPU Gaps" plan (May 2026), the
 /// FTLM facade dispatches on Backend internally (see
@@ -234,8 +238,7 @@ inline bool thermal_method_supports_gpu(
     return m == M::FTLM
         || m == M::LTLM
         || m == M::KpmDos
-        || m == M::mTPQ
-        || m == M::cTPQ;
+        || m == M::mTPQ;
 }
 
 /// Spectral lanes after Phases F + G of the "Close CPU/GPU Gaps"
@@ -275,7 +278,7 @@ inline void warn_silent_cpu_fallback(const char* what,
                   "implementation in the orchestrator. Falling back to the "
                   "CPU lane. Pass device='cpu' to silence this warning, or "
                   "switch to a GPU-clean method (Lanczos/BlockLanczos/"
-                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ/cTPQ for "
+                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ for "
                   "thermal; GroundStateCF for spectral).",
             py::module_::import("builtins").attr("RuntimeWarning"),
             py::arg("stacklevel") = 2);
@@ -330,6 +333,11 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::SolveOptions::n_up)
         .def_readwrite("basis_cache_dir",
                        &ed::workflows::SolveOptions::basis_cache_dir)
+        .def_readwrite("spin_flip",
+                       &ed::workflows::SolveOptions::spin_flip)
+        .def_readwrite("time_reversal",
+                       &ed::workflows::SolveOptions::time_reversal)
+        .def_readwrite("star_maps", &ed::workflows::SolveOptions::star_maps)
         .def_readwrite("precompute_basis_only",
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
@@ -405,7 +413,6 @@ void bind_workflows(py::module_& m) {
         .value("FTLM",   ed::workflows::ThermalOptions::Method::FTLM)
         .value("LTLM",   ed::workflows::ThermalOptions::Method::LTLM)
         .value("mTPQ",   ed::workflows::ThermalOptions::Method::mTPQ)
-        .value("cTPQ",   ed::workflows::ThermalOptions::Method::cTPQ)
         .value("KpmDos", ed::workflows::ThermalOptions::Method::KpmDos)
         .value("OFTLM",  ed::workflows::ThermalOptions::Method::OFTLM)
         .export_values();
@@ -422,6 +429,11 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("delta_beta",   &ed::workflows::ThermalOptions::delta_beta)
         .def_readwrite("beta_max",     &ed::workflows::ThermalOptions::beta_max)
         .def_readwrite("random_seed",  &ed::workflows::ThermalOptions::random_seed)
+        .def_readwrite("spin_flip",
+                       &ed::workflows::ThermalOptions::spin_flip)
+        .def_readwrite("time_reversal",
+                       &ed::workflows::ThermalOptions::time_reversal)
+        .def_readwrite("star_maps", &ed::workflows::ThermalOptions::star_maps)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -458,7 +470,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("kpm_num_random_vectors",
                        &ed::workflows::ThermalOptions::kpm_num_random_vectors)
         // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-        // user-supplied probe-betas for mTPQ/cTPQ state-vector
+        // user-supplied probe-betas for mTPQ state-vector
         // snapshots. Empty list (default) means "no state vectors are
         // saved"; the trajectory is always saved when ``output_dir``
         // is set.
@@ -595,6 +607,40 @@ void bind_workflows(py::module_& m) {
     // -----------------------------------------------------------------
     // The three entry points.
     // -----------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // Symmetry detection for the Python toggle surface (Stage 8e):
+    // term-level checks of the discrete symmetries the composition
+    // layer can exploit, so qed.solve/thermal/spectral can REPORT
+    // which symmetries the Hamiltonian actually carries and degrade
+    // gracefully when a requested one is absent.
+    // -----------------------------------------------------------------
+    m.def("detect_hamiltonian_symmetries",
+          [](const Operator& op) {
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op.transform_data_, op.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              py::dict out;
+              out["spin_flip"] =
+                  ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+              out["time_reversal"] = ed::symmetry::hamiltonian_is_real(soa);
+              return out;
+          },
+          py::arg("op"),
+          R"pbdoc(
+            Term-level discrete-symmetry detection.
+
+            Returns ``{"spin_flip": bool, "time_reversal": bool}``:
+            whether ``[H, prod_i sigma^x_i] == 0`` (global spin flip)
+            and whether every coefficient is real in the computational
+            basis (time reversal / conjugation pairing). These are the
+            same checks the C++ composition layer
+            (``ed::symmetry::resolve_symmetry_composition``) runs; the
+            Python binding exists so the toggle surface can *report*
+            the detection outcome and warn on a requested-but-absent
+            symmetry instead of failing later.
+          )pbdoc");
+
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
               // GPU lane (operator-collapse Phase 2a): the host Operator /
@@ -630,7 +676,7 @@ void bind_workflows(py::module_& m) {
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
               // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
-              // every thermal method (FTLM / LTLM / mTPQ / cTPQ /
+              // every thermal method (FTLM / LTLM / mTPQ /
               // KpmDos) dispatches on Backend internally and accepts both
               // ``CpuBackend`` and ``CudaBackend``, so the host operator's
               // lazy CudaMatVecBackend mirror (operator-collapse Phase 2a)
@@ -649,7 +695,7 @@ void bind_workflows(py::module_& m) {
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
           "Run the unified finite-temperature workflow (FTLM / LTLM / mTPQ / "
-          "cTPQ / KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
+          "KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
           "routes the matvec through the host operator's lazy "
           "CudaMatVecBackend device mirror without manual conversion.");
 
@@ -714,6 +760,7 @@ void bind_workflows(py::module_& m) {
               spec.num_sites          = num_sites;
               spec.spin_l             = static_cast<float>(spin_l);
               spec.streaming_symmetry = true;
+              spec.basis_cache_dir    = opts.basis_cache_dir;  // Stage 3
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
               }
@@ -728,6 +775,64 @@ void bind_workflows(py::module_& m) {
                   // irrep index). No monolithic streaming operator is
                   // materialised; the CSR-free lazy-rep memory optimisation
                   // is preserved by the tagged factory's lazy regime.
+                  // -----------------------------------------------------
+                  // Stage 8 + 8c (SymmetryEngine v2): symmetry composition
+                  // for the GS lane.
+                  //   * time-reversal PAIRING: for real H, spec(k) ==
+                  //     spec(-k); solve one member of each conjugate pair
+                  //     and DUPLICATE its eigenvalue list under the
+                  //     partner's tag (duplication -- not deduplication --
+                  //     keeps pooled degeneracy multiplicities correct).
+                  //   * spin-flip TRANSPORT: [H, X] == 0 makes the fixed-Sz
+                  //     blocks n_up and N - n_up isospectral; solve the
+                  //     smaller-n_up block and re-tag.
+                  //   * spin-flip PROJECTION: at n_up == N/2 split into
+                  //     (k, +/-) sectors (eigenvalues-only workloads; the
+                  //     projected eigenvectors are not orbit-reconstructable
+                  //     through the flip-unaware CSR lane).
+                  // Per-call toggles on SolveOptions (auto/off/require);
+                  // ED_SYM_SPIN_FLIP[_PROJECT] / ED_SYM_TIME_REVERSAL are
+                  // the env escapes for the Auto defaults.
+                  // -----------------------------------------------------
+                  ed::symmetry::SymmetryComposition comp;
+                  {
+                      auto probe = ed::detail::build_base_op(spec);
+                      ed::detail::load_terms_into(*probe, spec);
+                      ed::matvec::TermStorage soa;
+                      ed::matvec::TermStorage::classify_route(
+                          soa, probe->transform_data_, probe->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      probe->symmetry_info.loadFromDirectory(directory);
+                      comp = ed::symmetry::resolve_symmetry_composition(
+                          soa, probe->symmetry_info, opts.backend.allow_gpu,
+                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                          ed::symmetry::sym_toggle_from_int(
+                              opts.time_reversal));
+                      // Stage 7a: star maps (non-abelian residue) join
+                      // the isospectral-orbit relation alongside TR.
+                      const std::size_t nsec =
+                          probe->symmetry_info.sectors.size();
+                      for (const auto& m : opts.star_maps) {
+                          if (m.size() != nsec) continue;
+                          comp.star_maps.emplace_back(m.begin(), m.end());
+                      }
+                  }
+                  // Requested n_up before any transport re-target; -1 when
+                  // the fixed-Sz axis is off. Used to restore the caller's
+                  // n_up on the emitted sector tags.
+                  const int requested_n_up =
+                      spec.fixed_sz ? *spec.fixed_sz : -1;
+                  if (comp.flip_transport && spec.fixed_sz
+                      && *spec.fixed_sz * 2
+                             > static_cast<int>(num_sites)) {
+                      spec.fixed_sz = static_cast<int>(num_sites)
+                                      - *spec.fixed_sz;
+                  }
+                  if (comp.flip_project && spec.fixed_sz
+                      && *spec.fixed_sz * 2 == static_cast<int>(num_sites)
+                      && !opts.compute_vectors) {
+                      spec.flip_project_half = true;
+                  }
                   ed::core::SectorSetView handle(
                       ed::make_sector_operators_tagged(spec));
 
@@ -740,9 +845,59 @@ void bind_workflows(py::module_& m) {
                           "automorphism_results/ directory.");
                   }
 
-                  const std::vector<std::size_t> sector_indices =
+                  const std::vector<std::size_t> sector_indices_all =
                       ed::core::filter_sectors(num_sectors,
                                                opts.selected_sectors);
+
+                  std::vector<std::size_t> sector_indices;
+                  // (skipped_k, canonical_k): emit skipped_k's eigenvalues
+                  // as a copy of canonical_k's after the solve loop.
+                  std::vector<std::pair<std::size_t, std::size_t>> tr_mirrors;
+                  // Flip projection doubles the sector count with the
+                  // synthetic index convention k + parity * num_raw; the
+                  // TR conjugation AND the point-group star maps act on
+                  // the raw irrep index and preserve flip parity, so
+                  // canonicalise within parity blocks. One union-find
+                  // over both relations (sector_orbit_canonical).
+                  const std::size_t tr_num_raw =
+                      !comp.tr_partner.empty() ? comp.tr_partner.size()
+                      : !comp.star_maps.empty() ? comp.star_maps[0].size()
+                                                : 0;
+                  // Spectrum copies are not eigenVECTOR copies: a
+                  // skipped sector has no states to return or save, so
+                  // the orbit skip only runs on eigenvalue-only
+                  // workloads (TR pairing and star reduction alike).
+                  if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0
+                      && !opts.compute_vectors) {
+                      const std::vector<std::int32_t> canon =
+                          ed::symmetry::sector_orbit_canonical(
+                              tr_num_raw, comp);
+                      std::vector<char> in_sel(num_sectors, 0);
+                      for (std::size_t k : sector_indices_all) in_sel[k] = 1;
+                      for (std::size_t k : sector_indices_all) {
+                          const std::size_t ck = static_cast<std::size_t>(
+                              canon[k % tr_num_raw]);
+                          const std::size_t psy =
+                              ck + (k / tr_num_raw) * tr_num_raw;
+                          if (psy < k && in_sel[psy]
+                              && handle.sector_tag(k).sector_dim ==
+                                 handle.sector_tag(psy).sector_dim) {
+                              tr_mirrors.emplace_back(k, psy);
+                              continue;  // skip solving k
+                          }
+                          sector_indices.push_back(k);
+                      }
+                      if (!tr_mirrors.empty()
+                          && ed::symmetry::sym_profile_enabled()) {
+                          std::fprintf(stderr,
+                              "[sym-profile] time-reversal pairing (GS): "
+                              "solving %zu of %zu sectors\n",
+                              sector_indices.size(),
+                              sector_indices_all.size());
+                      }
+                  } else {
+                      sector_indices = sector_indices_all;
+                  }
 
                   // Per-sector storage we accumulate into so that the
                   // final ``GroundStateResult`` carries both the
@@ -850,7 +1005,15 @@ void bind_workflows(py::module_& m) {
                                     return a.first < b.first;
                                 });
                       double cutoff_E;
-                      if (phase1_min.size() <= target_num_eigs) {
+                      const bool phase1_has_nonfinite = std::any_of(
+                          phase1_min.begin(), phase1_min.end(),
+                          [](const auto& p) { return !std::isfinite(p.first); });
+                      if (phase1_min.size() <= target_num_eigs
+                          || phase1_has_nonfinite) {
+                          // Too few estimates, or a phase-1 solve threw
+                          // (recorded as -inf): the cutoff arithmetic
+                          // below would produce inf/NaN and silently
+                          // select NOTHING. Fail safe: solve everything.
                           cutoff_E = std::numeric_limits<double>::infinity();
                       } else {
                           const double best_E = phase1_min.front().first;
@@ -949,6 +1112,41 @@ void bind_workflows(py::module_& m) {
                                       sr.eigenvalues.end());
                       if (need_per_sector_outdir && !sr.hdf5_path.empty()) {
                           sector_hdf5_paths.push_back(sr.hdf5_path);
+                      }
+                  }
+
+                  // Stage 8 TR mirror emission: duplicate each solved
+                  // canonical sector's eigenvalue list under its conjugate
+                  // partner's tag (identical spectrum; keeps pooled
+                  // degeneracy multiplicities correct).
+                  for (const auto& [skipped_k, src_k] : tr_mirrors) {
+                      std::size_t src_slot = touched_tags.size();
+                      for (std::size_t t = 0; t < touched_tags.size(); ++t) {
+                          if (touched_tags[t].sector_index == src_k) {
+                              src_slot = t;
+                              break;
+                          }
+                      }
+                      if (src_slot == touched_tags.size()) continue;
+                      // (canonical pruned by the two-phase scan or empty:
+                      // the partner shares its spectrum, so skipping both
+                      // is consistent)
+                      std::vector<double> copy_eigs = eigs_per_sector[src_slot];
+                      touched_idx.push_back(touched_tags.size());
+                      touched_tags.push_back(handle.sector_tag(skipped_k));
+                      all_eigs.insert(all_eigs.end(),
+                                      copy_eigs.begin(), copy_eigs.end());
+                      eigs_per_sector.push_back(std::move(copy_eigs));
+                  }
+
+                  // Stage 8c: when spin-flip transport re-targeted the
+                  // solve to N - n_up, restore the caller's requested n_up
+                  // on the emitted tags (the two blocks are isospectral;
+                  // the tag should describe the sector the caller asked
+                  // for, not the one physics let us solve instead).
+                  if (requested_n_up >= 0) {
+                      for (auto& tag : touched_tags) {
+                          if (tag.n_up >= 0) tag.n_up = requested_n_up;
                       }
                   }
 
@@ -1433,7 +1631,7 @@ void bind_workflows(py::module_& m) {
         spin_l : float, optional
             Spin magnitude (0.5 for spin-1/2, the default).
         opts : ThermalOptions, optional
-            Per-sector finite-T options (FTLM / LTLM / mTPQ / cTPQ /
+            Per-sector finite-T options (FTLM / LTLM / mTPQ /
             KPM-DOS). ``selected_sectors`` filters the loop.
         fixed_sz_n_up : int or None, optional
             If set, project to a fixed-Sz sector with this ``n_up``
@@ -3148,10 +3346,62 @@ void bind_workflows(py::module_& m) {
                   spec.streaming_symmetry = true;
                   // No fixed_sz: build_all_sz_sector_operators covers all n_up.
 
-                  // Build ALL (n_up, irrep) sector operators in a single pass.
+                  // ---------------------------------------------------------
+                  // Stage 8 (SymmetryEngine v2): unified symmetry composition.
+                  // One SectorPlan resolution drives all three mechanisms
+                  // (spin-flip transport across Sz, spin-flip projection of
+                  // the half-filling block, time-reversal k <-> -k pairing);
+                  // see include/ed/symmetry/sector_plan.h. Per-call toggles
+                  // on ThermalOptions (auto/off/require) override the env
+                  // gates.
+                  // ---------------------------------------------------------
+                  const int N_sites = static_cast<int>(num_sites);
+                  const int req_lo  = std::max(0, n_up_min);
+                  const int req_hi  = (n_up_max < 0) ? N_sites
+                                                     : std::min(n_up_max, N_sites);
+                  ed::symmetry::SymmetryComposition comp;
+                  {
+                      auto probe = ed::detail::build_base_op(spec);
+                      ed::detail::load_terms_into(*probe, spec);
+                      ed::matvec::TermStorage soa;
+                      ed::matvec::TermStorage::classify_route(
+                          soa, probe->transform_data_, probe->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      probe->symmetry_info.loadFromDirectory(directory);
+                      comp = ed::symmetry::resolve_symmetry_composition(
+                          soa, probe->symmetry_info, opts.backend.allow_gpu,
+                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                          ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+                      // Stage 7a: point-group star maps join the
+                      // isospectral-orbit relation alongside TR.
+                      const std::size_t nsec =
+                          probe->symmetry_info.sectors.size();
+                      for (const auto& m : opts.star_maps) {
+                          if (m.size() != nsec) continue;
+                          comp.star_maps.emplace_back(m.begin(), m.end());
+                      }
+                  }
+                  const ed::symmetry::BuildWindow win =
+                      ed::symmetry::plan_build_window(
+                          comp, req_lo, req_hi, N_sites);
+                  const bool flip_transport = win.flip_transport;
+                  const bool flip_project   = win.flip_project_half;
+                  if (ed::symmetry::sym_profile_enabled()) {
+                      if (flip_transport)
+                          std::fprintf(stderr,
+                              "[sym-profile] spin-flip transport: solving "
+                              "n_up [%d, %d] for requested [%d, %d]\n",
+                              win.lo, win.hi, req_lo, req_hi);
+                      if (flip_project)
+                          std::fprintf(stderr,
+                              "[sym-profile] spin-flip projection: half-filling "
+                              "block split into (k, +/-) sectors\n");
+                  }
+
+                  // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, n_up_min, n_up_max);
+                          spec, win.lo, win.hi, flip_project);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());
@@ -3160,6 +3410,17 @@ void bind_workflows(py::module_& m) {
                           "workflows_thermal_all_sz_streaming_symmetry_"
                           "directory: no sectors found; check n_up range "
                           "and automorphism_results/ directory.");
+                  }
+
+                  const std::size_t n_raw = set.num_raw_sectors;
+                  const ed::symmetry::TrActionPlan tr_plan =
+                      ed::symmetry::plan_tr_actions(set.tags, n_raw, comp);
+                  if (tr_plan.active()
+                      && ed::symmetry::sym_profile_enabled()) {
+                      std::fprintf(stderr,
+                          "[sym-profile] time-reversal pairing: skipping "
+                          "%zu of %ld conjugate sectors\n",
+                          tr_plan.n_skipped, n_ops);
                   }
 
                   // Pre-build the beta grid once (same logic as the
@@ -3259,6 +3520,7 @@ void bind_workflows(py::module_& m) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
+                      if (tr_plan.skip[i]) continue;  // TR: copy from partner
                       ed::workflows::ThermalOptions topts = opts;
                       topts.selected_sectors.clear();
                       if (need_per_sector_outdir) {
@@ -3290,6 +3552,10 @@ void bind_workflows(py::module_& m) {
                       const std::size_t i = static_cast<std::size_t>(ii);
                       auto* op = set.operators[i].get();
                       if (!op || op->dim() == 0) continue;
+                      if (tr_plan.skip[i]) {
+                          // TR pairing: source the conjugate partner's result.
+                          all_results[i] = all_results[tr_plan.source[i]];
+                      }
                       auto& tr = all_results[i];
                       if (sector_lane.empty()
                           && !tr.backend.lane.empty()) {
@@ -3312,6 +3578,39 @@ void bind_workflows(py::module_& m) {
                       per_sector.push_back(std::move(entry));
                       if (std::isfinite(tr.ground_state_energy))
                           gs_E = std::min(gs_E, tr.ground_state_energy);
+                  }
+
+                  // Stage 5 mirror pass: duplicate every solved n_up < N/2
+                  // block into its flip partner N - n_up (same irrep, same
+                  // spectrum, same dim), then keep only entries inside the
+                  // originally requested window (the clamp may have solved
+                  // mirror-only blocks below req_lo).
+                  if (flip_transport) {
+                      const std::size_t solved = per_sector.size();
+                      for (std::size_t e = 0; e < solved; ++e) {
+                          const int n = per_sector[e].tag.n_up;
+                          const int m = N_sites - n;
+                          if (m == n || m < req_lo || m > req_hi) continue;
+                          ed::ThermalSectorEntry mirror = per_sector[e];
+                          mirror.sz_index  = m;
+                          mirror.tag.n_up  = m;
+                          per_sector_thermo.push_back(mirror.thermo);
+                          per_sector_dims.push_back(mirror.tag.sector_dim);
+                          per_sector.push_back(std::move(mirror));
+                      }
+                      std::vector<ThermodynamicData>      f_thermo;
+                      std::vector<std::uint64_t>          f_dims;
+                      std::vector<ed::ThermalSectorEntry> f_sector;
+                      for (std::size_t e = 0; e < per_sector.size(); ++e) {
+                          const int n = per_sector[e].tag.n_up;
+                          if (n < req_lo || n > req_hi) continue;
+                          f_thermo.push_back(std::move(per_sector_thermo[e]));
+                          f_dims.push_back(per_sector_dims[e]);
+                          f_sector.push_back(std::move(per_sector[e]));
+                      }
+                      per_sector_thermo = std::move(f_thermo);
+                      per_sector_dims   = std::move(f_dims);
+                      per_sector        = std::move(f_sector);
                   }
 
                   if (!per_sector_thermo.empty()) {

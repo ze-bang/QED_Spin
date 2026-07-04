@@ -49,7 +49,6 @@ cd QED
 
 cmake -B build \
       -DWITH_CUDA=ON -DWITH_MPI=ON \
-      -DED_BUILD_EXAMPLES=ON \
       -DED_BUILD_BENCHMARKS=ON
 cmake --build build -j
 
@@ -114,33 +113,63 @@ the operator geometry and the build flags; pin manually with
 
 ---
 
-## Symmetries — orthogonal composition
+## Symmetries — auto mode and per-symmetry toggles
 
-Symmetry projection is **orthogonal**: a sector is described by one
-`Subspace` (which computational basis states are enumerated) and one
-ordered `ProjectorChain` (zero or more group representations applied
-on top). The public Python kwargs encode the two axes directly:
+`symmetry="auto"` finds the maximal block diagonalisation for the
+Hamiltonian you pass in: the automorphism search runs internally, the
+largest commuting spatial group is used, and it composes with the
+independently auto-detected U(1) Sz axis, the spin-flip
+transporter/projector and the time-reversal sector pairing. Works on
+all three verbs and every backend:
 
 ```python
-# (Subspace, ProjectorChain)              Public kwargs
-# ----------------------------            -------------
-# (FullSpaceSubspace, [])                 qed.solve(H)
-# (FixedSzSubspace,   [])                 qed.solve(H, sz=N//2)
-# (FullSpaceSubspace, [Spatial])          qed.solve(H, symmetry=gens)
-# (FixedSzSubspace,   [Spatial])          qed.solve(H, sz=N//2, symmetry=gens)
+qed.solve(H,  symmetry="auto", sz=N//2)               # GS
+qed.thermal(H, method="mTPQ", symmetry="auto")        # finite T
+qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
+             sz=N//2, momentum_transfer=[0.5])        # DSSF
+qed.full_spectrum(H, symmetry="auto")                 # complete dense spectrum
+                                                      # (non-abelian SAB route)
 ```
 
-The headers live at
-[`include/ed/symmetry/subspace.h`](include/ed/symmetry/subspace.h),
-[`include/ed/symmetry/projector.h`](include/ed/symmetry/projector.h),
-and
-[`include/ed/symmetry/projector_chain.h`](include/ed/symmetry/projector_chain.h).
-Future axes (spin-flip Z₂, time-reversal antiunitary, SU(2) total-S)
-extend the chain or add new Subspace specialisations *without* touching
-the operator hierarchy. Full design discussion:
-[`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6.
-Copy-pasteable end-to-end demo:
-[`examples/_legacy/16_python_orthogonal_symmetry.py`](examples/_legacy/16_python_orthogonal_symmetry.py).
+Each discrete symmetry has its own four-state toggle, so you can mix
+and match — and the library tells you what your Hamiltonian actually
+has:
+
+| value | meaning |
+|---|---|
+| `"auto"` (default) | exploit the symmetry when H carries it, silently skip otherwise |
+| `"on"` | same, but REPORT: confirms detection, **warns and continues without it** when H lacks the symmetry |
+| `"off"` | never exploit it |
+| `"require"` | hard contract: throw when H lacks the symmetry |
+
+```python
+qed.solve(H, symmetry="auto", sz=N//2,
+          spin_flip="on", time_reversal="on")
+# [qed] symmetry='auto': U(1) Sz conserved; using generator set
+#       'full_automorphism' (|G| = 8).
+# [qed] spin_flip: Hamiltonian carries it -> exploiting.
+# [qed] time_reversal: Hamiltonian carries it -> exploiting.
+
+qed.solve(H_with_field, spin_flip="on", ...)
+# RuntimeWarning: spin_flip='on' requested but the Hamiltonian does
+# not carry this symmetry ([H, prod sigma^x] != 0 -- e.g. a Zeeman
+# field ...); running without it.
+```
+
+`qed._core.detect_hamiltonian_symmetries(H)` exposes the same
+term-level detection directly
+(`{"spin_flip": bool, "time_reversal": bool}`);
+`qed.find_symmetries(H)` reports the U(1) and spatial axes.
+
+Under the hood a sector is one `Subspace` (which computational basis
+states are enumerated) x one `ProjectorChain` (group representations
+applied on top); the composition layer
+([`include/ed/symmetry/sector_plan.h`](include/ed/symmetry/sector_plan.h))
+plans which sectors to build, which to solve, and which to copy from a
+partner (flip transport / mirror, time-reversal pairing). Full design:
+[`docs/architecture/SYMMETRY_V2_DESIGN.md`](docs/architecture/SYMMETRY_V2_DESIGN.md);
+measured speedups: [`docs/perf/`](docs/perf/) and
+`benchmarks/bench_auto_symmetry.py`.
 
 ---
 
@@ -193,51 +222,23 @@ docs/
 
 ## Examples
 
-The canonical example tree is **one file per ONLINE
-`(backend × symmetry × method)` cell**, organised by family / method:
+[`examples/tour/`](examples/tour/) is the canonical usage
+documentation: six short, heavily-commented scripts that cover every
+real knob, one verb per file --
 
-```
-examples/
-├── solve/{lanczos,block_lanczos,krylov_schur,full}/<lane>_<sym>.{cpp,py}     # 48 cells
-├── thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}/<lane>_<sym>.{cpp,py}               # 62 cells
-└── spectral/{single_expectation,ground_state_dssf,static_thermal,
-              dynamical_thermal}/<lane>_<sym>.{cpp,py}                       # 38 cells
-```
+| script | covers |
+|---|---|
+| [`01_ground_state.py`](examples/tour/01_ground_state.py) | `qed.solve`: `symmetry="auto"`, per-symmetry toggles, solvers, devices, per-sector attribution |
+| [`02_finite_temperature.py`](examples/tour/02_finite_temperature.py) | `qed.thermal`: mTPQ/FTLM/LTLM/KPM, the sector pool + flip/TR/star copies, Sz windows |
+| [`03_dynamics_dssf.py`](examples/tour/03_dynamics_dssf.py) | `qed.spectral`: S^z_Q / S^±_Q probes, GS + finite-T DSSF through the sector machinery |
+| [`04_symmetry_toolkit.py`](examples/tour/04_symmetry_toolkit.py) | `find_symmetries`, `GeneratorSet.describe()`, sector selection, env escapes |
+| [`05_tpq_dssf.py`](examples/tour/05_tpq_dssf.py) | finite-temperature DSSF from persisted mTPQ states (`initial_state=` seeding) |
 
-where `<lane>` ∈ {`cpu`, `gpu`, `mpi`, `mpi_gpu`} and
-`<sym>` ∈ {`none`, `sz`, `spatial`, `sz_spatial`}. **Every C++ cell has
-a Python twin that reads line-for-line identical at the API surface
-and prints the same numbers.** The full per-cell index, naming
-convention, expected-output schema, and smoke-test recipe live in
-[`examples/README.md`](examples/README.md).
-
-Quick examples (CPU lane, `examples/solve/lanczos/`):
-
-| Cell                                                                | What it does                                  |
-|---------------------------------------------------------------------|-----------------------------------------------|
-| [`solve/lanczos/cpu_none.py`](examples/solve/lanczos/cpu_none.py)   | Lanczos ground state, full Hilbert (N=8)      |
-| [`solve/lanczos/cpu_sz.py`](examples/solve/lanczos/cpu_sz.py)       | Lanczos in the half-filled Sz=0 sector        |
-| [`solve/lanczos/cpu_spatial.py`](examples/solve/lanczos/cpu_spatial.py) | Lanczos + cyclic-translation Z₈ symmetry     |
-| [`solve/lanczos/cpu_sz_spatial.py`](examples/solve/lanczos/cpu_sz_spatial.py) | Sz × translation joint symmetry      |
-| [`solve/full/cpu_none.py`](examples/solve/full/cpu_none.py)         | Dense diagonalisation, five lowest E[k]       |
-| [`thermal/ftlm/cpu_sz.py`](examples/thermal/ftlm/cpu_sz.py)         | FTLM E(T), Cv(T) with Sz auto-decomposition   |
-| [`thermal/ltlm/cpu_none.py`](examples/thermal/ltlm/cpu_none.py)     | LTLM low-T thermodynamics                     |
-| [`spectral/ground_state_dssf/cpu_none.py`](examples/spectral/ground_state_dssf/cpu_none.py) | T=0 S(ω) via CF resolvent      |
-| [`spectral/dynamical_thermal/cpu_none.py`](examples/spectral/dynamical_thermal/cpu_none.py) | Finite-T S(ω) via FTLM dynamical |
-
-The C++ twins live in the same directories with `.cpp` suffix; build
-them with `-DED_BUILD_EXAMPLES=ON` (the default is off):
-
-```bash
-cmake -B build -DED_BUILD_EXAMPLES=ON ...
-cmake --build build --target ed_examples_smoke      # CPU-only "smoke" subset
-cmake --build build --target ed_examples            # everything that's compilable
-```
-
-The previous, pre-mirror tutorials (the numbered `00_..16_*` files)
-are frozen under [`examples/_legacy/`](examples/_legacy/) -- they
-still build and run, but new tutorials only land in the new tree.
-
+Each runs standalone in seconds (`python3 examples/tour/01_ground_state.py`)
+and the `linux-tour` CI lane executes all of them on every push.
+Exhaustive per-configuration coverage lives in the test suites and the
+dense-verified capability matrix
+([`docs/perf/capability_matrix_2026-07-03.md`](docs/perf/capability_matrix_2026-07-03.md)).
 ---
 
 ## Performance

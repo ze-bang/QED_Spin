@@ -46,22 +46,25 @@ What `qed.solve` decides for you (override any of these via kwargs):
 * **Auto Sz** (`auto_sz=True` by default): if `H.conserves_sz()` and you
   didn't pass `sz=`, projects to the half-filled Sz=N/2 sector
   automatically (set `auto_sz=False` to keep the full Hilbert space).
-* **Symmetry**: pass `symmetry=` (a `GeneratorSet` or the dict from
-  `qed.symmetry.group_from_generators`) to dispatch through the
-  streaming-symmetry kernel. Symmetry projection is strictly opt-in.
-  Internally the `sz=` and `symmetry=` kwargs are orthogonal —
-  they map onto the `(Subspace, ProjectorChain)` decomposition
-  introduced in May 2026:
+* **Symmetry**: `symmetry="auto"` runs the automorphism search
+  internally and uses the maximal commuting spatial group; or pass a
+  `GeneratorSet` / permutation list / the dict from
+  `qed.symmetry.group_from_generators` explicitly (`"off"` / `None`
+  disables). The spatial sectors compose with two more discrete axes,
+  each with its own four-state toggle `spin_flip=` / `time_reversal=`
+  in {"auto", "on", "off", "require"}: `"on"` confirms the detection
+  or warns-and-continues when H lacks the symmetry; `"require"`
+  throws. `qed._core.detect_hamiltonian_symmetries(H)` exposes the
+  term-level detection directly. Internally the kwargs map onto the
+  `(Subspace, ProjectorChain)` decomposition:
   `sz=` selects between `FullSpaceSubspace` and `FixedSzSubspace`,
-  `symmetry=` populates a `ProjectorChain` with the spatial
-  projector. Future axes (global spin-flip Z_2, time-reversal
-  antiunitary, SU(2) total-S Casimir) extend the chain through the
-  same public surface. See
+  `symmetry=` populates a `ProjectorChain` with the spatial projector,
+  and the flip/TR mechanisms act at the sector-plan level
+  ([`sector_plan.h`](../../include/ed/symmetry/sector_plan.h)). See
   [`docs/architecture/SYMMETRY.md`](../architecture/SYMMETRY.md) §6
   and
-  [`examples/_legacy/16_python_orthogonal_symmetry.py`](../../examples/_legacy/16_python_orthogonal_symmetry.py).
-  For the per-cell minimal twins see `examples/solve/lanczos/`,
-  `examples/solve/full/`, etc. (Python kwargs are mirrored 1:1 in C++ via
+  [`examples/tour/04_symmetry_toolkit.py`](../../examples/tour/04_symmetry_toolkit.py).
+  (Python kwargs are mirrored 1:1 in C++ via
   the new `ed::api::*` facade in [`include/ed/api.h`](../../include/ed/api.h)).
 * **Memory guard** (no pre-flight planner): the workflow checks the dominant
   allocation against available RAM at the point of use and raises a clean error
@@ -108,8 +111,10 @@ What `qed.thermal` decides for you:
 
 * **β grid**: built from `T_min` / `T_max` / `num_T` if
   not given explicitly.
-* **mTPQ Taylor order / Δβ / energy shift**: filled by
-  `qed.auto_tune.tune_thermal(...)` from sector dim and target β.
+* **mTPQ Taylor order / Δβ / energy shift**: sensible static defaults
+  (`tpq_taylor_order`, `tpq_delta_beta`, spectral-bound `L_auto` energy
+  shift); the June-2026 planner removal retired the per-run
+  `tune_thermal` heuristic.
 * **Sector orchestration**: when H conserves Sz, the orchestrator
   sweeps Sz sectors, runs the kernel per-sector, then aggregates
   `<O>(T) = Σ_sector Z_sector <O>_sector / Z_total`.
@@ -326,23 +331,11 @@ unit-tested by
 
 ### 4a. ED-solver auto-tuning
 
-`qed.solve(...)` ships the same `auto_tune=True, level="balanced"` knobs
-as `qed.spectral`. Per-family fields filled from sector dim,
-`num_eigenvalues`, and Hamiltonian bandwidth (sentinel-only — anything
-the caller sets passes through):
-
-| Field                   | What it controls                | Sentinel default |
-| ----------------------- | ------------------------------- | ---------------- |
-| `tolerance`             | Eigenvalue convergence target   | `1e-10`          |
-| `max_iterations`        | Krylov outer-iteration cap      | `10000`          |
-| `block_size`            | Block-Lanczos block size        | `4`              |
-| `ftlm_krylov_dim`       | FTLM Lanczos micro-basis        | `100`            |
-| `ltlm_krylov_dim`       | LTLM excitation Krylov dim      | `200`            |
-| `ltlm_ground_krylov`    | LTLM ground-state Krylov dim    | `100`            |
-| `tpq_taylor_order`      | mTPQ Taylor order p             | `100`            |
-| `tpq_delta_beta`        | mTPQ imaginary-time step Δβ     | `1e-2`           |
-
-Standalone use (without dispatching the kernel):
+`qed.solve(...)` itself no longer takes an `auto_tune=` flag (the
+June-2026 planner removal replaced in-dispatch tuning with static
+defaults). The heuristic helpers remain available standalone via
+`qed.auto_tune.tune_diag` when you want suggested knobs to pass
+explicitly:
 
 ```python
 knobs = qed.auto_tune.tune_diag(

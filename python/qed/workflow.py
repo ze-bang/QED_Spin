@@ -37,6 +37,7 @@ __all__ = [
     "GeneratorSet",
     "SymmetryReport",
     "find_symmetries",
+    "resolve_auto_symmetry",
     "solve",
     "full_spectrum",
     "list_diag_parameters",
@@ -82,7 +83,7 @@ def _suppress_legacy_dispatch_warning():
 # ---------------------------------------------------------------------------
 
 # Ground-state methods the orchestrator's `workflows_solve` handles.
-# Thermal methods (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) route through
+# Thermal methods (FTLM / LTLM / mTPQ / KPM_DOS) route through
 # `_core.workflows_thermal` instead -- the dispatch is decided by the
 # helper `_diag_via_workflows_solve` below.
 _GROUND_STATE_METHODS = frozenset({
@@ -98,7 +99,6 @@ _THERMAL_METHOD_TO_CORE = {
     DiagonalizationMethod.OFTLM:   "OFTLM",
     DiagonalizationMethod.LTLM:    "LTLM",
     DiagonalizationMethod.mTPQ:    "mTPQ",
-    DiagonalizationMethod.cTPQ:    "cTPQ",
     DiagonalizationMethod.KPM_DOS: "KpmDos",
 }
 
@@ -141,8 +141,7 @@ def _ed_params_to_thermal_options(
     opts.backend.allow_mpi = bool(use_mpi)
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
     # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations; cTPQ uses it as the cap on the
-    # number of Taylor steps. For mTPQ/cTPQ we map the user's
+    # the number of (L - H) iterations. For mTPQ we map the user's
     # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
     # closes a gap where the legacy adapter hardcoded 100 iterations
     # for the TPQ lanes and never honoured the user's request.
@@ -155,15 +154,11 @@ def _ed_params_to_thermal_options(
             opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
-    elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+    elif method == DiagonalizationMethod.mTPQ:
         steps = int(getattr(params, "tpq_max_steps", 0) or 0)
         if steps <= 0:
             mi = getattr(params, "max_iterations", 0)
             steps = int(mi) if mi else 0
-        if steps <= 0 and method == DiagonalizationMethod.cTPQ:
-            # cTPQ uses ``krylov_dim`` as a Taylor-step CAP; preserve the
-            # historical default for an unset call.
-            steps = 1000
         # mTPQ: ``steps == 0`` -> orchestrator auto-sizes the iteration
         # count from the spectral bounds to bracket beta_max = 1/T_min.
         opts.krylov_dim = steps
@@ -189,7 +184,7 @@ def _ed_params_to_thermal_options(
     if hasattr(opts, "allow_infeasible"):
         opts.allow_infeasible = bool(allow_infeasible)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
-    # the user-supplied probe-betas for mTPQ/cTPQ state-vector
+    # the user-supplied probe-betas for mTPQ state-vector
     # snapshots. Empty list -> the kernel runs the standard path with no
     # state-vector copies and the orchestrator persists only the
     # thermo trajectory.
@@ -212,7 +207,7 @@ def _ed_result_from_thermal_result(
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # the thermal orchestrator now persists ``ed_results.h5`` when
     # ``output_dir`` is set (FTLM/LTLM/KPM_DOS: aggregated thermo;
-    # mTPQ/cTPQ: trajectory + state-vector snapshots at probe_betas).
+    # mTPQ: trajectory + state-vector snapshots at probe_betas).
     # Mirror the saved path through the legacy ``eigenvectors_path``
     # field so downstream consumers see the same envelope shape used
     # by ``qed.solve``.
@@ -307,6 +302,12 @@ def _ed_result_from_gs_result(
     _tags = getattr(gs_result, "sector_tags", None)
     if _tags:
         out.sector_tags = list(_tags)
+    # Truthful backend lane ("gpu"/"cpu"/"mpi"): the C++ aggregate
+    # carries it; surface it so callers (and the capability-matrix
+    # benchmark's GPU-row assertion) can verify which lane really ran.
+    _bk = getattr(gs_result, "backend", None)
+    if _bk is not None:
+        out.backend = _bk
     # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
     # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
     _kry = getattr(gs_result, "krylov", None)
@@ -348,7 +349,7 @@ def _diag_via_workflows_solve(
 
     Ground-state methods (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL)
     go through ``_core.workflows_solve``. Thermal methods (FTLM / LTLM
-    / mTPQ / cTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
+    / mTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
     No legacy fallback remains: the C++ ``exact_diagonalization_*``
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
@@ -367,7 +368,7 @@ def _diag_via_workflows_solve(
         f"_diag_via_workflows_solve: unsupported DiagonalizationMethod "
         f"{method!r}. Supported: ground-state "
         f"(LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL) and thermal "
-        f"(FTLM / LTLM / mTPQ / cTPQ / KPM_DOS)."
+        f"(FTLM / LTLM / mTPQ / KPM_DOS)."
     )
 
 
@@ -431,6 +432,20 @@ class GeneratorSet:
     generators: list[Permutation] = field(default_factory=list)
     orders: list[int] = field(default_factory=list)
     group_size: int = 1
+    # Stage 7a: automorphisms of the FULL (possibly non-abelian) group
+    # that lie outside the abelian subgroup spanned by ``generators``.
+    # The projector cannot use them, but the star-reduction plan can:
+    # they permute the abelian irreps, making related sectors
+    # isospectral (solve one per orbit, copy the rest).
+    star_perms: list[Permutation] = field(default_factory=list)
+
+    def describe(self) -> str:
+        """Precise group structure: abelian invariant factors,
+        generator permutations, residue conjugation relations and
+        common-case recognition (dihedral / direct product)."""
+        from .star_reduction import describe_group
+        return describe_group(self.generators, self.orders,
+                              self.star_perms, name=self.name)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return (
@@ -772,6 +787,14 @@ def find_symmetries(
                     "modulo the supercell)."
                 ),
             )
+            # Stage 7a: the ENTIRE point group is this set's residue --
+            # translations project, the point group folds the k sectors
+            # into isospectral stars (the textbook space-group split).
+            _t_keys = {tuple(pp) for pp in translation_autos}
+            translation_set.star_perms = [
+                list(pp) for pp in all_automorphisms
+                if tuple(pp) not in _t_keys
+            ]
             generator_sets.append(translation_set)
 
     # 3b. Full automorphism (max clique → minimal generators) when not
@@ -791,6 +814,14 @@ def find_symmetries(
                     "automorphism group."
                 ),
             )
+            # Stage 7a: retain the non-abelian residue (automorphisms
+            # outside the abelian clique) for star reduction and group
+            # structure reporting.
+            _clique_keys = {tuple(pp) for pp in clique}
+            full_set.star_perms = [
+                list(pp) for pp in all_automorphisms
+                if tuple(pp) not in _clique_keys
+            ]
             if (
                 translation_set is None
                 or _generators_equal(full_set.generators,
@@ -836,6 +867,155 @@ def find_symmetries(
 # ---------------------------------------------------------------------------
 
 
+def resolve_auto_symmetry(
+    operator: Operator,
+    symmetry: Any,
+    *,
+    verbose: bool = True,
+    lattice: Optional[Any] = None,
+) -> Any:
+    """Normalise the string forms of ``symmetry=``.
+
+    * ``"auto"`` -- run :func:`find_symmetries` on ``operator`` and use
+      the largest commuting generator set found (``None`` -- i.e. no
+      spatial projection -- when the automorphism group is trivial or
+      when the optional ``pynauty``/``networkx`` dependencies are
+      missing). This is the "maximal block diagonalisation" switch: the
+      spatial sectors compose with the U(1) Sz axis (``sz=`` /
+      ``auto_sz``), the spin-flip transporter/projector and the
+      time-reversal pairing, each of which independently auto-detects.
+    * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
+    * anything else (GeneratorSet, permutation list, dict, None) is
+      returned unchanged.
+    """
+    if not isinstance(symmetry, str):
+        return symmetry
+    key = symmetry.strip().lower()
+    if key in ("off", "none", ""):
+        return None
+    if key in ("translation", "translations"):
+        if lattice is None:
+            raise ValueError(
+                "symmetry='translation' needs lattice=... (positions + "
+                "lattice vectors identify which automorphisms are pure "
+                "translations). Pass the qed.input.Lattice the "
+                "Hamiltonian was built on."
+            )
+        try:
+            report = find_symmetries(operator, lattice=lattice,
+                                     verbose=False)
+        except ImportError as exc:
+            warnings.warn(
+                f"symmetry='translation': automorphism search "
+                f"unavailable ({exc}); running without spatial "
+                "symmetry.", RuntimeWarning, stacklevel=3)
+            return None
+        gen = report.translation_set
+        if gen is None or not getattr(gen, "generators", None):
+            if verbose:
+                print("[qed] symmetry='translation': no lattice "
+                      "translations commute with H -- no spatial "
+                      "projection.")
+            return None
+        if verbose:
+            print(f"[qed] symmetry='translation': |T| = "
+                  f"{gen.group_size}; point-group residue retained "
+                  f"({len(gen.star_perms)} automorphisms -> star "
+                  "reduction).")
+        return gen
+    if key != "auto":
+        raise ValueError(
+            f"symmetry={symmetry!r}: string forms are 'auto', "
+            "'translation' or 'off' (or pass a GeneratorSet / "
+            "permutation list / dict)."
+        )
+    try:
+        report = find_symmetries(operator, verbose=False)
+    except ImportError as exc:
+        warnings.warn(
+            f"symmetry='auto': automorphism search unavailable ({exc}); "
+            "running without spatial symmetry. Install pynauty + "
+            "networkx to enable it.",
+            RuntimeWarning, stacklevel=3)
+        return None
+    gen = report.full_set
+    u1 = ("U(1) Sz conserved" if report.has_u1_sz
+          else "U(1) Sz NOT conserved")
+    if gen is None or not getattr(gen, "generators", None):
+        if verbose:
+            print(f"[qed] symmetry='auto': {u1}; trivial automorphism "
+                  "group -- no spatial projection (flip/TR still "
+                  "auto-detect).")
+        return None
+    if verbose:
+        print(f"[qed] symmetry='auto': {u1}; using generator set "
+              f"{gen.name!r} (|G| = {gen.group_size}).")
+    return gen
+
+
+def resolve_discrete_toggle(
+    operator: Optional[Operator],
+    value: Any,
+    which: str,
+    *,
+    verbose: bool = True,
+) -> int:
+    """Map a ``spin_flip=`` / ``time_reversal=`` kwarg to the C++
+    toggle int (-1 auto / 0 off / 1 require), with detection reporting.
+
+    * ``"auto"`` / ``None`` / ``-1`` -- exploit the symmetry when the
+      Hamiltonian carries it, silently skip when it does not.
+    * ``"on"`` / ``True`` -- same as auto, but REPORT: confirms the
+      detection when the symmetry is present, warns (and continues
+      without it) when it is absent. Never fails.
+    * ``"off"`` / ``False`` / ``0`` -- never exploit it.
+    * ``"require"`` / ``1`` -- hard contract: the run throws when the
+      Hamiltonian does not carry the symmetry.
+
+    ``which`` is ``"spin_flip"`` or ``"time_reversal"``. ``operator``
+    may be None (directory-form callers); ``"on"`` then defers to auto
+    with a note, since the term-level detection needs the in-memory
+    operator.
+    """
+    if value is None or value == "auto" or value == -1:
+        return -1
+    if value is False or value == "off" or value == 0:
+        return 0
+    if value == "require" or value == 1:
+        return 1
+    if value is True or value == "on":
+        det = None
+        if operator is not None:
+            try:
+                det = bool(
+                    _core.detect_hamiltonian_symmetries(operator)[which])
+            except Exception:
+                det = None
+        if det is None:
+            if verbose:
+                print(f"[qed] {which}='on': detection needs the "
+                      "in-memory operator here; deferring to auto "
+                      "(the C++ layer engages it only when present).")
+            return -1
+        if det:
+            if verbose:
+                print(f"[qed] {which}: Hamiltonian carries it -> "
+                      "exploiting.")
+            return -1
+        warnings.warn(
+            f"{which}='on' requested but the Hamiltonian does not carry "
+            f"this symmetry"
+            + (" ([H, prod sigma^x] != 0 -- e.g. a Zeeman field or "
+               "unpaired S+/S- terms)" if which == "spin_flip" else
+               " (complex matrix elements in the computational basis)")
+            + "; running without it.",
+            RuntimeWarning, stacklevel=3)
+        return 0
+    raise ValueError(
+        f"{which} must be one of 'auto'|'on'|'off'|'require' "
+        f"(or None / bool), got {value!r}")
+
+
 def solve(
     H: Union[Operator, FixedSzOperator],
     *,
@@ -848,11 +1028,15 @@ def solve(
     sector: Optional[Sequence[int]] = None,
     sz: Optional[int] = None,
     auto_sz: bool = True,
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
+    lattice: Optional[Any] = None,
     output_dir: str = "",
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
     # Thermal-method first-class shortcuts (only consulted for
-    # mTPQ / cTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
+    # mTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
     # the relevant knob is num_eigenvalues + max_iterations).
     num_samples: Optional[int] = None,
     target_beta: Optional[float] = None,
@@ -904,7 +1088,7 @@ def solve(
         * thermal (returns ``EDResults`` with the imaginary-time
           trajectory in ``eigenvalues`` and the post-processed
           thermodynamic curve on disk in ``output_dir``):
-          ``mTPQ``, ``cTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
+          ``mTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"`` /
         ``"mpi"`` / ``"mpi_gpu"``. ``None`` (default) means ``"auto"``.
@@ -1037,7 +1221,9 @@ def solve(
         return full_spectrum_compute(
             H, symmetry=symmetry,
             sz_conserved=(None if auto_sz else False),
-            spin_length=spin_l, device=_dev, verbose=verbose)
+            spin_length=spin_l, device=_dev,
+            spin_flip=spin_flip, time_reversal=time_reversal,
+            point_group=point_group, lattice=lattice, verbose=verbose)
 
     fixed_sz_input = isinstance(H, FixedSzOperator)
     num_sites = int(H.num_sites)
@@ -1143,7 +1329,7 @@ def solve(
     # Allow this combination through to `_diag_via_mpi`.
     if symmetry is not None and is_tpq and not use_mpi:
         raise ValueError(
-            "qed.solve(H, solver='mTPQ'/'cTPQ', symmetry=..., "
+            "qed.solve(H, solver='mTPQ', symmetry=..., "
             "device='cpu'/'gpu') is not supported: TPQ acts on a "
             "single random state across the whole sector and per-"
             "symmetry-block diagonalisation does not factor through "
@@ -1248,6 +1434,8 @@ def solve(
     #     * CPU + no-symmetry → orchestrator with the CPU lane
     #       (the fastest path, no I/O).
     # ------------------------------------------------------------------
+    symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose,
+                                     lattice=lattice)
     if symmetry is not None:
         if use_mpi:
             return _diag_via_mpi(
@@ -1266,6 +1454,9 @@ def solve(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
             verbose=verbose,
+            spin_flip=spin_flip,
+            time_reversal=time_reversal,
+            point_group=point_group,
         )
 
     if use_mpi:
@@ -1366,7 +1557,6 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
@@ -1818,7 +2008,6 @@ def _thermal_method_names() -> set[str]:
     """
     return {
         "mTPQ",
-        "cTPQ",
         "FTLM",
         "LTLM",
         "KPM_DOS",
@@ -1842,7 +2031,7 @@ def _resolve_solver(
 
     String lookup is case-insensitive: ``"lanczos"`` / ``"LANCZOS"`` /
     ``"Lanczos"`` all resolve to ``DiagonalizationMethod.LANCZOS``. The
-    TPQ enum names are mixed-case in C++ (``mTPQ``, ``cTPQ``); we
+    TPQ enum names are mixed-case in C++ (``mTPQ``); we
     accept them in any case so users don't have to memorise the
     spelling.
     """
@@ -1858,7 +2047,7 @@ def _resolve_solver(
             if upper in members:
                 return members[upper]
             # Build a case-folded lookup for the rest (handles "mtpq",
-            # "ctpq_gpu", etc. against the mixed-case enum keys).
+            # etc. against the mixed-case enum keys).
             folded = {name.casefold(): name for name in members}
             key = solver.casefold()
             if key in folded:
@@ -2617,8 +2806,9 @@ def _aggregate_thermal_sectors(
             "_aggregate_thermal_sectors: the following per-sector "
             f"result files are missing the /Z dataset (or its length "
             f"disagrees with /betas) and cannot be combined: {missing}. "
-            "If the underlying binary is canonical-TPQ, ensure it was "
-            "built after the cTPQ self-consistent-Z fix."
+            "If the underlying binary is canonical-TPQ (the MPI "
+            "distributed lane), ensure it was built after the "
+            "self-consistent-Z fix."
         )
 
     have_lnz = all(len(lnz) == n_beta for _, _, _, lnz in raw)
@@ -2729,6 +2919,9 @@ def _diag_with_symmetry(
     *,
     sz: Optional[int],
     verbose: bool,
+    spin_flip="auto",
+    time_reversal="auto",
+    point_group="auto",
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -2803,7 +2996,7 @@ def _diag_with_symmetry(
         # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
         #
         # Phase B of the "Backend x Symmetries x Workflows" plan
-        # (May 2026): thermal methods (FTLM / LTLM / mTPQ / cTPQ /
+        # (May 2026): thermal methods (FTLM / LTLM / mTPQ /
         # KPM_DOS) now route through the matching
         # ``workflows_thermal_streaming_symmetry_directory`` binding,
         # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
@@ -2840,6 +3033,27 @@ def _diag_with_symmetry(
         # FULL) -- the original behaviour.
         opts = _ed_params_to_solve_options(params, method)
         opts.use_symmetry = True
+        # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
+        # with 'on' = auto + detection report (warn-and-continue when
+        # the Hamiltonian lacks the symmetry).
+        opts.spin_flip = resolve_discrete_toggle(
+            operator, spin_flip, "spin_flip", verbose=verbose)
+        opts.time_reversal = resolve_discrete_toggle(
+            operator, time_reversal, "time_reversal", verbose=verbose)
+        # Stage 7a: star reduction. The non-abelian residue of the
+        # spatial group permutes the abelian irreps; related sectors
+        # are isospectral, so the C++ plan solves one representative
+        # per orbit and copies the spectrum to its partners.
+        _star = getattr(symmetry, "star_perms", None) or []
+        if _star and point_group not in (False, 0, "off", "none"):
+            from .star_reduction import star_maps_from_info
+            _maps = star_maps_from_info(info, _star)
+            if _maps:
+                opts.star_maps = _maps
+                if verbose:
+                    print(f"[qed] point group: {len(_maps)} residue "
+                          "automorphisms fold the irrep sectors into "
+                          "isospectral stars (solve one per star).")
         if fixed_sz_n_up is not None:
             opts.use_fixed_sz = True
             opts.n_up         = fixed_sz_n_up
@@ -2953,6 +3167,10 @@ def full_spectrum(
     sz_conserved: Optional[bool] = None,
     spin_length: float = 0.5,
     device: str = "cpu",
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
+    lattice: Optional[Any] = None,
     verbose: bool = False,
 ) -> EDResults:
     """Compute the COMPLETE eigenvalue spectrum of ``operator`` decomposed
@@ -2988,10 +3206,26 @@ def full_spectrum(
     import math
 
     N = int(operator.num_sites)
+    symmetry = resolve_auto_symmetry(operator, symmetry, verbose=verbose,
+                                     lattice=lattice)
     info = _normalize_symmetry_info(operator, symmetry)
     if sz_conserved is None:
         sz_conserved = _operator_conserves_sz(operator)
     use_gpu = isinstance(device, str) and device.lower() in ("gpu", "cuda")
+    _sf = resolve_discrete_toggle(operator, spin_flip, "spin_flip",
+                                  verbose=verbose)
+    _tr = resolve_discrete_toggle(operator, time_reversal, "time_reversal",
+                                  verbose=verbose)
+    # Flip transport for the COMPLETE spectrum: [H, X] == 0 makes the
+    # n_up and N - n_up magnetisation blocks isospectral, so the dense
+    # sweep only diagonalises n_up <= N/2 and mirrors the spectra.
+    _flip_transport = False
+    if _sf != 0 and sz_conserved:
+        try:
+            _flip_transport = bool(
+                _core.detect_hamiltonian_symmetries(operator)["spin_flip"])
+        except Exception:
+            _flip_transport = False
 
     # NON-ABELIAN spatial group: the streaming-symmetry rep path below only
     # handles abelian (1-D irrep) projection and would silently restrict to a
@@ -3001,14 +3235,47 @@ def full_spectrum(
     # one call. This is the dense full diagonalisation benefiting from the full
     # non-abelian symmetry machinery.
     _gens = _raw_generators(symmetry)
+    _star = list(getattr(symmetry, "star_perms", None) or []) \
+        if symmetry is not None else []
+    gens_full = None
     if _gens is not None and _generators_nonabelian(_gens):
+        gens_full = [list(g) for g in _gens]     # explicit non-abelian input
+    elif (_gens is not None and _star
+          and point_group not in (False, 0, "off", "none")):
+        cand = [list(g) for g in _gens] + [list(p) for p in _star]
+        if _generators_nonabelian(cand):
+            gens_full = cand                     # clique + residue = full group
+    if gens_full is not None:
+        # SAB engine: FULL-group projection including d_G >= 2 irreps --
+        # the strongest dense reduction (blocks ~ dim / |G|). The point
+        # group is inside the projection here, so star reduction is
+        # subsumed; the flip transport still halves the Sz sweep.
         if verbose:
             print("[qed.full_spectrum] non-abelian group -> SAB engine "
-                  "(full d_G reduction)")
-        spec = _core.symmetry_adapted_eigenvalues(
-            operator, _gens, n_up=-1, use_gpu=use_gpu)
+                  "(full d_G reduction)"
+                  + (", flip transport halves the Sz sweep"
+                     if _flip_transport else ""))
+        eigs: list[float] = []
+        if sz_conserved:
+            top = N // 2 if _flip_transport else N
+            for n_up in range(top + 1):
+                spec = _core.symmetry_adapted_eigenvalues(
+                    operator, gens_full, n_up=int(n_up), use_gpu=use_gpu)
+                block = [float(e) for e in spec["eigenvalues"]]
+                eigs.extend(block)
+                if _flip_transport and n_up * 2 != N:
+                    eigs.extend(block)           # isospectral N - n_up mirror
+                if verbose:
+                    print(f"[qed.full_spectrum]   SAB n_up={n_up} "
+                          f"got={len(block)}"
+                          + (" (mirrored)" if _flip_transport
+                             and n_up * 2 != N else ""))
+        else:
+            spec = _core.symmetry_adapted_eigenvalues(
+                operator, gens_full, n_up=-1, use_gpu=use_gpu)
+            eigs = [float(e) for e in spec["eigenvalues"]]
         out = EDResults()
-        out.eigenvalues = sorted(float(e) for e in spec["eigenvalues"])
+        out.eigenvalues = sorted(eigs)
         return out
 
     # No spatial symmetry: a plain dense full diagonalisation already
@@ -3036,7 +3303,15 @@ def full_spectrum(
         _write_symmetry_directory(tmpdir, info)
 
         sz_values: list[Optional[int]] = (
-            list(range(N + 1)) if sz_conserved else [None])
+            (list(range(N // 2 + 1)) if _flip_transport
+             else list(range(N + 1)))
+            if sz_conserved else [None])
+        # Stage 7a star maps for the per-Sz sector loops.
+        _star_maps = None
+        if _star and point_group not in (False, 0, "off", "none") \
+                and info is not None:
+            from .star_reduction import star_maps_from_info
+            _star_maps = star_maps_from_info(info, _star) or None
         if verbose:
             print(f"[qed.full_spectrum] N={N} |G|="
                   f"{len(info.get('max_clique', []))} "
@@ -3059,12 +3334,20 @@ def full_spectrum(
             opts = _ed_params_to_solve_options(
                 params, DiagonalizationMethod.FULL)
             opts.use_symmetry = True
+            opts.spin_flip = _sf
+            opts.time_reversal = _tr
+            if _star_maps:
+                opts.star_maps = _star_maps
             if n_up is not None:
                 opts.use_fixed_sz = True
                 opts.n_up = int(n_up)
             gs = _core.workflows_solve_streaming_symmetry_directory(
                 tmpdir, N, float(spin_length), opts, n_up)
             eigs.extend(gs.eigenvalues)
+            if (_flip_transport and n_up is not None
+                    and int(n_up) * 2 != N):
+                # Isospectral N - n_up mirror of the whole Sz block.
+                eigs.extend(gs.eigenvalues)
             _eps = getattr(gs, "eigenvalues_per_sector", None)
             if _eps:
                 eigs_per_sector.extend([list(s) for s in _eps])

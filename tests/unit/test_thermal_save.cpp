@@ -11,7 +11,7 @@
 //     Python facade mirrors into ``EDResults.eigenvectors_path``).
 //   * FTLM / LTLM / KPM_DOS persist the aggregated thermodynamic curves
 //     (``T, E, Cv, S, F``) under ``/ftlm/averaged/<...>``.
-//   * mTPQ / cTPQ persist the per-sample trajectory rows
+//   * mTPQ persists the per-sample trajectory rows
 //     (``/tpq/samples/sample_<s>/thermodynamics``); when
 //     ``opts.probe_betas`` is set they ALSO snapshot the running state
 //     vector at the nearest kernel-step beta and write it to
@@ -20,7 +20,7 @@
 //     state vectors so callers can chain them into ``ed::workflows::spectral``
 //     (the TPQ-to-CF pipeline) without an HDF5 round-trip.
 //
-// Covered methods: FTLM, LTLM, KPM_DOS (thermo-only) + mTPQ, cTPQ
+// Covered methods: FTLM, LTLM, KPM_DOS (thermo-only) + mTPQ
 // (trajectory + probe-beta state snapshots).
 // =============================================================================
 
@@ -189,39 +189,6 @@ TEST_CASE("ed::thermal persists mTPQ trajectory + probe-beta state snapshots",
     std::filesystem::remove_all(outdir);
 }
 
-TEST_CASE("ed::thermal persists cTPQ trajectory + probe-beta state snapshots",
-          "[orchestrator][thermal-save][tpq]") {
-    auto H = heisen();
-    const std::string outdir = make_scratch_dir("thermal_save", "ctpq");
-
-    ed::workflows::ThermalOptions opts;
-    opts.method        = ed::workflows::ThermalOptions::Method::cTPQ;
-    opts.num_samples   = 1;
-    opts.krylov_dim    = 40;          // cap on Taylor steps
-    opts.delta_beta    = 0.1;
-    opts.taylor_order  = 8;
-    opts.temp_min      = 0.1;
-    opts.temp_max      = 5.0;
-    opts.num_temp_bins = 8;
-    opts.random_seed   = 42;
-    opts.output_dir    = outdir;
-    opts.probe_betas   = {1.0, 2.0};
-
-    auto R = ed::workflows::thermal(*H, opts);
-
-    const std::string h5 = outdir + "/ed_results.h5";
-    CHECK(std::filesystem::exists(h5));
-    CHECK(R.hdf5_path == h5);
-    CHECK(dataset_exists(h5, "/tpq/samples/sample_0/thermodynamics"));
-    REQUIRE(R.tpq_sample_betas.size() == opts.num_samples);
-    REQUIRE_FALSE(R.tpq_state_snapshots.empty());
-    for (const auto& snap : R.tpq_state_snapshots) {
-        REQUIRE(snap.psi.size() == (std::size_t{1} << N_SITES));
-    }
-
-    std::filesystem::remove_all(outdir);
-}
-
 TEST_CASE("ed::thermal leaves hdf5_path empty when output_dir is unset",
           "[orchestrator][thermal-save]") {
     auto H = heisen();
@@ -249,7 +216,7 @@ TEST_CASE("ed::thermal leaves hdf5_path empty when output_dir is unset",
 //      ``/tpq/samples/sample_<s>/states/beta_<b>`` round-trips them
 //      byte-for-byte under ``HDF5IO::loadTPQState``.
 //
-//   2. StreamingSymmetryOperator::SectorView + cTPQ + probe_betas:
+//   2. StreamingSymmetryOperator::SectorView + mTPQ + probe_betas:
 //      Same contract for symmetry sectors. The state vectors are
 //      stored in the ORBIT basis (length = sector dim, NOT full Hilbert
 //      dim). This is the matvec basis the ``CF`` / ``KpmDynamical`` lanes
@@ -401,60 +368,6 @@ TEST_CASE("ed::thermal persists FixedSzOperator mTPQ snapshots at sector dim",
     }
 
     std::filesystem::remove_all(outdir);
-}
-
-TEST_CASE("ed::thermal persists symmetry-sector cTPQ snapshots",
-          "[orchestrator][thermal-save][tpq][symmetry]") {
-    constexpr uint64_t N = 6;
-    // Force CPU lane so the test does not depend on a CUDA device.
-    setenv("ED_GPU_SYMMETRY_MIRROR", "0", 1);
-    const std::string sym_dir = write_zN_translation_fixture(
-        N, "thermal_save", "sym_ctpq_sym");
-
-    SymmetryGroupInfo info;
-    info.loadFromDirectory(sym_dir);
-    auto ops = ed::symmetry::build_full_sector_operators(
-        N, 0.5f, info,
-        [&](ed::symmetry::SectorOperator& op) {
-            add_heisenberg_pbc_terms(op, N, 1.0);
-        });
-    ed::symmetry::SectorOperator& view = largest_sector(ops);
-    REQUIRE(view.dim() > 0);
-
-    const std::string outdir = make_scratch_dir(
-        "thermal_save", "sym_ctpq_out");
-    ed::workflows::ThermalOptions opts;
-    opts.method        = ed::workflows::ThermalOptions::Method::cTPQ;
-    opts.num_samples   = 1;
-    opts.krylov_dim    = 20;
-    opts.delta_beta    = 0.1;
-    opts.taylor_order  = 8;
-    opts.temp_min      = 0.1;
-    opts.temp_max      = 5.0;
-    opts.num_temp_bins = 6;
-    opts.random_seed   = 17;
-    opts.output_dir    = outdir;
-    opts.probe_betas   = {0.5, 2.0};
-
-    auto R = ed::workflows::thermal(view, opts);
-
-    REQUIRE_FALSE(R.tpq_state_snapshots.empty());
-    const std::size_t sector_dim = view.dim();
-    for (const auto& snap : R.tpq_state_snapshots) {
-        REQUIRE(snap.psi.size() == sector_dim);
-    }
-    const std::string h5 = outdir + "/ed_results.h5";
-    CHECK(R.hdf5_path == h5);
-    for (const auto& snap : R.tpq_state_snapshots) {
-        std::vector<Complex> loaded;
-        REQUIRE(HDF5IO::loadTPQState(h5, snap.sample_index,
-                                      snap.effective_beta, loaded));
-        REQUIRE(loaded.size() == sector_dim);
-    }
-
-    std::filesystem::remove_all(outdir);
-    std::filesystem::remove_all(sym_dir);
-    unsetenv("ED_GPU_SYMMETRY_MIRROR");
 }
 
 TEST_CASE("ed::thermal persists fixed-Sz symmetry-sector mTPQ snapshots",

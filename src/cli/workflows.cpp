@@ -34,6 +34,7 @@
 // =============================================================================
 
 #include <ed/cli/workflows.h>
+#include <tuple>
 
 #include <iostream>
 #include <chrono>
@@ -939,7 +940,10 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
  * @brief Compute dynamical response (spectral functions)
  */
 void compute_dynamical_response_workflow(const EDConfig& config) {
-    auto [rank, size] = get_mpi_rank_size_safe();
+    // Plain locals (not a structured binding): C++17 forbids capturing
+    // structured bindings in lambdas (clang enforces; gcc extension).
+    int rank = 0, size = 1;
+    std::tie(rank, size) = get_mpi_rank_size_safe();
 
     if (!config.dynamical.thermal_average) {
         if (rank == 0) {
@@ -1931,7 +1935,10 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
  * @brief Compute static response (thermal expectation values)
  */
 void compute_static_response_workflow(const EDConfig& config) {
-    auto [rank, size] = get_mpi_rank_size_safe();
+    // Plain locals (not a structured binding): C++17 forbids capturing
+    // structured bindings in lambdas (clang enforces; gcc extension).
+    int rank = 0, size = 1;
+    std::tie(rank, size) = get_mpi_rank_size_safe();
 
     if (rank == 0) {
         std::cout << "\nStatic Response Calculation\n";
@@ -2479,7 +2486,10 @@ void compute_static_response_workflow(const EDConfig& config) {
  * - Continued fraction avoids explicit eigendecomposition
  */
 void compute_ground_state_dssf_workflow(const EDConfig& config) {
-    auto [rank, size] = get_mpi_rank_size_safe();
+    // Plain locals (not a structured binding): C++17 forbids capturing
+    // structured bindings in lambdas (clang enforces; gcc extension).
+    int rank = 0, size = 1;
+    std::tie(rank, size) = get_mpi_rank_size_safe();
 
     if (rank == 0) {
         std::cout << "\n==========================================\n";
@@ -2948,7 +2958,10 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
 // dispatch wiring lives in `src/cli/dssf_engine.cpp`; this is the body.
 // ============================================================================
 void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
-    auto [rank, size] = get_mpi_rank_size_safe();
+    // Plain locals (not a structured binding): C++17 forbids capturing
+    // structured bindings in lambdas (clang enforces; gcc extension).
+    int rank = 0, size = 1;
+    std::tie(rank, size) = get_mpi_rank_size_safe();
     (void)size;
 
     if (rank == 0) {

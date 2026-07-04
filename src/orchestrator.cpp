@@ -12,7 +12,7 @@
 //                  or block_lanczos_kernel<Backend>      (multi eig, BLAS-3)
 //                  or krylov_schur_kernel<Backend>       (many eigs / harder problems)
 //                  or full_diag fallback                  (small dim)
-//     ed::thermal   -> tpq_kernel<Backend>  (mTPQ, cTPQ)
+//     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
 //                  or the existing FTLM / LTLM / KpmDos kernels (CPU-only
 //                     until they migrate to Backend; orchestrator routes
 //                     CPU-friendly cases here).
@@ -53,7 +53,6 @@
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/TPQ.h>      // compute_tpq_thermo_from_trajectories aggregator
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
-#include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
@@ -224,8 +223,8 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
 // ---------------------------------------------------------------------------
 // Exact canonical thermodynamics from a complete eigenspectrum.
 //
-// Used as a small-sector fallback for mTPQ / cTPQ: when the Hilbert-space
-// dimension is small (D <= SMALL_THERMAL_DIM), the stochastic mTPQ / cTPQ
+// Used as a small-sector fallback for mTPQ: when the Hilbert-space
+// dimension is small (D <= SMALL_THERMAL_DIM), the stochastic mTPQ
 // estimator has large per-sample variance (no algorithmic bug — the inherent
 // limitation is that TPQ needs D >> num_samples for good typicality). For
 // the sz_spatial symmetry mode on N=8, the (n_up, k) sub-sectors have
@@ -886,7 +885,7 @@ GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
 }
 
 ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
-    // All five lanes are wired: mTPQ + cTPQ dispatch through the unified
+    // All lanes are wired: mTPQ dispatches through the unified
     // `tpq_kernel` via the Phase 2.4 facades; FTLM / LTLM / KpmDos
     // dispatch through their own `*_kernel<Backend>` templates (CPU
     // implementations today, GPU when the kernels migrate). The variant
@@ -953,7 +952,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     // per-sample Krylov basis + the exact-eigenpair Lanczos basis
                     vecs = std::max<std::size_t>(opts.krylov_dim, 4)
                          + 2 * opts.num_exact + 34; break;
-                default:  // mTPQ / cTPQ / KpmDos: a handful of state vectors
+                default:  // mTPQ / KpmDos: a handful of state vectors
                     vecs = 8; break;
             }
         }
@@ -997,9 +996,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     const auto t0 = std::chrono::steady_clock::now();
 
     // -----------------------------------------------------------------------
-    // Small-sector exact-thermal fallback for mTPQ / cTPQ.
+    // Small-sector exact-thermal fallback for mTPQ.
     //
-    // mTPQ and cTPQ are stochastic methods that need D >> num_samples for
+    // mTPQ is a stochastic method that needs D >> num_samples for
     // good typicality. For small sectors (D <= SMALL_THERMAL_DIM), the
     // per-sample variance is too high for the dE tolerance even with 20+
     // samples. The primary symptom is the sz_spatial mTPQ failure: within an
@@ -1012,8 +1011,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // high T) as compute_tpq_thermo_from_trajectories, so it plugs in
     // correctly to combine_sector_thermodynamics for Sz/spatial recombination.
     // -----------------------------------------------------------------------
-    const bool is_tpq_method = (opts.method == ThermalOptions::Method::mTPQ ||
-                                 opts.method == ThermalOptions::Method::cTPQ);
+    const bool is_tpq_method = (opts.method == ThermalOptions::Method::mTPQ);
     if (is_tpq_method &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
@@ -1232,78 +1230,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 }
             }
         }, variant);
-    } else if (opts.method == ThermalOptions::Method::cTPQ) {
-        std::visit([&](auto& backend_uptr) {
-            using BPtr = std::decay_t<decltype(backend_uptr)>;
-            using B = typename BPtr::element_type;
-            ed::thermal::CtpqOptions kopts;
-            kopts.num_samples  = opts.num_samples;
-            // SOTA beta_max pick (May 2026): if the caller asked for
-            // a coldest temperature ``temp_min`` smaller than the
-            // default beta_max would cover, extend beta_max so the
-            // trajectory actually brackets every target beta.
-            const double user_beta_max = (opts.temp_min > 0.0)
-                ? 1.0 / opts.temp_min : opts.beta_max;
-            kopts.beta_max     = std::max(opts.beta_max, 1.1 * user_beta_max);
-            kopts.delta_beta   = opts.delta_beta;
-            kopts.taylor_order = opts.taylor_order;
-            // Closing-the-symmetry-gap follow-up (May 2026): respect the
-            // user's ``max_iterations`` knob as a hard CAP on the
-            // Taylor step count. Without this cap, cTPQ silently runs
-            // ``beta_max / delta_beta`` steps (default 20.0 / 0.01 =
-            // 2000 steps) even when the user asked for ``max_iterations
-            // = 200``, which inflates the per-sector matvec count by
-            // 10x compared to mTPQ on the same call. The orchestrator
-            // pipes ``max_iterations`` into ``opts.krylov_dim`` for
-            // both mTPQ and cTPQ; mTPQ already honours it (l.550
-            // above); this brings cTPQ to parity. ``0`` means "no
-            // explicit cap" which preserves legacy behaviour.
-            if (opts.krylov_dim > 0 && opts.delta_beta > 0.0) {
-                const double cap_beta = static_cast<double>(opts.krylov_dim)
-                                       * opts.delta_beta;
-                if (cap_beta < kopts.beta_max) {
-                    kopts.beta_max = cap_beta;
-                }
-            }
-            kopts.random_seed  = opts.random_seed;
-            kopts.output_dir   = opts.output_dir;
-            kopts.probe_betas  = opts.probe_betas;
-            auto matvec = H.template bind<B>();
-            auto kres = ed::thermal::ctpq_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
-            R.ground_state_energy = kres.energies.empty()
-                ? 0.0 : *std::min_element(kres.energies.begin(),
-                                          kres.energies.end());
-            if (!R.thermo.temperatures.empty()) {
-                // Absolute entropy / free energy (ln(D) baseline); see the
-                // mTPQ branch above for the rationale.
-                ThermodynamicData td = compute_tpq_thermo_from_trajectories(
-                    kres.sample_inv_temps, kres.sample_energies,
-                    kres.sample_variances, R.thermo.temperatures,
-                    static_cast<double>(H.geometry().global_dim));
-                if (!td.energy.empty()) {
-                    R.thermo = std::move(td);
-                }
-            }
-            R.tpq_sample_betas     = std::move(kres.sample_inv_temps);
-            R.tpq_sample_energies  = std::move(kres.sample_energies);
-            R.tpq_sample_variances = std::move(kres.sample_variances);
-            for (std::size_t s = 0; s < kres.state_snapshots.size(); ++s) {
-                for (std::size_t p = 0; p < kres.state_snapshots[s].size(); ++p) {
-                    auto& psi = kres.state_snapshots[s][p];
-                    if (psi.empty()) continue;
-                    TpqStateSnapshot snap;
-                    snap.sample_index   = s;
-                    snap.requested_beta = (p < opts.probe_betas.size())
-                                              ? opts.probe_betas[p]
-                                              : 0.0;
-                    snap.effective_beta = kres.state_snapshot_betas[s][p];
-                    snap.psi            = std::move(psi);
-                    R.tpq_state_snapshots.push_back(std::move(snap));
-                }
-            }
-        }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {
         // Phase E of the "Close CPU/GPU Gaps" plan (May 2026): the
         // FTLM kernel facade now dispatches on Backend type internally
@@ -1500,7 +1426,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // resulting path via ``R.hdf5_path``.
     //
     // Method-conditional payload (user-confirmed policy):
-    //   - mTPQ / cTPQ: the full per-sample (beta, E, var, step)
+    //   - mTPQ: the full per-sample (beta, E, var, step)
     //     trajectory (one row per kernel step, appended via
     //     ``HDF5IO::appendTPQThermodynamics``), plus state vectors at
     //     the betas closest to ``opts.probe_betas`` written via
@@ -1516,7 +1442,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // ``rank_<r>.h5`` files written by ``ed_distributed_main`` remain
     // the canonical location for those. The unified file therefore
     // ships:
-    //   * mTPQ / cTPQ: per-sample trajectory rows (always on rank 0).
+    //   * mTPQ: per-sample trajectory rows (always on rank 0).
     //     The probe-beta state snapshots are written only when they are
     //     populated -- which is the serial case; in the distributed
     //     lane ``R.tpq_state_snapshots`` is empty on rank 0 and the
@@ -1537,7 +1463,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
             const bool is_tpq =
                 (opts.method == ThermalOptions::Method::mTPQ
-                 || opts.method == ThermalOptions::Method::cTPQ);
+);
             if (is_tpq) {
                 // (a) Per-sample trajectory rows.
                 const std::size_t S =

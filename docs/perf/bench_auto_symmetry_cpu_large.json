@@ -1,0 +1,56 @@
+[
+ {
+  "verb": "solve (GS, sz=N/2)",
+  "N": 20,
+  "device": "cpu",
+  "t_off": 0.13262457599921618,
+  "t_auto": 1.2668157900043298,
+  "blocks": 1,
+  "max_block": 4654
+ },
+ {
+  "verb": "spectral (DSSF S^z_Q)",
+  "N": 20,
+  "device": "cpu",
+  "t_off": 0.7977319130004616,
+  "t_auto": 0.9491561109898612,
+  "blocks": null,
+  "max_block": null
+ },
+ {
+  "verb": "solve (GS, sz=N/2)",
+  "N": 24,
+  "device": "cpu",
+  "t_off": null,
+  "t_auto": 5.734996578001301,
+  "blocks": 1,
+  "max_block": 56450
+ },
+ {
+  "verb": "spectral (DSSF S^z_Q)",
+  "N": 24,
+  "device": "cpu",
+  "t_off": null,
+  "t_auto": 5.893377358006546,
+  "blocks": null,
+  "max_block": null
+ },
+ {
+  "verb": "solve (GS, sz=N/2)",
+  "N": 28,
+  "device": "cpu",
+  "t_off": null,
+  "t_auto": 69.12434913200559,
+  "blocks": 1,
+  "max_block": 716728
+ },
+ {
+  "verb": "spectral (DSSF S^z_Q)",
+  "N": 28,
+  "device": "cpu",
+  "t_off": null,
+  "t_auto": 107.61032654000155,
+  "blocks": null,
+  "max_block": null
+ }
+]

@@ -12,7 +12,7 @@
 // the ~13 bespoke operator types the refactor collapses into a single
 // ``Operator<BasisPolicy, MemSpace>``. The MemSpace=DistributedHost lane of
 // that template needs the SAME comm-plan logic, but driven by a
-// ``DistributedBasisPolicy<InnerPolicy>`` rather than hard-wired to the
+// the distributed matvec impl rather than hard-wired to the
 // full-Hilbert 1D row slab.
 //
 // ``CommPlan`` is that logic, lifted out verbatim and made standalone:

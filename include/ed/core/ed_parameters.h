@@ -78,7 +78,7 @@ struct EDParameters {
 
     // ------------------------------------------------------------------
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    // user-supplied probe-beta list for mTPQ/cTPQ state-vector
+    // user-supplied probe-beta list for mTPQ state-vector
     // snapshots. The Python facade (``qed.thermal(probe_betas=[...])``)
     // routes here, then ``_ed_params_to_thermal_options`` forwards it
     // to ``_core.ThermalOptions::probe_betas``. Empty (default) means
@@ -267,5 +267,5 @@ struct EDParameters {
     // were retired with their solvers in the minimalist-architecture rev
     // (May 2026). EDParameters now carries only the knobs that are still
     // used by the kept solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
-    // FULL / FTLM / LTLM / mTPQ / cTPQ / KPM_DOS).
+    // FULL / FTLM / LTLM / mTPQ / KPM_DOS).
 };

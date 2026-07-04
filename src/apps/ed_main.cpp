@@ -105,7 +105,7 @@ void print_help(const char* prog_name) {
     std::cout << "  --calc_observables      (deprecated) Alias for --save-thermal-states\n";
     std::cout << "  --measure_spin          (deprecated) Alias for --compute-spin-correlations\n\n";
     
-    std::cout << "Thermal Options (for mTPQ/cTPQ/FULL):\n";
+    std::cout << "Thermal Options (for mTPQ/FULL):\n";
     std::cout << "  --samples=<n>           Number of TPQ samples\n";
     std::cout << "  --temp_min=<T>          Minimum temperature\n";
     std::cout << "  --temp_max=<T>          Maximum temperature\n";
@@ -196,7 +196,7 @@ void print_help(const char* prog_name) {
     std::cout << "  Use mpirun/mpiexec to run with multiple ranks:\n";
     std::cout << "    mpirun -np <N> " << prog_name << " <directory> [options]\n";
     std::cout << "  MPI parallelization automatically applies to:\n";
-    std::cout << "    - TPQ samples (mTPQ, cTPQ)\n";
+    std::cout << "    - TPQ samples (mTPQ)\n";
     std::cout << "    - Dynamical response (temperature × operator tasks)\n";
     std::cout << "    - Static response (operator tasks)\n\n";
     
@@ -223,7 +223,6 @@ void print_help(const char* prog_name) {
     std::cout << "\n";
     std::cout << "  Thermal Methods:\n";
     std::cout << "    mTPQ                   Microcanonical TPQ\n";
-    std::cout << "    cTPQ                   Canonical TPQ\n";
     std::cout << "    mTPQ_MPI               MPI parallel mTPQ (requires MPI build)\n";
     std::cout << "    mTPQ_CUDA              GPU-accelerated mTPQ (requires CUDA build)\n";
     std::cout << "    FTLM                   Finite Temperature Lanczos Method\n";
@@ -244,7 +243,7 @@ void print_help(const char* prog_name) {
     std::cout << "    FTLM_GPU               GPU-accelerated Finite Temperature Lanczos\n";
     std::cout << "    FTLM_GPU_FIXED_SZ      GPU FTLM for fixed Sz sector\n";
     std::cout << "    mTPQ_GPU               GPU-accelerated microcanonical TPQ\n";
-    std::cout << "    cTPQ_GPU               GPU-accelerated canonical TPQ\n\n";
+    std::cout << "\n";
     
     std::cout << "For detailed parameters of any method, use:\n";
     std::cout << "  " << prog_name << " --method-info=<METHOD_NAME>\n";

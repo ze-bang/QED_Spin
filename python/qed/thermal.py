@@ -71,6 +71,7 @@ from .workflow import (                 # in-memory symmetry -> temp directory
     _write_operator_directory as _write_operator_directory,
     _write_symmetry_directory as _write_symmetry_directory,
     _normalize_symmetry_info as _normalize_symmetry_info,
+    resolve_auto_symmetry as _resolve_auto_symmetry,
     SymmetryArg as SymmetryArg,
 )
 
@@ -92,7 +93,6 @@ _THERMAL_METHOD_MAP = {
     DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
     DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
     DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
-    DiagonalizationMethod.cTPQ:    _core.ThermalMethod.cTPQ,
     DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
 }
 
@@ -110,8 +110,7 @@ def _ed_params_to_thermal_options(
     opts.num_samples   = int(params.num_samples)
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
     # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations; cTPQ uses it as a CAP on the
-    # number of Taylor steps. For mTPQ/cTPQ we map the user's
+    # the number of (L - H) iterations. For mTPQ we map the user's
     # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
     # closes a gap where the legacy adapter hardcoded 100 iterations
     # for the TPQ lanes and never honoured the user's request.
@@ -126,7 +125,7 @@ def _ed_params_to_thermal_options(
             opts.num_exact = int(_nv)
     elif method == DiagonalizationMethod.LTLM:
         opts.krylov_dim = int(params.ltlm_krylov_dim)
-    elif method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+    elif method == DiagonalizationMethod.mTPQ:
         # ``tpq_max_steps`` is populated from ``qed.thermal(max_iterations=...)``
         # by ``_ed_params_to_thermal_options``'s caller in workflow.py.
         # Fall back to ``max_iterations`` if the TPQ-specific field
@@ -135,11 +134,6 @@ def _ed_params_to_thermal_options(
         if steps <= 0:
             mi = getattr(params, "max_iterations", 0)
             steps = int(mi) if mi else 0
-        if steps <= 0 and method == DiagonalizationMethod.cTPQ:
-            # cTPQ uses ``krylov_dim`` as a CAP on the number of Taylor
-            # steps; keep the historical default so an unset call does
-            # not run the full beta_max/delta_beta ladder.
-            steps = 1000
         # mTPQ: ``steps == 0`` reaches the orchestrator as the auto
         # sentinel -> it sizes the iteration count from the spectral
         # bounds to bracket beta_max = 1/T_min.
@@ -178,7 +172,7 @@ def _ed_params_to_thermal_options(
     if hasattr(opts, "mtpq_fp32"):
         opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # probe-beta list for mTPQ/cTPQ state-vector snapshots.
+    # probe-beta list for mTPQ state-vector snapshots.
     pb = list(getattr(params, "tpq_probe_betas", []) or [])
     if pb:
         opts.probe_betas = pb
@@ -199,12 +193,20 @@ def _ed_result_from_thermal_result(
     # the thermal orchestrator's ``ed_results.h5`` path through the
     # legacy ``eigenvectors_path`` field. ``qed.thermal(output_dir=...)``
     # now produces a self-describing HDF5 (trajectory + state vectors
-    # at probe-betas for mTPQ/cTPQ; aggregated thermo curves for
+    # at probe-betas for mTPQ; aggregated thermo curves for
     # FTLM/LTLM/KPM_DOS).
     h5_path = str(getattr(tr, "hdf5_path", "") or "")
     out.eigenvectors_computed = bool(h5_path)
     out.eigenvectors_path     = h5_path
     return out
+
+
+def _sym_toggle_int(value, name: str, operator=None, verbose=True) -> int:
+    """Map a spin_flip / time_reversal kwarg to the C++ toggle int:
+    -1 auto / 0 off / 1 require, with 'on' = auto + detection report.
+    Delegates to :func:`qed.workflow.resolve_discrete_toggle`."""
+    from .workflow import resolve_discrete_toggle
+    return resolve_discrete_toggle(operator, value, name, verbose=verbose)
 
 
 def _thermal_via_workflows_all_sz_streaming_symmetry(
@@ -218,6 +220,9 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     *,
     use_gpu: bool = False,
     use_mpi: bool = False,
+    spin_flip: int = -1,
+    time_reversal: int = -1,
+    star_maps: Optional[list] = None,
 ) -> "_core.ThermalResult":
     """Single C++ call covering ALL (n_up, irrep) sectors simultaneously.
 
@@ -236,6 +241,10 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts = _ed_params_to_thermal_options(params, method)
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
+    opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
+    opts.time_reversal = int(time_reversal)
+    if star_maps:
+        opts.star_maps = [[int(x) for x in m] for m in star_maps]
     return _core.workflows_thermal_all_sz_streaming_symmetry_directory(
         directory, int(num_sites), float(spin_l), opts,
         int(n_up_min), int(n_up_max))
@@ -364,7 +373,7 @@ class ThermalResult:
     per_sector: list[ThermalSectorEntry] = field(default_factory=list)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): path to
     # the HDF5 file produced by the thermal orchestrator (when
-    # ``output_dir`` was set). For mTPQ / cTPQ runs with ``probe_betas``
+    # ``output_dir`` was set). For mTPQ runs with ``probe_betas``
     # set, the file carries per-sample trajectories under
     # ``/tpq/samples/sample_<s>/thermodynamics`` and state vectors
     # under ``/tpq/samples/sample_<s>/states/beta_<b>``.
@@ -391,7 +400,6 @@ _THERMAL_METHODS = {
     "LTLM": DiagonalizationMethod.LTLM,
     "KPM_DOS": DiagonalizationMethod.KPM_DOS,
     "MTPQ": DiagonalizationMethod.mTPQ,
-    "CTPQ": DiagonalizationMethod.cTPQ,
 }
 
 # Methods that write per-sample HDF5 trajectories on disk and need a
@@ -399,7 +407,6 @@ _THERMAL_METHODS = {
 # read them back. Mirrors the C++ ``detail::method_needs_output_dir``.
 _TPQ_METHODS = {
     DiagonalizationMethod.mTPQ,
-    DiagonalizationMethod.cTPQ,
 }
 
 
@@ -449,7 +456,7 @@ def _coerce_method(method: Union[str, DiagonalizationMethod]) -> Diagonalization
         key = method.upper().replace("-", "_")
         if key in _THERMAL_METHODS:
             return _THERMAL_METHODS[key]
-        # mTPQ / cTPQ are case-sensitive in the enum.
+        # mTPQ is case-sensitive in the enum.
         if hasattr(DiagonalizationMethod, method):
             return getattr(DiagonalizationMethod, method)
         raise ValueError(
@@ -566,6 +573,11 @@ def thermal(
     random_seed: int = 0,
     use_symmetry_if_available: bool = False,
     use_sz_if_conserved: bool = True,
+    spin_flip: Union[str, bool, int, None] = "auto",
+    time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
+    star_maps: Optional[list] = None,
+    lattice: Optional[Any] = None,
     output_dir: str = "",
     verbose: bool = True,
     # Phase C of the "Backend x Symmetries x Workflows" plan
@@ -579,9 +591,9 @@ def thermal(
     # ---- KPM_DOS specific ------------------------------------------
     kpm_num_moments: int = 200,
     kpm_num_random_vectors: int = 16,
-    # ---- TPQ specific (mTPQ + cTPQ) --------------------------------
+    # ---- TPQ specific (mTPQ) ---------------------------------------
     tpq_num_measure_points: int = 100,
-    # ``None`` -> auto-derive from (T_min, T_max). For mTPQ/cTPQ we
+    # ``None`` -> auto-derive from (T_min, T_max). For mTPQ we
     # need the measurement β grid to bracket every target β = 1/T
     # the recombiner asks for, so pin it to ``1/T_max`` / ``1/T_min``
     # by default and let the user override.
@@ -594,7 +606,7 @@ def thermal(
     # inside the orchestrator's TPQ kernel (single source of truth).
     tpq_energy_shift: float = 0.0,
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # user-supplied probe-betas at which the mTPQ/cTPQ kernel should
+    # user-supplied probe-betas at which the mTPQ kernel should
     # snapshot the running state vector and persist it (together with
     # the trajectory) inside ``<output_dir>/ed_results.h5``. Empty
     # (default) -> no state vectors saved. Combine with
@@ -625,7 +637,7 @@ def thermal(
         ``num_sites`` is required.
     method : str or DiagonalizationMethod, optional
         Finite-T method: ``"FTLM"`` (default), ``"LTLM"``,
-        ``"KPM_DOS"``, ``"mTPQ"``, ``"cTPQ"``.
+        ``"KPM_DOS"``, ``"mTPQ"``.
     T_min, T_max, num_T : float / int, optional
         Temperature grid. Linear in T by convention; FTLM/LTLM use
         ``num_T`` evenly-spaced points in ``[T_min, T_max]``.
@@ -658,7 +670,7 @@ def thermal(
         Forwarded to :func:`qed.solve` per sector. Use for any niche
         ``EDParameters`` field this helper doesn't expose.
     probe_betas : list of float, optional
-        Inverse temperatures at which the mTPQ / cTPQ kernel should
+        Inverse temperatures at which the mTPQ kernel should
         snapshot (copy to host) the running TPQ state vector. Combined
         with ``output_dir``, this lands each snapshot in
         ``<output_dir>/ed_results.h5`` at
@@ -705,6 +717,27 @@ def thermal(
     # in-memory API. (A non-abelian generator set is reduced by its maximal
     # abelian subgroup here -- a complete, correct, coarser reduction; for the
     # FULL non-abelian reduction use qed._core.symmetry_adapted_thermodynamics.)
+    if not is_directory:
+        # symmetry='auto' -> maximal spatial generator set (or None);
+        # 'on' toggles -> detection-checked ints (report + degrade).
+        symmetry = _resolve_auto_symmetry(H, symmetry, verbose=verbose,
+                                          lattice=lattice)
+        spin_flip = _sym_toggle_int(spin_flip, "spin_flip", H, verbose)
+        time_reversal = _sym_toggle_int(
+            time_reversal, "time_reversal", H, verbose)
+        # Stage 7a: star reduction -- non-abelian residue folds the
+        # irrep sectors into isospectral orbits (solve one per star).
+        _star = getattr(symmetry, "star_perms", None) or []
+        if (star_maps is None and _star
+                and point_group not in (False, 0, "off", "none")):
+            _info_s = _normalize_symmetry_info(H, symmetry)
+            if _info_s is not None:
+                from .star_reduction import star_maps_from_info
+                star_maps = star_maps_from_info(_info_s, _star) or None
+                if star_maps and verbose:
+                    print(f"[qed] point group: {len(star_maps)} residue "
+                          "automorphisms fold the irrep sectors into "
+                          "isospectral stars (solve one per star).")
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
@@ -717,6 +750,9 @@ def thermal(
             _fwd["num_sites"] = _N
             _fwd["use_symmetry_if_available"] = True
             _fwd["symmetry"] = None
+            _fwd["spin_flip"] = spin_flip          # already resolved ints
+            _fwd["time_reversal"] = time_reversal
+            _fwd["star_maps"] = star_maps
             return thermal(_tmp, **_fwd)
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)
@@ -832,7 +868,7 @@ def thermal(
     needs_scratch = method_enum in _TPQ_METHODS and not output_dir
 
     def _alloc_scratch(n_up: Optional[int]) -> str:
-        tag = "ctpq" if method_enum == DiagonalizationMethod.cTPQ else "mtpq"
+        tag = "mtpq"
         d = _allocate_tpq_workdir(root="", method_tag=tag, n_up=n_up)
         tpq_scratch_dirs.append(d)
         return d
@@ -954,11 +990,11 @@ def thermal(
                 p.ltlm_krylov_dim = int(ltlm_krylov_dim)
                 p.ltlm_ground_krylov = int(ltlm_krylov_dim)
             # Pipe ``max_iterations`` into ``tpq_max_steps`` for the
-            # mTPQ / cTPQ lanes (closes a gap where this helper only
+            # mTPQ lane (closes a gap where this helper only
             # set the FTLM/LTLM Krylov-dim and left the TPQ iteration
             # budget at the EDParameters default). ``_ed_params_to_thermal_options``
             # reads ``tpq_max_steps`` to populate ``opts.krylov_dim``
-            # for mTPQ/cTPQ.
+            # for mTPQ.
             if max_iterations is not None:
                 p.max_iterations = int(max_iterations)
                 p.tpq_max_steps  = int(max_iterations)
@@ -976,7 +1012,7 @@ def thermal(
                 p.n_up = int(n_up_val)
             # SOTA upgrade (May 2026): the per-irrep sector loop is
             # now wired for every thermal method (FTLM / LTLM / KPM /
-            # mTPQ / cTPQ) via
+            # mTPQ) via
             # ``_core.workflows_thermal_streaming_symmetry_directory``
             # + ``ed::core::combine_sector_thermodynamics``. We still
             # honour the user's ``use_symmetry_if_available`` toggle,
@@ -1065,7 +1101,11 @@ def thermal(
                 p = _make_dir_params(None)
                 tr = _thermal_via_workflows_all_sz_streaming_symmetry(
                     directory, N, float(spin), method_enum, p,
-                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi)
+                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
+                    time_reversal=_sym_toggle_int(time_reversal,
+                                                  "time_reversal"),
+                    star_maps=star_maps)
                 td = tr.thermo
                 if not td or not td.temperatures:
                     raise RuntimeError(
@@ -1241,7 +1281,7 @@ def thermal(
             "device": device,
         }
         # Pipe ``max_iterations`` into the per-sector solver call. For
-        # mTPQ / cTPQ this controls the iteration budget; for FTLM /
+        # mTPQ this controls the iteration budget; for FTLM /
         # LTLM / KPM_DOS it's the Lanczos / KPM cap. Closes a gap where
         # this helper silently used the EDParameters default (1000)
         # regardless of what the user asked for.

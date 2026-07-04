@@ -1,9 +1,9 @@
-"""Regression tests for the unified mTPQ / cTPQ thermodynamics surface.
+"""Regression tests for the unified mTPQ thermodynamics surface.
 
-Pin the May-2026 fix that closed the gap where ``qed.thermal(method='mTPQ'|'cTPQ', ...)``
+Pin the May-2026 fix that closed the gap where ``qed.thermal(method='mTPQ', ...)``
 raised ``RuntimeError: solver returned no thermodynamic data`` (the
 orchestrator only populated ``ground_state_energy``; the per-sample
-trajectories were thrown away by ``mtpq_kernel`` / ``ctpq_kernel`` and
+trajectories were thrown away by ``mtpq_kernel`` and
 never aggregated into ``ThermodynamicData``).
 
 The fix:
@@ -16,14 +16,14 @@ The fix:
   boundary clamping for cold targets that exceed the trajectory's
   beta_max), Welford-averages across samples, and integrates C_v / T
   for entropy.
-* Wires the orchestrator's mTPQ / cTPQ branches to call the aggregator
-  and to pick ``large_value`` (mTPQ) / ``beta_max`` (cTPQ) so the
+* Wires the orchestrator's mTPQ branch to call the aggregator
+  and to pick ``large_value`` (mTPQ) so the
   trajectory actually brackets the requested T_min.
 * Pipes ``qed.thermal(max_iterations=...)`` into ``tpq_max_steps`` and
   thence into ``ThermalOptions.krylov_dim`` for the TPQ lanes (the
   legacy adapter hardcoded 100 iterations).
 
-The streaming-symmetry SIGSEGV that previously crashed mTPQ / cTPQ on
+The streaming-symmetry SIGSEGV that previously crashed mTPQ on
 directory operators was a downstream artifact of the same gap (sectors
 returned empty thermo, the recombiner walked nonexistent data) and
 resolves as a side-effect.
@@ -66,7 +66,7 @@ def _directory_with_symmetry():
 @pytest.fixture(scope="module")
 def ftlm_reference():
     """FTLM-on-full-Hilbert reference for the same T grid -- defines the
-    target the mTPQ / cTPQ paths must reach within a tolerance."""
+    target the mTPQ path must reach within a tolerance."""
     H = _ring()
     return qed.thermal(
         H, method="FTLM", T_min=0.1, T_max=5.0, num_T=10,
@@ -81,7 +81,7 @@ def ftlm_reference():
 # (or SIGSEGV'd on streaming symmetry).
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("method", ["mTPQ", "cTPQ"])
+@pytest.mark.parametrize("method", ["mTPQ"])
 def test_tpq_returns_populated_thermo_no_symmetry(method):
     H = _ring()
     r = qed.thermal(
@@ -99,7 +99,7 @@ def test_tpq_returns_populated_thermo_no_symmetry(method):
     assert np.all(np.isfinite(r.entropy))
 
 
-@pytest.mark.parametrize("method", ["mTPQ", "cTPQ"])
+@pytest.mark.parametrize("method", ["mTPQ"])
 def test_tpq_returns_populated_thermo_fixed_sz(method):
     H = _ring()
     r = qed.thermal(
@@ -111,7 +111,7 @@ def test_tpq_returns_populated_thermo_fixed_sz(method):
     assert np.all(np.isfinite(r.energy))
 
 
-@pytest.mark.parametrize("method", ["mTPQ", "cTPQ"])
+@pytest.mark.parametrize("method", ["mTPQ"])
 def test_tpq_returns_populated_thermo_streaming_symmetry(method):
     """Streaming-symmetry path used to SIGSEGV here because every sector
     returned empty thermo and the recombiner walked nonexistent data."""
@@ -127,7 +127,7 @@ def test_tpq_returns_populated_thermo_streaming_symmetry(method):
     assert np.all(np.isfinite(r.energy))
 
 
-@pytest.mark.parametrize("method", ["mTPQ", "cTPQ"])
+@pytest.mark.parametrize("method", ["mTPQ"])
 def test_tpq_returns_populated_thermo_sz_plus_symmetry(method):
     tmp, _ = _directory_with_symmetry()
     r = qed.thermal(
@@ -142,24 +142,9 @@ def test_tpq_returns_populated_thermo_sz_plus_symmetry(method):
 
 # ---------------------------------------------------------------------------
 # Physics correctness: low-T energy must approach the FTLM reference.
-# cTPQ is converged-accurate (uses exact Taylor evolution); mTPQ
-# converges as max_iter grows. Tolerances follow the per-method
-# intrinsic accuracy.
+# mTPQ converges as max_iter grows. Tolerances follow the
+# per-method intrinsic accuracy.
 # ---------------------------------------------------------------------------
-
-def test_ctpq_low_T_matches_ftlm(ftlm_reference):
-    H = _ring()
-    r = qed.thermal(
-        H, method="cTPQ", T_min=0.1, T_max=5.0, num_T=10,
-        num_samples=8, max_iterations=2000,
-        use_sz_if_conserved=False, random_seed=7, verbose=False,
-    )
-    # cTPQ uses exact Taylor evolution; should match FTLM to ~1e-2 at
-    # the coldest T (sample noise + finite delta_beta floor).
-    assert abs(r.energy[0] - ftlm_reference.energy[0]) < 5e-2, (
-        f"cTPQ E(T_min)={r.energy[0]:.4f} vs FTLM={ftlm_reference.energy[0]:.4f}"
-    )
-
 
 def test_mtpq_low_T_matches_ftlm(ftlm_reference):
     H = _ring()
@@ -181,7 +166,13 @@ def test_mtpq_converges_with_more_iterations():
     the asymptotic limit as max_iter grows. Locks in the
     ``max_iterations`` -> ``tpq_max_steps`` Python pipe fix (the legacy
     adapter hardcoded 100 iterations for the TPQ lanes)."""
-    H = _ring()
+    # NOTE: needs dim > SMALL_THERMAL_DIM (512): below that the
+    # orchestrator routes thermal() through the exact small-sector
+    # fallback, where max_iterations legitimately has no effect. A
+    # 12-site ring (dim 4096) keeps the stochastic mTPQ lane engaged.
+    b = qed.input.HamiltonianBuilder(12)
+    b.heisenberg([(i, (i + 1) % 12) for i in range(12)], J=1.0)
+    H = b.to_operator()
     Es = []
     for max_iter in (200, 1000, 5000):
         r = qed.thermal(
@@ -190,7 +181,7 @@ def test_mtpq_converges_with_more_iterations():
             use_sz_if_conserved=False, random_seed=42, verbose=False,
         )
         Es.append(r.energy[0])
-    # Each step closer to (or equal to) the asymptote E_gs ~ -3.65.
+    # Each step closer to (or equal to) the asymptote E_gs ~ -5.39.
     # Allow weak monotonicity (sample noise can push a single bin
     # slightly above its predecessor) but the trend must be downward.
     assert Es[-1] <= Es[0] + 1e-2, (
@@ -209,7 +200,7 @@ def test_mtpq_converges_with_more_iterations():
 # thermal states" regression matrix.
 #
 # Three bugs are pinned by the test cases below (all manifested when the
-# user called qed.thermal(method="mTPQ"|"cTPQ", probe_betas=..., output_dir=...)
+# user called qed.thermal(method="mTPQ", probe_betas=..., output_dir=...)
 # with symmetry on):
 #
 #   Bug 1 -- C++ streaming-symmetry binding (workflow_bindings.cpp)
@@ -348,7 +339,7 @@ def test_tpq_load_state_round_trip(tmp_path):
     outdir = str(tmp_path / "load_round_trip")
 
     R = qed.thermal(
-        tmp_dir, num_sites=N_SITES, method="cTPQ",
+        tmp_dir, num_sites=N_SITES, method="mTPQ",
         T_min=0.1, T_max=5.0, num_T=4,
         num_samples=1, max_iterations=15,
         probe_betas=[1.0],
@@ -381,7 +372,7 @@ def test_specific_heat_is_nonnegative_and_peaks_in_range():
     Heisenberg ring has its Schottky peak in [0.3, 2.0]; verify."""
     H = _ring()
     r = qed.thermal(
-        H, method="cTPQ", T_min=0.05, T_max=10.0, num_T=40,
+        H, method="mTPQ", T_min=0.05, T_max=10.0, num_T=40,
         num_samples=8, max_iterations=2000,
         use_sz_if_conserved=False, verbose=False,
     )

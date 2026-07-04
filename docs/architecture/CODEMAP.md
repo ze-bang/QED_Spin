@@ -275,8 +275,9 @@ distributed/MPI path is the canonical answer at those scales).
 ### 5.6 `include/ed/gpu/`
 
 - `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_ftlm.cuh`,
-  `gpu_solvers.h`, `gpu_lanczos.cuh`, `gpu_mixed_precision.h`,
-  `gpu_operator.cuh`, `gpu_tpq.cuh`, `kernel_config.h`, `kpm_dos_gpu.cuh`
+  `gpu_solvers.h`, `gpu_mixed_precision.h`,
+  `gpu_operator.cuh`, `kernel_config.h`, `kpm_dos_gpu.cuh`,
+  `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_ftlm.cuh`
 
 ### 5.7 `include/ed/input/`  *(Phase 4 — replaces `python/edlib/helper_*.py`)*
 
@@ -397,11 +398,17 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.22 `src/solvers/gpu/`
 
-- `gpu_block_lanczos.cu`, `gpu_ed_wrapper.cu`, `gpu_fixed_sz_operator.cu`,
-  `gpu_ftlm.cu`, `gpu_full_diag.cu`, `gpu_kernels.cu`, `gpu_krylov_schur.cu`,
-  `gpu_lanczos.cu`, `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`,
-  `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `gpu_symmetrized_operator.cu`,
-  `gpu_tpq.cu`, `kpm_dos_gpu.cu`
+- `gpu_ed_wrapper.cu`, `gpu_ftlm.cu`, `gpu_kernels.cu`,
+  `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`,
+  `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `kpm_dos_gpu.cu`,
+  `mtpq_f32_impl.cuh` (fp32 mTPQ lane, #include'd into
+  `src/core/operator_gpu.cu`), `symmetry_adapted_gpu.cu`.
+  (The Gen-1 hand-rolled bodies -- `gpu_lanczos.cu`, `gpu_block_lanczos.cu`,
+  `gpu_krylov_schur.cu`, `gpu_tpq.cu`, `gpu_full_diag.cu`,
+  `gpu_fixed_sz_operator.cu`, `gpu_symmetrized_operator.cu` -- were retired
+  across the Jun-2026 operator collapse + Gen-1 GPULanczos retirement;
+  GPU Lanczos/FTLM/mTPQ run on `lanczos_kernel<CudaBackend>` + the
+  backend-templated thermal kernels.)
 
 ### 5.23 `src/symmetry/`
 
@@ -591,8 +598,9 @@ generic version is what the streaming kernel now calls.
   retired in matvec-unification Phase 7.2 — the distributed/MPI
   build covers the very-large-Hilbert case the chunked path was
   built for.
-- **CPU + GPU solvers** (`lanczos.cpp` vs `gpu_lanczos.cu`, `TPQ.cpp` vs
-  `gpu_tpq.cu`, …): separate implementations bound by regression tests
+- **CPU + GPU solvers**: the Krylov plane is unified
+  (`lanczos_kernel<CpuBackend|CudaBackend>`); the remaining split
+  surfaces (GPUFTLMSolver, KPM-DOS GPU) are bound by regression tests
   (`test_cpu_gpu_equivalence.cpp`). Both paths plug into the unified
   `ed::matvec::MatVecOperator` interface -- the Hamiltonian wrappers
   (`Operator`, `GPUOperator`, etc.) advertise their memory space tag

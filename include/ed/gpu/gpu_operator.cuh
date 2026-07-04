@@ -431,56 +431,27 @@ protected:
     void initializeCUBLAS();
 };
 
-/**
- * Open-addressing hash entry for fixed-Sz state -> basis-index lookup.
- *
- * Stored device-side. Empty slots use key == UINT64_MAX (set via cudaMemset 0xFF).
- * Layout: 16 bytes (key 8 + value 4 + pad 4), naturally aligned for 64-bit loads.
- */
-struct GPUStateLookupEntry {
-    uint64_t key;     // basis state bitmask (UINT64_MAX = empty)
-    int32_t  value;   // index into basis_states[] (-1 = unused)
-    int32_t  _pad;    // align to 16 bytes
-
-    __host__ __device__ GPUStateLookupEntry()
-        : key(static_cast<uint64_t>(-1)), value(-1), _pad(0) {}
-};
-
 // The GPU-accelerated fixed-Sz operator class (`GPUFixedSzOperator : public
-// GPUOperator`) was retired in operator-collapse Phase 2b (Jun 2026): its only
-// callers were the now-deleted `GPUEDWrapper::runGPU*FixedSz` / DSSF / TPQ
-// forwarders. CLI fixed-Sz GPU paths now build their device matvec from the
-// unified host `FixedSzOperator::bind_cuda()` (-> `CudaMatVecBackend`). The
-// fixed-Sz device kernels below stay declared for `gpu_kernels.cu` (and the
-// rank/hash diagnostic tests), even though the legacy host wrapper is gone.
+// GPUOperator`) was retired in operator-collapse Phase 2b (Jun 2026), and its
+// device kernels (linear / hash / rank fixed-Sz matvec generations, the
+// symmetrized hash-scatter kernel, and the fixed-Sz branch-free kernels)
+// were deleted in the debt-cleanup sweep (Jul 2026). CLI fixed-Sz GPU paths
+// build their device matvec from the unified host `FixedSzOperator::bind_cuda()`
+// (-> `CudaMatVecBackend`); symmetry sectors ride the rep-walk kernels in
+// `term_kernels_gpu.cuh`. Only the combinadic rank/unrank diagnostic harness
+// survives below (pinned by `tests/unit/test_gpu_fixed_sz_rank.cpp`).
 
 // CUDA kernel declarations
 namespace GPUKernels {
 
 // State-parallel kernel with shared memory (used for small T)
-__global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDoubleComplex* y,
+__global__ void matVecKernelOptimized(cuDoubleComplex* y,
                                       int N, int n_sites, float spin_l,
                                       const GPUTransformData* transforms, int num_transforms,
                                       const cuDoubleComplex* x);
 
-// OPTIMIZED: Fixed-Sz matrix-vector product using Structure-of-Arrays
-// GPU-NATIVE: Transform-parallel Fixed-Sz kernel
-__global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                               const uint64_t* basis_states,
-                                               const GPUTransformData* transforms,
-                                               int num_transforms, int N, int n_sites, float spin_l);
-
-__global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                             const uint64_t* basis_states,
-                                             int N, int n_sites, float spin_l,
-                                             const GPUTransformData* transforms, int num_transforms);
-
-// Basis generation kernel for fixed Sz
-__global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, int n_up,
-                                          uint64_t start_state, int num_states);
-
 // Upload Pascal triangle into __constant__ d_pascal[][]. Required before
-// the first generateFixedSzBasisKernel launch; idempotent across calls.
+// any device combinadic rank/unrank use; idempotent across calls.
 void ensure_pascal_uploaded();
 
 // Phase A.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
@@ -497,73 +468,6 @@ void ensure_pascal_uploaded();
 bool gpu_rank_unrank_roundtrip(const std::vector<uint64_t>& ranks,
                                int n_bits, int k,
                                uint64_t* first_fail_rank_out);
-
-// State lookup (binary search)
-__device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);
-
-// ============================================================================
-// Hash-table accelerated fixed-Sz matvec kernels (Phase X optimization)
-// Replace per-element O(log N) binary search with O(1) avg open-addressing
-// hash lookup. Hash table is built once in GPUFixedSzOperator::buildStateHashOnGPU().
-// Hash size is a power of two; modulo replaced by bitmask in the lookup.
-// ============================================================================
-
-// One-pass build kernel: each thread inserts one basis state into the hash
-// using atomicCAS on the 64-bit key. Empty key sentinel = UINT64_MAX.
-__global__ void buildStateHashKernel(GPUStateLookupEntry* table,
-                                     int table_size,        // power of 2
-                                     uint32_t table_mask,   // = table_size - 1
-                                     const uint64_t* basis_states,
-                                     int num_states);
-
-// Hash-lookup variant of matVecFixedSzTransformParallel. Same 2D launch grid.
-__global__ void matVecFixedSzTransformParallelHash(const cuDoubleComplex* x,
-                                                   cuDoubleComplex* y,
-                                                   const uint64_t* basis_states,
-                                                   const GPUStateLookupEntry* hash_table,
-                                                   int hash_table_size,
-                                                   uint32_t hash_table_mask,
-                                                   const GPUTransformData* transforms,
-                                                   int num_transforms,
-                                                   int N, int n_sites, float spin_l);
-
-// Hash-lookup variant of matVecFixedSzKernelOptimized.
-__global__ void matVecFixedSzKernelOptimizedHash(const cuDoubleComplex* x,
-                                                 cuDoubleComplex* y,
-                                                 const uint64_t* basis_states,
-                                                 const GPUStateLookupEntry* hash_table,
-                                                 int hash_table_size,
-                                                 uint32_t hash_table_mask,
-                                                 int N, int n_sites, float spin_l,
-                                                 const GPUTransformData* transforms,
-                                                 int num_transforms);
-
-// =========================================================================
-// Phase A.2 of the "Kill the GPU State-Lookup Hash" plan (May 2026):
-// Rank-lookup variants of the fixed-Sz matvec kernels.
-//
-// Identical semantics to the Hash variants, but the per-(state, transform)
-// "lookup new_state -> new_idx" call is replaced by a constant-cache
-// combinadic ``rank_combination_dev`` (zero global memory traffic, no
-// device hash table to malloc / memset). Default dispatch path; the Hash
-// variants stay buildable for diagnostic compares behind ``ED_GPU_USE_HASH=1``.
-//
-// New parameter ``int n_up`` (the fixed-Sz popcount) is required by the
-// rank function and threaded through the operator.
-// =========================================================================
-__global__ void matVecFixedSzTransformParallelRank(const cuDoubleComplex* x,
-                                                   cuDoubleComplex* y,
-                                                   const uint64_t* basis_states,
-                                                   const GPUTransformData* transforms,
-                                                   int num_transforms,
-                                                   int N, int n_sites, int n_up, float spin_l);
-
-__global__ void matVecFixedSzKernelOptimizedRank(const cuDoubleComplex* x,
-                                                 cuDoubleComplex* y,
-                                                 const uint64_t* basis_states,
-                                                 int N, int n_sites, int n_up, float spin_l,
-                                                 const GPUTransformData* transforms,
-                                                 int num_transforms);
 
 // ============================================================================
 // MIXED-PRECISION CAST KERNELS (Phase 3a #3)
@@ -603,22 +507,6 @@ __global__ void matVecOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleCompl
                                          const GPUOffDiagonalTwoBody* transforms,
                                          int num_transforms, int N);
 
-// Fixed-Sz branch-free kernels (with binary search for state lookup)
-__global__ void matVecFixedSzDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                             const uint64_t* basis_states,
-                                             const GPUDiagonalOneBody* transforms,
-                                             int num_transforms, int N, float spin_l);
-
-__global__ void matVecFixedSzDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                             const uint64_t* basis_states,
-                                             const GPUDiagonalTwoBody* transforms,
-                                             int num_transforms, int N, float spin_l);
-
-__global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                                const uint64_t* basis_states,
-                                                const GPUOffDiagonalTwoBody* transforms,
-                                                int num_transforms, int N);
-
 // ============================================================================
 // WARP-REDUCTION (GATHER) KERNEL - Atomic-free output
 // Each warp computes one output element by gathering contributions from all inputs
@@ -635,33 +523,6 @@ __global__ void matVecWarpReductionFused(
     int N, float spin_l);
 
 } // namespace GPUKernels
-
-// ============================================================================
-// GPU Symmetrized Operator — matrix-free H*v in symmetry-projected sectors
-// ============================================================================
-
-/**
- * @brief Open-addressing hash table entry for state → basis index lookup
- *
- * Each computational basis state s that belongs to some symmetrized basis
- * state |φ_k⟩ is stored with:
- *   key   = s  (computational state, EMPTY_KEY = UINT64_MAX means vacant)
- *   value = k  (symmetrized basis index in sector)
- *   projection_factor = conj(β_s) * group_norm / norm_k
- *     where β_s is the orbit coefficient of s in |φ_k⟩
- *
- * Pre-computing the projection factor avoids per-lookup division/conjugation.
- */
-struct GPUHashEntry {
-    uint64_t key;                    // Computational basis state (UINT64_MAX = empty)
-    int32_t  value;                  // Symmetrized basis index
-    cuDoubleComplex projection;      // conj(coeff) * group_norm / norm
-    
-    __host__ __device__ GPUHashEntry()
-        : key(UINT64_MAX), value(-1) {
-        projection = make_cuDoubleComplex(0.0, 0.0);
-    }
-};
 
 // ============================================================================
 // CPU → GPU Conversion Helper

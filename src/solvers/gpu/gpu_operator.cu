@@ -607,7 +607,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             // V1: Shared memory kernel
             CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
             GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size>>>(
-                0, d_y, N, n_sites_, spin_l_,
+                d_y, N, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_, d_x);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -617,7 +617,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             // Should not reach here if selectKernelPathway was called
             CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
             GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size>>>(
-                0, d_y, N, n_sites_, spin_l_,
+                d_y, N, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_, d_x);
             CUDA_CHECK(cudaGetLastError());
             break;
@@ -849,7 +849,7 @@ void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_
         case KernelPathway::SHARED_MEMORY: {
             cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
             GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size, stream>>>(
-                0, d_y, N, n_sites_, spin_l_,
+                d_y, N, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_, d_x);
             break;
         }
@@ -857,7 +857,7 @@ void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_
         default:
             cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
             GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size, stream>>>(
-                0, d_y, N, n_sites_, spin_l_,
+                d_y, N, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_, d_x);
             break;
         }

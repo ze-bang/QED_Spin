@@ -164,6 +164,7 @@ ed::gpu -- CUDA lane (built only with WITH_CUDA=ON)
 ----------------------------------------------------
 
 GPU operators and solvers live under ``include/ed/gpu/`` and are only
-compiled when ``WITH_CUDA=ON``: ``gpu_operator.cuh``,
-``gpu_lanczos.cuh``, ``gpu_ftlm.cuh``, ``gpu_tpq.cuh``,
-``bit_operations.cuh``.
+compiled when ``WITH_CUDA=ON``: ``gpu_operator.cuh``, ``gpu_ftlm.cuh``,
+``gpu_solvers.h``, ``gpu_ed_wrapper.h``, ``gpu_mixed_precision.h``,
+``kpm_dos_gpu.cuh``, ``kernel_config.h``, ``bit_operations.cuh``,
+``combinadic.cuh``.
