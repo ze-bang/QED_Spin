@@ -109,8 +109,8 @@ struct RepSectorData {
     // Empty = pure permutations (every pre-5b group). When non-empty the
     // length must equal ``group_size`` and ``perms_flat`` carries the
     // permutation part of every element (the flip half repeats the spatial
-    // permutations). The device mirror does NOT support flips yet -- the
-    // builders only emit flip-extended sectors on the CPU lane.
+    // permutations). Stage 8b: the device mirror carries the same
+    // masks, so flip-extended sectors run on both CPU and GPU.
     std::vector<std::uint64_t> flip_masks;
 
     [[nodiscard]] bool has_flips() const noexcept {

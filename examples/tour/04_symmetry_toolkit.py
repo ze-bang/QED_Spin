@@ -66,7 +66,37 @@ except RuntimeError as e:
     print(f"require mode threw as designed: {str(e)[:60]}...")
 
 # ---------------------------------------------------------------------------
-# 5. Environment escapes (power users / debugging): every mechanism has
+# 5. Sz parity: when S+S+/S-S- terms break U(1), the Z2 remnant
+#    (-1)^{n_up} survives. Detection reports it; sz="even"/"odd" pins a
+#    half; the auto path uses both halves. (This ring conserves U(1),
+#    so parity is implied -- shown here on a J_pmpm-perturbed copy.)
+# ---------------------------------------------------------------------------
+bp = qed.input.HamiltonianBuilder(N)
+bp.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
+for i in range(N):
+    bp.add_two_body(qed.input.Op.Sp, i, qed.input.Op.Sp, (i + 1) % N, 0.3)
+    bp.add_two_body(qed.input.Op.Sm, i, qed.input.Op.Sm, (i + 1) % N, 0.3)
+Hp = bp.to_operator()
+det = dict(qed._core.detect_hamiltonian_symmetries(Hp))
+print(f"J_pmpm model: u1={det['u1']}  sz_parity={det['sz_parity']}")
+gp = qed.find_symmetries(Hp, verbose=False).full_set
+e_even = qed.solve(Hp, symmetry=gp, sz="even", num_eigenvalues=1,
+                   verbose=False).eigenvalues[0]
+print(f"even-parity-half GS = {e_even:.10f}")
+
+# ---------------------------------------------------------------------------
+# 6. TRUE non-abelian reduction: point_group="full" projects with the
+#    complete group's representation theory (d >= 2 irreps, blocks
+#    ~ dim/|G|, degeneracy multiplets structural) on the SAB engine --
+#    versus point_group="auto", which only FOLDS isospectral momentum
+#    sectors (solve-count, not block size).
+# ---------------------------------------------------------------------------
+r_full = qed.solve(H, symmetry=gen, num_eigenvalues=1,
+                   point_group="full", verbose=False)
+print(f"non-abelian full-group GS = {r_full.eigenvalues[0]:.10f}")
+
+# ---------------------------------------------------------------------------
+# 7. Environment escapes (power users / debugging): every mechanism has
 #    an env gate that overrides the Auto default --
 #      ED_SYM_SPIN_FLIP=0, ED_SYM_SPIN_FLIP_PROJECT=0,
 #      ED_SYM_TIME_REVERSAL=0, ED_SYM_REP=0 (orbit-CSR escape),

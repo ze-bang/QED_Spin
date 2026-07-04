@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-07-04 — monomial consolidation, parity, proper non-abelian, cleanup
+
+* Monomial taxonomy (SYMMETRY_V2_DESIGN.md §3b): every unitary symmetry
+  is (−1)^{popcount(s&z)}·|permute(s)⊕x⟩; four classes, one mechanism
+  each — diagonal→subspace, monomial-abelian→projector,
+  isospectral→folding, non-abelian→isotypic projection — with a single
+  closure rule replacing all historical flip special cases.
+* **Sz parity** (the Z₂ remnant of a broken U(1)): three-valued
+  detection (`u1`/`sz_parity`), parity-half sectors on the rep lanes
+  (CPU+GPU) across GS/thermal/full-dense; `sz="even"/"odd"`, auto
+  engagement, `auto_sz=False` disables the whole diagonal axis.
+* **Full-space ∏σˣ sectors** for U(1)-broken flip-symmetric models
+  (same CompiledGroup flip-mask machinery as the N/2 projection).
+* **Proper non-abelian on every verb**: `point_group="full"` wires the
+  SAB iterative engine (d≥2 irrep blocks, block-adaptive
+  dense/Lanczos) to solve/thermal/DSSF/full-dense, composed with the
+  diagonal axis (24× on the composed GS); content-keyed SAB basis
+  cache; star folding (`point_group="auto"`) remains the solve-count
+  mechanism, strictly distinct from projection.
+* Optimization pass: default thermal HDF5 scratch removed (up to 3.7×),
+  parallel parity scan, host identity-rank tables for full-space/parity
+  sectors; latent full-space-lazy degradation fixed (`usable()`).
+* Structural cleanup: ONE flip-sector constructor
+  (`build_rep_sectors_over_table`, −164 lines), ONE orbit
+  canonicalisation (`plan_tr_actions` shared by GS + thermal),
+  sector-mode validation at the factory seam.
+* Every-cell capability matrix (rev 3): both models, all compositions,
+  CPU+GPU, dense-verified with GPU-lane assertions.
+
+
 ## 2026-07-03 — auto-symmetry consolidation, tour examples, cTPQ removal
 
 * `symmetry="auto"` (maximal block diagonalisation) on all three verbs;
