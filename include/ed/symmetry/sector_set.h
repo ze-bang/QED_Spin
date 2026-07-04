@@ -570,6 +570,184 @@ make_sector_operator_adopt(const ::Operator& host,
 // ``SectorBasis::build`` the eager lane uses -- so a GPU-only run never
 // allocates the host orbit CSR.
 // ---------------------------------------------------------------------------
+// build_parity_sector_operators_lazy: Sz-PARITY sectors (monomial-group
+// consolidation, Jul 2026).
+//
+// For a Hamiltonian whose every term changes n_up by an EVEN amount
+// (S+S+ / S-S- anisotropic exchange breaking U(1)), the diagonal Z2
+// remnant (-1)^{n_up} splits the space into two 2^{N-1} halves. Each
+// half x spatial irrep is ONE RepSectorData with ``n_up = -1`` (no
+// popcount filter -- H never leaves the half) whose reps come from the
+// parity-filtered fused scan; the CPU/GPU rep lanes consume it through
+// the existing full-space (n_up = -1) machinery unchanged.
+//
+// Closure rule: the all-ones flip preserves popcount parity iff N is
+// even, so ``flip_sectors`` additionally splits every (parity, k) into
+// (parity, k, +/-) via the flip-extended group -- exactly the N/2 and
+// full-space constructions. (For odd N the caller must not request
+// flip sectors here; flip is then a parity <-> parity transport map.)
+//
+// ``which_parity``: 0 = even only, 1 = odd only, -1 = BOTH (one sector
+// set covering the whole space -- the pooled-GS / thermal / full-dense
+// mode). Synthetic ids: k + slot * num_irreps with slots enumerating
+// (parity, flip sign); tag quantum numbers append the parity label
+// (+1 even / -1 odd) and, when flip sectors are on, the flip sign.
+// ---------------------------------------------------------------------------
+template <class TermBuilder>
+[[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
+build_parity_sector_operators_lazy(std::uint64_t            n_bits,
+                                   float                    spin_l,
+                                   int                      which_parity,
+                                   const SymmetryGroupInfo& info,
+                                   TermBuilder&&            terms,
+                                   std::vector<std::size_t>* out_sector_ids = nullptr,
+                                   const std::string&       cache_dir = {},
+                                   bool                     flip_sectors = false)
+{
+    auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
+    std::vector<std::unique_ptr<SectorOperator>> ops;
+    if (!sym_fused_pass15_enabled()) {
+        throw std::runtime_error(
+            "build_parity_sector_operators_lazy: requires the fused "
+            "orbit-table lane (unset ED_SYM_FUSED_PASS15=0).");
+    }
+    if (flip_sectors && (n_bits % 2 != 0)) {
+        throw std::runtime_error(
+            "build_parity_sector_operators_lazy: the all-ones flip only "
+            "preserves Sz parity for even N (closure rule).");
+    }
+
+    const std::size_t num_irreps =
+        std::max<std::size_t>(info_sp->sectors.size(), 1);
+    const std::vector<int> shared_perms_flat =
+        flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+
+    // Group (per element: perm + optional flip mask).
+    CompiledGroup cg;
+    std::vector<int>           perms_use;
+    std::vector<std::uint64_t> flips_use;
+    std::size_t                G_use, Gs;
+    if (flip_sectors) {
+        cg = make_flip_extended_group(*info_sp, n_bits);
+        G_use = cg.size();
+        Gs    = G_use / 2;
+        if (info_sp->max_clique.empty()) {
+            perms_use.resize(2 * n_bits);
+            for (std::uint64_t i = 0; i < n_bits; ++i) {
+                perms_use[i]          = static_cast<int>(i);
+                perms_use[n_bits + i] = static_cast<int>(i);
+            }
+        } else {
+            perms_use = shared_perms_flat;
+            perms_use.insert(perms_use.end(), shared_perms_flat.begin(),
+                             shared_perms_flat.end());
+        }
+        const std::uint64_t all_ones =
+            (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
+        flips_use.assign(G_use, 0ULL);
+        for (std::size_t g = Gs; g < G_use; ++g) flips_use[g] = all_ones;
+    } else {
+        cg = info_sp->max_clique.empty()
+            ? CompiledGroup{}
+            : CompiledGroup::from_permutations(
+                  info_sp->max_clique, static_cast<int>(n_bits));
+        G_use = std::max<std::size_t>(cg.size(), 1);
+        Gs    = G_use;
+        perms_use = shared_perms_flat;
+        if (perms_use.empty()) {
+            perms_use.resize(n_bits);
+            for (std::uint64_t i = 0; i < n_bits; ++i)
+                perms_use[i] = static_cast<int>(i);
+        }
+    }
+
+    const int p_lo = (which_parity < 0) ? 0 : which_parity;
+    const int p_hi = (which_parity < 0) ? 1 : which_parity;
+    const int n_signs = flip_sectors ? 2 : 1;
+    std::size_t slot = 0;
+    for (int parity = p_lo; parity <= p_hi; ++parity) {
+        auto ptab = acquire_orbit_table_parity_compiled(
+            n_bits, parity, cg, cache_dir);
+        auto reps_fp = std::shared_ptr<const std::vector<std::uint64_t>>(
+            ptab, &ptab->reps);
+
+        for (int sign_i = 0; sign_i < n_signs; ++sign_i, ++slot) {
+            const int fsign = (sign_i == 0) ? +1 : -1;
+            const std::size_t n_k = num_irreps;
+            std::vector<std::unique_ptr<SectorOperator>> kslot(n_k);
+
+            #pragma omp parallel for schedule(dynamic) if(n_k > 1)
+            for (std::ptrdiff_t ki = 0;
+                 ki < static_cast<std::ptrdiff_t>(n_k); ++ki) {
+                const std::size_t k = static_cast<std::size_t>(ki);
+                std::vector<Complex> chi(G_use, Complex(1.0, 0.0));
+                if (!info_sp->sectors.empty()) {
+                    const std::vector<Complex> chi_k =
+                        sector_characters_from(
+                            *info_sp, info_sp->sectors[k].phase_factors);
+                    for (std::size_t g = 0; g < Gs; ++g) {
+                        chi[g] = chi_k[g];
+                        if (flip_sectors)
+                            chi[Gs + g] =
+                                static_cast<double>(fsign) * chi_k[g];
+                    }
+                } else if (flip_sectors) {
+                    chi[1] = Complex(static_cast<double>(fsign), 0.0);
+                }
+
+                RepSectorData rd;
+                rd.n_sites    = static_cast<int>(n_bits);
+                rd.group_size = static_cast<int>(G_use);
+                rd.reps.reserve(reps_fp->size());
+                rd.inv_norms.reserve(reps_fp->size());
+                for (std::size_t i = 0; i < reps_fp->size(); ++i) {
+                    const double norm_sq = projected_norm_sq_stab(
+                        ptab->stabilizer_of(i), chi);
+                    if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon)
+                        continue;
+                    rd.reps.push_back((*reps_fp)[i]);
+                    rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+                }
+                if (rd.reps.empty()) continue;
+                rd.n_up       = -1;   // parity half: no popcount filter
+                rd.characters = chi;
+                rd.perms_flat = perms_use;
+                if (flip_sectors) rd.flip_masks = flips_use;
+
+                bool is_real = true;
+                for (const auto& c : rd.characters)
+                    if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+                const std::uint64_t dim =
+                    static_cast<std::uint64_t>(rd.reps.size());
+                auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+
+                auto op = std::make_unique<SectorOperator>(
+                    n_bits, spin_l, SectorBasis{});
+                terms(*op);
+                op->configureRepLazy(
+                    dim, G_use, is_real,
+                    [rep_sp]() { return *rep_sp; },
+                    []() -> ::SymmetrySector {
+                        throw std::runtime_error(
+                            "Sz-parity sector: the orbit-CSR lane does "
+                            "not carry parity subspaces; keep the "
+                            "default rep lane (unset ED_SYM_REP=0).");
+                    },
+                    /*csr_available=*/false);
+                kslot[k] = std::move(op);
+            }
+            for (std::size_t k = 0; k < n_k; ++k) {
+                if (!kslot[k]) continue;
+                if (out_sector_ids)
+                    out_sector_ids->push_back(k + slot * num_irreps);
+                ops.push_back(std::move(kslot[k]));
+            }
+        }
+    }
+    return ops;
+}
+
+// ---------------------------------------------------------------------------
 // Forward declaration (defined below): the fixed-Sz lazy builder delegates
 // its Stage-8c flip-projected half-filling case to the all-Sz builder.
 template <class TermBuilder>
@@ -943,7 +1121,8 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
                         "lane is not flip-aware. Keep the default rep "
                         "lane (unset ED_SYM_REP=0) or disable the flip "
                         "projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
-                });
+                },
+                    /*csr_available=*/false);
 
             fslot[idx]     = std::move(op);
             fslot_ids[idx] = static_cast<long long>(idx);
@@ -1282,7 +1461,8 @@ build_all_sz_sector_operators(
                                 "not flip-aware. Keep the default rep lane "
                                 "(unset ED_SYM_REP=0) or disable the in-sector "
                                 "flip projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
-                        });
+                        },
+                    /*csr_available=*/false);
 
                     fslot[idx]     = std::move(op);
                     // Synthetic raw index k + parity*num_irreps keeps output

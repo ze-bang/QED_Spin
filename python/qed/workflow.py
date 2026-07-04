@@ -1230,8 +1230,20 @@ def solve(
     base_dim = int(H.dimension)  # full Hilbert dim, even for FixedSz
 
     # ------------------------------------------------------------------
-    # 1. Resolve the fixed-Sz axis.
+    # 1. Resolve the fixed-Sz axis. sz="even"/"odd" selects the
+    #    Sz-PARITY halves instead (the Z2 remnant when U(1) is broken;
+    #    also valid for U(1)-conserving H) -- handled by the symmetry
+    #    dispatch below, not the fixed-Sz machinery.
     # ------------------------------------------------------------------
+    _sz_parity_str: Optional[int] = None
+    if isinstance(sz, str):
+        _key = sz.strip().lower()
+        if _key not in ("even", "odd"):
+            raise ValueError(
+                f"sz={sz!r}: string forms are 'even'/'odd' (Sz-parity "
+                "halves) or pass an integer n_up.")
+        _sz_parity_str = 0 if _key == "even" else 1
+        sz = None
     op_to_use: Operator = H
     if sz is not None:
         if fixed_sz_input:
@@ -1453,6 +1465,7 @@ def solve(
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
+            sz_parity=_sz_parity_str,
             verbose=verbose,
             spin_flip=spin_flip,
             time_reversal=time_reversal,
@@ -2922,6 +2935,7 @@ def _diag_with_symmetry(
     spin_flip="auto",
     time_reversal="auto",
     point_group="auto",
+    sz_parity: Optional[int] = None,
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -3001,6 +3015,24 @@ def _diag_with_symmetry(
         # ``workflows_thermal_streaming_symmetry_directory`` binding,
         # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
         fixed_sz_n_up = None
+        # Sz-parity mode: explicit via sz="even"/"odd", or AUTO when the
+        # Hamiltonian breaks U(1) but keeps the Z2 remnant (-1)^{n_up}
+        # (all terms change n_up by even amounts): both halves in one
+        # sector set.
+        _parity_mode = sz_parity
+        if (_parity_mode is None and sz is None
+                and not isinstance(operator, FixedSzOperator)
+                and not operator.conserves_sz()):
+            try:
+                _det = _core.detect_hamiltonian_symmetries(operator)
+                if bool(_det["sz_parity"]):
+                    _parity_mode = 2          # both halves
+                    if verbose:
+                        print("[qed] Sz axis: U(1) broken but parity "
+                              "(-1)^{n_up} conserved -> parity-half "
+                              "sectors engage.")
+            except Exception:
+                _parity_mode = None
         if isinstance(operator, FixedSzOperator):
             if sz is None:
                 if params.n_up < 0:
@@ -3020,6 +3052,12 @@ def _diag_with_symmetry(
             # fixed_sz=fixed_sz_n_up). So we just hand it the temp
             # directory + sites + spin_l and the binding takes care of
             # composing the per-sector thermal lane.
+            if _parity_mode is not None:
+                topts.sz_parity = int(_parity_mode)
+            topts.spin_flip = resolve_discrete_toggle(
+                operator, spin_flip, "spin_flip", verbose=verbose)
+            topts.time_reversal = resolve_discrete_toggle(
+                operator, time_reversal, "time_reversal", verbose=verbose)
             tr = _core.workflows_thermal_streaming_symmetry_directory(
                 tmpdir,
                 int(operator.num_sites),
@@ -3040,6 +3078,8 @@ def _diag_with_symmetry(
             operator, spin_flip, "spin_flip", verbose=verbose)
         opts.time_reversal = resolve_discrete_toggle(
             operator, time_reversal, "time_reversal", verbose=verbose)
+        if _parity_mode is not None:
+            opts.sz_parity = int(_parity_mode)
         # Stage 7a: star reduction. The non-abelian residue of the
         # spatial group permutes the abelian irreps; related sectors
         # are isospectral, so the C++ plan solves one representative

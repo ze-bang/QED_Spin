@@ -338,6 +338,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("time_reversal",
                        &ed::workflows::SolveOptions::time_reversal)
         .def_readwrite("star_maps", &ed::workflows::SolveOptions::star_maps)
+        .def_readwrite("sz_parity", &ed::workflows::SolveOptions::sz_parity)
         .def_readwrite("precompute_basis_only",
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
@@ -434,6 +435,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("time_reversal",
                        &ed::workflows::ThermalOptions::time_reversal)
         .def_readwrite("star_maps", &ed::workflows::ThermalOptions::star_maps)
+        .def_readwrite("sz_parity", &ed::workflows::ThermalOptions::sz_parity)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -768,6 +770,9 @@ void bind_workflows(py::module_& m) {
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
               }
+              if (opts.sz_parity >= 0 && !spec.fixed_sz) {
+                  spec.sz_parity = opts.sz_parity;
+              }
 
               ed::GroundStateResult agg;
               {
@@ -837,11 +842,13 @@ void bind_workflows(py::module_& m) {
                       && !opts.compute_vectors) {
                       spec.flip_project_half = true;
                   }
-                  // Full-space prod-sigma^x sectors: no fixed-Sz axis
-                  // (U(1) broken or unused) but [H, X] == 0 -- every
-                  // irrep splits (k, +/-) over the full 2^N space.
+                  // Full-space / parity-half prod-sigma^x sectors: no
+                  // fixed-Sz axis but [H, X] == 0 -- every irrep splits
+                  // (k, +/-). Closure rule: over a parity half the flip
+                  // only preserves the subspace for even N.
                   if (comp.flip_project && !spec.fixed_sz
-                      && !opts.compute_vectors) {
+                      && !opts.compute_vectors
+                      && (!spec.sz_parity || num_sites % 2 == 0)) {
                       spec.flip_sectors_full = true;
                   }
                   ed::core::SectorSetView handle(
@@ -1299,6 +1306,30 @@ void bind_workflows(py::module_& m) {
               spec.streaming_symmetry = true;
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
+              }
+              // Monomial consolidation (Jul 2026): Sz-parity halves +
+              // full-space/parity prod-sigma^x sectors for the
+              // per-sector thermal lane (thermo = eigenvalue-only, so
+              // the rep-only sectors are always admissible).
+              if (opts.sz_parity >= 0 && !spec.fixed_sz) {
+                  spec.sz_parity = opts.sz_parity;
+              }
+              {
+                  auto probe = ed::detail::build_base_op(spec);
+                  ed::detail::load_terms_into(*probe, spec);
+                  ed::matvec::TermStorage soa;
+                  ed::matvec::TermStorage::classify_route(
+                      soa, probe->transform_data_, probe->three_body_data_,
+                      [](const std::complex<double>& c) { return c; });
+                  probe->symmetry_info.loadFromDirectory(directory);
+                  auto comp = ed::symmetry::resolve_symmetry_composition(
+                      soa, probe->symmetry_info, opts.backend.allow_gpu,
+                      ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                      ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+                  if (comp.flip_project && !spec.fixed_sz
+                      && (!spec.sz_parity || num_sites % 2 == 0)) {
+                      spec.flip_sectors_full = true;
+                  }
               }
 
               ed::ThermalResult agg;

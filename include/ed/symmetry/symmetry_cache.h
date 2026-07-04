@@ -327,6 +327,20 @@ acquire_orbit_table_full(std::uint64_t n_bits,
 }
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
+acquire_orbit_table_parity_compiled(std::uint64_t        n_bits,
+                                    int                  parity,
+                                    const CompiledGroup& cg,
+                                    const std::string&   cache_dir = {}) {
+    const std::uint64_t key = cg.content_hash()
+        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+        ^ (n_bits * 0x2545F4914F6CDD1DULL)
+        ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
+    return detail::acquire_impl(
+        key, cache_dir,
+        [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); });
+}
+
+[[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
                                   const CompiledGroup& cg,
                                   const std::string&   cache_dir = {}) {

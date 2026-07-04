@@ -355,20 +355,31 @@ n = N/2). Otherwise it degrades gracefully to a class-3 transport map
 (n ↔ N−n mirror). One rule generates every case we special-cased
 historically.
 
-### Sz parity — design (class 1, pending implementation)
+### Sz parity — IMPLEMENTED (Jul 2026)
 
-Detection ships now (`sz_axis_of`, `detect_hamiltonian_symmetries`
-keys `u1` / `sz_parity`). The subspace: states with popcount ≡ p
-(mod 2), dim 2^{N−1}. Because site permutations preserve popcount, the
-parity-sector × spatial-irrep bases are **concatenations of the
-existing fixed-Sz rep blocks** over n ∈ parity class: reps, inv-norms
-and per-n_up shared rank tables all reuse Stage-2/4 artifacts; the one
-new piece is a popcount-dispatched `index_of` in the rep policy
-(state → n_up → per-block offset + within-block rank). H terms with
-Δn_up = ±2 land in the neighbouring block of the same sector —
-handled by exactly that dispatch. GPU twin mirrors the offsets.
-Composes with class 2 (∏σˣ preserves parity for even N → Z₂×Z₂ with
-the flip) and classes 3/4 unchanged.
+Detection: `sz_axis_of` / `detect_hamiltonian_symmetries` keys
+`u1`/`sz_parity`. Implementation turned out simpler than the
+concatenated-block design: a parity sector is one `RepSectorData` with
+`n_up = -1` (no popcount filter — H never leaves the half) whose reps
+come from the parity-filtered fused scan
+(`build_orbit_table_parity_compiled` + cache variant), consumed by the
+existing full-space (n_up = −1) rep machinery on BOTH CPU and GPU
+unchanged. `build_parity_sector_operators_lazy` emits slots
+{parities} × {flip signs} (closure rule: ∏σˣ joins for even N →
+Z₂×Z₂), synthetic ids k + slot·num_raw, parity/flip labels appended to
+tag quantum numbers. Surface: `OperatorSpec::sz_parity` /
+`Solve/ThermalOptions::sz_parity`; `qed.solve(sz="even"/"odd")` pins a
+half; AUTO engages both halves when U(1) is broken but parity
+survives. Wired: GS binding, per-sector thermal binding (with the same
+comp-resolved flip engagement), `full_spectrum`. TR/star compose via
+the slot-generic synthetic canonicalisation. DSSF: parity (like flip)
+sectors are blocked on the Stage-8d cross-sector observable in the rep
+basis (`materialized_basis()` has no rep-only form) — DSSF stays
+U(1)×spatial until 8d. Verified: U(1)-broken ring, per-half spectra +
+full 256-multiset vs dense at 1e-14 (parity × flip × spatial: 32
+sectors, max block 12 vs 36 spatial-only); thermal E(T) machine-exact
+(4e-16); full_spectrum multiset 1e-14; CPU + GPU
+(`test_monomial_symmetry.py`).
 
 ### What else is exploitable (assessed)
 

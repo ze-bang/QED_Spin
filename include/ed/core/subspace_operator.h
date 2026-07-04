@@ -195,10 +195,11 @@ public:
             // sector union equals the full-Hilbert dense spectrum).
             if (static_cast<std::size_t>(producer_.dim()) != N) return false;
             this->commitPendingTransforms();
-            // Stage 8c: flip-projected (k, +/-) sectors have no orbit-CSR
-            // form (their csr_provider throws by design); decline so the
-            // caller falls back to the matvec column build, which runs the
-            // flip-aware rep gather backend.
+            // Rep-ONLY sectors (flip-extended / Sz-parity) have no
+            // orbit-CSR form (their csr_provider throws by design);
+            // decline so the caller falls back to the matvec column
+            // build, which runs the rep gather backend.
+            if (!producer_.csr_available()) return false;
             if (producer_.ensureRepData().has_flips()) return false;
             producer_.ensureHostCsr();   // materialise sector orbits for policy()
             auto basis_pol = producer_.policy();
@@ -457,9 +458,15 @@ public:
                           std::size_t                     group_size,
                           bool                            is_real,
                           std::function<ed::symmetry::RepSectorData()>  rep_provider,
-                          std::function<SymmetrySector()> csr_provider) {
+                          std::function<SymmetrySector()> csr_provider,
+                          bool                            csr_available = true) {
         producer_.configureRepLazy(sector_dim, group_size, is_real,
-                                   std::move(rep_provider), std::move(csr_provider));
+                                   std::move(rep_provider),
+                                   std::move(csr_provider), csr_available);
+    }
+
+    [[nodiscard]] bool csr_available() const noexcept {
+        return producer_.csr_available();
     }
 
     [[nodiscard]] bool rep_lazy() const noexcept { return producer_.rep_lazy(); }

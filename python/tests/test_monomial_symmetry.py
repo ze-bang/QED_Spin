@@ -152,3 +152,90 @@ def test_full_space_flip_sectors_gpu(dense_spectrum):
     a = _pooled(r)
     assert len(a) == len(dense_spectrum)
     np.testing.assert_allclose(a, dense_spectrum, rtol=0, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Sz-parity sectors (diagonal Z2 remnant): GS / thermal / full dense.
+# ---------------------------------------------------------------------------
+def test_parity_gs_auto_and_explicit_halves(dense_spectrum):
+    """AUTO: U(1)-broken parity-conserving H engages both parity halves
+    (composed with flip x spatial); explicit sz='even'/'odd' pins one
+    half; even-half GS is the global GS here."""
+    H = _u1_broken_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+
+    r = qed.solve(H, symmetry=gen, num_eigenvalues=1 << N_SITES,
+                  solver="full", device="cpu", verbose=False)
+    a = _pooled(r)
+    assert len(a) == len(dense_spectrum)
+    np.testing.assert_allclose(a, dense_spectrum, rtol=0, atol=1e-10)
+    # parity x flip x spatial: strictly smaller blocks than flip-only (20)
+    assert max(t.sector_dim for t in r.sector_tags) <= 12
+
+    e_even = qed.solve(H, symmetry=gen, sz="even", num_eigenvalues=1,
+                       device="cpu", verbose=False).eigenvalues[0]
+    e_odd = qed.solve(H, symmetry=gen, sz="odd", num_eigenvalues=1,
+                      device="cpu", verbose=False).eigenvalues[0]
+    assert abs(e_even - dense_spectrum[0]) < 1e-9
+    assert e_odd > e_even
+
+    with pytest.raises(ValueError, match="even"):
+        qed.solve(H, symmetry=gen, sz="sideways", verbose=False)
+
+
+def test_parity_thermal_machine_exact():
+    """Thermal over parity sectors: every block <= 512 hits the exact
+    fallback, so E(T) matches the exact partition sum to 1e-12."""
+    H = _u1_broken_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    dim = 1 << N_SITES
+    Hd = np.zeros((dim, dim))
+
+    def szv(s, i):
+        return 0.5 if (s >> i) & 1 else -0.5
+
+    for s in range(dim):
+        for i in range(N_SITES):
+            j = (i + 1) % N_SITES
+            Hd[s, s] += szv(s, i) * szv(s, j)
+            bi, bj = (s >> i) & 1, (s >> j) & 1
+            if bi != bj:
+                Hd[s ^ (1 << i) ^ (1 << j), s] += 0.5
+            if bi == 0 and bj == 0:
+                Hd[s | (1 << i) | (1 << j), s] += 0.3
+            if bi == 1 and bj == 1:
+                Hd[s & ~(1 << i) & ~(1 << j), s] += 0.3
+    w = np.linalg.eigvalsh(Hd)
+
+    t = qed.thermal(H, method="mTPQ", T_min=0.3, T_max=4.0, num_T=8,
+                    symmetry=gen, random_seed=3, device="cpu",
+                    verbose=False)
+    temps = np.asarray(getattr(t, "temperatures", None)
+                       if getattr(t, "temperatures", None) is not None
+                       else t.temperature)
+    E = np.asarray(t.energy)
+    for i, T in enumerate(temps):
+        x = np.exp(-(w - w[0]) / T)
+        assert abs(E[i] - (w * x).sum() / x.sum()) < 1e-12
+
+
+def test_parity_full_spectrum(dense_spectrum):
+    H = _u1_broken_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    fs = qed.full_spectrum(H, symmetry=gen, point_group="off",
+                           verbose=False)
+    a = np.asarray(fs.eigenvalues)
+    assert len(a) == len(dense_spectrum)
+    np.testing.assert_allclose(a, dense_spectrum, rtol=0, atol=1e-10)
+
+
+@pytest.mark.skipif(not _cuda_available(),
+                    reason="Requires a CUDA build and a visible device.")
+def test_parity_gs_gpu(dense_spectrum):
+    H = _u1_broken_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    r = qed.solve(H, symmetry=gen, num_eigenvalues=1 << N_SITES,
+                  solver="full", device="gpu", verbose=False)
+    a = _pooled(r)
+    assert len(a) == len(dense_spectrum)
+    np.testing.assert_allclose(a, dense_spectrum, rtol=0, atol=1e-10)

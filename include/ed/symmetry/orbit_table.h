@@ -375,6 +375,46 @@ build_orbit_table_full_compiled(std::uint64_t        n_bits,
     return tab;
 }
 
+/// Fused rep + stabilizer scan over the Sz-PARITY subspace
+/// (popcount(s) mod 2 == parity, dim 2^{N-1}). Every CompiledGroup
+/// element here must preserve popcount parity: site permutations
+/// always do; the all-ones flip does iff N is even (the caller
+/// enforces the closure rule).
+[[nodiscard]] inline OrbitTable
+build_orbit_table_parity_compiled(std::uint64_t        n_bits,
+                                  int                  parity,
+                                  const CompiledGroup& cg) {
+    SymPhaseTimer prof("pass1+1.5 fused orbit-table (Sz-parity)");
+    OrbitTable tab;
+    const std::uint64_t dim_all = (1ULL << n_bits);
+    tab.subspace_dim = dim_all / 2;
+
+    const std::size_t G = cg.size();
+    tab.content_hash = cg.content_hash()
+        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+        ^ (n_bits * 0x2545F4914F6CDD1DULL)
+        ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
+
+    std::vector<std::uint16_t> stab_scratch;
+    stab_scratch.reserve(G ? G : 1);
+    detail::StabDedup dedup;
+    for (std::uint64_t s = 0; s < dim_all; ++s) {
+        if ((static_cast<int>(__builtin_popcountll(s)) & 1) != parity)
+            continue;
+        if (G == 0) {
+            tab.reps.push_back(s);
+            stab_scratch.assign(1, 0);
+            tab.stab_id.push_back(dedup.id_of(stab_scratch));
+        } else if (detail::visit_state(s, cg, G, stab_scratch)) {
+            tab.reps.push_back(s);
+            tab.stab_id.push_back(dedup.id_of(stab_scratch));
+        }
+    }
+    tab.stab_elems = std::move(dedup.sets);
+    prof.set_items(tab.reps.size());
+    return tab;
+}
+
 /// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
 /// bit-identical to ``enumerate_full_orbit_reps``.
 [[nodiscard]] inline OrbitTable

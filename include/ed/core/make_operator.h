@@ -165,6 +165,14 @@ struct OperatorSpec {
     /// workload). Forces the lazy full-space builder.
     bool                  flip_sectors_full = false;
 
+    /// Sz-PARITY sectors (diagonal Z2 remnant when U(1) is broken but
+    /// every term changes n_up by an even amount): 0 = even half,
+    /// 1 = odd half, 2 = BOTH halves in one sector set (pooled GS /
+    /// thermal / full-dense mode). Unset = off. Mutually exclusive
+    /// with fixed_sz. ``flip_sectors_full`` additionally splits each
+    /// (parity, k) into flip signs (even N only).
+    std::optional<int>    sz_parity;
+
     /// Stage 3 (SymmetryEngine v2): explicit OrbitTable disk-cache
     /// directory. Empty = auto (``ED_SYM_CACHE_DIR`` override, else
     /// ``<lattice_dir>/basis_cache`` for directory sources; registry-only
@@ -544,7 +552,15 @@ make_sector_operators_tagged(const OperatorSpec& spec,
 
     const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
     const auto ctor_t0 = std::chrono::steady_clock::now();
-    if (spec.fixed_sz.has_value()) {
+    if (spec.sz_parity.has_value()) {
+        // Sz-parity halves (diagonal Z2 remnant), one RepSectorData per
+        // (parity, irrep[, flip sign]); rep lanes only.
+        set.operators = ed::symmetry::build_parity_sector_operators_lazy(
+            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+            (*spec.sz_parity >= 2) ? -1 : *spec.sz_parity,
+            base->symmetry_info, term_builder, &sector_ids, cache_dir,
+            spec.flip_sectors_full);
+    } else if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
         // fixed-Sz mTPQ): hand out operators that know their dim up-front and
         // defer the per-sector orbit CSR / GPU RepSectorData. Small/moderate
@@ -610,14 +626,26 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             tag.quantum_numbers =
                 base->symmetry_info.sectors[sector_ids[i]].quantum_numbers;
         } else if (nraw > 0) {
-            // Synthetic flip sector k + parity*num_raw: carry the raw
-            // irrep's quantum numbers plus the flip parity (+1 / -1)
-            // as the last entry.
+            // Synthetic sector k + slot*num_raw: carry the raw irrep's
+            // quantum numbers plus the slot labels. Slot layouts:
+            //   flip only          : slot = flip sign (0 -> +1, 1 -> -1)
+            //   parity only        : slot = parity     (0 -> +1 even, 1 -> -1 odd)
+            //   parity x flip      : slot = 2*parity + sign
             tag.quantum_numbers =
                 base->symmetry_info.sectors[sector_ids[i] % nraw]
                     .quantum_numbers;
-            tag.quantum_numbers.push_back(
-                sector_ids[i] / nraw == 0 ? +1 : -1);
+            const std::size_t slot = sector_ids[i] / nraw;
+            if (spec.sz_parity.has_value()) {
+                const int n_signs = spec.flip_sectors_full ? 2 : 1;
+                int p_idx = static_cast<int>(slot) / n_signs;
+                if (*spec.sz_parity == 1) p_idx += 1;   // odd-only set
+                tag.quantum_numbers.push_back(p_idx == 0 ? +1 : -1);
+                if (spec.flip_sectors_full)
+                    tag.quantum_numbers.push_back(
+                        (slot % n_signs) == 0 ? +1 : -1);
+            } else {
+                tag.quantum_numbers.push_back(slot == 0 ? +1 : -1);
+            }
         }
         tag.n_up = n_up;
         set.tags.push_back(std::move(tag));
