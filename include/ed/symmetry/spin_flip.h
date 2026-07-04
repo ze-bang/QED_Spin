@@ -51,6 +51,54 @@
 
 namespace ed::symmetry {
 
+// -----------------------------------------------------------------------------
+// Diagonal (S^z-basis-diagonal) symmetry axis of H, from the term-level
+// Delta(n_up) content:
+//   * U1     -- every term conserves popcount (S+S- pairs, diagonals):
+//               the full U(1) tower of fixed-Sz sectors applies.
+//   * Parity -- every term changes popcount by an EVEN amount (adds
+//               S+S+ / S-S- pair terms, e.g. J_{+-+-}-type anisotropic
+//               exchange): U(1) is broken but (-1)^{n_up} = prod sigma^z
+//               is conserved -- the Hilbert space splits into two
+//               2^{N-1} halves.
+//   * None   -- some term changes popcount by an odd amount (lone S+-,
+//               Sz S+- mixed terms, transverse fields): no diagonal
+//               reduction.
+// This is the three-valued refinement of the old binary conserves-Sz
+// check; ``Parity`` is the Z2 remnant of the broken U(1).
+// -----------------------------------------------------------------------------
+enum class SzAxis : std::uint8_t { None = 0, Parity = 1, U1 = 2 };
+
+[[nodiscard]] inline SzAxis
+sz_axis_of(const ed::matvec::TermStorage& t) noexcept {
+    // odd popcount changes -> None
+    if (!t.offdiag_one_body.empty() || !t.mixed_two_body.empty()) {
+        return SzAxis::None;
+    }
+    auto dpop = [](std::uint8_t op) -> int {
+        // op codes: 0 = S+, 1 = S-, 2 = Sz (see term_storage.h);
+        // only parity of the total change matters here.
+        return (op == 2) ? 0 : 1;
+    };
+    bool u1 = true;
+    for (const auto& tb : t.offdiag_two_body) {
+        // Both ops are off-diagonal S+- here; S+S- conserves, S+S+ /
+        // S-S- changes popcount by 2 (even either way).
+        if (tb.op_type_1 == tb.op_type_2) u1 = false;
+    }
+    for (const auto& tb : t.three_body) {
+        const int d = dpop(tb.op_type_1) + dpop(tb.op_type_2)
+                    + dpop(tb.op_type_3);
+        if (d % 2 != 0) return SzAxis::None;
+        // Even but possibly nonzero: S+S+SzSz-free 3-body raising pairs
+        // etc. break U(1) unless the +/- content pairs off exactly;
+        // conservative: any off-diagonal 3-body content demotes U(1).
+        if (d != 0) u1 = false;
+    }
+    return u1 ? SzAxis::U1 : SzAxis::Parity;
+}
+
+
 namespace detail {
 
 inline bool coeff_eq(const std::complex<double>& a,

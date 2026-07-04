@@ -158,6 +158,13 @@ struct OperatorSpec {
     /// eigenvalues-only workload). Forces the lazy builder variant.
     bool                  flip_project_half = false;
 
+    /// Full-space prod-sigma^x sectors (monomial-group consolidation,
+    /// Jul 2026): when no fixed-Sz axis applies but [H, X] == 0, split
+    /// every spatial irrep into (k, +/-) flip sectors over the full
+    /// 2^N space (caller verifies the symmetry + eigenvalues-only
+    /// workload). Forces the lazy full-space builder.
+    bool                  flip_sectors_full = false;
+
     /// Stage 3 (SymmetryEngine v2): explicit OrbitTable disk-cache
     /// directory. Empty = auto (``ED_SYM_CACHE_DIR`` override, else
     /// ``<lattice_dir>/basis_cache`` for directory sources; registry-only
@@ -563,12 +570,14 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     } else {
         // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
         // (memory-bounded, stabilizer-fused construction); small N stays eager.
-        if (detail::full_sectors_should_be_lazy(
+        if (spec.flip_sectors_full
+            || detail::full_sectors_should_be_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), base->symmetry_info)) {
             set.operators = ed::symmetry::build_full_sector_operators_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir);
+                mpi_rank, mpi_size, owner_ptr, cache_dir,
+                spec.flip_sectors_full);
         } else {
             set.operators = ed::symmetry::build_full_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
@@ -596,9 +605,19 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         ed::SectorTag tag;
         tag.sector_index = sector_ids[i];
         tag.sector_dim   = static_cast<std::uint64_t>(set.operators[i]->dim());
-        if (sector_ids[i] < base->symmetry_info.sectors.size()) {
+        const std::size_t nraw = base->symmetry_info.sectors.size();
+        if (sector_ids[i] < nraw) {
             tag.quantum_numbers =
                 base->symmetry_info.sectors[sector_ids[i]].quantum_numbers;
+        } else if (nraw > 0) {
+            // Synthetic flip sector k + parity*num_raw: carry the raw
+            // irrep's quantum numbers plus the flip parity (+1 / -1)
+            // as the last entry.
+            tag.quantum_numbers =
+                base->symmetry_info.sectors[sector_ids[i] % nraw]
+                    .quantum_numbers;
+            tag.quantum_numbers.push_back(
+                sector_ids[i] / nraw == 0 ? +1 : -1);
         }
         tag.n_up = n_up;
         set.tags.push_back(std::move(tag));

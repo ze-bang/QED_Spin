@@ -329,6 +329,67 @@ state, which also makes chain order irrelevant by construction.
 | Irrep loop length | |G| sectors | |G| | ~|G|/4 solved (flip ×2, TR pairing ×2), rest transported |
 | Re-run in a 200-point field sweep | ×200 | ×200 | ×1 (+199 cache hits) |
 
+## 3b. The consolidated symmetry taxonomy (Jul 2026)
+
+Every unitary symmetry this engine exploits acts on computational
+basis states as a **monomial (Pauli-string) operation**:
+
+    U |s>  =  (-1)^{popcount(s & z_mask)} · | permute(s) XOR x_mask >
+
+The whole zoo — U(1), Sz parity, spatial groups, ∏σˣ, plaquette
+fluxes — is classified by which parts are non-trivial, and each class
+maps to exactly ONE exploitation mechanism. This resolves the apparent
+redundancy between star reduction / SAB / parities:
+
+| class | form | mechanism | machinery |
+|---|---|---|---|
+| **1. Diagonal** (z_mask only) | (−1)^{popcount(s&z)} | **SUBSPACE** (basis restriction) | U(1) = fixed popcount; **Sz parity = popcount mod 2** (the Z₂ remnant when S⁺S⁺ terms break U(1)); detection: `sz_axis_of` ∈ {U1, Parity, None} |
+| **2. Monomial abelian** (perm ⊕ x_mask) | permute + XOR | **PROJECTOR** (rep-basis, 1-dim irreps) | one `CompiledGroup`: spatial perms AND ∏σˣ are the *same element type* — flip = identity perm ⊕ all-ones mask. Wherever the active subspace is closed under the element, it joins the projector group G′; blocks ÷\|G′\|. Full-space flip sectors + N/2 flip projection are the same code path |
+| **3. Isospectral maps** (antiunitary TR; non-abelian residue on iterative lanes) | sector ↔ sector unitary/antiunitary | **ORBIT FOLDING** (solve one, copy) | `sector_orbit_canonical` union-find: TR pairing + star maps. Cuts solve COUNT only — never block size. Star reduction is deliberately *not* representation theory |
+| **4. Non-abelian projection** | d≥2 irreps | **ISOTYPIC PROJECTOR** | SAB engine (numerical D^Γ(g) via the regular-representation commutant, monolithic group, dense-only) today; little-group induced reps for iterative lanes = Stage 7 |
+
+Closure rule for class 2 vs 3: an element ENTERS the projector group
+iff it preserves the active class-1 subspace (∏σˣ preserves: the full
+space always; a parity sector iff N even; a fixed-Sz block iff
+n = N/2). Otherwise it degrades gracefully to a class-3 transport map
+(n ↔ N−n mirror). One rule generates every case we special-cased
+historically.
+
+### Sz parity — design (class 1, pending implementation)
+
+Detection ships now (`sz_axis_of`, `detect_hamiltonian_symmetries`
+keys `u1` / `sz_parity`). The subspace: states with popcount ≡ p
+(mod 2), dim 2^{N−1}. Because site permutations preserve popcount, the
+parity-sector × spatial-irrep bases are **concatenations of the
+existing fixed-Sz rep blocks** over n ∈ parity class: reps, inv-norms
+and per-n_up shared rank tables all reuse Stage-2/4 artifacts; the one
+new piece is a popcount-dispatched `index_of` in the rep policy
+(state → n_up → per-block offset + within-block rank). H terms with
+Δn_up = ±2 land in the neighbouring block of the same sector —
+handled by exactly that dispatch. GPU twin mirrors the offsets.
+Composes with class 2 (∏σˣ preserves parity for even N → Z₂×Z₂ with
+the flip) and classes 3/4 unchanged.
+
+### What else is exploitable (assessed)
+
+* **General Pauli-string symmetry detection** — the natural closure of
+  this taxonomy: detect ANY set of commuting Pauli strings that
+  commute with H (sublattice parities ∏_{i∈A}σᶻᵢ, staggered flips,
+  Kitaev/QSI plaquette fluxes). Z-type strings are class-1 subspaces
+  (popcount over a mask), X-type are class-2 group elements (partial
+  XOR masks — `CompiledGroup` already supports arbitrary masks!),
+  mixed strings need the (−1)^{popcount(s&z)} phase added to
+  `CompiledGroup` (one sign per element application). Highest-leverage
+  future item: plaquette-flux models gain exponentially many sectors.
+* **SU(2) total-S** (Heisenberg points): genuine further reduction but
+  needs Clebsch–Gordan tower machinery orthogonal to everything here;
+  not planned.
+* **Spectrum reflections** (bipartite E→−E sublattice rotations):
+  niche; full_spectrum could halve; not planned.
+* **Little-group induced reps** (Stage 7): the remaining big lift —
+  gives ITERATIVE lanes the class-4 block reduction the SAB engine
+  proves out densely.
+
 ## 4. Migration plan (each stage independently landable + testable)
 
 | Stage | Deliverable | Guard | Status |

@@ -830,10 +830,136 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
                                  int                      mpi_rank = 0,
                                  int                      mpi_size = 1,
                                  const std::vector<int>*  sector_owner = nullptr,
-                                 const std::string&       cache_dir = {})
+                                 const std::string&       cache_dir = {},
+                                 bool                     flip_sectors = false)
 {
     auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
     const FullSpaceSubspace subspace(n_bits);
+
+    // -----------------------------------------------------------------
+    // FULL-SPACE prod-sigma^x sectors (monomial-group consolidation,
+    // Jul 2026). When U(1) Sz is broken but [H, X] == 0 (X = prod
+    // sigma^x -- e.g. anisotropic S+S+ exchange), the full 2^N space
+    // still splits by the flip quantum number: extend G to
+    // G' = G x Z2 exactly as the fixed-Sz N/2 projection does (flip is
+    // one more CompiledGroup element: identity perm (+) all-ones XOR
+    // mask; the full space is trivially closed under it) and emit
+    // (k, +/-) sectors with chi' = (chi, +/-chi). Halves every irrep
+    // block on top of the spatial reduction. CPU/GPU rep lanes only
+    // (the orbit-CSR fallback throws, as at N/2); single-rank.
+    // -----------------------------------------------------------------
+    if (flip_sectors && sym_fused_pass15_enabled() && mpi_size == 1) {
+        const CompiledGroup cg_flip =
+            make_flip_extended_group(*info_sp, n_bits);
+        const std::size_t G2 = cg_flip.size();
+        const std::size_t Gs = G2 / 2;
+        auto flip_tab = acquire_orbit_table_full_compiled(
+            n_bits, cg_flip, cache_dir);
+        auto reps_fp = std::shared_ptr<const std::vector<std::uint64_t>>(
+            flip_tab, &flip_tab->reps);
+
+        const std::size_t num_irreps = info_sp->sectors.size();
+        const std::vector<int> shared_perms_flat =
+            flatten_group_perms(*info_sp, static_cast<int>(n_bits));
+        std::vector<int> perms2;
+        if (info_sp->max_clique.empty()) {
+            perms2.resize(2 * n_bits);
+            for (std::uint64_t i = 0; i < n_bits; ++i) {
+                perms2[i]          = static_cast<int>(i);
+                perms2[n_bits + i] = static_cast<int>(i);
+            }
+        } else {
+            perms2 = shared_perms_flat;
+            perms2.insert(perms2.end(), shared_perms_flat.begin(),
+                          shared_perms_flat.end());
+        }
+        const std::uint64_t all_ones =
+            (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
+        std::vector<std::uint64_t> flips2(G2, 0ULL);
+        for (std::size_t g = Gs; g < G2; ++g) flips2[g] = all_ones;
+
+        const std::size_t n_flip_secs =
+            2 * std::max<std::size_t>(num_irreps, 1);
+        std::vector<std::unique_ptr<SectorOperator>> fslot(n_flip_secs);
+        std::vector<long long> fslot_ids(n_flip_secs, -1);
+
+        #pragma omp parallel for schedule(dynamic) if(n_flip_secs > 1)
+        for (std::ptrdiff_t si = 0;
+             si < static_cast<std::ptrdiff_t>(n_flip_secs); ++si) {
+            const std::size_t idx = static_cast<std::size_t>(si);
+            const std::size_t k =
+                idx % std::max<std::size_t>(num_irreps, 1);
+            const int parity =
+                (idx < std::max<std::size_t>(num_irreps, 1)) ? +1 : -1;
+
+            std::vector<Complex> chi2(G2, Complex(1.0, 0.0));
+            if (num_irreps > 0) {
+                const std::vector<Complex> chi_k = sector_characters_from(
+                    *info_sp, info_sp->sectors[k].phase_factors);
+                for (std::size_t g = 0; g < Gs; ++g) {
+                    chi2[g]      = chi_k[g];
+                    chi2[Gs + g] = static_cast<double>(parity) * chi_k[g];
+                }
+            } else {
+                chi2[1] = Complex(static_cast<double>(parity), 0.0);
+            }
+
+            RepSectorData rd;
+            rd.n_sites    = static_cast<int>(n_bits);
+            rd.group_size = static_cast<int>(G2);
+            rd.reps.reserve(reps_fp->size());
+            rd.inv_norms.reserve(reps_fp->size());
+            for (std::size_t i = 0; i < reps_fp->size(); ++i) {
+                const double norm_sq = projected_norm_sq_stab(
+                    flip_tab->stabilizer_of(i), chi2);
+                if (norm_sq <= SectorBasis::kOrbitNormSqEpsilon) continue;
+                rd.reps.push_back((*reps_fp)[i]);
+                rd.inv_norms.push_back(1.0 / std::sqrt(norm_sq));
+            }
+            if (rd.reps.empty()) continue;
+
+            rd.n_up       = -1;   // full space: no popcount filter
+            rd.characters = chi2;
+            rd.perms_flat = perms2;
+            rd.flip_masks = flips2;
+
+            bool is_real = true;
+            for (const auto& c : rd.characters) {
+                if (std::abs(c.imag()) > 1e-12) { is_real = false; break; }
+            }
+            const std::uint64_t dim =
+                static_cast<std::uint64_t>(rd.reps.size());
+            auto rep_sp = std::make_shared<RepSectorData>(std::move(rd));
+
+            auto op = std::make_unique<SectorOperator>(
+                n_bits, spin_l, SectorBasis{});
+            terms(*op);
+            op->configureRepLazy(
+                dim, G2, is_real,
+                [rep_sp]() { return *rep_sp; },
+                []() -> ::SymmetrySector {
+                    throw std::runtime_error(
+                        "flip-projected full-space sector: the orbit-CSR "
+                        "lane is not flip-aware. Keep the default rep "
+                        "lane (unset ED_SYM_REP=0) or disable the flip "
+                        "projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
+                });
+
+            fslot[idx]     = std::move(op);
+            fslot_ids[idx] = static_cast<long long>(idx);
+        }
+
+        std::vector<std::unique_ptr<SectorOperator>> ops;
+        for (std::size_t idx = 0; idx < n_flip_secs; ++idx) {
+            if (!fslot[idx]) continue;
+            if (out_sector_ids)
+                out_sector_ids->push_back(
+                    static_cast<std::size_t>(fslot_ids[idx]));
+            ops.push_back(std::move(fslot[idx]));
+        }
+        (void)mpi_rank; (void)sector_owner;
+        return ops;
+    }
 
     // Stage 2 (SymmetryEngine v2): fused pass1+1.5 (default) + irrep-parallel
     // Pass 1.5 loop. ``ED_SYM_FUSED_PASS15=0`` retains the legacy two-pass

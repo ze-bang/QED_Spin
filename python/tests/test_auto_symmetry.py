@@ -119,8 +119,8 @@ def test_on_toggle_reports_and_degrades():
 
     det = dict(qed._core.detect_hamiltonian_symmetries(H))
     detz = dict(qed._core.detect_hamiltonian_symmetries(Hz))
-    assert det == {"spin_flip": True, "time_reversal": True}
-    assert detz == {"spin_flip": False, "time_reversal": True}
+    assert det["spin_flip"] is True and det["time_reversal"] is True
+    assert detz["spin_flip"] is False and detz["time_reversal"] is True
 
     # symmetric H + 'on': engages, same physics as auto.
     r_on = qed.solve(H, symmetry="auto", sz=N_SITES // 2,

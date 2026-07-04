@@ -624,6 +624,10 @@ void bind_workflows(py::module_& m) {
               out["spin_flip"] =
                   ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
               out["time_reversal"] = ed::symmetry::hamiltonian_is_real(soa);
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+              out["u1"] = (ax == ed::symmetry::SzAxis::U1);
+              out["sz_parity"] =
+                  (ax != ed::symmetry::SzAxis::None);  // U1 implies parity
               return out;
           },
           py::arg("op"),
@@ -832,6 +836,13 @@ void bind_workflows(py::module_& m) {
                       && *spec.fixed_sz * 2 == static_cast<int>(num_sites)
                       && !opts.compute_vectors) {
                       spec.flip_project_half = true;
+                  }
+                  // Full-space prod-sigma^x sectors: no fixed-Sz axis
+                  // (U(1) broken or unused) but [H, X] == 0 -- every
+                  // irrep splits (k, +/-) over the full 2^N space.
+                  if (comp.flip_project && !spec.fixed_sz
+                      && !opts.compute_vectors) {
+                      spec.flip_sectors_full = true;
                   }
                   ed::core::SectorSetView handle(
                       ed::make_sector_operators_tagged(spec));

@@ -293,20 +293,20 @@ make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
                                         static_cast<int>(n_bits));
 }
 
-/// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
-/// bit-identical to ``enumerate_full_orbit_reps``.
+/// Fused rep + stabilizer scan over the full 2^N Hilbert space for an
+/// arbitrary CompiledGroup (perm (+) flip-mask elements -- the full
+/// 2^N space is closed under EVERY such element, so the min-image
+/// convention and closed-form norms hold unconditionally). This is the
+/// entry the flip-extended full-space sectors use.
 [[nodiscard]] inline OrbitTable
-build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
-    SymPhaseTimer prof("pass1+1.5 fused orbit-table (full)");
+build_orbit_table_full_compiled(std::uint64_t        n_bits,
+                                const CompiledGroup& cg) {
+    SymPhaseTimer prof("pass1+1.5 fused orbit-table (full, compiled)");
     OrbitTable tab;
     const std::uint64_t dim = (1ULL << n_bits);
     tab.subspace_dim = dim;
 
-    const std::size_t G = info.max_clique.size();
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    const std::size_t G = cg.size();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
@@ -373,6 +373,17 @@ build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
     tab.stab_elems = std::move(global.sets);
     prof.set_items(tab.reps.size());
     return tab;
+}
+
+/// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
+/// bit-identical to ``enumerate_full_orbit_reps``.
+[[nodiscard]] inline OrbitTable
+build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
+    const CompiledGroup cg = info.max_clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    return build_orbit_table_full_compiled(n_bits, cg);
 }
 
 }  // namespace ed::symmetry

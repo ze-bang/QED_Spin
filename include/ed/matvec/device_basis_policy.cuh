@@ -462,15 +462,24 @@ struct DeviceRepSymmetryBasisPolicy {
         return reps[idx];
     }
 
+    // Full-space sectors (n_up < 0): no popcount filter, and the
+    // "combinadic rank" of a state over the full 2^N space is the
+    // state itself (identity), so the reverse table is indexed by rb.
+    __device__ inline std::uint64_t rank_of_rep(std::uint64_t rb) const noexcept {
+        return (n_up >= 0)
+            ? static_cast<std::uint64_t>(
+                  ed::gpu::combinadic::rank_state(rb, n_sites, n_up))
+            : rb;
+    }
+
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
-        if (__popcll(state) != n_up) return kDeviceNotFound;
+        if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
         std::uint64_t rb = state;
         for (int g = 1; g < group_size; ++g) {
             const std::uint64_t img = apply_perm(state, g);
             if (img < rb) rb = img;
         }
-        const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
-        const std::int32_t k = rep_index_of_rank[r];
+        const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
         return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
     }
 
@@ -490,7 +499,7 @@ struct DeviceRepSymmetryBasisPolicy {
     // so correctness is never sacrificed.
     __device__ inline std::uint64_t
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
-        if (__popcll(state) != n_up) return kDeviceNotFound;
+        if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
 
         // kMaxGGpu = 256 covers all realistic lattice automorphism groups
         // (full D4h on 4×8 N=32 lattice: |G|=256; D6h on hexagonal: |G|=12×6=72).
@@ -508,8 +517,7 @@ struct DeviceRepSymmetryBasisPolicy {
                 images[g] = apply_perm(state, g);
                 if (images[g] < rb) rb = images[g];
             }
-            const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
-            const std::int32_t k = rep_index_of_rank[r];
+            const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
             if (k < 0) return kDeviceNotFound;
             // Accumulate from precomputed images — no more apply_perm here.
             cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
@@ -531,8 +539,7 @@ struct DeviceRepSymmetryBasisPolicy {
             const std::uint64_t img = apply_perm(state, g);
             if (img < rb) rb = img;
         }
-        const int r = ed::gpu::combinadic::rank_state(rb, n_sites, n_up);
-        const std::int32_t k = rep_index_of_rank[r];
+        const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
         if (k < 0) return kDeviceNotFound;
         cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
         for (int h = 0; h < group_size; ++h) {

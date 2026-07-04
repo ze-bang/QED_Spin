@@ -326,6 +326,18 @@ acquire_orbit_table_full(std::uint64_t n_bits,
         [&] { return build_orbit_table_full(n_bits, info); });
 }
 
+[[nodiscard]] inline std::shared_ptr<const OrbitTable>
+acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
+                                  const CompiledGroup& cg,
+                                  const std::string&   cache_dir = {}) {
+    const std::uint64_t key = cg.content_hash()
+        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+        ^ (n_bits * 0x2545F4914F6CDD1DULL);
+    return detail::acquire_impl(
+        key, cache_dir,
+        [&] { return build_orbit_table_full_compiled(n_bits, cg); });
+}
+
 /// Resolve the effective disk-cache directory for a lattice fixture
 /// directory (the documented ``basis_cache_dir`` contract):
 ///   explicit option > ED_SYM_CACHE_DIR > <lattice_dir>/basis_cache;

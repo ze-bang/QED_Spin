@@ -653,8 +653,15 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     }
     const int n_sites = data.n_sites;
     const int n_up    = data.n_up;
-    if (n_sites <= 0 || n_sites > 64 || n_up < 0 || n_up > n_sites) {
+    if (n_sites <= 0 || n_sites > 64 || n_up < -1 || n_up > n_sites) {
         throw std::runtime_error("build_rep_mirror: invalid n_sites / n_up");
+    }
+    if (n_up < 0 && n_sites > 31) {
+        // Full-space sector: the reverse table is indexed by the state
+        // itself (2^N int32 entries). 31 bits caps it at 8 GiB.
+        throw std::runtime_error(
+            "build_rep_mirror: full-space rep mirror needs n_sites <= 31 "
+            "(dense state-indexed reverse table)");
     }
 
     auto mirror = std::make_shared<GpuRepSectorMirror>();
@@ -665,13 +672,17 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     mirror->dim        = data.dim();
 
     // C(n_sites, n_up), capped at INT32_MAX (the rank-table value type).
+    // Full-space sectors (n_up < 0): the rank space is the whole 2^N
+    // (state-indexed identity rank).
     long double dv = 1.0L;
-    {
+    if (n_up >= 0) {
         int kk = (n_up < n_sites - n_up) ? n_up : (n_sites - n_up);
         for (int i = 0; i < kk; ++i) {
             dv *= static_cast<long double>(n_sites - i);
             dv /= static_cast<long double>(i + 1);
         }
+    } else {
+        dv = static_cast<long double>(1ULL << n_sites);
     }
     if (dv > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
         throw std::runtime_error(
@@ -715,7 +726,9 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     // ONLY -- no orbit images materialised.
     std::vector<std::int32_t> h_rep_index_of_rank(dim_full_sz, -1);
     for (std::size_t i = 0; i < data.reps.size(); ++i) {
-        const std::uint64_t r = rank_combination_host(data.reps[i], n_up);
+        const std::uint64_t r = (n_up >= 0)
+            ? rank_combination_host(data.reps[i], n_up)
+            : data.reps[i];                    // full space: identity rank
         if (r < dim_full_sz) {
             h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
         }

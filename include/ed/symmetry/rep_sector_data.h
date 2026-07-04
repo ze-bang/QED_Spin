@@ -219,7 +219,10 @@ struct RepSectorData {
     // fixed-Sz magnetisation (the device reverse lookup is a combinadic rank
     // table over C(n_sites, n_up)) and a non-empty group action.
     [[nodiscard]] bool usable() const noexcept {
-        return n_up >= 0 && group_size > 0 && n_sites > 0
+        // n_up == -1 is the documented full-space sentinel (the rep
+        // policy skips the popcount filter); rejecting it silently
+        // degraded the full-space lazy lane to orbit-CSR.
+        return n_up >= -1 && group_size > 0 && n_sites > 0
             && !reps.empty()
             && characters.size() == static_cast<std::size_t>(group_size)
             && perms_flat.size() ==
