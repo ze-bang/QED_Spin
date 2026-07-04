@@ -1,4 +1,4 @@
-# Capability matrix vs dense diagonalization — 2026-07-03 (rev 2)
+# Capability matrix vs dense diagonalization — 2026-07-04 (rev 3)
 
 `benchmarks/bench_capability_matrix.py --n 12 --devices cpu,gpu`.
 N=12 Heisenberg ring (all four symmetry axes present). **Ground truth
@@ -131,6 +131,39 @@ strongest dense reduction, 20× faster than the abelian path here), and
 spin-flip transport halves the magnetisation sweep on both routes. The
 same toggles apply (`spin_flip=` / `time_reversal=` / `point_group=`);
 `point_group="off"` pins the abelian streaming path.
+
+## Extended cells (rev 3): non-abelian full group + the U(1)-broken model
+
+The U(1)-broken model (Heisenberg ring + J±±-type S⁺S⁺/S⁻S⁻ terms,
+N=12, dense E₀ = −5.72132542) exercises the mechanisms a
+U(1)-conserving Hamiltonian cannot: **Sz parity** (the (−1)^{n_up} Z₂
+remnant), **full-space ∏σˣ sectors**, and their composition. Every
+cell = complete 4096-state multiset vs dense `eigvalsh`:
+
+| verb | composition | device | max dev | blocks | max dim | t [s] |
+|---|---|---|---|---|---|---|
+| GS | none | cpu | 5.3e−15 | 1 | 4096 | 9.82 |
+| GS | spatial | cpu | 7.1e−14 | 12 | 352 | 0.81 |
+| GS | spatial+flip(full-space) | cpu | 7.7e−14 | 24 | 180 | 0.60 |
+| GS | parity+spatial | cpu | 7.6e−14 | 24 | 180 | 0.29 |
+| GS | parity+spatial+flip | cpu | 7.2e−14 | 48 | 94 | 0.14 |
+| GS | parity+flip+TR+star | cpu | 7.2e−14 | 48 | 94 | **0.072 (136×)** |
+| GS | nonabelian-full (d≥2) | cpu | 2.9e−14 | — | — | 1.19 |
+| thermal (mTPQ) | parity(auto)+flip | cpu | 1.3e−14 | — | — | 0.36 |
+| full dense | parity(auto)+flip | cpu | 7.7e−14 | — | — | 0.11 |
+| GS | parity+flip+TR+star | gpu | 7.2e−14 | 48 | 94 | 0.34 |
+| thermal (mTPQ) | parity(auto)+flip | gpu | 1.3e−14 | — | — | 0.51 |
+| full dense | parity(auto)+flip | gpu | 7.7e−14 | — | — | 0.10 |
+
+Non-abelian `point_group="full"` cells on the U(1)-conserving ring
+(D₁₂, d≥2 irreps): GS lowest-6 incl. the d=2 triplet at 2.1e−14
+(0.82 s); exact thermodynamics at 1.8e−13 (0.31 s); GS DSSF vs the
+dense Lehmann sum at 8.9e−13 (5.3 s).
+
+Ladder reading: each Z₂ multiplies — spatial ÷12, ×∏σˣ ÷2, ×parity ÷2
+(48 blocks, max dim 94 vs 4096), TR+star then cut the solve count.
+`auto_sz=False` now disables the whole diagonal axis (parity included),
+so the pure-spatial rows are genuinely pure.
 
 ## GPU parity and optimization status
 

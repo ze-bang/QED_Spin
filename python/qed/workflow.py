@@ -1500,6 +1500,7 @@ def solve(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
             sz_parity=_sz_parity_str,
+            auto_sz_axis=auto_sz,
             verbose=verbose,
             spin_flip=spin_flip,
             time_reversal=time_reversal,
@@ -2970,6 +2971,7 @@ def _diag_with_symmetry(
     time_reversal="auto",
     point_group="auto",
     sz_parity: Optional[int] = None,
+    auto_sz_axis: bool = True,
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -3054,7 +3056,7 @@ def _diag_with_symmetry(
         # (all terms change n_up by even amounts): both halves in one
         # sector set.
         _parity_mode = sz_parity
-        if (_parity_mode is None and sz is None
+        if (_parity_mode is None and sz is None and auto_sz_axis
                 and not isinstance(operator, FixedSzOperator)
                 and not operator.conserves_sz()):
             try:
