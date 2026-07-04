@@ -202,6 +202,18 @@ def _extract_transforms(observable: Any) -> list:
     )
 
 
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class _SabDssfResult:
+    """Return shape of the full-group (non-abelian SAB) GS-DSSF lane."""
+    omega: "np.ndarray"
+    S_real: "np.ndarray"
+    gs_energy: float
+    total_weight: float
+
+
 def _infer_delta_n_up(transforms: list) -> int:
     """Infer the Sz selection rule of a probe from its transform tuples.
 
@@ -902,6 +914,7 @@ def spectral(
     # REPORT: 'on' confirms or warns, 'require' throws when absent.
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
+    point_group: Union[str, bool, None] = "auto",
     # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026) --------
     initial_state: Optional[Any] = None,
 ):
@@ -1301,6 +1314,34 @@ def spectral(
                   "not exploited by the spectral lanes yet (they only "
                   "affect solve/thermal); the U(1) x spatial sector "
                   "machinery is used when symmetry= is given.")
+    if (symmetry is not None and observables is not None
+            and not isinstance(H_or_directory, str)
+            and isinstance(point_group, str)
+            and point_group.lower() == "full"
+            and omega is not None and T is None):
+        # PROPER non-abelian GS-DSSF: H and the probe reduced by the
+        # FULL group (all d_Gamma partners summed for completeness) on
+        # the production multi-target matvec.
+        import numpy as np
+        from .workflow import (resolve_auto_symmetry as _ras,
+                               _full_group_generators as _fgg)
+        _sym = _ras(H_or_directory, symmetry, verbose=verbose)
+        _gens = _fgg(_sym) if _sym is not None else None
+        if _gens is not None:
+            ws = list(omega)
+            results = []
+            for obs in observables:
+                d = dict(_core.symmetry_adapted_gs_dssf(
+                    H_or_directory, obs, _gens,
+                    float(min(ws)), float(max(ws)), int(len(ws)),
+                    float(eta if eta is not None else 0.1)))
+                r = _SabDssfResult(
+                    omega=np.asarray(d["omega"], dtype=float),
+                    S_real=np.asarray(d["s_omega"], dtype=float),
+                    gs_energy=float(d["gs_energy"]),
+                    total_weight=float(d["total_weight"]))
+                results.append(r)
+            return results[0] if len(results) == 1 else results
     if symmetry is not None:
         routed = _spectral_in_memory_with_symmetry(
             H_or_directory, observables,

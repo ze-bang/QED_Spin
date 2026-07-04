@@ -790,6 +790,58 @@ PYBIND11_MODULE(_core, m) {
 
     // Finite-temperature thermodynamics via the symmetry-reduced spectrum
     // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
+    m.def("symmetry_adapted_lowest_eigenvalues",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             int k, int n_up, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto group = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
+              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
+                  op, gi, group, n_sites, k, n_up);
+              py::dict d;
+              d["eigenvalues"]     = spec.eigenvalues;
+              d["block_irrep_dim"] = spec.block_irrep_dim;
+              d["block_size"]      = spec.block_size;
+              d["group_order"]     = gi.order;
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("k"),
+          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          R"pbdoc(
+            Lowest-k eigenvalues under the FULL (possibly non-abelian)
+            group reduction: each irrep block runs the production
+            multi-target matvec through block-size-adaptive dense /
+            Lanczos solves; eigenvalues recombined with their d_Gamma
+            multiplicities and sorted. The ITERATIVE non-abelian lane
+            (blocks ~ dim/|G| including d >= 2 irreps).
+          )pbdoc");
+
+    m.def("symmetry_adapted_gs_dssf",
+          [](const Operator& op_h, const Operator& op_o,
+             const std::vector<std::vector<int>>& generators,
+             double omega_min, double omega_max, int n_omega,
+             double broadening) {
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+              auto group = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
+              auto res = ed::solvers::symmetry_adapted_ground_state_dssf(
+                  op_h, op_o, gi, group, n_sites,
+                  omega_min, omega_max, n_omega, broadening);
+              py::dict d;
+              d["omega"]        = res.omega;
+              d["s_omega"]      = res.spectral;
+              d["gs_energy"]    = res.ground_energy;
+              d["total_weight"] = res.total_weight;
+              return d;
+          },
+          py::arg("op_h"), py::arg("op_o"), py::arg("generators"),
+          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
+          py::arg("broadening"),
+          R"pbdoc(
+            Ground-state DSSF S(omega) under the FULL non-abelian group
+            reduction (all d_Gamma partners summed for completeness).
+          )pbdoc");
+
     m.def("symmetry_adapted_thermodynamics",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,
              const std::vector<double>& temperatures, int n_up, bool use_gpu) {

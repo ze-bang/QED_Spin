@@ -738,6 +738,37 @@ def thermal(
                     print(f"[qed] point group: {len(star_maps)} residue "
                           "automorphisms fold the irrep sectors into "
                           "isospectral stars (solve one per star).")
+    if (symmetry is not None and not is_directory
+            and isinstance(point_group, str)
+            and point_group.lower() == "full"):
+        # PROPER non-abelian thermodynamics: exact canonical Z/E/C/S
+        # from the full reduced spectrum (every irrep block, d_Gamma
+        # multiplicities folded in) on the production multi-target
+        # matvec. Moderate N (the full spectrum is materialised per
+        # block); the abelian streaming lanes remain the large-N route.
+        from .workflow import _full_group_generators
+        gens_full = _full_group_generators(symmetry)
+        if gens_full is None:
+            raise ValueError(
+                "point_group='full' needs a spatial symmetry with "
+                "retained residue (symmetry='auto' / find_symmetries).")
+        temps = list(np.linspace(T_min, T_max, num_T))
+        _nu = -1
+        td = dict(_core.symmetry_adapted_thermodynamics(
+            H, gens_full, temps, _nu,
+            isinstance(device, str) and device.lower() in ("gpu", "cuda")))
+        _E = np.asarray(td["energy"], dtype=float)
+        return ThermalResult(
+            temperatures=np.asarray(td["temperatures"], dtype=float),
+            energy=_E,
+            specific_heat=np.asarray(td["specific_heat"], dtype=float),
+            entropy=np.asarray(td["entropy"], dtype=float),
+            free_energy=np.asarray(td["free_energy"], dtype=float),
+            method=str(method),
+            ground_state_energy=float(_E[0]) if len(_E) else 0.0,
+            used_sz_decomposition=False,
+            used_symmetry_decomposition=True,
+        )
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")

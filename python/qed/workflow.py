@@ -1016,6 +1016,17 @@ def resolve_discrete_toggle(
         f"(or None / bool), got {value!r}")
 
 
+def _full_group_generators(symmetry) -> Optional[list]:
+    """Generators of the FULL (possibly non-abelian) spatial group: the
+    abelian clique generators plus the retained residue automorphisms.
+    None when there is no spatial symmetry or no residue is known."""
+    gens = getattr(symmetry, "generators", None)
+    if not gens:
+        return None
+    star = list(getattr(symmetry, "star_perms", None) or [])
+    return [list(g) for g in gens] + [list(p) for p in star]
+
+
 def solve(
     H: Union[Operator, FixedSzOperator],
     *,
@@ -1462,6 +1473,32 @@ def solve(
                 launcher_binary=mpi_launcher_binary,
                 verbose=verbose,
             )
+        if isinstance(point_group, str) and point_group.lower() == "full":
+            # PROPER non-abelian: every irrep block (d_Gamma >= 2
+            # included, blocks ~ dim/|G|) on the production multi-target
+            # matvec, block-size-adaptive dense/Lanczos per block,
+            # eigenvalues recombined with d_Gamma multiplicities. CPU
+            # engine (the GPU consumer covers the dense full-spectrum
+            # path); U(1) composes via sz=.
+            gens_full = _full_group_generators(symmetry)
+            if gens_full is None:
+                raise ValueError(
+                    "point_group='full' needs a spatial symmetry with "
+                    "retained residue (symmetry='auto' or a GeneratorSet "
+                    "from find_symmetries).")
+            _k = int(num_eigenvalues) if num_eigenvalues else 1
+            _nu = int(sz) if isinstance(sz, int) else -1
+            spec = _core.symmetry_adapted_lowest_eigenvalues(
+                op_to_use, gens_full, _k, _nu)
+            out = EDResults()
+            out.eigenvalues = sorted(
+                float(e) for e in spec["eigenvalues"])[:_k]
+            if verbose:
+                print(f"[qed.solve] non-abelian SAB lane: |G| = "
+                      f"{spec['group_order']}, blocks = "
+                      f"{len(spec['block_size'])} (irrep dims "
+                      f"{sorted(set(spec['block_irrep_dim']))}).")
+            return out
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
