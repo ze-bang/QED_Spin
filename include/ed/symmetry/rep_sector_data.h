@@ -155,7 +155,11 @@ struct RepSectorData {
     // Number of int32 entries a full rank table would need for this sector
     // (== C(n_sites, n_up)). 0 when the sector cannot carry a rank table.
     [[nodiscard]] std::uint64_t rank_table_entries() const noexcept {
-        if (n_up < 0 || n_sites <= 0) return 0;
+        if (n_sites <= 0) return 0;
+        if (n_up < 0) {
+            // State-indexed identity-rank table over the full 2^N.
+            return (n_sites <= 31) ? (1ULL << n_sites) : 0;
+        }
         ed::core::combinadic::BinomialTable b(n_sites);
         return b.at(n_sites, n_up);
     }
@@ -166,7 +170,24 @@ struct RepSectorData {
     // or when the sector is not a usable fixed-Sz sector.
     void build_rank_table() {
         if (has_rank_table()) return;
-        if (n_up < 0 || n_sites <= 0 || reps.empty()) return;
+        if (n_sites <= 0 || reps.empty()) return;
+        if (n_up < 0) {
+            // Full-space / parity / flip-extended sectors: the rank of
+            // a state over the full 2^N enumeration is the state
+            // itself (identity), so the reverse table is state-indexed
+            // (2^N int32; the caller budget-gates via
+            // rank_table_entries + rep_rank_table_enabled).
+            if (n_sites > 31) return;
+            const std::uint64_t dim_all = (1ULL << n_sites);
+            rep_index_of_rank.assign(static_cast<std::size_t>(dim_all),
+                                     std::int32_t{-1});
+            for (std::size_t i = 0; i < reps.size(); ++i) {
+                rep_index_of_rank[static_cast<std::size_t>(reps[i])] =
+                    static_cast<std::int32_t>(i);
+            }
+            binom.resize(n_sites);   // policy precondition (unused here)
+            return;
+        }
         binom.resize(n_sites);
         const std::uint64_t dim_full_sz = binom.at(n_sites, n_up);
         if (dim_full_sz == 0) return;

@@ -686,15 +686,12 @@ def test_mtpq_with_symmetry_is_rejected_with_actionable_error():
         )
 
 
-def test_mtpq_auto_creates_output_dir_when_unspecified(tmp_path, monkeypatch):
-    """With no output_dir, the workflow should mint a fresh
-    ``qed_thermal_mTPQ_<timestamp>`` directory and surface the path.
-    We chdir into a temp dir so we don't leave qed_thermal_* dirs in
-    the test-runner cwd. After the surface-unification collapse the
-    auto-minted directory is no longer populated by the orchestrator's
-    ``mtpq_kernel`` (the in-process kernel returns per-sample energies
-    only); the CLI binary continues to emit SS_rand*.dat trajectories.
-    """
+def test_mtpq_no_output_dir_writes_nothing(tmp_path, monkeypatch):
+    """Optimization contract (Jul 2026): the unified TPQ kernel returns
+    trajectories + thermodynamics in memory, so with no output_dir the
+    workflow writes NOTHING (no auto-minted qed_thermal_* directory, no
+    scratch HDF5 round-trip -- measured 2-7x wall-time overhead).
+    Explicit output_dir= still persists."""
     monkeypatch.chdir(tmp_path)
     H = _heisenberg_ring()
     res = qed.solve(
@@ -702,10 +699,7 @@ def test_mtpq_auto_creates_output_dir_when_unspecified(tmp_path, monkeypatch):
         target_beta=5.0, num_samples=1, verbose=False,
     )
     assert len(list(res.eigenvalues)) >= 1
-    minted = list(tmp_path.glob("qed_thermal_mTPQ_*"))
-    assert len(minted) == 1, (
-        f"expected exactly one qed_thermal_mTPQ_* dir, got {minted}"
-    )
+    assert list(tmp_path.glob("qed_thermal_*")) == []
 
 
 def test_thermal_kwargs_populate_ed_parameters():

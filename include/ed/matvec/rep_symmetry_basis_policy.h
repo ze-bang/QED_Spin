@@ -142,9 +142,14 @@ struct RepSymmetryBasisPolicy {
             const std::int32_t k = local_of_shared[g];
             return (k < 0) ? -1 : static_cast<std::int64_t>(k);
         }
-        if (rep_index_of_rank != nullptr && binom != nullptr) {
-            const std::int64_t r =
-                ed::core::combinadic::rank_state(rb, n_sites, n_up, *binom);
+        if (rep_index_of_rank != nullptr
+            && (n_up < 0 || binom != nullptr)) {
+            // n_up < 0: full-space/parity sectors use the identity
+            // rank (state-indexed table).
+            const std::int64_t r = (n_up < 0)
+                ? static_cast<std::int64_t>(rb)
+                : ed::core::combinadic::rank_state(rb, n_sites, n_up,
+                                                   *binom);
             const std::int32_t k = rep_index_of_rank[r];
             return (k < 0) ? -1 : static_cast<std::int64_t>(k);
         }

@@ -1376,14 +1376,11 @@ def solve(
     # ------------------------------------------------------------------
     effective_output = output_dir
     if is_thermal and not output_dir:
-        import datetime as _dt
-        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        effective_output = f"qed_thermal_{method.name}_{ts}"
-        os.makedirs(effective_output, exist_ok=True)
-        if verbose:
-            print(f"[qed.solve] thermal solver: writing trajectory + "
-                  f"thermodynamic data to {effective_output!r} "
-                  "(pass output_dir=... to choose explicitly).")
+        # Optimization (Jul 2026): the unified thermal kernels return
+        # trajectories + thermodynamics in memory; nothing needs the
+        # historical auto-created qed_thermal_<ts>/ directory. Writes
+        # happen only when the caller passes output_dir=.
+        effective_output = "/dev/null"
     elif is_thermal and output_dir and not output_dir.startswith("/dev/null"):
         # Surface-unification follow-up (May 2026): the orchestrator's
         # `_core.workflows_thermal` does NOT mkdir its `output_dir`.

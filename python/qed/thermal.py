@@ -895,8 +895,20 @@ def thermal(
     # per-sample HDF5 trajectories survive long enough for
     # ``compute_tpq_unified_thermo`` to read them back. We allocate
     # scratch dirs on-demand and clean them up when the call returns.
+    # Optimization (Jul 2026): the unified TPQ kernel returns every
+    # trajectory in-memory; the historical per-sector HDF5 scratch
+    # round-trip is pure I/O overhead (2-7x wall time at small N).
+    # No output_dir => writes disabled entirely. probe_betas snapshots
+    # REQUIRE an explicit output_dir (warned below).
     tpq_scratch_dirs: list[str] = []
-    needs_scratch = method_enum in _TPQ_METHODS and not output_dir
+    needs_scratch = False
+    if (method_enum in _TPQ_METHODS and not output_dir
+            and probe_betas):
+        import warnings as _warnings
+        _warnings.warn(
+            "probe_betas were requested without output_dir=; TPQ state "
+            "snapshots are only persisted to disk, so pass output_dir= "
+            "to keep them.", RuntimeWarning, stacklevel=2)
 
     def _alloc_scratch(n_up: Optional[int]) -> str:
         tag = "mtpq"
@@ -1004,8 +1016,8 @@ def thermal(
             # the file holds only aggregated curves which the
             # ``averaged/`` group can dedupe in-place; we still route
             # per-sector to be safe and consistent.
-            if needs_scratch:
-                p.output_dir = _alloc_scratch(n_up_val)
+            if not output_dir:
+                p.output_dir = "/dev/null"      # writes disabled
             elif output_dir and n_up_val is not None:
                 p.output_dir = _persistent_sector_outdir(output_dir, n_up_val)
                 if not p.output_dir.startswith("/dev/null"):
@@ -1286,8 +1298,8 @@ def thermal(
         # ``ThermalResult.thermo`` would mask the corruption but the
         # HDF5 file (used for diagnostics, post-processing, audit
         # trails) would still be wrong.
-        if needs_scratch:
-            _resolved_outdir = _alloc_scratch(n_up_val)
+        if not output_dir:
+            _resolved_outdir = "/dev/null"      # writes disabled
         elif output_dir and n_up_val is not None:
             _resolved_outdir = _persistent_sector_outdir(output_dir, n_up_val)
             if not _resolved_outdir.startswith("/dev/null"):
