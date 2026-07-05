@@ -38,6 +38,7 @@
 #endif
 
 #include <ed/core/combinadic.h>  // BinomialTable + rank_state (O(1) reverse lookup)
+#include <ed/matvec/rep_symmetry_basis_policy.h>  // RepSymmetryBasisPolicy (make_policy)
 
 namespace ed::symmetry {
 
@@ -234,6 +235,49 @@ struct RepSectorData {
                 }
             }
         }
+    }
+
+    // Non-owning host policy view over this data. THE single source of the
+    // RepSectorData -> RepSymmetryBasisPolicy mapping: the matvec factory
+    // (``rep_policy_from``) and the dense-assembly lane
+    // (``SubspaceOperator::try_build_dense_columns``, rep-only sectors) both
+    // route through here so the two-level rank table / flip masks / perm LUT
+    // wiring can never drift between them. The returned view holds raw
+    // pointers into this object's vectors -- keep it alive for the policy's
+    // lifetime.
+    [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy
+    make_policy() const noexcept {
+        ed::matvec::basis::RepSymmetryBasisPolicy p;
+        p.reps       = reps.data();
+        p.inv_norms  = inv_norms.data();
+        p.perms      = perms_flat.data();
+        p.characters = characters.data();
+        p.dim_       = reps.size();
+        p.group_size = group_size;
+        p.n_sites    = n_sites;
+        p.n_up       = n_up;
+        // Stage 4 two-level lookup takes precedence: shared rank table (one
+        // per (N, n_up)) + per-sector local remap. Then the legacy dense
+        // per-sector table; index_of_rep falls back to binary search when
+        // neither is set.
+        if (has_two_level()) {
+            p.shared_rank_of  = shared_rank->shared_of_rank.data();
+            p.local_of_shared = local_of_shared.data();
+            p.binom           = &shared_rank->binom;
+        } else if (has_rank_table()) {
+            p.rep_index_of_rank = rep_index_of_rank.data();
+            p.binom             = &binom;
+        }
+        // N<=32 fast apply_perm: byte-decomposition LUT (4 lookups vs N iters).
+        if (!perm_lut_data.empty()) {
+            p.perm_lut     = perm_lut_data.data();
+            p.perm_lut_bpw = perm_lut_bpw;
+        }
+        // Stage 5b: flip-extended elements (perm THEN xor).
+        if (!flip_masks.empty()) {
+            p.flips = flip_masks.data();
+        }
+        return p;
     }
 
     // A RepSectorData is usable by the rep matvec only when it carries a

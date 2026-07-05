@@ -106,36 +106,10 @@ make_cpu_nonabelian_symmetry_backend(basis::NonAbelianSymmetryBasisPolicy policy
 [[nodiscard]] inline basis::RepSymmetryBasisPolicy
 rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
 {
-    basis::RepSymmetryBasisPolicy p;
-    p.reps       = rd.reps.data();
-    p.inv_norms  = rd.inv_norms.data();
-    p.perms      = rd.perms_flat.data();
-    p.characters = rd.characters.data();
-    p.dim_       = rd.reps.size();
-    p.group_size = rd.group_size;
-    p.n_sites    = rd.n_sites;
-    p.n_up       = rd.n_up;
-    // Stage 4 two-level lookup takes precedence: shared rank table (one per
-    // (N, n_up)) + per-sector local remap. Then the legacy dense per-sector
-    // table; index_of_rep falls back to binary search when neither is set.
-    if (rd.has_two_level()) {
-        p.shared_rank_of  = rd.shared_rank->shared_of_rank.data();
-        p.local_of_shared = rd.local_of_shared.data();
-        p.binom           = &rd.shared_rank->binom;
-    } else if (rd.has_rank_table()) {
-        p.rep_index_of_rank = rd.rep_index_of_rank.data();
-        p.binom             = &rd.binom;
-    }
-    // N≤32 fast apply_perm: byte-decomposition LUT (4 lookups vs N iters).
-    if (!rd.perm_lut_data.empty()) {
-        p.perm_lut     = rd.perm_lut_data.data();
-        p.perm_lut_bpw = rd.perm_lut_bpw;
-    }
-    // Stage 5b: flip-extended elements (perm THEN xor).
-    if (!rd.flip_masks.empty()) {
-        p.flips = rd.flip_masks.data();
-    }
-    return p;
+    // Single source of the mapping now lives on RepSectorData (so the dense
+    // assembly lane and the matvec factory can never drift). Kept as a thin
+    // forwarder for the existing call sites.
+    return rd.make_policy();
 }
 
 template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,

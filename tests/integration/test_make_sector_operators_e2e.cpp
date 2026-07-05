@@ -32,6 +32,7 @@
 #include <ed/orchestrator.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -264,6 +265,70 @@ TEST_CASE("make_sector_operators: lazy rep-walk dense-assembly lane == full refe
                             std::abs(sym_spectrum[i] - ref_spectrum[i]));
     INFO("max |E_lazy_dense - E_full| = " << max_diff);
     REQUIRE(max_diff < 1e-9);
+}
+
+// -----------------------------------------------------------------------------
+// Pins the rep-CSR DENSIFY dense-assembly path (SubspaceOperator::
+// try_build_dense_columns, rep-lazy branch): a lazy (rep-only) sector's dense
+// matrix built via build_reduced_symmetry_csr_rep must be BYTE-FOR-BYTE what
+// the column-by-column matvec build (col_j = H*e_j) produces -- both are the
+// rep-walk gather. This is the full_spectrum "dense block" fix: the rep-CSR
+// path is parallel over rows and never materialises the orbit CSR, replacing
+// the serial column crawl / the ensureHostCsr storm. Reported timing shows the
+// assembly speedup (INFO only -- not a hard gate).
+TEST_CASE("make_sector_operators: rep-CSR densify == column build (bit-identical)",
+          "[make_operator][sector_set][e2e][dense][lazy][repcsr]") {
+    using Complex = std::complex<double>;
+    const int N = 14;
+    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);  // force rep-lazy producers
+
+    std::string dir = make_scratch_dir("make_sector_ops", "repcsr_densify_N12");
+    write_zN_translation_fixtures(dir, N);
+    write_heisenberg_directory(dir, N, 1.0);
+
+    auto ops = ed::make_sector_operators(heisenberg_spec(dir, N));
+    REQUIRE_FALSE(ops.empty());
+
+    std::size_t checked = 0;
+    double worst = 0.0;
+    for (const auto& op : ops) {
+        const std::size_t d = static_cast<std::size_t>(op->dim());
+        if (d == 0 || d > 4096) continue;   // keep the O(d^2) column build cheap
+
+        // (a) rep-CSR densify path under test.
+        std::vector<Complex> dense_csr(d * d, Complex(0.0, 0.0));
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool built = op->try_build_dense_columns(dense_csr.data(), d);
+        const auto t1 = std::chrono::steady_clock::now();
+        REQUIRE(built);   // rep-lazy sector MUST take the fast path, not decline
+
+        // (b) reference: column-by-column matvec build (col_j = H * e_j).
+        std::vector<Complex> dense_col(d * d, Complex(0.0, 0.0));
+        std::vector<Complex> e(d, Complex(0.0, 0.0)), col(d);
+        for (std::size_t j = 0; j < d; ++j) {
+            e[j] = Complex(1.0, 0.0);
+            op->apply(e.data(), col.data(), d);
+            for (std::size_t i = 0; i < d; ++i) dense_col[i + j * d] = col[i];
+            e[j] = Complex(0.0, 0.0);
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        if (d >= 512) {
+            const double ms_csr = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double ms_col = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            WARN("dim=" << d << " rep-CSR densify " << ms_csr
+                 << " ms  vs  column build " << ms_col << " ms  ("
+                 << (ms_col / std::max(ms_csr, 1e-6)) << "x)");
+        }
+
+        for (std::size_t k = 0; k < d * d; ++k)
+            worst = std::max(worst, std::abs(dense_csr[k] - dense_col[k]));
+        ++checked;
+    }
+    unsetenv("ED_SYM_LAZY_SECTORS");
+
+    INFO("sectors checked = " << checked << ", worst |csr - col| = " << worst);
+    REQUIRE(checked > 0);
+    REQUIRE(worst < 1e-12);   // both are the same rep-walk gather element
 }
 
 // -----------------------------------------------------------------------------
