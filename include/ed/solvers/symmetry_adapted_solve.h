@@ -95,6 +95,16 @@ symmetry_adapted_thermodynamics(
 
 /// Ground-state DSSF S(ω) = Σ_n |<n|O|0>|² Lorentzian, summing all d_Γ partners
 /// (completeness). H from `op_h`, the observable O from `op_o`.
+///
+/// Stage 8d (SymmetryEngine v2): ``subspaces`` partitions the eigen-
+/// decomposition by a conserved diagonal axis -- each (n_up, sz_parity)
+/// entry contributes its own per-irrep blocks and the union of all
+/// entries must span the full Hilbert space (U(1): {(0,-1)..(N,-1)};
+/// Sz parity: {(-1,0), (-1,1)}; none: {(-1,-1)}, the default). Blocks
+/// shrink by the subspace factor while completeness (needed because O
+/// may change the irrep / Sz) is preserved by the union. ONLY valid
+/// when H actually conserves the axis -- callers gate on the term-level
+/// detection (``sz_axis_of``).
 [[nodiscard]] ed::symmetry::SymDSSFResult
 symmetry_adapted_ground_state_dssf(
     const ::Operator&                     op_h,
@@ -105,7 +115,8 @@ symmetry_adapted_ground_state_dssf(
     double                                omega_min,
     double                                omega_max,
     int                                   n_omega,
-    double                                broadening);
+    double                                broadening,
+    const std::vector<std::pair<int, int>>& subspaces = {{-1, -1}});
 
 /// Per-irrep blocks H_Γ packed column-major (engine-materialised) for the GPU
 /// batched eigensolver.

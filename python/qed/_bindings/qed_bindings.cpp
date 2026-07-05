@@ -54,6 +54,7 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/symmetry_adapted.h>
 #include <ed/solvers/symmetry_adapted_solve.h>
+#include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -826,9 +827,30 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op_h.getNumBits());
               auto group = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(group, n_sites);
+              // Stage 8d: compose the diagonal axis. When H conserves
+              // U(1) Sz (or only its Z2 parity remnant), partition the
+              // eigen-decomposition by n_up (or parity half): the union
+              // of subspace blocks stays complete while every dense
+              // solve shrinks. Same term-level detection the
+              // composition layer uses everywhere else.
+              std::vector<std::pair<int, int>> subspaces{{-1, -1}};
+              {
+                  ed::matvec::TermStorage soa;
+                  ed::matvec::TermStorage::classify_route(
+                      soa, op_h.transform_data_, op_h.three_body_data_,
+                      [](const std::complex<double>& c) { return c; });
+                  const auto ax = ed::symmetry::sz_axis_of(soa);
+                  if (ax == ed::symmetry::SzAxis::U1) {
+                      subspaces.clear();
+                      for (int k = 0; k <= n_sites; ++k)
+                          subspaces.emplace_back(k, -1);
+                  } else if (ax == ed::symmetry::SzAxis::Parity) {
+                      subspaces = {{-1, 0}, {-1, 1}};
+                  }
+              }
               auto res = ed::solvers::symmetry_adapted_ground_state_dssf(
                   op_h, op_o, gi, group, n_sites,
-                  omega_min, omega_max, n_omega, broadening);
+                  omega_min, omega_max, n_omega, broadening, subspaces);
               py::dict d;
               d["omega"]        = res.omega;
               d["s_omega"]      = res.spectral;
@@ -842,6 +864,9 @@ PYBIND11_MODULE(_core, m) {
           R"pbdoc(
             Ground-state DSSF S(omega) under the FULL non-abelian group
             reduction (all d_Gamma partners summed for completeness).
+            Stage 8d: the diagonal axis composes automatically -- a
+            U(1)- / parity-conserving H is decomposed per n_up / parity
+            half (smaller dense blocks, identical physics).
           )pbdoc");
 
     m.def("symmetry_adapted_thermodynamics",

@@ -68,6 +68,8 @@
 #include <ed/core/sorted_uint64_index.h>  // SortedUint64Index::kNotFound
 #include <ed/symmetry/symmetry_sector_data.h>  // SymmetrySector
 #include <ed/symmetry/sector_basis.h>     // SectorBasis (operator-collapse lane)
+#include <ed/symmetry/rep_sector_data.h>  // RepSectorData (Stage 8d rep lane)
+#include <ed/matvec/rep_symmetry_basis_policy.h>  // host rep policy view
 
 #include <complex>
 #include <cstdint>
@@ -104,9 +106,20 @@ public:
     /// Operator-collapse Phase 3 (Jun 2026): the StreamingSymmetryOperator /
     /// FixedSzStreamingSymmetryOperator carrier lanes have been retired; the
     /// SectorBasis lane is the sole path.
+    ///
+    /// Stage 8d (SymmetryEngine v2, Jul 2026): second lane -- a CSR-free
+    /// ``RepSectorData`` ref. Flip-extended and Sz-parity sectors never
+    /// materialise an orbit CSR (their csr_provider throws by design), and
+    /// the default rep-lazy fixed-Sz lane shouldn't have to either. The rep
+    /// lane regenerates the source orbit per group element
+    /// (``apply_perm`` + conj(chi(g))) and projects into the destination
+    /// with ``index_and_projection`` -- the same arithmetic the rep matvec
+    /// kernel uses, so both refs produce identical matrix elements (pinned
+    /// by ``test_rep_cross_sector.cpp``).
     struct OperatorRef {
-        const ed::symmetry::SectorBasis*  sb       = nullptr;
-        std::uint64_t                     sb_bits  = 0;
+        const ed::symmetry::SectorBasis*    sb      = nullptr;
+        const ed::symmetry::RepSectorData*  rd      = nullptr;
+        std::uint64_t                       sb_bits = 0;
 
         /// Wrap a single materialised SectorBasis.
         /// ``num_bits`` is the lattice site count.
@@ -117,18 +130,32 @@ public:
             r.sb_bits = num_bits;
             return r;
         }
-        bool valid() const {
-            return sb != nullptr;
+
+        /// Wrap a CSR-free RepSectorData (rep-lazy / flip / parity
+        /// sectors). The RepSectorData must outlive the observable.
+        static OperatorRef from_rep(const ed::symmetry::RepSectorData& rep,
+                                    std::uint64_t                      num_bits) {
+            OperatorRef r;
+            r.rd      = &rep;
+            r.sb_bits = num_bits;
+            return r;
         }
 
+        bool valid()  const { return sb != nullptr || rd != nullptr; }
+        bool is_rep() const { return rd != nullptr; }
+
         const SymmetrySector& sector(std::size_t /*k*/) const {
-            return sb->sector();   // single-sector lane; k == 0
+            return sb->sector();   // orbit lane only; single sector, k == 0
         }
         std::size_t num_sectors() const {
             return 1;
         }
         std::uint64_t num_bits() const {
             return sb_bits;
+        }
+        std::size_t dim() const {
+            return is_rep() ? rd->reps.size()
+                            : sb->sector().basis_states.size();
         }
         std::size_t lookupBasisIndex(std::size_t /*k*/,
                                      std::uint64_t s) const {
@@ -138,7 +165,8 @@ public:
                 : static_cast<std::size_t>(idx);
         }
         std::uint64_t group_size() const {
-            return static_cast<std::uint64_t>(sb->group_size());
+            return is_rep() ? static_cast<std::uint64_t>(rd->group_size)
+                            : static_cast<std::uint64_t>(sb->group_size());
         }
     };
 
@@ -182,11 +210,18 @@ public:
     /// (mirror of ``SymBasisState::quantum_numbers``). Used by the
     /// streaming-symmetry spectral workflow to populate
     /// ``SpectralSectorEntry`` tags and the selection-rule label.
+    /// Rep-lane refs carry no SymmetrySector metadata -- callers on
+    /// that lane label from the handle's SectorTag instead (the
+    /// cross-irrep bindings already do).
     const std::vector<int>& src_quantum_numbers() const {
-        return src_.sector(src_sector_).quantum_numbers;
+        static const std::vector<int> kEmpty;
+        return src_.is_rep() ? kEmpty
+                             : src_.sector(src_sector_).quantum_numbers;
     }
     const std::vector<int>& dst_quantum_numbers() const {
-        return dst_.sector(dst_sector_).quantum_numbers;
+        static const std::vector<int> kEmpty;
+        return dst_.is_rep() ? kEmpty
+                             : dst_.sector(dst_sector_).quantum_numbers;
     }
 
 private:
@@ -200,6 +235,10 @@ private:
     std::size_t                  dim_src_    = 0;
     std::size_t                  dim_dst_    = 0;
     double                       group_norm_ = 1.0;
+    // Stage 8d rep-lane policy views (POD pointers into the refs'
+    // RepSectorData; valid only when the matching ref ``is_rep()``).
+    ed::matvec::basis::RepSymmetryBasisPolicy src_pol_{};
+    ed::matvec::basis::RepSymmetryBasisPolicy dst_pol_{};
 };
 
 }  // namespace ed::dssf

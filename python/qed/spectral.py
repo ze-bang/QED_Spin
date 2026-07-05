@@ -262,12 +262,21 @@ def _spectral_in_memory_with_symmetry(
     observable_type,
     spin_l,
     verbose,
+    spin_flip=-1,
 ):
     """Route an IN-MEMORY spectral call through the streaming-symmetry
     machinery: resolve ``symmetry`` (including ``"auto"``), export the
     operator + automorphism metadata to a temp directory, extract each
     observable's transform tuples, and dispatch to the cross-irrep
     GS-CF (T is None) or FTLM (finite T) C++ binding.
+
+    Stage 8d (SymmetryEngine v2): when ``sz`` is None the diagonal /
+    flip axes compose automatically -- Sz-parity halves when H carries
+    the Z2 remnant and the probe has a definite parity selection rule,
+    and full-space prod-sigma^x flip sectors when [H, X] == 0 and the
+    probe has a definite flip character (X O X == +-O; note S^z probes
+    are flip-ODD). ``spin_flip`` follows the toggle ints (-1 auto /
+    0 off / 1 require).
 
     Returns ``NotImplemented`` when the request cannot be routed (no
     spatial symmetry found, an observable without ``transform_tuples``,
@@ -330,9 +339,42 @@ def _spectral_in_memory_with_symmetry(
             return NotImplemented
         _write_sym_dir(tmpdir, info)
 
+        # Stage 8d: diagonal / flip axis composition for the sz=None
+        # lanes. Detection is term-level (same walk solve/thermal use);
+        # engagement is PER PROBE, since routability depends on the
+        # probe's selection rules.
+        det = None
+        if sz is None:
+            try:
+                det = dict(_core.detect_hamiltonian_symmetries(H))
+            except Exception:
+                det = None
+
+        def _probe_lanes(tuples):
+            """(sz_parity, flip_sectors) for one probe's transforms."""
+            szp, flip = -1, False
+            if sz is not None or det is None:
+                return szp, flip
+            n = int(H.num_sites)
+            if det.get("sz_parity") and not det.get("u1"):
+                if _core.probe_delta_n_up_parity(tuples) >= 0:
+                    szp = 2                     # pool both parity halves
+            if spin_flip != 0 and det.get("spin_flip"):
+                if (_core.probe_spin_flip_character(tuples) != 0
+                        and (szp < 0 or n % 2 == 0)):
+                    flip = True
+            if spin_flip == 1 and not flip:
+                raise RuntimeError(
+                    "qed.spectral: spin_flip='require' but the flip lane "
+                    "cannot route this call (H lacks the symmetry, the "
+                    "probe has no definite flip character, or the parity "
+                    "closure rule excludes it).")
+            return szp, flip
+
         results = []
         for tuples in transforms_per_obs:
-            delta = _infer_delta_n_up(tuples)
+            delta = _infer_delta_n_up(tuples) if sz is not None else 0
+            szp, flip = _probe_lanes(tuples)
             if T is None:
                 results.append(
                     _spectral_streaming_symmetry_cross_irrep_directory(
@@ -347,6 +389,8 @@ def _spectral_in_memory_with_symmetry(
                         selected_sectors=selected_sectors,
                         observable_transforms=tuples,
                         delta_n_up=delta,
+                        sz_parity=szp,
+                        flip_sectors=flip,
                         output_dir=output_dir,
                         observable_type=observable_type,
                         verbose=verbose,
@@ -365,6 +409,8 @@ def _spectral_in_memory_with_symmetry(
                         selected_sectors=selected_sectors,
                         observable_transforms=tuples,
                         delta_n_up=delta,
+                        sz_parity=szp,
+                        flip_sectors=flip,
                         temperatures=list(Ts_list),
                         num_samples=int(num_random_vectors or 30),
                         random_seed=0,
@@ -395,9 +441,14 @@ def _spectral_streaming_symmetry_cross_irrep_directory(
     output_dir: str,
     observable_type: str,
     verbose: bool,
+    sz_parity: int = -1,
+    flip_sectors: bool = False,
 ) -> Any:
     """SOTA cross-irrep streaming-symmetry spectral routing the call to
     ``_core.workflows_spectral_streaming_symmetry_cross_irrep_directory``.
+
+    Stage 8d: ``sz_parity`` / ``flip_sectors`` engage the Sz-parity /
+    prod-sigma^x synthetic sector lanes (sz=None only).
     """
     opts = _core.SpectralOptions()
     opts.method = _core.SpectralMethod.GroundStateCF
@@ -439,6 +490,8 @@ def _spectral_streaming_symmetry_cross_irrep_directory(
         opts,
         fixed_sz_n_up,
         int(delta_n_up),
+        int(sz_parity),
+        bool(flip_sectors),
     )
 
 
@@ -460,6 +513,8 @@ def _spectral_streaming_symmetry_cross_irrep_multiq_directory(
     output_dir: str,
     observable_type: str,
     verbose: bool,
+    sz_parity: int = -1,
+    flip_sectors: bool = False,
 ) -> Any:
     """SOTA amortised multi-Q cross-irrep streaming-symmetry spectral
     routing to
@@ -525,6 +580,8 @@ def _spectral_streaming_symmetry_cross_irrep_multiq_directory(
         opts,
         fixed_sz_n_up,
         int(delta_n_up),
+        int(sz_parity),
+        bool(flip_sectors),
     )
 
 
@@ -548,6 +605,8 @@ def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
     output_dir: str,
     observable_type: str,
     verbose: bool,
+    sz_parity: int = -1,
+    flip_sectors: bool = False,
 ) -> Any:
     """SOTA finite-T cross-irrep streaming-symmetry spectral routing to
     ``_core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory``.
@@ -607,6 +666,8 @@ def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
         Ts,
         int(num_samples),
         int(random_seed),
+        int(sz_parity),
+        bool(flip_sectors),
     )
 
     # The binding stuffs the multi-T payload into per_sector_pair as
@@ -1291,6 +1352,7 @@ def spectral(
             "For directory-form runs, pass the directory path as the "
             "first argument."
         )
+    sf_i = -1
     if spin_flip not in (None, "auto", -1) or \
             time_reversal not in (None, "auto", -1):
         from .workflow import resolve_discrete_toggle
@@ -1309,11 +1371,15 @@ def spectral(
                 raise RuntimeError(
                     "qed.spectral: time_reversal='require' but H has "
                     "complex matrix elements.")
-        if verbose and (sf_i != 0 or tr_i != 0):
-            print("[qed.spectral] note: spin-flip / time-reversal are "
-                  "not exploited by the spectral lanes yet (they only "
-                  "affect solve/thermal); the U(1) x spatial sector "
-                  "machinery is used when symmetry= is given.")
+        # Stage 8d: spin_flip is now CONSUMED by the sector lanes when
+        # ``sz`` is None (full-space / parity-half flip sectors) --
+        # sf_i rides into ``_spectral_in_memory_with_symmetry`` below.
+        # Time reversal remains detect-and-report on this verb.
+        if verbose and tr_i != 0:
+            print("[qed.spectral] note: time-reversal is detect-and-"
+                  "report on the spectral verb (spin-flip and the "
+                  "diagonal Sz axes are exploited by the sector lanes "
+                  "when symmetry= is given).")
     if (symmetry is not None and observables is not None
             and not isinstance(H_or_directory, str)
             and isinstance(point_group, str)
@@ -1353,7 +1419,8 @@ def spectral(
             momentum_tolerance=momentum_tolerance,
             selected_sectors=selected_sectors,
             output_dir=output_dir, observable_type=observable_type,
-            spin_l=spin_l, verbose=verbose)
+            spin_l=spin_l, verbose=verbose,
+            spin_flip=sf_i)
         if routed is not NotImplemented:
             return routed
         if verbose:

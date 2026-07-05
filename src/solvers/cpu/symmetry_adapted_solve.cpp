@@ -262,20 +262,27 @@ symmetry_adapted_ground_state_dssf(
     double                               omega_min,
     double                               omega_max,
     int                                  n_omega,
-    double                               broadening)
+    double                               broadening,
+    const std::vector<std::pair<int, int>>& subspaces)
 {
     // Eigenstates over the FULL Hilbert space, summing ALL d_Γ partners so the
     // eigenbasis is complete (a final state |n> survives even when O changes the
     // irrep / Sz). Each block is materialised by the SAME engine as everything
     // else; eigenvectors are expanded to the computational basis via the SAB.
+    //
+    // Stage 8d: when H conserves a diagonal axis, ``subspaces`` supplies a
+    // partition of the Hilbert space -- per-(n_up | parity) blocks are
+    // strictly smaller and their union keeps the eigenbasis complete.
     struct EigState { double energy; std::map<std::uint64_t, Complex> amp; };
     std::vector<EigState> states;
 
+    for (const auto& [ss_n_up, ss_parity] : subspaces) {
     for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
         const int d = gi.irreps[g].dim;
         for (int partner = 0; partner < d; ++partner) {
             auto sector = ed::symmetry::build_symmetry_adapted_sector(
-                gi, max_clique, static_cast<int>(g), n_sites, /*n_up=*/-1, partner);
+                gi, max_clique, static_cast<int>(g), n_sites, ss_n_up,
+                partner, ss_parity);
             if (sector.basis_states.empty()) continue;
             const int nb = static_cast<int>(sector.basis_states.size());
             NonAbelianSectorMatVec mv(op_h, sector);   // copy: sector reused below
@@ -293,6 +300,7 @@ symmetry_adapted_ground_state_dssf(
                 states.push_back(std::move(st));
             }
         }
+    }
     }
 
     ed::symmetry::SymDSSFResult R;

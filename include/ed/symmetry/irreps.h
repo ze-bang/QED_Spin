@@ -76,4 +76,13 @@ struct GroupIrreps {
 [[nodiscard]] GroupIrreps
 decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
 
+/// Stage 7 (SymmetryEngine v2): decompose an ABSTRACT finite group given only
+/// its multiplication table (mult[a][b] = index of a·b). Element 0 need not be
+/// the identity. Used for little co-groups, whose elements close only modulo
+/// the abelian translation subgroup and therefore have no faithful
+/// site-permutation realisation. Same numerical regular-representation
+/// commutant decomposition as `decompose_irreps`.
+[[nodiscard]] GroupIrreps
+decompose_irreps_tables(const std::vector<std::vector<int>>& mult);
+
 }  // namespace ed::symmetry

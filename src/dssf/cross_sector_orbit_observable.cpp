@@ -29,6 +29,7 @@
 
 #include <ed/core/basis_utils.h>          // popcount (defensive, mirrors CrossSectorObservable)
 #include <ed/core/sorted_uint64_index.h>  // SortedUint64Index::kNotFound
+#include <ed/matvec/symmetry_matvec_backend.h>  // rep_policy_from (Stage 8d)
 
 #include <algorithm>
 #include <cstdint>
@@ -78,8 +79,8 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
             "CrossSectorOrbitObservable: transforms is empty.");
     }
     n_bits_     = src_.num_bits();
-    dim_src_    = src_.sector(src_sector_).basis_states.size();
-    dim_dst_    = dst_.sector(dst_sector_).basis_states.size();
+    dim_src_    = src_.dim();
+    dim_dst_    = dst_.dim();
     // group_norm = 1 / |G|, matches the same-sector matvec at
     // streaming_symmetry.h:453.
     const std::uint64_t G = src_.group_size();
@@ -88,7 +89,23 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
             "CrossSectorOrbitObservable: src group_size is zero "
             "(streaming-symmetry operator missing automorphism metadata?).");
     }
+    if (dst_.group_size() != G) {
+        throw std::invalid_argument(
+            "CrossSectorOrbitObservable: src/dst group_size mismatch ("
+            + std::to_string(G) + " vs "
+            + std::to_string(dst_.group_size()) + ") -- the two sectors "
+            "must come from the same (possibly flip-extended) group.");
+    }
     group_norm_ = 1.0 / static_cast<double>(G);
+    // Stage 8d: build the POD policy views once. The rep-lane inner loops
+    // regenerate the orbit / projection arithmetically through these.
+    if (src_.is_rep()) src_pol_ = ed::matvec::rep_policy_from(*src_.rd);
+    if (dst_.is_rep()) dst_pol_ = ed::matvec::rep_policy_from(*dst_.rd);
+    if ((src_.is_rep() && G > 256) || (dst_.is_rep() && G > 256)) {
+        throw std::invalid_argument(
+            "CrossSectorOrbitObservable: rep-lane refs support group_size "
+            "<= 256 (index_and_projection stack buffer).");
+    }
 }
 
 namespace {
@@ -189,9 +206,14 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
     std::fill(out, out + dim_dst_, Complex(0.0, 0.0));
     if (dim_src_ == 0 || dim_dst_ == 0) return;
 
-    const auto& src_sec = src_.sector(src_sector_);
-    const auto& dst_sec = dst_.sector(dst_sector_);
+    const SymmetrySector* src_sec =
+        src_.is_rep() ? nullptr : &src_.sector(src_sector_);
+    const SymmetrySector* dst_sec =
+        dst_.is_rep() ? nullptr : &dst_.sector(dst_sector_);
     const double S = static_cast<double>(spin_l_);
+    const bool src_rep = src_.is_rep();
+    const bool dst_rep = dst_.is_rep();
+    const int  G_src   = static_cast<int>(src_.group_size());
 
     // OpenMP-parallel walk over source orbit-basis indices, with
     // per-thread output accumulators. Avoids the per-update atomic
@@ -213,12 +235,60 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
 #endif
         auto& local_out = tls[tid];
 
+        // Destination projection, shared by both source lanes. Orbit lane:
+        // sorted-index lookup + findCoeff; rep lane: index_and_projection
+        // (identical arithmetic, pinned by test_rep_cross_sector.cpp).
+        auto scatter_dst = [&](Complex weighted, std::uint64_t s_prime) {
+            if (dst_rep) {
+                Complex proj;
+                const std::int64_t k =
+                    dst_pol_.index_and_projection(s_prime, proj);
+                if (k < 0) return;
+                local_out[static_cast<std::size_t>(k)] +=
+                    weighted * proj * group_norm_;
+                return;
+            }
+            const std::size_t k = dst_.lookupBasisIndex(dst_sector_, s_prime);
+            if (k == ed::core::SortedUint64Index::kNotFound) return;
+            const auto& state_k = dst_sec->basis_states[k];
+            if (!(state_k.norm > 0.0)) return;
+            const Complex beta_s_prime = state_k.findCoeff(s_prime);
+            // Same projection formula as applyHamiltonianTermsFullSpace
+            // (streaming_symmetry.h:1288) with the destination orbit
+            // basis providing beta_s_prime / norm_k.
+            local_out[k] += weighted * std::conj(beta_s_prime)
+                          * group_norm_ / state_k.norm;
+        };
+
         #pragma omp for schedule(dynamic, 64)
         for (std::int64_t alpha = 0;
              alpha < static_cast<std::int64_t>(dim_src_); ++alpha) {
             const Complex c_alpha = in[alpha];
             if (std::abs(c_alpha) < 1e-15) continue;
-            const auto& state_alpha = src_sec.basis_states[alpha];
+
+            if (src_rep) {
+                // Rep lane: regenerate the source orbit per group element.
+                // The per-state expansion coefficient alpha_s of the orbit
+                // basis is sum_{g: g(rep)=s} conj(chi(g)); summing per-g is
+                // the same sum without the dedup.
+                const std::uint64_t rep = src_pol_.state_of(
+                    static_cast<std::uint64_t>(alpha));
+                const double inv_norm_alpha = src_pol_.inv_norm_of(
+                    static_cast<std::uint64_t>(alpha));
+                for (int g = 0; g < G_src; ++g) {
+                    const std::uint64_t s = src_pol_.apply_perm(rep, g);
+                    const Complex chi_g   = src_pol_.characters[g];
+                    const Complex weighted =
+                        c_alpha * std::conj(chi_g) * inv_norm_alpha;
+                    for (const auto& t : transforms_) {
+                        const TermResult r = applyOneTerm(s, t, S);
+                        if (r.valid) scatter_dst(weighted * r.amp, r.s_prime);
+                    }
+                }
+                continue;
+            }
+
+            const auto& state_alpha = src_sec->basis_states[alpha];
             const double norm_alpha = state_alpha.norm;
             if (!(norm_alpha > 0.0)) continue;
 
@@ -235,23 +305,7 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
 
                 for (const auto& t : transforms_) {
                     const TermResult r = applyOneTerm(s, t, S);
-                    if (!r.valid) continue;
-
-                    const std::size_t k =
-                        dst_.lookupBasisIndex(dst_sector_, r.s_prime);
-                    if (k == ed::core::SortedUint64Index::kNotFound) continue;
-
-                    const auto& state_k = dst_sec.basis_states[k];
-                    if (!(state_k.norm > 0.0)) continue;
-
-                    const Complex beta_s_prime = state_k.findCoeff(r.s_prime);
-                    // Same projection formula as
-                    // applyHamiltonianTermsFullSpace at line 1288 but
-                    // with the destination orbit basis providing
-                    // beta_s_prime / norm_k.
-                    local_out[k] += weighted * r.amp
-                                  * std::conj(beta_s_prime)
-                                  * group_norm_ / state_k.norm;
+                    if (r.valid) scatter_dst(weighted * r.amp, r.s_prime);
                 }
             }
         }

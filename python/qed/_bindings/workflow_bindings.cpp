@@ -25,6 +25,7 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/observable_character.h>  // Stage 8d probe classifiers
 #include <ed/symmetry/sector_plan.h>
 #include <ed/symmetry/time_reversal.h>
 #include <ed/symmetry/sym_profile.h>
@@ -76,6 +77,92 @@ inline std::pair<int, int> binding_mpi_rank_size() {
     }
 #endif
     return {rank, size};
+}
+
+// ---------------------------------------------------------------------------
+// Stage 8d (SymmetryEngine v2) DSSF helpers.
+// ---------------------------------------------------------------------------
+
+// Decode the 6-tuple probe-transform rows shared by every cross-irrep
+// spectral binding (op_type, site, coeff, is_two_body, op_type_2, site_2).
+inline std::vector<Operator::TransformData>
+decode_probe_transforms(const std::vector<py::tuple>& rows, const char* who) {
+    std::vector<Operator::TransformData> tlist;
+    tlist.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (row.size() < 6) {
+            throw std::invalid_argument(
+                std::string(who) + ": each transform must be a 6-tuple "
+                "(op_type, site, coeff, is_two_body, op_type_2, site_2).");
+        }
+        Operator::TransformData t;
+        t.op_type      = static_cast<uint8_t>(row[0].cast<int>());
+        t.site_index   = row[1].cast<std::uint64_t>();
+        t.coefficient  = row[2].cast<std::complex<double>>();
+        t.is_two_body  = row[3].cast<bool>();
+        t.op_type_2    = static_cast<uint8_t>(row[4].cast<int>());
+        t.site_index_2 = row[5].cast<std::uint64_t>();
+        tlist.push_back(t);
+    }
+    return tlist;
+}
+
+// Pick the observable ref for a sector: the CSR-free RepSectorData when the
+// sector runs the rep-lazy lane (flip-extended / Sz-parity sectors NEVER have
+// an orbit CSR; ordinary fixed-Sz sectors avoid materialising one), otherwise
+// the materialised orbit basis (eager small sectors).
+inline ed::dssf::CrossSectorOrbitObservable::OperatorRef
+make_cross_sector_ref(ed::symmetry::SectorOperator* sec,
+                      std::uint64_t                 num_sites) {
+    using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
+    if (sec->rep_lazy()) {
+        const auto& rd = sec->basis().ensureRepData();
+        if (rd.usable()) return Ref::from_rep(rd, num_sites);
+    }
+    if (!sec->csr_available()) {
+        throw std::runtime_error(
+            "cross-irrep spectral: sector carries neither a usable "
+            "RepSectorData nor a materialisable orbit CSR.");
+    }
+    return Ref::from(sec->materialized_basis(), num_sites);
+}
+
+// Synthetic-slot selection rule for the probe: how the trailing
+// (parity[, flip]) tag labels of the source sector map to the target's.
+// Throws when the probe cannot be routed through the engaged slots.
+struct SlottedSelection {
+    std::size_t      n_slots = 0;
+    std::vector<int> signs;
+};
+
+inline SlottedSelection
+slotted_selection_for(const ed::OperatorSpec&                     spec,
+                      const std::vector<Operator::TransformData>& tlist,
+                      const char*                                 who) {
+    SlottedSelection s;
+    if (spec.sz_parity.has_value()) {
+        ++s.n_slots;
+        const int dp = ed::symmetry::delta_n_up_parity(tlist);
+        if (dp < 0) {
+            throw std::invalid_argument(
+                std::string(who) + ": probe mixes even and odd Sz "
+                "selection rules and cannot be routed through Sz-parity "
+                "sectors; disable the parity lane for this probe.");
+        }
+        s.signs.push_back(dp == 1 ? -1 : +1);
+    }
+    if (spec.flip_sectors_full) {
+        ++s.n_slots;
+        const int fc = ed::symmetry::spin_flip_character(tlist);
+        if (fc == 0) {
+            throw std::invalid_argument(
+                std::string(who) + ": probe has no definite spin-flip "
+                "character (X O X != +-O) and cannot be routed through "
+                "flip sectors; pass flip_sectors=False for this probe.");
+        }
+        s.signs.push_back(fc);
+    }
+    return s;
 }
 
 #ifdef WITH_MPI
@@ -588,7 +675,8 @@ void bind_workflows(py::module_& m) {
         .def_readonly("final",     &ed::SpectralSectorEntry::final_)
         .def_readonly("S_real",    &ed::SpectralSectorEntry::S_real)
         .def_readonly("S_imag",    &ed::SpectralSectorEntry::S_imag)
-        .def_readonly("static_sf", &ed::SpectralSectorEntry::static_sf);
+        .def_readonly("static_sf", &ed::SpectralSectorEntry::static_sf)
+        .def_readonly("notes",     &ed::SpectralSectorEntry::notes);
 
     py::class_<ed::SpectralResult>(m, "SpectralResult", py::dynamic_attr())
         .def(py::init<>())
@@ -646,6 +734,28 @@ void bind_workflows(py::module_& m) {
             the detection outcome and warn on a requested-but-absent
             symmetry instead of failing later.
           )pbdoc");
+
+    // Stage 8d probe classifiers (Python decides whether the projected
+    // spectral lanes can route a given observable BEFORE engaging them).
+    m.def("probe_spin_flip_character",
+          [](const std::vector<py::tuple>& rows) {
+              return ed::symmetry::spin_flip_character(
+                  decode_probe_transforms(rows, "probe_spin_flip_character"));
+          },
+          py::arg("observable_transforms"),
+          "Spin-flip character of a probe's transform tuples: +1 when "
+          "X O X == +O (flip-even), -1 when X O X == -O (flip-odd; e.g. "
+          "any S^z_Q probe), 0 when O has no definite character (e.g. a "
+          "lone S^+ probe) and cannot ride the flip-projected DSSF lane.");
+    m.def("probe_delta_n_up_parity",
+          [](const std::vector<py::tuple>& rows) {
+              return ed::symmetry::delta_n_up_parity(
+                  decode_probe_transforms(rows, "probe_delta_n_up_parity"));
+          },
+          py::arg("observable_transforms"),
+          "Set-bit-parity selection rule of a probe: 0 = parity-even "
+          "(stays in its Sz-parity half), 1 = parity-odd (crosses "
+          "halves), -1 = mixed (cannot ride the parity DSSF lane).");
 
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
@@ -1974,7 +2084,9 @@ void bind_workflows(py::module_& m) {
              const std::vector<py::tuple>&          observable_transforms,
              ed::workflows::SpectralOptions         opts,
              py::object                             fixed_sz_n_up,
-             int                                    delta_n_up) {
+             int                                    delta_n_up,
+             int                                    sz_parity,
+             bool                                   flip_sectors) {
               // ----------------------------------------------------------
               // Decode the user-supplied transform tuples into the SoA
               // layout expected by CrossSectorOrbitObservable. Each
@@ -1982,25 +2094,11 @@ void bind_workflows(py::module_& m) {
               //   _transforms_from_operator(op) below:
               //     (op_type, site, coeff, is_two_body, op_type_2, site_2)
               // ----------------------------------------------------------
-              std::vector<Operator::TransformData> tlist;
-              tlist.reserve(observable_transforms.size());
-              for (const auto& row : observable_transforms) {
-                  if (row.size() < 6) {
-                      throw std::invalid_argument(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: each transform must be a 6-tuple "
-                          "(op_type, site, coeff, is_two_body, op_type_2, "
-                          "site_2).");
-                  }
-                  Operator::TransformData t;
-                  t.op_type       = static_cast<uint8_t>(row[0].cast<int>());
-                  t.site_index    = row[1].cast<std::uint64_t>();
-                  t.coefficient   = row[2].cast<std::complex<double>>();
-                  t.is_two_body   = row[3].cast<bool>();
-                  t.op_type_2     = static_cast<uint8_t>(row[4].cast<int>());
-                  t.site_index_2  = row[5].cast<std::uint64_t>();
-                  tlist.push_back(t);
-              }
+              std::vector<Operator::TransformData> tlist =
+                  decode_probe_transforms(
+                      observable_transforms,
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "directory");
               if (tlist.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_cross_irrep_"
@@ -2023,15 +2121,26 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: Sz-parity halves + full-space prod-sigma^x
+                      // flip sectors for the spectral verbs (the factory
+                      // validates the closure rules). The probe's slot
+                      // routing is computed below.
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  const SlottedSelection slots = slotted_selection_for(
+                      src_spec, tlist,
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "directory");
 
                   // Operator-collapse Phase 3 (Jun 2026): enumerate the source
                   // symmetry sectors directly via
                   // ``make_sector_operators_tagged`` + ``SectorSetView``. The
                   // cross-irrep observable's ``OperatorRef`` is built later
-                  // from the resolved source / target sectors'
-                  // ``SectorOperator::materialized_basis()`` (no monolithic
-                  // streaming operator).
+                  // from the resolved source / target sectors (Stage 8d: the
+                  // CSR-free RepSectorData on the rep-lazy lane, the
+                  // materialised orbit basis otherwise).
                   ed::core::SectorSetView src_handle(
                       ed::make_sector_operators_tagged(src_spec));
 
@@ -2174,16 +2283,13 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
-                  // Source observable handle: the GS sector's materialised
-                  // orbit basis (forces the host CSR for this one sector even
-                  // in the CSR-free lazy regime). ``num_bits`` is the lattice
-                  // site count the legacy streaming op exposed via
-                  // ``getNumBits()``.
-                  const ed::symmetry::SectorBasis& src_basis =
-                      gs_sec_view->materialized_basis();
+                  // Source observable handle. Stage 8d: rep-lazy sectors
+                  // (including flip / parity sectors, which have no orbit
+                  // CSR at all) ride the CSR-free RepSectorData ref; eager
+                  // sectors keep the materialised orbit basis.
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          src_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          gs_sec_view, static_cast<std::uint64_t>(num_sites));
 
                   // -----------------------------------------------------
                   // (4) Build / re-use the target sector set. If
@@ -2219,10 +2325,12 @@ void bind_workflows(py::module_& m) {
                   // -----------------------------------------------------
                   double q_residual = 0.0;
                   const std::size_t dst_sector_idx =
-                      ed::core::resolve_target_sector(
+                      ed::core::resolve_target_sector_slotted(
                           dst_handle,
                           gs_src_idx,
                           opts.momentum_transfer,
+                          slots.n_slots,
+                          slots.signs,
                           &q_residual);
                   if (dst_sector_idx == ed::core::kSectorNotFound) {
                       // Build a useful diagnostic for the no-survivor
@@ -2294,16 +2402,13 @@ void bind_workflows(py::module_& m) {
                       return agg;
                   }
 
-                  // Target observable handle: the resolved sector's
-                  // materialised orbit basis. Build phi = O_Q |psi_0> in the
-                  // target orbit basis via CrossSectorOrbitObservable. Each
+                  // Target observable handle: build phi = O_Q |psi_0> in the
+                  // target sector basis via CrossSectorOrbitObservable. Each
                   // OperatorRef wraps exactly ONE sector, so the source /
                   // target sector indices passed to the observable are 0.
-                  const ed::symmetry::SectorBasis& dst_basis =
-                      dst_sec_view->materialized_basis();
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          dst_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          dst_sec_view, static_cast<std::uint64_t>(num_sites));
                   ed::dssf::CrossSectorOrbitObservable orb_obs(
                       src_ref, /*src_sector=*/0,
                       dst_ref, /*dst_sector=*/0,
@@ -2429,6 +2534,8 @@ void bind_workflows(py::module_& m) {
           py::arg("opts")                  = ed::workflows::SpectralOptions{},
           py::arg("fixed_sz_n_up")         = py::none(),
           py::arg("delta_n_up")            = 0,
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
           R"pbdoc(
         Cross-irrep streaming-symmetry spectral workflow (SOTA).
 
@@ -2519,7 +2626,9 @@ void bind_workflows(py::module_& m) {
              const std::vector<std::vector<double>>&   momentum_points,
              ed::workflows::SpectralOptions            opts,
              py::object                                fixed_sz_n_up,
-             int                                       delta_n_up) {
+             int                                       delta_n_up,
+             int                                       sz_parity,
+             bool                                      flip_sectors) {
               // Decode the per-Q transform tuples. Each Q-point carries
               // its OWN observable O_Q (the e^{-iQ.r} Fourier phase is
               // baked into the transform coefficients), so the outer
@@ -2582,13 +2691,34 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: parity / flip sectors (see the single-Q
+                      // binding). Slot routing is per-Q (each Q has its own
+                      // probe transforms).
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  // Stage 8d TR panel gate: for a REAL H, the -Q panel of an
+                  // adjoint probe pair equals the +Q panel (S(-Q, omega) =
+                  // S(Q, omega)^* with a real spectral function) -- detected
+                  // once here, applied per-Q below.
+                  bool h_real = false;
+                  {
+                      auto probe = ed::detail::build_base_op(src_spec);
+                      ed::detail::load_terms_into(*probe, src_spec);
+                      ed::matvec::TermStorage soa;
+                      ed::matvec::TermStorage::classify_route(
+                          soa, probe->transform_data_,
+                          probe->three_body_data_,
+                          [](const std::complex<double>& c) { return c; });
+                      h_real = ed::symmetry::hamiltonian_is_real(soa);
+                  }
+
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
                   // ``SectorSetView``. ``src_ref`` is built once after the GS
-                  // solve from the GS sector's materialised orbit basis;
-                  // ``dst_ref`` is rebuilt per-Q from the resolved target
-                  // sector (the target sector varies with Q).
+                  // solve; ``dst_ref`` is rebuilt per-Q from the resolved
+                  // target sector (the target sector varies with Q).
                   ed::core::SectorSetView src_handle(
                       ed::make_sector_operators_tagged(src_spec));
 
@@ -2704,14 +2834,12 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
-                  // Source observable handle: GS sector's materialised orbit
-                  // basis (Q-independent, built once). Each OperatorRef wraps
-                  // exactly ONE sector.
-                  const ed::symmetry::SectorBasis& src_basis =
-                      gs_sec_view->materialized_basis();
+                  // Source observable handle (Q-independent, built once).
+                  // Stage 8d: rep-lazy / flip / parity sectors ride the
+                  // CSR-free RepSectorData ref.
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          src_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          gs_sec_view, static_cast<std::uint64_t>(num_sites));
 
                   // (4) Build / re-use the target sector set ONCE (depends
                   //     only on delta_n_up, not on Q). The view is cheaply
@@ -2773,10 +2901,65 @@ void bind_workflows(py::module_& m) {
                           agg.per_sector_pair.push_back(std::move(e));
                       };
 
+                      // Stage 8d TR panel copy: an earlier Q_j with
+                      // Q_j == -Q_i (mod 1) whose probe is THIS probe's
+                      // adjoint already computed this panel (real H).
+                      if (h_real) {
+                          bool copied = false;
+                          for (std::size_t qj = 0;
+                               qj < qi && qj < agg.per_sector_pair.size()
+                               && !copied; ++qj) {
+                              const auto& Qj = momentum_points[qj];
+                              if (Qj.size() != Q.size()) continue;
+                              bool neg = true;
+                              for (std::size_t c = 0; c < Q.size(); ++c) {
+                                  double s = Q[c] + Qj[c];
+                                  s -= std::round(s);
+                                  if (std::abs(s) > 1e-9) { neg = false; break; }
+                              }
+                              if (!neg) continue;
+                              const auto& prev = agg.per_sector_pair[qj];
+                              bool prev_ok = false;
+                              for (const auto& n : prev.notes) {
+                                  if (n.first == "status"
+                                      && n.second.rfind("ok", 0) == 0) {
+                                      prev_ok = true;
+                                      break;
+                                  }
+                              }
+                              if (!prev_ok) continue;
+                              if (!ed::symmetry::transforms_are_conjugate(
+                                      tlist_per_q[qj], tlist_per_q[qi]))
+                                  continue;
+                              ed::SpectralSectorEntry e;
+                              e.initial   = prev.initial;
+                              e.final_    = prev.final_;
+                              e.S_real    = prev.S_real;
+                              e.S_imag    = prev.S_imag;
+                              e.static_sf = prev.static_sf;
+                              e.notes.emplace_back(
+                                  "status",
+                                  "ok (TR panel copy of Q#"
+                                  + std::to_string(qj) + ")");
+                              agg.per_sector_pair.push_back(std::move(e));
+                              copied = true;
+                          }
+                          if (copied) continue;
+                      }
+
+                      // Stage 8d: per-Q slot routing (each Q has its own
+                      // probe; classifier failures are caller errors, not
+                      // zero-weight physics, so they throw).
+                      const SlottedSelection slots = slotted_selection_for(
+                          src_spec, tlist_per_q[qi],
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory");
+
                       double q_residual = 0.0;
                       const std::size_t dst_sector_idx =
-                          ed::core::resolve_target_sector(
-                              dst_handle, gs_src_idx, Q, &q_residual);
+                          ed::core::resolve_target_sector_slotted(
+                              dst_handle, gs_src_idx, Q,
+                              slots.n_slots, slots.signs, &q_residual);
                       if (dst_sector_idx == ed::core::kSectorNotFound) {
                           push_zero_entry(
                               "no surviving target sector (residual=" +
@@ -2803,11 +2986,10 @@ void bind_workflows(py::module_& m) {
                           push_zero_entry("target sector empty");
                           continue;
                       }
-                      const ed::symmetry::SectorBasis& dst_basis =
-                          dst_sec_view->materialized_basis();
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              dst_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              dst_sec_view,
+                              static_cast<std::uint64_t>(num_sites));
 
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
                           src_ref, /*src_sector=*/0,
@@ -2886,6 +3068,8 @@ void bind_workflows(py::module_& m) {
           py::arg("opts")                         = ed::workflows::SpectralOptions{},
           py::arg("fixed_sz_n_up")                = py::none(),
           py::arg("delta_n_up")                   = 0,
+          py::arg("sz_parity")                    = -1,
+          py::arg("flip_sectors")                 = false,
           R"pbdoc(
         Amortised multi-Q cross-irrep streaming-symmetry spectral
         workflow (SOTA).
@@ -2953,29 +3137,17 @@ void bind_workflows(py::module_& m) {
              int                                    delta_n_up,
              std::vector<double>                    temperatures,
              std::uint64_t                          num_samples,
-             std::uint64_t                          random_seed) {
+             std::uint64_t                          random_seed,
+             int                                    sz_parity,
+             bool                                   flip_sectors) {
               // ----------------------------------------------------------
               // Same observable-transform decoder as the GS path.
               // ----------------------------------------------------------
-              std::vector<Operator::TransformData> tlist;
-              tlist.reserve(observable_transforms.size());
-              for (const auto& row : observable_transforms) {
-                  if (row.size() < 6) {
-                      throw std::invalid_argument(
-                          "workflows_spectral_streaming_symmetry_ftlm_"
-                          "cross_irrep_directory: each transform must be "
-                          "a 6-tuple (op_type, site, coeff, is_two_body, "
-                          "op_type_2, site_2).");
-                  }
-                  Operator::TransformData t;
-                  t.op_type       = static_cast<uint8_t>(row[0].cast<int>());
-                  t.site_index    = row[1].cast<std::uint64_t>();
-                  t.coefficient   = row[2].cast<std::complex<double>>();
-                  t.is_two_body   = row[3].cast<bool>();
-                  t.op_type_2     = static_cast<uint8_t>(row[4].cast<int>());
-                  t.site_index_2  = row[5].cast<std::uint64_t>();
-                  tlist.push_back(t);
-              }
+              std::vector<Operator::TransformData> tlist =
+                  decode_probe_transforms(
+                      observable_transforms,
+                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
+                      "irrep_directory");
               if (tlist.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
@@ -3001,12 +3173,21 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: parity / flip sectors on the finite-T
+                      // spectral lane too.
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  const SlottedSelection slots = slotted_selection_for(
+                      src_spec, tlist,
+                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
+                      "irrep_directory");
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
                   // ``SectorSetView``. ``src_ref`` / ``dst_ref`` are built
-                  // per (k_src, k_dst) pair inside the loop from each sector
-                  // operator's materialised orbit basis.
+                  // per (k_src, k_dst) pair inside the loop (Stage 8d:
+                  // CSR-free rep refs on the rep-lazy lane).
                   ed::core::SectorSetView src_handle(
                       ed::make_sector_operators_tagged(src_spec));
 
@@ -3085,10 +3266,12 @@ void bind_workflows(py::module_& m) {
 
                       double q_residual = 0.0;
                       const std::size_t k_dst =
-                          ed::core::resolve_target_sector(
+                          ed::core::resolve_target_sector_slotted(
                               dst_handle,
                               k_src,
                               opts.momentum_transfer,
+                              slots.n_slots,
+                              slots.signs,
                               &q_residual);
                       if (k_dst == ed::core::kSectorNotFound) continue;
                       if (q_residual > opts.momentum_tolerance) {
@@ -3106,18 +3289,15 @@ void bind_workflows(py::module_& m) {
 
                       // Cross-irrep rectangular observable for THIS
                       // (k_src, k_dst) pair. Each OperatorRef wraps one
-                      // sector's materialised orbit basis (src_sector ==
-                      // dst_sector == 0).
-                      const ed::symmetry::SectorBasis& src_basis =
-                          src_view->materialized_basis();
-                      const ed::symmetry::SectorBasis& dst_basis =
-                          dst_view->materialized_basis();
+                      // sector (src_sector == dst_sector == 0); Stage 8d:
+                      // rep-lazy / flip / parity sectors ride the CSR-free
+                      // RepSectorData ref.
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              src_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              src_view, static_cast<std::uint64_t>(num_sites));
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              dst_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              dst_view, static_cast<std::uint64_t>(num_sites));
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
                           src_ref, /*src_sector=*/0,
                           dst_ref, /*dst_sector=*/0,
@@ -3288,6 +3468,8 @@ void bind_workflows(py::module_& m) {
           py::arg("temperatures")          = std::vector<double>{},
           py::arg("num_samples")           = std::uint64_t{30},
           py::arg("random_seed")           = std::uint64_t{0},
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
           R"pbdoc(
         Cross-irrep streaming-symmetry **finite-T** spectral workflow
         (SOTA FTLM).

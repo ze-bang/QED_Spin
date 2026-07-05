@@ -301,4 +301,77 @@ resolve_target_sector(const HandleT&                 handle,
     return find_sector_by_quantum_numbers(handle, tgt_qn);
 }
 
+/// Stage 8d (SymmetryEngine v2): selection rule over SYNTHETIC sector sets.
+///
+/// Sz-parity halves and prod-sigma^x flip sectors append +-1 slot labels
+/// AFTER the raw spatial irrep labels (see ``make_operator.h``: parity
+/// first, then flip sign). Those labels are NOT Z_n momentum axes -- the
+/// modular walk in ``resolve_target_sector`` would corrupt a -1 label
+/// ((-1 + 0) mod 2 == +1) and silently land in the wrong slot. This
+/// variant applies the momentum shift to the leading
+/// ``qn.size() - n_slots`` labels only and maps each trailing slot label
+/// by an explicit sign:
+///
+///   dst_slot[j] = src_slot[j] * slot_signs[j]
+///
+/// where the caller derives ``slot_signs`` from the probe observable:
+/// parity slot sign = -1 iff the probe toggles set-bit parity
+/// (``delta_n_up_parity``), flip slot sign = the probe's
+/// ``spin_flip_character`` (must be +-1; a character-less probe cannot
+/// be routed through flip slots).
+template <class HandleT>
+inline std::size_t
+resolve_target_sector_slotted(const HandleT&              handle,
+                              std::size_t                 src_sector,
+                              const std::vector<double>&  Q_frac,
+                              std::size_t                 n_slots,
+                              const std::vector<int>&     slot_signs,
+                              double*                     out_residual = nullptr) {
+    if (n_slots == 0) {
+        return resolve_target_sector(handle, src_sector, Q_frac, out_residual);
+    }
+    const std::size_t S = handle.num_sectors();
+    if (src_sector >= S || slot_signs.size() < n_slots) return kSectorNotFound;
+
+    // Split every tag into (raw momentum prefix, slot tail); infer the
+    // per-generator orders over the PREFIX only.
+    std::vector<int> orders;
+    auto split = [&](std::size_t k, std::vector<int>& prefix,
+                     std::vector<int>& tail) -> bool {
+        const auto& q = handle.sector_tag(k).quantum_numbers;
+        if (q.size() < n_slots) return false;
+        const std::size_t np = q.size() - n_slots;
+        prefix.assign(q.begin(), q.begin() + static_cast<std::ptrdiff_t>(np));
+        tail.assign(q.begin() + static_cast<std::ptrdiff_t>(np), q.end());
+        return true;
+    };
+    for (std::size_t k = 0; k < S; ++k) {
+        std::vector<int> prefix, tail;
+        if (!split(k, prefix, tail)) continue;
+        if (orders.size() < prefix.size()) orders.resize(prefix.size(), 1);
+        for (std::size_t g = 0; g < prefix.size(); ++g) {
+            if (prefix[g] + 1 > orders[g]) orders[g] = prefix[g] + 1;
+        }
+    }
+
+    std::vector<int> src_prefix, src_tail;
+    if (!split(src_sector, src_prefix, src_tail)) return kSectorNotFound;
+    const auto delta_q    = quantize_momentum_transfer(Q_frac, orders, out_residual);
+    const auto tgt_prefix = add_quantum_numbers(src_prefix, delta_q, orders);
+    std::vector<int> tgt_tail(n_slots);
+    for (std::size_t j = 0; j < n_slots; ++j) {
+        tgt_tail[j] = src_tail[j] * slot_signs[j];
+    }
+
+    std::size_t hit = kSectorNotFound;
+    for (std::size_t k = 0; k < S; ++k) {
+        std::vector<int> prefix, tail;
+        if (!split(k, prefix, tail)) continue;
+        if (prefix != tgt_prefix || tail != tgt_tail) continue;
+        if (hit != kSectorNotFound) return kSectorNotFound;  // ambiguous
+        hit = k;
+    }
+    return hit;
+}
+
 }  // namespace ed::core

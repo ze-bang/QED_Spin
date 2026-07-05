@@ -654,6 +654,19 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         if (sector_ids[i] < nraw) {
             tag.quantum_numbers =
                 base->symmetry_info.sectors[sector_ids[i]].quantum_numbers;
+            // Stage 8d: UNIFORM slot labels. Slot 0 keeps a raw sector id,
+            // but in the parity / full-space-flip modes its tag carries the
+            // explicit (+1 even / odd-only -1)[, +1 flip] labels so every
+            // tag in the set has the same shape -- the slot-aware spectral
+            // selection rule (resolve_target_sector_slotted) depends on it.
+            if (spec.sz_parity.has_value()) {
+                tag.quantum_numbers.push_back(
+                    (*spec.sz_parity == 1) ? -1 : +1);
+                if (spec.flip_sectors_full)
+                    tag.quantum_numbers.push_back(+1);
+            } else if (spec.flip_sectors_full) {
+                tag.quantum_numbers.push_back(+1);
+            }
         } else if (nraw > 0) {
             // Synthetic sector k + slot*num_raw: carry the raw irrep's
             // quantum numbers plus the slot labels. Slot layouts:
