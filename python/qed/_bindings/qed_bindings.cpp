@@ -54,6 +54,7 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/symmetry_adapted.h>
 #include <ed/solvers/symmetry_adapted_solve.h>
+#include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
 
 #include "dispatcher_bindings.h"
@@ -868,6 +869,100 @@ PYBIND11_MODULE(_core, m) {
             U(1)- / parity-conserving H is decomposed per n_up / parity
             half (smaller dense blocks, identical physics).
           )pbdoc");
+
+    // -----------------------------------------------------------------
+    // Stage 7 (SymmetryEngine v2): FACTORIZED non-abelian reduction via
+    // little co-groups. G = A ⋊ P: solve one momentum per star, project
+    // the star representative's MATRIX-FREE k-sector with the little
+    // co-group's (numerically decomposed) irreps -- memory O(#reps(k)),
+    // never O(2^N), so this scales past the monolithic SAB cap. Every
+    // refinement step degrades gracefully to the plain k0 block.
+    // -----------------------------------------------------------------
+    auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim) {
+        ed::solvers::LittleGroupOptions o;
+        o.n_up          = n_up;
+        o.sz_parity     = sz_parity;
+        o.dense_max_dim = dense_max_dim;
+        return o;
+    };
+    auto lg_stars_dict = [](const ed::solvers::LittleGroupSpectrum& s) {
+        py::list stars;
+        for (const auto& st : s.stars) {
+            py::dict d;
+            d["k0"]           = st.k0;
+            d["star_size"]    = st.star_size;
+            d["little_order"] = st.little_order;
+            d["projected"]    = st.projected;
+            d["dim_k0"]       = st.dim_k0;
+            stars.append(d);
+        }
+        return stars;
+    };
+
+    m.def("little_group_full_spectrum",
+          [lg_opts, lg_stars_dict](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int n_up, int sz_parity) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto s = ed::solvers::little_group_full_spectrum(
+                  op, abelian_group, residue_perms, n_sites,
+                  lg_opts(n_up, sz_parity, 4096));
+              py::dict d;
+              d["eigenvalues"]    = s.expanded();
+              d["block_values"]   = s.eigenvalues;
+              d["multiplicities"] = s.multiplicities;
+              d["stars"]          = lg_stars_dict(s);
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("n_up") = -1,
+          py::arg("sz_parity") = -1,
+          "Full spectrum via the FACTORIZED little-co-group reduction "
+          "(one momentum per star, per-irrep blocks inside the star "
+          "representative's matrix-free k-sector).");
+
+    m.def("little_group_lowest_eigenvalues",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              return ed::solvers::little_group_lowest_eigenvalues(
+                  op, abelian_group, residue_perms, n_sites, k,
+                  lg_opts(n_up, sz_parity, dense_max_dim));
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 64,
+          "Lowest-k eigenvalues via the factorized little-co-group "
+          "reduction (dense on small blocks, Lanczos on the projected "
+          "matrix-free matvec otherwise); multiplicities expanded.");
+
+    m.def("little_group_thermodynamics",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             const std::vector<double>& temperatures,
+             int n_up, int sz_parity) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto td = ed::solvers::little_group_thermodynamics(
+                  op, abelian_group, residue_perms, n_sites, temperatures,
+                  lg_opts(n_up, sz_parity, 4096));
+              py::dict d;
+              d["temperatures"]  = td.temperatures;
+              d["energy"]        = td.energy;
+              d["specific_heat"] = td.specific_heat;
+              d["entropy"]       = td.entropy;
+              d["free_energy"]   = td.free_energy;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("temperatures"),
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          "Exact canonical thermodynamics from the factorized "
+          "little-co-group full spectrum.");
 
     m.def("symmetry_adapted_thermodynamics",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,

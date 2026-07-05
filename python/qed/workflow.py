@@ -1027,6 +1027,39 @@ def _full_group_generators(symmetry) -> Optional[list]:
     return [list(g) for g in gens] + [list(p) for p in star]
 
 
+def _little_group_parts(symmetry) -> Optional[tuple]:
+    """Stage 7: ``(abelian_group_elements, residue_perms)`` for the
+    FACTORIZED non-abelian engine (little co-groups over matrix-free
+    momentum sectors). The abelian clique is closed here (|A| stays
+    small for physical clusters); residues are the retained point-group
+    coset representatives. None when there is no residue to factor over
+    or the lane is disabled (``ED_SYM_LITTLE_GROUP=0``)."""
+    if os.environ.get("ED_SYM_LITTLE_GROUP", "1") == "0":
+        return None
+    star = list(getattr(symmetry, "star_perms", None) or [])
+    gens = getattr(symmetry, "generators", None)
+    if not star or not gens:
+        return None
+    gens = [tuple(g) for g in gens]
+    n = len(gens[0])
+    ident = tuple(range(n))
+    elems = {ident}
+    frontier = [ident]
+    while frontier:
+        nxt = []
+        for e in frontier:
+            for g in gens:
+                c = tuple(g[e[i]] for i in range(n))
+                if c not in elems:
+                    elems.add(c)
+                    nxt.append(c)
+        frontier = nxt
+    if len(elems) > 4096:      # defensive: A must stay enumerable
+        return None
+    return ([list(e) for e in sorted(elems)],
+            [list(p) for p in star])
+
+
 def solve(
     H: Union[Operator, FixedSzOperator],
     *,
@@ -1501,6 +1534,36 @@ def solve(
                             _sp = 2
                     except Exception:
                         _sp = -1
+            # Stage 7: prefer the FACTORIZED little-co-group engine
+            # (matrix-free momentum sectors, scales past the monolithic
+            # SAB cap). Falls back to the monolithic reference on any
+            # decline (no residue split / engine error).
+            _lg = _little_group_parts(symmetry)
+            if _lg is not None:
+                _A, _res = _lg
+                try:
+                    if _sp == 2:
+                        ev = (list(_core.little_group_lowest_eigenvalues(
+                                  op_to_use, _A, _res, k=_k, sz_parity=0))
+                              + list(_core.little_group_lowest_eigenvalues(
+                                  op_to_use, _A, _res, k=_k, sz_parity=1)))
+                    elif _sp in (0, 1):
+                        ev = list(_core.little_group_lowest_eigenvalues(
+                            op_to_use, _A, _res, k=_k, sz_parity=_sp))
+                    else:
+                        ev = list(_core.little_group_lowest_eigenvalues(
+                            op_to_use, _A, _res, k=_k, n_up=_nu))
+                    out = EDResults()
+                    out.eigenvalues = sorted(float(e) for e in ev)[:_k]
+                    if verbose:
+                        print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
+                              f"(factorized): |A| = {len(_A)}, residues = "
+                              f"{len(_res)}.")
+                    return out
+                except Exception as exc:      # noqa: BLE001 -- graceful
+                    if verbose:
+                        print(f"[qed.solve] little-group lane declined "
+                              f"({exc}); using the monolithic SAB engine.")
             if _sp == 2:
                 spec0 = _core.symmetry_adapted_lowest_eigenvalues(
                     op_to_use, gens_full, _k, -1, sz_parity=0)
@@ -3353,6 +3416,43 @@ def full_spectrum(
         if _generators_nonabelian(cand):
             gens_full = cand                     # clique + residue = full group
     if gens_full is not None:
+        # Stage 7: the FACTORIZED little-co-group engine first (one
+        # momentum per star, per-irrep blocks inside the star rep's
+        # matrix-free sector); the monolithic SAB engine remains the
+        # graceful fallback (and the sole route for explicit
+        # non-abelian generator input, which has no clique/residue
+        # split to factor over, and for device='gpu', which routes to
+        # the batched-cuSOLVER SAB consumer).
+        _lg = None if use_gpu else _little_group_parts(symmetry)
+        if _lg is not None:
+            _A, _res = _lg
+            try:
+                eigs = []
+                if sz_conserved:
+                    top = N // 2 if _flip_transport else N
+                    for n_up in range(top + 1):
+                        d = dict(_core.little_group_full_spectrum(
+                            operator, _A, _res, n_up=int(n_up)))
+                        block = [float(e) for e in d["eigenvalues"]]
+                        eigs.extend(block)
+                        if _flip_transport and n_up * 2 != N:
+                            eigs.extend(block)   # isospectral mirror
+                else:
+                    d = dict(_core.little_group_full_spectrum(
+                        operator, _A, _res))
+                    eigs = [float(e) for e in d["eigenvalues"]]
+                if verbose:
+                    print("[qed.full_spectrum] non-abelian group -> "
+                          "LITTLE-GROUP engine (factorized d_G reduction)"
+                          + (", flip transport halves the Sz sweep"
+                             if _flip_transport else ""))
+                out = EDResults()
+                out.eigenvalues = sorted(eigs)
+                return out
+            except Exception as exc:            # noqa: BLE001 -- graceful
+                if verbose:
+                    print(f"[qed.full_spectrum] little-group lane declined "
+                          f"({exc}); using the monolithic SAB engine.")
         # SAB engine: FULL-group projection including d_G >= 2 irreps --
         # the strongest dense reduction (blocks ~ dim / |G|). The point
         # group is inside the projection here, so star reduction is
@@ -3362,7 +3462,7 @@ def full_spectrum(
                   "(full d_G reduction)"
                   + (", flip transport halves the Sz sweep"
                      if _flip_transport else ""))
-        eigs: list[float] = []
+        eigs = []
         if sz_conserved:
             top = N // 2 if _flip_transport else N
             for n_up in range(top + 1):
