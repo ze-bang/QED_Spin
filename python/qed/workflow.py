@@ -3421,9 +3421,9 @@ def full_spectrum(
         # matrix-free sector); the monolithic SAB engine remains the
         # graceful fallback (and the sole route for explicit
         # non-abelian generator input, which has no clique/residue
-        # split to factor over, and for device='gpu', which routes to
-        # the batched-cuSOLVER SAB consumer).
-        _lg = None if use_gpu else _little_group_parts(symmetry)
+        # split to factor over). device='gpu' batches ALL block
+        # eigensolves through one cuSOLVER stream-pool call.
+        _lg = _little_group_parts(symmetry)
         if _lg is not None:
             _A, _res = _lg
             try:
@@ -3432,14 +3432,15 @@ def full_spectrum(
                     top = N // 2 if _flip_transport else N
                     for n_up in range(top + 1):
                         d = dict(_core.little_group_full_spectrum(
-                            operator, _A, _res, n_up=int(n_up)))
+                            operator, _A, _res, n_up=int(n_up),
+                            use_gpu=use_gpu))
                         block = [float(e) for e in d["eigenvalues"]]
                         eigs.extend(block)
                         if _flip_transport and n_up * 2 != N:
                             eigs.extend(block)   # isospectral mirror
                 else:
                     d = dict(_core.little_group_full_spectrum(
-                        operator, _A, _res))
+                        operator, _A, _res, use_gpu=use_gpu))
                     eigs = [float(e) for e in d["eigenvalues"]]
                 if verbose:
                     print("[qed.full_spectrum] non-abelian group -> "

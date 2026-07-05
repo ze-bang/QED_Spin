@@ -409,7 +409,7 @@ sectors, max block 12 vs 36 spatial-only); thermal E(T) machine-exact
 | 2 | `OrbitTable` (fused pass1+1.5, deduped stabilizers) + closed-form prefilter + `build_prefiltered` parallel materialization; ALL builder lanes rewired (eager full/fixed-Sz, lazy full/fixed-Sz, all-Sz flat pool: per-n_up stabilizers partitioned from ONE full-space scan); per-irrep loops parallelized | fused-scan bit-identity vs legacy two-pass, Burnside sum rule, `build_prefiltered` bit-identity per irrep (`test_orbit_table.cpp`, 6.7k assertions) | **done (Jul 2026)** |
 | 2b | `build_reduced_symmetry_csr_rep`: reduced sector matrix assembled straight from `index_and_projection` — the default `RepReducedCsr` CPU lane routes to the REP policy and **never materializes the per-sector orbit CSR** (`ED_SYM_REP=0` = orbit escape) | rep-CSR SpMV == rep-walk GATHER to 1e-12 every sector (`test_rep_symmetry_backend.cpp`); N=26 half-fill CPU GS: 21.5 s / 4.98 GB / 0 orbit materializations vs the orbit escape lane not finishing in 10 min | **done (Jul 2026)** |
 | 3 | `SymmetryCache` (`symmetry_cache.h`): content-keyed in-process FIFO registry (always on; hits across the GeneratorSet temp-dir round-trip since keys are content-based) + atomic `.otab` disk layer (`<lattice_dir>/basis_cache/sym_v2/<hash>.otab`, `ED_SYM_CACHE=0` / `ED_SYM_CACHE_DIR` knobs); `OperatorSpec::basis_cache_dir` + `SolveOptions::basis_cache_dir` finally consumed | key==stamped-hash, bit-identical round-trip, corruption->rebuild, registry identity, precedence (`test_symmetry_cache.cpp`); N=28 cross-process demo: warm run loads 1.43M reps from a 14 MB file instead of rescanning | **done (Jul 2026)** |
-| 4 | `SharedRankLookup` (`rep_sector_data.h`): ONE dense rank→shared-rep-index table per (N, n_up), co-owned by every irrep sector; sectors carry only the int32×#reps `local_of_shared` remap. Two-level `index_of_rep` in `RepSymmetryBasisPolicy` (precedence: two-level > legacy dense > binary search); wired through the lazy fixed-Sz + all-Sz builders, budget-gated by the existing `rep_rank_table_enabled`. GPU device tables unchanged (follow-up) | two-level GATHER == binary-search GATHER bitwise on every sector (`test_rep_symmetry_backend.cpp`); N=26 half-fill peak RSS 4.98→4.04 GB, E0 unchanged (at N=32 the aggregate scales ~77 GB → ~4.8 GB) | **done (Jul 2026)** |
+| 4 | `SharedRankLookup` (`rep_sector_data.h`): ONE dense rank→shared-rep-index table per (N, n_up), co-owned by every irrep sector; sectors carry only the int32×#reps `local_of_shared` remap. Two-level `index_of_rep` in `RepSymmetryBasisPolicy` (precedence: two-level > legacy dense > binary search); wired through the lazy fixed-Sz + all-Sz builders, budget-gated by the existing `rep_rank_table_enabled`. GPU device twin (Jul 2026): `GpuSharedRankTable` weak registry + keep-alive FIFO in the rep mirror -- ONE `rank -> shared-idx` device upload per (N, n_up) co-owned across every sector mirror AND across the transient per-solve mirrors; `DeviceRepSymmetryBasisPolicy` two-level `index_of_rep_dev` (per-sector table not even built when the host sector is two-level) | two-level GATHER == binary-search GATHER bitwise on every sector (`test_rep_symmetry_backend.cpp`); N=26 half-fill peak RSS 4.98→4.04 GB, E0 unchanged (at N=32 the aggregate scales ~77 GB → ~4.8 GB) | **done (Jul 2026)** |
 | 5 | Spin-flip Z₂, transporter half: `spin_flip.h` term-level [H, X]=0 checker (Zeeman/lone-S± /wrong-sign partners all rejected; three-body conservative) + **SectorTransporter** in the all-Sz flat-pool thermal lane — X commutes with every site permutation so (n_up, k) ↔ (N−n_up, SAME k); solve n_up ≤ N/2, mirror the thermodynamic entries (`ED_SYM_SPIN_FLIP=0` escape). The n_up = N/2 in-sector projection (flip as a CompiledGroup element halving the biggest sector) is Stage 5b | checker unit tests (`test_spin_flip.cpp`); transport ON == OFF at 1e-15 on N=8 Heisenberg with full tag coverage; Zeeman negative control incl. ±Sz-degeneracy-actually-broken sanity (`test_spin_flip_transport.py`) | **5a + 5b done (Jul 2026)** — 5b: `make_flip_extended_group` (G′ = G × Z₂ via CompiledGroup flip masks), compiled-group OrbitTable builder + cache variant, flip masks on `RepSectorData`/`RepSymmetryBasisPolicy` (one XOR in `apply_perm`; `index_and_projection`/reduced-CSR/diagonal automatically flip-correct), and the all-Sz builder splits the n_up = N/2 block into (k, ±) with χ′ = (χ, ±χ). (Superseded by Stage 8b: the device policy carries the same flip masks — CPU *and* GPU.) Orbit-CSR fallback throws loud. Guards: Burnside + per-k dim tiling + spectrum union (k,+) ∪ (k,−) == plain k at 1e-10 (`test_flip_projection.cpp`); thermal parity + biggest-sector-halved assertion on the CPU lane (`test_spin_flip_transport.py`); `ED_SYM_SPIN_FLIP_PROJECT=0` sub-gate |
 | 6 | Time reversal (`time_reversal.h`): `hamiltonian_is_real` gate + `conjugate_sector_pairing` (χ → χ*, i.e. k ↔ −k, involution); the flat-pool thermal lane solves one member per conjugate pair and copies spectra/Z_s to the partner (composes with 5a/5b: flip synthetic indices pair as k+p·nirr → k̄+p·nirr). Reality half was already wired (`is_real_hermitian` consults the per-sector character → real fast path on self-conjugate sectors). Kramers tags deferred (bookkeeping only). `ED_SYM_TIME_REVERSAL=0` escape | pair-map involution + Z_N k↔N−k unit tests (`test_time_reversal.cpp`); thermal parity ON == OFF at 1e-10 with identical sector coverage; complex-H (DM-like imaginary coupling) negative control (`test_spin_flip_transport.py`) | **done (Jul 2026)** |
 | 7 | **Proper non-abelian on every workflow** (`point_group="full"`, Jul 2026): the SAB engine's iterative consumers -- per-irrep blocks (d_Γ ≥ 2 included, ~dim/\|G\|) on the production multi-target matvec (`NonAbelianSymmetryBasisPolicy`), block-size-adaptive dense/Lanczos -- are now wired to all four verbs: `qed.solve` (lowest-k with d_Γ multiplicities via the new `symmetry_adapted_lowest_eigenvalues` binding), `qed.thermal` (exact canonical thermo from the reduced spectrum), `qed.spectral` (GS DSSF, all partners summed, via `symmetry_adapted_gs_dssf`), `full_spectrum` (pre-existing SAB route). Full group = clique + retained star residue from `symmetry="auto"`. CPU engine (GPU covers the dense full-spectrum consumer); memory = SAB vectors O(d·dim) -- the correct monolithic-group REFERENCE at moderate N. **Factorized little-group engine (Jul 2026, `little_group_solve.h`)**: G = A ⋊ P split -- ONE momentum per residue star (proven folding) + little-co-group ISOTYPIC projection inside the star rep's MATRIX-FREE momentum sector. The P_k0 action on the k0 rep basis is a MONOMIAL matrix (U_p\|ψ_i⟩ = χ_k(b)\|ψ_j⟩, numerically validated per element via a random-vector [M_p, H] = 0 check); coset dedup (M_{a·p} = χ_k(a)M_p) gives the abstract little co-group, decomposed via `decompose_irreps_tables` (regular-rep commutant on the mult TABLE -- little co-groups have no faithful perm realisation); isotypic W_σ from per-index-orbit SVD (build_sab_partition0 one level up); blocks = W_σ† H_k W_σ on the CSR-free rep kernel, eigenvalue multiplicity \|star\|×d_σ. EVERY refinement degrades gracefully to the plain k0 block (projective factor systems, non-normalising residues, failed checks) -- correctness never depends on the bookkeeping. Default lane for solve/thermal/full_spectrum `point_group="full"` (`ED_SYM_LITTLE_GROUP=0` = monolithic escape; explicit non-abelian generator input and `device='gpu'` full_spectrum stay monolithic) | D8 ring (\|G\|=16, irrep dims {1,2}): lowest-6 incl. the d=2 triplet degeneracy == dense at 1e-8; thermal E(T) 1.6e-14; DSSF == dense Lehmann at 9e-14 (`test_nonabelian_lanes.py`). Factorized engine: ring + 3x3-square (C4v Γ little group, d=2) full spectra == dense at 1e-12 with the exact little-group star structure (Z2 at k=0/π, C4v order 8 at Γ); fixed-Sz/parity subspaces; verbs == monolithic (`test_little_group.py`). Scaling (ring GS, full group): N=12 0.005s vs 0.045s; N=16 0.03s vs 7.1s; **N=20 0.5s vs 317s (626×), ΔE0 = 0** | **done (Jul 2026)** -- monolithic + factorized |
@@ -440,3 +440,45 @@ new piece of sector metadata — never a new construction pipeline.**
 4. **Perf gates in CI-benchmarks**: construction time at N=24 ring +
    N=24 kagome fixture tracked nightly (`benchmarks.yml`), regression
    threshold 1.5×.
+
+## 6. Residual ledger (Jul 2026 sweep)
+
+Every item from the post-consolidation ledger is now either DONE or
+explicitly dispositioned:
+
+* **Stage 8d** (projected spectral) — done; **Stage 7** (factorized
+  non-abelian) — done; **GPU shared rank table** — done; **non-abelian
+  on GPU** — done for the dense/thermo consumers
+  (`LittleGroupOptions::use_gpu` batches every block eigensolve through
+  `sym_blocks_batched_eigenvalues_gpu`'s 8-stream cuSOLVER pool, which
+  is also the tiny-sector batching mechanism: many small blocks, one
+  upload, overlapped launches). Iterative little-group blocks stay on
+  the CPU rep kernel — at the block sizes the factorization produces
+  (dim_k/|P|), the CPU Lanczos is not the bottleneck; revisit only if a
+  profile shows otherwise.
+* **Probe-op double construction** — done: `load_directory_probe` +
+  `resolve_comp_with_stars` (one directory parse per binding call; the
+  probe's carrier op rides into `make_sector_operators_tagged` /
+  `make_all_sz_sector_operators_tagged` via the new prebuilt-base
+  parameter).
+* **Two group containers** (`SymmetryGroupInfo` vs raw perms +
+  `GroupIrreps`) — deliberately kept: they serve different layers
+  (directory-I/O metadata with per-sector phase factors vs abstract
+  numerical decomposition, which since Stage 7 also covers groups with
+  NO faithful permutation realisation via `decompose_irreps_tables`).
+  The boundary is two pure functions (`generate_group`,
+  `decompose_irreps*`); merging the containers would couple the I/O
+  schema to the decomposition for no measured cost today.
+* **Python SymmetryPlan object** — deliberately deferred: the per-verb
+  engagement logic genuinely differs (solve composes a diagonal axis,
+  spectral routes PER PROBE via the classifiers, thermal resolves in
+  C++); the shared kernel is only `detect_hamiltonian_symmetries` +
+  the closure rules, both already single-sourced. A unifying object
+  would add indirection without removing duplication.
+* **Assessed, not built** (unchanged priorities): general commuting
+  Pauli-string sectors (plaquette / gauge fluxes — highest-leverage
+  next capability), SU(2) total-S towers, spectrum reflections,
+  MPI support for the parity/flip lanes (mpi_size == 1 gated), and a
+  matrix-free non-abelian DSSF consumer (the SAB DSSF now composes the
+  diagonal axis; a factorized-basis probe application would be the
+  little-group analog of Stage 8d).

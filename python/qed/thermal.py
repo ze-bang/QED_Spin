@@ -761,7 +761,9 @@ def thermal(
         if _lg is not None:
             try:
                 td = dict(_core.little_group_thermodynamics(
-                    H, _lg[0], _lg[1], temps, n_up=_nu))
+                    H, _lg[0], _lg[1], temps, n_up=_nu,
+                    use_gpu=(isinstance(device, str)
+                             and device.lower() in ("gpu", "cuda"))))
                 if verbose:
                     print(f"[qed.thermal] non-abelian LITTLE-GROUP lane "
                           f"(factorized): |A| = {len(_lg[0])}, residues = "

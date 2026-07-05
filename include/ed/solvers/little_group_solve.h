@@ -50,6 +50,8 @@ struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
     int  dense_max_dim = 64;   ///< per-block dense/Lanczos crossover (lowest-k path)
+    bool use_gpu       = false;///< full-spectrum path: ONE batched cuSOLVER
+                               ///< eigensolve over all packed blocks (WITH_CUDA)
     bool verbose       = false;
 };
 

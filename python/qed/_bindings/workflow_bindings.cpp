@@ -127,6 +127,51 @@ make_cross_sector_ref(ed::symmetry::SectorOperator* sec,
     return Ref::from(sec->materialized_basis(), num_sites);
 }
 
+// ---------------------------------------------------------------------------
+// Structural cleanup (Jul 2026): ONE directory probe per binding call.
+//
+// Every symmetry binding needs (a) the term-level TermStorage for detection
+// and (b) the loaded symmetry_info for composition -- and then hands the
+// SAME parsed content to ``make_sector_operators_tagged``. This helper loads
+// the carrier once; the caller passes ``probe.base`` into the factory so the
+// directory is parsed exactly once per call (previously: probe + factory
+// each parsed it).
+// ---------------------------------------------------------------------------
+struct DirectoryProbe {
+    std::shared_ptr<Operator>  base;   // terms + symmetry_info loaded
+    ed::matvec::TermStorage    soa;    // classified term SoA (detection)
+};
+
+inline DirectoryProbe
+load_directory_probe(const ed::OperatorSpec& spec,
+                     const std::string&      directory) {
+    DirectoryProbe p;
+    p.base = ed::detail::build_base_op(spec);
+    ed::detail::load_terms_into(*p.base, spec);
+    ed::matvec::TermStorage::classify_route(
+        p.soa, p.base->transform_data_, p.base->three_body_data_,
+        [](const std::complex<double>& c) { return c; });
+    p.base->symmetry_info.loadFromDirectory(directory);
+    return p;
+}
+
+// Composition resolution over a loaded probe, with the Stage-7a star maps
+// folded in (shared by the GS / thermal / flat-pool bindings).
+template <class OptsT>
+inline ed::symmetry::SymmetryComposition
+resolve_comp_with_stars(const DirectoryProbe& probe, const OptsT& opts) {
+    auto comp = ed::symmetry::resolve_symmetry_composition(
+        probe.soa, probe.base->symmetry_info, opts.backend.allow_gpu,
+        ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+        ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+    const std::size_t nsec = probe.base->symmetry_info.sectors.size();
+    for (const auto& m : opts.star_maps) {
+        if (m.size() != nsec) continue;
+        comp.star_maps.emplace_back(m.begin(), m.end());
+    }
+    return comp;
+}
+
 // Synthetic-slot selection rule for the probe: how the trailing
 // (parity[, flip]) tag labels of the source sector map to the target's.
 // Throws when the probe cannot be routed through the engaged slots.
@@ -913,29 +958,10 @@ void bind_workflows(py::module_& m) {
                   // ED_SYM_SPIN_FLIP[_PROJECT] / ED_SYM_TIME_REVERSAL are
                   // the env escapes for the Auto defaults.
                   // -----------------------------------------------------
-                  ed::symmetry::SymmetryComposition comp;
-                  {
-                      auto probe = ed::detail::build_base_op(spec);
-                      ed::detail::load_terms_into(*probe, spec);
-                      ed::matvec::TermStorage soa;
-                      ed::matvec::TermStorage::classify_route(
-                          soa, probe->transform_data_, probe->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      probe->symmetry_info.loadFromDirectory(directory);
-                      comp = ed::symmetry::resolve_symmetry_composition(
-                          soa, probe->symmetry_info, opts.backend.allow_gpu,
-                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
-                          ed::symmetry::sym_toggle_from_int(
-                              opts.time_reversal));
-                      // Stage 7a: star maps (non-abelian residue) join
-                      // the isospectral-orbit relation alongside TR.
-                      const std::size_t nsec =
-                          probe->symmetry_info.sectors.size();
-                      for (const auto& m : opts.star_maps) {
-                          if (m.size() != nsec) continue;
-                          comp.star_maps.emplace_back(m.begin(), m.end());
-                      }
-                  }
+                  DirectoryProbe probe =
+                      load_directory_probe(spec, directory);
+                  ed::symmetry::SymmetryComposition comp =
+                      resolve_comp_with_stars(probe, opts);
                   // Requested n_up before any transport re-target; -1 when
                   // the fixed-Sz axis is off. Used to restore the caller's
                   // n_up on the emitted sector tags.
@@ -962,7 +988,8 @@ void bind_workflows(py::module_& m) {
                       spec.flip_sectors_full = true;
                   }
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec));
+                      ed::make_sector_operators_tagged(spec, 0, 1,
+                                                       probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -1427,16 +1454,12 @@ void bind_workflows(py::module_& m) {
               if (opts.sz_parity >= 0 && !spec.fixed_sz) {
                   spec.sz_parity = opts.sz_parity;
               }
+              const DirectoryProbe probe =
+                  load_directory_probe(spec, directory);
               {
-                  auto probe = ed::detail::build_base_op(spec);
-                  ed::detail::load_terms_into(*probe, spec);
-                  ed::matvec::TermStorage soa;
-                  ed::matvec::TermStorage::classify_route(
-                      soa, probe->transform_data_, probe->three_body_data_,
-                      [](const std::complex<double>& c) { return c; });
-                  probe->symmetry_info.loadFromDirectory(directory);
-                  auto comp = ed::symmetry::resolve_symmetry_composition(
-                      soa, probe->symmetry_info, opts.backend.allow_gpu,
+                  const auto comp = ed::symmetry::resolve_symmetry_composition(
+                      probe.soa, probe.base->symmetry_info,
+                      opts.backend.allow_gpu,
                       ed::symmetry::sym_toggle_from_int(opts.spin_flip),
                       ed::symmetry::sym_toggle_from_int(opts.time_reversal));
                   if (comp.flip_project && !spec.fixed_sz
@@ -1459,7 +1482,8 @@ void bind_workflows(py::module_& m) {
                   // Allgather-combined after the loop. Single-rank => unchanged.
                   const auto [mpi_rank, mpi_size] = binding_mpi_rank_size();
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size));
+                      ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size,
+                                                       probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (mpi_size == 1 && num_sectors == 0) {
@@ -2702,17 +2726,10 @@ void bind_workflows(py::module_& m) {
                   // adjoint probe pair equals the +Q panel (S(-Q, omega) =
                   // S(Q, omega)^* with a real spectral function) -- detected
                   // once here, applied per-Q below.
-                  bool h_real = false;
-                  {
-                      auto probe = ed::detail::build_base_op(src_spec);
-                      ed::detail::load_terms_into(*probe, src_spec);
-                      ed::matvec::TermStorage soa;
-                      ed::matvec::TermStorage::classify_route(
-                          soa, probe->transform_data_,
-                          probe->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      h_real = ed::symmetry::hamiltonian_is_real(soa);
-                  }
+                  const DirectoryProbe mq_probe =
+                      load_directory_probe(src_spec, directory);
+                  const bool h_real =
+                      ed::symmetry::hamiltonian_is_real(mq_probe.soa);
 
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
@@ -2720,7 +2737,8 @@ void bind_workflows(py::module_& m) {
                   // solve; ``dst_ref`` is rebuilt per-Q from the resolved
                   // target sector (the target sector varies with Q).
                   ed::core::SectorSetView src_handle(
-                      ed::make_sector_operators_tagged(src_spec));
+                      ed::make_sector_operators_tagged(src_spec, 0, 1,
+                                                       mq_probe.base));
 
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
@@ -3586,28 +3604,10 @@ void bind_workflows(py::module_& m) {
                   const int req_lo  = std::max(0, n_up_min);
                   const int req_hi  = (n_up_max < 0) ? N_sites
                                                      : std::min(n_up_max, N_sites);
-                  ed::symmetry::SymmetryComposition comp;
-                  {
-                      auto probe = ed::detail::build_base_op(spec);
-                      ed::detail::load_terms_into(*probe, spec);
-                      ed::matvec::TermStorage soa;
-                      ed::matvec::TermStorage::classify_route(
-                          soa, probe->transform_data_, probe->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      probe->symmetry_info.loadFromDirectory(directory);
-                      comp = ed::symmetry::resolve_symmetry_composition(
-                          soa, probe->symmetry_info, opts.backend.allow_gpu,
-                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
-                          ed::symmetry::sym_toggle_from_int(opts.time_reversal));
-                      // Stage 7a: point-group star maps join the
-                      // isospectral-orbit relation alongside TR.
-                      const std::size_t nsec =
-                          probe->symmetry_info.sectors.size();
-                      for (const auto& m : opts.star_maps) {
-                          if (m.size() != nsec) continue;
-                          comp.star_maps.emplace_back(m.begin(), m.end());
-                      }
-                  }
+                  DirectoryProbe probe =
+                      load_directory_probe(spec, directory);
+                  ed::symmetry::SymmetryComposition comp =
+                      resolve_comp_with_stars(probe, opts);
                   const ed::symmetry::BuildWindow win =
                       ed::symmetry::plan_build_window(
                           comp, req_lo, req_hi, N_sites);
@@ -3628,7 +3628,7 @@ void bind_workflows(py::module_& m) {
                   // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, win.lo, win.hi, flip_project);
+                          spec, win.lo, win.hi, flip_project, probe.base);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());

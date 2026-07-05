@@ -878,11 +878,17 @@ PYBIND11_MODULE(_core, m) {
     // never O(2^N), so this scales past the monolithic SAB cap. Every
     // refinement step degrades gracefully to the plain k0 block.
     // -----------------------------------------------------------------
-    auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim) {
+    auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim,
+                      bool use_gpu = false) {
         ed::solvers::LittleGroupOptions o;
         o.n_up          = n_up;
         o.sz_parity     = sz_parity;
         o.dense_max_dim = dense_max_dim;
+#ifdef WITH_CUDA
+        o.use_gpu       = use_gpu;
+#else
+        (void)use_gpu;
+#endif
         return o;
     };
     auto lg_stars_dict = [](const ed::solvers::LittleGroupSpectrum& s) {
@@ -903,11 +909,11 @@ PYBIND11_MODULE(_core, m) {
           [lg_opts, lg_stars_dict](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int n_up, int sz_parity) {
+             int n_up, int sz_parity, bool use_gpu) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto s = ed::solvers::little_group_full_spectrum(
                   op, abelian_group, residue_perms, n_sites,
-                  lg_opts(n_up, sz_parity, 4096));
+                  lg_opts(n_up, sz_parity, 4096, use_gpu));
               py::dict d;
               d["eigenvalues"]    = s.expanded();
               d["block_values"]   = s.eigenvalues;
@@ -917,7 +923,7 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("n_up") = -1,
-          py::arg("sz_parity") = -1,
+          py::arg("sz_parity") = -1, py::arg("use_gpu") = false,
           "Full spectrum via the FACTORIZED little-co-group reduction "
           "(one momentum per star, per-irrep blocks inside the star "
           "representative's matrix-free k-sector).");
@@ -945,11 +951,11 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<double>& temperatures,
-             int n_up, int sz_parity) {
+             int n_up, int sz_parity, bool use_gpu) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto td = ed::solvers::little_group_thermodynamics(
                   op, abelian_group, residue_perms, n_sites, temperatures,
-                  lg_opts(n_up, sz_parity, 4096));
+                  lg_opts(n_up, sz_parity, 4096, use_gpu));
               py::dict d;
               d["temperatures"]  = td.temperatures;
               d["energy"]        = td.energy;
@@ -961,6 +967,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("temperatures"),
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("use_gpu") = false,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
 

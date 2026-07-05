@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-07-04 — residual ledger cleared: projected DSSF, factorized non-abelian, GPU twins
+
+* **Stage 8d — spectral composition**: the dynamical lanes now compose
+  with every projected sector type. `CrossSectorOrbitObservable` grew a
+  CSR-free `RepSectorData` ref (rep-matvec arithmetic on both sides),
+  so Sz-parity and ∏σˣ flip sectors — which never materialise an orbit
+  CSR — route DSSF end-to-end: probe classifiers
+  (`spin_flip_character`: S^z_Q probes are flip-ODD; `delta_n_up_parity`)
+  pick the target slot through the new slot-aware selection rule.
+  `qed.spectral` auto-composes (parity halves + flip sectors, spin_flip=
+  toggle consumed); multi-Q sweeps copy the −Q panel from a computed +Q
+  panel for real H (coefficient-conjugate probes, exact on every
+  channel); the SAB GS-DSSF partitions by the conserved diagonal axis.
+  Pinned vs dense Lehmann sums at 1e−12 (`test_spectral_composition.py`).
+* **Stage 7 — factorized non-abelian (little co-groups)**:
+  `point_group="full"` now runs on `little_group_solve` — one momentum
+  per residue star plus little-co-group isotypic projection INSIDE the
+  star representative's matrix-free momentum sector (monomial action,
+  coset dedup, abstract-group irreps via `decompose_irreps_tables`,
+  per-element numerical `[M_p, H] = 0` validation, graceful per-star
+  fallback). Ring + C4v-square spectra == dense at 1e−12 with the
+  textbook little-group structure; **N=20 full-group ring GS 0.5 s vs
+  317 s monolithic (626×, ΔE₀ = 0)**. The monolithic SAB engine remains
+  the reference and fallback (`ED_SYM_LITTLE_GROUP=0`).
+* **GPU twins**: Stage-4 shared rank table now has a device twin (one
+  `rank → shared-idx` upload per (N, n_up) co-owned across all sector
+  mirrors and across per-solve mirror rebuilds — was one C(N,n_up)
+  table PER SECTOR); the little-group engine gained `use_gpu` (all
+  block eigensolves in ONE batched cuSOLVER stream-pool call, which is
+  also the tiny-sector batching mechanism). GPU == CPU at 1e−11/1e−13.
+* Structural: one directory parse per binding call
+  (`load_directory_probe` + prebuilt-base factory parameter replaces
+  the probe/factory double construction in four bindings); the
+  remaining ledger items are dispositioned in
+  `SYMMETRY_V2_DESIGN.md` §6.
+
 ## 2026-07-04 — monomial consolidation, parity, proper non-abelian, cleanup
 
 * Monomial taxonomy (SYMMETRY_V2_DESIGN.md §3b): every unitary symmetry

@@ -137,6 +137,13 @@ symmetry_adapted_thermodynamics_gpu(
     const std::vector<double>&            temperatures,
     int                                   n_up = -1);
 
+/// Stage 7 GPU lane: batched Hermitian eigensolve (values only) of packed
+/// column-major blocks. Variable block sizes; an 8-stream cuSOLVER pool
+/// overlaps the small-block launches (the tiny-sector batching mechanism).
+/// Consumed by the little-group engine's use_gpu path.
+[[nodiscard]] std::vector<double>
+sym_blocks_batched_eigenvalues_gpu(const SymBlocksPacked& P);
+
 // ---------------------------------------------------------------------------
 // Ground-state DSSF result S(ω) = Σ_n |<n|O|0>|² · Lorentzian(ω-(E_n-E0)).
 // Produced by ed::solvers::symmetry_adapted_ground_state_dssf.

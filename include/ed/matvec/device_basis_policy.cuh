@@ -437,6 +437,14 @@ struct DeviceRepSymmetryBasisPolicy {
     // pure permutations (every pre-8b sector). Mirrors the host
     // RepSymmetryBasisPolicy::flips field.
     const std::uint64_t*    flips             = nullptr;  // length group_size
+    // Stage-4 two-level reverse lookup, DEVICE twin (Jul 2026): ONE dense
+    // rank -> shared-rep-index table per (N, n_up), shared across every
+    // irrep sector's mirror, plus this sector's small local remap. When
+    // both are set they take precedence over the per-sector
+    // ``rep_index_of_rank`` (which is then not even uploaded). Mirrors the
+    // host RepSymmetryBasisPolicy::{shared_rank_of, local_of_shared}.
+    const std::int32_t*     shared_rank_of    = nullptr;  // C(N,n_up), shared
+    const std::int32_t*     local_of_shared   = nullptr;  // per sector
     std::uint64_t           dim_              = 0;
     int                     group_size        = 1;
     int                     n_sites           = 0;
@@ -472,6 +480,18 @@ struct DeviceRepSymmetryBasisPolicy {
             : rb;
     }
 
+    // Reverse lookup rb -> orbit index (-1 sentinel folded to the caller's
+    // kDeviceNotFound). Two-level (shared rank table + local remap) when
+    // available, per-sector dense table otherwise.
+    __device__ inline std::int32_t index_of_rep_dev(std::uint64_t rb) const noexcept {
+        const std::uint64_t r = rank_of_rep(rb);
+        if (shared_rank_of != nullptr) {
+            const std::int32_t g = shared_rank_of[r];
+            return (g < 0) ? std::int32_t{-1} : local_of_shared[g];
+        }
+        return rep_index_of_rank[r];
+    }
+
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
         std::uint64_t rb = state;
@@ -479,7 +499,7 @@ struct DeviceRepSymmetryBasisPolicy {
             const std::uint64_t img = apply_perm(state, g);
             if (img < rb) rb = img;
         }
-        const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
+        const std::int32_t k = index_of_rep_dev(rb);
         return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
     }
 
@@ -517,7 +537,7 @@ struct DeviceRepSymmetryBasisPolicy {
                 images[g] = apply_perm(state, g);
                 if (images[g] < rb) rb = images[g];
             }
-            const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
+            const std::int32_t k = index_of_rep_dev(rb);
             if (k < 0) return kDeviceNotFound;
             // Accumulate from precomputed images — no more apply_perm here.
             cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
@@ -539,7 +559,7 @@ struct DeviceRepSymmetryBasisPolicy {
             const std::uint64_t img = apply_perm(state, g);
             if (img < rb) rb = img;
         }
-        const std::int32_t k = rep_index_of_rank[rank_of_rep(rb)];
+        const std::int32_t k = index_of_rep_dev(rb);
         if (k < 0) return kDeviceNotFound;
         cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
         for (int h = 0; h < group_size; ++h) {

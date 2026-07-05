@@ -499,7 +499,8 @@ greedy_sector_owner(const std::vector<std::uint64_t>& dims, int nranks) {
 
 inline SectorOperatorSet
 make_sector_operators_tagged(const OperatorSpec& spec,
-                             int mpi_rank = 0, int mpi_size = 1) {
+                             int mpi_rank = 0, int mpi_size = 1,
+                             std::shared_ptr<Operator> base = nullptr) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_sector_operators: requires "
@@ -514,10 +515,15 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     // Carrier operator: load the Hamiltonian term list + the symmetry group
     // metadata exactly once. The terms are copied verbatim into every sector
     // operator by the term-builder below (identical to the proven
-    // ``make_sector_operator_adopt`` term-copy contract).
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    base->symmetry_info.loadFromDirectory(dir);
+    // ``make_sector_operator_adopt`` term-copy contract). Structural
+    // cleanup (Jul 2026): callers that already parsed the directory for
+    // symmetry DETECTION (the binding probes) pass their loaded carrier in
+    // -- one parse per binding call instead of two.
+    if (!base) {
+        base = detail::build_base_op(spec);
+        detail::load_terms_into(*base, spec);
+        base->symmetry_info.loadFromDirectory(dir);
+    }
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;
@@ -727,7 +733,8 @@ inline SectorOperatorSet
 make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
                                     int n_up_min = 0,
                                     int n_up_max = -1,
-                                    bool flip_project_half = false) {
+                                    bool flip_project_half = false,
+                                    std::shared_ptr<Operator> base = nullptr) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_all_sz_sector_operators_tagged: requires "
@@ -738,10 +745,13 @@ make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
     if (n_up_max < 0)
         n_up_max = static_cast<int>(n_bits);
 
-    // Load operator terms + symmetry group info ONCE.
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    base->symmetry_info.loadFromDirectory(dir);
+    // Load operator terms + symmetry group info ONCE (or reuse the caller's
+    // detection probe -- structural cleanup, Jul 2026).
+    if (!base) {
+        base = detail::build_base_op(spec);
+        detail::load_terms_into(*base, spec);
+        base->symmetry_info.loadFromDirectory(dir);
+    }
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;
