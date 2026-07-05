@@ -12,6 +12,7 @@
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
 #include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
+#include <ed/matvec/reduced_symmetry_csr.h>     // B4: build_reduced_symmetry_csr_rep
 #include <ed/matvec/term_storage.h>
 #include <ed/solvers/lanczos.h>                  // ::lanczos / ::full_diagonalization
 #include <ed/symmetry/compiled_group.h>
@@ -118,6 +119,20 @@ public:
         return *rd_;
     }
 
+    // B4: the reduced sector matrix H_k assembled DIRECTLY from the rep policy
+    // -- O(|G|*nnz), PARALLEL over rows -- instead of dim column matvecs. This
+    // is the same matrix element the gather backend applies (pinned bit-for-bit
+    // by test_reduced_symmetry_csr.cpp); densifying / sandwiching it retires the
+    // materialize() column crawl.
+    [[nodiscard]] ed::matvec::ReducedSymmetryCsr<Complex> reduced_csr() const {
+        return ed::matvec::build_reduced_symmetry_csr_rep<
+            ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                rd_->make_policy(), tv_.spin_l,
+                terms_.diag_one_body, terms_.offdiag_one_body,
+                terms_.diag_two_body, terms_.mixed_two_body,
+                terms_.offdiag_two_body, terms_.three_body);
+    }
+
 private:
     std::unique_ptr<ed::symmetry::RepSectorData>  rd_;   // stable address for the backend
     ed::matvec::TermStorage                        terms_;
@@ -167,6 +182,8 @@ public:
     [[nodiscard]] std::string description() const override {
         return "LittleGroupBlock(W^h H_k W)";
     }
+    [[nodiscard]] const RepSectorMatVec& hk() const { return hk_; }
+    [[nodiscard]] const SparseColumns&   cols() const { return W_; }
 
 private:
     const RepSectorMatVec&        hk_;
@@ -174,9 +191,54 @@ private:
     mutable std::vector<Complex>  scratch_in_, scratch_out_;
 };
 
-// Dense materialization through any MatVecOperator (same sampling trick as
-// the monolithic engine).
+// B4: dense H_k (plain block) or W^dagger H_k W (projected block) assembled
+// from the reduced CSR of H_k -- built ONCE, parallel, O(|G|*nnz) -- instead
+// of ``dim`` matvec columns (each a per-column OMP fork/join over a tiny
+// payload). ``W == nullptr`` => the plain k0 block; otherwise the isotypic
+// sandwich.
+[[nodiscard]] Eigen::MatrixXcd
+dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
+    const auto csr = hk.reduced_csr();
+    const std::size_t dk = hk.dim();
+    if (W == nullptr) {
+        Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(
+            static_cast<Eigen::Index>(dk), static_cast<Eigen::Index>(dk));
+        for (std::size_t r = 0; r < dk; ++r)
+            for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e)
+                H(static_cast<Eigen::Index>(r),
+                  static_cast<Eigen::Index>(csr.col_idx[e])) = csr.val[e];
+        return H;
+    }
+    // Projected: A[c1,c2] = sum_{r,j} conj(W[r,c1]) H_k[r,j] W[j,c2]. Index the
+    // columns that touch each rep index once, then a single CSR pass.
+    const std::size_t dw = W->cols.size();
+    std::vector<std::vector<std::pair<std::int32_t, Complex>>> touch(dk);
+    for (std::int32_t c = 0; c < static_cast<std::int32_t>(dw); ++c)
+        for (const auto& [i, w] : W->cols[static_cast<std::size_t>(c)])
+            touch[static_cast<std::size_t>(i)].emplace_back(c, w);
+    Eigen::MatrixXcd A = Eigen::MatrixXcd::Zero(
+        static_cast<Eigen::Index>(dw), static_cast<Eigen::Index>(dw));
+    for (std::size_t r = 0; r < dk; ++r) {
+        if (touch[r].empty()) continue;
+        for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e) {
+            const std::size_t j = csr.col_idx[e];
+            const Complex v = csr.val[e];
+            for (const auto& [c1, w1] : touch[r])
+                for (const auto& [c2, w2] : touch[j])
+                    A(c1, c2) += std::conj(w1) * v * w2;
+        }
+    }
+    return A;
+}
+
+// Dense materialization dispatch: the little-group blocks (plain rep sector /
+// projected W^dagger H_k W) take the CSR path above; anything else (defensive)
+// falls back to the column-by-column matvec build.
 [[nodiscard]] Eigen::MatrixXcd materialize(const ed::matvec::MatVecOperator& mv) {
+    if (const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv))
+        return dense_block(*hk, nullptr);
+    if (const auto* bop = dynamic_cast<const ProjectedBlockOp*>(&mv))
+        return dense_block(bop->hk(), &bop->cols());
     const std::size_t n = mv.dim();
     Eigen::MatrixXcd H(n, n);
     std::vector<Complex> e(n, Complex(0, 0)), col(n);
