@@ -47,6 +47,7 @@
 #include <map>
 #include <mutex>
 #include <cmath>
+#include <utility>
 #include <complex>
 #include <cstddef>
 #include <cstdio>
@@ -943,8 +944,63 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
     using ed::symmetry::gpu_mirror::detail::build_rep_mirror;
     using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
 
-    std::shared_ptr<const GpuRepSectorMirror> mirror =
-        build_rep_mirror(rep, spin_l, terms);
+    // B7: memoise the resident device mirror across binds. A single GS solve
+    // binds the operator several times (phase-1 scan, phase-2 refine, vector
+    // pull); without this each rebuilds the mirror and re-uploads reps + terms
+    // (~150 MB at an N=32 sector).
+    //
+    // The key MUST be content-based, NOT the RepSectorData address: sector
+    // operators are transient, so a destroyed sector's rep_data_ address is
+    // reused by the next sector, and within one Hamiltonian every sector
+    // shares identical terms -- so an (address, terms_hash) key collides
+    // across DIFFERENT sectors and returns the wrong mirror (GPU OOB on a
+    // dim-equal parity/flip pair). Key on the sector's own content: the
+    // per-sector characters (unique per irrep), the rep-list signature
+    // (n_up / size / samples), spin, and the term footprint.
+    auto content_key = [](const ed::symmetry::RepSectorData& r,
+                          const ed::matvec::TermStorage& t, double sl) {
+        std::uint64_t h = 1469598103934665603ULL;
+        auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        mix(static_cast<std::uint64_t>(r.n_up + 2));
+        mix(static_cast<std::uint64_t>(r.group_size));
+        mix(r.reps.size());
+        if (!r.reps.empty()) {
+            mix(r.reps.front());
+            mix(r.reps[r.reps.size() / 2]);
+            mix(r.reps.back());
+        }
+        for (const auto& c : r.characters) {   // per-irrep, uniquely identifies k
+            mix(static_cast<std::uint64_t>(std::llround(c.real() * 1e9)));
+            mix(static_cast<std::uint64_t>(std::llround(c.imag() * 1e9)));
+        }
+        if (!r.flip_masks.empty()) mix(r.flip_masks.front());
+        mix(static_cast<std::uint64_t>(std::llround(sl * 1e6)));
+        mix(t.diag_one_body.size());    mix(t.offdiag_one_body.size());
+        mix(t.diag_two_body.size());    mix(t.mixed_two_body.size());
+        mix(t.offdiag_two_body.size()); mix(t.three_body.size());
+        if (!t.offdiag_two_body.empty())
+            mix(static_cast<std::uint64_t>(
+                std::llround(t.offdiag_two_body.back().coefficient.real() * 1e9)));
+        return h;
+    };
+    std::shared_ptr<const GpuRepSectorMirror> mirror;
+    {
+        static std::mutex mtx;
+        static std::map<std::uint64_t,
+                        std::weak_ptr<const GpuRepSectorMirror>> registry;
+        static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
+        constexpr std::size_t kKeep = 4;
+        const std::uint64_t key = content_key(rep, terms, spin_l);
+        std::lock_guard<std::mutex> lk(mtx);
+        auto& slot = registry[key];
+        mirror = slot.lock();
+        if (!mirror) {
+            mirror = build_rep_mirror(rep, spin_l, terms);
+            slot = mirror;
+            if (keep.size() >= kKeep) keep.erase(keep.begin());
+            keep.push_back(mirror);
+        }
+    }
 
     const double spin = spin_l;
     const std::uint64_t dim_captured = mirror->dim;

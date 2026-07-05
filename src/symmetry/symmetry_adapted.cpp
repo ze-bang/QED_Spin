@@ -185,6 +185,7 @@ build_sab_partition0(const GroupIrreps&                   gi,
     static std::mutex sab_cache_mtx;
     static std::vector<std::pair<std::uint64_t, ::SymmetrySector>>
         sab_cache;                                // small FIFO
+    static std::size_t sab_cache_bytes = 0;       // C11: running footprint
     std::uint64_t key = 0xcbf29ce484222325ULL;
     auto mix = [&key](std::uint64_t v) {
         key ^= v; key *= 0x100000001b3ULL;
@@ -222,12 +223,42 @@ build_sab_partition0(const GroupIrreps&                   gi,
         bs.sortOrbit();   // sort orbit_elements (+ parallel coeffs) for findCoeff; refreshes inv_norm
         sec.basis_states.push_back(std::move(bs));
     }
+    // C11: FIFO with BOTH a count cap and a byte budget. Full-space SAB
+    // enumerations can make a single sector many MB (orbit elements +
+    // coefficients per basis vector), so a pure 64-entry FIFO could pin GBs.
+    // Evict oldest until under both limits. Default 512 MiB
+    // (ED_SYM_SAB_CACHE_BYTES overrides); a sector larger than the budget is
+    // returned but not cached.
+    auto sector_bytes = [](const ::SymmetrySector& s) -> std::size_t {
+        std::size_t b = 0;
+        for (const auto& bs : s.basis_states)
+            b += bs.orbit_elements.size() * sizeof(std::uint64_t)
+               + bs.orbit_coefficients.size() * sizeof(std::complex<double>);
+        return b + sizeof(::SymmetrySector);
+    };
     {
         std::lock_guard<std::mutex> lk(sab_cache_mtx);
         constexpr std::size_t kCap = 64;          // ~one model's irreps
-        if (sab_cache.size() >= kCap)
+        std::size_t budget = std::size_t{512} * 1024 * 1024;
+        if (const char* e = std::getenv("ED_SYM_SAB_CACHE_BYTES")) {
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(e, &end, 10);
+            if (end != e && v > 0) budget = static_cast<std::size_t>(v);
+        }
+        const std::size_t this_bytes = sector_bytes(sec);
+        // Evict oldest until this entry fits under both the count cap and the
+        // byte budget (never evict below one slot; a too-big sector is served
+        // uncached).
+        while (!sab_cache.empty()
+               && (sab_cache.size() >= kCap
+                   || sab_cache_bytes + this_bytes > budget)) {
+            sab_cache_bytes -= sector_bytes(sab_cache.front().second);
             sab_cache.erase(sab_cache.begin());
-        sab_cache.emplace_back(key, sec);
+        }
+        if (this_bytes <= budget) {
+            sab_cache.emplace_back(key, sec);
+            sab_cache_bytes += this_bytes;
+        }
     }
     return sec;
 }

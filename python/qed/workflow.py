@@ -636,7 +636,59 @@ class SymmetryReport:
 # ---------------------------------------------------------------------------
 
 
+_FIND_SYM_MEMO: "dict[Any, SymmetryReport]" = {}
+_FIND_SYM_MEMO_CAP = 32
+
+
+def _find_symmetries_key(operator, lattice, translation_only):
+    """Content key for the find_symmetries memo, or None to skip caching
+    (any part that can't be hashed => compute fresh, never cache wrong)."""
+    try:
+        terms = tuple(sorted(tuple(t) for t in operator.transform_tuples()))
+        three = tuple(sorted(tuple(t) for t in operator.iter_three_body_terms()))
+        lat = None
+        if lattice is not None:
+            pos = getattr(lattice, "positions", None)
+            vec = getattr(lattice, "lattice_vectors", None)
+            lat = (repr(pos), repr(vec))
+        return (int(operator.num_sites), terms, three,
+                bool(translation_only), lat)
+    except Exception:
+        return None
+
+
 def find_symmetries(
+    operator: Operator,
+    *,
+    lattice: Optional[Any] = None,
+    translation_only: bool = False,
+    verbose: bool = True,
+) -> SymmetryReport:
+    """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
+
+    B9: the colored-graph automorphism search + group closure (~0.5 s) is
+    memoised on the operator's term content (+ lattice + flags), so a
+    ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
+    the search once. ``ED_SYM_NO_DETECT_MEMO=1`` disables the cache.
+    """
+    _memo_ok = os.environ.get("ED_SYM_NO_DETECT_MEMO") != "1"
+    _key = _find_symmetries_key(operator, lattice, translation_only) \
+        if _memo_ok else None
+    if _key is not None:
+        hit = _FIND_SYM_MEMO.get(_key)
+        if hit is not None:
+            return hit
+    result = _find_symmetries_impl(
+        operator, lattice=lattice, translation_only=translation_only,
+        verbose=verbose)
+    if _key is not None:
+        if len(_FIND_SYM_MEMO) >= _FIND_SYM_MEMO_CAP:
+            _FIND_SYM_MEMO.pop(next(iter(_FIND_SYM_MEMO)))
+        _FIND_SYM_MEMO[_key] = result
+    return result
+
+
+def _find_symmetries_impl(
     operator: Operator,
     *,
     lattice: Optional[Any] = None,

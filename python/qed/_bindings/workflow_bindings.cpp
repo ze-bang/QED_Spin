@@ -51,6 +51,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef WITH_MPI
@@ -78,6 +79,39 @@ inline std::pair<int, int> binding_mpi_rank_size() {
     }
 #endif
     return {rank, size};
+}
+
+// B6: resolve the sector-level OMP gate. An explicit ED_SYM_SECTOR_PARALLEL
+// (0/1) always wins. When UNSET, auto-enable only in the many-tiny-sectors
+// regime (composed parity x flip x spatial => hundreds of ~tiny blocks),
+// where each inner solve is trivial so outer parallelism is a clear win with
+// negligible oversubscription. Few-large-sector runs (max_dim > cap) stay
+// serial-outer, preserving the inner Lanczos/BLAS threading.
+inline bool resolve_sector_parallel(std::size_t   num_sectors,
+                                    std::uint64_t max_sector_dim,
+                                    bool          gpu_lane) {
+    if (const char* env = std::getenv("ED_SYM_SECTOR_PARALLEL"))
+        return env[0] == '1';   // explicit override always wins (user's risk)
+    // NEVER auto-enable on the GPU lane: the per-sector solves launch CUDA
+    // kernels / build device mirrors, which are not safe to call concurrently
+    // from OMP threads on the default stream.
+    if (gpu_lane) return false;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    return num_sectors >= 4u * static_cast<std::size_t>(hw)
+        && max_sector_dim > 0 && max_sector_dim <= 4096;
+}
+
+// Largest sector dim across a filtered index list of a SectorSetView (O(1)
+// dim() per sector, no materialisation).
+template <class HandleT, class IdxContainer>
+inline std::uint64_t max_sector_dim(const HandleT& handle,
+                                    const IdxContainer& indices) {
+    std::uint64_t m = 0;
+    for (auto k : indices) {
+        auto s = handle.sector(static_cast<std::size_t>(k));
+        if (s) m = std::max<std::uint64_t>(m, s->dim());
+    }
+    return m;
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,11 +1161,13 @@ void bind_workflows(py::module_& m) {
                   // sectors should leave this off (per-sector matvec
                   // already saturates the CPU); small-sector regimes
                   // benefit.
-                  bool sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel the outer sector loop in the
+                  // many-tiny-sectors regime (composed sectors); explicit
+                  // ED_SYM_SECTOR_PARALLEL wins.
+                  const bool sector_parallel = resolve_sector_parallel(
+                      sector_indices.size(),
+                      max_sector_dim(handle, sector_indices),
+                      opts.backend.allow_gpu);
                   if (enable_two_phase) {
                       const std::size_t phase1_iter =
                           std::min<std::size_t>(40,
@@ -1681,11 +1717,11 @@ void bind_workflows(py::module_& m) {
                   //   OPENBLAS_NUM_THREADS=1       (or MKL_NUM_THREADS=1)
                   //   ED_AUTO_THREADS=0            (disable ThreadBudgetScope)
                   // OMP_NUM_THREADS should be set to the machine core count.
-                  bool thermal_sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      thermal_sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel across many tiny sectors.
+                  const bool thermal_sector_parallel = resolve_sector_parallel(
+                      sector_indices.size(),
+                      max_sector_dim(handle, sector_indices),
+                      opts.backend.allow_gpu);
 
                   // Pre-allocate indexed result storage so the parallel
                   // fill is race-free (each slot ii is written by exactly
@@ -1923,11 +1959,11 @@ void bind_workflows(py::module_& m) {
                       // Pass 1: GS sector scan. Independent per-sector
                       // Lanczos calls (1 eig, no vectors) — embarrassingly
                       // parallel. Reuses the ED_SYM_SECTOR_PARALLEL gate.
-                      bool sp_spectral = false;
-                      if (const char* env =
-                              std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                          sp_spectral = (env[0] == '1');
-                      }
+                      // B6: auto-parallel across many tiny sectors.
+                      const bool sp_spectral = resolve_sector_parallel(
+                          sector_indices.size(),
+                          max_sector_dim(handle, sector_indices),
+                          opts.backend.allow_gpu);
                       const long n_sp =
                           static_cast<long>(sector_indices.size());
                       // (gs_energy, sector_idx) per slot; sector_idx=SIZE_MAX
@@ -3789,11 +3825,15 @@ void bind_workflows(py::module_& m) {
                   // binding). With this binding, the parallel region covers
                   // ALL (n_up, irrep) sectors simultaneously, giving better
                   // load balancing than two nested loops.
-                  bool sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel across the flat (n_up x irrep) set
+                  // when it is many tiny sectors.
+                  std::uint64_t fp_max_dim = 0;
+                  for (const auto& fp_op : set.operators)
+                      if (fp_op) fp_max_dim = std::max<std::uint64_t>(
+                          fp_max_dim, fp_op->dim());
+                  const bool sector_parallel = resolve_sector_parallel(
+                      static_cast<std::size_t>(n_ops), fp_max_dim,
+                      opts.backend.allow_gpu);
 
                   // Pre-indexed result storage: each OMP thread writes to its
                   // own slot ii -- no push_back races.

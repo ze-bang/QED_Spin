@@ -17,7 +17,9 @@
 #include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/orbit_table.h>
+#include <ed/symmetry/symmetry_cache.h>   // B8: acquire_orbit_table_* (Stage-3 cache)
 #include <ed/symmetry/rep_sector_data.h>
+#include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/symmetry_adapted.h>        // canonical_thermo_from_eigs
 
 #include <Eigen/Dense>
@@ -201,7 +203,7 @@ struct EngineContext {
     ed::symmetry::GroupIrreps            giA;
     std::vector<std::vector<int>>        residues;      // usable, deduped, no identity
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
-    ed::symmetry::OrbitTable             otab;
+    std::shared_ptr<const ed::symmetry::OrbitTable> otab;
     int                                  n_sites = 0;
 };
 
@@ -267,11 +269,11 @@ build_k_sector(const EngineContext& cx, int k, int n_up) {
     rd.perms_flat.reserve(cx.A.size() * static_cast<std::size_t>(cx.n_sites));
     for (const auto& p : cx.A)
         rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
-    for (std::size_t i = 0; i < cx.otab.reps.size(); ++i) {
+    for (std::size_t i = 0; i < cx.otab->reps.size(); ++i) {
         const double nsq = ed::symmetry::projected_norm_sq_stab(
-            cx.otab.stabilizer_of(i), rd.characters);
+            cx.otab->stabilizer_of(i), rd.characters);
         if (nsq <= 1e-12) continue;
-        rd.reps.push_back(cx.otab.reps[i]);
+        rd.reps.push_back(cx.otab->reps[i]);
         rd.inv_norms.push_back(1.0 / std::sqrt(nsq));
     }
     return rd;
@@ -500,13 +502,13 @@ LittleGroupSpectrum run_little_group(
             "group; residues go in `residue_perms`.");
     const auto cgA = ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
     if (opt.n_up >= 0) {
-        cx.otab = ed::symmetry::build_orbit_table_fixed_sz_streaming(
+        cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
             static_cast<std::uint64_t>(n_sites), opt.n_up, cgA);
     } else if (opt.sz_parity >= 0) {
-        cx.otab = ed::symmetry::build_orbit_table_parity_compiled(
+        cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
             static_cast<std::uint64_t>(n_sites), opt.sz_parity, cgA);
     } else {
-        cx.otab = ed::symmetry::build_orbit_table_full_compiled(
+        cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
             static_cast<std::uint64_t>(n_sites), cgA);
     }
     build_residue_maps(cx, residue_perms);
@@ -752,6 +754,31 @@ ThermodynamicData little_group_thermodynamics(
     const std::vector<double>&           temperatures,
     const LittleGroupOptions&            opt)
 {
+    // B5: thermodynamics is a function of the eigenvalue MULTISET only, so
+    // partitioning by n_up does not change the result -- but each per-n_up
+    // reduction has far smaller blocks than the single 2^N reduction. When H
+    // conserves U(1) Sz and the caller did not already fix a subspace, sweep
+    // n_up = 0..N (union == full spectrum) instead of the giant n_up = -1
+    // block. Pure speed; identical E/C/S/F.
+    if (opt.n_up < 0 && opt.sz_parity < 0) {
+        ed::matvec::TermStorage soa;
+        ed::matvec::TermStorage::classify_route(
+            soa, op.transform_data_, op.three_body_data_,
+            [](const std::complex<double>& c) { return c; });
+        if (ed::symmetry::sz_axis_of(soa) == ed::symmetry::SzAxis::U1) {
+            std::vector<double> eigs;
+            for (int nu = 0; nu <= n_sites; ++nu) {
+                LittleGroupOptions o = opt;
+                o.n_up = nu;
+                const auto s = little_group_full_spectrum(
+                    op, abelian_group, residue_perms, n_sites, o);
+                const auto e = s.expanded();
+                eigs.insert(eigs.end(), e.begin(), e.end());
+            }
+            std::sort(eigs.begin(), eigs.end());
+            return ed::symmetry::canonical_thermo_from_eigs(eigs, temperatures);
+        }
+    }
     const auto spec = little_group_full_spectrum(
         op, abelian_group, residue_perms, n_sites, opt);
     return ed::symmetry::canonical_thermo_from_eigs(spec.expanded(),
