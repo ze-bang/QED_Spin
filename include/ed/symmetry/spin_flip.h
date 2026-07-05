@@ -42,6 +42,8 @@
 // halving the biggest sector -- is the Stage-5b follow-up.)
 // =============================================================================
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -126,8 +128,51 @@ hamiltonian_is_spin_flip_symmetric(const ed::matvec::TermStorage& t) noexcept {
     for (const auto& d : t.diag_one_body)
         if (std::abs(d.coefficient) > kZero) return false;
 
-    // Conservative on three-body content.
-    if (!t.three_body.empty()) return false;
+    // three_body: partner each term with its flip image -- all S+/- ops
+    // swapped (op 0 <-> 1), coefficient scaled by (-1)^{# Sz factors}
+    // (X Sz X = -Sz). Factors on DISTINCT sites commute, so compare
+    // site-sorted factor lists. Same-site three-body products don't commute
+    // under the sort, so stay conservative (reject) when any term repeats a
+    // site -- correctness over coverage for that exotic case (C10).
+    {
+        const auto& v = t.three_body;
+        using Fac = std::array<std::pair<std::uint64_t, int>, 3>;
+        auto facs = [](const ed::matvec::ThreeBodyTerm& tb, bool flip) -> Fac {
+            Fac f = {{ {tb.site_index_1, tb.op_type_1},
+                       {tb.site_index_2, tb.op_type_2},
+                       {tb.site_index_3, tb.op_type_3} }};
+            if (flip) for (auto& x : f) if (x.second != 2) x.second ^= 1;
+            std::sort(f.begin(), f.end());
+            return f;
+        };
+        auto sz_sign = [](const ed::matvec::ThreeBodyTerm& tb) -> double {
+            const int nz = (tb.op_type_1 == 2) + (tb.op_type_2 == 2)
+                         + (tb.op_type_3 == 2);
+            return (nz & 1) ? -1.0 : 1.0;
+        };
+        for (const auto& tb : v) {
+            if (tb.site_index_1 == tb.site_index_2 ||
+                tb.site_index_1 == tb.site_index_3 ||
+                tb.site_index_2 == tb.site_index_3)
+                return false;   // same-site 3-body: conservative
+        }
+        std::vector<char> used(v.size(), 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            const Fac fi = facs(v[i], /*flip=*/true);
+            const std::complex<double> ci = v[i].coefficient * sz_sign(v[i]);
+            bool matched = false;
+            for (std::size_t j = 0; j < v.size(); ++j) {
+                if (used[j]) continue;
+                if (facs(v[j], /*flip=*/false) == fi &&
+                    detail::coeff_eq(v[j].coefficient, ci)) {
+                    used[j] = 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+    }
 
     // offdiag_one_body: multiset must be invariant under op 0 <-> 1 with the
     // SAME coefficient.

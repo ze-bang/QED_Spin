@@ -315,7 +315,27 @@ sector_characters_from(const GroupInfoT&                        info,
     std::vector<std::complex<double>> chi(G, std::complex<double>(1.0, 0.0));
     // phase_factors: PER-ELEMENT (length |G|, χ(max_clique[g]) directly) or
     // PER-GENERATOR (length num_generators, reconstruct via power_representation).
-    const bool per_element = (phase_factors.size() == G);
+    // C12: disambiguate on the generator COUNT rather than length==|G| alone.
+    // The two forms collide only when #generators == |G| -- impossible for a
+    // MINIMAL generating set of a non-trivial group (num_gen = #invariant
+    // factors << |G|), but a caller listing |G| redundant generators would
+    // otherwise be mis-read as per-element. Prefer the per-generator reading
+    // when the length matches the generator count and that differs from |G|;
+    // fall to per-element (unambiguous data) when the length is |G|.
+    const std::size_t num_gen =
+        (G > 0 && !info.power_representation.empty())
+            ? info.power_representation[0].size() : 0;
+    const bool per_generator =
+        (num_gen != 0 && phase_factors.size() == num_gen && num_gen != G);
+    const bool per_element =
+        (!per_generator && phase_factors.size() == G);
+    if (!per_generator && !per_element) {
+        // Malformed metadata (length matches neither |G| nor #generators):
+        // keep the trivial (identity) characters rather than indexing out of
+        // bounds -- the caller's Burnside / sum-rule guard then flags the
+        // resulting sector dims.
+        return chi;
+    }
     for (std::size_t g = 0; g < G; ++g) {
         if (per_element) {
             chi[g] = phase_factors[g];
@@ -323,7 +343,8 @@ sector_characters_from(const GroupInfoT&                        info,
         }
         const auto& powers = info.power_representation[g];
         std::complex<double> c(1.0, 0.0);
-        for (std::size_t k = 0; k < powers.size(); ++k) {
+        for (std::size_t k = 0; k < powers.size() && k < phase_factors.size();
+             ++k) {
             const std::complex<double> phase = phase_factors[k];
             for (int p = 0; p < powers[k]; ++p) c *= phase;
         }

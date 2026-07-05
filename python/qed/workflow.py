@@ -867,6 +867,46 @@ def find_symmetries(
 # ---------------------------------------------------------------------------
 
 
+def _validate_explicit_generators(operator, symmetry, *, verbose=True) -> None:
+    """A2: verify an EXPLICIT / bridge-supplied generator set commutes with H.
+
+    The abelian rep lane trusts its generators; an ``"auto"`` automorphism is
+    a symmetry of H's coloured interaction graph by construction, but a
+    hand-supplied ``GeneratorSet`` or raw permutation list is unchecked -- a
+    wrong permutation (site-ordering mismatch, off-by-one) yields silently
+    wrong spectra with correct-looking per-sector sum rules. The check is
+    term-level and exact (no matvec). Raises ``RuntimeError`` on the first
+    non-commuting generator; set ``ED_SYM_SKIP_COMMUTE_CHECK=1`` to bypass.
+    """
+    if os.environ.get("ED_SYM_SKIP_COMMUTE_CHECK") == "1":
+        return
+    if symmetry is None or isinstance(symmetry, dict):
+        return                       # directory-form / no group: nothing to check
+    if not isinstance(operator, Operator):
+        return                       # can't term-inspect a non-in-memory operator
+    gens = getattr(symmetry, "generators", None)
+    if gens is None and isinstance(symmetry, (list, tuple)) and symmetry \
+            and isinstance(symmetry[0], (list, tuple)):
+        gens = symmetry             # raw permutation list
+    if not gens:
+        return
+    gens = [list(g) for g in gens]
+    try:
+        ok = list(_core.check_generators_commute(operator, gens))
+    except Exception:
+        return                       # checker unavailable -> don't block the run
+    bad = [i for i, c in enumerate(ok) if not c]
+    if bad:
+        raise RuntimeError(
+            f"qed: symmetry generator(s) {bad} do NOT commute with H "
+            f"([H, U_g] != 0 at the term level). An explicit / bridge-"
+            f"supplied permutation that is not a symmetry of H produces "
+            f"silently wrong spectra. Check the site-ordering of the "
+            f"permutation(s) against the Hamiltonian's site labels, or set "
+            f"ED_SYM_SKIP_COMMUTE_CHECK=1 to bypass if you are certain."
+        )
+
+
 def resolve_auto_symmetry(
     operator: Operator,
     symmetry: Any,
@@ -886,9 +926,15 @@ def resolve_auto_symmetry(
       time-reversal pairing, each of which independently auto-detects.
     * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
     * anything else (GeneratorSet, permutation list, dict, None) is
-      returned unchanged.
+      returned unchanged (after an EXPLICIT-generator [H, U_g] = 0
+      check -- see :func:`_validate_explicit_generators`).
     """
     if not isinstance(symmetry, str):
+        # A2: an explicit / bridge-supplied generator set is unchecked --
+        # validate it commutes with H before the rep lane trusts it (the
+        # "auto" and "translation" sets resolved below are symmetries of H
+        # by construction and skip the check).
+        _validate_explicit_generators(operator, symmetry, verbose=verbose)
         return symmetry
     key = symmetry.strip().lower()
     if key in ("off", "none", ""):

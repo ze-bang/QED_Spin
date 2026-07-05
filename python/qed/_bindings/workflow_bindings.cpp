@@ -26,6 +26,7 @@
 #include <ed/core/make_operator.h>
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/observable_character.h>  // Stage 8d probe classifiers
+#include <ed/symmetry/commute_check.h>         // A2 [H,g]=0 validation
 #include <ed/symmetry/sector_plan.h>
 #include <ed/symmetry/time_reversal.h>
 #include <ed/symmetry/sym_profile.h>
@@ -801,6 +802,27 @@ void bind_workflows(py::module_& m) {
           "Set-bit-parity selection rule of a probe: 0 = parity-even "
           "(stays in its Sz-parity half), 1 = parity-odd (crosses "
           "halves), -1 = mixed (cannot ride the parity DSSF lane).");
+
+    // A2: term-level [H, U_g] = 0 validation for EXPLICIT generator sets. The
+    // abelian rep lane trusts its generators; an auto automorphism commutes by
+    // construction, but a hand-supplied permutation list is unchecked and a
+    // wrong one yields silently-wrong spectra. Returns one bool per generator.
+    m.def("check_generators_commute",
+          [](const Operator& op,
+             const std::vector<std::vector<int>>& generators) {
+              std::vector<bool> out;
+              out.reserve(generators.size());
+              for (const auto& g : generators)
+                  out.push_back(
+                      ed::symmetry::hamiltonian_commutes_with_permutation(
+                          op.transform_data_, op.three_body_data_, g));
+              return out;
+          },
+          py::arg("op"), py::arg("generators"),
+          "Per-generator [H, U_g] = 0 check (term-level, exact, no matvec): "
+          "True iff relabelling H's term sites by the permutation leaves the "
+          "term multiset invariant. Used to validate explicit / bridge-"
+          "supplied generator sets before the rep lane trusts them.");
 
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
@@ -2230,12 +2252,27 @@ void bind_workflows(py::module_& m) {
                                     [](const auto& a, const auto& b) {
                                         return a.first < b.first;
                                     });
-                          const double best_E = phase1_min.front().first;
-                          const double gap = std::max(
-                              1e-2 * std::abs(best_E), 1e-4);
-                          for (const auto& [E, k] : phase1_min) {
-                              if (E <= best_E + gap) {
-                                  phase2_candidates.push_back(k);
+                          // A3 fail-safe: a phase-1 solve that threw is
+                          // recorded as -inf; best_E + gap would then be NaN and
+                          // select ZERO candidates, aborting the whole DSSF call
+                          // ("every source sector returned an empty spectrum").
+                          // Refine EVERYTHING instead (mirrors the same-irrep
+                          // binding's cutoff fail-safe).
+                          const bool phase1_nonfinite = std::any_of(
+                              phase1_min.begin(), phase1_min.end(),
+                              [](const auto& p){ return !std::isfinite(p.first); });
+                          if (phase1_nonfinite) {
+                              for (const auto& [E, k] : phase1_min) {
+                                  (void)E; phase2_candidates.push_back(k);
+                              }
+                          } else {
+                              const double best_E = phase1_min.front().first;
+                              const double gap = std::max(
+                                  1e-2 * std::abs(best_E), 1e-4);
+                              for (const auto& [E, k] : phase1_min) {
+                                  if (E <= best_E + gap) {
+                                      phase2_candidates.push_back(k);
+                                  }
                               }
                           }
                       }
@@ -2252,7 +2289,12 @@ void bind_workflows(py::module_& m) {
                       sopts.backend         = opts.backend;
                       sopts.method          = ed::workflows::SolveMethod::Lanczos;
                       sopts.compute_vectors = false;
-                      auto sr = ed::workflows::solve(*sec, sopts);
+                      // A3: a phase-2 candidate that throws the full solve
+                      // (near-degenerate / memory) must not abort the sweep.
+                      ed::GroundStateResult sr;
+                      try {
+                          sr = ed::workflows::solve(*sec, sopts);
+                      } catch (...) { continue; }
                       if (sr.eigenvalues.empty()) continue;
                       const double E_k = sr.eigenvalues.front();
                       if (E_k < gs_energy) {
@@ -2790,12 +2832,24 @@ void bind_workflows(py::module_& m) {
                                     [](const auto& a, const auto& b) {
                                         return a.first < b.first;
                                     });
-                          const double best_E = phase1_min.front().first;
-                          const double gap =
-                              std::max(1e-2 * std::abs(best_E), 1e-4);
-                          for (const auto& [E, k] : phase1_min) {
-                              if (E <= best_E + gap) {
-                                  phase2_candidates.push_back(k);
+                          // A3 fail-safe (see the single-Q binding): a
+                          // -inf phase-1 sentinel must not NaN the gap and
+                          // select zero candidates -- refine everything.
+                          const bool phase1_nonfinite = std::any_of(
+                              phase1_min.begin(), phase1_min.end(),
+                              [](const auto& p){ return !std::isfinite(p.first); });
+                          if (phase1_nonfinite) {
+                              for (const auto& [E, k] : phase1_min) {
+                                  (void)E; phase2_candidates.push_back(k);
+                              }
+                          } else {
+                              const double best_E = phase1_min.front().first;
+                              const double gap =
+                                  std::max(1e-2 * std::abs(best_E), 1e-4);
+                              for (const auto& [E, k] : phase1_min) {
+                                  if (E <= best_E + gap) {
+                                      phase2_candidates.push_back(k);
+                                  }
                               }
                           }
                       }
@@ -2812,7 +2866,12 @@ void bind_workflows(py::module_& m) {
                       sopts.backend         = opts.backend;
                       sopts.method          = ed::workflows::SolveMethod::Lanczos;
                       sopts.compute_vectors = false;
-                      auto sr = ed::workflows::solve(*sec, sopts);
+                      // A3: a phase-2 candidate that throws the full solve
+                      // (near-degenerate / memory) must not abort the sweep.
+                      ed::GroundStateResult sr;
+                      try {
+                          sr = ed::workflows::solve(*sec, sopts);
+                      } catch (...) { continue; }
                       if (sr.eigenvalues.empty()) continue;
                       const double E_k = sr.eigenvalues.front();
                       if (E_k < gs_energy) {
