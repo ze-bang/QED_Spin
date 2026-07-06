@@ -158,6 +158,21 @@ struct OperatorSpec {
     /// eigenvalues-only workload). Forces the lazy builder variant.
     bool                  flip_project_half = false;
 
+    /// Full-space prod-sigma^x sectors (monomial-group consolidation,
+    /// Jul 2026): when no fixed-Sz axis applies but [H, X] == 0, split
+    /// every spatial irrep into (k, +/-) flip sectors over the full
+    /// 2^N space (caller verifies the symmetry + eigenvalues-only
+    /// workload). Forces the lazy full-space builder.
+    bool                  flip_sectors_full = false;
+
+    /// Sz-PARITY sectors (diagonal Z2 remnant when U(1) is broken but
+    /// every term changes n_up by an even amount): 0 = even half,
+    /// 1 = odd half, 2 = BOTH halves in one sector set (pooled GS /
+    /// thermal / full-dense mode). Unset = off. Mutually exclusive
+    /// with fixed_sz. ``flip_sectors_full`` additionally splits each
+    /// (parity, k) into flip signs (even N only).
+    std::optional<int>    sz_parity;
+
     /// Stage 3 (SymmetryEngine v2): explicit OrbitTable disk-cache
     /// directory. Empty = auto (``ED_SYM_CACHE_DIR`` override, else
     /// ``<lattice_dir>/basis_cache`` for directory sources; registry-only
@@ -484,7 +499,8 @@ greedy_sector_owner(const std::vector<std::uint64_t>& dims, int nranks) {
 
 inline SectorOperatorSet
 make_sector_operators_tagged(const OperatorSpec& spec,
-                             int mpi_rank = 0, int mpi_size = 1) {
+                             int mpi_rank = 0, int mpi_size = 1,
+                             std::shared_ptr<Operator> base = nullptr) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_sector_operators: requires "
@@ -499,10 +515,15 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     // Carrier operator: load the Hamiltonian term list + the symmetry group
     // metadata exactly once. The terms are copied verbatim into every sector
     // operator by the term-builder below (identical to the proven
-    // ``make_sector_operator_adopt`` term-copy contract).
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    base->symmetry_info.loadFromDirectory(dir);
+    // ``make_sector_operator_adopt`` term-copy contract). Structural
+    // cleanup (Jul 2026): callers that already parsed the directory for
+    // symmetry DETECTION (the binding probes) pass their loaded carrier in
+    // -- one parse per binding call instead of two.
+    if (!base) {
+        base = detail::build_base_op(spec);
+        detail::load_terms_into(*base, spec);
+        base->symmetry_info.loadFromDirectory(dir);
+    }
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;
@@ -535,9 +556,46 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         }
     }
 
+    // Structural consolidation (Jul 2026): ONE decode of the sector-mode
+    // flags with the illegal combinations rejected up front (they were
+    // previously caught -- or not -- deep inside the builders).
+    //   diagonal axis: fixed_sz XOR sz_parity XOR none
+    //   flip split   : flip_project_half (fixed-Sz N/2 only) or
+    //                  flip_sectors_full (full space / parity halves;
+    //                  parity requires even N by the closure rule)
+    if (spec.fixed_sz && spec.sz_parity) {
+        throw std::invalid_argument(
+            "OperatorSpec: fixed_sz and sz_parity are mutually exclusive "
+            "diagonal axes.");
+    }
+    if (spec.flip_project_half && !spec.fixed_sz) {
+        throw std::invalid_argument(
+            "OperatorSpec: flip_project_half is the fixed-Sz N/2 variant; "
+            "use flip_sectors_full for full-space / parity sectors.");
+    }
+    if (spec.flip_sectors_full && spec.fixed_sz) {
+        throw std::invalid_argument(
+            "OperatorSpec: flip_sectors_full does not apply to a fixed-Sz "
+            "block (use flip_project_half at n_up == N/2).");
+    }
+    if (spec.flip_sectors_full && spec.sz_parity
+        && spec.num_sites % 2 != 0) {
+        throw std::invalid_argument(
+            "OperatorSpec: the all-ones flip only preserves Sz parity for "
+            "even N (closure rule).");
+    }
+
     const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
     const auto ctor_t0 = std::chrono::steady_clock::now();
-    if (spec.fixed_sz.has_value()) {
+    if (spec.sz_parity.has_value()) {
+        // Sz-parity halves (diagonal Z2 remnant), one RepSectorData per
+        // (parity, irrep[, flip sign]); rep lanes only.
+        set.operators = ed::symmetry::build_parity_sector_operators_lazy(
+            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+            (*spec.sz_parity >= 2) ? -1 : *spec.sz_parity,
+            base->symmetry_info, term_builder, &sector_ids, cache_dir,
+            spec.flip_sectors_full);
+    } else if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
         // fixed-Sz mTPQ): hand out operators that know their dim up-front and
         // defer the per-sector orbit CSR / GPU RepSectorData. Small/moderate
@@ -563,12 +621,14 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     } else {
         // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
         // (memory-bounded, stabilizer-fused construction); small N stays eager.
-        if (detail::full_sectors_should_be_lazy(
+        if (spec.flip_sectors_full
+            || detail::full_sectors_should_be_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), base->symmetry_info)) {
             set.operators = ed::symmetry::build_full_sector_operators_lazy(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
                 base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir);
+                mpi_rank, mpi_size, owner_ptr, cache_dir,
+                spec.flip_sectors_full);
         } else {
             set.operators = ed::symmetry::build_full_sector_operators(
                 static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
@@ -596,9 +656,44 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         ed::SectorTag tag;
         tag.sector_index = sector_ids[i];
         tag.sector_dim   = static_cast<std::uint64_t>(set.operators[i]->dim());
-        if (sector_ids[i] < base->symmetry_info.sectors.size()) {
+        const std::size_t nraw = base->symmetry_info.sectors.size();
+        if (sector_ids[i] < nraw) {
             tag.quantum_numbers =
                 base->symmetry_info.sectors[sector_ids[i]].quantum_numbers;
+            // Stage 8d: UNIFORM slot labels. Slot 0 keeps a raw sector id,
+            // but in the parity / full-space-flip modes its tag carries the
+            // explicit (+1 even / odd-only -1)[, +1 flip] labels so every
+            // tag in the set has the same shape -- the slot-aware spectral
+            // selection rule (resolve_target_sector_slotted) depends on it.
+            if (spec.sz_parity.has_value()) {
+                tag.quantum_numbers.push_back(
+                    (*spec.sz_parity == 1) ? -1 : +1);
+                if (spec.flip_sectors_full)
+                    tag.quantum_numbers.push_back(+1);
+            } else if (spec.flip_sectors_full) {
+                tag.quantum_numbers.push_back(+1);
+            }
+        } else if (nraw > 0) {
+            // Synthetic sector k + slot*num_raw: carry the raw irrep's
+            // quantum numbers plus the slot labels. Slot layouts:
+            //   flip only          : slot = flip sign (0 -> +1, 1 -> -1)
+            //   parity only        : slot = parity     (0 -> +1 even, 1 -> -1 odd)
+            //   parity x flip      : slot = 2*parity + sign
+            tag.quantum_numbers =
+                base->symmetry_info.sectors[sector_ids[i] % nraw]
+                    .quantum_numbers;
+            const std::size_t slot = sector_ids[i] / nraw;
+            if (spec.sz_parity.has_value()) {
+                const int n_signs = spec.flip_sectors_full ? 2 : 1;
+                int p_idx = static_cast<int>(slot) / n_signs;
+                if (*spec.sz_parity == 1) p_idx += 1;   // odd-only set
+                tag.quantum_numbers.push_back(p_idx == 0 ? +1 : -1);
+                if (spec.flip_sectors_full)
+                    tag.quantum_numbers.push_back(
+                        (slot % n_signs) == 0 ? +1 : -1);
+            } else {
+                tag.quantum_numbers.push_back(slot == 0 ? +1 : -1);
+            }
         }
         tag.n_up = n_up;
         set.tags.push_back(std::move(tag));
@@ -638,7 +733,8 @@ inline SectorOperatorSet
 make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
                                     int n_up_min = 0,
                                     int n_up_max = -1,
-                                    bool flip_project_half = false) {
+                                    bool flip_project_half = false,
+                                    std::shared_ptr<Operator> base = nullptr) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
             "ed::make_all_sz_sector_operators_tagged: requires "
@@ -649,10 +745,13 @@ make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
     if (n_up_max < 0)
         n_up_max = static_cast<int>(n_bits);
 
-    // Load operator terms + symmetry group info ONCE.
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    base->symmetry_info.loadFromDirectory(dir);
+    // Load operator terms + symmetry group info ONCE (or reuse the caller's
+    // detection probe -- structural cleanup, Jul 2026).
+    if (!base) {
+        base = detail::build_base_op(spec);
+        detail::load_terms_into(*base, spec);
+        base->symmetry_info.loadFromDirectory(dir);
+    }
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;

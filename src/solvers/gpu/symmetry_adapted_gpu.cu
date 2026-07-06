@@ -174,6 +174,15 @@ std::vector<double> full_spectrum_from_blocks(const SymBlocksPacked& P,
 
 }  // namespace
 
+// Stage 7 GPU lane (Jul 2026): public batched eigensolver over packed
+// blocks -- consumed by the little-group engine (variable block sizes,
+// 8-stream cuSOLVER pool overlaps the small-block launches, which is the
+// tiny-sector batching mechanism).
+std::vector<double>
+sym_blocks_batched_eigenvalues_gpu(const SymBlocksPacked& P) {
+    return batched_block_eigenvalues_gpu(P);
+}
+
 SymAdaptedSpectrum symmetry_adapted_spectrum_gpu(
     const ::Operator&                    op,
     const GroupIrreps&                   gi,

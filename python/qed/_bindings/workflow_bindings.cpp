@@ -25,6 +25,8 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
 #include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/observable_character.h>  // Stage 8d probe classifiers
+#include <ed/symmetry/commute_check.h>         // A2 [H,g]=0 validation
 #include <ed/symmetry/sector_plan.h>
 #include <ed/symmetry/time_reversal.h>
 #include <ed/symmetry/sym_profile.h>
@@ -49,6 +51,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef WITH_MPI
@@ -76,6 +79,170 @@ inline std::pair<int, int> binding_mpi_rank_size() {
     }
 #endif
     return {rank, size};
+}
+
+// B6: resolve the sector-level OMP gate. An explicit ED_SYM_SECTOR_PARALLEL
+// (0/1) always wins. When UNSET, auto-enable only in the many-tiny-sectors
+// regime (composed parity x flip x spatial => hundreds of ~tiny blocks),
+// where each inner solve is trivial so outer parallelism is a clear win with
+// negligible oversubscription. Few-large-sector runs (max_dim > cap) stay
+// serial-outer, preserving the inner Lanczos/BLAS threading.
+inline bool resolve_sector_parallel(std::size_t   num_sectors,
+                                    std::uint64_t max_sector_dim,
+                                    bool          gpu_lane) {
+    if (const char* env = std::getenv("ED_SYM_SECTOR_PARALLEL"))
+        return env[0] == '1';   // explicit override always wins (user's risk)
+    // NEVER auto-enable on the GPU lane: the per-sector solves launch CUDA
+    // kernels / build device mirrors, which are not safe to call concurrently
+    // from OMP threads on the default stream.
+    if (gpu_lane) return false;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    return num_sectors >= 4u * static_cast<std::size_t>(hw)
+        && max_sector_dim > 0 && max_sector_dim <= 4096;
+}
+
+// Largest sector dim across a filtered index list of a SectorSetView (O(1)
+// dim() per sector, no materialisation).
+template <class HandleT, class IdxContainer>
+inline std::uint64_t max_sector_dim(const HandleT& handle,
+                                    const IdxContainer& indices) {
+    std::uint64_t m = 0;
+    for (auto k : indices) {
+        auto s = handle.sector(static_cast<std::size_t>(k));
+        if (s) m = std::max<std::uint64_t>(m, s->dim());
+    }
+    return m;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 8d (SymmetryEngine v2) DSSF helpers.
+// ---------------------------------------------------------------------------
+
+// Decode the 6-tuple probe-transform rows shared by every cross-irrep
+// spectral binding (op_type, site, coeff, is_two_body, op_type_2, site_2).
+inline std::vector<Operator::TransformData>
+decode_probe_transforms(const std::vector<py::tuple>& rows, const char* who) {
+    std::vector<Operator::TransformData> tlist;
+    tlist.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (row.size() < 6) {
+            throw std::invalid_argument(
+                std::string(who) + ": each transform must be a 6-tuple "
+                "(op_type, site, coeff, is_two_body, op_type_2, site_2).");
+        }
+        Operator::TransformData t;
+        t.op_type      = static_cast<uint8_t>(row[0].cast<int>());
+        t.site_index   = row[1].cast<std::uint64_t>();
+        t.coefficient  = row[2].cast<std::complex<double>>();
+        t.is_two_body  = row[3].cast<bool>();
+        t.op_type_2    = static_cast<uint8_t>(row[4].cast<int>());
+        t.site_index_2 = row[5].cast<std::uint64_t>();
+        tlist.push_back(t);
+    }
+    return tlist;
+}
+
+// Pick the observable ref for a sector: the CSR-free RepSectorData when the
+// sector runs the rep-lazy lane (flip-extended / Sz-parity sectors NEVER have
+// an orbit CSR; ordinary fixed-Sz sectors avoid materialising one), otherwise
+// the materialised orbit basis (eager small sectors).
+inline ed::dssf::CrossSectorOrbitObservable::OperatorRef
+make_cross_sector_ref(ed::symmetry::SectorOperator* sec,
+                      std::uint64_t                 num_sites) {
+    using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
+    if (sec->rep_lazy()) {
+        const auto& rd = sec->basis().ensureRepData();
+        if (rd.usable()) return Ref::from_rep(rd, num_sites);
+    }
+    if (!sec->csr_available()) {
+        throw std::runtime_error(
+            "cross-irrep spectral: sector carries neither a usable "
+            "RepSectorData nor a materialisable orbit CSR.");
+    }
+    return Ref::from(sec->materialized_basis(), num_sites);
+}
+
+// ---------------------------------------------------------------------------
+// Structural cleanup (Jul 2026): ONE directory probe per binding call.
+//
+// Every symmetry binding needs (a) the term-level TermStorage for detection
+// and (b) the loaded symmetry_info for composition -- and then hands the
+// SAME parsed content to ``make_sector_operators_tagged``. This helper loads
+// the carrier once; the caller passes ``probe.base`` into the factory so the
+// directory is parsed exactly once per call (previously: probe + factory
+// each parsed it).
+// ---------------------------------------------------------------------------
+struct DirectoryProbe {
+    std::shared_ptr<Operator>  base;   // terms + symmetry_info loaded
+    ed::matvec::TermStorage    soa;    // classified term SoA (detection)
+};
+
+inline DirectoryProbe
+load_directory_probe(const ed::OperatorSpec& spec,
+                     const std::string&      directory) {
+    DirectoryProbe p;
+    p.base = ed::detail::build_base_op(spec);
+    ed::detail::load_terms_into(*p.base, spec);
+    ed::matvec::TermStorage::classify_route(
+        p.soa, p.base->transform_data_, p.base->three_body_data_,
+        [](const std::complex<double>& c) { return c; });
+    p.base->symmetry_info.loadFromDirectory(directory);
+    return p;
+}
+
+// Composition resolution over a loaded probe, with the Stage-7a star maps
+// folded in (shared by the GS / thermal / flat-pool bindings).
+template <class OptsT>
+inline ed::symmetry::SymmetryComposition
+resolve_comp_with_stars(const DirectoryProbe& probe, const OptsT& opts) {
+    auto comp = ed::symmetry::resolve_symmetry_composition(
+        probe.soa, probe.base->symmetry_info, opts.backend.allow_gpu,
+        ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+        ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+    const std::size_t nsec = probe.base->symmetry_info.sectors.size();
+    for (const auto& m : opts.star_maps) {
+        if (m.size() != nsec) continue;
+        comp.star_maps.emplace_back(m.begin(), m.end());
+    }
+    return comp;
+}
+
+// Synthetic-slot selection rule for the probe: how the trailing
+// (parity[, flip]) tag labels of the source sector map to the target's.
+// Throws when the probe cannot be routed through the engaged slots.
+struct SlottedSelection {
+    std::size_t      n_slots = 0;
+    std::vector<int> signs;
+};
+
+inline SlottedSelection
+slotted_selection_for(const ed::OperatorSpec&                     spec,
+                      const std::vector<Operator::TransformData>& tlist,
+                      const char*                                 who) {
+    SlottedSelection s;
+    if (spec.sz_parity.has_value()) {
+        ++s.n_slots;
+        const int dp = ed::symmetry::delta_n_up_parity(tlist);
+        if (dp < 0) {
+            throw std::invalid_argument(
+                std::string(who) + ": probe mixes even and odd Sz "
+                "selection rules and cannot be routed through Sz-parity "
+                "sectors; disable the parity lane for this probe.");
+        }
+        s.signs.push_back(dp == 1 ? -1 : +1);
+    }
+    if (spec.flip_sectors_full) {
+        ++s.n_slots;
+        const int fc = ed::symmetry::spin_flip_character(tlist);
+        if (fc == 0) {
+            throw std::invalid_argument(
+                std::string(who) + ": probe has no definite spin-flip "
+                "character (X O X != +-O) and cannot be routed through "
+                "flip sectors; pass flip_sectors=False for this probe.");
+        }
+        s.signs.push_back(fc);
+    }
+    return s;
 }
 
 #ifdef WITH_MPI
@@ -338,6 +505,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("time_reversal",
                        &ed::workflows::SolveOptions::time_reversal)
         .def_readwrite("star_maps", &ed::workflows::SolveOptions::star_maps)
+        .def_readwrite("sz_parity", &ed::workflows::SolveOptions::sz_parity)
         .def_readwrite("precompute_basis_only",
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
@@ -434,6 +602,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("time_reversal",
                        &ed::workflows::ThermalOptions::time_reversal)
         .def_readwrite("star_maps", &ed::workflows::ThermalOptions::star_maps)
+        .def_readwrite("sz_parity", &ed::workflows::ThermalOptions::sz_parity)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -586,7 +755,8 @@ void bind_workflows(py::module_& m) {
         .def_readonly("final",     &ed::SpectralSectorEntry::final_)
         .def_readonly("S_real",    &ed::SpectralSectorEntry::S_real)
         .def_readonly("S_imag",    &ed::SpectralSectorEntry::S_imag)
-        .def_readonly("static_sf", &ed::SpectralSectorEntry::static_sf);
+        .def_readonly("static_sf", &ed::SpectralSectorEntry::static_sf)
+        .def_readonly("notes",     &ed::SpectralSectorEntry::notes);
 
     py::class_<ed::SpectralResult>(m, "SpectralResult", py::dynamic_attr())
         .def(py::init<>())
@@ -624,6 +794,10 @@ void bind_workflows(py::module_& m) {
               out["spin_flip"] =
                   ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
               out["time_reversal"] = ed::symmetry::hamiltonian_is_real(soa);
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+              out["u1"] = (ax == ed::symmetry::SzAxis::U1);
+              out["sz_parity"] =
+                  (ax != ed::symmetry::SzAxis::None);  // U1 implies parity
               return out;
           },
           py::arg("op"),
@@ -640,6 +814,49 @@ void bind_workflows(py::module_& m) {
             the detection outcome and warn on a requested-but-absent
             symmetry instead of failing later.
           )pbdoc");
+
+    // Stage 8d probe classifiers (Python decides whether the projected
+    // spectral lanes can route a given observable BEFORE engaging them).
+    m.def("probe_spin_flip_character",
+          [](const std::vector<py::tuple>& rows) {
+              return ed::symmetry::spin_flip_character(
+                  decode_probe_transforms(rows, "probe_spin_flip_character"));
+          },
+          py::arg("observable_transforms"),
+          "Spin-flip character of a probe's transform tuples: +1 when "
+          "X O X == +O (flip-even), -1 when X O X == -O (flip-odd; e.g. "
+          "any S^z_Q probe), 0 when O has no definite character (e.g. a "
+          "lone S^+ probe) and cannot ride the flip-projected DSSF lane.");
+    m.def("probe_delta_n_up_parity",
+          [](const std::vector<py::tuple>& rows) {
+              return ed::symmetry::delta_n_up_parity(
+                  decode_probe_transforms(rows, "probe_delta_n_up_parity"));
+          },
+          py::arg("observable_transforms"),
+          "Set-bit-parity selection rule of a probe: 0 = parity-even "
+          "(stays in its Sz-parity half), 1 = parity-odd (crosses "
+          "halves), -1 = mixed (cannot ride the parity DSSF lane).");
+
+    // A2: term-level [H, U_g] = 0 validation for EXPLICIT generator sets. The
+    // abelian rep lane trusts its generators; an auto automorphism commutes by
+    // construction, but a hand-supplied permutation list is unchecked and a
+    // wrong one yields silently-wrong spectra. Returns one bool per generator.
+    m.def("check_generators_commute",
+          [](const Operator& op,
+             const std::vector<std::vector<int>>& generators) {
+              std::vector<bool> out;
+              out.reserve(generators.size());
+              for (const auto& g : generators)
+                  out.push_back(
+                      ed::symmetry::hamiltonian_commutes_with_permutation(
+                          op.transform_data_, op.three_body_data_, g));
+              return out;
+          },
+          py::arg("op"), py::arg("generators"),
+          "Per-generator [H, U_g] = 0 check (term-level, exact, no matvec): "
+          "True iff relabelling H's term sites by the permutation leaves the "
+          "term multiset invariant. Used to validate explicit / bridge-"
+          "supplied generator sets before the rep lane trusts them.");
 
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
@@ -764,6 +981,9 @@ void bind_workflows(py::module_& m) {
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
               }
+              if (opts.sz_parity >= 0 && !spec.fixed_sz) {
+                  spec.sz_parity = opts.sz_parity;
+              }
 
               ed::GroundStateResult agg;
               {
@@ -794,29 +1014,10 @@ void bind_workflows(py::module_& m) {
                   // ED_SYM_SPIN_FLIP[_PROJECT] / ED_SYM_TIME_REVERSAL are
                   // the env escapes for the Auto defaults.
                   // -----------------------------------------------------
-                  ed::symmetry::SymmetryComposition comp;
-                  {
-                      auto probe = ed::detail::build_base_op(spec);
-                      ed::detail::load_terms_into(*probe, spec);
-                      ed::matvec::TermStorage soa;
-                      ed::matvec::TermStorage::classify_route(
-                          soa, probe->transform_data_, probe->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      probe->symmetry_info.loadFromDirectory(directory);
-                      comp = ed::symmetry::resolve_symmetry_composition(
-                          soa, probe->symmetry_info, opts.backend.allow_gpu,
-                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
-                          ed::symmetry::sym_toggle_from_int(
-                              opts.time_reversal));
-                      // Stage 7a: star maps (non-abelian residue) join
-                      // the isospectral-orbit relation alongside TR.
-                      const std::size_t nsec =
-                          probe->symmetry_info.sectors.size();
-                      for (const auto& m : opts.star_maps) {
-                          if (m.size() != nsec) continue;
-                          comp.star_maps.emplace_back(m.begin(), m.end());
-                      }
-                  }
+                  DirectoryProbe probe =
+                      load_directory_probe(spec, directory);
+                  ed::symmetry::SymmetryComposition comp =
+                      resolve_comp_with_stars(probe, opts);
                   // Requested n_up before any transport re-target; -1 when
                   // the fixed-Sz axis is off. Used to restore the caller's
                   // n_up on the emitted sector tags.
@@ -833,8 +1034,18 @@ void bind_workflows(py::module_& m) {
                       && !opts.compute_vectors) {
                       spec.flip_project_half = true;
                   }
+                  // Full-space / parity-half prod-sigma^x sectors: no
+                  // fixed-Sz axis but [H, X] == 0 -- every irrep splits
+                  // (k, +/-). Closure rule: over a parity half the flip
+                  // only preserves the subspace for even N.
+                  if (comp.flip_project && !spec.fixed_sz
+                      && !opts.compute_vectors
+                      && (!spec.sz_parity || num_sites % 2 == 0)) {
+                      spec.flip_sectors_full = true;
+                  }
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec));
+                      ed::make_sector_operators_tagged(spec, 0, 1,
+                                                       probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -869,23 +1080,26 @@ void bind_workflows(py::module_& m) {
                   // workloads (TR pairing and star reduction alike).
                   if (tr_num_raw > 0 && num_sectors % tr_num_raw == 0
                       && !opts.compute_vectors) {
-                      const std::vector<std::int32_t> canon =
-                          ed::symmetry::sector_orbit_canonical(
-                              tr_num_raw, comp);
-                      std::vector<char> in_sel(num_sectors, 0);
-                      for (std::size_t k : sector_indices_all) in_sel[k] = 1;
-                      for (std::size_t k : sector_indices_all) {
-                          const std::size_t ck = static_cast<std::size_t>(
-                              canon[k % tr_num_raw]);
-                          const std::size_t psy =
-                              ck + (k / tr_num_raw) * tr_num_raw;
-                          if (psy < k && in_sel[psy]
-                              && handle.sector_tag(k).sector_dim ==
-                                 handle.sector_tag(psy).sector_dim) {
-                              tr_mirrors.emplace_back(k, psy);
-                              continue;  // skip solving k
+                      // Structural consolidation (Jul 2026): the GS lane
+                      // consumes the SAME orbit plan the thermal flat
+                      // pool uses (plan_tr_actions over the selected
+                      // tags) instead of a hand-rolled twin of it.
+                      std::vector<ed::SectorTag> sel_tags;
+                      sel_tags.reserve(sector_indices_all.size());
+                      for (std::size_t k : sector_indices_all)
+                          sel_tags.push_back(handle.sector_tag(k));
+                      const auto plan = ed::symmetry::plan_tr_actions(
+                          sel_tags, tr_num_raw, comp);
+                      for (std::size_t i = 0;
+                           i < sector_indices_all.size(); ++i) {
+                          if (plan.skip[i]) {
+                              tr_mirrors.emplace_back(
+                                  sector_indices_all[i],
+                                  sector_indices_all[plan.source[i]]);
+                          } else {
+                              sector_indices.push_back(
+                                  sector_indices_all[i]);
                           }
-                          sector_indices.push_back(k);
                       }
                       if (!tr_mirrors.empty()
                           && ed::symmetry::sym_profile_enabled()) {
@@ -947,11 +1161,13 @@ void bind_workflows(py::module_& m) {
                   // sectors should leave this off (per-sector matvec
                   // already saturates the CPU); small-sector regimes
                   // benefit.
-                  bool sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel the outer sector loop in the
+                  // many-tiny-sectors regime (composed sectors); explicit
+                  // ED_SYM_SECTOR_PARALLEL wins.
+                  const bool sector_parallel = resolve_sector_parallel(
+                      sector_indices.size(),
+                      max_sector_dim(handle, sector_indices),
+                      opts.backend.allow_gpu);
                   if (enable_two_phase) {
                       const std::size_t phase1_iter =
                           std::min<std::size_t>(40,
@@ -1289,6 +1505,26 @@ void bind_workflows(py::module_& m) {
               if (!fixed_sz_n_up.is_none()) {
                   spec.fixed_sz = fixed_sz_n_up.cast<int>();
               }
+              // Monomial consolidation (Jul 2026): Sz-parity halves +
+              // full-space/parity prod-sigma^x sectors for the
+              // per-sector thermal lane (thermo = eigenvalue-only, so
+              // the rep-only sectors are always admissible).
+              if (opts.sz_parity >= 0 && !spec.fixed_sz) {
+                  spec.sz_parity = opts.sz_parity;
+              }
+              const DirectoryProbe probe =
+                  load_directory_probe(spec, directory);
+              {
+                  const auto comp = ed::symmetry::resolve_symmetry_composition(
+                      probe.soa, probe.base->symmetry_info,
+                      opts.backend.allow_gpu,
+                      ed::symmetry::sym_toggle_from_int(opts.spin_flip),
+                      ed::symmetry::sym_toggle_from_int(opts.time_reversal));
+                  if (comp.flip_project && !spec.fixed_sz
+                      && (!spec.sz_parity || num_sites % 2 == 0)) {
+                      spec.flip_sectors_full = true;
+                  }
+              }
 
               ed::ThermalResult agg;
               {
@@ -1304,7 +1540,8 @@ void bind_workflows(py::module_& m) {
                   // Allgather-combined after the loop. Single-rank => unchanged.
                   const auto [mpi_rank, mpi_size] = binding_mpi_rank_size();
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size));
+                      ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size,
+                                                       probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (mpi_size == 1 && num_sectors == 0) {
@@ -1480,11 +1717,11 @@ void bind_workflows(py::module_& m) {
                   //   OPENBLAS_NUM_THREADS=1       (or MKL_NUM_THREADS=1)
                   //   ED_AUTO_THREADS=0            (disable ThreadBudgetScope)
                   // OMP_NUM_THREADS should be set to the machine core count.
-                  bool thermal_sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      thermal_sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel across many tiny sectors.
+                  const bool thermal_sector_parallel = resolve_sector_parallel(
+                      sector_indices.size(),
+                      max_sector_dim(handle, sector_indices),
+                      opts.backend.allow_gpu);
 
                   // Pre-allocate indexed result storage so the parallel
                   // fill is race-free (each slot ii is written by exactly
@@ -1722,11 +1959,11 @@ void bind_workflows(py::module_& m) {
                       // Pass 1: GS sector scan. Independent per-sector
                       // Lanczos calls (1 eig, no vectors) — embarrassingly
                       // parallel. Reuses the ED_SYM_SECTOR_PARALLEL gate.
-                      bool sp_spectral = false;
-                      if (const char* env =
-                              std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                          sp_spectral = (env[0] == '1');
-                      }
+                      // B6: auto-parallel across many tiny sectors.
+                      const bool sp_spectral = resolve_sector_parallel(
+                          sector_indices.size(),
+                          max_sector_dim(handle, sector_indices),
+                          opts.backend.allow_gpu);
                       const long n_sp =
                           static_cast<long>(sector_indices.size());
                       // (gs_energy, sector_idx) per slot; sector_idx=SIZE_MAX
@@ -1929,7 +2166,9 @@ void bind_workflows(py::module_& m) {
              const std::vector<py::tuple>&          observable_transforms,
              ed::workflows::SpectralOptions         opts,
              py::object                             fixed_sz_n_up,
-             int                                    delta_n_up) {
+             int                                    delta_n_up,
+             int                                    sz_parity,
+             bool                                   flip_sectors) {
               // ----------------------------------------------------------
               // Decode the user-supplied transform tuples into the SoA
               // layout expected by CrossSectorOrbitObservable. Each
@@ -1937,25 +2176,11 @@ void bind_workflows(py::module_& m) {
               //   _transforms_from_operator(op) below:
               //     (op_type, site, coeff, is_two_body, op_type_2, site_2)
               // ----------------------------------------------------------
-              std::vector<Operator::TransformData> tlist;
-              tlist.reserve(observable_transforms.size());
-              for (const auto& row : observable_transforms) {
-                  if (row.size() < 6) {
-                      throw std::invalid_argument(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: each transform must be a 6-tuple "
-                          "(op_type, site, coeff, is_two_body, op_type_2, "
-                          "site_2).");
-                  }
-                  Operator::TransformData t;
-                  t.op_type       = static_cast<uint8_t>(row[0].cast<int>());
-                  t.site_index    = row[1].cast<std::uint64_t>();
-                  t.coefficient   = row[2].cast<std::complex<double>>();
-                  t.is_two_body   = row[3].cast<bool>();
-                  t.op_type_2     = static_cast<uint8_t>(row[4].cast<int>());
-                  t.site_index_2  = row[5].cast<std::uint64_t>();
-                  tlist.push_back(t);
-              }
+              std::vector<Operator::TransformData> tlist =
+                  decode_probe_transforms(
+                      observable_transforms,
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "directory");
               if (tlist.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_cross_irrep_"
@@ -1978,15 +2203,26 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: Sz-parity halves + full-space prod-sigma^x
+                      // flip sectors for the spectral verbs (the factory
+                      // validates the closure rules). The probe's slot
+                      // routing is computed below.
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  const SlottedSelection slots = slotted_selection_for(
+                      src_spec, tlist,
+                      "workflows_spectral_streaming_symmetry_cross_irrep_"
+                      "directory");
 
                   // Operator-collapse Phase 3 (Jun 2026): enumerate the source
                   // symmetry sectors directly via
                   // ``make_sector_operators_tagged`` + ``SectorSetView``. The
                   // cross-irrep observable's ``OperatorRef`` is built later
-                  // from the resolved source / target sectors'
-                  // ``SectorOperator::materialized_basis()`` (no monolithic
-                  // streaming operator).
+                  // from the resolved source / target sectors (Stage 8d: the
+                  // CSR-free RepSectorData on the rep-lazy lane, the
+                  // materialised orbit basis otherwise).
                   ed::core::SectorSetView src_handle(
                       ed::make_sector_operators_tagged(src_spec));
 
@@ -2052,12 +2288,27 @@ void bind_workflows(py::module_& m) {
                                     [](const auto& a, const auto& b) {
                                         return a.first < b.first;
                                     });
-                          const double best_E = phase1_min.front().first;
-                          const double gap = std::max(
-                              1e-2 * std::abs(best_E), 1e-4);
-                          for (const auto& [E, k] : phase1_min) {
-                              if (E <= best_E + gap) {
-                                  phase2_candidates.push_back(k);
+                          // A3 fail-safe: a phase-1 solve that threw is
+                          // recorded as -inf; best_E + gap would then be NaN and
+                          // select ZERO candidates, aborting the whole DSSF call
+                          // ("every source sector returned an empty spectrum").
+                          // Refine EVERYTHING instead (mirrors the same-irrep
+                          // binding's cutoff fail-safe).
+                          const bool phase1_nonfinite = std::any_of(
+                              phase1_min.begin(), phase1_min.end(),
+                              [](const auto& p){ return !std::isfinite(p.first); });
+                          if (phase1_nonfinite) {
+                              for (const auto& [E, k] : phase1_min) {
+                                  (void)E; phase2_candidates.push_back(k);
+                              }
+                          } else {
+                              const double best_E = phase1_min.front().first;
+                              const double gap = std::max(
+                                  1e-2 * std::abs(best_E), 1e-4);
+                              for (const auto& [E, k] : phase1_min) {
+                                  if (E <= best_E + gap) {
+                                      phase2_candidates.push_back(k);
+                                  }
                               }
                           }
                       }
@@ -2074,7 +2325,12 @@ void bind_workflows(py::module_& m) {
                       sopts.backend         = opts.backend;
                       sopts.method          = ed::workflows::SolveMethod::Lanczos;
                       sopts.compute_vectors = false;
-                      auto sr = ed::workflows::solve(*sec, sopts);
+                      // A3: a phase-2 candidate that throws the full solve
+                      // (near-degenerate / memory) must not abort the sweep.
+                      ed::GroundStateResult sr;
+                      try {
+                          sr = ed::workflows::solve(*sec, sopts);
+                      } catch (...) { continue; }
                       if (sr.eigenvalues.empty()) continue;
                       const double E_k = sr.eigenvalues.front();
                       if (E_k < gs_energy) {
@@ -2129,16 +2385,13 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
-                  // Source observable handle: the GS sector's materialised
-                  // orbit basis (forces the host CSR for this one sector even
-                  // in the CSR-free lazy regime). ``num_bits`` is the lattice
-                  // site count the legacy streaming op exposed via
-                  // ``getNumBits()``.
-                  const ed::symmetry::SectorBasis& src_basis =
-                      gs_sec_view->materialized_basis();
+                  // Source observable handle. Stage 8d: rep-lazy sectors
+                  // (including flip / parity sectors, which have no orbit
+                  // CSR at all) ride the CSR-free RepSectorData ref; eager
+                  // sectors keep the materialised orbit basis.
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          src_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          gs_sec_view, static_cast<std::uint64_t>(num_sites));
 
                   // -----------------------------------------------------
                   // (4) Build / re-use the target sector set. If
@@ -2174,10 +2427,12 @@ void bind_workflows(py::module_& m) {
                   // -----------------------------------------------------
                   double q_residual = 0.0;
                   const std::size_t dst_sector_idx =
-                      ed::core::resolve_target_sector(
+                      ed::core::resolve_target_sector_slotted(
                           dst_handle,
                           gs_src_idx,
                           opts.momentum_transfer,
+                          slots.n_slots,
+                          slots.signs,
                           &q_residual);
                   if (dst_sector_idx == ed::core::kSectorNotFound) {
                       // Build a useful diagnostic for the no-survivor
@@ -2249,16 +2504,13 @@ void bind_workflows(py::module_& m) {
                       return agg;
                   }
 
-                  // Target observable handle: the resolved sector's
-                  // materialised orbit basis. Build phi = O_Q |psi_0> in the
-                  // target orbit basis via CrossSectorOrbitObservable. Each
+                  // Target observable handle: build phi = O_Q |psi_0> in the
+                  // target sector basis via CrossSectorOrbitObservable. Each
                   // OperatorRef wraps exactly ONE sector, so the source /
                   // target sector indices passed to the observable are 0.
-                  const ed::symmetry::SectorBasis& dst_basis =
-                      dst_sec_view->materialized_basis();
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          dst_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          dst_sec_view, static_cast<std::uint64_t>(num_sites));
                   ed::dssf::CrossSectorOrbitObservable orb_obs(
                       src_ref, /*src_sector=*/0,
                       dst_ref, /*dst_sector=*/0,
@@ -2384,6 +2636,8 @@ void bind_workflows(py::module_& m) {
           py::arg("opts")                  = ed::workflows::SpectralOptions{},
           py::arg("fixed_sz_n_up")         = py::none(),
           py::arg("delta_n_up")            = 0,
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
           R"pbdoc(
         Cross-irrep streaming-symmetry spectral workflow (SOTA).
 
@@ -2474,7 +2728,9 @@ void bind_workflows(py::module_& m) {
              const std::vector<std::vector<double>>&   momentum_points,
              ed::workflows::SpectralOptions            opts,
              py::object                                fixed_sz_n_up,
-             int                                       delta_n_up) {
+             int                                       delta_n_up,
+             int                                       sz_parity,
+             bool                                      flip_sectors) {
               // Decode the per-Q transform tuples. Each Q-point carries
               // its OWN observable O_Q (the e^{-iQ.r} Fourier phase is
               // baked into the transform coefficients), so the outer
@@ -2537,15 +2793,30 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: parity / flip sectors (see the single-Q
+                      // binding). Slot routing is per-Q (each Q has its own
+                      // probe transforms).
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  // Stage 8d TR panel gate: for a REAL H, the -Q panel of an
+                  // adjoint probe pair equals the +Q panel (S(-Q, omega) =
+                  // S(Q, omega)^* with a real spectral function) -- detected
+                  // once here, applied per-Q below.
+                  const DirectoryProbe mq_probe =
+                      load_directory_probe(src_spec, directory);
+                  const bool h_real =
+                      ed::symmetry::hamiltonian_is_real(mq_probe.soa);
+
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
                   // ``SectorSetView``. ``src_ref`` is built once after the GS
-                  // solve from the GS sector's materialised orbit basis;
-                  // ``dst_ref`` is rebuilt per-Q from the resolved target
-                  // sector (the target sector varies with Q).
+                  // solve; ``dst_ref`` is rebuilt per-Q from the resolved
+                  // target sector (the target sector varies with Q).
                   ed::core::SectorSetView src_handle(
-                      ed::make_sector_operators_tagged(src_spec));
+                      ed::make_sector_operators_tagged(src_spec, 0, 1,
+                                                       mq_probe.base));
 
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
@@ -2597,12 +2868,24 @@ void bind_workflows(py::module_& m) {
                                     [](const auto& a, const auto& b) {
                                         return a.first < b.first;
                                     });
-                          const double best_E = phase1_min.front().first;
-                          const double gap =
-                              std::max(1e-2 * std::abs(best_E), 1e-4);
-                          for (const auto& [E, k] : phase1_min) {
-                              if (E <= best_E + gap) {
-                                  phase2_candidates.push_back(k);
+                          // A3 fail-safe (see the single-Q binding): a
+                          // -inf phase-1 sentinel must not NaN the gap and
+                          // select zero candidates -- refine everything.
+                          const bool phase1_nonfinite = std::any_of(
+                              phase1_min.begin(), phase1_min.end(),
+                              [](const auto& p){ return !std::isfinite(p.first); });
+                          if (phase1_nonfinite) {
+                              for (const auto& [E, k] : phase1_min) {
+                                  (void)E; phase2_candidates.push_back(k);
+                              }
+                          } else {
+                              const double best_E = phase1_min.front().first;
+                              const double gap =
+                                  std::max(1e-2 * std::abs(best_E), 1e-4);
+                              for (const auto& [E, k] : phase1_min) {
+                                  if (E <= best_E + gap) {
+                                      phase2_candidates.push_back(k);
+                                  }
                               }
                           }
                       }
@@ -2619,7 +2902,12 @@ void bind_workflows(py::module_& m) {
                       sopts.backend         = opts.backend;
                       sopts.method          = ed::workflows::SolveMethod::Lanczos;
                       sopts.compute_vectors = false;
-                      auto sr = ed::workflows::solve(*sec, sopts);
+                      // A3: a phase-2 candidate that throws the full solve
+                      // (near-degenerate / memory) must not abort the sweep.
+                      ed::GroundStateResult sr;
+                      try {
+                          sr = ed::workflows::solve(*sec, sopts);
+                      } catch (...) { continue; }
                       if (sr.eigenvalues.empty()) continue;
                       const double E_k = sr.eigenvalues.front();
                       if (E_k < gs_energy) {
@@ -2659,14 +2947,12 @@ void bind_workflows(py::module_& m) {
                   const double E0  = gs_sr.eigenvalues.front();
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
-                  // Source observable handle: GS sector's materialised orbit
-                  // basis (Q-independent, built once). Each OperatorRef wraps
-                  // exactly ONE sector.
-                  const ed::symmetry::SectorBasis& src_basis =
-                      gs_sec_view->materialized_basis();
+                  // Source observable handle (Q-independent, built once).
+                  // Stage 8d: rep-lazy / flip / parity sectors ride the
+                  // CSR-free RepSectorData ref.
                   ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                      ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                          src_basis, static_cast<std::uint64_t>(num_sites));
+                      make_cross_sector_ref(
+                          gs_sec_view, static_cast<std::uint64_t>(num_sites));
 
                   // (4) Build / re-use the target sector set ONCE (depends
                   //     only on delta_n_up, not on Q). The view is cheaply
@@ -2728,10 +3014,65 @@ void bind_workflows(py::module_& m) {
                           agg.per_sector_pair.push_back(std::move(e));
                       };
 
+                      // Stage 8d TR panel copy: an earlier Q_j with
+                      // Q_j == -Q_i (mod 1) whose probe is THIS probe's
+                      // adjoint already computed this panel (real H).
+                      if (h_real) {
+                          bool copied = false;
+                          for (std::size_t qj = 0;
+                               qj < qi && qj < agg.per_sector_pair.size()
+                               && !copied; ++qj) {
+                              const auto& Qj = momentum_points[qj];
+                              if (Qj.size() != Q.size()) continue;
+                              bool neg = true;
+                              for (std::size_t c = 0; c < Q.size(); ++c) {
+                                  double s = Q[c] + Qj[c];
+                                  s -= std::round(s);
+                                  if (std::abs(s) > 1e-9) { neg = false; break; }
+                              }
+                              if (!neg) continue;
+                              const auto& prev = agg.per_sector_pair[qj];
+                              bool prev_ok = false;
+                              for (const auto& n : prev.notes) {
+                                  if (n.first == "status"
+                                      && n.second.rfind("ok", 0) == 0) {
+                                      prev_ok = true;
+                                      break;
+                                  }
+                              }
+                              if (!prev_ok) continue;
+                              if (!ed::symmetry::transforms_are_conjugate(
+                                      tlist_per_q[qj], tlist_per_q[qi]))
+                                  continue;
+                              ed::SpectralSectorEntry e;
+                              e.initial   = prev.initial;
+                              e.final_    = prev.final_;
+                              e.S_real    = prev.S_real;
+                              e.S_imag    = prev.S_imag;
+                              e.static_sf = prev.static_sf;
+                              e.notes.emplace_back(
+                                  "status",
+                                  "ok (TR panel copy of Q#"
+                                  + std::to_string(qj) + ")");
+                              agg.per_sector_pair.push_back(std::move(e));
+                              copied = true;
+                          }
+                          if (copied) continue;
+                      }
+
+                      // Stage 8d: per-Q slot routing (each Q has its own
+                      // probe; classifier failures are caller errors, not
+                      // zero-weight physics, so they throw).
+                      const SlottedSelection slots = slotted_selection_for(
+                          src_spec, tlist_per_q[qi],
+                          "workflows_spectral_streaming_symmetry_cross_irrep_"
+                          "multiq_directory");
+
                       double q_residual = 0.0;
                       const std::size_t dst_sector_idx =
-                          ed::core::resolve_target_sector(
-                              dst_handle, gs_src_idx, Q, &q_residual);
+                          ed::core::resolve_target_sector_slotted(
+                              dst_handle, gs_src_idx, Q,
+                              slots.n_slots, slots.signs, &q_residual);
                       if (dst_sector_idx == ed::core::kSectorNotFound) {
                           push_zero_entry(
                               "no surviving target sector (residual=" +
@@ -2758,11 +3099,10 @@ void bind_workflows(py::module_& m) {
                           push_zero_entry("target sector empty");
                           continue;
                       }
-                      const ed::symmetry::SectorBasis& dst_basis =
-                          dst_sec_view->materialized_basis();
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              dst_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              dst_sec_view,
+                              static_cast<std::uint64_t>(num_sites));
 
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
                           src_ref, /*src_sector=*/0,
@@ -2841,6 +3181,8 @@ void bind_workflows(py::module_& m) {
           py::arg("opts")                         = ed::workflows::SpectralOptions{},
           py::arg("fixed_sz_n_up")                = py::none(),
           py::arg("delta_n_up")                   = 0,
+          py::arg("sz_parity")                    = -1,
+          py::arg("flip_sectors")                 = false,
           R"pbdoc(
         Amortised multi-Q cross-irrep streaming-symmetry spectral
         workflow (SOTA).
@@ -2908,29 +3250,17 @@ void bind_workflows(py::module_& m) {
              int                                    delta_n_up,
              std::vector<double>                    temperatures,
              std::uint64_t                          num_samples,
-             std::uint64_t                          random_seed) {
+             std::uint64_t                          random_seed,
+             int                                    sz_parity,
+             bool                                   flip_sectors) {
               // ----------------------------------------------------------
               // Same observable-transform decoder as the GS path.
               // ----------------------------------------------------------
-              std::vector<Operator::TransformData> tlist;
-              tlist.reserve(observable_transforms.size());
-              for (const auto& row : observable_transforms) {
-                  if (row.size() < 6) {
-                      throw std::invalid_argument(
-                          "workflows_spectral_streaming_symmetry_ftlm_"
-                          "cross_irrep_directory: each transform must be "
-                          "a 6-tuple (op_type, site, coeff, is_two_body, "
-                          "op_type_2, site_2).");
-                  }
-                  Operator::TransformData t;
-                  t.op_type       = static_cast<uint8_t>(row[0].cast<int>());
-                  t.site_index    = row[1].cast<std::uint64_t>();
-                  t.coefficient   = row[2].cast<std::complex<double>>();
-                  t.is_two_body   = row[3].cast<bool>();
-                  t.op_type_2     = static_cast<uint8_t>(row[4].cast<int>());
-                  t.site_index_2  = row[5].cast<std::uint64_t>();
-                  tlist.push_back(t);
-              }
+              std::vector<Operator::TransformData> tlist =
+                  decode_probe_transforms(
+                      observable_transforms,
+                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
+                      "irrep_directory");
               if (tlist.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
@@ -2956,12 +3286,21 @@ void bind_workflows(py::module_& m) {
                   src_spec.streaming_symmetry = true;
                   if (!fixed_sz_n_up.is_none()) {
                       src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
+                  } else {
+                      // Stage 8d: parity / flip sectors on the finite-T
+                      // spectral lane too.
+                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
+                      if (flip_sectors)   src_spec.flip_sectors_full = true;
                   }
+                  const SlottedSelection slots = slotted_selection_for(
+                      src_spec, tlist,
+                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
+                      "irrep_directory");
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
                   // ``SectorSetView``. ``src_ref`` / ``dst_ref`` are built
-                  // per (k_src, k_dst) pair inside the loop from each sector
-                  // operator's materialised orbit basis.
+                  // per (k_src, k_dst) pair inside the loop (Stage 8d:
+                  // CSR-free rep refs on the rep-lazy lane).
                   ed::core::SectorSetView src_handle(
                       ed::make_sector_operators_tagged(src_spec));
 
@@ -3040,10 +3379,12 @@ void bind_workflows(py::module_& m) {
 
                       double q_residual = 0.0;
                       const std::size_t k_dst =
-                          ed::core::resolve_target_sector(
+                          ed::core::resolve_target_sector_slotted(
                               dst_handle,
                               k_src,
                               opts.momentum_transfer,
+                              slots.n_slots,
+                              slots.signs,
                               &q_residual);
                       if (k_dst == ed::core::kSectorNotFound) continue;
                       if (q_residual > opts.momentum_tolerance) {
@@ -3061,18 +3402,15 @@ void bind_workflows(py::module_& m) {
 
                       // Cross-irrep rectangular observable for THIS
                       // (k_src, k_dst) pair. Each OperatorRef wraps one
-                      // sector's materialised orbit basis (src_sector ==
-                      // dst_sector == 0).
-                      const ed::symmetry::SectorBasis& src_basis =
-                          src_view->materialized_basis();
-                      const ed::symmetry::SectorBasis& dst_basis =
-                          dst_view->materialized_basis();
+                      // sector (src_sector == dst_sector == 0); Stage 8d:
+                      // rep-lazy / flip / parity sectors ride the CSR-free
+                      // RepSectorData ref.
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef src_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              src_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              src_view, static_cast<std::uint64_t>(num_sites));
                       ed::dssf::CrossSectorOrbitObservable::OperatorRef dst_ref =
-                          ed::dssf::CrossSectorOrbitObservable::OperatorRef::from(
-                              dst_basis, static_cast<std::uint64_t>(num_sites));
+                          make_cross_sector_ref(
+                              dst_view, static_cast<std::uint64_t>(num_sites));
                       ed::dssf::CrossSectorOrbitObservable orb_obs(
                           src_ref, /*src_sector=*/0,
                           dst_ref, /*dst_sector=*/0,
@@ -3243,6 +3581,8 @@ void bind_workflows(py::module_& m) {
           py::arg("temperatures")          = std::vector<double>{},
           py::arg("num_samples")           = std::uint64_t{30},
           py::arg("random_seed")           = std::uint64_t{0},
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
           R"pbdoc(
         Cross-irrep streaming-symmetry **finite-T** spectral workflow
         (SOTA FTLM).
@@ -3359,28 +3699,10 @@ void bind_workflows(py::module_& m) {
                   const int req_lo  = std::max(0, n_up_min);
                   const int req_hi  = (n_up_max < 0) ? N_sites
                                                      : std::min(n_up_max, N_sites);
-                  ed::symmetry::SymmetryComposition comp;
-                  {
-                      auto probe = ed::detail::build_base_op(spec);
-                      ed::detail::load_terms_into(*probe, spec);
-                      ed::matvec::TermStorage soa;
-                      ed::matvec::TermStorage::classify_route(
-                          soa, probe->transform_data_, probe->three_body_data_,
-                          [](const std::complex<double>& c) { return c; });
-                      probe->symmetry_info.loadFromDirectory(directory);
-                      comp = ed::symmetry::resolve_symmetry_composition(
-                          soa, probe->symmetry_info, opts.backend.allow_gpu,
-                          ed::symmetry::sym_toggle_from_int(opts.spin_flip),
-                          ed::symmetry::sym_toggle_from_int(opts.time_reversal));
-                      // Stage 7a: point-group star maps join the
-                      // isospectral-orbit relation alongside TR.
-                      const std::size_t nsec =
-                          probe->symmetry_info.sectors.size();
-                      for (const auto& m : opts.star_maps) {
-                          if (m.size() != nsec) continue;
-                          comp.star_maps.emplace_back(m.begin(), m.end());
-                      }
-                  }
+                  DirectoryProbe probe =
+                      load_directory_probe(spec, directory);
+                  ed::symmetry::SymmetryComposition comp =
+                      resolve_comp_with_stars(probe, opts);
                   const ed::symmetry::BuildWindow win =
                       ed::symmetry::plan_build_window(
                           comp, req_lo, req_hi, N_sites);
@@ -3401,7 +3723,7 @@ void bind_workflows(py::module_& m) {
                   // Build the (n_up, irrep) sector operators in a single pass.
                   ed::SectorOperatorSet set =
                       ed::make_all_sz_sector_operators_tagged(
-                          spec, win.lo, win.hi, flip_project);
+                          spec, win.lo, win.hi, flip_project, probe.base);
 
                   const long n_ops =
                       static_cast<long>(set.operators.size());
@@ -3503,11 +3825,15 @@ void bind_workflows(py::module_& m) {
                   // binding). With this binding, the parallel region covers
                   // ALL (n_up, irrep) sectors simultaneously, giving better
                   // load balancing than two nested loops.
-                  bool sector_parallel = false;
-                  if (const char* env =
-                          std::getenv("ED_SYM_SECTOR_PARALLEL")) {
-                      sector_parallel = (env[0] == '1');
-                  }
+                  // B6: auto-parallel across the flat (n_up x irrep) set
+                  // when it is many tiny sectors.
+                  std::uint64_t fp_max_dim = 0;
+                  for (const auto& fp_op : set.operators)
+                      if (fp_op) fp_max_dim = std::max<std::uint64_t>(
+                          fp_max_dim, fp_op->dim());
+                  const bool sector_parallel = resolve_sector_parallel(
+                      static_cast<std::size_t>(n_ops), fp_max_dim,
+                      opts.backend.allow_gpu);
 
                   // Pre-indexed result storage: each OMP thread writes to its
                   // own slot ii -- no push_back races.

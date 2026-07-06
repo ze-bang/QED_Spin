@@ -113,7 +113,22 @@ couplings break TR):
 res = qed.solve(H, sz=N // 2, symmetry="auto",
                 spin_flip="on", time_reversal="on")
 print(qed._core.detect_hamiltonian_symmetries(H))
-# {'spin_flip': True, 'time_reversal': True}
+# {'spin_flip': True, 'time_reversal': True, 'u1': True, 'sz_parity': True}
+```
+
+The remaining axes, each keyable:
+
+```python
+qed.solve(H, symmetry=gen, sz="even")              # Sz-parity half: the Z2
+                                                   # remnant when S+S+ terms
+                                                   # break U(1) (auto-detected)
+qed.solve(H, symmetry=gen, point_group="auto")     # star folding (solve one
+                                                   # momentum per point-group
+                                                   # star, copy the spectrum)
+qed.solve(H, symmetry=gen, point_group="full")     # TRUE non-abelian: d>=2
+                                                   # irrep blocks ~ dim/|G|
+qed.solve(H, symmetry="translation", lattice=lat)  # T projector + point
+                                                   # group as stars
 ```
 
 To inspect / pick groups explicitly:

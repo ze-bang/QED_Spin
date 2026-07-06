@@ -636,7 +636,59 @@ class SymmetryReport:
 # ---------------------------------------------------------------------------
 
 
+_FIND_SYM_MEMO: "dict[Any, SymmetryReport]" = {}
+_FIND_SYM_MEMO_CAP = 32
+
+
+def _find_symmetries_key(operator, lattice, translation_only):
+    """Content key for the find_symmetries memo, or None to skip caching
+    (any part that can't be hashed => compute fresh, never cache wrong)."""
+    try:
+        terms = tuple(sorted(tuple(t) for t in operator.transform_tuples()))
+        three = tuple(sorted(tuple(t) for t in operator.iter_three_body_terms()))
+        lat = None
+        if lattice is not None:
+            pos = getattr(lattice, "positions", None)
+            vec = getattr(lattice, "lattice_vectors", None)
+            lat = (repr(pos), repr(vec))
+        return (int(operator.num_sites), terms, three,
+                bool(translation_only), lat)
+    except Exception:
+        return None
+
+
 def find_symmetries(
+    operator: Operator,
+    *,
+    lattice: Optional[Any] = None,
+    translation_only: bool = False,
+    verbose: bool = True,
+) -> SymmetryReport:
+    """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
+
+    B9: the colored-graph automorphism search + group closure (~0.5 s) is
+    memoised on the operator's term content (+ lattice + flags), so a
+    ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
+    the search once. ``ED_SYM_NO_DETECT_MEMO=1`` disables the cache.
+    """
+    _memo_ok = os.environ.get("ED_SYM_NO_DETECT_MEMO") != "1"
+    _key = _find_symmetries_key(operator, lattice, translation_only) \
+        if _memo_ok else None
+    if _key is not None:
+        hit = _FIND_SYM_MEMO.get(_key)
+        if hit is not None:
+            return hit
+    result = _find_symmetries_impl(
+        operator, lattice=lattice, translation_only=translation_only,
+        verbose=verbose)
+    if _key is not None:
+        if len(_FIND_SYM_MEMO) >= _FIND_SYM_MEMO_CAP:
+            _FIND_SYM_MEMO.pop(next(iter(_FIND_SYM_MEMO)))
+        _FIND_SYM_MEMO[_key] = result
+    return result
+
+
+def _find_symmetries_impl(
     operator: Operator,
     *,
     lattice: Optional[Any] = None,
@@ -867,6 +919,46 @@ def find_symmetries(
 # ---------------------------------------------------------------------------
 
 
+def _validate_explicit_generators(operator, symmetry, *, verbose=True) -> None:
+    """A2: verify an EXPLICIT / bridge-supplied generator set commutes with H.
+
+    The abelian rep lane trusts its generators; an ``"auto"`` automorphism is
+    a symmetry of H's coloured interaction graph by construction, but a
+    hand-supplied ``GeneratorSet`` or raw permutation list is unchecked -- a
+    wrong permutation (site-ordering mismatch, off-by-one) yields silently
+    wrong spectra with correct-looking per-sector sum rules. The check is
+    term-level and exact (no matvec). Raises ``RuntimeError`` on the first
+    non-commuting generator; set ``ED_SYM_SKIP_COMMUTE_CHECK=1`` to bypass.
+    """
+    if os.environ.get("ED_SYM_SKIP_COMMUTE_CHECK") == "1":
+        return
+    if symmetry is None or isinstance(symmetry, dict):
+        return                       # directory-form / no group: nothing to check
+    if not isinstance(operator, Operator):
+        return                       # can't term-inspect a non-in-memory operator
+    gens = getattr(symmetry, "generators", None)
+    if gens is None and isinstance(symmetry, (list, tuple)) and symmetry \
+            and isinstance(symmetry[0], (list, tuple)):
+        gens = symmetry             # raw permutation list
+    if not gens:
+        return
+    gens = [list(g) for g in gens]
+    try:
+        ok = list(_core.check_generators_commute(operator, gens))
+    except Exception:
+        return                       # checker unavailable -> don't block the run
+    bad = [i for i, c in enumerate(ok) if not c]
+    if bad:
+        raise RuntimeError(
+            f"qed: symmetry generator(s) {bad} do NOT commute with H "
+            f"([H, U_g] != 0 at the term level). An explicit / bridge-"
+            f"supplied permutation that is not a symmetry of H produces "
+            f"silently wrong spectra. Check the site-ordering of the "
+            f"permutation(s) against the Hamiltonian's site labels, or set "
+            f"ED_SYM_SKIP_COMMUTE_CHECK=1 to bypass if you are certain."
+        )
+
+
 def resolve_auto_symmetry(
     operator: Operator,
     symmetry: Any,
@@ -886,9 +978,15 @@ def resolve_auto_symmetry(
       time-reversal pairing, each of which independently auto-detects.
     * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
     * anything else (GeneratorSet, permutation list, dict, None) is
-      returned unchanged.
+      returned unchanged (after an EXPLICIT-generator [H, U_g] = 0
+      check -- see :func:`_validate_explicit_generators`).
     """
     if not isinstance(symmetry, str):
+        # A2: an explicit / bridge-supplied generator set is unchecked --
+        # validate it commutes with H before the rep lane trusts it (the
+        # "auto" and "translation" sets resolved below are symmetries of H
+        # by construction and skip the check).
+        _validate_explicit_generators(operator, symmetry, verbose=verbose)
         return symmetry
     key = symmetry.strip().lower()
     if key in ("off", "none", ""):
@@ -1014,6 +1112,50 @@ def resolve_discrete_toggle(
     raise ValueError(
         f"{which} must be one of 'auto'|'on'|'off'|'require' "
         f"(or None / bool), got {value!r}")
+
+
+def _full_group_generators(symmetry) -> Optional[list]:
+    """Generators of the FULL (possibly non-abelian) spatial group: the
+    abelian clique generators plus the retained residue automorphisms.
+    None when there is no spatial symmetry or no residue is known."""
+    gens = getattr(symmetry, "generators", None)
+    if not gens:
+        return None
+    star = list(getattr(symmetry, "star_perms", None) or [])
+    return [list(g) for g in gens] + [list(p) for p in star]
+
+
+def _little_group_parts(symmetry) -> Optional[tuple]:
+    """Stage 7: ``(abelian_group_elements, residue_perms)`` for the
+    FACTORIZED non-abelian engine (little co-groups over matrix-free
+    momentum sectors). The abelian clique is closed here (|A| stays
+    small for physical clusters); residues are the retained point-group
+    coset representatives. None when there is no residue to factor over
+    or the lane is disabled (``ED_SYM_LITTLE_GROUP=0``)."""
+    if os.environ.get("ED_SYM_LITTLE_GROUP", "1") == "0":
+        return None
+    star = list(getattr(symmetry, "star_perms", None) or [])
+    gens = getattr(symmetry, "generators", None)
+    if not star or not gens:
+        return None
+    gens = [tuple(g) for g in gens]
+    n = len(gens[0])
+    ident = tuple(range(n))
+    elems = {ident}
+    frontier = [ident]
+    while frontier:
+        nxt = []
+        for e in frontier:
+            for g in gens:
+                c = tuple(g[e[i]] for i in range(n))
+                if c not in elems:
+                    elems.add(c)
+                    nxt.append(c)
+        frontier = nxt
+    if len(elems) > 4096:      # defensive: A must stay enumerable
+        return None
+    return ([list(e) for e in sorted(elems)],
+            [list(p) for p in star])
 
 
 def solve(
@@ -1230,8 +1372,20 @@ def solve(
     base_dim = int(H.dimension)  # full Hilbert dim, even for FixedSz
 
     # ------------------------------------------------------------------
-    # 1. Resolve the fixed-Sz axis.
+    # 1. Resolve the fixed-Sz axis. sz="even"/"odd" selects the
+    #    Sz-PARITY halves instead (the Z2 remnant when U(1) is broken;
+    #    also valid for U(1)-conserving H) -- handled by the symmetry
+    #    dispatch below, not the fixed-Sz machinery.
     # ------------------------------------------------------------------
+    _sz_parity_str: Optional[int] = None
+    if isinstance(sz, str):
+        _key = sz.strip().lower()
+        if _key not in ("even", "odd"):
+            raise ValueError(
+                f"sz={sz!r}: string forms are 'even'/'odd' (Sz-parity "
+                "halves) or pass an integer n_up.")
+        _sz_parity_str = 0 if _key == "even" else 1
+        sz = None
     op_to_use: Operator = H
     if sz is not None:
         if fixed_sz_input:
@@ -1353,14 +1507,11 @@ def solve(
     # ------------------------------------------------------------------
     effective_output = output_dir
     if is_thermal and not output_dir:
-        import datetime as _dt
-        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        effective_output = f"qed_thermal_{method.name}_{ts}"
-        os.makedirs(effective_output, exist_ok=True)
-        if verbose:
-            print(f"[qed.solve] thermal solver: writing trajectory + "
-                  f"thermodynamic data to {effective_output!r} "
-                  "(pass output_dir=... to choose explicitly).")
+        # Optimization (Jul 2026): the unified thermal kernels return
+        # trajectories + thermodynamics in memory; nothing needs the
+        # historical auto-created qed_thermal_<ts>/ directory. Writes
+        # happen only when the caller passes output_dir=.
+        effective_output = "/dev/null"
     elif is_thermal and output_dir and not output_dir.startswith("/dev/null"):
         # Surface-unification follow-up (May 2026): the orchestrator's
         # `_core.workflows_thermal` does NOT mkdir its `output_dir`.
@@ -1450,9 +1601,98 @@ def solve(
                 launcher_binary=mpi_launcher_binary,
                 verbose=verbose,
             )
+        if isinstance(point_group, str) and point_group.lower() == "full":
+            # PROPER non-abelian: every irrep block (d_Gamma >= 2
+            # included, blocks ~ dim/|G|) on the production multi-target
+            # matvec, block-size-adaptive dense/Lanczos per block,
+            # eigenvalues recombined with d_Gamma multiplicities. CPU
+            # engine (the GPU consumer covers the dense full-spectrum
+            # path); U(1) composes via sz=.
+            gens_full = _full_group_generators(symmetry)
+            if gens_full is None:
+                raise ValueError(
+                    "point_group='full' needs a spatial symmetry with "
+                    "retained residue (symmetry='auto' or a GeneratorSet "
+                    "from find_symmetries).")
+            _k = int(num_eigenvalues) if num_eigenvalues else 1
+            _nu = int(sz) if isinstance(sz, int) else -1
+            _sp = -1
+            if _sz_parity_str is not None:
+                _sp = int(_sz_parity_str)
+            elif _nu < 0 and auto_sz:
+                # Compose the diagonal axis automatically: fixed Sz for
+                # U(1)-conserving H (GS at half filling), the parity
+                # half otherwise when the Z2 remnant survives.
+                if op_to_use.conserves_sz():
+                    _nu = num_sites // 2
+                else:
+                    try:
+                        if bool(_core.detect_hamiltonian_symmetries(
+                                op_to_use)["sz_parity"]):
+                            _sp = 2
+                    except Exception:
+                        _sp = -1
+            # Stage 7: prefer the FACTORIZED little-co-group engine
+            # (matrix-free momentum sectors, scales past the monolithic
+            # SAB cap). Falls back to the monolithic reference on any
+            # decline (no residue split / engine error).
+            _lg = _little_group_parts(symmetry)
+            if _lg is not None:
+                _A, _res = _lg
+                try:
+                    if _sp == 2:
+                        ev = (list(_core.little_group_lowest_eigenvalues(
+                                  op_to_use, _A, _res, k=_k, sz_parity=0))
+                              + list(_core.little_group_lowest_eigenvalues(
+                                  op_to_use, _A, _res, k=_k, sz_parity=1)))
+                    elif _sp in (0, 1):
+                        ev = list(_core.little_group_lowest_eigenvalues(
+                            op_to_use, _A, _res, k=_k, sz_parity=_sp))
+                    else:
+                        ev = list(_core.little_group_lowest_eigenvalues(
+                            op_to_use, _A, _res, k=_k, n_up=_nu))
+                    out = EDResults()
+                    out.eigenvalues = sorted(float(e) for e in ev)[:_k]
+                    if verbose:
+                        print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
+                              f"(factorized): |A| = {len(_A)}, residues = "
+                              f"{len(_res)}.")
+                    return out
+                except Exception as exc:      # noqa: BLE001 -- graceful
+                    if verbose:
+                        print(f"[qed.solve] little-group lane declined "
+                              f"({exc}); using the monolithic SAB engine.")
+            if _sp == 2:
+                spec0 = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, -1, sz_parity=0)
+                spec1 = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, -1, sz_parity=1)
+                spec = dict(spec0)
+                spec["eigenvalues"] = (list(spec0["eigenvalues"])
+                                       + list(spec1["eigenvalues"]))
+                spec["block_size"] = (list(spec0["block_size"])
+                                      + list(spec1["block_size"]))
+                spec["block_irrep_dim"] = (
+                    list(spec0["block_irrep_dim"])
+                    + list(spec1["block_irrep_dim"]))
+            else:
+                spec = _core.symmetry_adapted_lowest_eigenvalues(
+                    op_to_use, gens_full, _k, _nu,
+                    sz_parity=(_sp if _sp in (0, 1) else -1))
+            out = EDResults()
+            out.eigenvalues = sorted(
+                float(e) for e in spec["eigenvalues"])[:_k]
+            if verbose:
+                print(f"[qed.solve] non-abelian SAB lane: |G| = "
+                      f"{spec['group_order']}, blocks = "
+                      f"{len(spec['block_size'])} (irrep dims "
+                      f"{sorted(set(spec['block_irrep_dim']))}).")
+            return out
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
+            sz_parity=_sz_parity_str,
+            auto_sz_axis=auto_sz,
             verbose=verbose,
             spin_flip=spin_flip,
             time_reversal=time_reversal,
@@ -2922,6 +3162,8 @@ def _diag_with_symmetry(
     spin_flip="auto",
     time_reversal="auto",
     point_group="auto",
+    sz_parity: Optional[int] = None,
+    auto_sz_axis: bool = True,
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -3001,6 +3243,24 @@ def _diag_with_symmetry(
         # ``workflows_thermal_streaming_symmetry_directory`` binding,
         # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
         fixed_sz_n_up = None
+        # Sz-parity mode: explicit via sz="even"/"odd", or AUTO when the
+        # Hamiltonian breaks U(1) but keeps the Z2 remnant (-1)^{n_up}
+        # (all terms change n_up by even amounts): both halves in one
+        # sector set.
+        _parity_mode = sz_parity
+        if (_parity_mode is None and sz is None and auto_sz_axis
+                and not isinstance(operator, FixedSzOperator)
+                and not operator.conserves_sz()):
+            try:
+                _det = _core.detect_hamiltonian_symmetries(operator)
+                if bool(_det["sz_parity"]):
+                    _parity_mode = 2          # both halves
+                    if verbose:
+                        print("[qed] Sz axis: U(1) broken but parity "
+                              "(-1)^{n_up} conserved -> parity-half "
+                              "sectors engage.")
+            except Exception:
+                _parity_mode = None
         if isinstance(operator, FixedSzOperator):
             if sz is None:
                 if params.n_up < 0:
@@ -3020,6 +3280,12 @@ def _diag_with_symmetry(
             # fixed_sz=fixed_sz_n_up). So we just hand it the temp
             # directory + sites + spin_l and the binding takes care of
             # composing the per-sector thermal lane.
+            if _parity_mode is not None:
+                topts.sz_parity = int(_parity_mode)
+            topts.spin_flip = resolve_discrete_toggle(
+                operator, spin_flip, "spin_flip", verbose=verbose)
+            topts.time_reversal = resolve_discrete_toggle(
+                operator, time_reversal, "time_reversal", verbose=verbose)
             tr = _core.workflows_thermal_streaming_symmetry_directory(
                 tmpdir,
                 int(operator.num_sites),
@@ -3040,6 +3306,8 @@ def _diag_with_symmetry(
             operator, spin_flip, "spin_flip", verbose=verbose)
         opts.time_reversal = resolve_discrete_toggle(
             operator, time_reversal, "time_reversal", verbose=verbose)
+        if _parity_mode is not None:
+            opts.sz_parity = int(_parity_mode)
         # Stage 7a: star reduction. The non-abelian residue of the
         # spatial group permutes the abelian irreps; related sectors
         # are isospectral, so the C++ plan solves one representative
@@ -3246,6 +3514,44 @@ def full_spectrum(
         if _generators_nonabelian(cand):
             gens_full = cand                     # clique + residue = full group
     if gens_full is not None:
+        # Stage 7: the FACTORIZED little-co-group engine first (one
+        # momentum per star, per-irrep blocks inside the star rep's
+        # matrix-free sector); the monolithic SAB engine remains the
+        # graceful fallback (and the sole route for explicit
+        # non-abelian generator input, which has no clique/residue
+        # split to factor over). device='gpu' batches ALL block
+        # eigensolves through one cuSOLVER stream-pool call.
+        _lg = _little_group_parts(symmetry)
+        if _lg is not None:
+            _A, _res = _lg
+            try:
+                eigs = []
+                if sz_conserved:
+                    top = N // 2 if _flip_transport else N
+                    for n_up in range(top + 1):
+                        d = dict(_core.little_group_full_spectrum(
+                            operator, _A, _res, n_up=int(n_up),
+                            use_gpu=use_gpu))
+                        block = [float(e) for e in d["eigenvalues"]]
+                        eigs.extend(block)
+                        if _flip_transport and n_up * 2 != N:
+                            eigs.extend(block)   # isospectral mirror
+                else:
+                    d = dict(_core.little_group_full_spectrum(
+                        operator, _A, _res, use_gpu=use_gpu))
+                    eigs = [float(e) for e in d["eigenvalues"]]
+                if verbose:
+                    print("[qed.full_spectrum] non-abelian group -> "
+                          "LITTLE-GROUP engine (factorized d_G reduction)"
+                          + (", flip transport halves the Sz sweep"
+                             if _flip_transport else ""))
+                out = EDResults()
+                out.eigenvalues = sorted(eigs)
+                return out
+            except Exception as exc:            # noqa: BLE001 -- graceful
+                if verbose:
+                    print(f"[qed.full_spectrum] little-group lane declined "
+                          f"({exc}); using the monolithic SAB engine.")
         # SAB engine: FULL-group projection including d_G >= 2 irreps --
         # the strongest dense reduction (blocks ~ dim / |G|). The point
         # group is inside the projection here, so star reduction is
@@ -3255,7 +3561,7 @@ def full_spectrum(
                   "(full d_G reduction)"
                   + (", flip transport halves the Sz sweep"
                      if _flip_transport else ""))
-        eigs: list[float] = []
+        eigs = []
         if sz_conserved:
             top = N // 2 if _flip_transport else N
             for n_up in range(top + 1):

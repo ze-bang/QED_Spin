@@ -61,7 +61,8 @@ build_sab_partition0(const GroupIrreps&                    gi,
                      int                                   irrep_index,
                      int                                   n_sites,
                      int                                   n_up   = -1,
-                     int                                   partner = 0);
+                     int                                   partner = 0,
+                     int                                   sz_parity = -1);
 
 // ---------------------------------------------------------------------------
 // Pack the partner-0 SAB of one irrep into the PRODUCTION sector data structure
@@ -79,7 +80,8 @@ build_symmetry_adapted_sector(const GroupIrreps&                   gi,
                               int                                  irrep_index,
                               int                                  n_sites,
                               int                                  n_up    = -1,
-                              int                                  partner = 0);
+                              int                                  partner = 0,
+                              int                                  sz_parity = -1);
 
 /// Result of a symmetry-adapted spectrum: sorted eigenvalues with d_Γ
 /// multiplicities + per-block (n_Γ, d_Γ). Filled by the ed_solvers engine
@@ -134,6 +136,13 @@ symmetry_adapted_thermodynamics_gpu(
     int                                   n_sites,
     const std::vector<double>&            temperatures,
     int                                   n_up = -1);
+
+/// Stage 7 GPU lane: batched Hermitian eigensolve (values only) of packed
+/// column-major blocks. Variable block sizes; an 8-stream cuSOLVER pool
+/// overlaps the small-block launches (the tiny-sector batching mechanism).
+/// Consumed by the little-group engine's use_gpu path.
+[[nodiscard]] std::vector<double>
+sym_blocks_batched_eigenvalues_gpu(const SymBlocksPacked& P);
 
 // ---------------------------------------------------------------------------
 // Ground-state DSSF result S(ω) = Σ_n |<n|O|0>|² · Lorentzian(ω-(E_n-E0)).

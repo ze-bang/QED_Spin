@@ -195,10 +195,51 @@ public:
             // sector union equals the full-Hilbert dense spectrum).
             if (static_cast<std::size_t>(producer_.dim()) != N) return false;
             this->commitPendingTransforms();
-            // Stage 8c: flip-projected (k, +/-) sectors have no orbit-CSR
-            // form (their csr_provider throws by design); decline so the
-            // caller falls back to the matvec column build, which runs the
-            // flip-aware rep gather backend.
+            // Rep-LAZY sectors -- flip/parity rep-only ones (csr_available ==
+            // false) AND ordinary fixed-Sz/full-space sectors above the 64 MiB
+            // budget (csr_available == true but the orbit CSR is deferred) --
+            // assemble the reduced matrix DIRECTLY from the CSR-free rep policy
+            // via build_reduced_symmetry_csr_rep: O(|G|*nnz), PARALLEL over
+            // rows, and it NEVER materialises the orbit CSR.
+            //
+            // This is the full_spectrum "dense block" fix. Previously an
+            // over-budget sector either (a) fell to the caller's O(dim)-matvec
+            // column build (for j: col_j = H*e_j) -- serial outer loop, tiny
+            // per-column payload, so OpenMP fork/join per column dominated and
+            // the build collapsed to ~1 core -- or (b) paid ensureHostCsr()'s
+            // multi-GB orbit-CSR materialisation storm followed by a SERIAL
+            // orbit-walk assembly. The rep-CSR path avoids both. A[r, j] is
+            // byte-for-byte the column build's col_j[r] (both are the rep-walk
+            // gather; pinned by test_reduced_symmetry_csr.cpp and the
+            // lazy-dense e2e case). Flip/parity sectors work too -- the rep
+            // policy's apply_perm carries the flip masks.
+            if (producer_.rep_lazy() || !producer_.csr_available()) {
+                const auto& rd = producer_.ensureRepData();
+                if (rd.usable()) {
+                    const auto rep_pol = rd.make_policy();
+                    const auto csr = ed::matvec::build_reduced_symmetry_csr_rep<
+                        decltype(rep_pol), Complex>(
+                            rep_pol, static_cast<double>(this->getSpin()),
+                            this->terms_.diag_one_body, this->terms_.offdiag_one_body,
+                            this->terms_.diag_two_body, this->terms_.mixed_two_body,
+                            this->terms_.offdiag_two_body, this->terms_.three_body);
+                    for (std::uint64_t r = 0; r < N; ++r)
+                        for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e)
+                            dense[static_cast<std::size_t>(r)
+                                  + static_cast<std::size_t>(csr.col_idx[e]) * N]
+                                += csr.val[e];
+                    return true;
+                }
+                // Rep-only but rep data unusable (shouldn't happen): decline to
+                // the safe matvec column build rather than risk ensureHostCsr on
+                // a throwing provider.
+                if (!producer_.csr_available()) return false;
+            }
+            // Eager sector (orbit CSR already materialised): the direct
+            // orbit-walk assembler is fastest (no CSR intermediate). Requires
+            // pure permutations -- flip sectors are always rep-lazy so they took
+            // the branch above; this guard only fires on a hypothetical
+            // csr-available-AND-flipped sector.
             if (producer_.ensureRepData().has_flips()) return false;
             producer_.ensureHostCsr();   // materialise sector orbits for policy()
             auto basis_pol = producer_.policy();
@@ -457,9 +498,15 @@ public:
                           std::size_t                     group_size,
                           bool                            is_real,
                           std::function<ed::symmetry::RepSectorData()>  rep_provider,
-                          std::function<SymmetrySector()> csr_provider) {
+                          std::function<SymmetrySector()> csr_provider,
+                          bool                            csr_available = true) {
         producer_.configureRepLazy(sector_dim, group_size, is_real,
-                                   std::move(rep_provider), std::move(csr_provider));
+                                   std::move(rep_provider),
+                                   std::move(csr_provider), csr_available);
+    }
+
+    [[nodiscard]] bool csr_available() const noexcept {
+        return producer_.csr_available();
     }
 
     [[nodiscard]] bool rep_lazy() const noexcept { return producer_.rep_lazy(); }

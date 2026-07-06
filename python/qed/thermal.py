@@ -738,6 +738,57 @@ def thermal(
                     print(f"[qed] point group: {len(star_maps)} residue "
                           "automorphisms fold the irrep sectors into "
                           "isospectral stars (solve one per star).")
+    if (symmetry is not None and not is_directory
+            and isinstance(point_group, str)
+            and point_group.lower() == "full"):
+        # PROPER non-abelian thermodynamics: exact canonical Z/E/C/S
+        # from the full reduced spectrum (every irrep block, d_Gamma
+        # multiplicities folded in) on the production multi-target
+        # matvec. Moderate N (the full spectrum is materialised per
+        # block); the abelian streaming lanes remain the large-N route.
+        from .workflow import _full_group_generators, _little_group_parts
+        gens_full = _full_group_generators(symmetry)
+        if gens_full is None:
+            raise ValueError(
+                "point_group='full' needs a spatial symmetry with "
+                "retained residue (symmetry='auto' / find_symmetries).")
+        temps = list(np.linspace(T_min, T_max, num_T))
+        _nu = -1
+        # Stage 7: factorized little-co-group engine first (matrix-free
+        # momentum sectors); monolithic SAB as the graceful fallback.
+        td = None
+        _lg = _little_group_parts(symmetry)
+        if _lg is not None:
+            try:
+                td = dict(_core.little_group_thermodynamics(
+                    H, _lg[0], _lg[1], temps, n_up=_nu,
+                    use_gpu=(isinstance(device, str)
+                             and device.lower() in ("gpu", "cuda"))))
+                if verbose:
+                    print(f"[qed.thermal] non-abelian LITTLE-GROUP lane "
+                          f"(factorized): |A| = {len(_lg[0])}, residues = "
+                          f"{len(_lg[1])}.")
+            except Exception as exc:          # noqa: BLE001 -- graceful
+                td = None
+                if verbose:
+                    print(f"[qed.thermal] little-group lane declined "
+                          f"({exc}); using the monolithic SAB engine.")
+        if td is None:
+            td = dict(_core.symmetry_adapted_thermodynamics(
+                H, gens_full, temps, _nu,
+                isinstance(device, str) and device.lower() in ("gpu", "cuda")))
+        _E = np.asarray(td["energy"], dtype=float)
+        return ThermalResult(
+            temperatures=np.asarray(td["temperatures"], dtype=float),
+            energy=_E,
+            specific_heat=np.asarray(td["specific_heat"], dtype=float),
+            entropy=np.asarray(td["entropy"], dtype=float),
+            free_energy=np.asarray(td["free_energy"], dtype=float),
+            method=str(method),
+            ground_state_energy=float(_E[0]) if len(_E) else 0.0,
+            used_sz_decomposition=False,
+            used_symmetry_decomposition=True,
+        )
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
@@ -864,8 +915,20 @@ def thermal(
     # per-sample HDF5 trajectories survive long enough for
     # ``compute_tpq_unified_thermo`` to read them back. We allocate
     # scratch dirs on-demand and clean them up when the call returns.
+    # Optimization (Jul 2026): the unified TPQ kernel returns every
+    # trajectory in-memory; the historical per-sector HDF5 scratch
+    # round-trip is pure I/O overhead (2-7x wall time at small N).
+    # No output_dir => writes disabled entirely. probe_betas snapshots
+    # REQUIRE an explicit output_dir (warned below).
     tpq_scratch_dirs: list[str] = []
-    needs_scratch = method_enum in _TPQ_METHODS and not output_dir
+    needs_scratch = False
+    if (method_enum in _TPQ_METHODS and not output_dir
+            and probe_betas):
+        import warnings as _warnings
+        _warnings.warn(
+            "probe_betas were requested without output_dir=; TPQ state "
+            "snapshots are only persisted to disk, so pass output_dir= "
+            "to keep them.", RuntimeWarning, stacklevel=2)
 
     def _alloc_scratch(n_up: Optional[int]) -> str:
         tag = "mtpq"
@@ -973,8 +1036,8 @@ def thermal(
             # the file holds only aggregated curves which the
             # ``averaged/`` group can dedupe in-place; we still route
             # per-sector to be safe and consistent.
-            if needs_scratch:
-                p.output_dir = _alloc_scratch(n_up_val)
+            if not output_dir:
+                p.output_dir = "/dev/null"      # writes disabled
             elif output_dir and n_up_val is not None:
                 p.output_dir = _persistent_sector_outdir(output_dir, n_up_val)
                 if not p.output_dir.startswith("/dev/null"):
@@ -1255,8 +1318,8 @@ def thermal(
         # ``ThermalResult.thermo`` would mask the corruption but the
         # HDF5 file (used for diagnostics, post-processing, audit
         # trails) would still be wrong.
-        if needs_scratch:
-            _resolved_outdir = _alloc_scratch(n_up_val)
+        if not output_dir:
+            _resolved_outdir = "/dev/null"      # writes disabled
         elif output_dir and n_up_val is not None:
             _resolved_outdir = _persistent_sector_outdir(output_dir, n_up_val)
             if not _resolved_outdir.startswith("/dev/null"):

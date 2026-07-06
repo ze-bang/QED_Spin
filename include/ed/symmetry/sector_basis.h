@@ -373,16 +373,26 @@ public:
                           std::size_t                     group_size,
                           bool                            is_real,
                           std::function<RepSectorData()>  rep_provider,
-                          std::function<SymmetrySector()> csr_provider) {
+                          std::function<SymmetrySector()> csr_provider,
+                          bool                            csr_available = true) {
         rep_lazy_       = true;
         rep_dim_        = dim;
         group_size_     = group_size;
         rep_is_real_    = is_real;
         rep_provider_   = std::move(rep_provider);
         csr_provider_   = std::move(csr_provider);
+        csr_available_  = csr_available;
     }
 
     [[nodiscard]] bool rep_lazy() const noexcept { return rep_lazy_; }
+
+    /// False for rep-ONLY sectors (flip-extended / Sz-parity): the
+    /// orbit-CSR form does not exist and ``csr_provider`` throws by
+    /// design. Consumers with a matvec fallback (dense assembly, the
+    /// FullDiag column build) must check this before ensureHostCsr().
+    [[nodiscard]] bool csr_available() const noexcept {
+        return csr_available_;
+    }
     [[nodiscard]] bool rep_is_real() const noexcept { return rep_is_real_; }
 
     // True once the host orbit CSR has actually been materialised (CPU
@@ -467,6 +477,7 @@ private:
     bool                            rep_is_real_ = false;
     mutable RepSectorData           rep_data_{};   // CSR-free rep path source
     mutable std::function<RepSectorData()>  rep_provider_;
+    bool                            csr_available_ = true;
     mutable std::function<SymmetrySector()> csr_provider_;
 };
 

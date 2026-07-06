@@ -38,6 +38,7 @@
 #endif
 
 #include <ed/core/combinadic.h>  // BinomialTable + rank_state (O(1) reverse lookup)
+#include <ed/matvec/rep_symmetry_basis_policy.h>  // RepSymmetryBasisPolicy (make_policy)
 
 namespace ed::symmetry {
 
@@ -109,8 +110,8 @@ struct RepSectorData {
     // Empty = pure permutations (every pre-5b group). When non-empty the
     // length must equal ``group_size`` and ``perms_flat`` carries the
     // permutation part of every element (the flip half repeats the spatial
-    // permutations). The device mirror does NOT support flips yet -- the
-    // builders only emit flip-extended sectors on the CPU lane.
+    // permutations). Stage 8b: the device mirror carries the same
+    // masks, so flip-extended sectors run on both CPU and GPU.
     std::vector<std::uint64_t> flip_masks;
 
     [[nodiscard]] bool has_flips() const noexcept {
@@ -155,7 +156,11 @@ struct RepSectorData {
     // Number of int32 entries a full rank table would need for this sector
     // (== C(n_sites, n_up)). 0 when the sector cannot carry a rank table.
     [[nodiscard]] std::uint64_t rank_table_entries() const noexcept {
-        if (n_up < 0 || n_sites <= 0) return 0;
+        if (n_sites <= 0) return 0;
+        if (n_up < 0) {
+            // State-indexed identity-rank table over the full 2^N.
+            return (n_sites <= 31) ? (1ULL << n_sites) : 0;
+        }
         ed::core::combinadic::BinomialTable b(n_sites);
         return b.at(n_sites, n_up);
     }
@@ -166,7 +171,24 @@ struct RepSectorData {
     // or when the sector is not a usable fixed-Sz sector.
     void build_rank_table() {
         if (has_rank_table()) return;
-        if (n_up < 0 || n_sites <= 0 || reps.empty()) return;
+        if (n_sites <= 0 || reps.empty()) return;
+        if (n_up < 0) {
+            // Full-space / parity / flip-extended sectors: the rank of
+            // a state over the full 2^N enumeration is the state
+            // itself (identity), so the reverse table is state-indexed
+            // (2^N int32; the caller budget-gates via
+            // rank_table_entries + rep_rank_table_enabled).
+            if (n_sites > 31) return;
+            const std::uint64_t dim_all = (1ULL << n_sites);
+            rep_index_of_rank.assign(static_cast<std::size_t>(dim_all),
+                                     std::int32_t{-1});
+            for (std::size_t i = 0; i < reps.size(); ++i) {
+                rep_index_of_rank[static_cast<std::size_t>(reps[i])] =
+                    static_cast<std::int32_t>(i);
+            }
+            binom.resize(n_sites);   // policy precondition (unused here)
+            return;
+        }
         binom.resize(n_sites);
         const std::uint64_t dim_full_sz = binom.at(n_sites, n_up);
         if (dim_full_sz == 0) return;
@@ -215,11 +237,57 @@ struct RepSectorData {
         }
     }
 
+    // Non-owning host policy view over this data. THE single source of the
+    // RepSectorData -> RepSymmetryBasisPolicy mapping: the matvec factory
+    // (``rep_policy_from``) and the dense-assembly lane
+    // (``SubspaceOperator::try_build_dense_columns``, rep-only sectors) both
+    // route through here so the two-level rank table / flip masks / perm LUT
+    // wiring can never drift between them. The returned view holds raw
+    // pointers into this object's vectors -- keep it alive for the policy's
+    // lifetime.
+    [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy
+    make_policy() const noexcept {
+        ed::matvec::basis::RepSymmetryBasisPolicy p;
+        p.reps       = reps.data();
+        p.inv_norms  = inv_norms.data();
+        p.perms      = perms_flat.data();
+        p.characters = characters.data();
+        p.dim_       = reps.size();
+        p.group_size = group_size;
+        p.n_sites    = n_sites;
+        p.n_up       = n_up;
+        // Stage 4 two-level lookup takes precedence: shared rank table (one
+        // per (N, n_up)) + per-sector local remap. Then the legacy dense
+        // per-sector table; index_of_rep falls back to binary search when
+        // neither is set.
+        if (has_two_level()) {
+            p.shared_rank_of  = shared_rank->shared_of_rank.data();
+            p.local_of_shared = local_of_shared.data();
+            p.binom           = &shared_rank->binom;
+        } else if (has_rank_table()) {
+            p.rep_index_of_rank = rep_index_of_rank.data();
+            p.binom             = &binom;
+        }
+        // N<=32 fast apply_perm: byte-decomposition LUT (4 lookups vs N iters).
+        if (!perm_lut_data.empty()) {
+            p.perm_lut     = perm_lut_data.data();
+            p.perm_lut_bpw = perm_lut_bpw;
+        }
+        // Stage 5b: flip-extended elements (perm THEN xor).
+        if (!flip_masks.empty()) {
+            p.flips = flip_masks.data();
+        }
+        return p;
+    }
+
     // A RepSectorData is usable by the rep matvec only when it carries a
     // fixed-Sz magnetisation (the device reverse lookup is a combinadic rank
     // table over C(n_sites, n_up)) and a non-empty group action.
     [[nodiscard]] bool usable() const noexcept {
-        return n_up >= 0 && group_size > 0 && n_sites > 0
+        // n_up == -1 is the documented full-space sentinel (the rep
+        // policy skips the popcount filter); rejecting it silently
+        // degraded the full-space lazy lane to orbit-CSR.
+        return n_up >= -1 && group_size > 0 && n_sites > 0
             && !reps.empty()
             && characters.size() == static_cast<std::size_t>(group_size)
             && perms_flat.size() ==
@@ -247,7 +315,27 @@ sector_characters_from(const GroupInfoT&                        info,
     std::vector<std::complex<double>> chi(G, std::complex<double>(1.0, 0.0));
     // phase_factors: PER-ELEMENT (length |G|, χ(max_clique[g]) directly) or
     // PER-GENERATOR (length num_generators, reconstruct via power_representation).
-    const bool per_element = (phase_factors.size() == G);
+    // C12: disambiguate on the generator COUNT rather than length==|G| alone.
+    // The two forms collide only when #generators == |G| -- impossible for a
+    // MINIMAL generating set of a non-trivial group (num_gen = #invariant
+    // factors << |G|), but a caller listing |G| redundant generators would
+    // otherwise be mis-read as per-element. Prefer the per-generator reading
+    // when the length matches the generator count and that differs from |G|;
+    // fall to per-element (unambiguous data) when the length is |G|.
+    const std::size_t num_gen =
+        (G > 0 && !info.power_representation.empty())
+            ? info.power_representation[0].size() : 0;
+    const bool per_generator =
+        (num_gen != 0 && phase_factors.size() == num_gen && num_gen != G);
+    const bool per_element =
+        (!per_generator && phase_factors.size() == G);
+    if (!per_generator && !per_element) {
+        // Malformed metadata (length matches neither |G| nor #generators):
+        // keep the trivial (identity) characters rather than indexing out of
+        // bounds -- the caller's Burnside / sum-rule guard then flags the
+        // resulting sector dims.
+        return chi;
+    }
     for (std::size_t g = 0; g < G; ++g) {
         if (per_element) {
             chi[g] = phase_factors[g];
@@ -255,7 +343,8 @@ sector_characters_from(const GroupInfoT&                        info,
         }
         const auto& powers = info.power_representation[g];
         std::complex<double> c(1.0, 0.0);
-        for (std::size_t k = 0; k < powers.size(); ++k) {
+        for (std::size_t k = 0; k < powers.size() && k < phase_factors.size();
+             ++k) {
             const std::complex<double> phase = phase_factors[k];
             for (int p = 0; p < powers[k]; ++p) c *= phase;
         }

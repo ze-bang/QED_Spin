@@ -235,6 +235,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
     ${SOLVERS_CPU_DIR}/symmetry_adapted_solve.cpp
+    ${SOLVERS_CPU_DIR}/little_group_solve.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
     # Phase A of the "mirror examples" plan (May 2026): Python-named

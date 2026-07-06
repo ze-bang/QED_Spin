@@ -54,6 +54,8 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/symmetry_adapted.h>
 #include <ed/solvers/symmetry_adapted_solve.h>
+#include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
+#include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -790,9 +792,189 @@ PYBIND11_MODULE(_core, m) {
 
     // Finite-temperature thermodynamics via the symmetry-reduced spectrum
     // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
+    m.def("symmetry_adapted_lowest_eigenvalues",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators,
+             int k, int n_up, int dense_max_dim, int sz_parity) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto group = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
+              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
+                  op, gi, group, n_sites, k, n_up, dense_max_dim,
+                  ed::solvers::BlockMethod::Auto, sz_parity);
+              py::dict d;
+              d["eigenvalues"]     = spec.eigenvalues;
+              d["block_irrep_dim"] = spec.block_irrep_dim;
+              d["block_size"]      = spec.block_size;
+              d["group_order"]     = gi.order;
+              return d;
+          },
+          py::arg("operator"), py::arg("generators"), py::arg("k"),
+          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          py::arg("sz_parity") = -1,
+          R"pbdoc(
+            Lowest-k eigenvalues under the FULL (possibly non-abelian)
+            group reduction: each irrep block runs the production
+            multi-target matvec through block-size-adaptive dense /
+            Lanczos solves; eigenvalues recombined with their d_Gamma
+            multiplicities and sorted. The ITERATIVE non-abelian lane
+            (blocks ~ dim/|G| including d >= 2 irreps).
+          )pbdoc");
+
+    m.def("symmetry_adapted_gs_dssf",
+          [](const Operator& op_h, const Operator& op_o,
+             const std::vector<std::vector<int>>& generators,
+             double omega_min, double omega_max, int n_omega,
+             double broadening) {
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+              auto group = ed::sym::generate_group(generators);
+              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
+              // Stage 8d: compose the diagonal axis. When H conserves
+              // U(1) Sz (or only its Z2 parity remnant), partition the
+              // eigen-decomposition by n_up (or parity half): the union
+              // of subspace blocks stays complete while every dense
+              // solve shrinks. Same term-level detection the
+              // composition layer uses everywhere else.
+              std::vector<std::pair<int, int>> subspaces{{-1, -1}};
+              {
+                  ed::matvec::TermStorage soa;
+                  ed::matvec::TermStorage::classify_route(
+                      soa, op_h.transform_data_, op_h.three_body_data_,
+                      [](const std::complex<double>& c) { return c; });
+                  const auto ax = ed::symmetry::sz_axis_of(soa);
+                  if (ax == ed::symmetry::SzAxis::U1) {
+                      subspaces.clear();
+                      for (int k = 0; k <= n_sites; ++k)
+                          subspaces.emplace_back(k, -1);
+                  } else if (ax == ed::symmetry::SzAxis::Parity) {
+                      subspaces = {{-1, 0}, {-1, 1}};
+                  }
+              }
+              auto res = ed::solvers::symmetry_adapted_ground_state_dssf(
+                  op_h, op_o, gi, group, n_sites,
+                  omega_min, omega_max, n_omega, broadening, subspaces);
+              py::dict d;
+              d["omega"]        = res.omega;
+              d["s_omega"]      = res.spectral;
+              d["gs_energy"]    = res.ground_energy;
+              d["total_weight"] = res.total_weight;
+              return d;
+          },
+          py::arg("op_h"), py::arg("op_o"), py::arg("generators"),
+          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
+          py::arg("broadening"),
+          R"pbdoc(
+            Ground-state DSSF S(omega) under the FULL non-abelian group
+            reduction (all d_Gamma partners summed for completeness).
+            Stage 8d: the diagonal axis composes automatically -- a
+            U(1)- / parity-conserving H is decomposed per n_up / parity
+            half (smaller dense blocks, identical physics).
+          )pbdoc");
+
+    // -----------------------------------------------------------------
+    // Stage 7 (SymmetryEngine v2): FACTORIZED non-abelian reduction via
+    // little co-groups. G = A ⋊ P: solve one momentum per star, project
+    // the star representative's MATRIX-FREE k-sector with the little
+    // co-group's (numerically decomposed) irreps -- memory O(#reps(k)),
+    // never O(2^N), so this scales past the monolithic SAB cap. Every
+    // refinement step degrades gracefully to the plain k0 block.
+    // -----------------------------------------------------------------
+    auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim,
+                      bool use_gpu = false) {
+        ed::solvers::LittleGroupOptions o;
+        o.n_up          = n_up;
+        o.sz_parity     = sz_parity;
+        o.dense_max_dim = dense_max_dim;
+#ifdef WITH_CUDA
+        o.use_gpu       = use_gpu;
+#else
+        (void)use_gpu;
+#endif
+        return o;
+    };
+    auto lg_stars_dict = [](const ed::solvers::LittleGroupSpectrum& s) {
+        py::list stars;
+        for (const auto& st : s.stars) {
+            py::dict d;
+            d["k0"]           = st.k0;
+            d["star_size"]    = st.star_size;
+            d["little_order"] = st.little_order;
+            d["projected"]    = st.projected;
+            d["dim_k0"]       = st.dim_k0;
+            stars.append(d);
+        }
+        return stars;
+    };
+
+    m.def("little_group_full_spectrum",
+          [lg_opts, lg_stars_dict](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int n_up, int sz_parity, bool use_gpu) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto s = ed::solvers::little_group_full_spectrum(
+                  op, abelian_group, residue_perms, n_sites,
+                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+              py::dict d;
+              d["eigenvalues"]    = s.expanded();
+              d["block_values"]   = s.eigenvalues;
+              d["multiplicities"] = s.multiplicities;
+              d["stars"]          = lg_stars_dict(s);
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("n_up") = -1,
+          py::arg("sz_parity") = -1, py::arg("use_gpu") = false,
+          "Full spectrum via the FACTORIZED little-co-group reduction "
+          "(one momentum per star, per-irrep blocks inside the star "
+          "representative's matrix-free k-sector).");
+
+    m.def("little_group_lowest_eigenvalues",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              return ed::solvers::little_group_lowest_eigenvalues(
+                  op, abelian_group, residue_perms, n_sites, k,
+                  lg_opts(n_up, sz_parity, dense_max_dim));
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 64,
+          "Lowest-k eigenvalues via the factorized little-co-group "
+          "reduction (dense on small blocks, Lanczos on the projected "
+          "matrix-free matvec otherwise); multiplicities expanded.");
+
+    m.def("little_group_thermodynamics",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             const std::vector<double>& temperatures,
+             int n_up, int sz_parity, bool use_gpu) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              auto td = ed::solvers::little_group_thermodynamics(
+                  op, abelian_group, residue_perms, n_sites, temperatures,
+                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+              py::dict d;
+              d["temperatures"]  = td.temperatures;
+              d["energy"]        = td.energy;
+              d["specific_heat"] = td.specific_heat;
+              d["entropy"]       = td.entropy;
+              d["free_energy"]   = td.free_energy;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("temperatures"),
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("use_gpu") = false,
+          "Exact canonical thermodynamics from the factorized "
+          "little-co-group full spectrum.");
+
     m.def("symmetry_adapted_thermodynamics",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             const std::vector<double>& temperatures, int n_up, bool use_gpu) {
+             const std::vector<double>& temperatures, int n_up, bool use_gpu,
+             int sz_parity) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto max_clique = ed::sym::generate_group(generators);
               auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
@@ -804,7 +986,7 @@ PYBIND11_MODULE(_core, m) {
               else
 #endif
                   td = ed::solvers::symmetry_adapted_thermodynamics(
-                      op, gi, max_clique, n_sites, temperatures, n_up);
+                      op, gi, max_clique, n_sites, temperatures, n_up, sz_parity);
               (void)use_gpu;
               py::dict d;
               d["temperatures"] = td.temperatures;
@@ -816,6 +998,7 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("operator"), py::arg("generators"), py::arg("temperatures"),
           py::arg("n_up") = -1, py::arg("use_gpu") = false,
+          py::arg("sz_parity") = -1,
           "Exact canonical thermodynamics (E, C, S, F vs T) of a Hamiltonian "
           "reduced by the (possibly non-abelian) point group, with optional "
           "fixed-Sz restriction (n_up>=0). Diagonalises the small per-irrep "

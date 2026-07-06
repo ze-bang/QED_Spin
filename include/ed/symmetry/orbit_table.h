@@ -293,20 +293,20 @@ make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
                                         static_cast<int>(n_bits));
 }
 
-/// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
-/// bit-identical to ``enumerate_full_orbit_reps``.
+/// Fused rep + stabilizer scan over the full 2^N Hilbert space for an
+/// arbitrary CompiledGroup (perm (+) flip-mask elements -- the full
+/// 2^N space is closed under EVERY such element, so the min-image
+/// convention and closed-form norms hold unconditionally). This is the
+/// entry the flip-extended full-space sectors use.
 [[nodiscard]] inline OrbitTable
-build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
-    SymPhaseTimer prof("pass1+1.5 fused orbit-table (full)");
+build_orbit_table_full_compiled(std::uint64_t        n_bits,
+                                const CompiledGroup& cg) {
+    SymPhaseTimer prof("pass1+1.5 fused orbit-table (full, compiled)");
     OrbitTable tab;
     const std::uint64_t dim = (1ULL << n_bits);
     tab.subspace_dim = dim;
 
-    const std::size_t G = info.max_clique.size();
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    const std::size_t G = cg.size();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
@@ -373,6 +373,103 @@ build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
     tab.stab_elems = std::move(global.sets);
     prof.set_items(tab.reps.size());
     return tab;
+}
+
+/// Fused rep + stabilizer scan over the Sz-PARITY subspace
+/// (popcount(s) mod 2 == parity, dim 2^{N-1}). Every CompiledGroup
+/// element here must preserve popcount parity: site permutations
+/// always do; the all-ones flip does iff N is even (the caller
+/// enforces the closure rule).
+[[nodiscard]] inline OrbitTable
+build_orbit_table_parity_compiled(std::uint64_t        n_bits,
+                                  int                  parity,
+                                  const CompiledGroup& cg) {
+    SymPhaseTimer prof("pass1+1.5 fused orbit-table (Sz-parity)");
+    OrbitTable tab;
+    const std::uint64_t dim_all = (1ULL << n_bits);
+    tab.subspace_dim = dim_all / 2;
+
+    const std::size_t G = cg.size();
+    tab.content_hash = cg.content_hash()
+        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+        ^ (n_bits * 0x2545F4914F6CDD1DULL)
+        ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
+
+    int nthreads = 1;
+#ifdef _OPENMP
+    nthreads = omp_get_max_threads();
+#endif
+    if (dim_all < (std::uint64_t{1} << 14)) nthreads = 1;
+    if (nthreads < 1) nthreads = 1;
+
+    struct Local {
+        std::vector<std::uint64_t> reps;
+        std::vector<std::uint16_t> stab_id;
+        detail::StabDedup          dedup;
+    };
+    std::vector<Local> local(static_cast<std::size_t>(nthreads));
+
+#ifdef _OPENMP
+#   pragma omp parallel num_threads(nthreads)
+#endif
+    {
+        int tid = 0, nt = 1;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+        nt  = omp_get_num_threads();
+#endif
+        const std::uint64_t chunk = dim_all / static_cast<std::uint64_t>(nt);
+        const std::uint64_t rem   = dim_all % static_cast<std::uint64_t>(nt);
+        const std::uint64_t begin =
+            static_cast<std::uint64_t>(tid) * chunk +
+            std::min<std::uint64_t>(static_cast<std::uint64_t>(tid), rem);
+        const std::uint64_t count =
+            chunk + (static_cast<std::uint64_t>(tid) < rem ? 1u : 0u);
+
+        Local& out = local[static_cast<std::size_t>(tid)];
+        std::vector<std::uint16_t> stab_scratch;
+        stab_scratch.reserve(G ? G : 1);
+        for (std::uint64_t i = 0; i < count; ++i) {
+            const std::uint64_t s = begin + i;
+            if ((static_cast<int>(__builtin_popcountll(s)) & 1) != parity)
+                continue;
+            if (G == 0) {
+                out.reps.push_back(s);
+                stab_scratch.assign(1, 0);
+                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
+            } else if (detail::visit_state(s, cg, G, stab_scratch)) {
+                out.reps.push_back(s);
+                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
+            }
+        }
+    }
+
+    std::size_t tot = 0;
+    for (const auto& l : local) tot += l.reps.size();
+    tab.reps.reserve(tot);
+    tab.stab_id.reserve(tot);
+    detail::StabDedup global;
+    for (auto& l : local) {
+        std::vector<std::uint16_t> remap(l.dedup.sets.size());
+        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
+            remap[k] = global.id_of(l.dedup.sets[k]);
+        tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
+        for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
+    }
+    tab.stab_elems = std::move(global.sets);
+    prof.set_items(tab.reps.size());
+    return tab;
+}
+
+/// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
+/// bit-identical to ``enumerate_full_orbit_reps``.
+[[nodiscard]] inline OrbitTable
+build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
+    const CompiledGroup cg = info.max_clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              info.max_clique, static_cast<int>(info.max_clique[0].size()));
+    return build_orbit_table_full_compiled(n_bits, cg);
 }
 
 }  // namespace ed::symmetry

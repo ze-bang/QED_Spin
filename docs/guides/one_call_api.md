@@ -54,8 +54,14 @@ What `qed.solve` decides for you (override any of these via kwargs):
   each with its own four-state toggle `spin_flip=` / `time_reversal=`
   in {"auto", "on", "off", "require"}: `"on"` confirms the detection
   or warns-and-continues when H lacks the symmetry; `"require"`
-  throws. `qed._core.detect_hamiltonian_symmetries(H)` exposes the
-  term-level detection directly. Internally the kwargs map onto the
+  throws. `point_group=` distinguishes star FOLDING (`"auto"`: copy
+  isospectral momentum sectors) from true non-abelian PROJECTION
+  (`"full"`: d>=2 irrep blocks on the SAB engine). The diagonal axis is
+  `sz=` (int, `"even"`/`"odd"` parity halves, or auto — including the
+  Z2 parity remnant of a broken U(1)); `auto_sz=False` disables it
+  entirely. `qed._core.detect_hamiltonian_symmetries(H)` exposes the
+  term-level detection directly (`spin_flip` / `time_reversal` /
+  `u1` / `sz_parity`). Internally the kwargs map onto the
   `(Subspace, ProjectorChain)` decomposition:
   `sz=` selects between `FullSpaceSubspace` and `FixedSzSubspace`,
   `symmetry=` populates a `ProjectorChain` with the spatial projector,

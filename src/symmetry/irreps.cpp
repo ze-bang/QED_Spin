@@ -40,22 +40,16 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     return c;
 }
 
-[[nodiscard]] std::vector<int> inverse_perm(const std::vector<int>& p) {
-    std::vector<int> inv(p.size());
-    for (std::size_t i = 0; i < p.size(); ++i)
-        inv[static_cast<std::size_t>(p[i])] = static_cast<int>(i);
-    return inv;
-}
-
 // One decomposition attempt with a given RNG seed. Returns false (and leaves
 // `out` untouched) if the random Hermitian commutant element failed to separate
-// the irreps cleanly (caller retries with a new seed).
-[[nodiscard]] bool try_decompose(const std::vector<std::vector<int>>& G,
-                                 const std::vector<int>& inverse,
+// the irreps cleanly (caller retries with a new seed). Works purely from the
+// (mult, inverse) tables -- the group can be abstract (Stage 7 little
+// co-groups have no faithful site-permutation realisation).
+[[nodiscard]] bool try_decompose(const std::vector<int>& inverse,
                                  const std::vector<std::vector<int>>& mult,
                                  std::uint64_t seed,
                                  std::vector<IrrepData>& out) {
-    const int n = static_cast<int>(G.size());
+    const int n = static_cast<int>(mult.size());
 
     // ---- Random Hermitian commutant element M = Σ_h c_h R(h) -----------------
     // R(h) e_x = e_{x·h^{-1}} = e_{mult[x][inverse[h]]}. Hermiticity needs
@@ -170,9 +164,6 @@ GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
     const int n = static_cast<int>(max_clique.size());
     if (n == 0) throw std::runtime_error("decompose_irreps: empty group");
 
-    GroupIrreps gi;
-    gi.order = n;
-
     // Index every permutation for table lookups.
     std::map<std::vector<int>, int> idx;
     for (int a = 0; a < n; ++a) idx[max_clique[static_cast<std::size_t>(a)]] = a;
@@ -185,16 +176,52 @@ GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
         return it->second;
     };
 
-    // Multiplication + inverse tables.
-    gi.mult.assign(static_cast<std::size_t>(n), std::vector<int>(static_cast<std::size_t>(n)));
-    gi.inverse.assign(static_cast<std::size_t>(n), 0);
-    for (int a = 0; a < n; ++a) {
-        gi.inverse[static_cast<std::size_t>(a)] =
-            lookup(inverse_perm(max_clique[static_cast<std::size_t>(a)]));
+    // Multiplication table; the rest (inverse, classes, numerical
+    // decomposition) is abstract.
+    std::vector<std::vector<int>> mult(
+        static_cast<std::size_t>(n), std::vector<int>(static_cast<std::size_t>(n)));
+    for (int a = 0; a < n; ++a)
         for (int b = 0; b < n; ++b)
-            gi.mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] =
+            mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] =
                 lookup(compose(max_clique[static_cast<std::size_t>(a)],
                                max_clique[static_cast<std::size_t>(b)]));
+    return decompose_irreps_tables(mult);
+}
+
+GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
+    const int n = static_cast<int>(mult.size());
+    if (n == 0) throw std::runtime_error("decompose_irreps_tables: empty group");
+
+    GroupIrreps gi;
+    gi.order = n;
+    gi.mult  = mult;
+
+    // Identity + inverse from the table alone: e is the unique element with
+    // mult[e][b] == b for every b; inverse[a] solves mult[a][x] == e.
+    int e = -1;
+    for (int a = 0; a < n && e < 0; ++a) {
+        bool is_e = true;
+        for (int b = 0; b < n; ++b)
+            if (gi.mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] != b) {
+                is_e = false;
+                break;
+            }
+        if (is_e) e = a;
+    }
+    if (e < 0)
+        throw std::runtime_error(
+            "decompose_irreps_tables: multiplication table has no identity");
+    gi.inverse.assign(static_cast<std::size_t>(n), -1);
+    for (int a = 0; a < n; ++a) {
+        for (int x = 0; x < n; ++x) {
+            if (gi.mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(x)] == e) {
+                gi.inverse[static_cast<std::size_t>(a)] = x;
+                break;
+            }
+        }
+        if (gi.inverse[static_cast<std::size_t>(a)] < 0)
+            throw std::runtime_error(
+                "decompose_irreps_tables: element without inverse (not a group)");
     }
 
     // Conjugacy classes: a ~ x·a·x^{-1}.
@@ -216,7 +243,7 @@ GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
     std::vector<IrrepData> irreps;
     bool ok = false;
     for (std::uint64_t seed = 1; seed <= 16 && !ok; ++seed)
-        ok = try_decompose(max_clique, gi.inverse, gi.mult, 0x9E3779B97F4A7C15ull * seed, irreps);
+        ok = try_decompose(gi.inverse, gi.mult, 0x9E3779B97F4A7C15ull * seed, irreps);
     if (!ok)
         throw std::runtime_error(
             "decompose_irreps: numerical decomposition failed (Σ d_Γ² != |G|) "

@@ -144,6 +144,10 @@ struct SolveOptions {
     /// by the Python automorphism pipeline; empty = no star reduction.
     std::vector<std::vector<int>> star_maps;
 
+    /// Sz-parity sectors (diagonal Z2 remnant): -1 = off/auto-detect
+    /// upstream, 0 = even half, 1 = odd half, 2 = both halves.
+    int sz_parity = -1;
+
     /// If true, generate the symmetry basis + the sector-block
     /// Hamiltonians and exit without diagonalising. Used by the CLI's
     /// `precompute_basis_only` mode to pre-warm the cache on a single
@@ -170,6 +174,10 @@ struct ThermalOptions {
     /// Isospectral orbit members are solved once and copied. Computed
     /// by the Python automorphism pipeline; empty = no star reduction.
     std::vector<std::vector<int>> star_maps;
+
+    /// Sz-parity sectors (diagonal Z2 remnant): -1 = off/auto-detect
+    /// upstream, 0 = even half, 1 = odd half, 2 = both halves.
+    int sz_parity = -1;
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {

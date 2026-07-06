@@ -29,7 +29,7 @@ The same shape is exposed in Python as
 | Ground state / low-lying spectrum (Lanczos, Block-Lanczos, Krylov-Schur, dense LAPACK) | production |
 | Finite-temperature thermodynamics (FTLM, LTLM, mTPQ, cTPQ, KPM-DOS) | production |
 | Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
-| Symmetry projection: U(1) Sz × **abelian** spatial point group × translations | production, matrix-free at scale (rep walk) |
+| Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, SAB engine for d≥2 |
 | Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF, moderate-N (scale-guarded SAB engine) |
 | Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
 | Symmetry projection: spin-flip Z₂, time-reversal, SU(2) total-S | seam open, implementation deferred |
@@ -129,6 +129,9 @@ qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
              sz=N//2, momentum_transfer=[0.5])        # DSSF
 qed.full_spectrum(H, symmetry="auto")                 # complete dense spectrum
                                                       # (non-abelian SAB route)
+qed.solve(H, symmetry=gen, sz="even")                 # Sz-parity half (U(1)-broken H)
+qed.solve(H, symmetry=gen, point_group="full")        # true non-abelian d>=2 blocks
+qed.solve(H, symmetry="translation", lattice=lat)     # T projector + point-group stars
 ```
 
 Each discrete symmetry has its own four-state toggle, so you can mix
@@ -141,6 +144,14 @@ has:
 | `"on"` | same, but REPORT: confirms detection, **warns and continues without it** when H lacks the symmetry |
 | `"off"` | never exploit it |
 | `"require"` | hard contract: throw when H lacks the symmetry |
+
+`point_group=` adds two more positions: `"auto"` (star folding — solve
+one momentum per point-group star, copy the spectrum) and `"full"`
+(genuine non-abelian projection: d≥2 irrep blocks ~dim/|G| on the SAB
+engine, composed with the diagonal axis). The Sz axis itself is
+three-state: integer `sz=`, `sz="even"/"odd"` (the Z₂ parity remnant
+when S⁺S⁺-type terms break U(1)), or auto; `auto_sz=False` disables
+the whole diagonal axis.
 
 ```python
 qed.solve(H, symmetry="auto", sz=N//2,

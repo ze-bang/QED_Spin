@@ -142,9 +142,14 @@ struct RepSymmetryBasisPolicy {
             const std::int32_t k = local_of_shared[g];
             return (k < 0) ? -1 : static_cast<std::int64_t>(k);
         }
-        if (rep_index_of_rank != nullptr && binom != nullptr) {
-            const std::int64_t r =
-                ed::core::combinadic::rank_state(rb, n_sites, n_up, *binom);
+        if (rep_index_of_rank != nullptr
+            && (n_up < 0 || binom != nullptr)) {
+            // n_up < 0: full-space/parity sectors use the identity
+            // rank (state-indexed table).
+            const std::int64_t r = (n_up < 0)
+                ? static_cast<std::int64_t>(rb)
+                : ed::core::combinadic::rank_state(rb, n_sites, n_up,
+                                                   *binom);
             const std::int32_t k = rep_index_of_rank[r];
             return (k < 0) ? -1 : static_cast<std::int64_t>(k);
         }
@@ -173,29 +178,54 @@ struct RepSymmetryBasisPolicy {
     // pass accumulates the projection phase from the same images — halving the
     // apply_perm call count vs the prior two-pass approach (representative() +
     // separate scan). group_size is bounded by realistic lattice groups (≤256).
+    // Cap on the one-scan image cache. Groups this large are unusual (D4h on a
+    // 4x8 N=32 lattice is |G|=256, the largest common lattice case) but a
+    // flip-extension doubles |G|, and NLCE point groups can exceed it -- so
+    // |G| > kMaxG must NOT overrun the stack buffer. Matches the device policy's
+    // identically named guard (device_basis_policy.cuh).
+    static constexpr int kMaxG = 256;
+
     [[nodiscard]] inline std::int64_t
     index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
         if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
 
-        // Compute all |G| images once; find the minimum (= representative).
-        // 256 covers any realistic lattice automorphism group.
-        std::uint64_t images[256];
-        std::uint64_t rb = state;
-        for (int g = 0; g < group_size; ++g) {
-            images[g] = apply_perm(state, g);
-            if (images[g] < rb) rb = images[g];
+        if (group_size <= kMaxG) {
+            // Fast path: compute all |G| images once into a stack buffer; the
+            // representative (min) and the character accumulation both read it.
+            std::uint64_t images[kMaxG];
+            std::uint64_t rb = state;
+            for (int g = 0; g < group_size; ++g) {
+                images[g] = apply_perm(state, g);
+                if (images[g] < rb) rb = images[g];
+            }
+            const std::int64_t k = index_of_rep(rb);
+            if (k < 0) return -1;
+            double acc_re = 0.0, acc_im = 0.0;
+            for (int h = 0; h < group_size; ++h) {
+                if (images[h] == rb) {
+                    acc_re += characters[h].real();   // conj: +real
+                    acc_im -= characters[h].imag();   //       -imag
+                }
+            }
+            const double s = inv_norms[static_cast<std::size_t>(k)];
+            proj_out = Complex(acc_re * s, acc_im * s);
+            return k;
         }
 
+        // |G| > kMaxG: two-pass, buffer-free (recompute images in pass 2).
+        // Rare and slower, but correct rather than a stack overrun.
+        std::uint64_t rb = state;
+        for (int g = 1; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            if (img < rb) rb = img;
+        }
         const std::int64_t k = index_of_rep(rb);
         if (k < 0) return -1;
-
-        // Accumulate conj(chi_k) for all h mapping state → rb, using the
-        // already-computed images[] — no apply_perm calls here.
         double acc_re = 0.0, acc_im = 0.0;
         for (int h = 0; h < group_size; ++h) {
-            if (images[h] == rb) {
-                acc_re += characters[h].real();   // conj: +real
-                acc_im -= characters[h].imag();   //       -imag
+            if (apply_perm(state, h) == rb) {
+                acc_re += characters[h].real();
+                acc_im -= characters[h].imag();
             }
         }
         const double s = inv_norms[static_cast<std::size_t>(k)];

@@ -44,9 +44,14 @@
 #include <thrust/device_vector.h>
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <cmath>
+#include <utility>
 #include <complex>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -582,6 +587,45 @@ void launch_symmetry_matvec(const GpuSectorMirror& mirror,
 // The group action + projection are regenerated arithmetically inside the
 // kernel; per-SpMV traffic is just the in/out vectors -> the genuine /|G|.
 // =============================================================================
+// Stage-4 device twin (Jul 2026): ONE rank -> shared-rep-index table per
+// (N, n_up) subspace, co-owned by every irrep sector's mirror through a
+// content-keyed weak registry. Kills the per-sector C(N, n_up) x int32
+// duplication (2.4 GiB EACH at N=32 half filling).
+struct GpuSharedRankTable {
+    thrust::device_vector<std::int32_t> d_shared_of_rank;
+};
+
+[[nodiscard]] inline std::shared_ptr<GpuSharedRankTable>
+acquire_gpu_shared_rank(
+    const std::shared_ptr<const ed::symmetry::SharedRankLookup>& srl)
+{
+    static std::mutex mtx;
+    static std::map<const void*, std::weak_ptr<GpuSharedRankTable>> registry;
+    // Keep-alive FIFO: per-sector GPU mirrors are transient (rebuilt per
+    // solve), so a pure weak registry would re-upload the table between
+    // consecutive sector solves. A run touches at most a couple of
+    // (N, n_up) subspaces, so a tiny strong cache pins the recent tables.
+    static std::vector<std::pair<const void*,
+                                 std::shared_ptr<GpuSharedRankTable>>> keep;
+    constexpr std::size_t kKeepCap = 4;
+
+    std::lock_guard<std::mutex> lk(mtx);
+    auto& slot = registry[static_cast<const void*>(srl.get())];
+    if (auto sp = slot.lock()) return sp;
+    auto sp = std::make_shared<GpuSharedRankTable>();
+    sp->d_shared_of_rank = srl->shared_of_rank;   // one H2D per (N, n_up)
+    if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+        std::fprintf(stderr,
+                     "[sym_profile] GPU shared rank table uploaded: "
+                     "%zu entries (N=%d, n_up=%d), co-owned by mirrors\n",
+                     srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
+    }
+    slot = sp;
+    if (keep.size() >= kKeepCap) keep.erase(keep.begin());
+    keep.emplace_back(static_cast<const void*>(srl.get()), sp);
+    return sp;
+}
+
 struct GpuRepSectorMirror {
     thrust::device_vector<std::uint64_t>   d_reps;
     thrust::device_vector<double>          d_inv_norms;
@@ -589,6 +633,9 @@ struct GpuRepSectorMirror {
     thrust::device_vector<cuDoubleComplex> d_characters;
     thrust::device_vector<std::uint64_t>   d_flips;   // Stage 8b: flip masks
     thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
+    // Stage-4 device twin: shared table (co-owned) + per-sector remap.
+    std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
+    thrust::device_vector<std::int32_t>    d_local_of_shared;
 
     int           group_size = 1;
     int           n_sites    = 0;
@@ -611,7 +658,14 @@ struct GpuRepSectorMirror {
         v.characters        = thrust::raw_pointer_cast(d_characters.data());
         v.flips             = d_flips.empty()
             ? nullptr : thrust::raw_pointer_cast(d_flips.data());
-        v.rep_index_of_rank = thrust::raw_pointer_cast(d_rep_index_of_rank.data());
+        v.rep_index_of_rank = d_rep_index_of_rank.empty()
+            ? nullptr : thrust::raw_pointer_cast(d_rep_index_of_rank.data());
+        if (shared_rank_tab && !d_local_of_shared.empty()) {
+            v.shared_rank_of  = thrust::raw_pointer_cast(
+                shared_rank_tab->d_shared_of_rank.data());
+            v.local_of_shared = thrust::raw_pointer_cast(
+                d_local_of_shared.data());
+        }
         v.dim_              = dim;
         v.group_size        = group_size;
         v.n_sites           = n_sites;
@@ -653,8 +707,15 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     }
     const int n_sites = data.n_sites;
     const int n_up    = data.n_up;
-    if (n_sites <= 0 || n_sites > 64 || n_up < 0 || n_up > n_sites) {
+    if (n_sites <= 0 || n_sites > 64 || n_up < -1 || n_up > n_sites) {
         throw std::runtime_error("build_rep_mirror: invalid n_sites / n_up");
+    }
+    if (n_up < 0 && n_sites > 31) {
+        // Full-space sector: the reverse table is indexed by the state
+        // itself (2^N int32 entries). 31 bits caps it at 8 GiB.
+        throw std::runtime_error(
+            "build_rep_mirror: full-space rep mirror needs n_sites <= 31 "
+            "(dense state-indexed reverse table)");
     }
 
     auto mirror = std::make_shared<GpuRepSectorMirror>();
@@ -665,13 +726,17 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     mirror->dim        = data.dim();
 
     // C(n_sites, n_up), capped at INT32_MAX (the rank-table value type).
+    // Full-space sectors (n_up < 0): the rank space is the whole 2^N
+    // (state-indexed identity rank).
     long double dv = 1.0L;
-    {
+    if (n_up >= 0) {
         int kk = (n_up < n_sites - n_up) ? n_up : (n_sites - n_up);
         for (int i = 0; i < kk; ++i) {
             dv *= static_cast<long double>(n_sites - i);
             dv /= static_cast<long double>(i + 1);
         }
+    } else {
+        dv = static_cast<long double>(1ULL << n_sites);
     }
     if (dv > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
         throw std::runtime_error(
@@ -711,13 +776,25 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
         return r;
     };
 
-    // Reverse table: rank(representative) -> orbit index. Built from reps
-    // ONLY -- no orbit images materialised.
-    std::vector<std::int32_t> h_rep_index_of_rank(dim_full_sz, -1);
-    for (std::size_t i = 0; i < data.reps.size(); ++i) {
-        const std::uint64_t r = rank_combination_host(data.reps[i], n_up);
-        if (r < dim_full_sz) {
-            h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
+    // Reverse table. Stage-4 device twin (Jul 2026): when the host sector
+    // carries the two-level lookup, upload the small per-sector remap and
+    // co-own ONE shared rank table per (N, n_up) -- the per-sector dense
+    // table below is then never built (this was 2.4 GiB PER SECTOR at
+    // N=32 half filling). Fallback: the dense per-sector table, built
+    // from reps only (no orbit walk).
+    std::vector<std::int32_t> h_rep_index_of_rank;
+    if (data.has_two_level()) {
+        mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
+        mirror->d_local_of_shared = data.local_of_shared;
+    } else {
+        h_rep_index_of_rank.assign(dim_full_sz, -1);
+        for (std::size_t i = 0; i < data.reps.size(); ++i) {
+            const std::uint64_t r = (n_up >= 0)
+                ? rank_combination_host(data.reps[i], n_up)
+                : data.reps[i];                // full space: identity rank
+            if (r < dim_full_sz) {
+                h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
+            }
         }
     }
 
@@ -867,8 +944,63 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
     using ed::symmetry::gpu_mirror::detail::build_rep_mirror;
     using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
 
-    std::shared_ptr<const GpuRepSectorMirror> mirror =
-        build_rep_mirror(rep, spin_l, terms);
+    // B7: memoise the resident device mirror across binds. A single GS solve
+    // binds the operator several times (phase-1 scan, phase-2 refine, vector
+    // pull); without this each rebuilds the mirror and re-uploads reps + terms
+    // (~150 MB at an N=32 sector).
+    //
+    // The key MUST be content-based, NOT the RepSectorData address: sector
+    // operators are transient, so a destroyed sector's rep_data_ address is
+    // reused by the next sector, and within one Hamiltonian every sector
+    // shares identical terms -- so an (address, terms_hash) key collides
+    // across DIFFERENT sectors and returns the wrong mirror (GPU OOB on a
+    // dim-equal parity/flip pair). Key on the sector's own content: the
+    // per-sector characters (unique per irrep), the rep-list signature
+    // (n_up / size / samples), spin, and the term footprint.
+    auto content_key = [](const ed::symmetry::RepSectorData& r,
+                          const ed::matvec::TermStorage& t, double sl) {
+        std::uint64_t h = 1469598103934665603ULL;
+        auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        mix(static_cast<std::uint64_t>(r.n_up + 2));
+        mix(static_cast<std::uint64_t>(r.group_size));
+        mix(r.reps.size());
+        if (!r.reps.empty()) {
+            mix(r.reps.front());
+            mix(r.reps[r.reps.size() / 2]);
+            mix(r.reps.back());
+        }
+        for (const auto& c : r.characters) {   // per-irrep, uniquely identifies k
+            mix(static_cast<std::uint64_t>(std::llround(c.real() * 1e9)));
+            mix(static_cast<std::uint64_t>(std::llround(c.imag() * 1e9)));
+        }
+        if (!r.flip_masks.empty()) mix(r.flip_masks.front());
+        mix(static_cast<std::uint64_t>(std::llround(sl * 1e6)));
+        mix(t.diag_one_body.size());    mix(t.offdiag_one_body.size());
+        mix(t.diag_two_body.size());    mix(t.mixed_two_body.size());
+        mix(t.offdiag_two_body.size()); mix(t.three_body.size());
+        if (!t.offdiag_two_body.empty())
+            mix(static_cast<std::uint64_t>(
+                std::llround(t.offdiag_two_body.back().coefficient.real() * 1e9)));
+        return h;
+    };
+    std::shared_ptr<const GpuRepSectorMirror> mirror;
+    {
+        static std::mutex mtx;
+        static std::map<std::uint64_t,
+                        std::weak_ptr<const GpuRepSectorMirror>> registry;
+        static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
+        constexpr std::size_t kKeep = 4;
+        const std::uint64_t key = content_key(rep, terms, spin_l);
+        std::lock_guard<std::mutex> lk(mtx);
+        auto& slot = registry[key];
+        mirror = slot.lock();
+        if (!mirror) {
+            mirror = build_rep_mirror(rep, spin_l, terms);
+            slot = mirror;
+            if (keep.size() >= kKeep) keep.erase(keep.begin());
+            keep.push_back(mirror);
+        }
+    }
 
     const double spin = spin_l;
     const std::uint64_t dim_captured = mirror->dim;

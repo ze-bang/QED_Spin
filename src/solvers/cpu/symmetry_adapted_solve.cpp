@@ -117,10 +117,12 @@ build_nonabelian_sector_matvec(const ::Operator&                  op,
                                const std::vector<std::vector<int>>& max_clique,
                                int                                  irrep_index,
                                int                                  n_sites,
-                               int                                  n_up)
+                               int                                  n_up,
+                               int                                  sz_parity)
 {
     auto sector = ed::symmetry::build_symmetry_adapted_sector(
-        gi, max_clique, irrep_index, n_sites, n_up);
+        gi, max_clique, irrep_index, n_sites, n_up, /*partner=*/0,
+        sz_parity);
     return std::make_unique<NonAbelianSectorMatVec>(op, std::move(sector));
 }
 
@@ -133,7 +135,8 @@ symmetry_adapted_lowest_eigenvalues(
     int                                  k,
     int                                  n_up,
     int                                  dense_max_dim,
-    BlockMethod                          method)
+    BlockMethod                          method,
+    int                                  sz_parity)
 {
     using namespace ed::symmetry;
     SymAdaptedSpectrum out;
@@ -145,7 +148,7 @@ symmetry_adapted_lowest_eigenvalues(
         // and MatVecOperator interface as abelian/Sz, fed UNCHANGED to the
         // standard method overloads. Method ⟂ reduction ⟂ basis.
         auto mv = build_nonabelian_sector_matvec(op, gi, max_clique, static_cast<int>(g),
-                                                 n_sites, n_up);
+                                                 n_sites, n_up, sz_parity);
         const std::uint64_t nb = mv->dim();
         if (nb == 0) continue;
         const std::uint64_t want = std::max<std::uint64_t>(
@@ -185,12 +188,14 @@ symmetry_adapted_full_spectrum(
     const ed::symmetry::GroupIrreps&     gi,
     const std::vector<std::vector<int>>& max_clique,
     int                                  n_sites,
-    int                                  n_up)
+    int                                  n_up,
+    int                                  sz_parity)
 {
     ed::symmetry::SymAdaptedSpectrum out;
     for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
         auto sector = ed::symmetry::build_symmetry_adapted_sector(
-            gi, max_clique, static_cast<int>(g), n_sites, n_up);
+            gi, max_clique, static_cast<int>(g), n_sites, n_up,
+            /*partner=*/0, sz_parity);
         if (sector.basis_states.empty()) continue;
         const int d  = gi.irreps[g].dim;
         const int nb = static_cast<int>(sector.basis_states.size());
@@ -213,9 +218,11 @@ symmetry_adapted_thermodynamics(
     const std::vector<std::vector<int>>& max_clique,
     int                                  n_sites,
     const std::vector<double>&           temperatures,
-    int                                  n_up)
+    int                                  n_up,
+    int                                  sz_parity)
 {
-    const auto spec = symmetry_adapted_full_spectrum(op, gi, max_clique, n_sites, n_up);
+    const auto spec = symmetry_adapted_full_spectrum(op, gi, max_clique, n_sites,
+                                                     n_up, sz_parity);
     return ed::symmetry::canonical_thermo_from_eigs(spec.eigenvalues, temperatures);
 }
 
@@ -255,20 +262,27 @@ symmetry_adapted_ground_state_dssf(
     double                               omega_min,
     double                               omega_max,
     int                                  n_omega,
-    double                               broadening)
+    double                               broadening,
+    const std::vector<std::pair<int, int>>& subspaces)
 {
     // Eigenstates over the FULL Hilbert space, summing ALL d_Γ partners so the
     // eigenbasis is complete (a final state |n> survives even when O changes the
     // irrep / Sz). Each block is materialised by the SAME engine as everything
     // else; eigenvectors are expanded to the computational basis via the SAB.
+    //
+    // Stage 8d: when H conserves a diagonal axis, ``subspaces`` supplies a
+    // partition of the Hilbert space -- per-(n_up | parity) blocks are
+    // strictly smaller and their union keeps the eigenbasis complete.
     struct EigState { double energy; std::map<std::uint64_t, Complex> amp; };
     std::vector<EigState> states;
 
+    for (const auto& [ss_n_up, ss_parity] : subspaces) {
     for (std::size_t g = 0; g < gi.irreps.size(); ++g) {
         const int d = gi.irreps[g].dim;
         for (int partner = 0; partner < d; ++partner) {
             auto sector = ed::symmetry::build_symmetry_adapted_sector(
-                gi, max_clique, static_cast<int>(g), n_sites, /*n_up=*/-1, partner);
+                gi, max_clique, static_cast<int>(g), n_sites, ss_n_up,
+                partner, ss_parity);
             if (sector.basis_states.empty()) continue;
             const int nb = static_cast<int>(sector.basis_states.size());
             NonAbelianSectorMatVec mv(op_h, sector);   // copy: sector reused below
@@ -286,6 +300,7 @@ symmetry_adapted_ground_state_dssf(
                 states.push_back(std::move(st));
             }
         }
+    }
     }
 
     ed::symmetry::SymDSSFResult R;
