@@ -960,7 +960,21 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
     auto content_key = [](const ed::symmetry::RepSectorData& r,
                           const ed::matvec::TermStorage& t, double sl) {
         std::uint64_t h = 1469598103934665603ULL;
-        auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold:
+        // the plain XOR-multiply mix is structurally degenerate on the
+        // sign-patterned character values this key exists to separate --
+        // on a Z8 ring, chi_{k+4}(g) = (-1)^g chi_k(g) hashed IDENTICALLY
+        // to chi_k, so conjugate-partner sectors reused each other's
+        // mirror (the exact wrong-mirror bug the content key was built to
+        // prevent; caught by test_rep_symmetry_gpu Z8 sectors 5/7).
+        auto mix = [&h](std::uint64_t v) {
+            v += 0x9E3779B97F4A7C15ULL;
+            v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            v = (v ^ (v >> 27)) * 0x94D049BB133111EBULL;
+            v ^= v >> 31;
+            h ^= v;
+            h *= 1099511628211ULL;
+        };
         mix(static_cast<std::uint64_t>(r.n_up + 2));
         mix(static_cast<std::uint64_t>(r.group_size));
         mix(r.reps.size());
@@ -983,20 +997,68 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
                 std::llround(t.offdiag_two_body.back().coefficient.real() * 1e9)));
         return h;
     };
+    // Registry entries carry a FULL fingerprint of what the mirror encodes:
+    // reuse must never depend on hash quality (a silent wrong-mirror hit is
+    // wrong PHYSICS with correct-looking norms). The fingerprint covers
+    // everything the device tables are built from except the reps list,
+    // which is fully determined by (n_up window, group action, characters)
+    // and cross-checked by its (size, front, mid, back) signature.
+    struct MirrorSlot {
+        int                                       n_up;
+        double                                    spin;
+        std::uint64_t                             reps_sig[4];
+        std::vector<std::complex<double>>         chi;
+        std::vector<int>                          perms;
+        std::vector<std::uint64_t>                flips;
+        std::weak_ptr<const GpuRepSectorMirror>   mirror;
+    };
+    auto fingerprint_matches = [](const MirrorSlot& s,
+                                  const ed::symmetry::RepSectorData& r,
+                                  double sl) {
+        return s.n_up == r.n_up && s.spin == sl
+            && s.reps_sig[0] == r.reps.size()
+            && s.reps_sig[1] == (r.reps.empty() ? 0 : r.reps.front())
+            && s.reps_sig[2] == (r.reps.empty() ? 0
+                                   : r.reps[r.reps.size() / 2])
+            && s.reps_sig[3] == (r.reps.empty() ? 0 : r.reps.back())
+            && s.chi == r.characters
+            && s.perms == r.perms_flat
+            && s.flips == r.flip_masks;
+    };
+
     std::shared_ptr<const GpuRepSectorMirror> mirror;
     {
         static std::mutex mtx;
-        static std::map<std::uint64_t,
-                        std::weak_ptr<const GpuRepSectorMirror>> registry;
+        static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
         static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
         constexpr std::size_t kKeep = 4;
         const std::uint64_t key = content_key(rep, terms, spin_l);
         std::lock_guard<std::mutex> lk(mtx);
-        auto& slot = registry[key];
-        mirror = slot.lock();
+        auto& bucket = registry[key];
+        for (auto it = bucket.begin(); it != bucket.end();) {
+            auto locked = it->mirror.lock();
+            if (!locked) { it = bucket.erase(it); continue; }   // expired
+            if (fingerprint_matches(*it, rep, spin_l)) {
+                mirror = std::move(locked);
+                break;
+            }
+            ++it;
+        }
         if (!mirror) {
             mirror = build_rep_mirror(rep, spin_l, terms);
-            slot = mirror;
+            MirrorSlot s;
+            s.n_up        = rep.n_up;
+            s.spin        = spin_l;
+            s.reps_sig[0] = rep.reps.size();
+            s.reps_sig[1] = rep.reps.empty() ? 0 : rep.reps.front();
+            s.reps_sig[2] = rep.reps.empty() ? 0
+                              : rep.reps[rep.reps.size() / 2];
+            s.reps_sig[3] = rep.reps.empty() ? 0 : rep.reps.back();
+            s.chi         = rep.characters;
+            s.perms       = rep.perms_flat;
+            s.flips       = rep.flip_masks;
+            s.mirror      = mirror;
+            bucket.push_back(std::move(s));
             if (keep.size() >= kKeep) keep.erase(keep.begin());
             keep.push_back(mirror);
         }
