@@ -74,6 +74,7 @@ struct LittleGroupStarInfo {
     bool projected     = false;///< true when the little-group blocks were used
     std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
     int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
 };
 
 struct LittleGroupSpectrum {
@@ -84,6 +85,7 @@ struct LittleGroupSpectrum {
     std::vector<LittleGroupStarInfo> stars;
     std::uint64_t       total_dim = 0;
     bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
+    bool                tr_engaged   = false;  ///< 9b: TR folding was active
 
     /// Flat sorted spectrum with multiplicities expanded (dense-diag shape).
     [[nodiscard]] std::vector<double> expanded() const;

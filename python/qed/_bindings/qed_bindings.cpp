@@ -904,6 +904,7 @@ PYBIND11_MODULE(_core, m) {
             d["projected"]    = st.projected;
             d["dim_k0"]       = st.dim_k0;
             d["flip_parity"]  = st.flip_parity;
+            d["tr_pairs"]     = st.tr_pairs;
             stars.append(d);
         }
         return stars;
@@ -926,6 +927,7 @@ PYBIND11_MODULE(_core, m) {
               d["multiplicities"] = s.multiplicities;
               d["stars"]          = lg_stars_dict(s);
               d["flip_engaged"]   = s.flip_engaged;
+              d["tr_engaged"]     = s.tr_engaged;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),

@@ -21,6 +21,7 @@
 #include <ed/symmetry/symmetry_cache.h>   // B8: acquire_orbit_table_* (Stage-3 cache)
 #include <ed/symmetry/rep_sector_data.h>
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
+#include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
 #include <ed/symmetry/symmetry_adapted.h>        // canonical_thermo_from_eigs
 
 #include <Eigen/Dense>
@@ -300,11 +301,25 @@ characters_for(const EngineContext& cx, int k_ext) {
     return chi;
 }
 
-// Stage 9a env sub-gate (Auto mode only; Require overrides). Read per call,
-// like the other ED_SYM_* gates, so tests can toggle without restart.
+// Stage 9a/9b env sub-gates (Auto mode only; Require overrides). Read per
+// call, like the other ED_SYM_* gates, so tests can toggle without restart.
 [[nodiscard]] bool little_group_flip_enabled() noexcept {
     const char* v = std::getenv("ED_SYM_LG_FLIP");
     return v == nullptr || v[0] != '0';
+}
+
+[[nodiscard]] bool little_group_tr_enabled() noexcept {
+    const char* v = std::getenv("ED_SYM_LG_TR");
+    return v == nullptr || v[0] != '0';
+}
+
+// One term-level SoA per engine call, shared by the flip and TR resolvers.
+[[nodiscard]] ed::matvec::TermStorage term_soa(const ::Operator& op) {
+    ed::matvec::TermStorage soa;
+    ed::matvec::TermStorage::classify_route(
+        soa, op.transform_data_, op.three_body_data_,
+        [](const std::complex<double>& c) { return c; });
+    return soa;
 }
 
 // Decide whether A' = A x Z2 engages: [H, prod sigma^x] = 0 at term level AND
@@ -318,15 +333,11 @@ struct FlipEngagement {
 };
 
 [[nodiscard]] FlipEngagement
-resolve_flip_engagement(const ::Operator& op, const LittleGroupOptions& opt,
-                        int n_sites)
+resolve_flip_engagement(const ed::matvec::TermStorage& soa,
+                        const LittleGroupOptions& opt, int n_sites)
 {
     FlipEngagement fe;
     if (opt.spin_flip == 0) return fe;
-    ed::matvec::TermStorage soa;
-    ed::matvec::TermStorage::classify_route(
-        soa, op.transform_data_, op.three_body_data_,
-        [](const std::complex<double>& c) { return c; });
     fe.symmetric = ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
     const bool admissible =
         (opt.n_up >= 0)      ? (opt.n_up * 2 == n_sites)
@@ -349,6 +360,60 @@ resolve_flip_engagement(const ::Operator& op, const LittleGroupOptions& opt,
     fe.mask = (n_sites >= 64) ? ~0ULL
                               : ((std::uint64_t{1} << n_sites) - 1ULL);
     return fe;
+}
+
+// Stage 9b: TR folding engages when H is real in the computational basis
+// (then H_{conj(k)} = conj(H_k) -- isospectral, so conjugate momenta fold
+// into one star; and inside a REAL-character star, conjugate little-group
+// irreps sigma/sigma* carry identical spectra).
+[[nodiscard]] bool
+resolve_tr_engagement(const ed::matvec::TermStorage& soa,
+                      const LittleGroupOptions& opt)
+{
+    if (opt.time_reversal == 0) return false;
+    const bool h_real = ed::symmetry::hamiltonian_is_real(soa);
+    if (opt.time_reversal == 1 && !h_real)
+        throw std::runtime_error(
+            "little_group: time_reversal='require' but the Hamiltonian has "
+            "complex coefficients (no antiunitary K with [H, K] = 0 in the "
+            "computational basis).");
+    if (!h_real) return false;
+    if (opt.time_reversal < 0 && !little_group_tr_enabled()) return false;
+    return true;
+}
+
+// chi_k -> chi_{k*} with chi_{k*}(a) == conj(chi_k(a)) for all a, on the
+// EXTENDED irrep indices (the flip characters are real, so conjugation is
+// parity-diagonal). -1 when unmatched (that irrep is never folded).
+[[nodiscard]] std::vector<int>
+conjugate_irrep_map(const EngineContext& cx) {
+    const int n_raw = cx.n_irr_raw;
+    std::vector<int> raw(static_cast<std::size_t>(n_raw), -1);
+    const std::size_t nA = cx.A.size();
+    for (int k = 0; k < n_raw; ++k) {
+        const auto& chi_k = cx.giA.irreps[static_cast<std::size_t>(k)].character;
+        for (int k2 = 0; k2 < n_raw; ++k2) {
+            const auto& chi_k2 =
+                cx.giA.irreps[static_cast<std::size_t>(k2)].character;
+            bool match = true;
+            for (std::size_t a = 0; a < nA; ++a) {
+                if (std::abs(chi_k2[a] - std::conj(chi_k[a])) > 1e-8) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) { raw[static_cast<std::size_t>(k)] = k2; break; }
+        }
+    }
+    if (!cx.flip_half) return raw;
+    std::vector<int> ext(static_cast<std::size_t>(2 * n_raw), -1);
+    for (int k = 0; k < n_raw; ++k) {
+        if (raw[static_cast<std::size_t>(k)] < 0) continue;
+        ext[static_cast<std::size_t>(k)] = raw[static_cast<std::size_t>(k)];
+        ext[static_cast<std::size_t>(k + n_raw)] =
+            raw[static_cast<std::size_t>(k)] + n_raw;
+    }
+    return ext;
 }
 
 // Map each residue's conjugation action onto the abelian irreps
@@ -672,11 +737,16 @@ LittleGroupSpectrum run_little_group(
             "group; residues go in `residue_perms`.");
     cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
 
+    const auto soa = term_soa(op);
+
     // Stage 9a: extend the ABELIAN factor by the global spin flip when
     // admissible (A' = A x Z2; the flip commutes with every site perm).
-    const FlipEngagement fe = resolve_flip_engagement(op, opt, n_sites);
+    const FlipEngagement fe = resolve_flip_engagement(soa, opt, n_sites);
     cx.flip_half = fe.engaged;
     cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
+
+    // Stage 9b: antiunitary K folding (real H only).
+    const bool tr_on = resolve_tr_engagement(soa, opt);
 
     const auto cgA = cx.flip_half
         ? ed::symmetry::make_flip_extended_group_from_perms(
@@ -713,11 +783,25 @@ LittleGroupSpectrum run_little_group(
             const int a = find(k), b = find(mp[static_cast<std::size_t>(k)]);
             if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
         }
+    // Stage 9b star-level TR fold: H real => H_{conj(k)} = conj(H_k), an
+    // exact isospectral copy (surviving reps and norms are conjugation-
+    // invariant through |sum chi|^2). Idempotent when a residue already
+    // maps k -> -k (D_N reflections).
+    if (tr_on) {
+        const auto conj_map = conjugate_irrep_map(cx);
+        for (int k = 0; k < n_irr; ++k) {
+            const int kc = conj_map[static_cast<std::size_t>(k)];
+            if (kc < 0) continue;
+            const int a = find(k), b = find(kc);
+            if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
+        }
+    }
     std::map<int, std::vector<int>> stars;
     for (int k = 0; k < n_irr; ++k) stars[find(k)].push_back(k);
 
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
+    out.tr_engaged   = tr_on;
     for (const auto& [k0, members] : stars) {
         const int m_star = static_cast<int>(members.size());
         auto rd = build_k_sector(cx, k0, opt.n_up);
@@ -781,22 +865,75 @@ LittleGroupSpectrum run_little_group(
                 }
                 if (gi_ok) {
                     // Isotypic split; completeness guard sums the block dims.
-                    std::vector<std::pair<SparseColumns, int>> blocks;
+                    const int nIr = static_cast<int>(giP.irreps.size());
+                    std::vector<SparseColumns> Ws(static_cast<std::size_t>(nIr));
                     std::uint64_t covered = 0;
-                    for (const auto& ir : giP.irreps) {
-                        SparseColumns W = build_isotypic_columns(M, ir);
-                        covered += static_cast<std::uint64_t>(W.size())
-                                 * static_cast<std::uint64_t>(ir.dim);
-                        if (!W.cols.empty()) blocks.emplace_back(std::move(W), ir.dim);
+                    for (int ii = 0; ii < nIr; ++ii) {
+                        Ws[static_cast<std::size_t>(ii)] = build_isotypic_columns(
+                            M, giP.irreps[static_cast<std::size_t>(ii)]);
+                        covered += static_cast<std::uint64_t>(
+                                       Ws[static_cast<std::size_t>(ii)].size())
+                                 * static_cast<std::uint64_t>(
+                                       giP.irreps[static_cast<std::size_t>(ii)].dim);
+                    }
+                    // Stage 9b: sigma <-> sigma* pairing. Valid only when
+                    // the k0 sector is REAL: chi_{k0} real => the monomial
+                    // phases are real => H_{k0} and every M_p are real, so
+                    // conj(W_sigma) spans the sigma* isotypic and
+                    // W_sigma*^h H W_sigma* = conj(W_sigma^h H W_sigma) --
+                    // isospectral. Any doubt (complex phase, size mismatch)
+                    // => solve both blocks (correctness never depends on it).
+                    std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
+                    if (tr_on) {
+                        bool sector_real = true;
+                        for (const Complex& c : rdr.characters)
+                            if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
+                        for (const auto& m : M) {
+                            if (!sector_real) break;
+                            for (const Complex& ph : m.phase)
+                                if (std::abs(ph.imag()) > 1e-12) { sector_real = false; break; }
+                        }
+                        if (sector_real) {
+                            for (int ii = 0; ii < nIr && sector_real; ++ii) {
+                                if (pair_of[static_cast<std::size_t>(ii)] >= 0) continue;
+                                const auto& ci =
+                                    giP.irreps[static_cast<std::size_t>(ii)].character;
+                                for (int jj = ii + 1; jj < nIr; ++jj) {
+                                    const auto& cj =
+                                        giP.irreps[static_cast<std::size_t>(jj)].character;
+                                    bool conj_match = ci.size() == cj.size();
+                                    for (std::size_t g = 0; conj_match && g < ci.size(); ++g)
+                                        conj_match = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
+                                    if (conj_match
+                                        && giP.irreps[static_cast<std::size_t>(ii)].dim
+                                               == giP.irreps[static_cast<std::size_t>(jj)].dim
+                                        && Ws[static_cast<std::size_t>(ii)].size()
+                                               == Ws[static_cast<std::size_t>(jj)].size()) {
+                                        pair_of[static_cast<std::size_t>(ii)] = jj;
+                                        pair_of[static_cast<std::size_t>(jj)] = ii;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                     if (covered == rdr.reps.size()) {
                         projected = true;
-                        for (auto& [W, d] : blocks) {
+                        for (int ii = 0; ii < nIr; ++ii) {
+                            auto& W = Ws[static_cast<std::size_t>(ii)];
+                            if (W.cols.empty()) continue;
+                            const int d =
+                                giP.irreps[static_cast<std::size_t>(ii)].dim;
+                            const int jj = pair_of[static_cast<std::size_t>(ii)];
+                            if (jj >= 0 && jj < ii) continue;  // partner solved
+                            const int mult = (jj > ii) ? 2 * m_star * d
+                                                       : m_star * d;
+                            if (jj > ii) ++info.tr_pairs;
                             ProjectedBlockOp bop(hk, W);
-                            const auto ev = solve_block(bop, m_star * d);
+                            const auto ev = solve_block(bop, mult);
                             for (double e : ev) {
                                 out.eigenvalues.push_back(e);
-                                out.multiplicities.push_back(m_star * d);
+                                out.multiplicities.push_back(mult);
                             }
                         }
                         info.little_order = static_cast<int>(M.size());
@@ -946,10 +1083,7 @@ ThermodynamicData little_group_thermodynamics(
     // n_up = 0..N (union == full spectrum) instead of the giant n_up = -1
     // block. Pure speed; identical E/C/S/F.
     if (opt.n_up < 0 && opt.sz_parity < 0) {
-        ed::matvec::TermStorage soa;
-        ed::matvec::TermStorage::classify_route(
-            soa, op.transform_data_, op.three_body_data_,
-            [](const std::complex<double>& c) { return c; });
+        const auto soa = term_soa(op);
         if (ed::symmetry::sz_axis_of(soa) == ed::symmetry::SzAxis::U1) {
             // Stage 9a: flip TRANSPORT at the sweep level -- spec(n_up) ==
             // spec(N - n_up) when [H, prod sigma^x] = 0, so sweep only
@@ -957,7 +1091,7 @@ ThermodynamicData little_group_thermodynamics(
             // engagement on the full-space options == symmetric + toggles;
             // Require throws loudly here when the flip is absent.)
             const bool fold =
-                resolve_flip_engagement(op, opt, n_sites).engaged;
+                resolve_flip_engagement(soa, opt, n_sites).engaged;
             const int nu_max = fold ? n_sites / 2 : n_sites;
             std::vector<double> eigs;
             for (int nu = 0; nu <= nu_max; ++nu) {
