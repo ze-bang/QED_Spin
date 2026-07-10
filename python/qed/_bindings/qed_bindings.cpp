@@ -915,11 +915,11 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int n_up, int sz_parity, bool use_gpu, int spin_flip,
-             int time_reversal) {
+             int time_reversal, int dense_max_dim) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto s = ed::solvers::little_group_full_spectrum(
                   op, abelian_group, residue_perms, n_sites,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu, spin_flip,
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu, spin_flip,
                           time_reversal));
               py::dict d;
               d["eigenvalues"]    = s.expanded();
@@ -934,6 +934,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("residue_perms"), py::arg("n_up") = -1,
           py::arg("sz_parity") = -1, py::arg("use_gpu") = false,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
           "Full spectrum via the FACTORIZED little-co-group reduction "
           "(one momentum per star, per-irrep blocks inside the star "
           "representative's matrix-free k-sector).");
@@ -965,11 +966,11 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<double>& temperatures,
              int n_up, int sz_parity, bool use_gpu, int spin_flip,
-             int time_reversal) {
+             int time_reversal, int dense_max_dim) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto td = ed::solvers::little_group_thermodynamics(
                   op, abelian_group, residue_perms, n_sites, temperatures,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu, spin_flip,
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu, spin_flip,
                           time_reversal));
               py::dict d;
               d["temperatures"]  = td.temperatures;
@@ -984,6 +985,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("use_gpu") = false,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
 

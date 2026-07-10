@@ -254,13 +254,17 @@ def _pooled(r):
         [np.asarray(e) for e in r.eigenvalues_per_sector]))
 
 
-def test_gs_flip_projection_halffill_parity():
+def test_gs_flip_projection_halffill_parity(monkeypatch):
     """Stage 8c: GS lane flip projection at n_up = N/2. The FULL sector
     spectra (exact dense per-sector solves; the iterative lane's higher
     Ritz values are not converged, so they cannot be compared) must
     match the flip-off baseline eigenvalue-for-eigenvalue, while the
     projected run visibly splits the half-filling irreps into (k, +/-)
     sectors (biggest block halves, total reduced dim is conserved)."""
+    # ED_SYM_LITTLE_GROUP=0: pins the ABELIAN lane's flip machinery and
+    # its per-sector output (Stage 9c point_group='auto' would otherwise
+    # PROJECT and return pooled eigenvalues only).
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 
@@ -285,10 +289,12 @@ def test_gs_flip_projection_halffill_parity():
     assert len(dims_on) > len(dims_off)       # (k, +/-) doubling
 
 
-def test_gs_flip_transport_mirrors_high_sz():
+def test_gs_flip_transport_mirrors_high_sz(monkeypatch):
     """Stage 8c: for sz > N/2 the GS lane solves the isospectral
     N - n_up block and re-tags. Exact per-sector spectra and reported
     n_up must match the flip-off direct solve."""
+    # Abelian-lane machinery pin -- see test_gs_flip_projection_halffill_parity.
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
     n_up = N_SITES // 2 + 1   # 5: transport solves n_up = 3 instead

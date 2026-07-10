@@ -48,7 +48,12 @@ def test_residue_retained_and_described():
     assert "p a0 p^-1 = a0^11" in txt         # exact conjugation relation
 
 
-def test_gs_star_reduction_spectrum_parity():
+def test_gs_star_reduction_spectrum_parity(monkeypatch):
+    # ED_SYM_LITTLE_GROUP=0: this test pins the ABELIAN lane's star-fold
+    # machinery (sector_orbit_canonical) and its per-sector output; since
+    # Stage 9c point_group='auto' would otherwise PROJECT through the
+    # little-group engine (pooled eigenvalues, no per-sector arrays).
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 
@@ -64,9 +69,11 @@ def test_gs_star_reduction_spectrum_parity():
     assert abs(a[0] - E0_DENSE) < 1e-9
 
 
-def test_gs_all_mechanisms_composed():
+def test_gs_all_mechanisms_composed(monkeypatch):
     """Star + flip projection + TR pairing together == everything off
     (exact dense per-sector solves, full spectrum union)."""
+    # Abelian-lane machinery pin -- see test_gs_star_reduction_spectrum_parity.
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 

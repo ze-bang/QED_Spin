@@ -111,9 +111,14 @@ def test_full_space_flip_sectors_match_dense(dense_spectrum, device):
     assert max(dims_on) < max(dims_off)
 
 
-def test_full_space_flip_composes_with_tr_and_star(dense_spectrum):
+def test_full_space_flip_composes_with_tr_and_star(dense_spectrum,
+                                                   monkeypatch):
     """Everything on at once (flip sectors x TR x star) on the
     U(1)-broken model: still the exact dense multiset."""
+    # ED_SYM_LITTLE_GROUP=0: pins the ABELIAN lane's monomial-sector
+    # machinery and its per-sector output (Stage 9c 'auto' would
+    # otherwise PROJECT and return pooled eigenvalues only).
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _u1_broken_ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
     r = qed.solve(H, symmetry=gen, num_eigenvalues=1 << N_SITES,
@@ -157,10 +162,13 @@ def test_full_space_flip_sectors_gpu(dense_spectrum):
 # ---------------------------------------------------------------------------
 # Sz-parity sectors (diagonal Z2 remnant): GS / thermal / full dense.
 # ---------------------------------------------------------------------------
-def test_parity_gs_auto_and_explicit_halves(dense_spectrum):
+def test_parity_gs_auto_and_explicit_halves(dense_spectrum, monkeypatch):
     """AUTO: U(1)-broken parity-conserving H engages both parity halves
     (composed with flip x spatial); explicit sz='even'/'odd' pins one
     half; even-half GS is the global GS here."""
+    # Abelian-lane machinery pin -- see
+    # test_full_space_flip_composes_with_tr_and_star.
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _u1_broken_ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Union
 
 from . import _core as _core
+from .point_group_routing import resolve_projection_lane, split_nonabelian
 from ._core import (  # type: ignore[attr-defined]
     DiagonalizationMethod,
     EDParameters,
@@ -1000,8 +1001,13 @@ def resolve_auto_symmetry(
                 "Hamiltonian was built on."
             )
         try:
+            # translation_only=True: skips the max-clique analyzer (NP-hard;
+            # hangs for hours on large high-symmetry clusters). The full
+            # automorphism list -- and with it the translation set's
+            # star_perms residue -- is still computed, so star reduction
+            # and the little-group lane keep the whole point group.
             report = find_symmetries(operator, lattice=lattice,
-                                     verbose=False)
+                                     verbose=False, translation_only=True)
         except ImportError as exc:
             warnings.warn(
                 f"symmetry='translation': automorphism search "
@@ -1125,37 +1131,9 @@ def _full_group_generators(symmetry) -> Optional[list]:
     return [list(g) for g in gens] + [list(p) for p in star]
 
 
-def _little_group_parts(symmetry) -> Optional[tuple]:
-    """Stage 7: ``(abelian_group_elements, residue_perms)`` for the
-    FACTORIZED non-abelian engine (little co-groups over matrix-free
-    momentum sectors). The abelian clique is closed here (|A| stays
-    small for physical clusters); residues are the retained point-group
-    coset representatives. None when there is no residue to factor over
-    or the lane is disabled (``ED_SYM_LITTLE_GROUP=0``)."""
-    if os.environ.get("ED_SYM_LITTLE_GROUP", "1") == "0":
-        return None
-    star = list(getattr(symmetry, "star_perms", None) or [])
-    gens = getattr(symmetry, "generators", None)
-    if not star or not gens:
-        return None
-    gens = [tuple(g) for g in gens]
-    n = len(gens[0])
-    ident = tuple(range(n))
-    elems = {ident}
-    frontier = [ident]
-    while frontier:
-        nxt = []
-        for e in frontier:
-            for g in gens:
-                c = tuple(g[e[i]] for i in range(n))
-                if c not in elems:
-                    elems.add(c)
-                    nxt.append(c)
-        frontier = nxt
-    if len(elems) > 4096:      # defensive: A must stay enumerable
-        return None
-    return ([list(e) for e in sorted(elems)],
-            [list(p) for p in star])
+# Stage 9c: `_little_group_parts` retired -- the (abelian, residue) split
+# now lives in point_group_routing.split_nonabelian, which additionally
+# handles explicit non-abelian generator lists.
 
 
 def solve(
@@ -1601,19 +1579,23 @@ def solve(
                 launcher_binary=mpi_launcher_binary,
                 verbose=verbose,
             )
-        if isinstance(point_group, str) and point_group.lower() == "full":
-            # PROPER non-abelian: every irrep block (d_Gamma >= 2
-            # included, blocks ~ dim/|G|) on the production multi-target
-            # matvec, block-size-adaptive dense/Lanczos per block,
-            # eigenvalues recombined with d_Gamma multiplicities. CPU
-            # engine (the GPU consumer covers the dense full-spectrum
-            # path); U(1) composes via sz=.
-            gens_full = _full_group_generators(symmetry)
-            if gens_full is None:
-                raise ValueError(
-                    "point_group='full' needs a spatial symmetry with "
-                    "retained residue (symmetry='auto' or a GeneratorSet "
-                    "from find_symmetries).")
+        # Stage 9c: ONE routing decision. point_group='auto' (default)
+        # PROJECTS through the factorized little-group engine whenever
+        # the call is eigenvalue-only; 'full' requires projection
+        # (raises on decline); any decline degrades to the abelian rep
+        # lane with star/TR/flip folds. The monolithic SAB engine is a
+        # test oracle -- no longer production-routed.
+        lane = resolve_projection_lane(
+            symmetry, point_group=point_group, consumer="solve",
+            eigenvalues_only=(not compute_eigenvectors
+                              and sector is None
+                              and not is_thermal),
+            # an explicit GPU request is served by the abelian rep lane
+            # (the little-group lowest-k engine is CPU); 'full' still
+            # projects on CPU as before.
+            prefer_abelian=use_gpu,
+            verbose=verbose)
+        if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
             _sp = -1
@@ -1632,62 +1614,48 @@ def solve(
                             _sp = 2
                     except Exception:
                         _sp = -1
-            # Stage 7: prefer the FACTORIZED little-co-group engine
-            # (matrix-free momentum sectors, scales past the monolithic
-            # SAB cap). Falls back to the monolithic reference on any
-            # decline (no residue split / engine error).
-            _lg = _little_group_parts(symmetry)
-            if _lg is not None:
-                _A, _res = _lg
-                try:
-                    if _sp == 2:
-                        ev = (list(_core.little_group_lowest_eigenvalues(
-                                  op_to_use, _A, _res, k=_k, sz_parity=0))
-                              + list(_core.little_group_lowest_eigenvalues(
-                                  op_to_use, _A, _res, k=_k, sz_parity=1)))
-                    elif _sp in (0, 1):
-                        ev = list(_core.little_group_lowest_eigenvalues(
-                            op_to_use, _A, _res, k=_k, sz_parity=_sp))
-                    else:
-                        ev = list(_core.little_group_lowest_eigenvalues(
-                            op_to_use, _A, _res, k=_k, n_up=_nu))
-                    out = EDResults()
-                    out.eigenvalues = sorted(float(e) for e in ev)[:_k]
-                    if verbose:
-                        print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
-                              f"(factorized): |A| = {len(_A)}, residues = "
-                              f"{len(_res)}.")
-                    return out
-                except Exception as exc:      # noqa: BLE001 -- graceful
-                    if verbose:
-                        print(f"[qed.solve] little-group lane declined "
-                              f"({exc}); using the monolithic SAB engine.")
-            if _sp == 2:
-                spec0 = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, -1, sz_parity=0)
-                spec1 = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, -1, sz_parity=1)
-                spec = dict(spec0)
-                spec["eigenvalues"] = (list(spec0["eigenvalues"])
-                                       + list(spec1["eigenvalues"]))
-                spec["block_size"] = (list(spec0["block_size"])
-                                      + list(spec1["block_size"]))
-                spec["block_irrep_dim"] = (
-                    list(spec0["block_irrep_dim"])
-                    + list(spec1["block_irrep_dim"]))
-            else:
-                spec = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, _nu,
-                    sz_parity=(_sp if _sp in (0, 1) else -1))
-            out = EDResults()
-            out.eigenvalues = sorted(
-                float(e) for e in spec["eigenvalues"])[:_k]
-            if verbose:
-                print(f"[qed.solve] non-abelian SAB lane: |G| = "
-                      f"{spec['group_order']}, blocks = "
-                      f"{len(spec['block_size'])} (irrep dims "
-                      f"{sorted(set(spec['block_irrep_dim']))}).")
-            return out
+            _sf = resolve_discrete_toggle(op_to_use, spin_flip,
+                                          "spin_flip", verbose=verbose)
+            _tr = resolve_discrete_toggle(op_to_use, time_reversal,
+                                          "time_reversal", verbose=verbose)
+            _A, _res = lane.A, lane.residues
+            try:
+                def _lg_block(**kw):
+                    # solver='full' wants the exact spectrum: Lanczos
+                    # without reorthogonalisation only converges the
+                    # extreme pair, so big-k requests go through the
+                    # dense per-block full-spectrum path.
+                    if method == DiagonalizationMethod.FULL:
+                        d = dict(_core.little_group_full_spectrum(
+                            op_to_use, _A, _res,
+                            spin_flip=_sf, time_reversal=_tr, **kw))
+                        return [float(e) for e in d["eigenvalues"]]
+                    return [float(e)
+                            for e in _core.little_group_lowest_eigenvalues(
+                                op_to_use, _A, _res, k=_k,
+                                spin_flip=_sf, time_reversal=_tr, **kw)]
+                if _sp == 2:
+                    ev = _lg_block(sz_parity=0) + _lg_block(sz_parity=1)
+                elif _sp in (0, 1):
+                    ev = _lg_block(sz_parity=_sp)
+                else:
+                    ev = _lg_block(n_up=_nu)
+                out = EDResults()
+                out.eigenvalues = sorted(ev)[:_k] \
+                    if method != DiagonalizationMethod.FULL else sorted(ev)
+                if verbose:
+                    print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
+                          f"(factorized): |A| = {len(_A)}, residues = "
+                          f"{len(_res)}.")
+                return out
+            except Exception as exc:      # noqa: BLE001 -- graceful
+                if isinstance(point_group, str) \
+                        and point_group.lower() == "full":
+                    raise
+                if verbose:
+                    print(f"[qed.solve] little-group lane declined "
+                          f"({exc}); falling back to the abelian rep "
+                          "lane.")
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
@@ -3495,94 +3463,58 @@ def full_spectrum(
         except Exception:
             _flip_transport = False
 
-    # NON-ABELIAN spatial group: the streaming-symmetry rep path below only
-    # handles abelian (1-D irrep) projection and would silently restrict to a
-    # maximal abelian subgroup. Route to the symmetry-adapted (SAB) engine,
-    # which reduces by the FULL group including d_G>=2 irreps. n_up=-1 reduces
-    # the whole Hilbert space, so the complete spectrum (every Sz) comes out in
-    # one call. This is the dense full diagonalisation benefiting from the full
-    # non-abelian symmetry machinery.
+    # Spatial group: Stage 9c routes EVERY projectable call through the
+    # factorized little-group engine (the streaming rep path below only
+    # handles abelian 1-D irrep projection). Explicit NON-ABELIAN
+    # generator input -- which previously had no route except the
+    # monolithic SAB engine -- is split into (maximal abelian subgroup,
+    # coset residues) by split_nonabelian. 'full' raises on decline;
+    # 'auto' degrades to the abelian streaming path. device='gpu'
+    # batches ALL block eigensolves through one cuSOLVER pool call.
     _gens = _raw_generators(symmetry)
     _star = list(getattr(symmetry, "star_perms", None) or []) \
         if symmetry is not None else []
-    gens_full = None
-    if _gens is not None and _generators_nonabelian(_gens):
-        gens_full = [list(g) for g in _gens]     # explicit non-abelian input
-    elif (_gens is not None and _star
-          and point_group not in (False, 0, "off", "none")):
-        cand = [list(g) for g in _gens] + [list(p) for p in _star]
-        if _generators_nonabelian(cand):
-            gens_full = cand                     # clique + residue = full group
-    if gens_full is not None:
-        # Stage 7: the FACTORIZED little-co-group engine first (one
-        # momentum per star, per-irrep blocks inside the star rep's
-        # matrix-free sector); the monolithic SAB engine remains the
-        # graceful fallback (and the sole route for explicit
-        # non-abelian generator input, which has no clique/residue
-        # split to factor over). device='gpu' batches ALL block
-        # eigensolves through one cuSOLVER stream-pool call.
-        _lg = _little_group_parts(symmetry)
-        if _lg is not None:
-            _A, _res = _lg
-            try:
-                eigs = []
-                if sz_conserved:
-                    top = N // 2 if _flip_transport else N
-                    for n_up in range(top + 1):
-                        d = dict(_core.little_group_full_spectrum(
-                            operator, _A, _res, n_up=int(n_up),
-                            use_gpu=use_gpu))
-                        block = [float(e) for e in d["eigenvalues"]]
-                        eigs.extend(block)
-                        if _flip_transport and n_up * 2 != N:
-                            eigs.extend(block)   # isospectral mirror
-                else:
+    _sym_for_lane = symmetry
+    if (_gens is not None and _generators_nonabelian(_gens) and not _star):
+        _sym_for_lane = [list(g) for g in _gens]   # explicit raw-list input
+    lane = resolve_projection_lane(
+        _sym_for_lane, point_group=point_group, consumer="full_spectrum",
+        eigenvalues_only=True, verbose=verbose)
+    if lane.mode == "project":
+        _A, _res = lane.A, lane.residues
+        try:
+            eigs = []
+            if sz_conserved:
+                top = N // 2 if _flip_transport else N
+                for n_up in range(top + 1):
                     d = dict(_core.little_group_full_spectrum(
-                        operator, _A, _res, use_gpu=use_gpu))
-                    eigs = [float(e) for e in d["eigenvalues"]]
-                if verbose:
-                    print("[qed.full_spectrum] non-abelian group -> "
-                          "LITTLE-GROUP engine (factorized d_G reduction)"
-                          + (", flip transport halves the Sz sweep"
-                             if _flip_transport else ""))
-                out = EDResults()
-                out.eigenvalues = sorted(eigs)
-                return out
-            except Exception as exc:            # noqa: BLE001 -- graceful
-                if verbose:
-                    print(f"[qed.full_spectrum] little-group lane declined "
-                          f"({exc}); using the monolithic SAB engine.")
-        # SAB engine: FULL-group projection including d_G >= 2 irreps --
-        # the strongest dense reduction (blocks ~ dim / |G|). The point
-        # group is inside the projection here, so star reduction is
-        # subsumed; the flip transport still halves the Sz sweep.
-        if verbose:
-            print("[qed.full_spectrum] non-abelian group -> SAB engine "
-                  "(full d_G reduction)"
-                  + (", flip transport halves the Sz sweep"
-                     if _flip_transport else ""))
-        eigs = []
-        if sz_conserved:
-            top = N // 2 if _flip_transport else N
-            for n_up in range(top + 1):
-                spec = _core.symmetry_adapted_eigenvalues(
-                    operator, gens_full, n_up=int(n_up), use_gpu=use_gpu)
-                block = [float(e) for e in spec["eigenvalues"]]
-                eigs.extend(block)
-                if _flip_transport and n_up * 2 != N:
-                    eigs.extend(block)           # isospectral N - n_up mirror
-                if verbose:
-                    print(f"[qed.full_spectrum]   SAB n_up={n_up} "
-                          f"got={len(block)}"
-                          + (" (mirrored)" if _flip_transport
-                             and n_up * 2 != N else ""))
-        else:
-            spec = _core.symmetry_adapted_eigenvalues(
-                operator, gens_full, n_up=-1, use_gpu=use_gpu)
-            eigs = [float(e) for e in spec["eigenvalues"]]
-        out = EDResults()
-        out.eigenvalues = sorted(eigs)
-        return out
+                        operator, _A, _res, n_up=int(n_up),
+                        use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr))
+                    block = [float(e) for e in d["eigenvalues"]]
+                    eigs.extend(block)
+                    if _flip_transport and n_up * 2 != N:
+                        eigs.extend(block)   # isospectral mirror
+            else:
+                d = dict(_core.little_group_full_spectrum(
+                    operator, _A, _res, use_gpu=use_gpu,
+                    spin_flip=_sf, time_reversal=_tr))
+                eigs = [float(e) for e in d["eigenvalues"]]
+            if verbose:
+                print("[qed.full_spectrum] spatial group -> "
+                      "LITTLE-GROUP engine (factorized d_G reduction)"
+                      + (", flip transport halves the Sz sweep"
+                         if _flip_transport else ""))
+            out = EDResults()
+            out.eigenvalues = sorted(eigs)
+            return out
+        except Exception as exc:            # noqa: BLE001 -- graceful
+            if isinstance(point_group, str) \
+                    and point_group.lower() == "full":
+                raise
+            if verbose:
+                print(f"[qed.full_spectrum] little-group lane declined "
+                      f"({exc}); falling back to the abelian streaming "
+                      "path.")
 
     # No spatial symmetry: a plain dense full diagonalisation already
     # returns every eigenvalue. (Sz-block looping without a spatial group

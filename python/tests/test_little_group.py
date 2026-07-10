@@ -160,37 +160,37 @@ def test_fixed_sz_and_parity_subspaces():
     np.testing.assert_allclose(np.asarray(low), wsz[:4], rtol=0, atol=1e-8)
 
 
-def test_verbs_route_and_match_monolithic(monkeypatch, capsys):
+def test_verbs_route_and_match_monolithic(capsys):
+    """Stage 9c: the monolithic SAB engine is retired from production
+    routing but stays the TEST ORACLE -- the routed verbs must match the
+    direct `_core.symmetry_adapted_*` calls."""
     N = 8
     H = _ring(N)
     gen = qed.find_symmetries(H, verbose=False).full_set
+    from qed.workflow import _full_group_generators
+    gens_full = _full_group_generators(gen)
 
     r_lg = qed.solve(H, symmetry=gen, num_eigenvalues=3, auto_sz=False,
                      point_group="full", verbose=True)
     assert "LITTLE-GROUP" in capsys.readouterr().out
+    spec = dict(qed._core.symmetry_adapted_lowest_eigenvalues(
+        H, gens_full, 3, -1, sz_parity=-1))
+    np.testing.assert_allclose(
+        r_lg.eigenvalues, sorted(float(e) for e in spec["eigenvalues"])[:3],
+        rtol=0, atol=1e-9)
 
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    r_sab = qed.solve(H, symmetry=gen, num_eigenvalues=3, auto_sz=False,
-                      point_group="full", verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
-    np.testing.assert_allclose(r_lg.eigenvalues, r_sab.eigenvalues,
-                               rtol=0, atol=1e-9)
-
+    temps = list(np.linspace(0.3, 4.0, 5))
     t_lg = qed.thermal(H, method="FTLM", T_min=0.3, T_max=4.0, num_T=5,
                        symmetry=gen, point_group="full", device="cpu",
                        verbose=False)
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    t_sab = qed.thermal(H, method="FTLM", T_min=0.3, T_max=4.0, num_T=5,
-                        symmetry=gen, point_group="full", device="cpu",
-                        verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
+    td = dict(qed._core.symmetry_adapted_thermodynamics(
+        H, gens_full, temps, -1, False))
     np.testing.assert_allclose(np.asarray(t_lg.energy),
-                               np.asarray(t_sab.energy), rtol=0, atol=1e-10)
+                               np.asarray(td["energy"]), rtol=0, atol=1e-10)
 
     fs_lg = qed.full_spectrum(H, symmetry=gen, verbose=False)
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    fs_sab = qed.full_spectrum(H, symmetry=gen, verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
-    np.testing.assert_allclose(np.asarray(fs_lg.eigenvalues),
-                               np.asarray(fs_sab.eigenvalues),
-                               rtol=0, atol=1e-10)
+    sab = dict(qed._core.symmetry_adapted_eigenvalues(H, gens_full, n_up=-1))
+    np.testing.assert_allclose(
+        np.asarray(fs_lg.eigenvalues),
+        np.sort(np.asarray([float(e) for e in sab["eigenvalues"]])),
+        rtol=0, atol=1e-10)

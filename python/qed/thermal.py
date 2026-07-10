@@ -743,40 +743,26 @@ def thermal(
             and point_group.lower() == "full"):
         # PROPER non-abelian thermodynamics: exact canonical Z/E/C/S
         # from the full reduced spectrum (every irrep block, d_Gamma
-        # multiplicities folded in) on the production multi-target
-        # matvec. Moderate N (the full spectrum is materialised per
-        # block); the abelian streaming lanes remain the large-N route.
-        from .workflow import _full_group_generators, _little_group_parts
-        gens_full = _full_group_generators(symmetry)
-        if gens_full is None:
-            raise ValueError(
-                "point_group='full' needs a spatial symmetry with "
-                "retained residue (symmetry='auto' / find_symmetries).")
+        # multiplicities folded in). Stage 9c: the factorized
+        # little-group engine is the ONLY route ('full' raises on
+        # decline; the monolithic SAB engine is a test oracle now).
+        # This stays an explicit 'full' opt-in on the thermal verb:
+        # 'auto' never hijacks a sampling method (mTPQ/FTLM/LTLM) into
+        # exponentially costlier exact per-block spectra.
+        from .point_group_routing import resolve_projection_lane
+        lane = resolve_projection_lane(
+            symmetry, point_group=point_group, consumer="thermal",
+            eigenvalues_only=True, verbose=verbose)
         temps = list(np.linspace(T_min, T_max, num_T))
-        _nu = -1
-        # Stage 7: factorized little-co-group engine first (matrix-free
-        # momentum sectors); monolithic SAB as the graceful fallback.
-        td = None
-        _lg = _little_group_parts(symmetry)
-        if _lg is not None:
-            try:
-                td = dict(_core.little_group_thermodynamics(
-                    H, _lg[0], _lg[1], temps, n_up=_nu,
-                    use_gpu=(isinstance(device, str)
-                             and device.lower() in ("gpu", "cuda"))))
-                if verbose:
-                    print(f"[qed.thermal] non-abelian LITTLE-GROUP lane "
-                          f"(factorized): |A| = {len(_lg[0])}, residues = "
-                          f"{len(_lg[1])}.")
-            except Exception as exc:          # noqa: BLE001 -- graceful
-                td = None
-                if verbose:
-                    print(f"[qed.thermal] little-group lane declined "
-                          f"({exc}); using the monolithic SAB engine.")
-        if td is None:
-            td = dict(_core.symmetry_adapted_thermodynamics(
-                H, gens_full, temps, _nu,
-                isinstance(device, str) and device.lower() in ("gpu", "cuda")))
+        td = dict(_core.little_group_thermodynamics(
+            H, lane.A, lane.residues, temps, n_up=-1,
+            use_gpu=(isinstance(device, str)
+                     and device.lower() in ("gpu", "cuda")),
+            spin_flip=spin_flip, time_reversal=time_reversal))
+        if verbose:
+            print(f"[qed.thermal] non-abelian LITTLE-GROUP lane "
+                  f"(factorized): |A| = {len(lane.A)}, residues = "
+                  f"{len(lane.residues)}.")
         _E = np.asarray(td["energy"], dtype=float)
         return ThermalResult(
             temperatures=np.asarray(td["temperatures"], dtype=float),

@@ -1,0 +1,223 @@
+"""Stage 9c (SymmetryEngine v2): ONE point-group routing decision.
+
+Every verb used to carry its own ``point_group == "full"`` branch with a
+monolithic-SAB fallback. This module is the single decision point for the
+projection lane instead:
+
+* ``point_group="auto"`` (the default): PROJECT through the factorized
+  little-group engine whenever the consumer is eigenvalue-only (no
+  eigenvectors, no ``sector=`` restriction, an eigenvalue method) and a
+  (abelian, residue) split exists. Any decline falls back silently to the
+  abelian rep lane with star/TR/flip *folds* -- the pre-9c behaviour.
+  The thermal verb is the exception: its sampling methods (mTPQ/FTLM/
+  LTLM) are the large-N design point, and the projection lane computes
+  EXACT full-spectrum thermodynamics per block -- auto never hijacks a
+  sampling run into an exponentially costlier exact one, so thermal
+  projects only under the explicit ``point_group="full"`` contract.
+* ``point_group="full"``: REQUIRE projection -- raises with the decline
+  reason instead of silently degrading. (Until Stage 9c this fell back
+  to the monolithic SAB engine; that engine is now a test oracle and is
+  no longer production-routed.)
+* ``point_group=off/none/False``: the abelian lane with star folds also
+  disabled (unchanged semantics).
+
+``split_nonabelian`` generalizes the old ``_little_group_parts``: it also
+accepts an EXPLICIT (possibly non-abelian) permutation list, closing the
+full group and carving out a maximal-abelian subgroup + coset residues --
+the case that previously had no route except the monolithic engine. A
+greedy commuting-subgroup choice is always safe: a smaller A only means
+larger stars (less momentum reduction), never wrong physics -- the
+engine's covering sum rule remains the tripwire.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+__all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane"]
+
+_GROUP_CLOSURE_CAP = 4096   # A (and the closed full group) must stay enumerable
+
+
+@dataclass
+class ProjectionLane:
+    mode: str                          # "project" | "abelian"
+    A: Optional[list] = None           # closed abelian elements (project mode)
+    residues: Optional[list] = None    # point-group coset representatives
+    reason: str = ""                   # why the lane declined (diagnostics)
+
+
+def _compose(g, e):
+    """U-composition convention (matches irreps.cpp): (g.e)[i] = e[g[i]]."""
+    return tuple(e[g[i]] for i in range(len(g)))
+
+
+def _close(gens, cap=_GROUP_CLOSURE_CAP):
+    """BFS closure of a permutation set. None when the group exceeds cap."""
+    gens = [tuple(g) for g in gens]
+    if not gens:
+        return None
+    n = len(gens[0])
+    ident = tuple(range(n))
+    elems = {ident}
+    frontier = [ident]
+    while frontier:
+        nxt = []
+        for e in frontier:
+            for g in gens:
+                c = _compose(g, e)
+                if c not in elems:
+                    if len(elems) >= cap:
+                        return None
+                    elems.add(c)
+                    nxt.append(c)
+        frontier = nxt
+    return sorted(elems)
+
+
+def _commute(a, b):
+    return _compose(a, b) == _compose(b, a)
+
+
+def split_nonabelian(symmetry_or_gens):
+    """``(abelian_elements, residue_perms)`` for the factorized engine,
+    or a ``str`` decline reason.
+
+    * ``GeneratorSet``-like input (``generators`` + ``star_perms``): the
+      abelian clique is closed; the retained residue is the coset set --
+      the original ``_little_group_parts`` behaviour.
+    * explicit permutation list: the FULL group is closed, a maximal
+      abelian subgroup is chosen greedily (any commuting closure is
+      valid -- smaller A just folds less), and one representative per
+      A-coset of the remainder becomes the residue set.
+    """
+    gens = getattr(symmetry_or_gens, "generators", None)
+    if gens is not None:
+        star = list(getattr(symmetry_or_gens, "star_perms", None) or [])
+        if not gens:
+            return "the symmetry has no spatial generators"
+        A = _close([list(g) for g in gens])
+        if A is None:
+            return (f"the abelian group exceeds the {_GROUP_CLOSURE_CAP}-"
+                    "element closure cap")
+        if not star:
+            return ("no point-group residue is retained on the symmetry "
+                    "(symmetry='auto' or a find_symmetries GeneratorSet "
+                    "carry one; pure-abelian input has nothing to project)")
+        return ([list(e) for e in A], [list(p) for p in star])
+
+    # Explicit raw permutation list.
+    perms = [tuple(p) for p in (symmetry_or_gens or [])]
+    if not perms:
+        return "no generators given"
+    G = _close(perms)
+    if G is None:
+        return (f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element "
+                "cap -- pass a GeneratorSet from find_symmetries instead")
+    # Greedy maximal commuting subgroup (the closure of pairwise-commuting
+    # elements is abelian by construction). Seed with the HIGHEST-order
+    # elements first: long cycles (translations) build a large cyclic core,
+    # where naive sorted order tends to lock in an early involution (e.g.
+    # a reflection) and end up with a small Klein-type subgroup. Any
+    # commuting closure is *valid* -- smaller A only folds less -- this
+    # ordering just maximizes the reduction.
+    def _order(e):
+        k, c = 1, e
+        ident = tuple(range(len(e)))
+        while c != ident:
+            c = _compose(e, c)
+            k += 1
+        return k
+
+    A = [tuple(range(len(perms[0])))]
+    Aset = set(A)
+    for e in sorted(G, key=lambda e: (-_order(e), e)):
+        if e in Aset:
+            continue
+        if all(_commute(e, a) for a in A):
+            closed = _close(A + [e])
+            if closed is not None and len(closed) <= _GROUP_CLOSURE_CAP:
+                A = [tuple(a) for a in closed]
+                Aset = set(A)
+    if len(A) <= 1:
+        return "no non-trivial abelian subgroup found in the closed group"
+    # One representative per A-coset of the remainder.
+    residues, covered = [], set(Aset)
+    for e in G:
+        if e in covered:
+            continue
+        residues.append(list(e))
+        covered.update(_compose(a, e) for a in Aset)
+    if not residues:
+        return ("the input group is abelian -- nothing to project beyond "
+                "the momentum sectors (use the abelian rep lane)")
+    return ([list(a) for a in sorted(Aset)], residues)
+
+
+def _pg_key(point_group) -> str:
+    if point_group in (False, 0, None, "off", "none", ""):
+        return "off"
+    if point_group is True:
+        return "auto"
+    if isinstance(point_group, str):
+        k = point_group.strip().lower()
+        if k in ("auto", "full"):
+            return k
+        if k in ("off", "none", ""):
+            return "off"
+    raise ValueError(
+        f"point_group must be 'auto' | 'full' | 'off' (or bool/None), "
+        f"got {point_group!r}")
+
+
+def resolve_projection_lane(
+    symmetry_or_gens,
+    *,
+    point_group,
+    consumer: str,                 # "solve" | "thermal" | "full_spectrum" | "spectral"
+    eigenvalues_only: bool = True,
+    prefer_abelian: bool = False,  # soft veto: 'auto' declines, 'full' still projects
+    verbose: bool = False,
+) -> ProjectionLane:
+    """Decide project-vs-abelian for one verb call. ``point_group='full'``
+    raises on any decline; ``'auto'`` returns the abelian lane with the
+    decline reason recorded."""
+    pg = _pg_key(point_group)
+
+    def _decline(reason: str) -> ProjectionLane:
+        if pg == "full":
+            raise RuntimeError(
+                f"point_group='full' cannot engage the little-group "
+                f"projection lane on this {consumer} call: {reason}. "
+                "Use point_group='auto' to degrade to the abelian rep "
+                "lane with isospectral folds instead of raising.")
+        return ProjectionLane(mode="abelian", reason=reason)
+
+    if pg == "off":
+        return ProjectionLane(mode="abelian", reason="point_group off")
+    if symmetry_or_gens is None:
+        return _decline("no spatial symmetry was resolved")
+    if os.environ.get("ED_SYM_LITTLE_GROUP", "1") == "0":
+        return _decline("ED_SYM_LITTLE_GROUP=0 disables the lane")
+    if not eigenvalues_only:
+        return _decline(
+            "the call consumes eigenvectors / a sector restriction / a "
+            "sampling method, which the projection lane does not produce")
+    if pg == "auto" and prefer_abelian:
+        return ProjectionLane(
+            mode="abelian",
+            reason="the abelian lane better serves this call "
+                   "(e.g. an explicit GPU device request)")
+    if pg == "auto" and consumer == "thermal":
+        return _decline(
+            "thermal projects only under point_group='full' (the "
+            "projection lane replaces sampling with exact per-block "
+            "spectra -- an explicit opt-in)")
+    if pg == "auto" and consumer == "spectral":
+        return _decline("the spectral projection lane lands in Stage 9d")
+    split = split_nonabelian(symmetry_or_gens)
+    if isinstance(split, str):
+        return _decline(split)
+    A, residues = split
+    return ProjectionLane(mode="project", A=A, residues=residues)

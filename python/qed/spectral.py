@@ -1388,6 +1388,14 @@ def spectral(
         # PROPER non-abelian GS-DSSF: H and the probe reduced by the
         # FULL group (all d_Gamma partners summed for completeness) on
         # the production multi-target matvec.
+        # Stage 9c NOTE: this is the LAST production consumer of the
+        # monolithic SAB engine; Stage 9d replaces it with the
+        # factorized little_group_gs_dssf.
+        import warnings as _warnings
+        _warnings.warn(
+            "point_group='full' DSSF routes through the monolithic SAB "
+            "engine (moderate-N only) until the factorized little-group "
+            "DSSF lands (Stage 9d).", DeprecationWarning, stacklevel=2)
         import numpy as np
         from .workflow import (resolve_auto_symmetry as _ras,
                                _full_group_generators as _fgg)
