@@ -320,6 +320,7 @@ struct EngineContext {
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
                                                         // (EXTENDED indices when flip)
     std::shared_ptr<const ed::symmetry::OrbitTable> otab;
+    ed::symmetry::CompiledGroup          cg;            // A (or A'), byte-LUT
     int                                  n_sites = 0;
     // Stage 9a: A' = A x Z2 (global spin flip as an XOR element). Element
     // index convention: a in [0,|A|) pure, a+|A| = flip*a. Irrep index
@@ -566,7 +567,6 @@ build_monomial(const EngineContext& cx, int rp,
                const ed::symmetry::RepSectorData& rd, Monomial& out) {
     const auto& p    = cx.residues[static_cast<std::size_t>(rp)];
     const auto& chi  = rd.characters;
-    const std::size_t nAraw = cx.A.size();
     const std::size_t nA    = cx.nA_ext();
     const std::size_t dim = rd.reps.size();
     out.to.assign(dim, -1);
@@ -575,16 +575,15 @@ build_monomial(const EngineContext& cx, int rp,
         const std::uint64_t s = applyPermutation(rd.reps[i], p);
         // canonical rep of s's A-orbit + an element a* with U_{a*}|s> = |rb>.
         // The min is taken over the images ONLY (identity is in A, so s
-        // itself is among them and a* is always well-defined). With flip
-        // engaged the loop covers the XOR half too -- permute-then-XOR, the
-        // same composition CompiledGroup::apply uses (the all-ones mask is
-        // permutation-invariant, so the order is immaterial).
+        // itself is among them and a* is always well-defined). cx.cg is the
+        // byte-LUT CompiledGroup over A (or A' with the flip planes folded
+        // in, laid out [A, A*F] -- the same element-index convention as the
+        // extended characters), so this inner loop is ~4-8 table loads per
+        // image instead of the O(N) scalar bit scatter.
         std::uint64_t rb    = ~std::uint64_t{0};
         std::size_t   astar = 0;
         for (std::size_t a = 0; a < nA; ++a) {
-            const std::uint64_t img =
-                applyPermutation(s, cx.A[a % nAraw])
-                ^ (a >= nAraw ? cx.flip_mask : 0ULL);
+            const std::uint64_t img = cx.cg.apply(s, a);
             if (img < rb) { rb = img; astar = a; }
         }
         // locate rb among the surviving reps
@@ -764,19 +763,19 @@ void make_engine_context(const ::Operator&                    op,
     // Stage 9b: antiunitary K folding (real H only).
     tr_on = resolve_tr_engagement(soa, opt);
 
-    const auto cgA = cx.flip_half
+    cx.cg = cx.flip_half
         ? ed::symmetry::make_flip_extended_group_from_perms(
               cx.A, static_cast<std::uint64_t>(n_sites))
         : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
     if (opt.n_up >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.n_up, cgA);
+            static_cast<std::uint64_t>(n_sites), opt.n_up, cx.cg);
     } else if (opt.sz_parity >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.sz_parity, cgA);
+            static_cast<std::uint64_t>(n_sites), opt.sz_parity, cx.cg);
     } else {
         cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
-            static_cast<std::uint64_t>(n_sites), cgA);
+            static_cast<std::uint64_t>(n_sites), cx.cg);
     }
     build_residue_maps(cx, residue_perms);
 }
