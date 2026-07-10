@@ -1590,10 +1590,13 @@ def solve(
             eigenvalues_only=(not compute_eigenvectors
                               and sector is None
                               and not is_thermal),
-            # an explicit GPU request is served by the abelian rep lane
-            # (the little-group lowest-k engine is CPU); 'full' still
-            # projects on CPU as before.
-            prefer_abelian=use_gpu,
+            # an EXPLICIT GPU request is served by the abelian rep lane
+            # (the little-group lowest-k engine is CPU); auto-dispatch
+            # to GPU must NOT veto the projection -- the projected
+            # blocks are far smaller than what the GPU lane would chew.
+            # 'full' still projects on CPU as before.
+            prefer_abelian=(isinstance(device, str)
+                            and device.lower() in ("gpu", "cuda")),
             verbose=verbose)
         if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
