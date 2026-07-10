@@ -1,5 +1,10 @@
 # Symmetry implementation — finite temperature & DSSF
 
+> **For the current end-to-end picture see
+> [UNIFIED_STACK.md](UNIFIED_STACK.md)** — the Stage-9 layer-by-layer
+> architecture (routing → projection engine → basis → matvec regimes) and
+> the per-verb call pipelines. This file remains the mechanism reference.
+
 > **Update (2026-06-09): backend-aware symmetry matvec; memory-light full
 > spectrum + NLCE wiring. (Revised — see "when symmetry helps" below.)**
 >
