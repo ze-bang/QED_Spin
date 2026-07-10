@@ -79,7 +79,10 @@ def test_ring_full_spectrum_and_star_structure():
 
     w = np.linalg.eigvalsh(_dense_heisenberg(N, [(i, (i + 1) % N)
                                                  for i in range(N)]))
-    d = dict(qed._core.little_group_full_spectrum(H, A, res))
+    # spin_flip=0: this test pins the PURE Stage-7 star structure; the
+    # Stage-9a flip-extended (k, +/-) structure is pinned in
+    # test_little_group_flip.py.
+    d = dict(qed._core.little_group_full_spectrum(H, A, res, spin_flip=0))
     ev = np.sort(np.asarray(d["eigenvalues"]))
     assert len(ev) == 1 << N
     np.testing.assert_allclose(ev, w, rtol=0, atol=1e-12)
@@ -114,7 +117,9 @@ def test_square_lattice_c4v_gamma_point():
     assert len(A) == 9                        # Z3 x Z3 translations
 
     w = np.linalg.eigvalsh(_dense_heisenberg(N, bonds))
-    d = dict(qed._core.little_group_full_spectrum(H, A, res))
+    # spin_flip=0: pins the pure Stage-7 structure (flip-composed C4v is
+    # pinned in test_little_group_flip.py).
+    d = dict(qed._core.little_group_full_spectrum(H, A, res, spin_flip=0))
     ev = np.sort(np.asarray(d["eigenvalues"]))
     np.testing.assert_allclose(ev, w, rtol=0, atol=1e-12)
 

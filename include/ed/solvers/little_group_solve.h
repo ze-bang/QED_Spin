@@ -53,15 +53,27 @@ struct LittleGroupOptions {
     bool use_gpu       = false;///< full-spectrum path: ONE batched cuSOLVER
                                ///< eigensolve over all packed blocks (WITH_CUDA)
     bool verbose       = false;
+    /// Stage 9a: spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
+    /// flip commutes with every site permutation, so it never belongs to the
+    /// little co-group). SymToggle convention: -1 auto (engage when
+    /// [H, prod sigma^x] = 0 AND the subspace is flip-invariant: n_up = N/2,
+    /// parity with N even, or the full space; ED_SYM_LG_FLIP=0 vetoes),
+    /// 0 off, 1 require (throws when the symmetry or admissibility is absent).
+    int  spin_flip     = -1;
+    /// Stage 9b: time-reversal folding (star-level k <-> conj(k) merge +
+    /// conjugate-irrep pairing). Same SymToggle convention; dormant until 9b.
+    int  time_reversal = -1;
 };
 
 /// One star's diagnostics.
 struct LittleGroupStarInfo {
-    int  k0            = 0;    ///< star representative (abelian irrep index)
+    int  k0            = 0;    ///< star representative (extended irrep index:
+                               ///< k + s*n_irr_raw when flip is engaged)
     int  star_size     = 1;    ///< |star| (spectrum multiplicity factor)
     int  little_order  = 1;    ///< |P_k0| actually used (1 = plain fallback)
     bool projected     = false;///< true when the little-group blocks were used
     std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
+    int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
 };
 
 struct LittleGroupSpectrum {
@@ -71,6 +83,7 @@ struct LittleGroupSpectrum {
     std::vector<int>    multiplicities;
     std::vector<LittleGroupStarInfo> stars;
     std::uint64_t       total_dim = 0;
+    bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
 
     /// Flat sorted spectrum with multiplicities expanded (dense-diag shape).
     [[nodiscard]] std::vector<double> expanded() const;

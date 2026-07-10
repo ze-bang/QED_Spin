@@ -879,11 +879,14 @@ PYBIND11_MODULE(_core, m) {
     // refinement step degrades gracefully to the plain k0 block.
     // -----------------------------------------------------------------
     auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim,
-                      bool use_gpu = false) {
+                      bool use_gpu = false, int spin_flip = -1,
+                      int time_reversal = -1) {
         ed::solvers::LittleGroupOptions o;
         o.n_up          = n_up;
         o.sz_parity     = sz_parity;
         o.dense_max_dim = dense_max_dim;
+        o.spin_flip     = spin_flip;
+        o.time_reversal = time_reversal;
 #ifdef WITH_CUDA
         o.use_gpu       = use_gpu;
 #else
@@ -900,6 +903,7 @@ PYBIND11_MODULE(_core, m) {
             d["little_order"] = st.little_order;
             d["projected"]    = st.projected;
             d["dim_k0"]       = st.dim_k0;
+            d["flip_parity"]  = st.flip_parity;
             stars.append(d);
         }
         return stars;
@@ -909,21 +913,25 @@ PYBIND11_MODULE(_core, m) {
           [lg_opts, lg_stars_dict](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int n_up, int sz_parity, bool use_gpu) {
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto s = ed::solvers::little_group_full_spectrum(
                   op, abelian_group, residue_perms, n_sites,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+                  lg_opts(n_up, sz_parity, 4096, use_gpu, spin_flip,
+                          time_reversal));
               py::dict d;
               d["eigenvalues"]    = s.expanded();
               d["block_values"]   = s.eigenvalues;
               d["multiplicities"] = s.multiplicities;
               d["stars"]          = lg_stars_dict(s);
+              d["flip_engaged"]   = s.flip_engaged;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("n_up") = -1,
           py::arg("sz_parity") = -1, py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           "Full spectrum via the FACTORIZED little-co-group reduction "
           "(one momentum per star, per-irrep blocks inside the star "
           "representative's matrix-free k-sector).");
@@ -932,16 +940,19 @@ PYBIND11_MODULE(_core, m) {
           [lg_opts](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int k, int n_up, int sz_parity, int dense_max_dim) {
+             int k, int n_up, int sz_parity, int dense_max_dim,
+             int spin_flip, int time_reversal) {
               const int n_sites = static_cast<int>(op.getNumBits());
               return ed::solvers::little_group_lowest_eigenvalues(
                   op, abelian_group, residue_perms, n_sites, k,
-                  lg_opts(n_up, sz_parity, dense_max_dim));
+                  lg_opts(n_up, sz_parity, dense_max_dim, false,
+                          spin_flip, time_reversal));
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("k") = 1,
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("dense_max_dim") = 64,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           "Lowest-k eigenvalues via the factorized little-co-group "
           "reduction (dense on small blocks, Lanczos on the projected "
           "matrix-free matvec otherwise); multiplicities expanded.");
@@ -951,11 +962,13 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<double>& temperatures,
-             int n_up, int sz_parity, bool use_gpu) {
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto td = ed::solvers::little_group_thermodynamics(
                   op, abelian_group, residue_perms, n_sites, temperatures,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+                  lg_opts(n_up, sz_parity, 4096, use_gpu, spin_flip,
+                          time_reversal));
               py::dict d;
               d["temperatures"]  = td.temperatures;
               d["energy"]        = td.energy;
@@ -968,6 +981,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("residue_perms"), py::arg("temperatures"),
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
 

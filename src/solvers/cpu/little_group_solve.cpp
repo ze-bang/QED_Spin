@@ -31,6 +31,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <functional>
 #include <memory>
@@ -261,13 +262,94 @@ dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
 namespace {
 
 struct EngineContext {
-    std::vector<std::vector<int>>        A;
-    ed::symmetry::GroupIrreps            giA;
+    std::vector<std::vector<int>>        A;             // RAW abelian perms
+    ed::symmetry::GroupIrreps            giA;           // irreps of RAW A
     std::vector<std::vector<int>>        residues;      // usable, deduped, no identity
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
+                                                        // (EXTENDED indices when flip)
     std::shared_ptr<const ed::symmetry::OrbitTable> otab;
     int                                  n_sites = 0;
+    // Stage 9a: A' = A x Z2 (global spin flip as an XOR element). Element
+    // index convention: a in [0,|A|) pure, a+|A| = flip*a. Irrep index
+    // convention: k + s*n_irr_raw, s in {0,1} the flip parity -- the same
+    // synthetic-id arithmetic the sector_plan flip slots use.
+    bool                                 flip_half = false;
+    std::uint64_t                        flip_mask = 0;
+    int                                  n_irr_raw = 0;
+
+    [[nodiscard]] std::size_t nA_ext() const noexcept {
+        return A.size() * (flip_half ? 2u : 1u);
+    }
+    [[nodiscard]] int n_irr_ext() const noexcept {
+        return n_irr_raw * (flip_half ? 2 : 1);
+    }
 };
+
+// Extended-irrep characters chi'_{k,s}(a + f|A|) = chi_k(a) * (s ? -1 : +1)^f.
+// Without flip this is just the raw character vector.
+[[nodiscard]] std::vector<Complex>
+characters_for(const EngineContext& cx, int k_ext) {
+    const auto& base =
+        cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
+    std::vector<Complex> chi(base.begin(), base.end());
+    if (cx.flip_half) {
+        const double s = (k_ext / cx.n_irr_raw == 0) ? 1.0 : -1.0;
+        chi.reserve(2 * base.size());
+        for (const Complex& c : base) chi.push_back(s * c);
+    }
+    return chi;
+}
+
+// Stage 9a env sub-gate (Auto mode only; Require overrides). Read per call,
+// like the other ED_SYM_* gates, so tests can toggle without restart.
+[[nodiscard]] bool little_group_flip_enabled() noexcept {
+    const char* v = std::getenv("ED_SYM_LG_FLIP");
+    return v == nullptr || v[0] != '0';
+}
+
+// Decide whether A' = A x Z2 engages: [H, prod sigma^x] = 0 at term level AND
+// the active subspace is flip-invariant (n_up = N/2; parity half with N even;
+// full space unconditionally). Require throws loudly on either failure --
+// silently-different physics is worse than an error.
+struct FlipEngagement {
+    bool          symmetric = false;
+    bool          engaged   = false;
+    std::uint64_t mask      = 0;
+};
+
+[[nodiscard]] FlipEngagement
+resolve_flip_engagement(const ::Operator& op, const LittleGroupOptions& opt,
+                        int n_sites)
+{
+    FlipEngagement fe;
+    if (opt.spin_flip == 0) return fe;
+    ed::matvec::TermStorage soa;
+    ed::matvec::TermStorage::classify_route(
+        soa, op.transform_data_, op.three_body_data_,
+        [](const std::complex<double>& c) { return c; });
+    fe.symmetric = ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+    const bool admissible =
+        (opt.n_up >= 0)      ? (opt.n_up * 2 == n_sites)
+      : (opt.sz_parity >= 0) ? (n_sites % 2 == 0)
+                             : true;
+    if (opt.spin_flip == 1) {
+        if (!fe.symmetric)
+            throw std::runtime_error(
+                "little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
+                "at the term level (e.g. a Zeeman term breaks the flip).");
+        if (!admissible)
+            throw std::runtime_error(
+                "little_group: spin_flip='require' but the subspace is not "
+                "flip-invariant (needs n_up = N/2, an Sz-parity half with N "
+                "even, or the full space).");
+    }
+    if (!fe.symmetric || !admissible) return fe;
+    if (opt.spin_flip < 0 && !little_group_flip_enabled()) return fe;
+    fe.engaged = true;
+    fe.mask = (n_sites >= 64) ? ~0ULL
+                              : ((std::uint64_t{1} << n_sites) - 1ULL);
+    return fe;
+}
 
 // Map each residue's conjugation action onto the abelian irreps
 // (chi_k -> chi_k', with chi_{k'}(a') = chi_k(p^{-1} a' p)); residues that do
@@ -315,6 +397,18 @@ void build_residue_maps(EngineContext& cx,
             else mp[static_cast<std::size_t>(k)] = hit;
         }
         if (!ok) continue;
+        // Stage 9a: lift to extended irrep indices. A spatial residue
+        // commutes with the global flip (p^-1 (a F) p = (p^-1 a p) F), so the
+        // conjugation action is parity-diagonal: (k, s) -> (mp[k], s).
+        if (cx.flip_half) {
+            std::vector<int> mp2(static_cast<std::size_t>(2 * n_irr), -1);
+            for (int k = 0; k < n_irr; ++k) {
+                mp2[static_cast<std::size_t>(k)] = mp[static_cast<std::size_t>(k)];
+                mp2[static_cast<std::size_t>(k + n_irr)] =
+                    mp[static_cast<std::size_t>(k)] + n_irr;
+            }
+            mp = std::move(mp2);
+        }
         cx.residues.push_back(p);
         cx.irrep_map.push_back(std::move(mp));
     }
@@ -325,12 +419,20 @@ void build_residue_maps(EngineContext& cx,
 build_k_sector(const EngineContext& cx, int k, int n_up) {
     ed::symmetry::RepSectorData rd;
     rd.n_sites    = cx.n_sites;
-    rd.group_size = static_cast<int>(cx.A.size());
+    rd.group_size = static_cast<int>(cx.nA_ext());
     rd.n_up       = n_up;
-    rd.characters = cx.giA.irreps[static_cast<std::size_t>(k)].character;
-    rd.perms_flat.reserve(cx.A.size() * static_cast<std::size_t>(cx.n_sites));
+    rd.characters = characters_for(cx, k);
+    rd.perms_flat.reserve(cx.nA_ext() * static_cast<std::size_t>(cx.n_sites));
     for (const auto& p : cx.A)
         rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
+    if (cx.flip_half) {
+        // Flip half: the permutation part repeats, the XOR mask flips on.
+        for (const auto& p : cx.A)
+            rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
+        rd.flip_masks.assign(cx.nA_ext(), 0ULL);
+        for (std::size_t g = cx.A.size(); g < cx.nA_ext(); ++g)
+            rd.flip_masks[g] = cx.flip_mask;
+    }
     for (std::size_t i = 0; i < cx.otab->reps.size(); ++i) {
         const double nsq = ed::symmetry::projected_norm_sq_stab(
             cx.otab->stabilizer_of(i), rd.characters);
@@ -348,7 +450,8 @@ build_monomial(const EngineContext& cx, int rp,
                const ed::symmetry::RepSectorData& rd, Monomial& out) {
     const auto& p    = cx.residues[static_cast<std::size_t>(rp)];
     const auto& chi  = rd.characters;
-    const std::size_t nA = cx.A.size();
+    const std::size_t nAraw = cx.A.size();
+    const std::size_t nA    = cx.nA_ext();
     const std::size_t dim = rd.reps.size();
     out.to.assign(dim, -1);
     out.phase.assign(dim, Complex(0, 0));
@@ -356,11 +459,16 @@ build_monomial(const EngineContext& cx, int rp,
         const std::uint64_t s = applyPermutation(rd.reps[i], p);
         // canonical rep of s's A-orbit + an element a* with U_{a*}|s> = |rb>.
         // The min is taken over the images ONLY (identity is in A, so s
-        // itself is among them and a* is always well-defined).
+        // itself is among them and a* is always well-defined). With flip
+        // engaged the loop covers the XOR half too -- permute-then-XOR, the
+        // same composition CompiledGroup::apply uses (the all-ones mask is
+        // permutation-invariant, so the order is immaterial).
         std::uint64_t rb    = ~std::uint64_t{0};
         std::size_t   astar = 0;
         for (std::size_t a = 0; a < nA; ++a) {
-            const std::uint64_t img = applyPermutation(s, cx.A[a]);
+            const std::uint64_t img =
+                applyPermutation(s, cx.A[a % nAraw])
+                ^ (a >= nAraw ? cx.flip_mask : 0ULL);
             if (img < rb) { rb = img; astar = a; }
         }
         // locate rb among the surviving reps
@@ -562,7 +670,18 @@ LittleGroupSpectrum run_little_group(
         throw std::invalid_argument(
             "little_group: `abelian_group` is not abelian -- pass the clique "
             "group; residues go in `residue_perms`.");
-    const auto cgA = ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
+    cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
+
+    // Stage 9a: extend the ABELIAN factor by the global spin flip when
+    // admissible (A' = A x Z2; the flip commutes with every site perm).
+    const FlipEngagement fe = resolve_flip_engagement(op, opt, n_sites);
+    cx.flip_half = fe.engaged;
+    cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
+
+    const auto cgA = cx.flip_half
+        ? ed::symmetry::make_flip_extended_group_from_perms(
+              cx.A, static_cast<std::uint64_t>(n_sites))
+        : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
     if (opt.n_up >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
             static_cast<std::uint64_t>(n_sites), opt.n_up, cgA);
@@ -575,8 +694,10 @@ LittleGroupSpectrum run_little_group(
     }
     build_residue_maps(cx, residue_perms);
 
-    // Stars: union-find over abelian irreps under the residue maps.
-    const int n_irr = static_cast<int>(cx.giA.irreps.size());
+    // Stars: union-find over (extended) abelian irreps under the residue
+    // maps. With flip engaged the lifted maps are parity-diagonal, so a star
+    // never mixes (k,+) with (k,-).
+    const int n_irr = cx.n_irr_ext();
     std::vector<int> parent(static_cast<std::size_t>(n_irr));
     std::iota(parent.begin(), parent.end(), 0);
     std::function<int(int)> find = [&](int x) {
@@ -596,6 +717,7 @@ LittleGroupSpectrum run_little_group(
     for (int k = 0; k < n_irr; ++k) stars[find(k)].push_back(k);
 
     LittleGroupSpectrum out;
+    out.flip_engaged = cx.flip_half;
     for (const auto& [k0, members] : stars) {
         const int m_star = static_cast<int>(members.size());
         auto rd = build_k_sector(cx, k0, opt.n_up);
@@ -603,6 +725,7 @@ LittleGroupSpectrum run_little_group(
         info.k0        = k0;
         info.star_size = m_star;
         info.dim_k0    = rd.reps.size();
+        info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
         if (rd.reps.empty()) { out.stars.push_back(info); continue; }
 
         RepSectorMatVec hk(op, std::move(rd));
@@ -828,14 +951,27 @@ ThermodynamicData little_group_thermodynamics(
             soa, op.transform_data_, op.three_body_data_,
             [](const std::complex<double>& c) { return c; });
         if (ed::symmetry::sz_axis_of(soa) == ed::symmetry::SzAxis::U1) {
+            // Stage 9a: flip TRANSPORT at the sweep level -- spec(n_up) ==
+            // spec(N - n_up) when [H, prod sigma^x] = 0, so sweep only
+            // n_up <= N/2 and double the mirrored blocks. (resolve_flip_
+            // engagement on the full-space options == symmetric + toggles;
+            // Require throws loudly here when the flip is absent.)
+            const bool fold =
+                resolve_flip_engagement(op, opt, n_sites).engaged;
+            const int nu_max = fold ? n_sites / 2 : n_sites;
             std::vector<double> eigs;
-            for (int nu = 0; nu <= n_sites; ++nu) {
+            for (int nu = 0; nu <= nu_max; ++nu) {
                 LittleGroupOptions o = opt;
                 o.n_up = nu;
+                // In-sector (k,+/-) projection is only admissible at half
+                // filling; the mirrored blocks are covered by the fold.
+                if (2 * nu != n_sites) o.spin_flip = 0;
                 const auto s = little_group_full_spectrum(
                     op, abelian_group, residue_perms, n_sites, o);
                 const auto e = s.expanded();
                 eigs.insert(eigs.end(), e.begin(), e.end());
+                if (fold && nu != n_sites - nu)
+                    eigs.insert(eigs.end(), e.begin(), e.end());
             }
             std::sort(eigs.begin(), eigs.end());
             return ed::symmetry::canonical_thermo_from_eigs(eigs, temperatures);
