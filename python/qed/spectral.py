@@ -206,8 +206,9 @@ from dataclasses import dataclass as _dataclass
 
 
 @_dataclass
-class _SabDssfResult:
-    """Return shape of the full-group (non-abelian SAB) GS-DSSF lane."""
+class _GsDssfResult:
+    """Return shape of the full-group GS-DSSF lane (Stage 9d: the
+    factorized little-group engine)."""
     omega: "np.ndarray"
     S_real: "np.ndarray"
     gs_energy: float
@@ -1407,7 +1408,7 @@ def spectral(
                     float(min(ws)), float(max(ws)), int(len(ws)),
                     float(eta if eta is not None else 0.1),
                     krylov_dim=int(krylov_dim) if krylov_dim else 200))
-                r = _SabDssfResult(
+                r = _GsDssfResult(
                     omega=np.asarray(d["omega"], dtype=float),
                     S_real=np.asarray(d["s_omega"], dtype=float),
                     gs_energy=float(d["gs_energy"]),

@@ -1240,6 +1240,28 @@ def solve(
     sz : int, optional
         When ``H`` is an :class:`Operator` and the operator commutes
         with total Sz, restrict to the sector with this many up spins.
+    point_group : str or bool, optional
+        Stage 9c semantics. ``"auto"`` (default): eigenvalue-only calls
+        PROJECT through the factorized little-group engine (translation
+        x flip x little-co-group blocks); vector consumers
+        (``compute_eigenvectors``, ``sector=``, sampling methods, an
+        explicit GPU ``device=``) use the abelian rep lane with
+        star/TR/flip folds and per-sector output. ``"full"``: REQUIRE
+        projection -- raises with the decline reason instead of
+        degrading. ``"off"``: abelian lane, star folds disabled.
+        NOTE: the projection lane returns pooled ``eigenvalues`` only
+        (no ``eigenvalues_per_sector``) -- pass ``point_group="off"``
+        when per-sector arrays are needed.
+    spin_flip, time_reversal : str or bool, optional
+        Per-symmetry toggles (``"auto"`` / ``"on"`` / ``"off"`` /
+        ``"require"``): the flip projects at half filling and
+        transports elsewhere; TR folds conjugate sectors. ``"require"``
+        throws when H does not carry the symmetry. Applied identically
+        on both lanes.
+    lattice : qed.input.Lattice, optional
+        Required by ``symmetry="translation"`` (identifies which
+        automorphisms are pure translations; the point group rides as
+        star residue).
     output_dir : str, optional
         Directory where the C++ engine should write eigenvectors /
         HDF5 artefacts and (for thermal methods) the imaginary-time
@@ -3369,7 +3391,8 @@ def _normalize_symmetry_info(
 def _raw_generators(symmetry: SymmetryArg) -> Optional[list[list[int]]]:
     """The UNRESTRICTED site-permutation generators of ``symmetry`` (before
     the abelian-subgroup guard in ``group_from_generators``). Used to decide
-    whether the spatial group is non-abelian and to feed the SAB engine."""
+    whether the spatial group is non-abelian and to feed split_nonabelian
+    (Stage 9c; previously the monolithic SAB engine)."""
     if symmetry is None:
         return None
     if isinstance(symmetry, GeneratorSet):

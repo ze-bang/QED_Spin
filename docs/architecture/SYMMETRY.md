@@ -119,7 +119,11 @@
 > above a cap (`2^22` default, override `ED_SYM_SAB_MAX_DIM`) with an error pointing
 > here. For large N use the **matrix-free abelian rep path** (`RepSymmetryBasisPolicy`),
 > which holds only `reps[]` and regenerates the projection arithmetically — that is
-> the at-scale machinery. A matrix-free *non-abelian* engine is not yet implemented.
+> the at-scale machinery. The matrix-free *non-abelian* engine is the factorized
+> little-group solver (`little_group_solve.h`, Stage 7/9): little-co-group isotypic
+> projection inside the rep lane's matrix-free momentum sectors — since Stage 9c it
+> is the DEFAULT for eigenvalue-only `point_group="auto"` calls, and the monolithic
+> SAB engine above survives only as the parity-test oracle.
 >
 > **The sym-matvec regime is a default, not a planner decision.** There is no
 > execution planner; the strategy comes from the `sym_matvec_repr` leaf hook

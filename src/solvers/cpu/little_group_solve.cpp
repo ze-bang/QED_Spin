@@ -15,6 +15,7 @@
 #include <ed/matvec/backends/cpu_backend.h>      // 9d: CpuBackend for the GS Lanczos
 #include <ed/krylov/lanczos_kernel.h>            // 9d: keep_basis Ritz-vector GS
 #include <ed/core/blas_lapack_wrapper.h>         // 9d: LAPACKE_dstevd
+#include <ed/planner/sym_matvec_policy_hook.h>   // 9e: RepReducedCsr default
 #include <ed/matvec/reduced_symmetry_csr.h>     // B4: build_reduced_symmetry_csr_rep
 #include <ed/matvec/term_storage.h>
 #include <ed/solvers/lanczos.h>                  // ::lanczos / ::full_diagonalization
@@ -32,10 +33,12 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <map>
 #include <functional>
 #include <memory>
@@ -110,6 +113,17 @@ public:
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
+        // 9e: the production regime is build-the-reduced-block-ONCE +
+        // SpMV per apply (the same RepReducedCsr default the abelian
+        // lane has used since Stage 2b); the arithmetic-regeneration
+        // gather walk is the memory-budget fallback only. Without this,
+        // every Lanczos iteration re-derives the matrix elements and
+        // the gather cost eats the entire projection win.
+        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+        if (csr_) {
+            csr_->spmv(in, out);
+            return;
+        }
         backend_->apply_complex(&tv_, in, out, n);
     }
     [[nodiscard]] std::size_t dim() const override { return rd_->reps.size(); }
@@ -139,10 +153,44 @@ public:
     }
 
 private:
+    // 9e: lazily build the reduced sector matrix when (a) the policy hook
+    // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 /
+    // ED_SYM_REP=0 fall back to the gather walk) and (b) an UPPER-BOUND
+    // memory estimate fits the budget (ED_SYM_SECTOR_CSR_BUDGET_GIB,
+    // default 8; each off-diagonal term contributes at most one entry
+    // per source row). col_idx is uint32, so > 2^32-row sectors always
+    // stay on the gather walk.
+    void maybe_build_csr_() const {
+        if (ed::planner::resolved_sym_matvec_repr()
+                != static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr))
+            return;
+        const std::uint64_t dim = rd_->reps.size();
+        if (dim == 0 || dim >= (std::uint64_t{1} << 32)) return;
+        const std::uint64_t terms_per_row =
+            1  // fused diagonal
+            + terms_.offdiag_one_body.size()
+            + terms_.mixed_two_body.size()
+            + terms_.offdiag_two_body.size()
+            + terms_.three_body.size();
+        const std::uint64_t est_bytes =
+            dim * terms_per_row * (sizeof(Complex) + sizeof(std::uint32_t))
+            + (dim + 1) * sizeof(std::uint64_t);
+        double budget_gib = 8.0;
+        if (const char* v = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
+            const double b = std::atof(v);
+            if (b > 0.0) budget_gib = b;
+        }
+        if (static_cast<double>(est_bytes) > budget_gib * (1ULL << 30)) return;
+        csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
+            reduced_csr());
+    }
+
     std::unique_ptr<ed::symmetry::RepSectorData>  rd_;   // stable address for the backend
     ed::matvec::TermStorage                        terms_;
     TV                                             tv_{};
     std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
+    mutable std::once_flag                         csr_once_;
+    mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
 };
 
 // Monomial action of one little-group element on the k0 rep basis:
@@ -823,11 +871,25 @@ LittleGroupSpectrum run_little_group(
                         cx, tr_on);
     const auto stars = star_partition(cx, tr_on);
 
+    // ED_SYM_PROFILE=1: per-phase wall-time accounting (Stage-0 style --
+    // make the cost visible; the little-group engine is CONSTRUCTION-
+    // dominated at small-mid N, and this is how you see it).
+    const bool profile = [] {
+        const char* v = std::getenv("ED_SYM_PROFILE");
+        return v != nullptr && v[0] == '1';
+    }();
+    double t_sector = 0, t_monomial = 0, t_isotypic = 0, t_solve = 0;
+    auto tick = [] { return std::chrono::steady_clock::now(); };
+    auto secs = [](auto a, auto b) {
+        return std::chrono::duration<double>(b - a).count();
+    };
+
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
     out.tr_engaged   = tr_on;
     for (const auto& [k0, members] : stars) {
         const int m_star = static_cast<int>(members.size());
+        auto t0 = tick();
         auto rd = build_k_sector(cx, k0, opt.n_up);
         LittleGroupStarInfo info;
         info.k0        = k0;
@@ -838,6 +900,7 @@ LittleGroupSpectrum run_little_group(
 
         RepSectorMatVec hk(op, std::move(rd));
         const auto& rdr = hk.rep_data();
+        if (profile) { t_sector += secs(t0, tick()); t0 = tick(); }
 
         // Little co-group: identity + residues fixing k0, validated, ONE
         // representative per coset of A. Residues in the same coset act as
@@ -875,6 +938,7 @@ LittleGroupSpectrum run_little_group(
             if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
             M.push_back(std::move(m));
         }
+        if (profile) { t_monomial += secs(t0, tick()); t0 = tick(); }
 
         bool projected = false;
         if (M.size() > 1) {
@@ -941,6 +1005,7 @@ LittleGroupSpectrum run_little_group(
                             }
                         }
                     }
+                    if (profile) { t_isotypic += secs(t0, tick()); t0 = tick(); }
                     if (covered == rdr.reps.size()) {
                         projected = true;
                         for (int ii = 0; ii < nIr; ++ii) {
@@ -980,6 +1045,13 @@ LittleGroupSpectrum run_little_group(
         }
         info.projected = projected;
         out.stars.push_back(info);
+        if (profile) t_solve += secs(t0, tick());
+    }
+    if (profile) {
+        std::fprintf(stderr,
+            "[little_group profile] sector=%.3fs monomial=%.3fs "
+            "isotypic=%.3fs solve=%.3fs (stars=%zu)\n",
+            t_sector, t_monomial, t_isotypic, t_solve, stars.size());
     }
 
     for (int m : out.multiplicities) out.total_dim += static_cast<std::uint64_t>(m);
