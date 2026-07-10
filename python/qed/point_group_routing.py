@@ -215,7 +215,10 @@ def resolve_projection_lane(
             "projection lane replaces sampling with exact per-block "
             "spectra -- an explicit opt-in)")
     if pg == "auto" and consumer == "spectral":
-        return _decline("the spectral projection lane lands in Stage 9d")
+        return _decline(
+            "spectral 'auto' keeps the abelian per-probe cross-irrep "
+            "lanes (momentum-resolved panels); point_group='full' opts "
+            "into the factorized little-group GS-DSSF")
     split = split_nonabelian(symmetry_or_gens)
     if isinstance(split, str):
         return _decline(split)

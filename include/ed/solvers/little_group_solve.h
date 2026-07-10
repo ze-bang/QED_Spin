@@ -40,8 +40,12 @@
 
 #include <ed/core/operator.h>
 #include <ed/core/results.h>   // ThermodynamicData
+#include <ed/matvec/matvec.h>              // 9d: MatVecOperator factory
+#include <ed/symmetry/rep_sector_data.h>   // 9d: RepSectorData
 
+#include <complex>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ed::solvers {
@@ -113,6 +117,46 @@ little_group_lowest_eigenvalues(
     int                                   n_sites,
     int                                   k,
     const LittleGroupOptions&             opt = {});
+
+/// Stage 9d: the ground state localized in its momentum sector by the
+/// star walk (flip/TR folds reduce the search), then solved PLAIN
+/// (unprojected) in that sector with an in-memory eigenvector -- dense
+/// for small blocks, FullCGS2 Lanczos Ritz vector otherwise, residual-
+/// guarded (throws rather than returning a stale pair). The vector is
+/// expressed in ``rd``'s rep basis, ready for
+/// ``CrossSectorOrbitObservable::OperatorRef::from_rep``.
+struct LittleGroupGroundState {
+    double                             energy = 0.0;
+    int                                k0     = -1;  ///< extended irrep index
+    ed::symmetry::RepSectorData        rd;           ///< the GS sector
+    std::vector<std::complex<double>>  vec;          ///< GS in rd's basis
+};
+
+[[nodiscard]] LittleGroupGroundState
+little_group_ground_state(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    const std::vector<std::vector<int>>&  residue_perms,
+    int                                   n_sites,
+    const LittleGroupOptions&             opt = {});
+
+/// Stage 9d: every non-empty RAW momentum sector of one diagonal
+/// subspace (destination sweep of the factorized DSSF -- folding never
+/// applies to matrix elements, so destinations enumerate raw irreps).
+[[nodiscard]] std::vector<ed::symmetry::RepSectorData>
+little_group_k_sectors(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    int                                   n_sites,
+    int                                   n_up      = -1,
+    int                                   sz_parity = -1);
+
+/// Stage 9d: matrix-free H restricted to one rep-basis sector (public
+/// factory over the engine's internal RepSectorMatVec).
+[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
+make_rep_sector_matvec(
+    const ::Operator&            op,
+    ed::symmetry::RepSectorData  rd);
 
 /// Exact canonical thermodynamics from the factorized full spectrum.
 [[nodiscard]] ThermodynamicData

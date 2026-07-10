@@ -56,6 +56,9 @@
 #include <ed/solvers/symmetry_adapted_solve.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
+#include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
+#include <ed/observables/cf_spectral_kernel.h>      // 9d: cf_spectral_from_vector
+#include <ed/matvec/backends/cpu_backend.h>         // 9d: CF backend
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -988,6 +991,170 @@ PYBIND11_MODULE(_core, m) {
           py::arg("dense_max_dim") = 4096,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
+
+    m.def("little_group_gs_dssf",
+          [](const Operator& op_h, const Operator& op_o,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             double omega_min, double omega_max, int n_omega,
+             double broadening, int krylov_dim, int dense_max_dim,
+             int time_reversal) {
+              // Stage 9d: FACTORIZED GS-DSSF. The ground state is
+              // localized by the star walk (folds shrink the search) and
+              // solved PLAIN in its momentum sector; O|0> is scattered
+              // into every RAW destination sector by the Stage-8d
+              // CrossSectorOrbitObservable rep lane (matrix elements are
+              // never folded -- ||phi|| decides every selection rule);
+              // one continued-fraction Lanczos per receiving sector.
+              // Memory O(#reps) throughout -- this replaces the
+              // monolithic SAB DSSF, which materialised the FULL
+              // eigenbasis in the computational basis.
+              using Complex = std::complex<double>;
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+              if (!op_o.three_body_data_.empty())
+                  throw std::runtime_error(
+                      "little_group_gs_dssf: three-body probes are not "
+                      "supported (one/two-body TransformData only).");
+
+              // Diagonal axis (same detection as everywhere else).
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op_h.transform_data_, op_h.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+              std::vector<std::pair<int, int>> gs_subspaces{{-1, -1}};
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  gs_subspaces.clear();
+                  for (int k = 0; k <= n_sites; ++k)
+                      gs_subspaces.emplace_back(k, -1);
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  gs_subspaces = {{-1, 0}, {-1, 1}};
+              }
+
+              // (1) Locate the GS subspace by star-walk lowest-1 solves.
+              auto lg_o = [&](int nu, int par) {
+                  ed::solvers::LittleGroupOptions o;
+                  o.n_up          = nu;
+                  o.sz_parity     = par;
+                  o.dense_max_dim = dense_max_dim;
+                  o.spin_flip     = 0;  // 9d v1: raw sectors end-to-end
+                  o.time_reversal = time_reversal;
+                  return o;
+              };
+              int gs_nu = -1, gs_par = -1;
+              double e_best = 0.0;
+              bool have = false;
+              for (const auto& [nu, par] : gs_subspaces) {
+                  const auto ev = ed::solvers::little_group_lowest_eigenvalues(
+                      op_h, abelian_group, residue_perms, n_sites, 1,
+                      lg_o(nu, par));
+                  if (ev.empty()) continue;
+                  if (!have || ev[0] < e_best) {
+                      have = true;
+                      e_best = ev[0];
+                      gs_nu = nu;
+                      gs_par = par;
+                  }
+              }
+              if (!have)
+                  throw std::runtime_error(
+                      "little_group_gs_dssf: no non-empty subspace.");
+
+              // (2) The GS eigenvector in its momentum sector.
+              const auto gs = ed::solvers::little_group_ground_state(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  lg_o(gs_nu, gs_par));
+
+              // (3) Destination sweep: 1/2-body probes reach at most
+              // n_up +- 2 (U(1)) / both parity halves / the full space.
+              std::vector<std::pair<int, int>> dst_subspaces;
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  for (int d = -2; d <= 2; ++d) {
+                      const int nu = gs_nu + d;
+                      if (nu >= 0 && nu <= n_sites)
+                          dst_subspaces.emplace_back(nu, -1);
+                  }
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  dst_subspaces = {{-1, 0}, {-1, 1}};
+              } else {
+                  dst_subspaces = {{-1, -1}};
+              }
+
+              std::vector<double> omega_grid(
+                  static_cast<std::size_t>(std::max(n_omega, 1)));
+              const double dw = (n_omega > 1)
+                  ? (omega_max - omega_min) / (n_omega - 1) : 0.0;
+              for (int i = 0; i < std::max(n_omega, 1); ++i)
+                  omega_grid[static_cast<std::size_t>(i)] =
+                      omega_min + dw * i;
+
+              std::vector<double> s_omega(omega_grid.size(), 0.0);
+              double total_weight = 0.0;
+              ed::matvec::CpuBackend be;
+              using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
+              const auto src_ref = Ref::from_rep(
+                  gs.rd, static_cast<std::uint64_t>(n_sites));
+
+              for (const auto& [dnu, dpar] : dst_subspaces) {
+                  auto sectors = ed::solvers::little_group_k_sectors(
+                      op_h, abelian_group, n_sites, dnu, dpar);
+                  for (const auto& rd_dst : sectors) {
+                      const std::size_t dim_dst = rd_dst.reps.size();
+                      ed::dssf::CrossSectorOrbitObservable obs(
+                          src_ref, 0,
+                          Ref::from_rep(rd_dst,
+                                        static_cast<std::uint64_t>(n_sites)),
+                          0, op_o.transform_data_,
+                          static_cast<float>(op_h.getSpin()));
+                      std::vector<Complex> phi(dim_dst, Complex(0, 0));
+                      obs.apply(gs.vec.data(), phi.data(), dim_dst);
+                      double n2 = 0.0;
+                      for (const Complex& c : phi) n2 += std::norm(c);
+                      if (n2 < 1e-24) continue;   // selection rule says no
+                      total_weight += n2;
+
+                      auto mv = ed::solvers::make_rep_sector_matvec(
+                          op_h, rd_dst);
+                      ed::observables::CfSpectralOptions cfopts;
+                      cfopts.krylov_dim   = static_cast<std::size_t>(
+                          std::max(krylov_dim, 2));
+                      cfopts.broadening   = broadening;
+                      cfopts.energy_shift = gs.energy;
+                      cfopts.tolerance    = 1e-12;
+                      cfopts.global_n     = dim_dst;
+                      auto apply_H = [&mv](const Complex* in, Complex* out,
+                                           std::size_t nn) {
+                          mv->apply(in, out, nn);
+                      };
+                      const auto cf =
+                          ed::observables::cf_spectral_from_vector(
+                              be, apply_H, dim_dst, phi.data(),
+                              omega_grid, cfopts);
+                      for (std::size_t i = 0; i < s_omega.size(); ++i)
+                          s_omega[i] += cf.spectral_function[i];
+                  }
+              }
+
+              py::dict d;
+              d["omega"]        = omega_grid;
+              d["s_omega"]      = s_omega;
+              d["gs_energy"]    = gs.energy;
+              d["gs_k0"]        = gs.k0;
+              d["total_weight"] = total_weight;
+              return d;
+          },
+          py::arg("op"), py::arg("observable"),
+          py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("omega_min"), py::arg("omega_max"),
+          py::arg("n_omega"), py::arg("broadening") = 0.1,
+          py::arg("krylov_dim") = 200, py::arg("dense_max_dim") = 512,
+          py::arg("time_reversal") = -1,
+          "Stage 9d: factorized ground-state DSSF -- GS localized by the "
+          "star walk and solved matrix-free in its momentum sector; O|0> "
+          "scattered into every raw destination sector "
+          "(CrossSectorOrbitObservable rep lane); one continued-fraction "
+          "Lanczos per receiving sector. Memory O(#reps): the scalable "
+          "replacement for symmetry_adapted_gs_dssf.");
 
     m.def("symmetry_adapted_thermodynamics",
           [](const Operator& op, const std::vector<std::vector<int>>& generators,

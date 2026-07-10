@@ -1385,36 +1385,38 @@ def spectral(
             and isinstance(point_group, str)
             and point_group.lower() == "full"
             and omega is not None and T is None):
-        # PROPER non-abelian GS-DSSF: H and the probe reduced by the
-        # FULL group (all d_Gamma partners summed for completeness) on
-        # the production multi-target matvec.
-        # Stage 9c NOTE: this is the LAST production consumer of the
-        # monolithic SAB engine; Stage 9d replaces it with the
-        # factorized little_group_gs_dssf.
-        import warnings as _warnings
-        _warnings.warn(
-            "point_group='full' DSSF routes through the monolithic SAB "
-            "engine (moderate-N only) until the factorized little-group "
-            "DSSF lands (Stage 9d).", DeprecationWarning, stacklevel=2)
+        # PROPER non-abelian GS-DSSF -- Stage 9d: the FACTORIZED
+        # little-group lane (GS localized by the star walk, O|0>
+        # scattered into every raw destination sector via the Stage-8d
+        # CrossSectorOrbitObservable rep lane, one continued-fraction
+        # Lanczos per receiving sector; memory O(#reps)). This retired
+        # the monolithic SAB engine's last production route.
         import numpy as np
-        from .workflow import (resolve_auto_symmetry as _ras,
-                               _full_group_generators as _fgg)
+        from .workflow import resolve_auto_symmetry as _ras
+        from .point_group_routing import resolve_projection_lane
         _sym = _ras(H_or_directory, symmetry, verbose=verbose)
-        _gens = _fgg(_sym) if _sym is not None else None
-        if _gens is not None:
+        lane = resolve_projection_lane(
+            _sym, point_group=point_group, consumer="spectral",
+            eigenvalues_only=True, verbose=verbose)
+        if lane.mode == "project":
             ws = list(omega)
             results = []
             for obs in observables:
-                d = dict(_core.symmetry_adapted_gs_dssf(
-                    H_or_directory, obs, _gens,
+                d = dict(_core.little_group_gs_dssf(
+                    H_or_directory, obs, lane.A, lane.residues,
                     float(min(ws)), float(max(ws)), int(len(ws)),
-                    float(eta if eta is not None else 0.1)))
+                    float(eta if eta is not None else 0.1),
+                    krylov_dim=int(krylov_dim) if krylov_dim else 200))
                 r = _SabDssfResult(
                     omega=np.asarray(d["omega"], dtype=float),
                     S_real=np.asarray(d["s_omega"], dtype=float),
                     gs_energy=float(d["gs_energy"]),
                     total_weight=float(d["total_weight"]))
                 results.append(r)
+            if verbose:
+                print(f"[qed.spectral] non-abelian LITTLE-GROUP GS-DSSF "
+                      f"(factorized): |A| = {len(lane.A)}, residues = "
+                      f"{len(lane.residues)}.")
             return results[0] if len(results) == 1 else results
     if symmetry is not None:
         routed = _spectral_in_memory_with_symmetry(

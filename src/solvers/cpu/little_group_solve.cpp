@@ -12,6 +12,9 @@
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
 #include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
+#include <ed/matvec/backends/cpu_backend.h>      // 9d: CpuBackend for the GS Lanczos
+#include <ed/krylov/lanczos_kernel.h>            // 9d: keep_basis Ritz-vector GS
+#include <ed/core/blas_lapack_wrapper.h>         // 9d: LAPACKE_dstevd
 #include <ed/matvec/reduced_symmetry_csr.h>     // B4: build_reduced_symmetry_csr_rep
 #include <ed/matvec/term_storage.h>
 #include <ed/solvers/lanczos.h>                  // ::lanczos / ::full_diagonalization
@@ -678,6 +681,97 @@ build_isotypic_columns(const std::vector<Monomial>&     M,
     return W;
 }
 
+// Shared context setup: decompose A, resolve flip/TR engagement, acquire
+// the orbit table, map the residues. Used by run_little_group and the
+// Stage-9d ground-state / sector factories.
+void make_engine_context(const ::Operator&                    op,
+                         const std::vector<std::vector<int>>& abelian_group,
+                         const std::vector<std::vector<int>>& residue_perms,
+                         int                                  n_sites,
+                         const LittleGroupOptions&            opt,
+                         EngineContext&                       cx,
+                         bool&                                tr_on)
+{
+    if (opt.n_up >= 0 && opt.sz_parity >= 0)
+        throw std::invalid_argument(
+            "little_group: n_up and sz_parity are mutually exclusive.");
+
+    cx.A       = abelian_group;
+    cx.n_sites = n_sites;
+    cx.giA     = ed::symmetry::decompose_irreps(cx.A, n_sites);  // throws if not closed
+    if (!cx.giA.is_abelian())
+        throw std::invalid_argument(
+            "little_group: `abelian_group` is not abelian -- pass the clique "
+            "group; residues go in `residue_perms`.");
+    cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
+
+    const auto soa = term_soa(op);
+
+    // Stage 9a: extend the ABELIAN factor by the global spin flip when
+    // admissible (A' = A x Z2; the flip commutes with every site perm).
+    const FlipEngagement fe = resolve_flip_engagement(soa, opt, n_sites);
+    cx.flip_half = fe.engaged;
+    cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
+
+    // Stage 9b: antiunitary K folding (real H only).
+    tr_on = resolve_tr_engagement(soa, opt);
+
+    const auto cgA = cx.flip_half
+        ? ed::symmetry::make_flip_extended_group_from_perms(
+              cx.A, static_cast<std::uint64_t>(n_sites))
+        : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
+    if (opt.n_up >= 0) {
+        cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
+            static_cast<std::uint64_t>(n_sites), opt.n_up, cgA);
+    } else if (opt.sz_parity >= 0) {
+        cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
+            static_cast<std::uint64_t>(n_sites), opt.sz_parity, cgA);
+    } else {
+        cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
+            static_cast<std::uint64_t>(n_sites), cgA);
+    }
+    build_residue_maps(cx, residue_perms);
+}
+
+// Stars: union-find over (extended) abelian irreps under the residue maps
+// + Stage-9b TR fold. With flip engaged the lifted maps are parity-diagonal,
+// so a star never mixes (k,+) with (k,-). H real => H_{conj(k)} = conj(H_k),
+// an exact isospectral copy (surviving reps and norms are conjugation-
+// invariant through |sum chi|^2); idempotent when a residue already maps
+// k -> -k (D_N reflections).
+[[nodiscard]] std::map<int, std::vector<int>>
+star_partition(const EngineContext& cx, bool tr_on)
+{
+    const int n_irr = cx.n_irr_ext();
+    std::vector<int> parent(static_cast<std::size_t>(n_irr));
+    std::iota(parent.begin(), parent.end(), 0);
+    std::function<int(int)> find = [&](int x) {
+        while (parent[static_cast<std::size_t>(x)] != x) {
+            parent[static_cast<std::size_t>(x)] =
+                parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+            x = parent[static_cast<std::size_t>(x)];
+        }
+        return x;
+    };
+    for (const auto& mp : cx.irrep_map)
+        for (int k = 0; k < n_irr; ++k) {
+            const int a = find(k), b = find(mp[static_cast<std::size_t>(k)]);
+            if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
+        }
+    if (tr_on) {
+        const auto conj_map = conjugate_irrep_map(cx);
+        for (int k = 0; k < n_irr; ++k) {
+            const int kc = conj_map[static_cast<std::size_t>(k)];
+            if (kc < 0) continue;
+            const int a = find(k), b = find(kc);
+            if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
+        }
+    }
+    std::map<int, std::vector<int>> stars;
+    for (int k = 0; k < n_irr; ++k) stars[find(k)].push_back(k);
+    return stars;
+}
+
 // Per-block solve callbacks -----------------------------------------------
 
 // Full-spectrum: dense eigenvalues of the (projected or plain) block.
@@ -723,81 +817,11 @@ LittleGroupSpectrum run_little_group(
     const LittleGroupOptions&            opt,
     SolveFn&&                            solve_block)
 {
-    if (opt.n_up >= 0 && opt.sz_parity >= 0)
-        throw std::invalid_argument(
-            "little_group: n_up and sz_parity are mutually exclusive.");
-
     EngineContext cx;
-    cx.A       = abelian_group;
-    cx.n_sites = n_sites;
-    cx.giA     = ed::symmetry::decompose_irreps(cx.A, n_sites);  // throws if not closed
-    if (!cx.giA.is_abelian())
-        throw std::invalid_argument(
-            "little_group: `abelian_group` is not abelian -- pass the clique "
-            "group; residues go in `residue_perms`.");
-    cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
-
-    const auto soa = term_soa(op);
-
-    // Stage 9a: extend the ABELIAN factor by the global spin flip when
-    // admissible (A' = A x Z2; the flip commutes with every site perm).
-    const FlipEngagement fe = resolve_flip_engagement(soa, opt, n_sites);
-    cx.flip_half = fe.engaged;
-    cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
-
-    // Stage 9b: antiunitary K folding (real H only).
-    const bool tr_on = resolve_tr_engagement(soa, opt);
-
-    const auto cgA = cx.flip_half
-        ? ed::symmetry::make_flip_extended_group_from_perms(
-              cx.A, static_cast<std::uint64_t>(n_sites))
-        : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
-    if (opt.n_up >= 0) {
-        cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.n_up, cgA);
-    } else if (opt.sz_parity >= 0) {
-        cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.sz_parity, cgA);
-    } else {
-        cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
-            static_cast<std::uint64_t>(n_sites), cgA);
-    }
-    build_residue_maps(cx, residue_perms);
-
-    // Stars: union-find over (extended) abelian irreps under the residue
-    // maps. With flip engaged the lifted maps are parity-diagonal, so a star
-    // never mixes (k,+) with (k,-).
-    const int n_irr = cx.n_irr_ext();
-    std::vector<int> parent(static_cast<std::size_t>(n_irr));
-    std::iota(parent.begin(), parent.end(), 0);
-    std::function<int(int)> find = [&](int x) {
-        while (parent[static_cast<std::size_t>(x)] != x) {
-            parent[static_cast<std::size_t>(x)] =
-                parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
-            x = parent[static_cast<std::size_t>(x)];
-        }
-        return x;
-    };
-    for (const auto& mp : cx.irrep_map)
-        for (int k = 0; k < n_irr; ++k) {
-            const int a = find(k), b = find(mp[static_cast<std::size_t>(k)]);
-            if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
-        }
-    // Stage 9b star-level TR fold: H real => H_{conj(k)} = conj(H_k), an
-    // exact isospectral copy (surviving reps and norms are conjugation-
-    // invariant through |sum chi|^2). Idempotent when a residue already
-    // maps k -> -k (D_N reflections).
-    if (tr_on) {
-        const auto conj_map = conjugate_irrep_map(cx);
-        for (int k = 0; k < n_irr; ++k) {
-            const int kc = conj_map[static_cast<std::size_t>(k)];
-            if (kc < 0) continue;
-            const int a = find(k), b = find(kc);
-            if (a != b) parent[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
-        }
-    }
-    std::map<int, std::vector<int>> stars;
-    for (int k = 0; k < n_irr; ++k) stars[find(k)].push_back(k);
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
+                        cx, tr_on);
+    const auto stars = star_partition(cx, tr_on);
 
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
@@ -1066,6 +1090,159 @@ std::vector<double> little_group_lowest_eigenvalues(
     if (static_cast<int>(flat.size()) > k)
         flat.resize(static_cast<std::size_t>(k));
     return flat;
+}
+
+// =============================================================================
+// Stage 9d: public factories for the factorized GS-DSSF (composed in the
+// bindings with CrossSectorOrbitObservable + cf_spectral_from_vector).
+// =============================================================================
+
+namespace {
+
+// GS eigenpair of the PLAIN k0 sector with an in-memory eigenvector:
+// dense for small blocks, FullCGS2 Lanczos + Ritz vector otherwise (the
+// extreme pair is the only reliably converged one without reorth; with
+// FullCGS2 it is solid). Residual-guarded -- a failed vector THROWS
+// (the caller's point_group='full' contract is loud, and there is no
+// cheaper correct fallback for a vector consumer).
+[[nodiscard]] std::pair<double, std::vector<Complex>>
+solve_gs_vector(const RepSectorMatVec& hk, int dense_max_dim)
+{
+    const std::size_t n = hk.dim();
+    if (n == 0) throw std::runtime_error("little_group: empty GS sector");
+    double E0 = 0.0;
+    std::vector<Complex> u(n);
+    if (n <= static_cast<std::size_t>(std::max(dense_max_dim, 2))) {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(hk));
+        E0 = es.eigenvalues()(0);
+        for (std::size_t i = 0; i < n; ++i)
+            u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
+    } else {
+        ed::matvec::CpuBackend be;
+        std::vector<Complex> v0(n);
+        std::mt19937_64 gen(0x51ED900DULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        for (auto& v : v0) v = Complex(nd(gen), nd(gen));
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter   = std::min<std::size_t>(n, 200);
+        kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+        kopts.keep_basis = true;
+        kopts.dim_cap    = n;
+        auto apply_H = [&hk](const Complex* in, Complex* out, std::size_t nn) {
+            hk.apply(in, out, nn);
+        };
+        auto kres = ed::krylov::lanczos_kernel(be, apply_H, n, v0.data(),
+                                               kopts);
+        const std::size_t m = kres.alpha.size();
+        if (m == 0) throw std::runtime_error("little_group: GS Lanczos "
+                                             "produced an empty tridiag");
+        std::vector<double> diag = kres.alpha;
+        std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+        for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+        std::vector<double> z(m * m, 0.0);
+        const lapack_int info = LAPACKE_dstevd(
+            LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+            diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
+        if (info != 0)
+            throw std::runtime_error("little_group: tridiag eigensolve "
+                                     "failed (dstevd info != 0)");
+        E0 = diag[0];
+        std::fill(u.begin(), u.end(), Complex(0, 0));
+        for (std::size_t j = 0; j < m; ++j) {
+            const Complex* vj = kres.basis[j].get();
+            const double   yj = z[j];              // column 0, row j
+            if (std::abs(yj) < 1e-300) continue;
+            for (std::size_t i = 0; i < n; ++i) u[i] += yj * vj[i];
+        }
+    }
+    // Residual guard: the DSSF consumes this vector, so a stale pair is
+    // silently-wrong physics -- verify before returning.
+    std::vector<Complex> hu(n);
+    hk.apply(u.data(), hu.data(), n);
+    double num = 0.0, den = 1e-300;
+    for (std::size_t i = 0; i < n; ++i) {
+        num += std::norm(hu[i] - E0 * u[i]);
+        den += std::norm(u[i]);
+    }
+    if (std::sqrt(num / den) > 1e-8)
+        throw std::runtime_error(
+            "little_group: GS eigenvector residual "
+            + std::to_string(std::sqrt(num / den))
+            + " exceeds 1e-8 -- declining the factorized DSSF.");
+    const double inv = 1.0 / std::sqrt(den);
+    for (auto& c : u) c *= inv;
+    return {E0, std::move(u)};
+}
+
+}  // namespace
+
+LittleGroupGroundState little_group_ground_state(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    const std::vector<std::vector<int>>& residue_perms,
+    int                                  n_sites,
+    const LittleGroupOptions&            opt)
+{
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
+                        cx, tr_on);
+    const auto stars = star_partition(cx, tr_on);
+
+    int    best_k0 = -1;
+    double best_e  = 0.0;
+    for (const auto& [k0, members] : stars) {
+        auto rd = build_k_sector(cx, k0, opt.n_up);
+        if (rd.reps.empty()) continue;
+        RepSectorMatVec hk(op, std::move(rd));
+        const auto ev = solve_block_lowest(hk, 1, opt.dense_max_dim);
+        if (!ev.empty() && (best_k0 < 0 || ev[0] < best_e)) {
+            best_e  = ev[0];
+            best_k0 = k0;
+        }
+    }
+    if (best_k0 < 0)
+        throw std::runtime_error("little_group_ground_state: no non-empty "
+                                 "momentum sector in this subspace.");
+
+    LittleGroupGroundState gs;
+    gs.k0 = best_k0;
+    gs.rd = build_k_sector(cx, best_k0, opt.n_up);
+    RepSectorMatVec hk(op, gs.rd);          // copies rd; gs.rd stays valid
+    auto [e0, u]   = solve_gs_vector(hk, opt.dense_max_dim);
+    gs.energy      = e0;
+    gs.vec         = std::move(u);
+    return gs;
+}
+
+std::vector<ed::symmetry::RepSectorData> little_group_k_sectors(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    int                                  n_sites,
+    int                                  n_up,
+    int                                  sz_parity)
+{
+    LittleGroupOptions o;
+    o.n_up          = n_up;
+    o.sz_parity     = sz_parity;
+    o.spin_flip     = 0;      // destination sectors are RAW (9d v1)
+    o.time_reversal = 0;      // folding never applies to matrix elements
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, {}, n_sites, o, cx, tr_on);
+    std::vector<ed::symmetry::RepSectorData> out;
+    for (int k = 0; k < cx.n_irr_raw; ++k) {
+        auto rd = build_k_sector(cx, k, n_up);
+        if (!rd.reps.empty()) out.push_back(std::move(rd));
+    }
+    return out;
+}
+
+std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
+    const ::Operator&             op,
+    ed::symmetry::RepSectorData   rd)
+{
+    return std::make_unique<RepSectorMatVec>(op, std::move(rd));
 }
 
 ThermodynamicData little_group_thermodynamics(

@@ -425,6 +425,8 @@ sectors, max block 12 vs 36 spatial-only); thermal E(T) machine-exact
 | 9b | **TR folding in the little-group engine** (Jul 2026): H real ⇒ antiunitary K whose ENTIRE exploitable content is folding (never a projector). (i) star level: `conjugate_irrep_map` adds k ↔ conj(k) union-find edges (H_{conj k} = conj(H_k), exact copy; idempotent under D_N reflections; parity-diagonal lift under flip). (ii) σ ↔ σ* inside REAL-character stars: real χ_{k0} ⇒ real monomial phases and real H_{k0} ⇒ conj(W_σ) spans the σ* isotypic — one block solve at multiplicity 2·m_star·d, guarded by real-phase checks + equal W sizes + the covering sum rule (any doubt solves both). `LittleGroupOptions.time_reversal`; `ED_SYM_LG_TR=0` vetoes Auto; `tr_pairs`/`tr_engaged` diagnostics | period-3 modulated N=9 ring (reflections broken, Z3 survives): ±k stars fold, == dense 1e-12; 3×3 square with C4-rotation cosets: Z4 little group at Γ, conjugate irrep pair solved once (tr_pairs == 1), == dense 1e-12; D8 residues+TR idempotency; flip × TR at N=12 half filling; DM complex-H decline + require + env gate (`test_little_group_tr.py`, 5 tests) | **done (Jul 2026)** |
 | 9c | **Routing unification + SAB retirement** (Jul 2026): ONE decision point (`point_group_routing.resolve_projection_lane`) replaces the per-verb `point_group="full"` branches. `point_group="auto"` (default) PROJECTS eigenvalue-only solve/full_spectrum calls through the factorized engine (declines: vectors / `sector=` / sampling methods / explicit GPU device / no residue / env gate — degrade to the abelian rep lane with folds); `"full"` = require-projection (raises with the decline reason — **no SAB fallback**); thermal projects only under explicit `"full"` (auto never hijacks mTPQ/FTLM/LTLM into exact per-block spectra). `split_nonabelian` generalizes `_little_group_parts`: explicit non-abelian generator lists close the full group, carve a greedy maximal-abelian subgroup (highest-order elements seed the cyclic core) + coset residues — the case that previously had no route but the monolithic engine. Riding fixes: `symmetry='translation'` passes `translation_only=True` (kills the NP-hard max-clique hang on large clusters; star residue unaffected — computed before the clique gate); `dense_max_dim` un-hardcoded on the full-spectrum/thermo bindings. **The monolithic SAB engine is now a TEST ORACLE**: engine + `_core.symmetry_adapted_*` bindings kept, no production routing except the Stage-9d-pending spectral GS-DSSF branch (DeprecationWarning) | routed verbs == direct `_core.symmetry_adapted_*` oracle calls at 1e-9/1e-10 (`test_little_group.py`); auto-projects-by-default + full-raises (no residue / env gate / sector=) + env-gate degradation parity + explicit non-abelian generators == dense 1e-10 + translation-mode never runs the clique analyzer (`test_point_group_routing.py`, 7 tests); abelian fold machinery re-pinned under `ED_SYM_LITTLE_GROUP=0` (`test_star_reduction.py`) | **done (Jul 2026)** |
 
+| 9d | **Factorized GS-DSSF** (`little_group_gs_dssf`, Jul 2026): (i) the GS is localized by the star walk (flip/TR folds shrink the search over subspaces × stars) and solved PLAIN in its momentum sector with an in-memory eigenvector — dense for small blocks, FullCGS2 Lanczos Ritz vector otherwise, RESIDUAL-GUARDED (`little_group_ground_state`, throws rather than returning a stale pair); (ii) O\|0⟩ is scattered into EVERY raw destination sector of the reachable diagonal subspaces (n_up ± 2 / both parity halves / full space) via the Stage-8d `CrossSectorOrbitObservable` rep lane — matrix elements are never folded, so ‖φ‖ decides every selection rule with NO Python selection-rule plumbing; (iii) one `cf_spectral_from_vector` continued-fraction Lanczos per receiving sector, energy-shifted by the true E0, weights ‖φ_dst‖² summing to ‖O\|0⟩‖². Memory O(#reps) end-to-end. Composed in the bindings from three new public engine factories (`little_group_ground_state`, `little_group_k_sectors`, `make_rep_sector_matvec`); `run_little_group`'s context/star setup factored into `make_engine_context` + `star_partition`. `qed.spectral(point_group='full')` now routes here — **the monolithic SAB engine has NO production consumer left** (v1 scope: raw sectors end-to-end — flip stays with the abelian 8d lane; 1/2-body probes) | little-group == SAB oracle == dense Lehmann at 1e-9/1e-10 on the D8 S^z_π probe; public-API routing; U(1)-broken parity-axis destinations == oracle; forced-Lanczos GS path == dense-GS path; three-body probe raises (`test_little_group_dssf.py`, 5 tests) | **done (Jul 2026)** |
+
 Stages 1–4 remove the wall (and are pure consolidations — no new
 physics). Stages 5–7 add the new symmetry axes on the *same* artifact,
 which is the point of the design: **once the OrbitTable is the single
@@ -479,19 +481,21 @@ explicitly dispositioned:
   C++); the shared kernel is only `detect_hamiltonian_symmetries` +
   the closure rules, both already single-sourced. A unifying object
   would add indirection without removing duplication.
-* **Stage 9 (Jul 2026) — the unified stack**: flip and TR now compose
-  with the little-group projection (9a/9b), and `point_group="auto"`
-  projects by default on eigenvalue-only solve/full_spectrum (9c). The
-  monolithic SAB engine is retired to a TEST ORACLE (bindings kept,
-  routed only from the Stage-9d-pending spectral GS-DSSF branch). The
-  `is_real=false` hardwiring in `RepSectorMatVec` is a known perf item
-  (real self-conjugate sectors could ride the real kernel) — revisit
-  with a profile.
+* **Stage 9 (Jul 2026) — the unified stack, COMPLETE**: flip and TR
+  compose with the little-group projection (9a/9b), `point_group=
+  "auto"` projects by default on eigenvalue-only solve/full_spectrum
+  (9c), and the factorized GS-DSSF (9d) closed the last vector-consumer
+  hole. The monolithic SAB engine is a pure TEST ORACLE — bindings
+  kept, ZERO production routes. Residual 9-series items: (a) the
+  `is_real=false` hardwiring in `RepSectorMatVec` (real self-conjugate
+  sectors could ride the real kernel — perf, revisit with a profile);
+  (b) DSSF v1 runs raw sectors end-to-end — composing the 9a flip
+  split into the DSSF source/destination sectors stays with the
+  abelian 8d lane until a profile motivates it; (c) the GS-block W·v
+  expansion (solving the GS in the ISOTYPIC block and expanding) would
+  further shrink the GS solve — pure optimization, the plain-sector
+  solve is exact.
 * **Assessed, not built** (unchanged priorities): general commuting
   Pauli-string sectors (plaquette / gauge fluxes — highest-leverage
-  next capability), SU(2) total-S towers, spectrum reflections,
-  MPI support for the parity/flip lanes (mpi_size == 1 gated), and the
-  matrix-free non-abelian DSSF consumer — **scheduled as Stage 9d**
-  (`little_group_gs_dssf`: GS in the isotypic block, expand W·v back
-  into the abelian k-sector rep basis, then reuse the Stage-8d
-  CrossSectorOrbitObservable machinery in the destination sector).
+  next capability), SU(2) total-S towers, spectrum reflections, and
+  MPI support for the parity/flip lanes (mpi_size == 1 gated).
