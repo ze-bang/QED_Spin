@@ -146,3 +146,31 @@ def test_translation_mode_never_runs_max_clique(monkeypatch):
     r = qed.solve(H10, symmetry="translation", lattice=lat, sz=n // 2,
                   num_eigenvalues=1, verbose=False)
     assert len(r.eigenvalues) == 1
+
+
+def test_project_lane_carries_labels():
+    """Stage 10c: the default (projected) solve returns per-eigenvalue
+    quantum-number labels, aligned with eigenvalues."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    r = qed.solve(H, symmetry=gen, sz=N // 2, num_eigenvalues=4,
+                  verbose=False)
+    n = len(r.eigenvalues)
+    for attr in ("block_k_raw", "block_flip_parity", "block_irrep",
+                 "block_irrep_dim", "block_multiplicity",
+                 "block_subspace"):
+        assert len(getattr(r, attr)) == n, attr
+    assert len(r.irrep_characters) > 0
+    assert all(s == N // 2 for s in r.block_subspace)
+    # the GS momentum decodes to k=0 through chi_k(T)
+    import cmath
+    A_T = list(gen.generators[0])
+    # locate T inside the closed abelian group used by the engine: the
+    # characters are indexed by the CALLER's element order, which for the
+    # routed path is the sorted closure of the generators.
+    from qed.point_group_routing import split_nonabelian
+    A, _res = split_nonabelian(gen)
+    aT = A.index(A_T)
+    ph = r.irrep_characters[r.block_k_raw[0]][aT]
+    k_phys = round(-cmath.phase(ph) * N / (2 * cmath.pi)) % N
+    assert k_phys == 0
