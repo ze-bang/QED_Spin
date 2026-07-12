@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include <ed/orchestrator.h>
+#include <ed/core/solver_defaults.h>
 
 #include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
 #include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
@@ -1323,8 +1324,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             } else {
                 ed::thermal::LtlmOptions kopts;
                 kopts.num_samples         = opts.num_samples;
-                kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim : 200;
-                kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim : 100;
+                kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim
+                                            : ed::defaults::kLtlmKrylovDim;
+                kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim
+                                            : ed::defaults::kFtlmKrylovDim;
                 kopts.betas               = opts.betas;
                 kopts.random_seed         = opts.random_seed;
                 kopts.output_dir          = opts.output_dir;

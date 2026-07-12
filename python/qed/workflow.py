@@ -88,13 +88,15 @@ _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.FULL,
 })
 
-_THERMAL_METHOD_TO_CORE = {
-    DiagonalizationMethod.FTLM:    "FTLM",
-    DiagonalizationMethod.OFTLM:   "OFTLM",
-    DiagonalizationMethod.LTLM:    "LTLM",
-    DiagonalizationMethod.mTPQ:    "mTPQ",
-    DiagonalizationMethod.KPM_DOS: "KpmDos",
-}
+# Stage 11a: the parameter/result converters live in qed._params (the
+# thermal converter had FORKED between workflow.py and thermal.py).
+from ._params import (  # noqa: E402,F401  (single conversion layer)
+    THERMAL_METHOD_MAP as _THERMAL_METHOD_MAP,
+    ed_params_to_solve_options as _ed_params_to_solve_options,
+    ed_params_to_thermal_options as _ed_params_to_thermal_options,
+    ed_result_from_gs_result as _ed_result_from_gs_result,
+    ed_result_from_thermal_result as _ed_result_from_thermal_result,
+)
 
 
 def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
@@ -103,232 +105,8 @@ def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
     return method in _GROUND_STATE_METHODS
 
 
-def _ed_params_to_thermal_options(
-    params: EDParameters,
-    method: DiagonalizationMethod,
-    allow_infeasible: bool = False,
-) -> "_core.ThermalOptions":
-    """Translate the legacy `EDParameters` bag + a thermal
-    `DiagonalizationMethod` enumerator into a fresh
-    ``_core.ThermalOptions`` ready for ``workflows_thermal``."""
-    opts = _core.ThermalOptions()
-    enum_name = _THERMAL_METHOD_TO_CORE.get(method)
-    if enum_name is None:
-        raise ValueError(
-            f"_ed_params_to_thermal_options: method {method!r} is not a "
-            f"thermal lane. Use `_ed_params_to_solve_options` for "
-            f"ground-state methods."
-        )
-    opts.method        = getattr(_core.ThermalMethod, enum_name)
-    opts.num_samples   = int(params.num_samples)
-    # Pipe ``device=`` through to ``opts.backend.allow_gpu`` /
-    # ``allow_mpi`` so the orchestrator's ``select_backend`` picks the
-    # requested lane. Without this the thermal opts keep the C++
-    # default (``allow_gpu=true``) and ``qed.solve(method='mtpq',
-    # device='cpu')`` would silently route through the GPU promoter
-    # (rebuild GPUFixedSzOperator per sector, run on CUDA). Mirrors
-    # the ``_ed_params_to_solve_options`` wiring above and the
-    # ``_thermal_via_workflows_thermal`` override in thermal.py.
-    use_gpu = bool(getattr(params, "use_gpu", False))
-    use_mpi = bool(getattr(params, "use_mpi", False))
-    opts.backend.allow_gpu = bool(use_gpu)
-    opts.backend.allow_mpi = bool(use_mpi)
-    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
-    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations. For mTPQ we map the user's
-    # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
-    # closes a gap where the legacy adapter hardcoded 100 iterations
-    # for the TPQ lanes and never honoured the user's request.
-    if method == DiagonalizationMethod.FTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
-    elif method == DiagonalizationMethod.OFTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
-        _nv = getattr(params, "oftlm_num_exact", None)
-        if _nv is not None:
-            opts.num_exact = int(_nv)
-    elif method == DiagonalizationMethod.LTLM:
-        opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
-    elif method == DiagonalizationMethod.mTPQ:
-        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
-        if steps <= 0:
-            mi = getattr(params, "max_iterations", 0)
-            steps = int(mi) if mi else 0
-        # mTPQ: ``steps == 0`` -> orchestrator auto-sizes the iteration
-        # count from the spectral bounds to bracket beta_max = 1/T_min.
-        opts.krylov_dim = steps
-    else:
-        opts.krylov_dim = 100
-    opts.taylor_order  = int(params.tpq_taylor_order)
-    opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.random_seed   = int(
-        params.ftlm_seed or params.ltlm_seed or 0)
-    opts.output_dir    = str(params.output_dir or "")
-    # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
-    if hasattr(opts, "energy_shift"):
-        opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
-    # fp32 single-GPU mTPQ (memory-halving lane).
-    if hasattr(opts, "mtpq_fp32"):
-        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
-    opts.temp_min      = float(params.temp_min)
-    opts.temp_max      = float(params.temp_max)
-    opts.num_temp_bins = int(params.num_temp_bins)
-    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
-    # throw before allocating the kernel working set) unless this is set.
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible = bool(allow_infeasible)
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
-    # the user-supplied probe-betas for mTPQ state-vector
-    # snapshots. Empty list -> the kernel runs the standard path with no
-    # state-vector copies and the orchestrator persists only the
-    # thermo trajectory.
-    pb = list(getattr(params, "tpq_probe_betas", []) or [])
-    if pb:
-        opts.probe_betas = pb
-    return opts
 
 
-def _ed_result_from_thermal_result(
-    tr: "_core.ThermalResult",
-) -> EDResults:
-    """Wrap a `_core.ThermalResult` into the legacy `EDResults`
-    envelope (read by every downstream consumer that came through
-    the old dispatcher)."""
-    out = EDResults()
-    out.thermo_data = tr.thermo
-    out.eigenvalues = ([float(tr.ground_state_energy)]
-                       if tr.ground_state_energy != 0.0 else [])
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # the thermal orchestrator now persists ``ed_results.h5`` when
-    # ``output_dir`` is set (FTLM/LTLM/KPM_DOS: aggregated thermo;
-    # mTPQ: trajectory + state-vector snapshots at probe_betas).
-    # Mirror the saved path through the legacy ``eigenvectors_path``
-    # field so downstream consumers see the same envelope shape used
-    # by ``qed.solve``.
-    h5_path = str(getattr(tr, "hdf5_path", "") or "")
-    out.eigenvectors_computed = bool(h5_path)
-    out.eigenvectors_path     = h5_path
-    return out
-
-
-def _ed_params_to_solve_options(
-    params: EDParameters,
-    method: DiagonalizationMethod,
-    auto_method: bool = False,
-    allow_infeasible: bool = False,
-) -> "_core.SolveOptions":
-    """Translate `EDParameters` + `DiagonalizationMethod` into a
-    `_core.SolveOptions` for the orchestrator.
-
-    Mirrors `ed_adapter::toSolveOptions` on the C++ side: every field
-    that survives the unified collapse is forwarded; thermal / TPQ /
-    KPM-DOS knobs are simply not consulted because `workflows_solve`
-    does not exercise them."""
-    opts = _core.SolveOptions()
-    opts.num_eigs        = int(params.num_eigenvalues)
-    opts.max_iter        = int(params.max_iterations)
-    opts.block_size      = int(params.block_size)
-    opts.tolerance       = float(params.tolerance)
-    opts.compute_vectors = bool(params.compute_eigenvectors)
-    opts.output_dir      = str(params.output_dir or "")
-
-    # "Universal save contract" follow-up (May 2026): pipe the
-    # ``device=`` selection through to ``opts.backend.allow_gpu``.
-    # Previously ``qed.solve(device='cpu')`` left ``opts.backend``
-    # at its default (``allow_gpu=true``), so the streaming-symmetry
-    # binding's ``select_backend`` happily picked the CUDA mirror
-    # for SectorViews (which advertises ``supports_device_matvec``
-    # whenever ``WITH_CUDA`` is on). Mirrors the existing
-    # ``qed.thermal`` / ``qed.spectral`` wiring.
-    use_gpu = bool(getattr(params, "use_gpu", False))
-    use_mpi = bool(getattr(params, "use_mpi", False))
-    opts.backend.allow_gpu = bool(use_gpu)
-    opts.backend.allow_mpi = bool(use_mpi)
-
-    method_map = {
-        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
-        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
-        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
-        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
-        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
-    }
-    # When the user did not name a solver (auto_method), defer the eigensolver
-    # choice to the C++ dictator (ed::planner) by passing Auto -- Python no longer
-    # picks the ground-state method itself.
-    opts.method = (_core.SolveMethod.Auto if auto_method
-                   else method_map.get(method, _core.SolveMethod.Auto))
-
-    opts.use_fixed_sz          = bool(params.use_fixed_sz)
-    opts.use_symmetry          = bool(params.use_symmetry)
-    opts.n_up                  = int(params.n_up)
-    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
-    # throw before allocation) unless this is set. The qed.solve pre-flight is the
-    # Python gate (honors force=True); mirror its decision here so a forced
-    # dispatch isn't re-blocked by the C++ safety net. Other callers default off.
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible  = bool(allow_infeasible)
-    # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
-    # knobs that may not be bound on the Python `EDParameters` (the
-    # in-process pybind11 surface only exposes what `qed.solve` consumes
-    # today). Fall back to defaults when the attribute is absent.
-    opts.basis_cache_dir       = str(getattr(params, "basis_cache_dir", "") or "")
-    opts.precompute_basis_only = bool(getattr(params, "precompute_basis_only", False))
-    return opts
-
-
-def _ed_result_from_gs_result(
-    gs_result: "_core.GroundStateResult",
-    params: EDParameters,
-) -> EDResults:
-    """Wrap a `_core.GroundStateResult` (the orchestrator's return shape)
-    into an `EDResults` so callers see the same envelope every legacy
-    consumer expects (eigenvalues + eigenvector-path bookkeeping)."""
-    out = EDResults()
-    out.eigenvalues = list(gs_result.eigenvalues)
-    out.eigenvectors_computed = bool(params.compute_eigenvectors)
-    out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
-    # Surface symmetry-decomposed diagnostics when the orchestrator
-    # populated them (streaming-symmetry lane). Stored as dynamic attrs
-    # so legacy consumers that only read `.eigenvalues` are unaffected.
-    _eps = getattr(gs_result, "eigenvalues_per_sector", None)
-    if _eps:
-        out.eigenvalues_per_sector = [list(s) for s in _eps]
-    _tags = getattr(gs_result, "sector_tags", None)
-    if _tags:
-        out.sector_tags = list(_tags)
-    # Truthful backend lane ("gpu"/"cpu"/"mpi"): the C++ aggregate
-    # carries it; surface it so callers (and the capability-matrix
-    # benchmark's GPU-row assertion) can verify which lane really ran.
-    _bk = getattr(gs_result, "backend", None)
-    if _bk is not None:
-        out.backend = _bk
-    # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
-    # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
-    _kry = getattr(gs_result, "krylov", None)
-    if _kry is not None:
-        out.converged       = bool(getattr(_kry, "converged", False))
-        out.iterations      = int(getattr(_kry, "iters_done", 0))
-        out.residuals       = list(getattr(_kry, "ritz_residuals", []) or [])
-        out.n_converged     = int(getattr(_kry, "n_converged", 0))
-        out.residual_history = list(getattr(_kry, "resid_history", []) or [])
-        # Warn-not-fail (completion contract): the run COMPLETED but the
-        # eigensolver did not converge every requested eigenpair (e.g. the
-        # planner memory-capped the Krylov subspace, or max_iterations was hit).
-        # The contract guarantees COMPLETION, not convergence -- so surface a
-        # warning and return the best-effort result instead of raising.
-        if not out.converged:
-            want = int(getattr(params, "num_eigenvalues", 1) or 1)
-            rmax = max(out.residuals) if out.residuals else float("nan")
-            warnings.warn(
-                f"qed.solve: eigensolver did not fully converge "
-                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
-                f"residual {rmax:.2e} after {out.iterations} iterations). "
-                f"Returning the best-effort result. Raise max_iterations / "
-                f"tolerance, or give the run more memory so the Krylov subspace "
-                f"need not be capped.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-    return out
 
 
 def _diag_via_workflows_solve(
@@ -353,7 +131,7 @@ def _diag_via_workflows_solve(
         # it the `FixedSzOperator` directly (it derives from `Operator`).
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
-    if method in _THERMAL_METHOD_TO_CORE:
+    if method in _THERMAL_METHOD_MAP:
         opts = _ed_params_to_thermal_options(params, method, allow_infeasible)
         tr = _core.workflows_thermal(operator, opts)
         return _ed_result_from_thermal_result(tr)

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <ed/core/solver_defaults.h>
+
 #include <iostream>
 #include <complex>
 #include <vector>
@@ -31,7 +33,7 @@ struct LTLMParameters {
     uint64_t num_samples = 1;               // Usually 1 for LTLM (ground state is deterministic)
     uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-12;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters::ltlm_full_reorth)
+    bool full_reorthogonalization = ed::defaults::kThermalFullReorth;
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
     uint64_t random_seed = 0;      // Random seed (0 = use random_device) for initial state
     bool store_intermediate = false;   // Store intermediate data for debugging

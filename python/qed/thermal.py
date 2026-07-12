@@ -79,116 +79,15 @@ __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
 
 
 
-_THERMAL_METHOD_MAP = {
-    DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
-    DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
-    DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
-    DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
-    DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
-}
+# Stage 11a: converters single-sourced in qed._params (this module's
+# copy had silently diverged from workflow.py's -- see _params.py).
+from ._params import (  # noqa: E402,F401
+    THERMAL_METHOD_MAP as _THERMAL_METHOD_MAP,
+    ed_params_to_thermal_options as _ed_params_to_thermal_options,
+    ed_result_from_thermal_result as _ed_result_from_thermal_result,
+)
 
 
-def _ed_params_to_thermal_options(
-    params: EDParameters,
-    method: DiagonalizationMethod,
-) -> "_core.ThermalOptions":
-    """Translate `EDParameters` + thermal `DiagonalizationMethod` into
-    a `_core.ThermalOptions`. Mirrors the C++ adapter helpers; only
-    fields the orchestrator's `workflows_thermal` actually consults are
-    forwarded."""
-    opts = _core.ThermalOptions()
-    opts.method        = _THERMAL_METHOD_MAP.get(method, _core.ThermalMethod.FTLM)
-    opts.num_samples   = int(params.num_samples)
-    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
-    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations. For mTPQ we map the user's
-    # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
-    # closes a gap where the legacy adapter hardcoded 100 iterations
-    # for the TPQ lanes and never honoured the user's request.
-    if method == DiagonalizationMethod.FTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim)
-    elif method == DiagonalizationMethod.OFTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim)
-        # N_V (# exactly-treated low-lying states): honour an explicit
-        # params.oftlm_num_exact, else keep the C++ ThermalOptions default (8).
-        _nv = getattr(params, "oftlm_num_exact", None)
-        if _nv is not None:
-            opts.num_exact = int(_nv)
-    elif method == DiagonalizationMethod.LTLM:
-        opts.krylov_dim = int(params.ltlm_krylov_dim)
-    elif method == DiagonalizationMethod.mTPQ:
-        # ``tpq_max_steps`` is populated from ``qed.thermal(max_iterations=...)``
-        # by ``_ed_params_to_thermal_options``'s caller in workflow.py.
-        # Fall back to ``max_iterations`` if the TPQ-specific field
-        # was not set (defensive: both should be in lockstep today).
-        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
-        if steps <= 0:
-            mi = getattr(params, "max_iterations", 0)
-            steps = int(mi) if mi else 0
-        # mTPQ: ``steps == 0`` reaches the orchestrator as the auto
-        # sentinel -> it sizes the iteration count from the spectral
-        # bounds to bracket beta_max = 1/T_min.
-        opts.krylov_dim = steps
-    else:
-        opts.krylov_dim = 100
-    opts.taylor_order  = int(params.tpq_taylor_order)
-    opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
-    opts.output_dir    = str(params.output_dir or "")
-    # Closing-the-symmetry-gap follow-up (May 2026): forward the
-    # KPM moment / Hutchinson knobs the user passed through
-    # ``qed.thermal(kpm_num_moments=..., kpm_num_random_vectors=...)``
-    # so the streaming-symmetry binding does not silently fall back
-    # to the ``KpmDosOptions`` defaults (M=2048, R=20) -- the latter
-    # was a ~250x amplifier on FT-KPM_DOS Symm.
-    if method == DiagonalizationMethod.KPM_DOS:
-        kn_m = int(getattr(params, "kpm_num_moments", 0) or 0)
-        kn_r = int(getattr(params, "kpm_num_random_vectors", 0) or 0)
-        if kn_m > 0:
-            opts.kpm_num_moments = kn_m
-        if kn_r > 0:
-            opts.kpm_num_random_vectors = kn_r
-    opts.temp_min      = float(params.temp_min)
-    opts.temp_max      = float(params.temp_max)
-    opts.num_temp_bins = int(params.num_temp_bins)
-    # mTPQ expert override: a positive ``tpq_energy_shift`` pins the
-    # (L*I - H) large value L; 0.0 (default) keeps the orchestrator's
-    # Lanczos-based auto-tune. Previously this knob was silently dropped
-    # for the mTPQ lane.
-    if hasattr(opts, "energy_shift"):
-        opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
-    # fp32 single-GPU mTPQ (memory-halving lane): complex<float> state vectors
-    # let the full 2^32 Hilbert space run mTPQ on one 80 GB H100.
-    if hasattr(opts, "mtpq_fp32"):
-        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # probe-beta list for mTPQ state-vector snapshots.
-    pb = list(getattr(params, "tpq_probe_betas", []) or [])
-    if pb:
-        opts.probe_betas = pb
-    return opts
-
-
-def _ed_result_from_thermal_result(
-    tr: "_core.ThermalResult",
-) -> EDResults:
-    """Wrap a `_core.ThermalResult` (the orchestrator's return shape)
-    into an `EDResults` whose `thermo_data` carries the recombined
-    temperature scan, matching the legacy dispatcher's contract."""
-    out = EDResults()
-    out.thermo_data = tr.thermo
-    out.eigenvalues = [float(tr.ground_state_energy)] \
-        if tr.ground_state_energy != 0.0 else []
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): mirror
-    # the thermal orchestrator's ``ed_results.h5`` path through the
-    # legacy ``eigenvectors_path`` field. ``qed.thermal(output_dir=...)``
-    # now produces a self-describing HDF5 (trajectory + state vectors
-    # at probe-betas for mTPQ; aggregated thermo curves for
-    # FTLM/LTLM/KPM_DOS).
-    h5_path = str(getattr(tr, "hdf5_path", "") or "")
-    out.eigenvectors_computed = bool(h5_path)
-    out.eigenvectors_path     = h5_path
-    return out
 
 
 def _sym_toggle_int(value, name: str, operator=None, verbose=True) -> int:

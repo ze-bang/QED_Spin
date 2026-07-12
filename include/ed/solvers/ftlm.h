@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <ed/core/solver_defaults.h>
+
 #include <iostream>
 #include <complex>
 #include <vector>
@@ -26,7 +28,7 @@ struct FTLMParameters {
     uint64_t num_samples = 10;              // Number of random initial states
     uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters::ftlm_full_reorth)
+    bool full_reorthogonalization = ed::defaults::kThermalFullReorth;
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample intermediate data for debugging
@@ -52,7 +54,7 @@ struct DynamicalResponseParameters {
     uint64_t krylov_dim = 400;              // Dimension of Krylov subspace
     uint64_t num_samples = 40;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters)
+    bool full_reorthogonalization = ed::defaults::kThermalFullReorth;
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     double broadening = 0.1;           // Lorentzian broadening parameter (eta)
@@ -109,7 +111,7 @@ struct StaticResponseParameters {
     uint64_t krylov_dim = 100;              // Dimension of Krylov subspace per sample
     uint64_t num_samples = 10;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters)
+    bool full_reorthogonalization = ed::defaults::kThermalFullReorth;
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample data

@@ -1,0 +1,231 @@
+"""qed._params -- THE parameter/result conversion layer (Stage 11a).
+
+One module owns every translation between the legacy ``EDParameters``
+bag and the orchestrator's ``SolveOptions`` / ``ThermalOptions`` (and
+back from the orchestrator result shapes into the ``EDResults``
+envelope).
+
+Why this exists: the thermal converter had silently FORKED --
+``workflow.py`` and ``thermal.py`` each carried their own
+``_ed_params_to_thermal_options`` which diverged by 75 lines. One copy
+raised on a non-thermal method while the other silently defaulted it to
+FTLM; one wired ``device=`` into the backend constraints while the
+other dropped it; one forwarded the KPM moment/Hutchinson knobs while
+the other silently dropped them (a ~250x cost amplifier when the
+defaults kicked in). The merged converters below are the UNION of both
+copies' fixes: strict method mapping, backend wiring, feasibility gate,
+AND the KPM/OFTLM/mTPQ knob forwarding.
+
+The direction of travel (Stage 11 program): the orchestrator Options
+are the canonical parameter surface; ``EDParameters`` survives as the
+kwargs staging bag whose ONLY consumers are the converters in this
+file plus the CLI adapter (`ed_config_adapter.h`).
+"""
+
+from __future__ import annotations
+
+import warnings
+
+from . import _core as _core
+from ._core import (  # type: ignore[attr-defined]
+    DiagonalizationMethod,
+    EDParameters,
+    EDResults,
+)
+
+__all__ = [
+    "THERMAL_METHOD_MAP",
+    "ed_params_to_solve_options",
+    "ed_params_to_thermal_options",
+    "ed_result_from_gs_result",
+    "ed_result_from_thermal_result",
+]
+
+# The one thermal-method map (enum -> enum). Strict: an unknown method
+# raises in the converter -- the silent default-to-FTLM fork is dead.
+THERMAL_METHOD_MAP = {
+    DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
+    DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
+    DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
+    DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
+    DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
+}
+
+
+def ed_params_to_thermal_options(
+    params: EDParameters,
+    method: DiagonalizationMethod,
+    allow_infeasible: bool = False,
+) -> "_core.ThermalOptions":
+    """Translate the ``EDParameters`` bag + a thermal method into a
+    fresh ``_core.ThermalOptions`` for ``workflows_thermal``."""
+    opts = _core.ThermalOptions()
+    core_method = THERMAL_METHOD_MAP.get(method)
+    if core_method is None:
+        raise ValueError(
+            f"ed_params_to_thermal_options: method {method!r} is not a "
+            f"thermal lane. Use `ed_params_to_solve_options` for "
+            f"ground-state methods.")
+    opts.method      = core_method
+    opts.num_samples = int(params.num_samples)
+    # ``device=`` -> backend constraints: without this, the C++ default
+    # (allow_gpu=true) silently routed device='cpu' thermal jobs through
+    # the GPU promoter.
+    opts.backend.allow_gpu = bool(getattr(params, "use_gpu", False))
+    opts.backend.allow_mpi = bool(getattr(params, "use_mpi", False))
+    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
+    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
+    # the number of (L - H) iterations (0 = auto-size from the spectral
+    # bounds to bracket beta_max = 1/T_min).
+    if method in (DiagonalizationMethod.FTLM, DiagonalizationMethod.OFTLM):
+        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
+        if method == DiagonalizationMethod.OFTLM:
+            # N_V (# exactly-treated low-lying states): honour an explicit
+            # request, else keep the C++ ThermalOptions default (8).
+            _nv = getattr(params, "oftlm_num_exact", None)
+            if _nv is not None:
+                opts.num_exact = int(_nv)
+    elif method == DiagonalizationMethod.LTLM:
+        opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
+    elif method == DiagonalizationMethod.mTPQ:
+        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
+        if steps <= 0:
+            mi = getattr(params, "max_iterations", 0)
+            steps = int(mi) if mi else 0
+        opts.krylov_dim = steps
+    else:
+        opts.krylov_dim = 100
+    # KPM moment / Hutchinson knobs: forwarded so the streaming-symmetry
+    # binding does not fall back to the KpmDosOptions defaults
+    # (M=2048, R=20 -- a ~250x amplifier when unintended).
+    if method == DiagonalizationMethod.KPM_DOS:
+        kn_m = int(getattr(params, "kpm_num_moments", 0) or 0)
+        kn_r = int(getattr(params, "kpm_num_random_vectors", 0) or 0)
+        if kn_m > 0:
+            opts.kpm_num_moments = kn_m
+        if kn_r > 0:
+            opts.kpm_num_random_vectors = kn_r
+    opts.taylor_order  = int(params.tpq_taylor_order)
+    opts.delta_beta    = float(params.tpq_delta_beta)
+    opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
+    opts.output_dir    = str(params.output_dir or "")
+    opts.temp_min      = float(params.temp_min)
+    opts.temp_max      = float(params.temp_max)
+    opts.num_temp_bins = int(params.num_temp_bins)
+    # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
+    if hasattr(opts, "energy_shift"):
+        opts.energy_shift = float(
+            getattr(params, "tpq_energy_shift", 0.0) or 0.0)
+    # fp32 single-GPU mTPQ (memory-halving lane).
+    if hasattr(opts, "mtpq_fp32"):
+        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
+    # Completion guarantee: the orchestrator refuses an infeasible plan
+    # (clean throw before allocating) unless this is set.
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible = bool(allow_infeasible)
+    # Probe-beta list for mTPQ state-vector snapshots.
+    pb = list(getattr(params, "tpq_probe_betas", []) or [])
+    if pb:
+        opts.probe_betas = pb
+    return opts
+
+
+def ed_result_from_thermal_result(
+    tr: "_core.ThermalResult",
+) -> EDResults:
+    """Wrap a ``_core.ThermalResult`` into the ``EDResults`` envelope
+    (thermo curve + the persisted HDF5 path)."""
+    out = EDResults()
+    out.thermo_data = tr.thermo
+    out.eigenvalues = ([float(tr.ground_state_energy)]
+                       if tr.ground_state_energy != 0.0 else [])
+    h5_path = str(getattr(tr, "hdf5_path", "") or "")
+    out.eigenvectors_computed = bool(h5_path)
+    out.eigenvectors_path     = h5_path
+    return out
+
+
+def ed_params_to_solve_options(
+    params: EDParameters,
+    method: DiagonalizationMethod,
+    auto_method: bool = False,
+    allow_infeasible: bool = False,
+) -> "_core.SolveOptions":
+    """Translate ``EDParameters`` + ``DiagonalizationMethod`` into a
+    ``_core.SolveOptions`` for the orchestrator. Mirrors
+    ``ed_adapter::toSolveOptions``; thermal / TPQ / KPM knobs are not
+    consulted because ``workflows_solve`` does not exercise them."""
+    opts = _core.SolveOptions()
+    opts.num_eigs        = int(params.num_eigenvalues)
+    opts.max_iter        = int(params.max_iterations)
+    opts.block_size      = int(params.block_size)
+    opts.tolerance       = float(params.tolerance)
+    opts.compute_vectors = bool(params.compute_eigenvectors)
+    opts.output_dir      = str(params.output_dir or "")
+    # ``device=`` -> backend constraints (see the thermal twin above).
+    opts.backend.allow_gpu = bool(getattr(params, "use_gpu", False))
+    opts.backend.allow_mpi = bool(getattr(params, "use_mpi", False))
+
+    method_map = {
+        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
+        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
+        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
+        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
+        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
+    }
+    # auto_method: defer the eigensolver choice to the C++ side.
+    opts.method = (_core.SolveMethod.Auto if auto_method
+                   else method_map.get(method, _core.SolveMethod.Auto))
+
+    opts.use_fixed_sz = bool(params.use_fixed_sz)
+    opts.use_symmetry = bool(params.use_symmetry)
+    opts.n_up         = int(params.n_up)
+    if hasattr(opts, "allow_infeasible"):
+        opts.allow_infeasible = bool(allow_infeasible)
+    opts.basis_cache_dir = str(getattr(params, "basis_cache_dir", "") or "")
+    opts.precompute_basis_only = bool(
+        getattr(params, "precompute_basis_only", False))
+    return opts
+
+
+def ed_result_from_gs_result(
+    gs_result: "_core.GroundStateResult",
+    params: EDParameters,
+) -> EDResults:
+    """Wrap a ``_core.GroundStateResult`` into the ``EDResults``
+    envelope (eigenvalues, per-sector diagnostics, backend lane,
+    convergence bookkeeping + the warn-not-fail completion contract)."""
+    out = EDResults()
+    out.eigenvalues = list(gs_result.eigenvalues)
+    out.eigenvectors_computed = bool(params.compute_eigenvectors)
+    out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
+    _eps = getattr(gs_result, "eigenvalues_per_sector", None)
+    if _eps:
+        out.eigenvalues_per_sector = [list(s) for s in _eps]
+    _tags = getattr(gs_result, "sector_tags", None)
+    if _tags:
+        out.sector_tags = list(_tags)
+    _bk = getattr(gs_result, "backend", None)
+    if _bk is not None:
+        out.backend = _bk
+    _kry = getattr(gs_result, "krylov", None)
+    if _kry is not None:
+        out.converged        = bool(getattr(_kry, "converged", False))
+        out.iterations       = int(getattr(_kry, "iters_done", 0))
+        out.residuals        = list(getattr(_kry, "ritz_residuals", []) or [])
+        out.n_converged      = int(getattr(_kry, "n_converged", 0))
+        out.residual_history = list(getattr(_kry, "resid_history", []) or [])
+        if not out.converged:
+            want = int(getattr(params, "num_eigenvalues", 1) or 1)
+            rmax = max(out.residuals) if out.residuals else float("nan")
+            warnings.warn(
+                f"qed.solve: eigensolver did not fully converge "
+                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
+                f"residual {rmax:.2e} after {out.iterations} iterations). "
+                f"Returning the best-effort result. Raise max_iterations / "
+                f"tolerance, or give the run more memory so the Krylov "
+                f"subspace need not be capped.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return out

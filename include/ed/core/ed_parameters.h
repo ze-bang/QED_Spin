@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ed/core/solver_defaults.h>
+
 // =============================================================================
 // EDParameters — extracted from ed_wrapper.h so that translation units which
 // only need the parameter struct (notably ed_config_adapter.h and any code
@@ -104,17 +106,17 @@ struct EDParameters {
     // ------------------------------------------------------------------
 
     // ========== FTLM-Specific Parameters ==========
-    uint64_t ftlm_krylov_dim = 100;
-    bool ftlm_full_reorth = true;
+    uint64_t ftlm_krylov_dim = ed::defaults::kFtlmKrylovDim;
+    bool ftlm_full_reorth = ed::defaults::kThermalFullReorth;
     uint64_t ftlm_reorth_freq = 10;
     uint64_t ftlm_seed = 0;
     bool ftlm_store_samples = false;
     bool ftlm_error_bars = true;
 
     // ========== LTLM-Specific Parameters ==========
-    uint64_t ltlm_krylov_dim = 200;
+    uint64_t ltlm_krylov_dim = ed::defaults::kLtlmKrylovDim;
     uint64_t ltlm_ground_krylov = 100;
-    bool ltlm_full_reorth = true;
+    bool ltlm_full_reorth = ed::defaults::kThermalFullReorth;
     uint64_t ltlm_reorth_freq = 10;
     uint64_t ltlm_seed = 0;
     bool ltlm_store_data = false;
