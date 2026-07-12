@@ -18,6 +18,7 @@
 // Phase 4.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -84,12 +85,35 @@ using BackendVariant = std::variant<
 // ---------------------------------------------------------------------------
 inline bool have_cuda() noexcept {
 #ifdef WITH_CUDA
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) {
+    // Probed once per process. Environment-difference failures must be
+    // LOUD: a wheel built against a newer CUDA toolkit than the node's
+    // driver used to swallow cudaErrorInsufficientDriver here and silently
+    // degrade every GPU lane to CPU (a cluster ran days of "GPU" jobs on
+    // legacy drivers before anyone noticed). One clear diagnostic, then the
+    // documented CPU fallback.
+    static const bool ok = [] {
+        int n = 0;
+        const cudaError_t err = cudaGetDeviceCount(&n);
+        if (err == cudaSuccess) return n > 0;
         cudaGetLastError();
+        if (err == cudaErrorInsufficientDriver
+#if CUDART_VERSION >= 11000
+            || err == cudaErrorSystemDriverMismatch
+#endif
+        ) {
+            int drv = 0, rt = 0;
+            cudaDriverGetVersion(&drv);
+            cudaRuntimeGetVersion(&rt);
+            std::fprintf(stderr,
+                "[qed] CUDA DISABLED: the NVIDIA driver on this machine is "
+                "too old for this build (driver API %d.%d < runtime %d.%d). "
+                "Every GPU lane falls back to CPU. Fix: update the driver, "
+                "or rebuild against this node's CUDA toolkit.\n",
+                drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
+        }
         return false;
-    }
-    return n > 0;
+    }();
+    return ok;
 #else
     return false;
 #endif

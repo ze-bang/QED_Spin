@@ -182,12 +182,25 @@ build_sab_partition0(const GroupIrreps&                   gi,
     // tables. Kills the per-call reconstruction that dominated the
     // non-abelian lane's fixed costs (solve/thermal/DSSF on the same
     // model re-derived identical bases every call).
+    // Reuse must NEVER depend on hash quality (the GPU-mirror memo's
+    // word-XOR FNV collided on structured inputs -- same recipe here:
+    // avalanche every mixed word AND verify a FULL identity fingerprint
+    // on every hit; a silent wrong-basis hit is wrong physics).
+    struct SabCacheEntry {
+        std::uint64_t                 key;
+        std::vector<std::vector<int>> clique;
+        int  irrep_index, n_sites, n_up, partner, sz_parity;
+        ::SymmetrySector              sector;
+    };
     static std::mutex sab_cache_mtx;
-    static std::vector<std::pair<std::uint64_t, ::SymmetrySector>>
-        sab_cache;                                // small FIFO
+    static std::vector<SabCacheEntry> sab_cache;  // small FIFO
     static std::size_t sab_cache_bytes = 0;       // C11: running footprint
     std::uint64_t key = 0xcbf29ce484222325ULL;
     auto mix = [&key](std::uint64_t v) {
+        v += 0x9E3779B97F4A7C15ULL;                       // splitmix64 avalanche
+        v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        v = (v ^ (v >> 27)) * 0x94D049BB133111EBULL;
+        v ^= v >> 31;
         key ^= v; key *= 0x100000001b3ULL;
     };
     for (const auto& p : max_clique)
@@ -200,7 +213,11 @@ build_sab_partition0(const GroupIrreps&                   gi,
     {
         std::lock_guard<std::mutex> lk(sab_cache_mtx);
         for (const auto& e : sab_cache)
-            if (e.first == key) return e.second;
+            if (e.key == key && e.irrep_index == irrep_index
+                && e.n_sites == n_sites && e.n_up == n_up
+                && e.partner == partner && e.sz_parity == sz_parity
+                && e.clique == max_clique)
+                return e.sector;
     }
 
     ::SymmetrySector sec;
@@ -252,11 +269,13 @@ build_sab_partition0(const GroupIrreps&                   gi,
         while (!sab_cache.empty()
                && (sab_cache.size() >= kCap
                    || sab_cache_bytes + this_bytes > budget)) {
-            sab_cache_bytes -= sector_bytes(sab_cache.front().second);
+            sab_cache_bytes -= sector_bytes(sab_cache.front().sector);
             sab_cache.erase(sab_cache.begin());
         }
         if (this_bytes <= budget) {
-            sab_cache.emplace_back(key, sec);
+            sab_cache.push_back(SabCacheEntry{
+                key, max_clique, irrep_index, n_sites, n_up, partner,
+                sz_parity, sec});
             sab_cache_bytes += this_bytes;
         }
     }

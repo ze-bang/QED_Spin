@@ -134,17 +134,7 @@ inline bool reduced_csr_enabled() noexcept {
 // back to the CSR-free rep/orbit walk on its own, no env var required.
 inline bool reduced_csr_within_budget(std::uint64_t dim,
                                       std::uint64_t terms_per_row) noexcept {
-    const std::uint64_t est_bytes =
-        dim * terms_per_row
-            * (sizeof(std::complex<double>) + sizeof(std::uint32_t))
-        + (dim + 1) * sizeof(std::uint64_t);
-    double budget_gib = 8.0;
-    if (const char* v = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
-        const double b = std::atof(v);
-        if (b > 0.0) budget_gib = b;
-    }
-    return static_cast<double>(est_bytes)
-           <= budget_gib * static_cast<double>(1ULL << 30);
+    return ed::planner::sector_csr_within_budget(dim, terms_per_row);
 }
 
 template <class P, class = void>

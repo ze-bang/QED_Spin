@@ -250,31 +250,84 @@ public:
         while (entries_.size() > kMaxEntries) entries_.pop_front();
     }
 
+    /// Drop a poisoned entry (a hit that failed physical verification) so a
+    /// rebuilt table can take its key -- ``insert`` dedupes by hash and would
+    /// otherwise keep serving the bad entry forever.
+    void erase(std::uint64_t key) {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto it = entries_.begin(); it != entries_.end(); ++it)
+            if ((*it)->content_hash == key) { entries_.erase(it); return; }
+    }
+
 private:
     static constexpr std::size_t kMaxEntries = 8;
     std::mutex mu_;
     std::deque<std::shared_ptr<const OrbitTable>> entries_;
 };
 
-template <class BuildFn>
+// Physical verification of a cache hit: registry/disk entries are keyed by a
+// salted content hash, and correctness must NOT ride on hash quality (the
+// GPU-mirror memo's word-XOR FNV collided on structured inputs -- Stage-9f
+// precedent). Spot-verify sampled reps against the CALLER's group + subspace:
+// membership (bit range, popcount / parity) and canonical-minimum under the
+// group action. A wrong-table hit fails with near-certainty; cost is
+// <= 64 x |G| LUT applies, negligible next to any solve.
+[[nodiscard]] inline bool
+orbit_table_consistent(const OrbitTable&    t,
+                       const CompiledGroup& cg,
+                       std::uint64_t        n_bits,
+                       int                  n_up,
+                       int                  parity) noexcept {
+    if (t.reps.empty()) return true;
+    const std::uint64_t mask =
+        (n_bits >= 64) ? ~0ULL : ((std::uint64_t{1} << n_bits) - 1ULL);
+    const std::size_t n = t.reps.size();
+    const std::size_t samples = std::min<std::size_t>(n, 64);
+    for (std::size_t i = 0; i < samples; ++i) {
+        const std::size_t idx =
+            (samples == 1) ? 0 : i * (n - 1) / (samples - 1);
+        const std::uint64_t r = t.reps[idx];
+        if (r & ~mask) return false;
+        const int pc = __builtin_popcountll(r);
+        if (n_up >= 0 && pc != n_up) return false;
+        if (parity >= 0 && (pc & 1) != parity) return false;
+        for (std::size_t g = 0; g < cg.size(); ++g)
+            if (cg.apply(r, g) < r) return false;   // not canonical here
+    }
+    return true;
+}
+
+template <class BuildFn, class VerifyFn>
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build) {
+acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
+             VerifyFn&& verify) {
     auto& reg = OrbitTableRegistry::instance();
     if (auto hit = reg.find(key)) {
-        if (sym_profile_enabled())
-            std::fprintf(stderr,
-                         "[sym-profile] orbit-table registry HIT (%zu reps)\n",
-                         hit->size());
-        return hit;
+        if (verify(*hit)) {
+            if (sym_profile_enabled())
+                std::fprintf(stderr,
+                             "[sym-profile] orbit-table registry HIT (%zu reps)\n",
+                             hit->size());
+            return hit;
+        }
+        std::fprintf(stderr,
+                     "[symmetry-cache] orbit-table registry hit FAILED physical "
+                     "verification (key collision or stale entry) -- rebuilding\n");
+        reg.erase(key);
     }
     const std::string dir = disk_cache_enabled() ? cache_dir : std::string{};
     if (auto disk = load_orbit_table(key, dir)) {
-        if (sym_profile_enabled())
-            std::fprintf(stderr,
-                         "[sym-profile] orbit-table disk HIT (%zu reps)\n",
-                         disk->size());
-        reg.insert(disk);
-        return disk;
+        if (verify(*disk)) {
+            if (sym_profile_enabled())
+                std::fprintf(stderr,
+                             "[sym-profile] orbit-table disk HIT (%zu reps)\n",
+                             disk->size());
+            reg.insert(disk);
+            return disk;
+        }
+        std::fprintf(stderr,
+                     "[symmetry-cache] orbit-table disk hit FAILED physical "
+                     "verification -- rebuilding (file will be overwritten)\n");
     }
     auto tab = std::make_shared<OrbitTable>(build());
     if (!dir.empty()) {
@@ -294,9 +347,16 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build) {
 acquire_orbit_table_fixed_sz(std::uint64_t n_bits, int n_up,
                              const SymmetryGroupInfo& info,
                              const std::string& cache_dir = {}) {
+    const auto vg = info.max_clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              info.max_clique, static_cast<int>(n_bits));
     return detail::acquire_impl(
         orbit_table_key_fixed_sz(n_bits, n_up, info), cache_dir,
-        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, info); });
+        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, info); },
+        [&](const OrbitTable& t) {
+            return detail::orbit_table_consistent(t, vg, n_bits, n_up, -1);
+        });
 }
 
 /// Stage 5b: acquire with a caller-supplied CompiledGroup (flip-extended
@@ -314,16 +374,26 @@ acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
         ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
     return detail::acquire_impl(
         key, cache_dir,
-        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); });
+        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); },
+        [&](const OrbitTable& t) {
+            return detail::orbit_table_consistent(t, cg, n_bits, n_up, -1);
+        });
 }
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_full(std::uint64_t n_bits,
                          const SymmetryGroupInfo& info,
                          const std::string& cache_dir = {}) {
+    const auto vg = info.max_clique.empty()
+        ? CompiledGroup{}
+        : CompiledGroup::from_permutations(
+              info.max_clique, static_cast<int>(n_bits));
     return detail::acquire_impl(
         orbit_table_key_full(n_bits, info), cache_dir,
-        [&] { return build_orbit_table_full(n_bits, info); });
+        [&] { return build_orbit_table_full(n_bits, info); },
+        [&](const OrbitTable& t) {
+            return detail::orbit_table_consistent(t, vg, n_bits, -1, -1);
+        });
 }
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
@@ -337,7 +407,10 @@ acquire_orbit_table_parity_compiled(std::uint64_t        n_bits,
         ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
     return detail::acquire_impl(
         key, cache_dir,
-        [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); });
+        [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); },
+        [&](const OrbitTable& t) {
+            return detail::orbit_table_consistent(t, cg, n_bits, -1, parity);
+        });
 }
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
@@ -349,7 +422,10 @@ acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
     return detail::acquire_impl(
         key, cache_dir,
-        [&] { return build_orbit_table_full_compiled(n_bits, cg); });
+        [&] { return build_orbit_table_full_compiled(n_bits, cg); },
+        [&](const OrbitTable& t) {
+            return detail::orbit_table_consistent(t, cg, n_bits, -1, -1);
+        });
 }
 
 /// Resolve the effective disk-cache directory for a lattice fixture

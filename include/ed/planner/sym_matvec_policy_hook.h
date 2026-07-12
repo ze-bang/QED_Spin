@@ -26,6 +26,7 @@
 // =============================================================================
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 
 namespace ed::planner {
@@ -103,6 +104,30 @@ inline void clear_sym_matvec_repr() noexcept {
     // ~19-42 s/matvec vs reduced-CSR at ~0.2-0.4 s/matvec). Memory-bound large
     // systems can opt out with ED_SYM_REDUCED_CSR=0 (CSR-free rep walk).
     return static_cast<int>(SymMatvecRepr::RepReducedCsr);
+}
+
+/// Stage 9f consolidation: ONE budget decision for materializing a reduced
+/// sector matrix, shared by the abelian CpuMatVecBackend and the little-group
+/// engine's RepSectorMatVec. (Twin-lane drift here is exactly how the abelian
+/// lane shipped WITHOUT a guard while the engine had one -- keep a single
+/// definition.) The estimate is an UPPER BOUND: each off-diagonal term
+/// contributes at most one entry per source row; the budget knob is
+/// ``ED_SYM_SECTOR_CSR_BUDGET_GIB`` (default 8, read per call so tests can
+/// toggle without restart). An over-budget sector falls back to the CSR-free
+/// walk on its own -- frontier sectors (N=36 half filling: hundreds of GB)
+/// need no env var.
+[[nodiscard]] inline bool sector_csr_within_budget(
+        std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
+    const std::uint64_t est_bytes =
+        dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
+        + (dim + 1) * 8u /* row ptr */;
+    double budget_gib = 8.0;
+    if (const char* v = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
+        const double b = std::atof(v);
+        if (b > 0.0) budget_gib = b;
+    }
+    return static_cast<double>(est_bytes)
+           <= budget_gib * static_cast<double>(1ULL << 30);
 }
 
 /// RAII guard: set the override for a scope, restore the previous value on exit.
