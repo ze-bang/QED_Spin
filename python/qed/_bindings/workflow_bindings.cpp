@@ -455,6 +455,126 @@ inline void warn_silent_cpu_fallback(const char* what,
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Stage 10d: shared steps of the three cross-irrep spectral bindings
+// (GS-CF, multi-Q, FTLM). These were byte-identical blocks restated per
+// binding -- the A3 fail-safe had to be fixed TWICE because the GS scan
+// existed twice. One definition each; the bindings keep only their
+// genuinely different flows.
+// ---------------------------------------------------------------------------
+
+// Source-operator spec shared by all three cross-irrep bindings.
+[[nodiscard]] inline ed::OperatorSpec make_cross_irrep_src_spec(
+    const std::string& directory, std::uint64_t num_sites, double spin_l,
+    const py::object& fixed_sz_n_up, int sz_parity, bool flip_sectors)
+{
+    ed::OperatorSpec spec;
+    spec.source             = ed::DirectoryPath{directory};
+    spec.num_sites          = num_sites;
+    spec.spin_l             = static_cast<float>(spin_l);
+    spec.streaming_symmetry = true;
+    if (!fixed_sz_n_up.is_none()) {
+        spec.fixed_sz = fixed_sz_n_up.cast<int>();
+    } else {
+        // Stage 8d: Sz-parity halves + full-space prod-sigma^x flip
+        // sectors (the factory validates the closure rules; the probe's
+        // slot routing is the caller's).
+        if (sz_parity >= 0) spec.sz_parity = sz_parity;
+        if (flip_sectors)   spec.flip_sectors_full = true;
+    }
+    return spec;
+}
+
+// Two-phase global-GS scan across the source sectors (Wave B2 + the A3
+// fail-safes): cheap Phase-1 (krylov 40) everywhere, refine candidates
+// within `gap` of the best Phase-1 minimum; any non-finite Phase-1
+// estimate fails safe to refine-everything, and a throwing Phase-2
+// candidate is skipped, never fatal.
+struct GsScanResult {
+    std::size_t gs_idx    = 0;
+    double      gs_energy = std::numeric_limits<double>::infinity();
+    bool        any_solved = false;
+};
+
+[[nodiscard]] inline GsScanResult find_gs_sector_two_phase(
+    ed::core::SectorSetView&              handle,
+    const std::vector<std::size_t>&       sector_indices,
+    const ed::workflows::SpectralOptions& opts)
+{
+    GsScanResult out;
+    const bool enable_two_phase = sector_indices.size() > 2;
+    std::vector<std::size_t> phase2_candidates;
+    if (enable_two_phase) {
+        std::vector<std::pair<double, std::size_t>> phase1_min;
+        phase1_min.reserve(sector_indices.size());
+        for (std::size_t k : sector_indices) {
+            auto sec = handle.sector(k);
+            if (!sec || sec->dim() == 0) continue;
+            ed::workflows::SolveOptions p1;
+            p1.num_eigs        = 1;
+            p1.tolerance       = 1e-8;
+            p1.backend         = opts.backend;
+            p1.method          = ed::workflows::SolveMethod::Lanczos;
+            p1.compute_vectors = false;
+            p1.max_iter        = std::min<std::size_t>(40, sec->dim());
+            try {
+                auto sr = ed::workflows::solve(*sec, p1);
+                if (!sr.eigenvalues.empty())
+                    phase1_min.emplace_back(sr.eigenvalues.front(), k);
+            } catch (...) {
+                phase1_min.emplace_back(
+                    -std::numeric_limits<double>::infinity(), k);
+            }
+        }
+        if (!phase1_min.empty()) {
+            std::sort(phase1_min.begin(), phase1_min.end(),
+                      [](const auto& a, const auto& b) {
+                          return a.first < b.first;
+                      });
+            const bool phase1_nonfinite = std::any_of(
+                phase1_min.begin(), phase1_min.end(),
+                [](const auto& q) { return !std::isfinite(q.first); });
+            if (phase1_nonfinite) {
+                for (const auto& [E, k] : phase1_min) {
+                    (void)E;
+                    phase2_candidates.push_back(k);
+                }
+            } else {
+                const double best_E = phase1_min.front().first;
+                const double gap =
+                    std::max(1e-2 * std::abs(best_E), 1e-4);
+                for (const auto& [E, k] : phase1_min)
+                    if (E <= best_E + gap) phase2_candidates.push_back(k);
+            }
+        }
+    }
+    const std::vector<std::size_t>& scan =
+        enable_two_phase ? phase2_candidates : sector_indices;
+    for (std::size_t k : scan) {
+        auto sec = handle.sector(k);
+        if (!sec || sec->dim() == 0) continue;
+        ed::workflows::SolveOptions sopts;
+        sopts.num_eigs        = 1;
+        sopts.tolerance       = 1e-12;
+        sopts.backend         = opts.backend;
+        sopts.method          = ed::workflows::SolveMethod::Lanczos;
+        sopts.compute_vectors = false;
+        ed::GroundStateResult sr;
+        try {
+            sr = ed::workflows::solve(*sec, sopts);
+        } catch (...) { continue; }
+        if (sr.eigenvalues.empty()) continue;
+        if (sr.eigenvalues.front() < out.gs_energy) {
+            out.gs_energy = sr.eigenvalues.front();
+            out.gs_idx    = k;
+        }
+        out.any_solved = true;
+    }
+    return out;
+}
+
+
 }  // namespace
 
 void bind_workflows(py::module_& m) {
@@ -2202,21 +2322,9 @@ void bind_workflows(py::module_& m) {
                   // (1) Build source streaming operator. Mirror the
                   //     same-irrep binding's OperatorSpec layout.
                   // -----------------------------------------------------
-                  ed::OperatorSpec src_spec;
-                  src_spec.source             = ed::DirectoryPath{directory};
-                  src_spec.num_sites          = num_sites;
-                  src_spec.spin_l             = static_cast<float>(spin_l);
-                  src_spec.streaming_symmetry = true;
-                  if (!fixed_sz_n_up.is_none()) {
-                      src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
-                  } else {
-                      // Stage 8d: Sz-parity halves + full-space prod-sigma^x
-                      // flip sectors for the spectral verbs (the factory
-                      // validates the closure rules). The probe's slot
-                      // routing is computed below.
-                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
-                      if (flip_sectors)   src_spec.flip_sectors_full = true;
-                  }
+                  ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
+                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
                       "workflows_spectral_streaming_symmetry_cross_irrep_"
@@ -2257,94 +2365,11 @@ void bind_workflows(py::module_& m) {
                   const std::vector<std::size_t> src_sector_indices =
                       ed::core::filter_sectors(src_num_sectors,
                                                opts.selected_sectors);
-                  std::size_t gs_src_idx = 0;
-                  double      gs_energy  = std::numeric_limits<double>::infinity();
-                  bool        any_solved = false;
-
-                  const bool enable_two_phase_dssf =
-                      src_sector_indices.size() > 2;
-                  std::vector<std::size_t> phase2_candidates;
-                  if (enable_two_phase_dssf) {
-                      std::vector<std::pair<double, std::size_t>> phase1_min;
-                      phase1_min.reserve(src_sector_indices.size());
-                      for (std::size_t k : src_sector_indices) {
-                          auto sec = src_handle.sector(k);
-                          if (!sec || sec->dim() == 0) continue;
-                          ed::workflows::SolveOptions p1;
-                          p1.num_eigs        = 1;
-                          p1.tolerance       = 1e-8;
-                          p1.backend         = opts.backend;
-                          p1.method          = ed::workflows::SolveMethod::Lanczos;
-                          p1.compute_vectors = false;
-                          p1.max_iter        = std::min<std::size_t>(40, sec->dim());
-                          try {
-                              auto sr = ed::workflows::solve(*sec, p1);
-                              if (!sr.eigenvalues.empty()) {
-                                  phase1_min.emplace_back(
-                                      sr.eigenvalues.front(), k);
-                              }
-                          } catch (...) {
-                              phase1_min.emplace_back(
-                                  -std::numeric_limits<double>::infinity(),
-                                  k);
-                          }
-                      }
-                      if (!phase1_min.empty()) {
-                          std::sort(phase1_min.begin(), phase1_min.end(),
-                                    [](const auto& a, const auto& b) {
-                                        return a.first < b.first;
-                                    });
-                          // A3 fail-safe: a phase-1 solve that threw is
-                          // recorded as -inf; best_E + gap would then be NaN and
-                          // select ZERO candidates, aborting the whole DSSF call
-                          // ("every source sector returned an empty spectrum").
-                          // Refine EVERYTHING instead (mirrors the same-irrep
-                          // binding's cutoff fail-safe).
-                          const bool phase1_nonfinite = std::any_of(
-                              phase1_min.begin(), phase1_min.end(),
-                              [](const auto& p){ return !std::isfinite(p.first); });
-                          if (phase1_nonfinite) {
-                              for (const auto& [E, k] : phase1_min) {
-                                  (void)E; phase2_candidates.push_back(k);
-                              }
-                          } else {
-                              const double best_E = phase1_min.front().first;
-                              const double gap = std::max(
-                                  1e-2 * std::abs(best_E), 1e-4);
-                              for (const auto& [E, k] : phase1_min) {
-                                  if (E <= best_E + gap) {
-                                      phase2_candidates.push_back(k);
-                                  }
-                              }
-                          }
-                      }
-                  }
-                  const std::vector<std::size_t>& src_scan_indices =
-                      enable_two_phase_dssf ? phase2_candidates
-                                            : src_sector_indices;
-                  for (std::size_t k : src_scan_indices) {
-                      auto sec = src_handle.sector(k);
-                      if (!sec || sec->dim() == 0) continue;
-                      ed::workflows::SolveOptions sopts;
-                      sopts.num_eigs        = 1;
-                      sopts.tolerance       = 1e-12;
-                      sopts.backend         = opts.backend;
-                      sopts.method          = ed::workflows::SolveMethod::Lanczos;
-                      sopts.compute_vectors = false;
-                      // A3: a phase-2 candidate that throws the full solve
-                      // (near-degenerate / memory) must not abort the sweep.
-                      ed::GroundStateResult sr;
-                      try {
-                          sr = ed::workflows::solve(*sec, sopts);
-                      } catch (...) { continue; }
-                      if (sr.eigenvalues.empty()) continue;
-                      const double E_k = sr.eigenvalues.front();
-                      if (E_k < gs_energy) {
-                          gs_energy  = E_k;
-                          gs_src_idx = k;
-                      }
-                      any_solved = true;
-                  }
+                  const GsScanResult gs_scan = find_gs_sector_two_phase(
+                      src_handle, src_sector_indices, opts);
+                  const std::size_t gs_src_idx = gs_scan.gs_idx;
+                  const double      gs_energy  = gs_scan.gs_energy;
+                  const bool        any_solved = gs_scan.any_solved;
                   if (!any_solved) {
                       throw std::runtime_error(
                           "workflows_spectral_streaming_symmetry_cross_irrep_"
@@ -2792,20 +2817,9 @@ void bind_workflows(py::module_& m) {
                   py::gil_scoped_release release;
 
                   // (1) Source streaming operator + OperatorRef.
-                  ed::OperatorSpec src_spec;
-                  src_spec.source             = ed::DirectoryPath{directory};
-                  src_spec.num_sites          = num_sites;
-                  src_spec.spin_l             = static_cast<float>(spin_l);
-                  src_spec.streaming_symmetry = true;
-                  if (!fixed_sz_n_up.is_none()) {
-                      src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
-                  } else {
-                      // Stage 8d: parity / flip sectors (see the single-Q
-                      // binding). Slot routing is per-Q (each Q has its own
-                      // probe transforms).
-                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
-                      if (flip_sectors)   src_spec.flip_sectors_full = true;
-                  }
+                  ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
+                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      sz_parity, flip_sectors);
                   // Stage 8d TR panel gate: for a REAL H, the -Q panel of an
                   // adjoint probe pair equals the +Q panel (S(-Q, omega) =
                   // S(Q, omega)^* with a real spectral function) -- detected
@@ -2838,90 +2852,11 @@ void bind_workflows(py::module_& m) {
                   const std::vector<std::size_t> src_sector_indices =
                       ed::core::filter_sectors(src_num_sectors,
                                                opts.selected_sectors);
-                  std::size_t gs_src_idx = 0;
-                  double      gs_energy  = std::numeric_limits<double>::infinity();
-                  bool        any_solved = false;
-
-                  const bool enable_two_phase =
-                      src_sector_indices.size() > 2;
-                  std::vector<std::size_t> phase2_candidates;
-                  if (enable_two_phase) {
-                      std::vector<std::pair<double, std::size_t>> phase1_min;
-                      phase1_min.reserve(src_sector_indices.size());
-                      for (std::size_t k : src_sector_indices) {
-                          auto sec = src_handle.sector(k);
-                          if (!sec || sec->dim() == 0) continue;
-                          ed::workflows::SolveOptions p1;
-                          p1.num_eigs        = 1;
-                          p1.tolerance       = 1e-8;
-                          p1.backend         = opts.backend;
-                          p1.method          = ed::workflows::SolveMethod::Lanczos;
-                          p1.compute_vectors = false;
-                          p1.max_iter        = std::min<std::size_t>(40, sec->dim());
-                          try {
-                              auto sr = ed::workflows::solve(*sec, p1);
-                              if (!sr.eigenvalues.empty()) {
-                                  phase1_min.emplace_back(
-                                      sr.eigenvalues.front(), k);
-                              }
-                          } catch (...) {
-                              phase1_min.emplace_back(
-                                  -std::numeric_limits<double>::infinity(), k);
-                          }
-                      }
-                      if (!phase1_min.empty()) {
-                          std::sort(phase1_min.begin(), phase1_min.end(),
-                                    [](const auto& a, const auto& b) {
-                                        return a.first < b.first;
-                                    });
-                          // A3 fail-safe (see the single-Q binding): a
-                          // -inf phase-1 sentinel must not NaN the gap and
-                          // select zero candidates -- refine everything.
-                          const bool phase1_nonfinite = std::any_of(
-                              phase1_min.begin(), phase1_min.end(),
-                              [](const auto& p){ return !std::isfinite(p.first); });
-                          if (phase1_nonfinite) {
-                              for (const auto& [E, k] : phase1_min) {
-                                  (void)E; phase2_candidates.push_back(k);
-                              }
-                          } else {
-                              const double best_E = phase1_min.front().first;
-                              const double gap =
-                                  std::max(1e-2 * std::abs(best_E), 1e-4);
-                              for (const auto& [E, k] : phase1_min) {
-                                  if (E <= best_E + gap) {
-                                      phase2_candidates.push_back(k);
-                                  }
-                              }
-                          }
-                      }
-                  }
-                  const std::vector<std::size_t>& src_scan_indices =
-                      enable_two_phase ? phase2_candidates
-                                       : src_sector_indices;
-                  for (std::size_t k : src_scan_indices) {
-                      auto sec = src_handle.sector(k);
-                      if (!sec || sec->dim() == 0) continue;
-                      ed::workflows::SolveOptions sopts;
-                      sopts.num_eigs        = 1;
-                      sopts.tolerance       = 1e-12;
-                      sopts.backend         = opts.backend;
-                      sopts.method          = ed::workflows::SolveMethod::Lanczos;
-                      sopts.compute_vectors = false;
-                      // A3: a phase-2 candidate that throws the full solve
-                      // (near-degenerate / memory) must not abort the sweep.
-                      ed::GroundStateResult sr;
-                      try {
-                          sr = ed::workflows::solve(*sec, sopts);
-                      } catch (...) { continue; }
-                      if (sr.eigenvalues.empty()) continue;
-                      const double E_k = sr.eigenvalues.front();
-                      if (E_k < gs_energy) {
-                          gs_energy  = E_k;
-                          gs_src_idx = k;
-                      }
-                      any_solved = true;
-                  }
+                  const GsScanResult gs_scan = find_gs_sector_two_phase(
+                      src_handle, src_sector_indices, opts);
+                  const std::size_t gs_src_idx = gs_scan.gs_idx;
+                  const double      gs_energy  = gs_scan.gs_energy;
+                  const bool        any_solved = gs_scan.any_solved;
                   if (!any_solved) {
                       throw std::runtime_error(
                           "workflows_spectral_streaming_symmetry_cross_irrep_"
@@ -3285,19 +3220,9 @@ void bind_workflows(py::module_& m) {
                   // -----------------------------------------------
                   // (1) Build source streaming operator.
                   // -----------------------------------------------
-                  ed::OperatorSpec src_spec;
-                  src_spec.source             = ed::DirectoryPath{directory};
-                  src_spec.num_sites          = num_sites;
-                  src_spec.spin_l             = static_cast<float>(spin_l);
-                  src_spec.streaming_symmetry = true;
-                  if (!fixed_sz_n_up.is_none()) {
-                      src_spec.fixed_sz = fixed_sz_n_up.cast<int>();
-                  } else {
-                      // Stage 8d: parity / flip sectors on the finite-T
-                      // spectral lane too.
-                      if (sz_parity >= 0) src_spec.sz_parity = sz_parity;
-                      if (flip_sectors)   src_spec.flip_sectors_full = true;
-                  }
+                  ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
+                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
