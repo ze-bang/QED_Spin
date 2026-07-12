@@ -715,7 +715,6 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("taylor_order", &ed::workflows::ThermalOptions::taylor_order)
         .def_readwrite("betas",        &ed::workflows::ThermalOptions::betas)
         .def_readwrite("delta_beta",   &ed::workflows::ThermalOptions::delta_beta)
-        .def_readwrite("beta_max",     &ed::workflows::ThermalOptions::beta_max)
         .def_readwrite("random_seed",  &ed::workflows::ThermalOptions::random_seed)
         .def_readwrite("spin_flip",
                        &ed::workflows::ThermalOptions::spin_flip)

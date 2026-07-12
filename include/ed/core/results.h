@@ -185,7 +185,7 @@ struct ThermalSectorEntry {
 
 // ---------------------------------------------------------------------------
 // ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
-// LTLM / mTPQ / cTPQ / KPM-DOS family.
+// LTLM / mTPQ / KPM-DOS family.
 // ---------------------------------------------------------------------------
 /// One snapshotted TPQ state. Pillar 1 of the "Save and DSSF Upgrades"
 /// plan (May 2026). The orchestrator's thermal finalizer iterates these
@@ -223,7 +223,7 @@ struct ThermalResult {
     // -----------------------------------------------------------------
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
     // trajectory + state-snapshot surface. Populated only by the mTPQ
-    // and cTPQ branches of ``ed::workflows::thermal``; empty for
+    // branch of ``ed::workflows::thermal``; empty for
     // FTLM / LTLM / KPM-DOS.
     //
     // The trajectory fields are mirror-images of

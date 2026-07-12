@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import math
-import contextlib
 import os
 import shutil
 import tempfile
@@ -66,12 +65,6 @@ SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
 # code that imported it transitively; it will be deleted in the next
 # cycle.
 # ---------------------------------------------------------------------------
-@contextlib.contextmanager
-def _suppress_legacy_dispatch_warning():
-    """No-op kept transiently for back-compat; the legacy bindings
-    that used to emit ``DeprecationWarning`` are gone, so there is
-    nothing to suppress."""
-    yield
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +160,6 @@ def _ed_params_to_thermal_options(
         opts.krylov_dim = 100
     opts.taylor_order  = int(params.tpq_taylor_order)
     opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.beta_max      = float(params.tpq_beta_max)
     opts.random_seed   = int(
         params.ftlm_seed or params.ltlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")

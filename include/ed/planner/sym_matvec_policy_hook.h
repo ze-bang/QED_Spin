@@ -44,14 +44,11 @@ namespace ed::planner {
 ///                          for back-compat; also the representation the
 ///                          observable/DSSF lane reuses.
 ///   * Auto              -- no plan ran -> the producer's rep_lazy() heuristic.
-/// `Rep` / `OrbitCsr` are kept as aliases for pre-ordinal call sites.
 enum class SymMatvecRepr : int {
     Auto              = -1,
     RepStream         =  0,
     RepReducedCsr     =  1,
     OrbitMaterialized =  2,
-    Rep               =  0,   ///< deprecated alias == RepStream
-    OrbitCsr          =  2,   ///< deprecated alias == OrbitMaterialized
 };
 
 namespace detail {

@@ -45,7 +45,6 @@ thermodynamics plus a per-sector breakdown for diagnostics.
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 import math
 import os
 import shutil
@@ -78,14 +77,6 @@ from .workflow import (                 # in-memory symmetry -> temp directory
 __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
 
 
-# Compatibility shim: a few helpers still spell ``_suppress_legacy_dispatch_warning``
-# as a no-op context manager. After the May-2026 surface unification this
-# is a stub kept so other modules don't crash on import.
-@contextlib.contextmanager
-def _suppress_legacy_dispatch_warning():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        yield
 
 
 _THERMAL_METHOD_MAP = {
@@ -142,7 +133,6 @@ def _ed_params_to_thermal_options(
         opts.krylov_dim = 100
     opts.taylor_order  = int(params.tpq_taylor_order)
     opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.beta_max      = float(params.tpq_beta_max)
     opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")
     # Closing-the-symmetry-gap follow-up (May 2026): forward the

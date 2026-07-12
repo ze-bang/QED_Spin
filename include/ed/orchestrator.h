@@ -200,7 +200,6 @@ struct ThermalOptions {
     std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
     double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ imag-time step.
-    double      beta_max       = 1000.0;
     std::uint64_t random_seed  = 0;
     std::string output_dir;
     BackendConstraints backend;

@@ -57,10 +57,6 @@ namespace ed::symmetry {
       "byte budget of the SAB sector cache (test oracle)")                     \
     X("ED_SYM_LAZY_SECTORS", "auto",                                           \
       "=1 forces the lazy rep sector lane (test escape)")                      \
-    X("ED_SYM_FUSED_PASS15", "1",                                              \
-      "=0 restores the legacy two-pass enumeration (Stage-2 bisection)")       \
-    X("ED_SYM_STREAMING_ENUM", "1",                                            \
-      "=0 restores the legacy eager enumeration (Stage-2 bisection)")          \
     X("ED_SYM_CSR_DIM_MAX", "engine default",                                  \
       "dimension cap for assembled sector CSRs (legacy lane)")                 \
     X("ED_SYM_REP_RANKTABLE", "auto (budget)",                                 \
