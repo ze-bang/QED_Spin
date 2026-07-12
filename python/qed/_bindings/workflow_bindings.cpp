@@ -1030,7 +1030,9 @@ void bind_workflows(py::module_& m) {
                                       - *spec.fixed_sz;
                   }
                   if (comp.flip_project && spec.fixed_sz
-                      && *spec.fixed_sz * 2 == static_cast<int>(num_sites)
+                      && ed::symmetry::flip_subspace_admissible(
+                             *spec.fixed_sz, -1,
+                             static_cast<int>(num_sites))
                       && !opts.compute_vectors) {
                       spec.flip_project_half = true;
                   }
@@ -1040,7 +1042,9 @@ void bind_workflows(py::module_& m) {
                   // only preserves the subspace for even N.
                   if (comp.flip_project && !spec.fixed_sz
                       && !opts.compute_vectors
-                      && (!spec.sz_parity || num_sites % 2 == 0)) {
+                      && ed::symmetry::flip_subspace_admissible(
+                             -1, spec.sz_parity ? *spec.sz_parity : -1,
+                             static_cast<int>(num_sites))) {
                       spec.flip_sectors_full = true;
                   }
                   ed::core::SectorSetView handle(
@@ -1521,7 +1525,9 @@ void bind_workflows(py::module_& m) {
                       ed::symmetry::sym_toggle_from_int(opts.spin_flip),
                       ed::symmetry::sym_toggle_from_int(opts.time_reversal));
                   if (comp.flip_project && !spec.fixed_sz
-                      && (!spec.sz_parity || num_sites % 2 == 0)) {
+                      && ed::symmetry::flip_subspace_admissible(
+                             -1, spec.sz_parity ? *spec.sz_parity : -1,
+                             static_cast<int>(num_sites))) {
                       spec.flip_sectors_full = true;
                   }
               }

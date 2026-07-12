@@ -384,10 +384,8 @@ resolve_flip_engagement(const ed::matvec::TermStorage& soa,
     FlipEngagement fe;
     if (opt.spin_flip == 0) return fe;
     fe.symmetric = ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
-    const bool admissible =
-        (opt.n_up >= 0)      ? (opt.n_up * 2 == n_sites)
-      : (opt.sz_parity >= 0) ? (n_sites % 2 == 0)
-                             : true;
+    const bool admissible = ed::symmetry::flip_subspace_admissible(
+        opt.n_up, opt.sz_parity, n_sites);
     if (opt.spin_flip == 1) {
         if (!fe.symmetric)
             throw std::runtime_error(
