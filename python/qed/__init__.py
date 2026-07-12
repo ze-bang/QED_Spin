@@ -98,6 +98,16 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     load_mpi_eigenvectors,
     solver_device_support,
 )
+
+
+def debug_env() -> str:
+    """Stage 10b: every symmetry-stack environment gate with its live
+    value, default, and one-line meaning (the X-list in
+    ``include/ed/symmetry/env_gates.h`` is the single inventory).
+    Print this into bug reports -- machine-to-machine behaviour
+    differences (a cluster with legacy drivers, a stray bisection gate)
+    become one diff instead of a grep of the tree."""
+    return _core.dump_env_gates()
 from . import thermal as _thermal_module  # one canonical finite-T entry point
 from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
 from . import spectral as _spectral_module  # one canonical spectral entry point

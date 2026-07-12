@@ -55,7 +55,8 @@
 #include <ed/symmetry/symmetry_adapted.h>
 #include <ed/solvers/symmetry_adapted_solve.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
-#include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
+#include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
 #include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
 #include <ed/observables/cf_spectral_kernel.h>      // 9d: cf_spectral_from_vector
 #include <ed/matvec/backends/cpu_backend.h>         // 9d: CF backend
@@ -931,6 +932,11 @@ PYBIND11_MODULE(_core, m) {
         }
         return stars;
     };
+
+    m.def("dump_env_gates", [] { return ed::symmetry::dump_env_gates(); },
+          "Stage 10b: every symmetry-stack env gate with its live value, "
+          "default, and meaning -- paste into bug reports. The X-list in "
+          "env_gates.h is the single inventory.");
 
     m.def("little_group_full_spectrum",
           [lg_opts, lg_stars_dict, lg_label_arrays](const Operator& op,
