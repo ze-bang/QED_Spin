@@ -81,11 +81,33 @@ struct LittleGroupStarInfo {
     int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
 };
 
+/// Stage 9f: per-eigenvalue quantum-number label, parallel to
+/// ``LittleGroupSpectrum::eigenvalues``. ``k_raw`` is the star
+/// REPRESENTATIVE's abelian irrep index -- fold partners (star members,
+/// TR conjugates) share the representative's label; the full membership
+/// is in ``stars[]``. ``irrep`` indexes the little co-group's irrep
+/// decomposition at that star (-1 = plain / unprojected block; for a
+/// TR-folded sigma/sigma* pair it names the SOLVED member).
+struct LittleGroupLabel {
+    int k_raw       = -1;   ///< abelian irrep (momentum) of the star rep
+    int flip_parity = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int irrep       = -1;   ///< little-co-group irrep index; -1 = plain block
+    int irrep_dim   = 1;    ///< d_sigma (1 for plain blocks)
+};
+
 struct LittleGroupSpectrum {
     /// Distinct block eigenvalues, ascending, with their TOTAL multiplicity
     /// (|star| × d_σ). Σ multiplicities == subspace dimension.
     std::vector<double> eigenvalues;
     std::vector<int>    multiplicities;
+    std::vector<LittleGroupLabel>    labels;   ///< 9f: parallel to eigenvalues
+    /// 9f: character table of the RAW abelian irreps in the engine's own
+    /// ordering -- ``irrep_characters[k_raw][a]`` = chi_k(A[a]) with ``a``
+    /// indexing the caller's ``abelian_group`` element order. This is what
+    /// makes ``k_raw`` physically unambiguous: read the momentum off the
+    /// translation generator's phase instead of trusting an index
+    /// convention (decompose_irreps ordering != directory sector order).
+    std::vector<std::vector<std::complex<double>>> irrep_characters;
     std::vector<LittleGroupStarInfo> stars;
     std::uint64_t       total_dim = 0;
     bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
@@ -111,6 +133,18 @@ little_group_full_spectrum(
 /// matrix-free matvec otherwise), multiplicities expanded and sorted.
 [[nodiscard]] std::vector<double>
 little_group_lowest_eigenvalues(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    const std::vector<std::vector<int>>&  residue_perms,
+    int                                   n_sites,
+    int                                   k,
+    const LittleGroupOptions&             opt = {});
+
+/// Stage 9f: lowest-`k`-per-block spectrum WITH labels (the structured form
+/// `little_group_lowest_eigenvalues` flattens). Each block contributes its
+/// lowest `k`; consumers expand by multiplicity and truncate.
+[[nodiscard]] LittleGroupSpectrum
+little_group_lowest_spectrum(
     const ::Operator&                     op,
     const std::vector<std::vector<int>>&  abelian_group,
     const std::vector<std::vector<int>>&  residue_perms,

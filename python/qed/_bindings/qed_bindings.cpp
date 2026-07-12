@@ -897,6 +897,25 @@ PYBIND11_MODULE(_core, m) {
 #endif
         return o;
     };
+    // Stage 9f: per-BLOCK quantum-number labels, parallel to
+    // block_values / multiplicities. k_raw is the star REPRESENTATIVE's
+    // abelian irrep (fold partners share it; membership is in "stars").
+    auto lg_label_arrays = [](const ed::solvers::LittleGroupSpectrum& s,
+                              py::dict& d) {
+        std::vector<int> kraw, fpar, irr, irrd;
+        kraw.reserve(s.labels.size()); fpar.reserve(s.labels.size());
+        irr.reserve(s.labels.size());  irrd.reserve(s.labels.size());
+        for (const auto& L : s.labels) {
+            kraw.push_back(L.k_raw);
+            fpar.push_back(L.flip_parity);
+            irr.push_back(L.irrep);
+            irrd.push_back(L.irrep_dim);
+        }
+        d["block_k_raw"]       = kraw;
+        d["block_flip_parity"] = fpar;
+        d["block_irrep"]       = irr;
+        d["block_irrep_dim"]   = irrd;
+    };
     auto lg_stars_dict = [](const ed::solvers::LittleGroupSpectrum& s) {
         py::list stars;
         for (const auto& st : s.stars) {
@@ -914,7 +933,7 @@ PYBIND11_MODULE(_core, m) {
     };
 
     m.def("little_group_full_spectrum",
-          [lg_opts, lg_stars_dict](const Operator& op,
+          [lg_opts, lg_stars_dict, lg_label_arrays](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int n_up, int sz_parity, bool use_gpu, int spin_flip,
@@ -928,6 +947,8 @@ PYBIND11_MODULE(_core, m) {
               d["eigenvalues"]    = s.expanded();
               d["block_values"]   = s.eigenvalues;
               d["multiplicities"] = s.multiplicities;
+              lg_label_arrays(s, d);
+              d["irrep_characters"] = s.irrep_characters;
               d["stars"]          = lg_stars_dict(s);
               d["flip_engaged"]   = s.flip_engaged;
               d["tr_engaged"]     = s.tr_engaged;
@@ -962,6 +983,71 @@ PYBIND11_MODULE(_core, m) {
           "Lowest-k eigenvalues via the factorized little-co-group "
           "reduction (dense on small blocks, Lanczos on the projected "
           "matrix-free matvec otherwise); multiplicities expanded.");
+
+    m.def("little_group_lowest_eigenvalues_labeled",
+          [lg_opts, lg_stars_dict](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int dense_max_dim,
+             int spin_flip, int time_reversal) {
+              // Stage 9f: the labeled twin of little_group_lowest_eigenvalues.
+              // Aligned per-eigenvalue arrays (expanded by multiplicity,
+              // sorted ascending, truncated to k): momentum k_raw is the star
+              // REPRESENTATIVE's abelian irrep (fold partners share it; the
+              // membership is in "stars"), irrep indexes the little co-group
+              // decomposition at that star (-1 = plain block), flip_parity is
+              // the (k, +/-) slot when A' = A x Z2 engaged.
+              const int n_sites = static_cast<int>(op.getNumBits());
+              const auto s = ed::solvers::little_group_lowest_spectrum(
+                  op, abelian_group, residue_perms, n_sites, k,
+                  lg_opts(n_up, sz_parity, dense_max_dim, false,
+                          spin_flip, time_reversal));
+              std::vector<std::size_t> order(s.eigenvalues.size());
+              std::iota(order.begin(), order.end(), std::size_t{0});
+              std::sort(order.begin(), order.end(),
+                        [&](std::size_t a, std::size_t b) {
+                            return s.eigenvalues[a] < s.eigenvalues[b];
+                        });
+              std::vector<double> ev;
+              std::vector<int> kraw, fpar, irr, irrd, mult;
+              const std::size_t want = static_cast<std::size_t>(
+                  std::max(k, 1));
+              for (std::size_t idx : order) {
+                  const auto& L = s.labels[idx];
+                  for (int r = 0; r < s.multiplicities[idx]
+                                  && ev.size() < want; ++r) {
+                      ev.push_back(s.eigenvalues[idx]);
+                      kraw.push_back(L.k_raw);
+                      fpar.push_back(L.flip_parity);
+                      irr.push_back(L.irrep);
+                      irrd.push_back(L.irrep_dim);
+                      mult.push_back(s.multiplicities[idx]);
+                  }
+                  if (ev.size() >= want) break;
+              }
+              py::dict d;
+              d["eigenvalues"]  = ev;
+              d["k_raw"]        = kraw;
+              d["flip_parity"]  = fpar;
+              d["irrep"]        = irr;
+              d["irrep_dim"]    = irrd;
+              d["multiplicity"] = mult;
+              d["irrep_characters"] = s.irrep_characters;
+              d["stars"]        = lg_stars_dict(s);
+              d["flip_engaged"] = s.flip_engaged;
+              d["tr_engaged"]   = s.tr_engaged;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 64,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          "Stage 9f: lowest-k eigenvalues WITH aligned per-eigenvalue "
+          "quantum-number labels (k_raw = star representative's momentum "
+          "irrep, little-group irrep index + dimension, flip parity, "
+          "multiplicity) -- the labels the engine always computed and "
+          "previously discarded at this boundary.");
 
     m.def("little_group_thermodynamics",
           [lg_opts](const Operator& op,

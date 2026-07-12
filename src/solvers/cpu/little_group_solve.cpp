@@ -886,6 +886,10 @@ LittleGroupSpectrum run_little_group(
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
     out.tr_engaged   = tr_on;
+    out.irrep_characters.reserve(static_cast<std::size_t>(cx.n_irr_raw));
+    for (int kk = 0; kk < cx.n_irr_raw; ++kk)
+        out.irrep_characters.push_back(
+            cx.giA.irreps[static_cast<std::size_t>(kk)].character);
     for (const auto& [k0, members] : stars) {
         const int m_star = static_cast<int>(members.size());
         auto t0 = tick();
@@ -1017,11 +1021,17 @@ LittleGroupSpectrum run_little_group(
                             const int mult = (jj > ii) ? 2 * m_star * d
                                                        : m_star * d;
                             if (jj > ii) ++info.tr_pairs;
+                            LittleGroupLabel lab;
+                            lab.k_raw       = k0 % cx.n_irr_raw;
+                            lab.flip_parity = info.flip_parity;
+                            lab.irrep       = ii;
+                            lab.irrep_dim   = d;
                             ProjectedBlockOp bop(hk, W);
-                            const auto ev = solve_block(bop, mult);
+                            const auto ev = solve_block(bop, mult, lab);
                             for (double e : ev) {
                                 out.eigenvalues.push_back(e);
                                 out.multiplicities.push_back(mult);
+                                out.labels.push_back(lab);
                             }
                         }
                         info.little_order = static_cast<int>(M.size());
@@ -1036,10 +1046,14 @@ LittleGroupSpectrum run_little_group(
             }
         }
         if (!projected) {
-            const auto ev = solve_block(hk, m_star);
+            LittleGroupLabel lab;
+            lab.k_raw       = k0 % cx.n_irr_raw;
+            lab.flip_parity = info.flip_parity;
+            const auto ev = solve_block(hk, m_star, lab);
             for (double e : ev) {
                 out.eigenvalues.push_back(e);
                 out.multiplicities.push_back(m_star);
+                out.labels.push_back(lab);
             }
         }
         info.projected = projected;
@@ -1101,9 +1115,11 @@ LittleGroupSpectrum little_group_full_spectrum(
         // small-block launches (tiny-sector batching).
         ed::symmetry::SymBlocksPacked P;
         std::vector<int> pack_mult;
+        std::vector<LittleGroupLabel> pack_label;
         auto out = run_little_group(
             op, abelian_group, residue_perms, n_sites, opt,
-            [&](const ed::matvec::MatVecOperator& mv, int mult)
+            [&](const ed::matvec::MatVecOperator& mv, int mult,
+                const LittleGroupLabel& lab)
                 -> std::vector<double> {
                 const std::size_t nb = mv.dim();
                 if (nb == 0) return {};
@@ -1116,6 +1132,7 @@ LittleGroupSpectrum little_group_full_spectrum(
                         P.data.push_back(Hb(static_cast<Eigen::Index>(row),
                                             static_cast<Eigen::Index>(col)));
                 pack_mult.push_back(mult);
+                pack_label.push_back(lab);
                 return {};       // deferred: recorded above
             });
         const std::vector<double> eigs =
@@ -1125,6 +1142,7 @@ LittleGroupSpectrum little_group_full_spectrum(
             for (int i = 0; i < P.block_dim[b]; ++i) {
                 out.eigenvalues.push_back(eigs[off + static_cast<std::size_t>(i)]);
                 out.multiplicities.push_back(pack_mult[b]);
+                out.labels.push_back(pack_label[b]);
             }
             off += static_cast<std::size_t>(P.block_dim[b]);
         }
@@ -1137,11 +1155,28 @@ LittleGroupSpectrum little_group_full_spectrum(
 #endif
     auto out = run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
-        [](const ed::matvec::MatVecOperator& mv, int /*mult*/) {
+        [](const ed::matvec::MatVecOperator& mv, int /*mult*/,
+           const LittleGroupLabel& /*lab*/) {
             return solve_block_full(mv);
         });
     check_sum_rule(out, n_sites, opt);
     return out;
+}
+
+LittleGroupSpectrum little_group_lowest_spectrum(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    const std::vector<std::vector<int>>& residue_perms,
+    int                                  n_sites,
+    int                                  k,
+    const LittleGroupOptions&            opt)
+{
+    return run_little_group(
+        op, abelian_group, residue_perms, n_sites, opt,
+        [&](const ed::matvec::MatVecOperator& mv, int /*mult*/,
+            const LittleGroupLabel& /*lab*/) {
+            return solve_block_lowest(mv, k, opt.dense_max_dim);
+        });
 }
 
 std::vector<double> little_group_lowest_eigenvalues(
@@ -1152,11 +1187,8 @@ std::vector<double> little_group_lowest_eigenvalues(
     int                                  k,
     const LittleGroupOptions&            opt)
 {
-    auto spec = run_little_group(
-        op, abelian_group, residue_perms, n_sites, opt,
-        [&](const ed::matvec::MatVecOperator& mv, int /*mult*/) {
-            return solve_block_lowest(mv, k, opt.dense_max_dim);
-        });
+    auto spec = little_group_lowest_spectrum(
+        op, abelian_group, residue_perms, n_sites, k, opt);
     std::vector<double> flat = spec.expanded();
     if (static_cast<int>(flat.size()) > k)
         flat.resize(static_cast<std::size_t>(k));
