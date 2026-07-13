@@ -10,7 +10,7 @@
 // state->orbit ``SortedUint64Index`` lookup) -- ~24 GiB/sector at N=32 -- even
 // though the GPU on-the-fly representative matvec needs NONE of it.
 //
-// With ``ED_GPU_SYMMETRY_REP`` on (default), the fixed-Sz handle now returns a
+// The fixed-Sz handle returns a
 // CSR-free *lazy* ``SectorOperator`` (``make_rep_sector_operator_lazy``) that:
 //   * knows its ``dim`` up-front (Pass 1.5, no materialisation),
 //   * builds the CSR-free RepSectorData on demand for ``bind_cuda`` (GPU), and
@@ -281,16 +281,18 @@ void run_ring(int N, int n_up) {
             std::vector<Complex> y_gpu = run_gpu_matvec(fn, x);
 
             std::vector<Complex> y_cpu(sd, Complex(0.0, 0.0));
-            op->apply(x.data(), y_cpu.data(), sd);  // (4) lazily builds CSR
+            op->apply(x.data(), y_cpu.data(), sd);  // CPU rep kernel (CSR-free)
 
             expect_close(y_gpu, y_cpu,
                          tg + " probe " + std::to_string(probe) +
                          " (dim " + std::to_string(sd) + ")");
         }
 
-        // (4) CPU apply must have lazily materialised the host orbit CSR.
-        check(op->host_csr_materialized(),
-              tg + ": host CSR materialised by CPU apply fallback");
+        // (4) Stage 11c-2b: the CPU apply is CSR-free too (the rep kernel is
+        // the ONE matvec representation), so the host orbit CSR must STILL
+        // not exist after the CPU reference applies.
+        check(!op->host_csr_materialized(),
+              tg + ": host CSR must stay absent after the CSR-free CPU apply");
     }
 
     std::error_code ec;
@@ -306,28 +308,10 @@ int main() {
         return 0;
     }
 
-    // Pin the full CSR-free lazy configuration this acceptance test models.
-    // Three independent knobs all have to line up; the tiny Z_6 / Z_8 rings
-    // below would otherwise NOT trigger lazy mode on their own:
-    //
-    //   * ED_SYM_LAZY_SECTORS=1 forces build_fixed_sz_sector_operators_lazy
-    //     into lazy generation (Pass 1.5 dims, no eager orbit CSR). Without
-    //     it the ~4 GiB memory-budget heuristic keeps these small systems
-    //     eager, so SectorSetView::sector(k) would hand out a CSR-backed
-    //     adopt operator and checks (1)-(3) (rep_lazy / no host CSR) would
-    //     fail.
-    //   * ED_GPU_SYMMETRY_REP=1 engages the GPU on-the-fly representative
-    //     matvec in bind_cuda() (check (2): no host CSR on the GPU path).
-    //   * ED_SYM_REP=0 keeps the CPU `apply` on the orbit-CSR backend so the
-    //     CPU fallback lazily MATERIALISES the host CSR (check (4)). With the
-    //     CPU rep kernel on (its default) `apply` would also run CSR-free and
-    //     `host_csr_materialized()` would stay false, contradicting (4).
-    //
-    // All three are latched via function-local statics / read at generation
-    // time, so they must be set before the first operator is built.
-    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);
-    setenv("ED_GPU_SYMMETRY_REP", "1", /*overwrite=*/1);
-    setenv("ED_SYM_REP", "0", /*overwrite=*/1);
+    // (Stage 11c-2b: the ED_SYM_LAZY_SECTORS / ED_GPU_SYMMETRY_REP /
+    // ED_SYM_REP knobs this test used to pin are all retired -- lazy
+    // rep-first construction and the rep kernels are unconditional on both
+    // devices, which is exactly what checks (1)-(4) now assert.)
 
     run_ring(/*N=*/6, /*n_up=*/3);
     run_ring(/*N=*/8, /*n_up=*/4);  // |G|=8 fixture, complex characters

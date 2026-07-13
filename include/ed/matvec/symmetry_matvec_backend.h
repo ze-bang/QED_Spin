@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/matvec/symmetry_matvec_backend.h
 //
-// make_cpu_symmetry_backend: the missing third CPU backend factory.
+// CPU symmetry backend factories (rep + non-abelian oracle).
 //
 // ``matvec_backend.h`` ships ``make_cpu_full_basis_backend`` (FullBasisPolicy)
 // and ``make_cpu_fixed_sz_backend`` (FixedSzBasisPolicy) but deliberately
@@ -49,25 +49,9 @@
 
 namespace ed::matvec {
 
-template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
-          class OffDiagTwo, class ThreeBody>
-[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
-make_cpu_symmetry_backend(basis::SymmetryBasisPolicy policy,
-                          std::uint64_t default_csr_cutoff = (1ULL << 13))
-{
-    using Backend = CpuMatVecBackend<basis::SymmetryBasisPolicy,
-                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
-                                     OffDiagTwo, ThreeBody>;
-    // read_symmetry_tunables honours ED_SYM_CSR_DIM_MAX / ED_CSR_DIM_MAX /
-    // ED_CSR_FORCE for ABI parity, but the symmetry lane never actually
-    // takes the CSR branch (compiled out by needs_orbit_walk).
-    auto tunables = detail::read_symmetry_tunables(default_csr_cutoff);
-    const std::uint64_t dim = policy.dim();
-    return std::make_unique<Backend>(
-        std::move(policy),
-        tunables,
-        "CpuSymmetry(dim=" + std::to_string(dim) + ")");
-}
+// (Stage 11c-2b: ``make_cpu_symmetry_backend`` -- the orbit-CSR walk over a
+// ``SymmetryBasisPolicy`` view -- was deleted with the legacy orbit matvec
+// lane; the rep factory below is THE CPU symmetry backend.)
 
 // ---------------------------------------------------------------------------
 // make_cpu_nonabelian_symmetry_backend: same engine, the d≥2 (non-abelian)

@@ -7,8 +7,8 @@
 // their consumption sites: no single inventory (docs listed ~10 by hand), no
 // typo protection, and machine-to-machine behaviour differences (the
 // legacy-driver class of failure) were undiagnosable without grepping the
-// tree. This header is the SINGLE table for the ED_SYM_* family (plus the
-// GPU-rep toggle): every gate, its default, and one sentence of meaning --
+// tree. This header is the SINGLE table for the ED_SYM_* family: every
+// gate, its default, and one sentence of meaning --
 // and ``dump_env_gates()`` renders the live values for bug reports.
 //
 // Deliberately an INVENTORY-plus-dump, not a forced rewiring: the existing
@@ -20,8 +20,10 @@
 // Retired gates (rows removed when their lane died): ED_SYM_FUSED_PASS15 /
 // ED_SYM_STREAMING_ENUM (Stage 10e -- fused OrbitTable is the only enum
 // path); ED_SYM_LAZY_SECTORS / ED_SYM_LAZY_SECTORS_BYTES_MAX (Stage 11c-1
-// -- the lazy rep-first builders are the only construction lane; the eager
-// orbit-CSR builders survive solely as unit-test oracles in sector_set.h).
+// -- the lazy rep-first builders are the only construction lane);
+// ED_SYM_REP / ED_GPU_SYMMETRY_REP / ED_GPU_SYMMETRY_MIRROR_V2 (Stage 11c-2b
+// -- the orbit-CSR matvec backends themselves are gone: the CSR-free rep
+// kernel is the ONE representation on host and device).
 // =============================================================================
 
 #include <cstdio>
@@ -32,8 +34,6 @@ namespace ed::symmetry {
 
 // X-list: ED_SYM_GATE(name, default_text, description)
 #define ED_SYM_GATES(X)                                                        \
-    X("ED_SYM_REP", "unset (rep lane)",                                        \
-      "=0 forces the legacy orbit-CSR lane (bisection escape)")                \
     X("ED_SYM_REDUCED_CSR", "unset (auto: reduced-CSR default)",               \
       "=0 forces the CSR-free rep walk; =1 forces reduced-CSR")                \
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", "8",                                     \
@@ -70,9 +70,7 @@ namespace ed::symmetry {
     X("ED_SYM_SKIP_COMMUTE_CHECK", "0  [read in Python]",                      \
       "=1 skips the [H,U_g]=0 validation of explicit generators")              \
     X("ED_SYM_NO_DETECT_MEMO", "0  [read in Python]",                          \
-      "=1 disables the find_symmetries content memo")                          \
-    X("ED_GPU_SYMMETRY_REP", "auto",                                           \
-      "=1 forces the on-the-fly representative GPU kernel")
+      "=1 disables the find_symmetries content memo")
 
 /// Render every symmetry gate with its LIVE value (or "(unset)"), default,
 /// and meaning -- one call to paste into a bug report. Bound to Python as

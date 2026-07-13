@@ -1212,12 +1212,10 @@ if(BUILD_ED_TESTS)
     # P2: the unified CpuMatVecBackend<SymmetryBasisPolicy> + make_cpu_symmetry_backend
     # factory reproduce the legacy StreamingSymmetryOperator::applySymmetrized matvec
     # byte-for-byte in every momentum sector (Heisenberg Z_N ring, N=6).
-    ed_add_test(test_symmetry_backend           tests/unit/test_symmetry_backend.cpp USE_CATCH2)
     # P2 (fixed-Sz symmetry lane): the SAME generic backend reproduces the
     # legacy FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSz matvec
     # byte-for-byte in every momentum sector (half-filled Heisenberg Z_N ring,
     # N=6, n_up=3) -- orbits built over a FixedSzSubspace instead of full space.
-    ed_add_test(test_symmetry_backend_fixedsz   tests/unit/test_symmetry_backend_fixedsz.cpp USE_CATCH2)
     # "Optimized symmetry ED + NLCE" (Jun 2026), Phase 1 gate: the CPU
     # on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
     # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
@@ -1261,7 +1259,6 @@ if(BUILD_ED_TESTS)
         # projection hash; the GPU symmetry matvec matches the host
         # CpuMatVecBackend<Symmetry> to <1e-9 across every momentum sector of
         # the Heisenberg Z_N ring (N=6). CUDA-only; plain main() harness.
-        ed_add_test(test_cuda_symmetry_matvec_backend tests/unit/test_cuda_symmetry_matvec_backend.cu)
         # Phase A operator-collapse GPU parity (Jun 2026): a standalone
         # ed::symmetry::SectorOperator (from make_sector_operators -> the P5
         # sector-set enumerator, no StreamingSymmetryOperator) is backend-

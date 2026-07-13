@@ -10,8 +10,8 @@
 // ``ed::symmetry::SectorBasis`` producer (which also carries the CSR-free
 // lazy-rep state), and inherits the canonical term storage + management from
 // ``ed::Operator``. The matvec runs through the unified
-// ``CpuMatVecBackend<SymmetryBasisPolicy>`` (orbit-CSR walk) or
-// ``CpuMatVecBackend<RepSymmetryBasisPolicy>`` (CSR-free on-the-fly rep walk).
+// ``CpuMatVecBackend<RepSymmetryBasisPolicy>`` (CSR-free on-the-fly rep walk,
+// with the budget-gated reduced-CSR sub-mode).
 //
 // All construction sites (``SectorOperator(n_bits, spin_l, SectorBasis)``) and
 // the public surface (basis / materialized_basis / configureRepLazy /
@@ -24,7 +24,6 @@
 
 #include <ed/core/subspace_operator.h>
 #include <ed/matvec/symmetry_basis_policy.h>
-#include <ed/planner/sym_matvec_policy_hook.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
@@ -33,22 +32,11 @@
 namespace ed::symmetry {
 
 // ---------------------------------------------------------------------------
-// CPU on-the-fly representative SpMV gate ("Optimized symmetry ED + NLCE"
-// plan, Jun 2026). When enabled (default ON), a fixed-Sz symmetry sector's CPU
-// matvec runs the CSR-free representative kernel
-// (``make_cpu_rep_symmetry_backend``) instead of materialising the per-sector
-// orbit CSR (~24 GiB/sector at N=32). Set ``ED_SYM_REP=0`` to restore the
-// legacy orbit-CSR path (A/B + bisection).
+// Stage 11c-2b (Jul 2026): the CSR-free representative kernel is THE CPU
+// symmetry matvec. The legacy orbit-CSR backend and its ``ED_SYM_REP=0``
+// escape were retired -- every production SectorBasis carries a rep
+// provider (11c-1/2a), so the escape was the only route in.
 // ---------------------------------------------------------------------------
-[[nodiscard]] inline bool cpu_rep_symmetry_enabled() {
-    static const bool enabled = [] {
-        const char* e = std::getenv("ED_SYM_REP");
-        if (e == nullptr || e[0] == '\0') return true;   // default ON
-        if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
-        return true;                                      // anything else -> ON
-    }();
-    return enabled;
-}
 
 }  // namespace ed::symmetry
 
@@ -68,51 +56,31 @@ struct SubspaceProducerTraits<ed::matvec::basis::SymmetryBasisPolicy> {
 // ---------------------------------------------------------------------------
 // make_backend_ specialization (Symmetry lane).
 //
-// CPU on-the-fly representative path: for a fixed-Sz symmetry sector the
-// CSR-free RepSectorData is all the matvec needs (NEVER materialises the
-// per-sector orbit CSR). Taken only in the lazy regime (``rep_lazy()``);
-// otherwise the eager orbit-CSR backend is faster when the CSR fits. Falls
-// back to the orbit-CSR path when the rep path is disabled (ED_SYM_REP=0) or
-// the RepSectorData is unusable (sym-only sectors with varying popcount).
+// CPU on-the-fly representative path: the CSR-free RepSectorData is all the
+// matvec needs (the per-sector orbit CSR is never materialised for SpMV).
 // ---------------------------------------------------------------------------
 template <>
 inline std::unique_ptr<ed::matvec::MatVecBackendBase>
 SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
                  ed::matvec::MemorySpace::Host>::make_backend_() const {
-    // The planner owns the symmetry-matvec strategy (sym_matvec_policy_hook).
-    // resolved_sym_matvec_repr() folds the env overrides (ED_SYM_REP=0 ->
-    // OrbitMaterialized, ED_SYM_REDUCED_CSR=1 -> RepReducedCsr) and falls back to
-    // the producer's rep_lazy() heuristic when Auto (no plan ran).
-    //   * RepStream      -> rep policy (CSR-free on-the-fly rep walk, lean).
-    //   * RepReducedCsr  -> rep policy TOO (Stage 2b, SymmetryEngine v2): the
-    //                       reduced sector matrix is assembled straight from
-    //                       ``index_and_projection`` inside the rep backend
-    //                       (build_reduced_symmetry_csr_rep), so the per-sector
-    //                       orbit CSR is never materialized on the default lane.
-    //   * OrbitMaterialized / Auto-eager -> orbit policy (orbit-walk gather;
-    //                       ED_SYM_REP=0 is the bisection escape back to it).
-    const int  sym = ed::planner::resolved_sym_matvec_repr();
-    const bool want_rep =
-        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepStream)     ||
-        sym == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr) ||
-        (sym == static_cast<int>(ed::planner::SymMatvecRepr::Auto)
-         && producer_.rep_lazy());
-    if (want_rep) {
-        const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
-        if (rd.usable()) {
-            return ed::matvec::make_cpu_rep_symmetry_backend<
-                DiagonalOneBody, OffDiagonalOneBody,
-                DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-                ThreeBodyTransformData>(rd);
-        }
+    // ONE representation (Stage 11c-2b): the CSR-free RepSectorData drives
+    // both sub-modes -- RepStream walks representatives on the fly;
+    // RepReducedCsr (default) assembles the reduced sector matrix straight
+    // from ``index_and_projection`` (build_reduced_symmetry_csr_rep) inside
+    // the rep backend, budget-gated. The per-sector orbit CSR is never a
+    // matvec representation any more.
+    const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
+    if (!rd.usable()) {
+        throw std::runtime_error(
+            "SectorOperator::make_backend_: RepSectorData unusable -- every "
+            "production SectorBasis carries a rep provider since Stage "
+            "11c-2a, so this indicates a construction bug, not a "
+            "configuration problem.");
     }
-    // Orbit-CSR path (OrbitMaterialized, or rep data unusable). In CSR-free lazy
-    // mode the host orbit CSR has not been built yet -- materialise it now (once).
-    producer_.ensureHostCsr();
-    return ed::matvec::make_cpu_symmetry_backend<
+    return ed::matvec::make_cpu_rep_symmetry_backend<
         DiagonalOneBody, OffDiagonalOneBody,
         DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-        ThreeBodyTransformData>(producer_.policy());
+        ThreeBodyTransformData>(rd);
 }
 
 #ifdef WITH_CUDA

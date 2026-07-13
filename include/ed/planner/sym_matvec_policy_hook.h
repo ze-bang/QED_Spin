@@ -39,16 +39,14 @@ namespace ed::planner {
 ///                          floor that can never OOM.
 ///   * RepReducedCsr     -- rep policy + build the reduced sector matrix ONCE,
 ///                          then plain O(1)/nnz SpMV. Fast tier; +O(dim*nnz) mem.
-///   * OrbitMaterialized -- SymmetryBasisPolicy: materialized orbit lists
-///                          (~dim*|orbit|*24 B) walked with stored coeffs. Kept
-///                          for back-compat; also the representation the
-///                          observable/DSSF lane reuses.
-///   * Auto              -- no plan ran -> the producer's rep_lazy() heuristic.
+///   * Auto              -- no plan ran -> the default (reduced-CSR).
+/// (``OrbitMaterialized`` -- the legacy orbit-CSR walk -- was retired in
+/// Stage 11c-2b together with its ``ED_SYM_REP=0`` escape; the rep policy
+/// is the ONE matvec representation.)
 enum class SymMatvecRepr : int {
     Auto              = -1,
     RepStream         =  0,
     RepReducedCsr     =  1,
-    OrbitMaterialized =  2,
 };
 
 namespace detail {
@@ -75,16 +73,11 @@ inline void clear_sym_matvec_repr() noexcept {
 }
 
 /// Resolve the EFFECTIVE strategy with precedence: env override -> planner slot
-/// -> Auto. The env knobs are the manual escape hatch (cached process-globally,
-/// matching the legacy gates): ``ED_SYM_REP=0`` forces OrbitMaterialized (the old
-/// "disable rep" switch) and takes precedence; ``ED_SYM_REDUCED_CSR=1`` forces
-/// RepReducedCsr. Consumed by SectorOperator::make_backend_ (rep-vs-orbit policy)
-/// and CpuMatVecBackend (the reduced-CSR sub-choice).
+/// -> Auto. The env knob is the manual escape hatch (cached process-globally):
+/// ``ED_SYM_REDUCED_CSR=1`` forces RepReducedCsr, ``=0`` the CSR-free rep
+/// walk. Consumed by CpuMatVecBackend (the reduced-CSR sub-choice).
 [[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
     static const int env_override = [] {
-        if (const char* e = std::getenv("ED_SYM_REP"))
-            if (e[0] == '0' && e[1] == '\0')
-                return static_cast<int>(SymMatvecRepr::OrbitMaterialized);
         if (const char* e = std::getenv("ED_SYM_REDUCED_CSR")) {
             if (e[0] == '1' && e[1] == '\0')
                 return static_cast<int>(SymMatvecRepr::RepReducedCsr);

@@ -4,7 +4,7 @@
 // Acceptance pin for the "On-the-fly representative SpMV for streaming
 // symmetry" plan (Jun 2026).
 //
-// With ``ED_GPU_SYMMETRY_REP=1`` a fixed-Sz ``ed::symmetry::SectorOperator``'s
+// A fixed-Sz ``ed::symmetry::SectorOperator``'s
 // ``bind_cuda()`` takes the RESIDENT on-the-fly representative path
 // (``apply_terms_rep_symmetry_scatter`` driven by
 // ``DeviceRepSymmetryBasisPolicy`` + ``make_sector_matvec_gpu_rep``). That
@@ -272,7 +272,7 @@ void check_lane(const std::string& lane,
             continue;
         }
 
-        // ED_GPU_SYMMETRY_REP=1 (set in main) routes this to the on-the-fly
+        // bind_cuda routes unconditionally to the on-the-fly
         // representative kernel.
         auto fn = op->bind_cuda();
         for (int probe = 0; probe < 2; ++probe) {
@@ -328,7 +328,6 @@ int main() {
 
     // Engage the on-the-fly representative path (must be set before the first
     // bind_cuda(), which latches the gate via a function-local static).
-    setenv("ED_GPU_SYMMETRY_REP", "1", /*overwrite=*/1);
 
     run_ring(/*N=*/6, /*n_up=*/3);
     run_ring(/*N=*/8, /*n_up=*/4);  // |G|=8 fixture, complex characters

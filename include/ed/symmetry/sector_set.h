@@ -543,8 +543,8 @@ build_parity_sector_operators_lazy(std::uint64_t            n_bits,
         auto slots = build_rep_sectors_over_table(
             n_bits, spin_l, info_sp, ptab, n_signs, /*rd_n_up=*/-1,
             /*srl=*/nullptr, terms,
-            "Sz-parity sector: the orbit-CSR lane does not carry parity "
-            "subspaces; keep the default rep lane (unset ED_SYM_REP=0).");
+            "Sz-parity sector: no orbit-CSR form exists for parity "
+            "subspaces (the rep kernel is the only matvec).");
         for (std::size_t idx = 0; idx < slots.size(); ++idx) {
             if (!slots[idx]) continue;
             if (out_sector_ids)
@@ -820,9 +820,9 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
         auto slots = build_rep_sectors_over_table(
             n_bits, spin_l, info_sp, flip_tab, /*n_signs=*/2,
             /*rd_n_up=*/-1, /*srl=*/nullptr, terms,
-            "flip-projected full-space sector: the orbit-CSR lane is not "
-            "flip-aware. Keep the default rep lane (unset ED_SYM_REP=0) "
-            "or disable the flip projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
+            "flip-projected full-space sector: no orbit-CSR form exists "
+            "(the rep kernel is the only matvec); disable the flip "
+            "projection (ED_SYM_SPIN_FLIP_PROJECT=0) if orbit data is needed.");
         std::vector<std::unique_ptr<SectorOperator>> ops;
         for (std::size_t idx = 0; idx < slots.size(); ++idx) {
             if (!slots[idx]) continue;
@@ -1037,10 +1037,10 @@ build_all_sz_sector_operators(
                 auto slots = build_rep_sectors_over_table(
                     n_bits, spin_l, info_sp, flip_tab, /*n_signs=*/2,
                     static_cast<int>(n_up), srl_f, terms,
-                    "flip-projected sector: the orbit-CSR lane is not "
-                    "flip-aware. Keep the default rep lane (unset "
-                    "ED_SYM_REP=0) or disable the in-sector flip "
-                    "projection (ED_SYM_SPIN_FLIP_PROJECT=0).");
+                    "flip-projected sector: no orbit-CSR form exists (the "
+                    "rep kernel is the only matvec); disable the in-sector "
+                    "flip projection (ED_SYM_SPIN_FLIP_PROJECT=0) if orbit "
+                    "data is needed.");
                 for (std::size_t idx = 0; idx < slots.size(); ++idx) {
                     if (!slots[idx]) continue;
                     if (out_n_up_sector_ids)
