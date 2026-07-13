@@ -1,0 +1,1067 @@
+\documentclass[11pt]{article}
+
+% =============================================================================
+% unified_stack_reference.tex
+%
+% The QED unified symmetry stack, down to the lowest level: the group theory,
+% the Krylov numerics, and the actual code that implements them. Reflects the
+% post-Stage-11 state (Jul 2026): one construction lane, one matvec
+% representation, one Lanczos kernel, one operator template, one MPI story --
+% plus the two July hardenings (ghost-free lowest-k block solves; the GPU
+% auto-promotion dimension floor).
+%
+% Markdown twin: UNIFIED_STACK.md (layer map). This document carries the
+% mathematics and the implementation detail that Markdown cannot.
+% =============================================================================
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+\definecolor{code}{RGB}{35,38,45}
+\definecolor{kw}{RGB}{146,60,12}
+\definecolor{cm}{RGB}{100,110,120}
+\definecolor{st}{RGB}{40,100,70}
+\lstdefinestyle{cpp}{
+  language=C++,
+  basicstyle=\ttfamily\footnotesize\color{code},
+  keywordstyle=\color{kw},
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  frame=leftline,
+  framerule=0.8pt,
+  rulecolor=\color{cm},
+  xleftmargin=1.2em,
+  aboveskip=0.9em, belowskip=0.9em,
+  showstringspaces=false,
+}
+\lstset{style=cpp}
+
+\newtheorem{prop}{Proposition}[section]
+\newtheorem{lem}[prop]{Lemma}
+\newtheorem{rem}[prop]{Remark}
+
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\Hs}{\mathcal{H}}
+\newcommand{\Stab}{\mathrm{Stab}}
+\newcommand{\ket}[1]{|#1\rangle}
+\newcommand{\bra}[1]{\langle#1|}
+\newcommand{\braket}[2]{\langle#1|#2\rangle}
+\newcommand{\file}[1]{\texttt{\small #1}}
+
+\title{\bfseries The QED Unified Symmetry Stack\\
+\large Mathematics and implementation, down to the lowest level\\
+\normalsize (post--Stage-11 reference, July 2026)}
+\author{QED exact-diagonalization library \\ \small repo \texttt{ze-bang/QED}, branch \texttt{main}}
+\date{July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This is the complete technical reference for the QED exact-diagonalization
+engine after the Stage 9--11 consolidation. The pipeline is one sentence
+--- \emph{given a Hamiltonian: find the symmetries, build the basis, do the
+matvec, run the Lanczos} --- and after the consolidation every step has
+exactly one implementation. This document derives the mathematics each step
+rests on (monomial group actions, representative bases and their norms, the
+$A' = A \rtimes \Z_2$ flip extension, little co-groups and isotypic
+projection, time-reversal folds, Krylov convergence and the ghost-Ritz
+mechanism, finite-temperature estimators, continued-fraction spectral
+functions) and pairs each derivation with the code that implements it,
+quoted from the tree. The final sections cover the cross-cutting guards
+(covering sum rules, commutator probes, residual gates, content-hash
+verification), the two July hardenings, and the measured validation
+numbers.
+\end{abstract}
+
+\tableofcontents
+
+% =============================================================================
+\section{The problem and the design invariant}
+% =============================================================================
+
+\subsection{Setting}
+
+Spin-$\tfrac12$ models on $N$-site clusters. The computational basis is the
+$\sigma^z$ product basis, identified with bitstrings $s \in \{0,1\}^N \cong
+\{0,\dots,2^N-1\}$; site $i$ is up iff bit $i$ of $s$ is set. The
+Hamiltonian is a sum of one-, two- and three-body terms,
+\[
+  H \;=\; \sum_t c_t \, O_t, \qquad
+  O_t \in \{S^z_i,\ S^\pm_i,\ S^z_iS^z_j,\ S^+_iS^-_j,\ S^\pm_iS^\pm_j,\ \dots\},
+\]
+stored as structure-of-arrays term lists (\file{ed/matvec/term\_storage.h}).
+Every solver consumes $H$ only through its action $v \mapsto Hv$
+(``matvec''); no full matrix is ever required, though \emph{reduced} sector
+matrices are assembled when they fit a budget (\S\ref{sec:matvec}).
+
+At the frontier ($N = 36$, half filling) the $U(1)$ block has dimension
+$\binom{36}{18} \approx 9.1\times 10^9$: a single complex vector is
+$\sim$145\,GB. Everything below exists to divide that number by the
+symmetry group and to keep the working set at $O(\#\text{representatives})$.
+
+\subsection{The invariant that generates every layer}
+\label{sec:invariant}
+
+\begin{prop}[project vs.\ fold]\label{prop:projfold}
+Let $\Hs = \bigoplus_b \Hs_b$ be a decomposition preserved by $H$, and let
+$U$ be a unitary with $[H,U]=0$.
+(i) If $U\Hs_b = \Hs_b$, then $U|_{\Hs_b}$ generates a further orthogonal
+decomposition of $\Hs_b$ into eigenspaces of $U$ (\emph{projection}: smaller
+blocks).
+(ii) If $U\Hs_b = \Hs_{b'}$ with $b' \ne b$, then
+$H|_{\Hs_{b'}} = U H|_{\Hs_b} U^\dagger$ is unitarily equivalent to
+$H|_{\Hs_b}$ (\emph{fold}: one solve, copied spectrum, multiplicity 2).
+(iii) An antiunitary $K$ with $KHK^{-1}=H$ never projects: $K$ has no
+eigenspaces in the linear sense; its entire exploitable content is the fold
+$H|_{K\Hs_b} \cong \overline{H|_{\Hs_b}}$, which for Hermitian $H$ is
+isospectral.
+\end{prop}
+
+The stack is the maximal assignment of these three roles:
+\[
+\text{one solve} \;=\;
+\underbrace{\bigl(U(1)\ n_\uparrow \ \text{or}\ S^z\text{-parity}\bigr)}_{\text{subspace}}
+\times
+\underbrace{\bigl(A' = A \rtimes \Z_2^{\text{flip}}\bigr) \otimes P_{k_0}}_{\text{projector}}
+\times
+\underbrace{\bigl(\text{stars} \cdot \text{TR} \cdot \text{transport}\bigr)}_{\text{folds}}.
+\]
+
+\subsection{The seven layers}
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & Layer & The one implementation \\
+\midrule
+L7 & user verbs & \file{workflow.py} / \file{thermal.py} / \file{spectral.py}; parameters via \file{\_params.py} $\rightleftharpoons$ \file{ed\_config\_adapter.h} \\
+L6 & symmetry discovery & \file{discovery.py} (nauty automorphisms $\to$ abelian clique + residues) \\
+L5 & routing & \file{point\_group\_routing.py} (\emph{the} project-vs-fold decision) \\
+L4 & two lanes & A: \file{little\_group\_solve.cpp}; B: \file{sector\_plan.h} + workflow bindings \\
+L3 & basis artifacts & \file{compiled\_group.h} $\to$ \file{orbit\_table.h} $\to$ \file{rep\_sector\_data.h} (lazy-only builders, \file{sector\_set.h}) \\
+L2 & matvec & the CSR-free representative kernel, host + device; reduced-CSR sub-mode, budget-gated \\
+L1 & kernels & \file{ed/krylov/lanczos\_kernel.h}; thermal kernel headers; \file{orchestrator.cpp} + \file{select\_backend.h} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{Group action and the representative basis}
+% =============================================================================
+
+\subsection{Monomial action on bitstrings}
+\label{sec:action}
+
+The exploited symmetries act on the computational basis by \emph{site
+permutations composed with global bit-flips}. An element
+$g = (\pi_g, f_g)$, with $\pi_g \in S_N$ and $f_g \in \{0, \texttt{all-ones}\}$,
+acts as
+\[
+  U_g \ket{s} = \ket{g(s)}, \qquad
+  g(s) \;=\; \pi_g(s) \oplus f_g ,
+\]
+a pure permutation of basis states (no phases: $\prod_i \sigma^x_i$ maps a
+product state to a product state with coefficient $+1$). The group $G$ is
+therefore realized by 0/1 monomial matrices, and everything downstream ---
+orbits, stabilizers, norms --- is combinatorics on bitstrings.
+
+\textbf{Implementation.} \file{ed/symmetry/compiled\_group.h} compiles each
+element to a byte-lookup table: the permutation is applied one input byte at
+a time ($\mathrm{bpw} = \lceil N/8 \rceil$ table loads), then one XOR
+applies the flip:
+
+\begin{lstlisting}
+/// Action of element ``g`` on state ``s``. BPW table loads + one XOR.
+[[nodiscard]] inline std::uint64_t
+apply(std::uint64_t s, std::size_t g) const noexcept {
+    const std::uint64_t* lut_g = lut_.data() + g * stride_;
+    std::uint64_t out = 0;
+    for (int b = 0; b < bpw_; ++b) {
+        out |= lut_g[(static_cast<std::size_t>(b) << 8)
+                     + ((s >> (8 * b)) & 0xFFu)];
+    }
+    return out ^ flips_[g];
+}
+\end{lstlisting}
+
+The bit-identity contract (\texttt{apply(s,g) ==
+applyPermutation(s, perm[g]) \^{} flips[g]}) is pinned against the scalar
+reference by \file{test\_compiled\_group.cpp} ($\sim$17k assertions).
+
+\subsection{Orbits, stabilizers, projected states}
+\label{sec:repbasis}
+
+Fix an abelian group $A$ (the maximal abelian subgroup of the automorphism
+group, extended by the flip where admissible, \S\ref{sec:flip}) with
+characters $\chi_k : A \to U(1)$. For each orbit
+$\mathcal{O}_r = \{a(r) : a \in A\}$ choose the representative
+$r = \min \mathcal{O}_r$ (integer order on bitstrings). The projected state
+in irrep $k$ is
+\begin{equation}
+  \ket{r; k} \;=\; \frac{1}{\sqrt{|A|\, \nu_r(k)}}
+    \sum_{a \in A} \overline{\chi_k(a)}\, U_a \ket{r},
+  \qquad
+  \nu_r(k) \;=\; \sum_{h \in \Stab(r)} \chi_k(h),
+  \label{eq:projstate}
+\end{equation}
+where $\Stab(r) = \{h \in A : h(r) = r\}$. Since $A$ is abelian and
+$\chi_k$ is a homomorphism, $\nu_r(k) = |\Stab(r)|$ if $\chi_k$ restricts
+trivially to $\Stab(r)$ and $0$ otherwise --- the \emph{survival
+condition}. The basis of the $(n_\uparrow, k)$ sector is
+$\{\ket{r;k} : \nu_r(k) > 0\}$, of dimension
+$D_k = \#\{\text{surviving reps}\}$, and Burnside's lemma gives the
+covering sum rule used as a runtime tripwire (\S\ref{sec:guards}):
+\begin{equation}
+  \sum_k D_k \;=\; \binom{N}{n_\uparrow}.
+  \label{eq:burnside}
+\end{equation}
+
+\textbf{Implementation.} A single fused scan
+(\file{ed/symmetry/orbit\_table.h}) enumerates representatives \emph{and}
+stabilizers per $(\text{subspace}, G)$ pair --- the \texttt{OrbitTable}.
+The scan walks the subspace in ascending state order; for each state $s$ it
+computes the $|G|$ images with the byte-LUT \texttt{apply}, early-exits the
+moment any image is $< s$ (then $s$ is not a representative --- this is the
+dominant, cheap branch), and otherwise records $s$ as a representative
+together with the stabilizer bitmask $\{g : g(s) = s\}$ collected in the
+same pass. A closed-form popcount prefilter skips states whose bit count
+cannot match the subspace before any group work. Stabilizer masks are
+deduplicated (\texttt{StabDedup}): lattices have few distinct stabilizer
+subgroups, so per-rep storage is an index into a small table. The whole
+artifact is cached in-process by content hash and on disk as
+\texttt{<lattice>/basis\_cache/sym\_v2/<hash>.otab}
+(\S\ref{sec:hashing}); a warm $N{=}28$ run loads $1.43$M representatives
+from a $14$\,MB file instead of rescanning.
+
+Per irrep, the $O(\#\text{reps})$ view is a \texttt{RepSectorData}: sorted
+\texttt{reps[]}, $\texttt{inv\_norms}[i] = \nu_{r_i}(k)^{-1/2}$ evaluated
+in closed form from the stored stabilizer
+($\nu = \sum_{h \in \Stab} \chi_k(h)$, zero-norm reps dropped --- the
+survival condition), the $|A'|$ characters, the flattened permutations, and
+(when the flip is engaged) per-element XOR masks. Construction is
+\emph{lazy-only} since Stage 11c-1: the builders in \file{sector\_set.h}
+hand every sector a \texttt{RepSectorData} provider
+(\texttt{SectorBasis::configureRepLazy}), and the legacy per-sector ``orbit
+CSR'' exists only as an on-demand product for orbit-\emph{data} consumers
+(\texttt{SectorBasis::build} behind \texttt{ensureHostCsr}: the
+dense-assembly decline path and cross-sector observables).
+
+\subsection{Matrix elements: the representative walk}
+\label{sec:repwalk}
+
+Let a Hamiltonian term act as $O_t \ket{r_i} = c_t \ket{s'}$ (off-diagonal
+terms connect one basis state to one basis state). Projecting
+$H \ket{r_i;k}$ back onto the sector basis:
+
+\begin{prop}[rep-walk matrix element]\label{prop:repwalk}
+With $r_b = \min_{a} a(s')$ the representative of the destination orbit and
+$j$ its index,
+\begin{equation}
+  \bra{r_j;k} O_t \ket{r_i;k}
+  \;=\;
+  c_t \cdot \frac{1}{\sqrt{\nu_i}} \cdot
+  \overline{\beta_{s'}} \cdot \frac{1}{\sqrt{\nu_j}},
+  \qquad
+  \beta_{s'} \;=\; \sum_{\{h \in A \,:\, h(s') = r_b\}} \chi_k(h).
+  \label{eq:repel}
+\end{equation}
+The sum over the $|A|$-fold orbit walk of the naive projector, and its
+global $1/|A|$ weight, collapse into this single representative term.
+\end{prop}
+
+\begin{proof}[Sketch]
+Expand both projected states via \eqref{eq:projstate}; the double group sum
+$\sum_{a,a'}$ reduces by substitution $h = a'^{-1} a$ to $|A|$ times a sum
+over the coset $\{h : h(s') = r_b\}$; the $|A|$ cancels against the two
+$1/\sqrt{|A|}$ normalizations.
+\end{proof}
+
+\textbf{Implementation.} The kernel-facing form is
+\texttt{index\_and\_projection}: given a connected state, return the
+destination index $j$ and the scalar
+$\overline{\beta_{s'}}\, \nu_j^{-1/2}$ (the row factor $\nu_i^{-1/2}$ is
+supplied as the kernel's \texttt{pre\_phase}). The host implementation
+(\file{ed/matvec/rep\_symmetry\_basis\_policy.h}) computes all $|G|$ images
+once into a stack buffer; one pass finds the minimum, one accumulates the
+character sum:
+
+\begin{lstlisting}
+[[nodiscard]] inline std::int64_t
+index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
+    if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
+    if (group_size <= kMaxG) {           // kMaxG = 256
+        std::uint64_t images[kMaxG];
+        std::uint64_t rb = state;
+        for (int g = 0; g < group_size; ++g) {
+            images[g] = apply_perm(state, g);
+            if (images[g] < rb) rb = images[g];
+        }
+        const std::int64_t k = index_of_rep(rb);
+        if (k < 0) return -1;
+        double acc_re = 0.0, acc_im = 0.0;
+        for (int h = 0; h < group_size; ++h) {
+            if (images[h] == rb) {
+                acc_re += characters[h].real();   // conj: +real
+                acc_im -= characters[h].imag();   //       -imag
+            }
+        }
+        const double s = inv_norms[static_cast<std::size_t>(k)];
+        proj_out = Complex(acc_re * s, acc_im * s);
+        return k;
+    }
+    /* |G| > 256: two-pass, buffer-free fallback (same math) */
+    ...
+}
+\end{lstlisting}
+
+The reverse lookup \texttt{index\_of\_rep} is a binary search on the sorted
+\texttt{reps} (zero memory), upgraded to $O(1)$ by two budget-gated
+structures: a per-sector dense table indexed by the \emph{combinadic rank}
+\begin{equation}
+  \mathrm{rank}(s) \;=\; \sum_{m=1}^{n_\uparrow} \binom{b_m}{m},
+  \qquad b_1 < b_2 < \dots \ \text{the set-bit positions of } s,
+  \label{eq:combinadic}
+\end{equation}
+or --- the production default at scale --- \emph{one} shared
+$\mathrm{rank} \to \text{shared-rep-index}$ table per $(N, n_\uparrow)$
+subspace co-owned by every irrep sector (\texttt{SharedRankLookup};
+$77\,\mathrm{GB} \to 4.8\,\mathrm{GB}$ aggregate at $N=32$). The identical
+arithmetic runs on the GPU (\texttt{DeviceRepSymmetryBasisPolicy},
+\file{device\_basis\_policy.cuh}); full-space sectors ($n_\uparrow = -1$)
+use the identity rank.
+
+\subsection{One matvec representation, two sub-modes}
+\label{sec:matvec}
+
+Since Stage 11c-2b the representative kernel is the \emph{only} symmetry
+matvec on both backends. Its two sub-modes trade memory for speed:
+
+\begin{itemize}
+\item \textbf{RepReducedCsr (default).} Assemble the reduced sector matrix
+  once by running \eqref{eq:repel} over every representative row
+  (\file{ed/matvec/reduced\_symmetry\_csr.h}; OpenMP-parallel over rows),
+  then every iteration is a plain $O(\mathrm{nnz})$ SpMV. The build costs
+  one full group walk $\approx |G|$ SpMV-equivalents, so the breakeven
+  against the walk is exactly $\text{iterations} = |G|$ --- always won by
+  an iterative solver. Budget-gated per sector by an up-front upper bound
+  against \texttt{ED\_SYM\_SECTOR\_CSR\_BUDGET\_GIB} (default 8), on
+  \emph{both} lanes: an over-budget frontier sector falls back by itself.
+\item \textbf{RepStream} (\texttt{ED\_SYM\_REDUCED\_CSR=0}, and the
+  automatic over-budget fallback): regenerate \eqref{eq:repel} arithmetically
+  on every apply. $O(\#\text{reps})$ memory --- the $N=36$ regime --- at
+  $\sim|G|\times$ per-apply cost.
+\end{itemize}
+
+The budget gate is one consolidated helper, shared by both lanes
+(\file{ed/planner/sym\_matvec\_policy\_hook.h}):
+
+\begin{lstlisting}
+[[nodiscard]] inline bool sector_csr_within_budget(
+        std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
+    const std::uint64_t est_bytes =
+        dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
+        + (dim + 1) * 8u /* row ptr */;
+    double budget_gib = 8.0;
+    if (const char* v = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
+        const double b = std::atof(v);
+        if (b > 0.0) budget_gib = b;
+    }
+    return static_cast<double>(est_bytes)
+           <= budget_gib * static_cast<double>(1ULL << 30);
+}
+\end{lstlisting}
+
+The builder \texttt{build\_reduced\_symmetry\_csr\_rep}
+(\file{ed/matvec/reduced\_symmetry\_csr.h}) assembles row $r$ by applying
+every Hamiltonian term to the single representative
+$\texttt{rep}_r$ and resolving each connected state through
+\texttt{index\_and\_projection} --- \emph{verbatim} the same element math
+as the streaming kernel, which is what makes the two sub-modes bitwise
+comparable (pinned by \file{test\_reduced\_symmetry\_csr.cpp} and the
+integration strategy-parity test). Rows are independent, so the build is
+OpenMP-parallel. Dense consumers (\texttt{solver="full"} on a sector)
+densify the same reduced CSR; the eager orbit-walk dense assembler was
+deleted with the orbit lane. On the GPU the resident mirror holds
+$\texttt{reps} + \texttt{inv\_norms} + \text{perms} + \chi$
+($\sim$600\,MB at $N=32$) and regenerates the group action inside the
+kernel; measured end-to-end at $N=24$: rep mirror 4.8\,s vs the retired
+orbit-CSR mirror's 18.2\,s.
+
+% =============================================================================
+\section{The flip extension \texorpdfstring{$A' = A \rtimes \Z_2$}{A' = A x Z2}}
+% =============================================================================
+\label{sec:flip}
+
+The global spin flip $X = \prod_i \sigma^x_i$ commutes with every site
+permutation, so when $[H, X] = 0$ it extends the \emph{abelian} factor ---
+never the point-group residue: $A' = A \times \langle X \rangle$, realized
+on bitstrings by the all-ones XOR mask.
+
+\begin{lem}[closure rule]\label{lem:flip}
+$X$ preserves the diagonal subspace iff the subspace is flip-invariant:
+the $n_\uparrow$ block only at $n_\uparrow = N/2$; an $S^z$-parity half only
+for even $N$ (X changes $n_\uparrow$ by $N - 2n_\uparrow$, of parity
+$N \bmod 2$); the full space always. Elsewhere $X$ is a block mapper and
+contributes only \emph{transport}: $\mathrm{spec}\, H|_{n_\uparrow} =
+\mathrm{spec}\, H|_{N-n_\uparrow}$ (Prop.~\ref{prop:projfold}\,(ii)).
+\end{lem}
+
+This rule is stated \emph{once}
+(\texttt{flip\_subspace\_admissible}, \file{ed/symmetry/spin\_flip.h}) and
+consumed by the engine and every binding gate. Where admissible, the
+extended characters are \emph{synthesized}, never re-decomposed: elements
+are laid out $[A,\ A\!\cdot\!X]$ and
+\begin{equation}
+  \chi'_{k,s}(a X^f) \;=\; \chi_k(a)\, (\pm 1)^f, \qquad s \in \{+,-\},
+  \label{eq:chiprime}
+\end{equation}
+doubling the irrep count ($k_{\mathrm{ext}} = k + s\, n_{\mathrm{irr}}$) and
+halving the big sector:
+
+\begin{lstlisting}
+// Extended-irrep characters chi'_{k,s}(a + f|A|) = chi_k(a) * (s ? -1 : +1)^f.
+[[nodiscard]] std::vector<Complex>
+characters_for(const EngineContext& cx, int k_ext) {
+    const auto& base =
+        cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
+    std::vector<Complex> chi(base.begin(), base.end());
+    if (cx.flip_half) {
+        const double s = (k_ext / cx.n_irr_raw == 0) ? 1.0 : -1.0;
+        chi.reserve(2 * base.size());
+        for (const Complex& c : base) chi.push_back(s * c);
+    }
+    return chi;
+}
+\end{lstlisting}
+
+Everything downstream --- norms \eqref{eq:projstate}, the walk
+\eqref{eq:repel}, the reduced CSR, the GPU mirror --- is automatically
+flip-correct because the \texttt{CompiledGroup} carries the XOR masks
+inside \texttt{apply} and the characters carry the sign. Note that the
+covering sum rule \eqref{eq:burnside} is \emph{unchanged} by the flip: the
+flip halves sectors, not the subspace --- this makes it the Stage-9a
+tripwire rather than a quantity to ``fix''.
+
+% =============================================================================
+\section{The little-group engine (lane A)}
+% =============================================================================
+\label{sec:littlegroup}
+
+The full automorphism group is $G = A' \rtimes P$ with $P$ the retained
+non-abelian residue (e.g.\ reflections/rotations). Lane A exploits $P$
+\emph{maximally}: block-mapping residues fold sectors into stars; residues
+that fix a sector are projected via its little co-group. All of this lives
+in \file{src/solvers/cpu/little\_group\_solve.cpp} ($\sim$1.4\,kLOC).
+
+\subsection{Stars: residue conjugation and the union--find fold}
+
+A residue $p$ normalizes $A'$, so conjugation $c_p(a) = p^{-1} a p$
+permutes the abelian irreps: $\chi_k \mapsto \chi_k \circ c_p$. Sectors
+$k$ and $k^p$ are unitarily equivalent
+(Prop.~\ref{prop:projfold}\,(ii) with $U = U_p$), with equal dimensions by
+conjugation-invariance of $|\nu_r|$. One union--find over the extended
+irreps, with edges from every residue map \emph{and} from time reversal
+(\S\ref{sec:tr}), partitions the sector space into \textbf{stars}; each
+star is solved once at its representative $k_0$ with multiplicity
+$|\text{star}|$. Under the flip, residues act parity-diagonally
+($\chi'_{k,s} \mapsto \chi'_{k^p,s}$): stars never mix flip parities.
+
+\subsection{Monomial little co-group}
+
+The little co-group of $k_0$ is
+$L = \{\,p \in P : \chi_{k_0} \circ c_p = \chi_{k_0}\,\}$ modulo $A'$.
+Its elements act on the representative basis by \emph{monomial matrices}:
+
+\begin{prop}\label{prop:monomial}
+For $p \in L$ and a surviving representative $r_i$, let
+$s = \pi_p(r_i)$, let $r_b = \min_a a(s)$ with witness $a^*$
+($a^*(s) = r_b$), and let $j$ index $r_b$. Then
+\[
+  U_p \ket{\psi_i(k_0)} \;=\;
+  \overline{\chi_{k_0}(a^*)}\,
+  \frac{\nu_j^{1/2}}{\nu_i^{1/2}}\,
+  \ket{\psi_j(k_0)},
+\]
+and the coefficient has unit modulus. Coset representatives suffice:
+$M_{a p} = \chi_{k_0}(a)\, M_p$.
+\end{prop}
+
+\begin{lstlisting}
+// Monomial action of residue p on the k0 rep basis (build_monomial).
+for (std::size_t i = 0; i < dim; ++i) {
+    const std::uint64_t s = applyPermutation(rd.reps[i], p);
+    std::uint64_t rb    = ~std::uint64_t{0};
+    std::size_t   astar = 0;
+    for (std::size_t a = 0; a < nA; ++a) {          // byte-LUT walk over A'
+        const std::uint64_t img = cx.cg.apply(s, a);
+        if (img < rb) { rb = img; astar = a; }
+    }
+    const auto it = std::lower_bound(rd.reps.begin(), rd.reps.end(), rb);
+    if (it == rd.reps.end() || *it != rb) return false;      // fallback
+    const std::size_t j = static_cast<std::size_t>(it - rd.reps.begin());
+    // U_p |psi_i> = chi(b) (N_j/N_i) |psi_j>,  b = a*^{-1}
+    const Complex ph = std::conj(chi[astar])
+                     * (rd.inv_norms[i] / rd.inv_norms[j]);
+    if (std::abs(std::abs(ph) - 1.0) > 1e-8) return false;   // must be unit
+    out.to[i]    = static_cast<std::int32_t>(j);
+    out.phase[i] = ph / std::abs(ph);
+}
+\end{lstlisting}
+
+Each accepted monomial is then \emph{numerically validated} by a random-vector
+commutator probe $\lVert [M_p, H_{k_0}] x \rVert / \lVert H M x \rVert <
+10^{-8}$ (\texttt{monomial\_commutes}): a convention error or a residue that
+does not truly fix the sector costs only the refinement, never correctness.
+
+\subsection{Abstract decomposition and isotypic bases}
+
+The monomials $\{M_l\}_{l \in L}$ realize $L$ only projectively in general;
+the engine therefore decomposes the \emph{abstract} group from its
+multiplication table (little co-groups need no faithful permutation
+realization). \texttt{decompose\_irreps\_tables} computes the irreducible
+characters $\chi_\sigma$ of $L$ from the regular representation's commutant;
+the isotypic projectors
+\begin{equation}
+  P_\sigma \;=\; \frac{d_\sigma}{|L|} \sum_{l \in L}
+  \overline{\chi_\sigma(l)}\, M_l
+  \label{eq:isotypic}
+\end{equation}
+are applied per \emph{index orbit} of the monomial permutation structure,
+and sparse orthonormal bases $W_\sigma$ of their ranges are extracted by
+small SVDs. The block solved is $W_\sigma^\dagger H_{k_0} W_\sigma$ with
+eigenvalue multiplicity $|\text{star}| \times d_\sigma$; the covering check
+$\sum_\sigma (\#\mathrm{cols}\, W_\sigma) \, d_\sigma = \dim k_0$ guards
+completeness. \textbf{Fallback ladder}: projective factor system,
+non-closing residues, failed probe, incomplete covering $\Rightarrow$ solve
+the plain $k_0$ block --- less reduction, never wrong physics.
+
+\subsection{Time reversal: the fold that never projects}
+\label{sec:tr}
+
+For $H$ real in the computational basis, complex conjugation $K$ satisfies
+$K H K = H$. In the representative basis, $K$ maps sector $k$ to $\bar k$
+(characters conjugate), giving $H_{\bar k} = \overline{H_k}$ ---
+isospectral, so $k \leftrightarrow \bar k$ edges join the star union--find.
+Inside a self-conjugate star whose $\chi_{k_0}$ is \emph{all-real} (hence
+$H_{k_0}$ real and the monomial phases real), conjugation maps the isotypic
+component $\sigma$ to $\sigma^*$: $\overline{W_\sigma}$ spans the
+$\sigma^*$ isotypic, so conjugate pairs solve \emph{once} at doubled
+multiplicity. Both folds are exact copies, guarded (equal $W$ column
+counts, covering accounting) and revert to solving both on any doubt.
+
+\subsection{Routing (lane A vs lane B)}
+
+One decision point, \texttt{resolve\_projection\_lane}
+(\file{point\_group\_routing.py}): \texttt{point\_group="auto"} (default)
+projects every eigenvalue-only call; declines --- eigenvectors,
+\texttt{sector=}, sampling methods, an explicit GPU request, no residue,
+\texttt{ED\_SYM\_LITTLE\_GROUP=0} --- degrade silently to lane B
+(the abelian composition lane: same role assignment, fold-heavy, serving
+vectors/sampling/GPU/per-sector metadata). \texttt{"full"} raises with the
+decline reason; no fallback engine exists (the monolithic
+symmetry-adapted-basis engine survives only as a parity-test oracle).
+Explicit non-abelian generator lists are closed (cap 4096) and carved into
+(maximal-abelian core, coset residues) by \texttt{split\_nonabelian}.
+
+% =============================================================================
+\section{Lane B: the abelian composition lane}
+% =============================================================================
+\label{sec:laneb}
+
+Lane B serves every consumer the projection engine declines: eigenvector
+requests, per-sector metadata, sampling methods (FTLM/TPQ), and the GPU. It
+assigns the \emph{same} roles as lane A but exploits the block-mappers as
+folds over the abelian sector set rather than projecting little co-groups.
+
+\textbf{Composition plan} (\file{ed/symmetry/sector\_plan.h}). Pure planning
+functions shared by the thermal flat pool and the ground-state lane:
+\texttt{resolve\_symmetry\_composition} normalizes the per-call toggles
+(\texttt{spin\_flip=}, \texttt{time\_reversal=} in
+$\{\texttt{auto},\texttt{on},\texttt{off},\texttt{require}\}$, one SymToggle
+convention shared with the engine) against term-level detection
+($[H, X] = 0$ checker; $H$-real checker); \texttt{plan\_build\_window}
+shrinks the $n_\uparrow$ sweep to $n_\uparrow \le N/2$ under flip transport
+(Lemma~\ref{lem:flip}(ii), spectra mirrored to $N - n_\uparrow$ with tags
+restored); \texttt{plan\_tr\_actions} plus the point-group \emph{star maps}
+(how each residue conjugates the abelian irreps, pure permutation algebra
+computed in Python) feed \emph{one} union--find
+(\texttt{sector\_orbit\_canonical}) that folds TR pairing
+$k \leftrightarrow \bar k$ and all residue maps $k \mapsto k^p$ into
+isospectral orbits --- solve one representative per orbit, copy the
+spectrum. The fold arithmetic is flip-slot aware: synthetic indices
+$k + s\, n_{\mathrm{irr}}$ pair within parity blocks.
+
+\textbf{In-sector flip projection.} At $n_\uparrow = N/2$ (or on parity
+halves / the full space) lane B splits each momentum sector into
+$(k, \pm)$ slots using the same extended characters \eqref{eq:chiprime};
+the flip-projected sectors have \emph{no orbit-CSR form at all} (the
+provider throws by design) --- they exist only in the representative
+representation, which is why the one-matvec consolidation
+(\S\ref{sec:matvec}) was a precondition for this machinery rather than an
+optimization.
+
+\textbf{Labels.} Both lanes emit an honest per-eigenvalue attribution: the
+engine pools $(k_{\mathrm{raw}}, \text{flip parity}, \sigma, d_\sigma)$
+labels plus the raw-irrep character table (the engine's internal irrep
+order is \emph{not} the directory sector order; momentum is decoded from
+the phase of $\chi_k(T)$, convention $e^{-2\pi i k/N}$), and lane B carries
+per-sector eigenvalue arrays and \texttt{SectorTag}s. The pooled-vs-tagged
+fork is a documented output contract, not an accident.
+
+\textbf{Ground-state arbitration.} The cross-irrep bindings locate the
+ground sector by a two-phase scan (\texttt{find\_gs\_sector\_two\_phase}):
+a cheap 40-iteration Lanczos per sector prunes to candidates within a gap
+window of the running minimum; survivors re-solve at $10^{-12}$; the
+winner's eigenpair must then pass the residual gate of
+\S\ref{sec:dssf} before any weight is computed. Phase-1 failures mark a
+sector $-\infty$ (never silently dropped), and a non-finite phase-1 sweep
+falls back to scanning everything.
+
+% =============================================================================
+\section{Krylov numerics: Lanczos, ghosts, and the July 2026 fix}
+% =============================================================================
+\label{sec:lanczos}
+
+\subsection{The kernel}
+
+One templated implementation, \texttt{ed::krylov::lanczos\_kernel<Backend>}
+(\file{ed/krylov/lanczos\_kernel.h}), is \emph{the} Lanczos step for every
+consumer (ground state, FTLM/LTLM inner loops, continued fractions, thermal
+pure states). The three-term recurrence
+\begin{equation}
+  \beta_{j+1} v_{j+1} \;=\; H v_j - \alpha_j v_j - \beta_j v_{j-1},
+  \qquad \alpha_j = v_j^\dagger H v_j,
+  \label{eq:lanczos}
+\end{equation}
+builds $T_m = \mathrm{tridiag}(\beta; \alpha; \beta)$ whose eigenvalues
+(Ritz values) approximate $\mathrm{spec}(H)$ from the extremes inward.
+Reorthogonalization policies: \texttt{None}, \texttt{LocalDGKS$k$} (a ring
+of the last $k$ basis vectors, re-orthogonalized twice, DGKS-style),
+\texttt{PeriodicCGS2}, \texttt{FullCGS2}; options carry
+\texttt{convergence\_check} callbacks, \texttt{aux\_ortho\_ptrs} (project
+out a fixed external set --- used by thick-restart Krylov--Schur locking),
+\texttt{dim\_cap}, and \texttt{keep\_basis=false} for value-only runs.
+
+\subsection{The ghost mechanism}
+
+In exact arithmetic the $v_j$ are orthonormal and every Ritz value of $T_m$
+is a Rayleigh--Ritz approximation from a genuine subspace. In finite
+precision, orthogonality is lost \emph{precisely when a Ritz pair
+converges} (Paige): the recurrence re-introduces components along converged
+directions, and $T_m$ then carries \emph{ghost copies} --- spurious
+duplicates of converged eigenvalues, and transiently, spurious values
+between genuine levels. Two structural consequences matter for a
+\emph{block} solver that requests the lowest $k$:
+\begin{enumerate}
+\item ghosts can sit \emph{exactly on} true levels, so a value-membership
+  test passes while the returned \emph{multiset} is wrong (duplicated
+  levels displace true ones from the $k$-window);
+\item near subspace exhaustion ($m \to \dim$, unavoidable on small blocks)
+  ghost formation is generic even with ring reorthogonalization.
+\end{enumerate}
+
+\subsection{The bug and the fix (commit \texttt{7651683})}
+
+The little-group per-block lowest-$k$ solver, \texttt{solve\_block\_lowest},
+had delegated to a legacy wrapper with an iteration budget
+$\texttt{max\_it} = 2k + 40$ and \emph{no convergence guard} --- on
+near-degenerate blocks every block ran to its cap and returned whatever
+Ritz values $T_{60}$ held. Verified both ways on the $4\times4$
+$J_1$--$J_2$ model ($J_2 = 0.15$, $n_\uparrow = 8$, $k = 10$): the pre-fix
+body returns the multiset $\{E_0^{\times 2},\ E_1^{\times 2},\ E_2,\
+(-8.2328)^{\times 5}\}$ against the true
+$\{E_0, E_1, E_2, (-8.2328)^{\times 4}, (-8.0992)^{\times 3}\}$ ---
+multiset error $1.4$; the fixed body reproduces the dense window to
+$1.3\times 10^{-13}$.
+
+The replacement: below the crossover $\max(\texttt{dense\_max\_dim},\,64k)$
+a dense values-only eigensolve (near-exhaustion territory: exact and
+effectively free); above it, the kernel with \texttt{LocalDGKS3} (ring 8),
+no stored basis, a real budget $\max(40k, 400)$, and an
+\emph{all-$k$-lowest Ritz stationarity gate} --- the shared smallest-only
+predicate would strand the upper levels of the window:
+
+\begin{lstlisting}
+kopts.convergence_check =
+    [prev, kk](const std::vector<double>& alpha,
+               const std::vector<double>& beta) -> bool {
+        const int m = static_cast<int>(alpha.size());
+        if (static_cast<std::size_t>(m) < kk + 2) return false;
+        /* assemble T_m, dense-solve values-only (Eigen) ... */
+        std::vector<double> cur(es.eigenvalues().data(),
+                                es.eigenvalues().data() + nk);
+        bool conv = prev->size() == cur.size();
+        for (std::size_t i = 0; conv && i < cur.size(); ++i) {
+            const double den = std::max(std::abs(cur[i]), 1e-300);
+            conv = std::abs(cur[i] - (*prev)[i]) / den < 1e-11;
+        }
+        *prev = std::move(cur);
+        return conv;                      // every requested level stationary
+    };
+kopts.convergence_check_interval = 10;
+\end{lstlisting}
+
+The regression pin (\file{test\_little\_group\_lowest\_window.py}) compares
+the pooled lowest-$k$ against the pinned dense reference \emph{as sorted
+multisets} --- element-wise on sorted arrays, so one ghost duplicate shifts
+every subsequent entry.
+
+% =============================================================================
+\section{Finite temperature and spectra}
+% =============================================================================
+
+\subsection{Thermal kernels}
+
+All backend-templated headers under \file{ed/thermal/}, driven by
+\texttt{ed::workflows::thermal}:
+
+\textbf{FTLM} (finite-temperature Lanczos): for $R$ random states $\ket{r}$
+with per-state Krylov eigenpairs $(\varepsilon_j^{(r)}, \ket{\psi_j^{(r)}})$,
+\begin{equation}
+  Z \approx \frac{D}{R} \sum_{r=1}^{R} \sum_j
+    e^{-\beta \varepsilon_j^{(r)}} \bigl|\braket{r}{\psi_j^{(r)}}\bigr|^2,
+  \qquad
+  \langle H \rangle \approx \frac{D}{RZ} \sum_{r,j}
+    \varepsilon_j^{(r)} e^{-\beta \varepsilon_j^{(r)}}
+    \bigl|\braket{r}{\psi_j^{(r)}}\bigr|^2 .
+\end{equation}
+\textbf{LTLM} refines the low-$T$ end from a single ground-state-seeded
+chain. \textbf{mTPQ} (microcanonical thermal pure quantum): iterate
+$\ket{\phi_{m+1}} \propto (L - \hat h)\ket{\phi_m}$ with
+$\hat h = H/N$; the inverse temperature of the $m$-th iterate follows from
+its energy moments,
+$\beta_m \simeq 2m / \bigl(N (L - \langle \hat h \rangle_m)\bigr)$, and
+$C_v = \beta^2 \mathrm{Var}(H)$. The fp32 GPU lane
+(\file{mtpq\_f32.h}) halves the vector footprint for the frontier.
+
+\textbf{Trajectory aggregation} (\file{ed/thermal/tpq\_thermo.h}): samples'
+$(\beta_k, E_k, \mathrm{var}_k)$ trajectories are interpolated at
+$\beta = 1/T$ and Welford-averaged; \emph{absolute} entropy and free energy
+come from thermodynamic integration anchored at the exact infinite-$T$
+point:
+\begin{equation}
+  \ln Z(\beta) \;=\; \ln D \;-\; \int_0^\beta \langle E \rangle(\beta')\,
+  d\beta', \qquad
+  S = \beta \langle E \rangle + \ln Z, \qquad F = -\ln Z / \beta,
+  \label{eq:lnz}
+\end{equation}
+with the $[0, \beta_1]$ head segment anchored at
+$\langle E\rangle(0) = \mathrm{Tr}\,H / D$ (recovered for free from every
+sample's $\beta \approx 0$ first trajectory point). The absolute $F_s$ is
+what makes per-sector free energies usable as Boltzmann weights in the
+$U(1)$/spatial recombination.
+
+\textbf{KPM-DOS}: Chebyshev moments of the rescaled Hamiltonian with
+Jackson damping and a Hutchinson stochastic trace; the moment and
+random-vector counts are forwarded knobs (a silently-defaulted $M{=}2048,
+R{=}20$ was one of the converter-fork casualties fixed in Stage 11a).
+
+\subsection{Ground-state dynamical structure factors}
+\label{sec:dssf}
+
+The zero-temperature spectral function of a probe $O$ is
+\begin{equation}
+  S_O(\omega) = \sum_n |\bra{n} O \ket{0}|^2\, \delta(\omega - (E_n - E_0))
+  = -\tfrac{1}{\pi} \operatorname{Im}
+    \bra{\phi} \bigl(\omega + i\eta + E_0 - H\bigr)^{-1} \ket{\phi},
+  \quad \ket{\phi} = O\ket{0},
+\end{equation}
+evaluated as a continued fraction from the Lanczos coefficients of $H$
+seeded with $\ket{\phi}$:
+\begin{equation}
+  \bra{\phi}(z - H)^{-1}\ket{\phi} \;=\;
+  \cfrac{\lVert\phi\rVert^2}{z - \alpha_0 -
+    \cfrac{\beta_1^2}{z - \alpha_1 - \cfrac{\beta_2^2}{\;\ddots}}}\ .
+  \label{eq:cf}
+\end{equation}
+In the symmetry-resolved pipeline, $\ket{0}$ is located by the star walk
+and solved \emph{plain} in its momentum sector (residual-guarded); then
+$O\ket{0}$ is \emph{scattered} into every raw destination sector of every
+reachable diagonal subspace ($n_\uparrow \pm \Delta$, parity halves, full
+space) through the rectangular representative apply
+(\texttt{CrossSectorOrbitObservable}): source orbits regenerate per group
+element, the destination projects through
+\texttt{index\_and\_projection}. Selection rules are \emph{physical}:
+$\lVert \phi_{\mathrm{dst}} \rVert < \varepsilon$ means the channel is
+forbidden; no selection-rule plumbing exists, and the weights obey
+$\sum_{\mathrm{dst}} \lVert\phi_{\mathrm{dst}}\rVert^2 =
+\lVert O\ket{0}\rVert^2$. For real $H$, a $-Q$ panel whose probe is the
+coefficient-conjugate of a computed $+Q$ probe is copied exactly:
+$\bra{n}\bar O\ket{0} = \overline{\bra{n} O \ket{0}}$ in a real eigenbasis.
+
+\textbf{Residual guards.} Both GS re-solve sites in the cross-irrep
+bindings enforce
+$\lVert H\psi_0 - E_0 \psi_0\rVert / \lVert\psi_0\rVert < 10^{-8}$ before
+any weight is computed --- the orchestrator's warn-not-fail contract
+otherwise returns a best-effort pair whose garbage the scattered weights
+and the continued fraction inherit silently:
+
+\begin{lstlisting}
+template <class SectorView>
+inline void require_gs_residual(SectorView& sec,
+                                const std::vector<Complex>& psi0, double E0) {
+    const std::size_t d = psi0.size();
+    std::vector<Complex> hv(d, Complex(0.0, 0.0));
+    sec.apply(psi0.data(), hv.data(), d);
+    double num = 0.0, den = 0.0;
+    for (std::size_t i = 0; i < d; ++i) {
+        const Complex r = hv[i] - E0 * psi0[i];
+        num += std::norm(r);  den += std::norm(psi0[i]);
+    }
+    const double resid = (den > 0.0) ? std::sqrt(num / den)
+                                     : std::numeric_limits<double>::infinity();
+    if (!(resid < 1e-8)) throw std::runtime_error(/* loud, actionable */);
+}
+\end{lstlisting}
+
+% =============================================================================
+\section{Backends, dispatch, and the GPU dimension floor}
+% =============================================================================
+\label{sec:backends}
+
+\texttt{select\_backend(geometry, constraints)}
+(\file{ed/core/select\_backend.h}) picks
+$\{\texttt{Cpu}, \texttt{Cuda}, \texttt{Mpi}\}$ (with \texttt{MpiCuda}
+opt-in, never auto-selected): MPI when the process runs under
+\texttt{mpirun} and the operator is host-resident; otherwise CUDA when
+available, memory-fitting, allowed --- and, since July 2026, only above a
+dimension floor:
+
+\begin{lstlisting}
+struct BackendConstraints {
+    bool allow_gpu = true;  bool allow_mpi = true;  bool allow_mpi_gpu = true;
+    std::optional<std::size_t> gpu_mem_bytes;
+    double fudge_factor = 8.0;
+    /// Minimum problem dimension for the GPU AUTO-promotion. Below this,
+    /// launch + transfer overhead makes the GPU strictly slower -- and on
+    /// shared-GPU hosts tiny solves dispatched to a contended device have
+    /// produced silently-wrong spectra. Explicit device='gpu' sets 0.
+    std::size_t gpu_dim_floor = (std::size_t{1} << 14);
+};
+...
+const bool dim_ok = op_is_device || geom.local_dim >= c.gpu_dim_floor;
+if (device_mv && have_gpu && gpu_fits && c.allow_gpu && dim_ok) {
+    return BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
+}
+\end{lstlisting}
+
+Rationale: the recurring silently-wrong tiny-DSSF class (spectra
+$50$--$250\times$ too small, three sightings, only ever when the pytest
+lane launched immediately after the C++ test sweep) traced to the
+$\sim$40-dimensional internal solves of the cross-irrep DSSF
+auto-dispatching to a WSL2 GPU exactly when the host had it contended.
+Tiny solves are also strictly slower on the device, so the auto-promotion
+was lose--lose. Explicit GPU requests bypass the floor at every surface
+(the one solve converter, the thermal converter and overrides,
+\texttt{qed.spectral(device='gpu')}, raw bindings setting the field);
+tiny-fixture GPU tests keep coverage by zeroing it. MPI is one story:
+\texttt{mpirun ED} --- across-sector distribution (SectorDistributor:
+Burnside-weighted greedy packing of whole sectors onto ranks, rank-local
+solves) $\times$ the in-process \texttt{MpiBackend} for reductions.
+
+% =============================================================================
+\section{One operator template, one parameter converter}
+% =============================================================================
+\label{sec:operator}
+
+\subsection{The operator hierarchy}
+
+Historically four operator classes differed only in their basis. Today the
+hierarchy is
+\[
+  \texttt{LinearOperator} \;\longleftarrow\; \texttt{Operator}
+  \;\longleftarrow\; \texttt{SubspaceOperator<BasisPolicy>},
+\]
+with \texttt{FixedSzOperator} and \texttt{SectorOperator} as
+\texttt{using}-aliases (\texttt{FixedSzBasisPolicy} /
+\texttt{SymmetryBasisPolicy}). The basis axis is a POD \emph{policy}
+consumed by the matvec kernels plus an owning \emph{producer}
+(\texttt{FixedSzSubspace} / \texttt{SectorBasis}) selected by
+\texttt{SubspaceProducerTraits<Policy>}. After Stage 11c-2b the symmetry
+lane's backend factory is unconditional:
+
+\begin{lstlisting}
+template <>
+inline std::unique_ptr<ed::matvec::MatVecBackendBase>
+SubspaceOperator<ed::matvec::basis::SymmetryBasisPolicy,
+                 ed::matvec::MemorySpace::Host>::make_backend_() const {
+    // ONE representation: the CSR-free RepSectorData drives both
+    // sub-modes (RepStream walk; budget-gated RepReducedCsr).
+    const ed::symmetry::RepSectorData& rd = producer_.ensureRepData();
+    if (!rd.usable())
+        throw std::runtime_error(/* construction-bug invariant */);
+    return ed::matvec::make_cpu_rep_symmetry_backend<...>(rd);
+}
+\end{lstlisting}
+
+The factory surface is \texttt{ed::make\_operator(OperatorSpec)}; symmetry
+specs return one \texttt{SectorOperator} per surviving sector through the
+tagged factory (\texttt{make\_sector\_operators\_tagged}), iterated as a
+\texttt{SectorSetView} by the CLI sector loop, the Python bindings, and
+the SectorDistributor (which greedily packs whole sectors onto MPI ranks
+by their Burnside dimensions and solves rank-locally).
+
+\subsection{The one converter}
+
+Parameters cross the Python/C++ boundary through a single function,
+\texttt{ed\_adapter::toSolveOptions} (\file{ed/core/ed\_config\_adapter.h}),
+bound as \texttt{\_core.ed\_params\_to\_solve\_options}; the two callers'
+deliberate semantic differences are \emph{flags}, not divergent copies:
+
+\begin{lstlisting}
+inline ed::workflows::SolveOptions
+toSolveOptions(const EDParameters& params,
+               ::DiagonalizationMethod method,
+               bool auto_method = false,
+               bool wire_backend = false,     // Python: device= PINS the backend
+               bool allow_infeasible = false) {
+    ...
+    if (auto_method) opts.method = SM::Auto;
+    if (wire_backend) {
+        opts.backend.allow_gpu = params.use_gpu;
+        opts.backend.allow_mpi = params.use_mpi;
+        // Python vetted the GPU choice (explicit device='gpu' or its own
+        // dim >= 2^14 heuristic): the C++ auto-promotion floor must not
+        // second-guess it.
+        if (params.use_gpu) opts.backend.gpu_dim_floor = 0;
+    }
+    opts.allow_infeasible = allow_infeasible;
+    ...
+}
+\end{lstlisting}
+
+The thermal converter (\file{python/qed/\_params.py}, no C++ twin) follows
+the same rules and forwards every method knob strictly --- the historical
+fork between two Python copies (silent default-to-FTLM; dropped KPM
+moment counts, a $\sim$250$\times$ cost amplifier) is the incident that
+motivated the whole parameter consolidation.
+
+% =============================================================================
+\section{Cross-cutting guards and content-addressed caching}
+% =============================================================================
+\label{sec:guards}
+
+\subsection{Correctness never rides on bookkeeping}
+
+\begin{itemize}
+\item \textbf{Covering sum rule} \eqref{eq:burnside}: after every fold and
+  projection, pooled multiplicities must tile the subspace dimension.
+\item \textbf{Monomial probe}: every accepted $M_p$ passes the numerical
+  $[M_p, H_{k_0}] = 0$ random-vector test; the isotypic covering
+  $\sum_\sigma |W_\sigma| d_\sigma = \dim k_0$ is checked before any block
+  replaces the plain solve.
+\item \textbf{Residual gates}: the engine's ground-state factory throws on
+  a stale Ritz pair; both cross-irrep GS sites run
+  \texttt{require\_gs\_residual}; the lowest-$k$ window is
+  stationarity-gated (\S\ref{sec:lanczos}).
+\item \textbf{Oracles}: routed verbs $\equiv$ the retired monolithic SAB
+  engine $\equiv$ dense references, pinned across
+  \file{test\_little\_group*.py}, \file{test\_point\_group\_routing.py},
+  and multiset window pins. One local gate
+  (\file{scripts/check\_local.sh}) runs every CI lane.
+\end{itemize}
+
+\subsection{Hash quality is a correctness concern}
+\label{sec:hashing}
+
+Content-keyed registries (orbit tables, GPU mirrors, SAB cache) briefly
+keyed on a word-XOR FNV digest. That mix is \emph{degenerate under
+character sign patterns}: on a $\Z_8$ ring,
+$\chi_{k+4}(g) = (-1)^g \chi_k(g)$, and XOR-folding the words of two such
+character vectors collides --- observed as GPU sectors $5/7$ silently
+reusing the mirrors of $1/3$. Two independent fixes, both required:
+(i) every key material word passes through the \texttt{splitmix64}
+avalanche,
+\begin{lstlisting}
+z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+return z ^ (z >> 31);
+\end{lstlisting}
+and (ii) \emph{no hit is trusted}: mirror slots verify a full identity
+fingerprint; orbit-table registry and disk hits are physically re-verified
+(\texttt{orbit\_table\_consistent}: sampled representatives checked for
+subspace membership and canonical minimality under the caller's group),
+with loud eviction and rebuild on failure.
+
+% =============================================================================
+\section{The Stage-11 consolidation ledger}
+% =============================================================================
+
+Measured against the ideal pipeline, the tree carried four Lanczos
+generations, five parameter layers, two basis-construction lanes, two-plus
+matvec representations per backend, and a 6.6\,kLOC distributed-operator
+family with a single consumer. Nine CI-green commits removed the
+duplication:
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Stage & The one implementation & Deleted \\
+\midrule
+11a + tail & \file{\_params.py} $\rightleftharpoons$ \texttt{toSolveOptions} & forked thermal converter; Python solve-converter twin \\
+11b & \texttt{lanczos\_kernel<Backend>} & \file{TPQ.cpp}, \file{dynamics.cpp}, \file{time\_evolution.h}, \dots \\
+11c-1/2a & lazy rep-first builders & eager orbit-CSR builders; \texttt{adopt} bridge; budget fork \\
+11c-2b & CSR-free rep kernel (host+device) & CPU orbit backend; GPU orbit mirror; device orbit lane \\
+11d-prep & \texttt{SubspaceOperator<Policy>} & (verified real); stale prose; straggler gates \\
+11d & \texttt{mpirun ED} = SectorDistributor $\times$ MpiBackend & \texttt{ed::distributed} family; launcher; \texttt{qed.mpi} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Env-gate hygiene follows the same ledger
+(\file{ed/symmetry/env\_gates.h} / \texttt{qed.debug\_env()}): live gates
+are one X-macro list; retired gates (\texttt{ED\_SYM\_REP},
+\texttt{ED\_GPU\_SYMMETRY\_REP}, \texttt{ED\_SYM\_LAZY\_SECTORS}, \dots)
+are named in its retirement comment rather than lingering as dead reads.
+
+% =============================================================================
+\section{Validation numbers}
+% =============================================================================
+
+\begin{itemize}
+\item \textbf{Little-group scaling} (ring ground state, full group):
+  $N{=}12$: $0.005$\,s vs $0.045$\,s monolithic; $N{=}16$: $0.03$ vs
+  $7.1$\,s; $N{=}20$: $0.5$ vs $317$\,s ($626\times$), $\Delta E_0 = 0$.
+\item \textbf{Phase profile} ($N{=}22$ D$_{22}$ ring, warm caches,
+  \texttt{ED\_SYM\_PROFILE=1}): sector data $0.006$\,s; monomials + isotypic
+  $0.33$\,s; block solves $2.9$\,s (dominant). $44$ extended irreps fold to
+  $24$ stars.
+\item \textbf{GPU rep mirror} ($N{=}24$, end-to-end): $4.8$\,s vs the
+  retired orbit-CSR mirror's $18.2$\,s.
+\item \textbf{Ghost-Ritz case} ($4{\times}4$ $J_1$--$J_2$, $J_2{=}0.15$,
+  $n_\uparrow{=}8$, $k{=}10$): pre-fix multiset error $1.4$ (every block at
+  its 60-iteration cap); post-fix $1.3\times10^{-13}$; suites 34/34.
+\item \textbf{Memory}: shared rank tables collapse the per-sector reverse
+  lookup from $\sim$77\,GB aggregate to $\sim$4.8\,GB at $N{=}32$ half
+  filling; reduced-CSR budget gate keeps $N{=}36$ matrix-free with no
+  configuration.
+\item \textbf{After the dimension floor}: the first fully-green local gate
+  on the development host (381/381 ctest, all pytest, tour) --- the
+  previously load-flaky spectral tests no longer touch the contended GPU.
+\end{itemize}
+
+% =============================================================================
+\section*{Provenance}
+% =============================================================================
+
+Companion documents: \file{UNIFIED\_STACK.md} (layer map),
+\file{SYMMETRY\_V2\_DESIGN.md} \S4 (stage-by-stage migration record, rows
+9a--11d), \file{SYMMETRY.md} (mechanism reference), \file{SCALING.md}
+(memory envelope). Standard references for the numerical background:
+C.~C.~Paige's analysis of Lanczos in finite precision and Cullum--Willoughby
+on ghost identification; Jakli\v{c}--Prelov\v{s}ek for FTLM;
+Sugiura--Shimizu for thermal pure quantum states; Wei\ss{}e et al.\ for the
+kernel polynomial method.
+
+\end{document}

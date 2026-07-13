@@ -1,9 +1,12 @@
 # The Unified Symmetry Stack — architecture and pipeline
 
 Status: **current** (Stages 9–11 complete, Jul 2026). Companion to
-[SYMMETRY.md](SYMMETRY.md) (mechanism reference) and
+[SYMMETRY.md](SYMMETRY.md) (mechanism reference),
 [SYMMETRY_V2_DESIGN.md](SYMMETRY_V2_DESIGN.md) (stage-by-stage migration
-record, §4 rows 9a–11d).
+record, §4 rows 9a–11d), and
+[unified_stack_reference.tex](unified_stack_reference.tex) /
+[.pdf](unified_stack_reference.pdf) — the full mathematical + implementation
+reference (derivations, code excerpts, guards, validation numbers).
 
 ## 0. The invariant that generates every layer
 
