@@ -336,34 +336,3 @@ def test_spectral_directory_form_validates_inputs(tmp_path):
             method="dynamical_thermal",
             ed_binary="/definitely/not/a/path/to/ED",
         )
-
-
-# ----------------------------------------------------------------------------
-# MPI runner: smoke-check input validation only (no MPI launch in tests).
-# ----------------------------------------------------------------------------
-
-
-def test_mpi_run_distributed_rejects_unknown_method(tmp_path):
-    with pytest.raises(ValueError, match="not in"):
-        qed.mpi.run_distributed(
-            directory=str(tmp_path),
-            method="not-a-real-method",
-            n_ranks=1,
-        )
-
-
-def test_mpi_run_distributed_directory_kwarg_is_deprecated():
-    """``directory=`` is the old positional placeholder; ed_distributed_main
-    never consumed it. The wrapper should emit a DeprecationWarning and
-    drop the value rather than failing on a non-existent path."""
-    if shutil.which("ed_distributed_main") is None or shutil.which("mpiexec") is None:
-        pytest.skip("ed_distributed_main / mpiexec not on PATH")
-    with pytest.warns(DeprecationWarning, match="directory"):
-        qed.mpi.run_distributed(
-            directory="/definitely/not/a/dir",
-            method="lanczos",
-            n_ranks=1,
-            binary_args=("--num-sites", "8", "--max-iter", "20", "--exct", "1"),
-            check=True,
-            capture_output=True,
-        )

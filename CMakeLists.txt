@@ -185,7 +185,6 @@ set(BFG_DIR ${SRC_DIR}/bfg)
 set(CLI_DIR ${SRC_DIR}/cli)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
-set(DISTRIBUTED_DIR ${SRC_DIR}/distributed)
 set(MATVEC_DIR ${SRC_DIR}/matvec)  # Matvec-unification revamp (Phase 1)
 
 # Include directories - public headers in include/, private in src/
@@ -237,11 +236,11 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
-# Phase 3c: NCCL detection (used by ed_distributed_gpu).
+# Phase 3c: NCCL detection (used by ed_multi_gpu).
 #
 # Multi-GPU dot/norm reductions for ed::distributed::distributed_lanczos
 # ride NCCL (Phase 3c stage 1). This block is run BEFORE EDLibraries so
-# that `ed_distributed_gpu` can be added conditionally inside that file.
+# that `ed_multi_gpu` can be added conditionally inside that file.
 #
 # Sets:
 #   * NCCL_FOUND          (TRUE / FALSE)
@@ -252,7 +251,7 @@ endif()
 # even on hosts where it would otherwise be found (useful for CPU-only
 # regression rebuilds on GPU nodes).
 # -----------------------------------------------------------------------------
-option(WITH_NCCL "Discover NCCL for ed_distributed_gpu (Phase 3c)" ON)
+option(WITH_NCCL "Discover NCCL for ed_multi_gpu (NCCL collectives)" ON)
 if(WITH_CUDA AND WITH_MPI AND WITH_NCCL)
     find_path(NCCL_INCLUDE_DIRS NAMES nccl.h
               HINTS $ENV{NCCL_ROOT}/include $ENV{NCCL_HOME}/include
@@ -299,10 +298,6 @@ if(WITH_CUDA)
 else()
     target_link_libraries(ED PRIVATE ed_cli ed_solvers_cpu ed_dssf)
 endif()
-# Wave C2 (Full Unified-Interface Collapse, May 2026): `ed_cli` already
-# pulls in `ed_distributed` PUBLIC-ly so binaries linking `ed_cli`
-# resolve `DistributedOperator` / `DistributedSymmetryOperator`
-# constructors that the inline `ed::make_operator` factory references.
 
 # NOTE: The historical `TPQ_DSSF` standalone binary (~4.2 kLOC of duplicated
 # kernels + a positional CLI + parallel HDF5 plumbing) was deleted in P2.14.
@@ -311,32 +306,6 @@ endif()
 # See `docs/history/MODERNIZATION_AUDIT.md` for migration notes and the historical context.
 
 # -----------------------------------------------------------------------------
-# Phase 3b #4: ed_distributed_main (MPI cluster launcher)
-#
-# Tiny standalone driver that exercises ed::distributed::distributed_lanczos
-# and ed::distributed::distributed_ftlm on an unsymmetrised Heisenberg chain.
-# Designed to validate a build/queue/interconnect triple end-to-end before
-# scientists try the full DSSF/FTLM workflows on top of it. See the file
-# header for the CLI surface and `scripts/distributed/run_dist.sh` for the
-# launcher template.
-# -----------------------------------------------------------------------------
-if(WITH_MPI AND TARGET ed_distributed)
-    add_executable(ed_distributed_main src/cli/ed_distributed_main.cpp)
-    target_link_libraries(ed_distributed_main PRIVATE ed_distributed)
-    target_compile_options(ed_distributed_main PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-    )
-    # Phase 3c: when NCCL is discovered, also link the multi-GPU library so
-    # the launcher can print runtime status (`nccl_status_string()`) and so
-    # the future GPU-backed distributed_lanczos can resolve its symbols.
-    # ed_distributed_gpu propagates ED_HAVE_NCCL=1 to consumers via PUBLIC
-    # compile_definitions, so the CLI TU automatically picks the
-    # NCCL-aware code branch when the library is in scope.
-    if(TARGET ed_distributed_gpu)
-        target_link_libraries(ed_distributed_main PRIVATE ed_distributed_gpu)
-    endif()
-endif()
-
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
 target_link_libraries(compute_bfg_order_parameters ed_bfg ${HDF5_LIBRARIES})
@@ -465,8 +434,8 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_bfg ed_symmetry ed_input ed_solvers_cpu ed_cli)
-if(WITH_MPI AND TARGET ed_distributed)
-    list(APPEND _ED_INSTALL_TARGETS ed_distributed)
+if(WITH_MPI AND TARGET ed_multi_gpu)
+    list(APPEND _ED_INSTALL_TARGETS ed_multi_gpu)
 endif()
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
@@ -482,12 +451,6 @@ install(TARGETS ${_ED_INSTALL_TARGETS} ED
 
 if(TARGET compute_bfg_order_parameters)
     install(TARGETS compute_bfg_order_parameters
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
-
-# Phase 3b #4: install the distributed cluster launcher alongside ED.
-if(TARGET ed_distributed_main)
-    install(TARGETS ed_distributed_main
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
@@ -680,9 +643,6 @@ if(BUILD_ED_TESTS)
         # when the runtime branch is unreachable, so the linker needs the
         # distributed library when MPI is on. Link transitively here so test
         # authors do not have to remember per-target.
-        if(WITH_MPI AND TARGET ed_distributed)
-            target_link_libraries(${test_name} PRIVATE ed_distributed)
-        endif()
         target_compile_options(${test_name} PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
         )
@@ -859,14 +819,14 @@ if(BUILD_ED_TESTS)
     # REQUIRE() on any rank propagates via MPI_Allreduce(MPI_MAX) to the
     # CTest exit code.
     # -------------------------------------------------------------------------
-    if(WITH_MPI AND TARGET ed_distributed AND MPIEXEC_EXECUTABLE)
+    if(WITH_MPI AND MPIEXEC_EXECUTABLE)
         function(ed_add_mpi_test test_name test_source)
             add_executable(${test_name} ${test_source})
             target_include_directories(${test_name} PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests
             )
             target_link_libraries(${test_name} PRIVATE
-                ed_distributed Catch2::Catch2)
+                ed_core Catch2::Catch2)
             target_compile_options(${test_name} PRIVATE
                 $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
             )
@@ -887,137 +847,32 @@ if(BUILD_ED_TESTS)
             endforeach()
         endfunction()
 
-        # Phase 3b #1: distributed matrix-free SpMV (DistributedOperator)
-        ed_add_mpi_test(test_distributed_operator
-                        tests/unit/test_distributed_operator.cpp)
-
         # P4: policy-agnostic CommPlan halo-exchange schedule (the reusable
-        # extraction of DistributedOperator's build_comm_pattern_ for the
-        # unified MemSpace=DistributedHost matvec lane). Self-contained; no
+        # MemSpace=DistributedHost matvec machinery). Self-contained; no
         # Operator dependency. Validates geometry, send/recv conservation,
         # and end-to-end halo correctness (complex + real lanes) at np 1/2/4.
         ed_add_mpi_test(test_comm_plan
                         tests/unit/test_comm_plan.cpp)
 
         # P4: MpiMatVecImpl -- the MemSpace=DistributedHost matrix-free SpMV
-        # built on CommPlan + the GATHER kernel (the per-apply body lifted
-        # out of DistributedOperator::apply_local_). Validates the slab SpMV
+        # built on CommPlan + the GATHER kernel. Validates the slab SpMV
         # (complex + real lanes) against the INDEPENDENT serial SCATTER
         # kernel over the full Hilbert space at np 1/2/4.
         ed_add_mpi_test(test_mpi_matvec_impl
                         tests/unit/test_mpi_matvec_impl.cpp)
 
-        # Phase 3b #2: distributed Lanczos (rank-local Krylov + MPI_Allreduce)
-        ed_add_mpi_test(test_distributed_lanczos
-                        tests/unit/test_distributed_lanczos.cpp)
-
-        # "Universal save contract" follow-up (May 2026): rank-0
-        # emission of <output_dir>/ed_results.h5 from
-        # ed::workflows::solve in the MPI lane (aggregate fields only;
-        # slab-distributed eigenvectors stay in per-rank rank_<r>.h5
-        # files). Pins the contract at np ∈ {1, 2, 4}.
-        ed_add_mpi_test(test_distributed_workflows_save
-                        tests/unit/test_distributed_workflows_save.cpp)
-        # The orchestrator template-instantiates ``solve_on<CudaBackend>``
-        # under WITH_CUDA so the linker needs the GPU solver libs even
-        # when the test exercises only the CPU/MPI lane.
-        if(WITH_CUDA AND TARGET ed_solvers_gpu)
-            target_link_libraries(test_distributed_workflows_save PRIVATE
-                ed_solvers_gpu)
-        endif()
-        target_link_libraries(test_distributed_workflows_save PRIVATE
-            ${HDF5_LIBRARIES})
-        target_include_directories(test_distributed_workflows_save PRIVATE
-            ${HDF5_INCLUDE_DIRS})
-
-        # Phase 3b #3: distributed FTLM (J&P trace estimator with Ritz weights,
-        # MPI parallelism over samples)
-        ed_add_mpi_test(test_distributed_ftlm
-                        tests/unit/test_distributed_ftlm.cpp)
-
-        # Phase 3b #6: distributed Lanczos eigenvector reconstruction
-        # (rank-local V_local @ U[:,k] contraction; assemble via Allgatherv;
-        # ||H psi - E psi|| < 1e-8 lockdown)
-        ed_add_mpi_test(test_distributed_eigenvectors
-                        tests/unit/test_distributed_eigenvectors.cpp)
-
-        # Phase 3b #8: distributed canonical TPQ (Taylor-truncated
-        # e^{-(delta/2) H} on rank-local |psi>; cross-check vs exact
-        # thermal energy at np=1,2,4)
-        ed_add_mpi_test(test_distributed_tpq
-                        tests/unit/test_distributed_tpq.cpp)
-
-        # Phase 3b #7 stage 2 prep: orbit-aware MPI_Alltoallv halo plan
-        # consumed by the DistributedSymmetryOperator. Synthetic
-        # 1-D ring lockdown at np=1,2,4 (no GPU dependency).
-        ed_add_mpi_test(test_orbit_halo_plan
-                        tests/unit/test_orbit_halo_plan.cpp)
-
-        # Phase 3b #7 stage 2: full DistributedSymmetryOperator end-to-end
-        # (orbit-aware partition + halo + sparse symmetry-projected SpMV).
-        # Cross-checks distributed apply vs an independently-built dense
-        # reference of H_q on N=4/N=6 Heisenberg chains with translation
-        # symmetry, every momentum sector, np ∈ {1, 2, 4}.
-        ed_add_mpi_test(test_distributed_symmetry_operator
-                        tests/unit/test_distributed_symmetry_operator.cpp)
-        target_link_libraries(test_distributed_symmetry_operator PRIVATE
-            ed_symmetry)
-
-        # Phase 3b #7 stage 3: distributed Lanczos rebased onto
-        # DistributedSymmetryOperator. Cross-checks ground-state energies
-        # vs a dense Eigen::SelfAdjointEigenSolver reference of H_q on
-        # N=4/N=6 Heisenberg chains with translation symmetry across np ∈ {1,2,4}.
-        ed_add_mpi_test(test_distributed_lanczos_symmetry
-                        tests/unit/test_distributed_lanczos_symmetry.cpp)
-        target_link_libraries(test_distributed_lanczos_symmetry PRIVATE
-            ed_symmetry)
-
-        # Phase D step 2: distributed Krylov-Schur rebased onto
-        # DistributedSymmetryOperator (CPU-only, no NCCL). Cross-checks
-        # the leading min(k_target, ks_locked) eigenvalues against
-        # `distributed_lanczos_symmetry` at the same seed/max_iter on
-        # N=4/N=6 Heisenberg chains across all momentum sectors at
-        # np ∈ {1, 2, 4}.
-        ed_add_mpi_test(test_distributed_krylov_schur_symmetry
-                        tests/unit/test_distributed_krylov_schur_symmetry.cpp)
-        target_link_libraries(test_distributed_krylov_schur_symmetry PRIVATE
-            ed_symmetry)
-
-        # Phase D step 4: distributed FTLM rebased onto
-        # DistributedSymmetryOperator (CPU-only, no NCCL). Verifies that
-        # summing per-sector Z(beta) over every momentum sector of an
-        # N=4 PBC Heisenberg chain reproduces the full-space partition
-        # function within the J&P trace-estimator noise floor at np
-        # {1, 2, 4}.
-        ed_add_mpi_test(test_distributed_ftlm_symmetry
-                        tests/unit/test_distributed_ftlm_symmetry.cpp)
-        target_link_libraries(test_distributed_ftlm_symmetry PRIVATE
-            ed_symmetry)
-
-        # Phase E step 1: per-sector canonical TPQ rebased onto
-        # DistributedSymmetryOperator (CPU-only). Verifies that the
-        # sample-averaged <H>(beta) measured inside one momentum sector
-        # of an N=4 PBC Heisenberg chain converges to the dense-projected
-        # thermal energy of that sector at np {1, 2, 4}.
-        ed_add_mpi_test(test_distributed_tpq_symmetry
-                        tests/unit/test_distributed_tpq_symmetry.cpp)
-        target_link_libraries(test_distributed_tpq_symmetry PRIVATE
-            ed_symmetry)
-
-        # Phase 3c #1: NCCL multi-GPU collectives. Built only when
-        # ed_distributed_gpu is alive (WITH_CUDA + NCCL_FOUND); registered
-        # at np {1,2,4} same as the CPU MPI tests. The tests SKIP when no
+        # NCCL multi-GPU collectives (production MultiGpuCommunicator +
+        # MpiCudaBackend). Registered at np {1,2,4}; the tests SKIP when no
         # CUDA device is visible at runtime (e.g. CI on a CPU box) so the
         # CTest invocation stays green even without GPUs.
-        if(TARGET ed_distributed_gpu)
-            # Helper to register a Phase 3c MPI+GPU test at np {1,2,4}.
-            function(ed_add_phase3c_test test_name test_source)
+        if(TARGET ed_multi_gpu)
+            function(ed_add_nccl_test test_name test_source)
                 add_executable(${test_name} ${test_source})
                 target_include_directories(${test_name} PRIVATE
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests
                 )
                 target_link_libraries(${test_name} PRIVATE
-                    ed_distributed_gpu Catch2::Catch2)
+                    ed_multi_gpu ed_core Catch2::Catch2)
                 target_compile_options(${test_name} PRIVATE
                     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
                 )
@@ -1036,119 +891,18 @@ if(BUILD_ED_TESTS)
                 endforeach()
             endfunction()
 
-            # Phase 3c #1: NCCL collective wrappers (lockdown vs MPI ref).
-            ed_add_phase3c_test(test_multi_gpu_nccl
-                                tests/unit/test_multi_gpu_nccl.cpp)
+            # NCCL collective wrappers (lockdown vs MPI ref).
+            ed_add_nccl_test(test_multi_gpu_nccl
+                             tests/unit/test_multi_gpu_nccl.cpp)
 
-            # Phase 3.5 (Krylov-unification gap-fill): direct lockdown for
-            # `ed::matvec::MpiCudaBackend` overrides (dot, nrm2, dot_many,
-            # axpy_many, all_reduce_sum). Mirrors `test_cuda_backend.cpp`
-            # for the distributed lane. NCCL-gated.
-            ed_add_phase3c_test(test_mpi_cuda_backend
-                                tests/unit/test_mpi_cuda_backend.cpp)
-            target_link_libraries(test_mpi_cuda_backend PRIVATE
-                ed_distributed)
-
-            # Phase 3c #2 (stage 2): GPU-resident distributed Lanczos with
-            # ncclAllReduce dot/norm + host-staged SpMV. Cross-checks the
-            # CPU distributed_lanczos on small Heisenberg chains; SKIPs
-            # gracefully when CUDA / NCCL / device count is insufficient.
-            ed_add_phase3c_test(test_distributed_lanczos_gpu
-                                tests/unit/test_distributed_lanczos_gpu.cpp)
-            target_link_libraries(test_distributed_lanczos_gpu PRIVATE
-                ed_distributed)
-
-            # Phase 3c #2 (stage 3): fully GPU-resident DistributedGPUOperator
-            # (NCCL pairwise SendRecv halo + CUDA SpMV kernel). Cross-checks
-            # the CPU DistributedOperator::apply on small Heisenberg chains;
-            # SKIPs gracefully when CUDA / NCCL / device count is insufficient.
-            ed_add_phase3c_test(test_distributed_gpu_operator
-                                tests/unit/test_distributed_gpu_operator.cpp)
-            target_link_libraries(test_distributed_gpu_operator PRIVATE
-                ed_distributed)
-
-            # Phase A (device matrix MPI+GPU): on-device FTLM. Cross-checks
-            # the CPU `distributed_ftlm` on the same MPI_COMM_WORLD with the
-            # same operator/seeds/betas, with and without an observable.
-            # SKIPs gracefully when CUDA / NCCL / device count is
-            # insufficient (the test is build-only on CI's CUDA-build-only
-            # lane and runtime-tested on dev hosts with GPUs).
-            ed_add_phase3c_test(test_distributed_ftlm_gpu
-                                tests/unit/test_distributed_ftlm_gpu.cpp)
-            target_link_libraries(test_distributed_ftlm_gpu PRIVATE
-                ed_distributed)
-
-            # Phase B (device matrix MPI+GPU): on-device Krylov-Schur
-            # (thick-restart Lanczos with locking). Cross-checks the
-            # CPU `distributed_krylov_schur` on the lowest k_target
-            # eigenvalues at the same tol. SKIPs gracefully when CUDA /
-            # NCCL / device count is insufficient.
-            ed_add_phase3c_test(test_distributed_krylov_schur_gpu
-                                tests/unit/test_distributed_krylov_schur_gpu.cpp)
-            target_link_libraries(test_distributed_krylov_schur_gpu PRIVATE
-                ed_distributed)
-
-            # Phase C (device matrix MPI+GPU): on-device symmetry-projected
-            # SpMV. Cross-checks `DistributedSymmetryOperatorGPU::apply`
-            # against the CPU `DistributedSymmetryOperator::apply` on
-            # Heisenberg chains with translation symmetry across all
-            # momentum sectors at np in {1, 2, 4}.
-            ed_add_phase3c_test(test_distributed_symmetry_operator_gpu
-                                tests/unit/test_distributed_symmetry_operator_gpu.cpp)
-            target_link_libraries(test_distributed_symmetry_operator_gpu PRIVATE
-                ed_distributed ed_symmetry)
-
-            # Phase D step 1 (path matrix symm × mpi+gpu): on-device
-            # Lanczos consuming a `DistributedSymmetryOperatorGPU`. Cross-
-            # checks the GPU symm Lanczos eigenvalues against the CPU
-            # `distributed_lanczos_symmetry` at the same seed/max_iter.
-            ed_add_phase3c_test(test_distributed_lanczos_gpu_symmetry
-                                tests/unit/test_distributed_lanczos_gpu_symmetry.cpp)
-            target_link_libraries(test_distributed_lanczos_gpu_symmetry PRIVATE
-                ed_distributed ed_symmetry)
-
-            # Phase D step 3 (path matrix symm × mpi+gpu): on-device
-            # thick-restart Lanczos consuming a `DistributedSymmetryOperatorGPU`.
-            # Cross-checks the GPU symm KS ground-state eigenvalue
-            # against the CPU `distributed_krylov_schur_symmetry` at
-            # the same seed/max_iter.
-            ed_add_phase3c_test(test_distributed_krylov_schur_gpu_symmetry
-                                tests/unit/test_distributed_krylov_schur_gpu_symmetry.cpp)
-            target_link_libraries(test_distributed_krylov_schur_gpu_symmetry PRIVATE
-                ed_distributed ed_symmetry)
-
-            # Phase D step 5 (path matrix symm × mpi+gpu): on-device FTLM
-            # consuming a `DistributedSymmetryOperatorGPU`. Cross-checks
-            # the GPU symm FTLM Z(beta) against the CPU
-            # `distributed_ftlm_symmetry` at the same seed/max_iter on
-            # an N=4 PBC Heisenberg chain (single sector).
-            ed_add_phase3c_test(test_distributed_ftlm_gpu_symmetry
-                                tests/unit/test_distributed_ftlm_gpu_symmetry.cpp)
-            target_link_libraries(test_distributed_ftlm_gpu_symmetry PRIVATE
-                ed_distributed ed_symmetry)
-
-            # Phase E step 2 (path matrix symm × mpi+gpu for TPQ):
-            # on-device canonical TPQ consuming a
-            # `DistributedSymmetryOperatorGPU`. Cross-checks the GPU
-            # symm TPQ energy(beta) against the CPU
-            # `distributed_tpq_symmetry` at the same seed / delta_beta
-            # / taylor_order on an N=4 PBC Heisenberg chain (every
-            # momentum sector).
-            ed_add_phase3c_test(test_distributed_tpq_gpu_symmetry
-                                tests/unit/test_distributed_tpq_gpu_symmetry.cpp)
-            target_link_libraries(test_distributed_tpq_gpu_symmetry PRIVATE
-                ed_distributed ed_symmetry)
+            # Direct lockdown for `ed::matvec::MpiCudaBackend` overrides
+            # (dot, nrm2, dot_many, axpy_many, all_reduce_sum). Mirrors
+            # `test_cuda_backend.cpp` for the MPI+GPU lane. NCCL-gated.
+            ed_add_nccl_test(test_mpi_cuda_backend
+                             tests/unit/test_mpi_cuda_backend.cpp)
         endif()
     endif()
 
-    # Phase 3b #7 stage 1: orbit-respecting partition primitive (no MPI;
-    # the LPT greedy is a deterministic function of (orbit_weights,
-    # n_ranks) and runs in serial).
-    if(WITH_MPI AND TARGET ed_distributed)
-        ed_add_test(test_orbit_partition
-                    tests/unit/test_orbit_partition.cpp USE_CATCH2)
-        target_link_libraries(test_orbit_partition PRIVATE ed_distributed)
-    endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     # ed_input library lockdown (lattice generators + HamiltonianBuilder +
     # write_directory roundtrip vs Operator::loadFromDirectory).

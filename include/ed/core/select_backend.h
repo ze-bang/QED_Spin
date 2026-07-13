@@ -39,7 +39,7 @@
 #  include <mpi.h>
 #  include <ed/matvec/backends/mpi_backend.h>
 #  ifdef ED_HAVE_NCCL
-#    include <ed/distributed/multi_gpu.h>
+#    include <ed/parallel/multi_gpu.h>
 #    include <ed/matvec/backends/mpi_cuda_backend.cuh>
 #  endif
 #endif

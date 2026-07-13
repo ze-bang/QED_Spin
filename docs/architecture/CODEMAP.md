@@ -32,7 +32,6 @@ for `ED` typically come from JSON via `construct_ham` / file I/O).
 flowchart TB
   subgraph exe [Executables]
     ED["ED<br/>src/apps/ed_main.cpp"]
-    EDM["ed_distributed_main<br/>src/cli/ed_distributed_main.cpp"]
     BFG["compute_bfg_order_parameters"]
     BFGG["compute_bfg_order_parameters_gpu"]
   end
@@ -47,7 +46,6 @@ flowchart TB
     esym["ed_symmetry<br/>group.cpp"]
     ebfg["ed_bfg<br/>cluster corr … order_parameters"]
     ecli["ed_cli<br/>workflows dssf_engine"]
-    edist["ed_distributed<br/>WITH_MPI only"]
     einp["ed_input<br/>lattice + HamiltonianBuilder + file_io"]
   end
 
@@ -59,14 +57,10 @@ flowchart TB
   ecli --> edssf
   ecli --> eio
   ecli --> esg
-  edist --> esc
-  edist --> eio
-  edist --> ec
   einp --> ec
 
   ED --> ecli
   ED --> edssf
-  EDM --> edist
   BFG --> ebfg
   BFGG --> ebfg
 ```
@@ -135,9 +129,8 @@ flowchart TD
 
 *Figure: Main-line `ED` (not the `dssf` subcommand). The `--disk-streaming`
 and `--chunked-symm` workflows were retired in matvec-unification Phase 7.2;
-the streaming-symmetry path scales to every case they used to cover, and the
-distributed/MPI build is the canonical answer for Hilbert spaces too large
-for in-RAM streaming. Multiple workflows can still be toggled in one config;
+the streaming-symmetry path scales to every case they used to cover (the
+CSR-free rep lane is O(#reps) memory). Multiple workflows can still be toggled in one config;
 the most confusing case is `run_standard` **and** `run_symm_auto` both true
 — **both** runs execute and eigenvalues are **compared** (see `ed_main.cpp`).*
 
@@ -189,14 +182,18 @@ flowchart LR
 
 ---
 
-## 4. MPI: two different products
+## 4. MPI
 
-| Binary / API | Role |
-|--------------|------|
-| **`ED`** with `mpirun` | MPI-parallel *task* / sample decomposition for some methods (`mTPQ_MPI`, response parallelism, etc.) — same codebase as single-rank, but **not** the distributed-matrix SpMV path. |
-| **`ed_distributed_main`** + `ed::distributed::*` | **Distributed `Operator`**: 1D slab SpMV, `MPI_Alltoallv`, `distributed_lanczos`, `distributed_ftlm`, `distributed_tpq`. **Separate** from the main `ED` static link line (links **only** `ed_distributed`). |
-
-So “MPI” in the solver matrix can mean **task MPI inside `ED`** vs **data-parallel SpMV in `ed_distributed`** — different layers.
+One product (Stage 11d, Jul 2026): `ED` under `mpirun`. Across-sector
+distribution (SectorDistributor: Burnside dim-balanced sector ownership,
+rank-local solves) engages automatically for symmetry workloads; the
+in-process `MpiBackend` covers reduction parallelism. The separate
+`ed_distributed_main` launcher and the `ed::distributed::*` operator family
+(1D slab SpMV + distributed lanczos/ftlm/tpq/krylov-schur + GPU twins,
+~6.6 kLOC) were retired — recoverable from git history if within-sector
+memory distribution is ever needed again. Only the NCCL
+`MultiGpuCommunicator` survives (`ed/parallel/multi_gpu.h`, library
+`ed_multi_gpu`), consumed by `MpiCudaBackend`.
 
 ---
 
@@ -226,7 +223,7 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
   `ed::make_operator(OperatorSpec) -> std::unique_ptr<LinearOperator>`,
   with three input alternatives — programmatic `Operator`, directory
   path, or in-memory edge list — plus orthogonal axes
-  `use_fixed_sz` / `symmetry` / `distributed`),
+  `use_fixed_sz` / `symmetry`),
 - `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
   `ed_method_traits.h`, `ed_parameters.h`, `ed_legacy_types.h`,
   `ed_types.h`,
@@ -256,17 +253,13 @@ leaf header `include/ed/symmetry/symmetry_sector_data.h`, and the
 The chunked-symmetry / disk-streaming triplet
 (`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
 `ed_wrapper_chunked.h`) was deleted in matvec-unification Phase 7.2
-(~2.4 kLOC of ultra-low-memory single-node CPU specialisations; the
-distributed/MPI path is the canonical answer at those scales).
+(~2.4 kLOC of ultra-low-memory single-node CPU specialisations;
+the CSR-free rep lane is the answer at those scales).
 
 ### 5.4 `include/ed/distributed/`
 
-- `distributed_ftlm.h`, `distributed_lanczos.h`, `distributed_lanczos_kernel.h`,
-  `distributed_operator.h`, `distributed_symmetry_operator.h`,
-  `distributed_tpq.h`,
-- `orbit_partition.h`, `orbit_halo_plan.h`,
-- `distributed_lanczos_gpu.h`, `distributed_gpu_operator.h`,
-  `multi_gpu.h`, `multi_gpu_stub.h` *(back-compat shim → `multi_gpu.h`)*
+Retired in Stage 11d (Jul 2026) — see §4. `multi_gpu.h` survives at
+`include/ed/parallel/multi_gpu.h`.
 
 ### 5.5 `include/ed/dssf/`
 

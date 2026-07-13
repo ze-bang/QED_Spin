@@ -18,7 +18,7 @@
 // Gram update needs an all-reduce across ranks for the (b x b) block;
 // a TSQR-based replacement for the local `qr_thin` is similarly
 // pending. The static_assert below is the documented fallback. The
-// distributed block-Lanczos lives in `src/distributed/distributed_block_lanczos*`
+// (the distributed block-Lanczos family was retired in Stage 11d)
 // (a separate path that doesn't go through this kernel). When the
 // distributed `qr_thin` (CholeskyQR2-based, already in Backend::qr_thin
 // for MpiBackend) is wired through, the static_assert can be relaxed

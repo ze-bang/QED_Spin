@@ -16,7 +16,7 @@
 // regardless of `WITH_MPI` / `WITH_CUDA`.
 //
 // Provenance: extracted unchanged from
-// `include/ed/distributed/distributed_lanczos_kernel.h` (where they lived
+// the retired `distributed_lanczos_kernel.h` (where they lived
 // inside an `#ifdef WITH_MPI` block and were therefore unavailable to the
 // CPU-only Krylov-Schur kernel in `include/ed/krylov/krylov_schur_kernel.h`).
 // The distributed kernel header now `#include`s this header and re-exports

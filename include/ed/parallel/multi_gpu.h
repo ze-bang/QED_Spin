@@ -1,5 +1,5 @@
 // =============================================================================
-// include/ed/distributed/multi_gpu.h    (Phase 3c, runtime)
+// include/ed/parallel/multi_gpu.h    (Phase 3c, runtime)
 //
 // Multi-GPU collectives over NCCL for distributed-memory ED. Replaces the
 // detection-only `multi_gpu_stub.h` with an actual implementation surface

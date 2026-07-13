@@ -24,8 +24,7 @@
 //     etc.) across the Python <-> C++ boundary before they get
 //     translated into ``SolveOptions`` / ``ThermalOptions``.
 //   * ``EDResults`` + ``ThermodynamicData`` -- the result envelope
-//     every legacy consumer (including the MPI Python wrapper that
-//     reads ``ed_distributed_main`` HDF5 dumps) expects.
+//     every legacy consumer expects.
 //   * Symmetry attribute setters/getters on ``Operator`` /
 //     ``FixedSzOperator`` -- the in-process bridge between
 //     ``qed.symmetry.group_from_generators(...)`` and the streaming
@@ -445,8 +444,8 @@ void bind_dispatcher(py::module_& m) {
     },
         "True iff this build was compiled with ``WITH_MPI=ON``. The "
         "single-process ``qed._core`` does not call MPI directly; "
-        "use the standalone ``mpiexec ed_distributed_main ...`` binary "
-        "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
+        "launch the CLI under mpirun (SectorDistributor + MpiBackend) "
+        "to drive the MPI "
         "solvers.");
 
     // (capability-aware execution planner removed: sensible defaults +

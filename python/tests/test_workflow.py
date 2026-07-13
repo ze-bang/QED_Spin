@@ -299,89 +299,14 @@ def test_diag_with_trivial_generator_set_falls_back_to_full_hilbert():
 # ---------------------------------------------------------------------------
 
 
-def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
-    """Phase 9 / Layer 4b: ``device='mpi'`` is no longer rejected.
-
-    The unified ``qed.solve`` writes the operator to a temp dir, spawns
-    ``ed_distributed_main`` under ``mpiexec``, and reads the HDF5
-    result file back. We don't actually launch mpiexec here; we
-    monkeypatch ``qed.mpi.run_distributed`` to capture the
-    invocation and stub the result file so the test runs purely in
-    process. The point of the test is to verify the routing, not
-    re-test the C++ binary (those tests live in test_distributed_*).
-    """
-    import os
-    import h5py
-    import numpy as np
-    from qed import mpi as qed_mpi
-
-    captured = {}
-
-    def fake_run_distributed(*, method, n_ranks, binary_args, **_kw):
-        captured["method"]      = method
-        captured["n_ranks"]     = int(n_ranks)
-        captured["binary_args"] = list(binary_args)
-        # Synthesise a minimal result.h5 so _read_mpi_result_file is happy.
-        result_file = None
-        for i, tok in enumerate(binary_args):
-            if tok == "--result-file":
-                result_file = binary_args[i + 1]
-        assert result_file, "binary_args must include --result-file"
-        with h5py.File(result_file, "w") as f:
-            f.create_dataset("/eigenvalues",
-                             data=np.array([-1.5, -0.5], dtype=np.float64))
-            f.attrs["iterations"] = 7
-            f.attrs["elapsed_s"] = 0.001
-        class _CP:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return _CP()
-
-    monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
-
-    H = _heisenberg_ring()
-    res = qed.solve(
-        H, device="mpi", num_eigenvalues=2,
-        mpi_n_ranks=2, verbose=False,
-    )
-    assert captured["method"] in {"lanczos", "krylov_schur"}
-    assert captured["n_ranks"] == 2
-    assert "--num-sites" in captured["binary_args"]
-    assert "--result-file" in captured["binary_args"]
-    assert list(res.eigenvalues)[:2] == pytest.approx([-1.5, -0.5])
-
-
-def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
-    """Layer 3 wiring: ``solver='KRYLOV_SCHUR' + device='mpi'`` must
-    invoke ``ed_distributed_main --mode krylov_schur`` (not the legacy
-    --mode lanczos downgrade)."""
-    import h5py
-    import numpy as np
-    from qed import mpi as qed_mpi
-
-    captured = {}
-    def fake_run_distributed(*, method, n_ranks, binary_args, **_kw):
-        captured["method"] = method
-        result_file = None
-        for i, tok in enumerate(binary_args):
-            if tok == "--result-file":
-                result_file = binary_args[i + 1]
-        with h5py.File(result_file, "w") as f:
-            f.create_dataset("/eigenvalues",
-                             data=np.array([-1.0], dtype=np.float64))
-            f.attrs["iterations"] = 1
-            f.attrs["elapsed_s"] = 0.0
-        class _CP: returncode = 0; stdout = ""; stderr = ""
-        return _CP()
-    monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
-
-    H = _heisenberg_ring()
-    qed.solve(
-        H, device="mpi", solver="KRYLOV_SCHUR", num_eigenvalues=1,
-        mpi_n_ranks=2, verbose=False,
-    )
-    assert captured["method"] == "krylov_schur"
+def test_diag_rejects_retired_mpi_device():
+    """Stage 11d: the device='mpi' subprocess launcher (ed_distributed_main
+    + qed.mpi) was retired; the device string now raises with guidance."""
+    H = _heisenberg_ring(6)
+    with pytest.raises(RuntimeError, match="retired"):
+        qed.solve(H, device="mpi", num_eigenvalues=1, verbose=False)
+    with pytest.raises(RuntimeError, match="mpirun"):
+        qed.solve(H, device="mpi_gpu", num_eigenvalues=1, verbose=False)
 
 
 def test_diag_rejects_unknown_solver_name():
@@ -785,11 +710,9 @@ class TestDeviceMatrix:
       raises a clean RuntimeError when CUDA is missing) and through
       monkeypatching ``has_cuda_build`` so the routing decision is
       verified without touching the dispatcher;
-    * the MPI cells through the structured error in ``_resolve_device``
-      (the helper points the user at ``run_distributed`` with a
-      copy-pasteable snippet);
-    * the MPI+GPU cell through the same path with ``use_gpu=True`` in
-      the snippet.
+    * the MPI cells through the structured retirement error in
+      ``_resolve_device`` (Stage 11d: the subprocess launcher is gone;
+      the error points at mpirun + SectorDistributor).
     """
 
     @pytest.fixture
@@ -888,272 +811,21 @@ class TestDeviceMatrix:
         )
 
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
-    @pytest.mark.parametrize("solver", ["LANCZOS", "KRYLOV_SCHUR", "mTPQ"])
-    def test_mpi_paths_dispatch_binary(self, H, device, solver, monkeypatch):
-        """Phase 9 / Layer 4b: device='mpi' / 'mpi_gpu' shells out to
-        ``ed_distributed_main`` rather than rejecting in-process. The
-        routing layer must:
-          * route LANCZOS, KRYLOV_SCHUR, and mTPQ to the right
-            ``--mode`` token (lanczos / krylov_schur / tpq);
-          * propagate ``use_gpu=True`` for mpi_gpu;
-          * accept ``mpi_n_ranks`` and forward it to
-            ``run_distributed(n_ranks=...)``.
-        We monkeypatch ``run_distributed`` to capture the kwargs so the
-        test is self-contained; the actual MPI launch is exercised by
-        the C++ side under tests/test_distributed_*.cpp.
-        """
-        import h5py
-        import numpy as np
-        from qed import mpi as qed_mpi
-
-        captured = {}
-        def fake_run_distributed(*, method, n_ranks, binary_args,
-                                  use_gpu=False, **_kw):
-            captured["method"]  = method
-            captured["n_ranks"] = int(n_ranks)
-            captured["use_gpu"] = bool(use_gpu)
-            result_file = None
-            for i, tok in enumerate(binary_args):
-                if tok == "--result-file":
-                    result_file = binary_args[i + 1]
-            with h5py.File(result_file, "w") as f:
-                if method == "tpq":
-                    f.create_dataset("/betas",
-                                     data=np.array([0.1, 1.0]))
-                    f.create_dataset("/energy",
-                                     data=np.array([-0.5, -1.0]))
-                    f.attrs["samples_used"] = 1
-                else:
-                    f.create_dataset("/eigenvalues",
-                                     data=np.array([-1.0]))
-                    f.attrs["iterations"] = 1
-                f.attrs["elapsed_s"] = 0.0
-            class _CP: returncode = 0; stdout = ""; stderr = ""
-            return _CP()
-
-        monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
-
-        qed.solve(
-            H, solver=solver, device=device,
-            num_eigenvalues=1, target_beta=5.0,
-            num_samples=1, mpi_n_ranks=2,
-            verbose=False,
-        )
-        expected_mode = {
-            "LANCZOS": "lanczos",
-            "KRYLOV_SCHUR": "krylov_schur",
-            "mTPQ": "tpq",
-        }[solver]
-        assert captured["method"] == expected_mode
-        assert captured["n_ranks"] == 2
-        if device == "mpi_gpu":
-            assert captured["use_gpu"] is True
-        else:
-            assert captured["use_gpu"] is False
+    def test_mpi_devices_retired(self, H, device):
+        """Stage 11d: the device='mpi' subprocess launcher was retired;
+        both device strings raise with mpirun guidance."""
+        with pytest.raises(RuntimeError, match="retired"):
+            qed.solve(H, device=device, num_eigenvalues=1, verbose=False)
 
     def test_unknown_device_rejects(self, H):
         with pytest.raises(ValueError, match="device="):
             qed.solve(H, device="quantum-foam", verbose=False)
 
-    @pytest.mark.parametrize("solver", ["FTLM", "mTPQ"])
-    @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
-    def test_mpi_symm_thermal_aggregates_across_sectors(
-        self, H, solver, device, monkeypatch,
-    ):
-        """Phase H: ``device='mpi'/'mpi_gpu' + symmetry= + thermal``
-        must spawn ``ed_distributed_main`` once per irrep AND
-        Z-weight-average the per-sector ``Z_q``, ``<H>_q`` into a
-        single full-trace ``thermo_data.energy``.
-
-        We monkeypatch :func:`run_distributed` so each spawn writes a
-        synthetic per-sector HDF5 file with KNOWN ``/Z`` and
-        ``/energy`` arrays. The test then asserts:
-
-          1. ``run_distributed`` was called exactly ``len(sectors)``
-             times -- one per irrep -- with distinct
-             ``--sector-index`` values;
-          2. the returned ``EDResults.thermo_data.energy[i]`` equals
-             ``sum_q Z_q[i] * E_q[i] / sum_q Z_q[i]`` for every beta.
-        """
-        import h5py
-        import numpy as np
-        from qed import mpi as qed_mpi
-
-        # Use translation symmetry on the Heisenberg ring -- gives
-        # multiple irreps so the aggregation actually has work to do.
-        N = H.num_sites
-        translation = [(i + 1) % N for i in range(N)]
-        symm = qed.GeneratorSet(
-            name="Cn",
-            description="translation on the ring",
-            generators=[translation],
-        )
-
-        sector_calls: list[int] = []
-        # Two betas; per-sector synthetic data so the Z-weighted
-        # average has an obvious closed form to assert against.
-        betas = np.array([0.5, 1.5])
-        # Map sector_idx -> (energy[beta], Z[beta]).
-        synthetic = {
-            0: (np.array([-1.0, -2.0]), np.array([3.0, 4.0])),
-            1: (np.array([-0.5, -1.5]), np.array([1.0, 2.0])),
-            2: (np.array([+0.5, +0.5]), np.array([2.0, 1.0])),
-            3: (np.array([+1.0, +0.0]), np.array([1.0, 1.0])),
-            # extras in case the group has more irreps:
-            4: (np.array([0.0, 0.0]), np.array([1.0, 1.0])),
-            5: (np.array([0.0, 0.0]), np.array([1.0, 1.0])),
-        }
-
-        def fake_run_distributed(*, method, n_ranks, binary_args,
-                                  use_gpu=False, **_kw):
-            # Pull --sector-index and --result-file out of the args.
-            sec_idx = None
-            result_file = None
-            args = list(binary_args)
-            for i, tok in enumerate(args):
-                if tok == "--sector-index":
-                    sec_idx = int(args[i + 1])
-                elif tok == "--result-file":
-                    result_file = args[i + 1]
-            assert sec_idx is not None and result_file is not None
-            sector_calls.append(sec_idx)
-            energy_q, z_q = synthetic[sec_idx]
-            with h5py.File(result_file, "w") as f:
-                f.create_dataset("/betas", data=betas)
-                f.create_dataset("/energy", data=energy_q)
-                f.create_dataset("/Z", data=z_q)
-                # Mirror the canonical-TPQ binary post self-consistent-Z fix
-                # by also publishing /lnZ; the aggregator prefers the
-                # log-space recombination when present. For FTLM (which
-                # only emits /Z) we leave /lnZ off to keep coverage of
-                # the legacy linear path.
-                if solver == "mTPQ":
-                    f.create_dataset("/lnZ", data=np.log(z_q))
-                f.attrs["samples_used"] = 1
-                f.attrs["elapsed_s"] = 0.0
-            class _CP: returncode = 0; stdout = ""; stderr = ""
-            return _CP()
-
-        monkeypatch.setattr(qed_mpi, "run_distributed",
-                            fake_run_distributed)
-
-        res = qed.solve(
-            H, solver=solver, device=device,
-            symmetry=symm,
-            target_beta=2.0, num_samples=1, mpi_n_ranks=2, verbose=False,
-        )
-
-        # Phase H invariant 1: at least 2 distinct sectors were
-        # dispatched (translation gives N irreps; we just need >1
-        # to prove aggregation actually fired).
-        assert len(sector_calls) >= 2, (
-            f"expected >=2 per-sector spawns, got {sector_calls}"
-        )
-        assert len(set(sector_calls)) == len(sector_calls), (
-            f"each sector should be visited exactly once; "
-            f"got duplicates in {sector_calls}"
-        )
-
-        # Phase H invariant 2: Z-weighted average reproduces the
-        # closed-form combination.
-        z_total = np.zeros(len(betas))
-        zh_total = np.zeros(len(betas))
-        for q in sector_calls:
-            energy_q, z_q = synthetic[q]
-            z_total += z_q
-            zh_total += z_q * energy_q
-        expected = zh_total / z_total
-        got = np.asarray(res.thermo_data.energy, dtype=float)
-        np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)
-
-    def test_aggregate_thermal_sectors_rejects_missing_Z(
-        self, tmp_path,
-    ):
-        """Regression for the silent-NaN bug: prior to the canonical-TPQ
-        self-consistent-Z fix the TPQ binary wrote ``/energy`` but no
-        ``/Z``, and the aggregator silently produced NaN energies. The
-        guard must instead raise loudly so the broken result is never
-        consumed downstream.
-        """
-        import h5py
-        import numpy as np
-        from qed.workflow import _aggregate_thermal_sectors
-
-        betas = np.array([0.5, 1.0, 1.5])
-        files = []
-        for q in range(2):
-            p = tmp_path / f"sector_{q}.h5"
-            with h5py.File(p, "w") as f:
-                f.create_dataset("/betas",  data=betas)
-                f.create_dataset("/energy", data=np.full_like(betas, -0.5))
-                # NOTE: deliberately no /Z dataset.
-            files.append(str(p))
-
-        with pytest.raises(RuntimeError, match="missing the /Z dataset"):
-            _aggregate_thermal_sectors(files, mode="mTPQ")
-
-    @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
-    def test_mpi_symm_thermal_explicit_sector_skips_aggregation(
-        self, H, device, monkeypatch,
-    ):
-        """When the user passes an explicit ``sector=``, the Phase-H
-        aggregation must NOT fire: the binary is invoked exactly
-        once and its raw ``<H>_q(beta)`` is surfaced as-is.
-        """
-        import h5py
-        import numpy as np
-        from qed import mpi as qed_mpi
-
-        N = H.num_sites
-        translation = [(i + 1) % N for i in range(N)]
-        symm = qed.GeneratorSet(
-            name="Cn",
-            description="translation on the ring",
-            generators=[translation],
-        )
-
-        n_calls = {"n": 0}
-        per_sector_energy = np.array([-0.7, -1.3])
-        betas = np.array([0.5, 1.5])
-
-        def fake_run_distributed(*, method, n_ranks, binary_args,
-                                  use_gpu=False, **_kw):
-            n_calls["n"] += 1
-            args = list(binary_args)
-            result_file = next(
-                args[i + 1] for i, t in enumerate(args)
-                if t == "--result-file"
-            )
-            with h5py.File(result_file, "w") as f:
-                f.create_dataset("/betas", data=betas)
-                f.create_dataset("/energy", data=per_sector_energy)
-                f.create_dataset("/Z", data=np.array([1.0, 1.0]))
-                f.attrs["samples_used"] = 1
-                f.attrs["elapsed_s"] = 0.0
-            class _CP: returncode = 0; stdout = ""; stderr = ""
-            return _CP()
-
-        monkeypatch.setattr(qed_mpi, "run_distributed",
-                            fake_run_distributed)
-
-        res = qed.solve(
-            H, solver="FTLM", device=device,
-            symmetry=symm, sector=[0],
-            target_beta=2.0, num_samples=1, mpi_n_ranks=2, verbose=False,
-        )
-
-        assert n_calls["n"] == 1, (
-            f"explicit sector= must dispatch ONCE, got {n_calls['n']}"
-        )
-        np.testing.assert_allclose(
-            np.asarray(res.thermo_data.energy, dtype=float),
-            per_sector_energy, rtol=1e-12, atol=1e-12,
-        )
-
-
-# ---------------------------------------------------------------------------
-# solver_device_support()
-# ---------------------------------------------------------------------------
+    # (Stage 11d: the Phase-H mpi subprocess aggregation tests --
+    # test_mpi_symm_thermal_aggregates_across_sectors,
+    # test_aggregate_thermal_sectors_rejects_missing_Z,
+    # test_mpi_symm_thermal_explicit_sector_skips_aggregation -- were
+    # retired with their subject, the device='mpi' launcher lane.)
 
 
 class TestSolverDeviceSupport:
@@ -1205,95 +877,3 @@ class TestSolverDeviceSupport:
         assert "Build flags:" in captured.out
         assert "LANCZOS" in captured.out
         assert "Legend" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# qed.mpi.run_distributed Python-side aliases / use_gpu plumbing
-# ---------------------------------------------------------------------------
-
-
-class TestRunDistributedAliases:
-    """run_distributed accepts qed.solve-style solver names + a use_gpu flag.
-
-    These tests don't actually launch ``mpiexec`` -- we monkeypatch
-    ``subprocess.run`` and ``shutil.which`` so we can assert on the
-    constructed argv.
-    """
-
-    @pytest.fixture
-    def captured_argv(self, monkeypatch):
-        from qed import mpi as qed_mpi
-        captured = {}
-
-        def fake_run(cmd, **kw):
-            captured["cmd"] = list(cmd)
-            class _CP:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return _CP()
-
-        monkeypatch.setattr(qed_mpi.subprocess, "run", fake_run)
-        monkeypatch.setattr(qed_mpi.shutil, "which",
-                            lambda name: f"/usr/bin/{name}")
-        return captured
-
-    def test_method_lanczos_no_gpu_flag(self, captured_argv):
-        from qed import mpi as qed_mpi
-        qed_mpi.run_distributed(method="lanczos", n_ranks=4)
-        cmd = captured_argv["cmd"]
-        assert "--mode" in cmd and "lanczos" in cmd
-        assert "--gpu" not in cmd
-
-    def test_use_gpu_appends_flag(self, captured_argv):
-        from qed import mpi as qed_mpi
-        qed_mpi.run_distributed(method="lanczos", n_ranks=4, use_gpu=True)
-        cmd = captured_argv["cmd"]
-        assert "--gpu" in cmd
-        # --gpu must come after --mode <method>, before user binary_args.
-        gpu_idx = cmd.index("--gpu")
-        mode_idx = cmd.index("--mode")
-        assert mode_idx < gpu_idx
-
-    def test_tpq_mode_is_accepted(self, captured_argv):
-        from qed import mpi as qed_mpi
-        qed_mpi.run_distributed(
-            method="tpq", n_ranks=2,
-            binary_args=("--betas", "0.1,1.0", "--samples", "4"),
-        )
-        cmd = captured_argv["cmd"]
-        assert cmd[cmd.index("--mode") + 1] == "tpq"
-        assert "--betas" in cmd
-
-    def test_mtpq_alias_maps_to_tpq(self, captured_argv):
-        from qed import mpi as qed_mpi
-        qed_mpi.run_distributed(method="mtpq", n_ranks=2)
-        cmd = captured_argv["cmd"]
-        assert cmd[cmd.index("--mode") + 1] == "tpq"
-
-    def test_krylov_schur_routes_to_distributed_kernel(self, captured_argv):
-        # Phase 9 / Layer 3: distributed_krylov_schur (thick-restart
-        # Lanczos with locking) is now its own --mode on
-        # ed_distributed_main; the wrapper no longer downgrades to
-        # plain lanczos.
-        from qed import mpi as qed_mpi
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            qed_mpi.run_distributed(method="krylov_schur", n_ranks=2)
-        cmd = captured_argv["cmd"]
-        assert cmd[cmd.index("--mode") + 1] == "krylov_schur"
-
-    def test_ks_alias_maps_to_krylov_schur(self, captured_argv):
-        from qed import mpi as qed_mpi
-        qed_mpi.run_distributed(method="ks", n_ranks=2)
-        cmd = captured_argv["cmd"]
-        assert cmd[cmd.index("--mode") + 1] == "krylov_schur"
-
-    def test_unknown_method_lists_supported_modes(self, captured_argv):
-        from qed import mpi as qed_mpi
-        with pytest.raises(ValueError) as exc:
-            qed_mpi.run_distributed(method="quantum-magic", n_ranks=1)
-        msg = str(exc.value)
-        assert "lanczos" in msg and "ftlm" in msg and "tpq" in msg
-        assert "qed.solver_device_support" in msg

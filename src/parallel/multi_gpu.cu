@@ -2,7 +2,7 @@
 // src/distributed/multi_gpu.cu    (Phase 3c, runtime)
 //
 // NCCL collective wrappers for distributed-memory ED. See
-// include/ed/distributed/multi_gpu.h for the design and the honest scope.
+// include/ed/parallel/multi_gpu.h for the design and the honest scope.
 //
 // Compiled iff:
 //     WITH_MPI       (CMake)
@@ -16,7 +16,7 @@
 
 #ifdef ED_HAVE_NCCL
 
-#include <ed/distributed/multi_gpu.h>
+#include <ed/parallel/multi_gpu.h>
 
 #include <cuda_runtime.h>
 #include <nccl.h>
@@ -257,7 +257,7 @@ void synchronize_stream(cudaStream_t stream) {
 // build, which is the desired behaviour (compile-time error rather than
 // silent runtime failure).
 // ============================================================================
-#include <ed/distributed/multi_gpu.h>
+#include <ed/parallel/multi_gpu.h>
 #include <string>
 
 namespace ed::distributed::multi_gpu {

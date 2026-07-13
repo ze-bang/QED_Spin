@@ -66,7 +66,6 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/distributed>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/matvec>"  # Matvec-unification revamp
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
@@ -201,8 +200,7 @@ set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                          directly into the shared kernel)
 #
 # Layered above ed_core (which owns Operator / FixedSzOperator term
-# storage); consumed by ed_solvers_cpu (and later ed_solvers_gpu /
-# ed_distributed).
+# storage); consumed by ed_solvers_cpu and ed_solvers_gpu.
 # -----------------------------------------------------------------------------
 add_library(ed_matvec STATIC
     ${MATVEC_DIR}/sanity_check.cpp
@@ -256,10 +254,7 @@ target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel 
 # / `group_from_generators`, which live in `ed_symmetry`. Pull the
 # library into ed_solvers_cpu's PUBLIC link surface so downstream
 # consumers (tests, examples, new SDK callers) do not have to remember
-# the dep. ed_distributed already PUBLIC-ly links ed_solvers_cpu, so
-# the inverse link would create a cycle; downstream targets that need
-# the `WITH_MPI` distributed lane of `ed::make_operator` continue to
-# link `ed_distributed` explicitly via the `ed_add_test` helper.
+# the dep.
 target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry)
 # Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+): suppress
 # the `[[deprecated]]` warning on `build_lanczos_tridiagonal_with_basis`
@@ -275,142 +270,32 @@ target_compile_options(ed_solvers_cpu PRIVATE
 set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_distributed: Phase 3b -- distributed-memory matrix-free SpMV
-# (DistributedOperator) and distributed Lanczos / FTLM hooks built on top.
+# ed_multi_gpu: NCCL collective wrappers (MultiGpuCommunicator, RAII over
+# ncclComm_t built from MPI_Comm) consumed by the production MpiCudaBackend
+# (ed/matvec/backends/mpi_cuda_backend.cuh) and select_backend.
 #
-# Only built when WITH_MPI is ON; the library is the canonical home for
-# every TU that depends symbolically on `<mpi.h>` for the SOTA "honest 40"
-# scaling story. Depends on ed_core (for the `Operator` term storage we
-# read), ed_solvers_cpu (for re-orth helpers reused by DistributedLanczos),
-# and ed_parallel (for NUMA hooks shared with the single-rank Lanczos).
-#
-# The three Phase-3b TUs are intentionally CPU-only and OpenMP-friendly:
-# they layer cleanly on top of the rank-local SpMV without re-implementing
-# any of the matrix-free term iteration in `Operator::apply_real`.
-#
-# Phase 3b items:
-#   #1 distributed_operator.cpp     -- gather-form SpMV + halo exchange
-#   #2 distributed_lanczos.cpp      -- Lanczos w/ MPI_Allreduce dot/norm
-#                                      and rank-local Krylov basis
-#                                      (#6: + eigenvector reconstruction)
-#   #3 distributed_ftlm.cpp         -- multi-sample FTLM w/ MPI-over-samples
-#                                      composed on top of distributed Lanczos
-#                                      (#5: + observable expectation values)
-#   #8 distributed_tpq.cpp          -- canonical TPQ via Taylor-truncated
-#                                      e^{-(delta/2) H} on rank-local |psi>
-# -----------------------------------------------------------------------------
-if(WITH_MPI)
-    add_library(ed_distributed STATIC
-        ${DISTRIBUTED_DIR}/distributed_operator.cpp
-        # Wave 2 ("Unify all 16 matvec cells", May 2026) -- cell 2C
-        # (Distributed Fixed-Sz) as a native LinearOperator instead of
-        # the Phase G symmetry-with-trivial-group workaround.
-        ${DISTRIBUTED_DIR}/distributed_fixed_sz_operator.cpp
-        ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
-        ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
-        ${DISTRIBUTED_DIR}/distributed_tpq.cpp
-        # Phase 9 / Layer 3: distributed thick-restart Lanczos (Krylov-Schur
-        # for Hermitian operators); see distributed_krylov_schur.h.
-        ${DISTRIBUTED_DIR}/distributed_krylov_schur.cpp
-        # Phase 3b #7 stage 1: orbit-respecting partition primitive.
-        ${DISTRIBUTED_DIR}/orbit_partition.cpp
-        # Phase 3b #7 stage 2 prep: orbit-aware MPI_Alltoallv halo plan
-        # (consumed by DistributedSymmetryOperator).
-        ${DISTRIBUTED_DIR}/orbit_halo_plan.cpp
-        # Phase 3b #7 stage 2: symmetry-projected distributed SpMV
-        # (orbit-partitioned rows + orbit-aware halo + sparse local SpMV).
-        ${DISTRIBUTED_DIR}/distributed_symmetry_operator.cpp
-    )
-    target_include_directories(ed_distributed PUBLIC ${_ED_PUBLIC_INCLUDES})
-    target_link_libraries(ed_distributed PUBLIC
-        ed_core ed_io ed_solvers_cpu ed_parallel ${ED_COMMON_LINK_LIBS}
-    )
-    target_compile_options(ed_distributed PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-    )
-    set_target_properties(ed_distributed PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
-
-# -----------------------------------------------------------------------------
-# ed_distributed_gpu: Phase 3c -- multi-GPU collectives over NCCL.
-#
-# Built only when WITH_MPI && WITH_CUDA && NCCL_FOUND. Holds the .cu TU
-# that #includes <nccl.h> and <cuda_runtime.h>; keeping it OUT of
-# ed_distributed lets the CPU-only path stay a pure CXX library and avoids
-# pulling the CUDA toolchain into builds that don't ask for it.
-#
-# Phase 3c items:
-#   #1 multi_gpu.cu  -- MultiGpuCommunicator (RAII over ncclComm_t built
-#                       from MPI_Comm) + sum/broadcast wrappers used by
-#                       the future distributed_lanczos_gpu (#2). Stage 1
-#                       implementation; the SpMV halo continues to ride
-#                       MPI in this stage and only the dot/norm
-#                       reductions are NCCL-aware.
-#
-# Wired into ed_distributed_main and the multi-GPU tests via
-# `if(TARGET ed_distributed_gpu)` checks downstream so the rest of the
-# tree is honest about the optional dependency.
-#
-# NCCL_FOUND / NCCL_INCLUDE_DIRS / NCCL_LIBRARIES are populated by the
-# Phase 3c block in the top-level CMakeLists.txt (Phase 3c detection).
+# Stage 11d (Jul 2026): the distributed-operator family this used to belong
+# to (ed_distributed / ed_distributed_gpu: DistributedOperator + distributed
+# lanczos/ftlm/tpq/krylov-schur + GPU twins + ed_distributed_main) was
+# retired -- production MPI is MpiBackend (within-operator) x
+# SectorDistributor (across sectors). Only the multi-GPU communicator
+# survives, relocated to src/parallel/multi_gpu.cu.
 # -----------------------------------------------------------------------------
 if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
-    add_library(ed_distributed_gpu STATIC
-        ${DISTRIBUTED_DIR}/multi_gpu.cu
-        # Phase 3c stage 2: GPU-resident distributed Lanczos with
-        # ncclAllReduce dot/norm + host-staged SpMV via the existing
-        # CPU DistributedOperator.
-        ${DISTRIBUTED_DIR}/distributed_lanczos_gpu.cu
-        # Phase 3c stage 3: fully GPU-resident DistributedGPUOperator
-        # (NCCL pairwise SendRecv halo + CUDA SpMV kernel).
-        ${DISTRIBUTED_DIR}/distributed_gpu_operator.cu
-        # Phase 9 / Layer 2: multi-GPU canonical TPQ. Device-resident
-        # |psi> + DistributedGPUOperator SpMV + cuBLAS axpys/dotcs +
-        # NCCL allreduces for normalisation/observables. MPI-over-
-        # samples mirrors the CPU distributed_tpq.
-        ${DISTRIBUTED_DIR}/distributed_tpq_gpu.cu
-        # Phase A (device matrix MPI+GPU): on-device FTLM. Per-sample
-        # Lanczos with full re-orth runs entirely on the GPU (basis
-        # held in one device slab, cublasZdotc/cublasZaxpy/NCCL
-        # allreduce for the inner products, DistributedGPUOperator for
-        # the SpMV, host-side tridiag eigensolve), J&P observable
-        # contraction reuses the same on-device basis. MPI-over-
-        # samples mirrors the CPU distributed_ftlm.
-        ${DISTRIBUTED_DIR}/distributed_ftlm_gpu.cu
-        # Phase B (device matrix MPI+GPU): on-device Krylov-Schur
-        # (thick-restart Lanczos with Ritz-pair locking). In-cycle
-        # basis + locked Ritz vectors held in two device slabs;
-        # twice-CGS reorth against both is coalesced into single NCCL
-        # allreduces; DistributedGPUOperator for the SpMV; host-side
-        # (m x m) Eigen tridiag eigensolve per cycle.
-        ${DISTRIBUTED_DIR}/distributed_krylov_schur_gpu.cu
-        # Phase C (device matrix MPI+GPU): on-device symmetry-projected
-        # SpMV. Wraps a CPU `DistributedSymmetryOperator` (orbit basis
-        # + LPT partition + OrbitHaloPlan + projected CSR row slab),
-        # uploads the per-row CSR (col_idx, is_local mask, complex
-        # coefficients) and the halo-plan send_local_idx to device,
-        # halo runs through NCCL pairwise SendRecv, SpMV is one
-        # CUDA kernel per local row.
-        ${DISTRIBUTED_DIR}/distributed_symmetry_operator_gpu.cu
+    add_library(ed_multi_gpu STATIC
+        ${SRC_DIR}/parallel/multi_gpu.cu
     )
-    target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-    target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})
-    target_link_libraries(ed_distributed_gpu PUBLIC
-        ed_distributed
+    target_include_directories(ed_multi_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
+    target_include_directories(ed_multi_gpu PRIVATE ${NCCL_INCLUDE_DIRS})
+    target_link_libraries(ed_multi_gpu PUBLIC
         CUDA::cudart
-        CUDA::cublas
-        CUDA::cusolver
         ${NCCL_LIBRARIES}
         ${ED_COMMON_LINK_LIBS}
     )
-    target_compile_definitions(ed_distributed_gpu PUBLIC ED_HAVE_NCCL=1)
-    set_target_properties(ed_distributed_gpu PROPERTIES
+    target_compile_definitions(ed_multi_gpu PUBLIC ED_HAVE_NCCL=1)
+    set_target_properties(ed_multi_gpu PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
-    )
-    target_compile_options(ed_distributed_gpu PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
     )
 endif()
 
@@ -623,17 +508,6 @@ target_include_directories(ed_cli PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
 if(WITH_CUDA)
     target_link_libraries(ed_cli PUBLIC ed_solvers_gpu)
-endif()
-# Wave C2 (Full Unified-Interface Collapse, May 2026): the CLI now
-# builds operators via the inline `ed::make_operator` factory, whose
-# body references `DistributedOperator` /
-# `DistributedSymmetryOperator` constructors under `WITH_MPI`. The
-# distributed lanes are never selected from the CLI (it always sets
-# `spec.distributed = false`), but the constructors still appear as
-# weak references in the emitted object file and need to resolve
-# transitively for any binary that links `ed_cli`.
-if(WITH_MPI AND TARGET ed_distributed)
-    target_link_libraries(ed_cli PUBLIC ed_distributed)
 endif()
 target_link_libraries(ed_cli PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"

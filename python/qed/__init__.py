@@ -46,8 +46,6 @@ Submodules
 * :mod:`qed.dssf` -- DSSF observable-pair builders (data helpers only;
   the actual workflow lives in :func:`qed.spectral`).
 * :mod:`qed.bfg` -- BFG order-parameter helpers.
-* :mod:`qed.mpi` -- helper for the standalone ``mpiexec
-  ed_distributed_main`` binary.
 * :mod:`qed.auto_tune` -- internal heuristic tuner (used by
   :func:`qed.spectral` when ``auto_tune=True``).
 """
@@ -84,7 +82,6 @@ from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
 from . import input  # standalone C++ ed_input library bindings
 from . import symmetry  # programmatic site-permutation symmetry DSL
 from . import bfg  # BFG order-parameter library helpers
-from . import mpi  # mpiexec ed_distributed_main runner helper
 from . import helpers  # re-export edlib utilities under qed.helpers
 from . import workflow  # internal implementation module for qed.solve
 from .workflow import (  # noqa: E402  (top-level re-exports)
@@ -94,8 +91,6 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     full_spectrum,
     find_symmetries,
     list_diag_parameters,
-    load_mpi_eigenvector,
-    load_mpi_eigenvectors,
     solver_device_support,
 )
 
@@ -158,13 +153,10 @@ __all__ = [
     "input",
     "symmetry",
     "bfg",
-    "mpi",
     "helpers",
     "workflow",
     # Helpers
     "list_diag_parameters",
     "solver_device_support",
-    "load_mpi_eigenvector",
-    "load_mpi_eigenvectors",
     "__version__",
 ]

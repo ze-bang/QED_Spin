@@ -12,7 +12,7 @@
 //     manual construction in CLI binaries
 //
 // The factory returns ONLY the constructed `LinearOperator` (or a derived
-// concrete type --- distributed / streaming / GPU as the spec requests);
+// concrete type --- streaming / GPU as the spec requests);
 // the actual solve is then a separate `ed::workflows::solve(*op, opts)` call.
 //
 // Spec shape:
@@ -23,14 +23,13 @@
 //   spec.spin_l                  = 0.5f;
 //   spec.fixed_sz                = std::nullopt;          // fixed-Sz off
 //   spec.streaming_symmetry      = false;
-//   spec.distributed             = false;
 //
 //   auto op = ed::make_operator(spec);
 //   auto gs = ed::workflows::solve(*op, ed::SolveOptions{ .num_eigs = 5 });
 //
 // Phase 4.3 of the Minimalist ED Collapse (May 2026), extended for the full
 // unified-interface collapse to honour every axis the legacy CLI consumes
-// (streaming_symmetry, distributed, fixed_sz, plus their cross products).
+// (streaming_symmetry, fixed_sz, plus their cross products).
 //
 // Return-type policy: `std::unique_ptr<LinearOperator>` is the lowest common
 // type that covers the full matrix of subclasses the spec axes can
@@ -43,10 +42,9 @@
 //                                             one sector from the tagged
 //                                             factory -- the legacy monolithic
 //                                             streaming operators are gone)
-//   * `ed::distributed::DistributedOperator` (distributed = true)
-//   * `ed::distributed::DistributedSymmetryOperator`
-//                                            (distributed + streaming_symmetry
-//                                             + sector_index)
+//   (The distributed-operator family was retired in Stage 11d, Jul 2026;
+//    production MPI = MpiBackend within the operator x SectorDistributor
+//    across sectors.)
 //
 // Every case derives from `ed::LinearOperator`, so a single owning
 // pointer covers the matrix without losing dispatchability.
@@ -74,11 +72,6 @@
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
 
-#ifdef WITH_MPI
-#  include <mpi.h>
-#  include <ed/distributed/distributed_operator.h>
-#  include <ed/distributed/distributed_symmetry_operator.h>
-#endif
 
 namespace ed {
 
@@ -141,17 +134,9 @@ struct OperatorSpec {
     /// orchestrator when iterating sectors).
     bool                  streaming_symmetry = false;
 
-    /// If true, materialise a `DistributedOperator` (or
-    /// `DistributedSymmetryOperator` when `streaming_symmetry` is also
-    /// true). Requires `WITH_MPI` at compile time and `MPI_Init` at
-    /// runtime. The MPI communicator defaults to `MPI_COMM_WORLD`.
-    bool                  distributed = false;
-
-    /// For the distributed + streaming-symmetry lane: which symmetry
-    /// sector to materialise. Required in that lane; ignored otherwise.
-    /// (The non-distributed streaming-symmetry operator carries every
-    /// sector internally and the caller iterates them as
-    /// `SectorView`s.)
+    /// For the streaming-symmetry lane: which symmetry sector to
+    /// materialise (the factory returns that single SectorOperator).
+    /// Unset = the ground-state sector scan picks one downstream.
     std::optional<std::size_t> sector_index;
 
     /// Stage 8c (SymmetryEngine v2): split the half-filling Sz block into
@@ -182,12 +167,6 @@ struct OperatorSpec {
     /// entirely. See ed::symmetry::resolve_sym_cache_dir.
     std::string           basis_cache_dir;
 
-#ifdef WITH_MPI
-    /// MPI communicator for the distributed lanes. Defaults to
-    /// `MPI_COMM_WORLD`. Single-rank communicators are accepted (the
-    /// distributed operator degenerates to a single-slab apply).
-    MPI_Comm              comm = MPI_COMM_WORLD;
-#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -829,45 +808,7 @@ private:
 namespace ed {
 
 #ifdef WITH_MPI
-// ---------------------------------------------------------------------------
-// Distributed lanes (WITH_MPI only)
-// ---------------------------------------------------------------------------
 
-/// Build a `DistributedOperator` wrapping a serial `Operator` slab. The
-/// communicator defaults to `MPI_COMM_WORLD`; pass `spec.comm` to
-/// override.
-inline std::unique_ptr<LinearOperator>
-make_distributed_operator(const OperatorSpec& spec) {
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    return std::make_unique<ed::distributed::DistributedOperator>(
-        std::move(base), spec.comm);
-}
-
-/// Build a `DistributedSymmetryOperator` for a single symmetry sector.
-/// Requires `spec.sector_index`; the symmetry metadata is loaded from
-/// the directory's `automorphism_results/` before the distributed wrap.
-inline std::unique_ptr<LinearOperator>
-make_distributed_symmetry_operator(const OperatorSpec& spec) {
-    if (!spec.sector_index.has_value()) {
-        throw std::runtime_error(
-            "ed::make_operator: distributed + streaming_symmetry "
-            "requires OperatorSpec::sector_index (the "
-            "DistributedSymmetryOperator carries one sector at a "
-            "time; iterate sector indices in the caller for the full "
-            "spectrum).");
-    }
-    const std::string& dir = detail::require_directory(spec);
-
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    // The DistributedSymmetryOperator constructor reads
-    // `base->symmetry_info`, which is populated by `loadFromDirectory`.
-    base->symmetry_info.loadFromDirectory(dir);
-
-    return std::make_unique<ed::distributed::DistributedSymmetryOperator>(
-        std::move(base), *spec.sector_index, spec.comm);
-}
 #endif  // WITH_MPI
 
 // ---------------------------------------------------------------------------
@@ -899,26 +840,13 @@ inline std::unique_ptr<LinearOperator> make_operator(OperatorSpec spec) {
     // loading or term-storage manipulation that the caller has not
     // performed). Forward the bare unique_ptr in the simple case.
     if (auto* mem = std::get_if<InMemoryOperator>(&spec.source)) {
-        if (spec.streaming_symmetry || spec.distributed) {
+        if (spec.streaming_symmetry) {
             throw std::runtime_error(
                 "ed::make_operator: InMemoryOperator source is "
-                "incompatible with streaming_symmetry / distributed "
-                "axes; use FilePaths or DirectoryPath instead.");
+                "incompatible with the streaming_symmetry axis; use "
+                "FilePaths or DirectoryPath instead.");
         }
         return std::unique_ptr<LinearOperator>(mem->op.release());
-    }
-
-    if (spec.distributed) {
-#ifdef WITH_MPI
-        if (spec.streaming_symmetry) {
-            return make_distributed_symmetry_operator(spec);
-        }
-        return make_distributed_operator(spec);
-#else
-        throw std::runtime_error(
-            "ed::make_operator: distributed = true requires WITH_MPI "
-            "at compile time.");
-#endif
     }
 
     if (spec.streaming_symmetry) {

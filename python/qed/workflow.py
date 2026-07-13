@@ -42,8 +42,6 @@ __all__ = [
     "full_spectrum",
     "list_diag_parameters",
     "solver_device_support",
-    "load_mpi_eigenvector",
-    "load_mpi_eigenvectors",
 ]
 
 
@@ -199,13 +197,6 @@ def solve(
     num_temp_points: Optional[int] = None,
     temp_min: Optional[float] = None,
     temp_max: Optional[float] = None,
-    # MPI launcher knobs (consulted only when device='mpi' / 'mpi_gpu').
-    mpi_n_ranks: Optional[int] = None,
-    mpi_betas: Optional[Sequence[float]] = None,
-    mpi_compute_variance: bool = False,
-    mpi_binary: Optional[str] = None,
-    mpi_launcher: str = "mpiexec",
-    mpi_launcher_binary: Optional[str] = None,
     verbose: bool = True,
     full_spectrum: bool = False,
     extra_params: Optional[dict[str, Any]] = None,
@@ -511,32 +502,16 @@ def solve(
     is_tpq = _is_tpq_method(method)
 
     # TPQ relies on a single random state evolving on the full Hilbert
-    # space (or on a single fixed-Sz block). For the in-process
-    # (cpu / gpu) streaming kernel, per-sector symmetry projection
-    # breaks that and the C++ side silently falls back to Lanczos
-    # (ed_wrapper.h L1458) -- reject explicitly so users get a clear
-    # diagnostic. Phase E wires the distributed path:
-    # `distributed_tpq_symmetry` (CPU MPI) and
-    # `distributed_tpq_gpu_symmetry` (multi-GPU) DO project onto a
-    # single sector and return per-sector sample-averaged
-    # `<H>(beta)`. As of Phase H the Python dispatcher
-    # (`_diag_via_mpi`) automatically Z-weight-aggregates across
-    # sectors when `sector=` is omitted, so the user-facing
-    # `EDResults.thermo_data.energy` is the full-trace `<H>(beta)`.
-    # Allow this combination through to `_diag_via_mpi`.
-    if symmetry is not None and is_tpq and not use_mpi:
+    # space (or on a single fixed-Sz block); per-sector symmetry
+    # projection breaks that -- reject explicitly.
+    if symmetry is not None and is_tpq:
         raise ValueError(
-            "qed.solve(H, solver='mTPQ', symmetry=..., "
-            "device='cpu'/'gpu') is not supported: TPQ acts on a "
-            "single random state across the whole sector and per-"
-            "symmetry-block diagonalisation does not factor through "
-            "the in-process streaming kernel. Options: drop the "
-            "symmetry= argument (TPQ + sz= is supported), use the "
-            "distributed path with device='mpi'/'mpi_gpu' (Phase E "
-            "wires `distributed_tpq_symmetry` per-sector and "
-            "Phase H Z-weight-aggregates across sectors when "
-            "`sector=` is omitted), or use a different thermal "
-            "method (FTLM/LTLM combine across symmetry blocks "
+            "qed.solve(H, solver='mTPQ', symmetry=...) is not supported: "
+            "TPQ acts on a single random state across the whole sector "
+            "and per-symmetry-block diagonalisation does not factor "
+            "through the streaming kernel. Options: drop the symmetry= "
+            "argument (TPQ + sz= is supported), or use a different "
+            "thermal method (FTLM/LTLM combine across symmetry blocks "
             "correctly)."
         )
 
@@ -631,19 +606,6 @@ def solve(
     symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose,
                                      lattice=lattice)
     if symmetry is not None:
-        if use_mpi:
-            return _diag_via_mpi(
-                op_to_use, method, params,
-                symmetry=symmetry, sz=sz, sector=sector,
-                use_gpu=use_gpu,
-                n_ranks=mpi_n_ranks,
-                betas=mpi_betas,
-                compute_variance=mpi_compute_variance,
-                binary=mpi_binary,
-                launcher=mpi_launcher,
-                launcher_binary=mpi_launcher_binary,
-                verbose=verbose,
-            )
         # Stage 9c: ONE routing decision. point_group='auto' (default)
         # PROJECTS through the factorized little-group engine whenever
         # the call is eigenvalue-only; 'full' requires projection
@@ -770,19 +732,6 @@ def solve(
             point_group=point_group,
         )
 
-    if use_mpi:
-        return _diag_via_mpi(
-            op_to_use, method, params,
-            symmetry=None, sz=sz, sector=None,
-            use_gpu=use_gpu,
-            n_ranks=mpi_n_ranks,
-            betas=mpi_betas,
-            compute_variance=mpi_compute_variance,
-            binary=mpi_binary,
-            launcher=mpi_launcher,
-            launcher_binary=mpi_launcher_binary,
-            verbose=verbose,
-        )
 
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
@@ -863,12 +812,12 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
 # ed/core/ed_method_traits.h + include/ed/distributed/ + the
 # ed_distributed_main CLI actually expose.
 _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
-    "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "BLOCK_LANCZOS":   {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "mTPQ":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
+    "FTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
@@ -911,13 +860,9 @@ def solver_device_support(
 
     Notes
     -----
-    The MPI cells require the standalone ``ed_distributed_main`` binary
-    in addition to ``WITH_MPI=ON`` in the Python extension build (the
-    binary is built only when WITH_MPI=ON). The Python wrapper
-    :func:`qed.mpi.run_distributed` checks ``shutil.which`` at
-    call time, so a True ``available`` here means the Python side
-    knows how to launch it; the binary itself may still be elsewhere
-    on $PATH.
+    The MPI subprocess cells were retired in Stage 11d (Jul 2026);
+    MPI runs go through the CLI under mpirun (SectorDistributor +
+    MpiBackend).
     """
     cuda_ok = bool(has_cuda_build())
     mpi_ok = bool(has_mpi_build())
@@ -945,25 +890,12 @@ def solver_device_support(
                              else "build has WITH_CUDA=OFF; rebuild with "
                                   "-DWITH_CUDA=ON"),
                 }
-            elif device == "mpi":
+            elif device in ("mpi", "mpi_gpu"):
                 cells[device] = {
-                    "kernel": True,
-                    "available": mpi_ok,
-                    "note": ("launch via qed.solve(H, device='mpi', "
-                             "mpi_n_ranks=N) or qed.mpi.run_distributed(...)"
-                             if mpi_ok
-                             else "build has WITH_MPI=OFF; rebuild with "
-                                  "-DWITH_MPI=ON"),
-                }
-            elif device == "mpi_gpu":
-                cells[device] = {
-                    "kernel": True,
-                    "available": cuda_ok and mpi_ok,
-                    "note": ("launch via qed.solve(H, device='mpi_gpu', "
-                             "mpi_n_ranks=N) or qed.mpi.run_distributed("
-                             "use_gpu=True)"
-                             if (cuda_ok and mpi_ok)
-                             else "needs WITH_MPI=ON and WITH_CUDA=ON"),
+                    "kernel": False,
+                    "available": False,
+                    "note": ("retired (Stage 11d): run the CLI under "
+                             "mpirun -- SectorDistributor + MpiBackend"),
                 }
         matrix[solver_name] = cells
 
@@ -1196,15 +1128,10 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
 
     Single-GPU is honoured for any solver the in-process build supports,
     via a temp-dir routing in :func:`solve` (see ``_diag_via_directory``).
-    MPI / MPI+GPU are also honoured via a sibling temp-dir + subprocess
-    routing (:func:`_diag_via_mpi`) that spawns the standalone
-    ``ed_distributed_main`` driver under ``mpiexec``. Python itself
-    cannot host ``MPI_Init`` cleanly, so the launch is always a
-    subprocess; ``qed.solve`` waits for it to finish and reads the
-    HDF5 result file the binary writes into the temp dir.
+    ``device='mpi'``/``'mpi_gpu'`` (the retired subprocess launcher)
+    raise with guidance.
 
-    Returns ``(use_gpu, use_mpi)``. The diag dispatcher uses both flags
-    to pick the correct internal route.
+    Returns ``(use_gpu, use_mpi)``; ``use_mpi`` is always False now.
     """
     if device is None or device == "auto":
         use_gpu = bool(has_cuda_build()) and dim >= (1 << 14)
@@ -1220,20 +1147,17 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
                 "use device='cpu'."
             )
         return True, False
-    if device_lc == "mpi":
-        # Note: the Python extension's WITH_MPI flag is irrelevant for
-        # the MPI dispatch path -- qed.solve(device='mpi') shells out to
-        # the standalone `ed_distributed_main` binary via mpiexec, which
-        # is built independently from the Python extension. The only
-        # hard requirement is that the binary be reachable. We surface
-        # a clear error via `_diag_via_mpi` if it is not, so just record
-        # the device choice here.
-        return False, True
-    if device_lc == "mpi_gpu":
-        # Same comment as device='mpi' above. The `--gpu` flag is
-        # forwarded to ed_distributed_main; the binary itself errors
-        # cleanly if it was built without WITH_CUDA=ON / NCCL.
-        return True, True
+    if device_lc in ("mpi", "mpi_gpu"):
+        raise RuntimeError(
+            "device='mpi' / 'mpi_gpu' was retired (Stage 11d, Jul 2026): "
+            "the subprocess launcher (ed_distributed_main + qed.mpi) and "
+            "the distributed-operator family behind it were removed. "
+            "For MPI runs, launch the CLI under mpirun -- across-sector "
+            "distribution (SectorDistributor) engages automatically for "
+            "symmetry workloads, and the in-process MpiBackend covers "
+            "reduction parallelism. Single-node frontier runs use "
+            "device='gpu' (fp32 mTPQ / rep-lane memory scaling)."
+        )
     raise ValueError(
         f"device={device!r} not in "
         "{'auto', 'cpu', 'gpu', 'mpi', 'mpi_gpu'}."
@@ -1369,670 +1293,16 @@ def _diag_via_directory(
 
 
 # ---------------------------------------------------------------------------
-# MPI path (Layer 4b): write the operator to a temp dir, spawn
-# ed_distributed_main under mpiexec, read the HDF5 result file back, and
-# return a real EDResults so callers see the same shape as the in-process
-# CPU/GPU paths. Layer 5a piggybacks on the same helper by additionally
-# writing the symmetry directory and forwarding --use-symmetry.
+# (Stage 11d, Jul 2026: the device='mpi' subprocess lane -- _diag_via_mpi,
+# the ed_distributed_main launcher plumbing, the rank_<r>.h5 slab readers
+# load_mpi_eigenvector(s), and the per-sector Z-weighted aggregation that
+# only that lane produced -- was retired with the distributed-operator
+# family. MPI runs go through the CLI under mpirun: SectorDistributor
+# across sectors + MpiBackend in-process.)
 # ---------------------------------------------------------------------------
 
 
-_MPI_RANKS_DEFAULT = 2  # conservative; users override via extra_params
-
-
-def _ed_method_to_mpi_mode(method: DiagonalizationMethod) -> str:
-    """Map a DiagonalizationMethod to the --mode token ed_distributed_main accepts."""
-    name = method.name.upper()
-    if "TPQ" in name:
-        return "tpq"
-    if name.startswith("FTLM"):
-        return "ftlm"
-    # Phase 9 / Layer 3: thick-restart Lanczos with locking has a real
-    # distributed kernel (distributed_krylov_schur). Route the
-    # KRYLOV_SCHUR family to it directly instead of silently downgrading
-    # to plain Lanczos.
-    if "KRYLOV_SCHUR" in name:
-        return "krylov_schur"
-    return "lanczos"
-
-
-def _diag_via_mpi(
-    operator: Operator,
-    method: DiagonalizationMethod,
-    params: EDParameters,
-    *,
-    symmetry: SymmetryArg,
-    sz: Optional[int],
-    use_gpu: bool,
-    n_ranks: Optional[int],
-    betas: Optional[Sequence[float]],
-    compute_variance: bool,
-    sector: Optional[Sequence[int]] = None,
-    binary: Optional[str] = None,
-    launcher: str = "mpiexec",
-    launcher_binary: Optional[str] = None,
-    verbose: bool,
-) -> EDResults:
-    """Run ed_distributed_main on `operator` and return a real EDResults.
-
-    Layer 4b of the distributed-workflow closure. The flow is:
-
-      1. Write the operator (and, for Layer 5a, the symmetry directory)
-         into a fresh temp directory.
-      2. Spawn ``ed_distributed_main --directory <tmp> --num-sites N
-         --result-file <tmp>/result.h5 [--use-symmetry --sector-index k]
-         [--gpu] --mode <lanczos|ftlm|tpq> ...`` under
-         ``mpiexec -n N``.
-      3. Read the HDF5 result file (eigenvalues / betas / energy /
-         variance / Z / iterations / elapsed_s).
-      4. Pack the data into a real ``EDResults`` so the call shape
-         matches CPU / GPU / symmetry paths.
-
-    The :func:`qed.mpi.run_distributed` wrapper handles launcher /
-    binary discovery, alias mapping (``mtpq`` → ``tpq``), and the
-    ``use_gpu`` flag.
-
-    Multi-sector aggregation (Phase H)
-    ----------------------------------
-    When ``symmetry`` is set, ``mode`` is a thermal solver
-    (``ftlm`` / ``tpq``), and no explicit ``sector=`` was passed,
-    this function spawns ``ed_distributed_main`` ONCE PER irrep
-    (each call uses ``--sector-index <q>``), then combines the
-    per-sector results using the Z-weighted average:
-
-        Z(beta)   = sum_q Z_q(beta)
-        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
-
-    ``EDResults.thermo_data.energy`` then carries the full-trace
-    ``<H>(beta)`` (matching the in-process ``_diag_with_symmetry``
-    behaviour). Pass an explicit ``sector=`` to opt out of the
-    aggregation and get the per-sector ``Z_q`` / ``<H>_q`` instead.
-
-    For non-thermal solvers (``lanczos`` / ``krylov_schur``) the
-    function still picks ``sector=0`` by default; ground-state
-    aggregation across sectors is the user's responsibility (the
-    GS lives in exactly one sector and isn't a Z-weighted sum).
-    """
-    from . import mpi as _qed_mpi
-    from .symmetry import group_from_generators
-
-    if isinstance(operator, FixedSzOperator):
-        raise NotImplementedError(
-            "qed.solve(H, device='mpi') with a FixedSzOperator is not "
-            "yet wired through ed_distributed_main; the standalone "
-            "binary loads from full-Hilbert dat files only. Pass an "
-            "Operator and use sz= so the projection happens after "
-            "the MPI driver returns, or run a fixed-Sz workflow on "
-            "CPU / GPU."
-        )
-
-    effective_n_ranks = int(n_ranks) if n_ranks else _MPI_RANKS_DEFAULT
-    mode = _ed_method_to_mpi_mode(method)
-
-    # --------------------------------------------------------------
-    # Translate EDParameters into ed_distributed_main CLI flags.
-    # NOTE: this list does NOT yet contain --result-file,
-    # --use-symmetry, --sector-index, or --sz; those are appended
-    # per-sector inside the dispatch loop below so multi-sector
-    # aggregation can reuse the same base.
-    # --------------------------------------------------------------
-    base_binary_args: list[str] = [
-        "--num-sites", str(int(operator.num_sites)),
-    ]
-    max_iter = int(getattr(params, "max_iterations", 0) or 0)
-    if max_iter > 0:
-        base_binary_args += ["--max-iter", str(max_iter)]
-    exct = int(getattr(params, "num_eigenvalues", 1) or 1)
-    base_binary_args += ["--exct", str(exct)]
-    if mode in ("ftlm", "tpq"):
-        n_samples = int(getattr(params, "tpq_num_samples", 0) or 0) \
-            or int(getattr(params, "ftlm_store_samples", 0) or 0) \
-            or 8
-        base_binary_args += ["--samples", str(n_samples)]
-        if betas:
-            base_binary_args += ["--betas",
-                                 ",".join(f"{float(b):g}" for b in betas)]
-    if mode == "tpq":
-        base_binary_args += ["--delta-beta",
-                             f"{float(getattr(params, 'tpq_delta_tau', 0.05)):g}"]
-        base_binary_args += ["--taylor-order",
-                             str(int(getattr(params, 'tpq_taylor_order', 30)))]
-        if compute_variance:
-            base_binary_args += ["--compute-variance"]
-
-    tmpdir = tempfile.mkdtemp(prefix="qed_diag_mpi_")
-    eigvec_dir = ""
-    try:
-        _write_operator_directory(operator, tmpdir)
-        base_binary_args += ["--directory", tmpdir]
-
-        # ----------------------------------------------------------
-        # Resolve the symmetry / sz / sector configuration into:
-        #   sym_args     : list[str]    -- common flags for every spawn
-        #                                   (--use-symmetry, --sz, ...)
-        #   sectors_list : list[int]    -- sector indices to dispatch
-        #   aggregate    : bool         -- whether to Z-weight-combine
-        #                                   the per-sector results
-        # ----------------------------------------------------------
-        sym_args: list[str] = []
-        sectors_list: list[int] = [0]   # single dispatch by default
-        aggregate: bool = False
-
-        if symmetry is not None:
-            # Translate the symmetry argument into the on-disk JSON the
-            # ed_distributed_main loader consumes (same writer the
-            # streaming-symmetry path uses).
-            if isinstance(symmetry, GeneratorSet):
-                info = group_from_generators(int(operator.num_sites),
-                                              symmetry.generators)
-            elif isinstance(symmetry, dict):
-                info = symmetry
-            elif isinstance(symmetry, (list, tuple)):
-                info = group_from_generators(
-                    int(operator.num_sites),
-                    [list(map(int, p)) for p in symmetry])
-            else:
-                raise TypeError(
-                    f"symmetry must be GeneratorSet, list[Permutation], "
-                    f"or dict; got {type(symmetry).__name__}")
-            _write_symmetry_directory(tmpdir, info)
-            sym_args.append("--use-symmetry")
-
-            # Phase F: thread sz= onto the symm-projected basis. The
-            # binary's `--sz <n_up>` flag flips
-            # `op->symmetry_info.n_up`, which
-            # `DistributedSymmetryOperator`'s ctor honours by filtering
-            # orbits whose representative popcount does not match.
-            if sz is not None:
-                sym_args += ["--sz", str(int(sz))]
-
-            n_sectors = len(info.get("sectors", []))
-            if sector is not None:
-                # User opted into a single sector -- no aggregation.
-                requested = [int(q) for q in sector]
-                sec_idx = None
-                for s in info.get("sectors", []):
-                    if list(map(int, s.get("quantum_numbers", []))) == requested:
-                        sec_idx = int(s.get("sector_id", 0))
-                        break
-                if sec_idx is None:
-                    raise ValueError(
-                        f"sector={requested!r} does not match any of the "
-                        f"{n_sectors} irreps the symmetry group projects "
-                        "onto. Try qed.find_symmetries(H) to list the "
-                        "available quantum numbers."
-                    )
-                sectors_list = [sec_idx]
-            elif mode in ("ftlm", "tpq") and n_sectors > 1:
-                # Phase H: thermal solver + symm + no explicit sector
-                # -> auto-aggregate across all irreps. Each sector
-                # contributes additively to the partition function so
-                # the Z-weighted average gives the full <H>(beta).
-                sectors_list = list(range(n_sectors))
-                aggregate = True
-            else:
-                # Eigenvalue solver, or single-sector group, or sym+sz
-                # (sz collapses to one effective irrep for thermal
-                # purposes when the user is partitioning by Sz only).
-                sectors_list = [0]
-        elif sz is not None:
-            # Phase G: bare distributed FixedSz path.
-            #
-            # The underlying DistributedOperator iterates [0, 2^N) and
-            # has no fixed-Sz basis of its own. Rather than introducing
-            # a new DistributedFixedSzOperator class, we route through
-            # DistributedSymmetryOperator with a TRIVIAL one-element
-            # symmetry group (identity only) + the Phase F popcount
-            # filter (`--sz`). With |G|=1 every orbit is a singleton,
-            # so the popcount-filtered orbit basis IS exactly the
-            # C(N, n_up) binomial basis -- the same sub-block
-            # FixedSzOperator carries in-process.
-            n_sites = int(operator.num_sites)
-            if not (0 <= int(sz) <= n_sites):
-                raise ValueError(
-                    f"sz={sz} out of range [0, num_sites={n_sites}] for "
-                    f"the bare-FixedSz distributed path."
-                )
-            info = group_from_generators(n_sites, [list(range(n_sites))])
-            _write_symmetry_directory(tmpdir, info)
-            sym_args += ["--use-symmetry", "--sz", str(int(sz))]
-            sectors_list = [0]
-
-        if bool(getattr(params, "compute_eigenvectors", False)):
-            eigvec_dir = os.path.join(tmpdir, "eigvecs")
-            os.makedirs(eigvec_dir, exist_ok=True)
-            base_binary_args += ["--compute-eigenvectors",
-                                 "--eigenvector-dir", eigvec_dir]
-            if aggregate:
-                # Per-rank Lanczos slabs from a thermal aggregation
-                # would mix sectors and lose semantic meaning; reject.
-                raise ValueError(
-                    "qed.solve(device='mpi'/'mpi_gpu', symmetry=..., "
-                    "compute_eigenvectors=True) is not supported when "
-                    "auto-aggregating across sectors. Pass sector= to "
-                    "pin a single irrep, or run an eigenvalue solver "
-                    "(lanczos / krylov_schur)."
-                )
-
-        if verbose:
-            print(f"[qed.solve] MPI dispatch via {tmpdir!r} "
-                  f"(n_ranks={effective_n_ranks}, mode={mode}, "
-                  f"use_gpu={use_gpu}, "
-                  f"symmetry={'yes' if symmetry else 'no'}, "
-                  f"sectors={sectors_list}, aggregate={aggregate})")
-
-        # ----------------------------------------------------------
-        # Dispatch loop. For non-aggregated cases this runs once and
-        # behaves exactly like the pre-Phase-H code; for the symm+
-        # thermal+no-explicit-sector case it runs once per irrep and
-        # the per-sector HDF5 files land at result_q<idx>.h5.
-        # ----------------------------------------------------------
-        per_sector_files: list[tuple[int, str]] = []
-        for sec_idx in sectors_list:
-            rfile = os.path.join(
-                tmpdir,
-                "result.h5" if not aggregate
-                else f"result_q{sec_idx}.h5"
-            )
-            spawn_args = list(base_binary_args) + sym_args
-            if sym_args:
-                spawn_args += ["--sector-index", str(sec_idx)]
-            spawn_args += ["--result-file", rfile]
-
-            completed = _qed_mpi.run_distributed(
-                method=mode,
-                n_ranks=effective_n_ranks,
-                use_gpu=use_gpu,
-                binary_args=tuple(spawn_args),
-                launcher=launcher,
-                binary=binary,
-                launcher_binary=launcher_binary,
-                check=True,
-                capture_output=not verbose,
-            )
-            if verbose and completed and completed.stdout:
-                tail = completed.stdout.strip().splitlines()[-12:]
-                for line in tail:
-                    print(f"[qed.solve.mpi q={sec_idx}] {line}")
-            per_sector_files.append((sec_idx, rfile))
-
-        # ----------------------------------------------------------
-        # Read result(s).
-        # ----------------------------------------------------------
-        if not aggregate:
-            sec_idx, rfile = per_sector_files[0]
-            return _read_mpi_result_file(
-                rfile, mode=mode,
-                eigenvector_dir=eigvec_dir if eigvec_dir else None,
-            )
-
-        # Aggregate thermal: Z-weighted average across sectors.
-        return _aggregate_thermal_sectors(
-            [rf for _, rf in per_sector_files], mode=mode,
-        )
-    finally:
-        # Keep the eigenvector slabs around when the user asked for
-        # them; otherwise drop everything.
-        if not eigvec_dir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        elif verbose:
-            print(f"[qed.solve] MPI eigenvector slabs preserved at {eigvec_dir!r}")
-
-
-def load_mpi_eigenvector(
-    eigenvector_dir: str,
-    k: int = 0,
-) -> Any:
-    """Reassemble a single eigenvector from per-rank slabs.
-
-    ``ed_distributed_main --compute-eigenvectors --eigenvector-dir DIR``
-    writes one ``rank_<r>.h5`` per MPI rank, each containing the local
-    portion of every eigenvector returned by the distributed Lanczos.
-    This helper opens every ``rank_*.h5`` file in ``DIR``, reads slab
-    ``k`` from each, and stitches them in rank order into a single
-    ``numpy.ndarray`` of length ``global_dim`` and dtype
-    ``complex128``.
-
-    Parameters
-    ----------
-    eigenvector_dir : str
-        Directory passed as ``--eigenvector-dir`` to
-        ``ed_distributed_main`` (or, equivalently, the value
-        of ``EDResults.eigenvectors_path`` returned from
-        :func:`qed.solve(..., device='mpi', compute_eigenvectors=True)`).
-    k : int, optional
-        Index of the eigenvector to load (default 0 → ground state).
-
-    Returns
-    -------
-    numpy.ndarray
-        A 1-D ``complex128`` array of length ``global_dim``.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``eigenvector_dir`` is missing or has no ``rank_*.h5`` files.
-    KeyError
-        If the slab dataset for index ``k`` is missing on any rank.
-    """
-    import json
-
-    import h5py
-    import numpy as np
-
-    if not os.path.isdir(eigenvector_dir):
-        raise FileNotFoundError(
-            f"eigenvector directory {eigenvector_dir!r} does not exist."
-        )
-
-    manifest_path = os.path.join(eigenvector_dir, "manifest.json")
-    world_size: Optional[int] = None
-    global_dim: Optional[int] = None
-    if os.path.isfile(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-        world_size = int(manifest.get("world_size", 0)) or None
-        global_dim = int(manifest.get("global_dim", 0)) or None
-
-    rank_files = sorted(
-        f for f in os.listdir(eigenvector_dir)
-        if f.startswith("rank_") and f.endswith(".h5")
-    )
-    if not rank_files:
-        raise FileNotFoundError(
-            f"no rank_*.h5 files in {eigenvector_dir!r} -- did you pass "
-            "--compute-eigenvectors / compute_eigenvectors=True?"
-        )
-
-    by_rank: dict[int, tuple[int, int, "np.ndarray"]] = {}
-    inferred_global: int = 0
-    for fn in rank_files:
-        full = os.path.join(eigenvector_dir, fn)
-        with h5py.File(full, "r") as hf:
-            r = int(hf.attrs["rank"])
-            local_n = int(hf.attrs["local_n"])
-            local_offset = int(hf.attrs["local_offset"])
-            inferred_global = max(
-                inferred_global,
-                int(hf.attrs.get("global_dim", local_offset + local_n)),
-            )
-            slab_name = f"/slab/{k}"
-            if slab_name not in hf:
-                raise KeyError(
-                    f"{full}: missing dataset {slab_name!r} (n_eigenvectors="
-                    f"{int(hf.attrs.get('n_eigenvectors', -1))})"
-                )
-            interleaved = np.asarray(hf[slab_name][:], dtype=np.float64)
-            slab = interleaved[0::2] + 1j * interleaved[1::2]
-            by_rank[r] = (local_offset, local_n, slab)
-
-    if global_dim is None:
-        global_dim = inferred_global
-    if world_size is not None and world_size != len(by_rank):
-        raise RuntimeError(
-            f"manifest claims world_size={world_size} but only "
-            f"{len(by_rank)} rank_*.h5 files were found in "
-            f"{eigenvector_dir!r}"
-        )
-
-    psi = np.zeros(global_dim, dtype=np.complex128)
-    seen = 0
-    for r in sorted(by_rank):
-        local_offset, local_n, slab = by_rank[r]
-        if slab.shape[0] != local_n:
-            raise RuntimeError(
-                f"rank {r}: slab length {slab.shape[0]} != local_n {local_n}"
-            )
-        psi[local_offset:local_offset + local_n] = slab
-        seen += local_n
-    if seen != global_dim:
-        raise RuntimeError(
-            f"slabs cover {seen} entries but global_dim={global_dim}; "
-            "one or more ranks failed to dump."
-        )
-    return psi
-
-
-def load_mpi_eigenvectors(
-    eigenvector_dir: str,
-    k_max: Optional[int] = None,
-) -> Any:
-    """Reassemble all (or the first ``k_max``) eigenvectors at once.
-
-    Parameters
-    ----------
-    eigenvector_dir : str
-        Directory containing the ``rank_<r>.h5`` slabs.
-    k_max : int, optional
-        Number of eigenvectors to load. ``None`` (default) means
-        every slab dataset present.
-
-    Returns
-    -------
-    numpy.ndarray
-        A 2-D ``complex128`` array of shape ``(n_eig, global_dim)``.
-    """
-    import h5py
-    import numpy as np
-
-    if not os.path.isdir(eigenvector_dir):
-        raise FileNotFoundError(
-            f"eigenvector directory {eigenvector_dir!r} does not exist."
-        )
-    rank_files = sorted(
-        f for f in os.listdir(eigenvector_dir)
-        if f.startswith("rank_") and f.endswith(".h5")
-    )
-    if not rank_files:
-        raise FileNotFoundError(
-            f"no rank_*.h5 files in {eigenvector_dir!r}"
-        )
-
-    with h5py.File(os.path.join(eigenvector_dir, rank_files[0]), "r") as hf:
-        n_eig = int(hf.attrs.get("n_eigenvectors", 0))
-    if k_max is not None:
-        n_eig = min(n_eig, int(k_max))
-    if n_eig == 0:
-        return np.zeros((0, 0), dtype=np.complex128)
-
-    cols = [load_mpi_eigenvector(eigenvector_dir, k=k) for k in range(n_eig)]
-    return np.stack(cols, axis=0)
-
-
-def _read_mpi_thermo_arrays(
-    path: str,
-) -> tuple[list[float], list[float], list[float], list[float]]:
-    """Return ``(betas, energies, Z, lnZ)`` from a thermal MPI result file.
-
-    Used both by :func:`_read_mpi_result_file` (for the user-facing
-    EDResults shape) and by :func:`_aggregate_thermal_sectors` (which
-    needs the raw per-sector ``Z(beta)`` to do the Z-weighted
-    average -- the field is otherwise dropped from EDResults).
-
-    ``lnZ`` is the log-partition-function vector emitted by the
-    canonical-TPQ binary for numerical stability when ``Z`` itself
-    underflows at large beta. Returned empty for backends that don't
-    produce it (FTLM emits only ``/Z``).
-    """
-    import h5py
-    with h5py.File(path, "r") as f:
-        betas = (list(map(float, f["/betas"][:]))
-                 if "/betas" in f else [])
-        energies = (list(map(float, f["/energy"][:]))
-                    if "/energy" in f else [])
-        zvals = (list(map(float, f["/Z"][:]))
-                 if "/Z" in f else [])
-        lnzvals = (list(map(float, f["/lnZ"][:]))
-                   if "/lnZ" in f else [])
-    return betas, energies, zvals, lnzvals
-
-
-def _aggregate_thermal_sectors(
-    per_sector_paths: Sequence[str],
-    *,
-    mode: str,
-) -> EDResults:
-    """Combine per-sector FTLM/TPQ result files into one full-trace EDResults.
-
-    The Phase-H multi-sector dispatch in :func:`_diag_via_mpi` runs
-    ``ed_distributed_main`` once per irrep; each spawn writes its own
-    HDF5 file with that sector's ``Z_q(beta)`` and ``<H>_q(beta)``.
-    This helper reads them back and combines via the
-    additive-partition-function rule so the returned EDResults matches
-    the in-process :func:`_diag_with_symmetry` shape (one
-    ``thermo_data.energy`` per beta, totalled over irreps):
-
-        Z(beta)   = sum_q Z_q(beta)
-        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
-
-    When every per-sector file carries ``/lnZ`` (canonical-TPQ binary
-    since the self-consistent-Z fix), the recombination is done in
-    log-space via logsumexp so the aggregation stays numerically valid
-    at low temperature where each Z_q has wildly different magnitude.
-    """
-    if not per_sector_paths:
-        raise RuntimeError(
-            "internal: _aggregate_thermal_sectors called with no sectors"
-        )
-
-    raw: list[tuple[list[float], list[float], list[float], list[float]]] = [
-        _read_mpi_thermo_arrays(p) for p in per_sector_paths
-    ]
-
-    # All sectors must agree on the beta grid (the binary writes the
-    # same /betas dataset for every sector since the schedule is set
-    # by --betas / --delta-beta on the CLI).
-    betas_ref = raw[0][0]
-    for q, (betas_q, _, _, _) in enumerate(raw):
-        if betas_q != betas_ref:
-            raise RuntimeError(
-                f"sector q={q} returned a different beta grid than "
-                f"sector q=0; cannot aggregate."
-            )
-
-    n_beta = len(betas_ref)
-    if n_beta == 0:
-        raise RuntimeError(
-            "_aggregate_thermal_sectors: per-sector files contain an "
-            "empty /betas grid; nothing to aggregate."
-        )
-
-    # Sanity: every sector must have provided /Z. If a sector returned
-    # only energy[] -- the historical TPQ-binary bug fixed in the
-    # self-consistent-Z change -- we abort loudly rather than silently
-    # producing NaNs.
-    missing = [p for p, (_, _, z, _) in zip(per_sector_paths, raw)
-               if len(z) != n_beta]
-    if missing:
-        raise RuntimeError(
-            "_aggregate_thermal_sectors: the following per-sector "
-            f"result files are missing the /Z dataset (or its length "
-            f"disagrees with /betas) and cannot be combined: {missing}. "
-            "If the underlying binary is canonical-TPQ (the MPI "
-            "distributed lane), ensure it was built after the "
-            "self-consistent-Z fix."
-        )
-
-    have_lnz = all(len(lnz) == n_beta for _, _, _, lnz in raw)
-
-    import math
-    energy_avg: list[float] = [float("nan")] * n_beta
-
-    if have_lnz:
-        # Numerically robust: logsumexp over sectors of lnZ_q to get lnZ,
-        # then normalised weights w_q = exp(lnZ_q - lnZ_max) / sum, and
-        # <H> = sum_q w_q <H>_q.
-        for i in range(n_beta):
-            lnz_col = [lnz[i] for _, _, _, lnz in raw]
-            lnz_max = max(lnz_col)
-            if not math.isfinite(lnz_max):
-                continue
-            ws = [math.exp(lz - lnz_max) for lz in lnz_col]
-            sw = sum(ws)
-            if sw <= 0.0:
-                continue
-            num = 0.0
-            for (_, energies_q, _, _), w in zip(raw, ws):
-                num += w * energies_q[i]
-            energy_avg[i] = num / sw
-    else:
-        # Legacy: linear-space accumulation.
-        z_total = [0.0] * n_beta
-        zh_total = [0.0] * n_beta
-        for _, energies_q, zvals_q, _ in raw:
-            for i in range(n_beta):
-                z_total[i] += zvals_q[i]
-                zh_total[i] += zvals_q[i] * energies_q[i]
-        for i in range(n_beta):
-            if z_total[i] > 0.0:
-                energy_avg[i] = zh_total[i] / z_total[i]
-
-    out = EDResults()
-    out.eigenvalues = list(energy_avg)
-    out.eigenvectors_computed = False
-    out.eigenvectors_path = ""
-    t = ThermodynamicData()
-    t.temperatures = [1.0 / b if b > 0 else float("inf") for b in betas_ref]
-    t.energy = energy_avg
-    out.thermo_data = t
-    return out
-
-
-def _read_mpi_result_file(
-    path: str,
-    *,
-    mode: str,
-    eigenvector_dir: Optional[str],
-) -> EDResults:
-    """Load the HDF5 file ``ed_distributed_main`` wrote into an EDResults."""
-    try:
-        import h5py  # noqa: WPS433
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError(
-            "qed.solve(device='mpi') needs h5py to read the result file "
-            "produced by ed_distributed_main. `pip install h5py`."
-        ) from e
-
-    res = EDResults()
-    res.eigenvalues = []
-    res.eigenvectors_computed = bool(eigenvector_dir)
-    res.eigenvectors_path = eigenvector_dir or ""
-    res.thermo_data = ThermodynamicData()
-
-    if not os.path.isfile(path):
-        raise RuntimeError(
-            f"qed.solve(device='mpi'): expected ed_distributed_main to "
-            f"write {path!r} but it does not exist; check the MPI run "
-            "stdout for an upstream error."
-        )
-
-    with h5py.File(path, "r") as f:
-        if mode == "lanczos":
-            if "/eigenvalues" in f:
-                res.eigenvalues = list(map(float, f["/eigenvalues"][:]))
-        elif mode in ("tpq", "ftlm"):
-            betas = (list(map(float, f["/betas"][:]))
-                     if "/betas" in f else [])
-            energies = (list(map(float, f["/energy"][:]))
-                        if "/energy" in f else [])
-            zvals = (list(map(float, f["/Z"][:]))
-                     if "/Z" in f else [])
-            # Map onto ThermodynamicData; the C++ struct has
-            # temperatures + energy + ... fields, so we fill what we have
-            # and leave the rest empty (the user can compute Cv / S
-            # post-hoc from the betas + energy).
-            t = ThermodynamicData()
-            t.temperatures = [1.0 / b if b > 0 else float("inf")
-                              for b in betas]
-            t.energy = energies if energies else zvals
-            res.thermo_data = t
-            # Surface the imaginary-time trajectory in eigenvalues so the
-            # API matches the in-process thermal path (which puts the
-            # per-step E(beta) into eigenvalues).
-            res.eigenvalues = list(t.energy)
-    return res
-
-
+# ---------------------------------------------------------------------------
 def _diag_with_symmetry(
     operator: Operator,
     symmetry: SymmetryArg,
