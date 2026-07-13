@@ -40,13 +40,16 @@
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <map>
 #include <functional>
 #include <memory>
 #include <numeric>
 #include <random>
+#include <set>
 #include <stdexcept>
+#include <string>
 
 namespace ed::solvers {
 
@@ -1003,6 +1006,34 @@ LittleGroupSpectrum run_little_group(
         return std::chrono::duration<double>(b - a).count();
     };
 
+    // Star filter for job splitting (Jul 2026): at 36 sites one star's
+    // Lanczos is ~3 h on an H100 and the walk is ~14 stars -- no single
+    // job survives, and the all-at-end output loses everything on timeout.
+    // ED_SYM_LG_ONLY_K0="7,43" solves only the listed star representatives
+    // (extended irrep indices, the ``k0`` this loop iterates); the caller
+    // merges rows across jobs (stars are disjoint solve units).
+    // ED_SYM_LG_ONLY_K0="plan" builds every star's sector (dims + sizes),
+    // prints one line per star, and solves nothing -- the cheap pass that
+    // tells the job scripts which k0 values exist.
+    bool plan_only = false;
+    std::set<int> only_k0;
+    if (const char* fenv = std::getenv("ED_SYM_LG_ONLY_K0")) {
+        const std::string fs(fenv);
+        if (fs == "plan") {
+            plan_only = true;
+        } else if (!fs.empty()) {
+            std::size_t pos = 0;
+            while (pos < fs.size()) {
+                const std::size_t c = fs.find(',', pos);
+                const std::string tok =
+                    fs.substr(pos, c == std::string::npos ? c : c - pos);
+                if (!tok.empty()) only_k0.insert(std::stoi(tok));
+                if (c == std::string::npos) break;
+                pos = c + 1;
+            }
+        }
+    }
+
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
     out.tr_engaged   = tr_on;
@@ -1011,14 +1042,25 @@ LittleGroupSpectrum run_little_group(
         out.irrep_characters.push_back(
             cx.giA.irreps[static_cast<std::size_t>(kk)].character);
     for (const auto& [k0, members] : stars) {
+        if (!only_k0.empty() && only_k0.count(k0) == 0) continue;
         const int m_star = static_cast<int>(members.size());
         auto t0 = tick();
+        auto t_star = t0;
         auto rd = build_k_sector(cx, k0, opt.n_up);
         LittleGroupStarInfo info;
         info.k0        = k0;
         info.star_size = m_star;
         info.dim_k0    = rd.reps.size();
         info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
+        if (plan_only) {
+            std::fprintf(stderr,
+                "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
+                "dim=%llu\n",
+                k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
+                static_cast<unsigned long long>(rd.reps.size()));
+            out.stars.push_back(info);
+            continue;
+        }
         if (rd.reps.empty()) { out.stars.push_back(info); continue; }
 
         RepSectorMatVec hk(op, std::move(rd));
@@ -1178,7 +1220,19 @@ LittleGroupSpectrum run_little_group(
         }
         info.projected = projected;
         out.stars.push_back(info);
-        if (profile) t_solve += secs(t0, tick());
+        if (profile) {
+            t_solve += secs(t0, tick());
+            // Per-star progress line: at 36 sites a star is a ~3 h solve
+            // unit and this is the only liveness/salvage signal in the log.
+            double e_min = std::numeric_limits<double>::infinity();
+            for (double e : out.eigenvalues) e_min = std::min(e_min, e);
+            std::fprintf(stderr,
+                "[little_group profile] star k0=%d done in %.1fs "
+                "(dim=%llu, projected=%d, running E_min=%.10f)\n",
+                k0, secs(t_star, tick()),
+                static_cast<unsigned long long>(info.dim_k0),
+                projected ? 1 : 0, e_min);
+        }
     }
     if (profile) {
         std::fprintf(stderr,
@@ -1211,6 +1265,17 @@ void check_sum_rule(const LittleGroupSpectrum& out, int n_sites,
         want = std::uint64_t{1} << n_sites;
     }
     if (out.total_dim != want) {
+        if (std::getenv("ED_SYM_LG_ONLY_K0") != nullptr) {
+            // A star filter (or plan mode) is active: the walk deliberately
+            // covered a subset, so the tiling check cannot hold. Loud note
+            // instead of a false-positive bookkeeping error.
+            std::fprintf(stderr,
+                "[little_group] sum rule SKIPPED: ED_SYM_LG_ONLY_K0 is set "
+                "(covered %llu of %llu)\n",
+                static_cast<unsigned long long>(out.total_dim),
+                static_cast<unsigned long long>(want));
+            return;
+        }
         throw std::runtime_error(
             "little_group_full_spectrum: multiplicity sum "
             + std::to_string(out.total_dim) + " != subspace dim "
