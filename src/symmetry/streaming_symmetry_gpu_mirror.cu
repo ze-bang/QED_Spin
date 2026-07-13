@@ -243,12 +243,15 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     } else {
         dv = static_cast<long double>(1ULL << n_sites);
     }
-    if (dv > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
-        throw std::runtime_error(
-            "build_rep_mirror: C(n_sites, n_up) exceeds INT32_MAX; the rank "
-            "table value type would overflow");
-    }
+    // Ranks are 64-bit (C(36,18) ~ 9.1e9); only per-sector INDEX values
+    // must fit int32 (they index the sector basis, capped below).
     const std::uint64_t dim_full_sz = static_cast<std::uint64_t>(dv + 0.5L);
+    if (data.reps.size() > static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error(
+            "build_rep_mirror: sector has more than INT32_MAX representatives; "
+            "the reverse-lookup value type would overflow");
+    }
 
     // Device combinadic rank() reads a Pascal triangle from constant memory.
     ed::gpu::combinadic::detail::upload_pascal();
@@ -291,7 +294,13 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     if (data.has_two_level()) {
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
-    } else {
+    } else if (dim_full_sz <= static_cast<std::uint64_t>(
+                   std::numeric_limits<std::int32_t>::max())
+               && !(std::getenv("ED_SYM_GPU_NO_RANKTABLE") != nullptr
+                    && std::getenv("ED_SYM_GPU_NO_RANKTABLE")[0] == '1')) {
+        // ED_SYM_GPU_NO_RANKTABLE=1 (test hook): skip the dense table so
+        // small lattices exercise the same binary-search lookup that the
+        // > INT32_MAX rank spaces (36-site half filling) are forced onto.
         h_rep_index_of_rank.assign(dim_full_sz, -1);
         for (std::size_t i = 0; i < data.reps.size(); ++i) {
             const std::uint64_t r = (n_up >= 0)
@@ -301,6 +310,16 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
                 h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
             }
         }
+    } else if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+        // No dense table at this rank-space size (36 GiB+ per (N, n_up)):
+        // leave every lookup pointer null; the device policy binary-searches
+        // the resident sorted ``reps`` array instead.
+        std::fprintf(stderr,
+                     "[sym_profile] GPU rep mirror: rank space %llu exceeds "
+                     "dense-table range; using device binary search over "
+                     "%zu reps\n",
+                     static_cast<unsigned long long>(dim_full_sz),
+                     data.reps.size());
     }
 
     std::vector<cuDoubleComplex> h_characters(data.characters.size());
@@ -527,6 +546,47 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
             reinterpret_cast<cuDoubleComplex*>(out),
             n,
             spin);
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Host-pointer twin: persistent device staging buffers around the resident
+// mirror, one H2D + D2H per apply. Built for the little-group engine's CPU
+// Lanczos (host vectors); the staging traffic is O(dim) against the kernel's
+// O(dim * terms * |G|) walk.
+// ---------------------------------------------------------------------------
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
+    const ed::symmetry::RepSectorData& rep,
+    double                             spin_l,
+    const ed::matvec::TermStorage&     terms)
+{
+    using ed::symmetry::gpu_mirror::detail::cuda_check;
+
+    auto dev_fn = ed::symmetry::make_sector_matvec_gpu_rep(rep, spin_l, terms);
+    auto d_in   = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
+    auto d_out  = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
+
+    return [dev_fn, d_in, d_out](const ed::matvec::Complex* in,
+                                 ed::matvec::Complex*       out,
+                                 std::size_t                n) {
+        if (d_in->size() != n) {
+            d_in->resize(n);
+            d_out->resize(n);
+        }
+        cuda_check(cudaMemcpy(thrust::raw_pointer_cast(d_in->data()), in,
+                              n * sizeof(cuDoubleComplex),
+                              cudaMemcpyHostToDevice),
+                   "hostptr rep matvec H2D");
+        dev_fn(reinterpret_cast<const ed::matvec::Complex*>(
+                   thrust::raw_pointer_cast(d_in->data())),
+               reinterpret_cast<ed::matvec::Complex*>(
+                   thrust::raw_pointer_cast(d_out->data())),
+               n);
+        cuda_check(cudaMemcpy(out, thrust::raw_pointer_cast(d_out->data()),
+                              n * sizeof(cuDoubleComplex),
+                              cudaMemcpyDeviceToHost),
+                   "hostptr rep matvec D2H");
     };
 }
 

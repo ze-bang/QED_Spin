@@ -27,6 +27,8 @@
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
 #include <ed/symmetry/symmetry_adapted.h>        // canonical_thermo_from_eigs
+#include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
+#include <ed/core/select_backend.h>           // ed::have_cuda()
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -124,6 +126,19 @@ public:
             csr_->spmv(in, out);
             return;
         }
+        // GPU rep gather (Jul 2026): when the reduced CSR is over budget
+        // (the 36-site regime: ~0.5 TB per momentum block) the arithmetic
+        // gather walk is the only representation, and it is exactly the
+        // workload the resident device mirror was built for. Engage it for
+        // large blocks when a device is present; any construction failure
+        // falls back to the CPU walk permanently (the engine's graceful-
+        // degradation contract). ED_SYM_LG_GPU=0 vetoes, =1 drops the
+        // dimension floor (validation runs on small blocks).
+        std::call_once(gpu_once_, [this] { maybe_build_gpu_(); });
+        if (gpu_fn_) {
+            gpu_fn_(in, out, n);
+            return;
+        }
         backend_->apply_complex(&tv_, in, out, n);
     }
     [[nodiscard]] std::size_t dim() const override { return rd_->reps.size(); }
@@ -178,12 +193,41 @@ private:
             reduced_csr());
     }
 
+    // GPU rep-gather engagement (only reached when the reduced CSR was
+    // declined). Default: engage when a CUDA device is present and the
+    // block is large enough that the kernel dominates the H2D/D2H staging
+    // (2^20 reps). ED_SYM_LG_GPU=0 vetoes; =1 removes the floor so 4x4
+    // validation runs exercise the same lane.
+    void maybe_build_gpu_() const {
+        const char* gate = std::getenv("ED_SYM_LG_GPU");
+        if (gate != nullptr && gate[0] == '0' && gate[1] == '\0') return;
+        const bool force = (gate != nullptr && gate[0] == '1' && gate[1] == '\0');
+        if (!force && rd_->reps.size() < (std::size_t{1} << 20)) return;
+        if (!ed::have_cuda()) return;
+        try {
+            gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
+                *rd_, tv_.spin_l, terms_);
+            if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+                std::fprintf(stderr,
+                             "[sym_profile] little-group block dim=%zu: "
+                             "GPU rep gather engaged\n", rd_->reps.size());
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "[little_group] GPU rep gather declined (%s); "
+                         "using the CPU walk\n", e.what());
+            gpu_fn_ = nullptr;
+        }
+    }
+
     std::unique_ptr<ed::symmetry::RepSectorData>  rd_;   // stable address for the backend
     ed::matvec::TermStorage                        terms_;
     TV                                             tv_{};
     std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
     mutable std::once_flag                         csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
+    mutable std::once_flag                         gpu_once_;
+    mutable ed::LinearOperator::MatvecFn           gpu_fn_;
 };
 
 // Monomial action of one little-group element on the k0 rep basis:

@@ -42,4 +42,16 @@ make_sector_matvec_gpu_rep(const RepSectorData&            rep,
                            double                          spin_l,
                            const ed::matvec::TermStorage&  terms);
 
+/// HOST-pointer twin of ``make_sector_matvec_gpu_rep`` for callers whose
+/// Krylov loop keeps its vectors in host RAM (the little-group engine's
+/// CPU Lanczos): owns persistent device in/out buffers and stages one
+/// H2D + D2H copy per apply. The staging cost is O(dim) against the
+/// kernel's O(dim * terms * |G|) walk, so it is negligible for the large
+/// sectors this exists for. Same non-CUDA / no-device failure contract
+/// as the device-pointer factory.
+ed::LinearOperator::MatvecFn
+make_sector_matvec_gpu_rep_hostptr(const RepSectorData&            rep,
+                                   double                          spin_l,
+                                   const ed::matvec::TermStorage&  terms);
+
 } // namespace ed::symmetry

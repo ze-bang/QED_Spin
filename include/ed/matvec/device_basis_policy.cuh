@@ -324,7 +324,8 @@ struct DeviceSymmetryBasisPolicy {
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
         if (sz_to_sec != nullptr) {
             if (__popcll(state) != n_up) return kDeviceNotFound;
-            const int r = ed::gpu::combinadic::rank_state(state, n_sites, n_up);
+            const std::int64_t r =
+                ed::gpu::combinadic::rank_state(state, n_sites, n_up);
             const std::int32_t k = sz_to_sec[r];
             return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
         }
@@ -342,7 +343,8 @@ struct DeviceSymmetryBasisPolicy {
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
         if (sz_to_sec != nullptr) {
             if (__popcll(state) != n_up) return kDeviceNotFound;
-            const int r = ed::gpu::combinadic::rank_state(state, n_sites, n_up);
+            const std::int64_t r =
+                ed::gpu::combinadic::rank_state(state, n_sites, n_up);
             const std::int32_t k = sz_to_sec[r];
             if (k < 0) return kDeviceNotFound;
             proj_out = sz_to_proj[r];
@@ -482,14 +484,28 @@ struct DeviceRepSymmetryBasisPolicy {
 
     // Reverse lookup rb -> orbit index (-1 sentinel folded to the caller's
     // kDeviceNotFound). Two-level (shared rank table + local remap) when
-    // available, per-sector dense table otherwise.
+    // available, per-sector dense table otherwise; when NEITHER table is
+    // resident (C(N, n_up) too large for a dense table -- e.g. 36-site
+    // half filling at 9.1e9 ranks -- and the host sector carries no
+    // two-level lookup), binary-search the sorted ``reps`` array directly.
+    // ``reps`` is guaranteed ascending by the producer, exactly like the
+    // host RepSymmetryBasisPolicy's PRIMARY lookup.
     __device__ inline std::int32_t index_of_rep_dev(std::uint64_t rb) const noexcept {
-        const std::uint64_t r = rank_of_rep(rb);
         if (shared_rank_of != nullptr) {
-            const std::int32_t g = shared_rank_of[r];
+            const std::int32_t g = shared_rank_of[rank_of_rep(rb)];
             return (g < 0) ? std::int32_t{-1} : local_of_shared[g];
         }
-        return rep_index_of_rank[r];
+        if (rep_index_of_rank != nullptr) {
+            return rep_index_of_rank[rank_of_rep(rb)];
+        }
+        std::uint64_t lo = 0, hi = dim_;
+        while (lo < hi) {
+            const std::uint64_t mid = lo + ((hi - lo) >> 1);
+            if (reps[mid] < rb) lo = mid + 1;
+            else                hi = mid;
+        }
+        return (lo < dim_ && reps[lo] == rb)
+            ? static_cast<std::int32_t>(lo) : std::int32_t{-1};
     }
 
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {

@@ -59,6 +59,8 @@ namespace ed::symmetry {
       "=0 disables A' = A x Z2 inside the little-group engine (Stage 9a)")     \
     X("ED_SYM_LG_TR", "1",                                                     \
       "=0 disables TR star/sigma folding inside the engine (Stage 9b)")        \
+    X("ED_SYM_LG_GPU", "auto (device present + block >= 2^20 reps)",           \
+      "=0 vetoes the little-group GPU rep gather; =1 drops the dim floor")     \
     X("ED_SYM_SAB_CACHE_BYTES", "536870912",                                   \
       "byte budget of the SAB sector cache (test oracle)")                     \
     X("ED_SYM_CSR_DIM_MAX", "engine default",                                  \

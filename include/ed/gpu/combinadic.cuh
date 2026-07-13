@@ -58,12 +58,16 @@ unsigned long long binomial(int n, int k) {
 // Scans bits low-to-high; the (seen)-th set bit at position ``bit``
 // contributes ``C(bit, seen)`` to the rank.
 //
+// 64-bit rank: C(n_bits, k) exceeds INT32_MAX from N=34 half filling
+// (C(36,18) ~ 9.1e9), so the rank must be accumulated and returned in
+// 64 bits even though per-sector INDEX values stay int32.
+//
 // Returns 0 (which IS a valid rank) when ``popcount(state) != k``;
 // callers must guard with their own popcount check if the input
 // state might have escaped the fixed-Sz sector.
 __device__ __forceinline__
-int rank_state(std::uint64_t state, int n_bits, int k) {
-    int rank = 0;
+std::int64_t rank_state(std::uint64_t state, int n_bits, int k) {
+    std::int64_t rank = 0;
     int seen = 0;
     #pragma unroll
     for (int bit = 0; bit < 64; ++bit) {
@@ -71,7 +75,7 @@ int rank_state(std::uint64_t state, int n_bits, int k) {
         if (seen >= k) break;
         if ((state >> bit) & 1ULL) {
             ++seen;
-            rank += static_cast<int>(binomial(bit, seen));
+            rank += static_cast<std::int64_t>(binomial(bit, seen));
         }
     }
     return rank;
