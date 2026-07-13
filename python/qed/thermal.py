@@ -130,6 +130,8 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts = _ed_params_to_thermal_options(params, method)
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
+    if use_gpu:
+        opts.backend.gpu_dim_floor = 0
     opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
     opts.time_reversal = int(time_reversal)
     if star_maps:
@@ -180,6 +182,8 @@ def _thermal_via_workflows_thermal(
     opts = _ed_params_to_thermal_options(params, method)
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
+    if use_gpu:
+        opts.backend.gpu_dim_floor = 0
     tr = _core.workflows_thermal(op, opts)
     return _ed_result_from_thermal_result(tr)
 
@@ -212,6 +216,8 @@ def _thermal_via_workflows_streaming_symmetry(
     opts = _ed_params_to_thermal_options(params, method)
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
+    if use_gpu:
+        opts.backend.gpu_dim_floor = 0
     fixed_sz = int(params.n_up) if params.use_fixed_sz else None
     tr = _core.workflows_thermal_streaming_symmetry_directory(
         directory,

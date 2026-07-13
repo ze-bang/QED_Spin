@@ -81,6 +81,10 @@ def ed_params_to_thermal_options(
     # the GPU promoter.
     opts.backend.allow_gpu = bool(getattr(params, "use_gpu", False))
     opts.backend.allow_mpi = bool(getattr(params, "use_mpi", False))
+    if opts.backend.allow_gpu:
+        # The Python surface vetted the GPU choice (explicit device= or
+        # its own dim heuristic); disable the C++ auto-promotion floor.
+        opts.backend.gpu_dim_floor = 0
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
     # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
     # the number of (L - H) iterations (0 = auto-size from the spectral

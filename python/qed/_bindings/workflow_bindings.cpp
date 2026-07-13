@@ -616,6 +616,7 @@ void bind_workflows(py::module_& m) {
     py::class_<ed::BackendConstraints>(m, "BackendConstraints")
         .def(py::init<>())
         .def_readwrite("allow_gpu",     &ed::BackendConstraints::allow_gpu)
+        .def_readwrite("gpu_dim_floor", &ed::BackendConstraints::gpu_dim_floor)
         .def_readwrite("allow_mpi",     &ed::BackendConstraints::allow_mpi)
         .def_readwrite("allow_mpi_gpu", &ed::BackendConstraints::allow_mpi_gpu)
         .def_readwrite("fudge_factor",  &ed::BackendConstraints::fudge_factor);

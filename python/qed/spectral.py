@@ -874,6 +874,9 @@ def _spectral_in_memory(
                     "build of qed._core does not have WITH_CUDA=ON.")
             opts.backend.allow_gpu = True
             opts.backend.allow_mpi = False
+            # Explicit request: the GPU auto-promotion dim floor must
+            # not second-guess the caller.
+            opts.backend.gpu_dim_floor = 0
         elif dev_lc == "cpu":
             opts.backend.allow_gpu = False
             opts.backend.allow_mpi = False

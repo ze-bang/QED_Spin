@@ -407,6 +407,7 @@ def test_solve_streaming_symmetry_fulldiag_gpu_small_sectors(tmp_path):
         opts.output_dir = outdir
         opts.method = _core.SolveMethod.FullDiag
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
 
         agg = _core.workflows_solve_streaming_symmetry_directory(
             fixture_dir, N_SITES, 0.5, opts, None
@@ -463,6 +464,7 @@ def test_solve_plain_operator_device_gpu_runs_on_gpu(tmp_path):
     opts.n_up = 7
     opts.method = _core.SolveMethod.Lanczos
     opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
     fsz = H.make_fixed_sz(7)
     gs = _core.workflows_solve(fsz, opts)
     assert gs.backend.lane == "gpu", (
@@ -524,6 +526,7 @@ def test_thermal_device_gpu_builds_gpu_operator(tmp_path):
     opts.temp_max      = 4.0
     opts.output_dir    = str(tmp_path / "th_gpu")
     opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
     r = _core.workflows_thermal(H, opts)
     assert r.backend.lane == "gpu", (
         "qed.thermal(device='gpu') did not run on the GPU lane; the "
@@ -622,6 +625,8 @@ def test_thermal_ftlm_gpu_runs_on_gpu(tmp_path):
         opts.temp_max      = 4.0
         opts.random_seed   = 0xCAFEFEED
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     tr_gpu = _core.workflows_thermal(op, _opts(True))
@@ -740,6 +745,7 @@ def test_solve_streaming_symmetry_gpu_lane(tmp_path):
         opts.tolerance       = 1e-10
         opts.compute_vectors = False
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         gs = _core.workflows_solve_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -769,6 +775,7 @@ def test_solve_streaming_symmetry_sz_gpu_lane(tmp_path):
         opts.tolerance       = 1e-10
         opts.compute_vectors = False
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         gs = _core.workflows_solve_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts,
             N_SITES // 2,  # fixed_sz_n_up
@@ -800,6 +807,7 @@ def test_thermal_streaming_symmetry_gpu_lane(tmp_path):
         opts.temp_min      = 0.5
         opts.temp_max      = 4.0
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         tr = _core.workflows_thermal_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -830,6 +838,7 @@ def test_thermal_streaming_symmetry_sz_gpu_lane(tmp_path):
         opts.temp_min      = 0.5
         opts.temp_max      = 4.0
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         tr = _core.workflows_thermal_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts,
             N_SITES // 2,
@@ -859,6 +868,7 @@ def test_spectral_streaming_symmetry_gpu_lane(tmp_path):
         opts.omega_max  = 4.0
         opts.broadening = 0.1
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         sr = _core.workflows_spectral_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -969,6 +979,7 @@ def test_spectral_cross_irrep_lane_propagation_gpu(tmp_path):
         opts.broadening        = 0.1
         opts.momentum_transfer = [1.0 / N_SITES]
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
 
         agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
             tmp, N_SITES, 0.5,
@@ -1019,6 +1030,8 @@ def test_spectral_ftlm_dynamical_gpu_runs_on_gpu(tmp_path):
         opts.broadening    = 0.2
         opts.krylov_dim    = 40
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
@@ -1078,6 +1091,8 @@ def test_spectral_kpm_dynamical_gpu_runs_on_gpu(tmp_path):
         opts.broadening    = 0.1
         opts.kpm_moments   = 128
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
@@ -1129,6 +1144,8 @@ def test_spectral_cross_irrep_gs_gpu_runs_on_gpu(tmp_path):
             opts.krylov_dim        = 40
             opts.momentum_transfer = [1.0 / N_SITES]
             opts.backend.allow_gpu = allow_gpu
+            if allow_gpu:
+                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
             return opts
 
         agg_gpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
@@ -1207,6 +1224,8 @@ def test_spectral_ftlm_cross_irrep_lane_is_cpu(tmp_path):
             opts.krylov_dim        = 20
             opts.momentum_transfer = [1.0 / N_SITES]
             opts.backend.allow_gpu = allow_gpu
+            if allow_gpu:
+                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
             agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
                 tmp, N_SITES, 0.5,
                 _sz_q_observable_transforms(1),

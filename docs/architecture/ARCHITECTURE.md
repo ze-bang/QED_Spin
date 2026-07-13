@@ -35,7 +35,8 @@ public surface is captured immediately below.
                 +------------------+------------------+
                 v                  v                  v
             CpuBackend         CudaBackend         MpiBackend
-            (MpiCudaBackend opt-in, no auto-select)
+            (MpiCudaBackend opt-in, no auto-select;
+             GPU auto-promotion gated by gpu_dim_floor, default 2^14)
                                    |
                                    v
                lanczos_kernel<Backend>      block_lanczos_kernel<Backend>

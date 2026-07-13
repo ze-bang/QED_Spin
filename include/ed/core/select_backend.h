@@ -59,6 +59,15 @@ struct BackendConstraints {
     /// is a safe default for Lanczos / TPQ which carry ~5 N-length
     /// scratch vectors plus the basis.
     double fudge_factor = 8.0;
+    /// Minimum problem dimension for the GPU AUTO-promotion (Jul 2026).
+    /// Below this, kernel-launch + transfer overhead makes the GPU
+    /// strictly slower than the CPU -- and on shared-GPU hosts (WSL2)
+    /// tiny solves dispatched to a contended device have produced
+    /// silently-wrong spectra. Matches the Python-side ``dim >= 2^14``
+    /// heuristic in ``qed._resolve_device``. Callers that EXPLICITLY
+    /// request the GPU (``device='gpu'``) set this to 0 -- the floor
+    /// gates only the automatic promotion, never an explicit choice.
+    std::size_t gpu_dim_floor = (std::size_t{1} << 14);
 };
 
 // ---------------------------------------------------------------------------
@@ -203,7 +212,11 @@ inline BackendVariant select_backend(const Geometry& geom,
     // sector operators are host-resident but their CudaMatVecBackend
     // mirror (lazily constructed inside `bind_cuda`) runs on the GPU.
     const bool device_mv = op_is_device || geom.supports_device_matvec;
-    if (device_mv && have_gpu && gpu_fits && c.allow_gpu) {
+    // gpu_dim_floor gates only the AUTO promotion: a device-resident
+    // operator has already committed to the GPU, and explicit requests
+    // arrive with the floor zeroed.
+    const bool dim_ok = op_is_device || geom.local_dim >= c.gpu_dim_floor;
+    if (device_mv && have_gpu && gpu_fits && c.allow_gpu && dim_ok) {
         return BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
     }
 #endif

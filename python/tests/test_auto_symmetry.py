@@ -179,3 +179,22 @@ def test_spectral_toggle_require_detects():
         r = qed.spectral(Hz, [O], omega=om, eta=0.1, spin_flip="on",
                          verbose=False)
     assert len(np.asarray(r.S_real).ravel()) == 30
+
+
+def test_gpu_auto_promotion_floor_pins_tiny_solves_to_cpu():
+    """Jul-2026 hardening: select_backend's GPU AUTO-promotion carries a
+    dim floor (BackendConstraints.gpu_dim_floor, default 2^14), so the
+    tiny sector solves inside the in-memory DSSF never ride a (possibly
+    contended) GPU unless the caller explicitly asks. Explicit
+    device='gpu' zeroes the floor and must still land on the GPU."""
+    H = _ring()
+    O = _probe(qed.input.Op.Sz)
+    om = np.linspace(0.0, 2.0, 8)
+    s_auto = qed.spectral(H, [O], omega=om, eta=0.1, symmetry="auto",
+                          sz=N_SITES // 2, momentum_transfer=[0.5],
+                          verbose=False)
+    lane = str(getattr(getattr(s_auto, "backend", None), "lane", ""))
+    assert lane in ("cpu", ""), (
+        f"auto-dispatch put a dim-{2**N_SITES} problem's tiny sector "
+        f"solves on lane {lane!r}; the gpu_dim_floor should pin them to "
+        f"the CPU")

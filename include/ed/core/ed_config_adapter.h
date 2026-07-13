@@ -259,6 +259,11 @@ toSolveOptions(const EDParameters& params,
     if (wire_backend) {
         opts.backend.allow_gpu = params.use_gpu;
         opts.backend.allow_mpi = params.use_mpi;
+        // The Python surface has already vetted the GPU choice
+        // (explicit device='gpu', or auto with its own dim >= 2^14
+        // heuristic) -- the C++ auto-promotion floor must not
+        // second-guess it.
+        if (params.use_gpu) opts.backend.gpu_dim_floor = 0;
     }
     opts.allow_infeasible = allow_infeasible;
 

@@ -492,6 +492,10 @@ CSR-free rep lane keeps the basis memory at O(#reps).
 * `device=None` (the default) lets the workflow pick: CPU for small
   problems, single GPU when `WITH_CUDA=ON` and the dimension is large
   enough that PCIe transfer amortizes (current threshold: `dim ≥ 2¹⁴`).
+  The same floor is enforced C++-side for every internal solve
+  (`BackendConstraints.gpu_dim_floor`, default `2¹⁴`): tiny sector
+  solves inside DSSF/thermal never auto-ride the GPU. An explicit
+  `device='gpu'` zeroes the floor.
 * `device='cpu'` / `device='gpu'` force the choice. The GPU path
   routes through `_core.workflows_solve` with `OperatorSpec.distributed
   = false` and the GPU lane enabled in `BackendConstraints`; the
