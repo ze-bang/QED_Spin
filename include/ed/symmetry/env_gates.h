@@ -16,6 +16,12 @@
 // getenv semantics (tests toggle without restart); new gates should be added
 // HERE first and read through a named accessor. The X-list is the one place
 // a gate's name is spelled.
+//
+// Retired gates (rows removed when their lane died): ED_SYM_FUSED_PASS15 /
+// ED_SYM_STREAMING_ENUM (Stage 10e -- fused OrbitTable is the only enum
+// path); ED_SYM_LAZY_SECTORS / ED_SYM_LAZY_SECTORS_BYTES_MAX (Stage 11c-1
+// -- the lazy rep-first builders are the only construction lane; the eager
+// orbit-CSR builders survive solely as unit-test oracles in sector_set.h).
 // =============================================================================
 
 #include <cstdio>
@@ -55,8 +61,6 @@ namespace ed::symmetry {
       "=0 disables TR star/sigma folding inside the engine (Stage 9b)")        \
     X("ED_SYM_SAB_CACHE_BYTES", "536870912",                                   \
       "byte budget of the SAB sector cache (test oracle)")                     \
-    X("ED_SYM_LAZY_SECTORS", "auto",                                           \
-      "=1 forces the lazy rep sector lane (test escape)")                      \
     X("ED_SYM_CSR_DIM_MAX", "engine default",                                  \
       "dimension cap for assembled sector CSRs (legacy lane)")                 \
     X("ED_SYM_REP_RANKTABLE", "auto (budget)",                                 \

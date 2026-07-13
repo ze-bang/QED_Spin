@@ -208,10 +208,13 @@ ed::OperatorSpec heisenberg_spec(const std::string& dir, int N, int n_up) {
 // Pin the CSR-free RepSectorData extraction against the materialised sector
 // basis: usable() must hold, and reps / inv_norms must match orbit_rep / 1/norm
 // in order (this is the array index the solver's in/out vectors use).
+// Stage 11c-1: construction is lazy-only, so trigger both providers here --
+// the invariant pinned (rep data == orbit basis, index-aligned) is unchanged.
 void check_rep_data(const std::string& lane,
                     const ed::symmetry::SectorOperator& op,
                     std::size_t s) {
-    const auto& rd  = op.repSectorData();
+    const auto& rd = op.basis().ensureRepData();
+    op.basis().ensureHostCsr();
     const auto& sec = op.basis().sector();
     const std::string tag = lane + " sector " + std::to_string(s);
 

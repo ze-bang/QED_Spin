@@ -14,9 +14,9 @@ The cross-irrep spectral machinery now composes with the monomial axes:
 Both lanes ride the CSR-free RepSectorData refs on
 ``CrossSectorOrbitObservable`` (flip / parity sectors have no orbit CSR
 at all), the same rep arithmetic the matvec kernel uses -- pinned here
-against dense Lehmann sums at 1e-12. The rep ref is ALSO the default
-for rep-lazy fixed-Sz sectors; ``ED_SYM_LAZY_SECTORS=1`` forces that
-lane and pins it against the plain full-Hilbert result.
+against dense Lehmann sums at 1e-12. The rep ref is ALSO what
+ordinary fixed-Sz sectors ride (rep-first construction is the only
+lane since Stage 11c-1), pinned against the plain full-Hilbert result.
 """
 from __future__ import annotations
 
@@ -317,11 +317,10 @@ def test_sab_dssf_diagonal_axis_composed(dense):
     assert abs(r.gs_energy - w[0]) < 1e-9
 
 
-def test_rep_ref_lane_matches_plain_fixed_sz(monkeypatch):
-    """ED_SYM_LAZY_SECTORS=1 forces the CSR-free RepSectorData refs on
-    an ordinary U(1) fixed-Sz DSSF -- the rep-lane cross-sector
-    arithmetic must match the plain full-Hilbert lane."""
-    monkeypatch.setenv("ED_SYM_LAZY_SECTORS", "1")
+def test_rep_ref_lane_matches_plain_fixed_sz():
+    """The CSR-free RepSectorData refs (the only construction lane since
+    Stage 11c-1) on an ordinary U(1) fixed-Sz DSSF -- the rep-lane
+    cross-sector arithmetic must match the plain full-Hilbert lane."""
     b = qed.input.HamiltonianBuilder(N)
     b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
     H = b.to_operator()
@@ -332,7 +331,6 @@ def test_rep_ref_lane_matches_plain_fixed_sz(monkeypatch):
     O = mb.to_operator()
     s_sym = qed.spectral(H, [O], omega=OMEGA, eta=ETA, symmetry="auto",
                          sz=N // 2, momentum_transfer=[0.5], verbose=False)
-    monkeypatch.delenv("ED_SYM_LAZY_SECTORS")
     s_plain = qed.spectral(H, [O], omega=OMEGA, eta=ETA, verbose=False)
     np.testing.assert_allclose(np.asarray(s_sym.S_real).ravel(),
                                np.asarray(s_plain.S_real).ravel(),

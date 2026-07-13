@@ -324,6 +324,9 @@ rep_sector_data_from_sector(const ::SymmetrySector&  sec,
 /// Full-Hilbert-space symmetry sectors. ``n_bits`` / ``spin_l`` are the
 /// lattice constants; ``info`` carries the group + irrep metadata; ``terms``
 /// populates each sector operator's term list.
+/// TEST ORACLE (Stage 11c-1): no production consumer -- the tagged
+/// factory routes every build through the lazy rep-first twin. Kept
+/// as the eager orbit-CSR reference for the unit parity suites.
 template <class TermBuilder>
 [[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
 build_full_sector_operators(std::uint64_t            n_bits,
@@ -393,6 +396,9 @@ build_full_sector_operators(std::uint64_t            n_bits,
 /// the owning ``FixedSzSubspace`` is built internally and kept alive for the
 /// duration of the build (the orbit reps + SectorBasis are computed against
 /// it). ``info`` / ``terms`` as above.
+/// TEST ORACLE (Stage 11c-1): no production consumer -- the tagged
+/// factory routes every build through the lazy rep-first twin. Kept
+/// as the eager orbit-CSR reference for the unit parity suites.
 template <class TermBuilder>
 [[nodiscard]] std::vector<std::unique_ptr<SectorOperator>>
 build_fixed_sz_sector_operators(std::uint64_t            n_bits,
