@@ -123,6 +123,12 @@ jobs:
           cmake --build build-mpi --target test_mpi_matvec_impl -- -j$(nproc)
 
       - name: MPI smoke (mpiexec np 1/2/4, CommPlan + MpiMatVecImpl)
+        env:
+          # Same rationale as the full linux-mpi lane: hosted runners
+          # share cores, so np=4 needs oversubscription.
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+          OMPI_ALLOW_RUN_AS_ROOT: "1"
+          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
         run: |
           cd build-mpi
           ctest -R "test_comm_plan|test_mpi_matvec_impl" --output-on-failure
