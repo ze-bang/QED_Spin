@@ -37,6 +37,8 @@
 #include <ed/core/select_backend.h>
 #include <ed/dssf/cross_sector_orbit_observable.h>  // SOTA cross-irrep observable
 #include <ed/matvec/backends/cpu_backend.h>          // CpuBackend for cf_spectral_from_vector
+#include <ed/krylov/lanczos_kernel.h>                // CGS2 GS refinement (ensure_gs_residual)
+#include <ed/core/blas_lapack_wrapper.h>             // LAPACKE_dstevd (GS refinement)
 #include <ed/observables/cf_spectral_kernel.h>      // cf_spectral_from_vector
 #include <ed/observables/ftlm_cross_irrep_kernel.h>  // SOTA finite-T cross-irrep
 #include <ed/orchestrator.h>
@@ -497,16 +499,15 @@ struct GsScanResult {
     bool        any_solved = false;
 };
 
-// Residual guard for a cross-irrep ground-state pair (Jul 2026; mirrors
+// Residual of a cross-irrep ground-state pair (Jul 2026; mirrors
 // little_group_ground_state): the orchestrator returns a BEST-EFFORT pair
 // when the Krylov iteration does not converge, and everything downstream --
 // the scattered weights and the continued fraction -- would silently
-// inherit the garbage. One extra matvec at sector dim converts that into a
-// loud failure.
+// inherit the garbage. One extra matvec at sector dim measures it.
 template <class SectorView>
-inline void require_gs_residual(SectorView& sec,
-                                const std::vector<Complex>& psi0,
-                                double E0)
+[[nodiscard]] inline double gs_residual(SectorView& sec,
+                                        const std::vector<Complex>& psi0,
+                                        double E0)
 {
     const std::size_t d = psi0.size();
     std::vector<Complex> hv(d, Complex(0.0, 0.0));
@@ -517,15 +518,73 @@ inline void require_gs_residual(SectorView& sec,
         num += std::norm(r);
         den += std::norm(psi0[i]);
     }
-    const double resid = (den > 0.0)
-        ? std::sqrt(num / den)
-        : std::numeric_limits<double>::infinity();
+    return (den > 0.0) ? std::sqrt(num / den)
+                       : std::numeric_limits<double>::infinity();
+}
+
+// Refine-or-die (Jul 2026): the orchestrator's vector path has no stored-
+// basis reorthogonalisation, so its Ritz vector carries ~1e-4 residual even
+// on tiny sectors -- the guard alone dead-ended every cross-irrep spectral
+// workflow (caught at 4x4 by the e2e diagnostic). When the first pair fails
+// the bound, rerun a FullCGS2 Lanczos WITH a kept basis over the same
+// sector matvec, SEEDED by the failed vector (the little_group
+// solve_gs_vector construction), and re-guard. Still throws if even the
+// reorthogonalised pair cannot meet 1e-8.
+template <class SectorView>
+inline void ensure_gs_residual(SectorView& sec,
+                               std::vector<Complex>& psi0,
+                               double& E0)
+{
+    double resid = gs_residual(sec, psi0, E0);
+    if (resid < 1e-8) return;
+
+    const std::size_t n = psi0.size();
+    ed::matvec::CpuBackend be;
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter   = std::min<std::size_t>(n, 300);
+    kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    kopts.keep_basis = true;
+    kopts.dim_cap    = n;
+    auto apply_H = [&sec](const Complex* in, Complex* out, std::size_t nn) {
+        sec.apply(in, out, nn);
+    };
+    auto kres = ed::krylov::lanczos_kernel(be, apply_H, n, psi0.data(),
+                                           kopts);
+    const std::size_t m = kres.alpha.size();
+    if (m == 0)
+        throw std::runtime_error(
+            "cross-irrep spectral: CGS2 GS refinement produced an empty "
+            "tridiagonal.");
+    std::vector<double> diag = kres.alpha;
+    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+    std::vector<double> z(m * m, 0.0);
+    const lapack_int info = LAPACKE_dstevd(
+        LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+        diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
+    if (info != 0)
+        throw std::runtime_error(
+            "cross-irrep spectral: GS refinement tridiag eigensolve failed "
+            "(dstevd info != 0).");
+    E0 = diag[0];
+    std::fill(psi0.begin(), psi0.end(), Complex(0.0, 0.0));
+    for (std::size_t j = 0; j < m; ++j) {
+        const Complex* vj = kres.basis[j].get();
+        const double   yj = z[j];                    // column 0, row j
+        if (std::abs(yj) < 1e-300) continue;
+        for (std::size_t i = 0; i < n; ++i) psi0[i] += yj * vj[i];
+    }
+    double nrm = 1e-300;
+    for (const auto& c : psi0) nrm += std::norm(c);
+    const double inv = 1.0 / std::sqrt(nrm);
+    for (auto& c : psi0) c *= inv;
+
+    resid = gs_residual(sec, psi0, E0);
     if (!(resid < 1e-8)) {
         throw std::runtime_error(
             "cross-irrep spectral: ground-state pair failed the residual "
-            "guard (|H psi - E psi|/|psi| = " + std::to_string(resid) +
-            "); the sector Lanczos did not converge. Re-run with more "
-            "iterations / memory.");
+            "guard even after CGS2 refinement (|H psi - E psi|/|psi| = "
+            + std::to_string(resid) + ").");
     }
 }
 
@@ -2444,9 +2503,9 @@ void bind_workflows(py::module_& m) {
                       agg.backend.lane     = gs_sr.backend.lane;
                       agg.backend.mpi_size = gs_sr.backend.mpi_size;
                   }
-                  const auto& psi0 = gs_sr.eigenvectors->host[0];
-                  const double E0  = gs_sr.eigenvalues.front();
-                  require_gs_residual(*gs_sec_view, psi0, E0);
+                  std::vector<Complex> psi0 = gs_sr.eigenvectors->host[0];
+                  double E0 = gs_sr.eigenvalues.front();
+                  ensure_gs_residual(*gs_sec_view, psi0, E0);
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
                   // Source observable handle. Stage 8d: rep-lazy sectors
@@ -2917,9 +2976,9 @@ void bind_workflows(py::module_& m) {
                       agg.backend.lane     = gs_sr.backend.lane;
                       agg.backend.mpi_size = gs_sr.backend.mpi_size;
                   }
-                  const auto& psi0 = gs_sr.eigenvectors->host[0];
-                  const double E0  = gs_sr.eigenvalues.front();
-                  require_gs_residual(*gs_sec_view, psi0, E0);
+                  std::vector<Complex> psi0 = gs_sr.eigenvectors->host[0];
+                  double E0 = gs_sr.eigenvalues.front();
+                  ensure_gs_residual(*gs_sec_view, psi0, E0);
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
                   // Source observable handle (Q-independent, built once).
