@@ -105,7 +105,25 @@ def split_nonabelian(symmetry_or_gens):
             return ("no point-group residue is retained on the symmetry "
                     "(symmetry='auto' or a find_symmetries GeneratorSet "
                     "carry one; pure-abelian input has nothing to project)")
-        return ([list(e) for e in A], [list(p) for p in star])
+        # Dedup the retained residues modulo A. find_symmetries carries the
+        # FULL non-clique content as star_perms (e.g. all 30 elements of the
+        # C2*A coset on a 5x6 torus; 396 on the 6x6 C6v torus). Same-coset
+        # residues act as proportional monomials -- the engine validates and
+        # discards each duplicate, paying the O(dim) monomial build per
+        # element for zero extra reduction (measured 4x total at 30 sites).
+        # One representative per A-coset is the complete input.
+        Aset = {tuple(a) for a in A}
+        residues, covered = [], set(Aset)
+        for p in star:
+            tp = tuple(p)
+            if tp in covered:
+                continue
+            residues.append(list(tp))
+            covered.update(_compose(a, tp) for a in Aset)
+        if not residues:
+            return ("every retained residue lies in the abelian group -- "
+                    "nothing to project beyond the momentum sectors")
+        return ([list(e) for e in A], residues)
 
     # Explicit raw permutation list.
     perms = [tuple(p) for p in (symmetry_or_gens or [])]
