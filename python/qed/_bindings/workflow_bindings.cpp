@@ -497,6 +497,38 @@ struct GsScanResult {
     bool        any_solved = false;
 };
 
+// Residual guard for a cross-irrep ground-state pair (Jul 2026; mirrors
+// little_group_ground_state): the orchestrator returns a BEST-EFFORT pair
+// when the Krylov iteration does not converge, and everything downstream --
+// the scattered weights and the continued fraction -- would silently
+// inherit the garbage. One extra matvec at sector dim converts that into a
+// loud failure.
+template <class SectorView>
+inline void require_gs_residual(SectorView& sec,
+                                const std::vector<Complex>& psi0,
+                                double E0)
+{
+    const std::size_t d = psi0.size();
+    std::vector<Complex> hv(d, Complex(0.0, 0.0));
+    sec.apply(psi0.data(), hv.data(), d);
+    double num = 0.0, den = 0.0;
+    for (std::size_t i = 0; i < d; ++i) {
+        const Complex r = hv[i] - E0 * psi0[i];
+        num += std::norm(r);
+        den += std::norm(psi0[i]);
+    }
+    const double resid = (den > 0.0)
+        ? std::sqrt(num / den)
+        : std::numeric_limits<double>::infinity();
+    if (!(resid < 1e-8)) {
+        throw std::runtime_error(
+            "cross-irrep spectral: ground-state pair failed the residual "
+            "guard (|H psi - E psi|/|psi| = " + std::to_string(resid) +
+            "); the sector Lanczos did not converge. Re-run with more "
+            "iterations / memory.");
+    }
+}
+
 [[nodiscard]] inline GsScanResult find_gs_sector_two_phase(
     ed::core::SectorSetView&              handle,
     const std::vector<std::size_t>&       sector_indices,
@@ -2413,6 +2445,7 @@ void bind_workflows(py::module_& m) {
                   }
                   const auto& psi0 = gs_sr.eigenvectors->host[0];
                   const double E0  = gs_sr.eigenvalues.front();
+                  require_gs_residual(*gs_sec_view, psi0, E0);
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
                   // Source observable handle. Stage 8d: rep-lazy sectors
@@ -2885,6 +2918,7 @@ void bind_workflows(py::module_& m) {
                   }
                   const auto& psi0 = gs_sr.eigenvectors->host[0];
                   const double E0  = gs_sr.eigenvalues.front();
+                  require_gs_residual(*gs_sec_view, psi0, E0);
                   ed::SectorTag gs_src_tag = src_handle.sector_tag(gs_src_idx);
 
                   // Source observable handle (Q-independent, built once).

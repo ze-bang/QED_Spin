@@ -19,9 +19,7 @@
 //      membership match the independent ``compute_orbit_for_state``
 //      reference -- and whose state->orbit lookup round-trips for every
 //      orbit element.
-//   2. ``SectorBasis::adopt(SymmetrySector, |G|)`` reproduces an
-//      identical lookup from an already-materialised sector.
-//   3. ``policy()`` yields a non-owning view with group_norm = 1/|G|
+//   2. ``policy()`` yields a non-owning view with group_norm = 1/|G|
 //      and a sector pointer into the owning object.
 // =============================================================================
 
@@ -189,37 +187,3 @@ TEST_CASE("sector_basis: build(FullSpace) round-trips lookup for every sector (N
     }
 }
 
-TEST_CASE("sector_basis: adopt reproduces build lookup (N=6)",
-          "[symmetry][sector_basis][adopt]")
-{
-    const int N = 6;
-    std::string dir = make_scratch_dir("sector_basis", "adopt_N6");
-    write_zN_translation_fixtures(dir, N);
-
-    SymmetryGroupInfo info;
-    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
-
-    const ed::symmetry::FullSpaceSubspace full(static_cast<std::uint64_t>(N));
-    const ed::symmetry::SpatialProjector  spatial(info);
-    const std::vector<std::uint64_t> reps = enumerate_orbit_reps(info, N);
-    const std::size_t G = info.max_clique.size();
-
-    // Use sector 0 (trivial irrep) for the adopt round-trip.
-    const auto& qn = info.sectors[0].quantum_numbers;
-    const auto& pf = info.sectors[0].phase_factors;
-
-    ed::symmetry::SectorBasis built =
-        ed::symmetry::SectorBasis::build(full, spatial, qn, pf, reps, 0);
-
-    // Snapshot the materialised sector and adopt a copy of it.
-    SymmetrySector copy = built.sector();
-    ed::symmetry::SectorBasis adopted =
-        ed::symmetry::SectorBasis::adopt(std::move(copy), G);
-
-    REQUIRE(adopted.dim() == built.dim());
-    REQUIRE(adopted.group_size() == G);
-    for (std::uint64_t i = 0; i < built.dim(); ++i) {
-        const std::uint64_t rep = built.state_of(i);
-        REQUIRE(adopted.index_of(rep) == built.index_of(rep));
-    }
-}

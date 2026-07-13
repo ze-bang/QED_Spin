@@ -113,7 +113,7 @@ void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op, int N) {
 ed::SectorOperatorSet build_full_sector_set(int N, const SymmetryGroupInfo& info) {
     ed::SectorOperatorSet set;
     std::vector<std::size_t> ids;
-    set.operators = ed::symmetry::build_full_sector_operators(
+    set.operators = ed::symmetry::build_full_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) { add_heisenberg_pbc_terms(op, N); },
         &ids);

@@ -146,7 +146,7 @@ TEST_CASE("sector_set: build_full_sector_operators matches legacy dims + Bethe G
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
     // New path: a flat vector of standalone per-sector operators.
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);
@@ -154,6 +154,7 @@ TEST_CASE("sector_set: build_full_sector_operators matches legacy dims + Bethe G
 
     // (A1) every surviving sector is non-empty and carries its raw irrep id.
     for (const auto& op : ops) {
+        op->basis().ensureHostCsr();  // lazy op: id lives on the materialised sector
         const std::size_t id =
             static_cast<std::size_t>(op->basis().sector().sector_id);
         REQUIRE(id < info.sectors.size());
@@ -184,7 +185,7 @@ TEST_CASE("sector_set: build_fixed_sz_sector_operators tiles half-filling + Beth
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    auto ops = ed::symmetry::build_fixed_sz_sector_operators(
+    auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, n_up, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);
@@ -206,85 +207,6 @@ TEST_CASE("sector_set: build_fixed_sz_sector_operators tiles half-filling + Beth
     for (const auto& op : ops) {
         e0_min = std::min(e0_min, lowest_eigenvalue(*op));
     }
-    REQUIRE(std::abs(e0_min - kE0_N6) < 1e-10);
-}
-
-TEST_CASE("sector_set: make_sector_operator_adopt is Hermitian + recovers Bethe GS (N=6)",
-          "[symmetry][sector_set][adopt][N6]")
-{
-    const int N = 6;
-    std::string dir = make_scratch_dir("sector_set", "adopt_N6");
-    write_zN_translation_fixtures(dir, N);
-
-    SymmetryGroupInfo info;
-    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
-
-    // Host operator: a full-Hilbert Operator carrying the canonical term list
-    // + the symmetry group info. ``make_sector_operator_adopt`` reads its
-    // getNumBits / getSpin / symmetry_info to adopt a materialised sector.
-    auto host = std::make_unique<Operator>(static_cast<std::uint64_t>(N), 0.5f);
-    {
-        const Complex J_real(1.0, 0.0), J_half(0.5, 0.0);
-        for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
-            std::uint64_t j = (i + 1) % N;
-            Operator::TransformData t;
-            t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-            t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-            host->transform_data_.push_back(t);
-            t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-            t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            host->transform_data_.push_back(t);
-            t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-            t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-            host->transform_data_.push_back(t);
-        }
-    }
-    REQUIRE_NOTHROW(host->symmetry_info.loadFromDirectory(dir));
-
-    const ed::symmetry::FullSpaceSubspace full(static_cast<std::uint64_t>(N));
-    const ed::symmetry::SpatialProjector  spatial(info);
-    const std::vector<std::uint64_t> reps =
-        ed::symmetry::enumerate_full_orbit_reps(info,
-                                                static_cast<std::uint64_t>(N));
-    const std::size_t group_size = info.max_clique.size();
-
-    double e0_min = std::numeric_limits<double>::infinity();
-
-    for (std::size_t k = 0; k < info.sectors.size(); ++k) {
-        // Materialise the sector's orbit data via the kept SectorBasis builder
-        // (no symmetry carrier), then exercise the adopt bridge.
-        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
-            full, spatial,
-            info.sectors[k].quantum_numbers,
-            info.sectors[k].phase_factors,
-            reps, /*sector_id=*/k);
-        const std::size_t sd = sb.dim();
-        if (sd == 0) continue;
-
-        SymmetrySector sec = sb.sector();  // copy of the materialised sector
-        auto sec_op = ed::symmetry::make_sector_operator_adopt(
-            *host, std::move(sec), group_size);
-        REQUIRE(sec_op->dim() == sd);
-
-        // Hermiticity probe: <x|H x> must be real for two probe vectors.
-        for (int probe = 0; probe < 2; ++probe) {
-            std::vector<Complex> x(sd);
-            if (probe == 0) {
-                std::fill(x.begin(), x.end(), Complex(1.0, 0.0));
-            } else {
-                x = random_unit_vector(sd, (k + 11) * 60013ULL + 7);
-            }
-            std::vector<Complex> y(sd, Complex(0.0, 0.0));
-            sec_op->apply(x.data(), y.data(), sd);
-            Complex quad(0.0, 0.0);
-            for (std::size_t i = 0; i < sd; ++i) quad += std::conj(x[i]) * y[i];
-            REQUIRE(std::abs(quad.imag()) < 1e-10);
-        }
-
-        e0_min = std::min(e0_min, lowest_eigenvalue(*sec_op));
-    }
-
-    // The adopted sector operators must reproduce the Bethe-ansatz GS.
     REQUIRE(std::abs(e0_min - kE0_N6) < 1e-10);
 }
 

@@ -38,10 +38,9 @@
 //        the shared ``compute_orbit_for_state`` host helper (bit-identical
 //        to the legacy ``computeOrbitData*`` member methods), then builds
 //        the state->orbit lookup index.
-//   * ``SectorBasis::adopt(std::move(sector), group_size)``
-//        Adopts an already-materialised ``SymmetrySector`` (used during
-//        migration so the legacy streaming operators can hand their
-//        per-sector orbit data to the new abstraction without recompute).
+//   (``SectorBasis::adopt`` -- the migration bridge for already-
+//   materialised sectors -- was deleted in Stage 11c-2a with the eager
+//   builders; ``configureRepLazy`` + ``build`` are the two entry points.)
 //
 // Lookup strategy: the shipped path uses the ``SortedUint64Index``
 // fallback (O(log |orbit_total|) per find), exposed through a
@@ -126,28 +125,11 @@ public:
     SectorBasis(SectorBasis&&)                 = default;
     SectorBasis& operator=(SectorBasis&&)      = default;
 
-    // -----------------------------------------------------------------
-    // adopt: take ownership of an already-materialised SymmetrySector.
-    //
-    // Used by the migration shim so a legacy ``StreamingSymmetryOperator``
-    // / ``FixedSzStreamingSymmetryOperator`` can hand off its per-sector
-    // orbit CSR (sectors_[k]) without recomputing it. ``group_size`` is
-    // |G| (== max_clique.size()); it sets the ``group_norm = 1/|G|``
-    // weight the symmetry policy applies per emit.
-    //
-    // The sector's ``basis_states`` must already be orbit-sorted
-    // (``SymBasisState::sortOrbit()`` called) exactly as the legacy
-    // build does -- adopt() rebuilds only the state->orbit lookup index,
-    // not the orbit coefficients.
-    // -----------------------------------------------------------------
-    [[nodiscard]] static SectorBasis
-    adopt(SymmetrySector sector, std::size_t group_size) {
-        SectorBasis sb;
-        sb.sector_      = std::move(sector);
-        sb.group_size_  = group_size;
-        sb.rebuild_lookup_();
-        return sb;
-    }
+    // (Stage 11c-2a: the ``adopt()`` bridge -- take ownership of an
+    // already-materialised SymmetrySector -- was deleted with its last
+    // consumer, the eager sector builders. Every SectorBasis is now
+    // constructed rep-lazy via ``configureRepLazy``, or through
+    // ``build()`` below when a csr_provider materialises on demand.)
 
     // -----------------------------------------------------------------
     // build: enumerate this sector's orbits over ``subspace`` using the

@@ -204,8 +204,8 @@ public:
     /// Replace this operator's canonical AoS term storage with a verbatim
     /// copy of ``src``'s terms, then invalidate the derived SoA / CSR
     /// caches. Provided so that builders which assemble a fresh operator
-    /// from an existing host operator (e.g. the per-sector
-    /// ``make_sector_operator_adopt`` bridge) do not have to reach into
+    /// from an existing host operator (e.g. the per-sector lazy
+    /// builders in ``sector_set.h``) do not have to reach into
     /// the public ``transform_data_`` / ``three_body_data_`` members
     /// directly -- keeping that coupling behind a single intentional API
     /// as the members migrate toward ``protected:``.

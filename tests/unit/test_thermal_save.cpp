@@ -379,7 +379,7 @@ TEST_CASE("ed::thermal persists fixed-Sz symmetry-sector mTPQ snapshots",
 
     SymmetryGroupInfo info;
     info.loadFromDirectory(sym_dir);
-    auto ops = ed::symmetry::build_fixed_sz_sector_operators(
+    auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
         N, 0.5f, int64_t(N / 2), info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);

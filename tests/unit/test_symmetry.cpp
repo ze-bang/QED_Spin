@@ -192,7 +192,7 @@ TEST_CASE("Σ Z_N sector spectra == full spectrum (N=4)",
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         N, 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);
@@ -234,7 +234,7 @@ TEST_CASE("Σ Z_N sector spectra == full spectrum (N=6)",
     SymmetryGroupInfo info;
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         N, 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);

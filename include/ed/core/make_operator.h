@@ -319,9 +319,7 @@ inline const std::string& require_directory(const OperatorSpec& spec) {
 ///
 /// This is additive: ``make_operator`` (which must return a single
 /// ``LinearOperator``) is unchanged; callers that want the collapse-target
-/// multi-sector list opt in by calling this function. The production sector
-/// loop continues to use ``StreamingSymmetryHandle`` (which unconditionally
-/// adopts each legacy sector into a ``SectorOperator``); this entry point is
+/// multi-sector list opt in by calling this function. This entry point is
 /// the orbit-enumeration-free alternative that skips the legacy operator
 /// entirely.
 ///
@@ -452,7 +450,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     // Carrier operator: load the Hamiltonian term list + the symmetry group
     // metadata exactly once. The terms are copied verbatim into every sector
     // operator by the term-builder below (identical to the proven
-    // ``make_sector_operator_adopt`` term-copy contract). Structural
+    // ``copyTermsFrom`` term-copy contract). Structural
     // cleanup (Jul 2026): callers that already parsed the directory for
     // symmetry DETECTION (the binding probes) pass their loaded carrier in
     // -- one parse per binding call instead of two.

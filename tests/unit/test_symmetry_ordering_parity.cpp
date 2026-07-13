@@ -143,13 +143,14 @@ TEST_CASE("symmetry ordering parity: rep-set union matches enumerate_full_orbit_
     // Deduplicated union of every surviving sector's orbit_rep. Each orbit
     // survives in at least one sector (the k=0 symmetric combination has
     // nonzero norm), so the union must be the full canonical rep set.
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms_new(op, N, 1.0);
         });
     std::vector<std::uint64_t> union_reps;
     for (const auto& op : ops) {
+        op->basis().ensureHostCsr();
         for (const auto& bs : op->basis().sector().basis_states) {
             union_reps.push_back(bs.orbit_rep);
         }
@@ -179,7 +180,7 @@ TEST_CASE("symmetry ordering parity: build_full per-sector basis is canonically 
         ed::symmetry::enumerate_full_orbit_reps(
             info, static_cast<std::uint64_t>(N));
 
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms_new(op, N, 1.0);
@@ -194,6 +195,7 @@ TEST_CASE("symmetry ordering parity: build_full per-sector basis is canonically 
     // convention-free guarantees the HDF5 orbit caches + cross-sector
     // observables depend on.
     for (const auto& op : ops) {
+        op->basis().ensureHostCsr();
         const SymmetrySector& sec = op->basis().sector();
         REQUIRE_FALSE(sec.basis_states.empty());
 

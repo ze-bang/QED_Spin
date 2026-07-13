@@ -585,7 +585,7 @@ void spatial_trial(ThermalOptions::Method m, uint64_t seed,
     SymmetryGroupInfo info;
     info.loadFromDirectory(sym_root);
 
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         N_SITES, 0.5f, info,
         [](ed::symmetry::SectorOperator& op) {
             add_heisen_pbc_terms(op, N_SITES, J);
@@ -677,7 +677,7 @@ void sz_spatial_trial(ThermalOptions::Method m, uint64_t seed,
     std::vector<uint64_t>          all_dims;
 
     for (int64_t n_up = 0; n_up <= static_cast<int64_t>(N_SITES); ++n_up) {
-        auto ops = ed::symmetry::build_fixed_sz_sector_operators(
+        auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
             N_SITES, 0.5f, n_up, info,
             [](ed::symmetry::SectorOperator& op) {
                 add_heisen_pbc_terms(op, N_SITES, J);
