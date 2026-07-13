@@ -79,11 +79,13 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # CPU + MPI smoke lane: build the distributed tree (WITH_MPI=ON) and run a
-  # 2-rank mpiexec smoke on the CLI binary. Complements the full ``linux-mpi``
-  # ctest lane below (this one exercises the ed_distributed_main entry point
-  # itself). NOTE: this job was originally also named ``linux-mpi`` -- the
-  # duplicate YAML key made the whole workflow unparseable (every CI run from
+  # CPU + MPI smoke lane: build WITH_MPI=ON and run a fast 2-rank mpiexec
+  # smoke on the PRODUCTION MPI matvec machinery (CommPlan + MpiMatVecImpl --
+  # the MemSpace=DistributedHost lane). Stage 11d retired the
+  # ed_distributed_main launcher this job used to exercise; the full
+  # ``linux-mpi`` ctest lane below runs the complete mpi-labeled suite.
+  # NOTE: this job was originally also named ``linux-mpi`` -- the duplicate
+  # YAML key made the whole workflow unparseable (every CI run from
   # 2026-06-29 onward failed with zero jobs). Renamed in the Jul-2026 debt
   # cleanup.
   # ---------------------------------------------------------------------------
@@ -113,18 +115,17 @@ jobs:
         run: |
           cmake -S . -B build-mpi -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DBLAS_PROFILE=OPENBLAS \
-            -DWITH_MPI=ON -DWITH_CUDA=OFF -DBUILD_ED_TESTS=OFF
+            -DWITH_MPI=ON -DWITH_CUDA=OFF -DBUILD_ED_TESTS=ON
 
-      - name: Build ed_distributed_main
-        run: cmake --build build-mpi --target ed_distributed_main -- -j$(nproc)
-
-      - name: MPI smoke (mpiexec -n 2, built-in Heisenberg chain)
+      - name: Build the MPI matvec smoke tests
         run: |
-          set -o pipefail
-          mpiexec --oversubscribe -n 2 ./build-mpi/ed_distributed_main \
-            --mode lanczos --N 12 --J 1 --periodic 1 --exct 1 --max-iter 100 \
-            | tee mpi_smoke.out
-          grep -qE "eig\[0\]=" mpi_smoke.out
+          cmake --build build-mpi --target test_comm_plan -- -j$(nproc)
+          cmake --build build-mpi --target test_mpi_matvec_impl -- -j$(nproc)
+
+      - name: MPI smoke (mpiexec np 1/2/4, CommPlan + MpiMatVecImpl)
+        run: |
+          cd build-mpi
+          ctest -R "test_comm_plan|test_mpi_matvec_impl" --output-on-failure
 
   # ---------------------------------------------------------------------------
   # Python lane: install the wheel via scikit-build-core (which builds the
@@ -540,7 +541,7 @@ jobs:
   #
   # GitHub-hosted runners have no NVIDIA GPU, so the ``linux-cuda-build``
   # lane above only catches header / linker breakage. To actually execute
-  # the ``ed_solvers_gpu`` + ``ed_distributed_gpu`` test suites, point this
+  # the ``ed_solvers_gpu`` (+ ``ed_multi_gpu`` NCCL) test suites, point this
   # lane at a runner that has a CUDA-capable device. Three options:
   #
   #   1. GitHub-hosted GPU runners (public beta -> GA 2024-2025).
