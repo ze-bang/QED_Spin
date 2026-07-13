@@ -106,10 +106,12 @@ public:
     // -----------------------------------------------------------------
 
     /// Fixed-Sz lane: build the sorted basis + Lin (1990) O(1) index table
-    /// for the ``n_up`` magnetisation sector.
+    /// for the ``n_up`` magnetisation sector -- or the tableless combinadic
+    /// twin when the list would bust the byte budget (dimension-aware
+    /// default; env/planner overrides win, see basis_policy_hook.h).
     SubspaceOperator(std::uint64_t n_bits, float spin_l, std::int64_t n_up)
         : Operator(n_bits, spin_l),
-          producer_(ed::planner::prefer_tableless_fixed_sz()
+          producer_(ed::planner::prefer_tableless_fixed_sz(n_bits, n_up)
                         ? Producer::build_tableless(n_bits, n_up)
                         : Producer::build(n_bits, n_up)) {
         std::cout << "Fixed Sz basis: n_bits=" << n_bits

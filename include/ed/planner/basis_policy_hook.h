@@ -19,7 +19,9 @@
 // may be built off the orchestrator thread.
 // =============================================================================
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 
 namespace ed::planner {
@@ -66,6 +68,48 @@ private:
         if (v[0] == '0' && v[1] == '\0') return false;
     }
     return basis_repr() == static_cast<int>(BasisRepr::Tableless);
+}
+
+/// Byte budget for the materialized fixed-Sz basis list (the dimension-aware
+/// default below). ED_FIXED_SZ_TABLE_BUDGET_GIB overrides; default 16 GiB
+/// keeps every N <= 32 workload on the O(1)-lookup materialized path
+/// (C(32,16) x 8 B = 4.8 GB -- the CPU no-sym lane is 6.6x faster there)
+/// while N >= 35 half-filling flips to tableless automatically instead of
+/// silently allocating 72.6 GB the consumer may never read.
+[[nodiscard]] inline double fixed_sz_table_budget_bytes() noexcept {
+    double gib = 16.0;
+    if (const char* v = std::getenv("ED_FIXED_SZ_TABLE_BUDGET_GIB")) {
+        const double parsed = std::atof(v);
+        if (parsed > 0.0) gib = parsed;
+    }
+    return gib * 1073741824.0;
+}
+
+/// Dimension-aware resolution: env force, then the planner override, then a
+/// BUDGET default -- materialize iff the basis list (C(n_bits, n_up) x 8 B)
+/// fits ED_FIXED_SZ_TABLE_BUDGET_GIB. This replaces the legacy
+/// always-materialize default that eagerly built the 72.6 GB list at 36-site
+/// half filling even for consumers that only read the term list.
+[[nodiscard]] inline bool
+prefer_tableless_fixed_sz(std::uint64_t n_bits, std::int64_t n_up) noexcept {
+    if (const char* v = std::getenv("ED_FIXED_SZ_TABLELESS")) {
+        if (v[0] == '1' && v[1] == '\0') return true;
+        if (v[0] == '0' && v[1] == '\0') return false;
+    }
+    const int r = basis_repr();
+    if (r != static_cast<int>(BasisRepr::Default))
+        return r == static_cast<int>(BasisRepr::Tableless);
+    if (n_up < 0) return false;
+    long double dim = 1.0L;
+    const std::int64_t kk =
+        std::min<std::int64_t>(n_up, static_cast<std::int64_t>(n_bits) - n_up);
+    if (kk < 0) return false;
+    for (std::int64_t i = 0; i < kk; ++i) {
+        dim *= static_cast<long double>(static_cast<std::int64_t>(n_bits) - i);
+        dim /= static_cast<long double>(i + 1);
+    }
+    return dim * 8.0L
+        > static_cast<long double>(fixed_sz_table_budget_bytes());
 }
 
 }  // namespace ed::planner
