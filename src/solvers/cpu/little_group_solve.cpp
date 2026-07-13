@@ -824,24 +824,109 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 }
 
 // Lowest-k: dense on small blocks, Lanczos otherwise.
+// Stage-9f verification fix (2026-07-12). The previous body delegated to the
+// legacy ``::lanczos`` wrapper with an iteration budget of ``max_it = 2k+40``
+// -- far too small to converge k eigenvalues on near-degenerate little-group
+// blocks -- and no residual guard, so partially-converged and ghost Ritz
+// values (K=1 local-ring reorth) were returned as eigenvalues (caught at 4x4
+// J1-J2, J2=0.15, n_up=8, k=10: ghost -8.461485 beside the true -8.461508
+// doublet, spurious -8.44734 between genuine levels).  Replaced with a
+// direct kernel call: dense values-only eigensolve (mirroring
+// ``solve_block_full``) below a crossover, and above it the kernel Lanczos
+// with a LocalDGKS3 ring of 8, no stored basis, a real iteration budget,
+// and a k-lowest Ritz stationarity gate.
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
                    int dense_max_dim) {
     const std::uint64_t nb = mv.dim();
     if (nb == 0) return {};
-    const std::uint64_t k = std::max<std::uint64_t>(
-        1u, std::min<std::uint64_t>(static_cast<std::uint64_t>(want), nb));
-    std::vector<double> ev;
-    if (nb <= static_cast<std::uint64_t>(dense_max_dim) || nb <= 2) {
-        ::full_diagonalization(mv, nb, k, ev, /*dir=*/"", /*eigvecs=*/false);
-    } else {
-        const std::uint64_t max_it = std::min<std::uint64_t>(
-            nb, std::max<std::uint64_t>(2u * k + 40u, k + 1u));
-        ::lanczos(mv, nb, max_it, k, /*tol=*/1e-12, ev, "", false);
+    const std::size_t k = static_cast<std::size_t>(std::max<std::uint64_t>(
+        1u, std::min<std::uint64_t>(static_cast<std::uint64_t>(want), nb)));
+    // Dense crossover: below ~64k the Lanczos iteration count approaches the
+    // block dimension and even ring-reorthogonalised recurrences shed ghost
+    // copies near subspace exhaustion; a dense values-only eigensolve at
+    // these sizes is exact and effectively free.  Above it, the kernel
+    // Lanczos exits via the k-lowest Ritz gate long before exhaustion.
+    const std::uint64_t dense_floor = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(dense_max_dim),
+        64u * static_cast<std::uint64_t>(k));
+    if (nb <= dense_floor || nb <= 2) {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es;
+        es.compute(materialize(mv), Eigen::EigenvaluesOnly);
+        const auto& w = es.eigenvalues();          // ascending
+        const std::size_t m =
+            std::min<std::size_t>(k, static_cast<std::size_t>(w.size()));
+        return std::vector<double>(w.data(), w.data() + m);
     }
-    std::sort(ev.begin(), ev.end());
-    ev.resize(std::min<std::size_t>(ev.size(), static_cast<std::size_t>(k)));
-    return ev;
+    ed::matvec::CpuBackend be;
+    std::vector<Complex> v0(nb);
+    std::mt19937_64 gen(0x51ED0B70ULL);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    for (auto& v : v0) v = Complex(nd(gen), nd(gen));
+
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
+        nb, std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u)));
+    kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
+    kopts.local_ring_size = 8;
+    kopts.keep_basis      = false;
+    kopts.dim_cap         = nb;
+    // k-lowest Ritz early exit: stop once EVERY requested eigenvalue is
+    // stationary between checks (the shared smallest-only predicate would
+    // strand the upper levels of the window).
+    {
+        auto prev = std::make_shared<std::vector<double>>();
+        const std::size_t kk = k;
+        kopts.convergence_check =
+            [prev, kk](const std::vector<double>& alpha,
+                       const std::vector<double>& beta) -> bool {
+                const int m = static_cast<int>(alpha.size());
+                if (static_cast<std::size_t>(m) < kk + 2) return false;
+                Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
+                for (int i = 0; i < m; ++i)
+                    T(i, i) = alpha[static_cast<std::size_t>(i)];
+                for (int i = 1; i < m; ++i) {
+                    const double b = beta[static_cast<std::size_t>(i)];
+                    T(i, i - 1) = b;
+                    T(i - 1, i) = b;
+                }
+                Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
+                es.compute(T, Eigen::EigenvaluesOnly);
+                if (es.info() != Eigen::Success) return false;
+                const std::size_t nk =
+                    std::min<std::size_t>(kk, static_cast<std::size_t>(m));
+                std::vector<double> cur(es.eigenvalues().data(),
+                                        es.eigenvalues().data() + nk);
+                bool conv = prev->size() == cur.size();
+                for (std::size_t i = 0; conv && i < cur.size(); ++i) {
+                    const double den = std::max(std::abs(cur[i]), 1e-300);
+                    conv = std::abs(cur[i] - (*prev)[i]) / den < 1e-11;
+                }
+                *prev = std::move(cur);
+                return conv;
+            };
+        kopts.convergence_check_interval = 10;
+    }
+    auto apply_H = [&mv](const Complex* in, Complex* out, std::size_t nn) {
+        mv.apply(in, out, nn);
+    };
+    auto kres = ed::krylov::lanczos_kernel(be, apply_H,
+                                           static_cast<std::size_t>(nb),
+                                           v0.data(), kopts);
+    const std::size_t m = kres.alpha.size();
+    if (m == 0) return {};
+    std::vector<double> diag = kres.alpha;
+    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+    std::vector<double> zdummy(1, 0.0);
+    const lapack_int info = LAPACKE_dstevd(
+        LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(m),
+        diag.data(), off.data(), zdummy.data(), 1);
+    if (info != 0)
+        throw std::runtime_error("little_group: lowest-k tridiag eigensolve "
+                                 "failed (dstevd info != 0)");
+    diag.resize(std::min<std::size_t>(m, k));
+    return diag;
 }
 
 // The star walk shared by every consumer. ``solve_block(mv, plain)`` returns
