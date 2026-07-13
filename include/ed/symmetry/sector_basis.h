@@ -13,24 +13,12 @@
 // A SectorBasis is the symmetry analogue of a Subspace: it OWNS the orbit
 // data (one ``SymmetrySector`` plus the state->orbit lookup index) and
 // hands out the non-owning POD ``SymmetryBasisPolicy`` that the unified
-// matvec kernels (``ed::matvec::kernel::apply_terms`` and its GPU twin)
-// consume. It is the single owning artefact the future
-// ``Operator<SymmetryBasisPolicy, MemSpace>`` holds, replacing the
-// per-sector state that ``StreamingSymmetryOperator`` /
-// ``FixedSzStreamingSymmetryOperator`` currently bake into their class
-// identity.
-//
-// Why this exists (operator-collapse refactor, Jun 2026):
-// ------------------------------------------------------
-// The four legacy operator classes (Operator / FixedSzOperator /
-// StreamingSymmetryOperator / FixedSzStreamingSymmetryOperator) differ
-// ONLY in their basis. The basis axis is already expressed as a POD
-// policy + an owning producer for the trivial cases (Subspace). The
-// symmetry case lacked a standalone owning producer -- the orbit data
-// lived inside the operator and was reachable only through the nested
-// ``SectorView``. SectorBasis lifts that orbit data into a free-standing,
-// operator-independent value so a single operator template can hold any
-// of the three host policies uniformly.
+// matvec kernels consume. It is the owning artefact behind
+// ``SubspaceOperator<SymmetryBasisPolicy>`` (= ``SectorOperator``) -- the
+// legacy monolithic streaming operators that baked per-sector state into
+// their class identity are gone (operator-collapse, Jun 2026): the four
+// historical operator classes differed ONLY in their basis, and SectorBasis
+// is the symmetry lane's standalone owning producer of that basis.
 //
 // Construction routes:
 //   * ``SectorBasis::build(subspace, projector, sector_meta)``

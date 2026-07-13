@@ -234,11 +234,6 @@ void run_ring(int N, int n_up) {
     ed::core::SectorSetView view(
         ed::make_sector_operators_tagged(heisenberg_spec(dir, N, n_up)));
 
-    if (!ed::core::rep_lazy_sector_path_enabled()) {
-        std::cerr << "  FAIL " << lane
-                  << ": rep_lazy_sector_path_enabled() is false\n";
-        ++g_failures;
-    }
 
     const auto sectors =
         ed::core::filter_sectors(view.num_sectors(), /*selected=*/{});

@@ -67,7 +67,7 @@
 // legacy `ed::exact_diagonalization(directory, method, params, ...)` entry
 // from the now-deleted <ed/core/dispatch.h>.
 #include <ed/core/make_operator.h>
-#include <ed/core/sector_loop.h>          // StreamingSymmetryHandle (SOTA)
+#include <ed/core/sector_loop.h>          // filter_sectors / resolve_target_sector
 #include <ed/orchestrator.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/dssf/cross_sector_observable.h>

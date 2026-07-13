@@ -37,17 +37,19 @@
 // materialise:
 //
 //   * plain `Operator`                       (default lane)
-//   * `FixedSzOperator`                      (`fixed_sz` set)
-//   * `StreamingSymmetryOperator`            (`streaming_symmetry = true`)
-//   * `FixedSzStreamingSymmetryOperator`     (streaming_symmetry + fixed_sz)
+//   * `FixedSzOperator`                      (`fixed_sz` set; alias of
+//                                             `SubspaceOperator<FixedSzBasisPolicy>`)
+//   * `ed::symmetry::SectorOperator`         (`streaming_symmetry = true`;
+//                                             one sector from the tagged
+//                                             factory -- the legacy monolithic
+//                                             streaming operators are gone)
 //   * `ed::distributed::DistributedOperator` (distributed = true)
 //   * `ed::distributed::DistributedSymmetryOperator`
 //                                            (distributed + streaming_symmetry
 //                                             + sector_index)
 //
-// Both `Operator` and the distributed operators derive from
-// `ed::LinearOperator`, so a single owning pointer covers every case
-// without losing dispatchability.
+// Every case derives from `ed::LinearOperator`, so a single owning
+// pointer covers the matrix without losing dispatchability.
 // =============================================================================
 
 #include <algorithm>

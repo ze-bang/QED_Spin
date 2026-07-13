@@ -114,20 +114,6 @@ make_cpu_rep_symmetry_backend(const ed::symmetry::RepSectorData& rd)
         "CpuRepSymmetry(dim=" + std::to_string(dim) + ")");
 }
 
-// ---------------------------------------------------------------------------
-// P6 (operator-collapse): extern-template declaration for the Symmetry host
-// cell over the canonical term-view shape. The explicit instantiation
-// DEFINITION lives in src/matvec/cpu_backend_instantiations.cpp (ed_matvec);
-// every consumer links ed_matvec transitively. Kept here -- rather than in
-// matvec_backend.h -- because SymmetryBasisPolicy drags in the heavyweight
-// streaming-symmetry chain that the matvec_backend.h leaf header avoids.
-// ``DiagOneBody`` ... ``ThreeBodyTerm`` are visible via term_storage.h, which
-// matvec_backend.h now includes.
-// ---------------------------------------------------------------------------
-extern template class CpuMatVecBackend<basis::SymmetryBasisPolicy,
-                                       DiagOneBody, OffDiagOneBody, DiagTwoBody,
-                                       MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
-
 // On-the-fly representative host cell (Jun 2026). Definition in
 // src/matvec/cpu_backend_instantiations.cpp.
 extern template class CpuMatVecBackend<basis::RepSymmetryBasisPolicy,
