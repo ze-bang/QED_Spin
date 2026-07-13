@@ -616,10 +616,8 @@ generic version is what the streaming kernel now calls.
   `Operator` and file formats; hard to split without a large refactor.
 - **`mTPQ_CUDA` vs `mTPQ_GPU`**: two parse tokens → same *family*; prefer
   documenting one preferred string (`mTPQ_GPU` matches other `*_GPU` methods).
-- **`ed_distributed` vs `mTPQ_MPI`**: both use MPI, **different** algorithms
-  (slab matvec / Taylor cTPQ vs microcanonical mTPQ MPI). Name similarity is
-  confusing; this document + README TPQ section disambiguate.
-- **`multi_gpu_stub.h`**: placeholder for future NCCL / multi-GPU work.
+- *(the `ed_distributed`-vs-`mTPQ_MPI` naming confusion resolved itself in
+  Stage 11d: the distributed family is gone and MPI means one thing.)*
 
 ### 7.3 User-configuration redundancy
 

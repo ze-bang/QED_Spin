@@ -106,10 +106,11 @@ CLI:
 ./build/ED /path/to/heisenberg_dir --method=LANCZOS --eigenvalues=3 --thermo
 ```
 
-The backend (CPU / single-GPU / MPI / MPI+GPU) is auto-selected from
-the operator geometry and the build flags; pin manually with
-`device='cpu' | 'gpu' | 'mpi' | 'mpi_gpu'` in Python or
-`opts.backend_constraints` in C++.
+The backend (CPU / single-GPU / MPI under `mpirun`) is auto-selected
+from the operator geometry and the build flags; pin manually with
+`device='cpu' | 'gpu'` in Python or `opts.backend_constraints` in C++.
+For MPI, launch `ED` under `mpirun` — across-sector distribution
+(SectorDistributor) engages automatically for symmetry workloads.
 
 ---
 
@@ -276,7 +277,7 @@ Reproducer:
 ```bash
 python3 benchmarks/bench_all_backends.py \
         --build-dir build --sizes 12 14 16 18 \
-        --threads $(nproc) --mpi-ranks 1 2 4 \
+        --threads $(nproc) \
         --output bench_all_backends.json
 ```
 
@@ -295,7 +296,7 @@ QED/
 │   ├── thermal/               # FTLM / LTLM / mTPQ / cTPQ / KPM-DOS kernels
 │   ├── observables/           # expectation, static + dynamical correlator primitives
 │   ├── dssf/                  # cross-sector observables (Sz-resolved + orbit-basis)
-│   ├── distributed/           # MPI lane (operator + Lanczos + FTLM + TPQ)
+│   ├── parallel/              # NUMA + thread budget + NCCL multi-GPU comm
 │   ├── gpu/                   # CUDA lane (operator + solvers)
 │   ├── input/                 # ed_input lattice + Hamiltonian builder
 │   └── orchestrator.h         # the three workflow verbs
@@ -314,7 +315,7 @@ QED/
 ## Status
 
 The codebase is production-ready for serial, single-node multi-threaded,
-and multi-rank / multi-GPU distributed use. The May 2026 surface
+GPU, and multi-rank (across-sector MPI) use. The May 2026 surface
 collapse retired the legacy `auto_pilot` / `ed_wrapper` / `dispatch`
 families; **new code targets the three orchestrator verbs**
 (`ed::workflows::{solve, thermal, spectral}`) and their Python

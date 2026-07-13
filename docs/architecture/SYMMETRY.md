@@ -15,19 +15,15 @@
 > (~600 MB at N=32), regenerating the group action + projection phase
 > arithmetically inside the matvec.
 >
-> **The matvec path is chosen by backend AND memory regime** (the rep
-> kernel recomputes `rb = min_g g(s)` + the projection phase per connected
-> state — an O(|G|) cost that makes it ~100x slower *per matvec* than the
-> precomputed orbit-CSR walk when the CSR fits):
->
-> | Backend | CSR fits (eager regime) | CSR too big (lazy regime, e.g. N=32) |
-> |---------|-------------------------|--------------------------------------|
-> | **CPU** | precomputed orbit-CSR walk (fast) | on-the-fly rep SpMV (memory-light) |
-> | **GPU** | on-the-fly rep SpMV (skips CSR build + upload; faster) | on-the-fly rep SpMV |
->
-> The regime is decided at generation (`lazy_sectors_enabled()`, est. orbit
-> footprint vs `ED_SYM_LAZY_SECTORS_BYTES_MAX`, default 4 GiB) and the
-> `sector_loop` routes the per-sector operator accordingly.
+> **ONE matvec representation (Stage 11c, Jul 2026):** the rep kernel is
+> the only path on both backends. Its per-SpMV group-action recompute is
+> amortised by the budget-gated **reduced-CSR** sub-mode (default): the
+> reduced sector matrix is assembled ONCE from `index_and_projection`
+> (O(|G|·nnz), parallel over rows) and every subsequent matvec is a plain
+> SpMV; over-budget sectors (`ED_SYM_SECTOR_CSR_BUDGET_GIB`, default 8)
+> fall back to the CSR-free rep walk automatically. The legacy per-sector
+> orbit-CSR lane and the eager/lazy construction fork were deleted —
+> construction is always lazy rep-first.
 >
 > **When symmetry helps (important).** Spatial-symmetry decomposition is a
 > MEMORY tool and a FULL-SPECTRUM tool — it does **not** speed up an
@@ -59,20 +55,17 @@
 >   — the host rep kernel mirroring the GPU `apply_terms_rep_symmetry_scatter`.
 > * `make_cpu_rep_symmetry_backend` in
 >   [`include/ed/matvec/symmetry_matvec_backend.h`](../../include/ed/matvec/symmetry_matvec_backend.h).
-> * `FixedSzStreamingSymmetryOperator::lazy_sectors_enabled()` — the regime
->   accessor the `sector_loop` reads to route CSR-vs-rep.
->
-> **Env knobs.**
+> **Env knobs.** (Full inventory: `include/ed/symmetry/env_gates.h` /
+> `qed.debug_env()`.)
 >
 > | Env var        | Default | Effect                                            |
 > |----------------|---------|---------------------------------------------------|
-> | `ED_SYM_LAZY_SECTORS=1/0` | (auto) | Force the lazy (rep) / eager (CSR) regime. |
-> | `ED_SYM_REP=0` | (on)    | Keep the CPU on the orbit-CSR walk even in the lazy regime (bisection). |
-> | `ED_GPU_SYMMETRY_REP=0` | (on) | Restore the GPU orbit-CSR mirror. |
+> | `ED_SYM_REDUCED_CSR=1/0` | (auto: on) | Force / disable the reduced-CSR sub-mode. |
+> | `ED_SYM_SECTOR_CSR_BUDGET_GIB` | 8 | Per-sector reduced-CSR memory budget. |
 >
-> Equivalence is verified bit-for-bit against the orbit-CSR reference in
+> Equivalence between the two rep sub-modes is pinned in
 > [`tests/unit/test_rep_symmetry_backend.cpp`](../../tests/unit/test_rep_symmetry_backend.cpp)
-> (rep matvec == CSR matvec to ~1e-11 in every sector); the streaming
+> and `tests/integration/test_symmetry_matvec.py`; the streaming
 > symmetry / workflow / smoke pytest suites pass against the rebuilt
 > `qed._core`.
 >
@@ -96,8 +89,8 @@
 > widening) and `QED_NLCE/scripts/benchmark_pipelines.py --symmetry_ab`.
 >
 > *Note on the orbit-CSR HDF5 cache:* `saveOrbitBasisHDF5` /
-> `loadOrbitBasisHDF5` persist the **legacy** orbit CSR and are only
-> relevant to the `ED_SYM_REP=0` fallback. The rep path deliberately does
+> `loadOrbitBasisHDF5` persist the **legacy** orbit CSR (materialised
+> on demand for orbit-data consumers). The rep path deliberately does
 > not materialise that structure; cross-cluster reuse in NLCE is provided
 > at the coarser, more effective granularity of the eigenvalue cache
 > (whole spectrum keyed by topology+options) plus the in-process spatial-
@@ -138,14 +131,14 @@
 >   matrix **once** and reuse it for every `apply()` (O(1) SpMV per matvec). This
 >   is the build-once orbit-walk CSR (`include/ed/matvec/reduced_symmetry_csr.h`,
 >   OpenMP-parallel build + SpMV); ~5× over the rep walk at 18 sites.
-> * **`Rep`** (`ED_SYM_REDUCED_CSR=0`) — regenerate the projection arithmetically
->   each matvec; CSR-free, lowest memory, the at-scale fallback.
-> * **`OrbitMaterialized`** (`ED_SYM_REP=0`) — eager per-sector orbit-CSR.
+> * **`RepStream`** (`ED_SYM_REDUCED_CSR=0`) — regenerate the projection
+>   arithmetically each matvec; CSR-free, lowest memory, the at-scale
+>   fallback (also taken automatically for over-budget sectors).
 >
-> All three are numerically identical; the choice is memory-vs-speed only. The
-> distributed sector operator (`DistributedSymmetryOperator`) builds its
-> rank-local matrix with the same orbit-walk (linear, OpenMP-parallel) — see
-> [`SCALING.md`](SCALING.md).
+> (Stage 11c-2b: the third strategy — `OrbitMaterialized`, the eager
+> per-sector orbit-CSR under `ED_SYM_REP=0` — was deleted; the rep policy
+> is the ONE representation.) Both sub-modes are numerically identical;
+> the choice is memory-vs-speed only.
 
 > **Update (2026-05-26): Orthogonal symmetry composition lands.**
 >
@@ -172,10 +165,9 @@
 >   without further surgery on the streaming-symmetry operator.
 > * [`include/ed/symmetry/projector_chain.h`](../../include/ed/symmetry/projector_chain.h)
 >   — the templated `compute_orbit_for_state<Subspace>(...)` helper
->   that is now the single source of truth behind
->   `StreamingSymmetryOperator::computeOrbitData` and
->   `FixedSzStreamingSymmetryOperator::computeOrbitDataFixedSz` (both
->   delegate; output bit-identical, see
+>   that is the single source of truth behind every orbit expansion
+>   (`SectorBasis::build`; output bit-identical to the legacy operators'
+>   member methods, see
 >   [`tests/unit/test_projector_chain.cpp`](../../tests/unit/test_projector_chain.cpp)).
 >
 > Why this matters: layering a new symmetry axis (spin-flip Z_2,
@@ -244,11 +236,10 @@
 >        T = 0.5, 2.0, and 100 in
 >        `python/tests/test_streaming_symmetry_sota.py::test_cross_irrep_finite_T_spectral_*`.
 >
-> Helper: `ed::core::StreamingSymmetryHandle` +
-> `ed::core::filter_sectors` (in
-> `include/ed/core/sector_loop.h`) is the single source of truth
-> for every streaming-symmetry sector loop in the codebase (CLI,
-> Pybind11 bindings, in-process helpers).
+> Helper: `ed::core::SectorSetView` + `ed::core::filter_sectors` (in
+> `include/ed/core/sector_loop.h` / `make_operator.h`) is the single
+> source of truth for every streaming-symmetry sector loop in the
+> codebase (CLI, Pybind11 bindings, in-process helpers).
 
 > **Earlier update (2026-05-23):** The minimalist ED refactor
 > (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) consolidated every
@@ -256,10 +247,10 @@
 > base. The Phase-2 `SquareOperator<MS>` / `RectangularOperator<MS>`
 > wrappers and runtime `BasisPolicy<MS>` hierarchy were retired
 > after the dead-scaffolding sweep -- zero production consumers had
-> migrated. The streaming-symmetry path is still its own class
-> (`StreamingSymmetryOperator`, `FixedSzStreamingSymmetryOperator`).
-> The math below is unchanged; only the class mapping has been
-> simplified.
+> migrated. The symmetry lane is `SubspaceOperator<SymmetryBasisPolicy>`
+> (= `SectorOperator`), one per sector from the tagged factory (the
+> monolithic streaming operator classes are gone). The math below is
+> unchanged; only the class mapping has been simplified.
 
 **Audit date:** 2026-05-25. **Status:** Diagonalization, finite-T,
 and DSSF + Sz/spatial-symmetry are SOTA across all three
@@ -318,27 +309,23 @@ codes (HPhi, EDLib, QuSpin, Pomerol). It complements
   table, and accumulate with `\sum_{h: h(s')=r_\beta} \chi_k(h)` and the norm
   factors. This collapses the reference's `|G|`-fold orbit walk (with the
   `1/|G|` weight) into the single-representative term, matching the CPU
-  `applySymmetrized` reference bit-for-bit (`test_rep_symmetry_gpu`). It is the
-  resident N=32 Sz+Symm path — see `ED_GPU_SYMMETRY_REP` in
-  `SCALING.md` (default on; `=0` reverts to the orbit-CSR mirror). Code:
+  `applySymmetrized` reference bit-for-bit (`test_rep_symmetry_gpu`). It is
+  THE device symmetry matvec (the orbit-CSR mirror and its
+  `ED_GPU_SYMMETRY_REP=0` escape were deleted in Stage 11c-2b). Code:
   `DeviceRepSymmetryBasisPolicy` (`include/ed/matvec/device_basis_policy.cuh`),
   `apply_terms_rep_symmetry_scatter` (`include/ed/matvec/term_kernels_gpu.cuh`),
   `make_sector_matvec_gpu_rep` (`src/symmetry/streaming_symmetry_gpu_mirror.cu`).
-- **Host sector loop — CSR-free lazy sector (default, same gate).** The device
-  win above is matched on the host: with `ED_GPU_SYMMETRY_REP` on,
-  `StreamingSymmetryHandle::sector(k)` returns a *lazy* `SectorOperator`
-  (`make_rep_sector_operator_lazy`) that knows its `dim` up-front (from the
-  Pass 1.5 `getSectorDimension`, no orbit walk) and **defers the per-sector
-  host orbit CSR**. `bind_cuda()` builds the CSR-free `RepSectorData` on demand
-  via `FixedSzStreamingSymmetryOperator::getRepSectorData` (reps + `1/norm` +
-  characters + flattened permutations, with the per-rep orbit expansion run
-  transiently and discarded), so a GPU run **never materializes the
-  ~24 GiB/sector orbit CSR** (`orbit_elements`/`orbit_coefficients` +
-  `SortedUint64Index` reverse lookup). A CPU `apply` lazily materializes that
-  CSR (`getSector(k)` → `SectorBasis::adopt`) only as a fallback — so CPU-only
-  runs stay correct. Pinned by `test_rep_lazy_sector_loop` (GPU rep matvec ==
-  CPU `apply`; host-CSR-never-materialized invariant asserted on the GPU path).
-  `=0` reverts to the eager `make_sector_operator_adopt` + orbit-CSR mirror.
+- **Host sector loop — CSR-free lazy sector (the only construction lane
+  since Stage 11c-1).** Every sector from the tagged factory is a lazy
+  `SectorOperator` that knows its `dim` up-front (Pass 1.5
+  `getSectorDimension`, no orbit walk) and **never materializes the
+  ~24 GiB/sector orbit CSR for the matvec** on either device: `bind_cuda()`
+  and the CPU `apply` both build the CSR-free `RepSectorData` on demand
+  (reps + `1/norm` + characters + flattened permutations). The host orbit
+  CSR is materialised only on demand for orbit-DATA consumers
+  (`ensureHostCsr`: dense assembly decline path, cross-sector observables).
+  Pinned by `test_rep_lazy_sector_loop` (GPU rep matvec == CPU apply;
+  host-CSR-stays-absent invariant asserted on BOTH paths).
 
 ---
 
@@ -637,9 +624,8 @@ is computed in three steps:
    `include/ed/dssf/cross_sector_orbit_observable.h` and walks
    the source orbit, scatters via the user-supplied
    `TransformData` terms, then projects through the destination
-   sector's orbit coefficients
-   (`StreamingSymmetryOperator::lookupBasisIndex` is the new
-   public hook).
+   sector's orbit coefficients (or the CSR-free RepSectorData ref,
+   the default since Stage 8d).
 3. Run continued-fraction Lanczos on \(H\) restricted to the
    target sector, starting from \(|\phi\rangle\), via
    `cf_spectral_from_vector` (a new entry in
@@ -680,16 +666,11 @@ irrep decomposition, not in any of the math kernels.
   `applySymmetrized`) and GPU (`GPUSymmetrizedOperator` via
   `dispatchGPUSymmetrizedSector`) dispatch transparently. Sz is exact in
   both backends; spatial irrep ditto.
-- MPI distribution (NCCL multi-GPU) of the symmetrized matvec is
-  handled by `DistributedSymmetryOperatorGPU` in `src/distributed/`.
-  Same orbit basis, same per-irrep loop, partitioned across ranks.
-- The auto-pilot `Device::MPI` route does **not** currently dispatch
-  to the distributed Lanczos / FTLM / TPQ; that's the
-  `ed_distributed_main` family (and `mpi4py` from Python). The
-  `workflows::solve(Device::MPI)` semantic is ScaLAPACK only; the
-  distributed iterative solvers are reached via
-  `qed.mpi.run_distributed(...)` from Python or by linking
-  `ed_distributed` directly from C++.
+- MPI: across-sector distribution (SectorDistributor — each rank owns
+  a dim-balanced subset of the irrep sectors and solves rank-locally)
+  plus the in-process `MpiBackend` for reduction parallelism. Engages
+  automatically when the CLI runs under `mpirun`. (The within-sector
+  distributed-operator family was retired in Stage 11d, Jul 2026.)
 
 ---
 
@@ -704,11 +685,10 @@ irrep decomposition, not in any of the math kernels.
   fields on `GroundStateResult`, the SOTA `tag` field on
   `ThermalSectorEntry`, and `SpectralSectorEntry` +
   `SpectralResult::{per_sector_pair, selection_rule_label}`.
-- `include/ed/core/sector_loop.h` — `StreamingSymmetryHandle`
-  (single-source-of-truth wrapper over both
-  `StreamingSymmetryOperator` and
-  `FixedSzStreamingSymmetryOperator`) and `filter_sectors` (the
-  canonical resolver for the `selected_sectors` filter).
+- `include/ed/core/sector_loop.h` — per-sector plumbing shared by
+  every caller: `filter_sectors` (the canonical resolver for the
+  `selected_sectors` filter), `resolve_target_sector`, momentum
+  quantisation helpers.
 - `include/ed/core/sector_thermo.h` — single source of truth for the
   shifted-\(F\) Z-weighted mixture rule that recombines per-sector
   thermodynamics.

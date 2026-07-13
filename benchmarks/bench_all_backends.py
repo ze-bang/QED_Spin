@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+NOTE (Stage 11d, Jul 2026): the ed_distributed_main launcher was
+retired; the --mpi-ranks / --gpu-mpi-ranks lanes of this script are
+non-functional and skip unless the binary is restored from git history.
+
 benchmarks/bench_all_backends.py
 
 Unified head-to-head benchmark driver.

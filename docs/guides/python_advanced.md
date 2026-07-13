@@ -41,7 +41,6 @@ verbs.
 | eigenvalues / ground state / a few low-lying states | `qed.solve(H, ...)` | `qed.workflow` |
 | finite-temperature trajectories (mTPQ / cTPQ / FTLM / LTLM) | `qed.thermal(H, method=..., ...)` | `qed.thermal` |
 | structure factors S(Q, ω) / S(Q, T) / KPM-DOS | `qed.spectral(dir, T=..., omega=..., ...)` | `qed.dssf` |
-| MPI cluster + a directory | `qed.mpi.run_distributed(dir, method, n_ranks, ...)` | `qed.mpi` |
 
 The legacy `qed.exact_diagonalization_*` family was deleted in the
 May 2026 surface-unification collapse along with the C++
@@ -273,48 +272,28 @@ result = qed.thermal(
 )
 ```
 
-The orchestrator constructs the appropriate `GPUOperator` /
-`StreamingSymmetryOperator` internally via `ed::make_operator(spec)`
+The orchestrator constructs the appropriate operator internally via
+`ed::make_operator(spec)` (a `SectorOperator` set for symmetry specs)
 and dispatches to the right CUDA kernel — exactly the same code path
 `./ED --use-gpu` would take.
 
 ---
 
-## 4. MPI distributed solvers
+## 4. MPI runs
 
-`qed.mpi.run_distributed` is a thin Python wrapper that locates
-`mpiexec` (or your launcher of choice — `srun`, `mpirun`,
-`jsrun`, …) and `ed_distributed_main`, then runs the right argv:
+The `qed.mpi` subprocess launcher (and the `ed_distributed_main`
+binary + distributed-operator family it drove) was retired in
+Stage 11d (Jul 2026). MPI is driven from the CLI:
 
-```python
-import qed as qed
-from qed import mpi as qed_mpi
-
-if not qed.has_mpi_build():
-    raise RuntimeError("This build was made without MPI; ed_distributed_main "
-                       "does not exist.")
-
-result = qed_mpi.run_distributed(
-    directory="/scratch/runs/heisenberg-32-chain",
-    method="lanczos",          # or "ftlm", "tpq", "lanczos_symmetry",
-                               # "lanczos_gpu" (NCCL halo, requires WITH_CUDA)
-    n_ranks=8,
-    launcher="srun",           # default "mpiexec"; use "mpirun" for OpenMPI
-    launcher_args=("--bind-to=core", "--map-by=numa"),
-    extra_args=("--max-iter", "400", "--reorth", "1"),
-    capture_output=True,
-)
-print(result.stdout)
+```bash
+# Across-sector distribution (SectorDistributor) + in-process
+# MpiBackend engage automatically for symmetry workloads:
+mpiexec -n 8 ./ED /scratch/runs/heisenberg-32-chain --use-symmetry ...
 ```
 
-Why a subprocess and not in-process bindings? A single Python
-interpreter cannot host `MPI_Init` cleanly across all libraries it
-loads (interaction with NumPy / NCCL / cuSPARSE etc. is brittle), and
-the canonical SLURM workflow is one Python launcher per node anyway.
-The wrapper just removes the `subprocess` boilerplate and validates
-inputs (unknown method names raise `ValueError`; missing directory
-raises `FileNotFoundError`; missing `mpiexec` / `ed_distributed_main`
-raise `FileNotFoundError` with an actionable message).
+Single-node frontier runs generally don't need MPI: the CSR-free rep
+lane keeps basis memory at O(#reps) and the fp32 GPU mTPQ lane halves
+the vector footprint.
 
 ---
 
@@ -407,18 +386,7 @@ op.set_symmetry_info_from_dict(info)
 proj = qed.solve(op, num_eigenvalues=6, symmetry=info)
 print("symmetry-projected spectrum:", sorted(proj.eigenvalues))
 
-# 4. (Optional, requires WITH_MPI) MPI distributed Lanczos on a directory deck.
-if qed.has_mpi_build():
-    import tempfile
-    tmp = tempfile.mkdtemp()
-    b.write_directory(tmp, lattice=qed.input.lattice.chain(N))
-    qed.mpi.run_distributed(
-        tmp, "lanczos", n_ranks=2,
-        extra_args=("--max-iter", "200"),
-        capture_output=True,
-    )
-
-    # 5. (Optional, requires built ./ED on PATH) DSSF static thermal sweep.
+# 4. (Optional, requires built ./ED on PATH) DSSF static thermal sweep.
     qed.spectral(tmp, T=[0.1, 0.3, 1.0], method="static_thermal")
 ```
 
@@ -438,7 +406,7 @@ the CLI directly.
   `FixedSzOperator` / `EDParameters` / `EDResults` / utility types).
 * **Capability matrix:** [`python_api_coverage.md`](python_api_coverage.md).
 * **CLI counterparts:** [`usage.md`](usage.md) §2 (single-process CLI),
-  §3 (MPI launcher), §6 (`./ED dssf`).
+  §6 (`./ED dssf`).
 * **Tests:** `python/tests/test_workflow.py` exercises `qed.solve` /
   `qed.thermal` end-to-end on a 6-site Heisenberg ring (full Hilbert,
   fixed-Sz, symmetry, combined) and checks ground-state recovery to

@@ -48,8 +48,8 @@ print(qed.solve(H, num_eigenvalues=4,
 # 6. Memory safety: there is no pre-flight planner. If the dominant
 #    allocation would not fit in available RAM, the workflow raises a
 #    clean error (naming the workflow + estimated vs available bytes)
-#    instead of OOM-killing the process. Shrink dim with sz + symmetry,
-#    or distribute with device='mpi'. Bypass with ED_MEM_GUARD_OFF=1.
+#    instead of OOM-killing the process. Shrink dim with sz + symmetry.
+#    Bypass with ED_MEM_GUARD_OFF=1.
 qed.solve(H_big, solver="FTLM", sz=16, symmetry="auto")
 ```
 
@@ -215,13 +215,6 @@ qed.solve(H,
          # Thermal-method shortcuts (mTPQ / cTPQ / FTLM / LTLM):
          num_samples=None, target_beta=None, num_temp_points=None,
          temp_min=None, temp_max=None,
-         # MPI launcher knobs (consulted only for device='mpi'/'mpi_gpu'):
-         mpi_n_ranks=None,         # # of MPI ranks (default: 4)
-         mpi_betas=None,           # β grid for distributed TPQ / FTLM
-         mpi_compute_variance=False,
-         mpi_binary=None,          # ed_distributed_main path override
-         mpi_launcher="mpiexec",   # 'srun' on SLURM, etc.
-         mpi_launcher_binary=None,
          # (no pre-flight planner: a memory guard catches over-budget
          #  allocations at the point of use; ED_MEM_GUARD_OFF=1 bypasses)
          verbose=True,
@@ -245,12 +238,9 @@ qed.solve(H,
   `qed.has_cuda_build()` is true and the matrix is large
   enough for cuSPARSE matvec to amortize H2D / D2H (rule of thumb:
   dim ≥ 2¹⁴). Pass `"cpu"` / `"gpu"` to force a backend.
-  `"mpi"` and `"mpi_gpu"` are also accepted: the workflow writes
-  the operator to a temp directory, shells out to `mpiexec
-  ed_distributed_main` (with `--gpu` for `mpi_gpu`), and parses
-  the HDF5 result back into an `EDResults`. Python never hosts
-  `MPI_Init` itself; the launcher does. See "Distributed (MPI)
-  jobs" below for what that buys you.
+  (`"mpi"` / `"mpi_gpu"` -- the retired subprocess launcher -- raise
+  with guidance; MPI runs go through the CLI under `mpirun`, see
+  "MPI jobs" below.)
 * **Sz axis.** When `sz=` is passed and `H` is an `Operator`,
   `diag` materialises a `FixedSzOperator` from `H` for you (via the
   new `Operator.make_fixed_sz` binding) and runs the in-memory
@@ -276,10 +266,8 @@ qed.solve(H,
 * `eigenvectors` (when `compute_eigenvectors=True`) — packed as a
   numpy array of shape `(num_eigenvalues, dim)`.
 * `eigenvectors_path` — when `output_dir` is non-empty, the HDF5
-  file (or the per-rank-slab directory for distributed runs) the
-  solver wrote into. Useful for very large vectors that you don't
-  want pulled back across the C++/Python boundary; for distributed
-  runs see `qed.load_mpi_eigenvector(eigenvectors_path, k)`.
+  file the solver wrote into. Useful for very large vectors that
+  you don't want pulled back across the C++/Python boundary.
 
 ### Specifying simulation parameters
 
@@ -363,28 +351,16 @@ choice now goes through the `device=` kwarg.)
 
 Notes:
 
-¹ In the in-process (`device='cpu'`/`'gpu'`) path TPQ acts on a
-single random vector spread across the whole sector; projecting onto
-each symmetry irrep destroys the Z normalisation. The workflow
-raises a clear `ValueError` when this combination is requested on
-those devices. Pre-project to a fixed-Sz block instead, or use
-`device='mpi'`/`'mpi_gpu'` (see footnote ³).
+¹ TPQ acts on a single random vector spread across the whole
+sector; projecting onto each symmetry irrep destroys the Z
+normalisation, so `solver='mTPQ' + symmetry=` raises a clear
+`ValueError`. Pre-project to a fixed-Sz block instead (`sz=`), or
+use FTLM/LTLM.
 
 ² FTLM/LTLM/KPM_DOS *do* combine across symmetry blocks correctly
 because each block contributes an additive term to the partition
-function. On `device='cpu'`/`'gpu'` the in-process dispatcher loops
-the sectors itself; on `device='mpi'`/`'mpi_gpu'` the Python
-layer (`_diag_via_mpi`, Phase H) spawns `ed_distributed_main` once
-per irrep and Z-weight-averages the per-sector results so the
-returned `EDResults.thermo_data.energy` is the full-trace
-`<H>(beta)`. Pass an explicit `sector=` to opt out of the
-aggregation and keep just one irrep's `Z_q`, `<H>_q`.
-
-³ On `device='mpi'`/`'mpi_gpu'` only, `mTPQ` / `cTPQ` + symmetry
-is wired through `distributed_tpq_symmetry` (Phase E). Each sector
-uses an orbit-aware initial-state scatter so the Z normalisation is
-preserved, and the Phase-H aggregation in `_diag_via_mpi` Z-weight-
-averages across sectors automatically when `sector=` is omitted.
+function; the dispatcher loops the sectors itself (and under
+`mpirun`, SectorDistributor spreads the sectors across ranks).
 
 ```python
 # Eigenvalue solver, all four paths:
@@ -430,150 +406,39 @@ them.
 ## Solver × device support matrix
 
 Orthogonal to the basis (full / sz / symm / symm+sz) is the **device
-axis**: where the matrix-vector products execute. The four cells are
-single-process CPU, single-GPU, distributed CPU (MPI), and distributed
-GPU (MPI + per-rank GPU + NCCL collectives). Not every solver has a
-kernel for every cell -- the table below is the canonical record.
+axis**: where the matrix-vector products execute. Two in-process cells
+remain — single-process CPU and single-GPU. (The distributed-operator
+family and its `device='mpi'`/`'mpi_gpu'` subprocess launcher were
+retired in Stage 11d, Jul 2026; see "MPI jobs" below for how MPI works
+now.)
 
-| solver family            |  cpu  |  gpu  |  mpi  | mpi+gpu | how to invoke                                        |
-| ------------------------ | :---: | :---: | :---: | :-----: | ---------------------------------------------------- |
-| `LANCZOS`                |  ✅   |  ✅   |  ✅   |   ✅¹   | `qed.solve(H[, device='gpu'/'mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("lanczos"[, use_gpu=True])` |
-| `BLOCK_LANCZOS`          |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="BLOCK_LANCZOS"[, device='gpu'])` |
-| `KRYLOV_SCHUR`           |  ✅   |  ✅   |  ✅²  |   ✅⁶   | `qed.solve(H, solver="KRYLOV_SCHUR"[, device='gpu'/'mpi'/'mpi_gpu'])` |
-| `FULL`                   |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="FULL"[, device='gpu'])`         |
-| `mTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.thermal(H, method="mTPQ"[, device='mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("tpq"[, use_gpu=True], ...)` |
-| `cTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.thermal(H, method="cTPQ"[, device='mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("tpq"[, use_gpu=True], ...)` |
-| `FTLM`                   |  ✅   |  ✅   |  ✅   |   ✅⁵   | `qed.thermal(H, method="FTLM")` / `qed.mpi.run_distributed("ftlm"[, use_gpu=True], ...)` |
-| `LTLM`                   |  ✅   |  ❌   |  ❌   |   ❌    | `qed.thermal(H, method="LTLM")`                       |
-| `KPM_DOS`                |  ✅   |  ✅   |  ❌   |   ❌    | `qed.thermal(H, method="KPM_DOS"[, device='gpu'])`    |
-
-Notes:
-
-¹ Multi-GPU Lanczos is the `distributed_lanczos_gpu` kernel: per-rank
-CUDA Krylov vectors with `ncclAllReduce` for the dot/norm reductions.
-Built only when `WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`. With the
-"stage 3" GPU-resident SpMV (`--gpu-resident-spmv`), the halo also
-flows via `ncclSendRecv` between device buffers (GPU-Direct RDMA on
-supported fabrics).
-
-² Distributed Krylov-Schur is the `distributed_krylov_schur` kernel:
-thick-restart Lanczos with Ritz-pair locking, full re-orthogonalisation
-against locked vectors, and an orthogonalised re-seed each cycle.
-Built on the CPU `DistributedOperator`. See footnote ⁶ for the
-multi-GPU sibling.
-
-³ Distributed mTPQ/cTPQ goes through `--mode tpq` of
-`ed_distributed_main`, which invokes `distributed_tpq` (canonical TPQ
-with MPI-over-samples). See "Distributed (MPI) jobs" below for the
-recipe.
-
-⁴ Multi-GPU mTPQ/cTPQ is the `distributed_tpq_gpu` kernel: device-
-resident |ψ⟩, on-device SpMV via `DistributedGPUOperator` (NCCL halo +
-CUDA SoA SpMV), Taylor accumulator with `cublasZaxpy`, and norm /
-observable reductions through `cublasZdotc` +
-`multi_gpu::all_reduce_sum_complex_double` (one NCCL allreduce per
-scalar). MPI-over-samples mirrors the CPU path. Built only when
-`WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`.
-
-⁵ Multi-GPU FTLM is the `distributed_ftlm_gpu` kernel: per-sample
-Lanczos with full modified Gram–Schmidt re-orthogonalisation runs
-**entirely on device** (Krylov basis V[0..m-1] held contiguously in a
-single device slab, `cublasZdotc` for the inner products, one NCCL
-allreduce per scalar via `multi_gpu::all_reduce_sum_complex_double`,
-`cublasZaxpy` for the recurrence, `DistributedGPUOperator` for the
-SpMV). The (m × m) tridiagonal eigensolve is done redundantly on every
-rank with Eigen (small problem; not a bottleneck). When an observable
-is supplied the J&P contraction `q_j = ⟨V[j] | O V[0]⟩` reuses the
-same on-device basis with one extra device SpMV per sample plus a
-single NCCL allreduce of `2·m` doubles. MPI-over-samples mirrors the
-CPU `distributed_ftlm`. Built only when `WITH_MPI=ON && WITH_CUDA=ON
-&& NCCL_FOUND`.
-
-⁶ Multi-GPU Krylov-Schur is the `distributed_krylov_schur_gpu` kernel:
-the same thick-restart Lanczos with Ritz-pair locking as the CPU
-sibling, but the in-cycle Krylov basis V[0..m-1] **and** the locked
-Ritz vectors live in two contiguous device slabs ((m_max + |locked|)
-× local_n × 16 B per rank). Twice-CGS re-orthogonalisation against
-both sets is coalesced — each pass packs the |set| local
-`cublasZdotc` results into a single NCCL allreduce of `2·|set|`
-doubles, then runs |set| `cublasZaxpy` calls to subtract. SpMV goes
-through `DistributedGPUOperator` (NCCL halo + on-device SoA SpMV).
-The `(m × m)` tridiagonal eigensolve and the Ritz-residual /
-locking sweep are host-side (replicated on every rank); reconstruction
-of locked Ritz vectors `phi = Σ_j U[j,i] V[j]` and of the next-cycle
-seed runs on device via `cublasZaxpy`. **Limitation**: the locked
-Ritz vectors stay on device — `--compute-eigenvectors` /
-`--eigenvector-dir` is rejected on the GPU path with an actionable
-error (drop `--gpu` or skip the eigenvector dump). Built only when
-`WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`.
+| solver family            |  cpu  |  gpu  | how to invoke                                        |
+| ------------------------ | :---: | :---: | ---------------------------------------------------- |
+| `LANCZOS`                |  ✅   |  ✅   | `qed.solve(H[, device='gpu'])`                        |
+| `BLOCK_LANCZOS`          |  ✅   |  ✅   | `qed.solve(H, solver="BLOCK_LANCZOS"[, device='gpu'])` |
+| `KRYLOV_SCHUR`           |  ✅   |  ✅   | `qed.solve(H, solver="KRYLOV_SCHUR"[, device='gpu'])` |
+| `FULL`                   |  ✅   |  ✅   | `qed.solve(H, solver="FULL"[, device='gpu'])`         |
+| `mTPQ`                   |  ✅   |  ✅   | `qed.thermal(H, method="mTPQ"[, device='gpu'])` (fp32 GPU lane via `tpq_fp32=True`) |
+| `cTPQ`                   |  ✅   |  ✅   | `qed.thermal(H, method="cTPQ")`                       |
+| `FTLM`                   |  ✅   |  ✅   | `qed.thermal(H, method="FTLM")`                       |
+| `LTLM`                   |  ✅   |  ❌   | `qed.thermal(H, method="LTLM")`                       |
+| `KPM_DOS`                |  ✅   |  ✅   | `qed.thermal(H, method="KPM_DOS"[, device='gpu'])`    |
 
 ### Path × device — cross-product caveats
 
 The path matrix (`full` / `sz` / `symm` / `symm + sz`) and the device
-matrix (`cpu` / `gpu` / `mpi` / `mpi+gpu`) are **almost** orthogonal
-but not quite — a few combinations have known carve-outs that the
-two tables above don't capture on their own:
+matrix (`cpu` / `gpu`) are **almost** orthogonal:
 
-* `full` and `sz` work on every device cell where the solver is ✅.
-  This is the common case and what the `qed.solve(...)` quick-start
-  examples use.
+* `full` and `sz` work on both devices for every solver that is ✅ in
+  the table above.
 * `symm` (symmetry-projected basis) and `symm + sz` work on **cpu**
-  and **gpu** for every solver that supports them (the symmetry
-  projection happens before the Lanczos / TPQ kernel sees the
-  vector, so the kernel itself is none the wiser).
-* `symm` × **mpi** is wired through `DistributedSymmetryOperator`
-  for `LANCZOS`, `KRYLOV_SCHUR`, `FTLM`, `mTPQ`, and `cTPQ`. The
-  remaining `symm` × **mpi** cells (`BLOCK_LANCZOS`) fall back to the
-  CPU lane with an actionable warning.
-* `symm` × **mpi+gpu** is wired for `LANCZOS` via
-  `distributed_lanczos_gpu_symmetry` (Phase D step 1 — builds a
-  `DistributedSymmetryOperatorGPU` internally and runs the same
-  per-iteration cublasZdotc/cublasZaxpy/NCCL-allreduce recipe as the
-  unsymmetrised GPU Lanczos but with the orbit-row SpMV).
-* `symm` × **mpi** is wired for `KRYLOV_SCHUR` via
-  `distributed_krylov_schur_symmetry` (Phase D step 2 — templated
-  thick-restart body shared with the unsymmetrised KS, with a
-  symmetry-aware scatter helper).
-* `symm` × **mpi+gpu** is wired for `KRYLOV_SCHUR` via
-  `distributed_krylov_schur_gpu_symmetry` (Phase D step 3 — templated
-  on-device thick-restart body shared with the unsymmetrised GPU KS,
-  with the same orbit-aware scatter as the CPU symm path).
-* `symm` × **mpi** is wired for `FTLM` via
-  `distributed_ftlm_symmetry` (Phase D step 4 — templated J&P
-  trace-estimator body shared with the unsymmetrised FTLM, runs one
-  sector at a time on a per-group subcommunicator and routes the
-  per-sample Krylov build through `distributed_lanczos_symmetry`).
-  The CLI accepts `--mode ftlm --use-symmetry --sector-index k`; the
-  returned `Z[b]` is the contribution from that sector alone, and
-  the caller aggregates over sectors.
-* `symm` × **mpi+gpu** is wired for `FTLM` via
-  `distributed_ftlm_gpu_symmetry` (Phase D step 5 — templated
-  on-device J&P trace-estimator body shared with the unsymmetrised
-  GPU FTLM, with the same orbit-aware scatter as the CPU symm path).
-  The CLI accepts `--mode ftlm --gpu --use-symmetry --sector-index k`.
-  The remaining `symm` × **mpi+gpu** cell (`BLOCK_LANCZOS`) drops to
-  `device='gpu'` per node automatically when `--use-symmetry` is set.
-* `mTPQ` / `cTPQ` × **mpi** is wired (Phase E step 1) via
-  `distributed_tpq_symmetry` — templated per-sample canonical-TPQ
-  body shared with the unsymmetrised TPQ, with an orbit-aware
-  initial-state scatter and a per-group `DistributedSymmetryOperator`
-  driving the `taylor_step` propagation. The CLI accepts `--mode tpq
-  --use-symmetry --sector-index k`; the returned `energy[b]` is the
-  sample-averaged `<H>(beta)` measured **inside sector k only**.
-  When called from Python via `qed.solve(H, device='mpi',
-  symmetry=...)` without an explicit `sector=`, the Phase-H
-  multi-sector dispatch in `_diag_via_mpi` invokes the binary once
-  per irrep and Z-weight-averages the results so the returned
-  `EDResults.thermo_data.energy` is the full-trace `<H>(beta)`.
-* `mTPQ` / `cTPQ` × **mpi+gpu** is wired (Phase E step 2) via
-  `distributed_tpq_gpu_symmetry` — templated on-device per-sample
-  canonical-TPQ body shared with the unsymmetrised GPU TPQ, with the
-  same orbit-aware scatter as the CPU symm path. The CLI accepts
-  `--mode tpq --gpu --use-symmetry --sector-index k`.
-
-The introspection helper `qed.solver_device_support()` only reports
-the solver × device tensor; consult this subsection for the
-path-axis carve-outs that aren't visible there.
+  and **gpu** for every solver that supports them — the projection
+  happens in the basis (CSR-free rep kernel on both devices), so the
+  Lanczos / thermal kernel is none the wiser. The little-group
+  projection lane (`point_group='auto'`) is CPU-side; an explicit
+  `device='gpu'` request routes through the abelian rep lane's GPU
+  mirror instead.
+* `mTPQ`/`cTPQ` × `symmetry=` raises (footnote ¹ above): use `sz=`.
 
 ### Build-aware introspection
 
@@ -584,9 +449,10 @@ reachable:
 ```python
 qed.solver_device_support()                  # prints the table
 m = qed.solver_device_support(return_dict=True)
-m["LANCZOS"]["mpi_gpu"]
-# {'kernel': True, 'available': False,
-#  'note': 'needs WITH_MPI=ON and WITH_CUDA=ON'}
+m["LANCZOS"]["mpi"]
+# {'kernel': False, 'available': False,
+#  'note': 'retired (Stage 11d): run the CLI under mpirun -- '
+#          'SectorDistributor + MpiBackend'}
 
 qed.solver_device_support(solver="lanczos")  # filter to one solver family
 ```
@@ -616,8 +482,8 @@ available bytes — rather than letting the host OOM-kill the process. Set
 To size a job yourself: a dim-sized complex vector is `dim · 16 B`; Lanczos
 keeps a handful live (plus the `m`-vector basis when `compute_eigenvectors=True`),
 FTLM / TPQ keep O(few) per sample. Cut `dim` with `sz=N//2` (≈10× at half
-filling) and `symmetry=qed.find_symmetries(H).full_set` (≈`|G|×`), or distribute
-with `device='mpi'`.
+filling) and `symmetry=qed.find_symmetries(H).full_set` (≈`|G|×`); the
+CSR-free rep lane keeps the basis memory at O(#reps).
 
 ---
 
@@ -631,14 +497,9 @@ with `device='mpi'`.
   = false` and the GPU lane enabled in `BackendConstraints`; the
   orchestrator builds a `GPUOperator` via the same factory the
   CLI uses.
-* `device='mpi'` / `device='mpi_gpu'` write the operator to a temp
-  directory and shell out to `mpiexec ed_distributed_main`. The
-  helper picks the right `--mode` for the chosen solver
-  (`lanczos` / `krylov_schur` / `ftlm` / `tpq`), forwards `--gpu`
-  for `mpi_gpu`, and parses the HDF5 result back into an
-  `EDResults` -- so the call shape is identical to the in-process
-  CPU/GPU paths. Python never calls `MPI_Init` itself; the MPI
-  launcher does, in a separate process tree.
+* `device='mpi'` / `device='mpi_gpu'` raise: the subprocess launcher
+  was retired in Stage 11d. MPI runs go through the CLI under
+  `mpirun` (see "MPI jobs" below).
 
 ---
 
@@ -694,89 +555,27 @@ res = qed.solve(H,
 # (unified thermodynamic curve).
 ```
 
-### Distributed (MPI) jobs
+### MPI jobs
 
-`qed.solve(H, device='mpi'[, ...])` is the "do what I mean" entry
-point: it serialises `H` (and the symmetry directory if you pass
-`symmetry=`), shells out to `mpiexec ed_distributed_main`, parses
-the HDF5 result, and returns an `EDResults` indistinguishable in
-shape from a CPU run:
+The `device='mpi'` subprocess launcher (`ed_distributed_main` +
+`qed.mpi.run_distributed`) and the distributed-operator family behind
+it were retired in Stage 11d (Jul 2026). MPI is now ONE story, driven
+from the CLI:
 
-```python
-# Ground state of a 24-site chain on 8 CPU ranks:
-res = qed.solve(H, device='mpi', mpi_n_ranks=8)          # --mode lanczos
-print(res.eigenvalues[0])
+```bash
+# Across-sector MPI: each rank owns a dim-balanced subset of the
+# symmetry sectors (SectorDistributor; Burnside-weighted greedy
+# packing) and solves them rank-locally. Engages automatically for
+# symmetry workloads under mpirun:
+mpiexec -n 8 ./ED <input_dir> --use-symmetry --fixed-sz ...
 
-# Same, but multi-GPU per rank (NCCL collectives + GPU-resident SpMV):
-res = qed.solve(H, device='mpi_gpu', mpi_n_ranks=4)      # --mode lanczos --gpu
-
-# Symmetry-projected on the lattice + Sz=N/2 sector, 8 ranks:
-report = qed.find_symmetries(H, lattice=lat, verbose=False)
-res = qed.solve(H, device='mpi', mpi_n_ranks=8,
-               symmetry=report.full_set, sz=N // 2)
-
-# Distributed Krylov-Schur (thick-restart Lanczos w/ Ritz-pair locking):
-res = qed.solve(H, solver="KRYLOV_SCHUR",
-               device='mpi', mpi_n_ranks=8, num_eigenvalues=8)
-
-# Distributed canonical TPQ thermal trajectory, MPI-over-samples:
-res = qed.solve(H, solver="cTPQ", device='mpi', mpi_n_ranks=8,
-               num_samples=32, target_beta=20.0,
-               mpi_betas=[0.1, 0.5, 1.0, 2.0])
-
-# Multi-GPU canonical TPQ (distributed_tpq_gpu): device-resident |ψ⟩,
-# cuBLAS axpys/dotcs, NCCL allreduces, MPI-over-samples:
-res = qed.solve(H, solver="cTPQ", device='mpi_gpu', mpi_n_ranks=4,
-               num_samples=32, mpi_betas=[0.1, 0.5, 1.0, 2.0])
-
-# Eigenvectors over MPI: each rank dumps its slab to
-# <output_dir>/eigvecs/rank_<r>.h5; reassemble in Python via
-# qed.load_mpi_eigenvector(eigvec_dir, k).
-res = qed.solve(H, device='mpi', mpi_n_ranks=8,
-               num_eigenvalues=4, compute_eigenvectors=True,
-               output_dir="ed_runs/24site_mpi")
-psi0 = qed.load_mpi_eigenvector(res.eigenvectors_path, k=0)
+# In-process MPI reductions (MpiBackend) engage automatically when
+# the process runs under mpirun and the backend constraints allow it.
 ```
 
-If you want the lower-level launcher (e.g. for benchmarking with
-hand-rolled `binary_args`), `qed.mpi.run_distributed(...)` is still
-available and shells out to the same binary:
-
-```python
-# Distributed Lanczos on a chain Hamiltonian generated by the binary:
-qed.mpi.run_distributed(
-    method="lanczos", n_ranks=8,
-    binary_args=("--N", "24", "--J", "1.0", "--periodic", "1",
-                 "--max-iter", "400", "--reorth", "1"),
-)
-
-# Multi-GPU Lanczos with the stage-3 NCCL halo:
-qed.mpi.run_distributed(
-    method="lanczos", n_ranks=4, use_gpu=True,
-    binary_args=("--N", "30", "--J", "1.0", "--periodic", "1",
-                 "--max-iter", "200",
-                 "--gpu-resident-spmv"),
-)
-
-# Multi-GPU canonical TPQ (distributed_tpq_gpu):
-qed.mpi.run_distributed(
-    method="tpq", n_ranks=4, use_gpu=True,
-    binary_args=("--N", "24", "--betas", "0.1,0.5,1.0,2.0",
-                 "--samples", "32", "--groups", "4",
-                 "--delta-beta", "0.05", "--taylor-order", "30",
-                 "--compute-variance"),
-)
-# Aliases: solver names from qed.solve work too --
-# method='mtpq' / 'ctpq' map to --mode tpq, and
-# method='ks' maps to --mode krylov_schur (no warning since Phase 9).
-```
-
-`run_distributed` shells out to the standalone `ed_distributed_main`
-binary (built by the C++ side when `-DWITH_MPI=ON`). The binary
-accepts `--mode {lanczos|krylov_schur|ftlm|tpq}` and a `--gpu`
-switch; `--gpu` requires `WITH_CUDA=ON && NCCL_FOUND` and is
-honoured by `lanczos` (`distributed_lanczos_gpu`) and `tpq`
-(`distributed_tpq_gpu`).
+Single-node frontier runs (N = 32-36) do not need MPI at all: the
+CSR-free rep lane keeps basis memory at O(#reps) and the fp32 GPU
+mTPQ lane halves the vector footprint (`tpq_fp32=True`).
 
 ---
 
@@ -794,9 +593,7 @@ honoured by `lanczos` (`distributed_lanczos_gpu`) and `tpq`
 | `microcanonical_tpq(...)` driver + manual file plumbing    | `qed.solve(op, solver="mTPQ", target_beta=..., output_dir=...)` |
 | Memorize that the enum is `mTPQ` (mixed case)              | `qed.solve(op, solver="mtpq")` works (case-insensitive) |
 | Pass `--gpu` to `ED <dir> --method=LANCZOS_GPU`            | `qed.solve(op, device="gpu")` (auto temp-dir + from_directory) |
-| `mpiexec ed_distributed_main --mode lanczos` (no GPU flag) | `qed.solve(H, device='mpi'/'mpi_gpu', mpi_n_ranks=N)` (or `qed.mpi.run_distributed("lanczos", n_ranks=N, use_gpu=True, ...)`) |
-| `mpiexec ed_distributed_main --mode tpq --gpu` for thermal | `qed.solve(H, solver='cTPQ', device='mpi_gpu', mpi_n_ranks=N, ...)` |
-| Reassemble distributed eigenvectors by hand from rank_*.h5 | `qed.load_mpi_eigenvector(eigvec_dir, k)` (single) / `qed.load_mpi_eigenvectors(eigvec_dir)` (all) |
+| `mpiexec ed_distributed_main ...` (the retired launcher)   | `mpiexec -n N ./ED <dir> --use-symmetry ...` (SectorDistributor + MpiBackend) |
 | Look in `ed_method_traits.h` for solver/device wiring      | `qed.solver_device_support()` (build-aware (solver, device) matrix) |
 | Compute "will this fit?" before running                    | size it by hand (`dim · 16 B` per vector); the workflow itself raises a clean error if the dominant allocation won't fit (no planner) |
 

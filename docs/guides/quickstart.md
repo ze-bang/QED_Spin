@@ -6,7 +6,7 @@ public C++ API. The complete example fits in a single file.
 > **Tip — Python-mirror API.** If you want C++ code that reads
 > line-for-line like its Python sibling (designated initializers,
 > Python-named kwargs, case-insensitive method strings, `"auto"` /
-> `"cpu"` / `"gpu"` / `"mpi"` device tokens), use the
+> `"cpu"` / `"gpu"` device tokens), use the
 > [`ed::api::*`](../../include/ed/api.h) facade introduced in PR-1 of
 > the May 2026 *mirror examples* plan. The page below sticks with the
 > underlying `ed::workflows::*` types for didactic reasons; the
@@ -63,8 +63,8 @@ target_link_libraries(heisenberg_demo PRIVATE ED::ed_solvers_cpu)
   façades below.
 - **Operator construction** — `ed::make_operator(OperatorSpec)` is the
   unified factory; it returns a `std::unique_ptr<LinearOperator>`
-  covering in-memory / FixedSz / streaming-symmetry / distributed
-  variants via one struct.
+  covering in-memory / FixedSz / streaming-symmetry variants via one
+  struct.
 - **Finite-temperature methods** — `ed::workflows::thermal(...)`
   routes mTPQ / cTPQ / FTLM / LTLM / KPM-DOS through one entry point.
 - **DSSF / SSSF** — `ed::workflows::spectral(...)` is the single

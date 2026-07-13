@@ -40,8 +40,8 @@ What `qed.solve` decides for you (override any of these via kwargs):
 
 * **Solver** (`solver=None` → `"auto"`): picks `FULL` (≤2048 dim),
   `LANCZOS` (≤5 eigs), `KRYLOV_SCHUR` (≤20), `BLOCK_LANCZOS` (more).
-* **Device** (`device=None` → `"auto"`): picks `cpu`/`gpu`/`mpi`/`mpi_gpu`
-  based on `qed.has_cuda_build()`, `qed.has_mpi_build()` and the
+* **Device** (`device=None` → `"auto"`): picks `cpu`/`gpu`
+  based on `qed.has_cuda_build()` and the
   Hilbert / sector dim.
 * **Auto Sz** (`auto_sz=True` by default): if `H.conserves_sz()` and you
   didn't pass `sz=`, projects to the half-filled Sz=N/2 sector
@@ -95,9 +95,9 @@ auto res = ed::workflows::solve(*H, opts);
 ```
 
 Same auto-selection logic; same fall-back warnings. The C++
-orchestrator **does not** spawn MPI ranks — for distributed runs you
-must already be inside an `mpiexec` launcher (the Python `device="mpi"`
-path shells out to `mpiexec ed_distributed_main` for you).
+orchestrator **does not** spawn MPI ranks — for MPI runs, launch the
+CLI under `mpirun` (SectorDistributor + in-process MpiBackend; the
+Python `device="mpi"` subprocess launcher was retired in Stage 11d).
 
 ## 2. Finite-temperature — `qed.thermal`
 
