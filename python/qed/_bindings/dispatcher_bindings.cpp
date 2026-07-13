@@ -50,6 +50,7 @@
 #include <pybind11/numpy.h>
 
 #include <ed/core/ed_legacy_types.h>  // EDResults envelope (slim residue of ed_wrapper.h)
+#include <ed/core/ed_config_adapter.h>  // ed_adapter::toSolveOptions (THE converter)
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/operator.h>
@@ -311,6 +312,23 @@ void bind_dispatcher(py::module_& m) {
                    " use_fixed_sz=" + (p.use_fixed_sz ? "True" : "False") +
                    ">";
         });
+
+    // THE EDParameters -> SolveOptions converter (Stage 11a-tail): one
+    // implementation (`ed_adapter::toSolveOptions`, ed_config_adapter.h)
+    // shared by the CLI and the Python surface. `qed/_params.py` delegates
+    // here with `wire_backend=true`; the CLI calls the C++ function
+    // directly with its historical auto-promote semantics. No defaulted
+    // kwargs on purpose -- each caller MUST state its semantics.
+    m.def("ed_params_to_solve_options",
+          &ed_adapter::toSolveOptions,
+          py::arg("params"),
+          py::arg("method"),
+          py::arg("auto_method"),
+          py::arg("wire_backend"),
+          py::arg("allow_infeasible"),
+          "Translate an EDParameters bag + DiagonalizationMethod into "
+          "ed::workflows::SolveOptions (the single shared converter; see "
+          "ed_config_adapter.h).");
 
     // ------------------------------------------------------------------------
     // 4. EDResults -- read-only result envelope returned by the legacy

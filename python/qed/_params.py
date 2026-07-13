@@ -20,6 +20,14 @@ The direction of travel (Stage 11 program): the orchestrator Options
 are the canonical parameter surface; ``EDParameters`` survives as the
 kwargs staging bag whose ONLY consumers are the converters in this
 file plus the CLI adapter (`ed_config_adapter.h`).
+
+Stage 11a-tail: the SolveOptions converter is no longer duplicated
+across the language boundary either -- ``ed_params_to_solve_options``
+below delegates to the bound ``ed_adapter::toSolveOptions`` (the same
+function the CLI calls), with the deliberate semantic differences
+expressed as explicit flags instead of divergent copies. The
+ThermalOptions converter has no C++ twin (the CLI drives thermal
+through the legacy dispatcher), so it stays implemented here.
 """
 
 from __future__ import annotations
@@ -152,40 +160,21 @@ def ed_params_to_solve_options(
     allow_infeasible: bool = False,
 ) -> "_core.SolveOptions":
     """Translate ``EDParameters`` + ``DiagonalizationMethod`` into a
-    ``_core.SolveOptions`` for the orchestrator. Mirrors
-    ``ed_adapter::toSolveOptions``; thermal / TPQ / KPM knobs are not
-    consulted because ``workflows_solve`` does not exercise them."""
-    opts = _core.SolveOptions()
-    opts.num_eigs        = int(params.num_eigenvalues)
-    opts.max_iter        = int(params.max_iterations)
-    opts.block_size      = int(params.block_size)
-    opts.tolerance       = float(params.tolerance)
-    opts.compute_vectors = bool(params.compute_eigenvectors)
-    opts.output_dir      = str(params.output_dir or "")
-    # ``device=`` -> backend constraints (see the thermal twin above).
-    opts.backend.allow_gpu = bool(getattr(params, "use_gpu", False))
-    opts.backend.allow_mpi = bool(getattr(params, "use_mpi", False))
+    ``_core.SolveOptions`` for the orchestrator.
 
-    method_map = {
-        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
-        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
-        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
-        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
-        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
-    }
-    # auto_method: defer the eigensolver choice to the C++ side.
-    opts.method = (_core.SolveMethod.Auto if auto_method
-                   else method_map.get(method, _core.SolveMethod.Auto))
-
-    opts.use_fixed_sz = bool(params.use_fixed_sz)
-    opts.use_symmetry = bool(params.use_symmetry)
-    opts.n_up         = int(params.n_up)
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible = bool(allow_infeasible)
-    opts.basis_cache_dir = str(getattr(params, "basis_cache_dir", "") or "")
-    opts.precompute_basis_only = bool(
-        getattr(params, "precompute_basis_only", False))
-    return opts
+    Delegates to THE one converter, ``ed_adapter::toSolveOptions``
+    (ed_config_adapter.h) -- this module previously carried a Python
+    twin of it that silently drifted in three fields (backend wiring,
+    ``allow_infeasible``, ``selected_sectors``). ``wire_backend=True``
+    is the Python-surface semantic: ``device='cpu'`` must PIN the CPU
+    backend, where the CLI keeps its historical auto-promotion."""
+    return _core.ed_params_to_solve_options(
+        params=params,
+        method=method,
+        auto_method=bool(auto_method),
+        wire_backend=True,
+        allow_infeasible=bool(allow_infeasible),
+    )
 
 
 def ed_result_from_gs_result(
