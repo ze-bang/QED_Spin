@@ -31,7 +31,7 @@
 #include <curand.h>
 
 #include <ed/core/linear_operator.h>
-#include <ed/solvers/TPQ.h>  // ::tpq_per_sample_seed
+#include <ed/thermal/tpq_seeding.h>  // ed::tpq_per_sample_seed
 
 namespace ed::thermal {
 
@@ -185,7 +185,7 @@ MtpqResult mtpq_f32(const ed::LinearOperator& H, const MtpqOptions& opts) {
         for (std::size_t s = 0; s < opts.num_samples; ++s) {
             const std::uint64_t seed = opts.random_seed
                                         ? (opts.random_seed + s)
-                                        : ::tpq_per_sample_seed(s);
+                                        : ed::tpq_per_sample_seed(s);
             // Seed psi directly on-device (no host seed buffer). Unnormalised
             // Gaussian; the device normalises below.
             curand_check(curandSetPseudoRandomGeneratorSeed(rng, seed),

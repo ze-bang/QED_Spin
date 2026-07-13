@@ -393,8 +393,9 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.21 `src/solvers/cpu/`
 
-- `dynamics.cpp`, `ftlm.cpp`, `ftlm_kpm.cpp`,
-  `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `TPQ.cpp`
+- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`,
+  `lanczos.cpp`, `little_group_solve.cpp`, `ltlm.cpp`, `observables.cpp`,
+  `oftlm.cpp`, `symmetry_adapted_solve.cpp`
 
 ### 5.22 `src/solvers/gpu/`
 
@@ -441,8 +442,8 @@ exactly the same dispatch axes as the ground-state solvers
 | `FTLM`      | `include/ed/solvers/ftlm.h`             | `Z ≈ (D/R) Σ_r Σ_k |<r|ψ_k>|^2 e^{-β E_k}`, R random Lanczos starts        | `num_samples × krylov_dim`     |
 | `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
 | `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
-| `mTPQ`      | `include/ed/solvers/TPQ.h`              | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
-| `cTPQ`      | `include/ed/solvers/TPQ.h`              | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
+| `mTPQ`      | `include/ed/thermal/mtpq_kernel.h`      | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
+| `cTPQ`      | `include/ed/thermal/tpq_kernel.h`       | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
 
 Each of these solvers populates the same `ThermodynamicData` payload
 inside `EDResults` -- `temperatures`, `energy`, `specific_heat`,

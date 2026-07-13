@@ -106,7 +106,7 @@ Pipeline:
 
 Delegates verbatim to the legacy
 `compute_dynamical_correlation(H_apply, O1_apply, O2_apply, ..., T,
-output_dir, energy_shift)` in `src/solvers/cpu/dynamics.cpp`. FTLM
+output_dir, energy_shift)` in `src/solvers/cpu/ftlm_dynamical.cpp`. FTLM
 seeds `num_random_vectors` random vectors, builds a Krylov subspace per
 seed, evaluates `<psi_R| O dagger * (omega + i*eta - H)^-1 * O |psi_R>`
 on the Boltzmann-weighted shell, and averages. CPU-only today.

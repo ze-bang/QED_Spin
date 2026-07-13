@@ -22,22 +22,3 @@
 #include <ed/core/operator.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator_builders.h>
-
-// ---------------------------------------------------------------------------
-// Legacy result types kept here for backward compatibility.
-// These are still referenced by src/solvers/cpu/dynamics.cpp,
-// src/solvers/cpu/TPQ.cpp, and include/ed/solvers/dynamics.h.
-// Do not remove until those callers are updated.
-// ---------------------------------------------------------------------------
-
-// χ(ω) = ∑_{n,m} (p_m - p_n) * |<n|A|m>|^2 / (ω - (E_n - E_m) + iη)
-struct DynamicalSusceptibilityData {
-    std::vector<double> frequencies;
-    std::vector<std::complex<double>> chi;
-};
-
-// A(ω) = Σ_{n,m} |<n|O|m>|^2 δ(ω − (E_n − E_m)) · weight(m)
-struct SpectralFunctionData {
-    std::vector<double> frequencies;
-    std::vector<std::complex<double>> spectral_function;
-};

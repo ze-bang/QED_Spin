@@ -28,7 +28,6 @@
 #include <ed/observables/static_correlator.h>
 #include <ed/observables/cf_dynamical.h>
 #include <ed/observables/kpm_dynamical.h>
-#include <ed/observables/time_evolution.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -345,32 +344,4 @@ TEST_CASE("observables::expectation_value reproduces <psi|H|psi>",
     // <0...0| H | 0...0> = 0 for any traceless Heisenberg term + half-shift;
     // here only Sz Sz contributes => +N/4 on the fully-polarised state.
     REQUIRE(std::abs(e.imag()) < 1e-12);
-}
-
-TEST_CASE("observables::time_evolution_correlator returns C(0) and C(t)",
-          "[kernel-facade][observables][time-evolution][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    std::vector<Complex> psi(dim, Complex(0.0, 0.0));
-    psi[1] = Complex(1.0, 0.0);  // pick something that overlaps multiple sectors
-
-    ed::observables::TimeEvolutionOptions opts;
-    opts.dt          = 0.05;
-    opts.t_max       = 0.5;
-    opts.krylov_dim  = 16;
-
-    auto res = ed::observables::time_evolution_correlator(
-        backend, *H, *H, *H, psi.data(), dim, opts);
-
-    REQUIRE(res.t.size()          == res.correlator.size());
-    REQUIRE(res.t.size()          >= 2);
-    REQUIRE(res.t.front()         == 0.0);
-    REQUIRE(std::abs(res.t.back() - opts.t_max) <= opts.dt + 1e-12);
-    // C(0) = <H psi | H psi> is real and non-negative.
-    REQUIRE(std::abs(res.correlator.front().imag()) < 1e-10);
-    REQUIRE(res.correlator.front().real() > 0.0);
 }

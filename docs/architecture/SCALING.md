@@ -628,7 +628,7 @@ print(comb(N, N//2))"`), the per-vector sizes assume
 `sizeof(std::complex<double>) == 16`, and the per-N status in §2 is
 calibrated against the actual code paths in
 `src/solvers/cpu/lanczos.cpp`, `src/solvers/cpu/ftlm.cpp`,
-`src/solvers/cpu/TPQ.cpp`, the GPU twins, and
+`include/ed/thermal/{tpq,mtpq}_kernel.h`, the GPU twins, and
 `include/ed/core/streaming_symmetry.h`.
 
 If you change the vector type (e.g. to `std::complex<float>`) or

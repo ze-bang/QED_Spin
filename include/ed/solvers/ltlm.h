@@ -82,55 +82,10 @@ double find_ground_state_lanczos(
     ComplexVector& ground_state
 );
 
-/**
- * @brief Build Krylov subspace from ground state for low-lying excitations
- * 
- * After finding the ground state, build a Krylov subspace to capture
- * low-lying excitations. This gives accurate thermodynamics at low T.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param ground_state Ground state vector
- * @param ground_energy Ground state energy
- * @param N Hilbert space dimension
- * @param krylov_dim Maximum Krylov dimension
- * @param tolerance Convergence tolerance
- * @param full_reorth Use full reorthogonalization
- * @param reorth_freq Reorthogonalization frequency
- * @param excitation_energies Output: excitation energies (relative to ground state)
- * @param weights Output: statistical weights
- * @return Number of excitations found
- */
-int build_excitation_spectrum(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& ground_state,
-    double ground_energy,
-    uint64_t N,
-    uint64_t krylov_dim,
-    double tolerance,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    std::vector<double>& excitation_energies,
-    std::vector<double>& weights
-);
-
-/**
- * @brief Compute thermodynamics from ground state and low-lying excitations
- * 
- * Uses the ground state and excitation spectrum to compute thermodynamic
- * properties. More accurate than FTLM at low temperatures.
- * 
- * @param ground_energy Ground state energy
- * @param excitation_energies Excitation energies (relative to ground state)
- * @param weights Statistical weights
- * @param temperatures Temperature points to evaluate
- * @return ThermodynamicData structure with thermodynamic properties
- */
-ThermodynamicData compute_ltlm_thermodynamics(
-    double ground_energy,
-    const std::vector<double>& excitation_energies,
-    const std::vector<double>& weights,
-    const std::vector<double>& temperatures
-);
+// NOTE (Stage 11b surface shrink): the pipeline internals
+// ``build_excitation_spectrum`` / ``compute_ltlm_thermodynamics`` are
+// implementation details of ``low_temperature_lanczos`` and live as
+// file-locals in ltlm.cpp; ``save_ltlm_results`` (zero callers) was deleted.
 
 /**
  * @brief Main LTLM driver function
@@ -203,15 +158,4 @@ StaticResponseResults compute_connected_qh_response_ltlm(
     double temp_max,
     uint64_t num_temp_bins,
     const std::string& output_dir = ""
-);
-
-/**
- * @brief Save LTLM results to file
- * 
- * @param results LTLM results to save
- * @param filename Output filename
- */
-void save_ltlm_results(
-    const LTLMResults& results,
-    const std::string& filename
 );

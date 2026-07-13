@@ -4,7 +4,6 @@
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/ftlm.h>     // For build_lanczos_tridiagonal function
 #include <ed/solvers/lanczos.h>  // For helper functions
-#include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 #include <filesystem>  // P0.12
 #include <fstream>
@@ -111,7 +110,7 @@ double find_ground_state_lanczos(
 /**
  * @brief Build Krylov subspace from ground state for low-lying excitations
  */
-int build_excitation_spectrum(
+static int build_excitation_spectrum(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& ground_state,
     double ground_energy,
@@ -155,7 +154,7 @@ int build_excitation_spectrum(
 /**
  * @brief Compute thermodynamics from ground state and low-lying excitations
  */
-ThermodynamicData compute_ltlm_thermodynamics(
+static ThermodynamicData compute_ltlm_thermodynamics(
     double ground_energy,
     const std::vector<double>& excitation_energies,
     const std::vector<double>& weights,
@@ -535,98 +534,3 @@ StaticResponseResults compute_connected_qh_response_ltlm(
     return results;
 }
 
-/**
- * @brief Save LTLM results to HDF5 file and unified text format
- */
-void save_ltlm_results(
-    const LTLMResults& results,
-    const std::string& filename
-) {
-    // Extract directory from filename to create HDF5 file
-    std::string directory = filename.substr(0, filename.find_last_of('/'));
-    if (directory.empty()) directory = ".";
-
-    // Honour the unified "/dev/null" sentinel for "skip all I/O".
-    // ``ed_wrapper.h`` substitutes an empty ``output_dir`` with
-    // ``/dev/null`` so the dispatcher can keep its uniform
-    // ``output_dir.empty()`` checks downstream. Without this guard
-    // the LTLM saver tries to open ``/dev/null/ed_results.h5`` which
-    // returns HDF5's ``/dev/null`` sentinel, then attempts an
-    // ``H5F_ACC_RDWR`` open on it and segfaults at truncate time.
-    if (HDF5IO::isDisabledOutputPath(directory) ||
-        HDF5IO::isDisabledOutputPath(filename)) {
-        return;
-    }
-
-    try {
-        std::string h5_path = HDF5IO::createOrOpenFile(directory);
-        if (HDF5IO::isDisabledOutputPath(h5_path)) {
-            return;
-        }
-        
-        HDF5IO::saveFTLMThermodynamics(
-            h5_path,
-            results.thermo_data.temperatures,
-            results.thermo_data.energy,
-            results.energy_error,
-            results.thermo_data.specific_heat,
-            results.specific_heat_error,
-            results.thermo_data.entropy,
-            results.entropy_error,
-            results.thermo_data.free_energy,
-            results.free_energy_error,
-            results.total_samples,
-            "LTLM"
-        );
-        
-        // Also save ground state energy and spectrum if available
-        H5::H5File file(h5_path, H5F_ACC_RDWR);
-        
-        // Save ground state energy as attribute
-        std::string base_path = "/ftlm/averaged";
-        H5::Group group = file.openGroup(base_path);
-        H5::DataSpace attr_space(H5S_SCALAR);
-        
-        if (group.attrExists("ground_state_energy")) {
-            group.removeAttr("ground_state_energy");
-        }
-        H5::Attribute gs_attr = group.createAttribute("ground_state_energy",
-                                                      H5::PredType::NATIVE_DOUBLE,
-                                                      attr_space);
-        gs_attr.write(H5::PredType::NATIVE_DOUBLE, &results.ground_state_energy);
-        gs_attr.close();
-        
-        if (group.attrExists("krylov_dimension")) {
-            group.removeAttr("krylov_dimension");
-        }
-        H5::Attribute krylov_attr = group.createAttribute("krylov_dimension",
-                                                          H5::PredType::NATIVE_UINT64,
-                                                          attr_space);
-        krylov_attr.write(H5::PredType::NATIVE_UINT64, &results.krylov_dimension);
-        krylov_attr.close();
-        
-        group.close();
-        
-        // Save low-lying spectrum if available
-        if (!results.low_lying_spectrum.empty()) {
-            std::string spectrum_name = base_path + "/low_lying_spectrum";
-            if (file.nameExists(spectrum_name)) {
-                file.unlink(spectrum_name);
-            }
-            hsize_t dims[1] = {results.low_lying_spectrum.size()};
-            H5::DataSpace dataspace(1, dims);
-            H5::DataSet dataset = file.createDataSet(spectrum_name,
-                                                     H5::PredType::NATIVE_DOUBLE,
-                                                     dataspace);
-            dataset.write(results.low_lying_spectrum.data(), H5::PredType::NATIVE_DOUBLE);
-            dataset.close();
-        }
-        
-        file.close();
-        
-        std::cout << "LTLM results saved to: " << h5_path << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error saving LTLM results to HDF5: " << e.what() << std::endl;
-    }
-}

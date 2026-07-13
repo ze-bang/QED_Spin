@@ -24,10 +24,10 @@
 // checkpoint logic etc lives in the calling driver. This split allows the
 // same kernel body to drive:
 //
-//   * `src/solvers/cpu/TPQ.cpp::microcanonical_tpq` / `::canonical_tpq`
-//   * `src/solvers/gpu/gpu_tpq.cu`
-//   * `src/distributed/distributed_tpq*.cpp`
-//   * future `ed::thermal()` orchestrator in Phase 4.2
+//   * the `ed::workflows::thermal` orchestrator (`src/orchestrator.cpp`)
+//   * the fp32 GPU lane (`src/solvers/gpu/mtpq_f32_impl.cuh`)
+// (the original consumers -- `TPQ.cpp::microcanonical_tpq` / `::canonical_tpq`,
+//  `gpu_tpq.cu`, `distributed_tpq*.cpp` -- were all retired by Jul 2026)
 //
 // Phase 2.4 of the Minimalist ED Collapse (May 2026): see
 // `ed/thermal/mtpq_kernel.h` for the

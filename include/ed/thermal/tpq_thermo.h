@@ -1,16 +1,15 @@
+#pragma once
 // =============================================================================
-// src/solvers/cpu/TPQ.cpp
+// include/ed/thermal/tpq_thermo.h -- TPQ trajectory -> ThermodynamicData
+// aggregation (Stage 11b relocation of the last surviving TPQ.{h,cpp}
+// function into the thermal kernel family it serves).
 //
-// TPQ post-processing: trajectory -> ThermodynamicData aggregation.
-//
-// The legacy monolithic TPQ drivers (microcanonical_tpq / canonical_tpq,
-// their HDF5/text sidecar writers, per-site observable helpers, and
-// imaginary-time evolvers) were deleted in the debt-cleanup sweep
-// (Jul 2026); the live TPQ iteration lives in the backend-templated
-// kernels under include/ed/thermal/. See TPQ.h for the surviving surface.
+// Takes the per-sample (beta_k, E_k, var_k) trajectories DIRECTLY (no
+// HDF5/text round-trip) and interpolates onto the caller's temperature
+// grid. Called by the unified ``ed::workflows::thermal`` orchestrator for
+// the mTPQ lane (both the backend-templated kernel in ``mtpq_kernel.h``
+// and the fp32 GPU lane in ``mtpq_f32.h`` emit these trajectories).
 // =============================================================================
-
-#include <ed/solvers/TPQ.h>
 
 #include <algorithm>
 #include <array>
@@ -18,23 +17,50 @@
 #include <cstdint>
 #include <vector>
 
-// ============================================================================
-// In-memory TPQ trajectory aggregator (May 2026 surface unification).
-//
-// Takes the per-sample (beta_k, E_k, var_k) trajectories DIRECTLY
-// (no HDF5/text round-trip) and interpolates onto the caller's
-// temperature grid.
-// Called by the unified ``ed::workflows::thermal`` orchestrator for the
-// mTPQ lane -- closes the long-standing gap where the unified
-// TPQ kernels populated only ``ground_state_energy`` and left the
-// ThermodynamicData arrays empty.
-// ============================================================================
-ThermodynamicData compute_tpq_thermo_from_trajectories(
+#include <ed/core/thermal_types.h>  // ThermodynamicData
+
+namespace ed::thermal {
+
+/**
+ * @brief Aggregate per-sample TPQ trajectories into ThermodynamicData
+ *        on a user-supplied temperature grid (in-memory variant).
+ *
+ * Math: for each target temperature T (target_temperatures[t]), linearly
+ * interpolate every sample's (beta_k, E_k, var_k) at beta_target = 1/T,
+ * Welford-average across samples that bracket the target. Specific
+ * heat C_v = beta^2 * <var>.
+ *
+ * Samples whose trajectories don't bracket a given target beta are
+ * clamped to their nearest trajectory endpoint (beta=0 baseline on the
+ * warm side, the asymptotic deepest-beta iterate on the cold side).
+ *
+ * Returns an empty ``ThermodynamicData`` (all vectors zero-length)
+ * when ``sample_*.empty()`` or ``target_temperatures.empty()``.
+ *
+ * @param sample_inv_temps    Per-sample beta_k trajectory
+ * @param sample_energies     Per-sample E_k trajectory (same length)
+ * @param sample_variances    Per-sample var_k trajectory (same length)
+ * @param target_temperatures Temperature grid for the output
+ * @param hilbert_dim         Hilbert-space dimension D of the (sub)space
+ *                            the trajectories live in. When ``> 1`` the
+ *                            entropy and free energy are reconstructed in
+ *                            ABSOLUTE form via thermodynamic integration
+ *                            ``ln Z(beta) = ln(D) - \int_0^beta <E> dbeta'``,
+ *                            so ``S(T->inf) -> ln(D)`` and ``F`` carries the
+ *                            correct dimensional normalisation. This is what
+ *                            makes the per-sector ``F_s`` usable as a
+ *                            Boltzmann weight in
+ *                            ``combine_sector_thermodynamics`` (U(1)/Sz and
+ *                            spatial recombination). When ``0`` (default) the
+ *                            legacy zero-baseline integration ``S(T_min)=0``
+ *                            is used (kept for backwards compatibility).
+ */
+inline ThermodynamicData compute_tpq_thermo_from_trajectories(
     const std::vector<std::vector<double>>& sample_inv_temps,
     const std::vector<std::vector<double>>& sample_energies,
     const std::vector<std::vector<double>>& sample_variances,
     const std::vector<double>& target_temperatures,
-    double hilbert_dim
+    double hilbert_dim = 0.0
 ) {
     ThermodynamicData thermo{};
 
@@ -248,3 +274,4 @@ ThermodynamicData compute_tpq_thermo_from_trajectories(
     return thermo;
 }
 
+}  // namespace ed::thermal

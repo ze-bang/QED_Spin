@@ -52,7 +52,7 @@
 #include <ed/observables/kpm_dynamical.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/solvers/TPQ.h>      // compute_tpq_thermo_from_trajectories aggregator
+#include <ed/thermal/tpq_thermo.h>  // compute_tpq_thermo_from_trajectories aggregator
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
@@ -1199,7 +1199,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 // reconstruct ABSOLUTE entropy / free energy (ln(D)
                 // baseline). This is what makes per-sector F_s a valid
                 // Boltzmann weight for U(1)/Sz + spatial recombination.
-                ThermodynamicData td = compute_tpq_thermo_from_trajectories(
+                ThermodynamicData td = ed::thermal::compute_tpq_thermo_from_trajectories(
                     kres.sample_inv_temps, kres.sample_energies,
                     kres.sample_variances, R.thermo.temperatures,
                     static_cast<double>(H.geometry().global_dim));
