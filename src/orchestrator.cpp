@@ -1467,6 +1467,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 R.thermo.entropy = std::move(kres.entropy);
                 R.thermo.free_energy = std::move(kres.free_energy);
                 R.ground_state_energy = kres.e_min_estimate;
+                // Surface the raw DOS the method exists to produce (was
+                // computed and discarded; only its thermodynamics escaped).
+                R.dos_energies = std::move(kres.dos_grid_energies);
+                R.dos_values   = std::move(kres.dos_grid_values);
             }
         }, variant);
     } else {

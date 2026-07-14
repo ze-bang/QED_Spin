@@ -110,7 +110,7 @@ double find_ground_state_lanczos(
 /**
  * @brief Build Krylov subspace from ground state for low-lying excitations
  */
-static int build_excitation_spectrum(
+[[maybe_unused]] static int build_excitation_spectrum(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& ground_state,
     double ground_energy,
@@ -151,10 +151,120 @@ static int build_excitation_spectrum(
     return m;
 }
 
+// ---------------------------------------------------------------------------
+// Correct LTLM thermodynamics (Jul 2026 rewrite).
+//
+// The previous body seeded ONE Krylov space from the ground state and summed
+// Z = sum_n |<0|psi_n>|^2 e^{-beta E_n}: that is the local density of states
+// seen from |0>, i.e. <0|H e^{-bH}|0> / <0|e^{-bH}|0>, NOT the thermal trace
+// Tr(H e^{-bH})/Tr(e^{-bH}). It stays pinned near E_0 at every T (the GS
+// overlap |<0|psi_0>|^2 ~ 1 dominates) -- E(0.2) came out -8.55 vs the exact
+// -8.26, a 205% error in the excitation content.
+//
+// Correct LTLM (Aichhorn et al., PRB 67 161103): separate the exact ground
+// state and sample the (D-1)-dim complement with random vectors. For a
+// function of H alone (all thermodynamics here) the LTLM symmetric estimator
+// reduces to the FTLM one, so this is provably the correct thermal trace:
+//
+//   Ztilde = Tr e^{-b(H-E0)}
+//          = 1 (GS) + ((D-1)/R) sum_r sum_j w_j^r e^{-b(eps_j^r - E0)}
+//   U1 = Tr(H e^{-b(H-E0)}) = E0 + ((D-1)/R) sum_r sum_j w_j eps_j e^{...}
+//   U2 = Tr(H^2 e^{-b(H-E0)})= E0^2 + ((D-1)/R) sum_r sum_j w_j eps_j^2 e^{...}
+//   <E> = U1/Ztilde,  Cv = b^2 (U2/Ztilde - <E>^2),
+//   F = E0 - T ln Ztilde,  S = b(<E> - E0) + ln Ztilde.
+//
+// w_j^r = |<r_perp|psi_j>|^2 with |r_perp> the random vector projected off
+// the GS and renormalised (so sum_j w_j ~ 1 and the complement carries the
+// (D-1) trace weight). Keeping the GS exact makes the T->0 limit exact with
+// few samples -- the reason LTLM beats FTLM at low T.
+static ThermodynamicData compute_ltlm_thermodynamics_sampled(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    double ground_energy,
+    const ComplexVector& ground_state,
+    const LTLMParameters& params,
+    const std::vector<double>& temperatures)
+{
+    const uint64_t R = std::max<uint64_t>(1, params.num_samples);
+    const double D = static_cast<double>(N);
+    const double complement_factor = (D > 1.0) ? (D - 1.0) / static_cast<double>(R)
+                                               : 0.0;
+
+    // Per-sample (eps_j, w_j) over the GS complement.
+    std::vector<std::vector<double>> all_eps(R), all_w(R);
+    std::uint64_t base_seed = params.random_seed;
+    if (base_seed == 0) base_seed = 0x9E3779B97F4A7C15ULL;
+    for (uint64_t s = 0; s < R; ++s) {
+        std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (s + 1);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z =  z ^ (z >> 31);
+        std::mt19937 gen(static_cast<std::mt19937::result_type>(z));
+        ComplexVector v = generateGaussianRandomVector(N, gen);
+        // Project off the exact ground state: |v> -= |0><0|v>.
+        Complex proj;
+        cblas_zdotc_sub(N, ground_state.data(), 1, v.data(), 1, &proj);
+        Complex neg(-proj.real(), -proj.imag());
+        cblas_zaxpy(N, &neg, ground_state.data(), 1, v.data(), 1);
+        double nrm = cblas_dznrm2(N, v.data(), 1);
+        if (nrm < 1e-300) continue;
+        Complex inv(1.0 / nrm, 0.0);
+        cblas_zscal(N, &inv, v.data(), 1);
+
+        std::vector<double> alpha, beta;
+        build_lanczos_tridiagonal(H, v, N, params.krylov_dim, params.tolerance,
+                                  params.full_reorthogonalization,
+                                  params.reorth_frequency, alpha, beta);
+        diagonalize_tridiagonal_ritz(alpha, beta, all_eps[s], all_w[s]);
+    }
+
+    ThermodynamicData thermo;
+    thermo.temperatures = temperatures;
+    const std::size_t nT = temperatures.size();
+    thermo.energy.resize(nT);
+    thermo.specific_heat.resize(nT);
+    thermo.entropy.resize(nT);
+    thermo.free_energy.resize(nT);
+
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double T = temperatures[t];
+        const double beta = 1.0 / T;
+        // GS term (shifted by E0): weight 1 at energy E0.
+        double Ztil = 1.0;
+        double U1   = ground_energy;
+        double U2   = ground_energy * ground_energy;
+        for (uint64_t s = 0; s < R; ++s) {
+            const auto& eps = all_eps[s];
+            const auto& w   = all_w[s];
+            for (std::size_t j = 0; j < eps.size(); ++j) {
+                const double boltz = w[j] * std::exp(-beta * (eps[j] - ground_energy));
+                const double contrib = complement_factor * boltz;
+                Ztil += contrib;
+                U1   += contrib * eps[j];
+                U2   += contrib * eps[j] * eps[j];
+            }
+        }
+        if (Ztil > 1e-300) {
+            const double E_avg  = U1 / Ztil;
+            const double E2_avg = U2 / Ztil;
+            thermo.energy[t]        = E_avg;
+            thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+            thermo.entropy[t]       = beta * (E_avg - ground_energy) + std::log(Ztil);
+            thermo.free_energy[t]   = ground_energy - T * std::log(Ztil);
+        } else {
+            thermo.energy[t]        = ground_energy;
+            thermo.specific_heat[t] = 0.0;
+            thermo.entropy[t]       = 0.0;
+            thermo.free_energy[t]   = ground_energy;
+        }
+    }
+    return thermo;
+}
+
 /**
- * @brief Compute thermodynamics from ground state and low-lying excitations
+ * @brief (Legacy, retained for reference) GS-local-DOS thermodynamics.
  */
-static ThermodynamicData compute_ltlm_thermodynamics(
+[[maybe_unused]] static ThermodynamicData compute_ltlm_thermodynamics(
     double ground_energy,
     const std::vector<double>& excitation_energies,
     const std::vector<double>& weights,
@@ -329,27 +439,20 @@ LTLMResults low_temperature_lanczos(
     
     results.ground_state_energy = ground_energy;
     
-    // Step 2: Build excitation spectrum from ground state
-    std::cout << "\n--- Step 2: Building Excitation Spectrum ---\n";
-    std::vector<double> excitation_energies, weights;
-    uint64_t n_excitations = build_excitation_spectrum(
-        H, ground_state, ground_energy, N, params.krylov_dim,
-        params.tolerance, params.full_reorthogonalization, params.reorth_frequency,
-        excitation_energies, weights
-    );
-    
-    results.krylov_dimension = n_excitations;
-    results.low_lying_spectrum = excitation_energies;
-    
-    if (n_excitations == 0) {
-        std::cerr << "Error: Failed to build excitation spectrum\n";
-        return results;
-    }
-    
+    // Step 2 (Jul 2026): correct LTLM thermal trace -- exact GS + random-
+    // vector sampling of the complement (compute_ltlm_thermodynamics_sampled).
+    // The old build_excitation_spectrum path (single GS-seeded Krylov) is
+    // retained above only as reference; it computed the GS-local DOS, not the
+    // thermal trace, and is no longer on the production path.
+    std::cout << "\n--- Step 2: LTLM thermal trace (exact GS + "
+              << params.num_samples << " complement samples) ---\n";
+    results.krylov_dimension = params.krylov_dim;
+    results.low_lying_spectrum = { ground_energy };
+
     // Step 3: Compute thermodynamics
     std::cout << "\n--- Step 3: Computing Thermodynamics ---\n";
-    results.thermo_data = compute_ltlm_thermodynamics(
-        ground_energy, excitation_energies, weights, temperatures
+    results.thermo_data = compute_ltlm_thermodynamics_sampled(
+        H, N, ground_energy, ground_state, params, temperatures
     );
     
     // Initialize error bars to zero (LTLM is deterministic with single sample)
@@ -358,30 +461,12 @@ LTLMResults low_temperature_lanczos(
     results.entropy_error.resize(num_temp_bins, 0.0);
     results.free_energy_error.resize(num_temp_bins, 0.0);
     
-    // Save intermediate data if requested
-    if (params.store_intermediate && !output_dir.empty()) {
-        // Save excitation spectrum
-        std::string spectrum_file = output_dir + "/ltlm_data/excitation_spectrum.txt";
-        std::ofstream f(spectrum_file);
-        if (f.is_open()) {
-            f << "# Index  Energy  Weight\n";
-            for (int i = 0; i < n_excitations; i++) {
-                f << std::scientific << std::setprecision(12)
-                  << i << " "
-                  << excitation_energies[i] << " "
-                  << weights[i] << "\n";
-            }
-            f.close();
-            std::cout << "Saved excitation spectrum to: " << spectrum_file << std::endl;
-        }
-    }
-    
     std::cout << "\n==========================================\n";
     std::cout << "LTLM Calculation Complete\n";
     std::cout << "==========================================\n";
     std::cout << "Ground state energy: " << ground_energy << std::endl;
-    std::cout << "Number of excitations: " << n_excitations << std::endl;
-    
+    std::cout << "Complement samples: " << params.num_samples << std::endl;
+
     return results;
 }
 

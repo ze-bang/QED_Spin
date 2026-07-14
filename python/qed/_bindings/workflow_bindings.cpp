@@ -883,7 +883,9 @@ void bind_workflows(py::module_& m) {
         .def_readonly("tpq_sample_variances",
                       &ed::ThermalResult::tpq_sample_variances)
         .def_readonly("tpq_state_snapshots",
-                      &ed::ThermalResult::tpq_state_snapshots);
+                      &ed::ThermalResult::tpq_state_snapshots)
+        .def_readonly("dos_energies", &ed::ThermalResult::dos_energies)
+        .def_readonly("dos_values",   &ed::ThermalResult::dos_values);
 
     py::class_<ed::TpqStateSnapshot>(m, "TpqStateSnapshot")
         .def(py::init<>())

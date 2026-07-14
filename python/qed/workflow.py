@@ -1566,9 +1566,19 @@ def _normalize_symmetry_info(
         gens = [list(map(int, p)) for p in symmetry]
         return (group_from_generators(int(operator.num_sites), gens)
                 if gens else None)
+    # Duck-typed GeneratorSet-shaped carrier (a ``.generators`` attribute,
+    # optionally ``.star_perms``): qed.solve accepts these, so qed.thermal
+    # must too -- the two verbs took inconsistent symmetry= inputs, a trap
+    # for callers who reuse one symmetry object across both.
+    gens = getattr(symmetry, "generators", None)
+    if gens is not None:
+        gl = [list(map(int, p)) for p in gens]
+        return (group_from_generators(int(operator.num_sites), gl)
+                if gl else None)
     raise TypeError(
-        f"symmetry must be GeneratorSet, list[Permutation], or dict, "
-        f"got {type(symmetry).__name__}"
+        f"symmetry must be GeneratorSet, list[Permutation], dict, or an "
+        f"object exposing a .generators attribute, got "
+        f"{type(symmetry).__name__}"
     )
 
 
@@ -1586,7 +1596,9 @@ def _raw_generators(symmetry: SymmetryArg) -> Optional[list[list[int]]]:
     elif isinstance(symmetry, dict):
         gens = symmetry.get("generators")
     else:
-        return None
+        gens = getattr(symmetry, "generators", None)  # duck-typed carrier
+        if gens is None:
+            return None
     return [list(map(int, p)) for p in gens] if gens else None
 
 

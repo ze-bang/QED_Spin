@@ -154,6 +154,11 @@ def ed_result_from_thermal_result(
     h5_path = str(getattr(tr, "hdf5_path", "") or "")
     out.eigenvectors_computed = bool(h5_path)
     out.eigenvectors_path     = h5_path
+    # KPM-DOS raw density of states (Jul 2026): surface the density(E) the
+    # method produces so callers can consume/integrate it (EDResults carries
+    # py::dynamic_attr; empty lists for the non-DOS methods).
+    out.dos_energies = list(getattr(tr, "dos_energies", []) or [])
+    out.dos_values   = list(getattr(tr, "dos_values", []) or [])
     return out
 
 

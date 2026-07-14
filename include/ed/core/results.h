@@ -237,6 +237,15 @@ struct ThermalResult {
     std::vector<std::vector<double>>    tpq_sample_variances;
     /// One entry per snapshot the kernel actually recorded.
     std::vector<TpqStateSnapshot>       tpq_state_snapshots;
+
+    // KPM-DOS raw density of states (Jul 2026): the KpmDos lane computed
+    // the DOS grid and then discarded it, surfacing only its derived
+    // thermodynamics -- so the actual density(E) the method exists to
+    // produce was unreachable (a caller integrating it to check the sum
+    // rule int rho dE == D got nothing). Populated only by the KpmDos
+    // branch; empty for every other method.
+    std::vector<double>                 dos_energies;
+    std::vector<double>                 dos_values;
 };
 
 // ---------------------------------------------------------------------------
