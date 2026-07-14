@@ -925,7 +925,19 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     }
     ed::matvec::CpuBackend be;
     std::vector<Complex> v0(nb);
-    std::mt19937_64 gen(0x51ED0B70ULL);
+    // ED_SYM_LG_SEED offsets the start vector (default 0): the multi-seed
+    // verification protocol for within-block degeneracy suspicion -- two
+    // runs with different seeds must agree on every distinct level (a level
+    // with accidentally tiny overlap against one seed shows up with the
+    // other). NOTE: single-vector Lanczos still returns ONE copy of a
+    // genuinely degenerate pair regardless of seed; multiplicity needs
+    // block Lanczos (ledger #2).
+    std::uint64_t seed = 0x51ED0B70ULL;
+    if (const char* sv = std::getenv("ED_SYM_LG_SEED")) {
+        seed ^= static_cast<std::uint64_t>(std::strtoull(sv, nullptr, 10))
+                * 0x9E3779B97F4A7C15ULL;
+    }
+    std::mt19937_64 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& v : v0) v = Complex(nd(gen), nd(gen));
 

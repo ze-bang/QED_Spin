@@ -29,6 +29,7 @@
 // =============================================================================
 
 #include <complex>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -210,6 +211,13 @@ struct RepSectorData {
     void build_perm_lut() {
         if (!perm_lut_data.empty()) return;
         if (n_sites <= 0 || n_sites > 64 || perms_flat.empty()) return;
+        // ED_SYM_PERM_LUT=0 (test gate): keep the scalar bit walk so the
+        // pathway matrix can pin LUT == scalar at any size (the LUT is
+        // otherwise unconditional and the fallback would only ever run at
+        // N > 64, i.e. never in tests).
+        if (const char* v = std::getenv("ED_SYM_PERM_LUT")) {
+            if (v[0] == '0' && v[1] == '\0') return;
+        }
         const int G   = group_size;
         const int N   = n_sites;
         const int BPW = (N + 7) / 8;   // 5 for N=36
