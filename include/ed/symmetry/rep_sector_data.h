@@ -125,13 +125,14 @@ struct RepSectorData {
     // saving ~60% of instruction count at N=32 (4 L2 hits vs 32 scalar ops).
     //
     // Layout: perm_lut_data[(g * perm_lut_bpw + byte_idx) * 256 + byte_val]
-    //   = the bits that input byte byte_idx with value byte_val contributes
-    //     to the 32-bit output of group element g's permutation.
-    // perm_lut_bpw = ceil(n_sites / 8); always 4 for N=32.
-    // Size: group_size * perm_lut_bpw * 256 * 4 bytes
-    //   (~128 KB for |G|=32, N=32 -- L2-resident).
-    // Built by build_perm_lut(); empty/unused when n_sites > 32.
-    std::vector<std::uint32_t> perm_lut_data;
+    // -- 64-bit output words so every N <= 64 gets the byte-decomposition
+    // fast path (the uint32 version stranded N > 32, i.e. exactly the
+    // 36-site production regime, on the serial n_sites-iteration walk).
+    // perm_lut_bpw = ceil(n_sites / 8); 5 for N=36.
+    // Size: group_size * perm_lut_bpw * 256 * 8 bytes (~740 KB at N=36,
+    // |G|=72 -- L2-resident on host and device).
+    // Built by build_perm_lut(); empty when perms are absent.
+    std::vector<std::uint64_t> perm_lut_data;
     int                        perm_lut_bpw = 0;
 
     [[nodiscard]] std::uint64_t dim() const noexcept {
@@ -205,28 +206,28 @@ struct RepSectorData {
     }
 
     // Build the byte-decomposition LUT for N≤32. Idempotent / no-op when
-    // already built or when n_sites > 32. See ``perm_lut_data`` for layout.
+    // already built or when n_sites > 64. See ``perm_lut_data`` for layout.
     void build_perm_lut() {
         if (!perm_lut_data.empty()) return;
-        if (n_sites <= 0 || n_sites > 32 || perms_flat.empty()) return;
+        if (n_sites <= 0 || n_sites > 64 || perms_flat.empty()) return;
         const int G   = group_size;
         const int N   = n_sites;
-        const int BPW = (N + 7) / 8;   // 4 for N=32
+        const int BPW = (N + 7) / 8;   // 5 for N=36
         perm_lut_bpw  = BPW;
-        perm_lut_data.assign(static_cast<std::size_t>(G) * BPW * 256, 0u);
+        perm_lut_data.assign(static_cast<std::size_t>(G) * BPW * 256, 0ULL);
         for (int g = 0; g < G; ++g) {
             const int* p = perms_flat.data() + g * N;
             // Invert the permutation: p[i] = src for output bit i
             //   => p_inv[j] = dst for input bit j
-            int p_inv[32] = {};
+            int p_inv[64] = {};
             for (int i = 0; i < N; ++i) p_inv[p[i]] = i;
             for (int byte_idx = 0; byte_idx < BPW; ++byte_idx) {
                 const int bit_base = byte_idx * 8;
                 for (int byte_val = 0; byte_val < 256; ++byte_val) {
-                    std::uint32_t out = 0;
+                    std::uint64_t out = 0;
                     for (int b = 0; b < 8 && bit_base + b < N; ++b) {
                         if ((byte_val >> b) & 1)
-                            out |= (1u << p_inv[bit_base + b]);
+                            out |= (1ULL << p_inv[bit_base + b]);
                     }
                     const std::size_t idx =
                         (static_cast<std::size_t>(g) * BPW + byte_idx) * 256

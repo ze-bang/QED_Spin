@@ -137,6 +137,8 @@ struct GpuRepSectorMirror {
     thrust::device_vector<int>             d_perms;
     thrust::device_vector<cuDoubleComplex> d_characters;
     thrust::device_vector<std::uint64_t>   d_flips;   // Stage 8b: flip masks
+    thrust::device_vector<std::uint64_t>   d_perm_lut; // byte-LUT fast path
+    int                                     perm_lut_bpw = 0;
     thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
     // Stage-4 device twin: shared table (co-owned) + per-sector remap.
     std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
@@ -163,6 +165,9 @@ struct GpuRepSectorMirror {
         v.characters        = thrust::raw_pointer_cast(d_characters.data());
         v.flips             = d_flips.empty()
             ? nullptr : thrust::raw_pointer_cast(d_flips.data());
+        v.perm_lut          = d_perm_lut.empty()
+            ? nullptr : thrust::raw_pointer_cast(d_perm_lut.data());
+        v.perm_lut_bpw      = perm_lut_bpw;
         v.rep_index_of_rank = d_rep_index_of_rank.empty()
             ? nullptr : thrust::raw_pointer_cast(d_rep_index_of_rank.data());
         if (shared_rank_tab && !d_local_of_shared.empty()) {
@@ -334,6 +339,22 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     mirror->d_characters        = h_characters;
     if (data.has_flips()) {   // Stage 8b: flip-extended sector
         mirror->d_flips         = data.flip_masks;
+    }
+    // Byte-LUT permutation fast path (Jul 2026): reuse the host-built table
+    // when the caller carries one, else build it here from perms_flat --
+    // the ~740 KB (N=36, |G|=72) upload replaces the serial n_sites-loop
+    // walk in the device canonicalization hot path.
+    if (!data.perm_lut_data.empty()) {
+        mirror->d_perm_lut   = data.perm_lut_data;
+        mirror->perm_lut_bpw = data.perm_lut_bpw;
+    } else if (n_sites > 0 && n_sites <= 64 && !data.perms_flat.empty()) {
+        ed::symmetry::RepSectorData tmp;
+        tmp.n_sites    = n_sites;
+        tmp.group_size = data.group_size;
+        tmp.perms_flat = data.perms_flat;
+        tmp.build_perm_lut();
+        mirror->d_perm_lut   = tmp.perm_lut_data;
+        mirror->perm_lut_bpw = tmp.perm_lut_bpw;
     }
     mirror->d_rep_index_of_rank = h_rep_index_of_rank;
 

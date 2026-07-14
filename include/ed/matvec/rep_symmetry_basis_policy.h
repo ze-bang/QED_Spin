@@ -81,9 +81,10 @@ struct RepSymmetryBasisPolicy {
 
     // Optional byte-decomposition LUT for fast apply_perm (N≤32).
     // When non-null, replaces the N-iteration scalar bit-scatter loop with
-    // ``perm_lut_bpw`` table lookups (~4 for N=32). Pointer into
-    // RepSectorData::perm_lut_data; null when N>32 or not built.
-    const std::uint32_t* perm_lut     = nullptr;
+    // ``perm_lut_bpw`` table lookups (5 for N=36). Pointer into
+    // RepSectorData::perm_lut_data; null when not built. 64-bit words so
+    // every N <= 64 rides the fast path.
+    const std::uint64_t* perm_lut     = nullptr;
     int                  perm_lut_bpw = 0;
 
     [[nodiscard]] inline std::uint64_t dim() const noexcept { return dim_; }
@@ -106,12 +107,12 @@ struct RepSymmetryBasisPolicy {
     apply_perm(std::uint64_t s, int g) const noexcept {
         const std::uint64_t flip = (flips != nullptr) ? flips[g] : 0ULL;
         if (perm_lut != nullptr) {
-            const std::uint32_t* lut_g = perm_lut
+            const std::uint64_t* lut_g = perm_lut
                 + static_cast<std::size_t>(g) * perm_lut_bpw * 256;
-            std::uint32_t r = 0;
+            std::uint64_t r = 0;
             for (int b = 0; b < perm_lut_bpw; ++b)
                 r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
-            return static_cast<std::uint64_t>(r) ^ flip;
+            return r ^ flip;
         }
         // Scalar fallback for N>32 (or when LUT not built).
         const int* p = perms + static_cast<std::size_t>(g) * n_sites;
