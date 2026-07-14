@@ -670,16 +670,18 @@ def solve(
                                 d["block_k_raw"], d["block_flip_parity"],
                                 d["block_irrep"], d["block_irrep_dim"]):
                             rows.extend(
-                                [(float(e), kk, fp, ir, dd, m, sub)] * m)
+                                [(float(e), kk, fp, ir, dd, m, sub,
+                                  True)] * m)   # full spectrum is exact
                         return rows, d["irrep_characters"]
                     d = dict(_core.little_group_lowest_eigenvalues_labeled(
                         op_to_use, _A, _res, k=_k,
                         spin_flip=_sf, time_reversal=_tr, **kw))
-                    rows = [(float(e), kk, fp, ir, dd, m, sub)
-                            for e, kk, fp, ir, dd, m in zip(
+                    rows = [(float(e), kk, fp, ir, dd, m, sub, bool(cv))
+                            for e, kk, fp, ir, dd, m, cv in zip(
                                 d["eigenvalues"], d["k_raw"],
                                 d["flip_parity"], d["irrep"],
-                                d["irrep_dim"], d["multiplicity"])]
+                                d["irrep_dim"], d["multiplicity"],
+                                d["converged"])]
                     return rows, d["irrep_characters"]
 
                 if _sp == 2:
@@ -707,6 +709,11 @@ def solve(
                 out.block_irrep_dim    = [t[4] for t in rows]
                 out.block_multiplicity = [t[5] for t in rows]
                 out.block_subspace     = [t[6] for t in rows]
+                # 1b (Jul 2026): per-eigenvalue convergence flag -- a
+                # budget-capped Lanczos block that could not deliver its
+                # full window of distinct converged Ritz values marks its
+                # rows False; merged campaigns must be able to tell.
+                out.block_converged    = [t[7] for t in rows]
                 out.irrep_characters   = chars
                 if verbose:
                     print(f"[qed.solve] non-abelian LITTLE-GROUP lane "

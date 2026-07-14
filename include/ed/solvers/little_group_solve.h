@@ -93,6 +93,11 @@ struct LittleGroupLabel {
     int flip_parity = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
     int irrep       = -1;   ///< little-co-group irrep index; -1 = plain block
     int irrep_dim   = 1;    ///< d_sigma (1 for plain blocks)
+    /// Jul 2026: true iff the block delivered the full requested window of
+    /// DISTINCT, residual-bound-converged Ritz values (dense blocks are
+    /// exact and always true). A budget-capped Lanczos that found fewer is
+    /// flagged false -- merged campaigns must be able to tell.
+    bool converged  = true;
 };
 
 struct LittleGroupSpectrum {

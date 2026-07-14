@@ -1016,6 +1016,7 @@ PYBIND11_MODULE(_core, m) {
                         });
               std::vector<double> ev;
               std::vector<int> kraw, fpar, irr, irrd, mult;
+              std::vector<bool> conv;
               const std::size_t want = static_cast<std::size_t>(
                   std::max(k, 1));
               for (std::size_t idx : order) {
@@ -1028,6 +1029,7 @@ PYBIND11_MODULE(_core, m) {
                       irr.push_back(L.irrep);
                       irrd.push_back(L.irrep_dim);
                       mult.push_back(s.multiplicities[idx]);
+                      conv.push_back(L.converged);
                   }
                   if (ev.size() >= want) break;
               }
@@ -1038,6 +1040,7 @@ PYBIND11_MODULE(_core, m) {
               d["irrep"]        = irr;
               d["irrep_dim"]    = irrd;
               d["multiplicity"] = mult;
+              d["converged"]    = conv;
               d["irrep_characters"] = s.irrep_characters;
               d["stars"]        = lg_stars_dict(s);
               d["flip_engaged"] = s.flip_engaged;

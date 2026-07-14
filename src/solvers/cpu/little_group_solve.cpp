@@ -884,7 +884,8 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // and a k-lowest Ritz stationarity gate.
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
-                   int dense_max_dim) {
+                   int dense_max_dim, bool* converged_out = nullptr) {
+    if (converged_out) *converged_out = true;
     const std::uint64_t nb = mv.dim();
     if (nb == 0) return {};
     const std::size_t k = static_cast<std::size_t>(std::max<std::uint64_t>(
@@ -918,15 +919,18 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     kopts.local_ring_size = 8;
     kopts.keep_basis      = false;
     kopts.dim_cap         = nb;
-    // k-lowest Ritz early exit: stop once EVERY requested eigenvalue is
-    // stationary between checks (the shared smallest-only predicate would
-    // strand the upper levels of the window).
+    // k-DISTINCT converged Ritz early exit (Jul 2026, replaces the
+    // stationarity gate): at 1e8 dims the window fills with ghost COPIES
+    // of converged extremes, and a ghost is exactly as stationary as an
+    // eigenvalue -- the first production block burned its full budget and
+    // returned 8x E0. The tridiagonal residual bound |beta_m * z_{m,j}| is
+    // free, rigorous (Paige), and ghost-aware in combination with dedup:
+    // stop once k DISTINCT Ritz values carry converged bounds.
     {
-        auto prev = std::make_shared<std::vector<double>>();
         const std::size_t kk = k;
         kopts.convergence_check =
-            [prev, kk](const std::vector<double>& alpha,
-                       const std::vector<double>& beta) -> bool {
+            [kk](const std::vector<double>& alpha,
+                 const std::vector<double>& beta) -> bool {
                 const int m = static_cast<int>(alpha.size());
                 if (static_cast<std::size_t>(m) < kk + 2) return false;
                 Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
@@ -938,19 +942,26 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
                     T(i - 1, i) = b;
                 }
                 Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
-                es.compute(T, Eigen::EigenvaluesOnly);
+                es.compute(T, Eigen::ComputeEigenvectors);
                 if (es.info() != Eigen::Success) return false;
-                const std::size_t nk =
-                    std::min<std::size_t>(kk, static_cast<std::size_t>(m));
-                std::vector<double> cur(es.eigenvalues().data(),
-                                        es.eigenvalues().data() + nk);
-                bool conv = prev->size() == cur.size();
-                for (std::size_t i = 0; conv && i < cur.size(); ++i) {
-                    const double den = std::max(std::abs(cur[i]), 1e-300);
-                    conv = std::abs(cur[i] - (*prev)[i]) / den < 1e-11;
+                const double beta_m =
+                    (beta.size() > static_cast<std::size_t>(m))
+                        ? std::abs(beta[static_cast<std::size_t>(m)]) : 0.0;
+                const auto& w = es.eigenvalues();
+                const double scale = std::max(
+                    {std::abs(w(0)), std::abs(w(m - 1)), 1e-300});
+                std::size_t distinct = 0;
+                double last = 0.0;
+                for (int j = 0; j < m && distinct < kk; ++j) {
+                    const double bound =
+                        beta_m * std::abs(es.eigenvectors()(m - 1, j));
+                    if (bound > 1e-7 * scale) continue;
+                    if (distinct > 0
+                        && std::abs(w(j) - last) <= 1e-9 * scale) continue;
+                    last = w(j);
+                    ++distinct;
                 }
-                *prev = std::move(cur);
-                return conv;
+                return distinct >= kk;
             };
         kopts.convergence_check_interval = 10;
     }
@@ -995,7 +1006,24 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
             continue;                             // ghost copy
         keep.push_back(diag[j]);
     }
+    // 1b: a budget-capped block that could not deliver k distinct converged
+    // values must be DISTINGUISHABLE from a converged one downstream.
+    if (converged_out) *converged_out = keep.size() >= k;
     return keep;
+}
+
+// Dimension of the (n_up | parity | full) subspace this walk must tile.
+[[nodiscard]] std::uint64_t
+subspace_dim_of(int n_sites, const LittleGroupOptions& opt) {
+    if (opt.n_up >= 0) {
+        long double c = 1.0L;
+        const int kk = std::min(opt.n_up, n_sites - opt.n_up);
+        for (int i = 0; i < kk; ++i)
+            c = c * (n_sites - i) / (i + 1);
+        return static_cast<std::uint64_t>(c + 0.5L);
+    }
+    if (opt.sz_parity >= 0) return std::uint64_t{1} << (n_sites - 1);
+    return std::uint64_t{1} << n_sites;
 }
 
 // The star walk shared by every consumer. ``solve_block(mv, plain)`` returns
@@ -1263,6 +1291,30 @@ LittleGroupSpectrum run_little_group(
             t_sector, t_monomial, t_isotypic, t_solve, stars.size());
     }
 
+    // Coverage tripwire (Jul 2026): lowest-k walks have no multiplicity sum
+    // rule, so a dropped or mis-partitioned star was previously silent. When
+    // every star was visited (no filter), |star| x dim(rep) summed over the
+    // walk must tile the subspace exactly -- character-theory exactness, so
+    // any mismatch is a bookkeeping bug, not physics. Plan mode gets the
+    // same check for free (dims are computed there too).
+    if (only_k0.empty()) {
+        std::uint64_t got = 0;
+        for (const auto& s : out.stars)
+            got += static_cast<std::uint64_t>(s.star_size) * s.dim_k0;
+        const std::uint64_t want = subspace_dim_of(n_sites, opt);
+        if (got != want) {
+            std::fprintf(stderr,
+                "[little_group] COVERAGE FAIL: stars tile %llu of %llu "
+                "subspace states -- treat this walk's results as suspect\n",
+                static_cast<unsigned long long>(got),
+                static_cast<unsigned long long>(want));
+        } else if (profile || plan_only) {
+            std::fprintf(stderr,
+                "[little_group] coverage OK: %zu stars tile %llu states\n",
+                out.stars.size(), static_cast<unsigned long long>(want));
+        }
+    }
+
     for (int m : out.multiplicities) out.total_dim += static_cast<std::uint64_t>(m);
     return out;
 }
@@ -1326,7 +1378,7 @@ LittleGroupSpectrum little_group_full_spectrum(
         auto out = run_little_group(
             op, abelian_group, residue_perms, n_sites, opt,
             [&](const ed::matvec::MatVecOperator& mv, int mult,
-                const LittleGroupLabel& lab)
+                LittleGroupLabel& lab)
                 -> std::vector<double> {
                 const std::size_t nb = mv.dim();
                 if (nb == 0) return {};
@@ -1363,7 +1415,7 @@ LittleGroupSpectrum little_group_full_spectrum(
     auto out = run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [](const ed::matvec::MatVecOperator& mv, int /*mult*/,
-           const LittleGroupLabel& /*lab*/) {
+           LittleGroupLabel& /*lab*/) {
             return solve_block_full(mv);
         });
     check_sum_rule(out, n_sites, opt);
@@ -1381,8 +1433,11 @@ LittleGroupSpectrum little_group_lowest_spectrum(
     return run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [&](const ed::matvec::MatVecOperator& mv, int /*mult*/,
-            const LittleGroupLabel& /*lab*/) {
-            return solve_block_lowest(mv, k, opt.dense_max_dim);
+            LittleGroupLabel& lab) {
+            bool conv = true;
+            auto ev = solve_block_lowest(mv, k, opt.dense_max_dim, &conv);
+            lab.converged = conv;
+            return ev;
         });
 }
 
