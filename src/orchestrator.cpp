@@ -857,6 +857,81 @@ GroundStateResult solve_on(Backend& be,
     return R;
 }
 
+// ---------------------------------------------------------------------------
+// GroundStateCF / KpmDynamical seed guard (Jul 2026).
+//
+// The in-memory spectral lanes seeded the continued-fraction kernel with the
+// best-effort GS vector from ``solve()``, which caps its Lanczos and does NOT
+// reorthogonalise the eigenVECTOR (the eigenVALUE converges to the extreme
+// long before the vector does). A GS vector carrying ~1e-1..1e-3 residual
+// makes phi = O|psi0> -- and its weight ||phi||^2 -- systematically wrong:
+// the plain in-memory S(Q, omega) came out ~5% high vs the exact Lehmann /
+// cross-irrep references, while the cross-irrep lane was exact BECAUSE it
+// already refines its GS (ensure_gs_residual). This mirrors that refinement
+// on the host vector: measure the residual; if it exceeds 1e-8, rerun a
+// FullCGS2 kept-basis Lanczos on H seeded by the current vector, rebuild the
+// Ritz pair, and update (seed_host, E0) in place. Cheap when the vector was
+// already good (one matvec); decisive when it was not.
+inline void refine_gs_seed_host(const LinearOperator&        H,
+                                std::vector<std::complex<double>>& seed_host,
+                                double&                      E0)
+{
+    using Complex = std::complex<double>;
+    const std::size_t n = seed_host.size();
+    if (n == 0) return;
+    ed::matvec::CpuBackend be;
+    auto apply_H = H.template bind<ed::matvec::CpuBackend>();
+
+    auto residual = [&](const std::vector<Complex>& v, double e) {
+        std::vector<Complex> hv(n, Complex(0.0, 0.0));
+        apply_H(v.data(), hv.data(), n);
+        double num = 0.0, den = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            num += std::norm(hv[i] - e * v[i]);
+            den += std::norm(v[i]);
+        }
+        return (den > 0.0) ? std::sqrt(num / den)
+                           : std::numeric_limits<double>::infinity();
+    };
+
+    if (residual(seed_host, E0) < 1e-8) return;
+
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter   = std::min<std::size_t>(n, 300);
+    kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    kopts.keep_basis = true;
+    kopts.dim_cap    = n;
+    auto kres = ed::krylov::lanczos_kernel(be, apply_H, n,
+                                           seed_host.data(), kopts);
+    const std::size_t m = kres.alpha.size();
+    if (m == 0) return;   // leave the best-effort seed; CF still runs
+    std::vector<double> diag = kres.alpha;
+    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+    std::vector<double> z(m * m, 0.0);
+    const lapack_int info = LAPACKE_dstevd(
+        LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+        diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
+    if (info != 0) return;
+    std::vector<Complex> refined(n, Complex(0.0, 0.0));
+    for (std::size_t j = 0; j < m; ++j) {
+        const Complex* vj = kres.basis[j].get();
+        const double   yj = z[j];               // column 0, row j
+        if (std::abs(yj) < 1e-300) continue;
+        for (std::size_t i = 0; i < n; ++i) refined[i] += yj * vj[i];
+    }
+    double nrm = 0.0;
+    for (const auto& c : refined) nrm += std::norm(c);
+    if (nrm <= 0.0) return;
+    const double inv = 1.0 / std::sqrt(nrm);
+    for (auto& c : refined) c *= inv;
+    // Adopt the refined pair only if it is genuinely better.
+    if (residual(refined, diag[0]) < residual(seed_host, E0)) {
+        seed_host = std::move(refined);
+        E0 = diag[0];
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1647,6 +1722,9 @@ SpectralResult spectral(const LinearOperator&                      H,
             const double inv = (sumsq > 0.0)
                 ? (1.0 / std::sqrt(sumsq)) : 1.0;
             for (auto& z : seed_host) z *= inv;
+            // Guard the GS vector before it seeds the CF weight ||O|psi0>||^2
+            // (unrefined GS => ~5% S(omega) error vs the exact reference).
+            refine_gs_seed_host(H, seed_host, E0);
         }
         const double shift = (std::abs(opts.energy_shift) > 1e-14)
             ? opts.energy_shift : E0;
@@ -1727,6 +1805,13 @@ SpectralResult spectral(const LinearOperator&                      H,
             const double inv = (sumsq > 0.0)
                 ? (1.0 / std::sqrt(sumsq)) : 1.0;
             for (auto& z : seed_host) z *= inv;
+        }
+        // Guard the GS seed for the KPM correlator (same rationale as
+        // GroundStateCF). Only when NOT user-seeded: a caller-staged warm
+        // state (TPQ-to-KPM) is deliberately not a GS eigenvector.
+        if (opts.initial_state.empty()) {
+            double e0_dummy = 0.0;
+            refine_gs_seed_host(H, seed_host, e0_dummy);
         }
 
         const LinearOperator& O1 = *observables.front();
