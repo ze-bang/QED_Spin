@@ -315,7 +315,16 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
                      "verification (key collision or stale entry) -- rebuilding\n");
         reg.erase(key);
     }
-    const std::string dir = disk_cache_enabled() ? cache_dir : std::string{};
+    // Jul 2026: honor ED_SYM_CACHE_DIR HERE, at the single choke point --
+    // the little-group lane's acquire calls pass no caller dir, so despite
+    // the env being exported every 36-site job silently rebuilt its 126M-rep
+    // orbit table (83 s x hundreds of planned star jobs). Env override wins,
+    // caller dir second, empty disables the disk layer.
+    std::string dir;
+    if (disk_cache_enabled()) {
+        const std::string ovr = cache_dir_override();
+        dir = !ovr.empty() ? ovr : cache_dir;
+    }
     if (auto disk = load_orbit_table(key, dir)) {
         if (verify(*disk)) {
             if (sym_profile_enabled())

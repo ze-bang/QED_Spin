@@ -35,6 +35,7 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -609,7 +610,17 @@ build_monomial(const EngineContext& cx, int rp,
     const std::size_t dim = rd.reps.size();
     out.to.assign(dim, -1);
     out.phase.assign(dim, Complex(0, 0));
-    for (std::size_t i = 0; i < dim; ++i) {
+    // Jul 2026: rows are independent -- parallelize (this was ~1 h of
+    // SERIAL host work per residue on the 126M-dim 36-site Gamma sector,
+    // before any block was even solved). Failure is latched instead of
+    // early-returned; workers skip once it trips.
+    std::atomic<bool> ok{true};
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+    for (long long ii = 0; ii < static_cast<long long>(dim); ++ii) {
+        if (!ok.load(std::memory_order_relaxed)) continue;
+        const std::size_t i = static_cast<std::size_t>(ii);
         const std::uint64_t s = applyPermutation(rd.reps[i], p);
         // canonical rep of s's A-orbit + an element a* with U_{a*}|s> = |rb>.
         // The min is taken over the images ONLY (identity is in A, so s
@@ -626,16 +637,22 @@ build_monomial(const EngineContext& cx, int rp,
         }
         // locate rb among the surviving reps
         const auto it = std::lower_bound(rd.reps.begin(), rd.reps.end(), rb);
-        if (it == rd.reps.end() || *it != rb) return false;
+        if (it == rd.reps.end() || *it != rb) {
+            ok.store(false, std::memory_order_relaxed);
+            continue;
+        }
         const std::size_t j = static_cast<std::size_t>(it - rd.reps.begin());
         // U_p |psi_i> = chi(b) (N_j / N_i) |psi_j>, b = a*^{-1}: chi(b) = conj(chi(a*)).
         const Complex ph = std::conj(chi[astar])
                          * (rd.inv_norms[i] / rd.inv_norms[j]);
-        if (std::abs(std::abs(ph) - 1.0) > 1e-8) return false;   // must be unit
+        if (std::abs(std::abs(ph) - 1.0) > 1e-8) {   // must be unit
+            ok.store(false, std::memory_order_relaxed);
+            continue;
+        }
         out.to[i]    = static_cast<std::int32_t>(j);
         out.phase[i] = ph / std::abs(ph);
     }
-    return true;
+    return ok.load();
 }
 
 // Numerical guard: [M_p, H_k0] == 0 on a random vector. A convention error or

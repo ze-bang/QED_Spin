@@ -112,7 +112,18 @@ acquire_gpu_shared_rank(
     // (N, n_up) subspaces, so a tiny strong cache pins the recent tables.
     static std::vector<std::pair<const void*,
                                  std::shared_ptr<GpuSharedRankTable>>> keep;
-    constexpr std::size_t kKeepCap = 4;
+    // Jul 2026: BYTE-aware eviction. A count cap of 4 pinned up to 4 x 36 GB
+    // at N >= 34 half filling -- guaranteed device OOM the moment a job
+    // touched two subspaces. ED_GPU_SYM_CACHE_GIB (default 24) bounds the
+    // strong cache; the weak registry still dedups concurrent co-owners.
+    static const double kBudgetBytes = [] {
+        double gib = 24.0;
+        if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB")) {
+            const double parsed = std::atof(v);
+            if (parsed > 0.0) gib = parsed;
+        }
+        return gib * 1073741824.0;
+    }();
 
     std::lock_guard<std::mutex> lk(mtx);
     auto& slot = registry[static_cast<const void*>(srl.get())];
@@ -126,8 +137,17 @@ acquire_gpu_shared_rank(
                      srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
     }
     slot = sp;
-    if (keep.size() >= kKeepCap) keep.erase(keep.begin());
     keep.emplace_back(static_cast<const void*>(srl.get()), sp);
+    auto bytes_of = [](const std::shared_ptr<GpuSharedRankTable>& t) {
+        return static_cast<double>(t->d_shared_of_rank.size())
+             * sizeof(std::int32_t);
+    };
+    double total = 0.0;
+    for (const auto& kv : keep) total += bytes_of(kv.second);
+    while (keep.size() > 1 && total > kBudgetBytes) {
+        total -= bytes_of(keep.front().second);
+        keep.erase(keep.begin());
+    }
     return sp;
 }
 
@@ -261,70 +281,28 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     // Device combinadic rank() reads a Pascal triangle from constant memory.
     ed::gpu::combinadic::detail::upload_pascal();
 
-    // Host Pascal table matching the device ``binomial`` (0 when k > n), so
-    // host-built ranks line up with the device ``rank_state``.
-    std::vector<std::vector<std::uint64_t>> pascal(
-        65, std::vector<std::uint64_t>(65, 0));
-    for (int nn = 0; nn <= 64; ++nn) {
-        pascal[nn][0] = 1ULL;
-        for (int kk = 1; kk <= nn; ++kk) {
-            pascal[nn][kk] = pascal[nn - 1][kk - 1]
-                             + (kk < nn ? pascal[nn - 1][kk] : 0ULL);
-        }
-    }
-    auto binom_host = [&pascal](int nn, int kk) -> std::uint64_t {
-        if (kk < 0 || kk > nn || nn < 0 || nn > 64) return 0ULL;
-        return pascal[nn][kk];
-    };
-    auto rank_combination_host = [&binom_host, n_sites](
-        std::uint64_t state, int kk) -> std::uint64_t {
-        std::uint64_t r = 0;
-        int seen = 0;
-        for (int bit = 0; bit < n_sites && seen < kk; ++bit) {
-            if ((state >> bit) & 1ULL) {
-                ++seen;
-                r += binom_host(bit, seen);
-            }
-        }
-        return r;
-    };
-
     // Reverse table. Stage-4 device twin (Jul 2026): when the host sector
     // carries the two-level lookup, upload the small per-sector remap and
     // co-own ONE shared rank table per (N, n_up) -- the per-sector dense
     // table below is then never built (this was 2.4 GiB PER SECTOR at
     // N=32 half filling). Fallback: the dense per-sector table, built
     // from reps only (no orbit walk).
-    std::vector<std::int32_t> h_rep_index_of_rank;
+    // Reverse lookup (Jul 2026 consolidation): the shared two-level table
+    // when the host sector carries one (Stage 4 -- the production abelian
+    // lane), otherwise the device BINARY SEARCH over the resident sorted
+    // ``reps``. The per-sector dense rank table this replaced was strictly
+    // dominated (2.4 GiB per sector at N=32; 36 GiB impossible at N=36) and
+    // its ED_SYM_GPU_NO_RANKTABLE test hook is retired with it -- binary
+    // search is now the default-tested path wherever two-level is absent.
     if (data.has_two_level()) {
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
-    } else if (dim_full_sz <= static_cast<std::uint64_t>(
-                   std::numeric_limits<std::int32_t>::max())
-               && !(std::getenv("ED_SYM_GPU_NO_RANKTABLE") != nullptr
-                    && std::getenv("ED_SYM_GPU_NO_RANKTABLE")[0] == '1')) {
-        // ED_SYM_GPU_NO_RANKTABLE=1 (test hook): skip the dense table so
-        // small lattices exercise the same binary-search lookup that the
-        // > INT32_MAX rank spaces (36-site half filling) are forced onto.
-        h_rep_index_of_rank.assign(dim_full_sz, -1);
-        for (std::size_t i = 0; i < data.reps.size(); ++i) {
-            const std::uint64_t r = (n_up >= 0)
-                ? rank_combination_host(data.reps[i], n_up)
-                : data.reps[i];                // full space: identity rank
-            if (r < dim_full_sz) {
-                h_rep_index_of_rank[r] = static_cast<std::int32_t>(i);
-            }
-        }
     } else if (std::getenv("ED_SYM_PROFILE") != nullptr) {
-        // No dense table at this rank-space size (36 GiB+ per (N, n_up)):
-        // leave every lookup pointer null; the device policy binary-searches
-        // the resident sorted ``reps`` array instead.
         std::fprintf(stderr,
-                     "[sym_profile] GPU rep mirror: rank space %llu exceeds "
-                     "dense-table range; using device binary search over "
-                     "%zu reps\n",
-                     static_cast<unsigned long long>(dim_full_sz),
-                     data.reps.size());
+                     "[sym_profile] GPU rep mirror: binary-search lookup over "
+                     "%zu reps (rank space %llu)\n",
+                     data.reps.size(),
+                     static_cast<unsigned long long>(dim_full_sz));
     }
 
     std::vector<cuDoubleComplex> h_characters(data.characters.size());
@@ -356,7 +334,6 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
         mirror->d_perm_lut   = tmp.perm_lut_data;
         mirror->perm_lut_bpw = tmp.perm_lut_bpw;
     }
-    mirror->d_rep_index_of_rank = h_rep_index_of_rank;
 
     mirror->d_diag_one_body    = terms.diag_one_body;
     mirror->d_offdiag_one_body = terms.offdiag_one_body;
@@ -516,7 +493,16 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
         static std::mutex mtx;
         static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
         static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
-        constexpr std::size_t kKeep = 4;
+        // Jul 2026: byte-aware strong cache (count cap 4 pinned ~4 x 4 GB of
+        // sector arrays at N=36). Shares ED_GPU_SYM_CACHE_GIB semantics.
+        static const double kKeepBudget = [] {
+            double gib = 16.0;
+            if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB")) {
+                const double parsed = std::atof(v);
+                if (parsed > 0.0) gib = parsed;
+            }
+            return gib * 1073741824.0;
+        }();
         const std::uint64_t key = content_key(rep, terms, spin_l);
         std::lock_guard<std::mutex> lk(mtx);
         auto& bucket = registry[key];
@@ -544,8 +530,19 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
             s.flips       = rep.flip_masks;
             s.mirror      = mirror;
             bucket.push_back(std::move(s));
-            if (keep.size() >= kKeep) keep.erase(keep.begin());
             keep.push_back(mirror);
+            auto bytes_of = [](const std::shared_ptr<const GpuRepSectorMirror>& mm) {
+                return static_cast<double>(
+                    mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8
+                    + mm->d_perm_lut.size() * 8 + mm->d_perms.size() * 4
+                    + mm->d_local_of_shared.size() * 4);
+            };
+            double total = 0.0;
+            for (const auto& mm : keep) total += bytes_of(mm);
+            while (keep.size() > 1 && total > kKeepBudget) {
+                total -= bytes_of(keep.front());
+                keep.erase(keep.begin());
+            }
         }
     }
 

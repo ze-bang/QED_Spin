@@ -541,9 +541,14 @@ def solve(
     if verbose:
         method_name = method.name if hasattr(method, "name") else str(method)
         kind = "thermal" if is_thermal else "eigenvalue"
+        # use_gpu/use_mpi are the REQUEST derived from device= and the
+        # build, printed before lane dispatch -- say so (the old wording
+        # read as "this run is on the GPU" even on CPU-only nodes).
         print(f"[qed.solve] solver={method_name} ({kind})  "
               f"num_eigenvalues={num_eigenvalues}  "
-              f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
+              f"tolerance={tolerance:g}  "
+              f"gpu_requested={use_gpu}  mpi_requested={use_mpi} "
+              f"(lane chosen at dispatch)")
 
     # (Pre-flight planner removed: sensible defaults, no feasibility refusal.)
 
@@ -617,13 +622,11 @@ def solve(
             eigenvalues_only=(not compute_eigenvectors
                               and sector is None
                               and not is_thermal),
-            # an EXPLICIT GPU request is served by the abelian rep lane
-            # (the little-group lowest-k engine is CPU); auto-dispatch
-            # to GPU must NOT veto the projection -- the projected
-            # blocks are far smaller than what the GPU lane would chew.
-            # 'full' still projects on CPU as before.
-            prefer_abelian=(isinstance(device, str)
-                            and device.lower() in ("gpu", "cuda")),
+            # Jul 2026: an explicit GPU request no longer vetoes the
+            # projection -- the little-group engine drives the resident
+            # GPU rep gather itself (ED_SYM_LG_GPU auto gate), so the
+            # project lane is GPU-capable end to end.
+            prefer_abelian=False,
             verbose=verbose)
         if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
@@ -728,6 +731,21 @@ def solve(
                     print(f"[qed.solve] little-group lane declined "
                           f"({exc}); falling back to the abelian rep "
                           "lane.")
+        # Jul 2026 (#4): the abelian rep lane's per-sector Lanczos has no
+        # distinct-value/residual-bound gate -- upper-window levels drift
+        # ~1e-3 at 30 sites (measured CPU-vs-GPU by the e2e diagnostic).
+        # Until the orchestrator sector solve adopts the project lane's
+        # gate, say so instead of being quietly worse.
+        if not is_thermal and sector is None \
+                and int(num_eigenvalues or 1) > 1:
+            warnings.warn(
+                "qed.solve (abelian rep lane): eigenvalues beyond the "
+                "lowest per sector are not convergence-guarded on this "
+                "lane; for excited-window physics prefer the little-group "
+                "project lane (point_group='auto' with retained residues), "
+                "whose gate and filter guarantee distinct converged Ritz "
+                "values.",
+                RuntimeWarning, stacklevel=2)
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,

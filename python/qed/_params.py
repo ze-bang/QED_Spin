@@ -210,15 +210,31 @@ def ed_result_from_gs_result(
         out.residual_history = list(getattr(_kry, "resid_history", []) or [])
         if not out.converged:
             want = int(getattr(params, "num_eigenvalues", 1) or 1)
-            rmax = max(out.residuals) if out.residuals else float("nan")
-            warnings.warn(
-                f"qed.solve: eigensolver did not fully converge "
-                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
-                f"residual {rmax:.2e} after {out.iterations} iterations). "
-                f"Returning the best-effort result. Raise max_iterations / "
-                f"tolerance, or give the run more memory so the Krylov "
-                f"subspace need not be capped.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if out.residuals:
+                rmax = max(out.residuals)
+                warnings.warn(
+                    f"qed.solve: eigensolver did not fully converge "
+                    f"({out.n_converged}/{want} eigenpairs below tolerance; "
+                    f"max residual {rmax:.2e} after {out.iterations} "
+                    f"iterations). Returning the best-effort result. Raise "
+                    f"max_iterations / tolerance, or give the run more "
+                    f"memory so the Krylov subspace need not be capped.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                # Jul 2026: the old message claimed "0/k below tolerance;
+                # max residual nan" whenever the backend simply did not
+                # REPORT per-eigenpair residuals -- alarming and wrong
+                # (caught by the e2e diagnostic on runs whose energies were
+                # exact to 8+ digits). Say what is actually known.
+                warnings.warn(
+                    f"qed.solve: the backend reported no per-eigenpair "
+                    f"residuals after {out.iterations} iterations, so "
+                    f"convergence could not be verified (energies may "
+                    f"still be fully converged). Cross-check E0 or rerun "
+                    f"with a residual-reporting solver if it matters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
     return out
