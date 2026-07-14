@@ -965,15 +965,37 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     std::vector<double> diag = kres.alpha;
     std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
     for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
-    std::vector<double> zdummy(1, 0.0);
+    std::vector<double> z(m * m, 0.0);
     const lapack_int info = LAPACKE_dstevd(
-        LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(m),
-        diag.data(), off.data(), zdummy.data(), 1);
+        LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+        diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
     if (info != 0)
         throw std::runtime_error("little_group: lowest-k tridiag eigensolve "
                                  "failed (dstevd info != 0)");
-    diag.resize(std::min<std::size_t>(m, k));
-    return diag;
+    // Ghost handling (Jul 2026; the first 126M-dim production block returned
+    // EIGHT copies of E0): with a local reorth ring at dim ~1e8 the Ritz
+    // window fills with ghost COPIES of converged extremes faster than
+    // genuine upper levels converge. On this path a single-vector recurrence
+    // cannot represent a true within-block degeneracy anyway (exact
+    // arithmetic yields ONE copy per eigenvalue), so equal-to-tolerance
+    // duplicates ARE ghosts: keep the first of each cluster. Additionally
+    // keep only Ritz values whose tridiagonal residual bound
+    // |beta_m * z_{m,j}| marks them converged -- both tests are free (the
+    // tridiag is m <= a few hundred). The dense branch (exact; genuine
+    // duplicates possible) is untouched.
+    const double beta_m = (kres.beta.size() > m) ? std::abs(kres.beta[m]) : 0.0;
+    const double scale  = std::max(
+        {std::abs(diag.front()), std::abs(diag[m - 1]), 1e-300});
+    std::vector<double> keep;
+    for (std::size_t j = 0; j < m && keep.size() < k; ++j) {
+        const double bound = beta_m * std::abs(z[(m - 1) + j * m]);
+        if (bound > 1e-7 * scale) continue;      // unconverged Ritz value
+        if (!keep.empty()
+            && std::abs(diag[j] - keep.back()) <= 1e-9 * scale)
+            continue;                             // ghost copy
+        keep.push_back(diag[j]);
+    }
+    return keep;
 }
 
 // The star walk shared by every consumer. ``solve_block(mv, plain)`` returns
