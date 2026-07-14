@@ -284,6 +284,10 @@ class ThermalResult:
     # mapping so callers can reload state vectors per sector.
     hdf5_path: str = ""
     sector_hdf5_paths: dict[Optional[int], str] = field(default_factory=dict)
+    # KPM_DOS raw density of states (Jul 2026): populated only by the
+    # KPM_DOS method (full-Hilbert lane); empty for every other method.
+    dos_energies: np.ndarray = field(default_factory=lambda: np.array([]))
+    dos_values: np.ndarray = field(default_factory=lambda: np.array([]))
 
 
 # ---------------------------------------------------------------------------
@@ -859,6 +863,14 @@ def thermal(
 
     N = int(H_op.num_sites)
     sz_conserved = use_sz_if_conserved and bool(H_op.conserves_sz())
+    # KPM_DOS produces a density of states -- a full-SPECTRUM quantity. Sz
+    # decomposition would yield per-sector sub-DOS on different Chebyshev
+    # grids that the thermodynamic recombination cannot merge into one DOS
+    # (the raw density(E) then never reaches the caller). Run it on the full
+    # space so ThermalResult.dos_* is the complete DOS; the derived
+    # thermodynamics are identical (the DOS is Sz-summed either way).
+    if method_enum == DiagonalizationMethod.KPM_DOS:
+        sz_conserved = False
 
     if verbose:
         which = "directory" if is_directory else "in-memory"
@@ -1016,6 +1028,10 @@ def thermal(
                 # unconditionally.
                 used_symmetry_decomposition=bool(has_sym),
                 hdf5_path=h5_path,
+                dos_energies=np.asarray(
+                    getattr(res, "dos_energies", []) or [], dtype=float),
+                dos_values=np.asarray(
+                    getattr(res, "dos_values", []) or [], dtype=float),
             )
 
         if verbose:
@@ -1278,6 +1294,10 @@ def thermal(
             used_sz_decomposition=False,
             used_symmetry_decomposition=False,
             hdf5_path=h5_path_solo,
+            dos_energies=np.asarray(
+                getattr(res, "dos_energies", []) or [], dtype=float),
+            dos_values=np.asarray(
+                getattr(res, "dos_values", []) or [], dtype=float),
         )
 
     if verbose:

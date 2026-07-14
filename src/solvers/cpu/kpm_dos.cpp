@@ -536,11 +536,28 @@ KPMDOSResult compute_kpm_dos(
     }
 
     // -----------------------------------------------------------------
-    // Step 5: optional reconstructed DOS on caller-provided E grid.
+    // Step 5: reconstructed DOS. On a caller-provided E grid, or -- when
+    // none is given (Jul 2026) -- an AUTO grid spanning the estimated
+    // physical spectrum [b-a, b+a] with N_quad nodes. The DOS is this
+    // method's namesake output; previously an empty grid silently skipped
+    // it, so the thermal KpmDos lane (which passes no grid) surfaced only
+    // derived thermodynamics and never the density(E) itself.
     // -----------------------------------------------------------------
-    if (!dos_energies.empty()) {
-        result.dos_grid_energies = dos_energies;
-        result.dos_grid_values   = reconstruct_dos(mu_w, a, b, dos_energies);
+    std::vector<double> grid = dos_energies;
+    if (grid.empty()) {
+        const int npts = std::max(N_quad, 2);
+        grid.resize(static_cast<std::size_t>(npts));
+        // Inset slightly from the exact edges (the rescaled kernel diverges
+        // at +-1); 0.5% margin keeps the reconstruction well-conditioned.
+        const double lo = b - a * 0.995;
+        const double hi = b + a * 0.995;
+        const double dE = (npts > 1) ? (hi - lo) / (npts - 1) : 0.0;
+        for (int i = 0; i < npts; ++i)
+            grid[static_cast<std::size_t>(i)] = lo + dE * i;
+    }
+    if (!grid.empty()) {
+        result.dos_grid_values   = reconstruct_dos(mu_w, a, b, grid);
+        result.dos_grid_energies = std::move(grid);
     }
 
     result.moments_weighted        = std::move(mu_w);

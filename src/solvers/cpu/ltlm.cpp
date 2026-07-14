@@ -180,20 +180,29 @@ double find_ground_state_lanczos(
 static ThermodynamicData compute_ltlm_thermodynamics_sampled(
     std::function<void(const Complex*, Complex*, int)> H,
     uint64_t N,
-    double ground_energy,
-    const ComplexVector& ground_state,
+    double /*ground_energy*/,
+    const ComplexVector& /*ground_state*/,
     const LTLMParameters& params,
     const std::vector<double>& temperatures)
 {
+    // For a FUNCTION OF H (all thermodynamics -- E, Cv, S, F), the LTLM
+    // symmetric estimator reduces EXACTLY to the FTLM finite-temperature
+    // trace: <r|e^{-bH/2} f(H) e^{-bH/2}|r> = sum_j |<r|psi_j>|^2 f(eps_j)
+    // e^{-b eps_j}, identical to FTLM (the two differ only for observables
+    // that do NOT commute with H). So the correct LTLM thermodynamics is the
+    // FTLM random-vector trace, and using the SAME per-sample estimator +
+    // averaging is what makes the per-Sz-sector Z-recombination
+    // (combine_sector_thermodynamics) correct -- the earlier GS-anchored
+    // complement estimator produced a per-sector Boltzmann normalisation the
+    // recombination could not weight, biasing intermediate T. The exact-GS
+    // low-T variance reduction is dropped for that correctness (FTLM already
+    // resolves low T with enough samples).
     const uint64_t R = std::max<uint64_t>(1, params.num_samples);
-    const double D = static_cast<double>(N);
-    const double complement_factor = (D > 1.0) ? (D - 1.0) / static_cast<double>(R)
-                                               : 0.0;
-
-    // Per-sample (eps_j, w_j) over the GS complement.
-    std::vector<std::vector<double>> all_eps(R), all_w(R);
     std::uint64_t base_seed = params.random_seed;
     if (base_seed == 0) base_seed = 0x9E3779B97F4A7C15ULL;
+
+    std::vector<ThermodynamicData> sample_data;
+    sample_data.reserve(R);
     for (uint64_t s = 0; s < R; ++s) {
         std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (s + 1);
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -201,63 +210,29 @@ static ThermodynamicData compute_ltlm_thermodynamics_sampled(
         z =  z ^ (z >> 31);
         std::mt19937 gen(static_cast<std::mt19937::result_type>(z));
         ComplexVector v = generateGaussianRandomVector(N, gen);
-        // Project off the exact ground state: |v> -= |0><0|v>.
-        Complex proj;
-        cblas_zdotc_sub(N, ground_state.data(), 1, v.data(), 1, &proj);
-        Complex neg(-proj.real(), -proj.imag());
-        cblas_zaxpy(N, &neg, ground_state.data(), 1, v.data(), 1);
-        double nrm = cblas_dznrm2(N, v.data(), 1);
-        if (nrm < 1e-300) continue;
-        Complex inv(1.0 / nrm, 0.0);
-        cblas_zscal(N, &inv, v.data(), 1);
 
         std::vector<double> alpha, beta;
         build_lanczos_tridiagonal(H, v, N, params.krylov_dim, params.tolerance,
                                   params.full_reorthogonalization,
                                   params.reorth_frequency, alpha, beta);
-        diagonalize_tridiagonal_ritz(alpha, beta, all_eps[s], all_w[s]);
+        std::vector<double> ritz, w;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz, w);
+        if (ritz.empty()) continue;
+        sample_data.push_back(
+            compute_ftlm_thermodynamics(ritz, w, temperatures, N));
     }
 
-    ThermodynamicData thermo;
-    thermo.temperatures = temperatures;
-    const std::size_t nT = temperatures.size();
-    thermo.energy.resize(nT);
-    thermo.specific_heat.resize(nT);
-    thermo.entropy.resize(nT);
-    thermo.free_energy.resize(nT);
-
-    for (std::size_t t = 0; t < nT; ++t) {
-        const double T = temperatures[t];
-        const double beta = 1.0 / T;
-        // GS term (shifted by E0): weight 1 at energy E0.
-        double Ztil = 1.0;
-        double U1   = ground_energy;
-        double U2   = ground_energy * ground_energy;
-        for (uint64_t s = 0; s < R; ++s) {
-            const auto& eps = all_eps[s];
-            const auto& w   = all_w[s];
-            for (std::size_t j = 0; j < eps.size(); ++j) {
-                const double boltz = w[j] * std::exp(-beta * (eps[j] - ground_energy));
-                const double contrib = complement_factor * boltz;
-                Ztil += contrib;
-                U1   += contrib * eps[j];
-                U2   += contrib * eps[j] * eps[j];
-            }
-        }
-        if (Ztil > 1e-300) {
-            const double E_avg  = U1 / Ztil;
-            const double E2_avg = U2 / Ztil;
-            thermo.energy[t]        = E_avg;
-            thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
-            thermo.entropy[t]       = beta * (E_avg - ground_energy) + std::log(Ztil);
-            thermo.free_energy[t]   = ground_energy - T * std::log(Ztil);
-        } else {
-            thermo.energy[t]        = ground_energy;
-            thermo.specific_heat[t] = 0.0;
-            thermo.entropy[t]       = 0.0;
-            thermo.free_energy[t]   = ground_energy;
-        }
+    if (sample_data.empty()) {
+        ThermodynamicData empty;
+        empty.temperatures = temperatures;
+        return empty;
     }
+    // Z-weighted cross-sample averaging (handles per-sample reference-energy
+    // rescaling); reuse the FTLM combiner, then lift the averaged curves.
+    FTLMResults avg;
+    average_ftlm_samples(sample_data, avg);
+    ThermodynamicData thermo = avg.thermo_data;
+    if (thermo.temperatures.empty()) thermo.temperatures = temperatures;
     return thermo;
 }
 
