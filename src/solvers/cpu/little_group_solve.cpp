@@ -907,14 +907,24 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     if (nb == 0) return {};
     const std::size_t k = static_cast<std::size_t>(std::max<std::uint64_t>(
         1u, std::min<std::uint64_t>(static_cast<std::uint64_t>(want), nb)));
-    // Dense crossover: below ~64k the Lanczos iteration count approaches the
-    // block dimension and even ring-reorthogonalised recurrences shed ghost
-    // copies near subspace exhaustion; a dense values-only eigensolve at
-    // these sizes is exact and effectively free.  Above it, the kernel
-    // Lanczos exits via the k-lowest Ritz gate long before exhaustion.
+    // Dense crossover (Jul 2026 fix): the Lanczos below runs a LocalDGKS3
+    // ring-8 (partial) reorthogonalisation, which only stays orthogonal
+    // while the Krylov subspace is a SMALL fraction of the block. When the
+    // iteration cap (max(40k, 400)) approaches nb the recurrence sheds ghost
+    // copies near subspace exhaustion AND the extreme Ritz value itself can
+    // come out spurious -- at 4x4 n_up=8 (block ~800) this returned an
+    // interior level (-7.75) instead of the true GS (-8.57), silently
+    // corrupting the factorized GS-DSSF. The old floor was ``64 * k`` (=64
+    // for k=1) despite the comment claiming "~64k": three orders of
+    // magnitude too low. Force dense whenever nb < 32x the Lanczos cap, so
+    // the Lanczos path only ever runs at a <= ~3% Krylov fraction (validated
+    // safe: the 5x5 208012-dim blocks solve at 0.2%). A ~1.3e4-dim dense
+    // eigensolve is ~2.6 GB / ~1 s -- affordable; the 36-site blocks are
+    // millions-dim and stay on the (safe) Lanczos path unchanged.
+    const std::uint64_t max_iter_cap =
+        std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
     const std::uint64_t dense_floor = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(dense_max_dim),
-        64u * static_cast<std::uint64_t>(k));
+        static_cast<std::uint64_t>(dense_max_dim), 32u * max_iter_cap);
     if (nb <= dense_floor || nb <= 2) {
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es;
         es.compute(materialize(mv), Eigen::EigenvaluesOnly);
