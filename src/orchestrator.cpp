@@ -1397,23 +1397,34 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     "wired. Pin BackendConstraints to route through "
                     "the CPU/CUDA lanes.");
             } else {
-                ed::thermal::LtlmOptions kopts;
-                kopts.num_samples         = opts.num_samples;
-                kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim
-                                            : ed::defaults::kLtlmKrylovDim;
-                kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim
-                                            : ed::defaults::kFtlmKrylovDim;
-                kopts.betas               = opts.betas;
-                kopts.random_seed         = opts.random_seed;
-                kopts.output_dir          = opts.output_dir;
+                // Jul 2026: LTLM thermodynamics == FTLM. Both LTLM kernels
+                // (the CPU low_temperature_lanczos and the backend
+                // ltlm_kernel_via_backend) seeded a SECOND Lanczos from the
+                // ground state and summed sum_n |<0|psi_n>|^2 e^{-bE_n} --
+                // the GS-LOCAL density of states, i.e.
+                // <0|He^{-bH}|0>/<0|e^{-bH}|0>, NOT the thermal trace. It
+                // stayed pinned near E0 at every T (E(0.69)=-7.35 vs exact
+                // -6.33). For a FUNCTION OF H (all thermodynamics here) the
+                // LTLM symmetric estimator reduces EXACTLY to the FTLM
+                // trace, so route through the verified FTLM kernel; the two
+                // differ only for observables that do not commute with H,
+                // which this thermodynamics path never computes.
+                ed::thermal::FtlmOptions kopts;
+                kopts.num_samples = opts.num_samples;
+                kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
+                kopts.betas       = opts.betas;
+                kopts.random_seed = opts.random_seed;
+                kopts.output_dir  = opts.output_dir;
                 auto matvec = H.template bind<B>();
-                auto kres = ed::thermal::ltlm_kernel<B>(
+                auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
                     H.geometry().global_dim, kopts);
                 R.thermo.energy = std::move(kres.energy);
                 R.thermo.specific_heat = std::move(kres.heat_capacity);
                 R.thermo.entropy = std::move(kres.entropy);
-                R.ground_state_energy = kres.ground_state_energy;
+                R.ground_state_energy = R.thermo.energy.empty() ? 0.0
+                    : *std::min_element(R.thermo.energy.begin(),
+                                        R.thermo.energy.end());
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::KpmDos) {
