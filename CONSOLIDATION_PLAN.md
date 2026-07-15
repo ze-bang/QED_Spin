@@ -71,13 +71,15 @@ Do NOT delete gpu_ftlm.cu until step 4 passes.
 - ⏳ BLOCKER for deleting gpu_ftlm.cu: `GPUFTLMSolver` has a SECOND user —
   `compute_static_response_workflow`'s `process_task` calls `GPUFTLMSolver::computeStaticCorrelation`
   (static ⟨O₁†O₂⟩(T), the dM/dT / magnetocaloric path). Retiring GPUFTLMSolver requires porting THIS
-  too. computeStaticCorrelation is a **clean mirror** of the dynamical kernel: identical steps 1–8
-  (random vector → Lanczos+basis → tridiag → ritz/weights/overlaps), only the final step differs
-  (static thermal sum Σₙ wₙ·f(βEₙ) instead of the ω-Lorentzian). Port = add
-  `ftlm_static_correlation_via_backend_multitemp` (mirror), gate vs dense finite-T ⟨O₁†O₂⟩(T), wire
-  `process_task` + the orchestrator/CPU `compute_static_response` lane, CUDA-gate, THEN delete
-  gpu_ftlm.cu/.cuh + the now-dead dynamical CPU multi-temp fns. This feeds dM/dT research code — gate
-  rigorously. Steps 2 (per-T equivalence) and the dead-fn cleanup fold in here.
+  too. computeStaticCorrelation is a DISTINCT FTLM trace kernel, NOT a mirror of the dynamical one:
+  it seeds Krylov from the random vector |r> (not O2|psi>), reconstructs each Ritz state |n> from the
+  basis, forms the DIAGONAL element <n|O1^dag O2|n>, and thermal-averages with FTLM weights
+  w_n=|<r|n>|^2 -- structurally closer to the FTLM thermo kernel. Port = write a backend-generic
+  ftlm_static_correlation_via_backend_multitemp (random-vector Krylov + eigenstate reconstruction via
+  backend basis ops + diagonal O1^dag O2 + thermal sum), gate vs dense finite-T <O1^dag O2>(T), wire
+  process_task + the orchestrator/CPU compute_static_response lane, CUDA-gate, THEN delete
+  gpu_ftlm.cu/.cuh + the now-dead dynamical CPU multi-temp fns. Feeds dM/dT research code -- a
+  separate focused effort, gate rigorously; do not rush.
 
 Note: the Family 6 SAB removal built clean on CPU but broke the CUDA build (a WITH_CUDA-gated
 little-group lane reused the SAB GPU batched eigensolver) — fixed in commit d60dc09, caught by the
