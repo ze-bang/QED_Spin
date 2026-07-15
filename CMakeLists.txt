@@ -181,7 +181,6 @@ set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(IO_DIR ${SRC_DIR}/io)
 set(DSSF_DIR ${SRC_DIR}/dssf)
-set(BFG_DIR ${SRC_DIR}/bfg)
 set(CLI_DIR ${SRC_DIR}/cli)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
@@ -193,7 +192,6 @@ include_directories(${INCLUDE_DIR}/ed/core)
 include_directories(${INCLUDE_DIR}/ed/solvers)
 include_directories(${INCLUDE_DIR}/ed/io)
 include_directories(${INCLUDE_DIR}/ed/gpu)
-include_directories(${INCLUDE_DIR}/ed/bfg)
 include_directories(${INCLUDE_DIR}/ed/matvec)
 include_directories(${SRC_DIR})
 include_directories(${CORE_DIR})
@@ -305,45 +303,6 @@ endif()
 # routes the same `compute_*_workflow` kernels through `ed::dssf::run(...)`.
 # See `docs/history/MODERNIZATION_AUDIT.md` for migration notes and the historical context.
 
-# -----------------------------------------------------------------------------
-# BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
-add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
-target_link_libraries(compute_bfg_order_parameters ed_bfg ${HDF5_LIBRARIES})
-target_include_directories(compute_bfg_order_parameters PRIVATE ${HDF5_INCLUDE_DIRS})
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(compute_bfg_order_parameters OpenMP::OpenMP_CXX)
-    target_compile_definitions(compute_bfg_order_parameters PRIVATE _OPENMP)
-endif()
-target_compile_options(compute_bfg_order_parameters PRIVATE -O3 -march=native -fopenmp)
-
-# BFG Order Parameter GPU version (CUDA accelerated)
-if(WITH_CUDA)
-    add_executable(compute_bfg_order_parameters_gpu ${APPS_DIR}/compute_bfg_order_parameters_gpu.cu)
-    # Link the BFG library so the GPU driver shares the same authoritative
-    # `load_wavefunction` / `Cluster` infrastructure as the CPU driver
-    # (P2.1, third slice). `ed_bfg` brings the include path for
-    # `ed/bfg/wavefunction_io.h` and the HDF5 link stack PUBLIC-ly.
-    target_link_libraries(compute_bfg_order_parameters_gpu
-        CUDA::cudart
-        ed_bfg
-        ${HDF5_LIBRARIES}
-    )
-    # Explicitly add HDF5 include directories for CUDA compilation
-    # Use both target_include_directories and compile options to ensure nvcc gets them
-    target_include_directories(compute_bfg_order_parameters_gpu SYSTEM PRIVATE ${HDF5_INCLUDE_DIRS})
-    foreach(_hdf5_inc_dir ${HDF5_INCLUDE_DIRS})
-        target_compile_options(compute_bfg_order_parameters_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-I${_hdf5_inc_dir}>)
-    endforeach()
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(compute_bfg_order_parameters_gpu OpenMP::OpenMP_CXX)
-        target_compile_definitions(compute_bfg_order_parameters_gpu PRIVATE _OPENMP)
-    endif()
-    set_target_properties(compute_bfg_order_parameters_gpu PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-    )
-endif()
-
-
 # ED inherits BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP transitively
 # from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since those
 # libraries declare their dependencies as PUBLIC.
@@ -423,7 +382,7 @@ endif()
 #   target_link_libraries(myapp PRIVATE QED::ed_solvers_cpu)
 #
 # Layout under <prefix>:
-#   bin/                        ED, compute_bfg_order_parameters
+#   bin/                        ED
 #   include/ed/                 public headers (kept hierarchical)
 #   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
 #                               libed_solvers_gpu.a (when WITH_CUDA)
@@ -433,7 +392,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_bfg ed_symmetry ed_input ed_solvers_cpu ed_cli)
+set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu ed_cli)
 if(WITH_MPI AND TARGET ed_multi_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_multi_gpu)
 endif()
@@ -448,11 +407,6 @@ install(TARGETS ${_ED_INSTALL_TARGETS} ED
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-
-if(TARGET compute_bfg_order_parameters)
-    install(TARGETS compute_bfg_order_parameters
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
 
 # Public headers (preserve subdirectory layout).
 install(DIRECTORY ${INCLUDE_DIR}/ed
@@ -1068,49 +1022,6 @@ if(BUILD_ED_TESTS)
     # phantom-irrep filter). Lives in ed_symmetry.
     ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp USE_CATCH2)
     target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
-
-    ed_add_test(test_bfg_cluster                tests/unit/test_bfg_cluster.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_cluster PRIVATE ed_bfg)
-    target_compile_definitions(test_bfg_cluster PRIVATE
-        ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
-    )
-
-    # P2.1: lockdown for the topology / correlation kernels lifted out of
-    # `compute_bfg_order_parameters.cpp` into `ed_bfg`.
-    ed_add_test(test_bfg_topology               tests/unit/test_bfg_topology.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_topology PRIVATE ed_bfg)
-    target_compile_definitions(test_bfg_topology PRIVATE
-        ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
-    )
-
-    ed_add_test(test_bfg_correlations           tests/unit/test_bfg_correlations.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_correlations PRIVATE ed_bfg)
-
-    # P2.1 (4th slice): bond-bilinear structure factors / Fourier-applied
-    # dimer kernels shared by the CPU driver, the GPU driver, and the
-    # forthcoming Python bindings.
-    ed_add_test(test_bfg_structure_factor       tests/unit/test_bfg_structure_factor.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_structure_factor PRIVATE ed_bfg)
-
-    # P2.1 (5th slice): bowtie + triangle ring kernels promoted into
-    # `ed_bfg::ring_observables`. Same call-site contract as the dimer
-    # structure factor tests above, plus toggles for the memory-efficient
-    # global flag.
-    ed_add_test(test_bfg_ring_observables       tests/unit/test_bfg_ring_observables.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_ring_observables PRIVATE ed_bfg)
-
-    # P2.1 (6th slice): site-resolved spin structure factor kernel
-    # (`compute_spin_structure_factor`) on synthesised two-body
-    # correlation tables. Tests on a 2-site Neel state with hand-checked
-    # Re/Im parts.
-    ed_add_test(test_bfg_spin_structure_factor  tests/unit/test_bfg_spin_structure_factor.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_spin_structure_factor PRIVATE ed_bfg)
-
-    # P2.1 (third slice): HDF5 wavefunction loaders shared by the CPU + GPU
-    # drivers and by the Python bindings.
-    ed_add_test(test_bfg_wavefunction_io        tests/unit/test_bfg_wavefunction_io.cpp USE_CATCH2)
-    target_link_libraries(test_bfg_wavefunction_io PRIVATE ed_bfg)
-    target_include_directories(test_bfg_wavefunction_io PRIVATE ${HDF5_INCLUDE_DIRS})
 
     # -------------------------------------------------------------------------
     # CPU/GPU equivalence (P1.9). Only added when WITH_CUDA is ON so non-GPU

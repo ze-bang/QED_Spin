@@ -15,7 +15,7 @@
 #                   cuRAND/cuSOLVER imported targets.
 #
 # Each library exposes its include directories and link dependencies via
-# PUBLIC properties, so executables (ED, compute_bfg_order_parameters, the
+# PUBLIC properties, so executables (ED, the
 # test binaries) only need to write `target_link_libraries(<exe> PRIVATE
 # ed_solvers_cpu)` -- the include path and BLAS/LAPACK/HDF5/OpenMP/MPI/CUDA
 # link stack propagate automatically.
@@ -62,7 +62,6 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/core>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/bfg>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
@@ -390,101 +389,6 @@ target_compile_options(ed_input PRIVATE
 )
 set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# -----------------------------------------------------------------------------
-# ed_bfg: BFG order-parameter library (P2.1).
-#
-# Houses the kagome / pyrochlore-superlattice geometry loader plus the
-# pure-physics building blocks for the order-parameter pipeline:
-#
-#   * cluster.cpp           -- `Cluster` struct + `load_cluster(...)`.
-#   * topology.cpp          -- `find_triangles` / `find_bowties`
-#                              (combinatorial helpers, no wavefunctions).
-#   * correlations.cpp      -- two-body spin correlations + bond expectations
-#                              (`compute_smsp_correlations`,
-#                               `compute_szsz_correlations`, the four
-#                               `compute_*_bond_expectations` overloads).
-#   * structure_factor.cpp  -- bond-bilinear structure factors and
-#                              Fourier-applied dimer operators
-#                              (`compute_dimer_sf_direct`,
-#                               `compute_heisenberg_sf_direct`,
-#                               `apply_dimer_fourier`,
-#                               `apply_heisenberg_dimer_fourier`,
-#                               `compute_dimer_dimer_correlation`,
-#                               `compute_heisenberg_dimer_dimer_correlation`,
-#                               `set_memory_efficient_mode`).
-#   * ring_observables.cpp  -- bowtie ring-flip / triangle ring-exchange
-#                              kernels: `apply_bowtie_fourier`,
-#                              `compute_bowtie_resonance`,
-#                              `compute_triangle_chiral`. Reuses the
-#                              memory-efficient flag from structure_factor.
-#   * spin_structure_factor.cpp -- site-resolved spin structure factor
-#                              `compute_spin_structure_factor` over
-#                              precomputed two-body correlation tables;
-#                              produces `StructureFactorResult`.
-#   * wavefunction_io.cpp   -- HDF5 wavefunction + TPQ-state loaders shared
-#                              by the CPU and GPU drivers and by the Python
-#                              bindings (`load_wavefunction`,
-#                              `load_all_tpq_states`, `load_tpq_state`,
-#                              `TPQState`).
-#   * results_io.cpp        -- HDF5 results writers + scalar-summary structs
-#                              for the order-parameter pipeline
-#                              (`save_results`, `save_temperature_scan_results`,
-#                              `save_scan_results`, `NematicResult`,
-#                              `VBSResult`, `PlaquetteResult`, `Sq2DGridResult`,
-#                              `OrderParameterResults`).
-#   * order_parameters.cpp  -- physics kernels building the result aggregates
-#                              above: `compute_nematic_order(_real)`,
-#                              `compute_vbs_order`, `compute_plaquette_order`,
-#                              `compute_sq_2d_grid`,
-#                              `compute_all_order_parameters`.
-#   * cli.cpp               -- BFG order-parameter CLI orchestration helpers
-#                              (`process_all_temperatures`,
-#                              `scan_jpm_directories`, `run_single_file`,
-#                              `run_scan`, `print_usage`) consumed by
-#                              `compute_bfg_order_parameters`. Keeps the
-#                              driver itself a thin argv shell. P2.1 (9th
-#                              slice).
-#
-# The CPU driver (`compute_bfg_order_parameters`), the GPU driver
-# (`compute_bfg_order_parameters_gpu`), and the future Python bindings all
-# call into this library so they share one authoritative implementation
-# instead of copy-pasting the kernels three times.
-#
-# Link-deps: OpenMP for the correlation kernels (PUBLIC so executables
-# inherit it). HDF5 is now PUBLIC because `wavefunction_io.cpp` exposes
-# H5::Exception in its declared signatures (the headers themselves only
-# include <complex>, but the implementation pulls in libhdf5_cpp). MPI
-# integration is intentionally compile-time-optional inside
-# `cli.cpp` -- the calling executable owns whether to define USE_MPI and
-# link MPI; `ed_bfg` itself never pulls MPI into its PUBLIC link line so
-# the library remains usable from non-MPI executables (the GPU driver,
-# the Python `_core.so` extension, the unit-test binaries) without any
-# MPI dependency leaking through.
-# -----------------------------------------------------------------------------
-add_library(ed_bfg STATIC
-    ${BFG_DIR}/cluster.cpp
-    ${BFG_DIR}/topology.cpp
-    ${BFG_DIR}/correlations.cpp
-    ${BFG_DIR}/structure_factor.cpp
-    ${BFG_DIR}/ring_observables.cpp
-    ${BFG_DIR}/spin_structure_factor.cpp
-    ${BFG_DIR}/wavefunction_io.cpp
-    ${BFG_DIR}/results_io.cpp
-    ${BFG_DIR}/order_parameters.cpp
-    ${BFG_DIR}/cli.cpp
-)
-target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_include_directories(ed_bfg PRIVATE ${HDF5_INCLUDE_DIRS})
-target_link_libraries(ed_bfg PUBLIC ${HDF5_LIBRARIES})
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(ed_bfg PUBLIC OpenMP::OpenMP_CXX)
-endif()
-target_compile_options(ed_bfg PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-)
-set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# -----------------------------------------------------------------------------
 # ed_cli: CLI workflow entry points (run_*_workflow / compute_*_workflow /
 # parse_* / construct_operators_from_config / print_eigenvalue_summary /
 # compute_thermodynamics).
