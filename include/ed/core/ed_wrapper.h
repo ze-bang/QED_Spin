@@ -38,5 +38,5 @@
 // for the full surface, and `CHANGELOG.md` for the per-wave port log.
 // =============================================================================
 
-#include <ed/core/ed_legacy_types.h>
+#include <ed/core/results.h>        // ::EDResults (formerly ed_legacy_types.h)
 #include <ed/core/ed_parameters.h>

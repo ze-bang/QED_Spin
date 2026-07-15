@@ -48,7 +48,7 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 
-#include <ed/core/ed_legacy_types.h>  // EDResults envelope (slim residue of ed_wrapper.h)
+#include <ed/core/results.h>  // ::EDResults envelope (formerly ed_legacy_types.h)
 #include <ed/core/ed_config_adapter.h>  // ed_adapter::toSolveOptions (THE converter)
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>

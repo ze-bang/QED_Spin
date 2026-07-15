@@ -22,6 +22,27 @@
 
 #include <ed/core/thermal_types.h>  // ThermodynamicData, FTLMResults
 
+/**
+ * @brief Eigenvalue + thermodynamics + FTLM result envelope.
+ *
+ * Global (::EDResults) to match its call sites (the Python
+ * ``qed.workflow._ed_result_from_*`` adapters and the CLI HDF5 emit step in
+ * ``src/cli/workflows.cpp``). For ground-state lanes only ``eigenvalues`` /
+ * ``eigenvectors_*`` are populated; thermal lanes fill ``thermo_data`` (the
+ * temperature scan) and ``ftlm_results`` (error-bar statistics).
+ *
+ * Consolidation Family 10: relocated here from the retired
+ * ``ed_legacy_types.h`` (a one-struct "slim residue" file) to co-locate it
+ * with the other result envelopes it references.
+ */
+struct EDResults {
+    std::vector<double> eigenvalues;
+    bool eigenvectors_computed = false;
+    std::string eigenvectors_path;
+    ThermodynamicData thermo_data;
+    FTLMResults       ftlm_results;
+};
+
 namespace ed {
 
 using Complex = std::complex<double>;
