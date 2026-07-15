@@ -187,9 +187,13 @@ def _make_generator_set_from_clique(
         )
     gens = [list(map(int, gi["permutation"])) for gi in info]
     orders = [int(gi["order"]) for gi in info]
-    group_size = 1
-    for o in orders:
-        group_size *= o
+    # TRUE |A|, not prod(orders). The C++ minimal-generator decomposition is
+    # minimal in COUNT, not relation-free: a 4x4 torus yields three order-4
+    # generators spanning a group of order 16, where prod(orders) says 64.
+    # Overstating |A| makes correct dim/|A| blocks look like the engine is
+    # forfeiting a factor it never had. See star_reduction.abelian_order.
+    from .star_reduction import abelian_order
+    group_size = abelian_order(gens, orders)
     return GeneratorSet(
         name=name,
         description=description,
@@ -257,10 +261,11 @@ class GeneratorSet:
         eigs = qed.solve(H, symmetry=rot_only).eigenvalues
 
     The returned subgroup is a fresh :class:`GeneratorSet` whose
-    ``group_size`` is the product of the selected generators' orders
-    (correct because the parent ``full_set`` already came from a
-    minimal-generator decomposition of an abelian group, so the
-    selected subset is automatically commuting and relation-free).
+    ``group_size`` is the number of DISTINCT permutations the selected
+    generators span. It is NOT prod(orders): the parent decomposition is
+    minimal in generator COUNT, not relation-free, so the generators can
+    be dependent (a 4x4 torus yields three order-4 generators spanning a
+    group of order 16, where prod(orders) claims 64).
     """
 
     name: str
@@ -317,8 +322,9 @@ class GeneratorSet:
         -------
         GeneratorSet
             A new generator set named ``"<self.name>[i,j,...]"`` whose
-            ``group_size`` is the product of the selected generators'
-            orders. Pass it directly as ``symmetry=`` to
+            ``group_size`` is the number of distinct permutations the
+            selected generators span (NOT prod(orders) -- they may be
+            dependent). Pass it directly as ``symmetry=`` to
             :func:`solve`.
 
         Examples
@@ -343,9 +349,11 @@ class GeneratorSet:
 
         sub_gens = [list(self.generators[i]) for i in norm]
         sub_orders = [int(self.orders[i]) for i in norm]
-        sub_size = 1
-        for o in sub_orders:
-            sub_size *= o
+        # TRUE order of the span, not prod(sub_orders): the parent's
+        # generators are minimal in count, not relation-free, so a selected
+        # subset can be dependent too.
+        from .star_reduction import abelian_order
+        sub_size = abelian_order(sub_gens, sub_orders)
         return GeneratorSet(
             name=f"{self.name}[{','.join(str(i) for i in norm)}]",
             description=(

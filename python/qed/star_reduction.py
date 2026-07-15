@@ -43,9 +43,27 @@ def _inverse(p):
     return tuple(inv)
 
 
+def abelian_order(generators, orders) -> int:
+    """TRUE |A|: the number of DISTINCT permutations the generators span.
+
+    Not ``prod(orders)``. The C++ minimal-generator decomposition returns a
+    generating set that is minimal in COUNT, not relation-free -- on a 4x4
+    torus it hands back three order-4 generators spanning a group of order
+    16, where prod(orders) claims 64. Reporting the product overstates the
+    group by the redundancy among the generators, which reads downstream as
+    "my blocks are 4x bigger than the symmetry says they should be" when in
+    fact dim/|A| is exactly right. Enumeration dedups by construction and
+    stays cheap: |A| is small for physical clusters.
+    """
+    if not generators:
+        return 1
+    return len(_enumerate_abelian(generators, orders))
+
+
 def _enumerate_abelian(generators, orders):
     """Every element of the abelian group as {perm-tuple: exponent
-    vector}. |A| = prod(orders) stays small for physical clusters."""
+    vector}. Deduped by perm, so ``len()`` is the TRUE |A| (which may be
+    smaller than prod(orders) -- see :func:`abelian_order`)."""
     n = len(generators[0])
     gens = [tuple(g) for g in generators]
     # powers[i][a] = g_i^a
@@ -172,10 +190,18 @@ def describe_group(
     """
     lines = []
     gens = [tuple(g) for g in generators]
-    a_order = 1
-    for o in orders:
-        a_order *= o
+    # TRUE order, not prod(orders): the generators need not be independent.
+    a_order = abelian_order(gens, orders)
     shape = " x ".join(f"Z{o}" for o in orders) if orders else "trivial"
+    prod = 1
+    for o in orders:
+        prod *= o
+    if prod != a_order:
+        # Say so loudly: a reader who takes prod(orders) as |A| will expect
+        # blocks prod/|A| times smaller than the engine can deliver, and
+        # conclude the engine is leaving reduction on the table.
+        shape += (f"  [generators are NOT independent: <a0..a{len(orders)-1}> "
+                  f"spans {a_order}, not prod(orders)={prod}]")
     lines.append(f"{name}: abelian projector subgroup A = {shape} "
                  f"(|A| = {a_order})")
     for i, (g, o) in enumerate(zip(gens, orders)):
