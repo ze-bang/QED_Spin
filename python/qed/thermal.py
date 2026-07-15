@@ -615,7 +615,8 @@ def thermal(
     # Z-recombines. This makes the spatial-symmetry sectors available to the
     # in-memory API. (A non-abelian generator set is reduced by its maximal
     # abelian subgroup here -- a complete, correct, coarser reduction; for the
-    # FULL non-abelian reduction use qed._core.symmetry_adapted_thermodynamics.)
+    # FULL non-abelian reduction route through the little-group engine
+    # (point_group="full").)
     if not is_directory:
         # symmetry='auto' -> maximal spatial generator set (or None);
         # 'on' toggles -> detection-checked ints (report + degrade).

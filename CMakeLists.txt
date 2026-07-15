@@ -893,8 +893,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_sector_plan                tests/unit/test_sector_plan.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
-    # End-to-end non-abelian symmetry-adapted ED (C4v Heisenberg vs brute force)
-    ed_add_test(test_symmetry_adapted           tests/unit/test_symmetry_adapted.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel

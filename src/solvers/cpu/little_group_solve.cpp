@@ -26,7 +26,7 @@
 #include <ed/symmetry/rep_sector_data.h>
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
-#include <ed/symmetry/symmetry_adapted.h>        // canonical_thermo_from_eigs
+#include <ed/symmetry/canonical_thermo.h>        // canonical_thermo_from_eigs
 #include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
 #include <ed/core/select_backend.h>           // ed::have_cuda()
 

@@ -107,20 +107,16 @@ def _dense_sz_pi(n):
     return Od
 
 
-def test_matches_oracle_and_dense_lehmann():
+def test_matches_dense_lehmann():
+    # Family 6: the monolithic SAB oracle was removed; the little-group DSSF
+    # is now pinned directly against the dense Lehmann reference (a stronger,
+    # independent brute-force oracle).
     H = _ring()
     obs = _sz_pi_probe()
     _, A, res, gens_full = _parts(H)
 
     d_lg = dict(qed._core.little_group_gs_dssf(
         H, obs, A, res, WMIN, WMAX, NW, ETA))
-    d_sab = dict(qed._core.symmetry_adapted_gs_dssf(
-        H, obs, gens_full, WMIN, WMAX, NW, ETA))
-    np.testing.assert_allclose(np.asarray(d_lg["s_omega"]),
-                               np.asarray(d_sab["s_omega"]),
-                               rtol=0, atol=1e-9)
-    assert abs(d_lg["gs_energy"] - d_sab["gs_energy"]) < 1e-9
-    assert abs(d_lg["total_weight"] - d_sab["total_weight"]) < 1e-9
 
     wgrid = np.asarray(d_lg["omega"])
     S_ref, E0, W_ref = _dense_lehmann(_dense_h_ring(N), _dense_sz_pi(N),
@@ -145,9 +141,25 @@ def test_public_api_routes_factorized(capsys):
     assert abs(r.gs_energy - E0) < 1e-10
 
 
-def test_parity_axis_destinations_match_oracle():
+def _dense_h_ring_pmpm(n):
+    """Dense J+- +- ring: base Heisenberg plus 0.3 (Sp_i Sp_j + Sm_i Sm_j)."""
+    Hd = _dense_h_ring(n).astype(complex)
+    dim = 1 << n
+    for s in range(dim):
+        for i in range(n):
+            j = (i + 1) % n
+            bi, bj = (s >> i) & 1, (s >> j) & 1
+            if bi == 0 and bj == 0:               # Sp_i Sp_j: down,down -> up,up
+                Hd[s | (1 << i) | (1 << j), s] += 0.3
+            if bi == 1 and bj == 1:               # Sm_i Sm_j: up,up -> down,down
+                Hd[s & ~(1 << i) & ~(1 << j), s] += 0.3
+    return Hd
+
+
+def test_parity_axis_destinations_match_dense():
     """U(1)-broken (J+- +-) ring: the diagonal axis degrades to Sz
-    parity; destination sweep covers both halves."""
+    parity; destination sweep covers both halves. Pinned against the
+    dense Lehmann reference (Family 6: SAB oracle removed)."""
     b = qed.input.HamiltonianBuilder(N)
     b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
     for i in range(N):
@@ -159,12 +171,12 @@ def test_parity_axis_destinations_match_oracle():
 
     d_lg = dict(qed._core.little_group_gs_dssf(
         H, obs, A, res, WMIN, WMAX, NW, ETA))
-    d_sab = dict(qed._core.symmetry_adapted_gs_dssf(
-        H, obs, gens_full, WMIN, WMAX, NW, ETA))
-    np.testing.assert_allclose(np.asarray(d_lg["s_omega"]),
-                               np.asarray(d_sab["s_omega"]),
+    wgrid = np.asarray(d_lg["omega"])
+    S_ref, _E0, W_ref = _dense_lehmann(_dense_h_ring_pmpm(N), _dense_sz_pi(N),
+                                       wgrid, ETA)
+    np.testing.assert_allclose(np.asarray(d_lg["s_omega"]), S_ref,
                                rtol=0, atol=1e-9)
-    assert abs(d_lg["total_weight"] - d_sab["total_weight"]) < 1e-9
+    assert abs(d_lg["total_weight"] - W_ref) < 1e-9
 
 
 def test_lanczos_gs_path_matches_dense_path():

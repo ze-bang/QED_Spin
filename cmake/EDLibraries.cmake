@@ -229,7 +229,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
-    ${SOLVERS_CPU_DIR}/symmetry_adapted_solve.cpp
     ${SOLVERS_CPU_DIR}/little_group_solve.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
@@ -340,7 +339,6 @@ set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(ed_symmetry STATIC
     ${SYMMETRY_DIR}/group.cpp
     ${SYMMETRY_DIR}/irreps.cpp
-    ${SYMMETRY_DIR}/symmetry_adapted.cpp
 )
 target_include_directories(ed_symmetry PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_symmetry PUBLIC ed_core)
@@ -452,7 +450,6 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
-        ${SOLVERS_GPU_DIR}/symmetry_adapted_gpu.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for
         # StreamingSymmetryOperator + FixedSz variant. Lives here (and
