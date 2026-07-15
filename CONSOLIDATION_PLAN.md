@@ -43,8 +43,10 @@ O₁|ψ⟩, projections — are T-independent). So a multi-T extension reusing t
 clean change (loop the final reweighting over a T-vector), matching GPUFTLMSolver's efficiency.
 
 Steps (each gated before the next):
-1. Add `ftlm_dynamical_kernel_via_backend_multitemp(...)` (or a T-vector option) — compute steps 1–7
-   once per sample, accumulate per-T spectra via `ftlm_dynamical_sample_spectrum`. Pure addition.
+1. ✅ DONE (commit b1523f2): `ftlm_dynamical_kernel_via_backend_multitemp` added — steps 1–8 computed
+   once per sample, final Lorentzian reweighting looped over a T-vector. Single-temp kernel is now a
+   thin wrapper delegating to it (behaviour unchanged; orchestrator GPU spectral lane preserved).
+   Builds clean CPU + CUDA. Remaining steps 2–5 below are the integration + retirement.
 2. CPU gate: for a small H + (O₁,O₂), assert multi-T output == per-T single-call output == legacy
    `compute_dynamical_correlation` S(q,ω), to ~1e-10.
 3. Rewire the `workflows.cpp` DSSF block (both the GPU `GPUFTLMSolver` path and the CPU
