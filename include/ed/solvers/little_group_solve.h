@@ -67,6 +67,35 @@ struct LittleGroupOptions {
     /// Stage 9b: time-reversal folding (star-level k <-> conj(k) merge +
     /// conjugate-irrep pairing). Same SymToggle convention; dormant until 9b.
     int  time_reversal = -1;
+    /// Solve ONLY these star representatives (extended irrep indices -- the
+    /// same ``k0`` that ``LittleGroupStarInfo::k0`` reports). Empty = every
+    /// star, the default.
+    ///
+    /// This is the programmatic form of the ED_SYM_LG_ONLY_K0 job-splitting
+    /// env var, added so a caller can NAME a momentum block and have the
+    /// engine do only that block's work -- previously naming a sector forced
+    /// the whole call off the projection lane and onto the abelian one, i.e.
+    /// asking for a smaller block silently bought a BIGGER one (the
+    /// (n_up,k) sector instead of (n_up,k,irrep)).
+    ///
+    /// Note a star is the solve unit: members of one star are isospectral by
+    /// construction (the point-group residue maps them onto each other), so
+    /// restricting to a star representative answers for every member of that
+    /// star. The env var still wins when set, so existing job scripts keep
+    /// working.
+    std::vector<int> only_k0;
+    /// Build every star's sector and report it (``stars`` + the full
+    /// ``irrep_characters`` table), solving NOTHING. The programmatic form of
+    /// ED_SYM_LG_ONLY_K0="plan".
+    ///
+    /// This is what makes ``only_k0`` usable from a caller who knows physics
+    /// rather than engine indices: ``only_k0`` filters on star
+    /// REPRESENTATIVES, and a caller's momentum may be a non-representative
+    /// MEMBER of a star, so it must first read the star membership (and
+    /// decode its momentum from ``irrep_characters``, since k_raw is an
+    /// internal irrep index and NOT the momentum). Plan, decode, then solve
+    /// the one star.
+    bool plan_only = false;
 };
 
 /// One star's diagnostics.
@@ -79,6 +108,15 @@ struct LittleGroupStarInfo {
     std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
     int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
     int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
+    /// Every extended irrep index folded into this star (always includes
+    /// ``k0``). The engine has always known this -- the star loop iterates
+    /// ``(k0, members)`` -- but only published ``star_size``, which is not
+    /// enough to answer "which star holds MY momentum?". Naming a block needs
+    /// exactly that: ``only_k0`` filters on REPRESENTATIVES, so a caller whose
+    /// momentum is a non-representative member has to find its star first.
+    /// Members are isospectral by construction (the residue maps them onto
+    /// each other), so the representative's spectrum answers for all of them.
+    std::vector<int> members;
 };
 
 /// Stage 9f: per-eigenvalue quantum-number label, parallel to

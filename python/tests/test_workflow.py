@@ -803,12 +803,25 @@ class TestDeviceMatrix:
 
         monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
+        n_sites = int(H.num_sites)
         qed.solve(H, solver="LANCZOS", num_eigenvalues=1,
                  verbose=False)
-        assert called == {"workflows_solve": 1}, (
-            f"CPU+no-symmetry path took the wrong dispatcher: {called}. "
-            "Expected the unified `workflows_solve` route."
+        # ROUTE is what this test is about (no legacy forwarder). The COUNT
+        # used to be 1 only because an unnamed Sz silently meant "the
+        # n_up=N//2 sector"; it now means "every magnetisation sector,
+        # merged" (Jul 2026 -- the half-filling bet returned a wrong GS in a
+        # field), so the unified route is taken once per sector.
+        assert called["workflows_solve"] == n_sites + 1, (
+            f"CPU+no-symmetry path took the wrong dispatcher or the wrong "
+            f"number of sectors: {called}. Expected the unified "
+            f"`workflows_solve` route once per Sz sector (N+1 = {n_sites + 1})."
         )
+        # Naming a sector must still cost exactly one solve.
+        called["workflows_solve"] = 0
+        qed.solve(H, solver="LANCZOS", num_eigenvalues=1, sz=n_sites // 2,
+                  auto_sz=False, verbose=False)
+        assert called["workflows_solve"] == 1, (
+            f"sz= must solve exactly one block, got {called}")
 
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
     def test_mpi_devices_retired(self, H, device):

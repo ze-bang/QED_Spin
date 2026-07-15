@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Union
 
 from . import _core as _core
-from .point_group_routing import resolve_projection_lane, split_nonabelian
+from .point_group_routing import (resolve_projection_lane, split_nonabelian,
+                                  decode_star_for_sector)
 from ._core import (  # type: ignore[attr-defined]
     DiagonalizationMethod,
     EDParameters,
@@ -265,8 +266,19 @@ def solve(
         quantum numbers (one per generator). When omitted, every irrep
         is diagonalised and the eigenvalues merged.
     sz : int, optional
-        When ``H`` is an :class:`Operator` and the operator commutes
-        with total Sz, restrict to the sector with this many up spins.
+        Magnetisation sector, as a SET-BIT count -- i.e. the number of
+        **DOWN** spins, NOT up spins and NOT the value of total Sz.
+        ``sz=0`` is the fully polarised-UP block (S_z = +N/2) and ``sz=N``
+        the fully polarised-DOWN block; ``sz=N//2`` is half filling. The
+        name is historical (the C++ side calls it ``n_up`` while counting
+        set bits, and the set bit is the down spin -- hence ``S^-`` RAISES
+        ``n_up``). Verified: for ``H = Heisenberg - 3*sum(Sz)`` on N=10,
+        ``sz=0`` returns -12.5 (all up) and ``sz=10`` returns +17.5 (all
+        down). Pinned in test_quantum_number_selection.py.
+
+        Omit it to sweep EVERY magnetisation sector and merge (the true
+        global ground state, whatever sector holds it). Naming it solves
+        that one block and is ~sqrt(N)x cheaper.
     point_group : str or bool, optional
         Stage 9c semantics. ``"auto"`` (default): eigenvalue-only calls
         PROJECT through the factorized little-group engine (translation
@@ -420,6 +432,74 @@ def solve(
                 "halves) or pass an integer n_up.")
         _sz_parity_str = 0 if _key == "even" else 1
         sz = None
+
+    # ------------------------------------------------------------------
+    # 1a. Sz unnamed on the PLAIN lane -> sweep every magnetisation sector.
+    #
+    # This used to pin n_up = N//2 (see the auto-Sz note below). Half filling
+    # is where the Heisenberg-AFM ground state lives; it is NOT where a
+    # ground state lives in general. Under a field, or for a ferro/doped
+    # model, the pin returned a silently WRONG E0 -- measured on an N=10 ring
+    # with -3*sum(Sz): -4.5154 against the true -12.5, no warning.
+    #
+    # "Unnamed" now means ALL: solve each U(1) block and merge. Still block
+    # diagonal (per-sector solves keep the U(1) reduction; this is NOT a
+    # fall back to the full 2^N space), and each sector is <= the old
+    # half-filling block, so the cost is ~sqrt(N)x -- paid only when the
+    # caller declined to name a sector. `sz=` still buys the single-sector
+    # solve, and `auto_sz=False` still forces the plain full-Hilbert lane.
+    # ------------------------------------------------------------------
+    if (sz is None and _sz_parity_str is None
+            and not isinstance(H, FixedSzOperator)
+            and auto_sz and symmetry is None
+            and not full_spectrum
+            and H.conserves_sz()
+            and not (isinstance(device, str)
+                     and device.lower() in ("mpi", "mpi_gpu"))):
+        _n = int(H.num_sites)
+        _k_want = int(num_eigenvalues) if num_eigenvalues else 1
+        if verbose:
+            print(f"[qed.solve] Sz unnamed: sweeping n_up=0..{_n} and merging "
+                  f"(pass sz= to solve one sector).")
+        _per: list[tuple[float, int]] = []
+        _best: tuple[float, int, Any] = (float("inf"), -1, None)
+        for _nu_i in range(_n + 1):
+            _ri = solve(
+                H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
+                compute_eigenvectors=compute_eigenvectors, solver=solver,
+                device=device, symmetry=None, sector=sector, sz=_nu_i,
+                auto_sz=False, spin_flip=spin_flip,
+                time_reversal=time_reversal, point_group=point_group,
+                lattice=lattice, output_dir=output_dir,
+                max_iterations=max_iterations, block_size=block_size,
+                num_samples=num_samples, target_beta=target_beta,
+                num_temp_points=num_temp_points, temp_min=temp_min,
+                temp_max=temp_max, verbose=False, full_spectrum=False,
+                extra_params=extra_params)
+            _ev = list(getattr(_ri, "eigenvalues", []) or [])
+            for _e in _ev:
+                _per.append((float(_e), _nu_i))
+            if _ev and float(_ev[0]) < _best[0]:
+                _best = (float(_ev[0]), _nu_i, _ri)
+        if not _per:
+            raise RuntimeError(
+                "qed.solve: the Sz sweep produced no eigenvalues.")
+        _per.sort(key=lambda t: t[0])
+        _merged = _per[:_k_want]
+        # Eigenvectors live in their own sector's basis, so a merged window
+        # spanning sectors has no single basis to return them in. Hand back
+        # the winning sector's result (its vectors ARE the ground state) and
+        # overwrite the eigenvalue window with the true merged one.
+        _out = _best[2]
+        _out.eigenvalues = [e for e, _ in _merged]
+        try:
+            _out.sz_sectors = [nu for _, nu in _merged]
+        except Exception:
+            pass
+        if verbose:
+            print(f"[qed.solve] Sz sweep: E0={_merged[0][0]:.10f} in "
+                  f"n_up={_merged[0][1]}")
+        return _out
     op_to_use: Operator = H
     if sz is not None:
         if fixed_sz_input:
@@ -454,42 +534,13 @@ def solve(
                       f"(reduced from {base_dim}).")
     elif fixed_sz_input and verbose:
         print(f"[qed.solve] FixedSzOperator supplied: dim={H.dimension}.")
-    elif (sz is None and not fixed_sz_input and auto_sz
-          and symmetry is None
-          and H.conserves_sz()
-          and not (isinstance(device, str)
-                   and device.lower() in ("mpi", "mpi_gpu"))):
-        # Auto-Sz projection: the Hamiltonian respects total Sz but no
-        # sector was named. Default to the half-filling sector
-        # n_up = N//2 (where the ground state lives for Heisenberg-style
-        # antiferromagnets) -- it is C(N, N//2) ~ 2^N / sqrt(pi N/2),
-        # i.e. a sqrt(pi N/2)x speedup over the full 2^N Hilbert space
-        # at no accuracy cost. Pass ``auto_sz=False`` to keep the full
-        # Hilbert space, or ``sz=k`` to pick a different sector.
-        #
-        # IMPORTANT: skipped when ``symmetry=`` is explicitly given. Otherwise
-        # "pure spatial" (symmetry, no sz) would silently become sz+spatial in
-        # the n_up=N//2 sector -- an INCOMPLETE spectrum, and the WRONG ground
-        # state for any model whose GS is not at half-filling (the "no accuracy
-        # cost" claim holds only for the Heisenberg-AFM GS). With an explicit
-        # spatial symmetry, that symmetry IS the reduction; add ``sz=`` if you
-        # also want a magnetisation sector.
-        #
-        # MPI / MPI+GPU lanes are excluded from auto-Sz: the standalone
-        # ed_distributed_main binary loads from full-Hilbert .dat files
-        # only; the Sz projection happens inside the MPI driver via the
-        # `sz=` argument that gets forwarded through the launcher.
-        half = num_sites // 2
-        op_to_use = H.make_fixed_sz(int(half))
-        sz = half
-        if verbose:
-            try:
-                sec = math.comb(num_sites, half)
-            except Exception:  # pragma: no cover - defensive against odd N
-                sec = op_to_use.dimension
-            print(f"[qed.solve] auto-Sz: n_up={half}: dim={sec} "
-                  f"(reduced from {base_dim}). Pass auto_sz=False to "
-                  f"opt out, or sz=k for a different sector.")
+    # NOTE: the old "auto-Sz projection" branch lived here and pinned
+    # n_up = N//2 when Sz was unnamed. It is gone: unnamed now means the
+    # magnetisation SWEEP in section 1a above, which is right for every model
+    # rather than only for Heisenberg-style antiferromagnets. (MPI lanes were
+    # excluded from auto-Sz because ed_distributed_main loads full-Hilbert
+    # .dat files and does its own Sz projection via the launcher's sz=; the
+    # sweep carries the same exclusion.)
 
     sector_dim = int(op_to_use.dimension)
 
@@ -617,10 +668,16 @@ def solve(
         # (raises on decline); any decline degrades to the abelian rep
         # lane with star/TR/flip folds. The monolithic SAB engine is a
         # test oracle -- no longer production-routed.
+        # `sector=` no longer vetoes the projection (Jul 2026). Naming a
+        # momentum used to force the call onto the ABELIAN lane, i.e. asking
+        # for a smaller block silently bought a BIGGER one -- the (n_up, k)
+        # sector instead of (n_up, k, irrep). The engine can restrict its star
+        # walk (LittleGroupOptions::only_k0), so a named momentum now projects
+        # AND does only that star's work. Eigenvectors and sampling methods
+        # still decline: the projection lane genuinely does not produce them.
         lane = resolve_projection_lane(
             symmetry, point_group=point_group, consumer="solve",
             eigenvalues_only=(not compute_eigenvectors
-                              and sector is None
                               and not is_thermal),
             # Jul 2026: an explicit GPU request no longer vetoes the
             # projection -- the little-group engine drives the resident
@@ -631,15 +688,31 @@ def solve(
         if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
+            _nu_sweep = None       # magnetisation sectors to sweep + merge
+            _only_k0: list[int] = []   # star restriction for a named momentum
             _sp = -1
             if _sz_parity_str is not None:
                 _sp = int(_sz_parity_str)
             elif _nu < 0 and auto_sz:
-                # Compose the diagonal axis automatically: fixed Sz for
-                # U(1)-conserving H (GS at half filling), the parity
-                # half otherwise when the Z2 remnant survives.
+                # Compose the diagonal axis automatically. For U(1)-conserving
+                # H this used to PIN n_up = N//2 "(GS at half filling)". That is
+                # a Heisenberg-AFM fact, not a theorem: in a field, or for a
+                # ferro/doped model, the ground state moves off half filling and
+                # the pin returned a SILENTLY WRONG E0 (measured: N=10 ring with
+                # -3*sum(Sz) gave -4.5154 against the true -12.5). Worse, it
+                # fired even when the caller passed symmetry= explicitly --
+                # exactly what the sibling auto-Sz site refuses to do, for
+                # exactly this reason (see its `symmetry is None` guard).
+                #
+                # "Unnamed" must mean ALL, not "the sector we bet on": sweep
+                # every magnetisation sector and merge. This stays block
+                # diagonal (each n_up is solved in its own U(1) block, so the
+                # U(1) reduction is kept -- it is not a fall back to the full
+                # 2^N space); it costs ~sum_n C(N,n) instead of one C(N,N/2)
+                # solve, i.e. ~sqrt(N)x more work for an answer that is right
+                # for every model. Name sz= to pay for one sector only.
                 if op_to_use.conserves_sz():
-                    _nu = num_sites // 2
+                    _nu_sweep = list(range(num_sites + 1))
                 else:
                     try:
                         if bool(_core.detect_hamiltonian_symmetries(
@@ -652,6 +725,31 @@ def solve(
             _tr = resolve_discrete_toggle(op_to_use, time_reversal,
                                           "time_reversal", verbose=verbose)
             _A, _res = lane.A, lane.residues
+            if sector is not None:
+                # A NAMED momentum: decode it to a star and restrict the walk,
+                # so the caller pays for that block alone instead of the whole
+                # star sweep. k_raw is an engine-internal irrep index, so this
+                # goes through the character table (see decode_star_for_sector)
+                # -- never through an index convention.
+                _plan = dict(_core.little_group_full_spectrum(
+                    op_to_use, _A, _res,
+                    n_up=(_nu if _nu >= 0 else (num_sites // 2
+                                                if _nu_sweep else -1)),
+                    sz_parity=_sp if _sp in (0, 1) else -1,
+                    spin_flip=_sf, time_reversal=_tr, plan_only=True))
+                _dec = decode_star_for_sector(
+                    _plan["stars"], _plan["irrep_characters"], _A,
+                    symmetry.generators, symmetry.orders, sector)
+                if isinstance(_dec, str):
+                    raise RuntimeError(
+                        f"qed.solve: sector={list(sector)} could not be "
+                        f"resolved on the projection lane: {_dec}")
+                _k0, _kraw = _dec
+                _only_k0 = [_k0]
+                if verbose:
+                    print(f"[qed.solve] sector={list(sector)} -> irrep "
+                          f"k_raw={_kraw}, star k0={_k0}: solving that star "
+                          f"only (projected).")
             try:
                 def _lg_block(**kw):
                     # Stage 10c: both paths return LABELED rows
@@ -666,7 +764,8 @@ def solve(
                     if method == DiagonalizationMethod.FULL:
                         d = dict(_core.little_group_full_spectrum(
                             op_to_use, _A, _res,
-                            spin_flip=_sf, time_reversal=_tr, **kw))
+                            spin_flip=_sf, time_reversal=_tr,
+                            only_k0=_only_k0, **kw))
                         rows = []
                         for e, m, kk, fp, ir, dd in zip(
                                 d["block_values"], d["multiplicities"],
@@ -678,7 +777,8 @@ def solve(
                         return rows, d["irrep_characters"]
                     d = dict(_core.little_group_lowest_eigenvalues_labeled(
                         op_to_use, _A, _res, k=_k,
-                        spin_flip=_sf, time_reversal=_tr, **kw))
+                        spin_flip=_sf, time_reversal=_tr,
+                        only_k0=_only_k0, **kw))
                     rows = [(float(e), kk, fp, ir, dd, m, sub, bool(cv))
                             for e, kk, fp, ir, dd, m, cv in zip(
                                 d["eigenvalues"], d["k_raw"],
@@ -693,6 +793,16 @@ def solve(
                     rows += rows2
                 elif _sp in (0, 1):
                     rows, chars = _lg_block(sz_parity=_sp)
+                elif _nu_sweep is not None:
+                    # Sz unnamed -> every magnetisation sector, merged. Each
+                    # block_subspace row carries its own n_up, so the merged
+                    # rows stay attributable. irrep_characters are a property
+                    # of A, not of n_up, so the first block's table serves all
+                    # (same reasoning as the sz_parity==2 branch above).
+                    rows, chars = _lg_block(n_up=_nu_sweep[0])
+                    for _nu_i in _nu_sweep[1:]:
+                        _rows_i, _ = _lg_block(n_up=_nu_i)
+                        rows += _rows_i
                 else:
                     rows, chars = _lg_block(n_up=_nu)
                 rows.sort(key=lambda t: t[0])
@@ -1622,6 +1732,7 @@ def full_spectrum(
     operator: Operator,
     *,
     symmetry: SymmetryArg = None,
+    sz: Optional[int] = None,
     sz_conserved: Optional[bool] = None,
     spin_length: float = 0.5,
     device: str = "cpu",
@@ -1633,6 +1744,14 @@ def full_spectrum(
 ) -> EDResults:
     """Compute the COMPLETE eigenvalue spectrum of ``operator`` decomposed
     by all available ``(Sz x spatial)`` symmetries.
+
+    ``sz``: name a magnetisation block (a SET-BIT count -- the number of DOWN
+    spins; ``sz=0`` is fully polarised UP -- see :func:`solve`) to get the
+    complete spectrum OF THAT BLOCK. Omit it for every sector, merged (the
+    default, and the true full spectrum). Naming a sector disables the
+    flip-transport half-sweep: that optimisation mirrors a half sweep onto its
+    partner sectors, which is meaningless -- and would silently double-count --
+    when the caller asked for one specific block.
 
     Each ``(n_up, spatial irrep)`` block is dense-diagonalised through the
     memory-light on-the-fly representative SpMV
@@ -1707,14 +1826,23 @@ def full_spectrum(
         try:
             eigs = []
             if sz_conserved:
-                top = N // 2 if _flip_transport else N
-                for n_up in range(top + 1):
+                if sz is not None:
+                    # ONE named magnetisation block: its complete spectrum,
+                    # no mirror (the caller asked for this sector, not its
+                    # flip partner).
+                    _sectors = [int(sz)]
+                    _mirror = False
+                else:
+                    top = N // 2 if _flip_transport else N
+                    _sectors = list(range(top + 1))
+                    _mirror = _flip_transport
+                for n_up in _sectors:
                     d = dict(_core.little_group_full_spectrum(
                         operator, _A, _res, n_up=int(n_up),
                         use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr))
                     block = [float(e) for e in d["eigenvalues"]]
                     eigs.extend(block)
-                    if _flip_transport and n_up * 2 != N:
+                    if _mirror and n_up * 2 != N:
                         eigs.extend(block)   # isospectral mirror
             else:
                 d = dict(_core.little_group_full_spectrum(
@@ -1762,10 +1890,18 @@ def full_spectrum(
         _write_operator_directory(operator, tmpdir)
         _write_symmetry_directory(tmpdir, info)
 
-        sz_values: list[Optional[int]] = (
-            (list(range(N // 2 + 1)) if _flip_transport
-             else list(range(N + 1)))
-            if sz_conserved else [None])
+        if sz is not None and sz_conserved:
+            # ONE named magnetisation block. Flip transport mirrors a HALF
+            # sweep onto its partner; with a single named sector there is no
+            # sweep to halve, so disable it rather than silently returning
+            # the partner's copy too.
+            sz_values: list[Optional[int]] = [int(sz)]
+            _flip_transport = False
+        else:
+            sz_values = (
+                (list(range(N // 2 + 1)) if _flip_transport
+                 else list(range(N + 1)))
+                if sz_conserved else [None])
         # Stage 7a star maps for the per-Sz sector loops.
         _star_maps = None
         if _star and point_group not in (False, 0, "off", "none") \

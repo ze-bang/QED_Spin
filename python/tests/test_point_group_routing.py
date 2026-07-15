@@ -91,13 +91,32 @@ def test_env_gate_degrades_auto_and_fails_full(monkeypatch, capsys):
 
 
 def test_vector_consumers_stay_abelian():
+    """A consumer that needs EIGENVECTORS cannot be served by the projection
+    lane, so point_group='full' must raise rather than silently degrade.
+
+    Note what is NOT in this list any more: `sector=`. It used to be lumped in
+    here ("the projection lane cannot honor it"), which meant naming a
+    momentum bought the BIGGER abelian (n_up,k) block instead of the
+    (n_up,k,irrep) one. The engine can restrict its star walk, so a named
+    momentum now projects -- see
+    test_quantum_number_selection.py::test_named_momentum_projects_and_agrees_with_the_abelian_lane.
+    Eigenvectors remain a genuine decline: the lane really does not produce them.
+    """
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
-    # sector= restricts to one irrep -- the projection lane cannot honor
-    # it, so 'full' must raise rather than silently ignore the request.
-    with pytest.raises(RuntimeError, match="sector|eigenvector"):
+    with pytest.raises(RuntimeError, match="eigenvector"):
         qed.solve(H, symmetry=gen, num_eigenvalues=1, sz=N // 2,
+                  compute_eigenvectors=True, point_group="full",
+                  verbose=False)
+
+
+def test_named_momentum_no_longer_declines_the_projection_lane():
+    """The converse of the above: sector= must NOT raise under 'full'."""
+    H = _ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    r = qed.solve(H, symmetry=gen, num_eigenvalues=1, sz=N // 2,
                   sector=[0], point_group="full", verbose=False)
+    assert len(r.eigenvalues) >= 1
 
 
 def test_explicit_nonabelian_generators_project():

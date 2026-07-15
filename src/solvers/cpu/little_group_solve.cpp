@@ -1126,13 +1126,21 @@ LittleGroupSpectrum run_little_group(
     // ED_SYM_LG_ONLY_K0="plan" builds every star's sector (dims + sizes),
     // prints one line per star, and solves nothing -- the cheap pass that
     // tells the job scripts which k0 values exist.
-    bool plan_only = false;
-    std::set<int> only_k0;
+    // opt.plan_only / opt.only_k0 are the PROGRAMMATIC forms: a caller reading
+    // the star table, or naming a momentum block so the engine does only that
+    // block's work. The env var below is the job-splitting override and still
+    // wins when set, so existing job scripts keep working unchanged.
+    bool plan_only = opt.plan_only;
+    std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
     if (const char* fenv = std::getenv("ED_SYM_LG_ONLY_K0")) {
         const std::string fs(fenv);
         if (fs == "plan") {
             plan_only = true;
         } else if (!fs.empty()) {
+            // REPLACE, don't union: "the env var wins" has to mean the job
+            // script's split is exactly what runs. Unioning with opt.only_k0
+            // would silently widen a split job back out.
+            only_k0.clear();
             std::size_t pos = 0;
             while (pos < fs.size()) {
                 const std::size_t c = fs.find(',', pos);
@@ -1161,6 +1169,7 @@ LittleGroupSpectrum run_little_group(
         LittleGroupStarInfo info;
         info.k0        = k0;
         info.star_size = m_star;
+        info.members.assign(members.begin(), members.end());
         info.dim_k0    = rd.reps.size();
         info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
         if (plan_only) {
@@ -1217,6 +1226,22 @@ LittleGroupSpectrum run_little_group(
         if (profile) { t_monomial += secs(t0, tick()); t0 = tick(); }
 
         bool projected = false;
+        // Every decline below is CORRECTNESS-SAFE (we fall back to the plain
+        // k-sector block) but silently forfeits the |little co-group| block
+        // reduction -- and it forfeits the MOST at the high-symmetry momenta,
+        // where the co-group is largest. That made "why is my Gamma block
+        // |P| times too big?" undiagnosable without a debugger: the only
+        // signal was `projected=0` in the ED_SYM_PROFILE line. Each path now
+        // says WHY under ED_SYM_PROFILE=1 / verbose.
+        const bool lg_diag = profile || opt.verbose;
+        auto decline = [&](const char* why) {
+            if (lg_diag)
+                std::fprintf(stderr,
+                    "[little_group] star k0=%d (dim=%zu, |little co-group|=%zu): "
+                    "NOT projected -- %s. Correct, but this block keeps its "
+                    "full k-sector size.\n",
+                    k0, rdr.reps.size(), M.size(), why);
+        };
         if (M.size() > 1) {
             std::vector<std::vector<int>> multP;
             if (build_little_tables(M, multP)) {
@@ -1224,8 +1249,10 @@ LittleGroupSpectrum run_little_group(
                 bool gi_ok = true;
                 try {
                     giP = ed::symmetry::decompose_irreps_tables(multP);
-                } catch (const std::exception&) {
+                } catch (const std::exception& e) {
                     gi_ok = false;
+                    decline((std::string("decompose_irreps_tables threw: ")
+                             + e.what()).c_str());
                 }
                 if (gi_ok) {
                     // Isotypic split; completeness guard sums the block dims.
@@ -1308,15 +1335,23 @@ LittleGroupSpectrum run_little_group(
                             }
                         }
                         info.little_order = static_cast<int>(M.size());
-                    } else if (opt.verbose) {
-                        std::fprintf(stderr,
-                            "[little_group] star k0=%d: isotypic covering %llu != dim %zu"
-                            " -- falling back to the plain block\n",
-                            k0, static_cast<unsigned long long>(covered),
+                    } else {
+                        char buf[160];
+                        std::snprintf(buf, sizeof(buf),
+                            "isotypic columns cover %llu of %zu states (the "
+                            "irrep decomposition does not tile the sector)",
+                            static_cast<unsigned long long>(covered),
                             rdr.reps.size());
+                        decline(buf);
                     }
                 }
+            } else {
+                decline("build_little_tables failed -- the deduped monomials "
+                        "do not close into an abstract group table");
             }
+        } else {
+            decline("no residue fixes this momentum (little co-group is "
+                    "trivial) -- only the star fold applies here");
         }
         if (!projected) {
             LittleGroupLabel lab;
@@ -1400,12 +1435,18 @@ void check_sum_rule(const LittleGroupSpectrum& out, int n_sites,
         want = std::uint64_t{1} << n_sites;
     }
     if (out.total_dim != want) {
-        if (std::getenv("ED_SYM_LG_ONLY_K0") != nullptr) {
-            // A star filter (or plan mode) is active: the walk deliberately
-            // covered a subset, so the tiling check cannot hold. Loud note
-            // instead of a false-positive bookkeeping error.
+        // A star filter (env job-split, plan mode, or a caller naming a
+        // momentum via opt.only_k0) means the walk deliberately covered a
+        // SUBSET, so the tiling identity cannot hold -- skip with a loud note
+        // rather than raise a false bookkeeping error. Restricted to exactly
+        // these two causes: the sum rule is THE tripwire that catches a real
+        // covering bug, so it must still fire for every unrestricted call.
+        const bool restricted =
+            std::getenv("ED_SYM_LG_ONLY_K0") != nullptr
+            || !opt.only_k0.empty() || opt.plan_only;
+        if (restricted) {
             std::fprintf(stderr,
-                "[little_group] sum rule SKIPPED: ED_SYM_LG_ONLY_K0 is set "
+                "[little_group] sum rule SKIPPED: star filter active "
                 "(covered %llu of %llu)\n",
                 static_cast<unsigned long long>(out.total_dim),
                 static_cast<unsigned long long>(want));

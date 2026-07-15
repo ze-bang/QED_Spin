@@ -35,7 +35,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-__all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane"]
+__all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane",
+           "decode_star_for_sector"]
 
 _GROUP_CLOSURE_CAP = 4096   # A (and the closed full group) must stay enumerable
 
@@ -171,6 +172,64 @@ def split_nonabelian(symmetry_or_gens):
         return ("the input group is abelian -- nothing to project beyond "
                 "the momentum sectors (use the abelian rep lane)")
     return ([list(a) for a in sorted(Aset)], residues)
+
+
+def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
+                           sector):
+    """Which star does the caller's momentum live in?
+
+    ``sector`` names one quantum number per GENERATOR: generator ``a_i`` (of
+    order ``o_i``) acts with phase ``exp(-2*pi*i*q_i/o_i)``, the directory's
+    ``phase_factors`` convention. Returns ``(k0, k_raw)`` -- the star
+    REPRESENTATIVE to hand to ``only_k0``, and the caller's own raw irrep
+    index -- or a ``str`` decline reason.
+
+    Why this exists: the engine's ``k_raw`` is an INTERNAL irrep index from
+    ``decompose_irreps`` and is NOT the momentum (on a 12-ring, k_raw=8 is
+    q=0 and k_raw=9 is q=pi). The only honest way across that boundary is the
+    one the engine's own header prescribes: read the momentum off the
+    generator's phase in ``irrep_characters[k_raw][a]``, never trust an index
+    convention. And ``only_k0`` filters on star REPRESENTATIVES, so a momentum
+    that is a non-representative member has to be mapped to its star -- the
+    members are isospectral by construction, so the representative's spectrum
+    is the answer for every one of them.
+    """
+    import cmath
+
+    qns = [int(q) for q in sector]
+    gens = [list(g) for g in generators]
+    ords = [int(o) for o in orders]
+    if len(qns) != len(gens):
+        return (f"sector= names {len(qns)} quantum number(s) but the symmetry "
+                f"has {len(gens)} generator(s)")
+
+    # Locate each generator inside the caller's own A ordering: that is the
+    # index axis irrep_characters is expressed in.
+    A_t = [tuple(int(x) for x in a) for a in A]
+    want = []
+    for g, o, q in zip(gens, ords, qns):
+        try:
+            a_idx = A_t.index(tuple(g))
+        except ValueError:
+            return ("a generator is not present in the closed abelian group "
+                    "(cannot decode its character)")
+        want.append((a_idx, cmath.exp(-2j * cmath.pi * (q % o) / o)))
+
+    k_raw = None
+    for kk, row in enumerate(irrep_characters):
+        if all(abs(complex(row[a_idx]) - ph) < 1e-8 for a_idx, ph in want):
+            k_raw = kk
+            break
+    if k_raw is None:
+        return (f"no abelian irrep carries the requested quantum numbers "
+                f"{qns} (orders {ords})")
+
+    for st in stars:
+        members = [int(m) for m in (st.get("members") or [])]
+        if k_raw in members or int(st["k0"]) == k_raw:
+            return int(st["k0"]), k_raw
+    return (f"the decoded irrep k_raw={k_raw} is in no star -- the star walk "
+            "did not cover it")
 
 
 def _pg_key(point_group) -> str:
