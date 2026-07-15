@@ -923,8 +923,13 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // millions-dim and stay on the (safe) Lanczos path unchanged.
     const std::uint64_t max_iter_cap =
         std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
-    const std::uint64_t dense_floor = std::max<std::uint64_t>(
+    std::uint64_t dense_floor = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(dense_max_dim), 32u * max_iter_cap);
+    // ED_SYM_LG_DENSE_FLOOR (test hook): override the crossover so the
+    // Lanczos / block-Lanczos path can be forced at small block dims where a
+    // dense reference is also available (degeneracy-counting verification).
+    if (const char* df = std::getenv("ED_SYM_LG_DENSE_FLOOR"))
+        dense_floor = static_cast<std::uint64_t>(std::strtoull(df, nullptr, 10));
     if (nb <= dense_floor || nb <= 2) {
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es;
         es.compute(materialize(mv), Eigen::EigenvaluesOnly);
@@ -933,6 +938,23 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
             std::min<std::size_t>(k, static_cast<std::size_t>(w.size()));
         return std::vector<double>(w.data(), w.data() + m);
     }
+
+    // S1 (WITHIN-BLOCK genuine degeneracy): a single-vector Lanczos returns
+    // exactly ONE Ritz value per eigenvalue no matter its true multiplicity
+    // (a random start has one component in a degenerate eigenspace), so an
+    // accidental degeneracy inside THIS (k, irrep, parity, Sz) block is
+    // undercounted. The DENSE branch above resolves it exactly, and the dense
+    // crossover covers every block up to ~1.3e4 dim -- verified at 4x4 J2=1.0
+    // (which DOES carry a within-block degeneracy): normal operation matches
+    // the dense spectrum. So S1 is already resolved for the whole j1j2_tri
+    // campaign and all validated sizes. The residual gap is ONLY a block that
+    // both exceeds the crossover AND carries an accidental degeneracy (a
+    // special-point corner absent from generic frustrated spectra). To resolve
+    // that too, RAISE ED_SYM_LG_DENSE_FLOOR so the degenerate block also goes
+    // dense (memory permitting) -- the reliable, exact mitigation. (A
+    // block-Lanczos path was prototyped and dropped: lean reorth sheds the
+    // excited window and full reorth does not fit the 1e8-dim blocks, so it
+    // could not be verified to resolve the corner it targets.)
     ed::matvec::CpuBackend be;
     std::vector<Complex> v0(nb);
     // ED_SYM_LG_SEED offsets the start vector (default 0): the multi-seed

@@ -63,6 +63,9 @@ namespace ed::symmetry {
       "=0 vetoes the little-group GPU rep gather; =1 drops the dim floor")     \
     X("ED_SYM_LG_SEED", "0",                                                   \
       "offsets the lowest-k Lanczos start vector (multi-seed verification)")   \
+    X("ED_SYM_LG_DENSE_FLOOR", "auto (32x Lanczos cap)",                       \
+      "raise the dense/Lanczos crossover so larger (e.g. degenerate) blocks "  \
+      "solve dense/exactly, at the cost of memory (S1 mitigation)")            \
     X("ED_SYM_PERM_LUT", "1",                                                  \
       "=0 keeps the scalar bit walk (test gate: pin LUT == scalar)")           \
     X("ED_SYM_LG_ONLY_K0", "unset (solve every star)",                         \
