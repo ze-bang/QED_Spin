@@ -2083,76 +2083,75 @@ void compute_static_response_workflow(const EDConfig& config) {
             
             StaticResponseResults results;
             
+            // Consolidation Family 3: one backend-generic FTLM static kernel
+            // (ftlm_static_correlation_via_backend_multitemp) replaces BOTH the
+            // GPUFTLMSolver::computeStaticCorrelation GPU path and the host
+            // compute_static_response. select_backend picks CudaBackend when
+            // --use-gpu is set and the device matvec is available, else
+            // CpuBackend.
+            {
+                const int nTp = std::max<int>(
+                    1, static_cast<int>(config.static_resp.num_temp_points));
+                std::vector<double> temps(nTp);
+                const double tstep = (config.static_resp.temp_max -
+                    config.static_resp.temp_min) / std::max(1, nTp - 1);
+                for (int i = 0; i < nTp; ++i)
+                    temps[i] = config.static_resp.temp_min + i * tstep;
+
+                ed::LinearOperator& H_op = ham;
+                ed::LinearOperator& O1_op = config.system.use_fixed_sz
+                    ? static_cast<ed::LinearOperator&>(*obs_1_fs[op_idx])
+                    : static_cast<ed::LinearOperator&>(obs_1[op_idx]);
+                ed::LinearOperator& O2_op = config.system.use_fixed_sz
+                    ? static_cast<ed::LinearOperator&>(*obs_2_fs[op_idx])
+                    : static_cast<ed::LinearOperator&>(obs_2[op_idx]);
+
+                ed::BackendConstraints bc;
+                bc.allow_gpu     = config.static_resp.use_gpu;
+                bc.allow_mpi     = false;
+                bc.allow_mpi_gpu = false;
+                auto variant = ed::select_backend(H_op.geometry(), bc);
+
+                std::visit([&](auto& backend_uptr) {
+                    using BPtr = std::decay_t<decltype(backend_uptr)>;
+                    using B    = typename BPtr::element_type;
+                    constexpr bool is_cpu =
+                        std::is_same_v<B, ed::matvec::CpuBackend>;
 #ifdef WITH_CUDA
-            // GPU static path: requires --use-gpu (or --static-use-gpu).
-            // Operator-collapse Phase 2b (Jun 2026): GPUFTLMSolver is driven
-            // directly off the unified host operators' device matvec
-            // (CudaMatVecBackend via Operator/FixedSzOperator::bind_cuda); the
-            // bespoke GPUFixedSzOperator / convertOperatorToGPU round-trip is
-            // gone. Operators that change Sz still need cross-sector wiring to
-            // produce non-zero values.
-            if (config.static_resp.use_gpu) {
-                try {
-                    GPUFTLMSolver::DeviceMatVec o1_dev, o2_dev;
-                    if (config.system.use_fixed_sz) {
-                        o1_dev = device_matvec_from(*obs_1_fs[op_idx]);
-                        o2_dev = device_matvec_from(*obs_2_fs[op_idx]);
-                    } else {
-                        o1_dev = device_matvec_from(obs_1[op_idx]);
-                        o2_dev = device_matvec_from(obs_2[op_idx]);
-                    }
-
-                    GPUFTLMSolver ftlm_solver(
-                        device_matvec_from(ham),
-                        static_cast<int>(N), params.krylov_dim, 1e-10);
-
-                    // computeStaticCorrelation returns (temperatures, correlations, errors).
-                    auto [temps, corr, errs] = ftlm_solver.computeStaticCorrelation(
-                        params.num_samples, o1_dev, o2_dev,
-                        config.static_resp.temp_min,
-                        config.static_resp.temp_max,
-                        config.static_resp.num_temp_points,
-                        params.random_seed
-                    );
-
-                    // Static correlations are real-valued for Hermitian
-                    // operators; surface the real part as ⟨O⟩. GPU
-                    // susceptibility is not produced by the FTLM kernel.
-                    results.temperatures      = temps;
-                    results.expectation       = corr;
-                    results.expectation_error = errs;
-                    results.total_samples     = params.num_samples;
-                } catch (const std::exception& e) {
-                    if (rank == 0) {
-                        std::cerr << "  GPU computation failed for "
-                                  << names[op_idx] << ": " << e.what()
-                                  << " -- falling back to CPU\n";
-                    }
-                    results.temperatures.clear();
-                }
-            }
+                    constexpr bool is_cuda =
+                        std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+                    constexpr bool is_cuda = false;
 #endif
-            
-            // CPU computation path
-            if (results.temperatures.empty()) {  // Only compute on CPU if GPU didn't succeed
-                // Create function wrappers for this operator pair (audit #2:
-                // dispatch via apply_obs* so fixed-Sz uses the typed override).
-                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs1(op_idx, in, out, dim);
-                };
+                    if constexpr (!(is_cpu || is_cuda)) {
+                        throw std::runtime_error(
+                            "static FTLM: requires a CpuBackend or CudaBackend; "
+                            "distributed backends are not wired.");
+                    } else {
+                        ed::observables::detail::FtlmStaticOptions kopts;
+                        kopts.krylov_dim  = params.krylov_dim;
+                        kopts.num_samples = params.num_samples;
+                        kopts.tolerance   = 1e-10;
+                        kopts.random_seed = params.random_seed;
+                        kopts.global_n    = H_op.geometry().global_dim;
 
-                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs2(op_idx, in, out, dim);
-                };
-                
-                // Compute response on CPU
-                results = compute_static_response(
-                    H_func, O1_func, O2_func, N, params,
-                    config.static_resp.temp_min,
-                    config.static_resp.temp_max,
-                    config.static_resp.num_temp_points,
-                    config.workflow.output_dir
-                );
+                        auto mv_h  = H_op.template bind<B>();
+                        auto mv_o1 = O1_op.template bind<B>();
+                        auto mv_o2 = O2_op.template bind<B>();
+                        auto sr = ed::observables::detail::
+                            ftlm_static_correlation_via_backend_multitemp(
+                                *backend_uptr, mv_h, mv_o1, mv_o2,
+                                H_op.geometry().local_dim, temps, kopts);
+                        results.temperatures         = std::move(sr.temperatures);
+                        results.expectation          = std::move(sr.expectation);
+                        results.expectation_error    = std::move(sr.expectation_error);
+                        results.variance             = std::move(sr.variance);
+                        results.variance_error       = std::move(sr.variance_error);
+                        results.susceptibility       = std::move(sr.susceptibility);
+                        results.susceptibility_error = std::move(sr.susceptibility_error);
+                        results.total_samples        = sr.total_samples;
+                    }
+                }, variant);
             }
             
             // Save results to HDF5
