@@ -211,44 +211,66 @@ def pick_kpm_moments(*, level: Level = "balanced") -> int:
 
 
 # ---------------------------------------------------------------------------
-# Device picker — mirrors qed.workflow._resolve_device for the DSSF surface.
-# Kept separate from the pure-numerical helpers above so callers can audit it.
+# Device picker for the DSSF (subprocess ``./ED dssf``) surface.
+#
+# NOT a mirror of qed.workflow._resolve_device -- it used to claim it was, and
+# the claim was false in two ways (Jul 2026 audit):
+#
+#   * THRESHOLD (deliberate, kept): this picker promotes to GPU at 2^17 while
+#     _resolve_device and the C++ BackendConstraints::gpu_dim_floor use 2^14.
+#     The two serve different kernels -- the in-process Lanczos/thermal lanes
+#     vs the DSSF continued-fraction / FTLM / KPM kernels, whose per-omega
+#     work amortises launch latency only around ~131k. Different lane,
+#     different crossover; the numbers are allowed to differ, the silent
+#     "mirrors" comment was not.
+#   * RETIRED LANES (a bug, fixed): it used to auto-return "mpi" / "mpi_gpu".
+#     The device-string MPI lane was retired in Stage 11d -- to_cli_args emits
+#     no flag for "mpi", so an auto-selected MPI run silently degraded to
+#     serial CPU, while _resolve_device RAISES for the same token. MPI today
+#     means launching the CLI under mpirun (SectorDistributor x MpiBackend);
+#     it is not something a device string selects.
 # ---------------------------------------------------------------------------
 
 def pick_device(
     sector_dim: int,
     *,
     has_cuda_build: bool,
-    has_mpi_build: bool,
+    has_mpi_build: bool = False,
     user_request: Optional[str] = None,
     gpu_dim_threshold: int = 1 << 17,
-    mpi_dim_threshold: int = 1 << 22,
+    mpi_dim_threshold: Optional[int] = None,
 ) -> str:
-    """Choose ``"cpu" | "gpu" | "mpi" | "mpi_gpu"`` for a DSSF run.
+    """Choose ``"cpu" | "gpu"`` for a DSSF run.
 
     The DSSF kernels (FTLM, ground-state continued fraction, KPM-DOS) all
     benefit from GPU once the per-vector matvec dominates over launch
-    latency (~2^17 ≈ 131k); MPI helps once the sector dimension no longer
-    fits a single node (~2^22 ≈ 4M, very rough).
+    latency (~2^17 ≈ 131k). Below that the GPU is measurably slower, so
+    ``auto`` stays on the CPU.
+
+    ``has_mpi_build`` / ``mpi_dim_threshold`` are accepted and IGNORED: the
+    device-string MPI lane was retired (Stage 11d). Run the CLI under
+    ``mpirun`` for MPI. Passing ``device="mpi"``/``"mpi_gpu"`` raises, matching
+    :func:`qed.workflow._resolve_device`.
     """
+    del has_mpi_build, mpi_dim_threshold  # retired lane; see module note above
     if user_request is not None:
         u = user_request.lower()
-        if u not in ("auto", "cpu", "gpu", "mpi", "mpi_gpu"):
+        if u in ("mpi", "mpi_gpu"):
+            raise RuntimeError(
+                "device='mpi' / 'mpi_gpu' was retired (Stage 11d, Jul 2026): "
+                "the subprocess launcher and the distributed-operator family "
+                "behind it were removed. For MPI runs, launch the CLI under "
+                "mpirun -- across-sector MPI is chosen by the launch, not by "
+                "a device string."
+            )
+        if u not in ("auto", "cpu", "gpu"):
             raise ValueError(
                 f"device={user_request!r} is not recognised; "
-                f"expected one of auto, cpu, gpu, mpi, mpi_gpu"
+                f"expected one of auto, cpu, gpu"
             )
         if u != "auto":
             return u
-    use_gpu = has_cuda_build and sector_dim >= gpu_dim_threshold
-    use_mpi = has_mpi_build  and sector_dim >= mpi_dim_threshold
-    if use_gpu and use_mpi:
-        return "mpi_gpu"
-    if use_gpu:
-        return "gpu"
-    if use_mpi:
-        return "mpi"
-    return "cpu"
+    return "gpu" if (has_cuda_build and sector_dim >= gpu_dim_threshold) else "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +329,7 @@ class TunedDSSFKnobs:
                 f"--static-krylov={self.krylov_dim}",
                 f"--static-samples={self.num_random_vectors}",
             ]
-        if self.device in ("gpu", "mpi_gpu"):
+        if self.device == "gpu":
             args.append("--use-gpu")
         return args
 

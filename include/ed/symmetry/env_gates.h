@@ -23,7 +23,19 @@
 // -- the lazy rep-first builders are the only construction lane);
 // ED_SYM_REP / ED_GPU_SYMMETRY_REP / ED_GPU_SYMMETRY_MIRROR_V2 (Stage 11c-2b
 // -- the orbit-CSR matvec backends themselves are gone: the CSR-free rep
-// kernel is the ONE representation on host and device).
+// kernel is the ONE representation on host and device);
+// ED_SYM_SAB_CACHE_BYTES (consolidation Family 11, Jul 2026 -- the monolithic
+// symmetry-adapted engine and its sector cache were deleted outright).
+//
+// KEEPING THIS TABLE HONEST: a row here is a claim that the gate exists, and a
+// missing row hides one. Both directions had drifted by the Jul-2026 audit
+// (ED_SYM_REQUIRE_ABELIAN was live but unlisted; ED_SYM_SAB_CACHE_BYTES
+// outlived its engine as a row that budgeted nothing). The audit is one grep
+// each way -- live reads:
+//   grep -rhoE 'getenv\("ED_SYM_[A-Z0-9_]+"\)' src include | sort -u
+// against the X-list below. Note ED_SYM_CSR_DIM_MAX is read through the
+// read_cutoff() helper, not a literal getenv, and the four rows tagged
+// "[read in Python]" have no C++ read at all -- both are expected misses.
 // =============================================================================
 
 #include <cstdio>
@@ -37,8 +49,8 @@ namespace ed::symmetry {
     X("ED_SYM_REDUCED_CSR", "unset (auto: reduced-CSR default)",               \
       "=0 forces the CSR-free rep walk; =1 forces reduced-CSR")                \
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", "8",                                     \
-      "per-sector reduced-CSR memory budget; over-budget sectors fall "       \
-      "back to the CSR-free walk (both lanes)")                                \
+      "AGGREGATE reduced-CSR memory budget (split across concurrent sector "  \
+      "builders); over-budget sectors fall back to the CSR-free walk")         \
     X("ED_SYM_SECTOR_PARALLEL", "auto (many-tiny-sectors regime)",             \
       "=1/=0 force sector-parallel outer loops on/off")                        \
     X("ED_SYM_PROFILE", "0",                                                   \
@@ -71,8 +83,9 @@ namespace ed::symmetry {
     X("ED_SYM_LG_ONLY_K0", "unset (solve every star)",                         \
       "=\"7,43\" solves only these star reps (job splitting); =\"plan\" "     \
       "lists (k0, |star|, dim) per star and solves nothing")                   \
-    X("ED_SYM_SAB_CACHE_BYTES", "536870912",                                   \
-      "byte budget of the SAB sector cache (test oracle)")                     \
+    X("ED_SYM_REQUIRE_ABELIAN", "0",                                           \
+      "=1 makes a non-abelian generator set a hard ERROR instead of "         \
+      "auto-restricting to a maximal abelian subgroup (group.cpp)")            \
     X("ED_SYM_CSR_DIM_MAX", "engine default",                                  \
       "dimension cap for assembled sector CSRs (legacy lane)")                 \
     X("ED_SYM_REP_RANKTABLE", "auto (budget)",                                 \

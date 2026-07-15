@@ -204,8 +204,27 @@ def test_thermal_multi_sz_lands_per_sector_non_tpq(tmp_path, method):
         )
 
 
-def test_thermal_kpm_dos_multi_sz_lands_per_sector(tmp_path):
-    """Same contract for KPM_DOS."""
+def test_thermal_kpm_dos_ignores_the_sz_window_and_saves_one_file(tmp_path):
+    """KPM_DOS does NOT share the per-sector contract, ON PURPOSE.
+
+    This test used to assert the FTLM/LTLM contract ("Same contract for
+    KPM_DOS") and had been failing on main: it demanded per-sector
+    ``n_up_<n>/ed_results.h5`` files and ``hdf5_path == outdir`` from a
+    method that deliberately ignores the Sz window entirely.
+
+    ``qed.thermal`` forces ``sz_conserved = False`` for KPM_DOS
+    (thermal.py, "KPM_DOS produces a density of states -- a full-SPECTRUM
+    quantity"): per-sector sub-DOS land on different Chebyshev grids that
+    the thermodynamic recombination cannot merge, so an Sz-decomposed run
+    would silently return an EMPTY ``dos_*`` -- the whole deliverable of
+    the method. The full-Hilbert lane is therefore correct, and it makes
+    exactly one aggregated ``ed_results.h5`` whose path IS the file.
+
+    So this pins what KPM_DOS actually promises. Do not "restore" the
+    per-sector assertions: the per-sector return path carries no ``dos_*``
+    fields at all, and routing KPM through it trades a 128-point density
+    of states for a tidier directory layout.
+    """
     H = _ring()
     outdir = str(tmp_path / "thermal_kpm_dos_multi_sz")
 
@@ -220,11 +239,17 @@ def test_thermal_kpm_dos_multi_sz_lands_per_sector(tmp_path):
         random_seed=22, verbose=False, device="cpu",
     )
 
-    assert R.hdf5_path == outdir
-    assert len(R.sector_hdf5_paths) == (sz_hi - sz_lo + 1)
-    for n_up, path in R.sector_hdf5_paths.items():
-        assert path.endswith(f"n_up_{n_up}/ed_results.h5")
-        assert os.path.exists(path)
+    # One aggregated file, and hdf5_path names the FILE (no per-sector
+    # namespacing is needed -- there is only one writer).
+    assert R.hdf5_path == os.path.join(outdir, "ed_results.h5")
+    assert os.path.exists(R.hdf5_path)
+    assert R.sector_hdf5_paths == {}
+
+    # The Sz window was ignored: the run is full-Hilbert, so the DOS is
+    # the COMPLETE one. This is the assertion the old test traded away.
+    assert not R.used_sz_decomposition
+    assert len(R.dos_energies) > 0
+    assert len(R.dos_values) == len(R.dos_energies)
 
 
 # ===========================================================================

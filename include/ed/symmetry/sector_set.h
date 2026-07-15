@@ -613,18 +613,17 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     // identically -- and it is trivially copyable, so the deferred CSR provider
     // captures it by value instead of co-owning a materialized C(N,n_up) basis
     // vector + Lin table (the ~72 GB wall at N=36). Rep enumeration is the
-    // streaming Gosper scan by default; ``ED_SYM_STREAMING_ENUM=0`` falls back
-    // to the legacy materialized enumerator (built solely to enumerate, then
-    // discarded).
+    // streaming Gosper scan -- the ONLY lane (the ED_SYM_STREAMING_ENUM=0
+    // escape to the legacy materialized enumerator was retired in Stage 10e;
+    // that enumerator survives only as a bit-identity test reference).
     auto info_sp = std::make_shared<SymmetryGroupInfo>(info);
     const FixedSzMembershipSubspace subspace(n_bits, static_cast<int>(n_up));
 
-    // Stage 2 (SymmetryEngine v2): the default lane runs ONE fused
-    // pass1+1.5 scan (reps + deduped stabilizers in the same |G| walk).
-    // ``ED_SYM_FUSED_PASS15=0`` / ``ED_SYM_STREAMING_ENUM=0`` retain the
-    // legacy two-pass / materialized variants for bisection.
-    // Stage 10e: the fused streaming orbit table is the only production
-    // lane (legacy enumerators remain as test references only).
+    // Stage 2 (SymmetryEngine v2): the lane runs ONE fused pass1+1.5 scan
+    // (reps + deduped stabilizers in the same |G| walk). Stage 10e retired the
+    // ED_SYM_FUSED_PASS15=0 / ED_SYM_STREAMING_ENUM=0 bisection escapes to the
+    // legacy two-pass / materialized variants: the fused streaming orbit table
+    // is the only lane (legacy enumerators remain as test references only).
 
     // Stage 3: the fused lane acquires the (registry/disk-cached) shared
     // table; ``reps_sp`` is an ALIASING shared_ptr into it, so the deferred

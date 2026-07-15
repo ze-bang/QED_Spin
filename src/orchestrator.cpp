@@ -242,6 +242,19 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
 // ---------------------------------------------------------------------------
 constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
 
+// ED_THERMAL_EXACT_SMALL=0 forces the real sampling kernel even at
+// D <= SMALL_THERMAL_DIM. The fallback is a strict accuracy win for USERS, but
+// it silently removes the sampling kernels from any accuracy test whose system
+// fits under the cutoff -- test_thermal_dense_ref (N=6, dim=64) was already
+// exercising this path instead of the mTPQ kernel it claimed to check. Tests
+// that mean to gate a KERNEL set this to 0; nothing in production should.
+// Read per call so a test can toggle it without restarting the process.
+[[nodiscard]] inline bool exact_small_thermal_enabled() noexcept {
+    if (const char* v = std::getenv("ED_THERMAL_EXACT_SMALL"))
+        return !(v[0] == '0' && v[1] == '\0');
+    return true;
+}
+
 static ThermodynamicData compute_canonical_thermo_from_eigs(
     const std::vector<double>& eigs,
     const std::vector<double>& temperatures)
@@ -997,8 +1010,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // Leaf memory guard (planner feasibility pre-flight removed): throw cleanly
     // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
     // is the per-call working dim (symmetry iterates sectors a level up, so this
-    // is the sector dim there). LTLM stores GS + excitation bases (~2x krylov);
-    // FTLM one sample's basis at a time; TPQ/KPM are O(1) state vectors.
+    // is the sector dim there). FTLM and LTLM both keep one sample's Krylov
+    // basis at a time (LTLM routes through the FTLM kernel); TPQ/KPM are O(1)
+    // state vectors.
     {
         const std::uint64_t D = H.global_dim();
         std::uint64_t vecs;
@@ -1019,8 +1033,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             elem = 8ull;  // complex<float>
         } else {
             switch (opts.method) {
+                // LTLM thermodynamics dispatches through ftlm_kernel (Jul 2026,
+                // 654ea06) -- it no longer stores a GS + excitation basis pair,
+                // so it costs exactly what FTLM costs. The old 2*krylov estimate
+                // outlived the kernel it modelled and over-charged LTLM ~2x
+                // (400 vs 204 vectors at the kLtlmKrylovDim=200 default), which
+                // can refuse a run that fits comfortably.
                 case ThermalOptions::Method::LTLM:
-                    vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
                 case ThermalOptions::Method::FTLM:
                     vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
                 case ThermalOptions::Method::OFTLM:
@@ -1071,14 +1090,24 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     const auto t0 = std::chrono::steady_clock::now();
 
     // -----------------------------------------------------------------------
-    // Small-sector exact-thermal fallback for mTPQ.
+    // Small-sector exact-thermal fallback for EVERY sampling method.
     //
-    // mTPQ is a stochastic method that needs D >> num_samples for
-    // good typicality. For small sectors (D <= SMALL_THERMAL_DIM), the
-    // per-sample variance is too high for the dE tolerance even with 20+
-    // samples. The primary symptom is the sz_spatial mTPQ failure: within an
-    // n_up block, translation k-sectors have D ≈ 1–9 for N=8, giving a
-    // statistical error of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    // Every stochastic thermal method needs D >> num_samples for good
+    // typicality. For small sectors (D <= SMALL_THERMAL_DIM), the per-sample
+    // variance is too high for the dE tolerance even with 20+ samples. The
+    // original symptom was the sz_spatial mTPQ failure: within an n_up block,
+    // translation k-sectors have D ≈ 1–9 for N=8, giving a statistical error
+    // of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    //
+    // Jul 2026: the gate used to require mTPQ specifically, so FTLM/LTLM kept
+    // sampling in a regime where the exact solve is both free and machine
+    // precise -- measured at dim=64 (N=6 ring): mTPQ 1.4e-15 (this fallback)
+    // vs FTLM/LTLM 2.3e-02 (sampling), i.e. 13 orders for microseconds of
+    // eigensolve. The deliverable of FTLM / LTLM / OFTLM / mTPQ is identical
+    // here -- canonical E(T)/C(T)/S(T) -- so all four take the exact route.
+    // KpmDos is deliberately EXCLUDED: its deliverable includes the Chebyshev
+    // density of states, which this path does not produce (same rationale as
+    // the probe_betas carve-out below).
     //
     // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
@@ -1086,8 +1115,21 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // high T) as compute_tpq_thermo_from_trajectories, so it plugs in
     // correctly to combine_sector_thermodynamics for Sz/spatial recombination.
     // -----------------------------------------------------------------------
-    const bool is_tpq_method = (opts.method == ThermalOptions::Method::mTPQ);
-    if (is_tpq_method &&
+    const bool is_sampling_thermo_method =
+        opts.method == ThermalOptions::Method::mTPQ  ||
+        opts.method == ThermalOptions::Method::FTLM  ||
+        opts.method == ThermalOptions::Method::LTLM  ||
+        opts.method == ThermalOptions::Method::OFTLM;
+    // NOTE: this must NOT return early. Everything below the method dispatch --
+    // the universal-save persistence finalizer above all -- has to run for the
+    // exact result exactly as it does for a sampled one, or the fallback
+    // silently strips the caller's output_dir contract (R.hdf5_path empty ->
+    // Python's sector_hdf5_paths empty). That is a bug this file has already
+    // shipped once, on the solve verb (see apply_solve_save_finalizer's note).
+    // So: fill R.thermo, then flag the dispatch chain to stand down.
+    bool exact_thermo_done = false;
+    if (is_sampling_thermo_method &&
+        exact_small_thermal_enabled() &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
         !R.thermo.temperatures.empty() &&
@@ -1103,14 +1145,17 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 eigs, R.thermo.temperatures);
             R.ground_state_energy = eigs.front();
             // The exact fallback ran on the selected backend lane; label it like
-            // the normal return path (this early return previously left lane
-            // unset, failing the lane-metadata assertions).
+            // the normal return path.
             R.backend.lane = ed::lane_label_from_variant(variant);
-            return R;
+            exact_thermo_done = true;
         }
     }
 
-    if (opts.method == ThermalOptions::Method::mTPQ) {
+    if (exact_thermo_done) {
+        // The small-D exact fallback already filled R.thermo. Skip the
+        // estimator, but fall through to the shared tail (persistence
+        // finalizer, timing, lane metadata) like every other method.
+    } else if (opts.method == ThermalOptions::Method::mTPQ) {
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;

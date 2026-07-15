@@ -26,7 +26,6 @@
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
-#include <ed/thermal/ltlm_kernel.h>
 
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_solvers.h>  // run_lanczos_eigenvalues_kernel_facade
@@ -813,99 +812,17 @@ TEST_CASE("thermal::kpm_dos_kernel<CudaBackend> matches CpuBackend on N=6 chain"
     }
 }
 
-TEST_CASE("thermal::ltlm_kernel<CudaBackend> matches CpuBackend "
-          "ground-state energy on N=6 chain",
-          "[cuda-backend][ltlm][phase-e2]") {
-    // Phase E2 of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): pin that the new ``ltlm_kernel<CudaBackend>``
-    // specialisation (a fully Backend-templated body that reuses
-    // ``lanczos_kernel<CudaBackend>``) produces the same ground-state
-    // energy and a sane Z/E/Cv/S grid as the CpuBackend lane. Both
-    // lanes are seeded with the same RNG seed, but the CPU lane
-    // generates the start vector on the host via the legacy
-    // ``low_temperature_lanczos`` driver while the CUDA lane uses
-    // its own host-seeded mt19937_64, so we do not pin a tight
-    // numerical equivalence on the thermo curves -- the energies at
-    // beta -> infinity (Z dominated by the ground state) must agree.
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+// REMOVED: "thermal::ltlm_kernel<CudaBackend> matches CpuBackend".
+// ltlm_kernel (and ed/thermal/ltlm_kernel.h) were deleted in consolidation
+// Family 1 (Jul 2026). This case pinned CPU/GPU AGREEMENT between the two LTLM
+// lanes -- and they did agree, because both reimplemented the same
+// GS-local-DOS bug (each summed |<0|psi_n>|^2 e^{-bE_n} instead of the thermal
+// trace). A parity test between twins that share a defect cannot see it; this
+// one passed for months while LTLM returned E0 at every temperature. The
+// replacement pin compares LTLM against an INDEPENDENT reference rather than
+// its own twin: test_thermal_dense_ref's "LTLM thermodynamics IS the FTLM
+// trace" (identical knobs, 1e-12) plus its dense-reference cells.
 
-    constexpr int          N   = 6;
-    constexpr std::size_t  dim = std::size_t{1} << N;
-
-    auto cpu_H = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto gpu_H = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-
-    ed::matvec::CpuBackend  cpu;
-    ed::matvec::CudaBackend cuda;
-
-    ed::thermal::LtlmOptions opts;
-    opts.num_samples         = 1;
-    opts.krylov_dim          = 30;
-    opts.ground_state_krylov = 30;
-    opts.betas               = {0.5, 1.0, 2.0, 4.0, 8.0};
-    opts.random_seed         = 4242;
-    opts.output_dir          = "";   // skip CPU-lane HDF5 dump
-
-    auto cpu_res = ed::thermal::ltlm_kernel(
-        cpu,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            cpu_H->apply(in, out, n);
-        },
-        dim, static_cast<std::uint64_t>(dim), opts);
-
-    auto cuda_res = ed::thermal::ltlm_kernel(
-        cuda,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            gpu_H->matVecGPU(
-                reinterpret_cast<const cuDoubleComplex*>(in),
-                reinterpret_cast<cuDoubleComplex*>(out),
-                static_cast<int>(n));
-        },
-        dim, static_cast<std::uint64_t>(dim), opts);
-
-    INFO("cpu energy size  = " << cpu_res.energy.size());
-    INFO("cuda energy size = " << cuda_res.energy.size());
-    INFO("E_GS cpu  = " << cpu_res.ground_state_energy);
-    INFO("E_GS cuda = " << cuda_res.ground_state_energy);
-
-    // Ground-state energy is a numerical invariant of the
-    // Hamiltonian -- the Lanczos quadrature recovers it to ~1e-10
-    // for a M=30 Krylov on D=64 regardless of the random start.
-    REQUIRE(std::abs(cpu_res.ground_state_energy -
-                     cuda_res.ground_state_energy) < 1e-8);
-
-    // The CUDA lane writes thermo at the user-supplied betas. The
-    // CPU lane (legacy `low_temperature_lanczos`) writes thermo on
-    // a logarithmic temperature grid of length `betas.size()`; the
-    // entries are not in 1:1 beta correspondence but the sizes do
-    // match. So we only require sizes here.
-    REQUIRE(cpu_res.energy.size()  == opts.betas.size());
-    REQUIRE(cuda_res.energy.size() == opts.betas.size());
-
-    // For the CUDA lane (which computes at exactly the requested
-    // betas), the high-beta entry must be very close to the
-    // ground-state energy (the Boltzmann sum is dominated by the
-    // ground state).
-    REQUIRE(std::abs(cuda_res.energy.back() -
-                     cuda_res.ground_state_energy) < 1e-3);
-
-    // Sanity on the CUDA lane: Z positive, Cv non-negative,
-    // entropy non-negative. (The CPU lane's `to_ltlm_result`
-    // intentionally maps `partition_function` from the legacy
-    // `Z_sample` field which `compute_ltlm_thermodynamics` does
-    // not populate -- only Cv/entropy/F. We exercise the CUDA-lane
-    // surface here since that's the new contract.)
-    REQUIRE(cuda_res.partition_function.size() == opts.betas.size());
-    REQUIRE(cuda_res.heat_capacity.size()      == opts.betas.size());
-    REQUIRE(cuda_res.entropy.size()            == opts.betas.size());
-    for (std::size_t t = 0; t < opts.betas.size(); ++t) {
-        REQUIRE(cuda_res.partition_function[t] > 0.0);
-        REQUIRE(cuda_res.heat_capacity[t]      >= -1e-6);
-        REQUIRE(cuda_res.entropy[t]            >= -1e-6);
-        REQUIRE(cpu_res.heat_capacity.size()   == opts.betas.size());
-        REQUIRE(cpu_res.heat_capacity[t]       >= -1e-6);
-    }
-}
 
 TEST_CASE("gpu::lanczos_kernel facade is seed-reproducible",
           "[cuda-backend][facade]") {

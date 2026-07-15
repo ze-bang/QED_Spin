@@ -29,6 +29,10 @@
 #include <cstdint>
 #include <cstdlib>
 
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
 namespace ed::planner {
 
 /// Symmetry matvec strategy -- ONE planner-owned ordinal (memory up, apply-speed
@@ -96,6 +100,23 @@ inline void clear_sym_matvec_repr() noexcept {
     return static_cast<int>(SymMatvecRepr::RepReducedCsr);
 }
 
+/// How many sectors are being built CONCURRENTLY around this call.
+///
+/// The sector-parallel lanes run `omp parallel for` over sectors and build each
+/// sector's reduced CSR lazily inside the loop body, i.e. on an OMP worker. The
+/// outermost active team size is therefore the number of reduced CSRs that can
+/// be in flight at once. Reads the level-1 team (not the innermost) so an inner
+/// Lanczos/BLAS region cannot mistake its own width for the sector fan-out.
+[[nodiscard]] inline unsigned concurrent_sector_builders() noexcept {
+#ifdef _OPENMP
+    if (omp_in_parallel() && omp_get_active_level() >= 1) {
+        const int t = omp_get_team_size(1);
+        if (t > 1) return static_cast<unsigned>(t);
+    }
+#endif
+    return 1u;
+}
+
 /// Stage 9f consolidation: ONE budget decision for materializing a reduced
 /// sector matrix, shared by the abelian CpuMatVecBackend and the little-group
 /// engine's RepSectorMatVec. (Twin-lane drift here is exactly how the abelian
@@ -106,6 +127,16 @@ inline void clear_sym_matvec_repr() noexcept {
 /// toggle without restart). An over-budget sector falls back to the CSR-free
 /// walk on its own -- frontier sectors (N=36 half filling: hundreds of GB)
 /// need no env var.
+///
+/// Jul 2026 audit: the budget is an AGGREGATE, not per-sector. It used to be
+/// evaluated per sector with no knowledge of the outer fan-out, so N sector
+/// threads could each pass an 8 GiB check and allocate N x 8 GiB against a
+/// guard that believed it was bounding one -- the same OOM class Stage 9f was
+/// written to close, just reachable only through an explicit
+/// ED_SYM_SECTOR_PARALLEL=1 (the AUTO gate caps max_sector_dim at 4096, where
+/// these CSRs are trivial). Dividing by the concurrent builder count keeps the
+/// TOTAL in-flight CSR footprint under the knob regardless of thread count;
+/// an over-budget sector still degrades to the CSR-free walk, never OOMs.
 [[nodiscard]] inline bool sector_csr_within_budget(
         std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
     const std::uint64_t est_bytes =
@@ -116,6 +147,7 @@ inline void clear_sym_matvec_repr() noexcept {
         const double b = std::atof(v);
         if (b > 0.0) budget_gib = b;
     }
+    budget_gib /= static_cast<double>(concurrent_sector_builders());
     return static_cast<double>(est_bytes)
            <= budget_gib * static_cast<double>(1ULL << 30);
 }

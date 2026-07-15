@@ -734,7 +734,15 @@ if(BUILD_ED_TESTS)
     # Numerical accuracy: all finite-T methods vs full dense-diag reference,
     # across all backends (CPU, GPU), all symmetry modes (none, Sz, spatial,
     # Sz+spatial), multiple random seeds.
+    # THE reduced-CSR budget decision (shared by the abelian + little-group
+    # lanes): serial admission, and the aggregate split across concurrent
+    # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.
+    ed_add_test(test_sector_csr_budget          tests/unit/test_sector_csr_budget.cpp USE_CATCH2)
     ed_add_test(test_thermal_dense_ref          tests/unit/test_thermal_dense_ref.cpp USE_CATCH2)
+    # Complement to the above: pin the D <= SMALL_THERMAL_DIM exact fallback
+    # (every sampling method) and the ED_THERMAL_EXACT_SMALL=0 escape that
+    # test_thermal_dense_ref relies on to keep gating the real kernels.
+    ed_add_test(test_thermal_exact_small_fallback tests/unit/test_thermal_exact_small_fallback.cpp USE_CATCH2)
     # Smoke-test the unified spectral entry point
     # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.
