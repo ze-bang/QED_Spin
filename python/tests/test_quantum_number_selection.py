@@ -334,3 +334,82 @@ def test_naming_sz_solves_exactly_that_sector():
                              device="cpu", verbose=False).eigenvalues[0])
     assert e_up == pytest.approx(-12.5, abs=1e-8), "sz=0 must be the all-UP block"
     assert e_down == pytest.approx(+17.5, abs=1e-8), "sz=N must be the all-DOWN block"
+
+
+# ---------------------------------------------------------------------------
+# thermal(sector=)
+# ---------------------------------------------------------------------------
+
+def _ring10():
+    n = 10
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=1.0)
+    return b.to_operator()
+
+
+_TH = dict(method="FTLM", device="cpu", verbose=False, num_samples=4,
+           krylov_dim=20, spin_flip="off", time_reversal="off",
+           point_group="off")
+
+
+def test_thermal_sector_refuses_the_lane_that_would_ignore_it():
+    """The all-Sz fast path builds its own sector set and clears
+    selected_sectors per sector, so it cannot honour sector=.
+
+    It must REFUSE. Silently ignoring would hand back the fully recombined
+    thermodynamics while the caller believes they asked for one irrep -- the
+    exact failure mode this whole contract exists to prevent.
+    """
+    pytest.importorskip("pynauty")
+    H = _ring10()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(NotImplementedError, match="all-Sz|silently ignored"):
+        qed.thermal(H, T_min=0.5, T_max=2.0, num_T=3, sector=[0],
+                    symmetry=gen, **_TH)
+
+
+def test_thermal_sector_gives_per_irrep_thermodynamics():
+    pytest.importorskip("pynauty")
+    H = _ring10()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    seen = []
+    for k in (0, 1, 2):
+        r = qed.thermal(H, T_min=0.5, T_max=2.0, num_T=3, sector=[k],
+                        use_sz_if_conserved=False, symmetry=gen, **_TH)
+        seen.append(round(float(np.asarray(r.energy)[0]), 6))
+    assert len(set(seen)) == 3, (
+        f"per-irrep thermodynamics must differ, got {seen} -- the sector "
+        f"filter is not reaching the C++ loop")
+
+
+@pytest.mark.parametrize("k", [0, 1, 2, 3, 4])
+def test_thermal_sector_low_T_matches_solve_ground_state(k):
+    """Cross-VERB check: thermal(sector=k) as T->0 must equal solve(sector=k).
+
+    Both blocks are < SMALL_THERMAL_DIM here, so the exact fallback makes both
+    machine-precise and the comparison is exact rather than statistical.
+    """
+    pytest.importorskip("pynauty")
+    H = _ring10()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    rt = qed.thermal(H, T_min=0.001, T_max=0.002, num_T=2, sector=[k],
+                     use_sz_if_conserved=False, symmetry=gen, **_TH)
+    rs = qed.solve(H, num_eigenvalues=1, sector=[k], auto_sz=False,
+                   symmetry=gen, point_group="off", spin_flip="off",
+                   time_reversal="off", device="cpu", verbose=False)
+    assert float(np.asarray(rt.energy)[0]) == pytest.approx(
+        float(rs.eigenvalues[0]), abs=1e-6)
+
+
+def test_thermal_sector_without_spatial_symmetry_raises():
+    """sector= names a spatial irrep, so it is meaningless with no group.
+
+    Checked BEFORE any branching: the in-memory no-symmetry path never reaches
+    the directory branch that resolves sector=, so a late guard would let the
+    argument be silently ignored -- which is the failure mode sector= exists
+    to fix.
+    """
+    H = _ring10()
+    with pytest.raises(ValueError, match="spatial-symmetry irrep|symmetry="):
+        qed.thermal(H, T_min=0.5, T_max=2.0, num_T=3, sector=[0],
+                    use_sz_if_conserved=False, symmetry=None, **_TH)

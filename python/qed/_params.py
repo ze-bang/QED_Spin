@@ -139,6 +139,16 @@ def ed_params_to_thermal_options(
     pb = list(getattr(params, "tpq_probe_betas", []) or [])
     if pb:
         opts.probe_betas = pb
+    # Sector filter (raw sector INDICES -- see SolveOptions::selected_sectors;
+    # qed.thermal resolves quantum numbers to indices before setting it). This
+    # converter used to drop the field on the floor, so the thermal binding's
+    # filter_sectors() call was unreachable from Python: the C++ honoured a
+    # filter nothing could set. Same drift class the solve converter was
+    # consolidated to kill (this module's header calls out selected_sectors by
+    # name as one of the three fields its Python twin silently lost).
+    sel = list(getattr(params, "selected_sectors", []) or [])
+    if sel:
+        opts.selected_sectors = [int(k) for k in sel]
     return opts
 
 

@@ -52,7 +52,7 @@ import tempfile
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -187,6 +187,25 @@ def _thermal_via_workflows_thermal(
     tr = _core.workflows_thermal(op, opts)
     return _ed_result_from_thermal_result(tr)
 
+
+
+def _sector_table_from_directory(directory: str) -> Optional[dict]:
+    """The (sector_id, quantum_numbers) table a symmetry directory carries.
+
+    ``sector_metadata.json`` is written by ``_write_symmetry_directory`` and is
+    the same table the C++ side reads, so resolving a caller's quantum numbers
+    against it is a lookup rather than a guess about index conventions.
+    """
+    import json as _json
+    path = os.path.join(directory, "automorphism_results",
+                        "sector_metadata.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return {"sectors": _json.load(f).get("sectors", [])}
+    except Exception:
+        return None
 
 def _thermal_via_workflows_streaming_symmetry(
     directory: str,
@@ -462,6 +481,7 @@ def thermal(
     num_T: int = 24,
     sz_min: Optional[int] = None,
     sz_max: Optional[int] = None,
+    sector: Optional[Sequence[int]] = None,
     symmetry: "SymmetryArg" = None,
     num_samples: int = 40,
     krylov_dim: Optional[int] = None,
@@ -608,6 +628,19 @@ def thermal(
     _all_params = dict(locals())   # capture every parameter for the symmetry recursion
     method_enum = _coerce_method(method)
     is_directory = isinstance(H, (str, os.PathLike))
+
+    # sector= names a SPATIAL-symmetry irrep, so it is meaningless without a
+    # spatial group. Checked here, before any branch: the in-memory no-symmetry
+    # path never reaches the directory branch that resolves sector=, so an
+    # argument passed there would otherwise be silently ignored -- the same
+    # failure mode this parameter exists to fix.
+    if (sector is not None and symmetry is None and not is_directory):
+        raise ValueError(
+            "qed.thermal: sector= names a spatial-symmetry irrep, but no "
+            "symmetry= was given (and an in-memory operator has no "
+            "automorphism_results/ to auto-load one from). Pass symmetry= "
+            "(e.g. qed.find_symmetries(H).full_set), or use sz_min/sz_max for "
+            "magnetisation sectors.")
 
     # In-memory operator + explicit spatial `symmetry=`: materialise a temp
     # directory (operator + automorphism_results/) and re-dispatch as the
@@ -908,6 +941,31 @@ def thermal(
         sector_hdf5_paths: dict[Optional[int], str] = {}
         gs_E = math.inf
 
+        # ------------------------------------------------------------------
+        # sector= : resolve the caller's QUANTUM NUMBERS to the raw sector
+        # index the C++ filter selects on. Done once, up front, so a bad tuple
+        # fails before any solving.
+        # ------------------------------------------------------------------
+        _sector_sid: Optional[int] = None
+        if sector is not None:
+            if not has_sym:
+                raise ValueError(
+                    "qed.thermal: sector= names a spatial-symmetry irrep, but "
+                    "this run has no spatial symmetry (no automorphism_results/ "
+                    "in the directory, or use_symmetry_if_available=False). "
+                    "Use sz_min/sz_max for magnetisation sectors.")
+            _tbl = _sector_table_from_directory(directory)
+            if _tbl is None:
+                raise RuntimeError(
+                    "qed.thermal: sector= was given but the directory carries "
+                    "no automorphism_results/sector_metadata.json to resolve "
+                    "the quantum numbers against.")
+            from .workflow import _resolve_sector_quantum_numbers
+            _sector_sid = _resolve_sector_quantum_numbers(_tbl, sector)
+            if verbose:
+                print(f"[qed.thermal] sector={list(sector)} -> raw sector "
+                      f"index {_sector_sid}")
+
         def _make_dir_params(n_up_val: Optional[int]) -> EDParameters:
             p = EDParameters()
             p.num_sites = N
@@ -977,6 +1035,13 @@ def thermal(
             # exactly the same streaming loop as FTLM/LTLM/KPM, with
             # the Z-weighted recombiner handling sector mixing.
             p.use_symmetry = bool(has_sym)
+            # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw
+            # sector INDICES. Resolve against the directory's own
+            # sector_metadata.json (the same table the C++ side reads) rather
+            # than assuming the two axes coincide -- they only do for a
+            # single-generator group.
+            if _sector_sid is not None:
+                p.selected_sectors = [int(_sector_sid)]
             for k, v in merged_extra.items():
                 setattr(p, k, v)
             return p
@@ -1059,6 +1124,31 @@ def thermal(
                 # C++ manages per-sector subdirs internally
                 # (sz_<n_up>_sector_k_<k>/). For needs_scratch the
                 # scratch dir has no n_up suffix.
+                if _sector_sid is not None:
+                    # The all-Sz binding builds its OWN sector set and does
+                    # `topts.selected_sectors.clear()` per sector, so it does
+                    # not filter its loop by the caller's selection -- passing
+                    # sector= here would be SILENTLY IGNORED and the caller
+                    # would get the fully recombined thermodynamics while
+                    # believing they had one irrep.
+                    #
+                    # Refusing beats lying. Making this lane honour the filter
+                    # is not a one-liner: its loop interacts with TR pairing
+                    # (tr_plan.skip[i] copies from source[i], so a filter must
+                    # keep the closure selected + their TR sources, or the
+                    # selected sector silently copies an EMPTY result) and with
+                    # the Stage-5 flip mirror that duplicates n_up < N/2 onto
+                    # its partner. Both need a decided semantic, not a guess.
+                    raise NotImplementedError(
+                        "qed.thermal: sector= is not yet supported on the "
+                        "all-Sz fast path (Sz-conserving H + spatial "
+                        "symmetry): that C++ lane builds its own sector set "
+                        "and does not honour a sector filter, so the argument "
+                        "would be silently ignored. Workarounds: pass "
+                        "use_sz_if_conserved=False to take the single-call "
+                        "streaming-symmetry lane (which does filter), or use "
+                        "qed.solve(sector=..., sz=...) for sector-resolved "
+                        "eigenvalues.")
                 p = _make_dir_params(None)
                 tr = _thermal_via_workflows_all_sz_streaming_symmetry(
                     directory, N, float(spin), method_enum, p,
