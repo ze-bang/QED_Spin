@@ -5,6 +5,24 @@ Goal: collapse the parallel implementations that let bugs hide in the seams (the
 test hits), and retire dead/legacy lanes — without breaking the numerics that the legacy
 functions actually carry.
 
+## EXECUTION STATUS (2026-07-15, branch `consolidation-sweep`)
+
+| Family | Status | Outcome |
+|---|---|---|
+| 11 BFG | ✅ DONE (commit eddbe55) | Removed entirely; verified build + import |
+| 1 LTLM | ✅ DONE (commit faee61b) | Buggy kernel removed, binding redirected to FTLM, gated vs exact |
+| 6 SAB | ✅ DONE (commit 86f5e89) | Removed; canonical_thermo extracted; tests rewired to dense oracle |
+| 8 KPM-DOS | ✅ CLEAN | Already one CPU+one GPU impl behind a front door; no bypass binding. No change |
+| 2 FTLM thermo | ✅ CLEAN | CPU (legacy) vs GPU (via_backend) is a correct backend-split, not duplication; MPI throws. No change |
+| 5 Lanczos | ✅ CLEAN | Fast path already delegates to lanczos_kernel; slow path is a distinct no-reorth/no-basis memory-light variant. No change |
+| 10 config adapters | ⏳ TODO | Low-value inline of ≤4-consumer shims |
+| 4 term kernels | ⏳ SCOPED | Real seam: CPU `apply_term_to_state` and GPU `process_source_terms` reimplement the same 6-term-type gate math. Fix = one `__host__ __device__` gate-math core both call. Needs CPU dense-matvec gate + CUDA build + GPU matvec gate (RTX 4080 present) |
+| 3 dynamical FTLM | ⏳ SCOPED | Retire GPUFTLMSolver (1843 LOC) + ftlm_dynamical.cpp (3142) onto via_backend. Needs S(q,ω) equivalence gate on CPU + GPU |
+
+Note: the audit found Families 2, 5, 8 were **already consolidated** — the surface "many files" was a
+correct backend-split / deliberate variant, not a bug-hiding duplicate. The genuine remaining refactors
+are 4 and 3 (both hot-path, GPU-involving, requiring slow CUDA builds + physics-equivalence gates).
+
 ## The recurring shape of the debt
 
 Almost every solver family has the same three-layer structure:
