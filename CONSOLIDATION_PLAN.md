@@ -17,7 +17,48 @@ functions actually carry.
 | 5 Lanczos | ✅ CLEAN | Fast path already delegates to lanczos_kernel; slow path is a distinct no-reorth/no-basis memory-light variant. No change |
 | 4 term kernels | ✅ DONE (commit 9a6c1e8) | One `__host__ __device__` gate-math core (term_gate_math.h) now shared by apply_terms + apply_term_to_state (CPU) + process_source_terms (GPU). Verified CPU Δ=6.7e-15, GPU Δ=0.0 vs reference. Scatter/gather split kept (perf axis) |
 | 10 config adapters | ⏳ TODO | Low-value inline of ≤4-consumer shims |
-| 3 dynamical FTLM | ⏳ TODO | Retire GPUFTLMSolver (1843 LOC) + ftlm_dynamical.cpp (3142) onto via_backend. Largest + most physics-sensitive item; needs S(q,ω) equivalence gate on CPU + GPU. Recommend a dedicated gated effort |
+| 3 dynamical FTLM | ⏳ SCOPED — executable plan below | Feature-port, not a rewire. Retire GPUFTLMSolver (1843 LOC) + the *DSSF-dynamical* functions of ftlm_dynamical.cpp onto via_backend |
+
+### Family 3 — executable plan (analysis done 2026-07-15)
+
+Current three-way split of dynamical FTLM S(q,ω):
+- **Gen-2 `ftlm_dynamical_kernel_via_backend`** (cf_dynamical.h) — backend-generic, two-operator,
+  **already wired into `orchestrator.cpp` (in-memory API)**. This is the keeper. Single-temperature.
+- **Gen-1 GPU `GPUFTLMSolver`** (gpu_ftlm.cu, 1843 LOC) — drives the **CLI DSSF workflow**
+  (`workflows.cpp` ~L1319 & ~L2141, `computeDynamicalCorrelationMultiTemp`), multi-temperature with
+  Krylov-basis reuse across T.
+- **Gen-1 CPU `compute_dynamical_correlation*`** (ftlm_dynamical.cpp) — the CPU fallback in the same
+  workflow block.
+
+Non-obvious constraint: **ftlm_dynamical.cpp is a grab-bag**, not pure DSSF. It also owns live
+static/connected-response code used by the dM/dT campaign — `compute_static_response`,
+`compute_connected_qh_response`, `compute_thermal_expectation_value`,
+`compute_krylov_expectation_values`. Those MUST stay. Only the dynamical-DSSF functions
+(`compute_dynamical_response_thermal`, `compute_dynamical_correlation`,
+`compute_dynamical_correlation_state_cf`, `compute_spectral_function[_complex]`) are the retirement target.
+
+Key enabling insight: in `ftlm_dynamical_kernel_via_backend`, temperature enters **only** at the final
+`ftlm_dynamical_sample_spectrum` Lorentzian sum (steps 1–7 — seed, O₂|ψ⟩, Lanczos, tridiag, shift,
+O₁|ψ⟩, projections — are T-independent). So a multi-T extension reusing the Krylov basis is a small,
+clean change (loop the final reweighting over a T-vector), matching GPUFTLMSolver's efficiency.
+
+Steps (each gated before the next):
+1. Add `ftlm_dynamical_kernel_via_backend_multitemp(...)` (or a T-vector option) — compute steps 1–7
+   once per sample, accumulate per-T spectra via `ftlm_dynamical_sample_spectrum`. Pure addition.
+2. CPU gate: for a small H + (O₁,O₂), assert multi-T output == per-T single-call output == legacy
+   `compute_dynamical_correlation` S(q,ω), to ~1e-10.
+3. Rewire the `workflows.cpp` DSSF block (both the GPU `GPUFTLMSolver` path and the CPU
+   `compute_dynamical_correlation` fallback) to the new via_backend multi-T kernel, dispatching on
+   Backend (CudaBackend when `use_gpu`, else CpuBackend). Preserve the fixed-Sz/observable operator
+   plumbing already in that block.
+4. CUDA build + GPU gate: S(q,ω) from the rewired GPU path == reference GPUFTLMSolver output
+   (bit-level or ≤ Lanczos-noise) across the temperature sweep on the RTX 4080.
+5. Delete `GPUFTLMSolver` (gpu_ftlm.cu, gpu_ftlm.cuh) + its CMake entry; delete only the
+   DSSF-dynamical functions from ftlm_dynamical.cpp; keep the static/connected-response functions.
+6. Full CUDA rebuild + the little-group/DSSF Python tests.
+
+Risk: high (spectral-function correctness is the subtlest physics here; multi-cycle CUDA builds).
+Do NOT delete gpu_ftlm.cu until step 4 passes.
 
 Note: the Family 6 SAB removal built clean on CPU but broke the CUDA build (a WITH_CUDA-gated
 little-group lane reused the SAB GPU batched eigensolver) — fixed in commit d60dc09, caught by the
