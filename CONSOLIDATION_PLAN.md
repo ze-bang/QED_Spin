@@ -62,6 +62,23 @@ Steps (each gated before the next):
 Risk: high (spectral-function correctness is the subtlest physics here; multi-cycle CUDA builds).
 Do NOT delete gpu_ftlm.cu until step 4 passes.
 
+### Family 3 — PROGRESS (2026-07-15)
+- ✅ Step 1 (commit b1523f2): multi-T `ftlm_dynamical_kernel_via_backend_multitemp`.
+- ✅ Step 3 (commit 808b12e): `compute_dynamical_response_workflow` routed through it via
+  select_backend+std::visit. **Gated end-to-end**: ED `--dynamical-response` (4-site Heisenberg, 3 T,
+  SzSz+SmSp) with the rewire vs a reference ED from pre-rewire workflows.cpp → S(q,ω) agrees to ~5
+  decimals at every T/channel (behaviour-preserving). CPU + CUDA built.
+- ⏳ BLOCKER for deleting gpu_ftlm.cu: `GPUFTLMSolver` has a SECOND user —
+  `compute_static_response_workflow`'s `process_task` calls `GPUFTLMSolver::computeStaticCorrelation`
+  (static ⟨O₁†O₂⟩(T), the dM/dT / magnetocaloric path). Retiring GPUFTLMSolver requires porting THIS
+  too. computeStaticCorrelation is a **clean mirror** of the dynamical kernel: identical steps 1–8
+  (random vector → Lanczos+basis → tridiag → ritz/weights/overlaps), only the final step differs
+  (static thermal sum Σₙ wₙ·f(βEₙ) instead of the ω-Lorentzian). Port = add
+  `ftlm_static_correlation_via_backend_multitemp` (mirror), gate vs dense finite-T ⟨O₁†O₂⟩(T), wire
+  `process_task` + the orchestrator/CPU `compute_static_response` lane, CUDA-gate, THEN delete
+  gpu_ftlm.cu/.cuh + the now-dead dynamical CPU multi-temp fns. This feeds dM/dT research code — gate
+  rigorously. Steps 2 (per-T equivalence) and the dead-fn cleanup fold in here.
+
 Note: the Family 6 SAB removal built clean on CPU but broke the CUDA build (a WITH_CUDA-gated
 little-group lane reused the SAB GPU batched eigensolver) — fixed in commit d60dc09, caught by the
 Family 4 CUDA build. Lesson: SAB/GPU-touching removals must be CUDA-built, not just CPU-built.
