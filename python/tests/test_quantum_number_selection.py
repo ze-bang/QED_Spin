@@ -222,6 +222,104 @@ def test_sector_decoder_maps_momentum_through_characters_not_index_order():
     assert len(seen_k0) == 7
 
 
+def _square_torus(lx=4, ly=4):
+    n = lx * ly
+    idx = lambda x, y: (y % ly) * lx + (x % lx)   # noqa: E731
+    bonds = []
+    for y in range(ly):
+        for x in range(lx):
+            bonds.append((idx(x, y), idx(x + 1, y)))
+            bonds.append((idx(x, y), idx(x, y + 1)))
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg(bonds, J=1.0)
+    return b.to_operator()
+
+
+def test_sector_is_quantum_numbers_not_raw_indices():
+    """`sector=` names QUANTUM NUMBERS; selected_sectors takes raw INDICES.
+
+    These were wired straight together, which is invisible for a 1-generator
+    group (QN == index, so every ring test passed) and silently wrong for
+    anything else. On a 4x4 torus `sector=[2,2,2]` deduped to the index set
+    {2} and solved irrep [0,2,0]; any tuple containing a 0 pulled in sector 0,
+    which holds the global ground state -- so EVERY irrep answered
+    -11.2284832084 and looked plausible.
+
+    The witness: distinct irreps must have distinct energies.
+    """
+    pytest.importorskip("pynauty")
+    H = _square_torus()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    assert len(gen.generators) == 3, "this test needs a multi-generator group"
+
+    common = dict(num_eigenvalues=1, sz=8, symmetry=gen, point_group="off",
+                  spin_flip="off", time_reversal="off", device="cpu",
+                  verbose=False)
+    e_gamma = float(qed.solve(H, sector=[0, 0, 0], **common).eigenvalues[0])
+    e_other = float(qed.solve(H, sector=[2, 2, 2], **common).eigenvalues[0])
+
+    assert e_gamma == pytest.approx(-11.2284832084, abs=1e-6)
+    assert abs(e_other - e_gamma) > 1e-3, (
+        f"sector=[2,2,2] returned {e_other}, the Gamma/global GS -- the QN "
+        f"tuple is being read as raw sector indices again")
+
+
+def test_conjugate_irreps_are_isospectral():
+    """A real H makes k and -k isospectral: [1,1,1] and [3,3,3] must agree.
+
+    This is the physics check on the QN resolution -- getting DIFFERENT
+    energies per irrep is necessary but not sufficient; the ones that must
+    match still have to match.
+    """
+    pytest.importorskip("pynauty")
+    H = _square_torus()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    common = dict(num_eigenvalues=1, sz=8, symmetry=gen, point_group="off",
+                  spin_flip="off", time_reversal="off", device="cpu",
+                  verbose=False)
+    a = float(qed.solve(H, sector=[1, 1, 1], **common).eigenvalues[0])
+    b = float(qed.solve(H, sector=[3, 3, 3], **common).eigenvalues[0])
+    assert a == pytest.approx(b, abs=1e-8)
+
+
+@pytest.mark.parametrize("qn", [[0, 0, 0], [0, 0, 2], [0, 2, 0], [1, 1, 1],
+                                [2, 0, 0], [2, 2, 2]])
+def test_abelian_and_projected_lanes_resolve_the_same_qn(qn):
+    """Two INDEPENDENT resolutions must agree.
+
+    The abelian lane maps QN -> sector_id through info['sectors']; the
+    projection lane maps QN -> k_raw -> star through the character table.
+    Different code, different axes; if they disagree, one of them is decoding
+    the caller's physics wrong.
+    """
+    pytest.importorskip("pynauty")
+    H = _square_torus()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    common = dict(num_eigenvalues=1, sz=8, sector=qn, symmetry=gen,
+                  spin_flip="off", time_reversal="off", device="cpu",
+                  verbose=False)
+    e_abelian = float(qed.solve(H, point_group="off", **common).eigenvalues[0])
+    e_project = float(qed.solve(H, point_group="full", **common).eigenvalues[0])
+    assert e_abelian == pytest.approx(e_project, abs=1e-8)
+
+
+def test_non_irrep_quantum_numbers_raise():
+    """The 4x4's generators are NOT independent: |A|=16, prod(orders)=64. Most
+    QN tuples are therefore not characters of the group at all, and must be
+    REFUSED rather than silently resolved to some nearby index."""
+    pytest.importorskip("pynauty")
+    H = _square_torus()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="not an irrep"):
+        qed.solve(H, num_eigenvalues=1, sz=8, sector=[1, 0, 0], symmetry=gen,
+                  point_group="off", spin_flip="off", time_reversal="off",
+                  device="cpu", verbose=False)
+    with pytest.raises(ValueError, match="quantum number|generator"):
+        qed.solve(H, num_eigenvalues=1, sz=8, sector=[0], symmetry=gen,
+                  point_group="off", spin_flip="off", time_reversal="off",
+                  device="cpu", verbose=False)
+
+
 def test_naming_sz_solves_exactly_that_sector():
     """sz= counts SET BITS = DOWN spins: sz=0 is the all-UP state.
 

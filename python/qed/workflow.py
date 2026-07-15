@@ -859,6 +859,7 @@ def solve(
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
+            sector=sector,
             sz_parity=_sz_parity_str,
             auto_sz_axis=auto_sz,
             verbose=verbose,
@@ -1371,8 +1372,16 @@ def _make_params(
             steps = int(getattr(p, "tpq_max_steps", 0) or 0) or DEFAULT_TPQ_STEPS
             p.tpq_max_steps = steps
             p.max_iterations = steps
-        if sector is not None:
-            p.selected_sectors = list(int(q) for q in sector)
+        # NOTE: `sector` is a QUANTUM-NUMBER tuple (one per generator), while
+        # EDParameters.selected_sectors is a list of raw sector INDICES (see
+        # SolveOptions::selected_sectors: "only sectors whose linear index
+        # appears in this list"). Assigning one to the other here was a type
+        # confusion at the language boundary -- it silently read [1,0,0] as
+        # "sectors 1, 0 and 0" and returned their UNION's minimum, so every
+        # irrep of a multi-generator group answered with the global ground
+        # state. The resolution needs the QN->index table, which only exists
+        # once the symmetry info is built, so it happens in
+        # _diag_with_symmetry. Nothing to do here.
         return p
 
     # ---- Eigenvalue solvers ----
@@ -1393,8 +1402,9 @@ def _make_params(
     elif method == DiagonalizationMethod.BLOCK_LANCZOS:
         p.block_size = max(1, min(n_eigs, 4))
 
-    if sector is not None:
-        p.selected_sectors = list(int(q) for q in sector)
+    # `sector` (quantum numbers) is NOT selected_sectors (raw indices) -- see
+    # the note in the thermal branch above. Resolved in _diag_with_symmetry,
+    # where the QN->index table exists.
     return p
 
 
@@ -1438,6 +1448,44 @@ def _diag_via_directory(
 
 
 # ---------------------------------------------------------------------------
+def _resolve_sector_quantum_numbers(info: dict[str, Any],
+                                    sector: Sequence[int]) -> int:
+    """QN tuple -> the RAW sector index the C++ filter selects on.
+
+    ``sector=`` names one quantum number per generator; ``selected_sectors``
+    is documented as raw sector INDICES ("only sectors whose linear index
+    appears in this list"). The two axes coincide ONLY for a single generator,
+    which is why every ring test passed while a 4x4 torus silently answered
+    every irrep with the global ground state.
+
+    ``info['sectors']`` is the table -- Python builds it itself and writes it
+    to ``sector_metadata.json`` -- so the mapping is a lookup, not a guess:
+    match on ``quantum_numbers``, return ``sector_id``.
+    """
+    qn_want = [int(q) for q in sector]
+    sectors = list(info.get("sectors", []) or [])
+    if not sectors:
+        raise RuntimeError(
+            "qed.solve: sector= was given but the symmetry info carries no "
+            "sector table to resolve it against.")
+    for s in sectors:
+        if [int(x) for x in s.get("quantum_numbers", [])] == qn_want:
+            return int(s.get("sector_id", 0))
+    n_gen = len(sectors[0].get("quantum_numbers", []))
+    if len(qn_want) != n_gen:
+        raise ValueError(
+            f"qed.solve: sector={qn_want} names {len(qn_want)} quantum "
+            f"number(s) but this symmetry has {n_gen} generator(s); pass one "
+            f"per generator.")
+    raise ValueError(
+        f"qed.solve: sector={qn_want} is not an irrep of this group. Valid "
+        f"quantum numbers are "
+        f"{sorted([int(x) for x in s.get('quantum_numbers', [])] for s in sectors)[:8]}"
+        f"{' ...' if len(sectors) > 8 else ''}. (Generators need not be "
+        f"independent -- when they carry a relation, most QN tuples are not "
+        f"characters of the group at all.)")
+
+
 def _diag_with_symmetry(
     operator: Operator,
     symmetry: SymmetryArg,
@@ -1446,6 +1494,7 @@ def _diag_with_symmetry(
     *,
     sz: Optional[int],
     verbose: bool,
+    sector: Optional[Sequence[int]] = None,
     spin_flip="auto",
     time_reversal="auto",
     point_group="auto",
@@ -1503,6 +1552,16 @@ def _diag_with_symmetry(
         )
 
     params.use_symmetry = True
+
+    # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw INDICES.
+    # info['sectors'] is the table that maps between them (Python writes it to
+    # sector_metadata.json), so resolve here -- the first point where it exists.
+    if sector is not None:
+        _sid = _resolve_sector_quantum_numbers(info, sector)
+        params.selected_sectors = [_sid]
+        if verbose:
+            print(f"[qed.solve] sector={list(sector)} -> raw sector index "
+                  f"{_sid}")
 
     # ------------------------------------------------------------------
     # 2. Materialise operator + symmetry into a temp directory the
