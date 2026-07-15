@@ -15,10 +15,14 @@
 
 #include <cstdint>
 
+// Force inlining on the device: these are called in the innermost per-term
+// loop of the GPU matvec (process_source_terms). Without __forceinline__ nvcc
+// may emit real device function calls, which serialize the hot loop and cost
+// an order of magnitude on large sectors.
 #if defined(__CUDACC__)
-#define ED_TERM_GATE_HD __host__ __device__
+#define ED_TERM_GATE_HD __host__ __device__ __forceinline__
 #else
-#define ED_TERM_GATE_HD
+#define ED_TERM_GATE_HD inline
 #endif
 
 namespace ed::matvec::gate {
@@ -28,14 +32,14 @@ static constexpr std::uint8_t kOpSz = 2;
 
 // 1. One-body diagonal (Sz_k): state unchanged; returns the real factor
 //    spin_l * sign(bit).
-ED_TERM_GATE_HD inline double
+ED_TERM_GATE_HD double
 diag_one_body_factor(std::uint64_t s, std::uint32_t site, double spin_l) {
     return spin_l * (((s >> site) & 1ULL) ? -1.0 : 1.0);
 }
 
 // 2. One-body off-diagonal (S+ / S-): gated bit flip. Returns false if the
 //    ladder operator annihilates the state; otherwise sets s_prime.
-ED_TERM_GATE_HD inline bool
+ED_TERM_GATE_HD bool
 offdiag_one_body(std::uint64_t s, std::uint32_t site, std::uint32_t op_type,
                  std::uint64_t& s_prime) {
     if (((s >> site) & 1ULL) == op_type) return false;
@@ -45,7 +49,7 @@ offdiag_one_body(std::uint64_t s, std::uint32_t site, std::uint32_t op_type,
 
 // 3. Two-body purely diagonal (Sz_i Sz_j): state unchanged; returns
 //    spin_l^2 * sign_i * sign_j.
-ED_TERM_GATE_HD inline double
+ED_TERM_GATE_HD double
 diag_two_body_factor(std::uint64_t s, std::uint32_t s1, std::uint32_t s2,
                      double spin_sq) {
     const double sa = ((s >> s1) & 1ULL) ? -1.0 : 1.0;
@@ -56,7 +60,7 @@ diag_two_body_factor(std::uint64_t s, std::uint32_t s1, std::uint32_t s2,
 // 4. Two-body mixed (Sz * S+/-): gated flip on flip_site, Sz sign on sz_site.
 //    Returns false if the ladder gate annihilates; else sets s_prime and the
 //    real factor spin_l * sign(sz_site).
-ED_TERM_GATE_HD inline bool
+ED_TERM_GATE_HD bool
 mixed_two_body(std::uint64_t s, std::uint32_t flip_site, std::uint32_t flip_op,
                std::uint32_t sz_site, double spin_l,
                std::uint64_t& s_prime, double& factor) {
@@ -69,7 +73,7 @@ mixed_two_body(std::uint64_t s, std::uint32_t flip_site, std::uint32_t flip_op,
 
 // 5. Two-body off-diagonal (S+- * S+-): two gated bit flips. Returns false if
 //    either ladder gate annihilates; else sets s_prime.
-ED_TERM_GATE_HD inline bool
+ED_TERM_GATE_HD bool
 offdiag_two_body(std::uint64_t s, std::uint32_t s1, std::uint32_t s2,
                  std::uint32_t op1, std::uint32_t op2, std::uint64_t& s_prime) {
     if (((s >> s1) & 1ULL) == op1 || ((s >> s2) & 1ULL) == op2) return false;
@@ -81,7 +85,7 @@ offdiag_two_body(std::uint64_t s, std::uint32_t s1, std::uint32_t s2,
 //    pairs. Sz gates accumulate spin_l*sign into `factor`; ladder gates flip
 //    the running state or annihilate it. Returns false if annihilated; else
 //    sets cur (final state) and factor (product of the Sz geometric factors).
-ED_TERM_GATE_HD inline bool
+ED_TERM_GATE_HD bool
 three_body_walk(std::uint64_t s,
                 std::uint8_t op1, std::uint32_t site1,
                 std::uint8_t op2, std::uint32_t site2,
