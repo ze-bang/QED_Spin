@@ -539,6 +539,26 @@ py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
     return d;
 }
 
+// LTLM thermodynamics == FTLM trace for any function of H. The old
+// low_temperature_lanczos seeded a second Lanczos from |0> and summed the
+// GS-local density of states, not the thermal trace (it stayed pinned near
+// E0 at every T). This binding now routes through the verified FTLM path so
+// the public `qed.low_temperature_lanczos` name keeps working but returns
+// correct thermodynamics. See CONSOLIDATION_PLAN.md Family 1.
+FTLMParameters ltlm_to_ftlm_params(const LTLMParameters& p) {
+    FTLMParameters f;
+    f.krylov_dim               = p.krylov_dim;
+    f.num_samples              = p.num_samples;
+    f.max_iterations           = p.max_iterations;
+    f.tolerance                = p.tolerance;
+    f.full_reorthogonalization = p.full_reorthogonalization;
+    f.reorth_frequency         = p.reorth_frequency;
+    f.random_seed              = p.random_seed;
+    f.store_intermediate       = p.store_intermediate;
+    f.compute_error_bars       = p.compute_error_bars;
+    return f;
+}
+
 py::dict py_low_temperature_lanczos(const Operator& op,
                                     const LTLMParameters& params,
                                     double temp_min,
@@ -547,15 +567,15 @@ py::dict py_low_temperature_lanczos(const Operator& op,
                                     const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     const std::string dir = output_dir_or_devnull(output_dir);
-    LTLMResults res;
+    const FTLMParameters fparams = ltlm_to_ftlm_params(params);
+    FTLMResults res;
     {
         py::gil_scoped_release release;
-        res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                      temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, dir);
+        res = finite_temperature_lanczos(make_hv(op), n, fparams, temp_min,
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
+    d["ground_state_energy"] = res.ground_state_estimate;
     return d;
 }
 
@@ -567,15 +587,15 @@ py::dict py_low_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
                                              const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     const std::string dir = output_dir_or_devnull(output_dir);
-    LTLMResults res;
+    const FTLMParameters fparams = ltlm_to_ftlm_params(params);
+    FTLMResults res;
     {
         py::gil_scoped_release release;
-        res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                      temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, dir);
+        res = finite_temperature_lanczos(make_hv(op), n, fparams, temp_min,
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
+    d["ground_state_energy"] = res.ground_state_estimate;
     return d;
 }
 

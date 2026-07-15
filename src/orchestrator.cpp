@@ -57,7 +57,6 @@
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
-#include <ed/thermal/ltlm_kernel.h>
 #include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
 #include <ed/thermal/mtpq_f32.h>
