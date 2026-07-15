@@ -78,6 +78,8 @@
 #include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
+#include <ed/observables/cf_dynamical.h>   // ftlm_dynamical_kernel_via_backend_multitemp
+#include <ed/core/select_backend.h>        // select_backend + BackendConstraints
 
 #ifdef WITH_MPI
 #include <mpi.h>
@@ -1295,121 +1297,83 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             // This runs Lanczos once per sample, then computes all temperatures efficiently
             std::map<double, DynamicalResponseResults> results_map;
             
+            // Consolidation Family 3: one backend-generic dynamical-FTLM kernel
+            // (ftlm_dynamical_kernel_via_backend_multitemp) replaces BOTH the
+            // legacy GPUFTLMSolver multi-temp GPU path and the CPU
+            // compute_dynamical_correlation_*_multi_temperature functions.
+            // select_backend picks CudaBackend when --use-gpu is set and the
+            // device matvec is available, else CpuBackend; the Krylov basis is
+            // built once per random sample and reweighted across all T.
+            {
+                const uint64_t n_omega = config.dynamical.num_omega_points;
+                std::vector<double> omega_grid(n_omega);
+                const double omega_step = (config.dynamical.omega_max -
+                    config.dynamical.omega_min) /
+                    static_cast<double>(std::max<uint64_t>(1, n_omega - 1));
+                for (uint64_t i = 0; i < n_omega; ++i)
+                    omega_grid[i] = config.dynamical.omega_min +
+                                    static_cast<double>(i) * omega_step;
+
+                ed::LinearOperator& H_op = ham;
+                ed::LinearOperator& O1_op = config.system.use_fixed_sz
+                    ? static_cast<ed::LinearOperator&>(*obs_1_fs[op_idx])
+                    : static_cast<ed::LinearOperator&>(obs_1[op_idx]);
+                ed::LinearOperator& O2_op = config.system.use_fixed_sz
+                    ? static_cast<ed::LinearOperator&>(*obs_2_fs[op_idx])
+                    : static_cast<ed::LinearOperator&>(obs_2[op_idx]);
+
+                ed::BackendConstraints bc;
+                bc.allow_gpu     = config.dynamical.use_gpu;
+                bc.allow_mpi     = false;   // DSSF FTLM lane is single-node
+                bc.allow_mpi_gpu = false;
+                auto variant = ed::select_backend(H_op.geometry(), bc);
+
+                std::visit([&](auto& backend_uptr) {
+                    using BPtr = std::decay_t<decltype(backend_uptr)>;
+                    using B    = typename BPtr::element_type;
+                    constexpr bool is_cpu =
+                        std::is_same_v<B, ed::matvec::CpuBackend>;
 #ifdef WITH_CUDA
-            // GPU multi-temperature path: requires --use-gpu (or --dyn-use-gpu).
-            // Operator-collapse Phase 2b (Jun 2026): GPUFTLMSolver is driven
-            // directly off the unified host operators' device matvec
-            // (CudaMatVecBackend via Operator/FixedSzOperator::bind_cuda); the
-            // bespoke GPUFixedSzOperator / convertOperatorToGPU round-trip is
-            // gone. `ham` (= wh.ham_ref()) and the fixed-Sz / full observable
-            // operators carry the correct sector basis. Cross-sector operators
-            // (S±) still need cross-sector wiring for non-zero transverse
-            // channels.
-            if (config.dynamical.use_gpu) {
-                try {
-                    GPUFTLMSolver::DeviceMatVec o1_dev, o2_dev;
-                    if (config.system.use_fixed_sz) {
-                        o1_dev = device_matvec_from(*obs_1_fs[op_idx]);
-                        o2_dev = device_matvec_from(*obs_2_fs[op_idx]);
-                    } else {
-                        o1_dev = device_matvec_from(obs_1[op_idx]);
-                        o2_dev = device_matvec_from(obs_2[op_idx]);
-                    }
-
-                    GPUFTLMSolver ftlm_solver(
-                        device_matvec_from(ham),
-                        static_cast<int>(N), params.krylov_dim, 1e-10);
-
-                    auto gpu_results = ftlm_solver.computeDynamicalCorrelationMultiTemp(
-                        params.num_samples, o1_dev, o2_dev,
-                        config.dynamical.omega_min,
-                        config.dynamical.omega_max,
-                        config.dynamical.num_omega_points,
-                        params.broadening,
-                        temperatures,
-                        ground_state_energy,
-                        params.random_seed
-                    );
-
-                    for (const auto& [temp, result_tuple] : gpu_results) {
-                        auto [freqs, S_real, S_imag, err_real, err_imag] = result_tuple;
-
-                        DynamicalResponseResults result;
-                        result.frequencies = freqs;
-                        result.spectral_function = S_real;
-                        result.spectral_function_imag = S_imag;
-                        result.spectral_error = err_real.size() == freqs.size()
-                            ? err_real : std::vector<double>(freqs.size(), 0.0);
-                        result.spectral_error_imag = err_imag.size() == freqs.size()
-                            ? err_imag : std::vector<double>(freqs.size(), 0.0);
-                        result.total_samples = params.num_samples;
-
-                        results_map[temp] = result;
-                    }
-                } catch (const std::exception& e) {
-                    if (rank == 0) {
-                        std::cerr << "  GPU computation failed for "
-                                  << names[op_idx] << ": " << e.what()
-                                  << " -- falling back to CPU\n";
-                    }
-                    results_map.clear();
-                }
-            }
+                    constexpr bool is_cuda =
+                        std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+                    constexpr bool is_cuda = false;
 #endif
-            
-            // CPU computation path (only if GPU didn't produce results)
-            if (results_map.empty()) {
-                // Create function wrappers for this operator pair (audit #2:
-                // dispatch via apply_obs* so fixed-Sz uses the typed override).
-                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs1(op_idx, in, out, dim);
-                };
+                    if constexpr (!(is_cpu || is_cuda)) {
+                        throw std::runtime_error(
+                            "dynamical FTLM: requires a CpuBackend or "
+                            "CudaBackend; distributed backends are not wired.");
+                    } else {
+                        ed::observables::FtlmDynamicalOptions kopts;
+                        kopts.krylov_dim   = params.krylov_dim;
+                        kopts.num_samples  = params.num_samples;
+                        kopts.broadening   = params.broadening;
+                        kopts.energy_shift = ground_state_energy;
+                        kopts.tolerance    = 1e-10;
+                        kopts.random_seed  = params.random_seed;
+                        kopts.global_n     = H_op.geometry().global_dim;
 
-                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs2(op_idx, in, out, dim);
-                };
-                
-                if (params.num_samples == 1) {
-                    // Single sample mode - use state-based optimization
-                    // Generate a random state
-                    ComplexVector state(N);
-                    std::random_device rd;
-                    std::mt19937 gen(rd());
-                    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-                    for (uint64_t i = 0; i < N; i++) {
-                        state[i] = Complex(dist(gen), dist(gen));
+                        auto mv_h  = H_op.template bind<B>();
+                        auto mv_o1 = O1_op.template bind<B>();
+                        auto mv_o2 = O2_op.template bind<B>();
+                        auto res = ed::observables::detail::
+                            ftlm_dynamical_kernel_via_backend_multitemp(
+                                *backend_uptr, mv_h, mv_o1, mv_o2,
+                                H_op.geometry().local_dim, omega_grid,
+                                temperatures, kopts);
+
+                        for (std::size_t t = 0; t < temperatures.size(); ++t) {
+                            DynamicalResponseResults r;
+                            r.frequencies            = res[t].omega;
+                            r.spectral_function      = res[t].spectral_real;
+                            r.spectral_function_imag = res[t].spectral_imag;
+                            r.spectral_error         = res[t].spectral_error_real;
+                            r.spectral_error_imag    = res[t].spectral_error_imag;
+                            r.total_samples          = res[t].total_samples;
+                            results_map[temperatures[t]] = std::move(r);
+                        }
                     }
-                    double norm = cblas_dznrm2(N, state.data(), 1);
-                    Complex scale(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, state.data(), 1);
-                    
-                    results_map = compute_dynamical_correlation_state_multi_temperature(
-                        H_func, O1_func, O2_func, state, N, params,
-                        config.dynamical.omega_min,
-                        config.dynamical.omega_max,
-                        config.dynamical.num_omega_points,
-                        temperatures,
-                        ground_state_energy
-                    );
-                } else {
-                    // Multiple samples - use multi-sample multi-temperature optimization!
-                    if (rank == 0) {
-                        std::cout << "Using multi-sample multi-temperature optimization\n";
-                        std::cout << "Lanczos will run " << params.num_samples 
-                                  << " times, then compute " << temperatures.size() 
-                                  << " temperatures from cached data\n";
-                    }
-                    
-                    results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
-                        H_func, O1_func, O2_func, N, params,
-                        config.dynamical.omega_min,
-                        config.dynamical.omega_max,
-                        config.dynamical.num_omega_points,
-                        temperatures,
-                        ground_state_energy,
-                        config.workflow.output_dir
-                    );
-                }
+                }, variant);
             }
             
             // Save results for all temperatures to HDF5
