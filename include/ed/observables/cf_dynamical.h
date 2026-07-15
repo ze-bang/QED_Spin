@@ -243,14 +243,23 @@ inline void ftlm_dynamical_sample_spectrum(
 ///      ``p_im``); ``weight[n] = overlap_O1[n] * V[0,n] * phi_norm``.
 ///   9. Host-side Lorentzian sum (``ftlm_dynamical_sample_spectrum``).
 /// 10. Accumulate ``S_real`` / ``S_imag`` over samples.
+// Multi-temperature FTLM dynamical kernel (Consolidation Family 3). The
+// Krylov basis, Ritz values and O1/O2 overlap weights (steps 1-8) are
+// temperature-INDEPENDENT, so they are computed once per random sample and the
+// final Lorentzian reweighting (step 9, ``ftlm_dynamical_sample_spectrum``,
+// which already takes a temperature) is looped over ``temperatures``. This
+// reproduces the Krylov-reuse efficiency of the legacy
+// ``GPUFTLMSolver::computeDynamicalCorrelationMultiTemp`` on any Backend.
+// Returns one FtlmDynamicalResult per temperature (same order as the input).
 template <typename Backend, typename ApplyH, typename ApplyO>
-FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
+std::vector<FtlmDynamicalResult> ftlm_dynamical_kernel_via_backend_multitemp(
     Backend&                   be,
     ApplyH&&                   apply_H,
     ApplyO&&                   apply_O1,
     ApplyO&&                   apply_O2,
     std::size_t                local_n,
     const std::vector<double>& omega_grid,
+    const std::vector<double>& temperatures,
     const FtlmDynamicalOptions& opts)
 {
     if (local_n == 0) {
@@ -260,6 +269,10 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
     if (omega_grid.empty()) {
         throw std::invalid_argument(
             "ftlm_dynamical_kernel_via_backend: empty frequency grid");
+    }
+    if (temperatures.empty()) {
+        throw std::invalid_argument(
+            "ftlm_dynamical_kernel_via_backend: empty temperature list");
     }
     if (opts.num_samples == 0) {
         throw std::invalid_argument(
@@ -271,19 +284,24 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
     }
 
     const std::size_t n_omega = omega_grid.size();
-    FtlmDynamicalResult R;
-    R.omega = omega_grid;
-    R.spectral_real.assign(n_omega, 0.0);
-    R.spectral_imag.assign(n_omega, 0.0);
-    R.spectral_error_real.assign(n_omega, 0.0);
-    R.spectral_error_imag.assign(n_omega, 0.0);
+    const std::size_t n_temp  = temperatures.size();
+    std::vector<FtlmDynamicalResult> Rs(n_temp);
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        Rs[t].omega = omega_grid;
+        Rs[t].spectral_real.assign(n_omega, 0.0);
+        Rs[t].spectral_imag.assign(n_omega, 0.0);
+        Rs[t].spectral_error_real.assign(n_omega, 0.0);
+        Rs[t].spectral_error_imag.assign(n_omega, 0.0);
+    }
 
-    // Per-sample storage so we can compute the std error after
-    // averaging.
-    std::vector<std::vector<double>> sample_real;
-    std::vector<std::vector<double>> sample_imag;
-    sample_real.reserve(opts.num_samples);
-    sample_imag.reserve(opts.num_samples);
+    // Per-(temperature, sample) storage so we can compute the std error after
+    // averaging. sample_real[t][s] is the s-th sample's spectrum at temp t.
+    std::vector<std::vector<std::vector<double>>> sample_real(n_temp);
+    std::vector<std::vector<std::vector<double>>> sample_imag(n_temp);
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        sample_real[t].reserve(opts.num_samples);
+        sample_imag[t].reserve(opts.num_samples);
+    }
 
     const std::uint64_t base_seed = (opts.random_seed != 0)
         ? opts.random_seed
@@ -397,52 +415,78 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
             weights[n] = overlap_O1 * overlap_O2;
         }
 
-        // -------- 9. Lorentzian sum (host) --------------------------
-        std::vector<double> samp_re, samp_im;
-        ftlm_dynamical_sample_spectrum(
-            ritz_values, weights, omega_grid,
-            opts.broadening, opts.temperature, samp_re, samp_im);
-
-        sample_real.push_back(std::move(samp_re));
-        sample_imag.push_back(std::move(samp_im));
+        // -------- 9. Lorentzian sum (host), per temperature ---------
+        // Steps 1-8 above are temperature-independent; only this final
+        // reweighting varies with T, so loop it (Krylov basis reused).
+        for (std::size_t t = 0; t < n_temp; ++t) {
+            std::vector<double> samp_re, samp_im;
+            ftlm_dynamical_sample_spectrum(
+                ritz_values, weights, omega_grid,
+                opts.broadening, temperatures[t], samp_re, samp_im);
+            sample_real[t].push_back(std::move(samp_re));
+            sample_imag[t].push_back(std::move(samp_im));
+        }
     }
 
-    // ------ 10. Average over valid samples + std-error band --------
-    const std::size_t n_valid = sample_real.size();
-    R.total_samples = n_valid;
-    if (n_valid == 0) {
-        return R;   // all samples degenerate; spectrum stays zero
-    }
-    for (const auto& sr : sample_real) {
-        for (std::size_t i = 0; i < n_omega; ++i) R.spectral_real[i] += sr[i];
-    }
-    for (const auto& si : sample_imag) {
-        for (std::size_t i = 0; i < n_omega; ++i) R.spectral_imag[i] += si[i];
-    }
-    const double inv_n = 1.0 / static_cast<double>(n_valid);
-    for (std::size_t i = 0; i < n_omega; ++i) {
-        R.spectral_real[i] *= inv_n;
-        R.spectral_imag[i] *= inv_n;
-    }
-    if (n_valid > 1) {
-        for (std::size_t s = 0; s < n_valid; ++s) {
+    // ------ 10. Average over valid samples + std-error band, per T -----
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        FtlmDynamicalResult& R = Rs[t];
+        const auto& s_real = sample_real[t];
+        const auto& s_imag = sample_imag[t];
+        const std::size_t n_valid = s_real.size();
+        R.total_samples = n_valid;
+        if (n_valid == 0) {
+            continue;   // all samples degenerate; spectrum stays zero
+        }
+        for (const auto& sr : s_real) {
+            for (std::size_t i = 0; i < n_omega; ++i) R.spectral_real[i] += sr[i];
+        }
+        for (const auto& si : s_imag) {
+            for (std::size_t i = 0; i < n_omega; ++i) R.spectral_imag[i] += si[i];
+        }
+        const double inv_n = 1.0 / static_cast<double>(n_valid);
+        for (std::size_t i = 0; i < n_omega; ++i) {
+            R.spectral_real[i] *= inv_n;
+            R.spectral_imag[i] *= inv_n;
+        }
+        if (n_valid > 1) {
+            for (std::size_t s = 0; s < n_valid; ++s) {
+                for (std::size_t i = 0; i < n_omega; ++i) {
+                    const double dr = s_real[s][i] - R.spectral_real[i];
+                    const double di = s_imag[s][i] - R.spectral_imag[i];
+                    R.spectral_error_real[i] += dr * dr;
+                    R.spectral_error_imag[i] += di * di;
+                }
+            }
+            const double denom = std::sqrt(
+                static_cast<double>(n_valid * (n_valid - 1)));
             for (std::size_t i = 0; i < n_omega; ++i) {
-                const double dr = sample_real[s][i] - R.spectral_real[i];
-                const double di = sample_imag[s][i] - R.spectral_imag[i];
-                R.spectral_error_real[i] += dr * dr;
-                R.spectral_error_imag[i] += di * di;
+                R.spectral_error_real[i] =
+                    std::sqrt(R.spectral_error_real[i]) / denom;
+                R.spectral_error_imag[i] =
+                    std::sqrt(R.spectral_error_imag[i]) / denom;
             }
         }
-        const double denom = std::sqrt(
-            static_cast<double>(n_valid * (n_valid - 1)));
-        for (std::size_t i = 0; i < n_omega; ++i) {
-            R.spectral_error_real[i] =
-                std::sqrt(R.spectral_error_real[i]) / denom;
-            R.spectral_error_imag[i] =
-                std::sqrt(R.spectral_error_imag[i]) / denom;
-        }
     }
-    return R;
+    return Rs;
+}
+
+// Single-temperature wrapper (unchanged public API): delegates to the
+// multi-temperature core with a one-element temperature list.
+template <typename Backend, typename ApplyH, typename ApplyO>
+FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
+    Backend&                   be,
+    ApplyH&&                   apply_H,
+    ApplyO&&                   apply_O1,
+    ApplyO&&                   apply_O2,
+    std::size_t                local_n,
+    const std::vector<double>& omega_grid,
+    const FtlmDynamicalOptions& opts)
+{
+    auto Rs = ftlm_dynamical_kernel_via_backend_multitemp(
+        be, apply_H, apply_O1, apply_O2, local_n, omega_grid,
+        std::vector<double>{opts.temperature}, opts);
+    return std::move(Rs.front());
 }
 
 }  // namespace detail
