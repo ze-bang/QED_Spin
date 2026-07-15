@@ -1427,52 +1427,11 @@ LittleGroupSpectrum little_group_full_spectrum(
     int                                  n_sites,
     const LittleGroupOptions&            opt)
 {
-#ifdef WITH_CUDA
-    if (opt.use_gpu) {
-        // Stage 7 GPU lane: materialise every block on the host (the same
-        // engine sampling as the CPU path) and defer ALL eigensolves to ONE
-        // batched cuSOLVER call -- the 8-stream pool overlaps the many
-        // small-block launches (tiny-sector batching).
-        ed::symmetry::SymBlocksPacked P;
-        std::vector<int> pack_mult;
-        std::vector<LittleGroupLabel> pack_label;
-        auto out = run_little_group(
-            op, abelian_group, residue_perms, n_sites, opt,
-            [&](const ed::matvec::MatVecOperator& mv, int mult,
-                LittleGroupLabel& lab)
-                -> std::vector<double> {
-                const std::size_t nb = mv.dim();
-                if (nb == 0) return {};
-                const Eigen::MatrixXcd Hb = materialize(mv);
-                P.offset.push_back(P.data.size());
-                P.block_dim.push_back(static_cast<int>(nb));
-                P.block_irrep_dim.push_back(1);
-                for (std::size_t col = 0; col < nb; ++col)
-                    for (std::size_t row = 0; row < nb; ++row)
-                        P.data.push_back(Hb(static_cast<Eigen::Index>(row),
-                                            static_cast<Eigen::Index>(col)));
-                pack_mult.push_back(mult);
-                pack_label.push_back(lab);
-                return {};       // deferred: recorded above
-            });
-        const std::vector<double> eigs =
-            ed::symmetry::sym_blocks_batched_eigenvalues_gpu(P);
-        std::size_t off = 0;
-        for (std::size_t b = 0; b < P.block_dim.size(); ++b) {
-            for (int i = 0; i < P.block_dim[b]; ++i) {
-                out.eigenvalues.push_back(eigs[off + static_cast<std::size_t>(i)]);
-                out.multiplicities.push_back(pack_mult[b]);
-                out.labels.push_back(pack_label[b]);
-            }
-            off += static_cast<std::size_t>(P.block_dim[b]);
-        }
-        out.total_dim = 0;
-        for (int m : out.multiplicities)
-            out.total_dim += static_cast<std::uint64_t>(m);
-        check_sum_rule(out, n_sites, opt);
-        return out;
-    }
-#endif
+    // Note (Consolidation Family 6): the former GPU lane batched every block
+    // into the monolithic SAB GPU eigensolver (sym_blocks_batched_eigenvalues_gpu),
+    // which was removed with SAB. Little-group blocks are small (~dim/|G|), so
+    // the per-block CPU dense solve below is the single path; opt.use_gpu no
+    // longer selects a batched GPU eigensolve here.
     auto out = run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [](const ed::matvec::MatVecOperator& mv, int /*mult*/,
