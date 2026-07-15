@@ -250,7 +250,7 @@ Each runs standalone in seconds (`python3 examples/tour/01_ground_state.py`)
 and the `linux-tour` CI lane executes all of them on every push.
 Exhaustive per-configuration coverage lives in the test suites and the
 dense-verified capability matrix
-([`docs/perf/capability_matrix_2026-07-03.md`](docs/perf/capability_matrix_2026-07-03.md)).
+([`docs/perf/capability_matrix_2026-07-15.md`](docs/perf/capability_matrix_2026-07-15.md)).
 ---
 
 ## Performance
