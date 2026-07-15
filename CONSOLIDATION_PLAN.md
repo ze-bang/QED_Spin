@@ -15,9 +15,13 @@ functions actually carry.
 | 8 KPM-DOS | ✅ CLEAN | Already one CPU+one GPU impl behind a front door; no bypass binding. No change |
 | 2 FTLM thermo | ✅ CLEAN | CPU (legacy) vs GPU (via_backend) is a correct backend-split, not duplication; MPI throws. No change |
 | 5 Lanczos | ✅ CLEAN | Fast path already delegates to lanczos_kernel; slow path is a distinct no-reorth/no-basis memory-light variant. No change |
+| 4 term kernels | ✅ DONE (commit 9a6c1e8) | One `__host__ __device__` gate-math core (term_gate_math.h) now shared by apply_terms + apply_term_to_state (CPU) + process_source_terms (GPU). Verified CPU Δ=6.7e-15, GPU Δ=0.0 vs reference. Scatter/gather split kept (perf axis) |
 | 10 config adapters | ⏳ TODO | Low-value inline of ≤4-consumer shims |
-| 4 term kernels | ⏳ SCOPED | Real seam: CPU `apply_term_to_state` and GPU `process_source_terms` reimplement the same 6-term-type gate math. Fix = one `__host__ __device__` gate-math core both call. Needs CPU dense-matvec gate + CUDA build + GPU matvec gate (RTX 4080 present) |
-| 3 dynamical FTLM | ⏳ SCOPED | Retire GPUFTLMSolver (1843 LOC) + ftlm_dynamical.cpp (3142) onto via_backend. Needs S(q,ω) equivalence gate on CPU + GPU |
+| 3 dynamical FTLM | ⏳ TODO | Retire GPUFTLMSolver (1843 LOC) + ftlm_dynamical.cpp (3142) onto via_backend. Largest + most physics-sensitive item; needs S(q,ω) equivalence gate on CPU + GPU. Recommend a dedicated gated effort |
+
+Note: the Family 6 SAB removal built clean on CPU but broke the CUDA build (a WITH_CUDA-gated
+little-group lane reused the SAB GPU batched eigensolver) — fixed in commit d60dc09, caught by the
+Family 4 CUDA build. Lesson: SAB/GPU-touching removals must be CUDA-built, not just CPU-built.
 
 Note: the audit found Families 2, 5, 8 were **already consolidated** — the surface "many files" was a
 correct backend-split / deliberate variant, not a bug-hiding duplicate. The genuine remaining refactors
