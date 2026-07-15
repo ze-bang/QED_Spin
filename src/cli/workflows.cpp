@@ -88,7 +88,6 @@
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_ed_wrapper.h>
-#include <ed/gpu/gpu_ftlm.cuh>        // GPUFTLMSolver (DSSF dynamical / static, Phase 2b)
 #include <ed/gpu/kpm_dos_gpu.cuh>
 #include <cuda_runtime.h>
 #include <functional>

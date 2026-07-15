@@ -448,7 +448,6 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
-        ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for
