@@ -794,6 +794,7 @@ PYBIND11_MODULE(_core, m) {
             d["flip_parity"]  = st.flip_parity;
             d["tr_pairs"]     = st.tr_pairs;
             d["gpu_engaged"]  = st.gpu_engaged;
+            d["csr_engaged"]  = st.csr_engaged;
             stars.append(d);
         }
         return stars;

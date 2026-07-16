@@ -133,6 +133,12 @@ struct LittleGroupStarInfo {
     /// the caller asked for a GPU. A lane label that echoes the request rather
     /// than the fact is worse than none -- assertions against it are toothless.
     bool gpu_engaged   = false;
+    /// Did the star's matvec serve its applies from the lazily-built
+    /// reduced sector CSR? Truthful, post-solve, same contract as
+    /// gpu_engaged: false + !gpu_engaged after solves ran means the
+    /// CSR-free gather walk served them (the matvec-regime engagement
+    /// signal the permutation sweep asserts against).
+    bool csr_engaged   = false;
     /// Every extended irrep index folded into this star (always includes
     /// ``k0``). The engine has always known this -- the star loop iterates
     /// ``(k0, members)`` -- but only published ``star_size``, which is not

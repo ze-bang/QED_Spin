@@ -202,6 +202,13 @@ private:
             return;
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             reduced_csr());
+        if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+            std::fprintf(stderr,
+                         "[sym_profile] little-group block dim=%llu: "
+                         "reduced CSR engaged (nnz=%llu)\n",
+                         static_cast<unsigned long long>(dim),
+                         static_cast<unsigned long long>(csr_->nnz()));
+        }
     }
 
     // GPU rep-gather engagement (only reached when the reduced CSR was
@@ -247,6 +254,10 @@ public:
     /// twin of it would drift -- which is exactly how a lane label becomes a
     /// lie.
     [[nodiscard]] bool gpu_engaged() const noexcept { return gpu_fn_ != nullptr; }
+    /// Did the reduced-CSR sub-mode engage? Lazy like gpu_engaged() --
+    /// meaningful only after the first apply(). false + !gpu_engaged()
+    /// after applies ran means the CSR-free gather walk served them.
+    [[nodiscard]] bool csr_engaged() const noexcept { return csr_ != nullptr; }
 private:
 };
 
@@ -1580,6 +1591,7 @@ LittleGroupSpectrum run_little_group(
         // engine's own 2^20-rep gate, and echoing the request instead would
         // make every GPU assertion toothless.
         sb.info.gpu_engaged = sb.hk->gpu_engaged();
+        sb.info.csr_engaged = sb.hk->csr_engaged();
         if (sb.info.gpu_engaged) out.gpu_engaged = true;
         out.stars.push_back(sb.info);
         if (profile) {
