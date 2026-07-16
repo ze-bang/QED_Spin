@@ -224,3 +224,97 @@ TEST_CASE("U2a: lift_to_rep turns block eigenvectors into H_k0 eigenvectors",
     }
     REQUIRE(tested_projected);
 }
+
+namespace {
+
+// Dense N-site Heisenberg ring in the full 2^N computational basis.
+Eigen::MatrixXd dense_heisenberg(int N) {
+    const std::size_t dim = std::size_t{1} << N;
+    Eigen::MatrixXd Hd = Eigen::MatrixXd::Zero(
+        static_cast<Eigen::Index>(dim), static_cast<Eigen::Index>(dim));
+    auto sz = [](std::uint64_t s, int i) {
+        return ((s >> i) & 1u) ? 0.5 : -0.5;
+    };
+    for (std::uint64_t s = 0; s < dim; ++s) {
+        for (int i = 0; i < N; ++i) {
+            const int j = (i + 1) % N;
+            Hd(static_cast<Eigen::Index>(s), static_cast<Eigen::Index>(s))
+                += sz(s, i) * sz(s, j);
+            if (((s >> i) & 1u) != ((s >> j) & 1u)) {
+                const std::uint64_t t = s ^ (1ULL << i) ^ (1ULL << j);
+                Hd(static_cast<Eigen::Index>(t),
+                   static_cast<Eigen::Index>(s)) += 0.5;
+            }
+        }
+    }
+    return Hd;
+}
+
+}  // namespace
+
+TEST_CASE("U2b: flip-projected eigenvectors expand to the computational "
+          "basis (the orbit-CSR lane's refusal, done arithmetically)",
+          "[little_group][blocks][flip][expand]") {
+    const int N = 8, n_up = 4;
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up = n_up;   // spin_flip auto: (k, +/-) blocks engage at N/2
+
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    REQUIRE(set.meta.flip_engaged);
+    const auto Hd = dense_heisenberg(N);
+    const std::uint64_t mask = (1ULL << N) - 1;
+
+    int tested = 0;
+    for (const auto& b : set.blocks) {
+        if (b.tag().flip_parity < 0) continue;
+        REQUIRE(b.rep_data().has_flips());   // genuinely flip-extended
+        // Dense lowest eigenpair of this block...
+        const std::size_t d = b.op().dim();
+        Eigen::MatrixXcd Hb(static_cast<Eigen::Index>(d),
+                            static_cast<Eigen::Index>(d));
+        std::vector<Cx> e(d, Cx(0, 0)), col(d);
+        for (std::size_t j = 0; j < d; ++j) {
+            std::fill(e.begin(), e.end(), Cx(0, 0));
+            e[j] = Cx(1, 0);
+            b.op().apply(e.data(), col.data(), d);
+            for (std::size_t i = 0; i < d; ++i)
+                Hb(static_cast<Eigen::Index>(i),
+                   static_cast<Eigen::Index>(j)) = col[i];
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hb);
+        const double E0 = es.eigenvalues()(0);
+        std::vector<Cx> v(d);
+        for (std::size_t i = 0; i < d; ++i)
+            v[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
+        // ...lift to the (k, +/-) rep basis, expand to 2^N amplitudes.
+        const auto u   = b.lift_to_rep(v.data());
+        const auto psi = ed::solvers::expand_rep_vector_to_computational(
+            b.rep_data(), u);
+        // (a) eigenvector of the FULL dense H at the block eigenvalue;
+        double num = 0.0;
+        Eigen::VectorXcd p(static_cast<Eigen::Index>(psi.size()));
+        for (std::size_t i = 0; i < psi.size(); ++i)
+            p(static_cast<Eigen::Index>(i)) = psi[i];
+        Eigen::VectorXcd hp = Hd * p;
+        for (Eigen::Index i = 0; i < p.size(); ++i)
+            num += std::norm(hp(i) - E0 * p(i));
+        REQUIRE(std::sqrt(num) < 1e-9);
+        // (b) eigenvector of the FLIP at the block's labelled parity;
+        const double want = (b.tag().flip_parity == 0) ? 1.0 : -1.0;
+        double fnum = 0.0;
+        for (std::uint64_t s = 0; s < psi.size(); ++s)
+            fnum += std::norm(psi[s ^ mask] - want * psi[s]);
+        REQUIRE(std::sqrt(fnum) < 1e-9);
+        // (c) supported only on n_up states.
+        for (std::uint64_t s = 0; s < psi.size(); ++s)
+            if (std::abs(psi[s]) > 1e-12)
+                REQUIRE(__builtin_popcountll(s) == n_up);
+        if (++tested >= 4) break;   // a few blocks of each parity suffice
+    }
+    REQUIRE(tested >= 4);
+}

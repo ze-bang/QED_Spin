@@ -2168,4 +2168,46 @@ LittleGroupThermalResult little_group_thermal(
     return R;
 }
 
+// =============================================================================
+// U2b: flip-aware rep -> computational expansion. |psi> = sum_alpha
+// u_alpha |b_alpha> with |b_alpha> = (1/N_alpha) sum_g conj(chi(g)) g|rep>,
+// where g acts as permute-then-XOR when the sector is flip-extended (the
+// exact element action the rep matvec kernel applies). Stabilizer elements
+// hitting the same image accumulate, which is precisely the character sum
+// the projection demands. Normalized before return (the caller's residual
+// checks are the correctness authority, not the norm convention).
+// =============================================================================
+std::vector<std::complex<double>>
+expand_rep_vector_to_computational(
+    const ed::symmetry::RepSectorData&        rd,
+    const std::vector<std::complex<double>>&  u)
+{
+    if (u.size() != rd.reps.size())
+        throw std::invalid_argument(
+            "expand_rep_vector_to_computational: vector length != #reps");
+    if (rd.n_sites <= 0 || rd.n_sites > 30)
+        throw std::invalid_argument(
+            "expand_rep_vector_to_computational: dense 2^N expansion is "
+            "for moderate N (n_sites in [1, 30])");
+    const auto pol = rd.make_policy();
+    std::vector<Complex> psi(std::size_t{1} << rd.n_sites, Complex(0, 0));
+    for (std::size_t a = 0; a < rd.reps.size(); ++a) {
+        if (u[a] == Complex(0, 0)) continue;
+        const Complex w = u[a] * rd.inv_norms[a];
+        for (int g = 0; g < rd.group_size; ++g) {
+            const std::uint64_t s = pol.apply_perm(rd.reps[a], g);
+            psi[s] += w * std::conj(rd.characters[static_cast<std::size_t>(g)]);
+        }
+    }
+    double n2 = 0.0;
+    for (const auto& c : psi) n2 += std::norm(c);
+    if (!(n2 > 0.0))
+        throw std::runtime_error(
+            "expand_rep_vector_to_computational: expansion annihilated the "
+            "vector (inconsistent rd?)");
+    const double inv = 1.0 / std::sqrt(n2);
+    for (auto& c : psi) c *= inv;
+    return psi;
+}
+
 }  // namespace ed::solvers

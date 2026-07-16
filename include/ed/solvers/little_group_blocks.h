@@ -174,4 +174,22 @@ little_group_thermal(const ::Operator&                    op,
                      ed::workflows::ThermalOptions        topts,
                      const LittleGroupOptions&            opt);
 
+// =============================================================================
+// U2b: FLIP-AWARE expansion of a rep-basis vector to computational-basis
+// amplitudes. The regeneration arithmetic is the rep matvec's own
+// (RepSymmetryBasisPolicy::apply_perm applies the Stage-5b XOR flip masks;
+// the characters are extended), so this works identically for raw and
+// flip-extended (k, +/-) sectors -- the expansion the orbit-CSR lane
+// refuses ("no orbit-CSR form exists for flip-projected sectors") exists
+// arithmetically here.
+//
+// Returns a DENSE 2^n_sites amplitude vector, normalized. Sized for
+// moderate N (tests, DSSF sources, observable evaluation); at frontier N
+// consume the rep-basis vector directly instead.
+// =============================================================================
+[[nodiscard]] std::vector<std::complex<double>>
+expand_rep_vector_to_computational(
+    const ed::symmetry::RepSectorData&        rd,
+    const std::vector<std::complex<double>>&  u);
+
 }  // namespace ed::solvers
