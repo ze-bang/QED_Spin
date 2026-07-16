@@ -6,8 +6,9 @@ projection lane instead:
 
 * ``point_group="auto"`` (the default): PROJECT through the factorized
   little-group engine whenever the consumer is eigenvalue-only (no
-  eigenvectors, no ``sector=`` restriction, an eigenvalue method) and a
-  (abelian, residue) split exists. Any decline falls back silently to the
+  eigenvectors, an eigenvalue method) and a (abelian, residue) split
+  exists. (``sector=`` no longer declines: a named momentum restricts the
+  engine's star walk via ``only_k0`` instead of forcing the abelian lane.) Any decline falls back silently to the
   abelian rep lane with star/TR/flip *folds* -- the pre-9c behaviour.
   The thermal verb is the exception: its sampling methods (mTPQ/FTLM/
   LTLM) are the large-N design point, and the projection lane computes
@@ -360,8 +361,8 @@ def resolve_projection_lane(
         return _decline("ED_SYM_LITTLE_GROUP=0 disables the lane")
     if not eigenvalues_only:
         return _decline(
-            "the call consumes eigenvectors / a sector restriction / a "
-            "sampling method, which the projection lane does not produce")
+            "the call consumes eigenvectors or a sampling method, which "
+            "the projection lane does not produce")
     if pg == "auto" and prefer_abelian:
         return ProjectionLane(
             mode="abelian",

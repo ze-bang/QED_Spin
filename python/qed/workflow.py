@@ -286,11 +286,28 @@ def solve(
         Stage 9c semantics. ``"auto"`` (default): eigenvalue-only calls
         PROJECT through the factorized little-group engine (translation
         x flip x little-co-group blocks); vector consumers
-        (``compute_eigenvectors``, ``sector=``, sampling methods, an
-        explicit GPU ``device=``) use the abelian rep lane with
-        star/TR/flip folds and per-sector output. ``"full"``: REQUIRE
+        (``compute_eigenvectors``, sampling methods) use the abelian rep
+        lane with star/TR/flip folds and per-sector output. ``sector=``
+        no longer declines projection (Jul 2026): a named momentum
+        resolves to its star(s) through the character table and the
+        engine restricts its walk (``LittleGroupOptions::only_k0``) --
+        naming a smaller block gets a smaller block. ``"full"``: REQUIRE
         projection -- raises with the decline reason instead of
         degrading. ``"off"``: abelian lane, star folds disabled.
+    irrep : dict, optional
+        Little-co-group irrep, named BY ITS CHARACTER as
+        ``{residue_index: value}`` (``-1`` keys the identity) and
+        resolved against the star's published table -- never by index
+        (the engine's irrep index is per-star and internal, like
+        ``k_raw``). Requires ``sector=``; with the spin flip engaged
+        also requires ``flip=`` (the isotypic split is per
+        ``(k, parity)``). Projection lane only -- raises on the abelian
+        lane rather than being ignored.
+    flip : int, optional
+        Spin-flip parity half of a momentum star: ``0`` = (k,+),
+        ``1`` = (k,-). Requires ``sector=`` and an engaged flip
+        ([H, prod sigma^x] = 0 on a flip-invariant subspace). Omitted
+        with the flip engaged, a named momentum returns BOTH parities.
         Output contract (Stage 10c): BOTH lanes set ``eigenvalues``.
         The projection lane additionally sets per-eigenvalue label
         arrays ``block_k_raw`` / ``block_flip_parity`` /
