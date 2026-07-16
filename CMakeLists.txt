@@ -895,6 +895,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
     # Stage-5b SymmetryEngine v2: in-sector flip projection ((k,+/-) spectrum union)
     ed_add_test(test_flip_projection            tests/unit/test_flip_projection.cpp USE_CATCH2)
+    # U1a lane unification: owned little-group block handles (tiling/covering/spectra)
+    ed_add_test(test_little_group_blocks        tests/unit/test_little_group_blocks.cpp USE_CATCH2)
     # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
     # Stage-8 SymmetryEngine v2: composition planning (toggles, windows, TR actions)

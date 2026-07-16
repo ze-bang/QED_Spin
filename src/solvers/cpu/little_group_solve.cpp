@@ -9,8 +9,10 @@
 // =============================================================================
 
 #include <ed/solvers/little_group_solve.h>
+#include <ed/solvers/little_group_blocks.h>      // U1a: owned block handles
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
+#include <ed/core/linear_operator.h>             // U1a: blocks ARE LinearOperators
 #include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
 #include <ed/matvec/backends/cpu_backend.h>      // 9d: CpuBackend for the GS Lanczos
 #include <ed/krylov/lanczos_kernel.h>            // 9d: keep_basis Ritz-vector GS
@@ -91,7 +93,11 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 // Memory O(#reps), never O(2^N) -- this is what lets the factorized engine
 // scale past the monolithic SAB cap.
 // -----------------------------------------------------------------------------
-class RepSectorMatVec final : public ed::matvec::MatVecOperator {
+// U1a: derives from ed::LinearOperator (not bare MatVecOperator) so the block
+// handles can feed the orchestrator verbs directly (ed::workflows::thermal
+// consumes any LinearOperator; geometry()/bind_cpu() are synthesized from
+// dim()/apply()). Still a MatVecOperator for every existing use site.
+class RepSectorMatVec final : public ed::LinearOperator {
 public:
     using TV = ed::matvec::TermViewT<
         ::Operator::DiagonalOneBody,    ::Operator::OffDiagonalOneBody,
@@ -258,14 +264,23 @@ struct SparseColumns {
 
 // Projected block operator y = W^dagger (H (W x)) -- the factorized
 // little-group matvec (still matrix-free through H_k0).
-class ProjectedBlockOp final : public ed::matvec::MatVecOperator {
+//
+// U1a: owns its inputs via shared_ptr (all irrep blocks of one star co-own
+// the star's H_k0), and derives from LinearOperator so the orchestrator
+// verbs can consume it directly. Scratch is allocated LAZILY on first
+// apply: block handles are also built in plan/enumeration passes where a
+// dim_k0-sized allocation per block would be a real memory regression at
+// frontier N. One in-flight apply per instance (the shared hk_ apply is
+// re-entrant: call_once init + read-only CSR spmv / stateless gather).
+class ProjectedBlockOp final : public ed::LinearOperator {
 public:
-    ProjectedBlockOp(const RepSectorMatVec& hk, const SparseColumns& W)
-        : hk_(hk), W_(W),
-          scratch_in_(hk.dim()), scratch_out_(hk.dim()) {}
+    ProjectedBlockOp(std::shared_ptr<const RepSectorMatVec> hk,
+                     std::shared_ptr<const SparseColumns>   W)
+        : hk_(*hk), W_(*W), keep_hk_(std::move(hk)), keep_W_(std::move(W)) {}
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        std::fill(scratch_in_.begin(), scratch_in_.end(), Complex(0, 0));
+        scratch_in_.assign(hk_.dim(), Complex(0, 0));
+        scratch_out_.resize(hk_.dim());
         for (std::size_t c = 0; c < W_.cols.size(); ++c)
             for (const auto& [i, w] : W_.cols[c])
                 scratch_in_[static_cast<std::size_t>(i)] += w * in[c];
@@ -289,8 +304,10 @@ public:
     [[nodiscard]] const SparseColumns&   cols() const { return W_; }
 
 private:
-    const RepSectorMatVec&        hk_;
-    const SparseColumns&          W_;
+    const RepSectorMatVec&                  hk_;
+    const SparseColumns&                    W_;
+    std::shared_ptr<const RepSectorMatVec>  keep_hk_;   // U1a keepalives
+    std::shared_ptr<const SparseColumns>    keep_W_;
     mutable std::vector<Complex>  scratch_in_, scratch_out_;
 };
 
@@ -356,6 +373,45 @@ dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
 }
 
 }  // namespace
+
+// =============================================================================
+// U1a: LittleGroupBlock -- the owned handle over one (star, irrep) block.
+// Impl references the TU-private concrete types above; the pimpl keeps them
+// off the public surface. `pop == nullptr` marks the plain fallback-floor
+// block, whose operator IS the star's H_k0.
+// =============================================================================
+struct LittleGroupBlock::Impl {
+    LittleGroupBlockTag                   tag;
+    std::shared_ptr<RepSectorMatVec>      hk;    // shared across the star's blocks
+    std::shared_ptr<const SparseColumns>  W;     // null => plain floor block
+    std::unique_ptr<ProjectedBlockOp>     pop;   // null => op() is *hk
+};
+
+LittleGroupBlock::LittleGroupBlock(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+LittleGroupBlock::~LittleGroupBlock() = default;
+LittleGroupBlock::LittleGroupBlock(const LittleGroupBlock&) = default;
+LittleGroupBlock& LittleGroupBlock::operator=(const LittleGroupBlock&) = default;
+LittleGroupBlock::LittleGroupBlock(LittleGroupBlock&&) noexcept = default;
+LittleGroupBlock& LittleGroupBlock::operator=(LittleGroupBlock&&) noexcept
+    = default;
+
+const LittleGroupBlockTag& LittleGroupBlock::tag() const noexcept {
+    return impl_->tag;
+}
+ed::LinearOperator& LittleGroupBlock::op() const noexcept {
+    return impl_->pop ? static_cast<ed::LinearOperator&>(*impl_->pop)
+                      : static_cast<ed::LinearOperator&>(*impl_->hk);
+}
+const ed::symmetry::RepSectorData& LittleGroupBlock::rep_data() const noexcept {
+    return impl_->hk->rep_data();
+}
+bool LittleGroupBlock::projected() const noexcept {
+    return impl_->W != nullptr;
+}
+bool LittleGroupBlock::gpu_engaged() const noexcept {
+    return impl_->hk != nullptr && impl_->hk->gpu_engaged();
+}
 
 // =============================================================================
 // The engine core: shared by full-spectrum / lowest / thermodynamics through
@@ -1096,6 +1152,324 @@ subspace_dim_of(int n_sites, const LittleGroupOptions& opt) {
     return std::uint64_t{1} << n_sites;
 }
 
+// -----------------------------------------------------------------------------
+// U1a: shared parser for the ED_SYM_LG_ONLY_K0 job-splitting override. The env
+// var WINS over opt.only_k0 (replace, don't union -- a split job must run
+// exactly its share); "plan" flips plan mode where the caller honours it.
+// -----------------------------------------------------------------------------
+void parse_only_k0_env(std::set<int>& only_k0, bool& plan_only) {
+    if (const char* fenv = std::getenv("ED_SYM_LG_ONLY_K0")) {
+        const std::string fs(fenv);
+        if (fs == "plan") {
+            plan_only = true;
+        } else if (!fs.empty()) {
+            only_k0.clear();
+            std::size_t pos = 0;
+            while (pos < fs.size()) {
+                const std::size_t c = fs.find(',', pos);
+                const std::string tok =
+                    fs.substr(pos, c == std::string::npos ? c : c - pos);
+                if (!tok.empty()) only_k0.insert(std::stoi(tok));
+                if (c == std::string::npos) break;
+                pos = c + 1;
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// U1a: per-star block construction -- everything run_little_group's star loop
+// does EXCEPT the eigensolves: k0 sector build, monomial little co-group with
+// the numeric [M_p, H] = 0 probe, abstract-table decomposition, isotypic
+// bases, TR sigma/sigma* pairing, and the graceful decline to the plain
+// H_k0 floor block. Returns the blocks in the engine's canonical row order
+// (irreps ascending; TR later partner absent -- folded into the earlier one's
+// multiplicity; plain floor block iff not projected).
+//
+// `sb.hk == nullptr` marks an empty sector (info still filled). The three
+// profile accumulators keep run_little_group's historical phase boundaries;
+// pass nullptr when not profiling.
+// -----------------------------------------------------------------------------
+struct StarBuild {
+    std::vector<std::shared_ptr<LittleGroupBlock::Impl>> blocks;
+    LittleGroupStarInfo               info;
+    std::shared_ptr<RepSectorMatVec>  hk;   // null <=> empty sector
+};
+
+[[nodiscard]] StarBuild
+build_star_blocks(const ::Operator&         op,
+                  const EngineContext&      cx,
+                  bool                      tr_on,
+                  int                       k0,
+                  const std::vector<int>&   members,
+                  const LittleGroupOptions& opt,
+                  bool                      plan_print,
+                  double* t_sector, double* t_monomial, double* t_isotypic)
+{
+    auto tick = [] { return std::chrono::steady_clock::now(); };
+    auto secs = [](auto a, auto b) {
+        return std::chrono::duration<double>(b - a).count();
+    };
+    const bool profile = (t_sector != nullptr);
+    const int  m_star  = static_cast<int>(members.size());
+    auto t0 = tick();
+
+    StarBuild sb;
+    auto rd = build_k_sector(cx, k0, opt.n_up);
+    LittleGroupStarInfo& info = sb.info;
+    info.k0          = k0;
+    info.star_size   = m_star;
+    info.members.assign(members.begin(), members.end());
+    info.dim_k0      = rd.reps.size();
+    info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
+    if (plan_print) {
+        std::fprintf(stderr,
+            "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
+            "dim=%llu\n",
+            k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
+            static_cast<unsigned long long>(rd.reps.size()));
+        // NOTE: no early return. Plan mode used to bail out here, which meant
+        // it reported dims and star sizes but never built the little co-group
+        // -- so the one thing a caller needs in order to NAME an irrep (its
+        // character table) was missing from the only pass cheap enough to ask
+        // for it. Plan runs the monomial + isotypic decomposition and skips
+        // just the eigensolves, which is where the cost actually is.
+    }
+    if (rd.reps.empty()) return sb;
+
+    sb.hk = std::make_shared<RepSectorMatVec>(op, std::move(rd));
+    RepSectorMatVec& hk = *sb.hk;
+    const auto& rdr = hk.rep_data();
+    if (profile) { *t_sector += secs(t0, tick()); t0 = tick(); }
+
+    LittleGroupBlockTag base_tag;
+    base_tag.n_up        = opt.n_up;
+    base_tag.sz_parity   = opt.sz_parity;
+    base_tag.k0          = k0;
+    base_tag.k_raw       = k0 % cx.n_irr_raw;
+    base_tag.flip_parity = info.flip_parity;
+    base_tag.star_size   = m_star;
+
+    // Little co-group: identity + residues fixing k0, validated, ONE
+    // representative per coset of A. Residues in the same coset act as
+    // PROPORTIONAL monomials (U_a is the scalar chi_k(a) on the sector,
+    // so M_{a·p} = chi_k(a) M_p) -- keeping duplicates would break the
+    // abstract group closure (e.g. all N reflections of a D_N ring are
+    // one coset: the little co-group of k = 0 is Z2, not order N+1).
+    std::vector<Monomial> M;
+    // Which residue each co-group element came from (-1 = identity). The
+    // loop below already knows this; it just never kept it, which left the
+    // published character table's columns unidentifiable.
+    std::vector<int> M_res;
+    {
+        Monomial ident;
+        ident.to.resize(rdr.reps.size());
+        std::iota(ident.to.begin(), ident.to.end(), 0);
+        ident.phase.assign(rdr.reps.size(), Complex(1, 0));
+        M.push_back(std::move(ident));
+        M_res.push_back(-1);
+    }
+    auto same_coset = [](const Monomial& a, const Monomial& b) {
+        if (a.to != b.to) return false;
+        Complex r(0, 0);
+        bool first = true;
+        for (std::size_t i = 0; i < a.phase.size(); ++i) {
+            const Complex ratio = a.phase[i] / b.phase[i];
+            if (first) { r = ratio; first = false; }
+            else if (std::abs(ratio - r) > 1e-8) return false;
+        }
+        return true;
+    };
+    for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
+        if (cx.irrep_map[rp][static_cast<std::size_t>(k0)] != k0) continue;
+        Monomial m;
+        if (!build_monomial(cx, static_cast<int>(rp), rdr, m)) continue;
+        bool dup = false;
+        for (const auto& q : M)
+            if (same_coset(m, q)) { dup = true; break; }
+        if (dup) continue;
+        if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
+        M.push_back(std::move(m));
+        M_res.push_back(static_cast<int>(rp));
+    }
+    if (profile) { *t_monomial += secs(t0, tick()); t0 = tick(); }
+
+    bool projected = false;
+    // Every decline below is CORRECTNESS-SAFE (we fall back to the plain
+    // k-sector block) but silently forfeits the |little co-group| block
+    // reduction -- and it forfeits the MOST at the high-symmetry momenta,
+    // where the co-group is largest. That made "why is my Gamma block
+    // |P| times too big?" undiagnosable without a debugger: the only
+    // signal was `projected=0` in the ED_SYM_PROFILE line. Each path now
+    // says WHY under ED_SYM_PROFILE=1 / verbose.
+    const bool lg_diag = [&] {
+        const char* v = std::getenv("ED_SYM_PROFILE");
+        return (v != nullptr && v[0] == '1') || opt.verbose;
+    }();
+    auto decline = [&](const char* why) {
+        if (lg_diag)
+            std::fprintf(stderr,
+                "[little_group] star k0=%d (dim=%zu, |little co-group|=%zu): "
+                "NOT projected -- %s. Correct, but this block keeps its "
+                "full k-sector size.\n",
+                k0, rdr.reps.size(), M.size(), why);
+    };
+    if (M.size() > 1) {
+        std::vector<std::vector<int>> multP;
+        if (build_little_tables(M, multP)) {
+            ed::symmetry::GroupIrreps giP;
+            bool gi_ok = true;
+            try {
+                giP = ed::symmetry::decompose_irreps_tables(multP);
+            } catch (const std::exception& e) {
+                gi_ok = false;
+                decline((std::string("decompose_irreps_tables threw: ")
+                         + e.what()).c_str());
+            }
+            if (gi_ok) {
+                // Isotypic split; completeness guard sums the block dims.
+                const int nIr = static_cast<int>(giP.irreps.size());
+                std::vector<SparseColumns> Ws(static_cast<std::size_t>(nIr));
+                std::uint64_t covered = 0;
+                for (int ii = 0; ii < nIr; ++ii) {
+                    Ws[static_cast<std::size_t>(ii)] = build_isotypic_columns(
+                        M, giP.irreps[static_cast<std::size_t>(ii)]);
+                    covered += static_cast<std::uint64_t>(
+                                   Ws[static_cast<std::size_t>(ii)].size())
+                             * static_cast<std::uint64_t>(
+                                   giP.irreps[static_cast<std::size_t>(ii)].dim);
+                }
+                // Stage 9b: sigma <-> sigma* pairing. Valid only when
+                // the k0 sector is REAL: chi_{k0} real => the monomial
+                // phases are real => H_{k0} and every M_p are real, so
+                // conj(W_sigma) spans the sigma* isotypic and
+                // W_sigma*^h H W_sigma* = conj(W_sigma^h H W_sigma) --
+                // isospectral. Any doubt (complex phase, size mismatch)
+                // => solve both blocks (correctness never depends on it).
+                std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
+                // opt.only_irrep disables the pairing: the fold solves ONE
+                // member of a conjugate pair and reports the pair's doubled
+                // multiplicity under the EARLIER member's label, so a
+                // caller who named the later member would get nothing back.
+                // Naming one irrep forfeits a 2x fold that is irrelevant
+                // beside the |P_k| the projection already bought.
+                if (tr_on && opt.only_irrep.empty()) {
+                    bool sector_real = true;
+                    for (const Complex& c : rdr.characters)
+                        if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
+                    for (const auto& m : M) {
+                        if (!sector_real) break;
+                        for (const Complex& ph : m.phase)
+                            if (std::abs(ph.imag()) > 1e-12) { sector_real = false; break; }
+                    }
+                    if (sector_real) {
+                        for (int ii = 0; ii < nIr && sector_real; ++ii) {
+                            if (pair_of[static_cast<std::size_t>(ii)] >= 0) continue;
+                            const auto& ci =
+                                giP.irreps[static_cast<std::size_t>(ii)].character;
+                            for (int jj = ii + 1; jj < nIr; ++jj) {
+                                const auto& cj =
+                                    giP.irreps[static_cast<std::size_t>(jj)].character;
+                                bool conj_match = ci.size() == cj.size();
+                                for (std::size_t g = 0; conj_match && g < ci.size(); ++g)
+                                    conj_match = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
+                                if (conj_match
+                                    && giP.irreps[static_cast<std::size_t>(ii)].dim
+                                           == giP.irreps[static_cast<std::size_t>(jj)].dim
+                                    && Ws[static_cast<std::size_t>(ii)].size()
+                                           == Ws[static_cast<std::size_t>(jj)].size()) {
+                                    pair_of[static_cast<std::size_t>(ii)] = jj;
+                                    pair_of[static_cast<std::size_t>(jj)] = ii;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (profile) { *t_isotypic += secs(t0, tick()); t0 = tick(); }
+                if (covered == rdr.reps.size()) {
+                    projected = true;
+                    for (int ii = 0; ii < nIr; ++ii) {
+                        if (!opt.only_irrep.empty()
+                            && std::find(opt.only_irrep.begin(),
+                                         opt.only_irrep.end(), ii)
+                               == opt.only_irrep.end())
+                            continue;   // caller named other irreps
+                        auto& W = Ws[static_cast<std::size_t>(ii)];
+                        if (W.cols.empty()) continue;
+                        const int d =
+                            giP.irreps[static_cast<std::size_t>(ii)].dim;
+                        const int jj = pair_of[static_cast<std::size_t>(ii)];
+                        if (jj >= 0 && jj < ii) continue;  // partner solved
+                        const int mult = (jj > ii) ? 2 * m_star * d
+                                                   : m_star * d;
+                        if (jj > ii) ++info.tr_pairs;
+                        auto Wsp = std::make_shared<const SparseColumns>(
+                            std::move(W));
+                        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+                        impl->tag              = base_tag;
+                        impl->tag.irrep        = ii;
+                        impl->tag.irrep_dim    = d;
+                        impl->tag.tr_folded    = (jj > ii);
+                        impl->tag.dim          = Wsp->cols.size();
+                        impl->tag.multiplicity =
+                            static_cast<std::uint64_t>(mult);
+                        impl->hk  = sb.hk;
+                        impl->W   = Wsp;
+                        impl->pop = std::make_unique<ProjectedBlockOp>(
+                            sb.hk, Wsp);
+                        sb.blocks.push_back(std::move(impl));
+                    }
+                    info.little_order = static_cast<int>(M.size());
+                    // Publish P_k0's character table: the vocabulary that
+                    // lets a caller name an irrep by its CHARACTER instead
+                    // of by decompose_irreps' internal index. Rows are
+                    // parallel to LittleGroupLabel::irrep; columns are
+                    // identified by little_elems (residue indices into the
+                    // caller's own residue_perms, -1 = identity).
+                    info.little_elems = M_res;
+                    info.little_characters.clear();
+                    info.little_irrep_dims.clear();
+                    info.little_characters.reserve(
+                        static_cast<std::size_t>(nIr));
+                    info.little_irrep_dims.reserve(
+                        static_cast<std::size_t>(nIr));
+                    for (int ii = 0; ii < nIr; ++ii) {
+                        const auto& ir =
+                            giP.irreps[static_cast<std::size_t>(ii)];
+                        info.little_characters.push_back(ir.character);
+                        info.little_irrep_dims.push_back(ir.dim);
+                    }
+                } else {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf),
+                        "isotypic columns cover %llu of %zu states (the "
+                        "irrep decomposition does not tile the sector)",
+                        static_cast<unsigned long long>(covered),
+                        rdr.reps.size());
+                    decline(buf);
+                }
+            }
+        } else {
+            decline("build_little_tables failed -- the deduped monomials "
+                    "do not close into an abstract group table");
+        }
+    } else {
+        decline("no residue fixes this momentum (little co-group is "
+                "trivial) -- only the star fold applies here");
+    }
+    if (!projected) {
+        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+        impl->tag              = base_tag;   // irrep = -1, irrep_dim = 1
+        impl->tag.dim          = hk.dim();
+        impl->tag.multiplicity = static_cast<std::uint64_t>(m_star);
+        impl->hk = sb.hk;
+        sb.blocks.push_back(std::move(impl));
+    }
+    info.projected = projected;
+    return sb;
+}
+
 // The star walk shared by every consumer. ``solve_block(mv, plain)`` returns
 // the block eigenvalues to record (full spectrum or lowest-k).
 template <class SolveFn>
@@ -1141,26 +1515,7 @@ LittleGroupSpectrum run_little_group(
     // wins when set, so existing job scripts keep working unchanged.
     bool plan_only = opt.plan_only;
     std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
-    if (const char* fenv = std::getenv("ED_SYM_LG_ONLY_K0")) {
-        const std::string fs(fenv);
-        if (fs == "plan") {
-            plan_only = true;
-        } else if (!fs.empty()) {
-            // REPLACE, don't union: "the env var wins" has to mean the job
-            // script's split is exactly what runs. Unioning with opt.only_k0
-            // would silently widen a split job back out.
-            only_k0.clear();
-            std::size_t pos = 0;
-            while (pos < fs.size()) {
-                const std::size_t c = fs.find(',', pos);
-                const std::string tok =
-                    fs.substr(pos, c == std::string::npos ? c : c - pos);
-                if (!tok.empty()) only_k0.insert(std::stoi(tok));
-                if (c == std::string::npos) break;
-                pos = c + 1;
-            }
-        }
-    }
+    parse_only_k0_env(only_k0, plan_only);
 
     LittleGroupSpectrum out;
     out.flip_engaged = cx.flip_half;
@@ -1171,260 +1526,48 @@ LittleGroupSpectrum run_little_group(
             cx.giA.irreps[static_cast<std::size_t>(kk)].character);
     for (const auto& [k0, members] : stars) {
         if (!only_k0.empty() && only_k0.count(k0) == 0) continue;
-        const int m_star = static_cast<int>(members.size());
+        auto t_star = tick();
+        // U1a: the star's blocks come from the shared factory -- monomials,
+        // isotypic bases, TR pairing, and the plain-floor decline all live
+        // in build_star_blocks now; this loop only SOLVES. Plan mode builds
+        // everything (the character table must exist) and solves nothing.
+        StarBuild sb = build_star_blocks(
+            op, cx, tr_on, k0, members, opt, /*plan_print=*/plan_only,
+            profile ? &t_sector : nullptr,
+            profile ? &t_monomial : nullptr,
+            profile ? &t_isotypic : nullptr);
+        if (!sb.hk) { out.stars.push_back(sb.info); continue; }
         auto t0 = tick();
-        auto t_star = t0;
-        auto rd = build_k_sector(cx, k0, opt.n_up);
-        LittleGroupStarInfo info;
-        info.k0        = k0;
-        info.star_size = m_star;
-        info.members.assign(members.begin(), members.end());
-        info.dim_k0    = rd.reps.size();
-        info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
-        if (plan_only) {
-            std::fprintf(stderr,
-                "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
-                "dim=%llu\n",
-                k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
-                static_cast<unsigned long long>(rd.reps.size()));
-            // NOTE: no `continue` here. Plan mode used to bail out at this
-            // point, which meant it reported dims and star sizes but never
-            // built the little co-group -- so the one thing a caller needs in
-            // order to NAME an irrep (its character table) was missing from
-            // the only pass cheap enough to ask for it. Plan now runs the
-            // monomial + isotypic decomposition and skips just the
-            // eigensolves, which is where the cost actually is.
-        }
-        if (rd.reps.empty()) { out.stars.push_back(info); continue; }
-
-        RepSectorMatVec hk(op, std::move(rd));
-        const auto& rdr = hk.rep_data();
-        if (profile) { t_sector += secs(t0, tick()); t0 = tick(); }
-
-        // Little co-group: identity + residues fixing k0, validated, ONE
-        // representative per coset of A. Residues in the same coset act as
-        // PROPORTIONAL monomials (U_a is the scalar chi_k(a) on the sector,
-        // so M_{a·p} = chi_k(a) M_p) -- keeping duplicates would break the
-        // abstract group closure (e.g. all N reflections of a D_N ring are
-        // one coset: the little co-group of k = 0 is Z2, not order N+1).
-        std::vector<Monomial> M;
-        // Which residue each co-group element came from (-1 = identity). The
-        // loop below already knows this; it just never kept it, which left the
-        // published character table's columns unidentifiable.
-        std::vector<int> M_res;
-        {
-            Monomial ident;
-            ident.to.resize(rdr.reps.size());
-            std::iota(ident.to.begin(), ident.to.end(), 0);
-            ident.phase.assign(rdr.reps.size(), Complex(1, 0));
-            M.push_back(std::move(ident));
-            M_res.push_back(-1);
-        }
-        auto same_coset = [](const Monomial& a, const Monomial& b) {
-            if (a.to != b.to) return false;
-            Complex r(0, 0);
-            bool first = true;
-            for (std::size_t i = 0; i < a.phase.size(); ++i) {
-                const Complex ratio = a.phase[i] / b.phase[i];
-                if (first) { r = ratio; first = false; }
-                else if (std::abs(ratio - r) > 1e-8) return false;
-            }
-            return true;
-        };
-        for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
-            if (cx.irrep_map[rp][static_cast<std::size_t>(k0)] != k0) continue;
-            Monomial m;
-            if (!build_monomial(cx, static_cast<int>(rp), rdr, m)) continue;
-            bool dup = false;
-            for (const auto& q : M)
-                if (same_coset(m, q)) { dup = true; break; }
-            if (dup) continue;
-            if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
-            M.push_back(std::move(m));
-            M_res.push_back(static_cast<int>(rp));
-        }
-        if (profile) { t_monomial += secs(t0, tick()); t0 = tick(); }
-
-        bool projected = false;
-        // Every decline below is CORRECTNESS-SAFE (we fall back to the plain
-        // k-sector block) but silently forfeits the |little co-group| block
-        // reduction -- and it forfeits the MOST at the high-symmetry momenta,
-        // where the co-group is largest. That made "why is my Gamma block
-        // |P| times too big?" undiagnosable without a debugger: the only
-        // signal was `projected=0` in the ED_SYM_PROFILE line. Each path now
-        // says WHY under ED_SYM_PROFILE=1 / verbose.
-        const bool lg_diag = profile || opt.verbose;
-        auto decline = [&](const char* why) {
-            if (lg_diag)
-                std::fprintf(stderr,
-                    "[little_group] star k0=%d (dim=%zu, |little co-group|=%zu): "
-                    "NOT projected -- %s. Correct, but this block keeps its "
-                    "full k-sector size.\n",
-                    k0, rdr.reps.size(), M.size(), why);
-        };
-        if (M.size() > 1) {
-            std::vector<std::vector<int>> multP;
-            if (build_little_tables(M, multP)) {
-                ed::symmetry::GroupIrreps giP;
-                bool gi_ok = true;
-                try {
-                    giP = ed::symmetry::decompose_irreps_tables(multP);
-                } catch (const std::exception& e) {
-                    gi_ok = false;
-                    decline((std::string("decompose_irreps_tables threw: ")
-                             + e.what()).c_str());
+        if (!plan_only) {
+            for (const auto& bi : sb.blocks) {
+                LittleGroupLabel lab;
+                lab.k_raw       = bi->tag.k_raw;
+                lab.flip_parity = bi->tag.flip_parity;
+                lab.irrep       = bi->tag.irrep;
+                lab.irrep_dim   = bi->tag.irrep_dim;
+                const ed::matvec::MatVecOperator& mv =
+                    bi->pop
+                        ? static_cast<const ed::matvec::MatVecOperator&>(
+                              *bi->pop)
+                        : static_cast<const ed::matvec::MatVecOperator&>(
+                              *bi->hk);
+                const int mult = static_cast<int>(bi->tag.multiplicity);
+                const auto ev = solve_block(mv, mult, lab);
+                for (double e : ev) {
+                    out.eigenvalues.push_back(e);
+                    out.multiplicities.push_back(mult);
+                    out.labels.push_back(lab);
                 }
-                if (gi_ok) {
-                    // Isotypic split; completeness guard sums the block dims.
-                    const int nIr = static_cast<int>(giP.irreps.size());
-                    std::vector<SparseColumns> Ws(static_cast<std::size_t>(nIr));
-                    std::uint64_t covered = 0;
-                    for (int ii = 0; ii < nIr; ++ii) {
-                        Ws[static_cast<std::size_t>(ii)] = build_isotypic_columns(
-                            M, giP.irreps[static_cast<std::size_t>(ii)]);
-                        covered += static_cast<std::uint64_t>(
-                                       Ws[static_cast<std::size_t>(ii)].size())
-                                 * static_cast<std::uint64_t>(
-                                       giP.irreps[static_cast<std::size_t>(ii)].dim);
-                    }
-                    // Stage 9b: sigma <-> sigma* pairing. Valid only when
-                    // the k0 sector is REAL: chi_{k0} real => the monomial
-                    // phases are real => H_{k0} and every M_p are real, so
-                    // conj(W_sigma) spans the sigma* isotypic and
-                    // W_sigma*^h H W_sigma* = conj(W_sigma^h H W_sigma) --
-                    // isospectral. Any doubt (complex phase, size mismatch)
-                    // => solve both blocks (correctness never depends on it).
-                    std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
-                    // opt.only_irrep disables the pairing: the fold solves ONE
-                    // member of a conjugate pair and reports the pair's doubled
-                    // multiplicity under the EARLIER member's label, so a
-                    // caller who named the later member would get nothing back.
-                    // Naming one irrep forfeits a 2x fold that is irrelevant
-                    // beside the |P_k| the projection already bought.
-                    if (tr_on && opt.only_irrep.empty()) {
-                        bool sector_real = true;
-                        for (const Complex& c : rdr.characters)
-                            if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
-                        for (const auto& m : M) {
-                            if (!sector_real) break;
-                            for (const Complex& ph : m.phase)
-                                if (std::abs(ph.imag()) > 1e-12) { sector_real = false; break; }
-                        }
-                        if (sector_real) {
-                            for (int ii = 0; ii < nIr && sector_real; ++ii) {
-                                if (pair_of[static_cast<std::size_t>(ii)] >= 0) continue;
-                                const auto& ci =
-                                    giP.irreps[static_cast<std::size_t>(ii)].character;
-                                for (int jj = ii + 1; jj < nIr; ++jj) {
-                                    const auto& cj =
-                                        giP.irreps[static_cast<std::size_t>(jj)].character;
-                                    bool conj_match = ci.size() == cj.size();
-                                    for (std::size_t g = 0; conj_match && g < ci.size(); ++g)
-                                        conj_match = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
-                                    if (conj_match
-                                        && giP.irreps[static_cast<std::size_t>(ii)].dim
-                                               == giP.irreps[static_cast<std::size_t>(jj)].dim
-                                        && Ws[static_cast<std::size_t>(ii)].size()
-                                               == Ws[static_cast<std::size_t>(jj)].size()) {
-                                        pair_of[static_cast<std::size_t>(ii)] = jj;
-                                        pair_of[static_cast<std::size_t>(jj)] = ii;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (profile) { t_isotypic += secs(t0, tick()); t0 = tick(); }
-                    if (covered == rdr.reps.size()) {
-                        projected = true;
-                        for (int ii = 0; ii < nIr; ++ii) {
-                            if (!opt.only_irrep.empty()
-                                && std::find(opt.only_irrep.begin(),
-                                             opt.only_irrep.end(), ii)
-                                   == opt.only_irrep.end())
-                                continue;   // caller named other irreps
-                            auto& W = Ws[static_cast<std::size_t>(ii)];
-                            if (W.cols.empty()) continue;
-                            const int d =
-                                giP.irreps[static_cast<std::size_t>(ii)].dim;
-                            const int jj = pair_of[static_cast<std::size_t>(ii)];
-                            if (jj >= 0 && jj < ii) continue;  // partner solved
-                            const int mult = (jj > ii) ? 2 * m_star * d
-                                                       : m_star * d;
-                            if (jj > ii) ++info.tr_pairs;
-                            LittleGroupLabel lab;
-                            lab.k_raw       = k0 % cx.n_irr_raw;
-                            lab.flip_parity = info.flip_parity;
-                            lab.irrep       = ii;
-                            lab.irrep_dim   = d;
-                            if (!plan_only) {
-                                ProjectedBlockOp bop(hk, W);
-                                const auto ev = solve_block(bop, mult, lab);
-                                for (double e : ev) {
-                                    out.eigenvalues.push_back(e);
-                                    out.multiplicities.push_back(mult);
-                                    out.labels.push_back(lab);
-                                }
-                            }
-                        }
-                        info.little_order = static_cast<int>(M.size());
-                        // Publish P_k0's character table: the vocabulary that
-                        // lets a caller name an irrep by its CHARACTER instead
-                        // of by decompose_irreps' internal index. Rows are
-                        // parallel to LittleGroupLabel::irrep; columns are
-                        // identified by little_elems (residue indices into the
-                        // caller's own residue_perms, -1 = identity).
-                        info.little_elems = M_res;
-                        info.little_characters.clear();
-                        info.little_irrep_dims.clear();
-                        info.little_characters.reserve(
-                            static_cast<std::size_t>(nIr));
-                        info.little_irrep_dims.reserve(
-                            static_cast<std::size_t>(nIr));
-                        for (int ii = 0; ii < nIr; ++ii) {
-                            const auto& ir =
-                                giP.irreps[static_cast<std::size_t>(ii)];
-                            info.little_characters.push_back(ir.character);
-                            info.little_irrep_dims.push_back(ir.dim);
-                        }
-                    } else {
-                        char buf[160];
-                        std::snprintf(buf, sizeof(buf),
-                            "isotypic columns cover %llu of %zu states (the "
-                            "irrep decomposition does not tile the sector)",
-                            static_cast<unsigned long long>(covered),
-                            rdr.reps.size());
-                        decline(buf);
-                    }
-                }
-            } else {
-                decline("build_little_tables failed -- the deduped monomials "
-                        "do not close into an abstract group table");
-            }
-        } else {
-            decline("no residue fixes this momentum (little co-group is "
-                    "trivial) -- only the star fold applies here");
-        }
-        if (!projected && !plan_only) {
-            LittleGroupLabel lab;
-            lab.k_raw       = k0 % cx.n_irr_raw;
-            lab.flip_parity = info.flip_parity;
-            const auto ev = solve_block(hk, m_star, lab);
-            for (double e : ev) {
-                out.eigenvalues.push_back(e);
-                out.multiplicities.push_back(m_star);
-                out.labels.push_back(lab);
             }
         }
-        info.projected = projected;
         // Truthful lane report: ask the matvec what it DID (lazy, so this is
         // only meaningful after the solves above ran). Small blocks stay on
         // the CPU however loudly the caller asked for a GPU -- that is the
         // engine's own 2^20-rep gate, and echoing the request instead would
         // make every GPU assertion toothless.
-        info.gpu_engaged = hk.gpu_engaged();
-        if (info.gpu_engaged) out.gpu_engaged = true;
-        out.stars.push_back(info);
+        sb.info.gpu_engaged = sb.hk->gpu_engaged();
+        if (sb.info.gpu_engaged) out.gpu_engaged = true;
+        out.stars.push_back(sb.info);
         if (profile) {
             t_solve += secs(t0, tick());
             // Per-star progress line: at 36 sites a star is a ~3 h solve
@@ -1435,8 +1578,8 @@ LittleGroupSpectrum run_little_group(
                 "[little_group profile] star k0=%d done in %.1fs "
                 "(dim=%llu, projected=%d, running E_min=%.10f)\n",
                 k0, secs(t_star, tick()),
-                static_cast<unsigned long long>(info.dim_k0),
-                projected ? 1 : 0, e_min);
+                static_cast<unsigned long long>(sb.info.dim_k0),
+                sb.info.projected ? 1 : 0, e_min);
         }
     }
     if (profile) {
@@ -1520,6 +1663,51 @@ void check_sum_rule(const LittleGroupSpectrum& out, int n_sites,
 }
 
 }  // namespace
+
+// =============================================================================
+// U1a: the public block-set factory -- the same star walk as run_little_group
+// with the solves omitted. Consumed by the U1b thermal lane, the unit tests,
+// and (U2a) the projected ground-state path.
+// =============================================================================
+LittleGroupBlockSet build_little_group_blocks(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    const std::vector<std::vector<int>>& residue_perms,
+    int                                  n_sites,
+    const LittleGroupOptions&            opt)
+{
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
+                        cx, tr_on);
+    const auto stars = star_partition(cx, tr_on);
+
+    // Honour the job-splitting env override like every other consumer.
+    // "plan" is meaningless here (this factory never solves) -- ignored.
+    bool ignore_plan = false;
+    std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
+    parse_only_k0_env(only_k0, ignore_plan);
+
+    LittleGroupBlockSet set;
+    set.meta.flip_engaged = cx.flip_half;
+    set.meta.tr_engaged   = tr_on;
+    set.meta.irrep_characters.reserve(static_cast<std::size_t>(cx.n_irr_raw));
+    for (int kk = 0; kk < cx.n_irr_raw; ++kk)
+        set.meta.irrep_characters.push_back(
+            cx.giA.irreps[static_cast<std::size_t>(kk)].character);
+    for (const auto& [k0, members] : stars) {
+        if (!only_k0.empty() && only_k0.count(k0) == 0) continue;
+        StarBuild sb = build_star_blocks(
+            op, cx, tr_on, k0, members, opt, /*plan_print=*/false,
+            nullptr, nullptr, nullptr);
+        for (auto& bi : sb.blocks) {
+            set.meta.total_dim += bi->tag.dim * bi->tag.multiplicity;
+            set.blocks.emplace_back(std::move(bi));
+        }
+        set.meta.stars.push_back(std::move(sb.info));
+    }
+    return set;
+}
 
 LittleGroupSpectrum little_group_full_spectrum(
     const ::Operator&                    op,

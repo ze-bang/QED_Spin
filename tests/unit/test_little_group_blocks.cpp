@@ -1,0 +1,167 @@
+// =============================================================================
+// tests/unit/test_little_group_blocks.cpp
+//
+// U1a of the lane-unification series: the little-group engine's block-set
+// factory (include/ed/solvers/little_group_blocks.h) must hand out OWNED
+// block operators whose structure and spectra are identical to what
+// run_little_group solves internally:
+//
+//   1. isotypic tiling per projected star:
+//        sum_blocks dim * d_sigma * (tr_folded ? 2 : 1) == dim_k0;
+//   2. global covering: sum_blocks dim * multiplicity == C(N, n_up)
+//      (the factory's own meta.total_dim agrees);
+//   3. spectra: dense-solving every block.op() and expanding by
+//      multiplicity reproduces little_group_full_spectrum().expanded()
+//      exactly -- the blocks ARE the decomposition, not a relabeling;
+//   4. handle invariants: op().dim() == tag.dim, projected() <=> irrep >= 0,
+//      rep_data().reps.size() == the star's dim_k0.
+// =============================================================================
+#include "common/catch2_harness.h"
+
+#include <ed/core/linear_operator.h>
+#include <ed/core/operator.h>
+#include <ed/solvers/little_group_blocks.h>
+#include <ed/solvers/little_group_solve.h>
+
+#include <Eigen/Dense>
+
+#include <algorithm>
+#include <complex>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <vector>
+
+using Cx = std::complex<double>;
+
+namespace {
+
+std::unique_ptr<Operator> heisenberg_ring(std::uint64_t N, double J) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
+    const Cx J_real(J, 0.0), J_half(0.5 * J, 0.0);
+    for (std::uint64_t i = 0; i < N; ++i) {
+        const std::uint64_t j = (i + 1) % N;
+        Operator::TransformData t;
+        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
+        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
+        op->transform_data_.push_back(t);
+        t.op_type = 0; t.op_type_2 = 1; t.coefficient = J_half;
+        op->transform_data_.push_back(t);
+        t.op_type = 1; t.op_type_2 = 0;
+        op->transform_data_.push_back(t);
+    }
+    return op;
+}
+
+// Closed translation group + the N reflections of the D_N ring.
+std::vector<std::vector<int>> ring_translations(int N) {
+    std::vector<std::vector<int>> A;
+    for (int s = 0; s < N; ++s) {
+        std::vector<int> p(static_cast<std::size_t>(N));
+        for (int i = 0; i < N; ++i) p[static_cast<std::size_t>(i)] = (i + s) % N;
+        A.push_back(std::move(p));
+    }
+    return A;
+}
+
+std::vector<std::vector<int>> ring_reflections(int N) {
+    std::vector<std::vector<int>> R;
+    for (int s = 0; s < N; ++s) {
+        std::vector<int> p(static_cast<std::size_t>(N));
+        for (int i = 0; i < N; ++i)
+            p[static_cast<std::size_t>(i)] = ((s - i) % N + N) % N;
+        R.push_back(std::move(p));
+    }
+    return R;
+}
+
+std::vector<double> dense_eigs(ed::LinearOperator& op) {
+    const std::size_t d = op.dim();
+    Eigen::MatrixXcd H(static_cast<Eigen::Index>(d),
+                       static_cast<Eigen::Index>(d));
+    std::vector<Cx> e(d, Cx(0, 0)), col(d);
+    for (std::size_t j = 0; j < d; ++j) {
+        std::fill(e.begin(), e.end(), Cx(0, 0));
+        e[j] = Cx(1, 0);
+        op.apply(e.data(), col.data(), d);
+        for (std::size_t i = 0; i < d; ++i)
+            H(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j))
+                = col[i];
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(H);
+    std::vector<double> ev(es.eigenvalues().data(),
+                           es.eigenvalues().data() + d);
+    std::sort(ev.begin(), ev.end());
+    return ev;
+}
+
+}  // namespace
+
+TEST_CASE("little-group block factory: tiling, covering, spectra",
+          "[little_group][blocks]") {
+    const int N = 8, n_up = 4;
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up = n_up;
+
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    REQUIRE(!set.blocks.empty());
+    REQUIRE(set.meta.flip_engaged);   // Heisenberg at half filling
+
+    // ---- 4. handle invariants -------------------------------------------
+    std::map<int, std::uint64_t> dim_k0_of_star;
+    for (const auto& s : set.meta.stars) dim_k0_of_star[s.k0] = s.dim_k0;
+    bool any_projected = false;
+    for (const auto& b : set.blocks) {
+        const auto& t = b.tag();
+        REQUIRE(b.op().dim() == t.dim);
+        REQUIRE(b.projected() == (t.irrep >= 0));
+        REQUIRE(b.rep_data().reps.size() == dim_k0_of_star.at(t.k0));
+        any_projected |= b.projected();
+    }
+    REQUIRE(any_projected);   // the D8 ring projects its self-conjugate momenta
+
+    // ---- 1. isotypic tiling per projected star --------------------------
+    for (const auto& s : set.meta.stars) {
+        if (!s.projected) continue;
+        std::uint64_t covered = 0;
+        for (const auto& b : set.blocks) {
+            if (b.tag().k0 != s.k0) continue;
+            covered += b.tag().dim
+                     * static_cast<std::uint64_t>(b.tag().irrep_dim)
+                     * (b.tag().tr_folded ? 2u : 1u);
+        }
+        REQUIRE(covered == s.dim_k0);
+        // strict reduction: no single block as large as the sector
+        for (const auto& b : set.blocks)
+            if (b.tag().k0 == s.k0) REQUIRE(b.tag().dim < s.dim_k0);
+    }
+
+    // ---- 2. global covering ---------------------------------------------
+    std::uint64_t states = 0;
+    for (const auto& b : set.blocks)
+        states += b.tag().dim * b.tag().multiplicity;
+    REQUIRE(states == 70);   // C(8,4)
+    REQUIRE(set.meta.total_dim == 70);
+
+    // ---- 3. block spectra reproduce the engine output -------------------
+    std::vector<double> from_blocks;
+    for (const auto& b : set.blocks) {
+        const auto ev = dense_eigs(b.op());
+        for (double e : ev)
+            for (std::uint64_t r = 0; r < b.tag().multiplicity; ++r)
+                from_blocks.push_back(e);
+    }
+    std::sort(from_blocks.begin(), from_blocks.end());
+
+    const auto spec = ed::solvers::little_group_full_spectrum(
+        *H, A, res, N, opt);
+    const auto ref = spec.expanded();
+    REQUIRE(from_blocks.size() == ref.size());
+    ed_tests::require_eigs_close(from_blocks, ref, ref.size(), 1e-9,
+                                 "block-set vs engine spectrum");
+}
