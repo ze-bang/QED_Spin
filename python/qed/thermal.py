@@ -1282,8 +1282,15 @@ def thermal(
             hdf5_path=h5_path_multi,
             sector_hdf5_paths=sector_hdf5_paths,
             used_sz_decomposition=True,
-            used_symmetry_decomposition=(
-                has_sym and method_enum not in _TPQ_METHODS),
+            # TPQ is NOT carved out here: since the May-2026 SOTA upgrade
+            # every method (incl. mTPQ/cTPQ) feeds the same all-Sz
+            # streaming-symmetry loop above, so the flag is `has_sym`
+            # unconditionally -- matching the sz-not-conserved return site
+            # and the comment at the `p.use_symmetry` assignment. (The old
+            # `method_enum not in _TPQ_METHODS` carve-out was a stale
+            # leftover of the pre-SOTA silent TPQ downgrade: the lane ran
+            # all 66 (n_up, irrep) sectors and then reported False.)
+            used_symmetry_decomposition=bool(has_sym),
             per_sector=per_sector_records,
         )
 

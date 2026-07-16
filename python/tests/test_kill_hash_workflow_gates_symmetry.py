@@ -354,12 +354,11 @@ def test_phase_e2_mtpq_gpu_sym(sym_directory, tmp_path):
 
     res, _ = _time_and_check(go, "mTPQ[sym]")
     assert res is not None
-    # NOTE: ``used_symmetry_decomposition`` is False for mTPQ even when
-    # the per-sector loop ran -- the workflow consumes the streaming-
-    # symmetry binding but the ThermalResult bookkeeping was wired
-    # before mTPQ joined the SOTA upgrade. We rely on wall-time
-    # bounding plus the visible "sector_k_*/ed_results.h5" file
-    # cascade in test output to confirm the symmetry path engaged.
+    # ``used_symmetry_decomposition`` is now truthful for mTPQ too (the
+    # stale pre-SOTA carve-out that reported False while the 66-sector
+    # streaming loop ran was fixed 2026-07-16; pinned by
+    # test_lane_exploitation_matrix).
+    assert getattr(res, "used_symmetry_decomposition", False) is True
     assert hasattr(res, "energy") and np.all(np.isfinite(res.energy))
 
 
