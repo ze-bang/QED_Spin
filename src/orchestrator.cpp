@@ -514,7 +514,17 @@ GroundStateResult solve_on(Backend& be,
         // common num_eigs=1 + compute_vectors=false workflow.
         std::vector<double> evals;
         std::vector<double> evec_coeffs;  // column-major m x m
-        if (opts.compute_vectors) {
+        // GAP 10 fix (2026-07-16): a requested WINDOW (num_eigs > 1) needs
+        // the tridiag eigenvectors even on the eigenvalues-only path --
+        // the per-Ritz residual bound |beta_m| * |z_{m,i}| is free once z
+        // exists, and without it stalled interior Ritz values escaped
+        // into the merged spectrum as plausible-looking garbage (measured:
+        // -2.686 reported where dense says -2.459; NOT a reorth ghost --
+        // K = 1..32 identical). num_eigs == 1 keeps the fast
+        // eigenvalues-only path: the extreme pair is what Lanczos
+        // converges first and the stall detector guards it adequately.
+        const bool need_z = opts.compute_vectors || opts.num_eigs > 1;
+        if (need_z) {
             std::vector<double> weights;
             ed::krylov::detail::solve_tridiag_with_eigenvectors(
                 kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evec_coeffs);
@@ -522,7 +532,29 @@ GroundStateResult solve_on(Backend& be,
             evals = ed::krylov::detail::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
-        const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
+        std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
+        if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
+            const std::size_t m = kres.alpha.size();
+            // beta[0] is the seed norm in this kernel's convention; the
+            // off-diagonal reaching PAST the basis is beta[m] when the
+            // kernel ran to m < dim (0 when it exhausted the space).
+            const double beta_last =
+                (kres.beta.size() > m) ? std::abs(kres.beta[m])
+                                       : (m < geom.local_dim && !kres.beta.empty()
+                                              ? std::abs(kres.beta.back())
+                                              : 0.0);
+            const double bound_tol =
+                std::max(opts.tolerance * 100.0, 1e-8);
+            std::size_t ok = 0;
+            while (ok < n_keep) {
+                const double bound =
+                    beta_last * std::abs(evec_coeffs[(m - 1) + ok * m]);
+                if (bound > bound_tol) break;
+                ++ok;
+            }
+            if (ok == 0) ok = 1;   // the extreme pair is always reported
+            if (ok < n_keep) n_keep = ok;   // converged PREFIX only
+        }
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
 
         // Reconstruct host-side eigenvectors from the kept Lanczos basis

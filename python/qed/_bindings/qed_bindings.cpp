@@ -47,6 +47,7 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
+#include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
 #include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
@@ -800,6 +801,9 @@ PYBIND11_MODULE(_core, m) {
         return stars;
     };
 
+    m.def("have_cuda", [] { return ed::have_cuda(); },
+          "True when this build has CUDA support AND a device is present "
+          "(the same gate the engine's GPU rep-gather consults).");
     m.def("dump_env_gates", [] { return ed::symmetry::dump_env_gates(); },
           "Stage 10b: every symmetry-stack env gate with its live value, "
           "default, and meaning -- paste into bug reports. The X-list in "

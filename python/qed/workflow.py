@@ -1672,10 +1672,17 @@ def _diag_with_symmetry(
     # sector_metadata.json), so resolve here -- the first point where it exists.
     if sector is not None:
         _sid = _resolve_sector_quantum_numbers(info, sector)
-        params.selected_sectors = [_sid]
+        # GAP 9 fix: when the lane-B flip projection engages (n_up = N/2,
+        # flip-symmetric H) the sector set carries EXTENDED indices
+        # (k, +) = k and (k, -) = k + n_raw. Naming a momentum means BOTH
+        # parities -- the same contract the project lane's decoder honours.
+        # filter_sectors silently drops out-of-range ids, so selecting the
+        # partner unconditionally is a no-op when the flip is off.
+        _n_raw = len(info.get("sectors", []) or [])
+        params.selected_sectors = [_sid, _sid + _n_raw]
         if verbose:
             print(f"[qed.solve] sector={list(sector)} -> raw sector index "
-                  f"{_sid}")
+                  f"{_sid} (+ flip partner {_sid + _n_raw} when projected)")
 
     # ------------------------------------------------------------------
     # 2. Materialise operator + symmetry into a temp directory the

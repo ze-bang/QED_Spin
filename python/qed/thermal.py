@@ -1223,7 +1223,13 @@ def thermal(
             # than assuming the two axes coincide -- they only do for a
             # single-generator group.
             if _sector_sid is not None:
-                p.selected_sectors = [int(_sector_sid)]
+                # GAP 9: with the flip projection engaged the sector set
+                # is EXTENDED (k and k + n_raw are the two parities of one
+                # momentum). Select both; filter_sectors drops the partner
+                # silently when the flip is off.
+                _n_raw = len((_tbl or {}).get("sectors", []) or [])
+                p.selected_sectors = [int(_sector_sid),
+                                      int(_sector_sid) + _n_raw]
             for k, v in merged_extra.items():
                 setattr(p, k, v)
             return p
