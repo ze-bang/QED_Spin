@@ -264,6 +264,13 @@ struct LittleGroupGroundState {
     int                                k0     = -1;  ///< extended irrep index
     ed::symmetry::RepSectorData        rd;           ///< the GS sector
     std::vector<std::complex<double>>  vec;          ///< GS in rd's basis
+    /// U2a labels: which isotypic block held the GS (-1 = the plain k0
+    /// block -- either the star declined projection, or the projected
+    /// lift failed its residual guard and the engine fell back to the
+    /// plain re-solve). The vec contract is UNCHANGED either way: a
+    /// rep-basis vector of rd, ready for CrossSectorOrbitObservable.
+    int                                irrep       = -1;
+    int                                flip_parity = -1;
 };
 
 [[nodiscard]] LittleGroupGroundState

@@ -413,6 +413,19 @@ bool LittleGroupBlock::projected() const noexcept {
 bool LittleGroupBlock::gpu_engaged() const noexcept {
     return impl_->hk != nullptr && impl_->hk->gpu_engaged();
 }
+std::vector<std::complex<double>>
+LittleGroupBlock::lift_to_rep(const std::complex<double>* v) const {
+    const std::size_t nrep = impl_->hk->dim();
+    if (!impl_->W) {   // plain block: block coords ARE the rep basis
+        return std::vector<std::complex<double>>(v, v + nrep);
+    }
+    std::vector<std::complex<double>> u(nrep, {0.0, 0.0});
+    const auto& cols = impl_->W->cols;
+    for (std::size_t c = 0; c < cols.size(); ++c)
+        for (const auto& [i, w] : cols[c])
+            u[static_cast<std::size_t>(i)] += w * v[c];
+    return u;
+}
 
 // =============================================================================
 // The engine core: shared by full-spectrum / lowest / thermodynamics through
@@ -1781,7 +1794,7 @@ namespace {
 // (the caller's point_group='full' contract is loud, and there is no
 // cheaper correct fallback for a vector consumer).
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const RepSectorMatVec& hk, int dense_max_dim)
+solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
 {
     const std::size_t n = hk.dim();
     if (n == 0) throw std::runtime_error("little_group: empty GS sector");
@@ -1864,29 +1877,90 @@ LittleGroupGroundState little_group_ground_state(
                         cx, tr_on);
     const auto stars = star_partition(cx, tr_on);
 
-    int    best_k0 = -1;
-    double best_e  = 0.0;
+    // U2a: the lowest-1 probe walk runs per isotypic BLOCK (dims m_sigma,
+    // strictly below dim_k0 on projected stars) instead of per plain
+    // momentum sector -- the block factory's reduction now serves the
+    // vector path too. Ties (degenerate GS straddling blocks) keep the
+    // first block encountered; the residual guard below is basis-exact
+    // either way.
+    int         best_k0  = -1;
+    std::size_t best_blk = 0;
+    double      best_e   = 0.0;
     for (const auto& [k0, members] : stars) {
-        auto rd = build_k_sector(cx, k0, opt.n_up);
-        if (rd.reps.empty()) continue;
-        RepSectorMatVec hk(op, std::move(rd));
-        const auto ev = solve_block_lowest(hk, 1, opt.dense_max_dim);
-        if (!ev.empty() && (best_k0 < 0 || ev[0] < best_e)) {
-            best_e  = ev[0];
-            best_k0 = k0;
+        StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
+                                         false, nullptr, nullptr, nullptr);
+        if (!sb.hk) continue;
+        for (std::size_t bi = 0; bi < sb.blocks.size(); ++bi) {
+            const auto& impl = *sb.blocks[bi];
+            const ed::matvec::MatVecOperator& mv =
+                impl.pop ? static_cast<const ed::matvec::MatVecOperator&>(
+                               *impl.pop)
+                         : static_cast<const ed::matvec::MatVecOperator&>(
+                               *impl.hk);
+            const auto ev = solve_block_lowest(mv, 1, opt.dense_max_dim);
+            if (!ev.empty() && (best_k0 < 0 || ev[0] < best_e)) {
+                best_e   = ev[0];
+                best_k0  = k0;
+                best_blk = bi;
+            }
         }
     }
     if (best_k0 < 0)
         throw std::runtime_error("little_group_ground_state: no non-empty "
                                  "momentum sector in this subspace.");
 
+    // Rebuild the winning star and solve the winning block WITH its
+    // eigenvector; lift u = W_sigma v back to the rep basis.
+    StarBuild win = build_star_blocks(
+        op, cx, tr_on, best_k0, stars.at(best_k0), opt,
+        false, nullptr, nullptr, nullptr);
+    if (!win.hk || best_blk >= win.blocks.size())
+        throw std::runtime_error("little_group_ground_state: winning star "
+                                 "rebuild mismatch (internal)");
+    LittleGroupBlock block(win.blocks[best_blk]);
+
     LittleGroupGroundState gs;
     gs.k0 = best_k0;
-    gs.rd = build_k_sector(cx, best_k0, opt.n_up);
-    RepSectorMatVec hk(op, gs.rd);          // copies rd; gs.rd stays valid
-    auto [e0, u]   = solve_gs_vector(hk, opt.dense_max_dim);
-    gs.energy      = e0;
-    gs.vec         = std::move(u);
+    gs.rd = block.rep_data();               // copy; blocks may be dropped
+    bool lifted = false;
+    if (block.projected()) {
+        auto [e0, v] = solve_gs_vector(block.op(), opt.dense_max_dim);
+        auto u = block.lift_to_rep(v.data());
+        // Residual guard IN THE REP BASIS: the lift must reproduce an
+        // eigenvector of the full momentum-sector H_k0, not merely of
+        // the sandwich. A failed guard falls back to the plain re-solve
+        // below (correct, merely less reduced) -- never ship an
+        // unguarded vector.
+        const std::size_t n = u.size();
+        std::vector<Complex> hu(n);
+        win.hk->apply(u.data(), hu.data(), n);
+        double num = 0.0, den = 1e-300;
+        for (std::size_t i = 0; i < n; ++i) {
+            num += std::norm(hu[i] - e0 * u[i]);
+            den += std::norm(u[i]);
+        }
+        if (std::sqrt(num / den) <= 1e-8) {
+            const double inv = 1.0 / std::sqrt(den);
+            for (auto& c : u) c *= inv;
+            gs.energy      = e0;
+            gs.vec         = std::move(u);
+            gs.irrep       = block.tag().irrep;
+            gs.flip_parity = block.tag().flip_parity;
+            lifted = true;
+        } else {
+            std::fprintf(stderr,
+                "[little_group] GS lift residual %.3e > 1e-8 at k0=%d "
+                "irrep=%d -- falling back to the plain sector re-solve\n",
+                std::sqrt(num / den), best_k0, block.tag().irrep);
+        }
+    }
+    if (!lifted) {
+        auto [e0, u]   = solve_gs_vector(*win.hk, opt.dense_max_dim);
+        gs.energy      = e0;
+        gs.vec         = std::move(u);
+        gs.irrep       = -1;
+        gs.flip_parity = block.tag().flip_parity;
+    }
     return gs;
 }
 

@@ -99,6 +99,12 @@ public:
     [[nodiscard]] bool projected() const noexcept;
     /// Truthful post-apply report from the star's H_{k0} matvec.
     [[nodiscard]] bool gpu_engaged() const noexcept;
+    /// U2a: lift a block-coordinate vector to the momentum sector's rep
+    /// basis, u = W_sigma v (identity copy for plain blocks). `v` must
+    /// have tag().dim entries; the result has rep_data().reps.size().
+    /// W's columns are orthonormal (SVD), so norms are preserved.
+    [[nodiscard]] std::vector<std::complex<double>>
+    lift_to_rep(const std::complex<double>* v) const;
 
 private:
     std::shared_ptr<Impl> impl_;

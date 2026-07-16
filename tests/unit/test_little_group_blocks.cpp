@@ -165,3 +165,62 @@ TEST_CASE("little-group block factory: tiling, covering, spectra",
     ed_tests::require_eigs_close(from_blocks, ref, ref.size(), 1e-9,
                                  "block-set vs engine spectrum");
 }
+
+TEST_CASE("U2a: lift_to_rep turns block eigenvectors into H_k0 eigenvectors",
+          "[little_group][blocks][lift]") {
+    const int N = 8, n_up = 4;
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up      = n_up;
+    opt.spin_flip = 0;   // raw sectors: the GS-DSSF contract (9d v1)
+
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    bool tested_projected = false;
+    for (const auto& b : set.blocks) {
+        if (!b.projected()) continue;
+        tested_projected = true;
+        // Dense GS of the isotypic block...
+        const std::size_t d = b.op().dim();
+        Eigen::MatrixXcd Hb(static_cast<Eigen::Index>(d),
+                            static_cast<Eigen::Index>(d));
+        std::vector<Cx> e(d, Cx(0, 0)), col(d);
+        for (std::size_t j = 0; j < d; ++j) {
+            std::fill(e.begin(), e.end(), Cx(0, 0));
+            e[j] = Cx(1, 0);
+            b.op().apply(e.data(), col.data(), d);
+            for (std::size_t i = 0; i < d; ++i)
+                Hb(static_cast<Eigen::Index>(i),
+                   static_cast<Eigen::Index>(j)) = col[i];
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hb);
+        const double E0 = es.eigenvalues()(0);
+        std::vector<Cx> v(d);
+        for (std::size_t i = 0; i < d; ++i)
+            v[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
+        // ...lifted must be an eigenvector of the FULL momentum-sector
+        // H_k0 at the same eigenvalue (norm-preserving: W orthonormal).
+        auto u = b.lift_to_rep(v.data());
+        const std::size_t n = u.size();
+        REQUIRE(n == b.rep_data().reps.size());
+        // Norm preservation (W's columns are orthonormal)...
+        double norm2 = 0.0;
+        for (const auto& c : u) norm2 += std::norm(c);
+        REQUIRE(std::abs(norm2 - 1.0) < 1e-10);
+        // ...and the REAL claim: u is an eigenvector of the FULL
+        // momentum-sector H_k0 at the same eigenvalue -- the same
+        // residual the engine's GS guard enforces.
+        auto hk = ed::solvers::make_rep_sector_matvec(*H, b.rep_data());
+        std::vector<Cx> hu(n);
+        hk->apply(u.data(), hu.data(), n);
+        double num = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+            num += std::norm(hu[i] - E0 * u[i]);
+        REQUIRE(std::sqrt(num) < 1e-9);
+        break;
+    }
+    REQUIRE(tested_projected);
+}
