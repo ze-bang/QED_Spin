@@ -736,7 +736,8 @@ PYBIND11_MODULE(_core, m) {
                       bool use_gpu = false, int spin_flip = -1,
                       int time_reversal = -1,
                       const std::vector<int>& only_k0 = {},
-                      bool plan_only = false) {
+                      bool plan_only = false,
+                      const std::vector<int>& only_irrep = {}) {
         ed::solvers::LittleGroupOptions o;
         o.n_up          = n_up;
         o.sz_parity     = sz_parity;
@@ -745,6 +746,7 @@ PYBIND11_MODULE(_core, m) {
         o.time_reversal = time_reversal;
         o.only_k0       = only_k0;
         o.plan_only     = plan_only;
+        o.only_irrep    = only_irrep;
 #ifdef WITH_CUDA
         o.use_gpu       = use_gpu;
 #else
@@ -806,12 +808,13 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& residue_perms,
              int n_up, int sz_parity, bool use_gpu, int spin_flip,
              int time_reversal, int dense_max_dim,
-             const std::vector<int>& only_k0, bool plan_only) {
+             const std::vector<int>& only_k0, bool plan_only,
+             const std::vector<int>& only_irrep) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto s = ed::solvers::little_group_full_spectrum(
                   op, abelian_group, residue_perms, n_sites,
                   lg_opts(n_up, sz_parity, dense_max_dim, use_gpu, spin_flip,
-                          time_reversal, only_k0, plan_only));
+                          time_reversal, only_k0, plan_only, only_irrep));
               py::dict d;
               d["eigenvalues"]    = s.expanded();
               d["block_values"]   = s.eigenvalues;
@@ -830,6 +833,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("dense_max_dim") = 4096,
           py::arg("only_k0") = std::vector<int>{},
           py::arg("plan_only") = false,
+          py::arg("only_irrep") = std::vector<int>{},
           "Full spectrum via the FACTORIZED little-co-group reduction "
           "(one momentum per star, per-irrep blocks inside the star "
           "representative's matrix-free k-sector). only_k0=[...] solves ONLY "
@@ -868,7 +872,8 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& residue_perms,
              int k, int n_up, int sz_parity, int dense_max_dim,
              int spin_flip, int time_reversal,
-             const std::vector<int>& only_k0) {
+             const std::vector<int>& only_k0,
+             const std::vector<int>& only_irrep) {
               // Stage 9f: the labeled twin of little_group_lowest_eigenvalues.
               // Aligned per-eigenvalue arrays (expanded by multiplicity,
               // sorted ascending, truncated to k): momentum k_raw is the star
@@ -880,7 +885,8 @@ PYBIND11_MODULE(_core, m) {
               const auto s = ed::solvers::little_group_lowest_spectrum(
                   op, abelian_group, residue_perms, n_sites, k,
                   lg_opts(n_up, sz_parity, dense_max_dim, false,
-                          spin_flip, time_reversal, only_k0));
+                          spin_flip, time_reversal, only_k0, false,
+                          only_irrep));
               std::vector<std::size_t> order(s.eigenvalues.size());
               std::iota(order.begin(), order.end(), std::size_t{0});
               std::sort(order.begin(), order.end(),
@@ -926,6 +932,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("dense_max_dim") = 64,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           py::arg("only_k0") = std::vector<int>{},
+          py::arg("only_irrep") = std::vector<int>{},
           "Stage 9f: lowest-k eigenvalues WITH aligned per-eigenvalue "
           "quantum-number labels (k_raw = star representative's momentum "
           "irrep, little-group irrep index + dimension, flip parity, "

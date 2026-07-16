@@ -84,6 +84,24 @@ struct LittleGroupOptions {
     /// star. The env var still wins when set, so existing job scripts keep
     /// working.
     std::vector<int> only_k0;
+    /// Solve ONLY these little-co-group irreps (indices into the star's own
+    /// isotypic decomposition -- the same index ``LittleGroupLabel::irrep``
+    /// reports, and the row index of ``LittleGroupStarInfo::little_characters``).
+    /// Empty = every irrep, the default.
+    ///
+    /// Only meaningful together with ``only_k0``: the irrep index is PER STAR
+    /// (decompose_irreps orders each star's decomposition independently), so
+    /// "irrep 1" means different things in different stars. Callers name an
+    /// irrep by its CHARACTER and resolve it to an index against the plan's
+    /// published table -- never by assuming an index convention.
+    ///
+    /// TR INTERACTION: when this is non-empty the sigma <-> sigma* pairing is
+    /// disabled. That fold solves ONE member of a conjugate pair and reports
+    /// the pair's doubled multiplicity under the earlier member's label, so a
+    /// caller who named the LATER member would get nothing back. Naming one
+    /// irrep forfeits a 2x fold that is irrelevant next to the |P_k| the
+    /// projection already bought.
+    std::vector<int> only_irrep;
     /// Build every star's sector and report it (``stars`` + the full
     /// ``irrep_characters`` table), solving NOTHING. The programmatic form of
     /// ED_SYM_LG_ONLY_K0="plan".

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 __all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane",
-           "decode_star_for_sector"]
+           "decode_star_for_sector", "decode_irrep_for_character"]
 
 _GROUP_CLOSURE_CAP = 4096   # A (and the closed full group) must stay enumerable
 
@@ -230,6 +230,62 @@ def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
             return int(st["k0"]), k_raw
     return (f"the decoded irrep k_raw={k_raw} is in no star -- the star walk "
             "did not cover it")
+
+
+def decode_irrep_for_character(star, character):
+    """Little-co-group irrep index for a requested CHARACTER.
+
+    ``star`` is one entry of the plan's ``stars`` list (it carries
+    ``little_elems`` / ``little_characters`` / ``little_irrep_dims``).
+
+    ``character`` names the irrep physically, as ``{residue_index: value}`` --
+    e.g. ``{0: +1}`` is "the irrep on which residue 0 (say the reflection) acts
+    with character +1". Use ``-1`` as the key for the identity. Only the
+    elements you name are matched, so a partial spec is fine as long as it
+    picks out exactly one irrep.
+
+    Returns ``(irrep_index, dim)`` or a ``str`` decline reason.
+
+    Why by character and not by index: ``LittleGroupLabel::irrep`` is an index
+    into decompose_irreps' own per-star ordering. Naming an irrep by that index
+    would hand callers an engine-internal convention -- the same trap as
+    reading ``k_raw`` as a momentum (on a 12-ring k_raw=8 is q=0) or ``sector=``
+    as a raw index. The character IS the physics, so it is what callers name.
+    """
+    elems = [int(e) for e in (star.get("little_elems") or [])]
+    chars = [list(map(complex, row))
+             for row in (star.get("little_characters") or [])]
+    dims = [int(d) for d in (star.get("little_irrep_dims") or [])]
+    if not chars:
+        return ("this star was not projected (its little co-group is trivial, "
+                "or the decomposition declined) -- it has no irreps to name")
+
+    try:
+        want = {int(k): complex(v) for k, v in dict(character).items()}
+    except Exception:
+        return ("irrep= must be a {residue_index: character} mapping "
+                "(-1 keys the identity)")
+    if not want:
+        return "irrep= named no elements, so it selects nothing"
+
+    cols = {}
+    for e_key in want:
+        if e_key not in elems:
+            return (f"element {e_key} is not in this star's little co-group "
+                    f"(its elements are {elems}, -1 = identity)")
+        cols[e_key] = elems.index(e_key)
+
+    hits = [s for s, row in enumerate(chars)
+            if all(abs(row[cols[e]] - v) < 1e-8 for e, v in want.items())]
+    if not hits:
+        table = {s: [complex(round(x.real, 6), round(x.imag, 6)) for x in row]
+                 for s, row in enumerate(chars)}
+        return (f"no irrep of this star has character {want} on elements "
+                f"{elems}. The table is {table}")
+    if len(hits) > 1:
+        return (f"character {want} does not pick out a unique irrep "
+                f"(matches {hits}) -- name more elements")
+    return hits[0], dims[hits[0]]
 
 
 def _pg_key(point_group) -> str:

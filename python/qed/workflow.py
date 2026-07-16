@@ -22,7 +22,8 @@ from typing import Any, Iterable, Optional, Sequence, Union
 
 from . import _core as _core
 from .point_group_routing import (resolve_projection_lane, split_nonabelian,
-                                  decode_star_for_sector)
+                                  decode_star_for_sector,
+                                  decode_irrep_for_character)
 from ._core import (  # type: ignore[attr-defined]
     DiagonalizationMethod,
     EDParameters,
@@ -181,6 +182,7 @@ def solve(
     device: Optional[str] = None,
     symmetry: SymmetryArg = None,
     sector: Optional[Sequence[int]] = None,
+    irrep: Optional[dict] = None,
     sz: Optional[int] = None,
     auto_sz: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
@@ -413,6 +415,13 @@ def solve(
             spin_flip=spin_flip, time_reversal=time_reversal,
             point_group=point_group, lattice=lattice, verbose=verbose)
 
+    if irrep is not None and sector is None:
+        raise ValueError(
+            "qed.solve: irrep= names a LITTLE-CO-GROUP irrep, which is defined "
+            "per momentum star -- decompose_irreps orders each star's "
+            "decomposition independently, so 'irrep X' means different things "
+            "in different stars. Pass sector= (the momentum) alongside it.")
+
     fixed_sz_input = isinstance(H, FixedSzOperator)
     num_sites = int(H.num_sites)
     base_dim = int(H.dimension)  # full Hilbert dim, even for FixedSz
@@ -467,8 +476,8 @@ def solve(
             _ri = solve(
                 H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
                 compute_eigenvectors=compute_eigenvectors, solver=solver,
-                device=device, symmetry=None, sector=sector, sz=_nu_i,
-                auto_sz=False, spin_flip=spin_flip,
+                device=device, symmetry=None, sector=sector, irrep=irrep,
+                sz=_nu_i, auto_sz=False, spin_flip=spin_flip,
                 time_reversal=time_reversal, point_group=point_group,
                 lattice=lattice, output_dir=output_dir,
                 max_iterations=max_iterations, block_size=block_size,
@@ -690,6 +699,7 @@ def solve(
             _nu = int(sz) if isinstance(sz, int) else -1
             _nu_sweep = None       # magnetisation sectors to sweep + merge
             _only_k0: list[int] = []   # star restriction for a named momentum
+            _only_irrep: list[int] = []  # isotypic restriction for a named irrep
             _sp = -1
             if _sz_parity_str is not None:
                 _sp = int(_sz_parity_str)
@@ -750,6 +760,27 @@ def solve(
                     print(f"[qed.solve] sector={list(sector)} -> irrep "
                           f"k_raw={_kraw}, star k0={_k0}: solving that star "
                           f"only (projected).")
+                if irrep is not None:
+                    # Name the little-co-group irrep BY ITS CHARACTER and
+                    # resolve it against THIS star's published table. The
+                    # index is per-star (decompose_irreps orders each star
+                    # independently), which is exactly why irrep= requires
+                    # sector= and why the caller never passes an index.
+                    _st = next((x for x in _plan["stars"]
+                                if int(x["k0"]) == _k0), None)
+                    if _st is None:
+                        raise RuntimeError(
+                            f"qed.solve: star k0={_k0} vanished from the plan.")
+                    _idec = decode_irrep_for_character(_st, irrep)
+                    if isinstance(_idec, str):
+                        raise ValueError(
+                            f"qed.solve: irrep={irrep} could not be resolved "
+                            f"on star k0={_k0}: {_idec}")
+                    _ii, _idim = _idec
+                    _only_irrep = [_ii]
+                    if verbose:
+                        print(f"[qed.solve] irrep={irrep} -> index {_ii} "
+                              f"(d={_idim}) on star k0={_k0}.")
             try:
                 def _lg_block(**kw):
                     # Stage 10c: both paths return LABELED rows
@@ -765,7 +796,7 @@ def solve(
                         d = dict(_core.little_group_full_spectrum(
                             op_to_use, _A, _res,
                             spin_flip=_sf, time_reversal=_tr,
-                            only_k0=_only_k0, **kw))
+                            only_k0=_only_k0, only_irrep=_only_irrep, **kw))
                         rows = []
                         for e, m, kk, fp, ir, dd in zip(
                                 d["block_values"], d["multiplicities"],
@@ -778,7 +809,7 @@ def solve(
                     d = dict(_core.little_group_lowest_eigenvalues_labeled(
                         op_to_use, _A, _res, k=_k,
                         spin_flip=_sf, time_reversal=_tr,
-                        only_k0=_only_k0, **kw))
+                        only_k0=_only_k0, only_irrep=_only_irrep, **kw))
                     rows = [(float(e), kk, fp, ir, dd, m, sub, bool(cv))
                             for e, kk, fp, ir, dd, m, cv in zip(
                                 d["eigenvalues"], d["k_raw"],

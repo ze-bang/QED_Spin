@@ -532,3 +532,83 @@ def test_z2_cogroup_table_is_the_textbook_one():
                       for r in st["little_characters"])
         assert np.allclose(rows, [[1.0, -1.0], [1.0, 1.0]], atol=1e-8), \
             f"got {rows}"
+
+
+# ---------------------------------------------------------------------------
+# irrep= : name a little-co-group irrep BY ITS CHARACTER
+# ---------------------------------------------------------------------------
+
+_LG = dict(sz=6, point_group="full", spin_flip="off", time_reversal="off",
+           device="cpu", verbose=False)
+
+
+def test_irrep_by_character_tiles_the_star():
+    """The named irreps must PARTITION the star, not approximate it.
+
+    q=0 on a D12 ring is self-conjugate, so its co-group is Z2 = {identity,
+    reflection} and the star splits into chi(refl)=+1 and chi(refl)=-1. Merging
+    the two must reproduce the whole star's spectrum exactly -- that is what
+    makes each one a real sub-block rather than a filtered view.
+    """
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    whole = np.sort(np.asarray(qed.solve(
+        H, num_eigenvalues=8, sector=[0], symmetry=gen, **_LG).eigenvalues))
+    sym = np.asarray(qed.solve(H, num_eigenvalues=8, sector=[0],
+                               irrep={0: +1}, symmetry=gen, **_LG).eigenvalues)
+    anti = np.asarray(qed.solve(H, num_eigenvalues=8, sector=[0],
+                                irrep={0: -1}, symmetry=gen, **_LG).eigenvalues)
+    merged = np.sort(np.concatenate([sym, anti]))[:8]
+    assert np.allclose(merged, whole[:8], atol=1e-8), (
+        f"the irreps must tile the star: merged {merged} vs whole {whole[:8]}")
+    # and they must actually be different blocks
+    assert not np.allclose(np.sort(sym)[:4], np.sort(anti)[:4], atol=1e-6)
+
+
+def test_j1j2_ring_ground_state_is_reflection_symmetric():
+    """Physics, not bookkeeping: the q=0 GS of this ring carries chi(refl)=+1,
+    so the symmetric irrep must hold it and the antisymmetric one must not."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    e_star = float(qed.solve(H, num_eigenvalues=1, sector=[0], symmetry=gen,
+                             **_LG).eigenvalues[0])
+    e_sym = float(qed.solve(H, num_eigenvalues=1, sector=[0], irrep={0: +1},
+                            symmetry=gen, **_LG).eigenvalues[0])
+    e_anti = float(qed.solve(H, num_eigenvalues=1, sector=[0], irrep={0: -1},
+                             symmetry=gen, **_LG).eigenvalues[0])
+    assert e_sym == pytest.approx(e_star, abs=1e-8)
+    assert e_anti > e_star + 1e-3
+
+
+def test_irrep_requires_sector():
+    """The irrep index is PER STAR, so naming an irrep without naming the
+    momentum is ill-posed -- it must raise rather than pick a star."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="per momentum star|sector="):
+        qed.solve(H, num_eigenvalues=1, irrep={0: +1}, symmetry=gen, **_LG)
+
+
+def test_irrep_character_that_matches_nothing_raises_with_the_table():
+    """A character no irrep carries must be refused -- and the message has to
+    show the actual table, or the caller cannot fix their request."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="no irrep of this star|table"):
+        qed.solve(H, num_eigenvalues=1, sector=[0], irrep={0: 0.5},
+                  symmetry=gen, **_LG)
+
+
+def test_irrep_on_a_star_with_a_trivial_cogroup_raises():
+    """Generic momenta have no co-group (the reflection maps k -> -k rather
+    than fixing it), so there is nothing to name and it must say so."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="not projected|trivial"):
+        qed.solve(H, num_eigenvalues=1, sector=[1], irrep={0: +1},
+                  symmetry=gen, **_LG)

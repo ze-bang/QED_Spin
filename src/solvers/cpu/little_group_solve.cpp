@@ -1286,7 +1286,13 @@ LittleGroupSpectrum run_little_group(
                     // isospectral. Any doubt (complex phase, size mismatch)
                     // => solve both blocks (correctness never depends on it).
                     std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
-                    if (tr_on) {
+                    // opt.only_irrep disables the pairing: the fold solves ONE
+                    // member of a conjugate pair and reports the pair's doubled
+                    // multiplicity under the EARLIER member's label, so a
+                    // caller who named the later member would get nothing back.
+                    // Naming one irrep forfeits a 2x fold that is irrelevant
+                    // beside the |P_k| the projection already bought.
+                    if (tr_on && opt.only_irrep.empty()) {
                         bool sector_real = true;
                         for (const Complex& c : rdr.characters)
                             if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
@@ -1323,6 +1329,11 @@ LittleGroupSpectrum run_little_group(
                     if (covered == rdr.reps.size()) {
                         projected = true;
                         for (int ii = 0; ii < nIr; ++ii) {
+                            if (!opt.only_irrep.empty()
+                                && std::find(opt.only_irrep.begin(),
+                                             opt.only_irrep.end(), ii)
+                                   == opt.only_irrep.end())
+                                continue;   // caller named other irreps
                             auto& W = Ws[static_cast<std::size_t>(ii)];
                             if (W.cols.empty()) continue;
                             const int d =
@@ -1475,7 +1486,8 @@ void check_sum_rule(const LittleGroupSpectrum& out, int n_sites,
         // covering bug, so it must still fire for every unrestricted call.
         const bool restricted =
             std::getenv("ED_SYM_LG_ONLY_K0") != nullptr
-            || !opt.only_k0.empty() || opt.plan_only;
+            || !opt.only_k0.empty() || !opt.only_irrep.empty()
+            || opt.plan_only;
         if (restricted) {
             std::fprintf(stderr,
                 "[little_group] sum rule SKIPPED: star filter active "
