@@ -268,6 +268,38 @@ class ThermalSectorEntry:
     weight: int = 1
 
 
+def _thermal_result_from_block_lane(out: dict, method) -> "ThermalResult":
+    """Assemble a ThermalResult from _core.little_group_thermal output.
+    Shared by the in-memory (U1b) and directory (U4a) block-lane routes.
+    The curves are the COMBINED deliverable; per-block curves stay
+    engine-side until a consumer needs them -- the per_sector entries
+    carry the structural contract (n_up, block dim, recombination
+    weight)."""
+    per = [ThermalSectorEntry(
+               n_up=int(out["block_n_up"][i]),
+               sector_dim=int(out["block_dim"][i]),
+               temperatures=np.asarray(out["temperatures"], dtype=float),
+               energy=np.asarray([], dtype=float),
+               specific_heat=np.asarray([], dtype=float),
+               entropy=np.asarray([], dtype=float),
+               free_energy=np.asarray([], dtype=float),
+               weight=int(out["block_weight"][i]))
+           for i in range(len(out["block_dim"]))]
+    _E = np.asarray(out["energy"], dtype=float)
+    return ThermalResult(
+        temperatures=np.asarray(out["temperatures"], dtype=float),
+        energy=_E,
+        specific_heat=np.asarray(out["specific_heat"], dtype=float),
+        entropy=np.asarray(out["entropy"], dtype=float),
+        free_energy=np.asarray(out["free_energy"], dtype=float),
+        method=str(method),
+        ground_state_energy=float(out["ground_state_energy"]),
+        used_sz_decomposition=True,
+        used_symmetry_decomposition=True,
+        per_sector=per,
+    )
+
+
 @dataclass
 class ThermalResult:
     """Return type of :func:`qed.thermal`.
@@ -747,36 +779,7 @@ def thermal(
                       f"(U1b): {len(out['block_dim'])} blocks, "
                       f"projected_any={out['projected_any']}, "
                       f"max block dim={max(out['block_dim'])}.")
-            _E = np.asarray(out["energy"], dtype=float)
-            # Per-block structure entries. The curves are the COMBINED
-            # deliverable on this lane; per-block curves stay engine-side
-            # (LittleGroupThermalResult::per_block) until a consumer needs
-            # them -- the entries carry the structural contract (n_up,
-            # block dim, recombination weight).
-            per = [ThermalSectorEntry(
-                       n_up=int(out["block_n_up"][i]),
-                       sector_dim=int(out["block_dim"][i]),
-                       temperatures=np.asarray(out["temperatures"],
-                                               dtype=float),
-                       energy=np.asarray([], dtype=float),
-                       specific_heat=np.asarray([], dtype=float),
-                       entropy=np.asarray([], dtype=float),
-                       free_energy=np.asarray([], dtype=float),
-                       weight=int(out["block_weight"][i]))
-                   for i in range(len(out["block_dim"]))]
-            return ThermalResult(
-                temperatures=np.asarray(out["temperatures"], dtype=float),
-                energy=_E,
-                specific_heat=np.asarray(out["specific_heat"],
-                                         dtype=float),
-                entropy=np.asarray(out["entropy"], dtype=float),
-                free_energy=np.asarray(out["free_energy"], dtype=float),
-                method=str(method),
-                ground_state_energy=float(out["ground_state_energy"]),
-                used_sz_decomposition=True,
-                used_symmetry_decomposition=True,
-                per_sector=per,
-            )
+            return _thermal_result_from_block_lane(out, method)
         elif verbose:
             print(f"[qed.thermal] projection declined ({lane.reason}); "
                   f"abelian sector lane.")
@@ -1001,6 +1004,67 @@ def thermal(
                 f"qed.thermal: Sz window [{lo}, {hi}] must lie in "
                 f"[0, {N}]."
             )
+
+    # ------------------------------------------------------------------
+    # 2b. U4a: the directory form rides the SAME block lane as the
+    #     in-memory form. The directory's own automorphisms.json is the
+    #     full group; split_nonabelian carves it into (abelian core,
+    #     residues) exactly like an explicit generator list. Guards keep
+    #     every contract the block lane cannot yet honour on the abelian
+    #     loop instead:
+    #       * ThreeBodyG.dat: the Python-side loader above reads only
+    #         Trans/InterAll, so H_op would be INCOMPLETE -- decline.
+    #       * output_dir / probe_betas: per-sector files and TPQ
+    #         snapshots are flat-pool deliverables -- decline.
+    #       * sector= or a partial Sz window: the filtering loop serves
+    #         those -- decline.
+    # ------------------------------------------------------------------
+    if (is_directory and has_sym and sector is None
+            and isinstance(point_group, str)
+            and point_group.lower() == "auto"
+            and not output_dir and not probe_betas
+            and str(method).upper() in ("FTLM", "LTLM", "MTPQ", "OFTLM")
+            and not os.path.exists(os.path.join(directory, "ThreeBodyG.dat"))
+            and (not sz_conserved or (lo == 0 and hi == N))):
+        _autos_path = os.path.join(sym_dir, "automorphisms.json")
+        _autos = None
+        if os.path.exists(_autos_path):
+            import json as _json
+            try:
+                with open(_autos_path) as f:
+                    _cand = _json.load(f)
+                if (isinstance(_cand, list) and _cand
+                        and all(isinstance(p, list) and len(p) == N
+                                and sorted(p) == list(range(N))
+                                for p in _cand)):
+                    _autos = _cand
+            except Exception:
+                _autos = None
+        if _autos is not None:
+            from .point_group_routing import resolve_projection_lane
+            lane = resolve_projection_lane(
+                _autos, point_group="auto", consumer="thermal",
+                eigenvalues_only=True, method=str(method), verbose=verbose)
+            if lane.mode == "project":
+                out = dict(_core.little_group_thermal(
+                    H_op, lane.A, lane.residues, method=str(method),
+                    t_min=float(T_min), t_max=float(T_max),
+                    num_t=int(num_T), num_samples=int(num_samples),
+                    krylov_dim=int(krylov_dim) if krylov_dim else 100,
+                    random_seed=int(random_seed) if random_seed else 0,
+                    use_gpu=_use_gpu,
+                    spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
+                    time_reversal=_sym_toggle_int(time_reversal,
+                                                  "time_reversal")))
+                if verbose:
+                    print(f"[qed.thermal] directory -> little-group "
+                          f"SAMPLING lane (U4a): "
+                          f"{len(out['block_dim'])} blocks, "
+                          f"projected_any={out['projected_any']}.")
+                return _thermal_result_from_block_lane(out, method)
+            elif verbose:
+                print(f"[qed.thermal] directory projection declined "
+                      f"({lane.reason}); flat-pool sector lane.")
 
     # ------------------------------------------------------------------
     # 3a. Directory form -- per-Sz dispatch through the C++ dispatcher

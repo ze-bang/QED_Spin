@@ -490,6 +490,44 @@ def test_thermal_true_sampling_path_in_blocks(model, monkeypatch):
     np.testing.assert_allclose(np.asarray(tr.energy), Eref, rtol=0.15)
 
 
+def test_thermal_directory_form_rides_the_block_lane(model, tmp_path):
+    """U4a: a DIRECTORY with a full automorphism list must take the same
+    block lane as the in-memory form -- same block structure, same
+    covering, dense-exact E(T). (The directory's automorphisms.json is
+    the group; split_nonabelian carves it.)"""
+    import json
+    name, bonds, H, gens = model
+    from qed.workflow import (_write_operator_directory,
+                              _write_symmetry_directory,
+                              _normalize_symmetry_info)
+    d = str(tmp_path / "dir")
+    import os
+    os.makedirs(d, exist_ok=True)
+    _write_operator_directory(H, d)
+    _write_symmetry_directory(d, _normalize_symmetry_info(H, gens))
+    # the tempdir writer stores only the abelian clique; give the
+    # directory the FULL group (clique closure + residues) like a real
+    # nauty-generated automorphism_results/ carries.
+    full = [list(g) for g in _close([list(g) for g in gens.generators], N)]
+    full += [list(p) for p in (gens.star_perms or [])]
+    with open(os.path.join(d, "automorphism_results",
+                           "automorphisms.json"), "w") as f:
+        json.dump(full, f)
+    T = np.linspace(0.5, 2.0, 3)
+    tr = qed.thermal(d, num_sites=N, method="FTLM", T_min=float(T[0]),
+                     T_max=float(T[-1]), num_T=len(T), num_samples=2,
+                     use_symmetry_if_available=True, verbose=False)
+    assert tr.used_symmetry_decomposition
+    assert any(e.weight > 1 for e in tr.per_sector), (
+        f"[{name}] directory thermal did not project (flat-pool lane?)")
+    assert sum(e.sector_dim * e.weight for e in tr.per_sector) == 1 << N
+    Hd = _dense(bonds)
+    ev = np.linalg.eigvalsh(Hd)
+    Eref = [float((ev * np.exp(-(ev - ev[0]) / t)).sum()
+                  / np.exp(-(ev - ev[0]) / t).sum()) for t in T]
+    np.testing.assert_allclose(np.asarray(tr.energy), Eref, atol=1e-6)
+
+
 # ===========================================================================
 # 5. Combination sweep: dims match theory under every toggle combo
 # ===========================================================================
