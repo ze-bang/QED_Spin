@@ -11,7 +11,7 @@ star-folding solve-count reduction.
 
 Lanes pinned here (N=8 ring, G = D8, |G| = 16, irrep dims {1, 2}):
   * qed.solve(point_group="full")    -- lowest-k incl. degeneracies;
-  * qed.thermal(point_group="full")  -- exact canonical E(T)/C(T);
+  * qed.thermal(method="exact")      -- exact canonical E(T)/C(T);
   * qed.spectral(point_group="full") -- GS DSSF vs the dense Lehmann sum;
   * qed.full_spectrum                -- already routes to the same SAB
                                         engine (pinned in
@@ -78,9 +78,10 @@ def test_thermal_full_group_exact(dense):
     _, w, _ = dense
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
-    t = qed.thermal(H, method="FTLM", T_min=0.3, T_max=4.0, num_T=6,
-                    symmetry=gen, point_group="full", device="cpu",
-                    verbose=False)
+    # U4 semantic cleanup: exact per-block thermodynamics is a METHOD
+    # (method="exact"); point_group is pure routing.
+    t = qed.thermal(H, method="exact", T_min=0.3, T_max=4.0, num_T=6,
+                    symmetry=gen, device="cpu", verbose=False)
     temps = np.asarray(t.temperatures)
     E = np.asarray(t.energy)
     for i, T in enumerate(temps):

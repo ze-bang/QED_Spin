@@ -662,8 +662,76 @@ def thermal(
                           sz_min=N//2 - 1, sz_max=N//2 + 1)
     """
     _all_params = dict(locals())   # capture every parameter for the symmetry recursion
-    method_enum = _coerce_method(method)
     is_directory = isinstance(H, (str, os.PathLike))
+
+    # ------------------------------------------------------------------
+    # method="exact": exact canonical thermodynamics from the block
+    # engine's full per-block spectra. This is a METHOD, sitting beside
+    # FTLM/LTLM/mTPQ -- point_group stays a pure symmetry-routing knob
+    # ('auto' project-when-possible / 'full' require / 'off' abelian).
+    # Historically this computation was reachable only through the
+    # point_group='full' spelling, which conflated routing with solver
+    # strategy; that spelling now warns (see below) and requires
+    # projection without changing the method.
+    # ------------------------------------------------------------------
+    if isinstance(method, str) and method.upper() == "EXACT":
+        if is_directory:
+            raise NotImplementedError(
+                "qed.thermal: method='exact' is in-memory only for now "
+                "(pass the Operator + symmetry=). The directory sampling "
+                "lanes are exact anyway below the small-dim cutoff.")
+        if symmetry is None:
+            raise NotImplementedError(
+                "qed.thermal: method='exact' rides the little-group block "
+                "engine and needs symmetry=. (Without symmetry, the "
+                "sampling methods are already exact below dim 512 via the "
+                "small-dim fallback.)")
+        if sector is not None:
+            raise NotImplementedError(
+                "qed.thermal: sector= is not honoured on the exact lane "
+                "yet -- refusing to silently ignore it.")
+        from .point_group_routing import split_nonabelian, _close
+        _split = split_nonabelian(symmetry)
+        if isinstance(_split, str):
+            # No non-abelian residue (or unsplittable): exact per plain
+            # (n_up, k) block -- close the abelian generators, no
+            # residues. Correct, merely less reduced.
+            _gens = [list(g) for g in symmetry.generators] \
+                if hasattr(symmetry, "generators") else \
+                [list(g) for g in symmetry]
+            _A = _close(_gens)
+            if _A is None:
+                raise ValueError(
+                    f"qed.thermal(method='exact'): could not close the "
+                    f"symmetry group ({_split})")
+            _A, _res = [list(g) for g in _A], []
+        else:
+            _A, _res = _split
+        temps = list(np.linspace(T_min, T_max, num_T))
+        td = dict(_core.little_group_thermodynamics(
+            H, _A, _res, temps, n_up=-1,
+            use_gpu=(isinstance(device, str)
+                     and device.lower() in ("gpu", "cuda")),
+            spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
+            time_reversal=_sym_toggle_int(time_reversal,
+                                          "time_reversal")))
+        if verbose:
+            print(f"[qed.thermal] EXACT little-group lane: |A| = "
+                  f"{len(_A)}, residues = {len(_res)}.")
+        _E = np.asarray(td["energy"], dtype=float)
+        return ThermalResult(
+            temperatures=np.asarray(td["temperatures"], dtype=float),
+            energy=_E,
+            specific_heat=np.asarray(td["specific_heat"], dtype=float),
+            entropy=np.asarray(td["entropy"], dtype=float),
+            free_energy=np.asarray(td["free_energy"], dtype=float),
+            method="exact",
+            ground_state_energy=float(_E[0]) if len(_E) else 0.0,
+            used_sz_decomposition=False,
+            used_symmetry_decomposition=True,
+        )
+
+    method_enum = _coerce_method(method)
 
     # sector= names a SPATIAL-symmetry irrep, so it is meaningless without a
     # spatial group. Checked here, before any branch: the in-memory no-symmetry
@@ -707,47 +775,25 @@ def thermal(
                     print(f"[qed] point group: {len(star_maps)} residue "
                           "automorphisms fold the irrep sectors into "
                           "isospectral stars (solve one per star).")
-    if (symmetry is not None and not is_directory
-            and isinstance(point_group, str)
-            and point_group.lower() == "full"):
-        # PROPER non-abelian thermodynamics: exact canonical Z/E/C/S
-        # from the full reduced spectrum (every irrep block, d_Gamma
-        # multiplicities folded in). Stage 9c: the factorized
-        # little-group engine is the ONLY route ('full' raises on
-        # decline; the monolithic SAB engine is a test oracle now).
-        # This stays an explicit 'full' opt-in on the thermal verb:
-        # 'auto' never hijacks a sampling method (mTPQ/FTLM/LTLM) into
-        # exponentially costlier exact per-block spectra.
-        from .point_group_routing import resolve_projection_lane
-        lane = resolve_projection_lane(
-            symmetry, point_group=point_group, consumer="thermal",
-            eigenvalues_only=True, verbose=verbose)
-        temps = list(np.linspace(T_min, T_max, num_T))
-        td = dict(_core.little_group_thermodynamics(
-            H, lane.A, lane.residues, temps, n_up=-1,
-            use_gpu=(isinstance(device, str)
-                     and device.lower() in ("gpu", "cuda")),
-            spin_flip=spin_flip, time_reversal=time_reversal))
-        if verbose:
-            print(f"[qed.thermal] non-abelian LITTLE-GROUP lane "
-                  f"(factorized): |A| = {len(lane.A)}, residues = "
-                  f"{len(lane.residues)}.")
-        _E = np.asarray(td["energy"], dtype=float)
-        return ThermalResult(
-            temperatures=np.asarray(td["temperatures"], dtype=float),
-            energy=_E,
-            specific_heat=np.asarray(td["specific_heat"], dtype=float),
-            entropy=np.asarray(td["entropy"], dtype=float),
-            free_energy=np.asarray(td["free_energy"], dtype=float),
-            method=str(method),
-            ground_state_energy=float(_E[0]) if len(_E) else 0.0,
-            used_sz_decomposition=False,
-            used_symmetry_decomposition=True,
-        )
+    if (isinstance(point_group, str) and point_group.lower() == "full"):
+        # SEMANTIC CLEANUP (U4, user-requested): point_group is a pure
+        # symmetry-ROUTING knob. 'full' means REQUIRE projection (raise
+        # on decline); it no longer implies exact per-block spectra --
+        # that solver strategy is method="exact" now. Warn the old
+        # spelling's users: with a sampling method their run is now a
+        # sampled one inside the blocks (identical below the small-dim
+        # exact cutoff, stochastic above it).
+        import warnings as _warnings
+        _warnings.warn(
+            "qed.thermal(point_group='full') no longer implies exact "
+            "per-block thermodynamics -- it now purely REQUIRES the "
+            "little-group projection for whatever method= is set. For "
+            "the old exact behaviour pass method='exact'.",
+            FutureWarning, stacklevel=2)
     if (symmetry is not None and not is_directory
             and sector is None
             and isinstance(point_group, str)
-            and point_group.lower() == "auto"):
+            and point_group.lower() in ("auto", "full")):
         # U1b (lane unification): thermal 'auto' + a sampling method now
         # PROJECTS -- the run stays a sampling run, executed inside the
         # (n_up, k, +/-, sigma) little-group blocks via
@@ -759,7 +805,7 @@ def thermal(
         # QN decode for thermal is future work -- refusing to guess).
         from .point_group_routing import resolve_projection_lane
         lane = resolve_projection_lane(
-            symmetry, point_group="auto", consumer="thermal",
+            symmetry, point_group=point_group.lower(), consumer="thermal",
             eigenvalues_only=True, method=str(method),
             verbose=verbose)
         if lane.mode == "project":
@@ -1021,7 +1067,7 @@ def thermal(
     # ------------------------------------------------------------------
     if (is_directory and has_sym and sector is None
             and isinstance(point_group, str)
-            and point_group.lower() == "auto"
+            and point_group.lower() in ("auto", "full")
             and not output_dir and not probe_betas
             and str(method).upper() in ("FTLM", "LTLM", "MTPQ", "OFTLM")
             and not os.path.exists(os.path.join(directory, "ThreeBodyG.dat"))
@@ -1043,7 +1089,7 @@ def thermal(
         if _autos is not None:
             from .point_group_routing import resolve_projection_lane
             lane = resolve_projection_lane(
-                _autos, point_group="auto", consumer="thermal",
+                _autos, point_group=point_group.lower(), consumer="thermal",
                 eigenvalues_only=True, method=str(method), verbose=verbose)
             if lane.mode == "project":
                 out = dict(_core.little_group_thermal(
