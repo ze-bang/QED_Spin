@@ -792,6 +792,7 @@ PYBIND11_MODULE(_core, m) {
             d["dim_k0"]       = st.dim_k0;
             d["flip_parity"]  = st.flip_parity;
             d["tr_pairs"]     = st.tr_pairs;
+            d["gpu_engaged"]  = st.gpu_engaged;
             stars.append(d);
         }
         return stars;
@@ -824,6 +825,7 @@ PYBIND11_MODULE(_core, m) {
               d["stars"]          = lg_stars_dict(s);
               d["flip_engaged"]   = s.flip_engaged;
               d["tr_engaged"]     = s.tr_engaged;
+              d["gpu_engaged"]    = s.gpu_engaged;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),
@@ -924,6 +926,7 @@ PYBIND11_MODULE(_core, m) {
               d["stars"]        = lg_stars_dict(s);
               d["flip_engaged"] = s.flip_engaged;
               d["tr_engaged"]   = s.tr_engaged;
+              d["gpu_engaged"]  = s.gpu_engaged;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),

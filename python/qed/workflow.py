@@ -183,6 +183,7 @@ def solve(
     symmetry: SymmetryArg = None,
     sector: Optional[Sequence[int]] = None,
     irrep: Optional[dict] = None,
+    flip: Optional[int] = None,
     sz: Optional[int] = None,
     auto_sz: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
@@ -415,6 +416,11 @@ def solve(
             spin_flip=spin_flip, time_reversal=time_reversal,
             point_group=point_group, lattice=lattice, verbose=verbose)
 
+    if flip is not None and sector is None:
+        raise ValueError(
+            "qed.solve: flip= selects the (k,+) or (k,-) half of a MOMENTUM "
+            "star, so it needs sector= (the momentum) alongside it. Without a "
+            "momentum there is no star to halve.")
     if irrep is not None and sector is None:
         raise ValueError(
             "qed.solve: irrep= names a LITTLE-CO-GROUP irrep, which is defined "
@@ -477,7 +483,7 @@ def solve(
                 H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
                 compute_eigenvectors=compute_eigenvectors, solver=solver,
                 device=device, symmetry=None, sector=sector, irrep=irrep,
-                sz=_nu_i, auto_sz=False, spin_flip=spin_flip,
+                flip=flip, sz=_nu_i, auto_sz=False, spin_flip=spin_flip,
                 time_reversal=time_reversal, point_group=point_group,
                 lattice=lattice, output_dir=output_dir,
                 max_iterations=max_iterations, block_size=block_size,
@@ -763,23 +769,36 @@ def solve(
                     spin_flip=_sf, time_reversal=_tr, plan_only=True))
                 _dec = decode_star_for_sector(
                     _plan["stars"], _plan["irrep_characters"], _A,
-                    symmetry.generators, symmetry.orders, sector)
+                    symmetry.generators, symmetry.orders, sector, flip=flip)
                 if isinstance(_dec, str):
                     raise RuntimeError(
                         f"qed.solve: sector={list(sector)} could not be "
                         f"resolved on the projection lane: {_dec}")
-                _k0, _kraw = _dec
-                _only_k0 = [_k0]
+                _k0s, _kraw = _dec
+                # Naming a momentum but not a flip means BOTH parities: the
+                # decoder returns (k,+) and (k,-) so the caller gets the whole
+                # momentum sector. Resolving only the raw index would have
+                # matched the parity-0 star alone and silently halved the
+                # spectrum.
+                _only_k0 = list(_k0s)
                 if verbose:
-                    print(f"[qed.solve] sector={list(sector)} -> irrep "
-                          f"k_raw={_kraw}, star k0={_k0}: solving that star "
-                          f"only (projected).")
+                    print(f"[qed.solve] sector={list(sector)}"
+                          f"{'' if flip is None else f' flip={flip}'} -> irrep "
+                          f"k_raw={_kraw}, star(s) k0={_only_k0}: solving "
+                          f"those only (projected).")
                 if irrep is not None:
                     # Name the little-co-group irrep BY ITS CHARACTER and
                     # resolve it against THIS star's published table. The
                     # index is per-star (decompose_irreps orders each star
                     # independently), which is exactly why irrep= requires
                     # sector= and why the caller never passes an index.
+                    if len(_only_k0) != 1:
+                        raise ValueError(
+                            "qed.solve: irrep= needs a single star, but "
+                            f"sector={list(sector)} resolved to {len(_only_k0)} "
+                            "(both flip parities). Pass flip=0 or flip=1 too -- "
+                            "the isotypic decomposition is per (k, parity).")
+                    _k0 = _only_k0[0]
                     _st = next((x for x in _plan["stars"]
                                 if int(x["k0"]) == _k0), None)
                     if _st is None:
@@ -819,7 +838,8 @@ def solve(
                             rows.extend(
                                 [(float(e), kk, fp, ir, dd, m, sub,
                                   True)] * m)   # full spectrum is exact
-                        return rows, d["irrep_characters"]
+                        return rows, d["irrep_characters"], bool(
+                            d.get("gpu_engaged", False))
                     d = dict(_core.little_group_lowest_eigenvalues_labeled(
                         op_to_use, _A, _res, k=_k,
                         spin_flip=_sf, time_reversal=_tr,
@@ -830,26 +850,30 @@ def solve(
                                 d["flip_parity"], d["irrep"],
                                 d["irrep_dim"], d["multiplicity"],
                                 d["converged"])]
-                    return rows, d["irrep_characters"]
+                    return rows, d["irrep_characters"], bool(
+                        d.get("gpu_engaged", False))
 
+                _gpu_used = False
                 if _sp == 2:
-                    rows, chars = _lg_block(sz_parity=0)
-                    rows2, _ = _lg_block(sz_parity=1)
+                    rows, chars, _g0 = _lg_block(sz_parity=0)
+                    rows2, _, _g1 = _lg_block(sz_parity=1)
                     rows += rows2
+                    _gpu_used = _g0 or _g1
                 elif _sp in (0, 1):
-                    rows, chars = _lg_block(sz_parity=_sp)
+                    rows, chars, _gpu_used = _lg_block(sz_parity=_sp)
                 elif _nu_sweep is not None:
                     # Sz unnamed -> every magnetisation sector, merged. Each
                     # block_subspace row carries its own n_up, so the merged
                     # rows stay attributable. irrep_characters are a property
                     # of A, not of n_up, so the first block's table serves all
                     # (same reasoning as the sz_parity==2 branch above).
-                    rows, chars = _lg_block(n_up=_nu_sweep[0])
+                    rows, chars, _gpu_used = _lg_block(n_up=_nu_sweep[0])
                     for _nu_i in _nu_sweep[1:]:
-                        _rows_i, _ = _lg_block(n_up=_nu_i)
+                        _rows_i, _, _g_i = _lg_block(n_up=_nu_i)
                         rows += _rows_i
+                        _gpu_used = _gpu_used or _g_i
                 else:
-                    rows, chars = _lg_block(n_up=_nu)
+                    rows, chars, _gpu_used = _lg_block(n_up=_nu)
                 rows.sort(key=lambda t: t[0])
                 if method != DiagonalizationMethod.FULL:
                     rows = rows[:_k]
@@ -873,6 +897,14 @@ def solve(
                 # rows False; merged campaigns must be able to tell.
                 out.block_converged    = [t[7] for t in rows]
                 out.irrep_characters   = chars
+                # The project lane used to return an EDResults with NO backend
+                # metadata at all, so `r.backend` raised AttributeError and any
+                # GPU assertion against it was impossible. Report the lane the
+                # ENGINE says it ran -- not the device= that was requested: the
+                # little-group GPU gather only engages past 2^20 reps, so small
+                # blocks legitimately stay on the CPU no matter what was asked.
+                out.backend = _ProjectLaneBackend(
+                    "gpu" if _gpu_used else "cpu")
                 if verbose:
                     print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
                           f"(factorized): |A| = {len(_A)}, residues = "
@@ -1493,6 +1525,26 @@ def _diag_via_directory(
 
 
 # ---------------------------------------------------------------------------
+
+class _ProjectLaneBackend:
+    """Minimal backend envelope for the little-group project lane.
+
+    The abelian lane copies C++ ``GroundStateResult.backend`` (which
+    ``select_backend`` fills). The project lane has no such struct -- the
+    little-group engine is its own CPU engine with an optional GPU rep-gather
+    -- so it reports the engine's OWN answer here. Same duck-type
+    (``.lane`` / ``.mpi_size``) as the abelian one, so callers need not branch.
+    """
+
+    __slots__ = ("lane", "mpi_size")
+
+    def __init__(self, lane: str, mpi_size: int = 1):
+        self.lane = lane
+        self.mpi_size = mpi_size
+
+    def __repr__(self) -> str:      # pragma: no cover - diagnostics only
+        return f"Backend(lane={self.lane!r}, mpi_size={self.mpi_size})"
+
 def _resolve_sector_quantum_numbers(info: dict[str, Any],
                                     sector: Sequence[int]) -> int:
     """QN tuple -> the RAW sector index the C++ filter selects on.
@@ -1837,6 +1889,9 @@ def full_spectrum(
     *,
     symmetry: SymmetryArg = None,
     sz: Optional[int] = None,
+    sector: Optional[Sequence[int]] = None,
+    irrep: Optional[dict] = None,
+    flip: Optional[int] = None,
     sz_conserved: Optional[bool] = None,
     spin_length: float = 0.5,
     device: str = "cpu",
@@ -1925,8 +1980,65 @@ def full_spectrum(
     lane = resolve_projection_lane(
         _sym_for_lane, point_group=point_group, consumer="full_spectrum",
         eigenvalues_only=True, verbose=verbose)
+    if lane.mode != "project" and (sector is not None or irrep is not None
+                                   or flip is not None):
+        # Same contract as qed.solve: these name little-group structure, which
+        # only the projection lane has. Refusing beats accepting an argument
+        # the lane cannot honour.
+        raise ValueError(
+            f"qed.full_spectrum: sector=/irrep=/flip= name projection-lane "
+            f"structure, but this call resolved to the abelian lane "
+            f"({lane.reason or 'point_group is off'}). Pass point_group='full' "
+            f"to require projection, or drop them.")
     if lane.mode == "project":
         _A, _res = lane.A, lane.residues
+        _fs_only_k0: list[int] = []
+        _fs_only_irrep: list[int] = []
+        if sector is not None or flip is not None:
+            if sector is None:
+                raise ValueError(
+                    "qed.full_spectrum: flip= selects a half of a MOMENTUM "
+                    "star, so it needs sector= alongside it.")
+            _fs_plan = dict(_core.little_group_full_spectrum(
+                operator, _A, _res,
+                n_up=(int(sz) if sz is not None
+                      else (N // 2 if sz_conserved else -1)),
+                spin_flip=_sf, time_reversal=_tr, plan_only=True))
+            _fgens = getattr(_sym_for_lane, "generators", None)
+            _fords = getattr(_sym_for_lane, "orders", None)
+            if _fgens is None or _fords is None:
+                raise ValueError(
+                    "qed.full_spectrum: sector= names quantum numbers per "
+                    "GENERATOR, so it needs a GeneratorSet (e.g. from "
+                    "qed.find_symmetries), not a raw permutation list -- a raw "
+                    "list carries no generator/order basis to name them in.")
+            _fd = decode_star_for_sector(
+                _fs_plan["stars"], _fs_plan["irrep_characters"], _A,
+                _fgens, _fords, sector, flip=flip)
+            if isinstance(_fd, str):
+                raise ValueError(
+                    f"qed.full_spectrum: sector={list(sector)} could not be "
+                    f"resolved: {_fd}")
+            _fs_only_k0, _fkraw = list(_fd[0]), _fd[1]
+            if irrep is not None:
+                if len(_fs_only_k0) != 1:
+                    raise ValueError(
+                        "qed.full_spectrum: irrep= needs a single star, but "
+                        f"sector={list(sector)} resolved to "
+                        f"{len(_fs_only_k0)} (both flip parities). Pass "
+                        "flip=0 or flip=1 too.")
+                _fst = next((x for x in _fs_plan["stars"]
+                             if int(x["k0"]) == _fs_only_k0[0]), None)
+                _fid = decode_irrep_for_character(_fst, irrep)
+                if isinstance(_fid, str):
+                    raise ValueError(
+                        f"qed.full_spectrum: irrep={irrep} could not be "
+                        f"resolved on star k0={_fs_only_k0[0]}: {_fid}")
+                _fs_only_irrep = [_fid[0]]
+        elif irrep is not None:
+            raise ValueError(
+                "qed.full_spectrum: irrep= names a LITTLE-CO-GROUP irrep, "
+                "which is defined per momentum star -- pass sector= too.")
         try:
             eigs = []
             if sz_conserved:
@@ -1943,7 +2055,8 @@ def full_spectrum(
                 for n_up in _sectors:
                     d = dict(_core.little_group_full_spectrum(
                         operator, _A, _res, n_up=int(n_up),
-                        use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr))
+                        use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr,
+                        only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
                     block = [float(e) for e in d["eigenvalues"]]
                     eigs.extend(block)
                     if _mirror and n_up * 2 != N:
@@ -1951,7 +2064,8 @@ def full_spectrum(
             else:
                 d = dict(_core.little_group_full_spectrum(
                     operator, _A, _res, use_gpu=use_gpu,
-                    spin_flip=_sf, time_reversal=_tr))
+                    spin_flip=_sf, time_reversal=_tr,
+                    only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
                 eigs = [float(e) for e in d["eigenvalues"]]
             if verbose:
                 print("[qed.full_spectrum] spatial group -> "

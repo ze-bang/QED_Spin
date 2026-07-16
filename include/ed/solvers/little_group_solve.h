@@ -126,6 +126,13 @@ struct LittleGroupStarInfo {
     std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
     int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
     int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
+    /// Did this star's matvec actually run the GPU rep-gather? REPORTED by the
+    /// engine, never inferred from the caller's device= request: the gate
+    /// (reduced-CSR declined AND >= 2^20 reps AND a device present) is
+    /// internal, and small blocks legitimately stay on the CPU however loudly
+    /// the caller asked for a GPU. A lane label that echoes the request rather
+    /// than the fact is worse than none -- assertions against it are toothless.
+    bool gpu_engaged   = false;
     /// Every extended irrep index folded into this star (always includes
     /// ``k0``). The engine has always known this -- the star loop iterates
     /// ``(k0, members)`` -- but only published ``star_size``, which is not
@@ -201,6 +208,10 @@ struct LittleGroupSpectrum {
     std::uint64_t       total_dim = 0;
     bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
     bool                tr_engaged   = false;  ///< 9b: TR folding was active
+    /// True iff ANY star's matvec ran on the GPU rep-gather. This is the
+    /// engine's truthful lane report; the Python project lane surfaces it as
+    /// ``EDResults.backend.lane`` (which it previously did not set at all).
+    bool                gpu_engaged  = false;
 
     /// Flat sorted spectrum with multiplicities expanded (dense-diag shape).
     [[nodiscard]] std::vector<double> expanded() const;

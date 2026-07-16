@@ -229,7 +229,23 @@ def test_gs_star_reduction_parity_gpu():
                          point_group=pg, verbose=False)
 
     r_on, r_off = run("auto"), run("off")
-    assert getattr(r_on.backend, "lane", "") == "gpu"
+
+    # The project lane now REPORTS a lane at all (it used to return an
+    # EDResults with no `backend` attribute, so this assertion could only ever
+    # raise AttributeError -- it never tested anything).
+    #
+    # And it reports the truth, which is "cpu" here: the little-group engine
+    # only engages its GPU rep-gather past 2^20 reps, and this ring's blocks are
+    # ~80, so a device='gpu' request legitimately runs on the CPU -- exactly the
+    # tiny-block reasoning behind BackendConstraints::gpu_dim_floor. Demanding
+    # "gpu" asserted a fiction; demanding the ENGINE's own answer is what has
+    # teeth.
+    lane = getattr(r_on.backend, "lane", None)
+    assert lane in ("cpu", "gpu"), f"project lane reported no lane: {lane!r}"
+    assert lane == "cpu", (
+        f"blocks this small (~80 reps) are below the engine's 2^20 GPU gate, "
+        f"so the honest lane is cpu, got {lane!r}")
+
     np.testing.assert_allclose(r_on.eigenvalues[:1], r_off.eigenvalues[:1],
                                rtol=0, atol=1e-9)
     assert abs(float(r_on.eigenvalues[0]) - E0_DENSE) < 1e-8

@@ -175,8 +175,8 @@ def split_nonabelian(symmetry_or_gens):
 
 
 def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
-                           sector):
-    """Which star does the caller's momentum live in?
+                           sector, flip=None):
+    """Which star(s) does the caller's momentum live in?
 
     ``sector`` names one quantum number per GENERATOR: generator ``a_i`` (of
     order ``o_i``) acts with phase ``exp(-2*pi*i*q_i/o_i)``, the directory's
@@ -224,12 +224,37 @@ def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
         return (f"no abelian irrep carries the requested quantum numbers "
                 f"{qns} (orders {ords})")
 
-    for st in stars:
-        members = [int(m) for m in (st.get("members") or [])]
-        if k_raw in members or int(st["k0"]) == k_raw:
-            return int(st["k0"]), k_raw
-    return (f"the decoded irrep k_raw={k_raw} is in no star -- the star walk "
-            "did not cover it")
+    # Flip splits each momentum into (k,+) and (k,-), carried as EXTENDED
+    # indices k_raw + s*n_irr_raw. A raw k_raw therefore only ever matches the
+    # PARITY-0 star, so decoding it naively returns the + half and silently
+    # drops the - half -- the caller names a momentum and gets half its
+    # spectrum with no indication the rest exists.
+    n_irr = len(irrep_characters)
+    engaged = any(int(st.get("flip_parity", -1)) >= 0 for st in stars)
+    if flip is None:
+        # Name nothing -> get ALL of it: both parities when flip is engaged.
+        wanted = [k_raw + s * n_irr for s in (0, 1)] if engaged else [k_raw]
+    else:
+        if not engaged:
+            return ("flip= was given but the spin-flip Z2 is not engaged here "
+                    "(it needs [H, prod sigma^x] = 0 AND a flip-invariant "
+                    "subspace: n_up = N/2, an Sz-parity half with N even, or "
+                    "the full space)")
+        if int(flip) not in (0, 1):
+            return f"flip= must be 0 (+) or 1 (-), got {flip!r}"
+        wanted = [k_raw + int(flip) * n_irr]
+
+    k0s = []
+    for ext in wanted:
+        for st in stars:
+            members = [int(m) for m in (st.get("members") or [])]
+            if ext in members or int(st["k0"]) == ext:
+                k0s.append(int(st["k0"]))
+                break
+    if not k0s:
+        return (f"the decoded irrep k_raw={k_raw} (extended {wanted}) is in no "
+                f"star -- the star walk did not cover it")
+    return k0s, k_raw
 
 
 def decode_irrep_for_character(star, character):

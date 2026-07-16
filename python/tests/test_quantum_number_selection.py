@@ -210,8 +210,12 @@ def test_sector_decoder_maps_momentum_through_characters_not_index_order():
         dec = decode_star_for_sector(plan["stars"], plan["irrep_characters"],
                                      A, gen.generators, gen.orders, [q])
         assert not isinstance(dec, str), f"q={q} failed to decode: {dec}"
-        k0, k_raw = dec
-        seen_k0.add(k0)
+        # the decoder returns a LIST of star reps: with flip engaged a momentum
+        # spans (k,+) and (k,-), so naming it without a flip must give both.
+        # Here spin_flip is off, so it is one star per momentum.
+        k0s, k_raw = dec
+        assert len(k0s) == 1, f"flip is off, expected one star, got {k0s}"
+        seen_k0.add(k0s[0])
         if q == 0:
             assert k_raw == 8, (
                 "q=0 must decode to the engine's k_raw=8 on this ring -- if "
@@ -628,3 +632,118 @@ def test_irrep_on_the_abelian_lane_raises_instead_of_being_ignored():
         qed.solve(H, num_eigenvalues=1, sz=6, sector=[0], irrep={0: +1},
                   symmetry=gen, point_group="off", spin_flip="off",
                   time_reversal="off", device="cpu", verbose=False)
+
+
+# ---------------------------------------------------------------------------
+# flip= : the (k,+) / (k,-) halves of a momentum star
+# ---------------------------------------------------------------------------
+
+_FLIP = dict(sz=6, point_group="full", spin_flip="require",
+             time_reversal="off", device="cpu", verbose=False)
+
+
+def test_naming_a_momentum_returns_BOTH_flip_parities():
+    """Naming a momentum but not a flip must give the WHOLE momentum sector.
+
+    Flip splits each momentum into (k,+) and (k,-), carried as extended
+    indices k_raw + s*n_irr_raw. A raw k_raw only ever matches the parity-0
+    star, so the decoder used to return the + half alone -- silently halving
+    the spectrum of a sector the caller asked for in full. Regression witness:
+    this returned {0} before, and must return {0, 1}.
+    """
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    r = qed.solve(H, num_eigenvalues=8, sector=[0], symmetry=gen, **_FLIP)
+    assert set(r.block_flip_parity) == {0, 1}, (
+        f"both parities must come back, got {set(r.block_flip_parity)}")
+
+
+def test_flip_halves_tile_the_momentum_sector():
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    both = np.sort(np.asarray(qed.solve(
+        H, num_eigenvalues=8, sector=[0], symmetry=gen, **_FLIP).eigenvalues))
+    plus = np.asarray(qed.solve(H, num_eigenvalues=8, sector=[0], flip=0,
+                                symmetry=gen, **_FLIP).eigenvalues)
+    minus = np.asarray(qed.solve(H, num_eigenvalues=8, sector=[0], flip=1,
+                                 symmetry=gen, **_FLIP).eigenvalues)
+    assert set(qed.solve(H, num_eigenvalues=4, sector=[0], flip=0,
+                         symmetry=gen, **_FLIP).block_flip_parity) == {0}
+    assert set(qed.solve(H, num_eigenvalues=4, sector=[0], flip=1,
+                         symmetry=gen, **_FLIP).block_flip_parity) == {1}
+    merged = np.sort(np.concatenate([plus, minus]))[:8]
+    assert np.allclose(merged, both[:8], atol=1e-9), (
+        f"the flip halves must tile the star: {merged} vs {both[:8]}")
+
+
+def test_flip_requires_sector():
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="momentum star|sector="):
+        qed.solve(H, num_eigenvalues=1, flip=0, symmetry=gen, **_FLIP)
+
+
+def test_flip_when_the_flip_is_not_engaged_raises():
+    """spin_flip='off' means there are no (k,+/-) halves to pick between."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises((ValueError, RuntimeError), match="not engaged|flip"):
+        qed.solve(H, num_eigenvalues=1, sector=[0], flip=0, sz=6,
+                  symmetry=gen, point_group="full", spin_flip="off",
+                  time_reversal="off", device="cpu", verbose=False)
+
+
+def test_irrep_with_both_parities_unresolved_raises():
+    """The isotypic decomposition is per (k, parity), so irrep= needs a single
+    star -- naming a momentum with flip engaged resolves to two."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="single star|flip=0"):
+        qed.solve(H, num_eigenvalues=1, sector=[0], irrep={0: +1},
+                  symmetry=gen, **_FLIP)
+
+
+# ---------------------------------------------------------------------------
+# full_spectrum selectors -- the surface is now uniform across the verbs
+# ---------------------------------------------------------------------------
+
+def test_full_spectrum_sector_returns_that_stars_complete_spectrum():
+    """full_spectrum gained sector=/irrep=/flip= so the three verbs name the
+    same things. Each star's state count must be |star| * dim_k0, and the
+    stars must tile the magnetisation block."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    kw = dict(symmetry=gen, sz=6, point_group="full", spin_flip="off",
+              time_reversal="off", device="cpu", verbose=False)
+    whole = np.sort(np.asarray(qed.full_spectrum(H, **kw).eigenvalues))
+    assert len(whole) == 924, "C(12,6)"
+
+    total = 0
+    for q in range(12):
+        part = np.sort(np.asarray(
+            qed.full_spectrum(H, sector=[q], **kw).eigenvalues))
+        assert len(part) > 0
+        # every named-sector level must exist in the parent block
+        for x in part[:10]:
+            assert np.min(np.abs(whole - x)) < 1e-9
+        total += len(part)
+    # 12 momenta, but stars fold k <-> -k: each star answers for all members,
+    # so summing over momenta counts each star |star| times.
+    assert total > 924, "folding means per-momentum counts overlap by |star|"
+
+
+def test_full_spectrum_selectors_raise_on_the_abelian_lane():
+    """Same refusal as qed.solve: these name projection-lane structure."""
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="projection-lane|abelian lane"):
+        qed.full_spectrum(H, sector=[0], symmetry=gen, sz=6,
+                          point_group="off", spin_flip="off",
+                          time_reversal="off", device="cpu", verbose=False)

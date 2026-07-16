@@ -232,6 +232,15 @@ private:
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
     mutable std::once_flag                         gpu_once_;
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
+public:
+    /// Did the GPU rep-gather actually engage for this sector? Lazy, so this
+    /// is only meaningful after the first apply(). Reported rather than
+    /// inferred: the gate (reduced-CSR declined AND >= 2^20 reps AND a device
+    /// present, unless ED_SYM_LG_GPU=1) is engine-internal, and a Python-side
+    /// twin of it would drift -- which is exactly how a lane label becomes a
+    /// lie.
+    [[nodiscard]] bool gpu_engaged() const noexcept { return gpu_fn_ != nullptr; }
+private:
 };
 
 // Monomial action of one little-group element on the k0 rep basis:
@@ -1408,6 +1417,13 @@ LittleGroupSpectrum run_little_group(
             }
         }
         info.projected = projected;
+        // Truthful lane report: ask the matvec what it DID (lazy, so this is
+        // only meaningful after the solves above ran). Small blocks stay on
+        // the CPU however loudly the caller asked for a GPU -- that is the
+        // engine's own 2^20-rep gate, and echoing the request instead would
+        // make every GPU assertion toothless.
+        info.gpu_engaged = hk.gpu_engaged();
+        if (info.gpu_engaged) out.gpu_engaged = true;
         out.stars.push_back(info);
         if (profile) {
             t_solve += secs(t0, tick());
