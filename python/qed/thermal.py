@@ -676,10 +676,50 @@ def thermal(
     # ------------------------------------------------------------------
     if isinstance(method, str) and method.upper() == "EXACT":
         if is_directory:
-            raise NotImplementedError(
-                "qed.thermal: method='exact' is in-memory only for now "
-                "(pass the Operator + symmetry=). The directory sampling "
-                "lanes are exact anyway below the small-dim cutoff.")
+            # U4a pattern: the directory's own deck + automorphisms feed
+            # the exact block engine. Same guards as the sampling route:
+            # the Python loader reads only Trans/InterAll (refuse
+            # ThreeBodyG.dat), and the group comes from
+            # automorphisms.json (validated permutations).
+            directory = str(H)
+            if num_sites is None:
+                raise ValueError(
+                    "qed.thermal: pass num_sites= with the directory "
+                    "form.")
+            if os.path.exists(os.path.join(directory, "ThreeBodyG.dat")):
+                raise NotImplementedError(
+                    "qed.thermal(method='exact'): this directory carries "
+                    "ThreeBodyG.dat, which the Python-side loader does "
+                    "not read -- the exact lane would silently miss "
+                    "terms. Use the sampling methods (exact below the "
+                    "small-dim cutoff) or the in-memory form.")
+            _autos_path = os.path.join(directory, "automorphism_results",
+                                       "automorphisms.json")
+            if not os.path.exists(_autos_path):
+                raise ValueError(
+                    "qed.thermal(method='exact'): the directory carries "
+                    "no automorphism_results/automorphisms.json to build "
+                    "the block engine from; pass the in-memory form with "
+                    "symmetry= instead.")
+            import json as _json
+            with open(_autos_path) as f:
+                _cand = _json.load(f)
+            _N = int(num_sites)
+            if not (isinstance(_cand, list) and _cand
+                    and all(isinstance(p, list) and len(p) == _N
+                            and sorted(p) == list(range(_N))
+                            for p in _cand)):
+                raise ValueError(
+                    "qed.thermal(method='exact'): automorphisms.json is "
+                    "not a list of site permutations.")
+            H_ex = Operator(num_sites=_N, spin=float(spin))
+            _trans = os.path.join(directory, "Trans.dat")
+            _inter = os.path.join(directory, "InterAll.dat")
+            if os.path.exists(_trans):
+                H_ex.load_trans(_trans)
+            if os.path.exists(_inter):
+                H_ex.load_inter_all(_inter)
+            H, symmetry, is_directory = H_ex, _cand, False
         if symmetry is None:
             raise NotImplementedError(
                 "qed.thermal: method='exact' rides the little-group block "

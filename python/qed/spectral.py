@@ -1378,12 +1378,29 @@ def spectral(
         # Stage 8d: spin_flip is now CONSUMED by the sector lanes when
         # ``sz`` is None (full-space / parity-half flip sectors) --
         # sf_i rides into ``_spectral_in_memory_with_symmetry`` below.
-        # Time reversal remains detect-and-report on this verb.
-        if verbose and tr_i != 0:
-            print("[qed.spectral] note: time-reversal is detect-and-"
-                  "report on the spectral verb (spin-flip and the "
-                  "diagonal Sz axes are exploited by the sector lanes "
-                  "when symmetry= is given).")
+        #
+        # Diction cleanup (2026-07-16): time reversal is NOT EXPLOITED
+        # by any spectral lane (its k <-> -k fold trades solves the
+        # spectral verb does not batch). An accepted-but-inert knob is
+        # the worst kind of inconsistency, so an EXPLICIT toggle is now
+        # loud instead of silently ignored: 'require' raises (there is
+        # nothing to require of this verb), any other explicit value
+        # warns unconditionally. The default ('auto'/None) stays a
+        # silent no-op.
+        if tr_i == 1:
+            raise NotImplementedError(
+                "qed.spectral: time_reversal='require' -- the spectral "
+                "verb does not exploit time reversal (no lane folds "
+                "k <-> -k here). H does carry the symmetry; drop the "
+                "argument, or use the verbs that exploit it "
+                "(solve/full_spectrum/thermal).")
+        if time_reversal in ("on", True):
+            import warnings as _warnings
+            _warnings.warn(
+                "qed.spectral: time_reversal='on' is not exploited on "
+                "the spectral verb; the toggle has no effect here "
+                "(turning it 'off' is equally a no-op).",
+                RuntimeWarning, stacklevel=2)
     if (symmetry is not None and observables is not None
             and not isinstance(H_or_directory, str)
             and isinstance(point_group, str)
