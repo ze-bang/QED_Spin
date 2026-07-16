@@ -5,6 +5,13 @@ flip-symmetric H the (n_up, k) and (N - n_up, same k) sectors carry
 identical spectra and Z_s(beta). The all-Sz flat-pool thermal lane
 solves only n_up <= N/2 and mirrors the entries.
 
+Every thermal call here passes point_group="off": these are LANE-B
+mechanism pins (the transporter, the (k,+/-) projection, TR pairing on
+the flat-pool loop). Since U1b, thermal point_group='auto' + a sampling
+method projects through the little-group block lane instead -- whose
+mirror lives in block WEIGHTS, not replicated entries -- so the default
+routing would no longer exercise the machinery this file guards.
+
 Guards here:
   * transport ON == transport OFF (ED_SYM_SPIN_FLIP=0) to machine
     precision on an N=8 Heisenberg ring (every sector dim <= 512 routes
@@ -35,7 +42,7 @@ def _ring(hz: float = 0.0):
 
 def _thermal(H, gen):
     return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=12,
-                       symmetry=gen, random_seed=3, verbose=False)
+                       symmetry=gen, point_group="off", random_seed=3, verbose=False)
 
 
 def _with_env(key, val, fn):
@@ -108,7 +115,7 @@ def test_flip_projection_thermal_parity_cpu():
 
     def run():
         return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=12,
-                           symmetry=gen, random_seed=3, device="cpu",
+                           symmetry=gen, point_group="off", random_seed=3, device="cpu",
                            verbose=False)
 
     r_proj = run()                                   # transporter + projection
@@ -142,7 +149,7 @@ def test_time_reversal_pairing_thermal_parity():
 
     def run():
         return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=12,
-                           symmetry=gen, random_seed=3, device="cpu",
+                           symmetry=gen, point_group="off", random_seed=3, device="cpu",
                            verbose=False)
 
     r_on = run()
@@ -174,7 +181,7 @@ def test_time_reversal_declines_complex_hamiltonian():
 
     def run():
         return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=10,
-                           symmetry=gen, random_seed=5, device="cpu",
+                           symmetry=gen, point_group="off", random_seed=5, device="cpu",
                            verbose=False)
 
     r_on = run()
@@ -193,7 +200,7 @@ def test_per_call_toggles_compose():
     # thermal: spin_flip="off" must equal the env-off baseline exactly.
     def t(**kw):
         return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0, num_T=10,
-                           symmetry=gen, random_seed=3, device="cpu",
+                           symmetry=gen, point_group="off", random_seed=3, device="cpu",
                            verbose=False, **kw)
 
     r_kw  = t(spin_flip="off", time_reversal="off")
@@ -212,7 +219,7 @@ def test_per_call_toggles_compose():
     genz = qed.find_symmetries(Hz, verbose=False).full_set
     with pytest.raises(RuntimeError, match="spin_flip"):
         qed.thermal(Hz, method="mTPQ", T_min=0.5, T_max=5.0, num_T=6,
-                    symmetry=genz, device="cpu", verbose=False,
+                    symmetry=genz, point_group="off", device="cpu", verbose=False,
                     spin_flip="require")
 
 
@@ -329,7 +336,7 @@ def test_flip_projection_thermal_parity_gpu():
 
     def t():
         return qed.thermal(H, method="mTPQ", T_min=0.2, T_max=5.0,
-                           num_T=10, symmetry=gen, random_seed=3,
+                           num_T=10, symmetry=gen, point_group="off", random_seed=3,
                            device="gpu", verbose=False)
 
     r_on = t()

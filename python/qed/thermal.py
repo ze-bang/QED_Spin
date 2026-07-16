@@ -262,6 +262,10 @@ class ThermalSectorEntry:
     specific_heat: np.ndarray
     entropy: np.ndarray
     free_energy: np.ndarray
+    # U1b: how many times this block's spectrum enters the recombined Z
+    # (star size x d_sigma x TR fold x Sz mirror). 1 on the abelian lanes,
+    # whose loops enumerate every sector explicitly.
+    weight: int = 1
 
 
 @dataclass
@@ -708,6 +712,74 @@ def thermal(
             used_sz_decomposition=False,
             used_symmetry_decomposition=True,
         )
+    if (symmetry is not None and not is_directory
+            and sector is None
+            and isinstance(point_group, str)
+            and point_group.lower() == "auto"):
+        # U1b (lane unification): thermal 'auto' + a sampling method now
+        # PROJECTS -- the run stays a sampling run, executed inside the
+        # (n_up, k, +/-, sigma) little-group blocks via
+        # _core.little_group_thermal (F-shift Z-recombination). The lane
+        # resolver declines KPM_DOS (full-spectrum DOS) and honours
+        # ED_SYM_LG_THERMAL=0; any decline falls through to the abelian
+        # tempdir lane below unchanged. sector= keeps the abelian
+        # filtering lane (the block engine has only_k0/only_irrep but the
+        # QN decode for thermal is future work -- refusing to guess).
+        from .point_group_routing import resolve_projection_lane
+        lane = resolve_projection_lane(
+            symmetry, point_group="auto", consumer="thermal",
+            eigenvalues_only=True, method=str(method),
+            verbose=verbose)
+        if lane.mode == "project":
+            out = dict(_core.little_group_thermal(
+                H, lane.A, lane.residues, method=str(method),
+                t_min=float(T_min), t_max=float(T_max), num_t=int(num_T),
+                num_samples=int(num_samples),
+                krylov_dim=int(krylov_dim) if krylov_dim else 100,
+                random_seed=int(random_seed) if random_seed else 0,
+                use_gpu=(isinstance(device, str)
+                         and device.lower() in ("gpu", "cuda")),
+                spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
+                time_reversal=_sym_toggle_int(time_reversal,
+                                              "time_reversal")))
+            if verbose:
+                print(f"[qed.thermal] little-group SAMPLING lane "
+                      f"(U1b): {len(out['block_dim'])} blocks, "
+                      f"projected_any={out['projected_any']}, "
+                      f"max block dim={max(out['block_dim'])}.")
+            _E = np.asarray(out["energy"], dtype=float)
+            # Per-block structure entries. The curves are the COMBINED
+            # deliverable on this lane; per-block curves stay engine-side
+            # (LittleGroupThermalResult::per_block) until a consumer needs
+            # them -- the entries carry the structural contract (n_up,
+            # block dim, recombination weight).
+            per = [ThermalSectorEntry(
+                       n_up=int(out["block_n_up"][i]),
+                       sector_dim=int(out["block_dim"][i]),
+                       temperatures=np.asarray(out["temperatures"],
+                                               dtype=float),
+                       energy=np.asarray([], dtype=float),
+                       specific_heat=np.asarray([], dtype=float),
+                       entropy=np.asarray([], dtype=float),
+                       free_energy=np.asarray([], dtype=float),
+                       weight=int(out["block_weight"][i]))
+                   for i in range(len(out["block_dim"]))]
+            return ThermalResult(
+                temperatures=np.asarray(out["temperatures"], dtype=float),
+                energy=_E,
+                specific_heat=np.asarray(out["specific_heat"],
+                                         dtype=float),
+                entropy=np.asarray(out["entropy"], dtype=float),
+                free_energy=np.asarray(out["free_energy"], dtype=float),
+                method=str(method),
+                ground_state_energy=float(out["ground_state_energy"]),
+                used_sz_decomposition=True,
+                used_symmetry_decomposition=True,
+                per_sector=per,
+            )
+        elif verbose:
+            print(f"[qed.thermal] projection declined ({lane.reason}); "
+                  f"abelian sector lane.")
     if symmetry is not None and not is_directory:
         _N = int(H.num_sites)
         _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")

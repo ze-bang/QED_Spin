@@ -36,6 +36,7 @@
 #include <memory>
 #include <vector>
 
+#include <ed/orchestrator.h>                // ed::workflows::ThermalOptions (U1b)
 #include <ed/solvers/little_group_solve.h>  // LittleGroupOptions, LittleGroupSpectrum
 
 namespace ed {
@@ -128,5 +129,43 @@ build_little_group_blocks(const ::Operator&                    op,
                           const std::vector<std::vector<int>>& residue_perms,
                           int                                  n_sites,
                           const LittleGroupOptions&            opt);
+
+// =============================================================================
+// U1b: SAMPLED thermodynamics inside the projected blocks.
+//
+// Where little_group_thermodynamics (little_group_solve.h) EXACT-diagonalizes
+// every block (the point_group='full' contract), this runs the caller's
+// sampling method (FTLM / LTLM / mTPQ / OFTLM) per block through
+// ed::workflows::thermal(block.op(), ...) -- same kernels, same mem_guard,
+// same small-dim exact fallback -- and Z-recombines with each block's
+// spectral multiplicity folded in as a free-energy shift
+// F_b[t] -= T[t] * ln(m_b)  (exactly Z_b -> m_b * Z_b).
+//
+// KPM_DOS is REFUSED (std::invalid_argument): its deliverable is one
+// full-spectrum DOS; per-block sub-DOS on different Chebyshev grids cannot
+// recombine into it. Route KPM to the abelian lane.
+// =============================================================================
+struct LittleGroupThermalResult {
+    ThermodynamicData                 thermo;      ///< combined across blocks
+    std::vector<LittleGroupBlockTag>  block_tags;  ///< one per solved block
+    /// Per-block thermodynamics BEFORE the multiplicity F-shift
+    /// (diagnostics / tests), parallel to block_tags.
+    std::vector<ThermodynamicData>    per_block;
+    /// The weight actually folded into each block's Z: tag.multiplicity
+    /// times the Sz flip-transport mirror factor (2 for a mirrored
+    /// n_up != N/2 subspace in the unnamed-Sz sweep, else 1).
+    std::vector<std::uint64_t>        weights;
+    double ground_state_energy = 0.0; ///< min per-block GS estimate
+    bool   projected_any       = false;
+    bool   gpu_engaged         = false;
+};
+
+[[nodiscard]] LittleGroupThermalResult
+little_group_thermal(const ::Operator&                    op,
+                     const std::vector<std::vector<int>>& abelian_group,
+                     const std::vector<std::vector<int>>& residue_perms,
+                     int                                  n_sites,
+                     ed::workflows::ThermalOptions        topts,
+                     const LittleGroupOptions&            opt);
 
 }  // namespace ed::solvers

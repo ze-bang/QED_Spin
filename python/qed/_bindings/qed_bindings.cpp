@@ -46,6 +46,7 @@
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
+#include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
 #include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
@@ -973,6 +974,97 @@ PYBIND11_MODULE(_core, m) {
           py::arg("dense_max_dim") = 4096,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
+
+    // U1b (lane unification): SAMPLED thermodynamics inside the projected
+    // blocks -- FTLM/LTLM/mTPQ/OFTLM per (n_up, k, +/-, sigma) block via
+    // ed::workflows::thermal(block.op(), ...), Z-recombined with the block
+    // multiplicity folded in as an F-shift. KPM_DOS raises (full-spectrum
+    // DOS deliverable; use the abelian lane). Returns the combined thermo
+    // plus parallel per-block tag arrays -- the engagement signal the
+    // dimension-reduction matrix asserts block structure against.
+    m.def("little_group_thermal",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             const std::string& method, double t_min, double t_max,
+             std::size_t num_t, std::size_t num_samples,
+             std::size_t krylov_dim, std::uint64_t random_seed,
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal, int dense_max_dim) {
+              using Method = ed::workflows::ThermalOptions::Method;
+              ed::workflows::ThermalOptions topts;
+              if      (method == "FTLM")  topts.method = Method::FTLM;
+              else if (method == "LTLM")  topts.method = Method::LTLM;
+              else if (method == "mTPQ")  topts.method = Method::mTPQ;
+              else if (method == "OFTLM") topts.method = Method::OFTLM;
+              else
+                  throw std::invalid_argument(
+                      "little_group_thermal: method must be one of "
+                      "FTLM/LTLM/mTPQ/OFTLM (KPM_DOS recombines on the "
+                      "abelian lane only), got '" + method + "'");
+              topts.temp_min      = t_min;
+              topts.temp_max      = t_max;
+              topts.num_temp_bins = num_t;
+              topts.num_samples   = num_samples;
+              topts.krylov_dim    = krylov_dim;
+              topts.random_seed   = random_seed;
+              topts.backend.allow_gpu = use_gpu;
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupThermalResult r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::little_group_thermal(
+                      op, abelian_group, residue_perms, n_sites, topts,
+                      lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                              spin_flip, time_reversal));
+              }
+              py::dict d;
+              d["temperatures"]  = r.thermo.temperatures;
+              d["energy"]        = r.thermo.energy;
+              d["specific_heat"] = r.thermo.specific_heat;
+              d["entropy"]       = r.thermo.entropy;
+              d["free_energy"]   = r.thermo.free_energy;
+              d["ground_state_energy"] = r.ground_state_energy;
+              d["projected_any"] = r.projected_any;
+              d["gpu_engaged"]   = r.gpu_engaged;
+              std::vector<int> b_nup, b_kraw, b_flip, b_irrep, b_idim,
+                               b_star;
+              std::vector<std::uint64_t> b_dim, b_mult, b_weight;
+              for (std::size_t i = 0; i < r.block_tags.size(); ++i) {
+                  const auto& t = r.block_tags[i];
+                  b_nup.push_back(t.n_up);
+                  b_kraw.push_back(t.k_raw);
+                  b_flip.push_back(t.flip_parity);
+                  b_irrep.push_back(t.irrep);
+                  b_idim.push_back(t.irrep_dim);
+                  b_star.push_back(t.star_size);
+                  b_dim.push_back(t.dim);
+                  b_mult.push_back(t.multiplicity);
+                  b_weight.push_back(r.weights[i]);
+              }
+              d["block_n_up"]        = b_nup;
+              d["block_k_raw"]       = b_kraw;
+              d["block_flip_parity"] = b_flip;
+              d["block_irrep"]       = b_irrep;
+              d["block_irrep_dim"]   = b_idim;
+              d["block_star_size"]   = b_star;
+              d["block_dim"]         = b_dim;
+              d["block_multiplicity"] = b_mult;
+              d["block_weight"]      = b_weight;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("method") = "FTLM",
+          py::arg("t_min") = 0.1, py::arg("t_max") = 10.0,
+          py::arg("num_t") = 24, py::arg("num_samples") = 40,
+          py::arg("krylov_dim") = 100, py::arg("random_seed") = 0,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
+          "Sampled (FTLM/LTLM/mTPQ/OFTLM) thermodynamics inside the "
+          "factorized little-group blocks, Z-recombined with block "
+          "multiplicities.");
 
     m.def("little_group_gs_dssf",
           [](const Operator& op_h, const Operator& op_o,

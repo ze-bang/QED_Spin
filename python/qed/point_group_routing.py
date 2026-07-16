@@ -337,6 +337,7 @@ def resolve_projection_lane(
     consumer: str,                 # "solve" | "thermal" | "full_spectrum" | "spectral"
     eigenvalues_only: bool = True,
     prefer_abelian: bool = False,  # soft veto: 'auto' declines, 'full' still projects
+    method: Optional[str] = None,  # thermal only: the sampling method name
     verbose: bool = False,
 ) -> ProjectionLane:
     """Decide project-vs-abelian for one verb call. ``point_group='full'``
@@ -369,10 +370,26 @@ def resolve_projection_lane(
             reason="the abelian lane better serves this call "
                    "(e.g. an explicit GPU device request)")
     if pg == "auto" and consumer == "thermal":
-        return _decline(
-            "thermal projects only under point_group='full' (the "
-            "projection lane replaces sampling with exact per-block "
-            "spectra -- an explicit opt-in)")
+        # U1b (lane unification): thermal 'auto' PROJECTS for the sampling
+        # methods -- the run stays a sampling run, inside the smaller
+        # (n_up, k, +/-, sigma) blocks (little_group_thermal); only
+        # point_group='full' opts into EXACT per-block spectra
+        # (little_group_thermodynamics), unchanged. KPM_DOS keeps the
+        # abelian lane: its deliverable is one full-spectrum DOS, which
+        # per-block Chebyshev grids cannot recombine into.
+        _m = (method or "").upper()
+        if os.environ.get("ED_SYM_LG_THERMAL", "1") == "0":
+            return _decline(
+                "ED_SYM_LG_THERMAL=0 restores the pre-U1b behaviour "
+                "(thermal auto never projects)")
+        if _m in ("KPM_DOS", "KPMDOS"):
+            return _decline(
+                "KPM_DOS produces one full-spectrum DOS; per-block "
+                "sub-DOS cannot recombine -- the abelian lane serves it")
+        if _m not in ("FTLM", "LTLM", "MTPQ", "OFTLM"):
+            return _decline(
+                f"thermal method {method!r} has no sample-inside-block "
+                f"lane; only FTLM/LTLM/mTPQ/OFTLM project under 'auto'")
     if pg == "auto" and consumer == "spectral":
         return _decline(
             "spectral 'auto' keeps the abelian per-probe cross-irrep "

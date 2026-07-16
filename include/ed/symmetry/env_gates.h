@@ -73,6 +73,9 @@ namespace ed::symmetry {
       "=0 disables TR star/sigma folding inside the engine (Stage 9b)")        \
     X("ED_SYM_LG_GPU", "auto (device present + block >= 2^20 reps)",           \
       "=0 vetoes the little-group GPU rep gather; =1 drops the dim floor")     \
+    X("ED_SYM_LG_THERMAL", "1  [read in Python routing]",                      \
+      "=0: thermal 'auto' never projects (pre-U1b); sampling methods "        \
+      "keep the abelian sector lane")                                          \
     X("ED_SYM_LG_SEED", "0",                                                   \
       "offsets the lowest-k Lanczos start vector (multi-seed verification)")   \
     X("ED_SYM_LG_DENSE_FLOOR", "auto (32x Lanczos cap)",                       \

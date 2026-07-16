@@ -429,6 +429,68 @@ def test_forced_stream_regime_subprocess_same_dims(model):
 
 
 # ===========================================================================
+# 4b. U1b: thermal sampling runs inside the SAME reduced blocks
+# ===========================================================================
+
+def test_thermal_auto_samples_inside_isotypic_blocks(model):
+    """qed.thermal(point_group='auto', sampling method) must work in the
+    little-group blocks: at half filling the per_sector dims must equal
+    the m_sigma multiset the eigenvalue engine reports for the same
+    subspace, the global covering sum dim*weight == 2^N must hold, and
+    E(T) must match dense."""
+    name, bonds, H, gens = model
+    T = np.linspace(0.5, 2.0, 3)
+    tr = qed.thermal(H, symmetry=gens, method="FTLM", T_min=float(T[0]),
+                     T_max=float(T[-1]), num_T=len(T), num_samples=2,
+                     verbose=False)
+    assert tr.used_symmetry_decomposition
+    assert sum(e.sector_dim * e.weight for e in tr.per_sector) == 1 << N
+    # Half-filling block dims == the m_sigma multiset of the eigenvalue
+    # engine (rows per (k0, flip, irrep) of the labeled full spectrum).
+    out = _lg_out(H, gens, n_up=N // 2)
+    m_sigma = Counter()
+    rows = Counter(zip(out["block_k_raw"], out["block_flip_parity"],
+                       out["block_irrep"]))
+    for _, m in rows.items():
+        m_sigma[m] += 1
+    thermal_hf = Counter()
+    for e in tr.per_sector:
+        if e.n_up == N // 2:
+            thermal_hf[e.sector_dim] += 1
+    assert thermal_hf == Counter(
+        {dim: cnt for dim, cnt in m_sigma.items()}), (
+        f"[{name}] thermal blocks at n_up=N/2 "
+        f"{sorted(thermal_hf.elements())} != engine m_sigma "
+        f"{sorted(m_sigma.elements())}")
+    # dense anchor
+    Hd = _dense(bonds)
+    ev = np.linalg.eigvalsh(Hd)
+    Eref = [float((ev * np.exp(-(ev - ev[0]) / t)).sum()
+                  / np.exp(-(ev - ev[0]) / t).sum()) for t in T]
+    np.testing.assert_allclose(np.asarray(tr.energy), Eref, atol=1e-6)
+
+
+def test_thermal_true_sampling_path_in_blocks(model, monkeypatch):
+    """ED_THERMAL_EXACT_SMALL=0 forces the REAL sampling kernels inside
+    the blocks (no exact fallback). Loose tolerance -- this pins that the
+    kernels run at block dims (incl. dim 1-3) without error and land near
+    dense, not the estimator variance."""
+    name, bonds, H, gens = model
+    monkeypatch.setenv("ED_THERMAL_EXACT_SMALL", "0")
+    T = np.linspace(1.0, 2.0, 2)
+    tr = qed.thermal(H, symmetry=gens, method="FTLM", T_min=float(T[0]),
+                     T_max=float(T[-1]), num_T=len(T), num_samples=8,
+                     random_seed=7, verbose=False)
+    assert tr.used_symmetry_decomposition
+    assert sum(e.sector_dim * e.weight for e in tr.per_sector) == 1 << N
+    Hd = _dense(bonds)
+    ev = np.linalg.eigvalsh(Hd)
+    Eref = np.array([float((ev * np.exp(-(ev - ev[0]) / t)).sum()
+                           / np.exp(-(ev - ev[0]) / t).sum()) for t in T])
+    np.testing.assert_allclose(np.asarray(tr.energy), Eref, rtol=0.15)
+
+
+# ===========================================================================
 # 5. Combination sweep: dims match theory under every toggle combo
 # ===========================================================================
 
