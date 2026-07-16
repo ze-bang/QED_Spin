@@ -1071,6 +1071,67 @@ PYBIND11_MODULE(_core, m) {
           "factorized little-group blocks, Z-recombined with block "
           "multiplicities.");
 
+    // U2b-r2: certified lowest-k eigenpairs on the projection lane.
+    // Vectors are returned as COMPUTATIONAL-basis amplitude arrays
+    // (flip-aware expansion; moderate-N contract, n_sites <= 30). A row
+    // with multiplicity > 1 carries ONE representative vector (fold
+    // partners need U3 transport).
+    m.def("little_group_lowest_vectors",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int spin_flip,
+             int time_reversal, int dense_max_dim) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupVectors lv;
+              {
+                  py::gil_scoped_release release;
+                  lv = ed::solvers::little_group_lowest_vectors(
+                      op, abelian_group, residue_perms, n_sites, k,
+                      lg_opts(n_up, sz_parity, dense_max_dim,
+                              /*use_gpu=*/false, spin_flip,
+                              time_reversal));
+              }
+              py::dict d;
+              std::vector<double> evals;
+              std::vector<int> kraw, flip, irrep, idim;
+              std::vector<std::uint64_t> mult;
+              py::list vecs;
+              for (const auto& row : lv.rows) {
+                  evals.push_back(row.eigenvalue);
+                  kraw.push_back(row.tag.k_raw);
+                  flip.push_back(row.tag.flip_parity);
+                  irrep.push_back(row.tag.irrep);
+                  idim.push_back(row.tag.irrep_dim);
+                  mult.push_back(row.tag.multiplicity);
+                  const auto psi =
+                      ed::solvers::expand_rep_vector_to_computational(
+                          lv.sectors[row.sector_slot], row.vec);
+                  py::array_t<std::complex<double>> arr(
+                      static_cast<py::ssize_t>(psi.size()));
+                  std::copy(psi.begin(), psi.end(),
+                            arr.mutable_data());
+                  vecs.append(std::move(arr));
+              }
+              d["eigenvalues"]   = evals;
+              d["k_raw"]         = kraw;
+              d["flip_parity"]   = flip;
+              d["irrep"]         = irrep;
+              d["irrep_dim"]     = idim;
+              d["multiplicity"]  = mult;
+              d["vectors"]       = vecs;
+              d["flip_engaged"]  = lv.flip_engaged;
+              d["tr_engaged"]    = lv.tr_engaged;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
+          "Certified lowest-k eigenpairs of the factorized block "
+          "decomposition, vectors expanded to the computational basis.");
+
     m.def("little_group_gs_dssf",
           [](const Operator& op_h, const Operator& op_o,
              const std::vector<std::vector<int>>& abelian_group,

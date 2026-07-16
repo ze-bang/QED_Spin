@@ -192,4 +192,43 @@ expand_rep_vector_to_computational(
     const ed::symmetry::RepSectorData&        rd,
     const std::vector<std::complex<double>>&  u);
 
+// =============================================================================
+// U2b-r2: the lowest-k EIGENPAIRS of the block decomposition, vectors
+// included -- the capability whose absence forced eigenvector consumers
+// off the projection lane. Per block: dense below the crossover, else
+// FullCGS2 Lanczos with kept basis; every returned pair is
+// residual-CERTIFIED in the momentum sector's rep basis
+// (||H_k0 u - E u|| / ||u|| <= 1e-8 after the isotypic lift) -- an
+// uncertified pair is dropped, never returned.
+//
+// Vectors are returned in the REP BASIS of their momentum sector
+// (rows[i].vec over sectors[rows[i].sector_slot]); expand to
+// computational amplitudes with expand_rep_vector_to_computational
+// (flip-aware). A row with multiplicity > 1 carries ONE representative
+// vector -- the star/TR/d_sigma partners are isospectral copies whose
+// vectors need the U3 fold transport (not yet built); consumers that
+// need every partner's vector must solve those sectors directly.
+// =============================================================================
+struct LittleGroupVectorRow {
+    double                            eigenvalue = 0.0;
+    LittleGroupBlockTag               tag;          ///< incl. multiplicity
+    std::vector<std::complex<double>> vec;          ///< rep basis, certified
+    std::size_t                       sector_slot = 0;  ///< into sectors[]
+};
+
+struct LittleGroupVectors {
+    std::vector<LittleGroupVectorRow>        rows;     ///< ascending eigenvalue
+    std::vector<ed::symmetry::RepSectorData> sectors;  ///< one per touched star
+    bool flip_engaged = false;
+    bool tr_engaged   = false;
+};
+
+[[nodiscard]] LittleGroupVectors
+little_group_lowest_vectors(const ::Operator&                    op,
+                            const std::vector<std::vector<int>>& abelian_group,
+                            const std::vector<std::vector<int>>& residue_perms,
+                            int                                  n_sites,
+                            int                                  k,
+                            const LittleGroupOptions&            opt);
+
 }  // namespace ed::solvers

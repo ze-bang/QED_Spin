@@ -318,3 +318,69 @@ TEST_CASE("U2b: flip-projected eigenvectors expand to the computational "
     }
     REQUIRE(tested >= 4);
 }
+
+TEST_CASE("U2b-r2: little_group_lowest_vectors -- certified eigenpairs "
+          "across the block decomposition, flip rows included",
+          "[little_group][blocks][vectors]") {
+    const int N = 8, n_up = 4, k = 6;
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up = n_up;   // flip auto-engages at half filling
+
+    const auto lv = ed::solvers::little_group_lowest_vectors(
+        *H, A, res, N, k, opt);
+    REQUIRE(lv.flip_engaged);
+    REQUIRE(lv.rows.size() == static_cast<std::size_t>(k));
+
+    // Values: the k lowest DISTINCT block rows vs the engine's own
+    // labeled lowest walk (multiplicities aside, the row values must be
+    // a prefix-compatible subset of the dense fixed-Sz spectrum).
+    const auto Hd = dense_heisenberg(N);
+    std::vector<std::uint64_t> states;
+    for (std::uint64_t s = 0; s < (1ULL << N); ++s)
+        if (__builtin_popcountll(s) == n_up) states.push_back(s);
+    Eigen::MatrixXd Hs(states.size(), states.size());
+    for (std::size_t a = 0; a < states.size(); ++a)
+        for (std::size_t b = 0; b < states.size(); ++b)
+            Hs(static_cast<Eigen::Index>(a), static_cast<Eigen::Index>(b))
+                = Hd(static_cast<Eigen::Index>(states[a]),
+                     static_cast<Eigen::Index>(states[b]));
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Hs);
+
+    bool any_flip_row = false;
+    const std::uint64_t mask = (1ULL << N) - 1;
+    for (const auto& row : lv.rows) {
+        // every reported eigenvalue is IN the dense block spectrum
+        double best = 1e9;
+        for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i)
+            best = std::min(best,
+                            std::abs(es.eigenvalues()(i) - row.eigenvalue));
+        REQUIRE(best < 1e-8);
+        // and its expanded vector is a TRUE eigenvector of the full H
+        const auto psi = ed::solvers::expand_rep_vector_to_computational(
+            lv.sectors[row.sector_slot], row.vec);
+        double num = 0.0;
+        Eigen::VectorXcd p(static_cast<Eigen::Index>(psi.size()));
+        for (std::size_t s = 0; s < psi.size(); ++s)
+            p(static_cast<Eigen::Index>(s)) = psi[s];
+        Eigen::VectorXcd hp = Hd * p;
+        for (Eigen::Index s = 0; s < p.size(); ++s)
+            num += std::norm(hp(s) - row.eigenvalue * p(s));
+        REQUIRE(std::sqrt(num) < 1e-8);
+        // flip-tagged rows expand to flip eigenvectors of their parity
+        if (row.tag.flip_parity >= 0) {
+            any_flip_row = true;
+            const double want = row.tag.flip_parity == 0 ? 1.0 : -1.0;
+            double fnum = 0.0;
+            for (std::uint64_t s = 0; s < psi.size(); ++s)
+                fnum += std::norm(psi[s ^ mask] - want * psi[s]);
+            REQUIRE(std::sqrt(fnum) < 1e-8);
+        }
+    }
+    REQUIRE(any_flip_row);
+    // GS row is the true GS
+    REQUIRE(std::abs(lv.rows[0].eigenvalue - es.eigenvalues()(0)) < 1e-9);
+}

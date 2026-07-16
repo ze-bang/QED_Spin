@@ -2180,6 +2180,161 @@ LittleGroupThermalResult little_group_thermal(
     return R;
 }
 
+namespace {
+
+// r2: lowest-`want` eigenpairs of ONE block, vectors in block coordinates.
+// Dense below the crossover (exact); FullCGS2 Lanczos + kept-basis Ritz
+// reconstruction above it, with an EXPLICIT per-pair residual check --
+// only the certified prefix is returned (same truthful-truncation
+// contract the orchestrator's GAP-10 fix established).
+[[nodiscard]] std::pair<std::vector<double>,
+                        std::vector<std::vector<Complex>>>
+solve_block_pairs(const ed::matvec::MatVecOperator& mv, int want,
+                  int dense_max_dim)
+{
+    std::vector<double>               evals;
+    std::vector<std::vector<Complex>> vecs;
+    const std::size_t n = mv.dim();
+    if (n == 0 || want <= 0) return {evals, vecs};
+    const std::size_t k = std::min<std::size_t>(
+        static_cast<std::size_t>(want), n);
+    if (n <= static_cast<std::size_t>(std::max(dense_max_dim, 2))) {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(mv));
+        for (std::size_t i = 0; i < k; ++i) {
+            evals.push_back(es.eigenvalues()(static_cast<Eigen::Index>(i)));
+            std::vector<Complex> v(n);
+            for (std::size_t r = 0; r < n; ++r)
+                v[r] = es.eigenvectors()(static_cast<Eigen::Index>(r),
+                                         static_cast<Eigen::Index>(i));
+            vecs.push_back(std::move(v));
+        }
+        return {evals, vecs};
+    }
+    ed::matvec::CpuBackend be;
+    std::vector<Complex> v0(n);
+    std::mt19937_64 gen(0x51ED0EC2ULL);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    for (auto& c : v0) c = Complex(nd(gen), nd(gen));
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter   = std::min<std::size_t>(
+        n, std::max<std::size_t>(200, 8 * k));
+    kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    kopts.keep_basis = true;
+    kopts.dim_cap    = n;
+    auto apply_H = [&mv](const Complex* in, Complex* out, std::size_t nn) {
+        mv.apply(in, out, nn);
+    };
+    auto kres = ed::krylov::lanczos_kernel(be, apply_H, n, v0.data(), kopts);
+    const std::size_t m = kres.alpha.size();
+    if (m == 0) return {evals, vecs};
+    std::vector<double> diag = kres.alpha;
+    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+    std::vector<double> z(m * m, 0.0);
+    if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+                       diag.data(), off.data(), z.data(),
+                       static_cast<lapack_int>(m)) != 0)
+        return {evals, vecs};
+    std::vector<Complex> u(n), hu(n);
+    for (std::size_t i = 0; i < k && i < m; ++i) {
+        std::fill(u.begin(), u.end(), Complex(0, 0));
+        for (std::size_t j = 0; j < m; ++j) {
+            const double c = z[j + i * m];
+            if (std::abs(c) < 1e-300) continue;
+            const Complex* vj = kres.basis[j].get();
+            for (std::size_t r = 0; r < n; ++r) u[r] += c * vj[r];
+        }
+        mv.apply(u.data(), hu.data(), n);
+        double num = 0.0, den = 1e-300;
+        for (std::size_t r = 0; r < n; ++r) {
+            num += std::norm(hu[r] - diag[i] * u[r]);
+            den += std::norm(u[r]);
+        }
+        if (std::sqrt(num / den) > 1e-8) break;   // certified PREFIX only
+        const double inv = 1.0 / std::sqrt(den);
+        std::vector<Complex> v(n);
+        for (std::size_t r = 0; r < n; ++r) v[r] = inv * u[r];
+        evals.push_back(diag[i]);
+        vecs.push_back(std::move(v));
+    }
+    return {evals, vecs};
+}
+
+}  // namespace
+
+// =============================================================================
+// U2b-r2: lowest-k eigenpairs across the whole block decomposition, with
+// rep-basis vectors -- see little_group_blocks.h for the contract (one
+// representative vector per multiplicity-m row; U3 fold transport will
+// add the partners).
+// =============================================================================
+LittleGroupVectors little_group_lowest_vectors(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    const std::vector<std::vector<int>>& residue_perms,
+    int                                  n_sites,
+    int                                  k,
+    const LittleGroupOptions&            opt)
+{
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
+                        cx, tr_on);
+    const auto stars = star_partition(cx, tr_on);
+
+    LittleGroupVectors out;
+    out.flip_engaged = cx.flip_half;
+    out.tr_engaged   = tr_on;
+    for (const auto& [k0, members] : stars) {
+        StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
+                                         false, nullptr, nullptr, nullptr);
+        if (!sb.hk) continue;
+        std::size_t slot = static_cast<std::size_t>(-1);
+        for (const auto& bi : sb.blocks) {
+            const ed::matvec::MatVecOperator& mv =
+                bi->pop ? static_cast<const ed::matvec::MatVecOperator&>(
+                              *bi->pop)
+                        : static_cast<const ed::matvec::MatVecOperator&>(
+                              *bi->hk);
+            auto [ev, vv] = solve_block_pairs(mv, k, opt.dense_max_dim);
+            LittleGroupBlock blk(bi);
+            for (std::size_t i = 0; i < ev.size(); ++i) {
+                auto u = blk.lift_to_rep(vv[i].data());
+                // Certify the LIFT against the full momentum-sector H
+                // (the sandwich residual above does not cover W_sigma).
+                const std::size_t nrep = u.size();
+                std::vector<Complex> hu(nrep);
+                sb.hk->apply(u.data(), hu.data(), nrep);
+                double num = 0.0, den = 1e-300;
+                for (std::size_t r = 0; r < nrep; ++r) {
+                    num += std::norm(hu[r] - ev[i] * u[r]);
+                    den += std::norm(u[r]);
+                }
+                if (std::sqrt(num / den) > 1e-8) continue;
+                const double inv = 1.0 / std::sqrt(den);
+                for (auto& c : u) c *= inv;
+                if (slot == static_cast<std::size_t>(-1)) {
+                    out.sectors.push_back(sb.hk->rep_data());
+                    slot = out.sectors.size() - 1;
+                }
+                LittleGroupVectorRow row;
+                row.eigenvalue  = ev[i];
+                row.tag         = bi->tag;
+                row.vec         = std::move(u);
+                row.sector_slot = slot;
+                out.rows.push_back(std::move(row));
+            }
+        }
+    }
+    std::stable_sort(out.rows.begin(), out.rows.end(),
+                     [](const auto& a, const auto& b) {
+                         return a.eigenvalue < b.eigenvalue;
+                     });
+    if (out.rows.size() > static_cast<std::size_t>(std::max(k, 0)))
+        out.rows.resize(static_cast<std::size_t>(std::max(k, 0)));
+    return out;
+}
+
 // =============================================================================
 // U2b: flip-aware rep -> computational expansion. |psi> = sum_alpha
 // u_alpha |b_alpha> with |b_alpha> = (1/N_alpha) sum_g conj(chi(g)) g|rep>,
