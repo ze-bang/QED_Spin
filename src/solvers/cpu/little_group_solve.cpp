@@ -2282,10 +2282,19 @@ LittleGroupVectors little_group_lowest_vectors(
                         cx, tr_on);
     const auto stars = star_partition(cx, tr_on);
 
+    // Honour only_k0 (+ the env override) exactly like run_little_group.
+    // (First cut of r2a silently IGNORED it: a caller naming a star got
+    // the GLOBAL lowest rows instead -- the accepted-but-inert failure
+    // class. Caught by the U3 transport debug, pinned below in ctest.)
+    bool ignore_plan = false;
+    std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
+    parse_only_k0_env(only_k0, ignore_plan);
+
     LittleGroupVectors out;
     out.flip_engaged = cx.flip_half;
     out.tr_engaged   = tr_on;
     for (const auto& [k0, members] : stars) {
+        if (!only_k0.empty() && only_k0.count(k0) == 0) continue;
         StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
                                          false, nullptr, nullptr, nullptr);
         if (!sb.hk) continue;

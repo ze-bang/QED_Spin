@@ -244,12 +244,6 @@ little_group_lowest_vectors(const ::Operator&                    op,
 // by the CALLER's pin (transport itself is exact bookkeeping; a failed
 // canonicalization or a non-unit phase throws).
 //
-// *** EXPERIMENTAL (2026-07-16): the star-transport PHASE CONVENTION is
-// wrong (transported vectors fail the eigenvector residual; see the
-// [!shouldfail] pin in test_little_group_blocks). TR conjugation and
-// the identity path are unaffected. Do not consume star transport
-// until that pin flips. ***
-//
 // Scope: momentum partners within ONE subspace (star members via the
 // residue mapping k0 -> k_dst, TR conjugates via complex conjugation).
 // The flip mirror (n_up <-> N - n_up) and the d_sigma-internal degenerate

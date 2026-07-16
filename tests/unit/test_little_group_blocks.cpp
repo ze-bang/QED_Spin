@@ -385,14 +385,13 @@ TEST_CASE("U2b-r2: little_group_lowest_vectors -- certified eigenpairs "
     REQUIRE(std::abs(lv.rows[0].eigenvalue - es.eigenvalues()(0)) < 1e-9);
 }
 
-TEST_CASE("U3-WIP: fold transport delivers the partners' eigenvectors",
-          "[little_group][blocks][transport][!shouldfail]") {
-    // KNOWN-FAILING (2026-07-16): the cross-sector transport phase
-    // convention is wrong (residual ~2.0; direction ruled out -- the
-    // D8 reflections are involutions). The fix needs a dense-U_p
-    // oracle comparison; little_group_transport is marked
-    // EXPERIMENTAL in its header until this pin passes. [!shouldfail]
-    // makes the suite green now and LOUD the moment the math is fixed.
+TEST_CASE("U3: fold transport delivers the partners' eigenvectors",
+          "[little_group][blocks][transport]") {
+    // RESOLVED (2026-07-16): the transport math was correct all along;
+    // the dense-U_p oracle debug exposed the REAL bug -- r2a's
+    // little_group_lowest_vectors silently IGNORED only_k0, so this
+    // test transported a wrong-sector vector. The filter is now
+    // honoured (asserted below via the row tag).
     const int N = 8, n_up = 3;   // off half filling: raw sectors, star folds
     auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
     const auto A   = ring_translations(N);
@@ -415,6 +414,7 @@ TEST_CASE("U3-WIP: fold transport delivers the partners' eigenvectors",
             *H, A, res, N, 1, o);
         REQUIRE(!lv.rows.empty());
         const auto& row = lv.rows[0];
+        REQUIRE(row.tag.k0 == s.k0);   // only_k0 honoured (r2a fix)
         for (int member : s.members) {
             if (member == s.k0) continue;
             auto [rd_m, v_m] = ed::solvers::little_group_transport(
@@ -469,3 +469,4 @@ TEST_CASE("U3-WIP: fold transport delivers the partners' eigenvectors",
     }
     REQUIRE(transported >= 1);
 }
+
