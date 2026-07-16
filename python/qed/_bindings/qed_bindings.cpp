@@ -48,6 +48,7 @@
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
 #include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
+#include <ed/core/hdf5_io.h>                // r2b: canonical eigenvector save
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
 #include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
@@ -1081,7 +1082,8 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int k, int n_up, int sz_parity, int spin_flip,
-             int time_reversal, int dense_max_dim) {
+             int time_reversal, int dense_max_dim,
+             const std::string& output_dir) {
               const int n_sites = static_cast<int>(op.getNumBits());
               ed::solvers::LittleGroupVectors lv;
               {
@@ -1097,6 +1099,7 @@ PYBIND11_MODULE(_core, m) {
               std::vector<int> kraw, flip, irrep, idim;
               std::vector<std::uint64_t> mult;
               py::list vecs;
+              std::vector<std::vector<std::complex<double>>> psis;
               for (const auto& row : lv.rows) {
                   evals.push_back(row.eigenvalue);
                   kraw.push_back(row.tag.k_raw);
@@ -1104,7 +1107,7 @@ PYBIND11_MODULE(_core, m) {
                   irrep.push_back(row.tag.irrep);
                   idim.push_back(row.tag.irrep_dim);
                   mult.push_back(row.tag.multiplicity);
-                  const auto psi =
+                  auto psi =
                       ed::solvers::expand_rep_vector_to_computational(
                           lv.sectors[row.sector_slot], row.vec);
                   py::array_t<std::complex<double>> arr(
@@ -1112,6 +1115,20 @@ PYBIND11_MODULE(_core, m) {
                   std::copy(psi.begin(), psi.end(),
                             arr.mutable_data());
                   vecs.append(std::move(arr));
+                  if (!output_dir.empty()) psis.push_back(std::move(psi));
+              }
+              // r2b: persist through the canonical writer (the same
+              // /eigendata layout every solver emits). COMPUTATIONAL
+              // basis -- directly consumable, unlike the abelian lane's
+              // per-sector sector-basis files. Row i's eigenvector pairs
+              // with eigenvalue i.
+              if (!output_dir.empty()
+                  && !HDF5IO::isDisabledOutputPath(output_dir)) {
+                  HDF5IO::saveDiagonalizationResults(
+                      output_dir, evals, psis, "LITTLE_GROUP_VECTORS");
+                  d["hdf5_path"] = output_dir + "/ed_results.h5";
+              } else {
+                  d["hdf5_path"] = std::string();
               }
               d["eigenvalues"]   = evals;
               d["k_raw"]         = kraw;
@@ -1129,8 +1146,10 @@ PYBIND11_MODULE(_core, m) {
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           py::arg("dense_max_dim") = 4096,
+          py::arg("output_dir") = std::string(),
           "Certified lowest-k eigenpairs of the factorized block "
-          "decomposition, vectors expanded to the computational basis.");
+          "decomposition, vectors expanded to the computational basis "
+          "(persisted to <output_dir>/ed_results.h5 when given).");
 
     m.def("little_group_gs_dssf",
           [](const Operator& op_h, const Operator& op_o,

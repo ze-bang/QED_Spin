@@ -707,6 +707,51 @@ def solve(
         # walk (LittleGroupOptions::only_k0), so a named momentum now projects
         # AND does only that star's work. Eigenvectors and sampling methods
         # still decline: the projection lane genuinely does not produce them.
+        # r2b (lane unification): the projection lane now PRODUCES
+        # certified eigenvectors (little_group_lowest_vectors: per-block
+        # pairs, W_sigma lift re-certified against H_k0, flip-aware
+        # COMPUTATIONAL-basis expansion, persisted via the canonical
+        # /eigendata writer). Contract: a single NAMED subspace (sz=);
+        # the merged multi-subspace sweep keeps the abelian lane's
+        # winning-sector convention. A multiplicity-m row carries ONE
+        # representative vector (fold partners need U3 transport).
+        if (compute_eigenvectors and not is_thermal
+                and sector is None and irrep is None and flip is None
+                and isinstance(sz, int)):
+            vlane = resolve_projection_lane(
+                symmetry, point_group=point_group, consumer="solve",
+                eigenvalues_only=True,   # the capability exists as of r2
+                prefer_abelian=False, verbose=verbose)
+            if vlane.mode == "project":
+                _sfv = resolve_discrete_toggle(
+                    op_to_use, spin_flip, "spin_flip", verbose=verbose)
+                _trv = resolve_discrete_toggle(
+                    op_to_use, time_reversal, "time_reversal",
+                    verbose=verbose)
+                d = dict(_core.little_group_lowest_vectors(
+                    op_to_use, vlane.A, vlane.residues,
+                    k=int(num_eigenvalues) if num_eigenvalues else 1,
+                    n_up=int(sz), spin_flip=_sfv, time_reversal=_trv,
+                    output_dir=str(output_dir) if output_dir else ""))
+                out = EDResults()
+                out.eigenvalues          = list(d["eigenvalues"])
+                out.eigenvectors         = list(d["vectors"])
+                out.eigenvectors_computed = True
+                out.eigenvectors_path    = d["hdf5_path"]
+                out.block_k_raw          = list(d["k_raw"])
+                out.block_flip_parity    = list(d["flip_parity"])
+                out.block_irrep          = list(d["irrep"])
+                out.block_irrep_dim      = list(d["irrep_dim"])
+                out.block_multiplicity   = list(d["multiplicity"])
+                out.backend = _ProjectLaneBackend("cpu")
+                if verbose:
+                    print(f"[qed.solve] little-group VECTOR lane (r2b): "
+                          f"{len(out.eigenvalues)} certified pairs, "
+                          f"computational basis.")
+                return out
+            elif verbose:
+                print(f"[qed.solve] vector lane declined "
+                      f"({vlane.reason}); abelian lane.")
         lane = resolve_projection_lane(
             symmetry, point_group=point_group, consumer="solve",
             eigenvalues_only=(not compute_eigenvectors
