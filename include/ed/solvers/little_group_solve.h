@@ -117,6 +117,34 @@ struct LittleGroupStarInfo {
     /// Members are isospectral by construction (the residue maps them onto
     /// each other), so the representative's spectrum answers for all of them.
     std::vector<int> members;
+
+    // -----------------------------------------------------------------------
+    // The little co-group P_k0 of THIS star, published so a caller can NAME an
+    // irrep by its character instead of by an index.
+    //
+    // `LittleGroupLabel::irrep` is an index into decompose_irreps' own
+    // ordering -- engine-internal, exactly like `k_raw` (which is NOT the
+    // momentum). Momentum is nameable because `irrep_characters` publishes
+    // chi_k over the ABELIAN group; the co-group's characters had no such
+    // table, so a `irrep=<index>` API would have handed callers an internal
+    // convention and called it physics. These three fields are that missing
+    // table.
+    //
+    //   little_elems[e]        -- which residue is co-group element e: an index
+    //                             into the caller's own `residue_perms`, or -1
+    //                             for the identity (always element 0). This is
+    //                             what makes the character columns identifiable
+    //                             as permutations the caller already holds.
+    //   little_characters[s][e]-- chi_sigma(element e) for irrep s. Rows are
+    //                             parallel to `LittleGroupLabel::irrep`.
+    //   little_irrep_dims[s]   -- d_sigma. Sum of d_sigma^2 == little_order.
+    //
+    // Empty when the star was not projected (trivial co-group, or a graceful
+    // per-star fallback): there is no table to report.
+    // -----------------------------------------------------------------------
+    std::vector<int> little_elems;
+    std::vector<std::vector<std::complex<double>>> little_characters;
+    std::vector<int> little_irrep_dims;
 };
 
 /// Stage 9f: per-eigenvalue quantum-number label, parallel to

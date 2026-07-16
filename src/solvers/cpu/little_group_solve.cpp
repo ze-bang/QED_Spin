@@ -1178,8 +1178,13 @@ LittleGroupSpectrum run_little_group(
                 "dim=%llu\n",
                 k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
                 static_cast<unsigned long long>(rd.reps.size()));
-            out.stars.push_back(info);
-            continue;
+            // NOTE: no `continue` here. Plan mode used to bail out at this
+            // point, which meant it reported dims and star sizes but never
+            // built the little co-group -- so the one thing a caller needs in
+            // order to NAME an irrep (its character table) was missing from
+            // the only pass cheap enough to ask for it. Plan now runs the
+            // monomial + isotypic decomposition and skips just the
+            // eigensolves, which is where the cost actually is.
         }
         if (rd.reps.empty()) { out.stars.push_back(info); continue; }
 
@@ -1194,12 +1199,17 @@ LittleGroupSpectrum run_little_group(
         // abstract group closure (e.g. all N reflections of a D_N ring are
         // one coset: the little co-group of k = 0 is Z2, not order N+1).
         std::vector<Monomial> M;
+        // Which residue each co-group element came from (-1 = identity). The
+        // loop below already knows this; it just never kept it, which left the
+        // published character table's columns unidentifiable.
+        std::vector<int> M_res;
         {
             Monomial ident;
             ident.to.resize(rdr.reps.size());
             std::iota(ident.to.begin(), ident.to.end(), 0);
             ident.phase.assign(rdr.reps.size(), Complex(1, 0));
             M.push_back(std::move(ident));
+            M_res.push_back(-1);
         }
         auto same_coset = [](const Monomial& a, const Monomial& b) {
             if (a.to != b.to) return false;
@@ -1222,6 +1232,7 @@ LittleGroupSpectrum run_little_group(
             if (dup) continue;
             if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
             M.push_back(std::move(m));
+            M_res.push_back(static_cast<int>(rp));
         }
         if (profile) { t_monomial += secs(t0, tick()); t0 = tick(); }
 
@@ -1326,15 +1337,36 @@ LittleGroupSpectrum run_little_group(
                             lab.flip_parity = info.flip_parity;
                             lab.irrep       = ii;
                             lab.irrep_dim   = d;
-                            ProjectedBlockOp bop(hk, W);
-                            const auto ev = solve_block(bop, mult, lab);
-                            for (double e : ev) {
-                                out.eigenvalues.push_back(e);
-                                out.multiplicities.push_back(mult);
-                                out.labels.push_back(lab);
+                            if (!plan_only) {
+                                ProjectedBlockOp bop(hk, W);
+                                const auto ev = solve_block(bop, mult, lab);
+                                for (double e : ev) {
+                                    out.eigenvalues.push_back(e);
+                                    out.multiplicities.push_back(mult);
+                                    out.labels.push_back(lab);
+                                }
                             }
                         }
                         info.little_order = static_cast<int>(M.size());
+                        // Publish P_k0's character table: the vocabulary that
+                        // lets a caller name an irrep by its CHARACTER instead
+                        // of by decompose_irreps' internal index. Rows are
+                        // parallel to LittleGroupLabel::irrep; columns are
+                        // identified by little_elems (residue indices into the
+                        // caller's own residue_perms, -1 = identity).
+                        info.little_elems = M_res;
+                        info.little_characters.clear();
+                        info.little_irrep_dims.clear();
+                        info.little_characters.reserve(
+                            static_cast<std::size_t>(nIr));
+                        info.little_irrep_dims.reserve(
+                            static_cast<std::size_t>(nIr));
+                        for (int ii = 0; ii < nIr; ++ii) {
+                            const auto& ir =
+                                giP.irreps[static_cast<std::size_t>(ii)];
+                            info.little_characters.push_back(ir.character);
+                            info.little_irrep_dims.push_back(ir.dim);
+                        }
                     } else {
                         char buf[160];
                         std::snprintf(buf, sizeof(buf),
@@ -1353,7 +1385,7 @@ LittleGroupSpectrum run_little_group(
             decline("no residue fixes this momentum (little co-group is "
                     "trivial) -- only the star fold applies here");
         }
-        if (!projected) {
+        if (!projected && !plan_only) {
             LittleGroupLabel lab;
             lab.k_raw       = k0 % cx.n_irr_raw;
             lab.flip_parity = info.flip_parity;

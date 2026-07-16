@@ -778,6 +778,13 @@ PYBIND11_MODULE(_core, m) {
             d["k0"]           = st.k0;
             d["star_size"]    = st.star_size;
             d["members"]      = st.members;
+            // P_k0's character table -- name an irrep by its CHARACTER, not by
+            // decompose_irreps' internal index. Columns are identified by
+            // little_elems (residue indices into the caller's residue_perms;
+            // -1 = identity). Empty when the star was not projected.
+            d["little_elems"]      = st.little_elems;
+            d["little_characters"] = st.little_characters;
+            d["little_irrep_dims"] = st.little_irrep_dims;
             d["little_order"] = st.little_order;
             d["projected"]    = st.projected;
             d["dim_k0"]       = st.dim_k0;

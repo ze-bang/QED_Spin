@@ -413,3 +413,122 @@ def test_thermal_sector_without_spatial_symmetry_raises():
     with pytest.raises(ValueError, match="spatial-symmetry irrep|symmetry="):
         qed.thermal(H, T_min=0.5, T_max=2.0, num_T=3, sector=[0],
                     use_sz_if_conserved=False, symmetry=None, **_TH)
+
+
+# ---------------------------------------------------------------------------
+# The little co-group's character table -- the vocabulary for naming an irrep
+# ---------------------------------------------------------------------------
+
+def _plan(H, n_up):
+    from qed import _core
+    from qed.point_group_routing import split_nonabelian
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    A, res = split_nonabelian(gen)
+    return dict(_core.little_group_full_spectrum(
+        H, A, res, n_up=n_up, spin_flip=0, time_reversal=0, plan_only=True))
+
+
+def test_plan_only_publishes_the_cogroup_table_without_solving():
+    """plan_only must cost no eigensolves and still hand back the vocabulary.
+
+    It used to bail out before building the co-group, so it reported dims and
+    star sizes but not the ONE thing needed to name an irrep -- its character
+    table. Naming by `irrep=<index>` instead would hand callers
+    decompose_irreps' internal ordering and call it physics: the same mistake
+    as reading k_raw as a momentum.
+    """
+    pytest.importorskip("pynauty")
+    plan = _plan(_j1j2_ring(), 6)
+    assert len(plan["eigenvalues"]) == 0, "plan_only must solve nothing"
+    tables = [st for st in plan["stars"] if st["little_characters"]]
+    assert tables, "no star published a co-group table"
+
+
+def test_cogroup_character_table_obeys_the_group_order_identity():
+    """sum_sigma d_sigma^2 == |P_k| -- the identity a real character table
+    cannot violate. This is what makes the published table trustworthy as a
+    naming vocabulary rather than an opaque array."""
+    pytest.importorskip("pynauty")
+    for H, n_up in ((_j1j2_ring(), 6), (_square_torus(), 8)):
+        plan = _plan(H, n_up)
+        checked = 0
+        for st in plan["stars"]:
+            ch = st["little_characters"]
+            if not ch:
+                continue
+            dims = list(st["little_irrep_dims"])
+            order = len(list(st["little_elems"]))
+            assert sum(d * d for d in dims) == order, (
+                f"star k0={st['k0']}: sum d^2 = {sum(d*d for d in dims)} != "
+                f"|P_k| = {order}")
+            assert len(ch) == len(dims)
+            for row in ch:
+                assert len(row) == order, "character row must span the co-group"
+            checked += 1
+        assert checked, "no projected star to check"
+
+
+def test_cogroup_characters_are_orthogonal():
+    """Distinct irreps have orthogonal characters; each is normalised to |P_k|.
+
+    For the ABELIAN co-groups here every element is its own class, so the
+    orthogonality sum runs flat over elements.
+    """
+    pytest.importorskip("pynauty")
+    plan = _plan(_square_torus(), 8)
+    checked = 0
+    for st in plan["stars"]:
+        ch = [np.asarray(r, dtype=complex) for r in st["little_characters"]]
+        if len(ch) < 2:
+            continue
+        order = len(list(st["little_elems"]))
+        for i in range(len(ch)):
+            norm = np.vdot(ch[i], ch[i]).real
+            assert norm == pytest.approx(order, abs=1e-8), (
+                f"star k0={st['k0']} irrep {i}: <chi|chi> = {norm} != {order}")
+            for j in range(i + 1, len(ch)):
+                ov = abs(np.vdot(ch[i], ch[j]))
+                assert ov < 1e-8, (
+                    f"star k0={st['k0']}: irreps {i},{j} not orthogonal "
+                    f"(|<chi_i|chi_j>| = {ov})")
+        checked += 1
+    assert checked, "no multi-irrep star to check"
+
+
+def test_cogroup_elements_are_identifiable_as_caller_residues():
+    """little_elems maps each column to a residue the CALLER passed in (-1 =
+    identity), which is what makes the character table interpretable: without
+    it the columns are anonymous and the table cannot name anything."""
+    pytest.importorskip("pynauty")
+    from qed.point_group_routing import split_nonabelian
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    _A, res = split_nonabelian(gen)
+    plan = _plan(H, 6)
+    for st in plan["stars"]:
+        elems = list(st["little_elems"])
+        if not elems:
+            continue
+        assert elems[0] == -1, "element 0 must be the identity"
+        for e in elems[1:]:
+            assert 0 <= e < len(res), (
+                f"co-group element {e} is not an index into the caller's "
+                f"{len(res)} residue_perms")
+
+
+def test_z2_cogroup_table_is_the_textbook_one():
+    """At the momenta a D_N reflection fixes (q=0 and q=pi), the co-group is
+    Z2 and its table must be exactly {1,1} and {1,-1}."""
+    pytest.importorskip("pynauty")
+    plan = _plan(_j1j2_ring(), 6)
+    singletons = [st for st in plan["stars"]
+                  if st["star_size"] == 1 and st["little_characters"]]
+    assert len(singletons) == 2, (
+        "a 12-ring has exactly two self-conjugate momenta (q=0, q=pi)")
+    for st in singletons:
+        assert len(list(st["little_elems"])) == 2
+        # characters are computed, not tabulated -- compare numerically
+        rows = sorted([round(complex(x).real, 9) for x in r]
+                      for r in st["little_characters"])
+        assert np.allclose(rows, [[1.0, -1.0], [1.0, 1.0]], atol=1e-8), \
+            f"got {rows}"
