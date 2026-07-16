@@ -205,3 +205,25 @@ def test_three_body_probe_raises():
     obs3 = bo.to_operator()
     with pytest.raises(RuntimeError, match="three-body"):
         qed._core.little_group_gs_dssf(H, obs3, A, res, WMIN, WMAX, NW, ETA)
+
+
+def test_flip_extended_source_matches_dense_lehmann():
+    """U2b-r1b: the GS source sector is now flip-EXTENDED (spin_flip auto
+    in the binding); scattering (k,+/-) sources (|G'| = 2|A|) into RAW
+    destinations rides the generalized 1/sqrt(G_src*G_dst) normalization.
+    Engagement is proven by construction -- the pre-r1a constructor threw
+    on the group-order mismatch -- and the physics is pinned here against
+    the dense Lehmann sum with a flip-ODD observable (staggered S^z),
+    where a wrong parity or a wrong sqrt(2) weight cannot hide."""
+    H = _ring()
+    obs = _sz_pi_probe()
+    _, A, res, _gens = _parts(H)
+    d = dict(qed._core.little_group_gs_dssf(
+        H, obs, A, res, WMIN, WMAX, NW, ETA))
+    wgrid = np.asarray(d["omega"])
+    S_ref, E0, W_ref = _dense_lehmann(_dense_h_ring(N), _dense_sz_pi(N),
+                                      wgrid, ETA)
+    np.testing.assert_allclose(np.asarray(d["s_omega"]), S_ref,
+                               rtol=0, atol=1e-10)
+    assert abs(d["total_weight"] - W_ref) < 1e-10
+    assert abs(d["gs_energy"] - E0) < 1e-10

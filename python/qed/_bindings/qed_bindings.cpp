@@ -1116,7 +1116,13 @@ PYBIND11_MODULE(_core, m) {
                   o.n_up          = nu;
                   o.sz_parity     = par;
                   o.dense_max_dim = dense_max_dim;
-                  o.spin_flip     = 0;  // 9d v1: raw sectors end-to-end
+                  // U2b-r1b: the SOURCE may be flip-extended (auto). The
+                  // rep-lane scatter is flip-aware (Stage-5b masks ride
+                  // the policy) and the cross-sector normalization
+                  // handles |G_src| != |G_dst| (1/sqrt(Gs*Gd)); the
+                  // destinations below stay RAW. Pinned by the
+                  // flip-engaged Lehmann test in test_little_group_dssf.
+                  o.spin_flip     = -1;
                   o.time_reversal = time_reversal;
                   return o;
               };
