@@ -445,6 +445,11 @@ def test_thermal_auto_samples_inside_isotypic_blocks(model):
                      verbose=False)
     assert tr.used_symmetry_decomposition
     assert sum(e.sector_dim * e.weight for e in tr.per_sector) == 1 << N
+    # Unified BlockTag (2026-07-16): every block-lane entry carries its
+    # quantum-number labels -- a thermal block is no longer anonymous.
+    assert all(e.k_raw >= 0 for e in tr.per_sector)
+    assert all(e.irrep >= -1 and e.irrep_dim >= 1 and e.star_size >= 1
+               for e in tr.per_sector)
     # Half-filling block dims == the m_sigma multiset of the eigenvalue
     # engine (rows per (k0, flip, irrep) of the labeled full spectrum).
     out = _lg_out(H, gens, n_up=N // 2)

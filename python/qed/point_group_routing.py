@@ -391,10 +391,18 @@ def resolve_projection_lane(
                 f"thermal method {method!r} has no sample-inside-block "
                 f"lane; only FTLM/LTLM/mTPQ/OFTLM project under 'auto'")
     if pg == "auto" and consumer == "spectral":
+        # DELIBERATE dialect (kept after the 2026-07-16 diction audit):
+        # the little-group GS-DSSF computes the TOTAL S(omega) and
+        # returns a different result type (_GsDssfResult) than the
+        # momentum-resolved abelian lanes (SpectralResult with
+        # per_sector_pair panels). 'auto' must never silently change a
+        # caller's RESULT SHAPE, so projection on this verb stays an
+        # explicit 'full' opt-in -- a contract decision, not a gap.
         return _decline(
             "spectral 'auto' keeps the abelian per-probe cross-irrep "
-            "lanes (momentum-resolved panels); point_group='full' opts "
-            "into the factorized little-group GS-DSSF")
+            "lanes (momentum-resolved panels, SpectralResult shape); "
+            "point_group='full' opts into the factorized little-group "
+            "GS-DSSF (total S(omega), _GsDssfResult shape)")
     split = split_nonabelian(symmetry_or_gens)
     if isinstance(split, str):
         return _decline(split)

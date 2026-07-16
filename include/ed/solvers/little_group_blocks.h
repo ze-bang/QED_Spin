@@ -231,4 +231,39 @@ little_group_lowest_vectors(const ::Operator&                    op,
                             int                                  k,
                             const LittleGroupOptions&            opt);
 
+// =============================================================================
+// U3: FOLD TRANSPORT for vectors -- the partners a fold skipped. A star
+// fold proves spec(k') == spec(k0) by U_p; this applies that U_p (or the
+// antiunitary K for a TR pair) to an actual eigenvector:
+//
+//   U_p |b_i^{k0}> = conj(chi_{k'}(a*)) (N_j / N_i) |b_j^{k'}>
+//
+// -- the cross-sector generalization of the engine's monomial rows (same
+// canonicalization, destination characters/norms). Returns the partner
+// sector's RepSectorData plus the transported vector, residual-certified
+// by the CALLER's pin (transport itself is exact bookkeeping; a failed
+// canonicalization or a non-unit phase throws).
+//
+// *** EXPERIMENTAL (2026-07-16): the star-transport PHASE CONVENTION is
+// wrong (transported vectors fail the eigenvector residual; see the
+// [!shouldfail] pin in test_little_group_blocks). TR conjugation and
+// the identity path are unaffected. Do not consume star transport
+// until that pin flips. ***
+//
+// Scope: momentum partners within ONE subspace (star members via the
+// residue mapping k0 -> k_dst, TR conjugates via complex conjugation).
+// The flip mirror (n_up <-> N - n_up) and the d_sigma-internal degenerate
+// copies (sigma_0j isotypic columns) remain documented follow-ups.
+// =============================================================================
+[[nodiscard]] std::pair<ed::symmetry::RepSectorData,
+                        std::vector<std::complex<double>>>
+little_group_transport(const ::Operator&                    op,
+                       const std::vector<std::vector<int>>& abelian_group,
+                       const std::vector<std::vector<int>>& residue_perms,
+                       int                                  n_sites,
+                       int                                  k0_src,
+                       int                                  k0_dst,
+                       const std::vector<std::complex<double>>& vec,
+                       const LittleGroupOptions&            opt);
+
 }  // namespace ed::solvers

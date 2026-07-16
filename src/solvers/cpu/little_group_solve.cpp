@@ -2336,6 +2336,102 @@ LittleGroupVectors little_group_lowest_vectors(
 }
 
 // =============================================================================
+// U3: fold transport. One body serves the star residue (pre-map = site
+// permutation), the TR conjugate (amplitude conjugation; reps identical,
+// characters conjugated -- the general body reduces to a* = identity),
+// and, later, the flip mirror (pre-map = XOR). Exact bookkeeping: any
+// failed canonicalization / non-unit phase THROWS -- a transport that
+// cannot certify its algebra must never hand back a vector.
+// =============================================================================
+std::pair<ed::symmetry::RepSectorData, std::vector<std::complex<double>>>
+little_group_transport(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    const std::vector<std::vector<int>>& residue_perms,
+    int                                  n_sites,
+    int                                  k0_src,
+    int                                  k0_dst,
+    const std::vector<std::complex<double>>& vec,
+    const LittleGroupOptions&            opt)
+{
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
+                        cx, tr_on);
+    auto rd_src = build_k_sector(cx, k0_src, opt.n_up);
+    auto rd_dst = build_k_sector(cx, k0_dst, opt.n_up);
+    if (vec.size() != rd_src.reps.size())
+        throw std::invalid_argument(
+            "little_group_transport: vector length != source #reps");
+
+    // Which relation maps src -> dst? A residue with irrep_map[p][src] ==
+    // dst (star), or the TR conjugation (dst == conj irrep of src).
+    const std::vector<int>* perm = nullptr;
+    bool conjugate = false;
+    for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
+        if (cx.irrep_map[rp][static_cast<std::size_t>(k0_src)] == k0_dst) {
+            perm = &cx.residues[rp];
+            break;
+        }
+    }
+    if (perm == nullptr) {
+        const auto conj_map = conjugate_irrep_map(cx);
+        if (k0_src < static_cast<int>(conj_map.size())
+            && conj_map[static_cast<std::size_t>(k0_src)] == k0_dst) {
+            conjugate = true;
+        } else if (k0_src == k0_dst) {
+            // trivial transport (identity) -- allowed, returns a copy.
+        } else {
+            throw std::invalid_argument(
+                "little_group_transport: no residue maps k0_src -> k0_dst "
+                "and they are not a TR-conjugate pair; the sectors are "
+                "not fold partners in this group.");
+        }
+    }
+
+    std::vector<Complex> out(rd_dst.reps.size(), Complex(0, 0));
+    const std::size_t nA = cx.nA_ext();
+    for (std::size_t i = 0; i < rd_src.reps.size(); ++i) {
+        const Complex amp = conjugate ? std::conj(vec[i]) : vec[i];
+        if (amp == Complex(0, 0)) continue;
+        std::uint64_t s = rd_src.reps[i];
+        if (perm != nullptr) s = applyPermutation(s, inverse_perm(*perm));
+        std::uint64_t rb    = ~std::uint64_t{0};
+        std::size_t   astar = 0;
+        for (std::size_t a = 0; a < nA; ++a) {
+            const std::uint64_t img = cx.cg.apply(s, a);
+            if (img < rb) { rb = img; astar = a; }
+        }
+        const auto it = std::lower_bound(rd_dst.reps.begin(),
+                                         rd_dst.reps.end(), rb);
+        if (it == rd_dst.reps.end() || *it != rb)
+            throw std::runtime_error(
+                "little_group_transport: image state has no surviving "
+                "representative in the destination sector (fold "
+                "bookkeeping violated)");
+        const std::size_t j =
+            static_cast<std::size_t>(it - rd_dst.reps.begin());
+        Complex ph = std::conj(
+                         rd_dst.characters[astar])
+                   * (rd_src.inv_norms[i] / rd_dst.inv_norms[j]);
+        if (std::abs(std::abs(ph) - 1.0) > 1e-8)
+            throw std::runtime_error(
+                "little_group_transport: non-unit transport phase (norm "
+                "mismatch between fold partners)");
+        out[j] += amp * (ph / std::abs(ph));
+    }
+    // Unitarity check: the transport must preserve the norm.
+    double n_in = 0.0, n_out = 0.0;
+    for (const auto& c : vec) n_in += std::norm(c);
+    for (const auto& c : out) n_out += std::norm(c);
+    if (std::abs(n_in - n_out) > 1e-8 * std::max(1.0, n_in))
+        throw std::runtime_error(
+            "little_group_transport: norm not preserved (transport is "
+            "not unitary on this pair)");
+    return {std::move(rd_dst), std::move(out)};
+}
+
+// =============================================================================
 // U2b: flip-aware rep -> computational expansion. |psi> = sum_alpha
 // u_alpha |b_alpha> with |b_alpha> = (1/N_alpha) sum_g conj(chi(g)) g|rep>,
 // where g acts as permute-then-XOR when the sector is flip-extended (the

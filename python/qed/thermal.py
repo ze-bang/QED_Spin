@@ -266,6 +266,17 @@ class ThermalSectorEntry:
     # (star size x d_sigma x TR fold x Sz mirror). 1 on the abelian lanes,
     # whose loops enumerate every sector explicitly.
     weight: int = 1
+    # Unified block labels (BlockTag work item, 2026-07-16): which block
+    # this entry is, in the same vocabulary the solve verb's project lane
+    # uses. k_raw is an ENGINE irrep index, NOT the momentum -- decode via
+    # the abelian character table (chi_k of the translation generator),
+    # exactly like decode_star_for_sector. -1 = axis absent / abelian lane
+    # (whose entries predate the labels).
+    k_raw: int = -1
+    flip_parity: int = -1
+    irrep: int = -1
+    irrep_dim: int = 1
+    star_size: int = 1
 
 
 def _thermal_result_from_block_lane(out: dict, method) -> "ThermalResult":
@@ -283,7 +294,12 @@ def _thermal_result_from_block_lane(out: dict, method) -> "ThermalResult":
                specific_heat=np.asarray([], dtype=float),
                entropy=np.asarray([], dtype=float),
                free_energy=np.asarray([], dtype=float),
-               weight=int(out["block_weight"][i]))
+               weight=int(out["block_weight"][i]),
+               k_raw=int(out["block_k_raw"][i]),
+               flip_parity=int(out["block_flip_parity"][i]),
+               irrep=int(out["block_irrep"][i]),
+               irrep_dim=int(out["block_irrep_dim"][i]),
+               star_size=int(out["block_star_size"][i]))
            for i in range(len(out["block_dim"]))]
     _E = np.asarray(out["energy"], dtype=float)
     return ThermalResult(

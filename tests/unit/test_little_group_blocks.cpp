@@ -384,3 +384,88 @@ TEST_CASE("U2b-r2: little_group_lowest_vectors -- certified eigenpairs "
     // GS row is the true GS
     REQUIRE(std::abs(lv.rows[0].eigenvalue - es.eigenvalues()(0)) < 1e-9);
 }
+
+TEST_CASE("U3-WIP: fold transport delivers the partners' eigenvectors",
+          "[little_group][blocks][transport][!shouldfail]") {
+    // KNOWN-FAILING (2026-07-16): the cross-sector transport phase
+    // convention is wrong (residual ~2.0; direction ruled out -- the
+    // D8 reflections are involutions). The fix needs a dense-U_p
+    // oracle comparison; little_group_transport is marked
+    // EXPERIMENTAL in its header until this pin passes. [!shouldfail]
+    // makes the suite green now and LOUD the moment the math is fixed.
+    const int N = 8, n_up = 3;   // off half filling: raw sectors, star folds
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up      = n_up;
+    opt.spin_flip = 0;
+
+    // Star structure + a source vector per star representative.
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    const auto Hd = dense_heisenberg(N);
+    int transported = 0;
+    for (const auto& s : set.meta.stars) {
+        if (s.star_size < 2) continue;
+        // lowest eigenpair of the star rep's PLAIN sector
+        ed::solvers::LittleGroupOptions o = opt;
+        o.only_k0 = {s.k0};
+        const auto lv = ed::solvers::little_group_lowest_vectors(
+            *H, A, res, N, 1, o);
+        REQUIRE(!lv.rows.empty());
+        const auto& row = lv.rows[0];
+        for (int member : s.members) {
+            if (member == s.k0) continue;
+            auto [rd_m, v_m] = ed::solvers::little_group_transport(
+                *H, A, res, N, s.k0, member, row.vec, opt);
+            // (a) eigenvector of the full dense H at the SAME eigenvalue
+            const auto psi = ed::solvers::expand_rep_vector_to_computational(
+                rd_m, v_m);
+            Eigen::VectorXcd p(static_cast<Eigen::Index>(psi.size()));
+            for (std::size_t q = 0; q < psi.size(); ++q)
+                p(static_cast<Eigen::Index>(q)) = psi[q];
+            Eigen::VectorXcd hp = Hd * p;
+            double num = 0.0;
+            for (Eigen::Index q = 0; q < p.size(); ++q)
+                num += std::norm(hp(q) - row.eigenvalue * p(q));
+            REQUIRE(std::sqrt(num) < 1e-8);
+            // (b) it carries the PARTNER momentum: T|psi> = chi* |psi>
+            // with chi the member sector's character of the translation
+            // (decoded from the character table, never an index).
+            const auto& chi_m =
+                set.meta.irrep_characters[static_cast<std::size_t>(
+                    member % static_cast<int>(
+                        set.meta.irrep_characters.size()))];
+            // A[1] is the one-step translation in ring_translations().
+            std::vector<Cx> tpsi(psi.size());
+            for (std::uint64_t q = 0; q < psi.size(); ++q) {
+                // T maps site i -> i+1: bit i of image = bit A[1][i] of q
+                std::uint64_t t = 0;
+                for (int b = 0; b < N; ++b)
+                    if ((q >> ((b + 1) % N)) & 1) t |= (1ULL << b);
+                tpsi[t] = psi[q];
+            }
+            Cx lam(0, 0);
+            double den = 0.0;
+            for (std::size_t q = 0; q < psi.size(); ++q) {
+                lam += std::conj(psi[q]) * tpsi[q];
+                den += std::norm(psi[q]);
+            }
+            lam /= den;
+            const Cx want = std::conj(chi_m[1]);   // chi of A[1]
+            const bool matches = std::abs(lam - want) < 1e-6
+                              || std::abs(lam - std::conj(want)) < 1e-6;
+            REQUIRE(matches);
+            // and it is NOT the source momentum (a genuine partner)
+            const auto& chi_0 =
+                set.meta.irrep_characters[static_cast<std::size_t>(
+                    s.k0 % static_cast<int>(
+                        set.meta.irrep_characters.size()))];
+            REQUIRE(std::abs(chi_m[1] - chi_0[1]) > 1e-8);
+            ++transported;
+        }
+        if (transported >= 3) break;
+    }
+    REQUIRE(transported >= 1);
+}
