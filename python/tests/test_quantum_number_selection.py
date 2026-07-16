@@ -612,3 +612,19 @@ def test_irrep_on_a_star_with_a_trivial_cogroup_raises():
     with pytest.raises(ValueError, match="not projected|trivial"):
         qed.solve(H, num_eigenvalues=1, sector=[1], irrep={0: +1},
                   symmetry=gen, **_LG)
+
+
+def test_irrep_on_the_abelian_lane_raises_instead_of_being_ignored():
+    """irrep= is a LITTLE-CO-GROUP concept; the abelian lane has no irrep axis.
+
+    Accepting it there answered every character with the whole star's ground
+    state (+1 and -1 both -4.763032 on this ring) -- i.e. silently ignoring the
+    argument, which is the failure mode this whole contract exists to prevent.
+    """
+    pytest.importorskip("pynauty")
+    H = _j1j2_ring()
+    gen = qed.find_symmetries(H, verbose=False).full_set
+    with pytest.raises(ValueError, match="projection lane|abelian lane"):
+        qed.solve(H, num_eigenvalues=1, sz=6, sector=[0], irrep={0: +1},
+                  symmetry=gen, point_group="off", spin_flip="off",
+                  time_reversal="off", device="cpu", verbose=False)

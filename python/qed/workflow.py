@@ -694,6 +694,20 @@ def solve(
             # project lane is GPU-capable end to end.
             prefer_abelian=False,
             verbose=verbose)
+        if irrep is not None and lane.mode != "project":
+            # irrep= names a LITTLE-CO-GROUP irrep, which only the projection
+            # lane decomposes -- the abelian lane's blocks are (n_up, k) and
+            # have no isotypic split to name. Accepting it there returned the
+            # whole star's ground state for EVERY character (measured: +1 and
+            # -1 both -4.763032 on a 12-ring), i.e. silently ignoring the
+            # argument. Refuse instead.
+            raise ValueError(
+                f"qed.solve: irrep= names a little-co-group irrep, which only "
+                f"the projection lane computes -- this call resolved to the "
+                f"abelian lane ({lane.reason or 'point_group is off'}), whose "
+                f"blocks are (n_up, k) with no irrep axis to select on. Pass "
+                f"point_group='full' to require projection (it raises with the "
+                f"reason if it cannot), or drop irrep=.")
         if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
