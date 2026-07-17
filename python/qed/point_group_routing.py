@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 __all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane",
+           "greedy_maximal_abelian",
            "decode_star_for_sector", "decode_irrep_for_character"]
 
 _GROUP_CLOSURE_CAP = 4096   # A (and the closed full group) must stay enumerable
@@ -80,6 +81,48 @@ def _close(gens, cap=_GROUP_CLOSURE_CAP):
 
 def _commute(a, b):
     return _compose(a, b) == _compose(b, a)
+
+
+def greedy_maximal_abelian(elements, cap=_GROUP_CLOSURE_CAP):
+    """Greedy maximal commuting subgroup of an already-enumerated
+    permutation group.
+
+    Seed with the HIGHEST-order elements first: long cycles (translations)
+    build a large cyclic core, where naive sorted order tends to lock in an
+    early involution (e.g. a reflection) and end up with a small Klein-type
+    subgroup. Any commuting closure is *valid* -- smaller A only folds
+    less -- this ordering just maximizes the reduction.
+
+    Returns the CLOSED abelian subgroup as a sorted list of tuples (always
+    contains the identity; ``[]`` for empty input). Shared by
+    ``split_nonabelian``'s raw-list branch and ``find_symmetries``' clique
+    budget (``clique_budget=``), which uses it to sidestep the NP-hard
+    maximum-clique search on very large automorphism groups.
+    """
+    G = [tuple(e) for e in elements]
+    if not G:
+        return []
+    n = len(G[0])
+
+    def _order(e):
+        k, c = 1, e
+        ident = tuple(range(len(e)))
+        while c != ident:
+            c = _compose(e, c)
+            k += 1
+        return k
+
+    A = [tuple(range(n))]
+    Aset = set(A)
+    for e in sorted(G, key=lambda e: (-_order(e), e)):
+        if e in Aset:
+            continue
+        if all(_commute(e, a) for a in A):
+            closed = _close(A + [e])
+            if closed is not None and len(closed) <= cap:
+                A = [tuple(a) for a in closed]
+                Aset = set(A)
+    return sorted(Aset)
 
 
 def split_nonabelian(symmetry_or_gens):
@@ -136,30 +179,9 @@ def split_nonabelian(symmetry_or_gens):
         return (f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element "
                 "cap -- pass a GeneratorSet from find_symmetries instead")
     # Greedy maximal commuting subgroup (the closure of pairwise-commuting
-    # elements is abelian by construction). Seed with the HIGHEST-order
-    # elements first: long cycles (translations) build a large cyclic core,
-    # where naive sorted order tends to lock in an early involution (e.g.
-    # a reflection) and end up with a small Klein-type subgroup. Any
-    # commuting closure is *valid* -- smaller A only folds less -- this
-    # ordering just maximizes the reduction.
-    def _order(e):
-        k, c = 1, e
-        ident = tuple(range(len(e)))
-        while c != ident:
-            c = _compose(e, c)
-            k += 1
-        return k
-
-    A = [tuple(range(len(perms[0])))]
+    # elements is abelian by construction) -- see greedy_maximal_abelian.
+    A = greedy_maximal_abelian(G)
     Aset = set(A)
-    for e in sorted(G, key=lambda e: (-_order(e), e)):
-        if e in Aset:
-            continue
-        if all(_commute(e, a) for a in A):
-            closed = _close(A + [e])
-            if closed is not None and len(closed) <= _GROUP_CLOSURE_CAP:
-                A = [tuple(a) for a in closed]
-                Aset = set(A)
     if len(A) <= 1:
         return "no non-trivial abelian subgroup found in the closed group"
     # One representative per A-coset of the remainder.

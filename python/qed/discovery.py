@@ -484,7 +484,7 @@ _FIND_SYM_MEMO: "dict[Any, SymmetryReport]" = {}
 _FIND_SYM_MEMO_CAP = 32
 
 
-def _find_symmetries_key(operator, lattice, translation_only):
+def _find_symmetries_key(operator, lattice, translation_only, clique_budget):
     """Content key for the find_symmetries memo, or None to skip caching
     (any part that can't be hashed => compute fresh, never cache wrong)."""
     try:
@@ -496,9 +496,26 @@ def _find_symmetries_key(operator, lattice, translation_only):
             vec = getattr(lattice, "lattice_vectors", None)
             lat = (repr(pos), repr(vec))
         return (int(operator.num_sites), terms, three,
-                bool(translation_only), lat)
+                bool(translation_only), lat, int(clique_budget))
     except Exception:
         return None
+
+
+# Above this automorphism-group size, find_symmetries sidesteps the NP-hard
+# maximum-clique search (O(|Aut|^2) commutation graph + nx.find_cliques,
+# which enumerates ALL maximal cliques -- hours at |Aut| ~ 3e4) in favour of
+# a greedy maximal-abelian clique with the residue retained as star_perms.
+# 512 keeps the exact maximum clique for every ordinary cluster while
+# capping the pathological highly-symmetric ones (free-site permutations on
+# pyrochlore trees reach |Aut| ~ 1e3-3e4).
+_DEFAULT_CLIQUE_BUDGET = 512
+
+
+def _resolve_clique_budget(clique_budget):
+    if clique_budget is not None:
+        return int(clique_budget)
+    env = os.environ.get("ED_SYM_CLIQUE_BUDGET")
+    return int(env) if env else _DEFAULT_CLIQUE_BUDGET
 
 
 def find_symmetries(
@@ -507,6 +524,7 @@ def find_symmetries(
     lattice: Optional[Any] = None,
     translation_only: bool = False,
     verbose: bool = True,
+    clique_budget: Optional[int] = None,
 ) -> SymmetryReport:
     """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
 
@@ -514,9 +532,20 @@ def find_symmetries(
     memoised on the operator's term content (+ lattice + flags), so a
     ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
     the search once. ``ED_SYM_NO_DETECT_MEMO=1`` disables the cache.
+
+    ``clique_budget``: above this automorphism-group size the exact
+    maximum-clique search (NP-hard; hours at |Aut| ~ 3e4) is replaced by a
+    greedy maximal-abelian clique, with the full non-abelian residue still
+    retained as coset-representative ``star_perms`` -- so the factorized
+    little-group lane keeps the whole point group either way. Default 512
+    (env ``ED_SYM_CLIQUE_BUDGET``). A greedy maximal (not maximum) clique
+    is always valid: a smaller abelian core only folds less; the residue
+    grows correspondingly and the projection lane recovers the reduction.
     """
+    _budget = _resolve_clique_budget(clique_budget)
     _memo_ok = os.environ.get("ED_SYM_NO_DETECT_MEMO") != "1"
-    _key = _find_symmetries_key(operator, lattice, translation_only) \
+    _key = _find_symmetries_key(operator, lattice, translation_only,
+                                _budget) \
         if _memo_ok else None
     if _key is not None:
         hit = _FIND_SYM_MEMO.get(_key)
@@ -524,7 +553,7 @@ def find_symmetries(
             return hit
     result = _find_symmetries_impl(
         operator, lattice=lattice, translation_only=translation_only,
-        verbose=verbose)
+        verbose=verbose, clique_budget=_budget)
     if _key is not None:
         if len(_FIND_SYM_MEMO) >= _FIND_SYM_MEMO_CAP:
             _FIND_SYM_MEMO.pop(next(iter(_FIND_SYM_MEMO)))
@@ -538,6 +567,7 @@ def _find_symmetries_impl(
     lattice: Optional[Any] = None,
     translation_only: bool = False,
     verbose: bool = True,
+    clique_budget: int = _DEFAULT_CLIQUE_BUDGET,
 ) -> SymmetryReport:
     """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
 
@@ -696,10 +726,28 @@ def _find_symmetries_impl(
     # 3b. Full automorphism (max clique → minimal generators) when not
     #     restricted to translations.
     if not translation_only and len(all_automorphisms) > 1:
-        clique_indices = AutomorphismCliqueAnalyzer().find_maximum_clique(
-            all_automorphisms
-        )
-        clique = [all_automorphisms[i] for i in clique_indices]
+        _budgeted = len(all_automorphisms) > clique_budget
+        if _budgeted:
+            # Clique budget: the exact maximum-clique search is NP-hard
+            # (O(|Aut|^2) commutation graph + nx.find_cliques enumerating
+            # ALL maximal cliques -- hours at |Aut| ~ 3e4). A greedy
+            # maximal-abelian clique is always VALID (smaller A only folds
+            # less); the residue below carries the rest of the point group
+            # into the little-group lane, which recovers the reduction.
+            from .point_group_routing import greedy_maximal_abelian
+            clique = [list(pp) for pp in
+                      greedy_maximal_abelian(all_automorphisms)]
+            if verbose:
+                print(f"[qed.find_symmetries] |Aut| = "
+                      f"{len(all_automorphisms)} exceeds clique_budget = "
+                      f"{clique_budget}; greedy maximal-abelian clique "
+                      f"(|A| = {len(clique)}), full residue retained as "
+                      "coset-representative star_perms")
+        else:
+            clique_indices = AutomorphismCliqueAnalyzer().find_maximum_clique(
+                all_automorphisms
+            )
+            clique = [all_automorphisms[i] for i in clique_indices]
         if clique:
             full_set = _make_generator_set_from_clique(
                 clique,
@@ -714,10 +762,28 @@ def _find_symmetries_impl(
             # outside the abelian clique) for star reduction and group
             # structure reporting.
             _clique_keys = {tuple(pp) for pp in clique}
-            full_set.star_perms = [
-                list(pp) for pp in all_automorphisms
-                if tuple(pp) not in _clique_keys
-            ]
+            if _budgeted:
+                # ONE representative per A-coset instead of the raw
+                # complement: at |Aut| ~ 3e4 the complement would be ~3e4
+                # star_perms that split_nonabelian dedups per coset anyway
+                # (same set, computed later at O(|star|*|A|) per call) --
+                # store the deduped form once. The greedy clique is a
+                # CLOSED group, so left-cosets partition the complement.
+                from .point_group_routing import _compose as _pg_compose
+                _Aset = _clique_keys
+                _star, _covered = [], set(_Aset)
+                for pp in all_automorphisms:
+                    t = tuple(pp)
+                    if t in _covered:
+                        continue
+                    _star.append(list(t))
+                    _covered.update(_pg_compose(a, t) for a in _Aset)
+                full_set.star_perms = _star
+            else:
+                full_set.star_perms = [
+                    list(pp) for pp in all_automorphisms
+                    if tuple(pp) not in _clique_keys
+                ]
             if (
                 translation_set is None
                 or _generators_equal(full_set.generators,
