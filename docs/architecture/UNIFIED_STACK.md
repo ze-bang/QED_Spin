@@ -1,6 +1,49 @@
 # The Unified Symmetry Stack — architecture and pipeline
 
-Status: **current** (Stages 9–11 complete, Jul 2026). Companion to
+Status: **current** (Stages 9–11 + the lane-unification campaign complete,
+Jul 2026).
+
+## 2026-07-16 — the lane-unification campaign (U-series)
+
+The two-lane picture below is now HISTORICAL ROUTING DETAIL: one block
+engine ([little_group_blocks.h](../../include/ed/solvers/little_group_blocks.h))
+serves every verb, and lane B survives as (a) the engine's per-star
+fallback floor and (b) the deliberate server for KPM_DOS, `sector=`
+filtering, per-sector `output_dir` files, and the `ED_SYM_LG_THERMAL=0`
+escape. What changed:
+
+* **thermal projects under `auto`** for FTLM/LTLM/mTPQ/OFTLM — the same
+  sampler runs inside the (n↑, k, ±, σ) blocks (in-memory AND directory
+  forms), Z-recombined with multiplicities as free-energy shifts.
+  `method="exact"` is the exact-per-block strategy; `point_group` is pure
+  routing on every verb ('full' = require projection, FutureWarning on
+  the old exact-implying spelling).
+* **eigenvectors ride the projection lane**: `qed.solve(sz=<named>,
+  compute_eigenvectors=True)` returns certified computational-basis
+  vectors (per-block pairs, W_σ lift re-certified against H_k0,
+  flip-aware expansion) + canonical /eigendata persistence. Fold partners
+  are reachable: star/TR transport and the flip mirror
+  (`little_group_transport`), d_σ multiplet members
+  (`LittleGroupBlock::degenerate_partners`).
+* **GS-DSSF sources are flip-extended** (the raw-sector pin is retired;
+  cross-sector normalization generalized to 1/√(G_src·G_dst)).
+* **one Sz spelling**: `sz = int | (lo, hi) | 'auto' | 'off'` on every
+  verb; the five legacy knobs warn when load-bearing.
+* **truthful engagement signals** everywhere: `csr_engaged`,
+  `gpu_engaged`, `have_cuda`, per-eigenvalue block labels, BlockTag
+  fields on thermal entries, converged-prefix-only Ritz windows.
+* **verification**: `test_lane_exploitation_matrix` (which mechanism
+  engages per verb), `test_dimension_reduction_matrix` (blocks really
+  shrink — independent Burnside oracle, both matvec regimes),
+  `test_full_permutation_sweep` (content × regime × solver grid).
+
+**Distribution by stars (U5)**: stars are disjoint solve units;
+job-level splitting via `ED_SYM_LG_ONLY_K0` (or
+`LittleGroupOptions::only_k0`) is the production mechanism (proven at
+36 sites). Lane-B's across-sector `SectorDistributor` continues to serve
+the CLI under `mpirun`. Automatic in-process rank-striding of the star
+walk remains optional future convenience — the capability itself exists.
+ Companion to
 [SYMMETRY.md](SYMMETRY.md) (mechanism reference),
 [SYMMETRY_V2_DESIGN.md](SYMMETRY_V2_DESIGN.md) (stage-by-stage migration
 record, §4 rows 9a–11d), and

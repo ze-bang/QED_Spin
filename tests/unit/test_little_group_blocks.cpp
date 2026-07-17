@@ -470,3 +470,221 @@ TEST_CASE("U3: fold transport delivers the partners' eigenvectors",
     REQUIRE(transported >= 1);
 }
 
+
+TEST_CASE("flip-mirror transport: n_up -> N - n_up partner eigenvectors",
+          "[little_group][blocks][transport][mirror]") {
+    const int N = 8, n_up = 3;
+    auto H = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    const auto A   = ring_translations(N);
+    const auto res = ring_reflections(N);
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up = n_up; opt.spin_flip = 0;
+
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    const auto Hd = dense_heisenberg(N);
+    int mirrored = 0;
+    for (const auto& s : set.meta.stars) {
+        ed::solvers::LittleGroupOptions o = opt;
+        o.only_k0 = {s.k0};
+        const auto lv = ed::solvers::little_group_lowest_vectors(
+            *H, A, res, N, 1, o);
+        if (lv.rows.empty()) continue;
+        const auto& row = lv.rows[0];
+        auto [rd_m, v_m] = ed::solvers::little_group_transport(
+            *H, A, res, N, s.k0, s.k0, row.vec, opt,
+            /*n_up_dst=*/N - n_up);
+        const auto psi = ed::solvers::expand_rep_vector_to_computational(
+            rd_m, v_m);
+        // eigenvector at the SAME eigenvalue, supported on N - n_up states
+        Eigen::VectorXcd p(static_cast<Eigen::Index>(psi.size()));
+        for (std::size_t q = 0; q < psi.size(); ++q)
+            p(static_cast<Eigen::Index>(q)) = psi[q];
+        Eigen::VectorXcd hp = Hd * p;
+        double num = 0.0;
+        for (Eigen::Index q = 0; q < p.size(); ++q)
+            num += std::norm(hp(q) - row.eigenvalue * p(q));
+        REQUIRE(std::sqrt(num) < 1e-8);
+        for (std::uint64_t q = 0; q < psi.size(); ++q)
+            if (std::abs(psi[q]) > 1e-12)
+                REQUIRE(__builtin_popcountll(q) == N - n_up);
+        if (++mirrored >= 2) break;
+    }
+    REQUIRE(mirrored >= 1);
+    // negative control: a Zeeman field breaks the flip -> transport throws
+    auto Hf = heisenberg_ring(static_cast<std::uint64_t>(N), 1.0);
+    for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(N); ++i) {
+        Operator::TransformData t;
+        t.op_type = 2; t.site_index = i; t.is_two_body = false;
+        t.coefficient = Cx(-0.3, 0.0);
+        Hf->transform_data_.push_back(t);
+    }
+    ed::solvers::LittleGroupOptions of;
+    of.n_up = n_up; of.spin_flip = 0;
+    const auto lvf = ed::solvers::little_group_lowest_vectors(
+        *Hf, A, res, N, 1, of);
+    REQUIRE_THROWS(ed::solvers::little_group_transport(
+        *Hf, A, res, N, lvf.rows[0].tag.k0, lvf.rows[0].tag.k0,
+        lvf.rows[0].vec, of, N - n_up));
+}
+
+namespace {
+std::unique_ptr<Operator> heisenberg_torus33() {
+    const int L = 3, N = 9;
+    auto op = std::make_unique<Operator>(N, 0.5f);
+    auto add = [&](int i, int j) {
+        Operator::TransformData t;
+        t.op_type = 2; t.site_index = static_cast<std::uint64_t>(i);
+        t.op_type_2 = 2; t.site_index_2 = static_cast<std::uint64_t>(j);
+        t.coefficient = Cx(1.0, 0.0); t.is_two_body = true;
+        op->transform_data_.push_back(t);
+        t.op_type = 0; t.op_type_2 = 1; t.coefficient = Cx(0.5, 0.0);
+        op->transform_data_.push_back(t);
+        t.op_type = 1; t.op_type_2 = 0;
+        op->transform_data_.push_back(t);
+    };
+    for (int r = 0; r < L; ++r)
+        for (int c = 0; c < L; ++c) {
+            add(r * L + c, r * L + (c + 1) % L);
+            add(r * L + c, ((r + 1) % L) * L + c);
+        }
+    return op;
+}
+Eigen::MatrixXd dense_torus33() {
+    const int L = 3, N = 9;
+    const std::size_t dim = 1ULL << N;
+    Eigen::MatrixXd Hd = Eigen::MatrixXd::Zero(
+        static_cast<Eigen::Index>(dim), static_cast<Eigen::Index>(dim));
+    auto sz = [](std::uint64_t s, int i) {
+        return ((s >> i) & 1u) ? 0.5 : -0.5;
+    };
+    auto bond = [&](std::uint64_t s, int i, int j) {
+        Hd(static_cast<Eigen::Index>(s), static_cast<Eigen::Index>(s))
+            += sz(s, i) * sz(s, j);
+        if (((s >> i) & 1u) != ((s >> j) & 1u)) {
+            const std::uint64_t t = s ^ (1ULL << i) ^ (1ULL << j);
+            Hd(static_cast<Eigen::Index>(t), static_cast<Eigen::Index>(s))
+                += 0.5;
+        }
+    };
+    for (std::uint64_t s = 0; s < dim; ++s)
+        for (int r = 0; r < L; ++r)
+            for (int c = 0; c < L; ++c) {
+                bond(s, r * L + c, r * L + (c + 1) % L);
+                bond(s, r * L + c, ((r + 1) % L) * L + c);
+            }
+    return Hd;
+}
+}  // namespace
+
+TEST_CASE("d_sigma partners: degenerate multiplet members from the shift "
+          "projector (C4 co-group, E irrep)",
+          "[little_group][blocks][partners]") {
+    const int L = 3, N = 9, n_up = 4;
+    auto H = heisenberg_torus33();
+    // A: the two torus translations; residues: C4 rotation + a reflection.
+    std::vector<std::vector<int>> A;
+    {
+        std::vector<int> tx(N), ty(N);
+        for (int r = 0; r < L; ++r)
+            for (int c = 0; c < L; ++c) {
+                tx[r * L + c] = r * L + (c + 1) % L;
+                ty[r * L + c] = ((r + 1) % L) * L + c;
+            }
+        // closure of the two translations (9 elements)
+        A.push_back(tx);
+        A.push_back(ty);
+        std::vector<std::vector<int>> closure;
+        std::vector<int> ident(N);
+        for (int i = 0; i < N; ++i) ident[i] = i;
+        for (int a = 0; a < L; ++a)
+            for (int b = 0; b < L; ++b) {
+                std::vector<int> p = ident;
+                for (int r = 0; r < L; ++r)
+                    for (int c = 0; c < L; ++c)
+                        p[r * L + c] = ((r + b) % L) * L + (c + a) % L;
+                closure.push_back(p);
+            }
+        A = closure;
+    }
+    std::vector<std::vector<int>> res;
+    {
+        // The engine's co-group closure works over the PROVIDED residues
+        // (split_nonabelian supplies the full coset set in production):
+        // pass all 7 non-identity D4 elements.
+        std::vector<int> rot(N), refl(N), ident(N);
+        for (int i = 0; i < N; ++i) ident[i] = i;
+        for (int r = 0; r < L; ++r)
+            for (int c = 0; c < L; ++c) {
+                rot[r * L + c]  = c * L + (L - 1 - r);   // 90 degrees
+                refl[r * L + c] = r * L + (L - 1 - c);   // mirror
+            }
+        auto compose = [&](const std::vector<int>& a,
+                           const std::vector<int>& b) {
+            std::vector<int> c2(N);
+            for (int i = 0; i < N; ++i) c2[i] = b[a[i]];
+            return c2;
+        };
+        std::vector<std::vector<int>> d4 = {rot};
+        d4.push_back(compose(rot, rot));          // rot^2
+        d4.push_back(compose(compose(rot, rot), rot));   // rot^3
+        d4.push_back(refl);
+        d4.push_back(compose(rot, refl));
+        d4.push_back(compose(compose(rot, rot), refl));
+        d4.push_back(compose(compose(compose(rot, rot), rot), refl));
+        res = d4;
+    }
+
+    ed::solvers::LittleGroupOptions opt;
+    opt.n_up = n_up; opt.spin_flip = 0; opt.time_reversal = 0;
+    const auto set = ed::solvers::build_little_group_blocks(
+        *H, A, res, N, opt);
+    const auto Hd = dense_torus33();
+
+    bool found_d2 = false;
+    for (const auto& b : set.blocks) {
+        if (b.tag().irrep_dim != 2) continue;
+        found_d2 = true;
+        // lowest eigenpair of this block, lifted to the rep basis
+        const std::size_t dblk = b.op().dim();
+        Eigen::MatrixXcd Hb(static_cast<Eigen::Index>(dblk),
+                            static_cast<Eigen::Index>(dblk));
+        std::vector<Cx> e(dblk, Cx(0, 0)), col(dblk);
+        for (std::size_t j = 0; j < dblk; ++j) {
+            std::fill(e.begin(), e.end(), Cx(0, 0));
+            e[j] = Cx(1, 0);
+            b.op().apply(e.data(), col.data(), dblk);
+            for (std::size_t i = 0; i < dblk; ++i)
+                Hb(static_cast<Eigen::Index>(i),
+                   static_cast<Eigen::Index>(j)) = col[i];
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hb);
+        const double E0 = es.eigenvalues()(0);
+        std::vector<Cx> v(dblk);
+        for (std::size_t i = 0; i < dblk; ++i)
+            v[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
+        const auto u = b.lift_to_rep(v.data());
+        const auto partners = b.degenerate_partners(u);
+        REQUIRE(partners.size() == 1);   // d = 2 -> one partner
+        // partner: eigenvector of the FULL dense H at the same E,
+        // orthogonal to the original.
+        const auto psi0 = ed::solvers::expand_rep_vector_to_computational(
+            b.rep_data(), u);
+        const auto psi1 = ed::solvers::expand_rep_vector_to_computational(
+            b.rep_data(), partners[0]);
+        Eigen::VectorXcd p1(static_cast<Eigen::Index>(psi1.size()));
+        for (std::size_t q = 0; q < psi1.size(); ++q)
+            p1(static_cast<Eigen::Index>(q)) = psi1[q];
+        Eigen::VectorXcd hp = Hd * p1;
+        double num = 0.0;
+        for (Eigen::Index q = 0; q < p1.size(); ++q)
+            num += std::norm(hp(q) - E0 * p1(q));
+        REQUIRE(std::sqrt(num) < 1e-8);
+        Cx ov(0, 0);
+        for (std::size_t q = 0; q < psi0.size(); ++q)
+            ov += std::conj(psi0[q]) * psi1[q];
+        REQUIRE(std::abs(ov) < 1e-8);
+        break;
+    }
+    REQUIRE(found_d2);
+}

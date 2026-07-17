@@ -105,6 +105,15 @@ public:
     /// W's columns are orthonormal (SVD), so norms are preserved.
     [[nodiscard]] std::vector<std::complex<double>>
     lift_to_rep(const std::complex<double>* v) const;
+    /// d_sigma partners (Jul 2026): given a REP-BASIS eigenvector of this
+    /// block (row 0 of irrep sigma -- the W_sigma construction's row),
+    /// return the d-1 degenerate partners via the shift projector
+    /// P_{j0} = (d/|P|) sum_p conj(D_{j0}(p)) M_p. Empty for d == 1 and
+    /// plain blocks. Partners are normalized; certify with your own
+    /// residual pin (they are eigenvectors of H_k0 at the same E).
+    [[nodiscard]] std::vector<std::vector<std::complex<double>>>
+    degenerate_partners(
+        const std::vector<std::complex<double>>& u_rep) const;
 
 private:
     std::shared_ptr<Impl> impl_;
@@ -244,10 +253,11 @@ little_group_lowest_vectors(const ::Operator&                    op,
 // by the CALLER's pin (transport itself is exact bookkeeping; a failed
 // canonicalization or a non-unit phase throws).
 //
-// Scope: momentum partners within ONE subspace (star members via the
-// residue mapping k0 -> k_dst, TR conjugates via complex conjugation).
-// The flip mirror (n_up <-> N - n_up) and the d_sigma-internal degenerate
-// copies (sigma_0j isotypic columns) remain documented follow-ups.
+// Scope: star members (residue mapping k0 -> k_dst), TR conjugates
+// (complex conjugation), and the FLIP MIRROR (n_up_dst = N - n_up,
+// k0_dst == k0_src, XOR pre-map; requires [H, prod sigma^x] == 0).
+// The d_sigma-internal degenerate copies (sigma_0j isotypic columns)
+// remain a documented follow-up.
 // =============================================================================
 [[nodiscard]] std::pair<ed::symmetry::RepSectorData,
                         std::vector<std::complex<double>>>
@@ -258,6 +268,7 @@ little_group_transport(const ::Operator&                    op,
                        int                                  k0_src,
                        int                                  k0_dst,
                        const std::vector<std::complex<double>>& vec,
-                       const LittleGroupOptions&            opt);
+                       const LittleGroupOptions&            opt,
+                       int                                  n_up_dst = -1);
 
 }  // namespace ed::solvers

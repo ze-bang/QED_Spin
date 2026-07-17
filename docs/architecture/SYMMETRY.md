@@ -1,5 +1,17 @@
 # Symmetry implementation — finite temperature & DSSF
 
+> **Update (2026-07-16): the lane-unification campaign.** The
+> per-workflow tables below PREDATE the U-series: thermal now PROJECTS
+> under `point_group='auto'` for the sampling methods (blocks =
+> (n↑, k, ±, σ); `method="exact"` = exact per block), `qed.solve`
+> returns certified computational-basis eigenvectors on the projection
+> lane for a named `sz=`, GS-DSSF sources are flip-extended, fold
+> partners (star/TR/flip-mirror transport, d_σ multiplet members) are
+> obtainable as vectors, and one `sz=` spelling serves every verb. See
+> the 2026-07-16 section of [UNIFIED_STACK.md](UNIFIED_STACK.md) and the
+> three verification matrices in `python/tests/` for the current truth.
+
+
 > **For the current end-to-end picture see
 > [UNIFIED_STACK.md](UNIFIED_STACK.md)** — the Stage-9 layer-by-layer
 > architecture (routing → projection engine → basis → matvec regimes) and

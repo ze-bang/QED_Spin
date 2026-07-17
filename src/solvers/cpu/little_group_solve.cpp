@@ -397,6 +397,12 @@ struct LittleGroupBlock::Impl {
     std::shared_ptr<RepSectorMatVec>      hk;    // shared across the star's blocks
     std::shared_ptr<const SparseColumns>  W;     // null => plain floor block
     std::unique_ptr<ProjectedBlockOp>     pop;   // null => op() is *hk
+    // d_sigma partners (Jul 2026): the star's validated monomials + this
+    // irrep's D-matrices, retained so degenerate_partners() can apply the
+    // shift projector P_{j0} = (d/|P|) sum_p conj(D_{j0}(p)) M_p. Null /
+    // empty on plain blocks and d == 1 irreps.
+    std::shared_ptr<const std::vector<Monomial>>   M;
+    std::vector<std::vector<std::complex<double>>> Dmats;  // per p, d*d row-major
 };
 
 LittleGroupBlock::LittleGroupBlock(std::shared_ptr<Impl> impl)
@@ -424,6 +430,46 @@ bool LittleGroupBlock::projected() const noexcept {
 bool LittleGroupBlock::gpu_engaged() const noexcept {
     return impl_->hk != nullptr && impl_->hk->gpu_engaged();
 }
+std::vector<std::vector<std::complex<double>>>
+LittleGroupBlock::degenerate_partners(
+    const std::vector<std::complex<double>>& u_rep) const {
+    std::vector<std::vector<std::complex<double>>> out;
+    const int d = impl_->tag.irrep_dim;
+    if (d <= 1 || !impl_->M || impl_->Dmats.empty()) return out;
+    const auto& M = *impl_->M;
+    const std::size_t n = u_rep.size();
+    // cache M_p u once per element
+    std::vector<std::vector<Complex>> Mu(M.size(),
+                                         std::vector<Complex>(n, {0, 0}));
+    for (std::size_t p = 0; p < M.size(); ++p)
+        for (std::size_t i = 0; i < n; ++i)
+            Mu[p][static_cast<std::size_t>(M[p].to[i])] =
+                M[p].phase[i] * u_rep[i];
+    const double pref = static_cast<double>(d)
+                      / static_cast<double>(M.size());
+    for (int j = 1; j < d; ++j) {
+        std::vector<Complex> pj(n, Complex(0, 0));
+        for (std::size_t p = 0; p < M.size(); ++p) {
+            const Complex c = std::conj(
+                impl_->Dmats[p][static_cast<std::size_t>(j) *
+                                static_cast<std::size_t>(d)]);  // D_{j0}
+            if (c == Complex(0, 0)) continue;
+            for (std::size_t i = 0; i < n; ++i) pj[i] += c * Mu[p][i];
+        }
+        double n2 = 0.0;
+        for (auto& c : pj) { c *= pref; }
+        for (const auto& c : pj) n2 += std::norm(c);
+        if (n2 < 1e-12)
+            throw std::runtime_error(
+                "degenerate_partners: shift projector annihilated the "
+                "vector (row convention mismatch?)");
+        const double inv = 1.0 / std::sqrt(n2);
+        for (auto& c : pj) c *= inv;
+        out.push_back(std::move(pj));
+    }
+    return out;
+}
+
 std::vector<std::complex<double>>
 LittleGroupBlock::lift_to_rep(const std::complex<double>* v) const {
     const std::size_t nrep = impl_->hk->dim();
@@ -1414,6 +1460,7 @@ build_star_blocks(const ::Operator&         op,
                 if (profile) { *t_isotypic += secs(t0, tick()); t0 = tick(); }
                 if (covered == rdr.reps.size()) {
                     projected = true;
+                    auto M_sp = std::make_shared<const std::vector<Monomial>>(M);
                     for (int ii = 0; ii < nIr; ++ii) {
                         if (!opt.only_irrep.empty()
                             && std::find(opt.only_irrep.begin(),
@@ -1443,6 +1490,12 @@ build_star_blocks(const ::Operator&         op,
                         impl->W   = Wsp;
                         impl->pop = std::make_unique<ProjectedBlockOp>(
                             sb.hk, Wsp);
+                        if (d > 1) {
+                            impl->M     = M_sp;
+                            impl->Dmats =
+                                giP.irreps[static_cast<std::size_t>(ii)]
+                                    .matrices;
+                        }
                         sb.blocks.push_back(std::move(impl));
                     }
                     info.little_order = static_cast<int>(M.size());
@@ -2361,22 +2414,64 @@ little_group_transport(
     int                                  k0_src,
     int                                  k0_dst,
     const std::vector<std::complex<double>>& vec,
-    const LittleGroupOptions&            opt)
+    const LittleGroupOptions&            opt,
+    int                                  n_up_dst)
 {
     EngineContext cx;
     bool tr_on = false;
     make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
                         cx, tr_on);
+    // Flip-mirror transport (n_up <-> N - n_up): U_F commutes with every
+    // site permutation, so the momentum is preserved (k0_dst == k0_src)
+    // and the pre-map is the global XOR. Requires [H, prod sigma^x] == 0
+    // -- checked term-level, not assumed.
+    std::uint64_t xor_mask = 0;
+    if (n_up_dst >= 0 && n_up_dst != opt.n_up) {
+        if (opt.n_up < 0 || n_up_dst != n_sites - opt.n_up)
+            throw std::invalid_argument(
+                "little_group_transport: n_up_dst must be N - n_up (the "
+                "flip mirror is the only cross-subspace fold).");
+        if (k0_dst != k0_src)
+            throw std::invalid_argument(
+                "little_group_transport: the flip mirror preserves the "
+                "momentum -- pass k0_dst == k0_src.");
+        const auto soa = term_soa(op);
+        if (!ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa))
+            throw std::invalid_argument(
+                "little_group_transport: [H, prod sigma^x] != 0 -- the "
+                "flip mirror does not apply to this Hamiltonian.");
+        xor_mask = (n_sites >= 64) ? ~std::uint64_t{0}
+                                   : ((std::uint64_t{1} << n_sites) - 1);
+    }
     auto rd_src = build_k_sector(cx, k0_src, opt.n_up);
-    auto rd_dst = build_k_sector(cx, k0_dst, opt.n_up);
+    ed::symmetry::RepSectorData rd_dst;
+    if (xor_mask != 0) {
+        // The mirrored subspace needs its OWN engine context: the orbit
+        // table inside cx was acquired for the SOURCE n_up, and reps of
+        // (N - n_up, k) are not in it. The group action itself is
+        // n_up-independent, so cx.cg still canonicalizes the images.
+        LittleGroupOptions opt_dst = opt;
+        opt_dst.n_up = n_up_dst;
+        EngineContext cx_dst;
+        bool tr_dst = false;
+        make_engine_context(op, abelian_group, residue_perms, n_sites,
+                            opt_dst, cx_dst, tr_dst);
+        rd_dst = build_k_sector(cx_dst, k0_dst, n_up_dst);
+    } else {
+        rd_dst = build_k_sector(cx, k0_dst, opt.n_up);
+    }
     if (vec.size() != rd_src.reps.size())
         throw std::invalid_argument(
             "little_group_transport: vector length != source #reps");
 
     // Which relation maps src -> dst? A residue with irrep_map[p][src] ==
-    // dst (star), or the TR conjugation (dst == conj irrep of src).
+    // dst (star), the TR conjugation (dst == conj irrep of src), or the
+    // flip mirror above (same momentum, mirrored subspace).
     const std::vector<int>* perm = nullptr;
     bool conjugate = false;
+    if (xor_mask != 0) {
+        // mirror: no perm, no conjugation -- the XOR pre-map suffices.
+    } else
     for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
         if (cx.irrep_map[rp][static_cast<std::size_t>(k0_src)] == k0_dst) {
             perm = &cx.residues[rp];
@@ -2403,7 +2498,7 @@ little_group_transport(
     for (std::size_t i = 0; i < rd_src.reps.size(); ++i) {
         const Complex amp = conjugate ? std::conj(vec[i]) : vec[i];
         if (amp == Complex(0, 0)) continue;
-        std::uint64_t s = rd_src.reps[i];
+        std::uint64_t s = rd_src.reps[i] ^ xor_mask;
         if (perm != nullptr) s = applyPermutation(s, inverse_perm(*perm));
         std::uint64_t rb    = ~std::uint64_t{0};
         std::size_t   astar = 0;
