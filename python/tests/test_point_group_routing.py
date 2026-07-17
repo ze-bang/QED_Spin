@@ -91,8 +91,10 @@ def test_env_gate_degrades_auto_and_fails_full(monkeypatch, capsys):
 
 
 def test_vector_consumers_stay_abelian():
-    """A consumer that needs EIGENVECTORS cannot be served by the projection
-    lane, so point_group='full' must raise rather than silently degrade.
+    """Vector-consumer routing. Since U2b-r2b the projection lane DOES
+    serve eigenvectors for a NAMED sz= (certified pairs, computational
+    basis); the un-named merged sweep remains a genuine decline, and
+    point_group='full' still raises there rather than silently degrade.
 
     Note what is NOT in this list any more: `sector=`. It used to be lumped in
     here ("the projection lane cannot honor it"), which meant naming a
@@ -104,8 +106,19 @@ def test_vector_consumers_stay_abelian():
     """
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
+    # U2b-r2b (Jul 2026) CHANGED this contract for the NAMED-sz shape:
+    # the projection lane now PRODUCES certified eigenvectors
+    # (little_group_lowest_vectors -> lift -> flip-aware expansion), so
+    # 'full' + vectors + sz= succeeds on the project lane.
+    r = qed.solve(H, symmetry=gen, num_eigenvalues=1, sz=N // 2,
+                  compute_eigenvectors=True, point_group="full",
+                  verbose=False)
+    assert getattr(r.backend, "lane", None) in ("cpu", "gpu")
+    assert len(r.eigenvectors) == 1
+    # The UN-NAMED shape still declines (a merged multi-subspace window
+    # has no single vector basis), and 'full' still raises on a decline.
     with pytest.raises(RuntimeError, match="eigenvector"):
-        qed.solve(H, symmetry=gen, num_eigenvalues=1, sz=N // 2,
+        qed.solve(H, symmetry=gen, num_eigenvalues=1,
                   compute_eigenvectors=True, point_group="full",
                   verbose=False)
 

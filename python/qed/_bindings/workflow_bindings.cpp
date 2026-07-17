@@ -1539,10 +1539,28 @@ void bind_workflows(py::module_& m) {
                       }
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(k));
-                      eigs_per_sector.push_back(sr.eigenvalues);
+                      // GAP-10 v2: the MERGED window is where an
+                      // uncertified interior Ritz value does damage
+                      // (a stalled value from one sector can shadow
+                      // another sector's true lowest). Filter on the
+                      // per-value residual bound the orchestrator now
+                      // reports; each sector's LOWEST is always kept
+                      // (it is convergence-guarded by the stall
+                      // checker). Direct single-operator calls keep
+                      // their full num_eigs window + diagnostics.
+                      std::vector<double> kept;
+                      kept.reserve(sr.eigenvalues.size());
+                      const auto& rb = sr.krylov.ritz_residuals;
+                      for (std::size_t vi = 0;
+                           vi < sr.eigenvalues.size(); ++vi) {
+                          if (vi > 0 && vi < rb.size()
+                              && rb[vi] > 1e-6)
+                              continue;
+                          kept.push_back(sr.eigenvalues[vi]);
+                      }
+                      eigs_per_sector.push_back(kept);
                       all_eigs.insert(all_eigs.end(),
-                                      sr.eigenvalues.begin(),
-                                      sr.eigenvalues.end());
+                                      kept.begin(), kept.end());
                       if (need_per_sector_outdir && !sr.hdf5_path.empty()) {
                           sector_hdf5_paths.push_back(sr.hdf5_path);
                       }

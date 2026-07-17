@@ -532,35 +532,29 @@ GroundStateResult solve_on(Backend& be,
             evals = ed::krylov::detail::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
-        std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
+        const std::size_t n_keep =
+            std::min<std::size_t>(opts.num_eigs, evals.size());
+        // GAP-10 v2 (2026-07-17): the first fix TRUNCATED to the certified
+        // prefix, which broke the num_eigs COUNT contract in
+        // environment-dependent ways (an OpenBLAS runner trimmed a value
+        // the local run kept; [unified-e2e] 83 asserted the count). The
+        // window is now returned IN FULL and every value carries its
+        // residual bound |beta_m| * |z_{m,i}| in krylov.ritz_residuals --
+        // consumers that MERGE windows (the streaming sector pools, where
+        // the original garbage did its damage) filter on the bound; a
+        // direct caller keeps num_eigs values plus the diagnostics.
+        std::vector<double> ritz_bounds;
         if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
             const std::size_t m = kres.alpha.size();
-            // beta[0] is the seed norm in this kernel's convention; the
-            // off-diagonal reaching PAST the basis is beta[m] when the
-            // kernel ran to m < dim (0 when it exhausted the space).
             const double beta_last =
                 (kres.beta.size() > m) ? std::abs(kres.beta[m])
                                        : (m < geom.local_dim && !kres.beta.empty()
                                               ? std::abs(kres.beta.back())
                                               : 0.0);
-            // CI hardening (2026-07-17): 1e-8 was BLAS-marginal --
-            // OpenBLAS runners trimmed a value the local MKL run kept,
-            // and a directory-vs-memory e2e compare saw different window
-            // LENGTHS. The filter exists to drop GARBAGE (the measured
-            // stalled values were off by ~0.2, bounds far above 1e-6);
-            // marginal-but-converging values must be kept identically on
-            // every backend.
-            const double bound_tol =
-                std::max(opts.tolerance * 100.0, 1e-6);
-            std::size_t ok = 0;
-            while (ok < n_keep) {
-                const double bound =
-                    beta_last * std::abs(evec_coeffs[(m - 1) + ok * m]);
-                if (bound > bound_tol) break;
-                ++ok;
-            }
-            if (ok == 0) ok = 1;   // the extreme pair is always reported
-            if (ok < n_keep) n_keep = ok;   // converged PREFIX only
+            ritz_bounds.reserve(n_keep);
+            for (std::size_t i2 = 0; i2 < n_keep; ++i2)
+                ritz_bounds.push_back(
+                    beta_last * std::abs(evec_coeffs[(m - 1) + i2 * m]));
         }
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
 
@@ -592,6 +586,8 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.alpha = std::move(kres.alpha);
         R.krylov.beta  = std::move(kres.beta);
         R.krylov.iters_done = kres.iters_done;
+        if (!ritz_bounds.empty())
+            R.krylov.ritz_residuals = std::move(ritz_bounds);
     } else if (method == SolveMethod::BlockLanczos) {
         ed::krylov::BlockLanczosOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
