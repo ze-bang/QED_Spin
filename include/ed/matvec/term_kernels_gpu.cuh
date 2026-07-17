@@ -46,6 +46,7 @@
 
 #include <ed/matvec/device_basis_policy.cuh>
 #include <ed/matvec/term_storage.h>
+#include <ed/matvec/term_gate_math.h>   // shared host/device per-term gate math
 
 namespace ed::matvec::kernel::gpu {
 
@@ -253,14 +254,18 @@ __device__ __forceinline__ void process_source_terms(
 
     // ----------------------------------------------------------
     // 1. One-body diagonal (Sz_k)
+    // Per-term gate/geometric math shared with the CPU path via
+    // ed::matvec::gate (term_gate_math.h); this body owns the src multiply,
+    // atomic emit, and BasisPolicy branches.
     // ----------------------------------------------------------
+    namespace gate = ed::matvec::gate;
     for (std::uint32_t t = 0; t < terms.num_diag_one_body; ++t) {
         const auto& term = terms.diag_one_body[t];
-        const double sign = ((s >> term.site_index) & 1) ? -1.0 : 1.0;
+        const double factor =
+            gate::diag_one_body_factor(s, term.site_index, spin_l);
         const cuDoubleComplex c = load_coeff(term.coefficient);
         Scalar contrib =
-            ST::mul(ST::from_coeff(c),
-                    ST::mul_real(src, spin_l * sign));
+            ST::mul(ST::from_coeff(c), ST::mul_real(src, factor));
         if constexpr (BasisPolicy::has_coeff_modifier) {
             emit_to(self_idx, s, contrib);
         } else {
@@ -273,9 +278,9 @@ __device__ __forceinline__ void process_source_terms(
     // ----------------------------------------------------------
     for (std::uint32_t t = 0; t < terms.num_offdiag_one_body; ++t) {
         const auto& term = terms.offdiag_one_body[t];
-        const std::uint64_t bit = (s >> term.site_index) & 1ULL;
-        if (bit == term.op_type) continue;
-        const std::uint64_t new_s = s ^ (1ULL << term.site_index);
+        std::uint64_t new_s;
+        if (!gate::offdiag_one_body(s, term.site_index, term.op_type, new_s))
+            continue;
         const cuDoubleComplex c = load_coeff(term.coefficient);
         Scalar contrib = ST::mul(ST::from_coeff(c), src);
 
@@ -297,12 +302,11 @@ __device__ __forceinline__ void process_source_terms(
     // ----------------------------------------------------------
     for (std::uint32_t t = 0; t < terms.num_diag_two_body; ++t) {
         const auto& term = terms.diag_two_body[t];
-        const double sa = ((s >> term.site_index_1) & 1) ? -1.0 : 1.0;
-        const double sb = ((s >> term.site_index_2) & 1) ? -1.0 : 1.0;
+        const double factor = gate::diag_two_body_factor(
+            s, term.site_index_1, term.site_index_2, spin_sq);
         const cuDoubleComplex c = load_coeff(term.coefficient);
         Scalar contrib =
-            ST::mul(ST::from_coeff(c),
-                    ST::mul_real(src, spin_sq * sa * sb));
+            ST::mul(ST::from_coeff(c), ST::mul_real(src, factor));
         if constexpr (BasisPolicy::has_coeff_modifier) {
             emit_to(self_idx, s, contrib);
         } else {
@@ -315,14 +319,12 @@ __device__ __forceinline__ void process_source_terms(
     // ----------------------------------------------------------
     for (std::uint32_t t = 0; t < terms.num_mixed_two_body; ++t) {
         const auto& term = terms.mixed_two_body[t];
-        const std::uint64_t flip_bit = (s >> term.flip_site) & 1ULL;
-        if (flip_bit == term.flip_op_type) continue;
-        const double sz_sign = ((s >> term.sz_site) & 1) ? -1.0 : 1.0;
-        const std::uint64_t new_s = s ^ (1ULL << term.flip_site);
+        std::uint64_t new_s; double factor;
+        if (!gate::mixed_two_body(s, term.flip_site, term.flip_op_type,
+                                  term.sz_site, spin_l, new_s, factor)) continue;
         const cuDoubleComplex c = load_coeff(term.coefficient);
         Scalar contrib =
-            ST::mul(ST::from_coeff(c),
-                    ST::mul_real(src, spin_l * sz_sign));
+            ST::mul(ST::from_coeff(c), ST::mul_real(src, factor));
 
         if constexpr (BasisPolicy::may_leave_basis) {
             if constexpr (BasisPolicy::has_coeff_modifier) {
@@ -342,11 +344,10 @@ __device__ __forceinline__ void process_source_terms(
     // ----------------------------------------------------------
     for (std::uint32_t t = 0; t < terms.num_offdiag_two_body; ++t) {
         const auto& term = terms.offdiag_two_body[t];
-        const std::uint64_t b1 = (s >> term.site_index_1) & 1ULL;
-        const std::uint64_t b2 = (s >> term.site_index_2) & 1ULL;
-        if (b1 == term.op_type_1 || b2 == term.op_type_2) continue;
-        const std::uint64_t new_s =
-            s ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
+        std::uint64_t new_s;
+        if (!gate::offdiag_two_body(s, term.site_index_1, term.site_index_2,
+                                    term.op_type_1, term.op_type_2, new_s))
+            continue;
         const cuDoubleComplex c = load_coeff(term.coefficient);
         Scalar contrib = ST::mul(ST::from_coeff(c), src);
 
@@ -368,48 +369,15 @@ __device__ __forceinline__ void process_source_terms(
     // ----------------------------------------------------------
     for (std::uint32_t t = 0; t < terms.num_three_body; ++t) {
         const auto& term = terms.three_body[t];
-        std::uint64_t cur = s;
-        cuDoubleComplex scalar = load_coeff(term.coefficient);
-        bool valid = true;
-
-        // Gate 1
-        if (term.op_type_1 == kOpSz) {
-            const double sg = ((cur >> term.site_index_1) & 1) ? -1.0 : 1.0;
-            scalar = make_cuDoubleComplex(
-                cuCreal(scalar) * spin_l * sg,
-                cuCimag(scalar) * spin_l * sg);
-        } else {
-            const std::uint64_t b = (cur >> term.site_index_1) & 1ULL;
-            if (b != term.op_type_1) cur ^= (1ULL << term.site_index_1);
-            else                     valid = false;
-        }
-        // Gate 2
-        if (valid) {
-            if (term.op_type_2 == kOpSz) {
-                const double sg = ((cur >> term.site_index_2) & 1) ? -1.0 : 1.0;
-                scalar = make_cuDoubleComplex(
-                    cuCreal(scalar) * spin_l * sg,
-                    cuCimag(scalar) * spin_l * sg);
-            } else {
-                const std::uint64_t b = (cur >> term.site_index_2) & 1ULL;
-                if (b != term.op_type_2) cur ^= (1ULL << term.site_index_2);
-                else                     valid = false;
-            }
-        }
-        // Gate 3
-        if (valid) {
-            if (term.op_type_3 == kOpSz) {
-                const double sg = ((cur >> term.site_index_3) & 1) ? -1.0 : 1.0;
-                scalar = make_cuDoubleComplex(
-                    cuCreal(scalar) * spin_l * sg,
-                    cuCimag(scalar) * spin_l * sg);
-            } else {
-                const std::uint64_t b = (cur >> term.site_index_3) & 1ULL;
-                if (b != term.op_type_3) cur ^= (1ULL << term.site_index_3);
-                else                     valid = false;
-            }
-        }
-        if (!valid) continue;
+        std::uint64_t cur; double factor;
+        if (!gate::three_body_walk(
+                s, term.op_type_1, term.site_index_1,
+                term.op_type_2, term.site_index_2,
+                term.op_type_3, term.site_index_3,
+                spin_l, cur, factor)) continue;
+        const cuDoubleComplex c0 = load_coeff(term.coefficient);
+        const cuDoubleComplex scalar = make_cuDoubleComplex(
+            cuCreal(c0) * factor, cuCimag(c0) * factor);
         if (cuCreal(scalar) * cuCreal(scalar) +
             cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
 

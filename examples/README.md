@@ -22,5 +22,5 @@ For exhaustive per-configuration coverage — every
 (backend × symmetry × method) combination — the test suites are the
 reference: `python/tests/` + `tests/integration/` (Python) and
 `tests/unit/` (C++), plus the verified capability matrix in
-`docs/perf/capability_matrix_2026-07-03.md` /
+`docs/perf/capability_matrix_2026-07-15.md` /
 `benchmarks/bench_capability_matrix.py`.

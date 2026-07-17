@@ -43,19 +43,17 @@
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
-#include <ed/bfg/cluster.h>
-#include <ed/bfg/correlations.h>
-#include <ed/bfg/ring_observables.h>
-#include <ed/bfg/spin_structure_factor.h>
-#include <ed/bfg/structure_factor.h>
-#include <ed/bfg/topology.h>
-#include <ed/bfg/wavefunction_io.h>
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
-#include <ed/symmetry/symmetry_adapted.h>
-#include <ed/solvers/symmetry_adapted_solve.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
-#include <ed/symmetry/spin_flip.h>  // sz_axis_of (Stage 8d diagonal-axis compose)
+#include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
+#include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
+#include <ed/core/hdf5_io.h>                // r2b: canonical eigenvector save
+#include <ed/symmetry/spin_flip.h>
+#include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
+#include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
+#include <ed/observables/cf_spectral_kernel.h>      // 9d: cf_spectral_from_vector
+#include <ed/matvec/backends/cpu_backend.h>         // 9d: CF backend
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -542,6 +540,26 @@ py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
     return d;
 }
 
+// LTLM thermodynamics == FTLM trace for any function of H. The old
+// low_temperature_lanczos seeded a second Lanczos from |0> and summed the
+// GS-local density of states, not the thermal trace (it stayed pinned near
+// E0 at every T). This binding now routes through the verified FTLM path so
+// the public `qed.low_temperature_lanczos` name keeps working but returns
+// correct thermodynamics. See CONSOLIDATION_PLAN.md Family 1.
+FTLMParameters ltlm_to_ftlm_params(const LTLMParameters& p) {
+    FTLMParameters f;
+    f.krylov_dim               = p.krylov_dim;
+    f.num_samples              = p.num_samples;
+    f.max_iterations           = p.max_iterations;
+    f.tolerance                = p.tolerance;
+    f.full_reorthogonalization = p.full_reorthogonalization;
+    f.reorth_frequency         = p.reorth_frequency;
+    f.random_seed              = p.random_seed;
+    f.store_intermediate       = p.store_intermediate;
+    f.compute_error_bars       = p.compute_error_bars;
+    return f;
+}
+
 py::dict py_low_temperature_lanczos(const Operator& op,
                                     const LTLMParameters& params,
                                     double temp_min,
@@ -550,15 +568,15 @@ py::dict py_low_temperature_lanczos(const Operator& op,
                                     const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     const std::string dir = output_dir_or_devnull(output_dir);
-    LTLMResults res;
+    const FTLMParameters fparams = ltlm_to_ftlm_params(params);
+    FTLMResults res;
     {
         py::gil_scoped_release release;
-        res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                      temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, dir);
+        res = finite_temperature_lanczos(make_hv(op), n, fparams, temp_min,
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
+    d["ground_state_energy"] = res.ground_state_estimate;
     return d;
 }
 
@@ -570,15 +588,15 @@ py::dict py_low_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
                                              const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     const std::string dir = output_dir_or_devnull(output_dir);
-    LTLMResults res;
+    const FTLMParameters fparams = ltlm_to_ftlm_params(params);
+    FTLMResults res;
     {
         py::gil_scoped_release release;
-        res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                      temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, dir);
+        res = finite_temperature_lanczos(make_hv(op), n, fparams, temp_min,
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
+    d["ground_state_energy"] = res.ground_state_estimate;
     return d;
 }
 
@@ -709,167 +727,6 @@ PYBIND11_MODULE(_core, m) {
              "+ replaying every ``add_one_body`` / ``add_two_body`` call, "
              "but routed through a single C++ copy of the term arrays.");
 
-    // ------------------------------------------------------------------------
-    // Non-abelian symmetry-adapted spectrum. Reduces by the FULL point group
-    // (including d≥2 irreps) and returns the complete spectrum with the correct
-    // physical degeneracies. `generators` is a list of site permutations
-    // (length num_sites each). Correct for any group; reference-grade (works in
-    // the full 2^num_sites space, so moderate sizes).
-    // ------------------------------------------------------------------------
-    m.def("symmetry_adapted_eigenvalues",
-          [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             int n_up, bool use_gpu) {
-              const int n_sites = static_cast<int>(op.getNumBits());
-              auto max_clique = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              // Full reduced spectrum via the production engine (CpuMatVecBackend
-              // over op's terms); on GPU the host materialises the blocks and the
-              // device runs the batched cuSOLVER eigensolve. n_up >= 0 -> fixed-Sz.
-              ed::symmetry::SymAdaptedSpectrum spec;
-#ifdef WITH_CUDA
-              if (use_gpu)
-                  spec = ed::symmetry::symmetry_adapted_spectrum_gpu(
-                      op, gi, max_clique, n_sites, n_up);
-              else
-#endif
-                  spec = ed::solvers::symmetry_adapted_full_spectrum(
-                      op, gi, max_clique, n_sites, n_up);
-              (void)use_gpu;
-              py::dict d;
-              d["eigenvalues"]     = spec.eigenvalues;
-              d["block_irrep_dim"] = spec.block_irrep_dim;
-              d["block_size"]      = spec.block_size;
-              d["group_order"]     = gi.order;
-              d["num_irreps"]      = static_cast<int>(gi.irreps.size());
-              std::vector<int> dims; for (const auto& ir : gi.irreps) dims.push_back(ir.dim);
-              d["irrep_dims"]      = dims;
-              d["is_abelian"]      = gi.is_abelian();
-              return d;
-          },
-          py::arg("operator"), py::arg("generators"), py::arg("n_up") = -1,
-          py::arg("use_gpu") = false,
-          "Symmetry-adapted spectrum of a Hamiltonian under the (possibly "
-          "non-abelian) point group generated by `generators` (a list of site "
-          "permutations). With `n_up >= 0`, additionally restricts to the "
-          "fixed-Sz sector of that many up-spins (combined U(1)×point-group "
-          "reduction); `n_up = -1` (default) uses the full Hilbert space. Returns "
-          "a dict with `eigenvalues` (correct d_Γ degeneracies), per-block "
-          "(`block_irrep_dim`, `block_size`), and group info. Reduces by the FULL "
-          "group including 2-D+ irreps.");
-
-    // Lowest-k eigenvalues via the symmetry reduction, solved per block by a
-    // DENSE eigensolve (small blocks) or LANCZOS on the reduced matvec (large
-    // blocks) -- the method is chosen by block size, decoupled from the
-    // reduction. Use for ground state / low-lying of large non-abelian sectors.
-    m.def("symmetry_adapted_lowest",
-          [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             int k, int n_up, int dense_max_dim) {
-              const int n_sites = static_cast<int>(op.getNumBits());
-              auto max_clique = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              // Drives the production engine (CpuMatVecBackend over op's terms via
-              // NonAbelianSymmetryBasisPolicy) per block — no parallel matvec.
-              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
-                  op, gi, max_clique, n_sites, k, n_up, dense_max_dim);
-              py::dict d;
-              d["eigenvalues"]     = spec.eigenvalues;
-              d["block_irrep_dim"] = spec.block_irrep_dim;
-              d["block_size"]      = spec.block_size;
-              d["group_order"]     = gi.order;
-              d["is_abelian"]      = gi.is_abelian();
-              return d;
-          },
-          py::arg("operator"), py::arg("generators"), py::arg("k") = 1,
-          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
-          "Lowest-`k` eigenvalues (per irrep block, recombined with d_Γ "
-          "multiplicity, sorted) of a Hamiltonian under the (possibly non-abelian) "
-          "point group from `generators`. Each block H_Γ is solved by a dense "
-          "eigensolve when its reduced dimension n_Γ <= `dense_max_dim`, otherwise "
-          "by Lanczos on the reduced matvec -- so the symmetry reduction is solved "
-          "by EITHER method, chosen by block size. `n_up >= 0` adds the fixed-Sz "
-          "restriction. Ground state is the robust output; for a full low-lying "
-          "spectrum prefer `symmetry_adapted_eigenvalues` (dense).");
-
-    // Finite-temperature thermodynamics via the symmetry-reduced spectrum
-    // (exact canonical, d_Γ-weighted). n_up >= 0 -> combined fixed-Sz reduction.
-    m.def("symmetry_adapted_lowest_eigenvalues",
-          [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             int k, int n_up, int dense_max_dim, int sz_parity) {
-              const int n_sites = static_cast<int>(op.getNumBits());
-              auto group = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
-              auto spec = ed::solvers::symmetry_adapted_lowest_eigenvalues(
-                  op, gi, group, n_sites, k, n_up, dense_max_dim,
-                  ed::solvers::BlockMethod::Auto, sz_parity);
-              py::dict d;
-              d["eigenvalues"]     = spec.eigenvalues;
-              d["block_irrep_dim"] = spec.block_irrep_dim;
-              d["block_size"]      = spec.block_size;
-              d["group_order"]     = gi.order;
-              return d;
-          },
-          py::arg("operator"), py::arg("generators"), py::arg("k"),
-          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
-          py::arg("sz_parity") = -1,
-          R"pbdoc(
-            Lowest-k eigenvalues under the FULL (possibly non-abelian)
-            group reduction: each irrep block runs the production
-            multi-target matvec through block-size-adaptive dense /
-            Lanczos solves; eigenvalues recombined with their d_Gamma
-            multiplicities and sorted. The ITERATIVE non-abelian lane
-            (blocks ~ dim/|G| including d >= 2 irreps).
-          )pbdoc");
-
-    m.def("symmetry_adapted_gs_dssf",
-          [](const Operator& op_h, const Operator& op_o,
-             const std::vector<std::vector<int>>& generators,
-             double omega_min, double omega_max, int n_omega,
-             double broadening) {
-              const int n_sites = static_cast<int>(op_h.getNumBits());
-              auto group = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(group, n_sites);
-              // Stage 8d: compose the diagonal axis. When H conserves
-              // U(1) Sz (or only its Z2 parity remnant), partition the
-              // eigen-decomposition by n_up (or parity half): the union
-              // of subspace blocks stays complete while every dense
-              // solve shrinks. Same term-level detection the
-              // composition layer uses everywhere else.
-              std::vector<std::pair<int, int>> subspaces{{-1, -1}};
-              {
-                  ed::matvec::TermStorage soa;
-                  ed::matvec::TermStorage::classify_route(
-                      soa, op_h.transform_data_, op_h.three_body_data_,
-                      [](const std::complex<double>& c) { return c; });
-                  const auto ax = ed::symmetry::sz_axis_of(soa);
-                  if (ax == ed::symmetry::SzAxis::U1) {
-                      subspaces.clear();
-                      for (int k = 0; k <= n_sites; ++k)
-                          subspaces.emplace_back(k, -1);
-                  } else if (ax == ed::symmetry::SzAxis::Parity) {
-                      subspaces = {{-1, 0}, {-1, 1}};
-                  }
-              }
-              auto res = ed::solvers::symmetry_adapted_ground_state_dssf(
-                  op_h, op_o, gi, group, n_sites,
-                  omega_min, omega_max, n_omega, broadening, subspaces);
-              py::dict d;
-              d["omega"]        = res.omega;
-              d["s_omega"]      = res.spectral;
-              d["gs_energy"]    = res.ground_energy;
-              d["total_weight"] = res.total_weight;
-              return d;
-          },
-          py::arg("op_h"), py::arg("op_o"), py::arg("generators"),
-          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
-          py::arg("broadening"),
-          R"pbdoc(
-            Ground-state DSSF S(omega) under the FULL non-abelian group
-            reduction (all d_Gamma partners summed for completeness).
-            Stage 8d: the diagonal axis composes automatically -- a
-            U(1)- / parity-conserving H is decomposed per n_up / parity
-            half (smaller dense blocks, identical physics).
-          )pbdoc");
-
     // -----------------------------------------------------------------
     // Stage 7 (SymmetryEngine v2): FACTORIZED non-abelian reduction via
     // little co-groups. G = A ⋊ P: solve one momentum per star, project
@@ -879,11 +736,20 @@ PYBIND11_MODULE(_core, m) {
     // refinement step degrades gracefully to the plain k0 block.
     // -----------------------------------------------------------------
     auto lg_opts = [](int n_up, int sz_parity, int dense_max_dim,
-                      bool use_gpu = false) {
+                      bool use_gpu = false, int spin_flip = -1,
+                      int time_reversal = -1,
+                      const std::vector<int>& only_k0 = {},
+                      bool plan_only = false,
+                      const std::vector<int>& only_irrep = {}) {
         ed::solvers::LittleGroupOptions o;
         o.n_up          = n_up;
         o.sz_parity     = sz_parity;
         o.dense_max_dim = dense_max_dim;
+        o.spin_flip     = spin_flip;
+        o.time_reversal = time_reversal;
+        o.only_k0       = only_k0;
+        o.plan_only     = plan_only;
+        o.only_irrep    = only_irrep;
 #ifdef WITH_CUDA
         o.use_gpu       = use_gpu;
 #else
@@ -891,71 +757,213 @@ PYBIND11_MODULE(_core, m) {
 #endif
         return o;
     };
+    // Stage 9f: per-BLOCK quantum-number labels, parallel to
+    // block_values / multiplicities. k_raw is the star REPRESENTATIVE's
+    // abelian irrep (fold partners share it; membership is in "stars").
+    auto lg_label_arrays = [](const ed::solvers::LittleGroupSpectrum& s,
+                              py::dict& d) {
+        std::vector<int> kraw, fpar, irr, irrd;
+        kraw.reserve(s.labels.size()); fpar.reserve(s.labels.size());
+        irr.reserve(s.labels.size());  irrd.reserve(s.labels.size());
+        for (const auto& L : s.labels) {
+            kraw.push_back(L.k_raw);
+            fpar.push_back(L.flip_parity);
+            irr.push_back(L.irrep);
+            irrd.push_back(L.irrep_dim);
+        }
+        d["block_k_raw"]       = kraw;
+        d["block_flip_parity"] = fpar;
+        d["block_irrep"]       = irr;
+        d["block_irrep_dim"]   = irrd;
+    };
     auto lg_stars_dict = [](const ed::solvers::LittleGroupSpectrum& s) {
         py::list stars;
         for (const auto& st : s.stars) {
             py::dict d;
             d["k0"]           = st.k0;
             d["star_size"]    = st.star_size;
+            d["members"]      = st.members;
+            // P_k0's character table -- name an irrep by its CHARACTER, not by
+            // decompose_irreps' internal index. Columns are identified by
+            // little_elems (residue indices into the caller's residue_perms;
+            // -1 = identity). Empty when the star was not projected.
+            d["little_elems"]      = st.little_elems;
+            d["little_characters"] = st.little_characters;
+            d["little_irrep_dims"] = st.little_irrep_dims;
             d["little_order"] = st.little_order;
             d["projected"]    = st.projected;
             d["dim_k0"]       = st.dim_k0;
+            d["flip_parity"]  = st.flip_parity;
+            d["tr_pairs"]     = st.tr_pairs;
+            d["gpu_engaged"]  = st.gpu_engaged;
+            d["csr_engaged"]  = st.csr_engaged;
             stars.append(d);
         }
         return stars;
     };
 
+    m.def("have_cuda", [] { return ed::have_cuda(); },
+          "True when this build has CUDA support AND a device is present "
+          "(the same gate the engine's GPU rep-gather consults).");
+    m.def("dump_env_gates", [] { return ed::symmetry::dump_env_gates(); },
+          "Stage 10b: every symmetry-stack env gate with its live value, "
+          "default, and meaning -- paste into bug reports. The X-list in "
+          "env_gates.h is the single inventory.");
+
     m.def("little_group_full_spectrum",
-          [lg_opts, lg_stars_dict](const Operator& op,
+          [lg_opts, lg_stars_dict, lg_label_arrays](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int n_up, int sz_parity, bool use_gpu) {
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal, int dense_max_dim,
+             const std::vector<int>& only_k0, bool plan_only,
+             const std::vector<int>& only_irrep) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto s = ed::solvers::little_group_full_spectrum(
                   op, abelian_group, residue_perms, n_sites,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu, spin_flip,
+                          time_reversal, only_k0, plan_only, only_irrep));
               py::dict d;
               d["eigenvalues"]    = s.expanded();
               d["block_values"]   = s.eigenvalues;
               d["multiplicities"] = s.multiplicities;
+              lg_label_arrays(s, d);
+              d["irrep_characters"] = s.irrep_characters;
               d["stars"]          = lg_stars_dict(s);
+              d["flip_engaged"]   = s.flip_engaged;
+              d["tr_engaged"]     = s.tr_engaged;
+              d["gpu_engaged"]    = s.gpu_engaged;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("n_up") = -1,
           py::arg("sz_parity") = -1, py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
+          py::arg("only_k0") = std::vector<int>{},
+          py::arg("plan_only") = false,
+          py::arg("only_irrep") = std::vector<int>{},
           "Full spectrum via the FACTORIZED little-co-group reduction "
           "(one momentum per star, per-irrep blocks inside the star "
-          "representative's matrix-free k-sector).");
+          "representative's matrix-free k-sector). only_k0=[...] solves ONLY "
+          "those star representatives (extended irrep indices, as reported by "
+          "stars[].k0); the covering sum rule is skipped for a restricted "
+          "call because a subset cannot tile the subspace. plan_only=True builds "
+          "every star's sector and returns stars[] + irrep_characters WITHOUT "
+          "solving -- read the star membership and decode a momentum from "
+          "chi_k before naming only_k0 (k_raw is an internal irrep index, not "
+          "the momentum).");
 
     m.def("little_group_lowest_eigenvalues",
           [lg_opts](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int k, int n_up, int sz_parity, int dense_max_dim) {
+             int k, int n_up, int sz_parity, int dense_max_dim,
+             int spin_flip, int time_reversal) {
               const int n_sites = static_cast<int>(op.getNumBits());
               return ed::solvers::little_group_lowest_eigenvalues(
                   op, abelian_group, residue_perms, n_sites, k,
-                  lg_opts(n_up, sz_parity, dense_max_dim));
+                  lg_opts(n_up, sz_parity, dense_max_dim, false,
+                          spin_flip, time_reversal));
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("k") = 1,
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("dense_max_dim") = 64,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           "Lowest-k eigenvalues via the factorized little-co-group "
           "reduction (dense on small blocks, Lanczos on the projected "
           "matrix-free matvec otherwise); multiplicities expanded.");
+
+    m.def("little_group_lowest_eigenvalues_labeled",
+          [lg_opts, lg_stars_dict](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int dense_max_dim,
+             int spin_flip, int time_reversal,
+             const std::vector<int>& only_k0,
+             const std::vector<int>& only_irrep) {
+              // Stage 9f: the labeled twin of little_group_lowest_eigenvalues.
+              // Aligned per-eigenvalue arrays (expanded by multiplicity,
+              // sorted ascending, truncated to k): momentum k_raw is the star
+              // REPRESENTATIVE's abelian irrep (fold partners share it; the
+              // membership is in "stars"), irrep indexes the little co-group
+              // decomposition at that star (-1 = plain block), flip_parity is
+              // the (k, +/-) slot when A' = A x Z2 engaged.
+              const int n_sites = static_cast<int>(op.getNumBits());
+              const auto s = ed::solvers::little_group_lowest_spectrum(
+                  op, abelian_group, residue_perms, n_sites, k,
+                  lg_opts(n_up, sz_parity, dense_max_dim, false,
+                          spin_flip, time_reversal, only_k0, false,
+                          only_irrep));
+              std::vector<std::size_t> order(s.eigenvalues.size());
+              std::iota(order.begin(), order.end(), std::size_t{0});
+              std::sort(order.begin(), order.end(),
+                        [&](std::size_t a, std::size_t b) {
+                            return s.eigenvalues[a] < s.eigenvalues[b];
+                        });
+              std::vector<double> ev;
+              std::vector<int> kraw, fpar, irr, irrd, mult;
+              std::vector<bool> conv;
+              const std::size_t want = static_cast<std::size_t>(
+                  std::max(k, 1));
+              for (std::size_t idx : order) {
+                  const auto& L = s.labels[idx];
+                  for (int r = 0; r < s.multiplicities[idx]
+                                  && ev.size() < want; ++r) {
+                      ev.push_back(s.eigenvalues[idx]);
+                      kraw.push_back(L.k_raw);
+                      fpar.push_back(L.flip_parity);
+                      irr.push_back(L.irrep);
+                      irrd.push_back(L.irrep_dim);
+                      mult.push_back(s.multiplicities[idx]);
+                      conv.push_back(L.converged);
+                  }
+                  if (ev.size() >= want) break;
+              }
+              py::dict d;
+              d["eigenvalues"]  = ev;
+              d["k_raw"]        = kraw;
+              d["flip_parity"]  = fpar;
+              d["irrep"]        = irr;
+              d["irrep_dim"]    = irrd;
+              d["multiplicity"] = mult;
+              d["converged"]    = conv;
+              d["irrep_characters"] = s.irrep_characters;
+              d["stars"]        = lg_stars_dict(s);
+              d["flip_engaged"] = s.flip_engaged;
+              d["tr_engaged"]   = s.tr_engaged;
+              d["gpu_engaged"]  = s.gpu_engaged;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 64,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("only_k0") = std::vector<int>{},
+          py::arg("only_irrep") = std::vector<int>{},
+          "Stage 9f: lowest-k eigenvalues WITH aligned per-eigenvalue "
+          "quantum-number labels (k_raw = star representative's momentum "
+          "irrep, little-group irrep index + dimension, flip parity, "
+          "multiplicity) -- the labels the engine always computed and "
+          "previously discarded at this boundary. only_k0=[...] restricts the "
+          "walk to those star representatives, so NAMING a momentum costs only "
+          "that star's work instead of forcing the call off the projection "
+          "lane onto the (larger) abelian block.");
 
     m.def("little_group_thermodynamics",
           [lg_opts](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<double>& temperatures,
-             int n_up, int sz_parity, bool use_gpu) {
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal, int dense_max_dim) {
               const int n_sites = static_cast<int>(op.getNumBits());
               auto td = ed::solvers::little_group_thermodynamics(
                   op, abelian_group, residue_perms, n_sites, temperatures,
-                  lg_opts(n_up, sz_parity, 4096, use_gpu));
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu, spin_flip,
+                          time_reversal));
               py::dict d;
               d["temperatures"]  = td.temperatures;
               d["energy"]        = td.energy;
@@ -968,67 +976,350 @@ PYBIND11_MODULE(_core, m) {
           py::arg("residue_perms"), py::arg("temperatures"),
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
           py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
           "Exact canonical thermodynamics from the factorized "
           "little-co-group full spectrum.");
 
-    m.def("symmetry_adapted_thermodynamics",
-          [](const Operator& op, const std::vector<std::vector<int>>& generators,
-             const std::vector<double>& temperatures, int n_up, bool use_gpu,
-             int sz_parity) {
-              const int n_sites = static_cast<int>(op.getNumBits());
-              auto max_clique = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              ThermodynamicData td;
-#ifdef WITH_CUDA
-              if (use_gpu)
-                  td = ed::symmetry::symmetry_adapted_thermodynamics_gpu(
-                      op, gi, max_clique, n_sites, temperatures, n_up);
+    // U1b (lane unification): SAMPLED thermodynamics inside the projected
+    // blocks -- FTLM/LTLM/mTPQ/OFTLM per (n_up, k, +/-, sigma) block via
+    // ed::workflows::thermal(block.op(), ...), Z-recombined with the block
+    // multiplicity folded in as an F-shift. KPM_DOS raises (full-spectrum
+    // DOS deliverable; use the abelian lane). Returns the combined thermo
+    // plus parallel per-block tag arrays -- the engagement signal the
+    // dimension-reduction matrix asserts block structure against.
+    m.def("little_group_thermal",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             const std::string& method, double t_min, double t_max,
+             std::size_t num_t, std::size_t num_samples,
+             std::size_t krylov_dim, std::uint64_t random_seed,
+             int n_up, int sz_parity, bool use_gpu, int spin_flip,
+             int time_reversal, int dense_max_dim) {
+              using Method = ed::workflows::ThermalOptions::Method;
+              ed::workflows::ThermalOptions topts;
+              if      (method == "FTLM")  topts.method = Method::FTLM;
+              else if (method == "LTLM")  topts.method = Method::LTLM;
+              else if (method == "mTPQ")  topts.method = Method::mTPQ;
+              else if (method == "OFTLM") topts.method = Method::OFTLM;
               else
-#endif
-                  td = ed::solvers::symmetry_adapted_thermodynamics(
-                      op, gi, max_clique, n_sites, temperatures, n_up, sz_parity);
-              (void)use_gpu;
+                  throw std::invalid_argument(
+                      "little_group_thermal: method must be one of "
+                      "FTLM/LTLM/mTPQ/OFTLM (KPM_DOS recombines on the "
+                      "abelian lane only), got '" + method + "'");
+              topts.temp_min      = t_min;
+              topts.temp_max      = t_max;
+              topts.num_temp_bins = num_t;
+              topts.num_samples   = num_samples;
+              topts.krylov_dim    = krylov_dim;
+              topts.random_seed   = random_seed;
+              topts.backend.allow_gpu = use_gpu;
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupThermalResult r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::little_group_thermal(
+                      op, abelian_group, residue_perms, n_sites, topts,
+                      lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                              spin_flip, time_reversal));
+              }
               py::dict d;
-              d["temperatures"] = td.temperatures;
-              d["energy"]       = td.energy;
-              d["specific_heat"]= td.specific_heat;
-              d["entropy"]      = td.entropy;
-              d["free_energy"]  = td.free_energy;
+              d["temperatures"]  = r.thermo.temperatures;
+              d["energy"]        = r.thermo.energy;
+              d["specific_heat"] = r.thermo.specific_heat;
+              d["entropy"]       = r.thermo.entropy;
+              d["free_energy"]   = r.thermo.free_energy;
+              d["ground_state_energy"] = r.ground_state_energy;
+              d["projected_any"] = r.projected_any;
+              d["gpu_engaged"]   = r.gpu_engaged;
+              std::vector<int> b_nup, b_kraw, b_flip, b_irrep, b_idim,
+                               b_star;
+              std::vector<std::uint64_t> b_dim, b_mult, b_weight;
+              for (std::size_t i = 0; i < r.block_tags.size(); ++i) {
+                  const auto& t = r.block_tags[i];
+                  b_nup.push_back(t.n_up);
+                  b_kraw.push_back(t.k_raw);
+                  b_flip.push_back(t.flip_parity);
+                  b_irrep.push_back(t.irrep);
+                  b_idim.push_back(t.irrep_dim);
+                  b_star.push_back(t.star_size);
+                  b_dim.push_back(t.dim);
+                  b_mult.push_back(t.multiplicity);
+                  b_weight.push_back(r.weights[i]);
+              }
+              d["block_n_up"]        = b_nup;
+              d["block_k_raw"]       = b_kraw;
+              d["block_flip_parity"] = b_flip;
+              d["block_irrep"]       = b_irrep;
+              d["block_irrep_dim"]   = b_idim;
+              d["block_star_size"]   = b_star;
+              d["block_dim"]         = b_dim;
+              d["block_multiplicity"] = b_mult;
+              d["block_weight"]      = b_weight;
               return d;
           },
-          py::arg("operator"), py::arg("generators"), py::arg("temperatures"),
-          py::arg("n_up") = -1, py::arg("use_gpu") = false,
-          py::arg("sz_parity") = -1,
-          "Exact canonical thermodynamics (E, C, S, F vs T) of a Hamiltonian "
-          "reduced by the (possibly non-abelian) point group, with optional "
-          "fixed-Sz restriction (n_up>=0). Diagonalises the small per-irrep "
-          "blocks and weights eigenvalues by d_Γ.");
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("method") = "FTLM",
+          py::arg("t_min") = 0.1, py::arg("t_max") = 10.0,
+          py::arg("num_t") = 24, py::arg("num_samples") = 40,
+          py::arg("krylov_dim") = 100, py::arg("random_seed") = 0,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
+          "Sampled (FTLM/LTLM/mTPQ/OFTLM) thermodynamics inside the "
+          "factorized little-group blocks, Z-recombined with block "
+          "multiplicities.");
 
-    // Ground-state dynamical structure factor S(ω) = Σ_n |<n|O|0>|² L(ω-(E_n-E0)),
-    // symmetry-reduced. `observable` supplies O via its term list (any O, incl.
-    // Sz-changing — final states over the full reduced spectrum).
-    m.def("symmetry_adapted_dssf",
-          [](const Operator& H, const Operator& O,
-             const std::vector<std::vector<int>>& generators,
-             double omega_min, double omega_max, int n_omega, double broadening) {
-              const int n_sites = static_cast<int>(H.getNumBits());
-              auto max_clique = ed::sym::generate_group(generators);
-              auto gi = ed::symmetry::decompose_irreps(max_clique, n_sites);
-              auto r = ed::solvers::symmetry_adapted_ground_state_dssf(
-                  H, O, gi, max_clique, n_sites,
-                  omega_min, omega_max, n_omega, broadening);
+    // U2b-r2: certified lowest-k eigenpairs on the projection lane.
+    // Vectors are returned as COMPUTATIONAL-basis amplitude arrays
+    // (flip-aware expansion; moderate-N contract, n_sites <= 30). A row
+    // with multiplicity > 1 carries ONE representative vector (fold
+    // partners need U3 transport).
+    m.def("little_group_lowest_vectors",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int spin_flip,
+             int time_reversal, int dense_max_dim,
+             const std::string& output_dir) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupVectors lv;
+              {
+                  py::gil_scoped_release release;
+                  lv = ed::solvers::little_group_lowest_vectors(
+                      op, abelian_group, residue_perms, n_sites, k,
+                      lg_opts(n_up, sz_parity, dense_max_dim,
+                              /*use_gpu=*/false, spin_flip,
+                              time_reversal));
+              }
               py::dict d;
-              d["omega"]         = r.omega;
-              d["spectral"]      = r.spectral;
-              d["ground_energy"] = r.ground_energy;
-              d["total_weight"]  = r.total_weight;
+              std::vector<double> evals;
+              std::vector<int> kraw, flip, irrep, idim;
+              std::vector<std::uint64_t> mult;
+              py::list vecs;
+              std::vector<std::vector<std::complex<double>>> psis;
+              for (const auto& row : lv.rows) {
+                  evals.push_back(row.eigenvalue);
+                  kraw.push_back(row.tag.k_raw);
+                  flip.push_back(row.tag.flip_parity);
+                  irrep.push_back(row.tag.irrep);
+                  idim.push_back(row.tag.irrep_dim);
+                  mult.push_back(row.tag.multiplicity);
+                  auto psi =
+                      ed::solvers::expand_rep_vector_to_computational(
+                          lv.sectors[row.sector_slot], row.vec);
+                  py::array_t<std::complex<double>> arr(
+                      static_cast<py::ssize_t>(psi.size()));
+                  std::copy(psi.begin(), psi.end(),
+                            arr.mutable_data());
+                  vecs.append(std::move(arr));
+                  if (!output_dir.empty()) psis.push_back(std::move(psi));
+              }
+              // r2b: persist through the canonical writer (the same
+              // /eigendata layout every solver emits). COMPUTATIONAL
+              // basis -- directly consumable, unlike the abelian lane's
+              // per-sector sector-basis files. Row i's eigenvector pairs
+              // with eigenvalue i.
+              if (!output_dir.empty()
+                  && !HDF5IO::isDisabledOutputPath(output_dir)) {
+                  HDF5IO::saveDiagonalizationResults(
+                      output_dir, evals, psis, "LITTLE_GROUP_VECTORS");
+                  d["hdf5_path"] = output_dir + "/ed_results.h5";
+              } else {
+                  d["hdf5_path"] = std::string();
+              }
+              d["eigenvalues"]   = evals;
+              d["k_raw"]         = kraw;
+              d["flip_parity"]   = flip;
+              d["irrep"]         = irrep;
+              d["irrep_dim"]     = idim;
+              d["multiplicity"]  = mult;
+              d["vectors"]       = vecs;
+              d["flip_engaged"]  = lv.flip_engaged;
+              d["tr_engaged"]    = lv.tr_engaged;
               return d;
           },
-          py::arg("hamiltonian"), py::arg("observable"), py::arg("generators"),
-          py::arg("omega_min"), py::arg("omega_max"), py::arg("n_omega"),
-          py::arg("broadening"),
-          "Symmetry-reduced ground-state dynamical structure factor S(ω) for the "
-          "observable `O`. Correct for any O (Sz-conserving or -changing).");
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("k") = 1,
+          py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 4096,
+          py::arg("output_dir") = std::string(),
+          "Certified lowest-k eigenpairs of the factorized block "
+          "decomposition, vectors expanded to the computational basis "
+          "(persisted to <output_dir>/ed_results.h5 when given).");
+
+    m.def("little_group_gs_dssf",
+          [](const Operator& op_h, const Operator& op_o,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             double omega_min, double omega_max, int n_omega,
+             double broadening, int krylov_dim, int dense_max_dim,
+             int time_reversal) {
+              // Stage 9d: FACTORIZED GS-DSSF. The ground state is
+              // localized by the star walk (folds shrink the search) and
+              // solved PLAIN in its momentum sector; O|0> is scattered
+              // into every RAW destination sector by the Stage-8d
+              // CrossSectorOrbitObservable rep lane (matrix elements are
+              // never folded -- ||phi|| decides every selection rule);
+              // one continued-fraction Lanczos per receiving sector.
+              // Memory O(#reps) throughout -- this replaces the
+              // monolithic SAB DSSF, which materialised the FULL
+              // eigenbasis in the computational basis.
+              using Complex = std::complex<double>;
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+              if (!op_o.three_body_data_.empty())
+                  throw std::runtime_error(
+                      "little_group_gs_dssf: three-body probes are not "
+                      "supported (one/two-body TransformData only).");
+
+              // Diagonal axis (same detection as everywhere else).
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op_h.transform_data_, op_h.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+              std::vector<std::pair<int, int>> gs_subspaces{{-1, -1}};
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  gs_subspaces.clear();
+                  for (int k = 0; k <= n_sites; ++k)
+                      gs_subspaces.emplace_back(k, -1);
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  gs_subspaces = {{-1, 0}, {-1, 1}};
+              }
+
+              // (1) Locate the GS subspace by star-walk lowest-1 solves.
+              auto lg_o = [&](int nu, int par) {
+                  ed::solvers::LittleGroupOptions o;
+                  o.n_up          = nu;
+                  o.sz_parity     = par;
+                  o.dense_max_dim = dense_max_dim;
+                  // U2b-r1b: the SOURCE may be flip-extended (auto). The
+                  // rep-lane scatter is flip-aware (Stage-5b masks ride
+                  // the policy) and the cross-sector normalization
+                  // handles |G_src| != |G_dst| (1/sqrt(Gs*Gd)); the
+                  // destinations below stay RAW. Pinned by the
+                  // flip-engaged Lehmann test in test_little_group_dssf.
+                  o.spin_flip     = -1;
+                  o.time_reversal = time_reversal;
+                  return o;
+              };
+              int gs_nu = -1, gs_par = -1;
+              double e_best = 0.0;
+              bool have = false;
+              for (const auto& [nu, par] : gs_subspaces) {
+                  const auto ev = ed::solvers::little_group_lowest_eigenvalues(
+                      op_h, abelian_group, residue_perms, n_sites, 1,
+                      lg_o(nu, par));
+                  if (ev.empty()) continue;
+                  if (!have || ev[0] < e_best) {
+                      have = true;
+                      e_best = ev[0];
+                      gs_nu = nu;
+                      gs_par = par;
+                  }
+              }
+              if (!have)
+                  throw std::runtime_error(
+                      "little_group_gs_dssf: no non-empty subspace.");
+
+              // (2) The GS eigenvector in its momentum sector.
+              const auto gs = ed::solvers::little_group_ground_state(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  lg_o(gs_nu, gs_par));
+
+              // (3) Destination sweep: 1/2-body probes reach at most
+              // n_up +- 2 (U(1)) / both parity halves / the full space.
+              std::vector<std::pair<int, int>> dst_subspaces;
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  for (int d = -2; d <= 2; ++d) {
+                      const int nu = gs_nu + d;
+                      if (nu >= 0 && nu <= n_sites)
+                          dst_subspaces.emplace_back(nu, -1);
+                  }
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  dst_subspaces = {{-1, 0}, {-1, 1}};
+              } else {
+                  dst_subspaces = {{-1, -1}};
+              }
+
+              std::vector<double> omega_grid(
+                  static_cast<std::size_t>(std::max(n_omega, 1)));
+              const double dw = (n_omega > 1)
+                  ? (omega_max - omega_min) / (n_omega - 1) : 0.0;
+              for (int i = 0; i < std::max(n_omega, 1); ++i)
+                  omega_grid[static_cast<std::size_t>(i)] =
+                      omega_min + dw * i;
+
+              std::vector<double> s_omega(omega_grid.size(), 0.0);
+              double total_weight = 0.0;
+              ed::matvec::CpuBackend be;
+              using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
+              const auto src_ref = Ref::from_rep(
+                  gs.rd, static_cast<std::uint64_t>(n_sites));
+
+              for (const auto& [dnu, dpar] : dst_subspaces) {
+                  auto sectors = ed::solvers::little_group_k_sectors(
+                      op_h, abelian_group, n_sites, dnu, dpar);
+                  for (const auto& rd_dst : sectors) {
+                      const std::size_t dim_dst = rd_dst.reps.size();
+                      ed::dssf::CrossSectorOrbitObservable obs(
+                          src_ref, 0,
+                          Ref::from_rep(rd_dst,
+                                        static_cast<std::uint64_t>(n_sites)),
+                          0, op_o.transform_data_,
+                          static_cast<float>(op_h.getSpin()));
+                      std::vector<Complex> phi(dim_dst, Complex(0, 0));
+                      obs.apply(gs.vec.data(), phi.data(), dim_dst);
+                      double n2 = 0.0;
+                      for (const Complex& c : phi) n2 += std::norm(c);
+                      if (n2 < 1e-24) continue;   // selection rule says no
+                      total_weight += n2;
+
+                      auto mv = ed::solvers::make_rep_sector_matvec(
+                          op_h, rd_dst);
+                      ed::observables::CfSpectralOptions cfopts;
+                      cfopts.krylov_dim   = static_cast<std::size_t>(
+                          std::max(krylov_dim, 2));
+                      cfopts.broadening   = broadening;
+                      cfopts.energy_shift = gs.energy;
+                      cfopts.tolerance    = 1e-12;
+                      cfopts.global_n     = dim_dst;
+                      auto apply_H = [&mv](const Complex* in, Complex* out,
+                                           std::size_t nn) {
+                          mv->apply(in, out, nn);
+                      };
+                      const auto cf =
+                          ed::observables::cf_spectral_from_vector(
+                              be, apply_H, dim_dst, phi.data(),
+                              omega_grid, cfopts);
+                      for (std::size_t i = 0; i < s_omega.size(); ++i)
+                          s_omega[i] += cf.spectral_function[i];
+                  }
+              }
+
+              py::dict d;
+              d["omega"]        = omega_grid;
+              d["s_omega"]      = s_omega;
+              d["gs_energy"]    = gs.energy;
+              d["gs_k0"]        = gs.k0;
+              d["total_weight"] = total_weight;
+              return d;
+          },
+          py::arg("op"), py::arg("observable"),
+          py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("omega_min"), py::arg("omega_max"),
+          py::arg("n_omega"), py::arg("broadening") = 0.1,
+          py::arg("krylov_dim") = 200, py::arg("dense_max_dim") = 512,
+          py::arg("time_reversal") = -1,
+          "Stage 9d: factorized ground-state DSSF -- GS localized by the "
+          "star walk and solved matrix-free in its momentum sector; O|0> "
+          "scattered into every raw destination sector "
+          "(CrossSectorOrbitObservable rep lane); one continued-fraction "
+          "Lanczos per receiving sector. Memory O(#reps): the scalable "
+          "replacement for symmetry_adapted_gs_dssf.");
 
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.
@@ -1362,516 +1653,6 @@ PYBIND11_MODULE(_core, m) {
         py::arg("n_sites"),
         "Convenience: cyclic translation group Z_N on a 1D ring with all "
         "N momentum sectors enumerated.");
-
-    // ed::bfg -- BFG order-parameter library helpers (P2.1).
-    auto m_bfg = m.def_submodule("bfg",
-        "Bindings for the ed::bfg C++ library: cluster loader, topology "
-        "(triangles / bowties), and the two-body spin correlations and bond "
-        "expectations used by the BFG order-parameter pipeline. Lets Python "
-        "scripts share the same authoritative kernels the CPU and GPU "
-        "drivers (`compute_bfg_order_parameters[_gpu]`) call internally.");
-
-    py::class_<ed::bfg::Cluster>(m_bfg, "Cluster",
-        "Geometry + connectivity of a kagome / pyrochlore-superlattice "
-        "BFG cluster (read-only handle to the C++ struct).")
-        .def_readonly("n_sites",          &ed::bfg::Cluster::n_sites)
-        .def_readonly("positions",        &ed::bfg::Cluster::positions)
-        .def_readonly("sublattice",       &ed::bfg::Cluster::sublattice)
-        .def_readonly("edges_nn",         &ed::bfg::Cluster::edges_nn)
-        .def_readonly("nn_list",          &ed::bfg::Cluster::nn_list)
-        .def_readonly("a1",               &ed::bfg::Cluster::a1)
-        .def_readonly("a2",               &ed::bfg::Cluster::a2)
-        .def_readonly("b1",               &ed::bfg::Cluster::b1)
-        .def_readonly("b2",               &ed::bfg::Cluster::b2)
-        .def_readonly("k_points",         &ed::bfg::Cluster::k_points)
-        .def_readonly("n_cells_x",        &ed::bfg::Cluster::n_cells_x)
-        .def_readonly("n_cells_y",        &ed::bfg::Cluster::n_cells_y)
-        .def_readonly("bond_orientation", &ed::bfg::Cluster::bond_orientation)
-        .def_readonly("sites_per_cell",   &ed::bfg::Cluster::sites_per_cell)
-        .def("minimum_image_displacement",
-             &ed::bfg::Cluster::minimum_image_displacement,
-             py::arg("i"), py::arg("j"))
-        .def("bond_center_pbc",
-             &ed::bfg::Cluster::bond_center_pbc,
-             py::arg("i"), py::arg("j"));
-
-    m_bfg.def("load_cluster", &ed::bfg::load_cluster, py::arg("cluster_dir"),
-        "Load a Cluster from `cluster_dir` (positions.dat + optional "
-        "lattice_parameters / nn_list files). Mirrors the loader the CPU "
-        "and GPU drivers call internally.");
-
-    py::class_<ed::bfg::Bowtie>(m_bfg, "Bowtie",
-        "Two NN-triangles sharing exactly one vertex (`s0`). Outer "
-        "vertices: (s1, s2) and (s3, s4). `center` is the mean Cartesian "
-        "position of the five sites; `orientation` is the sublattice index "
-        "of `s0`.")
-        .def(py::init([](int s0, int s1, int s2, int s3, int s4,
-                         std::array<double, 2> center, int orientation) {
-            return ed::bfg::Bowtie{s0, s1, s2, s3, s4, center, orientation};
-        }),
-            py::arg("s0") = -1, py::arg("s1"), py::arg("s2"),
-            py::arg("s3"), py::arg("s4"),
-            py::arg("center") = std::array<double, 2>{0.0, 0.0},
-            py::arg("orientation") = 0,
-            "Construct a Bowtie from explicit fields. `s0` and `orientation` "
-            "default to placeholders (the ring kernels in "
-            "ed_bfg::ring_observables ignore them).")
-        .def_readwrite("s0",          &ed::bfg::Bowtie::s0)
-        .def_readwrite("s1",          &ed::bfg::Bowtie::s1)
-        .def_readwrite("s2",          &ed::bfg::Bowtie::s2)
-        .def_readwrite("s3",          &ed::bfg::Bowtie::s3)
-        .def_readwrite("s4",          &ed::bfg::Bowtie::s4)
-        .def_readwrite("center",      &ed::bfg::Bowtie::center)
-        .def_readwrite("orientation", &ed::bfg::Bowtie::orientation);
-
-    m_bfg.def("find_triangles", &ed::bfg::find_triangles, py::arg("cluster"),
-        "Enumerate every triple (i, j, k) of pairwise nearest-neighbour "
-        "sites in the cluster. Each triangle appears once with i<j<k.");
-
-    m_bfg.def("find_bowties", &ed::bfg::find_bowties, py::arg("cluster"),
-        "Enumerate every bowtie (pair of NN-triangles sharing exactly one "
-        "vertex). Built on top of find_triangles.");
-
-    // The correlation kernels accept the wavefunction as a NumPy
-    // complex128 array; we copy it into std::vector<Complex> for the
-    // call. Long enough that we release the GIL.
-    // Helper: validate that `psi` is 1-D with exactly 2^n_sites entries.
-    // Without this, an under-sized array silently produces UB reads in the
-    // BFG correlation kernels (memcpy used to copy `psi.shape[0]` doubles
-    // into a `v(n)` vector but then the kernel reads `1<<n_sites` of them).
-    auto bfg_check_psi = [](const py::array& psi, int n_sites,
-                            const char* where) {
-        if (psi.ndim() != 1) {
-            throw std::runtime_error(std::string(where) +
-                ": psi must be a 1-D complex128 array");
-        }
-        if (n_sites < 0 || n_sites > 63) {
-            throw std::runtime_error(std::string(where) +
-                ": n_sites must be in [0, 63]");
-        }
-        const auto expected = (n_sites == 0)
-            ? std::size_t{1}
-            : (std::size_t{1} << static_cast<unsigned>(n_sites));
-        const auto got = static_cast<std::size_t>(psi.shape(0));
-        if (got != expected) {
-            throw std::runtime_error(std::string(where) +
-                ": psi length " + std::to_string(got) +
-                " disagrees with 2^n_sites = " + std::to_string(expected));
-        }
-    };
-
-    m_bfg.def("compute_smsp_correlations",
-        [bfg_check_psi](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int n_sites) {
-            bfg_check_psi(psi, n_sites, "compute_smsp_correlations");
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_smsp_correlations(v, n_sites);
-        },
-        py::arg("psi"), py::arg("n_sites"),
-        "Site-to-site <S^- S^+> correlation matrix.");
-
-    m_bfg.def("compute_szsz_correlations",
-        [bfg_check_psi](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int n_sites) {
-            bfg_check_psi(psi, n_sites, "compute_szsz_correlations");
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_szsz_correlations(v, n_sites);
-        },
-        py::arg("psi"), py::arg("n_sites"),
-        "Site-to-site <S^z S^z> correlation matrix.");
-
-    m_bfg.def("compute_xy_bond_expectations",
-        [bfg_check_psi](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           const ed::bfg::Cluster& cluster) {
-            bfg_check_psi(psi, cluster.n_sites, "compute_xy_bond_expectations");
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_xy_bond_expectations(v, cluster);
-        },
-        py::arg("psi"), py::arg("cluster"),
-        "<S^+_i S^-_j + S^-_i S^+_j> per nearest-neighbour edge.");
-
-    m_bfg.def("compute_spsm_bond_expectations",
-        [bfg_check_psi](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           const ed::bfg::Cluster& cluster) {
-            bfg_check_psi(psi, cluster.n_sites, "compute_spsm_bond_expectations");
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_spsm_bond_expectations(v, cluster);
-        },
-        py::arg("psi"), py::arg("cluster"),
-        "<S^+_i S^-_j> per nearest-neighbour edge (asymmetric).");
-
-    m_bfg.def("compute_szsz_bond_expectations",
-        [bfg_check_psi](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           const ed::bfg::Cluster& cluster) {
-            bfg_check_psi(psi, cluster.n_sites, "compute_szsz_bond_expectations");
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_szsz_bond_expectations(v, cluster);
-        },
-        py::arg("psi"), py::arg("cluster"),
-        "<S^z_i S^z_j> per nearest-neighbour edge.");
-
-    m_bfg.def("compute_heisenberg_bond_expectations",
-        &ed::bfg::compute_heisenberg_bond_expectations,
-        py::arg("szsz_bonds"), py::arg("xy_bonds"),
-        "Combine SzSz and XY bond maps into the full Heisenberg "
-        "<S_i . S_j> per edge. The XY imaginary part is dropped.");
-
-    // ed::bfg::wavefunction_io: HDF5 wavefunction loaders shared by the
-    // CPU and GPU drivers (P2.1 third slice). Returning std::vector<Complex>
-    // through pybind11 produces a Python list of complex; callers that want
-    // a NumPy array can wrap with `np.asarray(...)`. We marshal the result
-    // into a NumPy complex128 array directly to avoid the per-element
-    // conversion cost on multi-million-amplitude wavefunctions.
-    auto wavefunction_to_numpy = [](std::vector<std::complex<double>>&& src) {
-        py::array_t<std::complex<double>> arr(static_cast<py::ssize_t>(src.size()));
-        std::memcpy(arr.mutable_data(), src.data(),
-                    src.size() * sizeof(std::complex<double>));
-        return arr;
-    };
-
-    m_bfg.def("load_wavefunction",
-        [wavefunction_to_numpy](const std::string& filename,
-                                int eigenvector_idx,
-                                bool verbose) {
-            std::vector<std::complex<double>> psi;
-            {
-                py::gil_scoped_release release;
-                psi = ed::bfg::load_wavefunction(filename, eigenvector_idx,
-                                                 verbose);
-            }
-            return wavefunction_to_numpy(std::move(psi));
-        },
-        py::arg("filename"),
-        py::arg("eigenvector_idx") = 0,
-        py::arg("verbose") = true,
-        "Load a single complex eigenvector from an ED HDF5 results file. "
-        "Probes both the canonical `eigendata/eigenvector_<idx>` and legacy "
-        "top-level paths, and supports HDF5 compound complex types with "
-        "either (real, imag) or (r, i) field names. Returns a NumPy "
-        "complex128 array.");
-
-    py::class_<ed::bfg::TPQState>(m_bfg, "TPQState",
-        "A single TPQ snapshot loaded from an HDF5 results file. The "
-        "wavefunction is exposed as a NumPy complex128 array; "
-        "`temperature` and `beta = 1/T` accompany it.")
-        .def_property_readonly("psi",
-            [wavefunction_to_numpy](const ed::bfg::TPQState& self) {
-                std::vector<std::complex<double>> copy(self.psi);
-                return wavefunction_to_numpy(std::move(copy));
-            })
-        .def_readonly("temperature", &ed::bfg::TPQState::temperature)
-        .def_readonly("beta",        &ed::bfg::TPQState::beta);
-
-    m_bfg.def("load_all_tpq_states",
-        [](const std::string& filename, int sample_idx, bool verbose) {
-            py::gil_scoped_release release;
-            return ed::bfg::load_all_tpq_states(filename, sample_idx, verbose);
-        },
-        py::arg("filename"),
-        py::arg("sample_idx") = 0,
-        py::arg("verbose") = true,
-        "Load every TPQ snapshot from `tpq/samples/sample_<idx>/states/"
-        "beta_*` in the file, sorted ascending in temperature.");
-
-    m_bfg.def("load_tpq_state",
-        [wavefunction_to_numpy](const std::string& filename,
-                                int sample_idx, bool verbose) {
-            std::vector<std::complex<double>> psi;
-            double temperature{0.0};
-            {
-                py::gil_scoped_release release;
-                auto pair = ed::bfg::load_tpq_state(filename, sample_idx,
-                                                     verbose);
-                psi = std::move(pair.first);
-                temperature = pair.second;
-            }
-            return py::make_tuple(wavefunction_to_numpy(std::move(psi)),
-                                  temperature);
-        },
-        py::arg("filename"),
-        py::arg("sample_idx") = 0,
-        py::arg("verbose") = true,
-        "Load the lowest-temperature (highest-beta) TPQ snapshot from the "
-        "file. Returns (psi, temperature).");
-
-    // ed::bfg::structure_factor: bond-bilinear structure factors and
-    // Fourier-applied dimer kernels (P2.1 fourth slice). Same NumPy
-    // marshalling as the correlation kernels above; the GIL is released
-    // around the C++ call because each kernel is O(N_bonds * Hilbert).
-    py::class_<ed::bfg::DimerSFResult>(m_bfg, "DimerSFResult",
-        "Tuple of dimer-structure-factor pieces returned by the "
-        "`compute_dimer_sf_direct` / `compute_heisenberg_sf_direct` "
-        "kernels: (overlap = ||D(q)|psi>||^2, expect_q1 = <D(q)>, "
-        "expect_q2 = <D(q)>). The structure factor consumed by callers "
-        "is `S_D(q) = overlap - |expect_q1|^2`.")
-        .def_readonly("overlap",   &ed::bfg::DimerSFResult::overlap)
-        .def_readonly("expect_q1", &ed::bfg::DimerSFResult::expect_q1)
-        .def_readonly("expect_q2", &ed::bfg::DimerSFResult::expect_q2);
-
-    m_bfg.def("set_memory_efficient_mode",
-        &ed::bfg::set_memory_efficient_mode,
-        py::arg("n_states"),
-        "Enable atomic-update kernels when the thread-local working set "
-        "would exceed 4 GB. Call once at startup; the flag is read by "
-        "every subsequent apply_*_fourier kernel.");
-
-    m_bfg.def("memory_efficient_mode_enabled",
-        &ed::bfg::memory_efficient_mode_enabled,
-        "Return whether memory-efficient (atomic-update) mode is on.");
-
-    auto sf_kernel = [wavefunction_to_numpy](
-        py::array_t<std::complex<double>,
-                    py::array::c_style | py::array::forcecast> psi,
-        const std::vector<std::pair<int, int>>& bonds,
-        const std::vector<std::array<double, 2>>& bond_centers,
-        const std::array<double, 2>& q,
-        ed::bfg::DimerSFResult (*fn)(const std::vector<ed::bfg::Complex>&,
-                                     const std::vector<std::pair<int, int>>&,
-                                     const std::vector<std::array<double, 2>>&,
-                                     const std::array<double, 2>&)) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return fn(v, bonds, bond_centers, q);
-    };
-
-    m_bfg.def("compute_dimer_sf_direct",
-        [sf_kernel](py::array_t<std::complex<double>,
-                                py::array::c_style | py::array::forcecast> psi,
-                    const std::vector<std::pair<int, int>>& bonds,
-                    const std::vector<std::array<double, 2>>& bond_centers,
-                    const std::array<double, 2>& q) {
-            return sf_kernel(psi, bonds, bond_centers, q,
-                             &ed::bfg::compute_dimer_sf_direct);
-        },
-        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
-        "S_D(q) = <D^dag(q) D(q)> for the XY dimer D = S+S- + S-S+.");
-
-    m_bfg.def("compute_heisenberg_sf_direct",
-        [sf_kernel](py::array_t<std::complex<double>,
-                                py::array::c_style | py::array::forcecast> psi,
-                    const std::vector<std::pair<int, int>>& bonds,
-                    const std::vector<std::array<double, 2>>& bond_centers,
-                    const std::array<double, 2>& q) {
-            return sf_kernel(psi, bonds, bond_centers, q,
-                             &ed::bfg::compute_heisenberg_sf_direct);
-        },
-        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
-        "S_D(q) for the Heisenberg dimer D = S_i . S_j.");
-
-    m_bfg.def("apply_dimer_fourier",
-        [wavefunction_to_numpy](
-            py::array_t<std::complex<double>,
-                        py::array::c_style | py::array::forcecast> psi,
-            const std::vector<std::pair<int, int>>& bonds,
-            const std::vector<std::array<double, 2>>& bond_centers,
-            const std::array<double, 2>& q) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            std::vector<ed::bfg::Complex> out;
-            {
-                py::gil_scoped_release release;
-                out = ed::bfg::apply_dimer_fourier(v, bonds, bond_centers, q);
-            }
-            return wavefunction_to_numpy(std::move(out));
-        },
-        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
-        "Apply D_XY(q) = sum_b exp(i q . r_b) (S+S- + S-S+) to psi. "
-        "Returns the resulting NumPy complex128 ket.");
-
-    m_bfg.def("apply_heisenberg_dimer_fourier",
-        [wavefunction_to_numpy](
-            py::array_t<std::complex<double>,
-                        py::array::c_style | py::array::forcecast> psi,
-            const std::vector<std::pair<int, int>>& bonds,
-            const std::vector<std::array<double, 2>>& bond_centers,
-            const std::array<double, 2>& q) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            std::pair<std::vector<ed::bfg::Complex>, ed::bfg::Complex> pair;
-            {
-                py::gil_scoped_release release;
-                pair = ed::bfg::apply_heisenberg_dimer_fourier(
-                    v, bonds, bond_centers, q);
-            }
-            return py::make_tuple(wavefunction_to_numpy(std::move(pair.first)),
-                                  pair.second);
-        },
-        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
-        "Apply D_H(q) = sum_b exp(i q . r_b) (S_i . S_j) to psi. "
-        "Returns (D(q)|psi> as NumPy complex128, <D(q)>).");
-
-    m_bfg.def("compute_dimer_dimer_correlation",
-        [](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int i1, int j1, int i2, int j2) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_dimer_dimer_correlation(v, i1, j1, i2, j2);
-        },
-        py::arg("psi"), py::arg("i1"), py::arg("j1"),
-        py::arg("i2"), py::arg("j2"),
-        "<psi| D_{b1} D_{b2} |psi> for the XY dimer.");
-
-    m_bfg.def("compute_heisenberg_dimer_dimer_correlation",
-        [](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int i1, int j1, int i2, int j2) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_heisenberg_dimer_dimer_correlation(
-                v, i1, j1, i2, j2);
-        },
-        py::arg("psi"), py::arg("i1"), py::arg("j1"),
-        py::arg("i2"), py::arg("j2"),
-        "<psi| (S_i1 . S_j1)(S_i2 . S_j2) |psi>.");
-
-    // -------------------------------------------------------------------------
-    // P2.1 (5th slice): ring observables (bowtie ring-flip + triangle
-    // ring-exchange + Fourier-applied bowtie operator). The Fourier kernel
-    // shares the memory-efficient flag bound above with the dimer kernels.
-    // -------------------------------------------------------------------------
-    m_bfg.def("apply_bowtie_fourier",
-        [wavefunction_to_numpy](
-            const std::vector<ed::bfg::Bowtie>& bowties,
-            py::array_t<std::complex<double>,
-                        py::array::c_style | py::array::forcecast> psi,
-            const std::array<double, 2>& q) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            std::vector<ed::bfg::Complex> out;
-            {
-                py::gil_scoped_release release;
-                out = ed::bfg::apply_bowtie_fourier(bowties, v, q);
-            }
-            return wavefunction_to_numpy(std::move(out));
-        },
-        py::arg("bowties"), py::arg("psi"), py::arg("q"),
-        "Apply P(q) = sum_bt exp(i q . r_bt) (S+_1 S-_2 S+_3 S-_4 + h.c.) "
-        "to psi over the supplied bowties. Only `s1..s4` and `center` are "
-        "read; `s0` / `orientation` are ignored. Returns the resulting "
-        "NumPy complex128 ket.");
-
-    m_bfg.def("compute_bowtie_resonance",
-        [](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int s1, int s2, int s3, int s4) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_bowtie_resonance(v, s1, s2, s3, s4);
-        },
-        py::arg("psi"), py::arg("s1"), py::arg("s2"),
-        py::arg("s3"), py::arg("s4"),
-        "Real-space bowtie ring-flip expectation "
-        "<psi| S+_1 S-_2 S+_3 S-_4 + h.c. |psi> on the four outer corners.");
-
-    m_bfg.def("compute_triangle_chiral",
-        [](py::array_t<std::complex<double>,
-                       py::array::c_style | py::array::forcecast> psi,
-           int s1, int s2, int s3) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
-            const auto n = static_cast<std::size_t>(psi.shape(0));
-            std::vector<ed::bfg::Complex> v(n);
-            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
-            py::gil_scoped_release release;
-            return ed::bfg::compute_triangle_chiral(v, s1, s2, s3);
-        },
-        py::arg("psi"), py::arg("s1"), py::arg("s2"), py::arg("s3"),
-        "Symmetric triangle ring-exchange expectation "
-        "<psi| S+_1 S-_2 S+_3 + S-_1 S+_2 S-_3 |psi>. Note this is the "
-        "(S+S-S+ + h.c.) symmetrisation, not the antisymmetric scalar "
-        "chirality S_1 . (S_2 x S_3).");
-
-    // -------------------------------------------------------------------------
-    // P2.1 (6th slice): site-resolved spin structure factor over precomputed
-    // two-body correlations. The kernel does not see a wavefunction;
-    // collaborators feed in the (Hermitian-style) S^{-+} and SzSz tables
-    // they already obtained from `compute_smsp_correlations` /
-    // `compute_szsz_correlations`.
-    // -------------------------------------------------------------------------
-    py::class_<ed::bfg::StructureFactorResult>(m_bfg, "StructureFactorResult",
-        "Output of `compute_spin_structure_factor`. `s_q[ik]` is the "
-        "full Heisenberg structure factor at `cluster.k_points[ik]` in "
-        "the SzSz + Re S^{-+} reduction, decomposed into longitudinal "
-        "(`s_q_szsz`) and transverse (`s_q_smsp`) channels. "
-        "`q_max_idx` / `q_max` / `s_q_max` flag the abscissa of the "
-        "max |S(q)| and `m_translation = sqrt(max |S(q)| / N)` is the "
-        "BFG translation order parameter.")
-        .def_readonly("s_q",          &ed::bfg::StructureFactorResult::s_q)
-        .def_readonly("s_q_smsp",     &ed::bfg::StructureFactorResult::s_q_smsp)
-        .def_readonly("s_q_szsz",     &ed::bfg::StructureFactorResult::s_q_szsz)
-        .def_readonly("q_max_idx",    &ed::bfg::StructureFactorResult::q_max_idx)
-        .def_readonly("s_q_max",      &ed::bfg::StructureFactorResult::s_q_max)
-        .def_readonly("q_max",        &ed::bfg::StructureFactorResult::q_max)
-        .def_readonly("m_translation",
-                      &ed::bfg::StructureFactorResult::m_translation);
-
-    m_bfg.def("compute_spin_structure_factor",
-        [](const std::vector<std::vector<ed::bfg::Complex>>& smsp_corr,
-           const std::vector<std::vector<double>>& szsz_corr,
-           const ed::bfg::Cluster& cluster) {
-            py::gil_scoped_release release;
-            return ed::bfg::compute_spin_structure_factor(
-                smsp_corr, szsz_corr, cluster);
-        },
-        py::arg("smsp_corr"), py::arg("szsz_corr"), py::arg("cluster"),
-        "Compute S(q) at every k-point in `cluster.k_points` from "
-        "precomputed `<S^-_i S^+_j>` and `<S^z_i S^z_j>` tables. "
-        "Both inputs are site-by-site `n_sites x n_sites` matrices. "
-        "Returns a `StructureFactorResult`.");
 
     // -------------------------------------------------------------------------
     // Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +

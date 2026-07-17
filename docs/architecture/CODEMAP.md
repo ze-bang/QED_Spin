@@ -32,7 +32,6 @@ for `ED` typically come from JSON via `construct_ham` / file I/O).
 flowchart TB
   subgraph exe [Executables]
     ED["ED<br/>src/apps/ed_main.cpp"]
-    EDM["ed_distributed_main<br/>src/cli/ed_distributed_main.cpp"]
     BFG["compute_bfg_order_parameters"]
     BFGG["compute_bfg_order_parameters_gpu"]
   end
@@ -47,7 +46,6 @@ flowchart TB
     esym["ed_symmetry<br/>group.cpp"]
     ebfg["ed_bfg<br/>cluster corr … order_parameters"]
     ecli["ed_cli<br/>workflows dssf_engine"]
-    edist["ed_distributed<br/>WITH_MPI only"]
     einp["ed_input<br/>lattice + HamiltonianBuilder + file_io"]
   end
 
@@ -59,14 +57,10 @@ flowchart TB
   ecli --> edssf
   ecli --> eio
   ecli --> esg
-  edist --> esc
-  edist --> eio
-  edist --> ec
   einp --> ec
 
   ED --> ecli
   ED --> edssf
-  EDM --> edist
   BFG --> ebfg
   BFGG --> ebfg
 ```
@@ -135,9 +129,8 @@ flowchart TD
 
 *Figure: Main-line `ED` (not the `dssf` subcommand). The `--disk-streaming`
 and `--chunked-symm` workflows were retired in matvec-unification Phase 7.2;
-the streaming-symmetry path scales to every case they used to cover, and the
-distributed/MPI build is the canonical answer for Hilbert spaces too large
-for in-RAM streaming. Multiple workflows can still be toggled in one config;
+the streaming-symmetry path scales to every case they used to cover (the
+CSR-free rep lane is O(#reps) memory). Multiple workflows can still be toggled in one config;
 the most confusing case is `run_standard` **and** `run_symm_auto` both true
 — **both** runs execute and eigenvalues are **compared** (see `ed_main.cpp`).*
 
@@ -189,14 +182,18 @@ flowchart LR
 
 ---
 
-## 4. MPI: two different products
+## 4. MPI
 
-| Binary / API | Role |
-|--------------|------|
-| **`ED`** with `mpirun` | MPI-parallel *task* / sample decomposition for some methods (`mTPQ_MPI`, response parallelism, etc.) — same codebase as single-rank, but **not** the distributed-matrix SpMV path. |
-| **`ed_distributed_main`** + `ed::distributed::*` | **Distributed `Operator`**: 1D slab SpMV, `MPI_Alltoallv`, `distributed_lanczos`, `distributed_ftlm`, `distributed_tpq`. **Separate** from the main `ED` static link line (links **only** `ed_distributed`). |
-
-So “MPI” in the solver matrix can mean **task MPI inside `ED`** vs **data-parallel SpMV in `ed_distributed`** — different layers.
+One product (Stage 11d, Jul 2026): `ED` under `mpirun`. Across-sector
+distribution (SectorDistributor: Burnside dim-balanced sector ownership,
+rank-local solves) engages automatically for symmetry workloads; the
+in-process `MpiBackend` covers reduction parallelism. The separate
+`ed_distributed_main` launcher and the `ed::distributed::*` operator family
+(1D slab SpMV + distributed lanczos/ftlm/tpq/krylov-schur + GPU twins,
+~6.6 kLOC) were retired — recoverable from git history if within-sector
+memory distribution is ever needed again. Only the NCCL
+`MultiGpuCommunicator` survives (`ed/parallel/multi_gpu.h`, library
+`ed_multi_gpu`), consumed by `MpiCudaBackend`.
 
 ---
 
@@ -226,7 +223,7 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
   `ed::make_operator(OperatorSpec) -> std::unique_ptr<LinearOperator>`,
   with three input alternatives — programmatic `Operator`, directory
   path, or in-memory edge list — plus orthogonal axes
-  `use_fixed_sz` / `symmetry` / `distributed`),
+  `use_fixed_sz` / `symmetry`),
 - `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
   `ed_method_traits.h`, `ed_parameters.h`, `ed_legacy_types.h`,
   `ed_types.h`,
@@ -256,17 +253,13 @@ leaf header `include/ed/symmetry/symmetry_sector_data.h`, and the
 The chunked-symmetry / disk-streaming triplet
 (`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
 `ed_wrapper_chunked.h`) was deleted in matvec-unification Phase 7.2
-(~2.4 kLOC of ultra-low-memory single-node CPU specialisations; the
-distributed/MPI path is the canonical answer at those scales).
+(~2.4 kLOC of ultra-low-memory single-node CPU specialisations;
+the CSR-free rep lane is the answer at those scales).
 
 ### 5.4 `include/ed/distributed/`
 
-- `distributed_ftlm.h`, `distributed_lanczos.h`, `distributed_lanczos_kernel.h`,
-  `distributed_operator.h`, `distributed_symmetry_operator.h`,
-  `distributed_tpq.h`,
-- `orbit_partition.h`, `orbit_halo_plan.h`,
-- `distributed_lanczos_gpu.h`, `distributed_gpu_operator.h`,
-  `multi_gpu.h`, `multi_gpu_stub.h` *(back-compat shim → `multi_gpu.h`)*
+Retired in Stage 11d (Jul 2026) — see §4. `multi_gpu.h` survives at
+`include/ed/parallel/multi_gpu.h`.
 
 ### 5.5 `include/ed/dssf/`
 
@@ -393,8 +386,9 @@ distributed/MPI path is the canonical answer at those scales).
 
 ### 5.21 `src/solvers/cpu/`
 
-- `dynamics.cpp`, `ftlm.cpp`, `ftlm_kpm.cpp`,
-  `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `TPQ.cpp`
+- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`,
+  `lanczos.cpp`, `little_group_solve.cpp`, `ltlm.cpp`, `observables.cpp`,
+  `oftlm.cpp`, `symmetry_adapted_solve.cpp`
 
 ### 5.22 `src/solvers/gpu/`
 
@@ -441,8 +435,8 @@ exactly the same dispatch axes as the ground-state solvers
 | `FTLM`      | `include/ed/solvers/ftlm.h`             | `Z ≈ (D/R) Σ_r Σ_k |<r|ψ_k>|^2 e^{-β E_k}`, R random Lanczos starts        | `num_samples × krylov_dim`     |
 | `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
 | `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
-| `mTPQ`      | `include/ed/solvers/TPQ.h`              | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
-| `cTPQ`      | `include/ed/solvers/TPQ.h`              | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
+| `mTPQ`      | `include/ed/thermal/mtpq_kernel.h`      | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
+| `cTPQ`      | `include/ed/thermal/tpq_kernel.h`       | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
 
 Each of these solvers populates the same `ThermodynamicData` payload
 inside `EDResults` -- `temperatures`, `energy`, `specific_heat`,
@@ -622,10 +616,8 @@ generic version is what the streaming kernel now calls.
   `Operator` and file formats; hard to split without a large refactor.
 - **`mTPQ_CUDA` vs `mTPQ_GPU`**: two parse tokens → same *family*; prefer
   documenting one preferred string (`mTPQ_GPU` matches other `*_GPU` methods).
-- **`ed_distributed` vs `mTPQ_MPI`**: both use MPI, **different** algorithms
-  (slab matvec / Taylor cTPQ vs microcanonical mTPQ MPI). Name similarity is
-  confusing; this document + README TPQ section disambiguate.
-- **`multi_gpu_stub.h`**: placeholder for future NCCL / multi-GPU work.
+- *(the `ed_distributed`-vs-`mTPQ_MPI` naming confusion resolved itself in
+  Stage 11d: the distributed family is gone and MPI means one thing.)*
 
 ### 7.3 User-configuration redundancy
 

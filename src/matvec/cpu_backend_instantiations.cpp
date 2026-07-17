@@ -53,9 +53,6 @@ template class CpuMatVecBackend<basis::FixedSzBasisPolicy,
                                 DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                 MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 
-template class CpuMatVecBackend<basis::SymmetryBasisPolicy,
-                                DiagOneBody, OffDiagOneBody, DiagTwoBody,
-                                MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 
 // cell 5H (RepSymmetry) -- on-the-fly representative SpMV (Jun 2026). The
 // rep policy forces the complex matrix-free path (is_rep_symmetry==true

@@ -38,6 +38,19 @@ def _pooled(r):
         [np.asarray(e) for e in r.eigenvalues_per_sector]))
 
 
+def _square_torus(lx, ly):
+    n = lx * ly
+    idx = lambda x, y: (y % ly) * lx + (x % lx)  # noqa: E731
+    bonds = []
+    for y in range(ly):
+        for x in range(lx):
+            bonds.append((idx(x, y), idx(x + 1, y)))
+            bonds.append((idx(x, y), idx(x, y + 1)))
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg(bonds, J=1.0)
+    return b.to_operator()
+
+
 def test_residue_retained_and_described():
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
@@ -48,7 +61,50 @@ def test_residue_retained_and_described():
     assert "p a0 p^-1 = a0^11" in txt         # exact conjugation relation
 
 
-def test_gs_star_reduction_spectrum_parity():
+def test_group_size_is_the_true_span_not_prod_of_orders():
+    """|A| must be the number of DISTINCT permutations spanned.
+
+    The C++ minimal-generator decomposition is minimal in generator COUNT,
+    not relation-free. On a 4x4 torus it returns THREE order-4 generators
+    spanning a group of order 16 -- `prod(orders)` says 64, and the C++ log
+    itself says "maximal abelian subgroup order 16". Reporting 64 makes the
+    engine's blocks (which are exactly dim/16) look 4x larger than the
+    symmetry "should" allow, i.e. it manufactures a phantom redundancy in
+    the reader's head. The ring is the control: one generator, no relation,
+    so prod(orders) is already right there and must not change.
+    """
+    gen = qed.find_symmetries(_square_torus(4, 4), verbose=False).full_set
+    prod = 1
+    for o in gen.orders:
+        prod *= o
+    assert prod == 64, f"expected three order-4 generators, got {gen.orders}"
+    assert gen.group_size == 16, (
+        f"group_size={gen.group_size}: must be the TRUE span (16), not "
+        f"prod(orders)={prod}")
+    txt = gen.describe()
+    assert "(|A| = 16)" in txt
+    assert "NOT independent" in txt, \
+        "describe() must flag the dependent generators, not print a bare Z4 x Z4 x Z4"
+
+    # Control: independent generator set -- unchanged, no false positive.
+    ring = qed.find_symmetries(_ring(), verbose=False).full_set
+    assert ring.group_size == 12
+    assert "NOT independent" not in ring.describe()
+
+
+def test_subgroup_group_size_is_also_the_true_span():
+    gen = qed.find_symmetries(_square_torus(4, 4), verbose=False).full_set
+    sub = gen.subgroup([0, 1, 2])          # all three: the dependent set
+    assert sub.group_size == 16, \
+        f"subgroup() must recompute the span, got {sub.group_size}"
+
+
+def test_gs_star_reduction_spectrum_parity(monkeypatch):
+    # ED_SYM_LITTLE_GROUP=0: this test pins the ABELIAN lane's star-fold
+    # machinery (sector_orbit_canonical) and its per-sector output; since
+    # Stage 9c point_group='auto' would otherwise PROJECT through the
+    # little-group engine (pooled eigenvalues, no per-sector arrays).
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 
@@ -64,9 +120,11 @@ def test_gs_star_reduction_spectrum_parity():
     assert abs(a[0] - E0_DENSE) < 1e-9
 
 
-def test_gs_all_mechanisms_composed():
+def test_gs_all_mechanisms_composed(monkeypatch):
     """Star + flip projection + TR pairing together == everything off
     (exact dense per-sector solves, full spectrum union)."""
+    # Abelian-lane machinery pin -- see test_gs_star_reduction_spectrum_parity.
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
 
@@ -171,7 +229,23 @@ def test_gs_star_reduction_parity_gpu():
                          point_group=pg, verbose=False)
 
     r_on, r_off = run("auto"), run("off")
-    assert getattr(r_on.backend, "lane", "") == "gpu"
+
+    # The project lane now REPORTS a lane at all (it used to return an
+    # EDResults with no `backend` attribute, so this assertion could only ever
+    # raise AttributeError -- it never tested anything).
+    #
+    # And it reports the truth, which is "cpu" here: the little-group engine
+    # only engages its GPU rep-gather past 2^20 reps, and this ring's blocks are
+    # ~80, so a device='gpu' request legitimately runs on the CPU -- exactly the
+    # tiny-block reasoning behind BackendConstraints::gpu_dim_floor. Demanding
+    # "gpu" asserted a fiction; demanding the ENGINE's own answer is what has
+    # teeth.
+    lane = getattr(r_on.backend, "lane", None)
+    assert lane in ("cpu", "gpu"), f"project lane reported no lane: {lane!r}"
+    assert lane == "cpu", (
+        f"blocks this small (~80 reps) are below the engine's 2^20 GPU gate, "
+        f"so the honest lane is cpu, got {lane!r}")
+
     np.testing.assert_allclose(r_on.eigenvalues[:1], r_off.eigenvalues[:1],
                                rtol=0, atol=1e-9)
     assert abs(float(r_on.eigenvalues[0]) - E0_DENSE) < 1e-8

@@ -12,7 +12,7 @@
 //     manual construction in CLI binaries
 //
 // The factory returns ONLY the constructed `LinearOperator` (or a derived
-// concrete type --- distributed / streaming / GPU as the spec requests);
+// concrete type --- streaming / GPU as the spec requests);
 // the actual solve is then a separate `ed::workflows::solve(*op, opts)` call.
 //
 // Spec shape:
@@ -23,31 +23,31 @@
 //   spec.spin_l                  = 0.5f;
 //   spec.fixed_sz                = std::nullopt;          // fixed-Sz off
 //   spec.streaming_symmetry      = false;
-//   spec.distributed             = false;
 //
 //   auto op = ed::make_operator(spec);
 //   auto gs = ed::workflows::solve(*op, ed::SolveOptions{ .num_eigs = 5 });
 //
 // Phase 4.3 of the Minimalist ED Collapse (May 2026), extended for the full
 // unified-interface collapse to honour every axis the legacy CLI consumes
-// (streaming_symmetry, distributed, fixed_sz, plus their cross products).
+// (streaming_symmetry, fixed_sz, plus their cross products).
 //
 // Return-type policy: `std::unique_ptr<LinearOperator>` is the lowest common
 // type that covers the full matrix of subclasses the spec axes can
 // materialise:
 //
 //   * plain `Operator`                       (default lane)
-//   * `FixedSzOperator`                      (`fixed_sz` set)
-//   * `StreamingSymmetryOperator`            (`streaming_symmetry = true`)
-//   * `FixedSzStreamingSymmetryOperator`     (streaming_symmetry + fixed_sz)
-//   * `ed::distributed::DistributedOperator` (distributed = true)
-//   * `ed::distributed::DistributedSymmetryOperator`
-//                                            (distributed + streaming_symmetry
-//                                             + sector_index)
+//   * `FixedSzOperator`                      (`fixed_sz` set; alias of
+//                                             `SubspaceOperator<FixedSzBasisPolicy>`)
+//   * `ed::symmetry::SectorOperator`         (`streaming_symmetry = true`;
+//                                             one sector from the tagged
+//                                             factory -- the legacy monolithic
+//                                             streaming operators are gone)
+//   (The distributed-operator family was retired in Stage 11d, Jul 2026;
+//    production MPI = MpiBackend within the operator x SectorDistributor
+//    across sectors.)
 //
-// Both `Operator` and the distributed operators derive from
-// `ed::LinearOperator`, so a single owning pointer covers every case
-// without losing dispatchability.
+// Every case derives from `ed::LinearOperator`, so a single owning
+// pointer covers the matrix without losing dispatchability.
 // =============================================================================
 
 #include <algorithm>
@@ -72,11 +72,6 @@
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
 
-#ifdef WITH_MPI
-#  include <mpi.h>
-#  include <ed/distributed/distributed_operator.h>
-#  include <ed/distributed/distributed_symmetry_operator.h>
-#endif
 
 namespace ed {
 
@@ -139,17 +134,9 @@ struct OperatorSpec {
     /// orchestrator when iterating sectors).
     bool                  streaming_symmetry = false;
 
-    /// If true, materialise a `DistributedOperator` (or
-    /// `DistributedSymmetryOperator` when `streaming_symmetry` is also
-    /// true). Requires `WITH_MPI` at compile time and `MPI_Init` at
-    /// runtime. The MPI communicator defaults to `MPI_COMM_WORLD`.
-    bool                  distributed = false;
-
-    /// For the distributed + streaming-symmetry lane: which symmetry
-    /// sector to materialise. Required in that lane; ignored otherwise.
-    /// (The non-distributed streaming-symmetry operator carries every
-    /// sector internally and the caller iterates them as
-    /// `SectorView`s.)
+    /// For the streaming-symmetry lane: which symmetry sector to
+    /// materialise (the factory returns that single SectorOperator).
+    /// Unset = the ground-state sector scan picks one downstream.
     std::optional<std::size_t> sector_index;
 
     /// Stage 8c (SymmetryEngine v2): split the half-filling Sz block into
@@ -180,12 +167,6 @@ struct OperatorSpec {
     /// entirely. See ed::symmetry::resolve_sym_cache_dir.
     std::string           basis_cache_dir;
 
-#ifdef WITH_MPI
-    /// MPI communicator for the distributed lanes. Defaults to
-    /// `MPI_COMM_WORLD`. Single-rank communicators are accepted (the
-    /// distributed operator degenerates to a single-slab apply).
-    MPI_Comm              comm = MPI_COMM_WORLD;
-#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -288,79 +269,16 @@ inline const std::string& require_directory(const OperatorSpec& spec) {
     }, spec.source);
 }
 
-// ---------------------------------------------------------------------------
-// Eager-vs-lazy regime decision for the fixed-Sz sector set (operator-collapse
-// Phase 3, Jun 2026). Mirrors the budget logic baked into
-// ``FixedSzStreamingSymmetryOperator::generateSymmetrySectorsStreamingFixedSz``
-// so ``make_sector_operators`` picks the SAME regime as the legacy streaming
-// loop for any (N, n_up, |G|) -- the invariant the N>=28 parity check rests
-// on. Estimates the all-sector resident orbit-CSR footprint as
-// ``C(n_bits, n_up) * num_sectors * 40 B`` (the streaming op uses
-// ``num_orbits * |G| * num_sectors * 40`` and ``num_orbits * |G| ~ dim``, so
-// the two estimates agree to within the orbit-fragmentation factor). The
-// fixed-Sz dimension is computed via the binomial directly -- we must NOT
-// build the FixedSzSubspace just to size it (that is the ~5 GB allocation the
-// lazy path exists to defer). Env overrides (identical names/semantics to the
-// streaming op): ``ED_SYM_LAZY_SECTORS`` (1 force lazy / 0 force eager),
-// ``ED_SYM_LAZY_SECTORS_BYTES_MAX`` (budget in bytes, default 4 GiB).
-// ---------------------------------------------------------------------------
-inline bool fixed_sz_sectors_should_be_lazy(std::uint64_t           n_bits,
-                                            std::int64_t            n_up,
-                                            const SymmetryGroupInfo& info) {
-    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS")) {
-        if (e[0] == '1') return true;
-        if (e[0] == '0') return false;
-    }
-    // Default budget = 64 MiB (was 4 GiB). The "eager" orbit-CSR lane is NOT
-    // actually faster for non-trivial sectors: its reverse lookup falls back to
-    // an O(log dim) SortedUint64Index binary search (the O(1) dense lookup is
-    // never built on this path), making its symmetry SpMV ~14x slower than the
-    // matrix-free rep walk -- which is ALSO O(#reps) memory instead of O(dim).
-    // So we only stay eager for genuinely tiny sectors (where construction is
-    // instant); everything larger uses the rep walk. Measured (XXZ ring, |G|=N):
-    // N=21 eager 44s -> rep walk 3.2s; N=24 eager >90s -> rep walk 7.5s.
-    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
-    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
-        try { budget = std::stoull(e); } catch (...) {}
-    }
-    // C(n_bits, n_up) in long double (multiplicative form, no overflow).
-    const int n = static_cast<int>(n_bits);
-    int k = static_cast<int>(n_up);
-    long double dim = 0.0L;
-    if (k >= 0 && k <= n) {
-        k = std::min(k, n - k);
-        dim = 1.0L;
-        for (int i = 0; i < k; ++i) {
-            dim = dim * static_cast<long double>(n - i)
-                / static_cast<long double>(i + 1);
-        }
-    }
-    const long double num_sectors =
-        static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
-    const long double est_bytes = dim * num_sectors * 40.0L;
-    return est_bytes > static_cast<long double>(budget);
-}
-
-// Full-space (no Sz) twin of ``fixed_sz_sectors_should_be_lazy``: the eager full
-// builder materializes an orbit CSR over the 2^N space, so route to the
-// CSR-free rep-walk lane once that would exceed the budget. Same env knobs.
-inline bool full_sectors_should_be_lazy(std::uint64_t            n_bits,
-                                        const SymmetryGroupInfo& info) {
-    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS")) {
-        if (e[0] == '1') return true;
-        if (e[0] == '0') return false;
-    }
-    std::size_t budget = 64ULL * 1024ULL * 1024ULL;  // 64 MiB
-    if (const char* e = std::getenv("ED_SYM_LAZY_SECTORS_BYTES_MAX")) {
-        try { budget = std::stoull(e); } catch (...) {}
-    }
-    long double dim = 1.0L;                            // 2^n_bits
-    for (std::uint64_t i = 0; i < n_bits; ++i) dim *= 2.0L;
-    const long double num_sectors =
-        static_cast<long double>(std::max<std::size_t>(1, info.sectors.size()));
-    const long double est_bytes = dim * num_sectors * 40.0L;
-    return est_bytes > static_cast<long double>(budget);
-}
+// NOTE (Stage 11c-1, Jul 2026): the eager-vs-lazy regime decision
+// (``fixed_sz_sectors_should_be_lazy`` / ``full_sectors_should_be_lazy`` and
+// the ``ED_SYM_LAZY_SECTORS`` / ``ED_SYM_LAZY_SECTORS_BYTES_MAX`` env knobs)
+// was retired: the lazy rep-first builders are now the ONLY production
+// construction lane. The eager orbit-CSR lane was strictly worse outside the
+// tiny-sector regime (~14x slower SpMV via the O(log dim) reverse lookup,
+// O(dim) memory vs O(#reps); measured XXZ ring N=21 eager 44s vs rep 3.2s),
+// and in the tiny regime the rep lane's reduced-CSR mode assembles the same
+// small matrix anyway. The eager builders survive in sector_set.h solely as
+// unit-test oracles.
 
 }  // namespace detail
 
@@ -382,9 +300,7 @@ inline bool full_sectors_should_be_lazy(std::uint64_t            n_bits,
 ///
 /// This is additive: ``make_operator`` (which must return a single
 /// ``LinearOperator``) is unchanged; callers that want the collapse-target
-/// multi-sector list opt in by calling this function. The production sector
-/// loop continues to use ``StreamingSymmetryHandle`` (which unconditionally
-/// adopts each legacy sector into a ``SectorOperator``); this entry point is
+/// multi-sector list opt in by calling this function. This entry point is
 /// the orbit-enumeration-free alternative that skips the legacy operator
 /// entirely.
 ///
@@ -515,7 +431,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     // Carrier operator: load the Hamiltonian term list + the symmetry group
     // metadata exactly once. The terms are copied verbatim into every sector
     // operator by the term-builder below (identical to the proven
-    // ``make_sector_operator_adopt`` term-copy contract). Structural
+    // ``copyTermsFrom`` term-copy contract). Structural
     // cleanup (Jul 2026): callers that already parsed the directory for
     // symmetry DETECTION (the binding probes) pass their loaded carrier in
     // -- one parse per binding call instead of two.
@@ -596,45 +512,23 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             base->symmetry_info, term_builder, &sector_ids, cache_dir,
             spec.flip_sectors_full);
     } else if (spec.fixed_sz.has_value()) {
-        // CSR-free lazy-rep regime (memory-bounded large systems, e.g. N=32
-        // fixed-Sz mTPQ): hand out operators that know their dim up-front and
-        // defer the per-sector orbit CSR / GPU RepSectorData. Small/moderate
-        // systems stay eager (fast precomputed-CSR matvec). Same budget knobs
-        // as the streaming operator so both production paths agree.
-        if (spec.flip_project_half
-            || detail::fixed_sz_sectors_should_be_lazy(
-                static_cast<std::uint64_t>(spec.num_sites),
-                static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info)) {
-            set.operators = ed::symmetry::build_fixed_sz_sector_operators_lazy(
-                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-                static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir, spec.flip_project_half);
-        } else {
-            set.operators = ed::symmetry::build_fixed_sz_sector_operators(
-                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-                static_cast<std::int64_t>(*spec.fixed_sz),
-                base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir);
-        }
+        // CSR-free lazy-rep regime -- THE fixed-Sz construction lane
+        // (Stage 11c-1): operators know their dim up-front (Pass 1.5) and
+        // defer the per-sector orbit CSR / GPU RepSectorData; tiny sectors
+        // get the same SpMV speed through the reduced-CSR mode.
+        set.operators = ed::symmetry::build_fixed_sz_sector_operators_lazy(
+            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+            static_cast<std::int64_t>(*spec.fixed_sz),
+            base->symmetry_info, term_builder, &sector_ids,
+            mpi_rank, mpi_size, owner_ptr, cache_dir, spec.flip_project_half);
     } else {
-        // Pure-spatial symmetry (no Sz). Large N -> CSR-free rep-walk lazy lane
-        // (memory-bounded, stabilizer-fused construction); small N stays eager.
-        if (spec.flip_sectors_full
-            || detail::full_sectors_should_be_lazy(
-                static_cast<std::uint64_t>(spec.num_sites), base->symmetry_info)) {
-            set.operators = ed::symmetry::build_full_sector_operators_lazy(
-                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-                base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir,
-                spec.flip_sectors_full);
-        } else {
-            set.operators = ed::symmetry::build_full_sector_operators(
-                static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
-                base->symmetry_info, term_builder, &sector_ids,
-                mpi_rank, mpi_size, owner_ptr, cache_dir);
-        }
+        // Pure-spatial symmetry (no Sz): CSR-free rep-walk lazy lane
+        // (memory-bounded, stabilizer-fused construction).
+        set.operators = ed::symmetry::build_full_sector_operators_lazy(
+            static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
+            base->symmetry_info, term_builder, &sector_ids,
+            mpi_rank, mpi_size, owner_ptr, cache_dir,
+            spec.flip_sectors_full);
     }
     if (time_ctor) {
         const double ms = std::chrono::duration<double, std::milli>(
@@ -914,45 +808,7 @@ private:
 namespace ed {
 
 #ifdef WITH_MPI
-// ---------------------------------------------------------------------------
-// Distributed lanes (WITH_MPI only)
-// ---------------------------------------------------------------------------
 
-/// Build a `DistributedOperator` wrapping a serial `Operator` slab. The
-/// communicator defaults to `MPI_COMM_WORLD`; pass `spec.comm` to
-/// override.
-inline std::unique_ptr<LinearOperator>
-make_distributed_operator(const OperatorSpec& spec) {
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    return std::make_unique<ed::distributed::DistributedOperator>(
-        std::move(base), spec.comm);
-}
-
-/// Build a `DistributedSymmetryOperator` for a single symmetry sector.
-/// Requires `spec.sector_index`; the symmetry metadata is loaded from
-/// the directory's `automorphism_results/` before the distributed wrap.
-inline std::unique_ptr<LinearOperator>
-make_distributed_symmetry_operator(const OperatorSpec& spec) {
-    if (!spec.sector_index.has_value()) {
-        throw std::runtime_error(
-            "ed::make_operator: distributed + streaming_symmetry "
-            "requires OperatorSpec::sector_index (the "
-            "DistributedSymmetryOperator carries one sector at a "
-            "time; iterate sector indices in the caller for the full "
-            "spectrum).");
-    }
-    const std::string& dir = detail::require_directory(spec);
-
-    auto base = detail::build_base_op(spec);
-    detail::load_terms_into(*base, spec);
-    // The DistributedSymmetryOperator constructor reads
-    // `base->symmetry_info`, which is populated by `loadFromDirectory`.
-    base->symmetry_info.loadFromDirectory(dir);
-
-    return std::make_unique<ed::distributed::DistributedSymmetryOperator>(
-        std::move(base), *spec.sector_index, spec.comm);
-}
 #endif  // WITH_MPI
 
 // ---------------------------------------------------------------------------
@@ -984,26 +840,13 @@ inline std::unique_ptr<LinearOperator> make_operator(OperatorSpec spec) {
     // loading or term-storage manipulation that the caller has not
     // performed). Forward the bare unique_ptr in the simple case.
     if (auto* mem = std::get_if<InMemoryOperator>(&spec.source)) {
-        if (spec.streaming_symmetry || spec.distributed) {
+        if (spec.streaming_symmetry) {
             throw std::runtime_error(
                 "ed::make_operator: InMemoryOperator source is "
-                "incompatible with streaming_symmetry / distributed "
-                "axes; use FilePaths or DirectoryPath instead.");
+                "incompatible with the streaming_symmetry axis; use "
+                "FilePaths or DirectoryPath instead.");
         }
         return std::unique_ptr<LinearOperator>(mem->op.release());
-    }
-
-    if (spec.distributed) {
-#ifdef WITH_MPI
-        if (spec.streaming_symmetry) {
-            return make_distributed_symmetry_operator(spec);
-        }
-        return make_distributed_operator(spec);
-#else
-        throw std::runtime_error(
-            "ed::make_operator: distributed = true requires WITH_MPI "
-            "at compile time.");
-#endif
     }
 
     if (spec.streaming_symmetry) {

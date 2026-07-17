@@ -271,11 +271,11 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
 /// Stage 5b: the flip-extended group G' = G x Z2 -- elements
 /// [g_0..g_{|G|-1}, g_0*F, .., g_{|G|-1}*F] with F = XOR all-ones
 /// (the global spin flip; it commutes with every site permutation, so
-/// this IS the direct product). Only meaningful on the half-filling
-/// subspace, where F preserves popcount.
+/// this IS the direct product). Only meaningful on subspaces F preserves
+/// (half filling; parity halves with N even; the full space).
 [[nodiscard]] inline CompiledGroup
-make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
-    std::vector<std::vector<int>> perms = info.max_clique;
+make_flip_extended_group_from_perms(std::vector<std::vector<int>> perms,
+                                    std::uint64_t                 n_bits) {
     if (perms.empty()) {  // trivial spatial group: identity + flip
         std::vector<int> ident(static_cast<std::size_t>(n_bits));
         for (std::size_t i = 0; i < ident.size(); ++i)
@@ -291,6 +291,11 @@ make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
     for (std::size_t g = Gs; g < 2 * Gs; ++g) flips[g] = all_ones;
     return CompiledGroup::from_elements(perms2, flips,
                                         static_cast<int>(n_bits));
+}
+
+[[nodiscard]] inline CompiledGroup
+make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
+    return make_flip_extended_group_from_perms(info.max_clique, n_bits);
 }
 
 /// Fused rep + stabilizer scan over the full 2^N Hilbert space for an

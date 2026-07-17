@@ -26,9 +26,11 @@
 // =============================================================================
 
 #include <algorithm>
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -204,8 +206,8 @@ public:
     /// Replace this operator's canonical AoS term storage with a verbatim
     /// copy of ``src``'s terms, then invalidate the derived SoA / CSR
     /// caches. Provided so that builders which assemble a fresh operator
-    /// from an existing host operator (e.g. the per-sector
-    /// ``make_sector_operator_adopt`` bridge) do not have to reach into
+    /// from an existing host operator (e.g. the per-sector lazy
+    /// builders in ``sector_set.h``) do not have to reach into
     /// the public ``transform_data_`` / ``three_body_data_`` members
     /// directly -- keeping that coupling behind a single intentional API
     /// as the members migrate toward ``protected:``.
@@ -240,12 +242,27 @@ public:
     void commitPendingTransforms() const {
         const std::size_t aos_n  = transform_data_.size();
         const std::size_t aos3_n = three_body_data_.size();
-        if (terms_fresh_ &&
+        // Double-checked locking: the fast path is one acquire load per
+        // matvec; the rebuild is serialized. THREAD SAFETY IS LOAD-BEARING
+        // (F6, Jul 2026): ``term_view_()`` is reached from inside OMP
+        // parallel regions (the dense column assemblers, the sector-parallel
+        // FULL loop), and racing the first rebuild dropped terms -- a
+        // 14-site XXZ tree's full 16384-dim dense spectrum shipped WRONG
+        // eigenvalues (E0 off by 2.25) with no error. The release store of
+        // ``terms_fresh_`` is last, so a reader that passes the acquire
+        // check sees the fully built SoA.
+        if (terms_fresh_.load(std::memory_order_acquire) &&
             aos_n  == terms_committed_aos_size_ &&
             aos3_n == terms_committed_three_aos_size_) {
             return;
         }
         auto* self = const_cast<Operator*>(this);
+        std::lock_guard<std::mutex> lock(self->terms_commit_mutex_);
+        if (terms_fresh_.load(std::memory_order_acquire) &&
+            aos_n  == terms_committed_aos_size_ &&
+            aos3_n == terms_committed_three_aos_size_) {
+            return;  // another thread committed while we waited
+        }
         self->terms_.clear();
         // ``classify_route`` is the single source of truth for the
         // op_type -> {diag,offdiag,mixed} x {one,two}body decision tree.
@@ -257,11 +274,11 @@ public:
             self->transform_data_,
             self->three_body_data_,
             [](const Complex& c) { return c; });
-        self->terms_fresh_                    = true;
         self->terms_committed_aos_size_       = aos_n;
         self->terms_committed_three_aos_size_ = aos3_n;
         // SoA changed -> backend CSR is stale; isReal() must rescan.
         if (backend_) self->backend_->invalidate_caches();
+        self->terms_fresh_.store(true, std::memory_order_release);
         self->real_check_done_ = false;
     }
 
@@ -426,7 +443,7 @@ public:
           symmetry_info(other.symmetry_info),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
-          terms_fresh_(other.terms_fresh_),
+          terms_fresh_(other.terms_fresh_.load()),
           terms_committed_aos_size_(other.terms_committed_aos_size_),
           terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
@@ -442,7 +459,7 @@ public:
           symmetry_info(std::move(other.symmetry_info)),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
-          terms_fresh_(other.terms_fresh_),
+          terms_fresh_(other.terms_fresh_.load()),
           terms_committed_aos_size_(other.terms_committed_aos_size_),
           terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
@@ -463,7 +480,7 @@ public:
             transform_data_                  = other.transform_data_;
             three_body_data_                 = other.three_body_data_;
             terms_                           = other.terms_;
-            terms_fresh_                     = other.terms_fresh_;
+            terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             symmetrized_block_ham_sizes      = other.symmetrized_block_ham_sizes;
@@ -483,7 +500,7 @@ public:
             transform_data_                  = std::move(other.transform_data_);
             three_body_data_                 = std::move(other.three_body_data_);
             terms_                           = std::move(other.terms_);
-            terms_fresh_                     = other.terms_fresh_;
+            terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             symmetrized_block_ham_sizes      = std::move(other.symmetrized_block_ham_sizes);
@@ -585,6 +602,13 @@ public:
                                                std::size_t N) const override {
         const std::uint64_t D = static_cast<std::uint64_t>(dim());
         if (static_cast<std::size_t>(D) != N) return false;
+        // Commit the SoA term cache BEFORE the parallel loop (the
+        // SubspaceOperator override already does) -- besides skipping the
+        // per-thread first-call contention, this was the F6 (Jul 2026)
+        // corruption site before commitPendingTransforms was made
+        // thread-safe: a cold operator's first term_view_() raced across
+        // the OMP team and dropped terms from the assembled matrix.
+        commitPendingTransforms();
         #pragma omp parallel for schedule(static)
         for (std::uint64_t j = 0; j < D; ++j) {
             for_each_connected_state(j, [&](std::uint64_t sp, Complex h) {
@@ -831,7 +855,12 @@ protected:
     /// ``transforms_separated_`` was not reset by cache invalidation,
     /// silently dropping any term added between ``invalidateMatrixCaches()``
     /// and the next ``apply()``; ``terms_fresh_`` closes that hole.)
-    mutable bool terms_fresh_ = false;
+    // Atomic + paired with ``terms_commit_mutex_``: ``term_view_()`` is
+    // reached from OMP-parallel loops on cold operators (see the F6 note
+    // in commitPendingTransforms). Plain-bool + unlocked rebuild shipped
+    // wrong dense spectra.
+    mutable std::atomic<bool> terms_fresh_{false};
+    mutable std::mutex terms_commit_mutex_;
 
     /// AoS-vector sizes recorded at the last ``commitPendingTransforms()``
     /// call. Used to detect direct ``transform_data_`` / ``three_body_data_``

@@ -72,10 +72,9 @@ struct Geometry {
     ///      `apply()` (bit-exact within FP atomic-ordering tol).
     ///
     /// Default `false` keeps every existing host-only operator
-    /// unchanged. Symmetry sector views (StreamingSymmetryOperator::
-    /// SectorView, FixedSzStreamingSymmetryOperator::SectorView) flip
-    /// this to `true` once their lazy GPU mirror is wired (see the
-    /// twin block in `streaming_symmetry.h`).
+    /// unchanged. ``SectorOperator`` / ``FixedSzOperator`` flip this to
+    /// `true` on CUDA builds (their bind_cuda builds the device rep
+    /// mirror).
     bool                  supports_device_matvec = false;
 
 #ifdef WITH_MPI

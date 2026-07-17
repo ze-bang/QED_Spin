@@ -35,6 +35,7 @@
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/sector_basis.h>
 #include <ed/symmetry/sector_operator.h>
+#include <ed/symmetry/sector_set.h>
 #include <ed/symmetry/subspace.h>
 
 #include <Eigen/Dense>
@@ -205,6 +206,12 @@ TEST_CASE("sector_operator: standalone SectorOperator matches legacy applySymmet
             static_cast<std::uint64_t>(N), 0.5f, std::move(sb));
         add_heisenberg_pbc_terms(sec_op, N, 1.0);
         REQUIRE(sec_op.dim() == sd);
+        // Stage 11c-2b: the rep kernel is the only matvec, so a
+        // directly-built (materialised) SectorBasis needs its rep data
+        // extracted before apply(); production operators get this from
+        // their lazy rep provider.
+        sec_op.setRepSectorData(ed::symmetry::rep_sector_data_from_sector(
+            sec_op.basis().sector(), info, N));
 
         // (1) complex matvec equivalence vs the independent reference, two probes.
         for (int probe = 0; probe < 2; ++probe) {

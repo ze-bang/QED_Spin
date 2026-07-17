@@ -1,3 +1,18 @@
+> **SUPERSEDED — do not cite these numbers.** Replaced by
+> [`capability_matrix_2026-07-15.md`](capability_matrix_2026-07-15.md) (rev 4).
+> Kept only as the historical snapshot the CHANGELOG references.
+>
+> Two blocks below are known-wrong:
+> * The **LTLM rows** (`9.5e−01` / `4.6e−01`) and the prose calling that "a
+>   method-regime property, reported as-is" describe a **bug**, not the method.
+>   Both the CPU and GPU LTLM lanes summed the ground-state local DOS instead of
+>   the thermal trace; their agreement was misread as confirmation. Fixed in
+>   654ea06 — LTLM thermodynamics IS the FTLM trace.
+> * The **"Complete spectrum (dense)"** section's `SAB` rows describe the
+>   monolithic symmetry-adapted engine, which lost every production route at
+>   Stage 9c and was deleted in the consolidation sweep. The non-abelian route is
+>   the factorized little-group engine.
+
 # Capability matrix vs dense diagonalization — 2026-07-04 (rev 3)
 
 `benchmarks/bench_capability_matrix.py --n 12 --devices cpu,gpu`.

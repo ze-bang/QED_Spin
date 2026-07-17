@@ -13,24 +13,12 @@
 // A SectorBasis is the symmetry analogue of a Subspace: it OWNS the orbit
 // data (one ``SymmetrySector`` plus the state->orbit lookup index) and
 // hands out the non-owning POD ``SymmetryBasisPolicy`` that the unified
-// matvec kernels (``ed::matvec::kernel::apply_terms`` and its GPU twin)
-// consume. It is the single owning artefact the future
-// ``Operator<SymmetryBasisPolicy, MemSpace>`` holds, replacing the
-// per-sector state that ``StreamingSymmetryOperator`` /
-// ``FixedSzStreamingSymmetryOperator`` currently bake into their class
-// identity.
-//
-// Why this exists (operator-collapse refactor, Jun 2026):
-// ------------------------------------------------------
-// The four legacy operator classes (Operator / FixedSzOperator /
-// StreamingSymmetryOperator / FixedSzStreamingSymmetryOperator) differ
-// ONLY in their basis. The basis axis is already expressed as a POD
-// policy + an owning producer for the trivial cases (Subspace). The
-// symmetry case lacked a standalone owning producer -- the orbit data
-// lived inside the operator and was reachable only through the nested
-// ``SectorView``. SectorBasis lifts that orbit data into a free-standing,
-// operator-independent value so a single operator template can hold any
-// of the three host policies uniformly.
+// matvec kernels consume. It is the owning artefact behind
+// ``SubspaceOperator<SymmetryBasisPolicy>`` (= ``SectorOperator``) -- the
+// legacy monolithic streaming operators that baked per-sector state into
+// their class identity are gone (operator-collapse, Jun 2026): the four
+// historical operator classes differed ONLY in their basis, and SectorBasis
+// is the symmetry lane's standalone owning producer of that basis.
 //
 // Construction routes:
 //   * ``SectorBasis::build(subspace, projector, sector_meta)``
@@ -38,10 +26,9 @@
 //        the shared ``compute_orbit_for_state`` host helper (bit-identical
 //        to the legacy ``computeOrbitData*`` member methods), then builds
 //        the state->orbit lookup index.
-//   * ``SectorBasis::adopt(std::move(sector), group_size)``
-//        Adopts an already-materialised ``SymmetrySector`` (used during
-//        migration so the legacy streaming operators can hand their
-//        per-sector orbit data to the new abstraction without recompute).
+//   (``SectorBasis::adopt`` -- the migration bridge for already-
+//   materialised sectors -- was deleted in Stage 11c-2a with the eager
+//   builders; ``configureRepLazy`` + ``build`` are the two entry points.)
 //
 // Lookup strategy: the shipped path uses the ``SortedUint64Index``
 // fallback (O(log |orbit_total|) per find), exposed through a
@@ -126,28 +113,11 @@ public:
     SectorBasis(SectorBasis&&)                 = default;
     SectorBasis& operator=(SectorBasis&&)      = default;
 
-    // -----------------------------------------------------------------
-    // adopt: take ownership of an already-materialised SymmetrySector.
-    //
-    // Used by the migration shim so a legacy ``StreamingSymmetryOperator``
-    // / ``FixedSzStreamingSymmetryOperator`` can hand off its per-sector
-    // orbit CSR (sectors_[k]) without recomputing it. ``group_size`` is
-    // |G| (== max_clique.size()); it sets the ``group_norm = 1/|G|``
-    // weight the symmetry policy applies per emit.
-    //
-    // The sector's ``basis_states`` must already be orbit-sorted
-    // (``SymBasisState::sortOrbit()`` called) exactly as the legacy
-    // build does -- adopt() rebuilds only the state->orbit lookup index,
-    // not the orbit coefficients.
-    // -----------------------------------------------------------------
-    [[nodiscard]] static SectorBasis
-    adopt(SymmetrySector sector, std::size_t group_size) {
-        SectorBasis sb;
-        sb.sector_      = std::move(sector);
-        sb.group_size_  = group_size;
-        sb.rebuild_lookup_();
-        return sb;
-    }
+    // (Stage 11c-2a: the ``adopt()`` bridge -- take ownership of an
+    // already-materialised SymmetrySector -- was deleted with its last
+    // consumer, the eager sector builders. Every SectorBasis is now
+    // constructed rep-lazy via ``configureRepLazy``, or through
+    // ``build()`` below when a csr_provider materialises on demand.)
 
     // -----------------------------------------------------------------
     // build: enumerate this sector's orbits over ``subspace`` using the

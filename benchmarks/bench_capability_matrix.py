@@ -227,8 +227,16 @@ def run_thermal_methods(H, n, gen, device, truth, rows):
     (star+flip+TR) vs the unsymmetrised lane. Both are stochastic --
     the check is that the composed lane's deviation is comparable to
     (not worse than) the unsymmetrised lane's own sampling error.
-    (LTLM's absolute accuracy at these sizes/defaults is poor in BOTH
-    lanes -- a method-regime property, reported as-is.)"""
+
+    LTLM: earlier revisions of this benchmark reported LTLM's accuracy as
+    "poor in BOTH lanes -- a method-regime property, reported as-is". That
+    was wrong, and the reasoning is worth keeping: BOTH lanes agreed because
+    both reimplemented the SAME bug (each summed the ground-state local DOS
+    instead of the thermal trace), so LTLM sat at E0 for every T. Twin
+    agreement is not ground truth when the twins share lineage. Fixed Jul
+    2026 (654ea06): for a function of H the symmetric LTLM estimator reduces
+    exactly to the FTLM trace, so LTLM thermodynamics now dispatches through
+    ftlm_kernel and these rows track FTLM's."""
     t_lo, t_hi, n_t = T_GRID
     for m in ("FTLM", "LTLM"):
         devs = {}

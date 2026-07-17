@@ -35,4 +35,23 @@ for cand in _candidates:
         py_root = str(cand.parent)
         if py_root not in sys.path:
             sys.path.insert(0, py_root)
+        # A scikit-build EDITABLE FINDER on sys.meta_path (installed by
+        # `pip install -e` of a sibling checkout) outranks sys.path and
+        # silently redirects `import qed` to a stale site-packages build --
+        # resolution has been observed to FLIP-FLOP between runs, and a
+        # 2026-07-15 probe measured a two-day-old binary while reporting
+        # green. Strip it whenever a source-tree build was selected above,
+        # then hard-assert the pin below.
+        sys.meta_path = [
+            f for f in sys.meta_path
+            if "editable" not in type(f).__module__.lower()
+        ]
+        import qed  # noqa: E402  (resolve NOW, under the pinned path)
+
+        _got = Path(qed.__file__).resolve().parent
+        assert _got == cand.resolve(), (
+            f"qed resolved to {_got}, expected the source-tree build at "
+            f"{cand} -- another finder/path won; refusing to test the "
+            "wrong build."
+        )
         break

@@ -85,11 +85,15 @@ e_even = qed.solve(Hp, symmetry=gp, sz="even", num_eigenvalues=1,
 print(f"even-parity-half GS = {e_even:.10f}")
 
 # ---------------------------------------------------------------------------
-# 6. TRUE non-abelian reduction: point_group="full" projects with the
-#    complete group's representation theory (d >= 2 irreps, blocks
-#    ~ dim/|G|, degeneracy multiplets structural) on the SAB engine --
-#    versus point_group="auto", which only FOLDS isospectral momentum
-#    sectors (solve-count, not block size).
+# 6. TRUE non-abelian reduction (Stage 9c: the DEFAULT). point_group=
+#    "auto" projects every eigenvalue-only solve/full_spectrum call
+#    through the factorized little-group engine: complete-group
+#    representation theory (d >= 2 irreps, blocks ~ dim_k/|P_k|),
+#    spin-flip (k,+/-) splitting at half filling, TR star folding --
+#    all matrix-free per momentum sector. point_group="full" REQUIRES
+#    projection (raises with the reason instead of degrading); vector
+#    consumers (eigenvectors, sector=, sampling methods) use the
+#    abelian rep lane with isospectral folds.
 # ---------------------------------------------------------------------------
 r_full = qed.solve(H, symmetry=gen, num_eigenvalues=1,
                    point_group="full", verbose=False)
@@ -100,6 +104,8 @@ print(f"non-abelian full-group GS = {r_full.eigenvalues[0]:.10f}")
 #    an env gate that overrides the Auto default --
 #      ED_SYM_SPIN_FLIP=0, ED_SYM_SPIN_FLIP_PROJECT=0,
 #      ED_SYM_TIME_REVERSAL=0, ED_SYM_REP=0 (orbit-CSR escape),
+#      ED_SYM_LITTLE_GROUP=0 (projection lane -> abelian folds),
+#      ED_SYM_LG_FLIP=0 / ED_SYM_LG_TR=0 (flip/TR inside the engine),
 #      ED_SYM_CACHE=0 / ED_SYM_CACHE_DIR=..., ED_SYM_PROFILE=1 (timers).
 # ---------------------------------------------------------------------------
 print("done.")

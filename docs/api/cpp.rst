@@ -148,17 +148,16 @@ helpers. It emits either an in-memory ``Operator`` or the
 
 .. doxygennamespace:: ed::input::lattice
 
-ed::distributed -- MPI lane (built only with WITH_MPI=ON)
-----------------------------------------------------------
+MPI lane (built only with WITH_MPI=ON)
+---------------------------------------
 
-The distributed operators and Lanczos / FTLM / TPQ drivers under
-``include/ed/distributed/`` are only compiled when ``WITH_MPI=ON``.
-
-- ``include/ed/distributed/distributed_operator.h``
-- ``include/ed/distributed/distributed_symmetry_operator.h``
-- ``include/ed/distributed/distributed_fixed_sz_operator.h``
-- ``include/ed/distributed/distributed_lanczos.h``
-- ``include/ed/distributed/distributed_lanczos_kernel.h``
+Production MPI is the in-process ``ed::matvec::MpiBackend``
+(``include/ed/matvec/backends/mpi_backend.h``, selected by
+``select_backend`` when the process runs under ``mpirun``) plus the
+across-sector SectorDistributor in the CLI sector loop. The NCCL
+multi-GPU communicator lives in ``include/ed/parallel/multi_gpu.h``.
+(The ``ed::distributed`` operator family was retired in Stage 11d,
+Jul 2026.)
 
 ed::gpu -- CUDA lane (built only with WITH_CUDA=ON)
 ----------------------------------------------------

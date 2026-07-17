@@ -12,19 +12,20 @@ orphan: true
 > Read this file *before* you spin up a 36-site DSSF run, and definitely
 > before you tell anyone we can do 40+.
 
-> **Update (2026-06-09): backend-aware symmetry matvec + when symmetry
-> actually helps.** The per-sector matvec path now follows the memory
-> regime AND the backend (see [`SYMMETRY.md`](SYMMETRY.md)):
+> **Update (Jul 2026, Stage 11c): ONE symmetry matvec representation.**
+> The CSR-free representative kernel is the only path on both backends
+> (see [`SYMMETRY.md`](SYMMETRY.md)):
 >
-> * **CPU** — the precomputed orbit-CSR walk when the CSR fits (eager
->   regime), the CSR-free on-the-fly representative SpMV only when it does
->   not (lazy regime, e.g. ~24 GiB/sector at N=32). The rep kernel is
->   ~100x slower *per matvec* than the CSR walk when the CSR fits, so it is
->   reserved for the scale where the CSR is infeasible.
-> * **GPU** — always the on-the-fly representative SpMV when usable: it
->   skips the orbit-CSR build + multi-GiB device upload and the per-element
->   recompute is hidden by the resident threads (measured N=24: rep 4.8 s
->   vs CSR-mirror 18.2 s end-to-end). Per-sector memory is just
+> * **CPU** — the rep policy with the budget-gated **reduced-CSR**
+>   sub-mode as default: the reduced sector matrix is assembled once
+>   (O(|G|·nnz), parallel) and each matvec is a plain SpMV; over-budget
+>   sectors (`ED_SYM_SECTOR_CSR_BUDGET_GIB`, default 8) fall back to the
+>   CSR-free rep walk automatically — N=36 runs matrix-free on a
+>   standard node with no env var.
+> * **GPU** — the on-the-fly representative SpMV: it skips any CSR build
+>   + multi-GiB device upload and the per-element recompute is hidden by
+>   the resident threads (measured N=24: rep 4.8 s vs the retired
+>   CSR-mirror 18.2 s end-to-end). Per-sector memory is just
 >   `reps[] + inv_norms[] + perms + characters` (~600 MB at N=32).
 >
 > **Symmetry is a MEMORY tool and a FULL-SPECTRUM tool, not an
@@ -50,9 +51,11 @@ orphan: true
 >   N=12 the symmetry path is ~6.6x faster at ~9.5x less peak RSS, widening
 >   with N.
 >
-> Knobs: `ED_SYM_LAZY_SECTORS=1/0` forces the lazy/eager regime;
-> `ED_SYM_REP=0` keeps the CPU on the CSR walk even in the lazy regime
-> (bisection); `ED_GPU_SYMMETRY_REP=0` restores the GPU orbit-CSR mirror.
+> Knobs: `ED_SYM_REDUCED_CSR=1/0` forces the reduced-CSR / rep-walk
+> sub-mode; `ED_SYM_SECTOR_CSR_BUDGET_GIB` sets the per-sector budget.
+> (The eager/lazy construction fork and the orbit-CSR escapes —
+> `ED_SYM_LAZY_SECTORS`, `ED_SYM_REP`, `ED_GPU_SYMMETRY_REP` — were
+> retired in Stage 11c; see `include/ed/symmetry/env_gates.h`.)
 
 > **Update (2026-06): the regime is a default, not planner-decided; non-abelian
 > symmetry has a hard scale ceiling.** There is no execution planner. The
@@ -60,7 +63,7 @@ orphan: true
 > ([`include/ed/planner/sym_matvec_policy_hook.h`](../../include/ed/planner/sym_matvec_policy_hook.h)),
 > which defaults to **`RepReducedCsr`** (build the reduced sector matrix once,
 > O(1) SpMV) and falls back to the matrix-free rep walk under
-> `ED_SYM_REDUCED_CSR=0` (or orbit-materialized under `ED_SYM_REP=0`). All three
+> `ED_SYM_REDUCED_CSR=0`. Both sub-modes
 > are numerically identical — the choice is memory-vs-speed, with no cost model or
 > feasibility check (an over-budget allocation is caught at the point of use by
 > `guard_working_set`, not predicted).
@@ -134,10 +137,11 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
   * `ED_LANCZOS_DISK=1` so the Krylov basis spills to a directory under the
     lanczos working dir (the basis doesn't have to fit in RAM, only two
     active vectors and one accumulator do — ~12 GB working set).
-  * **Distributed/MPI build** (`ed_distributed_main`) for symmetry-projected
-    bases that don't fit in single-node RAM. The chunked/disk-streaming
-    single-node fallbacks were retired in matvec-unification Phase 7.2;
-    the MPI path is faster and works on any cluster.
+  * The CSR-free rep lane: basis memory is O(#reps), the reduced-CSR
+    budget gate auto-declines over-budget sectors, and the fp32 GPU mTPQ
+    lane halves the vector footprint. (The within-sector distributed-
+    memory operator family was retired in Stage 11d; single-node is the
+    supported N=36 story.)
   * Selective re-orth (the default after Batch 1) — full re-orth at m=200
     against 250 M-state vectors costs 8 TFLOPs per sweep just for the
     re-orth pass.
@@ -161,8 +165,9 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
 * **N = 44–48**: needs HΦ-on-Fugaku-class infrastructure: distributed
   multi-GPU Lanczos with NCCL all-reduce on dot products, halo-exchange
   SpMV, perfect-hash symmetry indexing because no `unordered_map<uint64_t>`
-  can store the basis. This codebase is two engineering quarters away from
-  that, not two weeks. See §6.
+  can store the basis. The Stage-11d retirement removed the earlier
+  prototype of that stack (recoverable from git history); building it
+  properly is quarters of engineering, not weeks. See §6.
 
 ---
 
@@ -227,30 +232,14 @@ precision.
 * **Memory**: 3 × 10⁷ × 16 B = 480 MB per vector. m=200 in-memory basis is
   96 GB — fits on a fat node (`ED_LANCZOS_DISK=0`). On a 64 GB workstation,
   set `ED_LANCZOS_DISK=1` and let the basis spill.
-* **Symmetry construction**: if the symmetry-projected basis does not fit
-  in single-node RAM, switch to the distributed/MPI build
-  (`ed_distributed_main`, exercised by the `phase3b` / `mpi` test labels).
-  The Phase 7.2 cleanup retired the chunked / disk-streaming single-node
-  fallbacks (`run_chunked_symmetry_workflow`,
-  `run_disk_streaming_workflow`); the MPI path is faster, works on
-  arbitrary cluster sizes, and is matvec-unification first-class
-  (`DistributedHost` memory space tag on `DistributedOperator`).
-  * **Construction cost is linear.** `DistributedSymmetryOperator` builds its
-    rank-local matrix with the **orbit-walk** (`src/distributed/distributed_symmetry_operator.cpp`):
-    for each orbit it walks the member states and emits `<s'|H|s>` via
-    `ed::matvec::kernel::apply_term_to_state`, projecting back onto orbits —
-    **O(dim·num_terms)**, the same complexity as the streaming SpMV. (The earlier
-    dense per-orbit H-probe was O(dim²/|G|); it survives behind
-    `ED_DISTRIBUTED_LEGACY_PROBE` only as a numerical cross-check.) The orbit-walk
-    is ~**410×** faster than the probe at 18 sites (46.4 s → 0.11 s, sector 0, one
-    rank) and scales ~linearly in `dim` thereafter. Both the enumeration and the
-    matrix build are OpenMP-parallel, but the speedup is **memory-bandwidth-bound**
-    (random access into `state_to_orbit`/`phi`), so it is sublinear: at N=24 the
-    matbuild is 17.9 s on 1 thread → 4.5 s on 8 → 3.7 s on 32. **You must launch
-    the MPI ranks with `--bind-to none`** (or `--map-by …:PE=$OMP_NUM_THREADS`),
-    otherwise OpenMPI pins each rank — and all its OpenMP threads — to a single
-    core and construction stays serial. This build is workflow-agnostic — ground
-    state (Lanczos / Krylov-Schur) and finite-T (FTLM / TPQ) share it.
+* **Symmetry construction**: the lazy rep-first builders (the only
+  construction lane since Stage 11c-1) keep the per-sector footprint at
+  O(#reps); the OrbitTable disk cache (`<lattice_dir>/basis_cache`)
+  makes warm restarts load reps instead of rescanning. Under `mpirun`,
+  SectorDistributor spreads whole sectors across ranks (dim-balanced,
+  rank-local solves). When launching MPI ranks with OpenMP inside, use
+  `--bind-to none` (or `--map-by …:PE=$OMP_NUM_THREADS`) so construction
+  keeps its OpenMP parallelism.
 * **Wallclock**: hours, not days. GPU path (`LANCZOS_GPU` with
   `BLOCK_LANCZOS_GPU` for nev=5) is 3–10× faster.
 * **Honesty**: this is well-trodden territory. Multiple groups have
@@ -333,6 +322,17 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 ---
 
 ## 6. The Phase 3 roadmap (lifts the ceiling 36 → 40 → 48)
+
+> **RETIRED (Stage 11d, Jul 2026).** The Phase-3b/3c prototype this
+> section narrates — `DistributedOperator`, distributed Lanczos / FTLM /
+> TPQ / Krylov-Schur, the GPU/NCCL twins, and the `ed_distributed_main`
+> launcher — was deleted: it had no production consumer (production MPI
+> is SectorDistributor × MpiBackend) and the "honest 40" regime was
+> never reached. The section is kept as the design record for whenever
+> distributed-memory state vectors are attempted again (the code is one
+> `git log -S DistributedOperator` away). Only the NCCL
+> `MultiGpuCommunicator` (`ed/parallel/multi_gpu.h`) and the
+> `CommPlan`/`MpiMatVecImpl` matvec machinery survive in-tree.
 
 > Listed in dependency order. Each phase produces a usable library; the
 > jumps in supported N are gated by the *biggest* missing piece.
@@ -628,7 +628,7 @@ print(comb(N, N//2))"`), the per-vector sizes assume
 `sizeof(std::complex<double>) == 16`, and the per-N status in §2 is
 calibrated against the actual code paths in
 `src/solvers/cpu/lanczos.cpp`, `src/solvers/cpu/ftlm.cpp`,
-`src/solvers/cpu/TPQ.cpp`, the GPU twins, and
+`include/ed/thermal/{tpq,mtpq}_kernel.h`, the GPU twins, and
 `include/ed/core/streaming_symmetry.h`.
 
 If you change the vector type (e.g. to `std::complex<float>`) or

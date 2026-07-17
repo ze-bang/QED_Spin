@@ -27,10 +27,10 @@ sudo apt-get install -y \
 Optional:
 
 - **MPI** (`libopenmpi-dev openmpi-bin`) — enables the distributed
-  Lanczos / FTLM / TPQ lane and the `ed_distributed_main` binary.
+  lane (SectorDistributor across sectors + in-process MpiBackend).
 - **CUDA Toolkit ≥ 12.x** — enables the GPU solvers (`ed_solvers_gpu`).
 - **NCCL** — enables the multi-GPU distributed lane
-  (`distributed_lanczos_gpu`, NCCL collectives).
+  (NCCL collectives for the MPI+GPU backend, library `ed_multi_gpu`).
 
 Then:
 

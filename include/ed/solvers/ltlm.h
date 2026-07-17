@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <ed/core/solver_defaults.h>
+
 #include <iostream>
 #include <complex>
 #include <vector>
@@ -31,28 +33,12 @@ struct LTLMParameters {
     uint64_t num_samples = 1;               // Usually 1 for LTLM (ground state is deterministic)
     uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-12;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters::ltlm_full_reorth)
+    bool full_reorthogonalization = ed::defaults::kThermalFullReorth;
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
     uint64_t random_seed = 0;      // Random seed (0 = use random_device) for initial state
     bool store_intermediate = false;   // Store intermediate data for debugging
     bool compute_error_bars = false;   // Compute standard error (only useful if num_samples > 1)
     bool use_exact_ground_state = false; // If true and ground state eigenvector provided, use it
-};
-
-/**
- * @brief Results from LTLM calculation
- */
-struct LTLMResults {
-    ThermodynamicData thermo_data;           // Thermodynamic properties
-    std::vector<ThermodynamicData> per_sample_data;  // Per-sample data (if stored)
-    std::vector<double> energy_error;        // Standard error in energy
-    std::vector<double> specific_heat_error; // Standard error in specific heat
-    std::vector<double> entropy_error;       // Standard error in entropy
-    std::vector<double> free_energy_error;   // Standard error in free energy
-    double ground_state_energy;              // Ground state energy
-    std::vector<double> low_lying_spectrum;  // Low-lying excitation energies
-    uint64_t total_samples;                       // Number of samples used
-    uint64_t krylov_dimension;                    // Actual Krylov dimension achieved
 };
 
 /**
@@ -80,102 +66,15 @@ double find_ground_state_lanczos(
     ComplexVector& ground_state
 );
 
-/**
- * @brief Build Krylov subspace from ground state for low-lying excitations
- * 
- * After finding the ground state, build a Krylov subspace to capture
- * low-lying excitations. This gives accurate thermodynamics at low T.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param ground_state Ground state vector
- * @param ground_energy Ground state energy
- * @param N Hilbert space dimension
- * @param krylov_dim Maximum Krylov dimension
- * @param tolerance Convergence tolerance
- * @param full_reorth Use full reorthogonalization
- * @param reorth_freq Reorthogonalization frequency
- * @param excitation_energies Output: excitation energies (relative to ground state)
- * @param weights Output: statistical weights
- * @return Number of excitations found
- */
-int build_excitation_spectrum(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& ground_state,
-    double ground_energy,
-    uint64_t N,
-    uint64_t krylov_dim,
-    double tolerance,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    std::vector<double>& excitation_energies,
-    std::vector<double>& weights
-);
-
-/**
- * @brief Compute thermodynamics from ground state and low-lying excitations
- * 
- * Uses the ground state and excitation spectrum to compute thermodynamic
- * properties. More accurate than FTLM at low temperatures.
- * 
- * @param ground_energy Ground state energy
- * @param excitation_energies Excitation energies (relative to ground state)
- * @param weights Statistical weights
- * @param temperatures Temperature points to evaluate
- * @return ThermodynamicData structure with thermodynamic properties
- */
-ThermodynamicData compute_ltlm_thermodynamics(
-    double ground_energy,
-    const std::vector<double>& excitation_energies,
-    const std::vector<double>& weights,
-    const std::vector<double>& temperatures
-);
-
-/**
- * @brief Main LTLM driver function
- * 
- * Low Temperature Lanczos Method for thermodynamics:
- * 1. Find ground state via Lanczos
- * 2. Build Krylov subspace from ground state to get low-lying excitations
- * 3. Compute thermodynamics using ground state + excitations
- * 4. More accurate than FTLM at low temperatures
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param N Hilbert space dimension
- * @param params LTLM parameters
- * @param temp_min Minimum temperature
- * @param temp_max Maximum temperature
- * @param num_temp_bins Number of temperature points
- * @param ground_state Optional: pre-computed ground state vector (if available)
- * @param output_dir Directory for output files
- * @return LTLMResults containing thermodynamic properties vs temperature
- */
-LTLMResults low_temperature_lanczos(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t N,
-    const LTLMParameters& params,
-    double temp_min,
-    double temp_max,
-    uint64_t num_temp_bins,
-    const ComplexVector* ground_state = nullptr,
-    const std::string& output_dir = ""
-);
-
-// Phase 4 (matvec-unification): MatVecOperator-taking overload.
-inline LTLMResults low_temperature_lanczos(
-    const ed::matvec::MatVecOperator& H_op,
-    uint64_t N,
-    const LTLMParameters& params,
-    double temp_min,
-    double temp_max,
-    uint64_t num_temp_bins,
-    const ComplexVector* ground_state = nullptr,
-    const std::string& output_dir = "")
-{
-    return low_temperature_lanczos(
-        ed::matvec::as_apply_function(H_op),
-        N, params, temp_min, temp_max, num_temp_bins,
-        ground_state, output_dir);
-}
+// NOTE (Consolidation Family 1): the LTLM *thermodynamics* driver
+// ``low_temperature_lanczos`` was removed. Its estimator seeded a second
+// Lanczos from |0> and summed the GS-local density of states, not the
+// thermal trace, so it stayed pinned near E0 at every T. Since LTLM
+// thermodynamics reduces exactly to the FTLM trace for any function of H,
+// all thermodynamics now routes through ``finite_temperature_lanczos`` /
+// ``ftlm_kernel``. The connected static response below (⟨OH⟩-⟨O⟩⟨H⟩), which
+// probes an operator that does NOT commute with H, is genuinely LTLM-only
+// and is retained. See CONSOLIDATION_PLAN.md Family 1.
 
 /**
  * @brief Compute the connected thermal-expansion covariance with LTLM.
@@ -201,15 +100,4 @@ StaticResponseResults compute_connected_qh_response_ltlm(
     double temp_max,
     uint64_t num_temp_bins,
     const std::string& output_dir = ""
-);
-
-/**
- * @brief Save LTLM results to file
- * 
- * @param results LTLM results to save
- * @param filename Output filename
- */
-void save_ltlm_results(
-    const LTLMResults& results,
-    const std::string& filename
 );

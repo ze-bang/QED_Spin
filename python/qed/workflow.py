@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import math
-import contextlib
 import os
 import shutil
 import tempfile
@@ -22,6 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Union
 
 from . import _core as _core
+from .point_group_routing import (resolve_projection_lane, split_nonabelian,
+                                  decode_star_for_sector,
+                                  decode_irrep_for_character)
 from ._core import (  # type: ignore[attr-defined]
     DiagonalizationMethod,
     EDParameters,
@@ -42,8 +44,6 @@ __all__ = [
     "full_spectrum",
     "list_diag_parameters",
     "solver_device_support",
-    "load_mpi_eigenvector",
-    "load_mpi_eigenvectors",
 ]
 
 
@@ -65,12 +65,6 @@ SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
 # code that imported it transitively; it will be deleted in the next
 # cycle.
 # ---------------------------------------------------------------------------
-@contextlib.contextmanager
-def _suppress_legacy_dispatch_warning():
-    """No-op kept transiently for back-compat; the legacy bindings
-    that used to emit ``DeprecationWarning`` are gone, so there is
-    nothing to suppress."""
-    yield
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +88,15 @@ _GROUND_STATE_METHODS = frozenset({
     DiagonalizationMethod.FULL,
 })
 
-_THERMAL_METHOD_TO_CORE = {
-    DiagonalizationMethod.FTLM:    "FTLM",
-    DiagonalizationMethod.OFTLM:   "OFTLM",
-    DiagonalizationMethod.LTLM:    "LTLM",
-    DiagonalizationMethod.mTPQ:    "mTPQ",
-    DiagonalizationMethod.KPM_DOS: "KpmDos",
-}
+# Stage 11a: the parameter/result converters live in qed._params (the
+# thermal converter had FORKED between workflow.py and thermal.py).
+from ._params import (  # noqa: E402,F401  (single conversion layer)
+    THERMAL_METHOD_MAP as _THERMAL_METHOD_MAP,
+    ed_params_to_solve_options as _ed_params_to_solve_options,
+    ed_params_to_thermal_options as _ed_params_to_thermal_options,
+    ed_result_from_gs_result as _ed_result_from_gs_result,
+    ed_result_from_thermal_result as _ed_result_from_thermal_result,
+)
 
 
 def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
@@ -109,233 +105,8 @@ def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
     return method in _GROUND_STATE_METHODS
 
 
-def _ed_params_to_thermal_options(
-    params: EDParameters,
-    method: DiagonalizationMethod,
-    allow_infeasible: bool = False,
-) -> "_core.ThermalOptions":
-    """Translate the legacy `EDParameters` bag + a thermal
-    `DiagonalizationMethod` enumerator into a fresh
-    ``_core.ThermalOptions`` ready for ``workflows_thermal``."""
-    opts = _core.ThermalOptions()
-    enum_name = _THERMAL_METHOD_TO_CORE.get(method)
-    if enum_name is None:
-        raise ValueError(
-            f"_ed_params_to_thermal_options: method {method!r} is not a "
-            f"thermal lane. Use `_ed_params_to_solve_options` for "
-            f"ground-state methods."
-        )
-    opts.method        = getattr(_core.ThermalMethod, enum_name)
-    opts.num_samples   = int(params.num_samples)
-    # Pipe ``device=`` through to ``opts.backend.allow_gpu`` /
-    # ``allow_mpi`` so the orchestrator's ``select_backend`` picks the
-    # requested lane. Without this the thermal opts keep the C++
-    # default (``allow_gpu=true``) and ``qed.solve(method='mtpq',
-    # device='cpu')`` would silently route through the GPU promoter
-    # (rebuild GPUFixedSzOperator per sector, run on CUDA). Mirrors
-    # the ``_ed_params_to_solve_options`` wiring above and the
-    # ``_thermal_via_workflows_thermal`` override in thermal.py.
-    use_gpu = bool(getattr(params, "use_gpu", False))
-    use_mpi = bool(getattr(params, "use_mpi", False))
-    opts.backend.allow_gpu = bool(use_gpu)
-    opts.backend.allow_mpi = bool(use_mpi)
-    # ``krylov_dim`` is the orchestrator's per-method iteration budget:
-    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
-    # the number of (L - H) iterations. For mTPQ we map the user's
-    # ``max_iterations`` (a.k.a. ``params.tpq_max_steps``) here -- this
-    # closes a gap where the legacy adapter hardcoded 100 iterations
-    # for the TPQ lanes and never honoured the user's request.
-    if method == DiagonalizationMethod.FTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
-    elif method == DiagonalizationMethod.OFTLM:
-        opts.krylov_dim = int(params.ftlm_krylov_dim or 100)
-        _nv = getattr(params, "oftlm_num_exact", None)
-        if _nv is not None:
-            opts.num_exact = int(_nv)
-    elif method == DiagonalizationMethod.LTLM:
-        opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
-    elif method == DiagonalizationMethod.mTPQ:
-        steps = int(getattr(params, "tpq_max_steps", 0) or 0)
-        if steps <= 0:
-            mi = getattr(params, "max_iterations", 0)
-            steps = int(mi) if mi else 0
-        # mTPQ: ``steps == 0`` -> orchestrator auto-sizes the iteration
-        # count from the spectral bounds to bracket beta_max = 1/T_min.
-        opts.krylov_dim = steps
-    else:
-        opts.krylov_dim = 100
-    opts.taylor_order  = int(params.tpq_taylor_order)
-    opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.beta_max      = float(params.tpq_beta_max)
-    opts.random_seed   = int(
-        params.ftlm_seed or params.ltlm_seed or 0)
-    opts.output_dir    = str(params.output_dir or "")
-    # mTPQ expert override of the (L*I - H) large value; 0.0 -> auto.
-    if hasattr(opts, "energy_shift"):
-        opts.energy_shift = float(getattr(params, "tpq_energy_shift", 0.0) or 0.0)
-    # fp32 single-GPU mTPQ (memory-halving lane).
-    if hasattr(opts, "mtpq_fp32"):
-        opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
-    opts.temp_min      = float(params.temp_min)
-    opts.temp_max      = float(params.temp_max)
-    opts.num_temp_bins = int(params.num_temp_bins)
-    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
-    # throw before allocating the kernel working set) unless this is set.
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible = bool(allow_infeasible)
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): forward
-    # the user-supplied probe-betas for mTPQ state-vector
-    # snapshots. Empty list -> the kernel runs the standard path with no
-    # state-vector copies and the orchestrator persists only the
-    # thermo trajectory.
-    pb = list(getattr(params, "tpq_probe_betas", []) or [])
-    if pb:
-        opts.probe_betas = pb
-    return opts
 
 
-def _ed_result_from_thermal_result(
-    tr: "_core.ThermalResult",
-) -> EDResults:
-    """Wrap a `_core.ThermalResult` into the legacy `EDResults`
-    envelope (read by every downstream consumer that came through
-    the old dispatcher)."""
-    out = EDResults()
-    out.thermo_data = tr.thermo
-    out.eigenvalues = ([float(tr.ground_state_energy)]
-                       if tr.ground_state_energy != 0.0 else [])
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # the thermal orchestrator now persists ``ed_results.h5`` when
-    # ``output_dir`` is set (FTLM/LTLM/KPM_DOS: aggregated thermo;
-    # mTPQ: trajectory + state-vector snapshots at probe_betas).
-    # Mirror the saved path through the legacy ``eigenvectors_path``
-    # field so downstream consumers see the same envelope shape used
-    # by ``qed.solve``.
-    h5_path = str(getattr(tr, "hdf5_path", "") or "")
-    out.eigenvectors_computed = bool(h5_path)
-    out.eigenvectors_path     = h5_path
-    return out
-
-
-def _ed_params_to_solve_options(
-    params: EDParameters,
-    method: DiagonalizationMethod,
-    auto_method: bool = False,
-    allow_infeasible: bool = False,
-) -> "_core.SolveOptions":
-    """Translate `EDParameters` + `DiagonalizationMethod` into a
-    `_core.SolveOptions` for the orchestrator.
-
-    Mirrors `ed_adapter::toSolveOptions` on the C++ side: every field
-    that survives the unified collapse is forwarded; thermal / TPQ /
-    KPM-DOS knobs are simply not consulted because `workflows_solve`
-    does not exercise them."""
-    opts = _core.SolveOptions()
-    opts.num_eigs        = int(params.num_eigenvalues)
-    opts.max_iter        = int(params.max_iterations)
-    opts.block_size      = int(params.block_size)
-    opts.tolerance       = float(params.tolerance)
-    opts.compute_vectors = bool(params.compute_eigenvectors)
-    opts.output_dir      = str(params.output_dir or "")
-
-    # "Universal save contract" follow-up (May 2026): pipe the
-    # ``device=`` selection through to ``opts.backend.allow_gpu``.
-    # Previously ``qed.solve(device='cpu')`` left ``opts.backend``
-    # at its default (``allow_gpu=true``), so the streaming-symmetry
-    # binding's ``select_backend`` happily picked the CUDA mirror
-    # for SectorViews (which advertises ``supports_device_matvec``
-    # whenever ``WITH_CUDA`` is on). Mirrors the existing
-    # ``qed.thermal`` / ``qed.spectral`` wiring.
-    use_gpu = bool(getattr(params, "use_gpu", False))
-    use_mpi = bool(getattr(params, "use_mpi", False))
-    opts.backend.allow_gpu = bool(use_gpu)
-    opts.backend.allow_mpi = bool(use_mpi)
-
-    method_map = {
-        DiagonalizationMethod.LANCZOS:            _core.SolveMethod.Lanczos,
-        DiagonalizationMethod.BLOCK_LANCZOS:      _core.SolveMethod.BlockLanczos,
-        DiagonalizationMethod.KRYLOV_SCHUR:       _core.SolveMethod.KrylovSchur,
-        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR: _core.SolveMethod.BlockKrylovSchur,
-        DiagonalizationMethod.FULL:               _core.SolveMethod.FullDiag,
-    }
-    # When the user did not name a solver (auto_method), defer the eigensolver
-    # choice to the C++ dictator (ed::planner) by passing Auto -- Python no longer
-    # picks the ground-state method itself.
-    opts.method = (_core.SolveMethod.Auto if auto_method
-                   else method_map.get(method, _core.SolveMethod.Auto))
-
-    opts.use_fixed_sz          = bool(params.use_fixed_sz)
-    opts.use_symmetry          = bool(params.use_symmetry)
-    opts.n_up                  = int(params.n_up)
-    # Completion guarantee: the orchestrator refuses an infeasible plan (clean
-    # throw before allocation) unless this is set. The qed.solve pre-flight is the
-    # Python gate (honors force=True); mirror its decision here so a forced
-    # dispatch isn't re-blocked by the C++ safety net. Other callers default off.
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible  = bool(allow_infeasible)
-    # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
-    # knobs that may not be bound on the Python `EDParameters` (the
-    # in-process pybind11 surface only exposes what `qed.solve` consumes
-    # today). Fall back to defaults when the attribute is absent.
-    opts.basis_cache_dir       = str(getattr(params, "basis_cache_dir", "") or "")
-    opts.precompute_basis_only = bool(getattr(params, "precompute_basis_only", False))
-    return opts
-
-
-def _ed_result_from_gs_result(
-    gs_result: "_core.GroundStateResult",
-    params: EDParameters,
-) -> EDResults:
-    """Wrap a `_core.GroundStateResult` (the orchestrator's return shape)
-    into an `EDResults` so callers see the same envelope every legacy
-    consumer expects (eigenvalues + eigenvector-path bookkeeping)."""
-    out = EDResults()
-    out.eigenvalues = list(gs_result.eigenvalues)
-    out.eigenvectors_computed = bool(params.compute_eigenvectors)
-    out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
-    # Surface symmetry-decomposed diagnostics when the orchestrator
-    # populated them (streaming-symmetry lane). Stored as dynamic attrs
-    # so legacy consumers that only read `.eigenvalues` are unaffected.
-    _eps = getattr(gs_result, "eigenvalues_per_sector", None)
-    if _eps:
-        out.eigenvalues_per_sector = [list(s) for s in _eps]
-    _tags = getattr(gs_result, "sector_tags", None)
-    if _tags:
-        out.sector_tags = list(_tags)
-    # Truthful backend lane ("gpu"/"cpu"/"mpi"): the C++ aggregate
-    # carries it; surface it so callers (and the capability-matrix
-    # benchmark's GPU-row assertion) can verify which lane really ran.
-    _bk = getattr(gs_result, "backend", None)
-    if _bk is not None:
-        out.backend = _bk
-    # Convergence diagnostics (Lanczos / block-Lanczos / Krylov-Schur). Stored as
-    # dynamic attrs; legacy consumers that only read `.eigenvalues` are unaffected.
-    _kry = getattr(gs_result, "krylov", None)
-    if _kry is not None:
-        out.converged       = bool(getattr(_kry, "converged", False))
-        out.iterations      = int(getattr(_kry, "iters_done", 0))
-        out.residuals       = list(getattr(_kry, "ritz_residuals", []) or [])
-        out.n_converged     = int(getattr(_kry, "n_converged", 0))
-        out.residual_history = list(getattr(_kry, "resid_history", []) or [])
-        # Warn-not-fail (completion contract): the run COMPLETED but the
-        # eigensolver did not converge every requested eigenpair (e.g. the
-        # planner memory-capped the Krylov subspace, or max_iterations was hit).
-        # The contract guarantees COMPLETION, not convergence -- so surface a
-        # warning and return the best-effort result instead of raising.
-        if not out.converged:
-            want = int(getattr(params, "num_eigenvalues", 1) or 1)
-            rmax = max(out.residuals) if out.residuals else float("nan")
-            warnings.warn(
-                f"qed.solve: eigensolver did not fully converge "
-                f"({out.n_converged}/{want} eigenpairs below tolerance; max "
-                f"residual {rmax:.2e} after {out.iterations} iterations). "
-                f"Returning the best-effort result. Raise max_iterations / "
-                f"tolerance, or give the run more memory so the Krylov subspace "
-                f"need not be capped.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-    return out
 
 
 def _diag_via_workflows_solve(
@@ -360,7 +131,7 @@ def _diag_via_workflows_solve(
         # it the `FixedSzOperator` directly (it derives from `Operator`).
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
-    if method in _THERMAL_METHOD_TO_CORE:
+    if method in _THERMAL_METHOD_MAP:
         opts = _ed_params_to_thermal_options(params, method, allow_infeasible)
         tr = _core.workflows_thermal(operator, opts)
         return _ed_result_from_thermal_result(tr)
@@ -377,785 +148,91 @@ def _diag_via_workflows_solve(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class GeneratorSet:
-    """A named candidate set of commuting permutation generators.
+# ---------------------------------------------------------------------------
+# Stage 10b: the L6 group-discovery layer lives in qed.discovery; every name
+# is re-exported here for back-compat (qed.workflow.find_symmetries etc.).
+# ---------------------------------------------------------------------------
+from .discovery import (  # noqa: F401  (re-exports)
+    GeneratorSet,
+    SymmetryReport,
+    find_symmetries,
+    resolve_auto_symmetry,
+    resolve_discrete_toggle,
+    _FIND_SYM_MEMO,
+    _find_symmetries_key,
+    _find_symmetries_impl,
+    _validate_explicit_generators,
+    _full_group_generators,
+    _operator_to_graph_records,
+    _run_full_automorphism_pipeline,
+    _translation_autos_from_lattice,
+    _infer_cluster_dims,
+    _make_generator_set_from_clique,
+    _generators_equal,
+)
 
-    Attributes
-    ----------
-    name : str
-        Short label, e.g. ``"translation"`` or ``"full_automorphism"``.
-    description : str
-        One-line human summary used by :meth:`SymmetryReport.summary`.
-    generators : list[list[int]]
-        Site permutations in C++ convention: ``perm[i]`` is the site
-        that site ``i`` is mapped to. The empty list means no symmetry
-        (full Hilbert space).
-    orders : list[int]
-        Order (cyclic period) of each generator. Same length as
-        ``generators``.
-    group_size : int
-        ``|<generators>|``: size of the abelian group spanned by these
-        generators. ``1`` for the empty list (trivial group).
 
-    Selecting subgroups
-    -------------------
-    The discovered ``full_automorphism`` set typically has more than one
-    generator (e.g. ``orders=[2, 3]`` for a 6-site ring → reflection +
-    rotation). Two ergonomic ways to project onto a subgroup:
+def normalize_sz(sz, *, verb: str,
+                 auto_sz=None, sz_conserved=None,
+                 use_sz_if_conserved=None, sz_min=None, sz_max=None):
+    """ONE Sz spelling across every verb (diction consolidation, Jul 2026).
 
-    .. code-block:: python
+    ``sz`` accepts::
 
-        report = qed.find_symmetries(H)
-        full   = report.full_set                  # generators=[reflection, rot3]
+        None | "auto"   auto-detect the U(1) axis; sweep/window everything
+        int             name ONE magnetisation block (set bits = DOWN spins)
+        (lo, hi)        a window of blocks
+        "off"           force the full Hilbert space (no U(1) axis)
 
-        # By index (single generator or slice):
-        rot_only  = full[1]                       # only generator #1 (Z3)
-        refl_only = full[0]                       # only generator #0 (Z2)
-        first_two = full[:2]                      # GeneratorSet with gens 0,1
+    The legacy per-verb detection knobs (``auto_sz`` / ``sz_conserved`` /
+    ``use_sz_if_conserved`` / ``sz_min``+``sz_max``) still work but emit a
+    FutureWarning WHEN LOAD-BEARING (an explicit ``sz`` always wins
+    silently, so internal named-block recursions stay quiet).
 
-        # By explicit list of indices:
-        custom    = full.subgroup([1])            # same as full[1]
-
-        # Then pass any GeneratorSet to qed.solve(...):
-        eigs = qed.solve(H, symmetry=rot_only).eigenvalues
-
-    The returned subgroup is a fresh :class:`GeneratorSet` whose
-    ``group_size`` is the product of the selected generators' orders
-    (correct because the parent ``full_set`` already came from a
-    minimal-generator decomposition of an abelian group, so the
-    selected subset is automatically commuting and relation-free).
+    Returns one of ``("auto",)``, ``("off",)``, ``("named", n)``,
+    ``("window", lo, hi)`` (lo/hi may be None = verb default).
     """
+    import warnings as _w
 
-    name: str
-    description: str
-    generators: list[Permutation] = field(default_factory=list)
-    orders: list[int] = field(default_factory=list)
-    group_size: int = 1
-    # Stage 7a: automorphisms of the FULL (possibly non-abelian) group
-    # that lie outside the abelian subgroup spanned by ``generators``.
-    # The projector cannot use them, but the star-reduction plan can:
-    # they permute the abelian irreps, making related sectors
-    # isospectral (solve one per orbit, copy the rest).
-    star_perms: list[Permutation] = field(default_factory=list)
-
-    def describe(self) -> str:
-        """Precise group structure: abelian invariant factors,
-        generator permutations, residue conjugation relations and
-        common-case recognition (dihedral / direct product)."""
-        from .star_reduction import describe_group
-        return describe_group(self.generators, self.orders,
-                              self.star_perms, name=self.name)
-
-    def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        return (
-            f"GeneratorSet(name={self.name!r}, "
-            f"num_generators={len(self.generators)}, "
-            f"orders={self.orders}, group_size={self.group_size})"
-        )
-
-    def __len__(self) -> int:
-        return len(self.generators)
-
-    def __getitem__(self, key: Union[int, slice, Sequence[int]]) -> "GeneratorSet":
-        """Return a subgroup by integer index, slice, or list of indices."""
-        if isinstance(key, int):
-            indices = [key]
-        elif isinstance(key, slice):
-            indices = list(range(*key.indices(len(self.generators))))
+    mode = None
+    if isinstance(sz, str):
+        s = sz.lower()
+        if s == "auto":
+            mode = ("auto",)
+        elif s == "off":
+            mode = ("off",)
         else:
-            indices = [int(i) for i in key]
-        return self.subgroup(indices)
-
-    def subgroup(self, indices: Sequence[int]) -> "GeneratorSet":
-        """Return a fresh GeneratorSet keeping only generators at ``indices``.
-
-        Parameters
-        ----------
-        indices : sequence of int
-            Positions in :attr:`generators` to keep. Accepts any
-            iterable of ints (negative indices count from the end,
-            same as Python list semantics).
-
-        Returns
-        -------
-        GeneratorSet
-            A new generator set named ``"<self.name>[i,j,...]"`` whose
-            ``group_size`` is the product of the selected generators'
-            orders. Pass it directly as ``symmetry=`` to
-            :func:`solve`.
-
-        Examples
-        --------
-        ``full.subgroup([1])`` is equivalent to ``full[1]``;
-        ``full.subgroup([0, 2])`` keeps generators 0 and 2.
-        """
-        n = len(self.generators)
-        if n == 0:
-            raise ValueError("Cannot take a subgroup of the trivial set.")
-        norm: list[int] = []
-        for idx in indices:
-            i = int(idx)
-            if i < 0:
-                i += n
-            if not (0 <= i < n):
-                raise IndexError(
-                    f"generator index {idx} out of range "
-                    f"(this GeneratorSet has {n} generators)"
-                )
-            norm.append(i)
-
-        sub_gens = [list(self.generators[i]) for i in norm]
-        sub_orders = [int(self.orders[i]) for i in norm]
-        sub_size = 1
-        for o in sub_orders:
-            sub_size *= o
-        return GeneratorSet(
-            name=f"{self.name}[{','.join(str(i) for i in norm)}]",
-            description=(
-                f"Subgroup of {self.name!r} keeping generators {norm}."
-            ),
-            generators=sub_gens,
-            orders=sub_orders,
-            group_size=sub_size,
-        )
-
-
-@dataclass
-class SymmetryReport:
-    """Output of :func:`find_symmetries`.
-
-    Attributes
-    ----------
-    num_sites : int
-        Number of sites of the Hamiltonian.
-    has_u1_sz : bool
-        Whether total Sz is conserved (U(1) symmetry).
-    sz_sectors : list[tuple[int, int]]
-        For each ``n_up`` (number of up spins) the dimension
-        ``C(num_sites, n_up)``. Empty when ``has_u1_sz`` is false.
-    generator_sets : list[GeneratorSet]
-        Candidate symmetry groups discovered in the operator. The first
-        entry is always the trivial one (no symmetry); the rest are
-        ranked by group size.
-    """
-
-    num_sites: int
-    has_u1_sz: bool
-    sz_sectors: list[tuple[int, int]] = field(default_factory=list)
-    generator_sets: list[GeneratorSet] = field(default_factory=list)
-
-    # Convenience attributes - populated by find_symmetries() -----------
-    full_set: Optional[GeneratorSet] = None
-    """The largest commuting subgroup found (max clique → minimal
-    generators). ``None`` if the Hamiltonian has trivial automorphism
-    group beyond identity."""
-
-    translation_set: Optional[GeneratorSet] = None
-    """The translation-only generator set, when ``lattice=`` was
-    supplied to :func:`find_symmetries` and the operator commutes with
-    at least one lattice translation."""
-
-    trivial_set: GeneratorSet = field(default_factory=lambda: GeneratorSet(
-        name="trivial",
-        description="No symmetry projection (full Hilbert space).",
-        generators=[],
-        orders=[],
-        group_size=1,
-    ))
-
-    # ------------------------------------------------------------------
-    def get(self, name: str) -> GeneratorSet:
-        """Look up a generator set by name (raises :class:`KeyError`)."""
-        for gs in self.generator_sets:
-            if gs.name == name:
-                return gs
-        raise KeyError(
-            f"No generator set named {name!r}; "
-            f"available: {[gs.name for gs in self.generator_sets]}"
-        )
-
-    def summary(self) -> str:
-        """Human-readable summary."""
-        lines: list[str] = []
-        lines.append(
-            f"SymmetryReport(num_sites={self.num_sites}, "
-            f"has_u1_sz={self.has_u1_sz})"
-        )
-        if self.has_u1_sz:
-            lines.append("")
-            lines.append(
-                "  U(1) Sz is conserved.  Available sectors "
-                "(n_up: dimension):"
-            )
-            for n_up, dim in self.sz_sectors:
-                lines.append(f"    sz={n_up:3d}   dim={dim}")
-            lines.append(
-                "  -> pass `sz=<n_up>` to qed.solve(...) to restrict "
-                "to a sector."
-            )
-        else:
-            lines.append("  U(1) Sz is NOT conserved -- only the full "
-                         "Hilbert space is available.")
-
-        lines.append("")
-        lines.append(f"  Generator sets ({len(self.generator_sets)}):")
-        for gs in self.generator_sets:
-            lines.append(
-                f"    [{gs.name:>20}]  group_size={gs.group_size:>4}  "
-                f"|generators|={len(gs.generators):>2}   orders={gs.orders}"
-            )
-            lines.append(f"      {gs.description}")
-        lines.append("")
-        lines.append(
-            "  -> pass any GeneratorSet (or list[Permutation]) as "
-            "`symmetry=...` to qed.solve(...)."
-        )
-        if (
-            self.full_set is not None
-            and len(self.full_set.generators) > 1
-        ):
-            lines.append(
-                "  -> the full automorphism group has "
-                f"{len(self.full_set.generators)} generators; pick a "
-                "subset with e.g. report.full_set[0] / "
-                "report.full_set.subgroup([0,2])."
-            )
-        lines.append(
-            "  -> call qed.list_diag_parameters() to see every "
-            "knob qed.solve(...) supports via extra_params=..."
-        )
-        return "\n".join(lines)
-
-    def __repr__(self) -> str:
-        return self.summary()
-
-
-# ---------------------------------------------------------------------------
-# find_symmetries
-# ---------------------------------------------------------------------------
-
-
-_FIND_SYM_MEMO: "dict[Any, SymmetryReport]" = {}
-_FIND_SYM_MEMO_CAP = 32
-
-
-def _find_symmetries_key(operator, lattice, translation_only):
-    """Content key for the find_symmetries memo, or None to skip caching
-    (any part that can't be hashed => compute fresh, never cache wrong)."""
-    try:
-        terms = tuple(sorted(tuple(t) for t in operator.transform_tuples()))
-        three = tuple(sorted(tuple(t) for t in operator.iter_three_body_terms()))
-        lat = None
-        if lattice is not None:
-            pos = getattr(lattice, "positions", None)
-            vec = getattr(lattice, "lattice_vectors", None)
-            lat = (repr(pos), repr(vec))
-        return (int(operator.num_sites), terms, three,
-                bool(translation_only), lat)
-    except Exception:
-        return None
-
-
-def find_symmetries(
-    operator: Operator,
-    *,
-    lattice: Optional[Any] = None,
-    translation_only: bool = False,
-    verbose: bool = True,
-) -> SymmetryReport:
-    """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
-
-    B9: the colored-graph automorphism search + group closure (~0.5 s) is
-    memoised on the operator's term content (+ lattice + flags), so a
-    ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
-    the search once. ``ED_SYM_NO_DETECT_MEMO=1`` disables the cache.
-    """
-    _memo_ok = os.environ.get("ED_SYM_NO_DETECT_MEMO") != "1"
-    _key = _find_symmetries_key(operator, lattice, translation_only) \
-        if _memo_ok else None
-    if _key is not None:
-        hit = _FIND_SYM_MEMO.get(_key)
-        if hit is not None:
-            return hit
-    result = _find_symmetries_impl(
-        operator, lattice=lattice, translation_only=translation_only,
-        verbose=verbose)
-    if _key is not None:
-        if len(_FIND_SYM_MEMO) >= _FIND_SYM_MEMO_CAP:
-            _FIND_SYM_MEMO.pop(next(iter(_FIND_SYM_MEMO)))
-        _FIND_SYM_MEMO[_key] = result
-    return result
-
-
-def _find_symmetries_impl(
-    operator: Operator,
-    *,
-    lattice: Optional[Any] = None,
-    translation_only: bool = False,
-    verbose: bool = True,
-) -> SymmetryReport:
-    """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
-
-    Runs the colored-graph automorphism pipeline (powered by
-    ``pynauty`` + ``networkx``) on the in-memory operator's term lists,
-    finds the maximum clique of commuting automorphisms, and reports
-    every distinct generator set the engine produces.
-
-    Parameters
-    ----------
-    operator : Operator
-        Spin Hamiltonian to inspect.
-    lattice : qed.input.Lattice, optional
-        If provided, an additional ``"translation"`` generator set is
-        produced by filtering automorphisms to pure lattice
-        translations. Requires ``lattice.positions`` and
-        ``lattice.lattice_vectors``.
-    translation_only : bool, optional
-        If True, only emit the ``"translation"`` generator set
-        (skipping the full automorphism search). Useful for very large
-        clusters where the full search would be expensive. Requires
-        ``lattice`` to be provided.
-    verbose : bool, optional
-        If True (default), the underlying automorphism finder prints
-        per-stage progress. Set to False to silence it.
-
-    Returns
-    -------
-    SymmetryReport
-
-    Notes
-    -----
-    The pipeline is tolerant of operators that have an empty
-    automorphism group: it always returns at least the trivial
-    generator set (``[]``) so the rest of the workflow keeps working.
-    """
-    num_sites = int(operator.num_sites)
-
-    # ------------------------------------------------------------------
-    # 0. Pre-flight cost note. The colored-graph automorphism search is
-    #     polynomial in the operator's term graph but the Schreier-Sims
-    #     enumeration of the resulting permutation group can blow up
-    #     for large highly-symmetric clusters. Surface a one-line note
-    #     when the user is asking for something potentially expensive.
-    # ------------------------------------------------------------------
-    if verbose:
-        if num_sites >= 28:
-            print(f"[qed.find_symmetries] N={num_sites}: full Hilbert dim "
-                  f"= 2^{num_sites} = {1 << num_sites:_d}. The automorphism "
-                  "search is on the term graph (cheap), but enumerating the "
-                  "resulting group can take seconds-to-minutes for large "
-                  "clusters with rich point-group symmetry. Pass "
-                  "translation_only=True (with lattice=) to skip the full "
-                  "search if you only need k-point projection.")
-        elif num_sites >= 20:
-            print(f"[qed.find_symmetries] N={num_sites}: searching the "
-                  f"automorphism group (cheap; should finish in <1 s).")
-
-    # ------------------------------------------------------------------
-    # 1. U(1) Sz sectors.
-    # ------------------------------------------------------------------
-    has_sz = bool(operator.conserves_sz())
-    sz_sectors: list[tuple[int, int]] = []
-    if has_sz:
-        # C(N, n_up) for n_up = 0, 1, ..., N. Use math.comb -- O(N) work.
-        for n_up in range(num_sites + 1):
-            sz_sectors.append((n_up, math.comb(num_sites, n_up)))
-
-    # ------------------------------------------------------------------
-    # 2. Build (vertex_weights, edges) Python records that the existing
-    #    automorphism_finder routines consume.
-    # ------------------------------------------------------------------
-    vertex_weights, edges = _operator_to_graph_records(operator)
-
-    # ------------------------------------------------------------------
-    # 3. Run the automorphism pipeline (or just the translation filter).
-    # ------------------------------------------------------------------
-    generator_sets: list[GeneratorSet] = []
-    full_set: Optional[GeneratorSet] = None
-    translation_set: Optional[GeneratorSet] = None
-
-    # Always include the trivial set first.
-    trivial = GeneratorSet(
-        name="trivial",
-        description="No symmetry projection (full Hilbert space).",
-        generators=[],
-        orders=[],
-        group_size=1,
-    )
-    generator_sets.append(trivial)
-
-    # Imports kept inside the function so that find_symmetries() doesn't
-    # force pynauty / networkx onto users who never call it.
-    try:
-        from edlib.automorphism_finder import (  # type: ignore
-            AutomorphismCliqueAnalyzer,
-            AutomorphismFinder,
-            MaximalAbelianSubgroupFinder,
-            construct_colored_graph,
-            filter_hamiltonian_automorphisms,
-            filter_translation_automorphisms,
-        )
-        from pynauty import autgrp  # type: ignore
-    except ImportError as e:  # pragma: no cover - environment-dependent
-        raise ImportError(
-            "find_symmetries() requires pynauty and networkx. Install "
-            "with `pip install pynauty networkx` (or skip find_symmetries "
-            "entirely and pass your own generators to qed.solve(...))."
-        ) from e
-
-    # The legacy pipeline prints quite a lot. The cheapest way to silence
-    # it is to redirect stdout for the duration of the call.
-    if verbose:
-        all_automorphisms = _run_full_automorphism_pipeline(
-            vertex_weights, edges,
-            construct_colored_graph, autgrp,
-            AutomorphismFinder, filter_hamiltonian_automorphisms,
-        )
-    else:
-        import contextlib, io  # noqa: E401
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            all_automorphisms = _run_full_automorphism_pipeline(
-                vertex_weights, edges,
-                construct_colored_graph, autgrp,
-                AutomorphismFinder, filter_hamiltonian_automorphisms,
-            )
-
-    # 3a. Translation-only generator set (when a lattice is provided).
-    if lattice is not None:
-        translation_autos = _translation_autos_from_lattice(
-            all_automorphisms, lattice,
-            filter_translation_automorphisms, num_sites,
-            verbose=verbose,
-        )
-        if translation_autos:
-            translation_set = _make_generator_set_from_clique(
-                translation_autos,
-                MaximalAbelianSubgroupFinder,
-                name="translation",
-                description=(
-                    "Pure lattice translations (preserves all positions "
-                    "modulo the supercell)."
-                ),
-            )
-            # Stage 7a: the ENTIRE point group is this set's residue --
-            # translations project, the point group folds the k sectors
-            # into isospectral stars (the textbook space-group split).
-            _t_keys = {tuple(pp) for pp in translation_autos}
-            translation_set.star_perms = [
-                list(pp) for pp in all_automorphisms
-                if tuple(pp) not in _t_keys
-            ]
-            generator_sets.append(translation_set)
-
-    # 3b. Full automorphism (max clique → minimal generators) when not
-    #     restricted to translations.
-    if not translation_only and len(all_automorphisms) > 1:
-        clique_indices = AutomorphismCliqueAnalyzer().find_maximum_clique(
-            all_automorphisms
-        )
-        clique = [all_automorphisms[i] for i in clique_indices]
-        if clique:
-            full_set = _make_generator_set_from_clique(
-                clique,
-                MaximalAbelianSubgroupFinder,
-                name="full_automorphism",
-                description=(
-                    "Largest abelian subgroup of the lattice + Hamiltonian "
-                    "automorphism group."
-                ),
-            )
-            # Stage 7a: retain the non-abelian residue (automorphisms
-            # outside the abelian clique) for star reduction and group
-            # structure reporting.
-            _clique_keys = {tuple(pp) for pp in clique}
-            full_set.star_perms = [
-                list(pp) for pp in all_automorphisms
-                if tuple(pp) not in _clique_keys
-            ]
-            if (
-                translation_set is None
-                or _generators_equal(full_set.generators,
-                                     translation_set.generators)
-            ):
-                if translation_set is None:
-                    generator_sets.append(full_set)
-            else:
-                generator_sets.append(full_set)
-
-            # When the full set has > 1 generator, emit each individual
-            # generator as its own GeneratorSet too, so users can browse
-            # the available subgroups by name (e.g.
-            # ``report.get("full_automorphism[0]")``) without needing to
-            # call ``full_set.subgroup(...)`` manually. We don't enumerate
-            # *all* 2**k − 1 subgroups -- the per-generator set is the
-            # most physically meaningful axis (rotation alone, reflection
-            # alone, ...). Pairwise / higher combos are still trivially
-            # available via ``full_set.subgroup([i, j, ...])``.
-            if full_set is not None and len(full_set.generators) > 1:
-                for i in range(len(full_set.generators)):
-                    sub = full_set.subgroup([i])
-                    sub.description = (
-                        f"Single-generator subgroup of "
-                        f"{full_set.name!r} (generator index {i}, "
-                        f"order {sub.orders[0]})."
-                    )
-                    generator_sets.append(sub)
-
-    return SymmetryReport(
-        num_sites=num_sites,
-        has_u1_sz=has_sz,
-        sz_sectors=sz_sectors,
-        generator_sets=generator_sets,
-        full_set=full_set,
-        translation_set=translation_set,
-        trivial_set=trivial,
-    )
-
-
-# ---------------------------------------------------------------------------
-# diag
-# ---------------------------------------------------------------------------
-
-
-def _validate_explicit_generators(operator, symmetry, *, verbose=True) -> None:
-    """A2: verify an EXPLICIT / bridge-supplied generator set commutes with H.
-
-    The abelian rep lane trusts its generators; an ``"auto"`` automorphism is
-    a symmetry of H's coloured interaction graph by construction, but a
-    hand-supplied ``GeneratorSet`` or raw permutation list is unchecked -- a
-    wrong permutation (site-ordering mismatch, off-by-one) yields silently
-    wrong spectra with correct-looking per-sector sum rules. The check is
-    term-level and exact (no matvec). Raises ``RuntimeError`` on the first
-    non-commuting generator; set ``ED_SYM_SKIP_COMMUTE_CHECK=1`` to bypass.
-    """
-    if os.environ.get("ED_SYM_SKIP_COMMUTE_CHECK") == "1":
-        return
-    if symmetry is None or isinstance(symmetry, dict):
-        return                       # directory-form / no group: nothing to check
-    if not isinstance(operator, Operator):
-        return                       # can't term-inspect a non-in-memory operator
-    gens = getattr(symmetry, "generators", None)
-    if gens is None and isinstance(symmetry, (list, tuple)) and symmetry \
-            and isinstance(symmetry[0], (list, tuple)):
-        gens = symmetry             # raw permutation list
-    if not gens:
-        return
-    gens = [list(g) for g in gens]
-    try:
-        ok = list(_core.check_generators_commute(operator, gens))
-    except Exception:
-        return                       # checker unavailable -> don't block the run
-    bad = [i for i, c in enumerate(ok) if not c]
-    if bad:
-        raise RuntimeError(
-            f"qed: symmetry generator(s) {bad} do NOT commute with H "
-            f"([H, U_g] != 0 at the term level). An explicit / bridge-"
-            f"supplied permutation that is not a symmetry of H produces "
-            f"silently wrong spectra. Check the site-ordering of the "
-            f"permutation(s) against the Hamiltonian's site labels, or set "
-            f"ED_SYM_SKIP_COMMUTE_CHECK=1 to bypass if you are certain."
-        )
-
-
-def resolve_auto_symmetry(
-    operator: Operator,
-    symmetry: Any,
-    *,
-    verbose: bool = True,
-    lattice: Optional[Any] = None,
-) -> Any:
-    """Normalise the string forms of ``symmetry=``.
-
-    * ``"auto"`` -- run :func:`find_symmetries` on ``operator`` and use
-      the largest commuting generator set found (``None`` -- i.e. no
-      spatial projection -- when the automorphism group is trivial or
-      when the optional ``pynauty``/``networkx`` dependencies are
-      missing). This is the "maximal block diagonalisation" switch: the
-      spatial sectors compose with the U(1) Sz axis (``sz=`` /
-      ``auto_sz``), the spin-flip transporter/projector and the
-      time-reversal pairing, each of which independently auto-detects.
-    * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
-    * anything else (GeneratorSet, permutation list, dict, None) is
-      returned unchanged (after an EXPLICIT-generator [H, U_g] = 0
-      check -- see :func:`_validate_explicit_generators`).
-    """
-    if not isinstance(symmetry, str):
-        # A2: an explicit / bridge-supplied generator set is unchecked --
-        # validate it commutes with H before the rep lane trusts it (the
-        # "auto" and "translation" sets resolved below are symmetries of H
-        # by construction and skip the check).
-        _validate_explicit_generators(operator, symmetry, verbose=verbose)
-        return symmetry
-    key = symmetry.strip().lower()
-    if key in ("off", "none", ""):
-        return None
-    if key in ("translation", "translations"):
-        if lattice is None:
             raise ValueError(
-                "symmetry='translation' needs lattice=... (positions + "
-                "lattice vectors identify which automorphisms are pure "
-                "translations). Pass the qed.input.Lattice the "
-                "Hamiltonian was built on."
-            )
-        try:
-            report = find_symmetries(operator, lattice=lattice,
-                                     verbose=False)
-        except ImportError as exc:
-            warnings.warn(
-                f"symmetry='translation': automorphism search "
-                f"unavailable ({exc}); running without spatial "
-                "symmetry.", RuntimeWarning, stacklevel=3)
-            return None
-        gen = report.translation_set
-        if gen is None or not getattr(gen, "generators", None):
-            if verbose:
-                print("[qed] symmetry='translation': no lattice "
-                      "translations commute with H -- no spatial "
-                      "projection.")
-            return None
-        if verbose:
-            print(f"[qed] symmetry='translation': |T| = "
-                  f"{gen.group_size}; point-group residue retained "
-                  f"({len(gen.star_perms)} automorphisms -> star "
-                  "reduction).")
-        return gen
-    if key != "auto":
-        raise ValueError(
-            f"symmetry={symmetry!r}: string forms are 'auto', "
-            "'translation' or 'off' (or pass a GeneratorSet / "
-            "permutation list / dict)."
-        )
-    try:
-        report = find_symmetries(operator, verbose=False)
-    except ImportError as exc:
-        warnings.warn(
-            f"symmetry='auto': automorphism search unavailable ({exc}); "
-            "running without spatial symmetry. Install pynauty + "
-            "networkx to enable it.",
-            RuntimeWarning, stacklevel=3)
-        return None
-    gen = report.full_set
-    u1 = ("U(1) Sz conserved" if report.has_u1_sz
-          else "U(1) Sz NOT conserved")
-    if gen is None or not getattr(gen, "generators", None):
-        if verbose:
-            print(f"[qed] symmetry='auto': {u1}; trivial automorphism "
-                  "group -- no spatial projection (flip/TR still "
-                  "auto-detect).")
-        return None
-    if verbose:
-        print(f"[qed] symmetry='auto': {u1}; using generator set "
-              f"{gen.name!r} (|G| = {gen.group_size}).")
-    return gen
+                f"qed.{verb}: sz={sz!r} -- use an int, (lo, hi), 'auto', "
+                f"or 'off' (qed.solve additionally accepts the 'even'/'odd' "
+                f"Sz-parity spellings, handled before this normalizer).")
+    elif isinstance(sz, (tuple, list)):
+        if len(sz) != 2:
+            raise ValueError(
+                f"qed.{verb}: an Sz window is (lo, hi), got {sz!r}.")
+        mode = ("window", int(sz[0]), int(sz[1]))
+    elif sz is not None:
+        mode = ("named", int(sz))
 
+    def _warn(old: str, new: str) -> None:
+        _w.warn(
+            f"qed.{verb}: {old} is deprecated -- use {new} (one Sz "
+            f"spelling across every verb).", FutureWarning, stacklevel=4)
 
-def resolve_discrete_toggle(
-    operator: Optional[Operator],
-    value: Any,
-    which: str,
-    *,
-    verbose: bool = True,
-) -> int:
-    """Map a ``spin_flip=`` / ``time_reversal=`` kwarg to the C++
-    toggle int (-1 auto / 0 off / 1 require), with detection reporting.
-
-    * ``"auto"`` / ``None`` / ``-1`` -- exploit the symmetry when the
-      Hamiltonian carries it, silently skip when it does not.
-    * ``"on"`` / ``True`` -- same as auto, but REPORT: confirms the
-      detection when the symmetry is present, warns (and continues
-      without it) when it is absent. Never fails.
-    * ``"off"`` / ``False`` / ``0`` -- never exploit it.
-    * ``"require"`` / ``1`` -- hard contract: the run throws when the
-      Hamiltonian does not carry the symmetry.
-
-    ``which`` is ``"spin_flip"`` or ``"time_reversal"``. ``operator``
-    may be None (directory-form callers); ``"on"`` then defers to auto
-    with a note, since the term-level detection needs the in-memory
-    operator.
-    """
-    if value is None or value == "auto" or value == -1:
-        return -1
-    if value is False or value == "off" or value == 0:
-        return 0
-    if value == "require" or value == 1:
-        return 1
-    if value is True or value == "on":
-        det = None
-        if operator is not None:
-            try:
-                det = bool(
-                    _core.detect_hamiltonian_symmetries(operator)[which])
-            except Exception:
-                det = None
-        if det is None:
-            if verbose:
-                print(f"[qed] {which}='on': detection needs the "
-                      "in-memory operator here; deferring to auto "
-                      "(the C++ layer engages it only when present).")
-            return -1
-        if det:
-            if verbose:
-                print(f"[qed] {which}: Hamiltonian carries it -> "
-                      "exploiting.")
-            return -1
-        warnings.warn(
-            f"{which}='on' requested but the Hamiltonian does not carry "
-            f"this symmetry"
-            + (" ([H, prod sigma^x] != 0 -- e.g. a Zeeman field or "
-               "unpaired S+/S- terms)" if which == "spin_flip" else
-               " (complex matrix elements in the computational basis)")
-            + "; running without it.",
-            RuntimeWarning, stacklevel=3)
-        return 0
-    raise ValueError(
-        f"{which} must be one of 'auto'|'on'|'off'|'require' "
-        f"(or None / bool), got {value!r}")
-
-
-def _full_group_generators(symmetry) -> Optional[list]:
-    """Generators of the FULL (possibly non-abelian) spatial group: the
-    abelian clique generators plus the retained residue automorphisms.
-    None when there is no spatial symmetry or no residue is known."""
-    gens = getattr(symmetry, "generators", None)
-    if not gens:
-        return None
-    star = list(getattr(symmetry, "star_perms", None) or [])
-    return [list(g) for g in gens] + [list(p) for p in star]
-
-
-def _little_group_parts(symmetry) -> Optional[tuple]:
-    """Stage 7: ``(abelian_group_elements, residue_perms)`` for the
-    FACTORIZED non-abelian engine (little co-groups over matrix-free
-    momentum sectors). The abelian clique is closed here (|A| stays
-    small for physical clusters); residues are the retained point-group
-    coset representatives. None when there is no residue to factor over
-    or the lane is disabled (``ED_SYM_LITTLE_GROUP=0``)."""
-    if os.environ.get("ED_SYM_LITTLE_GROUP", "1") == "0":
-        return None
-    star = list(getattr(symmetry, "star_perms", None) or [])
-    gens = getattr(symmetry, "generators", None)
-    if not star or not gens:
-        return None
-    gens = [tuple(g) for g in gens]
-    n = len(gens[0])
-    ident = tuple(range(n))
-    elems = {ident}
-    frontier = [ident]
-    while frontier:
-        nxt = []
-        for e in frontier:
-            for g in gens:
-                c = tuple(g[e[i]] for i in range(n))
-                if c not in elems:
-                    elems.add(c)
-                    nxt.append(c)
-        frontier = nxt
-    if len(elems) > 4096:      # defensive: A must stay enumerable
-        return None
-    return ([list(e) for e in sorted(elems)],
-            [list(p) for p in star])
+    if mode is None:
+        if auto_sz is False:
+            _warn("auto_sz=False", "sz='off'")
+            mode = ("off",)
+        elif sz_conserved is False:
+            _warn("sz_conserved=False", "sz='off'")
+            mode = ("off",)
+        elif use_sz_if_conserved is False:
+            _warn("use_sz_if_conserved=False", "sz='off'")
+            mode = ("off",)
+        elif sz_min is not None or sz_max is not None:
+            _warn("sz_min=/sz_max=", "sz=(lo, hi)")
+            mode = ("window", sz_min, sz_max)
+    return mode if mode is not None else ("auto",)
 
 
 def solve(
@@ -1168,7 +245,9 @@ def solve(
     device: Optional[str] = None,
     symmetry: SymmetryArg = None,
     sector: Optional[Sequence[int]] = None,
-    sz: Optional[int] = None,
+    irrep: Optional[dict] = None,
+    flip: Optional[int] = None,
+    sz: Union[int, str, tuple, None] = None,
     auto_sz: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
@@ -1185,13 +264,6 @@ def solve(
     num_temp_points: Optional[int] = None,
     temp_min: Optional[float] = None,
     temp_max: Optional[float] = None,
-    # MPI launcher knobs (consulted only when device='mpi' / 'mpi_gpu').
-    mpi_n_ranks: Optional[int] = None,
-    mpi_betas: Optional[Sequence[float]] = None,
-    mpi_compute_variance: bool = False,
-    mpi_binary: Optional[str] = None,
-    mpi_launcher: str = "mpiexec",
-    mpi_launcher_binary: Optional[str] = None,
     verbose: bool = True,
     full_spectrum: bool = False,
     extra_params: Optional[dict[str, Any]] = None,
@@ -1260,8 +332,65 @@ def solve(
         quantum numbers (one per generator). When omitted, every irrep
         is diagonalised and the eigenvalues merged.
     sz : int, optional
-        When ``H`` is an :class:`Operator` and the operator commutes
-        with total Sz, restrict to the sector with this many up spins.
+        Magnetisation sector, as a SET-BIT count -- i.e. the number of
+        **DOWN** spins, NOT up spins and NOT the value of total Sz.
+        ``sz=0`` is the fully polarised-UP block (S_z = +N/2) and ``sz=N``
+        the fully polarised-DOWN block; ``sz=N//2`` is half filling. The
+        name is historical (the C++ side calls it ``n_up`` while counting
+        set bits, and the set bit is the down spin -- hence ``S^-`` RAISES
+        ``n_up``). Verified: for ``H = Heisenberg - 3*sum(Sz)`` on N=10,
+        ``sz=0`` returns -12.5 (all up) and ``sz=10`` returns +17.5 (all
+        down). Pinned in test_quantum_number_selection.py.
+
+        Omit it to sweep EVERY magnetisation sector and merge (the true
+        global ground state, whatever sector holds it). Naming it solves
+        that one block and is ~sqrt(N)x cheaper.
+    point_group : str or bool, optional
+        Stage 9c semantics. ``"auto"`` (default): eigenvalue-only calls
+        PROJECT through the factorized little-group engine (translation
+        x flip x little-co-group blocks); vector consumers
+        (``compute_eigenvectors``, sampling methods) use the abelian rep
+        lane with star/TR/flip folds and per-sector output. ``sector=``
+        no longer declines projection (Jul 2026): a named momentum
+        resolves to its star(s) through the character table and the
+        engine restricts its walk (``LittleGroupOptions::only_k0``) --
+        naming a smaller block gets a smaller block. ``"full"``: REQUIRE
+        projection -- raises with the decline reason instead of
+        degrading. ``"off"``: abelian lane, star folds disabled.
+    irrep : dict, optional
+        Little-co-group irrep, named BY ITS CHARACTER as
+        ``{residue_index: value}`` (``-1`` keys the identity) and
+        resolved against the star's published table -- never by index
+        (the engine's irrep index is per-star and internal, like
+        ``k_raw``). Requires ``sector=``; with the spin flip engaged
+        also requires ``flip=`` (the isotypic split is per
+        ``(k, parity)``). Projection lane only -- raises on the abelian
+        lane rather than being ignored.
+    flip : int, optional
+        Spin-flip parity half of a momentum star: ``0`` = (k,+),
+        ``1`` = (k,-). Requires ``sector=`` and an engaged flip
+        ([H, prod sigma^x] = 0 on a flip-invariant subspace). Omitted
+        with the flip engaged, a named momentum returns BOTH parities.
+        Output contract (Stage 10c): BOTH lanes set ``eigenvalues``.
+        The projection lane additionally sets per-eigenvalue label
+        arrays ``block_k_raw`` / ``block_flip_parity`` /
+        ``block_irrep`` / ``block_irrep_dim`` / ``block_multiplicity``
+        / ``block_subspace`` plus ``irrep_characters`` (decode the
+        momentum as the phase of chi_k(T); the engine's irrep index
+        order is NOT the directory sector order). The abelian lane
+        sets ``sector_tags`` + ``eigenvalues_per_sector`` instead --
+        pass ``point_group="off"`` when those per-sector arrays are
+        required.
+    spin_flip, time_reversal : str or bool, optional
+        Per-symmetry toggles (``"auto"`` / ``"on"`` / ``"off"`` /
+        ``"require"``): the flip projects at half filling and
+        transports elsewhere; TR folds conjugate sectors. ``"require"``
+        throws when H does not carry the symmetry. Applied identically
+        on both lanes.
+    lattice : qed.input.Lattice, optional
+        Required by ``symmetry="translation"`` (identifies which
+        automorphisms are pure translations; the point group rides as
+        star residue).
     output_dir : str, optional
         Directory where the C++ engine should write eigenvectors /
         HDF5 artefacts and (for thermal methods) the imaginary-time
@@ -1345,6 +474,31 @@ def solve(
         )
 
     # ------------------------------------------------------------------
+    # ONE Sz spelling (diction consolidation, Jul 2026): sz= accepts
+    # int | (lo, hi) | "auto" | "off". auto_sz=False keeps working with
+    # a FutureWarning when load-bearing.
+    # ------------------------------------------------------------------
+    if isinstance(sz, str) and sz.lower() in ("even", "odd"):
+        # Pre-existing Sz-PARITY spelling (parsed further down into
+        # _sz_parity_str) -- not part of the magnetisation axis the
+        # normalizer owns. CI regression 2026-07-17: the first cut of
+        # normalize_sz rejected it and broke the examples tour.
+        _szmode = ("auto",)
+    else:
+        _szmode = normalize_sz(sz, verb="solve", auto_sz=auto_sz)
+    _sz_window = None
+    if _szmode[0] == "named":
+        sz = _szmode[1]
+    elif _szmode[0] == "off":
+        sz, auto_sz = None, False
+    elif _szmode[0] == "window":
+        sz = None
+        _sz_window = (int(_szmode[1] or 0), int(_szmode[2]
+                      if _szmode[2] is not None else H.num_sites))
+    elif not (isinstance(sz, str) and sz.lower() in ("even", "odd")):
+        sz = None
+
+    # ------------------------------------------------------------------
     # Full-spectrum shortcut: compute EVERY eigenvalue decomposed by all
     # (Sz x spatial) symmetries via the memory-light representative SpMV.
     # Routes to the standalone :func:`full_spectrum` helper, which loops
@@ -1362,10 +516,22 @@ def solve(
         _dev = device if isinstance(device, str) else "cpu"
         return full_spectrum_compute(
             H, symmetry=symmetry,
-            sz_conserved=(None if auto_sz else False),
+            sz=("off" if not auto_sz else None),
             spin_length=spin_l, device=_dev,
             spin_flip=spin_flip, time_reversal=time_reversal,
             point_group=point_group, lattice=lattice, verbose=verbose)
+
+    if flip is not None and sector is None:
+        raise ValueError(
+            "qed.solve: flip= selects the (k,+) or (k,-) half of a MOMENTUM "
+            "star, so it needs sector= (the momentum) alongside it. Without a "
+            "momentum there is no star to halve.")
+    if irrep is not None and sector is None:
+        raise ValueError(
+            "qed.solve: irrep= names a LITTLE-CO-GROUP irrep, which is defined "
+            "per momentum star -- decompose_irreps orders each star's "
+            "decomposition independently, so 'irrep X' means different things "
+            "in different stars. Pass sector= (the momentum) alongside it.")
 
     fixed_sz_input = isinstance(H, FixedSzOperator)
     num_sites = int(H.num_sites)
@@ -1386,6 +552,75 @@ def solve(
                 "halves) or pass an integer n_up.")
         _sz_parity_str = 0 if _key == "even" else 1
         sz = None
+
+    # ------------------------------------------------------------------
+    # 1a. Sz unnamed on the PLAIN lane -> sweep every magnetisation sector.
+    #
+    # This used to pin n_up = N//2 (see the auto-Sz note below). Half filling
+    # is where the Heisenberg-AFM ground state lives; it is NOT where a
+    # ground state lives in general. Under a field, or for a ferro/doped
+    # model, the pin returned a silently WRONG E0 -- measured on an N=10 ring
+    # with -3*sum(Sz): -4.5154 against the true -12.5, no warning.
+    #
+    # "Unnamed" now means ALL: solve each U(1) block and merge. Still block
+    # diagonal (per-sector solves keep the U(1) reduction; this is NOT a
+    # fall back to the full 2^N space), and each sector is <= the old
+    # half-filling block, so the cost is ~sqrt(N)x -- paid only when the
+    # caller declined to name a sector. `sz=` still buys the single-sector
+    # solve, and `auto_sz=False` still forces the plain full-Hilbert lane.
+    # ------------------------------------------------------------------
+    if (sz is None and _sz_parity_str is None
+            and not isinstance(H, FixedSzOperator)
+            and auto_sz and symmetry is None
+            and not full_spectrum
+            and H.conserves_sz()
+            and not (isinstance(device, str)
+                     and device.lower() in ("mpi", "mpi_gpu"))):
+        _n = int(H.num_sites)
+        _k_want = int(num_eigenvalues) if num_eigenvalues else 1
+        if verbose:
+            print(f"[qed.solve] Sz unnamed: sweeping n_up=0..{_n} and merging "
+                  f"(pass sz= to solve one sector).")
+        _per: list[tuple[float, int]] = []
+        _best: tuple[float, int, Any] = (float("inf"), -1, None)
+        _swlo, _swhi = _sz_window or (0, _n)
+        for _nu_i in range(_swlo, _swhi + 1):
+            _ri = solve(
+                H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
+                compute_eigenvectors=compute_eigenvectors, solver=solver,
+                device=device, symmetry=None, sector=sector, irrep=irrep,
+                flip=flip, sz=_nu_i, auto_sz=False, spin_flip=spin_flip,
+                time_reversal=time_reversal, point_group=point_group,
+                lattice=lattice, output_dir=output_dir,
+                max_iterations=max_iterations, block_size=block_size,
+                num_samples=num_samples, target_beta=target_beta,
+                num_temp_points=num_temp_points, temp_min=temp_min,
+                temp_max=temp_max, verbose=False, full_spectrum=False,
+                extra_params=extra_params)
+            _ev = list(getattr(_ri, "eigenvalues", []) or [])
+            for _e in _ev:
+                _per.append((float(_e), _nu_i))
+            if _ev and float(_ev[0]) < _best[0]:
+                _best = (float(_ev[0]), _nu_i, _ri)
+        if not _per:
+            raise RuntimeError(
+                "qed.solve: the Sz sweep produced no eigenvalues.")
+        _per.sort(key=lambda t: t[0])
+        _merged = _per[:_k_want]
+        # Eigenvectors live in their own sector's basis, so a merged window
+        # spanning sectors has no single basis to return them in. Hand back
+        # the winning sector's result (its vectors ARE the ground state) and
+        # overwrite the eigenvalue window with the true merged one.
+        _out = _best[2]
+        _out.eigenvalues = [e for e, _ in _merged]
+        try:
+            _out.sz_sectors = [nu for _, nu in _merged]
+        except Exception:
+            pass
+        if verbose:
+            print(f"[qed.solve] Sz sweep: E0={_merged[0][0]:.10f} in "
+                  f"n_up={_merged[0][1]}")
+        return _out
     op_to_use: Operator = H
     if sz is not None:
         if fixed_sz_input:
@@ -1420,42 +655,13 @@ def solve(
                       f"(reduced from {base_dim}).")
     elif fixed_sz_input and verbose:
         print(f"[qed.solve] FixedSzOperator supplied: dim={H.dimension}.")
-    elif (sz is None and not fixed_sz_input and auto_sz
-          and symmetry is None
-          and H.conserves_sz()
-          and not (isinstance(device, str)
-                   and device.lower() in ("mpi", "mpi_gpu"))):
-        # Auto-Sz projection: the Hamiltonian respects total Sz but no
-        # sector was named. Default to the half-filling sector
-        # n_up = N//2 (where the ground state lives for Heisenberg-style
-        # antiferromagnets) -- it is C(N, N//2) ~ 2^N / sqrt(pi N/2),
-        # i.e. a sqrt(pi N/2)x speedup over the full 2^N Hilbert space
-        # at no accuracy cost. Pass ``auto_sz=False`` to keep the full
-        # Hilbert space, or ``sz=k`` to pick a different sector.
-        #
-        # IMPORTANT: skipped when ``symmetry=`` is explicitly given. Otherwise
-        # "pure spatial" (symmetry, no sz) would silently become sz+spatial in
-        # the n_up=N//2 sector -- an INCOMPLETE spectrum, and the WRONG ground
-        # state for any model whose GS is not at half-filling (the "no accuracy
-        # cost" claim holds only for the Heisenberg-AFM GS). With an explicit
-        # spatial symmetry, that symmetry IS the reduction; add ``sz=`` if you
-        # also want a magnetisation sector.
-        #
-        # MPI / MPI+GPU lanes are excluded from auto-Sz: the standalone
-        # ed_distributed_main binary loads from full-Hilbert .dat files
-        # only; the Sz projection happens inside the MPI driver via the
-        # `sz=` argument that gets forwarded through the launcher.
-        half = num_sites // 2
-        op_to_use = H.make_fixed_sz(int(half))
-        sz = half
-        if verbose:
-            try:
-                sec = math.comb(num_sites, half)
-            except Exception:  # pragma: no cover - defensive against odd N
-                sec = op_to_use.dimension
-            print(f"[qed.solve] auto-Sz: n_up={half}: dim={sec} "
-                  f"(reduced from {base_dim}). Pass auto_sz=False to "
-                  f"opt out, or sz=k for a different sector.")
+    # NOTE: the old "auto-Sz projection" branch lived here and pinned
+    # n_up = N//2 when Sz was unnamed. It is gone: unnamed now means the
+    # magnetisation SWEEP in section 1a above, which is right for every model
+    # rather than only for Heisenberg-style antiferromagnets. (MPI lanes were
+    # excluded from auto-Sz because ed_distributed_main loads full-Hilbert
+    # .dat files and does its own Sz projection via the launcher's sz=; the
+    # sweep carries the same exclusion.)
 
     sector_dim = int(op_to_use.dimension)
 
@@ -1468,32 +674,16 @@ def solve(
     is_tpq = _is_tpq_method(method)
 
     # TPQ relies on a single random state evolving on the full Hilbert
-    # space (or on a single fixed-Sz block). For the in-process
-    # (cpu / gpu) streaming kernel, per-sector symmetry projection
-    # breaks that and the C++ side silently falls back to Lanczos
-    # (ed_wrapper.h L1458) -- reject explicitly so users get a clear
-    # diagnostic. Phase E wires the distributed path:
-    # `distributed_tpq_symmetry` (CPU MPI) and
-    # `distributed_tpq_gpu_symmetry` (multi-GPU) DO project onto a
-    # single sector and return per-sector sample-averaged
-    # `<H>(beta)`. As of Phase H the Python dispatcher
-    # (`_diag_via_mpi`) automatically Z-weight-aggregates across
-    # sectors when `sector=` is omitted, so the user-facing
-    # `EDResults.thermo_data.energy` is the full-trace `<H>(beta)`.
-    # Allow this combination through to `_diag_via_mpi`.
-    if symmetry is not None and is_tpq and not use_mpi:
+    # space (or on a single fixed-Sz block); per-sector symmetry
+    # projection breaks that -- reject explicitly.
+    if symmetry is not None and is_tpq:
         raise ValueError(
-            "qed.solve(H, solver='mTPQ', symmetry=..., "
-            "device='cpu'/'gpu') is not supported: TPQ acts on a "
-            "single random state across the whole sector and per-"
-            "symmetry-block diagonalisation does not factor through "
-            "the in-process streaming kernel. Options: drop the "
-            "symmetry= argument (TPQ + sz= is supported), use the "
-            "distributed path with device='mpi'/'mpi_gpu' (Phase E "
-            "wires `distributed_tpq_symmetry` per-sector and "
-            "Phase H Z-weight-aggregates across sectors when "
-            "`sector=` is omitted), or use a different thermal "
-            "method (FTLM/LTLM combine across symmetry blocks "
+            "qed.solve(H, solver='mTPQ', symmetry=...) is not supported: "
+            "TPQ acts on a single random state across the whole sector "
+            "and per-symmetry-block diagonalisation does not factor "
+            "through the streaming kernel. Options: drop the symmetry= "
+            "argument (TPQ + sz= is supported), or use a different "
+            "thermal method (FTLM/LTLM combine across symmetry blocks "
             "correctly)."
         )
 
@@ -1523,9 +713,14 @@ def solve(
     if verbose:
         method_name = method.name if hasattr(method, "name") else str(method)
         kind = "thermal" if is_thermal else "eigenvalue"
+        # use_gpu/use_mpi are the REQUEST derived from device= and the
+        # build, printed before lane dispatch -- say so (the old wording
+        # read as "this run is on the GPU" even on CPU-only nodes).
         print(f"[qed.solve] solver={method_name} ({kind})  "
               f"num_eigenvalues={num_eigenvalues}  "
-              f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
+              f"tolerance={tolerance:g}  "
+              f"gpu_requested={use_gpu}  mpi_requested={use_mpi} "
+              f"(lane chosen at dispatch)")
 
     # (Pre-flight planner removed: sensible defaults, no feasibility refusal.)
 
@@ -1588,43 +783,119 @@ def solve(
     symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose,
                                      lattice=lattice)
     if symmetry is not None:
-        if use_mpi:
-            return _diag_via_mpi(
-                op_to_use, method, params,
-                symmetry=symmetry, sz=sz, sector=sector,
-                use_gpu=use_gpu,
-                n_ranks=mpi_n_ranks,
-                betas=mpi_betas,
-                compute_variance=mpi_compute_variance,
-                binary=mpi_binary,
-                launcher=mpi_launcher,
-                launcher_binary=mpi_launcher_binary,
-                verbose=verbose,
-            )
-        if isinstance(point_group, str) and point_group.lower() == "full":
-            # PROPER non-abelian: every irrep block (d_Gamma >= 2
-            # included, blocks ~ dim/|G|) on the production multi-target
-            # matvec, block-size-adaptive dense/Lanczos per block,
-            # eigenvalues recombined with d_Gamma multiplicities. CPU
-            # engine (the GPU consumer covers the dense full-spectrum
-            # path); U(1) composes via sz=.
-            gens_full = _full_group_generators(symmetry)
-            if gens_full is None:
-                raise ValueError(
-                    "point_group='full' needs a spatial symmetry with "
-                    "retained residue (symmetry='auto' or a GeneratorSet "
-                    "from find_symmetries).")
+        # Stage 9c: ONE routing decision. point_group='auto' (default)
+        # PROJECTS through the factorized little-group engine whenever
+        # the call is eigenvalue-only; 'full' requires projection
+        # (raises on decline); any decline degrades to the abelian rep
+        # lane with star/TR/flip folds. The monolithic SAB engine is a
+        # test oracle -- no longer production-routed.
+        # `sector=` no longer vetoes the projection (Jul 2026). Naming a
+        # momentum used to force the call onto the ABELIAN lane, i.e. asking
+        # for a smaller block silently bought a BIGGER one -- the (n_up, k)
+        # sector instead of (n_up, k, irrep). The engine can restrict its star
+        # walk (LittleGroupOptions::only_k0), so a named momentum now projects
+        # AND does only that star's work. Eigenvectors and sampling methods
+        # still decline: the projection lane genuinely does not produce them.
+        # r2b (lane unification): the projection lane now PRODUCES
+        # certified eigenvectors (little_group_lowest_vectors: per-block
+        # pairs, W_sigma lift re-certified against H_k0, flip-aware
+        # COMPUTATIONAL-basis expansion, persisted via the canonical
+        # /eigendata writer). Contract: a single NAMED subspace (sz=);
+        # the merged multi-subspace sweep keeps the abelian lane's
+        # winning-sector convention. A multiplicity-m row carries ONE
+        # representative vector (fold partners need U3 transport).
+        if (compute_eigenvectors and not is_thermal
+                and sector is None and irrep is None and flip is None
+                and isinstance(sz, int)):
+            vlane = resolve_projection_lane(
+                symmetry, point_group=point_group, consumer="solve",
+                eigenvalues_only=True,   # the capability exists as of r2
+                prefer_abelian=False, verbose=verbose)
+            if vlane.mode == "project":
+                _sfv = resolve_discrete_toggle(
+                    op_to_use, spin_flip, "spin_flip", verbose=verbose)
+                _trv = resolve_discrete_toggle(
+                    op_to_use, time_reversal, "time_reversal",
+                    verbose=verbose)
+                d = dict(_core.little_group_lowest_vectors(
+                    op_to_use, vlane.A, vlane.residues,
+                    k=int(num_eigenvalues) if num_eigenvalues else 1,
+                    n_up=int(sz), spin_flip=_sfv, time_reversal=_trv,
+                    output_dir=str(output_dir) if output_dir else ""))
+                out = EDResults()
+                out.eigenvalues          = list(d["eigenvalues"])
+                out.eigenvectors         = list(d["vectors"])
+                out.eigenvectors_computed = True
+                out.eigenvectors_path    = d["hdf5_path"]
+                out.block_k_raw          = list(d["k_raw"])
+                out.block_flip_parity    = list(d["flip_parity"])
+                out.block_irrep          = list(d["irrep"])
+                out.block_irrep_dim      = list(d["irrep_dim"])
+                out.block_multiplicity   = list(d["multiplicity"])
+                out.backend = _ProjectLaneBackend("cpu")
+                if verbose:
+                    print(f"[qed.solve] little-group VECTOR lane (r2b): "
+                          f"{len(out.eigenvalues)} certified pairs, "
+                          f"computational basis.")
+                return out
+            elif verbose:
+                print(f"[qed.solve] vector lane declined "
+                      f"({vlane.reason}); abelian lane.")
+        lane = resolve_projection_lane(
+            symmetry, point_group=point_group, consumer="solve",
+            eigenvalues_only=(not compute_eigenvectors
+                              and not is_thermal),
+            # Jul 2026: an explicit GPU request no longer vetoes the
+            # projection -- the little-group engine drives the resident
+            # GPU rep gather itself (ED_SYM_LG_GPU auto gate), so the
+            # project lane is GPU-capable end to end.
+            prefer_abelian=False,
+            verbose=verbose)
+        if irrep is not None and lane.mode != "project":
+            # irrep= names a LITTLE-CO-GROUP irrep, which only the projection
+            # lane decomposes -- the abelian lane's blocks are (n_up, k) and
+            # have no isotypic split to name. Accepting it there returned the
+            # whole star's ground state for EVERY character (measured: +1 and
+            # -1 both -4.763032 on a 12-ring), i.e. silently ignoring the
+            # argument. Refuse instead.
+            raise ValueError(
+                f"qed.solve: irrep= names a little-co-group irrep, which only "
+                f"the projection lane computes -- this call resolved to the "
+                f"abelian lane ({lane.reason or 'point_group is off'}), whose "
+                f"blocks are (n_up, k) with no irrep axis to select on. Pass "
+                f"point_group='full' to require projection (it raises with the "
+                f"reason if it cannot), or drop irrep=.")
+        if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
+            _nu_sweep = None       # magnetisation sectors to sweep + merge
+            _only_k0: list[int] = []   # star restriction for a named momentum
+            _only_irrep: list[int] = []  # isotypic restriction for a named irrep
             _sp = -1
             if _sz_parity_str is not None:
                 _sp = int(_sz_parity_str)
             elif _nu < 0 and auto_sz:
-                # Compose the diagonal axis automatically: fixed Sz for
-                # U(1)-conserving H (GS at half filling), the parity
-                # half otherwise when the Z2 remnant survives.
+                # Compose the diagonal axis automatically. For U(1)-conserving
+                # H this used to PIN n_up = N//2 "(GS at half filling)". That is
+                # a Heisenberg-AFM fact, not a theorem: in a field, or for a
+                # ferro/doped model, the ground state moves off half filling and
+                # the pin returned a SILENTLY WRONG E0 (measured: N=10 ring with
+                # -3*sum(Sz) gave -4.5154 against the true -12.5). Worse, it
+                # fired even when the caller passed symmetry= explicitly --
+                # exactly what the sibling auto-Sz site refuses to do, for
+                # exactly this reason (see its `symmetry is None` guard).
+                #
+                # "Unnamed" must mean ALL, not "the sector we bet on": sweep
+                # every magnetisation sector and merge. This stays block
+                # diagonal (each n_up is solved in its own U(1) block, so the
+                # U(1) reduction is kept -- it is not a fall back to the full
+                # 2^N space); it costs ~sum_n C(N,n) instead of one C(N,N/2)
+                # solve, i.e. ~sqrt(N)x more work for an answer that is right
+                # for every model. Name sz= to pay for one sector only.
                 if op_to_use.conserves_sz():
-                    _nu = num_sites // 2
+                    _nu_sweep = list(range(*( (_sz_window[0],
+                        _sz_window[1] + 1) if _sz_window else
+                        (0, num_sites + 1) )))
                 else:
                     try:
                         if bool(_core.detect_hamiltonian_symmetries(
@@ -1632,65 +903,193 @@ def solve(
                             _sp = 2
                     except Exception:
                         _sp = -1
-            # Stage 7: prefer the FACTORIZED little-co-group engine
-            # (matrix-free momentum sectors, scales past the monolithic
-            # SAB cap). Falls back to the monolithic reference on any
-            # decline (no residue split / engine error).
-            _lg = _little_group_parts(symmetry)
-            if _lg is not None:
-                _A, _res = _lg
-                try:
-                    if _sp == 2:
-                        ev = (list(_core.little_group_lowest_eigenvalues(
-                                  op_to_use, _A, _res, k=_k, sz_parity=0))
-                              + list(_core.little_group_lowest_eigenvalues(
-                                  op_to_use, _A, _res, k=_k, sz_parity=1)))
-                    elif _sp in (0, 1):
-                        ev = list(_core.little_group_lowest_eigenvalues(
-                            op_to_use, _A, _res, k=_k, sz_parity=_sp))
-                    else:
-                        ev = list(_core.little_group_lowest_eigenvalues(
-                            op_to_use, _A, _res, k=_k, n_up=_nu))
-                    out = EDResults()
-                    out.eigenvalues = sorted(float(e) for e in ev)[:_k]
+            _sf = resolve_discrete_toggle(op_to_use, spin_flip,
+                                          "spin_flip", verbose=verbose)
+            _tr = resolve_discrete_toggle(op_to_use, time_reversal,
+                                          "time_reversal", verbose=verbose)
+            _A, _res = lane.A, lane.residues
+            if sector is not None:
+                # A NAMED momentum: decode it to a star and restrict the walk,
+                # so the caller pays for that block alone instead of the whole
+                # star sweep. k_raw is an engine-internal irrep index, so this
+                # goes through the character table (see decode_star_for_sector)
+                # -- never through an index convention.
+                _plan = dict(_core.little_group_full_spectrum(
+                    op_to_use, _A, _res,
+                    n_up=(_nu if _nu >= 0 else (num_sites // 2
+                                                if _nu_sweep else -1)),
+                    sz_parity=_sp if _sp in (0, 1) else -1,
+                    spin_flip=_sf, time_reversal=_tr, plan_only=True))
+                _dec = decode_star_for_sector(
+                    _plan["stars"], _plan["irrep_characters"], _A,
+                    symmetry.generators, symmetry.orders, sector, flip=flip)
+                if isinstance(_dec, str):
+                    raise RuntimeError(
+                        f"qed.solve: sector={list(sector)} could not be "
+                        f"resolved on the projection lane: {_dec}")
+                _k0s, _kraw = _dec
+                # Naming a momentum but not a flip means BOTH parities: the
+                # decoder returns (k,+) and (k,-) so the caller gets the whole
+                # momentum sector. Resolving only the raw index would have
+                # matched the parity-0 star alone and silently halved the
+                # spectrum.
+                _only_k0 = list(_k0s)
+                if verbose:
+                    print(f"[qed.solve] sector={list(sector)}"
+                          f"{'' if flip is None else f' flip={flip}'} -> irrep "
+                          f"k_raw={_kraw}, star(s) k0={_only_k0}: solving "
+                          f"those only (projected).")
+                if irrep is not None:
+                    # Name the little-co-group irrep BY ITS CHARACTER and
+                    # resolve it against THIS star's published table. The
+                    # index is per-star (decompose_irreps orders each star
+                    # independently), which is exactly why irrep= requires
+                    # sector= and why the caller never passes an index.
+                    if len(_only_k0) != 1:
+                        raise ValueError(
+                            "qed.solve: irrep= needs a single star, but "
+                            f"sector={list(sector)} resolved to {len(_only_k0)} "
+                            "(both flip parities). Pass flip=0 or flip=1 too -- "
+                            "the isotypic decomposition is per (k, parity).")
+                    _k0 = _only_k0[0]
+                    _st = next((x for x in _plan["stars"]
+                                if int(x["k0"]) == _k0), None)
+                    if _st is None:
+                        raise RuntimeError(
+                            f"qed.solve: star k0={_k0} vanished from the plan.")
+                    _idec = decode_irrep_for_character(_st, irrep)
+                    if isinstance(_idec, str):
+                        raise ValueError(
+                            f"qed.solve: irrep={irrep} could not be resolved "
+                            f"on star k0={_k0}: {_idec}")
+                    _ii, _idim = _idec
+                    _only_irrep = [_ii]
                     if verbose:
-                        print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
-                              f"(factorized): |A| = {len(_A)}, residues = "
-                              f"{len(_res)}.")
-                    return out
-                except Exception as exc:      # noqa: BLE001 -- graceful
-                    if verbose:
-                        print(f"[qed.solve] little-group lane declined "
-                              f"({exc}); using the monolithic SAB engine.")
-            if _sp == 2:
-                spec0 = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, -1, sz_parity=0)
-                spec1 = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, -1, sz_parity=1)
-                spec = dict(spec0)
-                spec["eigenvalues"] = (list(spec0["eigenvalues"])
-                                       + list(spec1["eigenvalues"]))
-                spec["block_size"] = (list(spec0["block_size"])
-                                      + list(spec1["block_size"]))
-                spec["block_irrep_dim"] = (
-                    list(spec0["block_irrep_dim"])
-                    + list(spec1["block_irrep_dim"]))
-            else:
-                spec = _core.symmetry_adapted_lowest_eigenvalues(
-                    op_to_use, gens_full, _k, _nu,
-                    sz_parity=(_sp if _sp in (0, 1) else -1))
-            out = EDResults()
-            out.eigenvalues = sorted(
-                float(e) for e in spec["eigenvalues"])[:_k]
-            if verbose:
-                print(f"[qed.solve] non-abelian SAB lane: |G| = "
-                      f"{spec['group_order']}, blocks = "
-                      f"{len(spec['block_size'])} (irrep dims "
-                      f"{sorted(set(spec['block_irrep_dim']))}).")
-            return out
+                        print(f"[qed.solve] irrep={irrep} -> index {_ii} "
+                              f"(d={_idim}) on star k0={_k0}.")
+            try:
+                def _lg_block(**kw):
+                    # Stage 10c: both paths return LABELED rows
+                    # (eigenvalue, k_raw, flip_parity, irrep, irrep_dim,
+                    # multiplicity, subspace) so the project lane's
+                    # EDResults carries the quantum numbers the engine
+                    # always computed. solver='full' wants the exact
+                    # spectrum: Lanczos without reorthogonalisation only
+                    # converges the extreme pair, so big-k requests go
+                    # through the dense per-block full-spectrum path.
+                    sub = kw.get("n_up", kw.get("sz_parity", -1))
+                    if method == DiagonalizationMethod.FULL:
+                        d = dict(_core.little_group_full_spectrum(
+                            op_to_use, _A, _res,
+                            spin_flip=_sf, time_reversal=_tr,
+                            only_k0=_only_k0, only_irrep=_only_irrep, **kw))
+                        rows = []
+                        for e, m, kk, fp, ir, dd in zip(
+                                d["block_values"], d["multiplicities"],
+                                d["block_k_raw"], d["block_flip_parity"],
+                                d["block_irrep"], d["block_irrep_dim"]):
+                            rows.extend(
+                                [(float(e), kk, fp, ir, dd, m, sub,
+                                  True)] * m)   # full spectrum is exact
+                        return rows, d["irrep_characters"], bool(
+                            d.get("gpu_engaged", False))
+                    d = dict(_core.little_group_lowest_eigenvalues_labeled(
+                        op_to_use, _A, _res, k=_k,
+                        spin_flip=_sf, time_reversal=_tr,
+                        only_k0=_only_k0, only_irrep=_only_irrep, **kw))
+                    rows = [(float(e), kk, fp, ir, dd, m, sub, bool(cv))
+                            for e, kk, fp, ir, dd, m, cv in zip(
+                                d["eigenvalues"], d["k_raw"],
+                                d["flip_parity"], d["irrep"],
+                                d["irrep_dim"], d["multiplicity"],
+                                d["converged"])]
+                    return rows, d["irrep_characters"], bool(
+                        d.get("gpu_engaged", False))
+
+                _gpu_used = False
+                if _sp == 2:
+                    rows, chars, _g0 = _lg_block(sz_parity=0)
+                    rows2, _, _g1 = _lg_block(sz_parity=1)
+                    rows += rows2
+                    _gpu_used = _g0 or _g1
+                elif _sp in (0, 1):
+                    rows, chars, _gpu_used = _lg_block(sz_parity=_sp)
+                elif _nu_sweep is not None:
+                    # Sz unnamed -> every magnetisation sector, merged. Each
+                    # block_subspace row carries its own n_up, so the merged
+                    # rows stay attributable. irrep_characters are a property
+                    # of A, not of n_up, so the first block's table serves all
+                    # (same reasoning as the sz_parity==2 branch above).
+                    rows, chars, _gpu_used = _lg_block(n_up=_nu_sweep[0])
+                    for _nu_i in _nu_sweep[1:]:
+                        _rows_i, _, _g_i = _lg_block(n_up=_nu_i)
+                        rows += _rows_i
+                        _gpu_used = _gpu_used or _g_i
+                else:
+                    rows, chars, _gpu_used = _lg_block(n_up=_nu)
+                rows.sort(key=lambda t: t[0])
+                if method != DiagonalizationMethod.FULL:
+                    rows = rows[:_k]
+                out = EDResults()
+                out.eigenvalues = [t[0] for t in rows]
+                # Stage 10c contract: per-eigenvalue labels on the
+                # PROJECT lane (engine irrep-index convention; decode the
+                # momentum from irrep_characters via chi_k(T)). The
+                # abelian lane provides sector_tags /
+                # eigenvalues_per_sector instead -- see the point_group
+                # docstring for the full table.
+                out.block_k_raw        = [t[1] for t in rows]
+                out.block_flip_parity  = [t[2] for t in rows]
+                out.block_irrep        = [t[3] for t in rows]
+                out.block_irrep_dim    = [t[4] for t in rows]
+                out.block_multiplicity = [t[5] for t in rows]
+                out.block_subspace     = [t[6] for t in rows]
+                # 1b (Jul 2026): per-eigenvalue convergence flag -- a
+                # budget-capped Lanczos block that could not deliver its
+                # full window of distinct converged Ritz values marks its
+                # rows False; merged campaigns must be able to tell.
+                out.block_converged    = [t[7] for t in rows]
+                out.irrep_characters   = chars
+                # The project lane used to return an EDResults with NO backend
+                # metadata at all, so `r.backend` raised AttributeError and any
+                # GPU assertion against it was impossible. Report the lane the
+                # ENGINE says it ran -- not the device= that was requested: the
+                # little-group GPU gather only engages past 2^20 reps, so small
+                # blocks legitimately stay on the CPU no matter what was asked.
+                out.backend = _ProjectLaneBackend(
+                    "gpu" if _gpu_used else "cpu")
+                if verbose:
+                    print(f"[qed.solve] non-abelian LITTLE-GROUP lane "
+                          f"(factorized): |A| = {len(_A)}, residues = "
+                          f"{len(_res)}.")
+                return out
+            except Exception as exc:      # noqa: BLE001 -- graceful
+                if isinstance(point_group, str) \
+                        and point_group.lower() == "full":
+                    raise
+                if verbose:
+                    print(f"[qed.solve] little-group lane declined "
+                          f"({exc}); falling back to the abelian rep "
+                          "lane.")
+        # Jul 2026 (#4): the abelian rep lane's per-sector Lanczos has no
+        # distinct-value/residual-bound gate -- upper-window levels drift
+        # ~1e-3 at 30 sites (measured CPU-vs-GPU by the e2e diagnostic).
+        # Until the orchestrator sector solve adopts the project lane's
+        # gate, say so instead of being quietly worse.
+        if not is_thermal and sector is None \
+                and int(num_eigenvalues or 1) > 1:
+            warnings.warn(
+                "qed.solve (abelian rep lane): eigenvalues beyond the "
+                "lowest per sector are not convergence-guarded on this "
+                "lane; for excited-window physics prefer the little-group "
+                "project lane (point_group='auto' with retained residues), "
+                "whose gate and filter guarantee distinct converged Ritz "
+                "values.",
+                RuntimeWarning, stacklevel=2)
         return _diag_with_symmetry(
             op_to_use, symmetry, params, method,
             sz=sz if sz is not None else None,
+            sector=sector,
             sz_parity=_sz_parity_str,
             auto_sz_axis=auto_sz,
             verbose=verbose,
@@ -1699,19 +1098,6 @@ def solve(
             point_group=point_group,
         )
 
-    if use_mpi:
-        return _diag_via_mpi(
-            op_to_use, method, params,
-            symmetry=None, sz=sz, sector=None,
-            use_gpu=use_gpu,
-            n_ranks=mpi_n_ranks,
-            betas=mpi_betas,
-            compute_variance=mpi_compute_variance,
-            binary=mpi_binary,
-            launcher=mpi_launcher,
-            launcher_binary=mpi_launcher_binary,
-            verbose=verbose,
-        )
 
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
@@ -1792,12 +1178,12 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
 # ed/core/ed_method_traits.h + include/ed/distributed/ + the
 # ed_distributed_main CLI actually expose.
 _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
-    "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "BLOCK_LANCZOS":   {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
+    "mTPQ":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
+    "FTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
@@ -1840,13 +1226,9 @@ def solver_device_support(
 
     Notes
     -----
-    The MPI cells require the standalone ``ed_distributed_main`` binary
-    in addition to ``WITH_MPI=ON`` in the Python extension build (the
-    binary is built only when WITH_MPI=ON). The Python wrapper
-    :func:`qed.mpi.run_distributed` checks ``shutil.which`` at
-    call time, so a True ``available`` here means the Python side
-    knows how to launch it; the binary itself may still be elsewhere
-    on $PATH.
+    The MPI subprocess cells were retired in Stage 11d (Jul 2026);
+    MPI runs go through the CLI under mpirun (SectorDistributor +
+    MpiBackend).
     """
     cuda_ok = bool(has_cuda_build())
     mpi_ok = bool(has_mpi_build())
@@ -1874,25 +1256,12 @@ def solver_device_support(
                              else "build has WITH_CUDA=OFF; rebuild with "
                                   "-DWITH_CUDA=ON"),
                 }
-            elif device == "mpi":
+            elif device in ("mpi", "mpi_gpu"):
                 cells[device] = {
-                    "kernel": True,
-                    "available": mpi_ok,
-                    "note": ("launch via qed.solve(H, device='mpi', "
-                             "mpi_n_ranks=N) or qed.mpi.run_distributed(...)"
-                             if mpi_ok
-                             else "build has WITH_MPI=OFF; rebuild with "
-                                  "-DWITH_MPI=ON"),
-                }
-            elif device == "mpi_gpu":
-                cells[device] = {
-                    "kernel": True,
-                    "available": cuda_ok and mpi_ok,
-                    "note": ("launch via qed.solve(H, device='mpi_gpu', "
-                             "mpi_n_ranks=N) or qed.mpi.run_distributed("
-                             "use_gpu=True)"
-                             if (cuda_ok and mpi_ok)
-                             else "needs WITH_MPI=ON and WITH_CUDA=ON"),
+                    "kernel": False,
+                    "available": False,
+                    "note": ("retired (Stage 11d): run the CLI under "
+                             "mpirun -- SectorDistributor + MpiBackend"),
                 }
         matrix[solver_name] = cells
 
@@ -2047,195 +1416,6 @@ def list_diag_parameters(
 # ===========================================================================
 
 
-def _operator_to_graph_records(
-    operator: Operator,
-) -> tuple[dict[int, tuple[int, float, float]], list[dict[str, Any]]]:
-    """Build (vertex_weights, edges) records the legacy
-    ``automorphism_finder`` routines consume."""
-    num_sites = int(operator.num_sites)
-
-    # Trans.dat-style: vertex_id -> (op_type, real, imag).
-    vertex_weights: dict[int, tuple[int, float, float]] = {
-        i: (2, 0.0, 0.0) for i in range(num_sites)  # default: bare Sz
-    }
-    for op_type, site, coeff in operator.iter_one_body_terms():
-        c = complex(coeff)
-        vertex_weights[int(site)] = (int(op_type), float(c.real), float(c.imag))
-
-    # InterAll.dat-style edges: list of dicts.
-    edges: list[dict[str, Any]] = []
-    for op1, s1, op2, s2, coeff in operator.iter_two_body_terms():
-        c = complex(coeff)
-        edges.append({
-            "vertex1": int(s1),
-            "vertex2": int(s2),
-            "type1": int(op1),
-            "type2": int(op2),
-            "weight": (float(c.real), float(c.imag)),
-        })
-    return vertex_weights, edges
-
-
-def _run_full_automorphism_pipeline(
-    vertex_weights: dict[int, tuple[int, float, float]],
-    edges: list[dict[str, Any]],
-    construct_colored_graph,
-    autgrp,
-    AutomorphismFinder,
-    filter_hamiltonian_automorphisms,
-) -> list[Permutation]:
-    """Run nauty + Hamiltonian filter. Returns the list of valid
-    Hamiltonian-preserving permutations on the original vertices."""
-    graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(
-        vertex_weights, edges
-    )
-    aut = autgrp(graph)
-    n_total = graph.number_of_vertices
-    finder = AutomorphismFinder()
-    expanded = finder.generate_all_automorphisms(aut[0], n_total)
-
-    # Project back to original-vertex permutations and dedup.
-    seen: set[tuple[int, ...]] = set()
-    autos: list[Permutation] = []
-    for perm in expanded:
-        proj = [idx_to_vid[perm[vid_to_idx[vid]]] for vid in idx_to_vid]
-        key = tuple(proj)
-        if key not in seen:
-            seen.add(key)
-            autos.append(proj)
-
-    # Hamiltonian-preservation safety filter (catches edge-coloring
-    # corner cases where the subdivision trick over-counted).
-    return filter_hamiltonian_automorphisms(autos, edges)
-
-
-def _translation_autos_from_lattice(
-    all_automorphisms: list[Permutation],
-    lattice: Any,
-    filter_translation_automorphisms,
-    num_sites: int,
-    *,
-    verbose: bool,
-) -> list[Permutation]:
-    """Convert ``Lattice`` into the dict + list[np.array] layout the
-    legacy filter expects, and apply it."""
-    import numpy as np
-
-    positions = list(lattice.positions)
-    sublattice = list(lattice.sublattice) if lattice.sublattice else \
-        [0] * num_sites
-    if len(positions) != num_sites:
-        raise ValueError(
-            f"lattice.positions has length {len(positions)} but the "
-            f"operator has num_sites={num_sites}."
-        )
-    sites = {
-        i: {
-            "sublattice": int(sublattice[i] if i < len(sublattice) else 0),
-            "position": np.asarray(positions[i], dtype=float),
-        }
-        for i in range(num_sites)
-    }
-    lat_vectors = [np.asarray(v, dtype=float) for v in lattice.lattice_vectors]
-    # Drop any zero lattice vectors (the Lattice container always emits
-    # 3 vectors even for 2D / 1D lattices).
-    nonzero_lat = [v for v in lat_vectors if np.linalg.norm(v) > 1e-12]
-    cluster_dims = _infer_cluster_dims(positions, nonzero_lat)
-
-    # Trim the position arrays AND lattice vectors to the lattice
-    # dimensionality so the legacy filter's S_inv = inv(S) is well-defined.
-    # (Kagome and other 2D lattices embed in 3D, so each non-zero lattice
-    # vector has 3 components but only 2 are non-trivial; filter requires
-    # a square matrix: num_vectors == vector_dimension.)
-    lat_dim = len(nonzero_lat)
-    nonzero_lat = [v[:lat_dim] for v in nonzero_lat]
-    for i in sites:
-        sites[i]["position"] = sites[i]["position"][:lat_dim]
-
-    if verbose:
-        return filter_translation_automorphisms(
-            all_automorphisms, sites, nonzero_lat, cluster_dims
-        )
-    import contextlib, io  # noqa: E401
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        return filter_translation_automorphisms(
-            all_automorphisms, sites, nonzero_lat, cluster_dims
-        )
-
-
-def _infer_cluster_dims(positions: list[Any],
-                        lattice_vectors: list[Any]) -> list[int]:
-    """Heuristic: how many primitive cells along each lattice direction
-    fit in the spanned position set. Falls back to ``[1, 1, ...]`` when
-    the lattice has only one site per cell."""
-    import numpy as np
-
-    if not lattice_vectors:
-        return [1]
-    pts = np.asarray(positions, dtype=float)[:, : len(lattice_vectors)]
-    S = np.column_stack(lattice_vectors)
-    try:
-        S_inv = np.linalg.inv(S)
-    except np.linalg.LinAlgError:
-        return [1] * len(lattice_vectors)
-    fracs = pts @ S_inv.T  # n_sites x lat_dim
-    dims = []
-    for k in range(len(lattice_vectors)):
-        col = fracs[:, k]
-        # Cluster_dim = ceil(max - min) + 1 in fractional coords; clip
-        # to >= 1.
-        rng = float(col.max() - col.min())
-        d = max(1, int(round(rng)) + 1)
-        dims.append(d)
-    return dims
-
-
-def _make_generator_set_from_clique(
-    clique: list[Permutation],
-    MaximalAbelianSubgroupFinder,
-    *,
-    name: str,
-    description: str,
-) -> GeneratorSet:
-    """Run ``find_minimal_generators`` on the supplied clique and
-    return a typed :class:`GeneratorSet`."""
-    info = MaximalAbelianSubgroupFinder().find_minimal_generators(clique)
-    if not info:
-        return GeneratorSet(
-            name=name,
-            description=description + " (only the identity automorphism was found.)",
-            generators=[],
-            orders=[],
-            group_size=1,
-        )
-    gens = [list(map(int, gi["permutation"])) for gi in info]
-    orders = [int(gi["order"]) for gi in info]
-    group_size = 1
-    for o in orders:
-        group_size *= o
-    return GeneratorSet(
-        name=name,
-        description=description,
-        generators=gens,
-        orders=orders,
-        group_size=group_size,
-    )
-
-
-def _generators_equal(a: list[Permutation], b: list[Permutation]) -> bool:
-    if len(a) != len(b):
-        return False
-    return sorted(tuple(p) for p in a) == sorted(tuple(p) for p in b)
-
-
-# ---------------------------------------------------------------------------
-# Thermal vs eigenvalue solver classification
-#
-# Mirror ed/core/ed_method_traits.h. We don't bind those predicates from
-# C++ because pybind doesn't expose constexpr functions cleanly and the
-# enum is small enough that maintaining the lists in two places (C++ +
-# Python) is cheap.
 # ---------------------------------------------------------------------------
 
 def _thermal_method_names() -> set[str]:
@@ -2314,15 +1494,10 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
 
     Single-GPU is honoured for any solver the in-process build supports,
     via a temp-dir routing in :func:`solve` (see ``_diag_via_directory``).
-    MPI / MPI+GPU are also honoured via a sibling temp-dir + subprocess
-    routing (:func:`_diag_via_mpi`) that spawns the standalone
-    ``ed_distributed_main`` driver under ``mpiexec``. Python itself
-    cannot host ``MPI_Init`` cleanly, so the launch is always a
-    subprocess; ``qed.solve`` waits for it to finish and reads the
-    HDF5 result file the binary writes into the temp dir.
+    ``device='mpi'``/``'mpi_gpu'`` (the retired subprocess launcher)
+    raise with guidance.
 
-    Returns ``(use_gpu, use_mpi)``. The diag dispatcher uses both flags
-    to pick the correct internal route.
+    Returns ``(use_gpu, use_mpi)``; ``use_mpi`` is always False now.
     """
     if device is None or device == "auto":
         use_gpu = bool(has_cuda_build()) and dim >= (1 << 14)
@@ -2338,20 +1513,17 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
                 "use device='cpu'."
             )
         return True, False
-    if device_lc == "mpi":
-        # Note: the Python extension's WITH_MPI flag is irrelevant for
-        # the MPI dispatch path -- qed.solve(device='mpi') shells out to
-        # the standalone `ed_distributed_main` binary via mpiexec, which
-        # is built independently from the Python extension. The only
-        # hard requirement is that the binary be reachable. We surface
-        # a clear error via `_diag_via_mpi` if it is not, so just record
-        # the device choice here.
-        return False, True
-    if device_lc == "mpi_gpu":
-        # Same comment as device='mpi' above. The `--gpu` flag is
-        # forwarded to ed_distributed_main; the binary itself errors
-        # cleanly if it was built without WITH_CUDA=ON / NCCL.
-        return True, True
+    if device_lc in ("mpi", "mpi_gpu"):
+        raise RuntimeError(
+            "device='mpi' / 'mpi_gpu' was retired (Stage 11d, Jul 2026): "
+            "the subprocess launcher (ed_distributed_main + qed.mpi) and "
+            "the distributed-operator family behind it were removed. "
+            "For MPI runs, launch the CLI under mpirun -- across-sector "
+            "distribution (SectorDistributor) engages automatically for "
+            "symmetry workloads, and the in-process MpiBackend covers "
+            "reduction parallelism. Single-node frontier runs use "
+            "device='gpu' (fp32 mTPQ / rep-lane memory scaling)."
+        )
     raise ValueError(
         f"device={device!r} not in "
         "{'auto', 'cpu', 'gpu', 'mpi', 'mpi_gpu'}."
@@ -2430,8 +1602,16 @@ def _make_params(
             steps = int(getattr(p, "tpq_max_steps", 0) or 0) or DEFAULT_TPQ_STEPS
             p.tpq_max_steps = steps
             p.max_iterations = steps
-        if sector is not None:
-            p.selected_sectors = list(int(q) for q in sector)
+        # NOTE: `sector` is a QUANTUM-NUMBER tuple (one per generator), while
+        # EDParameters.selected_sectors is a list of raw sector INDICES (see
+        # SolveOptions::selected_sectors: "only sectors whose linear index
+        # appears in this list"). Assigning one to the other here was a type
+        # confusion at the language boundary -- it silently read [1,0,0] as
+        # "sectors 1, 0 and 0" and returned their UNION's minimum, so every
+        # irrep of a multi-generator group answered with the global ground
+        # state. The resolution needs the QN->index table, which only exists
+        # once the symmetry info is built, so it happens in
+        # _diag_with_symmetry. Nothing to do here.
         return p
 
     # ---- Eigenvalue solvers ----
@@ -2452,8 +1632,9 @@ def _make_params(
     elif method == DiagonalizationMethod.BLOCK_LANCZOS:
         p.block_size = max(1, min(n_eigs, 4))
 
-    if sector is not None:
-        p.selected_sectors = list(int(q) for q in sector)
+    # `sector` (quantum numbers) is NOT selected_sectors (raw indices) -- see
+    # the note in the thermal branch above. Resolved in _diag_with_symmetry,
+    # where the QN->index table exists.
     return p
 
 
@@ -2487,668 +1668,72 @@ def _diag_via_directory(
 
 
 # ---------------------------------------------------------------------------
-# MPI path (Layer 4b): write the operator to a temp dir, spawn
-# ed_distributed_main under mpiexec, read the HDF5 result file back, and
-# return a real EDResults so callers see the same shape as the in-process
-# CPU/GPU paths. Layer 5a piggybacks on the same helper by additionally
-# writing the symmetry directory and forwarding --use-symmetry.
+# (Stage 11d, Jul 2026: the device='mpi' subprocess lane -- _diag_via_mpi,
+# the ed_distributed_main launcher plumbing, the rank_<r>.h5 slab readers
+# load_mpi_eigenvector(s), and the per-sector Z-weighted aggregation that
+# only that lane produced -- was retired with the distributed-operator
+# family. MPI runs go through the CLI under mpirun: SectorDistributor
+# across sectors + MpiBackend in-process.)
 # ---------------------------------------------------------------------------
 
 
-_MPI_RANKS_DEFAULT = 2  # conservative; users override via extra_params
+# ---------------------------------------------------------------------------
 
+class _ProjectLaneBackend:
+    """Minimal backend envelope for the little-group project lane.
 
-def _ed_method_to_mpi_mode(method: DiagonalizationMethod) -> str:
-    """Map a DiagonalizationMethod to the --mode token ed_distributed_main accepts."""
-    name = method.name.upper()
-    if "TPQ" in name:
-        return "tpq"
-    if name.startswith("FTLM"):
-        return "ftlm"
-    # Phase 9 / Layer 3: thick-restart Lanczos with locking has a real
-    # distributed kernel (distributed_krylov_schur). Route the
-    # KRYLOV_SCHUR family to it directly instead of silently downgrading
-    # to plain Lanczos.
-    if "KRYLOV_SCHUR" in name:
-        return "krylov_schur"
-    return "lanczos"
-
-
-def _diag_via_mpi(
-    operator: Operator,
-    method: DiagonalizationMethod,
-    params: EDParameters,
-    *,
-    symmetry: SymmetryArg,
-    sz: Optional[int],
-    use_gpu: bool,
-    n_ranks: Optional[int],
-    betas: Optional[Sequence[float]],
-    compute_variance: bool,
-    sector: Optional[Sequence[int]] = None,
-    binary: Optional[str] = None,
-    launcher: str = "mpiexec",
-    launcher_binary: Optional[str] = None,
-    verbose: bool,
-) -> EDResults:
-    """Run ed_distributed_main on `operator` and return a real EDResults.
-
-    Layer 4b of the distributed-workflow closure. The flow is:
-
-      1. Write the operator (and, for Layer 5a, the symmetry directory)
-         into a fresh temp directory.
-      2. Spawn ``ed_distributed_main --directory <tmp> --num-sites N
-         --result-file <tmp>/result.h5 [--use-symmetry --sector-index k]
-         [--gpu] --mode <lanczos|ftlm|tpq> ...`` under
-         ``mpiexec -n N``.
-      3. Read the HDF5 result file (eigenvalues / betas / energy /
-         variance / Z / iterations / elapsed_s).
-      4. Pack the data into a real ``EDResults`` so the call shape
-         matches CPU / GPU / symmetry paths.
-
-    The :func:`qed.mpi.run_distributed` wrapper handles launcher /
-    binary discovery, alias mapping (``mtpq`` → ``tpq``), and the
-    ``use_gpu`` flag.
-
-    Multi-sector aggregation (Phase H)
-    ----------------------------------
-    When ``symmetry`` is set, ``mode`` is a thermal solver
-    (``ftlm`` / ``tpq``), and no explicit ``sector=`` was passed,
-    this function spawns ``ed_distributed_main`` ONCE PER irrep
-    (each call uses ``--sector-index <q>``), then combines the
-    per-sector results using the Z-weighted average:
-
-        Z(beta)   = sum_q Z_q(beta)
-        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
-
-    ``EDResults.thermo_data.energy`` then carries the full-trace
-    ``<H>(beta)`` (matching the in-process ``_diag_with_symmetry``
-    behaviour). Pass an explicit ``sector=`` to opt out of the
-    aggregation and get the per-sector ``Z_q`` / ``<H>_q`` instead.
-
-    For non-thermal solvers (``lanczos`` / ``krylov_schur``) the
-    function still picks ``sector=0`` by default; ground-state
-    aggregation across sectors is the user's responsibility (the
-    GS lives in exactly one sector and isn't a Z-weighted sum).
+    The abelian lane copies C++ ``GroundStateResult.backend`` (which
+    ``select_backend`` fills). The project lane has no such struct -- the
+    little-group engine is its own CPU engine with an optional GPU rep-gather
+    -- so it reports the engine's OWN answer here. Same duck-type
+    (``.lane`` / ``.mpi_size``) as the abelian one, so callers need not branch.
     """
-    from . import mpi as _qed_mpi
-    from .symmetry import group_from_generators
 
-    if isinstance(operator, FixedSzOperator):
-        raise NotImplementedError(
-            "qed.solve(H, device='mpi') with a FixedSzOperator is not "
-            "yet wired through ed_distributed_main; the standalone "
-            "binary loads from full-Hilbert dat files only. Pass an "
-            "Operator and use sz= so the projection happens after "
-            "the MPI driver returns, or run a fixed-Sz workflow on "
-            "CPU / GPU."
-        )
+    __slots__ = ("lane", "mpi_size")
 
-    effective_n_ranks = int(n_ranks) if n_ranks else _MPI_RANKS_DEFAULT
-    mode = _ed_method_to_mpi_mode(method)
+    def __init__(self, lane: str, mpi_size: int = 1):
+        self.lane = lane
+        self.mpi_size = mpi_size
 
-    # --------------------------------------------------------------
-    # Translate EDParameters into ed_distributed_main CLI flags.
-    # NOTE: this list does NOT yet contain --result-file,
-    # --use-symmetry, --sector-index, or --sz; those are appended
-    # per-sector inside the dispatch loop below so multi-sector
-    # aggregation can reuse the same base.
-    # --------------------------------------------------------------
-    base_binary_args: list[str] = [
-        "--num-sites", str(int(operator.num_sites)),
-    ]
-    max_iter = int(getattr(params, "max_iterations", 0) or 0)
-    if max_iter > 0:
-        base_binary_args += ["--max-iter", str(max_iter)]
-    exct = int(getattr(params, "num_eigenvalues", 1) or 1)
-    base_binary_args += ["--exct", str(exct)]
-    if mode in ("ftlm", "tpq"):
-        n_samples = int(getattr(params, "tpq_num_samples", 0) or 0) \
-            or int(getattr(params, "ftlm_store_samples", 0) or 0) \
-            or 8
-        base_binary_args += ["--samples", str(n_samples)]
-        if betas:
-            base_binary_args += ["--betas",
-                                 ",".join(f"{float(b):g}" for b in betas)]
-    if mode == "tpq":
-        base_binary_args += ["--delta-beta",
-                             f"{float(getattr(params, 'tpq_delta_tau', 0.05)):g}"]
-        base_binary_args += ["--taylor-order",
-                             str(int(getattr(params, 'tpq_taylor_order', 30)))]
-        if compute_variance:
-            base_binary_args += ["--compute-variance"]
+    def __repr__(self) -> str:      # pragma: no cover - diagnostics only
+        return f"Backend(lane={self.lane!r}, mpi_size={self.mpi_size})"
 
-    tmpdir = tempfile.mkdtemp(prefix="qed_diag_mpi_")
-    eigvec_dir = ""
-    try:
-        _write_operator_directory(operator, tmpdir)
-        base_binary_args += ["--directory", tmpdir]
+def _resolve_sector_quantum_numbers(info: dict[str, Any],
+                                    sector: Sequence[int]) -> int:
+    """QN tuple -> the RAW sector index the C++ filter selects on.
 
-        # ----------------------------------------------------------
-        # Resolve the symmetry / sz / sector configuration into:
-        #   sym_args     : list[str]    -- common flags for every spawn
-        #                                   (--use-symmetry, --sz, ...)
-        #   sectors_list : list[int]    -- sector indices to dispatch
-        #   aggregate    : bool         -- whether to Z-weight-combine
-        #                                   the per-sector results
-        # ----------------------------------------------------------
-        sym_args: list[str] = []
-        sectors_list: list[int] = [0]   # single dispatch by default
-        aggregate: bool = False
+    ``sector=`` names one quantum number per generator; ``selected_sectors``
+    is documented as raw sector INDICES ("only sectors whose linear index
+    appears in this list"). The two axes coincide ONLY for a single generator,
+    which is why every ring test passed while a 4x4 torus silently answered
+    every irrep with the global ground state.
 
-        if symmetry is not None:
-            # Translate the symmetry argument into the on-disk JSON the
-            # ed_distributed_main loader consumes (same writer the
-            # streaming-symmetry path uses).
-            if isinstance(symmetry, GeneratorSet):
-                info = group_from_generators(int(operator.num_sites),
-                                              symmetry.generators)
-            elif isinstance(symmetry, dict):
-                info = symmetry
-            elif isinstance(symmetry, (list, tuple)):
-                info = group_from_generators(
-                    int(operator.num_sites),
-                    [list(map(int, p)) for p in symmetry])
-            else:
-                raise TypeError(
-                    f"symmetry must be GeneratorSet, list[Permutation], "
-                    f"or dict; got {type(symmetry).__name__}")
-            _write_symmetry_directory(tmpdir, info)
-            sym_args.append("--use-symmetry")
-
-            # Phase F: thread sz= onto the symm-projected basis. The
-            # binary's `--sz <n_up>` flag flips
-            # `op->symmetry_info.n_up`, which
-            # `DistributedSymmetryOperator`'s ctor honours by filtering
-            # orbits whose representative popcount does not match.
-            if sz is not None:
-                sym_args += ["--sz", str(int(sz))]
-
-            n_sectors = len(info.get("sectors", []))
-            if sector is not None:
-                # User opted into a single sector -- no aggregation.
-                requested = [int(q) for q in sector]
-                sec_idx = None
-                for s in info.get("sectors", []):
-                    if list(map(int, s.get("quantum_numbers", []))) == requested:
-                        sec_idx = int(s.get("sector_id", 0))
-                        break
-                if sec_idx is None:
-                    raise ValueError(
-                        f"sector={requested!r} does not match any of the "
-                        f"{n_sectors} irreps the symmetry group projects "
-                        "onto. Try qed.find_symmetries(H) to list the "
-                        "available quantum numbers."
-                    )
-                sectors_list = [sec_idx]
-            elif mode in ("ftlm", "tpq") and n_sectors > 1:
-                # Phase H: thermal solver + symm + no explicit sector
-                # -> auto-aggregate across all irreps. Each sector
-                # contributes additively to the partition function so
-                # the Z-weighted average gives the full <H>(beta).
-                sectors_list = list(range(n_sectors))
-                aggregate = True
-            else:
-                # Eigenvalue solver, or single-sector group, or sym+sz
-                # (sz collapses to one effective irrep for thermal
-                # purposes when the user is partitioning by Sz only).
-                sectors_list = [0]
-        elif sz is not None:
-            # Phase G: bare distributed FixedSz path.
-            #
-            # The underlying DistributedOperator iterates [0, 2^N) and
-            # has no fixed-Sz basis of its own. Rather than introducing
-            # a new DistributedFixedSzOperator class, we route through
-            # DistributedSymmetryOperator with a TRIVIAL one-element
-            # symmetry group (identity only) + the Phase F popcount
-            # filter (`--sz`). With |G|=1 every orbit is a singleton,
-            # so the popcount-filtered orbit basis IS exactly the
-            # C(N, n_up) binomial basis -- the same sub-block
-            # FixedSzOperator carries in-process.
-            n_sites = int(operator.num_sites)
-            if not (0 <= int(sz) <= n_sites):
-                raise ValueError(
-                    f"sz={sz} out of range [0, num_sites={n_sites}] for "
-                    f"the bare-FixedSz distributed path."
-                )
-            info = group_from_generators(n_sites, [list(range(n_sites))])
-            _write_symmetry_directory(tmpdir, info)
-            sym_args += ["--use-symmetry", "--sz", str(int(sz))]
-            sectors_list = [0]
-
-        if bool(getattr(params, "compute_eigenvectors", False)):
-            eigvec_dir = os.path.join(tmpdir, "eigvecs")
-            os.makedirs(eigvec_dir, exist_ok=True)
-            base_binary_args += ["--compute-eigenvectors",
-                                 "--eigenvector-dir", eigvec_dir]
-            if aggregate:
-                # Per-rank Lanczos slabs from a thermal aggregation
-                # would mix sectors and lose semantic meaning; reject.
-                raise ValueError(
-                    "qed.solve(device='mpi'/'mpi_gpu', symmetry=..., "
-                    "compute_eigenvectors=True) is not supported when "
-                    "auto-aggregating across sectors. Pass sector= to "
-                    "pin a single irrep, or run an eigenvalue solver "
-                    "(lanczos / krylov_schur)."
-                )
-
-        if verbose:
-            print(f"[qed.solve] MPI dispatch via {tmpdir!r} "
-                  f"(n_ranks={effective_n_ranks}, mode={mode}, "
-                  f"use_gpu={use_gpu}, "
-                  f"symmetry={'yes' if symmetry else 'no'}, "
-                  f"sectors={sectors_list}, aggregate={aggregate})")
-
-        # ----------------------------------------------------------
-        # Dispatch loop. For non-aggregated cases this runs once and
-        # behaves exactly like the pre-Phase-H code; for the symm+
-        # thermal+no-explicit-sector case it runs once per irrep and
-        # the per-sector HDF5 files land at result_q<idx>.h5.
-        # ----------------------------------------------------------
-        per_sector_files: list[tuple[int, str]] = []
-        for sec_idx in sectors_list:
-            rfile = os.path.join(
-                tmpdir,
-                "result.h5" if not aggregate
-                else f"result_q{sec_idx}.h5"
-            )
-            spawn_args = list(base_binary_args) + sym_args
-            if sym_args:
-                spawn_args += ["--sector-index", str(sec_idx)]
-            spawn_args += ["--result-file", rfile]
-
-            completed = _qed_mpi.run_distributed(
-                method=mode,
-                n_ranks=effective_n_ranks,
-                use_gpu=use_gpu,
-                binary_args=tuple(spawn_args),
-                launcher=launcher,
-                binary=binary,
-                launcher_binary=launcher_binary,
-                check=True,
-                capture_output=not verbose,
-            )
-            if verbose and completed and completed.stdout:
-                tail = completed.stdout.strip().splitlines()[-12:]
-                for line in tail:
-                    print(f"[qed.solve.mpi q={sec_idx}] {line}")
-            per_sector_files.append((sec_idx, rfile))
-
-        # ----------------------------------------------------------
-        # Read result(s).
-        # ----------------------------------------------------------
-        if not aggregate:
-            sec_idx, rfile = per_sector_files[0]
-            return _read_mpi_result_file(
-                rfile, mode=mode,
-                eigenvector_dir=eigvec_dir if eigvec_dir else None,
-            )
-
-        # Aggregate thermal: Z-weighted average across sectors.
-        return _aggregate_thermal_sectors(
-            [rf for _, rf in per_sector_files], mode=mode,
-        )
-    finally:
-        # Keep the eigenvector slabs around when the user asked for
-        # them; otherwise drop everything.
-        if not eigvec_dir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        elif verbose:
-            print(f"[qed.solve] MPI eigenvector slabs preserved at {eigvec_dir!r}")
-
-
-def load_mpi_eigenvector(
-    eigenvector_dir: str,
-    k: int = 0,
-) -> Any:
-    """Reassemble a single eigenvector from per-rank slabs.
-
-    ``ed_distributed_main --compute-eigenvectors --eigenvector-dir DIR``
-    writes one ``rank_<r>.h5`` per MPI rank, each containing the local
-    portion of every eigenvector returned by the distributed Lanczos.
-    This helper opens every ``rank_*.h5`` file in ``DIR``, reads slab
-    ``k`` from each, and stitches them in rank order into a single
-    ``numpy.ndarray`` of length ``global_dim`` and dtype
-    ``complex128``.
-
-    Parameters
-    ----------
-    eigenvector_dir : str
-        Directory passed as ``--eigenvector-dir`` to
-        ``ed_distributed_main`` (or, equivalently, the value
-        of ``EDResults.eigenvectors_path`` returned from
-        :func:`qed.solve(..., device='mpi', compute_eigenvectors=True)`).
-    k : int, optional
-        Index of the eigenvector to load (default 0 → ground state).
-
-    Returns
-    -------
-    numpy.ndarray
-        A 1-D ``complex128`` array of length ``global_dim``.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``eigenvector_dir`` is missing or has no ``rank_*.h5`` files.
-    KeyError
-        If the slab dataset for index ``k`` is missing on any rank.
+    ``info['sectors']`` is the table -- Python builds it itself and writes it
+    to ``sector_metadata.json`` -- so the mapping is a lookup, not a guess:
+    match on ``quantum_numbers``, return ``sector_id``.
     """
-    import json
-
-    import h5py
-    import numpy as np
-
-    if not os.path.isdir(eigenvector_dir):
-        raise FileNotFoundError(
-            f"eigenvector directory {eigenvector_dir!r} does not exist."
-        )
-
-    manifest_path = os.path.join(eigenvector_dir, "manifest.json")
-    world_size: Optional[int] = None
-    global_dim: Optional[int] = None
-    if os.path.isfile(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-        world_size = int(manifest.get("world_size", 0)) or None
-        global_dim = int(manifest.get("global_dim", 0)) or None
-
-    rank_files = sorted(
-        f for f in os.listdir(eigenvector_dir)
-        if f.startswith("rank_") and f.endswith(".h5")
-    )
-    if not rank_files:
-        raise FileNotFoundError(
-            f"no rank_*.h5 files in {eigenvector_dir!r} -- did you pass "
-            "--compute-eigenvectors / compute_eigenvectors=True?"
-        )
-
-    by_rank: dict[int, tuple[int, int, "np.ndarray"]] = {}
-    inferred_global: int = 0
-    for fn in rank_files:
-        full = os.path.join(eigenvector_dir, fn)
-        with h5py.File(full, "r") as hf:
-            r = int(hf.attrs["rank"])
-            local_n = int(hf.attrs["local_n"])
-            local_offset = int(hf.attrs["local_offset"])
-            inferred_global = max(
-                inferred_global,
-                int(hf.attrs.get("global_dim", local_offset + local_n)),
-            )
-            slab_name = f"/slab/{k}"
-            if slab_name not in hf:
-                raise KeyError(
-                    f"{full}: missing dataset {slab_name!r} (n_eigenvectors="
-                    f"{int(hf.attrs.get('n_eigenvectors', -1))})"
-                )
-            interleaved = np.asarray(hf[slab_name][:], dtype=np.float64)
-            slab = interleaved[0::2] + 1j * interleaved[1::2]
-            by_rank[r] = (local_offset, local_n, slab)
-
-    if global_dim is None:
-        global_dim = inferred_global
-    if world_size is not None and world_size != len(by_rank):
+    qn_want = [int(q) for q in sector]
+    sectors = list(info.get("sectors", []) or [])
+    if not sectors:
         raise RuntimeError(
-            f"manifest claims world_size={world_size} but only "
-            f"{len(by_rank)} rank_*.h5 files were found in "
-            f"{eigenvector_dir!r}"
-        )
-
-    psi = np.zeros(global_dim, dtype=np.complex128)
-    seen = 0
-    for r in sorted(by_rank):
-        local_offset, local_n, slab = by_rank[r]
-        if slab.shape[0] != local_n:
-            raise RuntimeError(
-                f"rank {r}: slab length {slab.shape[0]} != local_n {local_n}"
-            )
-        psi[local_offset:local_offset + local_n] = slab
-        seen += local_n
-    if seen != global_dim:
-        raise RuntimeError(
-            f"slabs cover {seen} entries but global_dim={global_dim}; "
-            "one or more ranks failed to dump."
-        )
-    return psi
-
-
-def load_mpi_eigenvectors(
-    eigenvector_dir: str,
-    k_max: Optional[int] = None,
-) -> Any:
-    """Reassemble all (or the first ``k_max``) eigenvectors at once.
-
-    Parameters
-    ----------
-    eigenvector_dir : str
-        Directory containing the ``rank_<r>.h5`` slabs.
-    k_max : int, optional
-        Number of eigenvectors to load. ``None`` (default) means
-        every slab dataset present.
-
-    Returns
-    -------
-    numpy.ndarray
-        A 2-D ``complex128`` array of shape ``(n_eig, global_dim)``.
-    """
-    import h5py
-    import numpy as np
-
-    if not os.path.isdir(eigenvector_dir):
-        raise FileNotFoundError(
-            f"eigenvector directory {eigenvector_dir!r} does not exist."
-        )
-    rank_files = sorted(
-        f for f in os.listdir(eigenvector_dir)
-        if f.startswith("rank_") and f.endswith(".h5")
-    )
-    if not rank_files:
-        raise FileNotFoundError(
-            f"no rank_*.h5 files in {eigenvector_dir!r}"
-        )
-
-    with h5py.File(os.path.join(eigenvector_dir, rank_files[0]), "r") as hf:
-        n_eig = int(hf.attrs.get("n_eigenvectors", 0))
-    if k_max is not None:
-        n_eig = min(n_eig, int(k_max))
-    if n_eig == 0:
-        return np.zeros((0, 0), dtype=np.complex128)
-
-    cols = [load_mpi_eigenvector(eigenvector_dir, k=k) for k in range(n_eig)]
-    return np.stack(cols, axis=0)
-
-
-def _read_mpi_thermo_arrays(
-    path: str,
-) -> tuple[list[float], list[float], list[float], list[float]]:
-    """Return ``(betas, energies, Z, lnZ)`` from a thermal MPI result file.
-
-    Used both by :func:`_read_mpi_result_file` (for the user-facing
-    EDResults shape) and by :func:`_aggregate_thermal_sectors` (which
-    needs the raw per-sector ``Z(beta)`` to do the Z-weighted
-    average -- the field is otherwise dropped from EDResults).
-
-    ``lnZ`` is the log-partition-function vector emitted by the
-    canonical-TPQ binary for numerical stability when ``Z`` itself
-    underflows at large beta. Returned empty for backends that don't
-    produce it (FTLM emits only ``/Z``).
-    """
-    import h5py
-    with h5py.File(path, "r") as f:
-        betas = (list(map(float, f["/betas"][:]))
-                 if "/betas" in f else [])
-        energies = (list(map(float, f["/energy"][:]))
-                    if "/energy" in f else [])
-        zvals = (list(map(float, f["/Z"][:]))
-                 if "/Z" in f else [])
-        lnzvals = (list(map(float, f["/lnZ"][:]))
-                   if "/lnZ" in f else [])
-    return betas, energies, zvals, lnzvals
-
-
-def _aggregate_thermal_sectors(
-    per_sector_paths: Sequence[str],
-    *,
-    mode: str,
-) -> EDResults:
-    """Combine per-sector FTLM/TPQ result files into one full-trace EDResults.
-
-    The Phase-H multi-sector dispatch in :func:`_diag_via_mpi` runs
-    ``ed_distributed_main`` once per irrep; each spawn writes its own
-    HDF5 file with that sector's ``Z_q(beta)`` and ``<H>_q(beta)``.
-    This helper reads them back and combines via the
-    additive-partition-function rule so the returned EDResults matches
-    the in-process :func:`_diag_with_symmetry` shape (one
-    ``thermo_data.energy`` per beta, totalled over irreps):
-
-        Z(beta)   = sum_q Z_q(beta)
-        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
-
-    When every per-sector file carries ``/lnZ`` (canonical-TPQ binary
-    since the self-consistent-Z fix), the recombination is done in
-    log-space via logsumexp so the aggregation stays numerically valid
-    at low temperature where each Z_q has wildly different magnitude.
-    """
-    if not per_sector_paths:
-        raise RuntimeError(
-            "internal: _aggregate_thermal_sectors called with no sectors"
-        )
-
-    raw: list[tuple[list[float], list[float], list[float], list[float]]] = [
-        _read_mpi_thermo_arrays(p) for p in per_sector_paths
-    ]
-
-    # All sectors must agree on the beta grid (the binary writes the
-    # same /betas dataset for every sector since the schedule is set
-    # by --betas / --delta-beta on the CLI).
-    betas_ref = raw[0][0]
-    for q, (betas_q, _, _, _) in enumerate(raw):
-        if betas_q != betas_ref:
-            raise RuntimeError(
-                f"sector q={q} returned a different beta grid than "
-                f"sector q=0; cannot aggregate."
-            )
-
-    n_beta = len(betas_ref)
-    if n_beta == 0:
-        raise RuntimeError(
-            "_aggregate_thermal_sectors: per-sector files contain an "
-            "empty /betas grid; nothing to aggregate."
-        )
-
-    # Sanity: every sector must have provided /Z. If a sector returned
-    # only energy[] -- the historical TPQ-binary bug fixed in the
-    # self-consistent-Z change -- we abort loudly rather than silently
-    # producing NaNs.
-    missing = [p for p, (_, _, z, _) in zip(per_sector_paths, raw)
-               if len(z) != n_beta]
-    if missing:
-        raise RuntimeError(
-            "_aggregate_thermal_sectors: the following per-sector "
-            f"result files are missing the /Z dataset (or its length "
-            f"disagrees with /betas) and cannot be combined: {missing}. "
-            "If the underlying binary is canonical-TPQ (the MPI "
-            "distributed lane), ensure it was built after the "
-            "self-consistent-Z fix."
-        )
-
-    have_lnz = all(len(lnz) == n_beta for _, _, _, lnz in raw)
-
-    import math
-    energy_avg: list[float] = [float("nan")] * n_beta
-
-    if have_lnz:
-        # Numerically robust: logsumexp over sectors of lnZ_q to get lnZ,
-        # then normalised weights w_q = exp(lnZ_q - lnZ_max) / sum, and
-        # <H> = sum_q w_q <H>_q.
-        for i in range(n_beta):
-            lnz_col = [lnz[i] for _, _, _, lnz in raw]
-            lnz_max = max(lnz_col)
-            if not math.isfinite(lnz_max):
-                continue
-            ws = [math.exp(lz - lnz_max) for lz in lnz_col]
-            sw = sum(ws)
-            if sw <= 0.0:
-                continue
-            num = 0.0
-            for (_, energies_q, _, _), w in zip(raw, ws):
-                num += w * energies_q[i]
-            energy_avg[i] = num / sw
-    else:
-        # Legacy: linear-space accumulation.
-        z_total = [0.0] * n_beta
-        zh_total = [0.0] * n_beta
-        for _, energies_q, zvals_q, _ in raw:
-            for i in range(n_beta):
-                z_total[i] += zvals_q[i]
-                zh_total[i] += zvals_q[i] * energies_q[i]
-        for i in range(n_beta):
-            if z_total[i] > 0.0:
-                energy_avg[i] = zh_total[i] / z_total[i]
-
-    out = EDResults()
-    out.eigenvalues = list(energy_avg)
-    out.eigenvectors_computed = False
-    out.eigenvectors_path = ""
-    t = ThermodynamicData()
-    t.temperatures = [1.0 / b if b > 0 else float("inf") for b in betas_ref]
-    t.energy = energy_avg
-    out.thermo_data = t
-    return out
-
-
-def _read_mpi_result_file(
-    path: str,
-    *,
-    mode: str,
-    eigenvector_dir: Optional[str],
-) -> EDResults:
-    """Load the HDF5 file ``ed_distributed_main`` wrote into an EDResults."""
-    try:
-        import h5py  # noqa: WPS433
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError(
-            "qed.solve(device='mpi') needs h5py to read the result file "
-            "produced by ed_distributed_main. `pip install h5py`."
-        ) from e
-
-    res = EDResults()
-    res.eigenvalues = []
-    res.eigenvectors_computed = bool(eigenvector_dir)
-    res.eigenvectors_path = eigenvector_dir or ""
-    res.thermo_data = ThermodynamicData()
-
-    if not os.path.isfile(path):
-        raise RuntimeError(
-            f"qed.solve(device='mpi'): expected ed_distributed_main to "
-            f"write {path!r} but it does not exist; check the MPI run "
-            "stdout for an upstream error."
-        )
-
-    with h5py.File(path, "r") as f:
-        if mode == "lanczos":
-            if "/eigenvalues" in f:
-                res.eigenvalues = list(map(float, f["/eigenvalues"][:]))
-        elif mode in ("tpq", "ftlm"):
-            betas = (list(map(float, f["/betas"][:]))
-                     if "/betas" in f else [])
-            energies = (list(map(float, f["/energy"][:]))
-                        if "/energy" in f else [])
-            zvals = (list(map(float, f["/Z"][:]))
-                     if "/Z" in f else [])
-            # Map onto ThermodynamicData; the C++ struct has
-            # temperatures + energy + ... fields, so we fill what we have
-            # and leave the rest empty (the user can compute Cv / S
-            # post-hoc from the betas + energy).
-            t = ThermodynamicData()
-            t.temperatures = [1.0 / b if b > 0 else float("inf")
-                              for b in betas]
-            t.energy = energies if energies else zvals
-            res.thermo_data = t
-            # Surface the imaginary-time trajectory in eigenvalues so the
-            # API matches the in-process thermal path (which puts the
-            # per-step E(beta) into eigenvalues).
-            res.eigenvalues = list(t.energy)
-    return res
+            "qed.solve: sector= was given but the symmetry info carries no "
+            "sector table to resolve it against.")
+    for s in sectors:
+        if [int(x) for x in s.get("quantum_numbers", [])] == qn_want:
+            return int(s.get("sector_id", 0))
+    n_gen = len(sectors[0].get("quantum_numbers", []))
+    if len(qn_want) != n_gen:
+        raise ValueError(
+            f"qed.solve: sector={qn_want} names {len(qn_want)} quantum "
+            f"number(s) but this symmetry has {n_gen} generator(s); pass one "
+            f"per generator.")
+    raise ValueError(
+        f"qed.solve: sector={qn_want} is not an irrep of this group. Valid "
+        f"quantum numbers are "
+        f"{sorted([int(x) for x in s.get('quantum_numbers', [])] for s in sectors)[:8]}"
+        f"{' ...' if len(sectors) > 8 else ''}. (Generators need not be "
+        f"independent -- when they carry a relation, most QN tuples are not "
+        f"characters of the group at all.)")
 
 
 def _diag_with_symmetry(
@@ -3159,6 +1744,7 @@ def _diag_with_symmetry(
     *,
     sz: Optional[int],
     verbose: bool,
+    sector: Optional[Sequence[int]] = None,
     spin_flip="auto",
     time_reversal="auto",
     point_group="auto",
@@ -3216,6 +1802,23 @@ def _diag_with_symmetry(
         )
 
     params.use_symmetry = True
+
+    # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw INDICES.
+    # info['sectors'] is the table that maps between them (Python writes it to
+    # sector_metadata.json), so resolve here -- the first point where it exists.
+    if sector is not None:
+        _sid = _resolve_sector_quantum_numbers(info, sector)
+        # GAP 9 fix: when the lane-B flip projection engages (n_up = N/2,
+        # flip-symmetric H) the sector set carries EXTENDED indices
+        # (k, +) = k and (k, -) = k + n_raw. Naming a momentum means BOTH
+        # parities -- the same contract the project lane's decoder honours.
+        # filter_sectors silently drops out-of-range ids, so selecting the
+        # partner unconditionally is a no-op when the flip is off.
+        _n_raw = len(info.get("sectors", []) or [])
+        params.selected_sectors = [_sid, _sid + _n_raw]
+        if verbose:
+            print(f"[qed.solve] sector={list(sector)} -> raw sector index "
+                  f"{_sid} (+ flip partner {_sid + _n_raw} when projected)")
 
     # ------------------------------------------------------------------
     # 2. Materialise operator + symmetry into a temp directory the
@@ -3389,16 +1992,27 @@ def _normalize_symmetry_info(
         gens = [list(map(int, p)) for p in symmetry]
         return (group_from_generators(int(operator.num_sites), gens)
                 if gens else None)
+    # Duck-typed GeneratorSet-shaped carrier (a ``.generators`` attribute,
+    # optionally ``.star_perms``): qed.solve accepts these, so qed.thermal
+    # must too -- the two verbs took inconsistent symmetry= inputs, a trap
+    # for callers who reuse one symmetry object across both.
+    gens = getattr(symmetry, "generators", None)
+    if gens is not None:
+        gl = [list(map(int, p)) for p in gens]
+        return (group_from_generators(int(operator.num_sites), gl)
+                if gl else None)
     raise TypeError(
-        f"symmetry must be GeneratorSet, list[Permutation], or dict, "
-        f"got {type(symmetry).__name__}"
+        f"symmetry must be GeneratorSet, list[Permutation], dict, or an "
+        f"object exposing a .generators attribute, got "
+        f"{type(symmetry).__name__}"
     )
 
 
 def _raw_generators(symmetry: SymmetryArg) -> Optional[list[list[int]]]:
     """The UNRESTRICTED site-permutation generators of ``symmetry`` (before
     the abelian-subgroup guard in ``group_from_generators``). Used to decide
-    whether the spatial group is non-abelian and to feed the SAB engine."""
+    whether the spatial group is non-abelian and to feed split_nonabelian
+    (Stage 9c; previously the monolithic SAB engine)."""
     if symmetry is None:
         return None
     if isinstance(symmetry, GeneratorSet):
@@ -3408,7 +2022,9 @@ def _raw_generators(symmetry: SymmetryArg) -> Optional[list[list[int]]]:
     elif isinstance(symmetry, dict):
         gens = symmetry.get("generators")
     else:
-        return None
+        gens = getattr(symmetry, "generators", None)  # duck-typed carrier
+        if gens is None:
+            return None
     return [list(map(int, p)) for p in gens] if gens else None
 
 
@@ -3432,6 +2048,10 @@ def full_spectrum(
     operator: Operator,
     *,
     symmetry: SymmetryArg = None,
+    sz: Union[int, str, tuple, None] = None,
+    sector: Optional[Sequence[int]] = None,
+    irrep: Optional[dict] = None,
+    flip: Optional[int] = None,
     sz_conserved: Optional[bool] = None,
     spin_length: float = 0.5,
     device: str = "cpu",
@@ -3443,6 +2063,14 @@ def full_spectrum(
 ) -> EDResults:
     """Compute the COMPLETE eigenvalue spectrum of ``operator`` decomposed
     by all available ``(Sz x spatial)`` symmetries.
+
+    ``sz``: name a magnetisation block (a SET-BIT count -- the number of DOWN
+    spins; ``sz=0`` is fully polarised UP -- see :func:`solve`) to get the
+    complete spectrum OF THAT BLOCK. Omit it for every sector, merged (the
+    default, and the true full spectrum). Naming a sector disables the
+    flip-transport half-sweep: that optimisation mirrors a half sweep onto its
+    partner sectors, which is meaningless -- and would silently double-count --
+    when the caller asked for one specific block.
 
     Each ``(n_up, spatial irrep)`` block is dense-diagonalised through the
     memory-light on-the-fly representative SpMV
@@ -3474,6 +2102,21 @@ def full_spectrum(
     import math
 
     N = int(operator.num_sites)
+    # ONE Sz spelling (Jul 2026): int | "auto" | "off" ((lo, hi) windows
+    # interact with the flip-transport mirror -- not supported here yet).
+    _szmode = normalize_sz(sz, verb="full_spectrum",
+                           sz_conserved=sz_conserved)
+    if _szmode[0] == "named":
+        sz = _szmode[1]
+    elif _szmode[0] == "off":
+        sz, sz_conserved = None, False
+    elif _szmode[0] == "window":
+        raise NotImplementedError(
+            "qed.full_spectrum: sz=(lo, hi) windows are not supported on "
+            "this verb (they interact with the flip-transport mirror); "
+            "name a single block or take the full sweep.")
+    else:
+        sz = None
     symmetry = resolve_auto_symmetry(operator, symmetry, verbose=verbose,
                                      lattice=lattice)
     info = _normalize_symmetry_info(operator, symmetry)
@@ -3495,98 +2138,157 @@ def full_spectrum(
         except Exception:
             _flip_transport = False
 
-    # NON-ABELIAN spatial group: the streaming-symmetry rep path below only
-    # handles abelian (1-D irrep) projection and would silently restrict to a
-    # maximal abelian subgroup. Route to the symmetry-adapted (SAB) engine,
-    # which reduces by the FULL group including d_G>=2 irreps. n_up=-1 reduces
-    # the whole Hilbert space, so the complete spectrum (every Sz) comes out in
-    # one call. This is the dense full diagonalisation benefiting from the full
-    # non-abelian symmetry machinery.
+    # Spatial group: Stage 9c routes EVERY projectable call through the
+    # factorized little-group engine (the streaming rep path below only
+    # handles abelian 1-D irrep projection). Explicit NON-ABELIAN
+    # generator input -- which previously had no route except the
+    # monolithic SAB engine -- is split into (maximal abelian subgroup,
+    # coset residues) by split_nonabelian. 'full' raises on decline;
+    # 'auto' degrades to the abelian streaming path. device='gpu'
+    # batches ALL block eigensolves through one cuSOLVER pool call.
     _gens = _raw_generators(symmetry)
     _star = list(getattr(symmetry, "star_perms", None) or []) \
         if symmetry is not None else []
-    gens_full = None
-    if _gens is not None and _generators_nonabelian(_gens):
-        gens_full = [list(g) for g in _gens]     # explicit non-abelian input
-    elif (_gens is not None and _star
-          and point_group not in (False, 0, "off", "none")):
-        cand = [list(g) for g in _gens] + [list(p) for p in _star]
-        if _generators_nonabelian(cand):
-            gens_full = cand                     # clique + residue = full group
-    if gens_full is not None:
-        # Stage 7: the FACTORIZED little-co-group engine first (one
-        # momentum per star, per-irrep blocks inside the star rep's
-        # matrix-free sector); the monolithic SAB engine remains the
-        # graceful fallback (and the sole route for explicit
-        # non-abelian generator input, which has no clique/residue
-        # split to factor over). device='gpu' batches ALL block
-        # eigensolves through one cuSOLVER stream-pool call.
-        _lg = _little_group_parts(symmetry)
-        if _lg is not None:
-            _A, _res = _lg
-            try:
-                eigs = []
-                if sz_conserved:
-                    top = N // 2 if _flip_transport else N
-                    for n_up in range(top + 1):
-                        d = dict(_core.little_group_full_spectrum(
-                            operator, _A, _res, n_up=int(n_up),
-                            use_gpu=use_gpu))
-                        block = [float(e) for e in d["eigenvalues"]]
-                        eigs.extend(block)
-                        if _flip_transport and n_up * 2 != N:
-                            eigs.extend(block)   # isospectral mirror
+    _sym_for_lane = symmetry
+    if (_gens is not None and _generators_nonabelian(_gens) and not _star):
+        _sym_for_lane = [list(g) for g in _gens]   # explicit raw-list input
+    lane = resolve_projection_lane(
+        _sym_for_lane, point_group=point_group, consumer="full_spectrum",
+        eigenvalues_only=True, verbose=verbose)
+    if lane.mode != "project" and (sector is not None or irrep is not None
+                                   or flip is not None):
+        # Same contract as qed.solve: these name little-group structure, which
+        # only the projection lane has. Refusing beats accepting an argument
+        # the lane cannot honour.
+        raise ValueError(
+            f"qed.full_spectrum: sector=/irrep=/flip= name projection-lane "
+            f"structure, but this call resolved to the abelian lane "
+            f"({lane.reason or 'point_group is off'}). Pass point_group='full' "
+            f"to require projection, or drop them.")
+    if lane.mode == "project":
+        _A, _res = lane.A, lane.residues
+        _fs_only_k0: list[int] = []
+        _fs_only_irrep: list[int] = []
+        if sector is not None or flip is not None:
+            if sector is None:
+                raise ValueError(
+                    "qed.full_spectrum: flip= selects a half of a MOMENTUM "
+                    "star, so it needs sector= alongside it.")
+            _fs_plan = dict(_core.little_group_full_spectrum(
+                operator, _A, _res,
+                n_up=(int(sz) if sz is not None
+                      else (N // 2 if sz_conserved else -1)),
+                spin_flip=_sf, time_reversal=_tr, plan_only=True))
+            _fgens = getattr(_sym_for_lane, "generators", None)
+            _fords = getattr(_sym_for_lane, "orders", None)
+            if _fgens is None or _fords is None:
+                raise ValueError(
+                    "qed.full_spectrum: sector= names quantum numbers per "
+                    "GENERATOR, so it needs a GeneratorSet (e.g. from "
+                    "qed.find_symmetries), not a raw permutation list -- a raw "
+                    "list carries no generator/order basis to name them in.")
+            _fd = decode_star_for_sector(
+                _fs_plan["stars"], _fs_plan["irrep_characters"], _A,
+                _fgens, _fords, sector, flip=flip)
+            if isinstance(_fd, str):
+                raise ValueError(
+                    f"qed.full_spectrum: sector={list(sector)} could not be "
+                    f"resolved: {_fd}")
+            _fs_only_k0, _fkraw = list(_fd[0]), _fd[1]
+            if irrep is not None:
+                if len(_fs_only_k0) != 1:
+                    raise ValueError(
+                        "qed.full_spectrum: irrep= needs a single star, but "
+                        f"sector={list(sector)} resolved to "
+                        f"{len(_fs_only_k0)} (both flip parities). Pass "
+                        "flip=0 or flip=1 too.")
+                _fst = next((x for x in _fs_plan["stars"]
+                             if int(x["k0"]) == _fs_only_k0[0]), None)
+                _fid = decode_irrep_for_character(_fst, irrep)
+                if isinstance(_fid, str):
+                    raise ValueError(
+                        f"qed.full_spectrum: irrep={irrep} could not be "
+                        f"resolved on star k0={_fs_only_k0[0]}: {_fid}")
+                _fs_only_irrep = [_fid[0]]
+        elif irrep is not None:
+            raise ValueError(
+                "qed.full_spectrum: irrep= names a LITTLE-CO-GROUP irrep, "
+                "which is defined per momentum star -- pass sector= too.")
+        try:
+            eigs = []
+            if sz_conserved:
+                if sz is not None:
+                    # ONE named magnetisation block: its complete spectrum,
+                    # no mirror (the caller asked for this sector, not its
+                    # flip partner).
+                    _sectors = [int(sz)]
+                    _mirror = False
                 else:
+                    top = N // 2 if _flip_transport else N
+                    _sectors = list(range(top + 1))
+                    _mirror = _flip_transport
+                for n_up in _sectors:
                     d = dict(_core.little_group_full_spectrum(
-                        operator, _A, _res, use_gpu=use_gpu))
-                    eigs = [float(e) for e in d["eigenvalues"]]
-                if verbose:
-                    print("[qed.full_spectrum] non-abelian group -> "
-                          "LITTLE-GROUP engine (factorized d_G reduction)"
-                          + (", flip transport halves the Sz sweep"
-                             if _flip_transport else ""))
-                out = EDResults()
-                out.eigenvalues = sorted(eigs)
-                return out
-            except Exception as exc:            # noqa: BLE001 -- graceful
-                if verbose:
-                    print(f"[qed.full_spectrum] little-group lane declined "
-                          f"({exc}); using the monolithic SAB engine.")
-        # SAB engine: FULL-group projection including d_G >= 2 irreps --
-        # the strongest dense reduction (blocks ~ dim / |G|). The point
-        # group is inside the projection here, so star reduction is
-        # subsumed; the flip transport still halves the Sz sweep.
-        if verbose:
-            print("[qed.full_spectrum] non-abelian group -> SAB engine "
-                  "(full d_G reduction)"
-                  + (", flip transport halves the Sz sweep"
-                     if _flip_transport else ""))
-        eigs = []
-        if sz_conserved:
-            top = N // 2 if _flip_transport else N
-            for n_up in range(top + 1):
-                spec = _core.symmetry_adapted_eigenvalues(
-                    operator, gens_full, n_up=int(n_up), use_gpu=use_gpu)
-                block = [float(e) for e in spec["eigenvalues"]]
-                eigs.extend(block)
-                if _flip_transport and n_up * 2 != N:
-                    eigs.extend(block)           # isospectral N - n_up mirror
-                if verbose:
-                    print(f"[qed.full_spectrum]   SAB n_up={n_up} "
-                          f"got={len(block)}"
-                          + (" (mirrored)" if _flip_transport
-                             and n_up * 2 != N else ""))
-        else:
-            spec = _core.symmetry_adapted_eigenvalues(
-                operator, gens_full, n_up=-1, use_gpu=use_gpu)
-            eigs = [float(e) for e in spec["eigenvalues"]]
-        out = EDResults()
-        out.eigenvalues = sorted(eigs)
-        return out
+                        operator, _A, _res, n_up=int(n_up),
+                        use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr,
+                        only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
+                    block = [float(e) for e in d["eigenvalues"]]
+                    eigs.extend(block)
+                    if _mirror and n_up * 2 != N:
+                        eigs.extend(block)   # isospectral mirror
+            else:
+                d = dict(_core.little_group_full_spectrum(
+                    operator, _A, _res, use_gpu=use_gpu,
+                    spin_flip=_sf, time_reversal=_tr,
+                    only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
+                eigs = [float(e) for e in d["eigenvalues"]]
+            if verbose:
+                print("[qed.full_spectrum] spatial group -> "
+                      "LITTLE-GROUP engine (factorized d_G reduction)"
+                      + (", flip transport halves the Sz sweep"
+                         if _flip_transport else ""))
+            out = EDResults()
+            out.eigenvalues = sorted(eigs)
+            return out
+        except Exception as exc:            # noqa: BLE001 -- graceful
+            if isinstance(point_group, str) \
+                    and point_group.lower() == "full":
+                raise
+            if verbose:
+                print(f"[qed.full_spectrum] little-group lane declined "
+                      f"({exc}); falling back to the abelian streaming "
+                      "path.")
 
-    # No spatial symmetry: a plain dense full diagonalisation already
-    # returns every eigenvalue. (Sz-block looping without a spatial group
-    # buys nothing for the spectrum multiset, so keep it simple.)
+    # No spatial symmetry. Sz / Sz-parity / flip-transport / time-reversal
+    # still BLOCK the sweep, and eigh is O(d^3), so the blocking is a large
+    # win even though it "buys nothing for the spectrum multiset" -- the old
+    # single plain-dense solve here cost 32 s for a 13-site XXZ tree whose
+    # Sz-blocked sweep is seconds (and its 2^N dense build was also the F6
+    # first-commit race site). Route through the STREAMING sector path below
+    # with the TRIVIAL spatial group (identity generator; one k=0 irrep per
+    # sector): plain U(1) Sz blocks -- or the rep lane's native Sz-parity
+    # half sectors for U(1)-broken-but-parity-graded models -- with the fast
+    # rep-walk dense assembly and the sector-parallel FULL loop. (The
+    # factorized little-group engine is the WRONG lane here: measured 16 s
+    # per 2048-dim trivial-star block vs sub-second on the streaming path.)
+    # Plain dense remains only when there is literally nothing to exploit.
+    if info is None:
+        _parity = False
+        if not sz_conserved:
+            try:
+                _parity = bool(_core.detect_hamiltonian_symmetries(
+                    operator)["sz_parity"])
+            except Exception:
+                _parity = False
+        if sz_conserved or _parity:
+            info = _normalize_symmetry_info(operator, [list(range(N))])
+            if verbose and info is not None:
+                print("[qed.full_spectrum] trivial spatial group -> "
+                      + ("Sz-blocked" if sz_conserved
+                         else "Sz-parity-blocked")
+                      + " streaming sweep (no 2^N dense build)"
+                      + (", flip transport halves the Sz sweep"
+                         if _flip_transport else ""))
     if info is None:
         params = _bare_full_params(N, 1 << N, spin_length)
         params.use_gpu = use_gpu
@@ -3608,10 +2310,18 @@ def full_spectrum(
         _write_operator_directory(operator, tmpdir)
         _write_symmetry_directory(tmpdir, info)
 
-        sz_values: list[Optional[int]] = (
-            (list(range(N // 2 + 1)) if _flip_transport
-             else list(range(N + 1)))
-            if sz_conserved else [None])
+        if sz is not None and sz_conserved:
+            # ONE named magnetisation block. Flip transport mirrors a HALF
+            # sweep onto its partner; with a single named sector there is no
+            # sweep to halve, so disable it rather than silently returning
+            # the partner's copy too.
+            sz_values: list[Optional[int]] = [int(sz)]
+            _flip_transport = False
+        else:
+            sz_values = (
+                (list(range(N // 2 + 1)) if _flip_transport
+                 else list(range(N + 1)))
+                if sz_conserved else [None])
         # Stage 7a star maps for the per-Sz sector loops.
         _star_maps = None
         if _star and point_group not in (False, 0, "off", "none") \

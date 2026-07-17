@@ -204,8 +204,27 @@ def test_thermal_multi_sz_lands_per_sector_non_tpq(tmp_path, method):
         )
 
 
-def test_thermal_kpm_dos_multi_sz_lands_per_sector(tmp_path):
-    """Same contract for KPM_DOS."""
+def test_thermal_kpm_dos_ignores_the_sz_window_and_saves_one_file(tmp_path):
+    """KPM_DOS does NOT share the per-sector contract, ON PURPOSE.
+
+    This test used to assert the FTLM/LTLM contract ("Same contract for
+    KPM_DOS") and had been failing on main: it demanded per-sector
+    ``n_up_<n>/ed_results.h5`` files and ``hdf5_path == outdir`` from a
+    method that deliberately ignores the Sz window entirely.
+
+    ``qed.thermal`` forces ``sz_conserved = False`` for KPM_DOS
+    (thermal.py, "KPM_DOS produces a density of states -- a full-SPECTRUM
+    quantity"): per-sector sub-DOS land on different Chebyshev grids that
+    the thermodynamic recombination cannot merge, so an Sz-decomposed run
+    would silently return an EMPTY ``dos_*`` -- the whole deliverable of
+    the method. The full-Hilbert lane is therefore correct, and it makes
+    exactly one aggregated ``ed_results.h5`` whose path IS the file.
+
+    So this pins what KPM_DOS actually promises. Do not "restore" the
+    per-sector assertions: the per-sector return path carries no ``dos_*``
+    fields at all, and routing KPM through it trades a 128-point density
+    of states for a tidier directory layout.
+    """
     H = _ring()
     outdir = str(tmp_path / "thermal_kpm_dos_multi_sz")
 
@@ -220,11 +239,17 @@ def test_thermal_kpm_dos_multi_sz_lands_per_sector(tmp_path):
         random_seed=22, verbose=False, device="cpu",
     )
 
-    assert R.hdf5_path == outdir
-    assert len(R.sector_hdf5_paths) == (sz_hi - sz_lo + 1)
-    for n_up, path in R.sector_hdf5_paths.items():
-        assert path.endswith(f"n_up_{n_up}/ed_results.h5")
-        assert os.path.exists(path)
+    # One aggregated file, and hdf5_path names the FILE (no per-sector
+    # namespacing is needed -- there is only one writer).
+    assert R.hdf5_path == os.path.join(outdir, "ed_results.h5")
+    assert os.path.exists(R.hdf5_path)
+    assert R.sector_hdf5_paths == {}
+
+    # The Sz window was ignored: the run is full-Hilbert, so the DOS is
+    # the COMPLETE one. This is the assertion the old test traded away.
+    assert not R.used_sz_decomposition
+    assert len(R.dos_energies) > 0
+    assert len(R.dos_values) == len(R.dos_energies)
 
 
 # ===========================================================================
@@ -407,6 +432,7 @@ def test_solve_streaming_symmetry_fulldiag_gpu_small_sectors(tmp_path):
         opts.output_dir = outdir
         opts.method = _core.SolveMethod.FullDiag
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
 
         agg = _core.workflows_solve_streaming_symmetry_directory(
             fixture_dir, N_SITES, 0.5, opts, None
@@ -463,6 +489,7 @@ def test_solve_plain_operator_device_gpu_runs_on_gpu(tmp_path):
     opts.n_up = 7
     opts.method = _core.SolveMethod.Lanczos
     opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
     fsz = H.make_fixed_sz(7)
     gs = _core.workflows_solve(fsz, opts)
     assert gs.backend.lane == "gpu", (
@@ -524,6 +551,7 @@ def test_thermal_device_gpu_builds_gpu_operator(tmp_path):
     opts.temp_max      = 4.0
     opts.output_dir    = str(tmp_path / "th_gpu")
     opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
     r = _core.workflows_thermal(H, opts)
     assert r.backend.lane == "gpu", (
         "qed.thermal(device='gpu') did not run on the GPU lane; the "
@@ -622,6 +650,8 @@ def test_thermal_ftlm_gpu_runs_on_gpu(tmp_path):
         opts.temp_max      = 4.0
         opts.random_seed   = 0xCAFEFEED
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     tr_gpu = _core.workflows_thermal(op, _opts(True))
@@ -740,6 +770,7 @@ def test_solve_streaming_symmetry_gpu_lane(tmp_path):
         opts.tolerance       = 1e-10
         opts.compute_vectors = False
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         gs = _core.workflows_solve_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -769,6 +800,7 @@ def test_solve_streaming_symmetry_sz_gpu_lane(tmp_path):
         opts.tolerance       = 1e-10
         opts.compute_vectors = False
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         gs = _core.workflows_solve_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts,
             N_SITES // 2,  # fixed_sz_n_up
@@ -800,6 +832,7 @@ def test_thermal_streaming_symmetry_gpu_lane(tmp_path):
         opts.temp_min      = 0.5
         opts.temp_max      = 4.0
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         tr = _core.workflows_thermal_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -830,6 +863,7 @@ def test_thermal_streaming_symmetry_sz_gpu_lane(tmp_path):
         opts.temp_min      = 0.5
         opts.temp_max      = 4.0
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         tr = _core.workflows_thermal_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts,
             N_SITES // 2,
@@ -859,6 +893,7 @@ def test_spectral_streaming_symmetry_gpu_lane(tmp_path):
         opts.omega_max  = 4.0
         opts.broadening = 0.1
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
         sr = _core.workflows_spectral_streaming_symmetry_directory(
             tmp, N_SITES, 0.5, opts, None,
         )
@@ -969,6 +1004,7 @@ def test_spectral_cross_irrep_lane_propagation_gpu(tmp_path):
         opts.broadening        = 0.1
         opts.momentum_transfer = [1.0 / N_SITES]
         opts.backend.allow_gpu = True
+        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
 
         agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
             tmp, N_SITES, 0.5,
@@ -1019,6 +1055,8 @@ def test_spectral_ftlm_dynamical_gpu_runs_on_gpu(tmp_path):
         opts.broadening    = 0.2
         opts.krylov_dim    = 40
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
@@ -1078,6 +1116,8 @@ def test_spectral_kpm_dynamical_gpu_runs_on_gpu(tmp_path):
         opts.broadening    = 0.1
         opts.kpm_moments   = 128
         opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
         return opts
 
     sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
@@ -1129,6 +1169,8 @@ def test_spectral_cross_irrep_gs_gpu_runs_on_gpu(tmp_path):
             opts.krylov_dim        = 40
             opts.momentum_transfer = [1.0 / N_SITES]
             opts.backend.allow_gpu = allow_gpu
+            if allow_gpu:
+                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
             return opts
 
         agg_gpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
@@ -1207,6 +1249,8 @@ def test_spectral_ftlm_cross_irrep_lane_is_cpu(tmp_path):
             opts.krylov_dim        = 20
             opts.momentum_transfer = [1.0 / N_SITES]
             opts.backend.allow_gpu = allow_gpu
+            if allow_gpu:
+                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
             agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
                 tmp, N_SITES, 0.5,
                 _sz_q_observable_transforms(1),

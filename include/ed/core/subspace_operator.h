@@ -106,10 +106,12 @@ public:
     // -----------------------------------------------------------------
 
     /// Fixed-Sz lane: build the sorted basis + Lin (1990) O(1) index table
-    /// for the ``n_up`` magnetisation sector.
+    /// for the ``n_up`` magnetisation sector -- or the tableless combinadic
+    /// twin when the list would bust the byte budget (dimension-aware
+    /// default; env/planner overrides win, see basis_policy_hook.h).
     SubspaceOperator(std::uint64_t n_bits, float spin_l, std::int64_t n_up)
         : Operator(n_bits, spin_l),
-          producer_(ed::planner::prefer_tableless_fixed_sz()
+          producer_(ed::planner::prefer_tableless_fixed_sz(n_bits, n_up)
                         ? Producer::build_tableless(n_bits, n_up)
                         : Producer::build(n_bits, n_up)) {
         std::cout << "Fixed Sz basis: n_bits=" << n_bits
@@ -235,41 +237,12 @@ public:
                 // a throwing provider.
                 if (!producer_.csr_available()) return false;
             }
-            // Eager sector (orbit CSR already materialised): the direct
-            // orbit-walk assembler is fastest (no CSR intermediate). Requires
-            // pure permutations -- flip sectors are always rep-lazy so they took
-            // the branch above; this guard only fires on a hypothetical
-            // csr-available-AND-flipped sector.
-            if (producer_.ensureRepData().has_flips()) return false;
-            producer_.ensureHostCsr();   // materialise sector orbits for policy()
-            auto basis_pol = producer_.policy();
-            using PolicyT = decltype(basis_pol);
-            static_assert(!ed::matvec::kernel::policy_multi_target_v<PolicyT>,
-                          "orbit-walk dense assembly is single-target only "
-                          "(non-abelian d_G>=2 goes through the SAB solver)");
-            const double spin    = static_cast<double>(this->getSpin());
-            const double spin_sq = spin * spin;
-            // Serial assembly (O(|G|*nnz), cheap next to the dense eigensolve):
-            // reuse the SAME parity-tested per-row enumerator that
-            // build_reduced_symmetry_csr drives, writing each projected element
-            // conj(base_contrib*coeff_modifier) straight into the column-major
-            // dense buffer. Done single-threaded on purpose -- the matrix-free
-            // gather backend is the parallel hot path; this one-shot build is
-            // off the critical path, and a serial walk keeps the per-emit sector
-            // reads trivially data-race-free (the parallel CSR builder is only
-            // exercised for the rep policy).
-            for (std::uint64_t r = 0; r < N; ++r) {
-                ed::matvec::detail::rep_symmetry_row_for_each<PolicyT, Complex>(
-                    r, basis_pol, spin, spin_sq,
-                    this->terms_.diag_one_body, this->terms_.offdiag_one_body,
-                    this->terms_.diag_two_body, this->terms_.mixed_two_body,
-                    this->terms_.offdiag_two_body, this->terms_.three_body,
-                    [&](std::uint64_t dst, const Complex& v) {
-                        dense[static_cast<std::size_t>(r)
-                              + static_cast<std::size_t>(dst) * N] += v;
-                    });
-            }
-            return true;
+            // (Stage 11c-2b: the eager orbit-walk dense assembler that lived
+            // here was deleted -- every production SectorBasis is rep-lazy,
+            // so the rep-CSR densify above is the ONE assembly path and this
+            // tail was unreachable. Declining falls to the caller's matvec
+            // column build, which rides the same rep kernel.)
+            return false;
         } else {
             (void)dense; (void)N;
             return false;
@@ -539,20 +512,6 @@ protected:
     //     out-of-line bind_cuda key-function behaviour).
     [[nodiscard]] MatvecFn bind_cuda_impl_() const;
 #endif
-
-    // Derive the shared magnetisation ``n_up`` of a fixed-Sz symmetry sector
-    // (every orbit representative shares one popcount); -1 for a full-Hilbert
-    // (sym-only) sector. Selects the GPU dense combinadic rank-table lookup.
-    // Symmetry-only; instantiated by the symmetry bind_cuda_impl_.
-    [[nodiscard]] int sector_n_up_() const noexcept {
-        const auto& states = producer_.sector().basis_states;
-        if (states.empty()) return -1;
-        const int n_up = __builtin_popcountll(states.front().orbit_rep);
-        for (const auto& st : states) {
-            if (__builtin_popcountll(st.orbit_rep) != n_up) return -1;
-        }
-        return n_up;
-    }
 
 private:
     mutable Producer producer_;

@@ -45,9 +45,6 @@ Submodules
 * :mod:`qed.symmetry` -- programmatic permutation-group helpers.
 * :mod:`qed.dssf` -- DSSF observable-pair builders (data helpers only;
   the actual workflow lives in :func:`qed.spectral`).
-* :mod:`qed.bfg` -- BFG order-parameter helpers.
-* :mod:`qed.mpi` -- helper for the standalone ``mpiexec
-  ed_distributed_main`` binary.
 * :mod:`qed.auto_tune` -- internal heuristic tuner (used by
   :func:`qed.spectral` when ``auto_tune=True``).
 """
@@ -83,8 +80,6 @@ from . import auto_tune  # heuristic helpers consumed internally by qed.spectral
 from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
 from . import input  # standalone C++ ed_input library bindings
 from . import symmetry  # programmatic site-permutation symmetry DSL
-from . import bfg  # BFG order-parameter library helpers
-from . import mpi  # mpiexec ed_distributed_main runner helper
 from . import helpers  # re-export edlib utilities under qed.helpers
 from . import workflow  # internal implementation module for qed.solve
 from .workflow import (  # noqa: E402  (top-level re-exports)
@@ -94,10 +89,18 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     full_spectrum,
     find_symmetries,
     list_diag_parameters,
-    load_mpi_eigenvector,
-    load_mpi_eigenvectors,
     solver_device_support,
 )
+
+
+def debug_env() -> str:
+    """Stage 10b: every symmetry-stack environment gate with its live
+    value, default, and one-line meaning (the X-list in
+    ``include/ed/symmetry/env_gates.h`` is the single inventory).
+    Print this into bug reports -- machine-to-machine behaviour
+    differences (a cluster with legacy drivers, a stray bisection gate)
+    become one diff instead of a grep of the tree."""
+    return _core.dump_env_gates()
 from . import thermal as _thermal_module  # one canonical finite-T entry point
 from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
 from . import spectral as _spectral_module  # one canonical spectral entry point
@@ -147,14 +150,10 @@ __all__ = [
     "hamiltonian",
     "input",
     "symmetry",
-    "bfg",
-    "mpi",
     "helpers",
     "workflow",
     # Helpers
     "list_diag_parameters",
     "solver_device_support",
-    "load_mpi_eigenvector",
-    "load_mpi_eigenvectors",
     "__version__",
 ]

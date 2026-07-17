@@ -33,11 +33,9 @@
 // LinIndexTable per sector); the POD policies are non-owning and
 // therefore cannot drive sector generation by themselves.
 //
-// The legacy classes ``Operator``, ``FixedSzOperator``,
-// ``StreamingSymmetryOperator``, ``FixedSzStreamingSymmetryOperator``
-// keep their storage layout; ``FixedSzOperator`` now exposes a
-// ``subspace()`` method returning a non-owning ``FixedSzSubspace`` view
-// over its existing fields. Future operator-side refactors (R3) may
+// ``FixedSzOperator`` exposes a ``subspace()`` method returning a
+// non-owning ``FixedSzSubspace`` view over its existing fields (the
+// legacy monolithic streaming operators are gone). Future refactors may
 // migrate ownership in here without disturbing the new abstraction's
 // public surface.
 //

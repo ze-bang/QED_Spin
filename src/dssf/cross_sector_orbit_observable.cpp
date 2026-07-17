@@ -89,14 +89,23 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
             "CrossSectorOrbitObservable: src group_size is zero "
             "(streaming-symmetry operator missing automorphism metadata?).");
     }
-    if (dst_.group_size() != G) {
-        throw std::invalid_argument(
-            "CrossSectorOrbitObservable: src/dst group_size mismatch ("
-            + std::to_string(G) + " vs "
-            + std::to_string(dst_.group_size()) + ") -- the two sectors "
-            "must come from the same (possibly flip-extended) group.");
+    // U2b-r1: src and dst may come from DIFFERENT group extensions -- a
+    // flip-extended (k, +/-) source (|G'| = 2|A|) scattering into raw
+    // destination sectors (|A|). The normalization convention stores
+    // per-rep norms of sqrt(|Stab|) (rep_projection.h closed form), i.e.
+    // each side's basis vector is short a sqrt(|G_side|); the bra-ket
+    // therefore carries 1/sqrt(G_src * G_dst), which reduces to the
+    // historical 1/G when the groups match (every existing pin
+    // unchanged). The destination group must still divide or extend the
+    // same automorphism content -- that is the caller's contract (both
+    // handles built from one engine context).
+    const std::uint64_t Gd = dst_.group_size();
+    if (Gd == 0) {
+        throw std::runtime_error(
+            "CrossSectorOrbitObservable: dst group_size is zero.");
     }
-    group_norm_ = 1.0 / static_cast<double>(G);
+    group_norm_ = 1.0 / std::sqrt(static_cast<double>(G)
+                                  * static_cast<double>(Gd));
     // Stage 8d: build the POD policy views once. The rep-lane inner loops
     // regenerate the orbit / projection arithmetically through these.
     if (src_.is_rep()) src_pol_ = ed::matvec::rep_policy_from(*src_.rd);

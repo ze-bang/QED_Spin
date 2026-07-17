@@ -245,8 +245,8 @@ to_legacy(const SpectralOptions& opts, std::uint64_t dim_hint = 0);
 //     spectral`. Mirrors Python's `qed.solve(H, ...)` when `H` is built
 //     via `qed.input.HamiltonianBuilder` or `qed.Operator`.
 //   * Operator form: takes a pre-built `LinearOperator&`. For callers who
-//     hold an `Operator` / `FixedSzOperator` / `StreamingSymmetryOperator`
-//     directly and don't want to round-trip through `OperatorSpec`.
+//     hold an `Operator` / `FixedSzOperator` / `SectorOperator` directly
+//     and don't want to round-trip through `OperatorSpec`.
 // ===========================================================================
 
 // Note: the OperatorSpec form takes `spec` by value because OperatorSpec

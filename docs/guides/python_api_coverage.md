@@ -16,11 +16,11 @@ For how to *invoke* each mode (files, `ED`, `import`, MPI), see
 
 | Question | Short answer |
 |----------|--------------|
-| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI distributed solvers run through `qed.mpi.run_distributed(...)` (which shells out to `mpiexec ed_distributed_main`); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
+| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI runs launch the CLI under `mpirun` (SectorDistributor + MpiBackend; the `qed.mpi` subprocess launcher was retired in Stage 11d); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
 | Is the **legacy** path (edlib → files → `./ED`) complete? | **Yes** (unchanged). The orchestrator reads the same on-disk deck the CLI consumes. |
 | Is the **C++ library** complete? | **Yes — every retained solver, every backend (CPU / GPU / MPI), symmetry projection, and fixed-Sz are header-callable.** All paths route through `ed::make_operator(OperatorSpec)` and `ed::workflows::{solve,thermal,spectral}` (declared in `include/ed/orchestrator.h`). See [§0 below](#0-capability-matrix-c-vs-python-vs-cli) for the matrix. |
-| What is Python strongest at today? | **Hamiltonian + lattice construction** (`qed.input` — full C++ `ed::input` library), the **three-verb orchestrator** (`solve` / `thermal` / `spectral`) that routes to every retained backend, **programmatic symmetries** (`ed::sym`) including in-process round-trip via `Operator.set_symmetry_info_from_dict(...)`, the **MPI launcher helper** (`qed.mpi.run_distributed`), and **BFG** post-processing on states. |
-| What still requires the CLI / a subprocess? | The **MPI** distributed solvers (single-process Python cannot host `MPI_Init` cleanly) and the **full DSSF spectral driver** (continued fractions + HDF5 trees). Both are wrapped by Python helpers (`qed.mpi.run_distributed`, `qed.spectral`) that build the right launcher / argv for you and shell out — no manual subprocess wiring required. |
+| What is Python strongest at today? | **Hamiltonian + lattice construction** (`qed.input` — full C++ `ed::input` library), the **three-verb orchestrator** (`solve` / `thermal` / `spectral`) that routes to every retained backend, **programmatic symmetries** (`ed::sym`) including in-process round-trip via `Operator.set_symmetry_info_from_dict(...)`, and **BFG** post-processing on states. |
+| What still requires the CLI / a subprocess? | **MPI runs** (single-process Python cannot host `MPI_Init` cleanly — launch `ED` under `mpirun`) and the **full DSSF spectral driver** (continued fractions + HDF5 trees; wrapped by `qed.spectral`, which shells out to `./ED dssf` for you). |
 
 ---
 
@@ -33,7 +33,7 @@ callable from where". Cells are interpreted as:
   and link the relevant static libraries.
 * **Python** — directly callable from `import qed`, no subprocess.
 * **CLI** — reachable via `./ED [--method=…]` or a sibling binary
-  (`ed_distributed_main`, `compute_bfg_order_parameters[_gpu]`).
+  (`compute_bfg_order_parameters[_gpu]`).
 
 | Capability | C++ | Python | CLI |
 |---|:---:|:---:|:---:|
@@ -55,14 +55,9 @@ callable from where". Cells are interpreted as:
 | GPU FTLM / mTPQ / cTPQ | yes | **`qed.thermal(H, method="FTLM"/"mTPQ"/"cTPQ", device="gpu", ...)`** | `--method=… --use-gpu` |
 | GPU DSSF kernels (dynamical / static / correlations) | yes | **`qed.spectral(dir, method, ...)`** (shells out to `./ED dssf <method>`) | `./ED dssf <method>` |
 | Per-Sz GPU variants (`use_fixed_sz=true` + `use_gpu=true`) | yes | **`qed.solve(H, sz=n_up, device="gpu", ...)`** | `--method=… --fixed-sz --use-gpu` |
-| Multi-GPU NCCL (`<ed/distributed/multi_gpu.h>`) | yes | reached via the MPI launcher (see below) | (used by `distributed_lanczos_gpu`) |
-| **MPI distributed** (`-DWITH_MPI=ON`; gate with `qed.has_mpi_build()`) | | | |
-| `DistributedOperator` (1D row-slab matrix-free SpMV) | yes | (under the hood of the launcher) | (used by `ed_distributed_main`) |
-| `distributed_lanczos` / `distributed_lanczos_eigenvectors` | yes | **`qed.mpi.run_distributed(dir, "lanczos", n_ranks, ...)`** | `mpiexec -n N ed_distributed_main <dir> --method=lanczos` |
-| `distributed_ftlm` (sample-parallel) | yes | **`qed.mpi.run_distributed(dir, "ftlm", n_ranks, ...)`** | `mpiexec -n N ed_distributed_main <dir> --method=ftlm` |
-| `distributed_tpq` (canonical TPQ, two-level parallel) | yes | **`qed.mpi.run_distributed(dir, "tpq", n_ranks, ...)`** | `mpiexec -n N ed_distributed_main <dir> --method=tpq` |
-| `DistributedSymmetryOperator` + `distributed_lanczos_symmetry` | yes | **`qed.mpi.run_distributed(dir, "lanczos_symmetry", n_ranks, ...)`** | `mpiexec -n N ed_distributed_main <dir> --method=lanczos_symmetry` |
-| `DistributedGPUOperator` (`ncclSendRecv` halo) + `distributed_lanczos_gpu` | yes | **`qed.mpi.run_distributed(dir, "lanczos_gpu", n_ranks, ...)`** | `mpiexec -n N ed_distributed_main <dir> --method=lanczos_gpu` |
+| Multi-GPU NCCL (`<ed/parallel/multi_gpu.h>`) | yes | (used by the MPI+GPU backend `MpiCudaBackend`) | (in-process) |
+| **MPI** (`-DWITH_MPI=ON`; gate with `qed.has_mpi_build()`) | | | |
+| Across-sector distribution (SectorDistributor) + in-process `MpiBackend` | yes | (run the CLI under mpirun) | `mpiexec -n N ./ED <dir> --use-symmetry ...` |
 | **Symmetry projection** | | | |
 | `ed::sym` DSL: `translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `group_from_generators`, `translation_group_1d`, `translation_group_with_reflection_1d` | yes | **`qed.symmetry.*`** (returns dict) | (writes `automorphism_results/*.json`) |
 | Attach `SymmetryGroupInfo` to an `Operator` | yes (`op.symmetry_info = ...;` then dispatch via orchestrator) | **`op.set_symmetry_info_from_dict(info)`** / **`op.get_symmetry_info_as_dict()`** | `./ED <dir> --symm` (reads `automorphism_results/`) |
@@ -91,7 +86,6 @@ callable from where". Cells are interpreted as:
   (`mTPQ` / `cTPQ` / `FTLM` / `LTLM`).
 * `qed.spectral(dir, T=..., omega=..., method=..., ...)` — structure
   factors and KPM-DOS thermodynamics.
-* `qed.mpi.run_distributed(dir, method, n_ranks, ...)` — MPI launcher.
 * `qed.has_cuda_build()` / `has_mpi_build()` / `has_scalapack_build()`
   — runtime build introspection.
 
@@ -221,27 +215,20 @@ as a top-level entry point; if you still have legacy notebooks that
 (`InterAll.dat` / `Trans.dat` / `positions.dat`) is unchanged and the
 `./ED` CLI consumes it byte-identically.
 
-### 1.7 `qed.mpi`
+### 1.7 MPI
 
-Tiny launcher helper for the standalone `ed_distributed_main` MPI binary. The
-single-process Python interpreter cannot host `MPI_Init` cleanly, so this
-module deliberately **does not** add `mpi4py`-style in-process bindings;
-instead it just builds the right `mpiexec -n N ed_distributed_main ...`
-command line and waits.
-
-| Symbol | Role |
-|--------|------|
-| `MPI_METHODS` (tuple of str) | `"lanczos"`, `"ftlm"`, `"tpq"`, `"lanczos_symmetry"`, `"lanczos_gpu"` — every backend `ed_distributed_main` exposes. |
-| `run_distributed(directory, method, n_ranks, *, launcher="mpiexec", launcher_args=(), binary=None, launcher_binary=None, extra_args=(), env=None, check=True, capture_output=False)` | Validates inputs, locates the launcher and the binary on `$PATH` (or honours the `binary=` / `launcher_binary=` overrides), and runs `[launcher_path, "-n", str(n_ranks), *launcher_args, binary_path, directory, f"--method={method}", *extra_args]`. Returns the `subprocess.CompletedProcess`. |
+The `qed.mpi` launcher module was retired in Stage 11d (Jul 2026)
+together with `ed_distributed_main` and the distributed-operator
+family. MPI runs launch the CLI under `mpirun`; a single-process
+Python interpreter cannot host `MPI_Init` cleanly, so there are
+deliberately no in-process MPI bindings.
 
 ---
 
 ## 2. What still requires the CLI / a subprocess
 
-The Python wrappers `qed.mpi.run_distributed(...)` and
-`qed.spectral(...)` shell out to the self-documenting
-`ed_distributed_main` and `./ED dssf` binaries respectively. This is
-by design (the MPI path needs a separate process per rank; the DSSF
+`qed.spectral(...)` shells out to the self-documenting `./ED dssf`
+binary. This is by design (the DSSF
 driver consumes the hierarchical `EDConfig` struct that has not yet
 been migrated to a `pybind11`-friendly schema). Neither helper asks
 the caller to write any `subprocess` boilerplate; both forward

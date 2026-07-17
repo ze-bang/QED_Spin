@@ -291,7 +291,7 @@ TEST_CASE("projector_chain: end-to-end ground state on Heisenberg N=6 unchanged"
     REQUIRE_NOTHROW(info.loadFromDirectory(dir));
 
     // Carrier-free standalone per-sector operators (the production path).
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         N, 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);

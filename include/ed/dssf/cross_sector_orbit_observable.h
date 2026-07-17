@@ -6,7 +6,7 @@
 //
 // Maps a vector expressed in the orbit basis of a *source* irrep
 // (sector ``src_sector_idx`` of the underlying ``StreamingSymmetryOperator``
-// or ``FixedSzStreamingSymmetryOperator``) to a vector expressed in
+// operators) to a vector expressed in
 // the orbit basis of a *target* irrep (``dst_sector_idx`` of the same
 // or a different streaming operator on the same lattice).
 //

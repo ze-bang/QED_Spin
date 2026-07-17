@@ -243,14 +243,23 @@ inline void ftlm_dynamical_sample_spectrum(
 ///      ``p_im``); ``weight[n] = overlap_O1[n] * V[0,n] * phi_norm``.
 ///   9. Host-side Lorentzian sum (``ftlm_dynamical_sample_spectrum``).
 /// 10. Accumulate ``S_real`` / ``S_imag`` over samples.
+// Multi-temperature FTLM dynamical kernel (Consolidation Family 3). The
+// Krylov basis, Ritz values and O1/O2 overlap weights (steps 1-8) are
+// temperature-INDEPENDENT, so they are computed once per random sample and the
+// final Lorentzian reweighting (step 9, ``ftlm_dynamical_sample_spectrum``,
+// which already takes a temperature) is looped over ``temperatures``. This
+// reproduces the Krylov-reuse efficiency of the legacy
+// ``GPUFTLMSolver::computeDynamicalCorrelationMultiTemp`` on any Backend.
+// Returns one FtlmDynamicalResult per temperature (same order as the input).
 template <typename Backend, typename ApplyH, typename ApplyO>
-FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
+std::vector<FtlmDynamicalResult> ftlm_dynamical_kernel_via_backend_multitemp(
     Backend&                   be,
     ApplyH&&                   apply_H,
     ApplyO&&                   apply_O1,
     ApplyO&&                   apply_O2,
     std::size_t                local_n,
     const std::vector<double>& omega_grid,
+    const std::vector<double>& temperatures,
     const FtlmDynamicalOptions& opts)
 {
     if (local_n == 0) {
@@ -260,6 +269,10 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
     if (omega_grid.empty()) {
         throw std::invalid_argument(
             "ftlm_dynamical_kernel_via_backend: empty frequency grid");
+    }
+    if (temperatures.empty()) {
+        throw std::invalid_argument(
+            "ftlm_dynamical_kernel_via_backend: empty temperature list");
     }
     if (opts.num_samples == 0) {
         throw std::invalid_argument(
@@ -271,19 +284,24 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
     }
 
     const std::size_t n_omega = omega_grid.size();
-    FtlmDynamicalResult R;
-    R.omega = omega_grid;
-    R.spectral_real.assign(n_omega, 0.0);
-    R.spectral_imag.assign(n_omega, 0.0);
-    R.spectral_error_real.assign(n_omega, 0.0);
-    R.spectral_error_imag.assign(n_omega, 0.0);
+    const std::size_t n_temp  = temperatures.size();
+    std::vector<FtlmDynamicalResult> Rs(n_temp);
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        Rs[t].omega = omega_grid;
+        Rs[t].spectral_real.assign(n_omega, 0.0);
+        Rs[t].spectral_imag.assign(n_omega, 0.0);
+        Rs[t].spectral_error_real.assign(n_omega, 0.0);
+        Rs[t].spectral_error_imag.assign(n_omega, 0.0);
+    }
 
-    // Per-sample storage so we can compute the std error after
-    // averaging.
-    std::vector<std::vector<double>> sample_real;
-    std::vector<std::vector<double>> sample_imag;
-    sample_real.reserve(opts.num_samples);
-    sample_imag.reserve(opts.num_samples);
+    // Per-(temperature, sample) storage so we can compute the std error after
+    // averaging. sample_real[t][s] is the s-th sample's spectrum at temp t.
+    std::vector<std::vector<std::vector<double>>> sample_real(n_temp);
+    std::vector<std::vector<std::vector<double>>> sample_imag(n_temp);
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        sample_real[t].reserve(opts.num_samples);
+        sample_imag[t].reserve(opts.num_samples);
+    }
 
     const std::uint64_t base_seed = (opts.random_seed != 0)
         ? opts.random_seed
@@ -397,49 +415,256 @@ FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
             weights[n] = overlap_O1 * overlap_O2;
         }
 
-        // -------- 9. Lorentzian sum (host) --------------------------
-        std::vector<double> samp_re, samp_im;
-        ftlm_dynamical_sample_spectrum(
-            ritz_values, weights, omega_grid,
-            opts.broadening, opts.temperature, samp_re, samp_im);
-
-        sample_real.push_back(std::move(samp_re));
-        sample_imag.push_back(std::move(samp_im));
+        // -------- 9. Lorentzian sum (host), per temperature ---------
+        // Steps 1-8 above are temperature-independent; only this final
+        // reweighting varies with T, so loop it (Krylov basis reused).
+        for (std::size_t t = 0; t < n_temp; ++t) {
+            std::vector<double> samp_re, samp_im;
+            ftlm_dynamical_sample_spectrum(
+                ritz_values, weights, omega_grid,
+                opts.broadening, temperatures[t], samp_re, samp_im);
+            sample_real[t].push_back(std::move(samp_re));
+            sample_imag[t].push_back(std::move(samp_im));
+        }
     }
 
-    // ------ 10. Average over valid samples + std-error band --------
-    const std::size_t n_valid = sample_real.size();
-    R.total_samples = n_valid;
-    if (n_valid == 0) {
-        return R;   // all samples degenerate; spectrum stays zero
-    }
-    for (const auto& sr : sample_real) {
-        for (std::size_t i = 0; i < n_omega; ++i) R.spectral_real[i] += sr[i];
-    }
-    for (const auto& si : sample_imag) {
-        for (std::size_t i = 0; i < n_omega; ++i) R.spectral_imag[i] += si[i];
-    }
-    const double inv_n = 1.0 / static_cast<double>(n_valid);
-    for (std::size_t i = 0; i < n_omega; ++i) {
-        R.spectral_real[i] *= inv_n;
-        R.spectral_imag[i] *= inv_n;
-    }
-    if (n_valid > 1) {
-        for (std::size_t s = 0; s < n_valid; ++s) {
+    // ------ 10. Average over valid samples + std-error band, per T -----
+    for (std::size_t t = 0; t < n_temp; ++t) {
+        FtlmDynamicalResult& R = Rs[t];
+        const auto& s_real = sample_real[t];
+        const auto& s_imag = sample_imag[t];
+        const std::size_t n_valid = s_real.size();
+        R.total_samples = n_valid;
+        if (n_valid == 0) {
+            continue;   // all samples degenerate; spectrum stays zero
+        }
+        for (const auto& sr : s_real) {
+            for (std::size_t i = 0; i < n_omega; ++i) R.spectral_real[i] += sr[i];
+        }
+        for (const auto& si : s_imag) {
+            for (std::size_t i = 0; i < n_omega; ++i) R.spectral_imag[i] += si[i];
+        }
+        const double inv_n = 1.0 / static_cast<double>(n_valid);
+        for (std::size_t i = 0; i < n_omega; ++i) {
+            R.spectral_real[i] *= inv_n;
+            R.spectral_imag[i] *= inv_n;
+        }
+        if (n_valid > 1) {
+            for (std::size_t s = 0; s < n_valid; ++s) {
+                for (std::size_t i = 0; i < n_omega; ++i) {
+                    const double dr = s_real[s][i] - R.spectral_real[i];
+                    const double di = s_imag[s][i] - R.spectral_imag[i];
+                    R.spectral_error_real[i] += dr * dr;
+                    R.spectral_error_imag[i] += di * di;
+                }
+            }
+            const double denom = std::sqrt(
+                static_cast<double>(n_valid * (n_valid - 1)));
             for (std::size_t i = 0; i < n_omega; ++i) {
-                const double dr = sample_real[s][i] - R.spectral_real[i];
-                const double di = sample_imag[s][i] - R.spectral_imag[i];
-                R.spectral_error_real[i] += dr * dr;
-                R.spectral_error_imag[i] += di * di;
+                R.spectral_error_real[i] =
+                    std::sqrt(R.spectral_error_real[i]) / denom;
+                R.spectral_error_imag[i] =
+                    std::sqrt(R.spectral_error_imag[i]) / denom;
             }
         }
-        const double denom = std::sqrt(
-            static_cast<double>(n_valid * (n_valid - 1)));
-        for (std::size_t i = 0; i < n_omega; ++i) {
-            R.spectral_error_real[i] =
-                std::sqrt(R.spectral_error_real[i]) / denom;
-            R.spectral_error_imag[i] =
-                std::sqrt(R.spectral_error_imag[i]) / denom;
+    }
+    return Rs;
+}
+
+// Single-temperature wrapper (unchanged public API): delegates to the
+// multi-temperature core with a one-element temperature list.
+template <typename Backend, typename ApplyH, typename ApplyO>
+FtlmDynamicalResult ftlm_dynamical_kernel_via_backend(
+    Backend&                   be,
+    ApplyH&&                   apply_H,
+    ApplyO&&                   apply_O1,
+    ApplyO&&                   apply_O2,
+    std::size_t                local_n,
+    const std::vector<double>& omega_grid,
+    const FtlmDynamicalOptions& opts)
+{
+    auto Rs = ftlm_dynamical_kernel_via_backend_multitemp(
+        be, apply_H, apply_O1, apply_O2, local_n, omega_grid,
+        std::vector<double>{opts.temperature}, opts);
+    return std::move(Rs.front());
+}
+
+// ---------------------------------------------------------------------------
+// Static two-operator correlation <O1^dag O2>(T) via the standard FTLM trace
+// estimator (Consolidation Family 3). DISTINCT from the dynamical kernel: the
+// Krylov basis is seeded from the random vector |r> (NOT O2|psi>); each Ritz
+// state |n> is reconstructed from the basis; the DIAGONAL element
+// <n|O1^dag O2|n> is formed; and the FTLM weights w_n = |<r|n>|^2 thermal-
+// average it (e_min-shifted for low-T stability):
+//   <O1^dag O2>(T) = Sum_n w_n e^{-b(E_n-e_min)} <n|O1^dag O2|n>
+//                  / Sum_n w_n e^{-b(E_n-e_min)}.
+// Mirrors the trusted host ::compute_static_response; also emits the variance
+// <O^2>-<O>^2 and susceptibility = variance / T. Backend-generic (CPU / CUDA):
+// the single implementation replacing GPUFTLMSolver::computeStaticCorrelation
+// and the host compute_static_response.
+// ---------------------------------------------------------------------------
+struct FtlmStaticOptions {
+    std::size_t   krylov_dim  = 200;
+    std::size_t   num_samples = 1;
+    double        tolerance   = 1e-12;
+    std::uint64_t random_seed = 0;
+    std::uint64_t global_n    = 0;   ///< 0 -> use local_n for the per-cycle cap
+};
+
+struct FtlmStaticResult {
+    std::vector<double> temperatures;
+    std::vector<double> expectation;
+    std::vector<double> variance;
+    std::vector<double> susceptibility;
+    std::vector<double> expectation_error;
+    std::vector<double> variance_error;
+    std::vector<double> susceptibility_error;
+    std::size_t         total_samples = 0;
+};
+
+template <typename Backend, typename ApplyH, typename ApplyO>
+FtlmStaticResult ftlm_static_correlation_via_backend_multitemp(
+    Backend&                   be,
+    ApplyH&&                   apply_H,
+    ApplyO&&                   apply_O1,
+    ApplyO&&                   apply_O2,
+    std::size_t                local_n,
+    const std::vector<double>& temperatures,
+    const FtlmStaticOptions&   opts)
+{
+    if (local_n == 0)
+        throw std::invalid_argument("ftlm_static_correlation: local_n == 0");
+    if (temperatures.empty())
+        throw std::invalid_argument("ftlm_static_correlation: empty temperature list");
+    for (double T : temperatures)
+        if (!(T > 0.0))
+            throw std::invalid_argument("ftlm_static_correlation: temperatures must be > 0");
+    if (opts.num_samples == 0)
+        throw std::invalid_argument("ftlm_static_correlation: num_samples == 0");
+    if (opts.krylov_dim < 2)
+        throw std::invalid_argument("ftlm_static_correlation: krylov_dim must be >= 2");
+
+    const std::size_t nT = temperatures.size();
+    FtlmStaticResult R;
+    R.temperatures = temperatures;
+    R.expectation.assign(nT, 0.0);
+    R.variance.assign(nT, 0.0);
+    R.susceptibility.assign(nT, 0.0);
+    R.expectation_error.assign(nT, 0.0);
+    R.variance_error.assign(nT, 0.0);
+    R.susceptibility_error.assign(nT, 0.0);
+
+    std::vector<std::vector<double>> sample_exp;   // [valid_sample][T]
+    std::vector<std::vector<double>> sample_var;
+    sample_exp.reserve(opts.num_samples);
+    sample_var.reserve(opts.num_samples);
+
+    const std::uint64_t base_seed = (opts.random_seed != 0)
+        ? opts.random_seed : 0xBADDCAFEULL;
+
+    for (std::size_t s = 0; s < opts.num_samples; ++s) {
+        // 1. Gaussian random seed (host), normalise, copy to backend.
+        std::mt19937_64 rng(base_seed + 0x9E3779B97F4A7C15ULL * s);
+        std::normal_distribution<double> gauss(0.0, 1.0);
+        std::vector<Complex> r_host(local_n);
+        for (auto& c : r_host) c = Complex(gauss(rng), gauss(rng));
+        double sumsq = 0.0;
+        for (const auto& c : r_host) sumsq += std::norm(c);
+        const double r0 = std::sqrt(sumsq);
+        if (!(r0 > 0.0)) continue;
+        const double inv0 = 1.0 / r0;
+        for (auto& c : r_host) c *= inv0;
+
+        auto rvec = be.make_zero_vector(local_n);
+        be.copy_from_host(r_host.data(), rvec.get(), local_n);
+
+        // 2. Lanczos with basis storage (seeded from |r>).
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter      = opts.krylov_dim;
+        kopts.keep_basis    = true;
+        kopts.breakdown_tol = opts.tolerance;
+        kopts.reorth        = ed::krylov::ReorthPolicy::FullCGS2;
+        kopts.dim_cap       = (opts.global_n > 0)
+            ? static_cast<std::size_t>(opts.global_n) : local_n;
+        auto kres = ed::krylov::lanczos_kernel(
+            be, apply_H, local_n, rvec.get(), kopts);
+        const std::size_t m = kres.alpha.size();
+        if (m == 0) continue;
+
+        // 3. Tridiagonal diagonalisation: Ritz values, FTLM weights, evecs.
+        std::vector<double> ritz_values, weights, evecs;
+        diagonalize_tridiagonal_ritz(
+            kres.alpha, kres.beta, ritz_values, weights, &evecs);
+        if (ritz_values.empty()) continue;
+
+        // 4. corr[n] = Re <n|O1^dag O2|n>, reconstructing
+        //    |n> = Sum_j evecs[n*m+j] |v_j> in the backend.
+        std::vector<double> corr(m, 0.0);
+        auto psi_n = be.make_zero_vector(local_n);
+        auto O1_n  = be.make_zero_vector(local_n);
+        auto O2_n  = be.make_zero_vector(local_n);
+        for (std::size_t n = 0; n < m; ++n) {
+            be.scale(Complex(0.0, 0.0), psi_n.get(), local_n);   // zero
+            for (std::size_t j = 0; j < m; ++j) {
+                be.axpy(Complex(evecs[n * m + j], 0.0),
+                        kres.basis[j].get(), psi_n.get(), local_n);
+            }
+            apply_O1(psi_n.get(), O1_n.get(), local_n);
+            apply_O2(psi_n.get(), O2_n.get(), local_n);
+            corr[n] = be.dot(O1_n.get(), O2_n.get(), local_n).real();
+        }
+
+        // 5. Thermal averages per temperature (e_min-shifted for stability).
+        const double e_min =
+            *std::min_element(ritz_values.begin(), ritz_values.end());
+        std::vector<double> s_exp(nT), s_var(nT);
+        for (std::size_t t = 0; t < nT; ++t) {
+            const double beta = 1.0 / temperatures[t];
+            double Z = 0.0, sO = 0.0, sO2 = 0.0;
+            for (std::size_t i = 0; i < m; ++i) {
+                const double bw =
+                    weights[i] * std::exp(-beta * (ritz_values[i] - e_min));
+                Z += bw; sO += bw * corr[i]; sO2 += bw * corr[i] * corr[i];
+            }
+            const double invZ = (Z > 1e-300) ? (1.0 / Z) : 0.0;
+            const double mean = sO * invZ;
+            s_exp[t] = mean;
+            s_var[t] = sO2 * invZ - mean * mean;
+        }
+        sample_exp.push_back(std::move(s_exp));
+        sample_var.push_back(std::move(s_var));
+    }
+
+    // 6. Average over valid samples + std error on the mean.
+    const std::size_t nv = sample_exp.size();
+    R.total_samples = nv;
+    if (nv == 0) return R;
+    for (const auto& se : sample_exp)
+        for (std::size_t t = 0; t < nT; ++t) R.expectation[t] += se[t];
+    for (const auto& sv : sample_var)
+        for (std::size_t t = 0; t < nT; ++t) R.variance[t] += sv[t];
+    const double invn = 1.0 / static_cast<double>(nv);
+    for (std::size_t t = 0; t < nT; ++t) {
+        R.expectation[t]    *= invn;
+        R.variance[t]       *= invn;
+        R.susceptibility[t]  = R.variance[t] / temperatures[t];
+    }
+    if (nv > 1) {
+        std::vector<double> acc_e(nT, 0.0), acc_v(nT, 0.0), acc_s(nT, 0.0);
+        for (std::size_t s = 0; s < nv; ++s)
+            for (std::size_t t = 0; t < nT; ++t) {
+                const double de = sample_exp[s][t] - R.expectation[t];
+                const double dv = sample_var[s][t] - R.variance[t];
+                const double ds = (sample_var[s][t] / temperatures[t])
+                                  - R.susceptibility[t];
+                acc_e[t] += de * de; acc_v[t] += dv * dv; acc_s[t] += ds * ds;
+            }
+        const double denom =
+            std::sqrt(static_cast<double>(nv * (nv - 1)));
+        for (std::size_t t = 0; t < nT; ++t) {
+            R.expectation_error[t]    = std::sqrt(acc_e[t]) / denom;
+            R.variance_error[t]       = std::sqrt(acc_v[t]) / denom;
+            R.susceptibility_error[t] = std::sqrt(acc_s[t]) / denom;
         }
     }
     return R;

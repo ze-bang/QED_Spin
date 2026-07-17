@@ -133,9 +133,9 @@ void GPUMyOperator::matVecGPU(const cuDoubleComplex* d_x,
 If the new operator is host-resident with a lazy GPU mirror, set
 `Geometry::supports_device_matvec = true` in its `geometry()`
 override and implement `bind_cuda()` to return a `MatvecFn` that
-runs the device matvec. See `StreamingSymmetryOperator::SectorView`
-(`include/ed/core/streaming_symmetry.h`) for the canonical
-pattern.
+runs the device matvec. See the `SectorOperator` bind_cuda
+specialization (`src/symmetry/sector_operator_gpu.cu`) for the
+canonical pattern.
 
 If the new operator is device-resident from construction
 (`memory_space() == MemorySpace::CudaDevice`), `select_backend`

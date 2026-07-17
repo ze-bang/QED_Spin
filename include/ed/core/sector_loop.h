@@ -13,12 +13,6 @@
 //
 // To keep all of those callers in lock-step, this header centralises:
 //
-//   * ``StreamingSymmetryHandle`` -- a thin downcast wrapper that
-//     exposes ``num_sectors()``, ``sector(k)``, ``sector_tag(k)`` for
-//     both the full streaming-symmetry operator and its fixed-Sz
-//     sibling (``FixedSzStreamingSymmetryOperator``). Hides the
-//     ``dynamic_cast`` boilerplate every caller used to repeat.
-//
 //   * ``filter_sectors(...)`` -- canonical resolution of the
 //     ``opts.selected_sectors`` filter against the set of non-empty
 //     sectors. Single source of truth so the CLI / Python / GPU paths
@@ -41,47 +35,13 @@
 namespace ed::core {
 
 // ---------------------------------------------------------------------------
-// Operator-collapse refactor (Phase C, Jun 2026).
-//
-// ``StreamingSymmetryHandle::sector(k)`` returns a standalone
-// ``ed::symmetry::SectorOperator`` (owning its sector's orbit data + a copy
-// of the Hamiltonian terms, driven by the unified
-// ``CpuMatVecBackend<SymmetryBasisPolicy>`` on the CPU and the GPU sector
-// mirror via ``bind_cuda()`` on CUDA builds). This routes the ENTIRE
-// production sector loop (CLI, Python bindings, thermal, spectral) through
-// the collapse-target operator.
-//
-// Phase C (Jun 2026): the cutover gate (``ED_SYMMETRY_SECTOR_OPERATOR``) and
-// the legacy back-referencing ``SectorView`` escape hatch have been REMOVED.
-// ``SectorOperator`` is now the only sector-matvec path on every backend
-// (CPU/GPU parity landed in Phase A; production cutover validated in Phase B).
+// Every sector is a standalone ``ed::symmetry::SectorOperator`` from the
+// tagged factory (the legacy monolithic streaming operators, their
+// ``StreamingSymmetryHandle`` downcast wrapper, and the ``SectorView``
+// escape hatch are all gone); callers iterate a ``SectorSetView``. The
+// helpers below are the shared per-sector plumbing.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// CSR-free lazy rep path gate ("scan other region" optimisation, Jun 2026).
-//
-// On CUDA builds the fixed-Sz sector loop hands out CSR-free lazy
-// SectorOperators (``make_rep_sector_operator_lazy``): the GPU on-the-fly
-// representative matvec never materialises the per-sector host orbit CSR
-// (~24 GiB/sector at N=32), and a CPU fallback lazily materialises it only if
-// ``apply`` is actually called. Tied to the SAME ``ED_GPU_SYMMETRY_REP`` gate
-// as the device rep matvec so ``=0`` restores the legacy adopt/orbit-CSR path
-// end-to-end. On non-CUDA builds there is no GPU rep matvec, so the CPU always
-// needs the orbit CSR -- keep the eager adopt path (return false).
-// ---------------------------------------------------------------------------
-inline bool rep_lazy_sector_path_enabled() {
-#ifdef WITH_CUDA
-    static const bool enabled = [] {
-        const char* e = std::getenv("ED_GPU_SYMMETRY_REP");
-        if (e == nullptr || e[0] == '\0') return true;   // default ON
-        if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
-        return true;                                     // anything else -> ON
-    }();
-    return enabled;
-#else
-    return false;
-#endif
-}
 
 /// Canonical filter for the ``selected_sectors`` axis. Returns the
 /// list of sector indices (in ascending order) that the streaming
@@ -175,9 +135,8 @@ inline constexpr std::size_t kSectorNotFound =
 /// inferred order matches ``N`` exactly when at least one sector hits
 /// the maximal irrep, which is always true for the streaming-symmetry
 /// builder (it enumerates ``N`` distinct sectors per generator).
-// Templated on the handle type so the same logic drives both the legacy
-// ``StreamingSymmetryHandle`` and the operator-collapse ``SectorSetView``
-// (``ed/core/make_operator.h``). Any type exposing ``num_sectors()`` +
+// Templated on the handle type (``SectorSetView`` in production;
+// ``ed/core/make_operator.h``). Any type exposing ``num_sectors()`` +
 // ``sector_tag(k).quantum_numbers`` for EVERY raw sector (including empty
 // irreps) satisfies the contract.
 template <class HandleT>

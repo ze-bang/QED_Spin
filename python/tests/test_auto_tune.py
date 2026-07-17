@@ -137,10 +137,32 @@ def test_device_picker_auto_falls_back_to_cpu_no_build():
                                  has_mpi_build=False) == "cpu"
 
 
-def test_device_picker_combines_gpu_and_mpi():
-    huge = 1 << 23  # > 4M
+def test_device_picker_never_auto_selects_the_retired_mpi_lane():
+    # Stage 11d retired the device-string MPI lane. pick_device used to return
+    # "mpi"/"mpi_gpu" above 2^22; to_cli_args emits no flag for "mpi", so such
+    # a run silently degraded to serial CPU. has_mpi_build is now ignored.
+    huge = 1 << 23  # > 4M -- the old mpi_dim_threshold
     assert auto_tune.pick_device(huge, has_cuda_build=True,
-                                 has_mpi_build=True) == "mpi_gpu"
+                                 has_mpi_build=True) == "gpu"
+    assert auto_tune.pick_device(huge, has_cuda_build=False,
+                                 has_mpi_build=True) == "cpu"
+
+
+@pytest.mark.parametrize("token", ["mpi", "mpi_gpu"])
+def test_device_picker_raises_on_retired_mpi_request(token):
+    # Match qed.workflow._resolve_device, which raises for the same tokens --
+    # the two pickers disagreeing on this is what let the lane rot unnoticed.
+    with pytest.raises(RuntimeError, match="retired"):
+        auto_tune.pick_device(1 << 23, has_cuda_build=True,
+                              has_mpi_build=True, user_request=token)
+
+
+def test_device_picker_dssf_threshold_is_2_17_not_the_in_process_2_14():
+    # DELIBERATE divergence from _resolve_device / gpu_dim_floor (2^14): the
+    # DSSF kernels amortise launch latency only around ~131k. Pinned so the
+    # difference stays a decision rather than drifting silently.
+    assert auto_tune.pick_device((1 << 17) - 1, has_cuda_build=True) == "cpu"
+    assert auto_tune.pick_device(1 << 17, has_cuda_build=True) == "gpu"
 
 
 # ----------------------------------------------------------------------------

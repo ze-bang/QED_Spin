@@ -145,7 +145,7 @@ TEST_CASE("nonabelian: restricted sectors are COMPLETE + match brute force",
     auto info = ed::sym::group_from_generators(
         N, {ed::sym::translation(N, 1), ed::sym::reflection_1d(N)});
 
-    auto ops = ed::symmetry::build_full_sector_operators(
+    auto ops = ed::symmetry::build_full_sector_operators_lazy(
         static_cast<std::uint64_t>(N), 0.5f, info,
         [&](ed::symmetry::SectorOperator& op) {
             add_heisenberg_pbc_terms(op, N, 1.0);

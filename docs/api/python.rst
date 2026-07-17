@@ -128,18 +128,6 @@ removed in favour of sensible defaults plus a runtime memory guard.)
    :undoc-members:
    :show-inheritance:
 
-MPI launcher helper (``qed.mpi``)
----------------------------------
-
-Helpers that build the right ``mpiexec`` invocation for
-``ed_distributed_main`` so multi-rank runs can be driven from a single
-Python process.
-
-.. automodule:: qed.mpi
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Hamiltonian builder (``qed.hamiltonian``)
 -----------------------------------------
 

@@ -1,12 +1,13 @@
-"""Guard the three symmetry-matvec strategies against each other.
+"""Guard the symmetry-matvec sub-modes against each other.
 
-The symmetry matvec has three interchangeable implementations selected by env
-(read once per process, hence subprocesses here):
+The rep matvec has two sub-modes selected by env (read once per process,
+hence subprocesses here):
   * default                 -> reduced-CSR  (RepReducedCsr)
   * ED_SYM_REDUCED_CSR=0    -> rep walk     (RepStream, CSR-free)
-  * ED_SYM_REP=0            -> orbit        (OrbitMaterialized)
+(The legacy orbit lane -- ED_SYM_REP=0 / OrbitMaterialized -- was retired in
+Stage 11c-2b; the rep kernel is the ONE representation.)
 
-They MUST give the same physics. A mis-wired default (the orbit path was
+They MUST give the same physics. A mis-wired default (the old orbit path was
 silently ~5-48x slower) slipped through precisely because nothing compared
 them. The equivalence test is the fast CI gate; the perf guard (default must
 not be catastrophically slower than the fastest strategy) is `slow`-marked.
@@ -20,7 +21,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STRATEGIES = {
     "reduced_csr": {},                          # default
     "rep_walk":    {"ED_SYM_REDUCED_CSR": "0"},
-    "orbit":       {"ED_SYM_REP": "0"},
 }
 
 
@@ -39,7 +39,7 @@ def _run_worker(env_extra, lx=2, ly=2):
 
 
 def test_symmetry_matvec_equivalence():
-    """All three strategies give the SAME ground state (12-site kagome, sz+trans)."""
+    """Both sub-modes give the SAME ground state (12-site kagome, sz+trans)."""
     eigs = {name: _run_worker(env)[0] for name, env in STRATEGIES.items()}
     ref = eigs["reduced_csr"]
     for name, e in eigs.items():
@@ -49,7 +49,7 @@ def test_symmetry_matvec_equivalence():
 @pytest.mark.slow
 def test_default_not_catastrophically_slow():
     """Default (reduced-CSR) must not be much slower than the fastest strategy.
-    Catches a mis-defaulted sym-matvec (the orbit path was 5-48x slower)."""
+    Catches a mis-defaulted sym-matvec (the retired orbit path was 5-48x slower)."""
     times = {name: _run_worker(env, lx=3, ly=2)[1] for name, env in STRATEGIES.items()}
     fastest = min(times.values())
     assert times["reduced_csr"] <= 1.8 * fastest, \

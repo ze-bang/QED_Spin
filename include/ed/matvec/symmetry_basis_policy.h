@@ -8,7 +8,7 @@
 //
 // A SymmetryBasisPolicy is the thin, POD-style view into a single
 // symmetry sector of either StreamingSymmetryOperator (full Hilbert)
-// or FixedSzStreamingSymmetryOperator (fixed-Sz). It exposes:
+// sector (full-space or fixed-Sz). It exposes:
 //
 //   * dim()        --- sector_dim (number of orbit representatives)
 //   * state_of(i)  --- orbit-rep bitstring of orbit i
@@ -56,7 +56,7 @@ namespace ed::matvec::basis {
 // SymmetryBasisPolicy
 //
 // Serves BOTH the full-Hilbert symmetry sector (StreamingSymmetryOperator)
-// and the fixed-Sz symmetry sector (FixedSzStreamingSymmetryOperator).
+// and the fixed-Sz symmetry sector.
 // The only mode-specific data lives inside ``SectorLookupHandle``
 // (dense table + optional LinIndexTable indirection); the policy reads
 // the same SymmetrySector / SymBasisState layout in both cases.

@@ -22,6 +22,27 @@
 
 #include <ed/core/thermal_types.h>  // ThermodynamicData, FTLMResults
 
+/**
+ * @brief Eigenvalue + thermodynamics + FTLM result envelope.
+ *
+ * Global (::EDResults) to match its call sites (the Python
+ * ``qed.workflow._ed_result_from_*`` adapters and the CLI HDF5 emit step in
+ * ``src/cli/workflows.cpp``). For ground-state lanes only ``eigenvalues`` /
+ * ``eigenvectors_*`` are populated; thermal lanes fill ``thermo_data`` (the
+ * temperature scan) and ``ftlm_results`` (error-bar statistics).
+ *
+ * Consolidation Family 10: relocated here from the retired
+ * ``ed_legacy_types.h`` (a one-struct "slim residue" file) to co-locate it
+ * with the other result envelopes it references.
+ */
+struct EDResults {
+    std::vector<double> eigenvalues;
+    bool eigenvectors_computed = false;
+    std::string eigenvectors_path;
+    ThermodynamicData thermo_data;
+    FTLMResults       ftlm_results;
+};
+
 namespace ed {
 
 using Complex = std::complex<double>;
@@ -185,7 +206,7 @@ struct ThermalSectorEntry {
 
 // ---------------------------------------------------------------------------
 // ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
-// LTLM / mTPQ / cTPQ / KPM-DOS family.
+// LTLM / mTPQ / KPM-DOS family.
 // ---------------------------------------------------------------------------
 /// One snapshotted TPQ state. Pillar 1 of the "Save and DSSF Upgrades"
 /// plan (May 2026). The orchestrator's thermal finalizer iterates these
@@ -223,7 +244,7 @@ struct ThermalResult {
     // -----------------------------------------------------------------
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
     // trajectory + state-snapshot surface. Populated only by the mTPQ
-    // and cTPQ branches of ``ed::workflows::thermal``; empty for
+    // branch of ``ed::workflows::thermal``; empty for
     // FTLM / LTLM / KPM-DOS.
     //
     // The trajectory fields are mirror-images of
@@ -237,6 +258,15 @@ struct ThermalResult {
     std::vector<std::vector<double>>    tpq_sample_variances;
     /// One entry per snapshot the kernel actually recorded.
     std::vector<TpqStateSnapshot>       tpq_state_snapshots;
+
+    // KPM-DOS raw density of states (Jul 2026): the KpmDos lane computed
+    // the DOS grid and then discarded it, surfacing only its derived
+    // thermodynamics -- so the actual density(E) the method exists to
+    // produce was unreachable (a caller integrating it to check the sum
+    // rule int rho dE == D got nothing). Populated only by the KpmDos
+    // branch; empty for every other method.
+    std::vector<double>                 dos_energies;
+    std::vector<double>                 dos_values;
 };
 
 // ---------------------------------------------------------------------------

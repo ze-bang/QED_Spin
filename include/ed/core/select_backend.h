@@ -18,6 +18,7 @@
 // Phase 4.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -38,7 +39,7 @@
 #  include <mpi.h>
 #  include <ed/matvec/backends/mpi_backend.h>
 #  ifdef ED_HAVE_NCCL
-#    include <ed/distributed/multi_gpu.h>
+#    include <ed/parallel/multi_gpu.h>
 #    include <ed/matvec/backends/mpi_cuda_backend.cuh>
 #  endif
 #endif
@@ -58,6 +59,15 @@ struct BackendConstraints {
     /// is a safe default for Lanczos / TPQ which carry ~5 N-length
     /// scratch vectors plus the basis.
     double fudge_factor = 8.0;
+    /// Minimum problem dimension for the GPU AUTO-promotion (Jul 2026).
+    /// Below this, kernel-launch + transfer overhead makes the GPU
+    /// strictly slower than the CPU -- and on shared-GPU hosts (WSL2)
+    /// tiny solves dispatched to a contended device have produced
+    /// silently-wrong spectra. Matches the Python-side ``dim >= 2^14``
+    /// heuristic in ``qed._resolve_device``. Callers that EXPLICITLY
+    /// request the GPU (``device='gpu'``) set this to 0 -- the floor
+    /// gates only the automatic promotion, never an explicit choice.
+    std::size_t gpu_dim_floor = (std::size_t{1} << 14);
 };
 
 // ---------------------------------------------------------------------------
@@ -84,12 +94,35 @@ using BackendVariant = std::variant<
 // ---------------------------------------------------------------------------
 inline bool have_cuda() noexcept {
 #ifdef WITH_CUDA
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) {
+    // Probed once per process. Environment-difference failures must be
+    // LOUD: a wheel built against a newer CUDA toolkit than the node's
+    // driver used to swallow cudaErrorInsufficientDriver here and silently
+    // degrade every GPU lane to CPU (a cluster ran days of "GPU" jobs on
+    // legacy drivers before anyone noticed). One clear diagnostic, then the
+    // documented CPU fallback.
+    static const bool ok = [] {
+        int n = 0;
+        const cudaError_t err = cudaGetDeviceCount(&n);
+        if (err == cudaSuccess) return n > 0;
         cudaGetLastError();
+        if (err == cudaErrorInsufficientDriver
+#if CUDART_VERSION >= 11000
+            || err == cudaErrorSystemDriverMismatch
+#endif
+        ) {
+            int drv = 0, rt = 0;
+            cudaDriverGetVersion(&drv);
+            cudaRuntimeGetVersion(&rt);
+            std::fprintf(stderr,
+                "[qed] CUDA DISABLED: the NVIDIA driver on this machine is "
+                "too old for this build (driver API %d.%d < runtime %d.%d). "
+                "Every GPU lane falls back to CPU. Fix: update the driver, "
+                "or rebuild against this node's CUDA toolkit.\n",
+                drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
+        }
         return false;
-    }
-    return n > 0;
+    }();
+    return ok;
 #else
     return false;
 #endif
@@ -179,7 +212,11 @@ inline BackendVariant select_backend(const Geometry& geom,
     // sector operators are host-resident but their CudaMatVecBackend
     // mirror (lazily constructed inside `bind_cuda`) runs on the GPU.
     const bool device_mv = op_is_device || geom.supports_device_matvec;
-    if (device_mv && have_gpu && gpu_fits && c.allow_gpu) {
+    // gpu_dim_floor gates only the AUTO promotion: a device-resident
+    // operator has already committed to the GPU, and explicit requests
+    // arrive with the floor zeroed.
+    const bool dim_ok = op_is_device || geom.local_dim >= c.gpu_dim_floor;
+    if (device_mv && have_gpu && gpu_fits && c.allow_gpu && dim_ok) {
         return BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
     }
 #endif

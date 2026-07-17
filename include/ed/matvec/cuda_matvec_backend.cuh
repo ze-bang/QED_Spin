@@ -456,37 +456,11 @@ make_cuda_fixed_sz_backend(const std::vector<std::uint64_t>& sorted_basis_states
         view, spin_l, std::move(label), std::move(holder));
 }
 
-// ---------------------------------------------------------------------------
-// Factory: symmetry-projected sector lane (P3c). The richest cell -- it
-// engages the orbit-walk + coeff-modifier kernel traits. The device backing
-// (orbit CSR + pre-baked projection hash) is owned by a
-// ``DeviceSymmetryBasisPolicyHolder`` and built from the plain host orbit CSR
-// (the same arrays the host ``SymmetryBasisPolicy`` exposes). Taking the raw
-// CSR (rather than a ``SymmetryBasisPolicy``) keeps this header free of the
-// ``::SymmetrySector`` dependency; the caller extracts the CSR from the host
-// sector. Mirrors make_cpu_symmetry_backend.
-// ---------------------------------------------------------------------------
-template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
-          class OffDiagTwo, class ThreeBody>
-[[nodiscard]] std::unique_ptr<MatVecBackendBase>
-make_cuda_symmetry_backend(const std::vector<std::uint32_t>&        orbit_offsets,
-                           const std::vector<std::uint64_t>&        orbit_elements,
-                           const std::vector<std::complex<double>>& orbit_coefficients,
-                           const std::vector<double>&               orbit_norms,
-                           double      group_norm,
-                           double      spin_l,
-                           std::string label = "CudaMatVecBackend<Symmetry>")
-{
-    auto holder = std::make_shared<
-        ed::matvec::basis::DeviceSymmetryBasisPolicyHolder>();
-    holder->build_from_orbits(orbit_offsets, orbit_elements,
-                              orbit_coefficients, orbit_norms, group_norm);
-    auto view = holder->view();
-    return std::make_unique<CudaMatVecBackend<
-        ed::matvec::basis::DeviceSymmetryBasisPolicy,
-        DiagOne, OffDiagOne, DiagTwo, MixedTwo, OffDiagTwo, ThreeBody>>(
-        view, spin_l, std::move(label), std::move(holder));
-}
+// (Stage 11c-2b: ``make_cuda_symmetry_backend`` -- the device orbit-CSR
+// symmetry lane -- was deleted with the legacy orbit matvec representation;
+// the on-the-fly representative mirror (make_sector_matvec_gpu_rep) is THE
+// device symmetry matvec.)
+
 
 }  // namespace ed::matvec
 

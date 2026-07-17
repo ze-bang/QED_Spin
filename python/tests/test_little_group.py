@@ -79,7 +79,10 @@ def test_ring_full_spectrum_and_star_structure():
 
     w = np.linalg.eigvalsh(_dense_heisenberg(N, [(i, (i + 1) % N)
                                                  for i in range(N)]))
-    d = dict(qed._core.little_group_full_spectrum(H, A, res))
+    # spin_flip=0: this test pins the PURE Stage-7 star structure; the
+    # Stage-9a flip-extended (k, +/-) structure is pinned in
+    # test_little_group_flip.py.
+    d = dict(qed._core.little_group_full_spectrum(H, A, res, spin_flip=0))
     ev = np.sort(np.asarray(d["eigenvalues"]))
     assert len(ev) == 1 << N
     np.testing.assert_allclose(ev, w, rtol=0, atol=1e-12)
@@ -114,7 +117,9 @@ def test_square_lattice_c4v_gamma_point():
     assert len(A) == 9                        # Z3 x Z3 translations
 
     w = np.linalg.eigvalsh(_dense_heisenberg(N, bonds))
-    d = dict(qed._core.little_group_full_spectrum(H, A, res))
+    # spin_flip=0: pins the pure Stage-7 structure (flip-composed C4v is
+    # pinned in test_little_group_flip.py).
+    d = dict(qed._core.little_group_full_spectrum(H, A, res, spin_flip=0))
     ev = np.sort(np.asarray(d["eigenvalues"]))
     np.testing.assert_allclose(ev, w, rtol=0, atol=1e-12)
 
@@ -155,37 +160,34 @@ def test_fixed_sz_and_parity_subspaces():
     np.testing.assert_allclose(np.asarray(low), wsz[:4], rtol=0, atol=1e-8)
 
 
-def test_verbs_route_and_match_monolithic(monkeypatch, capsys):
+def test_verbs_route_and_match_dense(capsys):
+    """Family 6: the monolithic SAB oracle was removed; the routed
+    little-group verbs (lowest / thermodynamics / full spectrum) are pinned
+    against a dense brute-force reference (full_diagonalization)."""
     N = 8
     H = _ring(N)
     gen = qed.find_symmetries(H, verbose=False).full_set
 
+    dense_ev = np.sort(np.asarray(qed._core.full_diagonalization(H), dtype=float))
+
     r_lg = qed.solve(H, symmetry=gen, num_eigenvalues=3, auto_sz=False,
                      point_group="full", verbose=True)
     assert "LITTLE-GROUP" in capsys.readouterr().out
-
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    r_sab = qed.solve(H, symmetry=gen, num_eigenvalues=3, auto_sz=False,
-                      point_group="full", verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
-    np.testing.assert_allclose(r_lg.eigenvalues, r_sab.eigenvalues,
+    np.testing.assert_allclose(r_lg.eigenvalues, dense_ev[:3],
                                rtol=0, atol=1e-9)
 
+    temps = np.linspace(0.3, 4.0, 5)
     t_lg = qed.thermal(H, method="FTLM", T_min=0.3, T_max=4.0, num_T=5,
                        symmetry=gen, point_group="full", device="cpu",
                        verbose=False)
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    t_sab = qed.thermal(H, method="FTLM", T_min=0.3, T_max=4.0, num_T=5,
-                        symmetry=gen, point_group="full", device="cpu",
-                        verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
+    # Exact canonical energy from the full dense spectrum (little-group thermal
+    # over these small blocks is exact, so this matches to machine precision).
+    E0 = dense_ev.min()
+    dense_E = [float((dense_ev * np.exp(-(dense_ev - E0) / T)).sum()
+                     / np.exp(-(dense_ev - E0) / T).sum()) for T in temps]
     np.testing.assert_allclose(np.asarray(t_lg.energy),
-                               np.asarray(t_sab.energy), rtol=0, atol=1e-10)
+                               np.asarray(dense_E), rtol=0, atol=1e-10)
 
     fs_lg = qed.full_spectrum(H, symmetry=gen, verbose=False)
-    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
-    fs_sab = qed.full_spectrum(H, symmetry=gen, verbose=False)
-    monkeypatch.delenv("ED_SYM_LITTLE_GROUP")
-    np.testing.assert_allclose(np.asarray(fs_lg.eigenvalues),
-                               np.asarray(fs_sab.eigenvalues),
+    np.testing.assert_allclose(np.asarray(fs_lg.eigenvalues), dense_ev,
                                rtol=0, atol=1e-10)

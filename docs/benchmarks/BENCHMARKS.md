@@ -156,7 +156,11 @@ Notes:
   with `ncv` clamped to ours; in practice users do not tune that, so the
   comparison here reflects what someone would actually run.
 
-### Distributed Lanczos (`mpiexec -n {1,2,4}`)
+### Distributed Lanczos (`mpiexec -n {1,2,4}`) — HISTORICAL
+
+> The distributed-operator family and `ed_distributed_main` were
+> retired in Stage 11d (Jul 2026); these numbers are kept as the
+> historical record of that prototype's scaling behaviour.
 
 Lower is better. Numbers in **wall seconds**, taken as the median of
 three runs of `ed_distributed_main` with `OMP_NUM_THREADS = 16 / np`,
@@ -231,10 +235,9 @@ Notes:
   lattices. The 4 × 6 sweep across all `(Subspace, ProjectorChain)`
   cells and all six workflows is documented in
   [`ORTHOGONAL_SYMMETRY.md`](ORTHOGONAL_SYMMETRY.md).
-* **Multi-GPU**: the NCCL-based all-reduce backend extends the GPU
-  advantage to clusters via `distributed_lanczos_gpu` /
-  `distributed_lanczos_gpu_symmetry` /
-  `distributed_krylov_schur_gpu`.
+* **Multi-GPU**: the NCCL `MultiGpuCommunicator` + `MpiCudaBackend`
+  provide the collectives layer; the prototype distributed GPU solvers
+  built on it were retired in Stage 11d (recoverable from git history).
 
 ---
 

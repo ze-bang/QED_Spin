@@ -51,10 +51,15 @@ print(f"U(1) Sz: {report.has_u1_sz}, spatial |G| = "
 # 4. Solver / device / convergence knobs.
 #    solver: "lanczos" (default) | "block_lanczos" | "krylov_schur" | "full"
 #    device: "auto" (default) | "cpu" | "gpu" | "mpi" | "mpi_gpu"
+#
+#    Stage 9c: point_group="auto" (the default) PROJECTS eigenvalue-only
+#    calls through the little-group engine and returns POOLED eigenvalues.
+#    Per-sector attribution (sector_tags / eigenvalues_per_sector) is the
+#    abelian lane's contract -- opt into it with point_group="off".
 # ---------------------------------------------------------------------------
 r = qed.solve(H, symmetry="auto", sz=N // 2, num_eigenvalues=6,
               solver="full",              # exact dense per sector
-              device="cpu",
+              device="cpu", point_group="off",
               tolerance=1e-12, max_iterations=500)
 
 # Per-sector attribution: which irrep each eigenvalue came from.

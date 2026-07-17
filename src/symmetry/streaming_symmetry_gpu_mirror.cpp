@@ -22,24 +22,10 @@
 
 #ifndef WITH_CUDA
 
-#include <ed/symmetry/symmetry_sector_data.h>
 #include <ed/symmetry/sector_gpu_mirror.h>
 
 #include <stdexcept>
 #include <string>
-
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu(const ::SymmetrySector&        /*sector*/,
-                                     double                         /*group_size*/,
-                                     double                         /*spin_l*/,
-                                     const ed::matvec::TermStorage& /*terms*/,
-                                     int                            /*n_sites*/,
-                                     int                            /*n_up*/) {
-    throw std::logic_error(
-        "ed::symmetry::make_sector_matvec_gpu: built without WITH_CUDA. "
-        "Rebuild with -DWITH_CUDA=ON to enable the GPU symmetry mirror, "
-        "or route the workload through CpuBackend (device='cpu').");
-}
 
 ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*rep*/,
@@ -49,6 +35,17 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*re
         "ed::symmetry::make_sector_matvec_gpu_rep: built without WITH_CUDA. "
         "Rebuild with -DWITH_CUDA=ON to enable the on-the-fly representative "
         "GPU matvec, or route the workload through CpuBackend (device='cpu').");
+}
+
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
+    const ed::symmetry::RepSectorData& /*rep*/,
+    double                             /*spin_l*/,
+    const ed::matvec::TermStorage&     /*terms*/) {
+    throw std::logic_error(
+        "ed::symmetry::make_sector_matvec_gpu_rep_hostptr: built without "
+        "WITH_CUDA. Rebuild with -DWITH_CUDA=ON, or route the workload "
+        "through CpuBackend (device='cpu').");
 }
 
 #endif  // !WITH_CUDA

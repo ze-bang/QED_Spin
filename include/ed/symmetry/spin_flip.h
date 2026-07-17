@@ -111,6 +111,22 @@ inline bool coeff_eq(const std::complex<double>& a,
 
 }  // namespace detail
 
+/// Stage 10a: THE flip-subspace closure rule, single-sourced. It was
+/// restated at every consumer -- the little-group engine, the GS/thermal
+/// binding gates, and the sector factory's comments -- which is exactly
+/// the twin-drift class that shipped one lane unguarded (Stage 9f).
+/// prod sigma^x preserves:
+///   * a fixed-Sz block   iff n_up == N/2,
+///   * an Sz-parity half  iff N is even,
+///   * the full space     always.
+/// ``n_up >= 0`` wins over ``sz_parity`` (mutually exclusive upstream).
+[[nodiscard]] inline bool
+flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
+    if (n_up >= 0)      return 2 * n_up == n_sites;
+    if (sz_parity >= 0) return n_sites % 2 == 0;
+    return true;
+}
+
 /// Env gate for the Stage-5 Sz transporter (default ON; set
 /// ED_SYM_SPIN_FLIP=0 to disable for bisection). Read per call so tests
 /// can toggle it from Python without process restarts.

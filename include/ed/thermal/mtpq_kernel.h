@@ -10,10 +10,10 @@
 //
 // Phase 2.4 of the Minimalist ED Collapse (May 2026): replaces the
 // CPU-only `::microcanonical_tpq` forward with a backend-templated
-// kernel call. The legacy `::microcanonical_tpq` body in
-// `src/solvers/cpu/TPQ.cpp` is retained for the CLI/HDF5 paths but
-// will be migrated to a thin HDF5 wrapper over this facade as part of
-// the follow-up tightening (tracked in the Phase 2.4 docs).
+// kernel call. The legacy monolith (`src/solvers/cpu/TPQ.cpp`) is gone:
+// its drivers were deleted in the Jul-2026 debt cleanup and its last
+// survivor, the trajectory aggregator, now lives in
+// `include/ed/thermal/tpq_thermo.h` (Stage 11b).
 // =============================================================================
 
 #include <cmath>
@@ -26,7 +26,7 @@
 #include <vector>
 
 #include <ed/matvec/backend.h>
-#include <ed/solvers/TPQ.h>
+#include <ed/thermal/tpq_seeding.h>
 #include <ed/thermal/tpq_kernel.h>
 
 namespace ed::thermal {
@@ -131,7 +131,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
     for (std::size_t s = 0; s < opts.num_samples; ++s) {
         const std::uint64_t seed = opts.random_seed
                                     ? (opts.random_seed + s)
-                                    : ::tpq_per_sample_seed(s);
+                                    : ed::tpq_per_sample_seed(s);
         auto host_seed = detail::mtpq_make_seed(local_n, seed);
 
         auto seed_dev = backend.make_zero_vector(local_n);

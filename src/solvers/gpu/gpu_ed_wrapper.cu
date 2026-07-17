@@ -41,9 +41,31 @@
 // ============================================================================
 
 bool GPUEDWrapper::isGPUAvailable() {
-    int device_count = 0;
-    cudaError_t error = cudaGetDeviceCount(&device_count);
-    return (error == cudaSuccess && device_count > 0);
+    // Same loud diagnostic as ed::have_cuda(): a driver older than this
+    // build's CUDA runtime must not silently degrade to CPU (once/process).
+    static const bool ok = [] {
+        int device_count = 0;
+        const cudaError_t error = cudaGetDeviceCount(&device_count);
+        if (error == cudaSuccess) return device_count > 0;
+        cudaGetLastError();
+        if (error == cudaErrorInsufficientDriver
+#if CUDART_VERSION >= 11000
+            || error == cudaErrorSystemDriverMismatch
+#endif
+        ) {
+            int drv = 0, rt = 0;
+            cudaDriverGetVersion(&drv);
+            cudaRuntimeGetVersion(&rt);
+            std::fprintf(stderr,
+                "[qed] CUDA DISABLED: the NVIDIA driver on this machine is "
+                "too old for this build (driver API %d.%d < runtime %d.%d). "
+                "Every GPU lane falls back to CPU. Fix: update the driver, "
+                "or rebuild against this node's CUDA toolkit.\n",
+                drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
+        }
+        return false;
+    }();
+    return ok;
 }
 
 void GPUEDWrapper::printGPUInfo() {

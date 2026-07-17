@@ -202,10 +202,31 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
  * the collapse is preserved; the few that have no orchestrator
  * counterpart (sector_index, save_thermal_states, observable name
  * lists, etc.) are left for the CLI layer to consume directly.
+ *
+ * Stage 11a-tail (Jul 2026): this is THE one EDParameters -> SolveOptions
+ * converter. The Python surface (`qed/_params.py`) had grown a twin that
+ * silently drifted from this one in three fields (backend wiring,
+ * allow_infeasible, selected_sectors) -- the same cross-copy drift class
+ * that produced the thermal-converter fork. The union now lives here and
+ * the deliberate semantic differences between the two callers are the
+ * explicit flags:
+ *
+ *   - `auto_method`: defer the eigensolver choice to the orchestrator
+ *     (Python `method=None`); overrides the mapped `method`.
+ *   - `wire_backend`: map `params.use_gpu/use_mpi` onto the backend
+ *     CONSTRAINTS. Python passes true (`device='cpu'` must pin CPU);
+ *     the CLI passes false (its historical semantics: `select_backend`
+ *     auto-promotes regardless of the flag, which only picks the
+ *     GPU-specific workflow variants).
+ *   - `allow_infeasible`: skip the orchestrator's up-front feasibility
+ *     refusal (Python expert escape hatch).
  */
 inline ed::workflows::SolveOptions
 toSolveOptions(const EDParameters& params,
-               ::DiagonalizationMethod method = ::DiagonalizationMethod::LANCZOS) {
+               ::DiagonalizationMethod method = ::DiagonalizationMethod::LANCZOS,
+               bool auto_method = false,
+               bool wire_backend = false,
+               bool allow_infeasible = false) {
     ed::workflows::SolveOptions opts;
 
     opts.num_eigs       = static_cast<std::size_t>(params.num_eigenvalues);
@@ -229,6 +250,22 @@ toSolveOptions(const EDParameters& params,
         case ::DiagonalizationMethod::FULL:           opts.method = SM::FullDiag; break;
         default:                                      opts.method = SM::Auto; break;
     }
+    if (auto_method) {
+        opts.method = SM::Auto;
+    }
+
+    // Device axes -> backend CONSTRAINTS (Python surface only; see the
+    // flag documentation above).
+    if (wire_backend) {
+        opts.backend.allow_gpu = params.use_gpu;
+        opts.backend.allow_mpi = params.use_mpi;
+        // The Python surface has already vetted the GPU choice
+        // (explicit device='gpu', or auto with its own dim >= 2^14
+        // heuristic) -- the C++ auto-promotion floor must not
+        // second-guess it.
+        if (params.use_gpu) opts.backend.gpu_dim_floor = 0;
+    }
+    opts.allow_infeasible = allow_infeasible;
 
     // Orthogonal axes mirrored onto SolveOptions (Wave A5 CLI parity).
     opts.use_fixed_sz          = params.use_fixed_sz;

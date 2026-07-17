@@ -24,8 +24,7 @@
 //     etc.) across the Python <-> C++ boundary before they get
 //     translated into ``SolveOptions`` / ``ThermalOptions``.
 //   * ``EDResults`` + ``ThermodynamicData`` -- the result envelope
-//     every legacy consumer (including the MPI Python wrapper that
-//     reads ``ed_distributed_main`` HDF5 dumps) expects.
+//     every legacy consumer expects.
 //   * Symmetry attribute setters/getters on ``Operator`` /
 //     ``FixedSzOperator`` -- the in-process bridge between
 //     ``qed.symmetry.group_from_generators(...)`` and the streaming
@@ -49,7 +48,8 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 
-#include <ed/core/ed_legacy_types.h>  // EDResults envelope (slim residue of ed_wrapper.h)
+#include <ed/core/results.h>  // ::EDResults envelope (formerly ed_legacy_types.h)
+#include <ed/core/ed_config_adapter.h>  // ed_adapter::toSolveOptions (THE converter)
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/operator.h>
@@ -312,6 +312,23 @@ void bind_dispatcher(py::module_& m) {
                    ">";
         });
 
+    // THE EDParameters -> SolveOptions converter (Stage 11a-tail): one
+    // implementation (`ed_adapter::toSolveOptions`, ed_config_adapter.h)
+    // shared by the CLI and the Python surface. `qed/_params.py` delegates
+    // here with `wire_backend=true`; the CLI calls the C++ function
+    // directly with its historical auto-promote semantics. No defaulted
+    // kwargs on purpose -- each caller MUST state its semantics.
+    m.def("ed_params_to_solve_options",
+          &ed_adapter::toSolveOptions,
+          py::arg("params"),
+          py::arg("method"),
+          py::arg("auto_method"),
+          py::arg("wire_backend"),
+          py::arg("allow_infeasible"),
+          "Translate an EDParameters bag + DiagonalizationMethod into "
+          "ed::workflows::SolveOptions (the single shared converter; see "
+          "ed_config_adapter.h).");
+
     // ------------------------------------------------------------------------
     // 4. EDResults -- read-only result envelope returned by the legacy
     //    Python adapter (``qed.workflow._ed_result_from_*``).
@@ -427,8 +444,8 @@ void bind_dispatcher(py::module_& m) {
     },
         "True iff this build was compiled with ``WITH_MPI=ON``. The "
         "single-process ``qed._core`` does not call MPI directly; "
-        "use the standalone ``mpiexec ed_distributed_main ...`` binary "
-        "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
+        "launch the CLI under mpirun (SectorDistributor + MpiBackend) "
+        "to drive the MPI "
         "solvers.");
 
     // (capability-aware execution planner removed: sensible defaults +

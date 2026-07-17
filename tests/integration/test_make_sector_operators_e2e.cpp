@@ -219,16 +219,14 @@ TEST_CASE("make_sector_operators: full lane solves to Bethe GS + matches legacy"
 // -----------------------------------------------------------------------------
 // Pins the CSR-free rep-walk DENSE-ASSEMBLY lane (SubspaceOperator::assembleDense
 // for `needs_orbit_walk && has_coeff_modifier` producers -- the "orbit-walk
-// symmetry dense-assembly lane"). Forcing ED_SYM_LAZY_SECTORS=1 routes
-// make_sector_operators to the lazy rep-walk producers, so a FullDiag solve
-// assembles each sector densely *through that lane* (vs the eager orbit-CSR path
-// the N=6 default would otherwise take). The sector union must still reproduce
+// symmetry dense-assembly lane"). make_sector_operators always builds the
+// lazy rep-walk producers (Stage 11c-1), so a FullDiag solve assembles each
+// sector densely *through that lane*. The sector union must still reproduce
 // the full-Hilbert dense reference -- byte-for-byte the same physics as the
 // gather matvec, now built in one O(|G|*nnz) pass.
 TEST_CASE("make_sector_operators: lazy rep-walk dense-assembly lane == full reference",
           "[make_operator][sector_set][e2e][dense][lazy][N6]") {
     const int N = 6;
-    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);  // force rep-walk producers
 
     std::string dir = make_scratch_dir("make_sector_ops", "lazydense_full_N6");
     write_zN_translation_fixtures(dir, N);
@@ -255,7 +253,6 @@ TEST_CASE("make_sector_operators: lazy rep-walk dense-assembly lane == full refe
     auto full_op = ed::make_operator(std::move(full_spec));
     std::vector<double> ref_spectrum = solve_full_spectrum(*full_op);
 
-    unsetenv("ED_SYM_LAZY_SECTORS");
 
     REQUIRE(sym_spectrum.size() == ref_spectrum.size());
     REQUIRE(sym_spectrum.size() == (1ULL << N));
@@ -280,7 +277,6 @@ TEST_CASE("make_sector_operators: rep-CSR densify == column build (bit-identical
           "[make_operator][sector_set][e2e][dense][lazy][repcsr]") {
     using Complex = std::complex<double>;
     const int N = 14;
-    setenv("ED_SYM_LAZY_SECTORS", "1", /*overwrite=*/1);  // force rep-lazy producers
 
     std::string dir = make_scratch_dir("make_sector_ops", "repcsr_densify_N12");
     write_zN_translation_fixtures(dir, N);
@@ -324,7 +320,6 @@ TEST_CASE("make_sector_operators: rep-CSR densify == column build (bit-identical
             worst = std::max(worst, std::abs(dense_csr[k] - dense_col[k]));
         ++checked;
     }
-    unsetenv("ED_SYM_LAZY_SECTORS");
 
     INFO("sectors checked = " << checked << ", worst |csr - col| = " << worst);
     REQUIRE(checked > 0);

@@ -206,8 +206,9 @@ from dataclasses import dataclass as _dataclass
 
 
 @_dataclass
-class _SabDssfResult:
-    """Return shape of the full-group (non-abelian SAB) GS-DSSF lane."""
+class _GsDssfResult:
+    """Return shape of the full-group GS-DSSF lane (Stage 9d: the
+    factorized little-group engine)."""
     omega: "np.ndarray"
     S_real: "np.ndarray"
     gs_energy: float
@@ -873,6 +874,9 @@ def _spectral_in_memory(
                     "build of qed._core does not have WITH_CUDA=ON.")
             opts.backend.allow_gpu = True
             opts.backend.allow_mpi = False
+            # Explicit request: the GPU auto-promotion dim floor must
+            # not second-guess the caller.
+            opts.backend.gpu_dim_floor = 0
         elif dev_lc == "cpu":
             opts.backend.allow_gpu = False
             opts.backend.allow_mpi = False
@@ -1374,39 +1378,66 @@ def spectral(
         # Stage 8d: spin_flip is now CONSUMED by the sector lanes when
         # ``sz`` is None (full-space / parity-half flip sectors) --
         # sf_i rides into ``_spectral_in_memory_with_symmetry`` below.
-        # Time reversal remains detect-and-report on this verb.
-        if verbose and tr_i != 0:
-            print("[qed.spectral] note: time-reversal is detect-and-"
-                  "report on the spectral verb (spin-flip and the "
-                  "diagonal Sz axes are exploited by the sector lanes "
-                  "when symmetry= is given).")
+        #
+        # Diction cleanup (2026-07-16): time reversal is NOT EXPLOITED
+        # by any spectral lane (its k <-> -k fold trades solves the
+        # spectral verb does not batch). An accepted-but-inert knob is
+        # the worst kind of inconsistency, so an EXPLICIT toggle is now
+        # loud instead of silently ignored: 'require' raises (there is
+        # nothing to require of this verb), any other explicit value
+        # warns unconditionally. The default ('auto'/None) stays a
+        # silent no-op.
+        if tr_i == 1:
+            raise NotImplementedError(
+                "qed.spectral: time_reversal='require' -- the spectral "
+                "verb does not exploit time reversal (no lane folds "
+                "k <-> -k here). H does carry the symmetry; drop the "
+                "argument, or use the verbs that exploit it "
+                "(solve/full_spectrum/thermal).")
+        if time_reversal in ("on", True):
+            import warnings as _warnings
+            _warnings.warn(
+                "qed.spectral: time_reversal='on' is not exploited on "
+                "the spectral verb; the toggle has no effect here "
+                "(turning it 'off' is equally a no-op).",
+                RuntimeWarning, stacklevel=2)
     if (symmetry is not None and observables is not None
             and not isinstance(H_or_directory, str)
             and isinstance(point_group, str)
             and point_group.lower() == "full"
             and omega is not None and T is None):
-        # PROPER non-abelian GS-DSSF: H and the probe reduced by the
-        # FULL group (all d_Gamma partners summed for completeness) on
-        # the production multi-target matvec.
+        # PROPER non-abelian GS-DSSF -- Stage 9d: the FACTORIZED
+        # little-group lane (GS localized by the star walk, O|0>
+        # scattered into every raw destination sector via the Stage-8d
+        # CrossSectorOrbitObservable rep lane, one continued-fraction
+        # Lanczos per receiving sector; memory O(#reps)). This retired
+        # the monolithic SAB engine's last production route.
         import numpy as np
-        from .workflow import (resolve_auto_symmetry as _ras,
-                               _full_group_generators as _fgg)
+        from .workflow import resolve_auto_symmetry as _ras
+        from .point_group_routing import resolve_projection_lane
         _sym = _ras(H_or_directory, symmetry, verbose=verbose)
-        _gens = _fgg(_sym) if _sym is not None else None
-        if _gens is not None:
+        lane = resolve_projection_lane(
+            _sym, point_group=point_group, consumer="spectral",
+            eigenvalues_only=True, verbose=verbose)
+        if lane.mode == "project":
             ws = list(omega)
             results = []
             for obs in observables:
-                d = dict(_core.symmetry_adapted_gs_dssf(
-                    H_or_directory, obs, _gens,
+                d = dict(_core.little_group_gs_dssf(
+                    H_or_directory, obs, lane.A, lane.residues,
                     float(min(ws)), float(max(ws)), int(len(ws)),
-                    float(eta if eta is not None else 0.1)))
-                r = _SabDssfResult(
+                    float(eta if eta is not None else 0.1),
+                    krylov_dim=int(krylov_dim) if krylov_dim else 200))
+                r = _GsDssfResult(
                     omega=np.asarray(d["omega"], dtype=float),
                     S_real=np.asarray(d["s_omega"], dtype=float),
                     gs_energy=float(d["gs_energy"]),
                     total_weight=float(d["total_weight"]))
                 results.append(r)
+            if verbose:
+                print(f"[qed.spectral] non-abelian LITTLE-GROUP GS-DSSF "
+                      f"(factorized): |A| = {len(lane.A)}, residues = "
+                      f"{len(lane.residues)}.")
             return results[0] if len(results) == 1 else results
     if symmetry is not None:
         routed = _spectral_in_memory_with_symmetry(

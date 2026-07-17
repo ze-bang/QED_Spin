@@ -87,7 +87,6 @@ if(WITH_CUDA)
 endif()
 if(WITH_MPI)
     target_link_libraries(bench_minimalist_collapse PRIVATE
-        ed_distributed
         MPI::MPI_CXX
     )
 endif()

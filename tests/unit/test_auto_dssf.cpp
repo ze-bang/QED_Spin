@@ -66,6 +66,7 @@ TEST_CASE("workflows::spectral GroundStateCF produces a finite S(omega) grid",
     auto Sz0 = build_single_site_sz(N);
 
     SpectralOptions opts;
+    opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep the GPU CF lane covered
     opts.method      = SpectralOptions::Method::GroundStateCF;
     opts.krylov_dim  = 120;
     opts.broadening  = 0.05;
@@ -91,6 +92,7 @@ TEST_CASE("workflows::spectral throws when no observable is supplied",
           "[workflows][spectral][guard]") {
     auto H = build_heisen(4);
     SpectralOptions opts;
+    opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep the GPU CF lane covered
     std::vector<const ed::LinearOperator*> obs;
     REQUIRE_THROWS_AS(ed::workflows::spectral(*H, obs, opts),
                        std::invalid_argument);
@@ -108,6 +110,7 @@ TEST_CASE("workflows::spectral FtlmDynamical lane runs the FTLM "
     auto Sz0 = build_single_site_sz(4);
 
     SpectralOptions opts;
+    opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep the GPU CF lane covered
     opts.method      = SpectralOptions::Method::FtlmDynamical;
     opts.krylov_dim  = 32;
     opts.num_omega   = 16;

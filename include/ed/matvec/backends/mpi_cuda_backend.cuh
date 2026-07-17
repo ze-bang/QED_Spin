@@ -56,7 +56,7 @@
 #include <nccl.h>
 
 #include <ed/core/blas_lapack_wrapper.h>
-#include <ed/distributed/multi_gpu.h>
+#include <ed/parallel/multi_gpu.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/matvec/memory_space.h>
@@ -69,7 +69,7 @@ namespace ed::matvec {
 class MpiCudaBackend final : public CudaBackend {
 public:
     /// Construct with a multi-GPU communicator (RAII over `ncclComm_t`
-    /// built from an MPI_Comm; see `ed/distributed/multi_gpu.h`). The
+    /// built from an MPI_Comm; see `ed/parallel/multi_gpu.h`). The
     /// referenced comm must outlive the backend.
     explicit MpiCudaBackend(
         const ed::distributed::multi_gpu::MultiGpuCommunicator& comm)

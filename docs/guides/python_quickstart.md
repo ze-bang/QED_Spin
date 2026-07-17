@@ -203,17 +203,16 @@ Pass `symmetry=True` (or a dict with `observable=` /
 spectral binding — see [`one_call_api.md`](one_call_api.md) §3 for the
 full SOTA cross-irrep and finite-T cross-irrep recipes.
 
-## MPI distributed runs
+## MPI runs
 
-```python
-if qed.has_mpi_build():
-    qed.mpi.run_distributed("./chain24",
-                            method="lanczos",
-                            n_ranks=8)
+MPI is driven from the CLI: launch `ED` under `mpirun` and the
+across-sector distribution (SectorDistributor) plus the in-process
+`MpiBackend` engage automatically for symmetry workloads. (The
+`qed.mpi` subprocess launcher was retired in Stage 11d, Jul 2026.)
+
+```bash
+mpiexec -n 8 ./ED <input_dir> --use-symmetry --fixed-sz ...
 ```
-
-The helper builds the right `mpiexec` argv for
-`ed_distributed_main`. For GPU + MPI add `use_gpu=True` (uses NCCL).
 
 ## Next steps
 

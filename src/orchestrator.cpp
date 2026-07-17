@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include <ed/orchestrator.h>
+#include <ed/core/solver_defaults.h>
 
 #include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
 #include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
@@ -51,12 +52,11 @@
 #include <ed/observables/kpm_dynamical.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/solvers/TPQ.h>      // compute_tpq_thermo_from_trajectories aggregator
+#include <ed/thermal/tpq_thermo.h>  // compute_tpq_thermo_from_trajectories aggregator
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
-#include <ed/thermal/ltlm_kernel.h>
 #include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
 #include <ed/thermal/mtpq_f32.h>
@@ -241,6 +241,19 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
 // combine_sector_thermodynamics expects for the per-sector Boltzmann weight.
 // ---------------------------------------------------------------------------
 constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
+
+// ED_THERMAL_EXACT_SMALL=0 forces the real sampling kernel even at
+// D <= SMALL_THERMAL_DIM. The fallback is a strict accuracy win for USERS, but
+// it silently removes the sampling kernels from any accuracy test whose system
+// fits under the cutoff -- test_thermal_dense_ref (N=6, dim=64) was already
+// exercising this path instead of the mTPQ kernel it claimed to check. Tests
+// that mean to gate a KERNEL set this to 0; nothing in production should.
+// Read per call so a test can toggle it without restarting the process.
+[[nodiscard]] inline bool exact_small_thermal_enabled() noexcept {
+    if (const char* v = std::getenv("ED_THERMAL_EXACT_SMALL"))
+        return !(v[0] == '0' && v[1] == '\0');
+    return true;
+}
 
 static ThermodynamicData compute_canonical_thermo_from_eigs(
     const std::vector<double>& eigs,
@@ -501,7 +514,17 @@ GroundStateResult solve_on(Backend& be,
         // common num_eigs=1 + compute_vectors=false workflow.
         std::vector<double> evals;
         std::vector<double> evec_coeffs;  // column-major m x m
-        if (opts.compute_vectors) {
+        // GAP 10 fix (2026-07-16): a requested WINDOW (num_eigs > 1) needs
+        // the tridiag eigenvectors even on the eigenvalues-only path --
+        // the per-Ritz residual bound |beta_m| * |z_{m,i}| is free once z
+        // exists, and without it stalled interior Ritz values escaped
+        // into the merged spectrum as plausible-looking garbage (measured:
+        // -2.686 reported where dense says -2.459; NOT a reorth ghost --
+        // K = 1..32 identical). num_eigs == 1 keeps the fast
+        // eigenvalues-only path: the extreme pair is what Lanczos
+        // converges first and the stall detector guards it adequately.
+        const bool need_z = opts.compute_vectors || opts.num_eigs > 1;
+        if (need_z) {
             std::vector<double> weights;
             ed::krylov::detail::solve_tridiag_with_eigenvectors(
                 kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evec_coeffs);
@@ -509,7 +532,30 @@ GroundStateResult solve_on(Backend& be,
             evals = ed::krylov::detail::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
-        const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
+        const std::size_t n_keep =
+            std::min<std::size_t>(opts.num_eigs, evals.size());
+        // GAP-10 v2 (2026-07-17): the first fix TRUNCATED to the certified
+        // prefix, which broke the num_eigs COUNT contract in
+        // environment-dependent ways (an OpenBLAS runner trimmed a value
+        // the local run kept; [unified-e2e] 83 asserted the count). The
+        // window is now returned IN FULL and every value carries its
+        // residual bound |beta_m| * |z_{m,i}| in krylov.ritz_residuals --
+        // consumers that MERGE windows (the streaming sector pools, where
+        // the original garbage did its damage) filter on the bound; a
+        // direct caller keeps num_eigs values plus the diagnostics.
+        std::vector<double> ritz_bounds;
+        if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
+            const std::size_t m = kres.alpha.size();
+            const double beta_last =
+                (kres.beta.size() > m) ? std::abs(kres.beta[m])
+                                       : (m < geom.local_dim && !kres.beta.empty()
+                                              ? std::abs(kres.beta.back())
+                                              : 0.0);
+            ritz_bounds.reserve(n_keep);
+            for (std::size_t i2 = 0; i2 < n_keep; ++i2)
+                ritz_bounds.push_back(
+                    beta_last * std::abs(evec_coeffs[(m - 1) + i2 * m]));
+        }
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
 
         // Reconstruct host-side eigenvectors from the kept Lanczos basis
@@ -540,6 +586,8 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.alpha = std::move(kres.alpha);
         R.krylov.beta  = std::move(kres.beta);
         R.krylov.iters_done = kres.iters_done;
+        if (!ritz_bounds.empty())
+            R.krylov.ritz_residuals = std::move(ritz_bounds);
     } else if (method == SolveMethod::BlockLanczos) {
         ed::krylov::BlockLanczosOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
@@ -856,6 +904,81 @@ GroundStateResult solve_on(Backend& be,
     return R;
 }
 
+// ---------------------------------------------------------------------------
+// GroundStateCF / KpmDynamical seed guard (Jul 2026).
+//
+// The in-memory spectral lanes seeded the continued-fraction kernel with the
+// best-effort GS vector from ``solve()``, which caps its Lanczos and does NOT
+// reorthogonalise the eigenVECTOR (the eigenVALUE converges to the extreme
+// long before the vector does). A GS vector carrying ~1e-1..1e-3 residual
+// makes phi = O|psi0> -- and its weight ||phi||^2 -- systematically wrong:
+// the plain in-memory S(Q, omega) came out ~5% high vs the exact Lehmann /
+// cross-irrep references, while the cross-irrep lane was exact BECAUSE it
+// already refines its GS (ensure_gs_residual). This mirrors that refinement
+// on the host vector: measure the residual; if it exceeds 1e-8, rerun a
+// FullCGS2 kept-basis Lanczos on H seeded by the current vector, rebuild the
+// Ritz pair, and update (seed_host, E0) in place. Cheap when the vector was
+// already good (one matvec); decisive when it was not.
+inline void refine_gs_seed_host(const LinearOperator&        H,
+                                std::vector<std::complex<double>>& seed_host,
+                                double&                      E0)
+{
+    using Complex = std::complex<double>;
+    const std::size_t n = seed_host.size();
+    if (n == 0) return;
+    ed::matvec::CpuBackend be;
+    auto apply_H = H.template bind<ed::matvec::CpuBackend>();
+
+    auto residual = [&](const std::vector<Complex>& v, double e) {
+        std::vector<Complex> hv(n, Complex(0.0, 0.0));
+        apply_H(v.data(), hv.data(), n);
+        double num = 0.0, den = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            num += std::norm(hv[i] - e * v[i]);
+            den += std::norm(v[i]);
+        }
+        return (den > 0.0) ? std::sqrt(num / den)
+                           : std::numeric_limits<double>::infinity();
+    };
+
+    if (residual(seed_host, E0) < 1e-8) return;
+
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter   = std::min<std::size_t>(n, 300);
+    kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    kopts.keep_basis = true;
+    kopts.dim_cap    = n;
+    auto kres = ed::krylov::lanczos_kernel(be, apply_H, n,
+                                           seed_host.data(), kopts);
+    const std::size_t m = kres.alpha.size();
+    if (m == 0) return;   // leave the best-effort seed; CF still runs
+    std::vector<double> diag = kres.alpha;
+    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
+    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
+    std::vector<double> z(m * m, 0.0);
+    const lapack_int info = LAPACKE_dstevd(
+        LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+        diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
+    if (info != 0) return;
+    std::vector<Complex> refined(n, Complex(0.0, 0.0));
+    for (std::size_t j = 0; j < m; ++j) {
+        const Complex* vj = kres.basis[j].get();
+        const double   yj = z[j];               // column 0, row j
+        if (std::abs(yj) < 1e-300) continue;
+        for (std::size_t i = 0; i < n; ++i) refined[i] += yj * vj[i];
+    }
+    double nrm = 0.0;
+    for (const auto& c : refined) nrm += std::norm(c);
+    if (nrm <= 0.0) return;
+    const double inv = 1.0 / std::sqrt(nrm);
+    for (auto& c : refined) c *= inv;
+    // Adopt the refined pair only if it is genuinely better.
+    if (residual(refined, diag[0]) < residual(seed_host, E0)) {
+        seed_host = std::move(refined);
+        E0 = diag[0];
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -922,8 +1045,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // Leaf memory guard (planner feasibility pre-flight removed): throw cleanly
     // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
     // is the per-call working dim (symmetry iterates sectors a level up, so this
-    // is the sector dim there). LTLM stores GS + excitation bases (~2x krylov);
-    // FTLM one sample's basis at a time; TPQ/KPM are O(1) state vectors.
+    // is the sector dim there). FTLM and LTLM both keep one sample's Krylov
+    // basis at a time (LTLM routes through the FTLM kernel); TPQ/KPM are O(1)
+    // state vectors.
     {
         const std::uint64_t D = H.global_dim();
         std::uint64_t vecs;
@@ -944,8 +1068,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             elem = 8ull;  // complex<float>
         } else {
             switch (opts.method) {
+                // LTLM thermodynamics dispatches through ftlm_kernel (Jul 2026,
+                // 654ea06) -- it no longer stores a GS + excitation basis pair,
+                // so it costs exactly what FTLM costs. The old 2*krylov estimate
+                // outlived the kernel it modelled and over-charged LTLM ~2x
+                // (400 vs 204 vectors at the kLtlmKrylovDim=200 default), which
+                // can refuse a run that fits comfortably.
                 case ThermalOptions::Method::LTLM:
-                    vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4); break;
                 case ThermalOptions::Method::FTLM:
                     vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
                 case ThermalOptions::Method::OFTLM:
@@ -996,14 +1125,24 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     const auto t0 = std::chrono::steady_clock::now();
 
     // -----------------------------------------------------------------------
-    // Small-sector exact-thermal fallback for mTPQ.
+    // Small-sector exact-thermal fallback for EVERY sampling method.
     //
-    // mTPQ is a stochastic method that needs D >> num_samples for
-    // good typicality. For small sectors (D <= SMALL_THERMAL_DIM), the
-    // per-sample variance is too high for the dE tolerance even with 20+
-    // samples. The primary symptom is the sz_spatial mTPQ failure: within an
-    // n_up block, translation k-sectors have D ≈ 1–9 for N=8, giving a
-    // statistical error of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    // Every stochastic thermal method needs D >> num_samples for good
+    // typicality. For small sectors (D <= SMALL_THERMAL_DIM), the per-sample
+    // variance is too high for the dE tolerance even with 20+ samples. The
+    // original symptom was the sz_spatial mTPQ failure: within an n_up block,
+    // translation k-sectors have D ≈ 1–9 for N=8, giving a statistical error
+    // of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    //
+    // Jul 2026: the gate used to require mTPQ specifically, so FTLM/LTLM kept
+    // sampling in a regime where the exact solve is both free and machine
+    // precise -- measured at dim=64 (N=6 ring): mTPQ 1.4e-15 (this fallback)
+    // vs FTLM/LTLM 2.3e-02 (sampling), i.e. 13 orders for microseconds of
+    // eigensolve. The deliverable of FTLM / LTLM / OFTLM / mTPQ is identical
+    // here -- canonical E(T)/C(T)/S(T) -- so all four take the exact route.
+    // KpmDos is deliberately EXCLUDED: its deliverable includes the Chebyshev
+    // density of states, which this path does not produce (same rationale as
+    // the probe_betas carve-out below).
     //
     // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
@@ -1011,8 +1150,21 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // high T) as compute_tpq_thermo_from_trajectories, so it plugs in
     // correctly to combine_sector_thermodynamics for Sz/spatial recombination.
     // -----------------------------------------------------------------------
-    const bool is_tpq_method = (opts.method == ThermalOptions::Method::mTPQ);
-    if (is_tpq_method &&
+    const bool is_sampling_thermo_method =
+        opts.method == ThermalOptions::Method::mTPQ  ||
+        opts.method == ThermalOptions::Method::FTLM  ||
+        opts.method == ThermalOptions::Method::LTLM  ||
+        opts.method == ThermalOptions::Method::OFTLM;
+    // NOTE: this must NOT return early. Everything below the method dispatch --
+    // the universal-save persistence finalizer above all -- has to run for the
+    // exact result exactly as it does for a sampled one, or the fallback
+    // silently strips the caller's output_dir contract (R.hdf5_path empty ->
+    // Python's sector_hdf5_paths empty). That is a bug this file has already
+    // shipped once, on the solve verb (see apply_solve_save_finalizer's note).
+    // So: fill R.thermo, then flag the dispatch chain to stand down.
+    bool exact_thermo_done = false;
+    if (is_sampling_thermo_method &&
+        exact_small_thermal_enabled() &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
         !R.thermo.temperatures.empty() &&
@@ -1028,14 +1180,17 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 eigs, R.thermo.temperatures);
             R.ground_state_energy = eigs.front();
             // The exact fallback ran on the selected backend lane; label it like
-            // the normal return path (this early return previously left lane
-            // unset, failing the lane-metadata assertions).
+            // the normal return path.
             R.backend.lane = ed::lane_label_from_variant(variant);
-            return R;
+            exact_thermo_done = true;
         }
     }
 
-    if (opts.method == ThermalOptions::Method::mTPQ) {
+    if (exact_thermo_done) {
+        // The small-D exact fallback already filled R.thermo. Skip the
+        // estimator, but fall through to the shared tail (persistence
+        // finalizer, timing, lane metadata) like every other method.
+    } else if (opts.method == ThermalOptions::Method::mTPQ) {
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
@@ -1198,7 +1353,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 // reconstruct ABSOLUTE entropy / free energy (ln(D)
                 // baseline). This is what makes per-sector F_s a valid
                 // Boltzmann weight for U(1)/Sz + spatial recombination.
-                ThermodynamicData td = compute_tpq_thermo_from_trajectories(
+                ThermodynamicData td = ed::thermal::compute_tpq_thermo_from_trajectories(
                     kres.sample_inv_temps, kres.sample_energies,
                     kres.sample_variances, R.thermo.temperatures,
                     static_cast<double>(H.geometry().global_dim));
@@ -1321,21 +1476,34 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     "wired. Pin BackendConstraints to route through "
                     "the CPU/CUDA lanes.");
             } else {
-                ed::thermal::LtlmOptions kopts;
-                kopts.num_samples         = opts.num_samples;
-                kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim : 200;
-                kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim : 100;
-                kopts.betas               = opts.betas;
-                kopts.random_seed         = opts.random_seed;
-                kopts.output_dir          = opts.output_dir;
+                // Jul 2026: LTLM thermodynamics == FTLM. Both LTLM kernels
+                // (the CPU low_temperature_lanczos and the backend
+                // ltlm_kernel_via_backend) seeded a SECOND Lanczos from the
+                // ground state and summed sum_n |<0|psi_n>|^2 e^{-bE_n} --
+                // the GS-LOCAL density of states, i.e.
+                // <0|He^{-bH}|0>/<0|e^{-bH}|0>, NOT the thermal trace. It
+                // stayed pinned near E0 at every T (E(0.69)=-7.35 vs exact
+                // -6.33). For a FUNCTION OF H (all thermodynamics here) the
+                // LTLM symmetric estimator reduces EXACTLY to the FTLM
+                // trace, so route through the verified FTLM kernel; the two
+                // differ only for observables that do not commute with H,
+                // which this thermodynamics path never computes.
+                ed::thermal::FtlmOptions kopts;
+                kopts.num_samples = opts.num_samples;
+                kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
+                kopts.betas       = opts.betas;
+                kopts.random_seed = opts.random_seed;
+                kopts.output_dir  = opts.output_dir;
                 auto matvec = H.template bind<B>();
-                auto kres = ed::thermal::ltlm_kernel<B>(
+                auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
                     H.geometry().global_dim, kopts);
                 R.thermo.energy = std::move(kres.energy);
                 R.thermo.specific_heat = std::move(kres.heat_capacity);
                 R.thermo.entropy = std::move(kres.entropy);
-                R.ground_state_energy = kres.ground_state_energy;
+                R.ground_state_energy = R.thermo.energy.empty() ? 0.0
+                    : *std::min_element(R.thermo.energy.begin(),
+                                        R.thermo.energy.end());
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::KpmDos) {
@@ -1389,6 +1557,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 R.thermo.entropy = std::move(kres.entropy);
                 R.thermo.free_energy = std::move(kres.free_energy);
                 R.ground_state_energy = kres.e_min_estimate;
+                // Surface the raw DOS the method exists to produce (was
+                // computed and discarded; only its thermodynamics escaped).
+                R.dos_energies = std::move(kres.dos_grid_energies);
+                R.dos_values   = std::move(kres.dos_grid_values);
             }
         }, variant);
     } else {
@@ -1644,6 +1816,9 @@ SpectralResult spectral(const LinearOperator&                      H,
             const double inv = (sumsq > 0.0)
                 ? (1.0 / std::sqrt(sumsq)) : 1.0;
             for (auto& z : seed_host) z *= inv;
+            // Guard the GS vector before it seeds the CF weight ||O|psi0>||^2
+            // (unrefined GS => ~5% S(omega) error vs the exact reference).
+            refine_gs_seed_host(H, seed_host, E0);
         }
         const double shift = (std::abs(opts.energy_shift) > 1e-14)
             ? opts.energy_shift : E0;
@@ -1724,6 +1899,13 @@ SpectralResult spectral(const LinearOperator&                      H,
             const double inv = (sumsq > 0.0)
                 ? (1.0 / std::sqrt(sumsq)) : 1.0;
             for (auto& z : seed_host) z *= inv;
+        }
+        // Guard the GS seed for the KPM correlator (same rationale as
+        // GroundStateCF). Only when NOT user-seeded: a caller-staged warm
+        // state (TPQ-to-KPM) is deliberately not a GS eigenvector.
+        if (opts.initial_state.empty()) {
+            double e0_dummy = 0.0;
+            refine_gs_seed_host(H, seed_host, e0_dummy);
         }
 
         const LinearOperator& O1 = *observables.front();

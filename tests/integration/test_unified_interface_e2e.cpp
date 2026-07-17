@@ -120,7 +120,9 @@ void write_chain_interall(const std::filesystem::path& path,
 // whenever a CUDA device is visible -- exactly like the symmetry-sector
 // operators already did. Dense FullDiag stays on the CPU lane. Tests that want
 // to pin the CPU lane regardless of hardware set opts.backend.allow_gpu=false
-// (see the dedicated BackendConstraints case below).
+// (see the dedicated BackendConstraints case below). These tiny fixtures
+// zero ``gpu_dim_floor`` (the Jul-2026 auto-promotion floor) so the GPU
+// lane keeps its e2e coverage despite dims far below the production floor.
 inline std::string expected_iterative_lane() {
     return ed::have_cuda() ? "gpu" : "cpu";
 }
@@ -140,6 +142,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         REQUIRE(op);
 
         ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
         opts.num_eigs        = 1;
         opts.method          = ed::SolveMethod::Lanczos;
         opts.tolerance       = 1e-12;
@@ -160,6 +163,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         auto op = ed::make_operator(std::move(spec));
 
         ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
         opts.num_eigs = 4;
         opts.method   = ed::SolveMethod::FullDiag;
         auto r = ed::workflows::solve(*op, opts);
@@ -178,6 +182,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         auto op = ed::make_operator(std::move(spec));
 
         ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
         opts.num_eigs   = 4;
         opts.method     = ed::SolveMethod::KrylovSchur;
         opts.tolerance  = 1e-10;
@@ -199,6 +204,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         auto op = ed::make_operator(std::move(spec));
 
         ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
         opts.num_eigs   = 4;
         opts.block_size = 4;
         opts.method     = ed::SolveMethod::BlockLanczos;
@@ -217,6 +223,7 @@ TEST_CASE("[unified-e2e] InMemoryOperator source through every solve method",
         auto op = ed::make_operator(std::move(spec));
 
         ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
         opts.num_eigs = 1;
         opts.method   = ed::SolveMethod::Auto;
         auto r = ed::workflows::solve(*op, opts);
@@ -244,6 +251,7 @@ TEST_CASE("[unified-e2e] FilePaths source loads InterAll.dat and "
     REQUIRE(op);
 
     ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.num_eigs  = 1;
     opts.method    = ed::SolveMethod::Lanczos;
     opts.tolerance = 1e-12;
@@ -272,6 +280,7 @@ TEST_CASE("[unified-e2e] DirectoryPath source loads from a directory and "
     auto op = ed::make_operator(std::move(spec));
 
     ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.num_eigs  = 2;
     opts.method    = ed::SolveMethod::Lanczos;
     opts.tolerance = 1e-12;
@@ -302,6 +311,7 @@ TEST_CASE("[unified-e2e] fixed_sz axis projects to the Sz = 0 sector",
     REQUIRE(op->dim() == 20);
 
     ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.num_eigs       = 1;
     opts.method         = ed::SolveMethod::Lanczos;
     opts.tolerance      = 1e-12;
@@ -328,6 +338,7 @@ TEST_CASE("[unified-e2e] thermal mTPQ end-to-end on the in-memory operator",
     auto op = ed::make_operator(std::move(spec));
 
     ed::ThermalOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.method      = ed::ThermalOptions::Method::mTPQ;
     opts.num_samples = 1;
     opts.krylov_dim  = 50;
@@ -355,6 +366,7 @@ TEST_CASE("[unified-e2e] thermal FTLM end-to-end on the in-memory operator",
     auto op = ed::make_operator(std::move(spec));
 
     ed::ThermalOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.method      = ed::ThermalOptions::Method::FTLM;
     opts.num_samples = 2;
     opts.krylov_dim  = 30;
@@ -384,6 +396,7 @@ TEST_CASE("[unified-e2e] spectral CF ground-state on the in-memory operator",
     auto obs_op = ed::make_operator(std::move(spec_obs));
 
     ed::SpectralOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.method     = ed::SpectralOptions::Method::GroundStateCF;
     opts.num_omega  = 16;
     opts.omega_min  = -5.0;
@@ -411,6 +424,7 @@ TEST_CASE("[unified-e2e] solve carries Krylov diagnostics and backend "
     auto op = ed::make_operator(std::move(spec));
 
     ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.num_eigs        = 1;
     opts.method          = ed::SolveMethod::Lanczos;
     opts.tolerance       = 1e-12;
@@ -447,6 +461,7 @@ TEST_CASE("[unified-e2e] BackendConstraints can force the CPU lane "
     auto op = ed::make_operator(std::move(spec));
 
     ed::SolveOptions opts;
+        opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep exercising the GPU lane
     opts.num_eigs       = 1;
     opts.method         = ed::SolveMethod::Lanczos;
     opts.backend.allow_gpu = false;  // explicit CPU pin

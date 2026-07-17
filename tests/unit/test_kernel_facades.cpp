@@ -3,7 +3,7 @@
 //
 // Phase-6 lockdown for the unified algorithm-kernel facades. Each
 // kernel header is a thin Backend-templated wrapper over an existing
-// CPU body (Lanczos / FTLM / LTLM / mTPQ / KPM-DOS /
+// CPU body (Lanczos / FTLM / mTPQ / KPM-DOS /
 // block-Lanczos / Krylov-Schur). The tests prove the new headers
 // actually compile, link, and produce the same numbers as the legacy
 // entry points on small Heisenberg chains.
@@ -20,7 +20,6 @@
 #include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
-#include <ed/thermal/ltlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
 #include <ed/thermal/kpm_dos_kernel.h>
 
@@ -28,7 +27,6 @@
 #include <ed/observables/static_correlator.h>
 #include <ed/observables/cf_dynamical.h>
 #include <ed/observables/kpm_dynamical.h>
-#include <ed/observables/time_evolution.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -258,28 +256,15 @@ TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
     REQUIRE_FALSE(res.heat_capacity.empty());
 }
 
-TEST_CASE("thermal::ltlm_kernel returns thermodynamic data + ground-state E",
-          "[kernel-facade][ltlm][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    MatvecCallable apply{H.get()};
-
-    ed::thermal::LtlmOptions opts;
-    opts.num_samples = 1;
-    opts.krylov_dim  = 12;
-    opts.betas       = {0.5, 1.0, 5.0};
-    opts.random_seed = 7;
-
-    auto res = ed::thermal::ltlm_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
-
-    REQUIRE_FALSE(res.energy.empty());
-    REQUIRE(res.ground_state_energy < 0.0);  // Heisenberg AFM GS is negative
-}
+// NOTE: there is no ltlm_kernel facade to pin. ed/thermal/ltlm_kernel.h and
+// low_temperature_lanczos were deleted in consolidation Family 1 (Jul 2026):
+// both reimplemented the same GS-local-DOS bug, and for a function of H the
+// symmetric LTLM estimator reduces exactly to the FTLM trace, so the
+// orchestrator's LTLM branch dispatches through ftlm_kernel. That equivalence
+// is pinned in test_thermal_dense_ref ("LTLM thermodynamics IS the FTLM
+// trace"); the genuinely LTLM-only estimator that survives
+// (compute_connected_qh_response_ltlm, dM/dT -- an observable that does NOT
+// commute with H) is pinned by test_ltlm_static_connected_qh.
 
 TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
           "[kernel-facade][mtpq][phase6]") {
@@ -345,32 +330,4 @@ TEST_CASE("observables::expectation_value reproduces <psi|H|psi>",
     // <0...0| H | 0...0> = 0 for any traceless Heisenberg term + half-shift;
     // here only Sz Sz contributes => +N/4 on the fully-polarised state.
     REQUIRE(std::abs(e.imag()) < 1e-12);
-}
-
-TEST_CASE("observables::time_evolution_correlator returns C(0) and C(t)",
-          "[kernel-facade][observables][time-evolution][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    std::vector<Complex> psi(dim, Complex(0.0, 0.0));
-    psi[1] = Complex(1.0, 0.0);  // pick something that overlaps multiple sectors
-
-    ed::observables::TimeEvolutionOptions opts;
-    opts.dt          = 0.05;
-    opts.t_max       = 0.5;
-    opts.krylov_dim  = 16;
-
-    auto res = ed::observables::time_evolution_correlator(
-        backend, *H, *H, *H, psi.data(), dim, opts);
-
-    REQUIRE(res.t.size()          == res.correlator.size());
-    REQUIRE(res.t.size()          >= 2);
-    REQUIRE(res.t.front()         == 0.0);
-    REQUIRE(std::abs(res.t.back() - opts.t_max) <= opts.dt + 1e-12);
-    // C(0) = <H psi | H psi> is real and non-negative.
-    REQUIRE(std::abs(res.correlator.front().imag()) < 1e-10);
-    REQUIRE(res.correlator.front().real() > 0.0);
 }

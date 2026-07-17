@@ -40,8 +40,12 @@
 
 #include <ed/core/operator.h>
 #include <ed/core/results.h>   // ThermodynamicData
+#include <ed/matvec/matvec.h>              // 9d: MatVecOperator factory
+#include <ed/symmetry/rep_sector_data.h>   // 9d: RepSectorData
 
+#include <complex>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ed::solvers {
@@ -53,15 +57,144 @@ struct LittleGroupOptions {
     bool use_gpu       = false;///< full-spectrum path: ONE batched cuSOLVER
                                ///< eigensolve over all packed blocks (WITH_CUDA)
     bool verbose       = false;
+    /// Stage 9a: spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
+    /// flip commutes with every site permutation, so it never belongs to the
+    /// little co-group). SymToggle convention: -1 auto (engage when
+    /// [H, prod sigma^x] = 0 AND the subspace is flip-invariant: n_up = N/2,
+    /// parity with N even, or the full space; ED_SYM_LG_FLIP=0 vetoes),
+    /// 0 off, 1 require (throws when the symmetry or admissibility is absent).
+    int  spin_flip     = -1;
+    /// Stage 9b: time-reversal folding (star-level k <-> conj(k) merge +
+    /// conjugate-irrep pairing). Same SymToggle convention; dormant until 9b.
+    int  time_reversal = -1;
+    /// Solve ONLY these star representatives (extended irrep indices -- the
+    /// same ``k0`` that ``LittleGroupStarInfo::k0`` reports). Empty = every
+    /// star, the default.
+    ///
+    /// This is the programmatic form of the ED_SYM_LG_ONLY_K0 job-splitting
+    /// env var, added so a caller can NAME a momentum block and have the
+    /// engine do only that block's work -- previously naming a sector forced
+    /// the whole call off the projection lane and onto the abelian one, i.e.
+    /// asking for a smaller block silently bought a BIGGER one (the
+    /// (n_up,k) sector instead of (n_up,k,irrep)).
+    ///
+    /// Note a star is the solve unit: members of one star are isospectral by
+    /// construction (the point-group residue maps them onto each other), so
+    /// restricting to a star representative answers for every member of that
+    /// star. The env var still wins when set, so existing job scripts keep
+    /// working.
+    std::vector<int> only_k0;
+    /// Solve ONLY these little-co-group irreps (indices into the star's own
+    /// isotypic decomposition -- the same index ``LittleGroupLabel::irrep``
+    /// reports, and the row index of ``LittleGroupStarInfo::little_characters``).
+    /// Empty = every irrep, the default.
+    ///
+    /// Only meaningful together with ``only_k0``: the irrep index is PER STAR
+    /// (decompose_irreps orders each star's decomposition independently), so
+    /// "irrep 1" means different things in different stars. Callers name an
+    /// irrep by its CHARACTER and resolve it to an index against the plan's
+    /// published table -- never by assuming an index convention.
+    ///
+    /// TR INTERACTION: when this is non-empty the sigma <-> sigma* pairing is
+    /// disabled. That fold solves ONE member of a conjugate pair and reports
+    /// the pair's doubled multiplicity under the earlier member's label, so a
+    /// caller who named the LATER member would get nothing back. Naming one
+    /// irrep forfeits a 2x fold that is irrelevant next to the |P_k| the
+    /// projection already bought.
+    std::vector<int> only_irrep;
+    /// Build every star's sector and report it (``stars`` + the full
+    /// ``irrep_characters`` table), solving NOTHING. The programmatic form of
+    /// ED_SYM_LG_ONLY_K0="plan".
+    ///
+    /// This is what makes ``only_k0`` usable from a caller who knows physics
+    /// rather than engine indices: ``only_k0`` filters on star
+    /// REPRESENTATIVES, and a caller's momentum may be a non-representative
+    /// MEMBER of a star, so it must first read the star membership (and
+    /// decode its momentum from ``irrep_characters``, since k_raw is an
+    /// internal irrep index and NOT the momentum). Plan, decode, then solve
+    /// the one star.
+    bool plan_only = false;
 };
 
 /// One star's diagnostics.
 struct LittleGroupStarInfo {
-    int  k0            = 0;    ///< star representative (abelian irrep index)
+    int  k0            = 0;    ///< star representative (extended irrep index:
+                               ///< k + s*n_irr_raw when flip is engaged)
     int  star_size     = 1;    ///< |star| (spectrum multiplicity factor)
     int  little_order  = 1;    ///< |P_k0| actually used (1 = plain fallback)
     bool projected     = false;///< true when the little-group blocks were used
     std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
+    int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
+    /// Did this star's matvec actually run the GPU rep-gather? REPORTED by the
+    /// engine, never inferred from the caller's device= request: the gate
+    /// (reduced-CSR declined AND >= 2^20 reps AND a device present) is
+    /// internal, and small blocks legitimately stay on the CPU however loudly
+    /// the caller asked for a GPU. A lane label that echoes the request rather
+    /// than the fact is worse than none -- assertions against it are toothless.
+    bool gpu_engaged   = false;
+    /// Did the star's matvec serve its applies from the lazily-built
+    /// reduced sector CSR? Truthful, post-solve, same contract as
+    /// gpu_engaged: false + !gpu_engaged after solves ran means the
+    /// CSR-free gather walk served them (the matvec-regime engagement
+    /// signal the permutation sweep asserts against).
+    bool csr_engaged   = false;
+    /// Every extended irrep index folded into this star (always includes
+    /// ``k0``). The engine has always known this -- the star loop iterates
+    /// ``(k0, members)`` -- but only published ``star_size``, which is not
+    /// enough to answer "which star holds MY momentum?". Naming a block needs
+    /// exactly that: ``only_k0`` filters on REPRESENTATIVES, so a caller whose
+    /// momentum is a non-representative member has to find its star first.
+    /// Members are isospectral by construction (the residue maps them onto
+    /// each other), so the representative's spectrum answers for all of them.
+    std::vector<int> members;
+
+    // -----------------------------------------------------------------------
+    // The little co-group P_k0 of THIS star, published so a caller can NAME an
+    // irrep by its character instead of by an index.
+    //
+    // `LittleGroupLabel::irrep` is an index into decompose_irreps' own
+    // ordering -- engine-internal, exactly like `k_raw` (which is NOT the
+    // momentum). Momentum is nameable because `irrep_characters` publishes
+    // chi_k over the ABELIAN group; the co-group's characters had no such
+    // table, so a `irrep=<index>` API would have handed callers an internal
+    // convention and called it physics. These three fields are that missing
+    // table.
+    //
+    //   little_elems[e]        -- which residue is co-group element e: an index
+    //                             into the caller's own `residue_perms`, or -1
+    //                             for the identity (always element 0). This is
+    //                             what makes the character columns identifiable
+    //                             as permutations the caller already holds.
+    //   little_characters[s][e]-- chi_sigma(element e) for irrep s. Rows are
+    //                             parallel to `LittleGroupLabel::irrep`.
+    //   little_irrep_dims[s]   -- d_sigma. Sum of d_sigma^2 == little_order.
+    //
+    // Empty when the star was not projected (trivial co-group, or a graceful
+    // per-star fallback): there is no table to report.
+    // -----------------------------------------------------------------------
+    std::vector<int> little_elems;
+    std::vector<std::vector<std::complex<double>>> little_characters;
+    std::vector<int> little_irrep_dims;
+};
+
+/// Stage 9f: per-eigenvalue quantum-number label, parallel to
+/// ``LittleGroupSpectrum::eigenvalues``. ``k_raw`` is the star
+/// REPRESENTATIVE's abelian irrep index -- fold partners (star members,
+/// TR conjugates) share the representative's label; the full membership
+/// is in ``stars[]``. ``irrep`` indexes the little co-group's irrep
+/// decomposition at that star (-1 = plain / unprojected block; for a
+/// TR-folded sigma/sigma* pair it names the SOLVED member).
+struct LittleGroupLabel {
+    int k_raw       = -1;   ///< abelian irrep (momentum) of the star rep
+    int flip_parity = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int irrep       = -1;   ///< little-co-group irrep index; -1 = plain block
+    int irrep_dim   = 1;    ///< d_sigma (1 for plain blocks)
+    /// Jul 2026: true iff the block delivered the full requested window of
+    /// DISTINCT, residual-bound-converged Ritz values (dense blocks are
+    /// exact and always true). A budget-capped Lanczos that found fewer is
+    /// flagged false -- merged campaigns must be able to tell.
+    bool converged  = true;
 };
 
 struct LittleGroupSpectrum {
@@ -69,8 +202,22 @@ struct LittleGroupSpectrum {
     /// (|star| × d_σ). Σ multiplicities == subspace dimension.
     std::vector<double> eigenvalues;
     std::vector<int>    multiplicities;
+    std::vector<LittleGroupLabel>    labels;   ///< 9f: parallel to eigenvalues
+    /// 9f: character table of the RAW abelian irreps in the engine's own
+    /// ordering -- ``irrep_characters[k_raw][a]`` = chi_k(A[a]) with ``a``
+    /// indexing the caller's ``abelian_group`` element order. This is what
+    /// makes ``k_raw`` physically unambiguous: read the momentum off the
+    /// translation generator's phase instead of trusting an index
+    /// convention (decompose_irreps ordering != directory sector order).
+    std::vector<std::vector<std::complex<double>>> irrep_characters;
     std::vector<LittleGroupStarInfo> stars;
     std::uint64_t       total_dim = 0;
+    bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
+    bool                tr_engaged   = false;  ///< 9b: TR folding was active
+    /// True iff ANY star's matvec ran on the GPU rep-gather. This is the
+    /// engine's truthful lane report; the Python project lane surfaces it as
+    /// ``EDResults.backend.lane`` (which it previously did not set at all).
+    bool                gpu_engaged  = false;
 
     /// Flat sorted spectrum with multiplicities expanded (dense-diag shape).
     [[nodiscard]] std::vector<double> expanded() const;
@@ -98,6 +245,65 @@ little_group_lowest_eigenvalues(
     int                                   n_sites,
     int                                   k,
     const LittleGroupOptions&             opt = {});
+
+/// Stage 9f: lowest-`k`-per-block spectrum WITH labels (the structured form
+/// `little_group_lowest_eigenvalues` flattens). Each block contributes its
+/// lowest `k`; consumers expand by multiplicity and truncate.
+[[nodiscard]] LittleGroupSpectrum
+little_group_lowest_spectrum(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    const std::vector<std::vector<int>>&  residue_perms,
+    int                                   n_sites,
+    int                                   k,
+    const LittleGroupOptions&             opt = {});
+
+/// Stage 9d: the ground state localized in its momentum sector by the
+/// star walk (flip/TR folds reduce the search), then solved PLAIN
+/// (unprojected) in that sector with an in-memory eigenvector -- dense
+/// for small blocks, FullCGS2 Lanczos Ritz vector otherwise, residual-
+/// guarded (throws rather than returning a stale pair). The vector is
+/// expressed in ``rd``'s rep basis, ready for
+/// ``CrossSectorOrbitObservable::OperatorRef::from_rep``.
+struct LittleGroupGroundState {
+    double                             energy = 0.0;
+    int                                k0     = -1;  ///< extended irrep index
+    ed::symmetry::RepSectorData        rd;           ///< the GS sector
+    std::vector<std::complex<double>>  vec;          ///< GS in rd's basis
+    /// U2a labels: which isotypic block held the GS (-1 = the plain k0
+    /// block -- either the star declined projection, or the projected
+    /// lift failed its residual guard and the engine fell back to the
+    /// plain re-solve). The vec contract is UNCHANGED either way: a
+    /// rep-basis vector of rd, ready for CrossSectorOrbitObservable.
+    int                                irrep       = -1;
+    int                                flip_parity = -1;
+};
+
+[[nodiscard]] LittleGroupGroundState
+little_group_ground_state(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    const std::vector<std::vector<int>>&  residue_perms,
+    int                                   n_sites,
+    const LittleGroupOptions&             opt = {});
+
+/// Stage 9d: every non-empty RAW momentum sector of one diagonal
+/// subspace (destination sweep of the factorized DSSF -- folding never
+/// applies to matrix elements, so destinations enumerate raw irreps).
+[[nodiscard]] std::vector<ed::symmetry::RepSectorData>
+little_group_k_sectors(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    int                                   n_sites,
+    int                                   n_up      = -1,
+    int                                   sz_parity = -1);
+
+/// Stage 9d: matrix-free H restricted to one rep-basis sector (public
+/// factory over the engine's internal RepSectorMatVec).
+[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
+make_rep_sector_matvec(
+    const ::Operator&            op,
+    ed::symmetry::RepSectorData  rd);
 
 /// Exact canonical thermodynamics from the factorized full spectrum.
 [[nodiscard]] ThermodynamicData

@@ -124,6 +124,19 @@ inline bool reduced_csr_enabled() noexcept {
            == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr);
 }
 
+// Stage 9f: the reduced sector matrix is ~dim x terms_per_row entries, and it
+// used to be assembled UNCONDITIONALLY under the RepReducedCsr default -- an
+// automatic OOM at frontier sectors (N=36 half filling: hundreds of GB) that
+// the "opt out with ED_SYM_REDUCED_CSR=0" comment merely documented. Mirror
+// the little-group engine's up-front UPPER-BOUND estimate (each off-diagonal
+// term contributes at most one entry per source row) against the SAME budget
+// knob, ED_SYM_SECTOR_CSR_BUDGET_GIB (default 8): an oversized sector falls
+// back to the CSR-free rep/orbit walk on its own, no env var required.
+inline bool reduced_csr_within_budget(std::uint64_t dim,
+                                      std::uint64_t terms_per_row) noexcept {
+    return ed::planner::sector_csr_within_budget(dim, terms_per_row);
+}
+
 template <class P, class = void>
 struct policy_is_rep : std::false_type {};
 template <class P>
@@ -583,7 +596,11 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()) {
+            } else if (detail::reduced_csr_enabled()
+                       && detail::reduced_csr_within_budget(
+                              basis_.dim(),
+                              1 + t.offdiag_one->size() + t.mixed_two->size()
+                                + t.offdiag_two->size() + t.three_body->size())) {
                 // Stage 2b: reduced sector matrix assembled straight from the
                 // rep policy (index_and_projection) -- no orbit CSR, then
                 // O(1)-per-nnz SpMV.
@@ -625,7 +642,11 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()) {
+            } else if (detail::reduced_csr_enabled()
+                       && detail::reduced_csr_within_budget(
+                              basis_.dim(),
+                              1 + t.offdiag_one->size() + t.mixed_two->size()
+                                + t.offdiag_two->size() + t.three_body->size())) {
                 // Skeleton lane: materialize the reduced sector matrix ONCE
                 // (same coeff_modifier as the gather) then O(1)-per-nnz SpMV.
                 if (!rep_csr_cplx_.built())
@@ -676,7 +697,11 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()) {
+            } else if (detail::reduced_csr_enabled()
+                       && detail::reduced_csr_within_budget(
+                              basis_.dim(),
+                              1 + t.offdiag_one->size() + t.mixed_two->size()
+                                + t.offdiag_two->size() + t.three_body->size())) {
                 // Stage 2b: rep-assembled reduced sector matrix (see the
                 // complex twin above).
                 if (!rep_csr_real_.built())
@@ -702,7 +727,11 @@ private:
                     *t.diag_two, *t.mixed_two, *t.offdiag_two,
                     *t.three_body,
                     in, out);
-            } else if (detail::reduced_csr_enabled()) {
+            } else if (detail::reduced_csr_enabled()
+                       && detail::reduced_csr_within_budget(
+                              basis_.dim(),
+                              1 + t.offdiag_one->size() + t.mixed_two->size()
+                                + t.offdiag_two->size() + t.three_body->size())) {
                 if (!rep_csr_real_.built())
                     rep_csr_real_ = build_reduced_symmetry_csr<BasisPolicy, double>(
                         basis_, t.spin_l,
