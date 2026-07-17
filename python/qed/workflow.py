@@ -2263,10 +2263,14 @@ def full_spectrum(
     # still BLOCK the sweep, and eigh is O(d^3), so the blocking is a large
     # win even though it "buys nothing for the spectrum multiset" -- the old
     # single plain-dense solve here cost 32 s for a 13-site XXZ tree whose
-    # Sz-blocked sweep is ~2 s (and its 2^N dense build was also the F6
-    # first-commit race site). Route through the factorized engine with the
-    # TRIVIAL spatial group: each (n_up) [or parity] sector is one star with
-    # one block, i.e. plain U(1)/Z2 blocking with the engine's flip/TR folds.
+    # Sz-blocked sweep is seconds (and its 2^N dense build was also the F6
+    # first-commit race site). Route through the STREAMING sector path below
+    # with the TRIVIAL spatial group (identity generator; one k=0 irrep per
+    # sector): plain U(1) Sz blocks -- or the rep lane's native Sz-parity
+    # half sectors for U(1)-broken-but-parity-graded models -- with the fast
+    # rep-walk dense assembly and the sector-parallel FULL loop. (The
+    # factorized little-group engine is the WRONG lane here: measured 16 s
+    # per 2048-dim trivial-star block vs sub-second on the streaming path.)
     # Plain dense remains only when there is literally nothing to exploit.
     if info is None:
         _parity = False
@@ -2277,48 +2281,15 @@ def full_spectrum(
             except Exception:
                 _parity = False
         if sz_conserved or _parity:
-            _ident = [list(range(N))]
-            try:
-                eigs = []
-                if sz_conserved:
-                    if sz is not None:
-                        # ONE named magnetisation block, no mirror (same
-                        # contract as the projection sweep above).
-                        _sectors, _mirror = [int(sz)], False
-                    else:
-                        top = N // 2 if _flip_transport else N
-                        _sectors = list(range(top + 1))
-                        _mirror = _flip_transport
-                    for n_up in _sectors:
-                        d = dict(_core.little_group_full_spectrum(
-                            operator, _ident, [], n_up=int(n_up),
-                            use_gpu=use_gpu, spin_flip=_sf,
-                            time_reversal=_tr))
-                        block = [float(e) for e in d["eigenvalues"]]
-                        eigs.extend(block)
-                        if _mirror and n_up * 2 != N:
-                            eigs.extend(block)   # isospectral mirror
-                else:
-                    # Sz broken but parity-graded: the engine blocks by
-                    # up-spin parity natively (half sectors on the rep lane).
-                    d = dict(_core.little_group_full_spectrum(
-                        operator, _ident, [], use_gpu=use_gpu,
-                        spin_flip=_sf, time_reversal=_tr))
-                    eigs = [float(e) for e in d["eigenvalues"]]
-                if verbose:
-                    print("[qed.full_spectrum] trivial spatial group -> "
-                          + ("Sz-blocked" if sz_conserved
-                             else "Sz-parity-blocked")
-                          + " sweep (no 2^N dense build)"
-                          + (", flip transport halves the Sz sweep"
-                             if _flip_transport else ""))
-                out = EDResults()
-                out.eigenvalues = sorted(eigs)
-                return out
-            except Exception as exc:        # noqa: BLE001 -- graceful
-                if verbose:
-                    print(f"[qed.full_spectrum] trivial-group blocked sweep "
-                          f"declined ({exc}); plain dense fallback.")
+            info = _normalize_symmetry_info(operator, [list(range(N))])
+            if verbose and info is not None:
+                print("[qed.full_spectrum] trivial spatial group -> "
+                      + ("Sz-blocked" if sz_conserved
+                         else "Sz-parity-blocked")
+                      + " streaming sweep (no 2^N dense build)"
+                      + (", flip transport halves the Sz sweep"
+                         if _flip_transport else ""))
+    if info is None:
         params = _bare_full_params(N, 1 << N, spin_length)
         params.use_gpu = use_gpu
         res = _diag_via_workflows_solve(
