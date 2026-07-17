@@ -65,6 +65,7 @@ from ._core import (
     ThermodynamicData,
 )
 from .workflow import solve as _solve  # per-sector dispatcher
+from .workflow import normalize_sz     # ONE Sz spelling (Jul 2026)
 from .workflow import _resolve_device   # (use_gpu, use_mpi) device picker
 from .workflow import (                 # in-memory symmetry -> temp directory
     _write_operator_directory as _write_operator_directory,
@@ -531,6 +532,7 @@ def thermal(
     T_min: float = 0.1,
     T_max: float = 10.0,
     num_T: int = 24,
+    sz: Union[int, str, tuple, None] = None,
     sz_min: Optional[int] = None,
     sz_max: Optional[int] = None,
     sector: Optional[Sequence[int]] = None,
@@ -678,6 +680,32 @@ def thermal(
                           sz_min=N//2 - 1, sz_max=N//2 + 1)
     """
     _all_params = dict(locals())   # capture every parameter for the symmetry recursion
+    # ONE Sz spelling (diction consolidation, Jul 2026): sz= accepts
+    # int | (lo, hi) | "auto" | "off"; the legacy sz_min/sz_max and
+    # use_sz_if_conserved=False keep working with a FutureWarning when
+    # load-bearing. Canonicalized BEFORE the recursion capture so the
+    # tempdir-forwarded call speaks the new spelling (no double warning).
+    _szmode = normalize_sz(sz, verb="thermal",
+                           use_sz_if_conserved=use_sz_if_conserved,
+                           sz_min=sz_min, sz_max=sz_max)
+    if _szmode[0] == "named":
+        sz = int(_szmode[1])
+        sz_min = sz_max = int(_szmode[1])
+        use_sz_if_conserved = True
+    elif _szmode[0] == "window":
+        sz = (_szmode[1], _szmode[2])
+        sz_min, sz_max = _szmode[1], _szmode[2]
+        use_sz_if_conserved = True
+    elif _szmode[0] == "off":
+        sz = "off"
+        sz_min = sz_max = None
+        use_sz_if_conserved = False
+    else:
+        sz = None
+    # keep the recursion speaking the canonical spelling
+    _all_params.update(sz=sz, sz_min=sz_min, sz_max=sz_max,
+                       use_sz_if_conserved=use_sz_if_conserved)
+
     is_directory = isinstance(H, (str, os.PathLike))
 
     # ------------------------------------------------------------------

@@ -172,6 +172,68 @@ from .discovery import (  # noqa: F401  (re-exports)
 )
 
 
+def normalize_sz(sz, *, verb: str,
+                 auto_sz=None, sz_conserved=None,
+                 use_sz_if_conserved=None, sz_min=None, sz_max=None):
+    """ONE Sz spelling across every verb (diction consolidation, Jul 2026).
+
+    ``sz`` accepts::
+
+        None | "auto"   auto-detect the U(1) axis; sweep/window everything
+        int             name ONE magnetisation block (set bits = DOWN spins)
+        (lo, hi)        a window of blocks
+        "off"           force the full Hilbert space (no U(1) axis)
+
+    The legacy per-verb detection knobs (``auto_sz`` / ``sz_conserved`` /
+    ``use_sz_if_conserved`` / ``sz_min``+``sz_max``) still work but emit a
+    FutureWarning WHEN LOAD-BEARING (an explicit ``sz`` always wins
+    silently, so internal named-block recursions stay quiet).
+
+    Returns one of ``("auto",)``, ``("off",)``, ``("named", n)``,
+    ``("window", lo, hi)`` (lo/hi may be None = verb default).
+    """
+    import warnings as _w
+
+    mode = None
+    if isinstance(sz, str):
+        s = sz.lower()
+        if s == "auto":
+            mode = ("auto",)
+        elif s == "off":
+            mode = ("off",)
+        else:
+            raise ValueError(
+                f"qed.{verb}: sz={sz!r} -- use an int, (lo, hi), 'auto', "
+                f"or 'off'.")
+    elif isinstance(sz, (tuple, list)):
+        if len(sz) != 2:
+            raise ValueError(
+                f"qed.{verb}: an Sz window is (lo, hi), got {sz!r}.")
+        mode = ("window", int(sz[0]), int(sz[1]))
+    elif sz is not None:
+        mode = ("named", int(sz))
+
+    def _warn(old: str, new: str) -> None:
+        _w.warn(
+            f"qed.{verb}: {old} is deprecated -- use {new} (one Sz "
+            f"spelling across every verb).", FutureWarning, stacklevel=4)
+
+    if mode is None:
+        if auto_sz is False:
+            _warn("auto_sz=False", "sz='off'")
+            mode = ("off",)
+        elif sz_conserved is False:
+            _warn("sz_conserved=False", "sz='off'")
+            mode = ("off",)
+        elif use_sz_if_conserved is False:
+            _warn("use_sz_if_conserved=False", "sz='off'")
+            mode = ("off",)
+        elif sz_min is not None or sz_max is not None:
+            _warn("sz_min=/sz_max=", "sz=(lo, hi)")
+            mode = ("window", sz_min, sz_max)
+    return mode if mode is not None else ("auto",)
+
+
 def solve(
     H: Union[Operator, FixedSzOperator],
     *,
@@ -184,7 +246,7 @@ def solve(
     sector: Optional[Sequence[int]] = None,
     irrep: Optional[dict] = None,
     flip: Optional[int] = None,
-    sz: Optional[int] = None,
+    sz: Union[int, str, tuple, None] = None,
     auto_sz: bool = True,
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
@@ -411,6 +473,24 @@ def solve(
         )
 
     # ------------------------------------------------------------------
+    # ONE Sz spelling (diction consolidation, Jul 2026): sz= accepts
+    # int | (lo, hi) | "auto" | "off". auto_sz=False keeps working with
+    # a FutureWarning when load-bearing.
+    # ------------------------------------------------------------------
+    _szmode = normalize_sz(sz, verb="solve", auto_sz=auto_sz)
+    _sz_window = None
+    if _szmode[0] == "named":
+        sz = _szmode[1]
+    elif _szmode[0] == "off":
+        sz, auto_sz = None, False
+    elif _szmode[0] == "window":
+        sz = None
+        _sz_window = (int(_szmode[1] or 0), int(_szmode[2]
+                      if _szmode[2] is not None else H.num_sites))
+    else:
+        sz = None
+
+    # ------------------------------------------------------------------
     # Full-spectrum shortcut: compute EVERY eigenvalue decomposed by all
     # (Sz x spatial) symmetries via the memory-light representative SpMV.
     # Routes to the standalone :func:`full_spectrum` helper, which loops
@@ -428,7 +508,7 @@ def solve(
         _dev = device if isinstance(device, str) else "cpu"
         return full_spectrum_compute(
             H, symmetry=symmetry,
-            sz_conserved=(None if auto_sz else False),
+            sz=("off" if not auto_sz else None),
             spin_length=spin_l, device=_dev,
             spin_flip=spin_flip, time_reversal=time_reversal,
             point_group=point_group, lattice=lattice, verbose=verbose)
@@ -495,7 +575,8 @@ def solve(
                   f"(pass sz= to solve one sector).")
         _per: list[tuple[float, int]] = []
         _best: tuple[float, int, Any] = (float("inf"), -1, None)
-        for _nu_i in range(_n + 1):
+        _swlo, _swhi = _sz_window or (0, _n)
+        for _nu_i in range(_swlo, _swhi + 1):
             _ri = solve(
                 H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
                 compute_eigenvectors=compute_eigenvectors, solver=solver,
@@ -804,7 +885,9 @@ def solve(
                 # solve, i.e. ~sqrt(N)x more work for an answer that is right
                 # for every model. Name sz= to pay for one sector only.
                 if op_to_use.conserves_sz():
-                    _nu_sweep = list(range(num_sites + 1))
+                    _nu_sweep = list(range(*( (_sz_window[0],
+                        _sz_window[1] + 1) if _sz_window else
+                        (0, num_sites + 1) )))
                 else:
                     try:
                         if bool(_core.detect_hamiltonian_symmetries(
@@ -1957,7 +2040,7 @@ def full_spectrum(
     operator: Operator,
     *,
     symmetry: SymmetryArg = None,
-    sz: Optional[int] = None,
+    sz: Union[int, str, tuple, None] = None,
     sector: Optional[Sequence[int]] = None,
     irrep: Optional[dict] = None,
     flip: Optional[int] = None,
@@ -2011,6 +2094,21 @@ def full_spectrum(
     import math
 
     N = int(operator.num_sites)
+    # ONE Sz spelling (Jul 2026): int | "auto" | "off" ((lo, hi) windows
+    # interact with the flip-transport mirror -- not supported here yet).
+    _szmode = normalize_sz(sz, verb="full_spectrum",
+                           sz_conserved=sz_conserved)
+    if _szmode[0] == "named":
+        sz = _szmode[1]
+    elif _szmode[0] == "off":
+        sz, sz_conserved = None, False
+    elif _szmode[0] == "window":
+        raise NotImplementedError(
+            "qed.full_spectrum: sz=(lo, hi) windows are not supported on "
+            "this verb (they interact with the flip-transport mirror); "
+            "name a single block or take the full sweep.")
+    else:
+        sz = None
     symmetry = resolve_auto_symmetry(operator, symmetry, verbose=verbose,
                                      lattice=lattice)
     info = _normalize_symmetry_info(operator, symmetry)
