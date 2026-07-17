@@ -204,7 +204,8 @@ def normalize_sz(sz, *, verb: str,
         else:
             raise ValueError(
                 f"qed.{verb}: sz={sz!r} -- use an int, (lo, hi), 'auto', "
-                f"or 'off'.")
+                f"or 'off' (qed.solve additionally accepts the 'even'/'odd' "
+                f"Sz-parity spellings, handled before this normalizer).")
     elif isinstance(sz, (tuple, list)):
         if len(sz) != 2:
             raise ValueError(
@@ -477,7 +478,14 @@ def solve(
     # int | (lo, hi) | "auto" | "off". auto_sz=False keeps working with
     # a FutureWarning when load-bearing.
     # ------------------------------------------------------------------
-    _szmode = normalize_sz(sz, verb="solve", auto_sz=auto_sz)
+    if isinstance(sz, str) and sz.lower() in ("even", "odd"):
+        # Pre-existing Sz-PARITY spelling (parsed further down into
+        # _sz_parity_str) -- not part of the magnetisation axis the
+        # normalizer owns. CI regression 2026-07-17: the first cut of
+        # normalize_sz rejected it and broke the examples tour.
+        _szmode = ("auto",)
+    else:
+        _szmode = normalize_sz(sz, verb="solve", auto_sz=auto_sz)
     _sz_window = None
     if _szmode[0] == "named":
         sz = _szmode[1]
@@ -487,7 +495,7 @@ def solve(
         sz = None
         _sz_window = (int(_szmode[1] or 0), int(_szmode[2]
                       if _szmode[2] is not None else H.num_sites))
-    else:
+    elif not (isinstance(sz, str) and sz.lower() in ("even", "odd")):
         sz = None
 
     # ------------------------------------------------------------------

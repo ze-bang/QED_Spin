@@ -543,8 +543,15 @@ GroundStateResult solve_on(Backend& be,
                                        : (m < geom.local_dim && !kres.beta.empty()
                                               ? std::abs(kres.beta.back())
                                               : 0.0);
+            // CI hardening (2026-07-17): 1e-8 was BLAS-marginal --
+            // OpenBLAS runners trimmed a value the local MKL run kept,
+            // and a directory-vs-memory e2e compare saw different window
+            // LENGTHS. The filter exists to drop GARBAGE (the measured
+            // stalled values were off by ~0.2, bounds far above 1e-6);
+            // marginal-but-converging values must be kept identically on
+            // every backend.
             const double bound_tol =
-                std::max(opts.tolerance * 100.0, 1e-8);
+                std::max(opts.tolerance * 100.0, 1e-6);
             std::size_t ok = 0;
             while (ok < n_keep) {
                 const double bound =
