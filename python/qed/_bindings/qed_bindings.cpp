@@ -1321,6 +1321,133 @@ PYBIND11_MODULE(_core, m) {
           "Lanczos per receiving sector. Memory O(#reps): the scalable "
           "replacement for symmetry_adapted_gs_dssf.");
 
+    m.def("little_group_gs_correlators",
+          [](const Operator& op_h,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             const std::vector<std::vector<int>>& translations,
+             int dense_max_dim, int time_reversal) {
+              // STATIC structure factor without the DSSF machinery.
+              //
+              // S^zz(Q) needs only DIAGONAL, G-INVARIANT correlators:
+              //   O_d = sum_i S^z_i S^z_{i+d}
+              // is diagonal in the computational basis, translation
+              // invariant (the sum over i) and flip invariant
+              // (S^z -> -S^z gives (-)(-)). For such an operator the
+              // orbit cross-terms vanish and the expectation collapses to
+              // a weighted sum over REPRESENTATIVES:
+              //     <Psi|O_d|Psi> = sum_r |c_r|^2 O_d(rep_r)
+              // with O_d(s) = [N - 2*popcount(s ^ T_d s)] / 4.
+              //
+              // So ONE ground-state solve yields the energy AND every
+              // C(d); the caller Fourier transforms C(d) -> S(Q) at ALL
+              // momenta for free. No destination sectors, no
+              // continued-fraction chains: memory is ONE sector instead of
+              // the ~N_Q resident mirrors the multi-Q spectral lane needs,
+              // and the flip Z2 is exploited (half the reps).
+              using Complex = std::complex<double>;
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op_h.transform_data_, op_h.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+              std::vector<std::pair<int, int>> gs_subspaces{{-1, -1}};
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  gs_subspaces.clear();
+                  for (int k = 0; k <= n_sites; ++k)
+                      gs_subspaces.emplace_back(k, -1);
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  gs_subspaces = {{-1, 0}, {-1, 1}};
+              }
+              auto lg_o = [&](int nu, int par) {
+                  ed::solvers::LittleGroupOptions o;
+                  o.n_up          = nu;
+                  o.sz_parity     = par;
+                  o.dense_max_dim = dense_max_dim;
+                  o.spin_flip     = -1;
+                  o.time_reversal = time_reversal;
+                  return o;
+              };
+              int gs_nu = -1, gs_par = -1;
+              double e_best = 0.0;
+              bool have = false;
+              for (const auto& [nu, par] : gs_subspaces) {
+                  const auto ev = ed::solvers::little_group_lowest_eigenvalues(
+                      op_h, abelian_group, residue_perms, n_sites, 1,
+                      lg_o(nu, par));
+                  if (ev.empty()) continue;
+                  if (!have || ev[0] < e_best) {
+                      have = true; e_best = ev[0]; gs_nu = nu; gs_par = par;
+                  }
+              }
+              if (!have)
+                  throw std::runtime_error(
+                      "little_group_gs_correlators: no non-empty subspace.");
+
+              const auto gs = ed::solvers::little_group_ground_state(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  lg_o(gs_nu, gs_par));
+
+              const auto& reps = gs.rd.reps;
+              const std::size_t nr = reps.size();
+              if (gs.vec.size() != nr)
+                  throw std::runtime_error(
+                      "little_group_gs_correlators: vec/reps length mismatch.");
+              std::vector<double> w(nr);
+              double nrm = 0.0;
+              for (std::size_t r = 0; r < nr; ++r) {
+                  w[r] = std::norm(gs.vec[r]);
+                  nrm += w[r];
+              }
+              if (!(nrm > 0.0))
+                  throw std::runtime_error(
+                      "little_group_gs_correlators: zero-norm GS vector.");
+              const double inv_nrm = 1.0 / nrm;
+
+              const std::size_t nd = translations.size();
+              std::vector<double> C(nd, 0.0);
+              for (std::size_t d = 0; d < nd; ++d) {
+                  const auto& perm = translations[d];
+                  if (static_cast<int>(perm.size()) != n_sites)
+                      throw std::runtime_error(
+                          "little_group_gs_correlators: translation length "
+                          "!= n_sites.");
+                  double acc = 0.0;
+#ifdef _OPENMP
+#   pragma omp parallel for reduction(+ : acc) schedule(static)
+#endif
+                  for (long long r = 0; r < static_cast<long long>(nr); ++r) {
+                      const std::uint64_t s = reps[static_cast<std::size_t>(r)];
+                      std::uint64_t t = 0;
+                      for (int i = 0; i < n_sites; ++i)
+                          t |= ((s >> perm[i]) & 1ULL) << i;
+                      const int pc = __builtin_popcountll(s ^ t);
+                      acc += w[static_cast<std::size_t>(r)]
+                             * static_cast<double>(n_sites - 2 * pc) * 0.25;
+                  }
+                  C[d] = acc * inv_nrm / static_cast<double>(n_sites);
+              }
+
+              py::dict out;
+              out["gs_energy"]   = gs.energy;
+              out["gs_k0"]       = gs.k0;
+              out["gs_n_up"]     = gs_nu;
+              out["correlators"] = C;
+              out["n_reps"]      = static_cast<std::uint64_t>(nr);
+              return out;
+          },
+          py::arg("op"), py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("translations"), py::arg("dense_max_dim") = 512,
+          py::arg("time_reversal") = -1,
+          "ONE ground-state solve -> energy AND the translation-averaged "
+          "diagonal correlators C(d) = <sum_i S^z_i S^z_{i+d}>/N. Fourier "
+          "transform C(d) for S^zz(Q) at EVERY momentum. Memory is one "
+          "sector (no destination mirrors, no continued fractions) and the "
+          "flip Z2 is exploited -- the cheap replacement for the multi-Q "
+          "spectral lane when only the STATIC structure factor is wanted.");
+
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.
 

@@ -2968,6 +2968,8 @@ void bind_workflows(py::module_& m) {
                       src_handle, src_sector_indices, opts);
                   const std::size_t gs_src_idx = gs_scan.gs_idx;
                   const double      gs_energy  = gs_scan.gs_energy;
+                  std::fprintf(stderr, "[multiq_gs_energy] %.12f\n", gs_energy);
+                  std::fflush(stderr);
                   const bool        any_solved = gs_scan.any_solved;
                   if (!any_solved) {
                       throw std::runtime_error(
