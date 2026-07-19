@@ -193,3 +193,6 @@ local.cmake.user
 /core
 /core.*
 *.dSYM/
+
+# Vendored ezARPACK checkout (local dependency clone)
+ezARPACK.git/
