@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=bfg_lg_4x3
+#SBATCH --account=def-ybkim
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=187G
+#SBATCH --time=24:00:00
+#SBATCH --array=0-5
+#SBATCH --output=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.out
+#SBATCH --error=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.err
+#
+# BFG kagome 4x3 PBC (N=36): GS energy + S^zz(q) via the little-group
+# diagonal-correlator lane (little_group_gs_correlators, upstream f421ee3 +
+# 0461db3). ONE n_up-pinned GS solve per point; memory O(#reps) -- replaces
+# the streaming-symmetry spectral campaign that OOM-killed at 384G
+# (49567791/49574551, all six tasks, ~3h each, during sector construction).
+#
+#   Jpm grid: -0.05 .. -0.15 step 0.02, Jzz = 1.0
+#   Driver: run_bfg_sssf_littlegroup.py (validated exactly vs dense on
+#           2x3 and 3x2: E0 to 1e-10, S_zz(q) to <1e-6 at every q).
+#   CPU-only: the lane is host-side; no GPU request (cheaper queue).
+#   Upstream measurement (0461db3): ~96 star solves in 10 h at N=36
+#   unpinned => the pinned 12-star scan is ~1.5 h/point; 24 h is margin.
+#
+# zz channel only (diagonal correlators). The S^{+-} channel needs the
+# cross-irrep spectral lane and a bigger-memory strategy -- future work.
+#
+# Submit:  sbatch QED/scripts/research/bfg/bfg_sssf_4x3_littlegroup.sbatch
+#
+set -euo pipefail
+
+PROJ="/project/6003507/zhouzb79"
+OUT_BASE="${OUT_BASE:-${PROJ}/data/bfg_gs_sssf_4x3}"
+SCRIPT="${PROJ}/QED/scripts/research/bfg/run_bfg_sssf_littlegroup.py"
+
+mkdir -p "${OUT_BASE}/logs"
+
+module --force purge
+module load StdEnv/2023 gcc/12.3 openmpi/4.1.5 aocl-blas/5.1 aocl-lapack/5.1 \
+            scalapack/2.2.0 cmake eigen arpack-ng hdf5-mpi cuda nccl/2.26.2
+module load python/3.11.5 scipy-stack/2024b
+export PYTHONNOUSERSITE=1
+source "${PROJ}/venvs/qed_prl/bin/activate"
+export FLEXIBLAS=AOCL
+export LD_LIBRARY_PATH="${EBROOTHDF5:+$EBROOTHDF5/lib:}${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="${PROJ}/QED/python:${PYTHONPATH:-}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-64}"
+export PYTHONUNBUFFERED=1
+
+JPM_VALUES=(-0.05 -0.07 -0.09 -0.11 -0.13 -0.15)
+TASK="${SLURM_ARRAY_TASK_ID}"
+JPM="${JPM_VALUES[${TASK}]}"
+
+echo "============================================================"
+echo "  BFG 4x3 little-group GS + S^zz | task=${TASK}  Jpm=${JPM}"
+echo "  job_id=${SLURM_JOB_ID}  node=$(hostname)"
+echo "============================================================"
+
+stdbuf -oL -eL python3 -u "${SCRIPT}" \
+    --dim1        4 \
+    --dim2        3 \
+    --Jpm         "${JPM}" \
+    --Jzz         1.0 \
+    --fine-grid   48 \
+    --output-dir  "${OUT_BASE}"
+
+echo "Done: task=${TASK}  Jpm=${JPM}"
