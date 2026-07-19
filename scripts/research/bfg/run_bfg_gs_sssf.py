@@ -16,30 +16,17 @@ Campaign driver for clusters too large for full-basis observable expansion
                 CrossSectorOrbitObservable scatter + one inner CF-Lanczos.
                 ``per_sector_pair[i].static_sf`` = ||O|psi0>||^2.
 
-PROBE SCHEME (constraint discovered 2026-07-18, validated on 2x3 vs dense):
-The cross-irrep scatter is numerically WRONG for probes whose coefficients
-vary within a unit cell (e.g. physical e^{-iq.r_j} phases with sublattice
-offsets) -- it silently loses weight. It is EXACT for cell-phase probes
-(coefficients constant within each unit cell = pure group characters).
-So we use sublattice-resolved cell-phase probes
+PROBES: one physical probe per momentum point and channel,
 
-    O_a(q) = N^{-1/2} sum_cells e^{-i q.R_cell} S_{cell,a}     a = 0,1,2
+    O(q) = N^{-1/2} sum_j e^{-i q.r_j} S_j        (r_j = full site positions)
 
-and reconstruct the full sublattice matrix S_ab = <O_a psi|O_b psi> via
-polarization identities from norm-only measurements:
-
-    diag:      S_aa = ||O_a psi||^2
-    off-diag:  Re S_ab = (||(O_a+O_b) psi||^2 - S_aa - S_bb) / 2
-               Im S_ab = (S_aa + S_bb - ||(O_a + i O_b) psi||^2) / 2
-
-(9 probes per q per channel; every probe is still a single momentum
-eigenoperator at the same q, so all land in the same target sector).
-The physical SSSF then assembles in post with the sublattice offsets:
-
-    S(q) = sum_ab e^{+i q.(delta_a - delta_b)} S_ab(q)
-         = (1/N) sum_ij e^{i q.(r_i - r_j)} <S_i S_j>        (exact)
-
-and identically per-omega for S(q, omega) from the probes' CF spectra.
+so static_sf = ||O(q)|psi0>||^2 = (1/N) sum_ij e^{iq(ri-rj)} <S_i S_j> is
+the physical SSSF directly. (History note, 2026-07-18: an earlier version
+routed sublattice-resolved reversed-site probes through a polarization
+identity to work around an apparent "site reversal" in the cross-irrep
+scatter. That reversal was an artifact of a wrong dense REFERENCE --
+``combinations()`` lex order is not ascending-integer order, see
+_expand_sz_eigenvector -- the lane itself is exact for physical probes.)
 
 Channels:
   zz : S_j = S^z_j                 (delta_n_up = 0)
@@ -181,50 +168,6 @@ def probe_momentum_fracs(coeffs, generators, generator_orders, q_sign: int):
     return fracs
 
 
-def sublattice_probe_set(cell, sub, dim1, dim2, m1, m2):
-    """The 9 polarization probes for one q, as (label, coeffs) pairs.
-
-    Coefficient normalization: 1/sqrt(N) so that the assembled
-    S(q) = sum_ab e^{iq(da-db)} S_ab equals (1/N) sum_ij e^{iq(ri-rj)} C_ij.
-    """
-    N = len(sub)
-    cell_phase = np.exp(-2j * np.pi * (m1 * cell[:, 0] / dim1 +
-                                       m2 * cell[:, 1] / dim2)) / np.sqrt(N)
-    u = [cell_phase * (sub == a) for a in range(N_SUB)]
-    probes = [(f"d{a}", u[a]) for a in range(N_SUB)]
-    for a in range(N_SUB):
-        for b in range(a + 1, N_SUB):
-            probes.append((f"r{a}{b}", u[a] + u[b]))
-            probes.append((f"i{a}{b}", u[a] + 1j * u[b]))
-    return probes
-
-
-def assemble_sublattice_matrix(norms):
-    """S_ab (3x3 Hermitian) from the 9 polarization norms.
-
-    ``norms`` maps probe label -> measured value; values may be scalars
-    (static_sf) or arrays (per-omega spectra)."""
-    first = next(iter(norms.values()))
-    shape = np.shape(first)
-    S = np.zeros((N_SUB, N_SUB) + shape, dtype=complex)
-    for a in range(N_SUB):
-        S[a, a] = norms[f"d{a}"]
-    for a in range(N_SUB):
-        for b in range(a + 1, N_SUB):
-            re = (norms[f"r{a}{b}"] - S[a, a].real - S[b, b].real) / 2.0
-            im = (S[a, a].real + S[b, b].real - norms[f"i{a}{b}"]) / 2.0
-            S[a, b] = re + 1j * im
-            S[b, a] = re - 1j * im
-    return S
-
-
-def assemble_physical(S_ab, q_cart):
-    """S(q) = sum_ab e^{+i q.(delta_a - delta_b)} S_ab."""
-    ph = np.exp(1j * (DELTAS @ q_cart))          # e^{+i q.delta_a}
-    w = np.einsum("a,b->ab", ph, ph.conj())
-    return np.real(np.tensordot(w, S_ab, axes=([0, 1], [0, 1])))
-
-
 # ---------------------------------------------------------------------------
 # SSSF stage
 # ---------------------------------------------------------------------------
@@ -293,27 +236,18 @@ def run_sssf(*, dim1, dim2, Jpm, Jzz, run_dir: Path, channels, krylov_dim,
     for chan in channels:
         op_code = op_codes[chan]
         delta = CHAN_SPEC[chan][1]
-        obs_list, q_fracs, labels, q_of_probe = [], [], [], []
+        obs_list, q_fracs, q_carts_in = [], [], []
         for (m1, m2) in q_list:
-            probes = sublattice_probe_set(cell, sub, dim1, dim2, m1, m2)
-            # SITE-INDEX REVERSAL (empirical, validated exactly on 2x3 vs
-            # dense): the cross-irrep scatter interprets transform site
-            # indices with REVERSED bit order relative to the streaming
-            # basis (site j <-> bit N-1-j). H is immune (kagome PBC is
-            # inversion-symmetric and H rides its own loader), but probes
-            # must be index-reversed, and their momentum classified from
-            # the reversed coefficients (reversal = inversion => -q).
-            frac = probe_momentum_fracs(probes[0][1][::-1], generators,
+            q_cart = (m1 / dim1) * b1 + (m2 / dim2) * b2
+            coeffs = np.exp(-1j * (pos @ q_cart)) / np.sqrt(N)
+            frac = probe_momentum_fracs(coeffs, generators,
                                         generator_orders, q_sign)
-            for lab, coeffs in probes:
-                obs_list.append(build_probe(op_code, coeffs[::-1]))
-                q_fracs.append(frac)
-                labels.append(lab)
-                q_of_probe.append((m1, m2))
+            obs_list.append(build_probe(op_code, coeffs))
+            q_fracs.append(frac)
+            q_carts_in.append(q_cart)
 
         print(f"  [{chan}] launching multi-Q cross-irrep spectral: "
-              f"{len(obs_list)} probes ({len(q_list)} q-points x 9), "
-              f"delta_n_up={delta}")
+              f"{len(obs_list)} physical probes, delta_n_up={delta}")
         t0 = time.perf_counter()
         res = qed.spectral(
             str(exp_dir),
@@ -334,46 +268,22 @@ def run_sssf(*, dim1, dim2, Jpm, Jzz, run_dir: Path, channels, krylov_dim,
         dt = time.perf_counter() - t0
         entries = list(res.per_sector_pair)
         print(f"  [{chan}] done in {dt:.1f} s; {len(entries)} entries")
-        bad = [i for i, e in enumerate(entries)
-               if not dict(e.notes).get("status", "ok").startswith("ok")]
-        if bad:
-            for i in bad[:6]:
-                print(f"    [warn] probe {labels[i]}@{q_of_probe[i]}: "
-                      f"{dict(entries[i].notes)}")
-
-        # Group the 9 probes per q, assemble S_ab and physical S(q).
-        per_q_static, per_q_Sab, per_q_Somega, q_carts = [], [], [], []
-        idx = 0
-        for (m1, m2) in q_list:
-            norms_static = {}
-            norms_omega = {}
-            for _ in range(9):
-                e = entries[idx]
-                norms_static[labels[idx]] = float(e.static_sf)
-                norms_omega[labels[idx]] = np.asarray(e.S_real)
-                idx += 1
-            q_cart = (m1 / dim1) * b1 + (m2 / dim2) * b2
-            Sab = assemble_sublattice_matrix(norms_static)
-            Sab_w = assemble_sublattice_matrix(norms_omega)
-            per_q_static.append(assemble_physical(Sab, q_cart))
-            per_q_Sab.append(Sab)
-            per_q_Somega.append(assemble_physical(Sab_w, q_cart))
-            q_carts.append(q_cart)
+        for (m1, m2), e in zip(q_list, entries):
+            status = dict(e.notes).get("status", "ok")
+            if not status.startswith("ok"):
+                print(f"    [warn] q=({m1},{m2}): {dict(e.notes)}")
 
         d = {
             "q_int": np.array(q_list, dtype=int),
-            "q_frac": np.array([q_fracs[9 * i] for i in range(len(q_list))]),
-            "q_cart": np.array(q_carts),
-            "static_sf": np.array(per_q_static),
-            "S_ab": np.array(per_q_Sab),
-            "S_omega": np.array(per_q_Somega),
-            "raw_static": np.array([float(e.static_sf) for e in entries]),
-            "raw_labels": list(labels),
+            "q_frac": np.array(q_fracs),
+            "q_cart": np.array(q_carts_in),
+            "static_sf": np.array([float(e.static_sf) for e in entries]),
+            "S_omega": np.array([np.asarray(e.S_real) for e in entries]),
             "notes": [dict(e.notes) for e in entries],
             "elapsed_s": dt,
         }
         results[chan] = d
-        for (m1, m2), s in zip(q_list, per_q_static):
+        for (m1, m2), s in zip(q_list, d["static_sf"]):
             print(f"    q=({m1},{m2})  S(q)={s:+.8f}")
 
         # Incremental save after EVERY channel: a walltime kill during a
@@ -385,7 +295,7 @@ def run_sssf(*, dim1, dim2, Jpm, Jzz, run_dir: Path, channels, krylov_dim,
                     "model": "BFG_kagome", "dim1": dim1, "dim2": dim2,
                     "N_sites": N, "n_up": n_up, "Jpm": Jpm, "Jzz": Jzz,
                     "eta": eta, "krylov_dim": krylov_dim, "q_sign": q_sign,
-                    "probe_scheme": "sublattice-cellphase-polarization",
+                    "probe_scheme": "physical-fullposition",
                     "gs_sector": -1 if gs_sector is None else int(gs_sector),
                 })
                 if "omega" not in f:
@@ -394,10 +304,9 @@ def run_sssf(*, dim1, dim2, Jpm, Jzz, run_dir: Path, channels, krylov_dim,
                     del f[chan]
                 g = f.create_group(chan)
                 for key in ("q_int", "q_frac", "q_cart", "static_sf",
-                            "S_ab", "S_omega", "raw_static"):
+                            "S_omega"):
                     g.create_dataset(key, data=d[key])
                 g.attrs["elapsed_s"] = d["elapsed_s"]
-                g.attrs["raw_labels"] = json.dumps(d["raw_labels"])
                 g.attrs["notes_json"] = json.dumps(d["notes"])
             print(f"  [{chan}] saved to {out}")
 

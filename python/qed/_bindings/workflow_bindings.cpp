@@ -651,6 +651,14 @@ inline void ensure_gs_residual(SectorView& sec,
         sopts.backend         = opts.backend;
         sopts.method          = ed::workflows::SolveMethod::Lanczos;
         sopts.compute_vectors = false;
+        // Phase-2 refinement decides WHICH sector holds the global GS, so
+        // its energies must be trusted at the inter-sector spacing. The
+        // auto-tuned iteration budget resolved to ~32 here, which left
+        // per-sector E0 estimates unconverged at the ~1e-3 level and was
+        // observed (2026-07-18, kagome 2x3, sector spacing 4.3e-3) to pick
+        // a WRONG sector non-deterministically. 300 iterations converges
+        // a single extremal eigenvalue at every dim this scan sees.
+        sopts.max_iter        = std::min<std::size_t>(sec->dim(), 300);
         ed::GroundStateResult sr;
         try {
             sr = ed::workflows::solve(*sec, sopts);
@@ -2500,6 +2508,13 @@ void bind_workflows(py::module_& m) {
                   sopts_full.backend         = opts.backend;
                   sopts_full.method          = ed::workflows::SolveMethod::Lanczos;
                   sopts_full.compute_vectors = true;
+                  // GS eigenVECTOR quality gates every scattered weight and
+                  // the CF resolvent; give the solve enough iterations that
+                  // ensure_gs_residual's CGS2 rescue (which materialises a
+                  // full Krylov basis -- unaffordable at frontier dims)
+                  // stays a no-op.
+                  sopts_full.max_iter        = std::min<std::size_t>(
+                      gs_sec_view->dim(), 600);
                   auto gs_sr =
                       ed::workflows::solve(*gs_sec_view, sopts_full);
                   if (gs_sr.eigenvalues.empty() || !gs_sr.eigenvectors ||
@@ -2984,6 +2999,13 @@ void bind_workflows(py::module_& m) {
                   sopts_full.backend         = opts.backend;
                   sopts_full.method          = ed::workflows::SolveMethod::Lanczos;
                   sopts_full.compute_vectors = true;
+                  // GS eigenVECTOR quality gates every scattered weight and
+                  // the CF resolvent; give the solve enough iterations that
+                  // ensure_gs_residual's CGS2 rescue (which materialises a
+                  // full Krylov basis -- unaffordable at frontier dims)
+                  // stays a no-op.
+                  sopts_full.max_iter        = std::min<std::size_t>(
+                      gs_sec_view->dim(), 600);
                   auto gs_sr = ed::workflows::solve(*gs_sec_view, sopts_full);
                   if (gs_sr.eigenvalues.empty() || !gs_sr.eigenvectors ||
                       gs_sr.eigenvectors->host.empty()) {

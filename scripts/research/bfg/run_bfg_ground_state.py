@@ -104,21 +104,26 @@ _MAX_FULL_BASIS_SITES = 27
 
 def _expand_sz_eigenvector(psi_sz: np.ndarray, n_sites: int, n_up: int) -> np.ndarray:
     """Expand a Sz-projected eigenvector (dim = C(N, n_up)) to the full 2^N
-    computational basis, which is what qed.bfg correlation kernels expect.
+    computational basis.
 
     QED enumerates Sz basis states as integers with exactly n_up bits set,
-    sorted in ascending order.
+    sorted in ASCENDING INTEGER order (Gosper / colex).
+
+    WARNING (bug fixed 2026-07-18): ``combinations(range(n), k)`` iterates in
+    lexicographic order of the POSITION TUPLES, which is NOT ascending-integer
+    order of the packed bitmasks (e.g. {0..7,17} precedes {0..6,8,9} in lex
+    but 0x200FF > 0x37F). The previous version relied on that false
+    equivalence and silently permuted the eigenvector — the permutation
+    happens to equal exact site reversal (bit j <-> bit N-1-j), so every
+    site-resolved observable computed through it was reversed. The sort below
+    restores the true enumeration.
     """
-    # Generate basis states via combinations → packed into a numpy array.
-    # For N=27: C(27,13) ≈ 20 M — takes ~15 s on a single core.  Acceptable
-    # for a batch job; a Gosper's-hack C loop would be ~10× faster if needed.
     combos = np.fromiter(
         (sum(1 << b for b in bits) for bits in combinations(range(n_sites), n_up)),
         dtype=np.int64,
         count=-1,
     )
-    # The generator already yields them in sorted order (combinations(range(n),k)
-    # iterates in lexicographic = ascending-integer order).
+    combos = np.sort(combos)
     psi_full = np.zeros(1 << n_sites, dtype=complex)
     psi_full[combos] = psi_sz
     return psi_full
