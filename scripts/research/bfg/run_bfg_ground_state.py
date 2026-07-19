@@ -76,17 +76,21 @@ except ImportError:
     _HAS_H5PY = False
     print("[warning] h5py not found; results will be saved as .npz only.")
 
+# The kagome cluster helper is a hard requirement (Hamiltonian builder);
+# qed.bfg (correlation kernels) was retired in the 2026-07 consolidation
+# sweep and only gates the --with-observables analysis.
+from edlib.helper_kagome_bfg import (
+    generate_kagome_cluster,
+    create_nn_lists,
+    write_cluster_nn_list,
+)
+
 try:
     import qed.bfg as _QED_BFG
-    from edlib.helper_kagome_bfg import (
-        generate_kagome_cluster,
-        create_nn_lists,
-        write_cluster_nn_list,
-    )
     _HAS_BFG = True
 except Exception:
     _HAS_BFG = False
-    print("[warning] qed.bfg or helper_kagome_bfg not available; --with-observables disabled.")
+    print("[warning] qed.bfg not available (retired 2026-07); --with-observables disabled.")
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +828,8 @@ def run_one(
             output_dir=str(run_dir),
             tolerance=1e-10,
             verbose=verbose,
-            plan=not no_plan,   # False skips feasibility check + auto-tune
-            force=no_plan,      # override resource warnings when --no-plan
+            # (plan=/force= removed 2026-07: qed.solve dropped the pre-flight
+            # planner; --no-plan is now a no-op kept for CLI compatibility)
             max_iterations=max_iter,  # None → auto-tuned
             block_size=block_size,    # None → auto-tuned; set to ~100 if 0 evals
         )
@@ -899,6 +903,8 @@ def run_one(
             _print_eigenvalue_only_analysis(
                 list(eigs), list(tags) if tags else None, N, pbc
             )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
