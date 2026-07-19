@@ -1326,7 +1326,7 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<std::vector<int>>& translations,
-             int dense_max_dim, int time_reversal) {
+             int n_up, int dense_max_dim, int time_reversal) {
               // STATIC structure factor without the DSSF machinery.
               //
               // S^zz(Q) needs only DIAGONAL, G-INVARIANT correlators:
@@ -1354,7 +1354,15 @@ PYBIND11_MODULE(_core, m) {
                   [](const std::complex<double>& c) { return c; });
               const auto ax = ed::symmetry::sz_axis_of(soa);
               std::vector<std::pair<int, int>> gs_subspaces{{-1, -1}};
-              if (ax == ed::symmetry::SzAxis::U1) {
+              if (n_up >= 0) {
+                  // PINNED: the caller knows the GS magnetisation (a
+                  // Heisenberg AFM ground state is a total-spin singlet, so
+                  // n_up = N/2). Scanning every n_up costs ~7.6x the
+                  // half-filled sector alone at N=36 and cannot find a lower
+                  // state -- measured: 96 star solves in 10 h, none of them
+                  // in the sector that holds the GS.
+                  gs_subspaces = {{n_up, -1}};
+              } else if (ax == ed::symmetry::SzAxis::U1) {
                   gs_subspaces.clear();
                   for (int k = 0; k <= n_sites; ++k)
                       gs_subspaces.emplace_back(k, -1);
@@ -1439,8 +1447,8 @@ PYBIND11_MODULE(_core, m) {
               return out;
           },
           py::arg("op"), py::arg("abelian_group"), py::arg("residue_perms"),
-          py::arg("translations"), py::arg("dense_max_dim") = 512,
-          py::arg("time_reversal") = -1,
+          py::arg("translations"), py::arg("n_up") = -1,
+          py::arg("dense_max_dim") = 512, py::arg("time_reversal") = -1,
           "ONE ground-state solve -> energy AND the translation-averaged "
           "diagonal correlators C(d) = <sum_i S^z_i S^z_{i+d}>/N. Fourier "
           "transform C(d) for S^zz(Q) at EVERY momentum. Memory is one "
