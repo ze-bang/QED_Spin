@@ -1394,7 +1394,17 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     }
 
     // Detect if matrix is small enough for dense approach or needs sparse optimization
-    const uint64_t DENSE_THRESHOLD = 20000;  // Example threshold for dense vs sparse
+    // Dense LAPACK (zheevd/dsyevd) computes the COMPLETE spectrum correctly and
+    // stably. The "sparse" fallback below builds an Eigen sparse matrix
+    // column-by-column and is BOTH wrong for a full spectrum (a sparse iterative
+    // solver cannot cheaply return all N eigenvalues) AND buggy: it heap-corrupts
+    // (glibc "malloc_consolidate(): invalid chunk size") at N=32768 on symmetry-
+    // free clusters -- e.g. a 15-site order-7 triangular cluster with a bond-
+    // dependent Jz+- term (breaks Sz-parity) and no spatial automorphisms.
+    // Raise the threshold so 2^15=32768 takes the dense path (~17 GB, minutes);
+    // stays below 2^16 so genuinely oversized blocks still divert. TODO: the
+    // sparse-full-diag branch should be removed or replaced outright.
+    const uint64_t DENSE_THRESHOLD = 40000;  // covers 2^15; dense is the correct full-spectrum solver
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
