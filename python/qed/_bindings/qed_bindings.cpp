@@ -1381,13 +1381,26 @@ PYBIND11_MODULE(_core, m) {
               int gs_nu = -1, gs_par = -1;
               double e_best = 0.0;
               bool have = false;
-              for (const auto& [nu, par] : gs_subspaces) {
-                  const auto ev = ed::solvers::little_group_lowest_eigenvalues(
-                      op_h, abelian_group, residue_perms, n_sites, 1,
-                      lg_o(nu, par));
-                  if (ev.empty()) continue;
-                  if (!have || ev[0] < e_best) {
-                      have = true; e_best = ev[0]; gs_nu = nu; gs_par = par;
+              if (gs_subspaces.size() == 1) {
+                  // Only ONE candidate subspace (the caller pinned n_up), so
+                  // the localization scan can only return that subspace --
+                  // running it would solve the very same blocks that
+                  // little_group_ground_state re-solves below, DOUBLING the
+                  // cost of the whole call. Skip straight to the eigenvector.
+                  gs_nu = gs_subspaces[0].first;
+                  gs_par = gs_subspaces[0].second;
+                  have = true;
+              } else {
+                  for (const auto& [nu, par] : gs_subspaces) {
+                      const auto ev =
+                          ed::solvers::little_group_lowest_eigenvalues(
+                              op_h, abelian_group, residue_perms, n_sites, 1,
+                              lg_o(nu, par));
+                      if (ev.empty()) continue;
+                      if (!have || ev[0] < e_best) {
+                          have = true; e_best = ev[0];
+                          gs_nu = nu; gs_par = par;
+                      }
                   }
               }
               if (!have)

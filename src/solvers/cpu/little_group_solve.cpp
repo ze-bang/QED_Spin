@@ -1951,7 +1951,18 @@ LittleGroupGroundState little_group_ground_state(
     int         best_k0  = -1;
     std::size_t best_blk = 0;
     double      best_e   = 0.0;
+    // Star filter (opt.only_k0 / ED_SYM_LG_ONLY_K0). The eigenvalue verbs
+    // honour it via run_little_group, but this vector path walked EVERY star
+    // unconditionally, so naming a momentum block here was silently ignored
+    // -- at 36 sites that is ~14 stars x ~10 h instead of the one the caller
+    // asked for. Same precedence as elsewhere: the env var wins over opt.
+    std::set<int> gs_only_k0(opt.only_k0.begin(), opt.only_k0.end());
+    {
+        bool ignore_plan = false;
+        parse_only_k0_env(gs_only_k0, ignore_plan);
+    }
     for (const auto& [k0, members] : stars) {
+        if (!gs_only_k0.empty() && gs_only_k0.count(k0) == 0) continue;
         StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
                                          false, nullptr, nullptr, nullptr);
         if (!sb.hk) continue;
