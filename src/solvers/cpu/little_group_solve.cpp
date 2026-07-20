@@ -71,6 +71,22 @@ std::vector<double> LittleGroupSpectrum::expanded() const {
 
 namespace {
 
+// Dim floor above which the GS vector is built by the TWO-PASS no-reorth
+// Lanczos below instead of FullCGS2 + keep_basis. keep_basis stores every
+// Krylov vector (16 B * n per iteration): at frontier block dims (N=36 half
+// filling, n ~ 4e8) that is ~6 GB PER ITERATION and OOM-killed the first
+// 4x3 correlator campaign at 187 G around iteration ~30. Override with
+// ED_SYM_LG_TWO_PASS_MIN_DIM (validation suites set it to 1 to force the
+// two-pass lane at toy sizes).
+[[nodiscard]] inline std::size_t lg_two_pass_min_dim() {
+    if (const char* v = std::getenv("ED_SYM_LG_TWO_PASS_MIN_DIM")) {
+        const unsigned long long x = std::strtoull(v, nullptr, 10);
+        if (x > 0) return static_cast<std::size_t>(x);
+    }
+    return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
+}
+
+
 // U-composition convention (matches irreps.cpp): U(g)U(h) = U(g·h) with
 // (g·h)[i] = h[g[i]].
 [[nodiscard]] std::vector<int>
@@ -1112,8 +1128,20 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     ed::krylov::LanczosKernelOptions kopts;
     kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
         nb, std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u)));
-    kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
-    kopts.local_ring_size = 8;
+    // Ring reorth is a MEMORY term at frontier dims: 8 ring vectors x 16 B
+    // x nb is ~48 GB per 3.8e8-dim block (measured 81 G RSS against a 96 G
+    // budget on the 4x3 kagome campaign, 2026-07-19). This scan is
+    // eigenvalues-only and the k-DISTINCT Paige-bound gate below is
+    // ghost-aware by design, so above the two-pass dim floor we drop to
+    // the pure three-term recurrence: ghosts cost duplicate converged
+    // copies (deduped), not wrong eigenvalues. Small blocks keep the ring
+    // -- it sharpens the excited window at negligible cost there.
+    if (static_cast<std::size_t>(nb) > lg_two_pass_min_dim()) {
+        kopts.reorth          = ed::krylov::ReorthPolicy::None;
+    } else {
+        kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
+        kopts.local_ring_size = 8;
+    }
     kopts.keep_basis      = false;
     kopts.dim_cap         = nb;
     // k-DISTINCT converged Ritz early exit (Jul 2026, replaces the
@@ -1851,21 +1879,6 @@ std::vector<double> little_group_lowest_eigenvalues(
 // =============================================================================
 
 namespace {
-
-// Dim floor above which the GS vector is built by the TWO-PASS no-reorth
-// Lanczos below instead of FullCGS2 + keep_basis. keep_basis stores every
-// Krylov vector (16 B * n per iteration): at frontier block dims (N=36 half
-// filling, n ~ 4e8) that is ~6 GB PER ITERATION and OOM-killed the first
-// 4x3 correlator campaign at 187 G around iteration ~30. Override with
-// ED_SYM_LG_TWO_PASS_MIN_DIM (validation suites set it to 1 to force the
-// two-pass lane at toy sizes).
-[[nodiscard]] inline std::size_t lg_two_pass_min_dim() {
-    if (const char* v = std::getenv("ED_SYM_LG_TWO_PASS_MIN_DIM")) {
-        const unsigned long long x = std::strtoull(v, nullptr, 10);
-        if (x > 0) return static_cast<std::size_t>(x);
-    }
-    return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
-}
 
 // TWO-PASS no-reorth ground-state Ritz vector (2026-07-19).
 //

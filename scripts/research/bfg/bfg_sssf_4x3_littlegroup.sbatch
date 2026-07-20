@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:h100:1
 #SBATCH --time=12:00:00
 #SBATCH --array=0-5
@@ -25,6 +25,11 @@
 #   TWO-PASS no-reorth Lanczos (memory: 4 vectors) -- the FullCGS2
 #   kept-basis path banked ~6 GB/iteration at these dims and OOM-doomed
 #   the CPU attempt (49619841, cancelled at 87G RSS ~ 14 banked vectors).
+#   Second relaunch note: the first GPU array (49667944) ran the star scan
+#   with LocalDGKS3 ring-8 reorth = 8 x 16 B x 3.78e8 ~ 48 GB of ring
+#   buffers, sitting at 81/96 G -- cancelled pre-OOM; large blocks now run
+#   the pure three-term recurrence (ghost-aware k-distinct gate) and the
+#   budget is 128 G for margin over the ~35 G no-reorth footprint.
 #
 # zz channel only (diagonal correlators). The S^{+-} channel needs the
 # cross-irrep spectral lane and a bigger-memory strategy -- future work.
