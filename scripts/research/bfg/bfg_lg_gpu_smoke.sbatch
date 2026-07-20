@@ -39,6 +39,13 @@ export PYTHONUNBUFFERED=1
 export ED_SYM_LG_GPU=1
 export ED_SYM_LG_TWO_PASS_MIN_DIM=1
 export ED_SYM_PROFILE=1        # prints "GPU rep gather engaged" per block
+# Shrink the sector-CSR budget to ~1 KB: at toy dims the reduced CSR wins
+# the lane choice and the GPU rep-gather is never reached, so the first
+# smoke run never exercised the device kernel. Declining CSR makes the GPU
+# gather the serving lane -- exactly what the 4x3 blocks will use (their
+# dims blow the default 8 GiB budget anyway). NB: the parser IGNORES 0
+# ("if (b > 0.0)"), so a tiny positive value is the way to force a decline.
+export ED_SYM_SECTOR_CSR_BUDGET_GIB=0.000001
 
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
