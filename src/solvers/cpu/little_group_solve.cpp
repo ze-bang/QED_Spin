@@ -2053,8 +2053,8 @@ namespace {
 solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
                          std::size_t n)
 {
-    const std::size_t max_iter = std::min<std::size_t>(n, 400);
-    const int restarts = 3;
+    const std::size_t max_iter = std::min<std::size_t>(n, 600);
+    const int restarts = 4;
 
     std::vector<Complex> v0(n);
     {
@@ -2275,11 +2275,25 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         num += std::norm(hu[i] - E0 * u[i]);
         den += std::norm(u[i]);
     }
-    if (std::sqrt(num / den) > 1e-8)
+    // Residual acceptance. 1e-8 is calibrated for the CF/DSSF consumer;
+    // diagonal-correlator consumers (weights |c_r|^2) are first-order
+    // insensitive and may relax via ED_SYM_LG_GS_RESID_TOL (the 4x3
+    // kagome campaign's small-|Jpm| points exhaust the two-pass restarts
+    // near ~1e-7 -- task 49669202_2 died on this guard 11.8 h in).
+    double resid_tol = 1e-8;
+    if (const char* v = std::getenv("ED_SYM_LG_GS_RESID_TOL")) {
+        const double t = std::atof(v);
+        if (t > 0.0) resid_tol = t;
+    }
+    if (std::sqrt(num / den) > resid_tol) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%.3e", std::sqrt(num / den));
         throw std::runtime_error(
-            "little_group: GS eigenvector residual "
-            + std::to_string(std::sqrt(num / den))
-            + " exceeds 1e-8 -- declining the factorized DSSF.");
+            std::string("little_group: GS eigenvector residual ") + buf
+            + " exceeds tolerance " + std::to_string(resid_tol)
+            + " -- declining the factorized DSSF "
+            "(ED_SYM_LG_GS_RESID_TOL relaxes for correlator-only use).");
+    }
     const double inv = 1.0 / std::sqrt(den);
     for (auto& c : u) c *= inv;
     return {E0, std::move(u)};

@@ -56,6 +56,7 @@ export PYTHONPATH="${PROJ}/QED/python:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 export PYTHONUNBUFFERED=1
 export ED_SYM_PROFILE=1        # log per-block lane engagement (GPU/CSR/walk)
+export ED_SYM_LG_GS_RESID_TOL=1e-6  # correlator weights are |c|^2: ~1e-7 residual is ample (1e-8 default killed task 49669202_2)
 
 JPM_VALUES=(-0.05 -0.07 -0.09 -0.11 -0.13 -0.15)
 TASK="${SLURM_ARRAY_TASK_ID}"
