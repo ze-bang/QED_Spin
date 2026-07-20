@@ -32,6 +32,7 @@
 #include <ed/core/sector_thermo.h>               // U1b: combine_sector_thermodynamics
 #include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
 #include <ed/core/select_backend.h>           // ed::have_cuda()
+#include <ed/solvers/little_group_gpu.h>      // batched GPU block eigensolve
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -1048,6 +1049,30 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // J1-J2, J2=0.15, n_up=8, k=10: ghost -8.461485 beside the true -8.461508
 // doublet, spurious -8.44734 between genuine levels).  Replaced with a
 // direct kernel call: dense values-only eigensolve (mirroring
+// Shared dense/Lanczos crossover for the lowest-k path. Kept in one place so
+// the GPU deferred-batch lane below makes exactly the same dense-vs-Lanczos
+// decision as the CPU ``solve_block_lowest``.
+[[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
+    const std::uint64_t max_iter_cap =
+        std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
+    std::uint64_t dense_floor = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(dense_max_dim), 32u * max_iter_cap);
+    if (const char* df = std::getenv("ED_SYM_LG_DENSE_FLOOR"))
+        dense_floor = static_cast<std::uint64_t>(std::strtoull(df, nullptr, 10));
+    return dense_floor;
+}
+
+// Batched-GPU-eigensolve gate: opt.use_gpu is the request; ED_SYM_LG_GPU=0 is
+// the global little-group GPU veto (same env var that gates the rep-gather);
+// a present device is required. Failures inside the lane degrade to the CPU
+// path (the engine's graceful-degradation contract).
+[[nodiscard]] bool lg_gpu_eigensolve_enabled(const LittleGroupOptions& opt) {
+    if (!opt.use_gpu) return false;
+    const char* gate = std::getenv("ED_SYM_LG_GPU");
+    if (gate != nullptr && gate[0] == '0' && gate[1] == '\0') return false;
+    return ed::have_cuda();
+}
+
 // ``solve_block_full``) below a crossover, and above it the kernel Lanczos
 // with a LocalDGKS3 ring of 8, no stored basis, a real iteration budget,
 // and a k-lowest Ritz stationarity gate.
@@ -1073,15 +1098,10 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // safe: the 5x5 208012-dim blocks solve at 0.2%). A ~1.3e4-dim dense
     // eigensolve is ~2.6 GB / ~1 s -- affordable; the 36-site blocks are
     // millions-dim and stay on the (safe) Lanczos path unchanged.
-    const std::uint64_t max_iter_cap =
-        std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
-    std::uint64_t dense_floor = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(dense_max_dim), 32u * max_iter_cap);
-    // ED_SYM_LG_DENSE_FLOOR (test hook): override the crossover so the
-    // Lanczos / block-Lanczos path can be forced at small block dims where a
-    // dense reference is also available (degeneracy-counting verification).
-    if (const char* df = std::getenv("ED_SYM_LG_DENSE_FLOOR"))
-        dense_floor = static_cast<std::uint64_t>(std::strtoull(df, nullptr, 10));
+    // (ED_SYM_LG_DENSE_FLOOR test hook lives inside lowest_dense_floor: it
+    // overrides the crossover so the Lanczos path can be forced at small
+    // block dims where a dense reference is also available.)
+    const std::uint64_t dense_floor = lowest_dense_floor(k, dense_max_dim);
     if (nb <= dense_floor || nb <= 2) {
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es;
         es.compute(materialize(mv), Eigen::EigenvaluesOnly);
@@ -1823,11 +1843,61 @@ LittleGroupSpectrum little_group_full_spectrum(
     int                                  n_sites,
     const LittleGroupOptions&            opt)
 {
-    // Note (Consolidation Family 6): the former GPU lane batched every block
-    // into the monolithic SAB GPU eigensolver (sym_blocks_batched_eigenvalues_gpu),
-    // which was removed with SAB. Little-group blocks are small (~dim/|G|), so
-    // the per-block CPU dense solve below is the single path; opt.use_gpu no
-    // longer selects a batched GPU eigensolve here.
+    // GPU lane (restored 2026-07-20; the Family-6 removal of the SAB engine
+    // took the batched eigensolver down with it and silently no-op'd
+    // opt.use_gpu -- the kernel now lives in little_group_gpu.cu, SAB-free):
+    // materialise every block on the host (same engine sampling as the CPU
+    // path, the callback defers), then ONE batched cuSOLVER stream-pool call
+    // solves them all. Any GPU failure degrades to the CPU path below.
+#ifdef WITH_CUDA
+    if (lg_gpu_eigensolve_enabled(opt)) {
+        try {
+            ed::solvers::LgBlocksPacked P;
+            std::vector<int> pack_mult;
+            std::vector<LittleGroupLabel> pack_label;
+            auto out = run_little_group(
+                op, abelian_group, residue_perms, n_sites, opt,
+                [&](const ed::matvec::MatVecOperator& mv, int mult,
+                    LittleGroupLabel& lab) -> std::vector<double> {
+                    const std::size_t nb = mv.dim();
+                    if (nb == 0) return {};
+                    const Eigen::MatrixXcd Hb = materialize(mv);
+                    P.offset.push_back(P.data.size());
+                    P.block_dim.push_back(static_cast<int>(nb));
+                    P.block_irrep_dim.push_back(1);
+                    for (std::size_t col = 0; col < nb; ++col)
+                        for (std::size_t row = 0; row < nb; ++row)
+                            P.data.push_back(Hb(static_cast<Eigen::Index>(row),
+                                                static_cast<Eigen::Index>(col)));
+                    pack_mult.push_back(mult);
+                    pack_label.push_back(lab);
+                    return {};       // deferred: recorded above
+                });
+            const std::vector<double> eigs =
+                ed::solvers::lg_blocks_batched_eigenvalues_gpu(P);
+            std::size_t off = 0;
+            for (std::size_t b = 0; b < P.block_dim.size(); ++b) {
+                for (int i = 0; i < P.block_dim[b]; ++i) {
+                    out.eigenvalues.push_back(
+                        eigs[off + static_cast<std::size_t>(i)]);
+                    out.multiplicities.push_back(pack_mult[b]);
+                    out.labels.push_back(pack_label[b]);
+                }
+                off += static_cast<std::size_t>(P.block_dim[b]);
+            }
+            out.total_dim = 0;
+            for (int m : out.multiplicities)
+                out.total_dim += static_cast<std::uint64_t>(m);
+            out.gpu_engaged = true;   // the batched eigensolve ran on device
+            check_sum_rule(out, n_sites, opt);
+            return out;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "[little_group] GPU batched eigensolve declined "
+                         "(%s); using the CPU path\n", e.what());
+        }
+    }
+#endif
     auto out = run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [](const ed::matvec::MatVecOperator& mv, int /*mult*/,
@@ -1846,6 +1916,76 @@ LittleGroupSpectrum little_group_lowest_spectrum(
     int                                  k,
     const LittleGroupOptions&            opt)
 {
+    // GPU lane (2026-07-20): dense-eligible blocks (the same crossover
+    // decision as solve_block_lowest, via lowest_dense_floor) are DEFERRED
+    // into one packed batch and eigensolved in a single cuSOLVER stream-pool
+    // call; Lanczos-sized blocks solve inline on the CPU kernel exactly as
+    // before (at >= 2^20 reps their matvec engages the GPU rep-gather). Any
+    // GPU failure degrades to the all-CPU path below.
+#ifdef WITH_CUDA
+    if (lg_gpu_eigensolve_enabled(opt)) {
+        try {
+            ed::solvers::LgBlocksPacked P;
+            std::vector<int> pack_mult;
+            std::vector<int> pack_keep;   // lowest-k kept per deferred block
+            std::vector<LittleGroupLabel> pack_label;
+            auto out = run_little_group(
+                op, abelian_group, residue_perms, n_sites, opt,
+                [&](const ed::matvec::MatVecOperator& mv, int mult,
+                    LittleGroupLabel& lab) -> std::vector<double> {
+                    const std::uint64_t nb = mv.dim();
+                    if (nb == 0) return {};
+                    const std::size_t kk =
+                        static_cast<std::size_t>(std::max<std::uint64_t>(
+                            1u, std::min<std::uint64_t>(
+                                    static_cast<std::uint64_t>(k), nb)));
+                    if (nb <= lowest_dense_floor(kk, opt.dense_max_dim)
+                            || nb <= 2) {
+                        const Eigen::MatrixXcd Hb = materialize(mv);
+                        P.offset.push_back(P.data.size());
+                        P.block_dim.push_back(static_cast<int>(nb));
+                        P.block_irrep_dim.push_back(1);
+                        for (std::size_t col = 0; col < nb; ++col)
+                            for (std::size_t row = 0; row < nb; ++row)
+                                P.data.push_back(
+                                    Hb(static_cast<Eigen::Index>(row),
+                                       static_cast<Eigen::Index>(col)));
+                        pack_mult.push_back(mult);
+                        pack_keep.push_back(static_cast<int>(kk));
+                        lab.converged = true;   // dense spectrum is exact
+                        pack_label.push_back(lab);
+                        return {};   // deferred
+                    }
+                    bool conv = true;
+                    auto ev = solve_block_lowest(mv, k, opt.dense_max_dim,
+                                                 &conv);
+                    lab.converged = conv;
+                    return ev;
+                });
+            const std::vector<double> eigs =
+                ed::solvers::lg_blocks_batched_eigenvalues_gpu(P);
+            std::size_t off = 0;
+            for (std::size_t b = 0; b < P.block_dim.size(); ++b) {
+                const int keep = std::min(pack_keep[b], P.block_dim[b]);
+                for (int i = 0; i < keep; ++i) {   // ascending per block
+                    out.eigenvalues.push_back(
+                        eigs[off + static_cast<std::size_t>(i)]);
+                    out.multiplicities.push_back(pack_mult[b]);
+                    out.labels.push_back(pack_label[b]);
+                    out.total_dim +=
+                        static_cast<std::uint64_t>(pack_mult[b]);
+                }
+                off += static_cast<std::size_t>(P.block_dim[b]);
+            }
+            out.gpu_engaged = true;   // the batched eigensolve ran on device
+            return out;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "[little_group] GPU batched eigensolve declined "
+                         "(%s); using the CPU path\n", e.what());
+        }
+    }
+#endif
     return run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [&](const ed::matvec::MatVecOperator& mv, int /*mult*/,

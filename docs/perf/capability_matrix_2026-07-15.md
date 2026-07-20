@@ -1,5 +1,10 @@
 # Capability matrix vs dense diagonalization — 2026-07-15 (rev 4)
 
+> Superseded by
+> [`capability_matrix_2026-07-20.md`](capability_matrix_2026-07-20.md) (rev 5,
+> post-consolidation stack + supplementary little-group-GPU / composed-DSSF /
+> finite-T-DSSF cells).
+
 Regenerated with `benchmarks/bench_capability_matrix.py --n 12 --devices cpu,gpu`.
 N=12 Heisenberg ring (all four symmetry axes present). **Ground truth = full
 dense `eigh` of the 4096-dim Hamiltonian**: exact E₀, exact partition sum for

@@ -230,21 +230,20 @@ def test_gs_star_reduction_parity_gpu():
 
     r_on, r_off = run("auto"), run("off")
 
-    # The project lane now REPORTS a lane at all (it used to return an
-    # EDResults with no `backend` attribute, so this assertion could only ever
-    # raise AttributeError -- it never tested anything).
-    #
-    # And it reports the truth, which is "cpu" here: the little-group engine
-    # only engages its GPU rep-gather past 2^20 reps, and this ring's blocks are
-    # ~80, so a device='gpu' request legitimately runs on the CPU -- exactly the
-    # tiny-block reasoning behind BackendConstraints::gpu_dim_floor. Demanding
-    # "gpu" asserted a fiction; demanding the ENGINE's own answer is what has
-    # teeth.
+    # 2026-07-20: an EXPLICIT device='gpu' request must actually run the
+    # symmetry machinery on the device. point_group='auto' projects, and
+    # the little-group engine's batched cuSOLVER block eigensolve
+    # (little_group_gpu.cu -- silently lost when Family 6 removed its
+    # SAB-owned kernel, restored since) solves the dense non-abelian
+    # blocks ON the GPU, so the project lane's truthful report is 'gpu'.
+    # (Two earlier revisions of this assertion were both wrong ways: one
+    # demanded 'gpu' while the engine had no GPU eigensolve -- a fiction;
+    # the next pinned 'cpu' -- canonizing the quiet out-vote of the
+    # explicit device request.)
     lane = getattr(r_on.backend, "lane", None)
-    assert lane in ("cpu", "gpu"), f"project lane reported no lane: {lane!r}"
-    assert lane == "cpu", (
-        f"blocks this small (~80 reps) are below the engine's 2^20 GPU gate, "
-        f"so the honest lane is cpu, got {lane!r}")
+    assert lane == "gpu", (
+        f"explicit device='gpu' with point_group='auto' must engage the "
+        f"little-group GPU eigensolve, got lane={lane!r}")
 
     np.testing.assert_allclose(r_on.eigenvalues[:1], r_off.eigenvalues[:1],
                                rtol=0, atol=1e-9)

@@ -880,7 +880,7 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int k, int n_up, int sz_parity, int dense_max_dim,
-             int spin_flip, int time_reversal,
+             bool use_gpu, int spin_flip, int time_reversal,
              const std::vector<int>& only_k0,
              const std::vector<int>& only_irrep) {
               // Stage 9f: the labeled twin of little_group_lowest_eigenvalues.
@@ -893,7 +893,7 @@ PYBIND11_MODULE(_core, m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               const auto s = ed::solvers::little_group_lowest_spectrum(
                   op, abelian_group, residue_perms, n_sites, k,
-                  lg_opts(n_up, sz_parity, dense_max_dim, false,
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
                           spin_flip, time_reversal, only_k0, false,
                           only_irrep));
               std::vector<std::size_t> order(s.eigenvalues.size());
@@ -939,7 +939,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("k") = 1,
           py::arg("n_up") = -1, py::arg("sz_parity") = -1,
-          py::arg("dense_max_dim") = 64,
+          py::arg("dense_max_dim") = 64, py::arg("use_gpu") = false,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           py::arg("only_k0") = std::vector<int>{},
           py::arg("only_irrep") = std::vector<int>{},

@@ -439,7 +439,8 @@ if(WITH_CUDA)
         # gpu_tpq.cu were deleted along with the dead GPUEDWrapper forwarders
         # that were their only callers. The production GPU paths now run off
         # the unified host operators' bind_cuda() device matvec (CudaBackend /
-        # CudaMatVecBackend) and a directly-constructed GPUFTLMSolver.
+        # CudaMatVecBackend); GPUFTLMSolver was retired in consolidation
+        # Family 3 (FTLM rides the backend-generic via_backend kernels).
         # gpu_lanczos.cu (the Gen-1 hand-rolled GPULanczos class) was retired:
         # runGPULanczos routes entirely through gpu_lanczos_kernel_facade.cu
         # (lanczos_kernel<CudaBackend>). The one capability it uniquely held --
@@ -448,6 +449,7 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
+        ${SOLVERS_GPU_DIR}/little_group_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for

@@ -1,5 +1,235 @@
 # Changelog
 
+## 2026-07-20 (later) — non-abelian little-group on the GPU; sector semantics confirmed
+
+* **The little-group engine's batched GPU eigensolve is BACK — and now
+  covers the lowest-k path too.** Family 6 removed the SAB engine and
+  silently took the batched cuSOLVER kernel down with it, no-op'ing
+  `LittleGroupOptions::use_gpu`; a U-series revision then removed the
+  explicit-GPU routing veto on the (false) claim the lane was still
+  GPU-capable. Fixed at the root: the kernel is recovered from git
+  history and re-homed SAB-free as `little_group_gpu.{h,cu}`
+  (`lg_blocks_batched_eigenvalues_gpu`: one upload of all packed dense
+  blocks, an 8-stream `cusolverDnZheevd` pool, one download — two
+  transfers total). `little_group_full_spectrum` regains its deferred
+  batch lane, and `little_group_lowest_spectrum` gains a NEW one: dense
+  crossover blocks (the shared `lowest_dense_floor` decision) defer
+  into the batch while Lanczos-sized blocks solve inline (their matvec
+  engages the GPU rep-gather at ≥2²⁰ reps). The exact thermal route
+  (`little_group_thermodynamics`) inherits the lane through its
+  full-spectrum sweep; the sampled route already passes
+  `backend.allow_gpu`. `use_gpu` threaded through the labeled binding
+  (new kwarg) and `qed.solve`'s project lane; graceful degradation on
+  any GPU failure; `ED_SYM_LG_GPU=0` vetoes. GS-DSSF's continued
+  fraction remains CPU (unported corner, noted in the matrix).
+  **Verified GPU == CPU**: project-lane GS 1.5e-14, `point_group=
+  'full'` lowest-4 exact match, full spectrum all 4096 values 2.3e-14,
+  exact thermal E(T) identical, `lane='gpu'` truthfully reported; the
+  capability matrix's strict GPU-lane assertion now also covers the
+  GS/na + thermal/na + broken-model non-abelian rows on both devices.
+  (`test_star_reduction`'s GPU pin re-pointed a second time — its two
+  earlier revisions had asserted 'gpu' while the engine had no GPU
+  eigensolve, then canonized the quiet CPU out-vote.)
+* **Sector semantics confirmed empirically** (N=10 ring vs dense):
+  unnamed sector ⇒ iterate ALL sectors and merge (GS: every momentum
+  sector, and on the project lane every magnetisation sector — the
+  half-filling pin is gone; thermal: all 46 (n_up, k) sectors,
+  Z-recombined to the exact partition sum at 4.4e-15); named sector ⇒
+  that block alone (`sz=2` returns the n_up=2 slice minimum, NOT the
+  global GS; `sector=(1,)` solves one 25-dim irrep block only), with
+  block dims verified reduced at every step. `qed.thermal(sector=)` on
+  the all-Sz fast path refuses loudly with workarounds rather than
+  silently ignoring the filter.
+* Doc follow-through: last cTPQ references purged from SYMMETRY.md /
+  workflow.md / python_api_coverage.md / python_quickstart.md /
+  SCALING.md / thermal.py comments; python_api_coverage.md dropped the
+  deleted `qed.bfg` surface (and `docs/api/python.rst` its
+  `automodule qed.bfg`, which would have broken the Sphinx build);
+  workflow.md's "distributed variant = solver='cTPQ' + device='mpi'"
+  paragraph replaced with the real MPI story (`mpirun ./ED`,
+  SectorDistributor).
+
+## 2026-07-20 — documentation audit + legacy sweep + dense-verified behavior confirmation
+
+* **Capability matrix rev 5**
+  (`docs/perf/capability_matrix_2026-07-20.md`): full
+  workflow × symmetry × backend sweep re-run on the post-consolidation
+  stack — every cell matches dense `eigh` at its expected tolerance on
+  CPU **and** GPU (GS 9 compositions, mTPQ/FTLM/LTLM composed thermal,
+  DSSF, non-abelian little-group, the U(1)-broken parity/flip model).
+  New supplementary cells (`benchmarks/audit_capability_gaps.py`,
+  dense-verified): little-group solve/thermal under `ED_SYM_LG_GPU=1`,
+  `full_spectrum` on GPU with symmetry and with `point_group='full'`
+  (8.4e-15 over all 1024 values), DSSF with `spin_flip='require'`
+  (Stage 8d flip composition confirmed CONSUMED, 1.4e-13), little-group
+  DSSF (2.5e-14), finite-T DSSF vs the dense thermal Lehmann sum
+  (CPU+GPU, stochastic regime).
+* **Audit findings**: (1) `point_group` rows under an explicit
+  `device='gpu'` request project through the little-group engine and
+  truthfully report `lane='cpu'` at small block sizes — the request is
+  neither honored (no floor bypass, unlike `select_backend`) nor
+  warned about; the benchmark's blanket GPU-lane assertion predated
+  this routing and aborted the GPU pass — narrowed to
+  non-project-lane rows. (2) `qed.spectral` refuses
+  `time_reversal='require'` loudly BY DESIGN (no k↔−k fold on the
+  spectral verb) — README's "works on all three verbs" claim now
+  carries that asterisk. (3) cTPQ was removed as a user-facing method
+  in the final consolidation but README/guides/CODEMAP still sold it —
+  all repointed to FTLM / LTLM / OFTLM / mTPQ / KPM-DOS.
+* **Docs truth pass, phase 2**: CODEMAP §5 regenerated from the actual
+  tree (55 deleted files were still listed as live: bfg, distributed,
+  gpu_ftlm, symmetry_adapted, chunked/streaming carriers, …) and §6.5
+  rewritten to the sector-pool thermal reality (the "TPQ can't factor
+  through spatial irreps / silently disabled" claims were obsolete);
+  one_call_api gained the qn-series selector semantics (`sector=` is
+  quantum numbers, `irrep=` by character + raises on the abelian lane,
+  `flip=`, `method='exact'`) and dropped the "SAB engine" description
+  of `point_group='full'`; README/index/SYMMETRY/DSSF/BENCHMARKS
+  repointed off the removed SAB engine, cTPQ, and distributed family;
+  `scripts/distributed/` (launchers for the retired
+  `ed_distributed_main`) deleted; spectral.py's stale "flip not
+  consumed" comment corrected to the verified Stage-8d truth.
+
+* Docs brought back in line with the tree: README/examples tour count
+  (five scripts, not six), README docs-tree listing (UNIFIED_STACK.md,
+  SYMMETRY_V2_DESIGN.md, DSSF.md, `docs/perf/`), CONTRIBUTING's
+  example-contribution section rewritten for the tour (the per-cell
+  `examples/{solve,thermal,spectral}` tree it described is gone),
+  SYMMETRY.md repointed from the removed monolithic SAB
+  (`build_sab_partition0` / `SymmetrizedHamiltonian`) to
+  `little_group_solve` / `SectorOperator`, ARCHITECTURE.md +
+  `ed_wrapper.h` repointed from the retired `ed_legacy_types.h` to
+  `results.h`, Python guides repointed from the deleted `usage.md` to
+  `one_call_api.md`. `SPATIAL_SYMMETRY_OPTIMIZATIONS.{md,tex}` archived
+  under `docs/history/` with a staleness banner.
+* Family 3 follow-up sweep executed: the caller-less
+  `compute_dynamical_correlation_state_multi_temperature`, the plain
+  `compute_dynamical_correlation_multi_sample_multi_temperature`
+  wrapper, and their orphaned support chain (`LanczosSpectralData`,
+  `compute_lanczos_spectral_data`,
+  `compute_spectral_function_from_lanczos_data`) are deleted
+  (~500 LOC); the P==1 `_impl` is `WITH_MPI`-gated since its only
+  caller is the `_comm` variant. Dead `gpu_ed_wrapper.h` include
+  dropped from `workflows.cpp`. CONSOLIDATION_PLAN status table now
+  matches reality (Families 3 follow-up + 10 recorded done).
+
+## 2026-07-17/18 — campaign lanes, GAP-10 root fix, full-spectrum routing
+
+* **bfg campaign**: GS+SSSF campaign driver over the multi-Q
+  cross-irrep spectral lane; little-group **static structure factor
+  from diagonal correlators** (one GS solve per star, no Lehmann sum).
+  Follow-up retracted the suspected 'scatter site-reversal bug' — the
+  real bugs were elsewhere (see commit 645ce3a).
+* **GAP-10 root fix (v2+v3)**: the Lanczos convergence predicate now
+  certifies the requested spectral WINDOW (full windows + bound
+  diagnostics); merging filters at the MERGE, not the solve. F6 fixed:
+  cold-operator dense assembly raced the first SoA term commit.
+* **full_spectrum**: the trivial-spatial-group sweep is blocked by
+  Sz / Sz-parity and rides the STREAMING sector path; `full_diag`
+  dense/sparse threshold raised so N ≤ 2¹⁵ uses dense LAPACK.
+* **find_symmetries**: clique budget — greedy maximal-abelian above
+  |Aut| = 512 instead of the exact max-clique search.
+* CI reds fixed: `sz='even'/'odd'` parity spelling restored; Ritz cut
+  de-marginalized.
+
+## 2026-07-16/17 — quantum-number selection + lane unification (qn/U-series)
+
+* **sector= is QUANTUM NUMBERS**, not raw sector indices, across every
+  verb: unnamed Sz means ALL sectors (the half-filling assumption is
+  gone); **naming a momentum now PROJECTS** (only_k0 star filter +
+  chi_k decoder — `k_raw` is not the momentum); `irrep=` names a
+  little-co-group irrep BY ITS CHARACTER, raises on the abelian lane
+  instead of being silently ignored; the co-group character table is
+  published as the naming vocabulary; `thermal(sector=)` gives
+  per-irrep finite-T with a loud refusal where it cannot work;
+  `flip=` selector + full_spectrum selectors.
+* **Lane unification**: U1a owned little-group block handles (one
+  factory behind every verb); U1b `thermal` 'auto' samples inside the
+  little-group blocks; U2a eigenvector lift u = W_σ v on the GS path;
+  U2b flip-aware rep→computational expansion (with proof), certified
+  eigenpairs and `qed.solve` eigenvectors on the projection lane,
+  GS-DSSF sources flip-extended (raw-sector pin retired), cross-sector
+  normalization for unequal group orders; U3 flip-mirror transport +
+  d_sigma partners (`little_group_lowest_vectors` only_k0 fix); U4a
+  directory-form thermal on the block lane; U4b `method='exact'` —
+  `point_group` stops smuggling a solver strategy.
+* Diction pass: ONE Sz spelling across every verb; spectral
+  `time_reversal` is loud, not inert; BlockTag on thermal + spectral.
+  `symmetry` reports the TRUE abelian group order, not `prod(orders)`.
+* Audit repair (01e6ad5): main compiled again behind what a green
+  ctest had hidden; the LTLM fix pinned; exact thermal fallback
+  widened. Full permutation-grid sweep with truthful matvec-regime
+  signal; GAP 9/10 closed at sweep level; `have_cuda` bound so the GPU
+  sweep cell actually runs.
+
+## 2026-07-14/15 — consolidation sweep: parallel-implementation debt retired
+
+Audit + execution recorded in `CONSOLIDATION_PLAN.md` (branch
+`consolidation-sweep`, −11.4k LOC net):
+
+* **Family 11 (BFG)**: one-off order-parameter pipeline removed
+  entirely (`bfg.py`, `compute_bfg_order_parameters*`).
+* **Family 1 (LTLM)**: buggy GS-local-DOS kernel removed; the LTLM
+  binding routes through the verified FTLM trace estimator, gated vs
+  exact.
+* **Family 6 (SAB)**: the monolithic symmetry-adapted-basis engine
+  removed — the factorized little-group solver is the SOLE non-abelian
+  engine; `canonical_thermo` extracted; tests rewired to the dense
+  oracle.
+* **Family 4 (term kernels)**: one `__host__ __device__` per-term
+  gate-math core (`term_gate_math.h`) shared by CPU apply_terms /
+  apply_term_to_state and GPU process_source_terms (CPU Δ=6.7e-15,
+  GPU Δ=0.0 vs reference).
+* **Family 10 (config adapters)**: `ed_legacy_types.h` retired into
+  `results.h` (with `matvec_types.h` / `thermal_types.h`).
+* **Family 3 (dynamical FTLM)**: `GPUFTLMSolver` (1843 LOC,
+  `gpu_ftlm.cu/.cuh`) retired — dynamical S(q,ω) AND static
+  ⟨O₁†O₂⟩(T) each unified onto ONE backend-generic `via_backend`
+  kernel (CPU+CUDA), behaviour-preserving and CUDA-verified.
+* Families 2/5/8 audited CLEAN (correct backend splits, not
+  duplication). Little-group S1 within-block degeneracy: dense path
+  resolves it (`ED_SYM_LG_DENSE_FLOOR`).
+
+## 2026-07-08..13 — Stages 9–11: one unified stack
+
+* **Stage 9 (SymmetryEngine v2 close-out)**: spin flip (9a) and
+  time-reversal folding (9b) run INSIDE the little-group engine;
+  routing unified — the SAB engine retired to test oracle (9c) with
+  only an explicit GPU device request vetoing auto-projection;
+  factorized GS-DSSF — SAB's last route retired (9d); production
+  matvec regime + routing verification (9e); sector-CSR budget on both
+  lanes + little-group label exposure (9f); debt hardening (9g).
+  `point_group='auto'` projects by default.
+* **Stage 10**: single-sourced flip-subspace closure rule (10a);
+  env-gate inventory + `qed.debug_env()`, `workflow.py` →
+  `discovery.py` (10b); unified solve output contract — labels on the
+  project lane (10c); cross-irrep spectral binding dedup (10d);
+  dead-code retirement sweep (10e).
+* **Stage 11**: one parameter-conversion layer, solver defaults
+  defined once (11a) + one `EDParameters → SolveOptions` converter
+  across the language boundary; **Gen-1 deletable solver files
+  retired** (11b); ONE symmetry-sector construction lane — lazy
+  rep-first, eager builders deleted (11c-1/2a); ONE matvec
+  representation — the orbit-CSR lane deleted, host and device
+  (11c-2b); the distributed-operator family retired wholesale (11d,
+  user-approved) — across-sector MPI (SectorDistributor × MpiBackend)
+  is the production MPI story, and the MPI smoke lane repointed at the
+  production matvec.
+* Little-group hardening: converged, ghost-free lowest-k block solves
+  (ghost dedup + tridiag residual-bound filter + coverage tripwire);
+  the lowest-k WINDOW pinned as a multiset vs dense; refine-or-die GS
+  residual guard on the cross-irrep spectral lane; 64-bit
+  byte-decomposition permutation LUT on host AND device (N ≤ 64) with
+  `ED_SYM_PERM_LUT` pin gate; GPU rep gather via 64-bit device rank +
+  binary search; dense/Lanczos crossover in `solve_block_lowest` fixed
+  (was 3 orders too low); dimension-aware fixed-Sz materialization
+  budget; GeneratorSet residue dedup modulo automorphism;
+  `ED_SYM_LG_ONLY_K0` star filter + plan mode.
+* Docs: `UNIFIED_STACK.md` (Stage-9 layer-by-layer architecture),
+  `unified_stack_reference.tex` (full mathematical + implementation
+  reference), full post-Stage-11 docs pass, capability matrix rev 4
+  (`docs/perf/capability_matrix_2026-07-15.md`).
+
 ## 2026-07-04 — residual ledger cleared: projected DSSF, factorized non-abelian, GPU twins
 
 * **Stage 8d — spectral composition**: the dynamical lanes now compose

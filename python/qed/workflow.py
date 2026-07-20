@@ -845,10 +845,13 @@ def solve(
             symmetry, point_group=point_group, consumer="solve",
             eigenvalues_only=(not compute_eigenvectors
                               and not is_thermal),
-            # Jul 2026: an explicit GPU request no longer vetoes the
-            # projection -- the little-group engine drives the resident
-            # GPU rep gather itself (ED_SYM_LG_GPU auto gate), so the
-            # project lane is GPU-capable end to end.
+            # 2026-07-20: the project lane is genuinely GPU-capable again
+            # -- the batched cuSOLVER block eigensolve (little_group_gpu.cu,
+            # silently lost when Family 6 removed its SAB-owned kernel) is
+            # restored and use_gpu= is threaded through _lg_block below, so
+            # a device='gpu' request runs the non-abelian blocks ON the
+            # device (plus the >= 2^20-rep gather for Lanczos-sized blocks)
+            # and no longer vetoes projection.
             prefer_abelian=False,
             verbose=verbose)
         if irrep is not None and lane.mode != "project":
@@ -981,6 +984,7 @@ def solve(
                     if method == DiagonalizationMethod.FULL:
                         d = dict(_core.little_group_full_spectrum(
                             op_to_use, _A, _res,
+                            use_gpu=use_gpu,
                             spin_flip=_sf, time_reversal=_tr,
                             only_k0=_only_k0, only_irrep=_only_irrep, **kw))
                         rows = []
@@ -995,6 +999,7 @@ def solve(
                             d.get("gpu_engaged", False))
                     d = dict(_core.little_group_lowest_eigenvalues_labeled(
                         op_to_use, _A, _res, k=_k,
+                        use_gpu=use_gpu,
                         spin_flip=_sf, time_reversal=_tr,
                         only_k0=_only_k0, only_irrep=_only_irrep, **kw))
                     rows = [(float(e), kk, fp, ir, dd, m, sub, bool(cv))
@@ -2154,7 +2159,12 @@ def full_spectrum(
         _sym_for_lane = [list(g) for g in _gens]   # explicit raw-list input
     lane = resolve_projection_lane(
         _sym_for_lane, point_group=point_group, consumer="full_spectrum",
-        eigenvalues_only=True, verbose=verbose)
+        eigenvalues_only=True,
+        # 2026-07-20: the project lane's batched GPU block eigensolve is
+        # restored (little_group_gpu.cu), and use_gpu= is already passed to
+        # the full-spectrum binding -- no device-based veto needed.
+        prefer_abelian=False,
+        verbose=verbose)
     if lane.mode != "project" and (sector is not None or irrep is not None
                                    or flip is not None):
         # Same contract as qed.solve: these name little-group structure, which

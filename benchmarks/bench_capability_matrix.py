@@ -183,7 +183,11 @@ def run_gs(H, n, gen, lat, device, truth, rows):
         # A GPU row that silently ran on the CPU would fake its label.
         # The legacy plain-lane EDResults carries no backend metadata
         # (lane == ""); every streaming-symmetry row does, and those
-        # are strictly enforced.
+        # are strictly enforced. (2026-07-20: point_group='auto' GPU rows
+        # PROJECT through the little-group engine, whose batched cuSOLVER
+        # block eigensolve -- restored in little_group_gpu.cu after Family 6
+        # silently dropped it -- runs the dense blocks on the device, so the
+        # project lane's truthful label under device='gpu' is 'gpu' too.)
         if device == "gpu" and lane:
             assert lane == "gpu", \
                 f"GS[{label}] requested gpu but ran lane={lane!r}"
@@ -332,30 +336,40 @@ def dense_truth_broken(n):
     return dict(E0=float(w[0]), spectrum=np.sort(w), thermo_E=thermo)
 
 
-def run_nonabelian_section(n, truth, H, gen, rows):
+def run_nonabelian_section(n, truth, H, gen, rows, devices=("cpu",)):
     """point_group='full' cells (D_n group, d >= 2 irreps): GS /
-    thermal / DSSF vs dense. CPU engine."""
+    thermal / DSSF vs dense. Since 2026-07-20 the little-group engine's
+    batched cuSOLVER block eigensolve (little_group_gpu.cu) makes the GS
+    and exact-thermal cells GPU rows too; the reported lane is asserted
+    truthful. DSSF/na stays CPU (the GS-DSSF continued fraction is not
+    GPU-batched)."""
     omega = np.linspace(0.0, 4.0, 120)
     w = truth["spectrum"]
     t_lo, t_hi, n_t = T_GRID
 
-    t, r = timed(lambda: qed.solve(H, symmetry=gen, num_eigenvalues=1,
-                                   point_group="full", verbose=False))
-    rows.append(dict(verb="GS/na", config="nonabelian-full+U(1)",
-                     device="cpu", E0=float(r.eigenvalues[0]),
-                     dev=abs(float(r.eigenvalues[0]) - float(w[0])),
-                     t=t, blocks=None, max_block=None))
+    for dev in devices:
+        t, r = timed(lambda: qed.solve(H, symmetry=gen, num_eigenvalues=1,
+                                       point_group="full", device=dev,
+                                       verbose=False))
+        lane = getattr(getattr(r, "backend", None), "lane", "")
+        if dev == "gpu":
+            assert lane == "gpu", \
+                f"GS/na requested gpu but ran lane={lane!r}"
+        rows.append(dict(verb="GS/na", config="nonabelian-full+U(1)",
+                         device=dev, E0=float(r.eigenvalues[0]),
+                         dev=abs(float(r.eigenvalues[0]) - float(w[0])),
+                         t=t, blocks=None, max_block=None))
 
-    t, r = timed(lambda: qed.thermal(
-        H, method="FTLM", T_min=t_lo, T_max=t_hi, num_T=n_t,
-        symmetry=gen, point_group="full", device="cpu", verbose=False))
-    temps = np.asarray(r.temperatures)
-    E = np.asarray(r.energy)
-    exE = np.array([truth["thermo"](T)[0] for T in temps])
-    rows.append(dict(verb="thermal/na", config="nonabelian-full(exact)",
-                     device="cpu", E0=float(E[0]),
-                     dev=float(np.max(np.abs(E - exE))), t=t,
-                     blocks=None, max_block=None))
+        t, r = timed(lambda: qed.thermal(
+            H, method="FTLM", T_min=t_lo, T_max=t_hi, num_T=n_t,
+            symmetry=gen, point_group="full", device=dev, verbose=False))
+        temps = np.asarray(r.temperatures)
+        E = np.asarray(r.energy)
+        exE = np.array([truth["thermo"](T)[0] for T in temps])
+        rows.append(dict(verb="thermal/na", config="nonabelian-full(exact)",
+                         device=dev, E0=float(E[0]),
+                         dev=float(np.max(np.abs(E - exE))), t=t,
+                         blocks=None, max_block=None))
 
     t, r = timed(lambda: qed.spectral(
         H, [build_probe(n)], omega=omega, eta=ETA, symmetry=gen,
@@ -411,16 +425,15 @@ def run_broken_section(n, devices, rows):
                              dev=dev_err, t=t, blocks=len(tags) or 1,
                              max_block=max((tg.sector_dim for tg in tags),
                                            default=dim)))
-        if dev == "cpu":
-            t, r = timed(lambda: qed.solve(
-                H, symmetry=gen, num_eigenvalues=1,
-                point_group="full", verbose=False))
-            rows.append(dict(verb="GS[U(1)-broken]",
-                             config="nonabelian-full+parity", device=dev,
-                             E0=float(r.eigenvalues[0]),
-                             dev=abs(float(r.eigenvalues[0])
-                                     - float(w[0])),
-                             t=t, blocks=None, max_block=None))
+        t, r = timed(lambda: qed.solve(
+            H, symmetry=gen, num_eigenvalues=1,
+            point_group="full", device=dev, verbose=False))
+        rows.append(dict(verb="GS[U(1)-broken]",
+                         config="nonabelian-full+parity", device=dev,
+                         E0=float(r.eigenvalues[0]),
+                         dev=abs(float(r.eigenvalues[0])
+                                 - float(w[0])),
+                         t=t, blocks=None, max_block=None))
         t, r = timed(lambda: qed.thermal(
             H, method="mTPQ", T_min=t_lo, T_max=t_hi, num_T=n_t,
             symmetry=gen, random_seed=7, device=dev, verbose=False))
@@ -472,7 +485,8 @@ def main():
         run_thermal_methods(H, n, gen, dev, truth, rows)
         run_dssf(H, n, gen, dev, omega, truth, rows)
 
-    run_nonabelian_section(n, truth, H, gen, rows)
+    run_nonabelian_section(n, truth, H, gen, rows,
+                           devices=tuple(devices))
     run_broken_section(n, devices, rows)
 
     # ---- markdown ----

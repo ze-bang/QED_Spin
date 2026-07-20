@@ -54,8 +54,14 @@ struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
     int  dense_max_dim = 64;   ///< per-block dense/Lanczos crossover (lowest-k path)
-    bool use_gpu       = false;///< full-spectrum path: ONE batched cuSOLVER
-                               ///< eigensolve over all packed blocks (WITH_CUDA)
+    bool use_gpu       = false;///< Batched cuSOLVER stream-pool eigensolve of
+                               ///< the dense blocks (full-spectrum path AND the
+                               ///< lowest-k path's dense-crossover blocks) --
+                               ///< restored 2026-07-20 as the little-group-owned
+                               ///< `little_group_gpu.cu` after the Family-6 SAB
+                               ///< removal had silently no-op'd it. Also gates
+                               ///< backend.allow_gpu for in-block sampling in
+                               ///< the thermal binding; ED_SYM_LG_GPU=0 vetoes.
     bool verbose       = false;
     /// Stage 9a: spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the
