@@ -1394,15 +1394,20 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     }
 
     // Dense window: LAPACK (zheevd/dsyevd) computes the COMPLETE spectrum
-    // correctly and stably up to this dimension (40000 covers 2^15 = ~17 GB
-    // complex / ~8.5 GB real). Above it, a PARTIAL request (num_eigs < N/2)
-    // routes to matrix-free Lanczos; a FULL-spectrum request is a hard error
-    // (the historical Eigen-sparse "full diagonalization" fallback was both
-    // wrong -- an iterative solver cannot deliver all N eigenvalues -- and
-    // broken: glibc heap corruption at N=32768 on symmetry-free clusters;
-    // retired 2026-07-20). ED_FULLDIAG_DENSE_MAX raises the window
-    // deliberately on machines whose RAM genuinely fits the dense matrix.
-    uint64_t DENSE_THRESHOLD = 40000;
+    // correctly and stably up to this dimension. 120000 aligns with the
+    // NLCE router's --exact_max_block default, so a cluster the plan
+    // admits is never refused here; at the cap the matrix is ~230 GB
+    // complex / ~115 GB real (transient peak ~1.5x during the real-path
+    // conversion) -- fat-node territory, and undersized machines fail as
+    // a clean bad_alloc up front, before any solve work. Above the
+    // window, a PARTIAL request (num_eigs < N/2) routes to matrix-free
+    // Lanczos; a FULL-spectrum request is a hard error (the historical
+    // Eigen-sparse "full diagonalization" fallback was both wrong -- an
+    // iterative solver cannot deliver all N eigenvalues -- and broken:
+    // glibc heap corruption at N=32768 on symmetry-free clusters;
+    // retired 2026-07-20). ED_FULLDIAG_DENSE_MAX overrides in either
+    // direction.
+    uint64_t DENSE_THRESHOLD = 120000;
     if (const char* env_max = std::getenv("ED_FULLDIAG_DENSE_MAX")) {
         const unsigned long long v = std::strtoull(env_max, nullptr, 10);
         if (v > 0) DENSE_THRESHOLD = static_cast<uint64_t>(v);
@@ -1437,7 +1442,12 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         try {
             dense_matrix.resize(matrix_size, Complex(0.0, 0.0));
         } catch (const std::bad_alloc& e) {
-            std::cerr << "Failed to allocate memory for dense matrix. Consider using sparse methods." << std::endl;
+            std::cerr << "Failed to allocate the " << N << "x" << N
+                      << " dense matrix ("
+                      << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0)
+                      << " GB): this machine cannot hold the block. Shrink "
+                      << "the block via symmetry, request fewer eigenvalues, "
+                      << "or run on a node with more RAM." << std::endl;
             throw;
         }
         
