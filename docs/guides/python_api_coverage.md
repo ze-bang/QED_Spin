@@ -16,10 +16,10 @@ For how to *invoke* each mode (files, `ED`, `import`, MPI), see
 
 | Question | Short answer |
 |----------|--------------|
-| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI runs launch the CLI under `mpirun` (SectorDistributor + MpiBackend; the `qed.mpi` subprocess launcher was retired in Stage 11d); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
+| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI runs launch the CLI under `mpirun` (SectorDistributor + MpiBackend; the `qed.mpi` subprocess launcher was retired in Stage 11d); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
 | Is the **legacy** path (edlib → files → `./ED`) complete? | **Yes** (unchanged). The orchestrator reads the same on-disk deck the CLI consumes. |
 | Is the **C++ library** complete? | **Yes — every retained solver, every backend (CPU / GPU / MPI), symmetry projection, and fixed-Sz are header-callable.** All paths route through `ed::make_operator(OperatorSpec)` and `ed::workflows::{solve,thermal,spectral}` (declared in `include/ed/orchestrator.h`). See [§0 below](#0-capability-matrix-c-vs-python-vs-cli) for the matrix. |
-| What is Python strongest at today? | **Hamiltonian + lattice construction** (`qed.input` — full C++ `ed::input` library), the **three-verb orchestrator** (`solve` / `thermal` / `spectral`) that routes to every retained backend, **programmatic symmetries** (`ed::sym`) including in-process round-trip via `Operator.set_symmetry_info_from_dict(...)`, and **BFG** post-processing on states. |
+| What is Python strongest at today? | **Hamiltonian + lattice construction** (`qed.input` — full C++ `ed::input` library), the **three-verb orchestrator** (`solve` / `thermal` / `spectral`) that routes to every retained backend, **programmatic symmetries** (`ed::sym`) including in-process round-trip via `Operator.set_symmetry_info_from_dict(...)`. |
 | What still requires the CLI / a subprocess? | **MPI runs** (single-process Python cannot host `MPI_Init` cleanly — launch `ED` under `mpirun`) and the **full DSSF spectral driver** (continued fractions + HDF5 trees; wrapped by `qed.spectral`, which shells out to `./ED dssf` for you). |
 
 ---
@@ -32,8 +32,8 @@ callable from where". Cells are interpreted as:
 * **C++** — `#include <ed/orchestrator.h>` + `#include <ed/core/make_operator.h>`
   and link the relevant static libraries.
 * **Python** — directly callable from `import qed`, no subprocess.
-* **CLI** — reachable via `./ED [--method=…]` or a sibling binary
-  (`compute_bfg_order_parameters[_gpu]`).
+* **CLI** — reachable via `./ED [--method=…]` (incl. the `dssf`
+  subcommand).
 
 | Capability | C++ | Python | CLI |
 |---|:---:|:---:|:---:|
@@ -46,13 +46,12 @@ callable from where". Cells are interpreted as:
 | `FTLM` (Finite-Temperature Lanczos) | yes | **`qed.thermal(H, method="FTLM", ...)`** | `--method=FTLM` |
 | `LTLM` (Low-Temperature Lanczos) | yes | **`qed.thermal(H, method="LTLM", ...)`** | `--method=LTLM` |
 | `mTPQ` (microcanonical Thermal Pure Quantum) | yes | **`qed.thermal(H, method="mTPQ", num_samples=R, target_beta=β, ...)`** | `--method=mTPQ` |
-| `cTPQ` (canonical TPQ) | yes | **`qed.thermal(H, method="cTPQ", ...)`** | `--method=cTPQ` |
 | `KPM_DOS` (Chebyshev moments → DOS / thermo) | yes | **`qed.spectral(dir, method="kpm_thermodynamics")`** | `--method=KPM_DOS` |
 | `compute_thermodynamics_from_spectrum` | yes | **`qed.compute_thermodynamics_from_spectrum`** | (post-pass on `--method=FULL` HDF5) |
 | **GPU** (`-DWITH_CUDA=ON`; gate with `qed.has_cuda_build()`) | | | |
 | GPU Lanczos / Block-Lanczos / Krylov-Schur | yes | **`qed.solve(H, solver="LANCZOS"/"BLOCK_LANCZOS"/"KRYLOV_SCHUR", device="gpu", ...)`** | `--method=… --use-gpu` |
 | GPU full diag (cuSOLVER zheevd) | yes | **`qed.solve(H, solver="FULL", device="gpu")`** | `--method=FULL --use-gpu` |
-| GPU FTLM / mTPQ / cTPQ | yes | **`qed.thermal(H, method="FTLM"/"mTPQ"/"cTPQ", device="gpu", ...)`** | `--method=… --use-gpu` |
+| GPU FTLM / mTPQ | yes | **`qed.thermal(H, method="FTLM"/"mTPQ", device="gpu", ...)`** | `--method=… --use-gpu` |
 | GPU DSSF kernels (dynamical / static / correlations) | yes | **`qed.spectral(dir, method, ...)`** (shells out to `./ED dssf <method>`) | `./ED dssf <method>` |
 | Per-Sz GPU variants (`use_fixed_sz=true` + `use_gpu=true`) | yes | **`qed.solve(H, sz=n_up, device="gpu", ...)`** | `--method=… --fixed-sz --use-gpu` |
 | Multi-GPU NCCL (`<ed/parallel/multi_gpu.h>`) | yes | (used by the MPI+GPU backend `MpiCudaBackend`) | (in-process) |
@@ -69,8 +68,6 @@ callable from where". Cells are interpreted as:
 | **DSSF** (structure factors) | | | |
 | `ed::dssf::build_observable_pairs` (operator assembly) | yes | **`qed.dssf.build_observable_pairs`** | (used internally by `./ED dssf`) |
 | Full S(Q,ω) / S(Q) driver (continued-fraction, FTLM averaging) | yes (`ed::workflows::spectral` in `ed/orchestrator.h`; the `ed_cli` workflow uses it) | **`qed.spectral(dir, method, ...)`** | `./ED dssf {dynamical_thermal,static_thermal,ground_state_dssf}` |
-| **BFG post-processing** | | | |
-| Correlations, ring observables, structure factors, HDF5 wavefunction / TPQ-state loaders | yes (`<ed/bfg/*.h>`) | **`qed.bfg.*`** | `compute_bfg_order_parameters[_gpu]` |
 | **High-level orchestrator** | | | |
 | `ed::make_operator(OperatorSpec)` (unified factory: in-memory / FixedSz / streaming-symmetry / distributed) | yes (`<ed/core/make_operator.h>`) | (built internally by `qed.solve` / `qed.thermal` / `qed.spectral`) | (CLI internals) |
 | `ed::workflows::solve` / `thermal` / `spectral` (3 verbs over a `LinearOperator`) | yes (`<ed/orchestrator.h>`) | **`qed.solve(H, ...)`** / **`qed.thermal(H, ...)`** / **`qed.spectral(dir, ...)`** | (CLI internals) |
@@ -83,7 +80,7 @@ callable from where". Cells are interpreted as:
 
 * `qed.solve(H, ...)` — eigenvalues / ground state / low-lying states.
 * `qed.thermal(H, method=..., ...)` — finite-temperature trajectories
-  (`mTPQ` / `cTPQ` / `FTLM` / `LTLM`).
+  (`mTPQ` / `FTLM` / `LTLM` / `OFTLM`).
 * `qed.spectral(dir, T=..., omega=..., method=..., ...)` — structure
   factors and KPM-DOS thermodynamics.
 * `qed.has_cuda_build()` / `has_mpi_build()` / `has_scalapack_build()`
@@ -118,7 +115,7 @@ from `qed/__init__.py`:
 | `OP_SPLUS`, `OP_SMINUS`, `OP_SZ` | Integer op-type tags matching `Trans.dat` / C++ |
 | `full_diagonalization(op, …)` | Dense eigensolve **through** `apply` (small Hilbert spaces). Equivalent to `qed.solve(op, solver="FULL")`. |
 | `solve(H, *, num_eigenvalues=1, solver=None, device=None, sz=None, symmetry=None, auto_sz=True, ...)` | The canonical eigenvalue / ground-state entry point. Smart defaults + kwargs-only overrides. |
-| `thermal(H, *, method="mTPQ", num_samples=None, target_beta=None, T_min=None, T_max=None, num_T=None, sz=None, symmetry=None, ...)` | The canonical finite-temperature entry point. Routes to `mTPQ` / `cTPQ` / `FTLM` / `LTLM` via the `method=` kwarg. |
+| `thermal(H, *, method="mTPQ", num_samples=None, target_beta=None, T_min=None, T_max=None, num_T=None, sz=None, symmetry=None, ...)` | The canonical finite-temperature entry point. Routes to `mTPQ` / `FTLM` / `LTLM` / `OFTLM` / `KPM_DOS` via the `method=` kwarg (cTPQ was removed in the final consolidation). |
 | `spectral(directory, *, T=None, omega=None, method=None, ...)` | The canonical structure-factor entry point. The `(T, omega)` truth table selects `single_expectation` / `ground_state_dssf` / `static_thermal` / `dynamical_thermal` automatically. |
 | `compute_thermodynamics_from_spectrum` | Post-process a **given** energy list into thermodynamic curves. |
 | **Orchestrator internals** | |
@@ -196,15 +193,7 @@ op.set_symmetry_info_from_dict(info)
 res = qed.solve(op, symmetry=info)
 ```
 
-### 1.5 `qed.bfg`
-
-Large surface: `Cluster`, `load_cluster`, two-point correlations, bond
-expectations, dimer / Heisenberg structure-factor kernels, ring observables,
-`load_wavefunction`, TPQ state loaders, etc. — the same **post-processing**
-kernels the CPU/GPU BFG drivers call. This is **not** a separate "BFG
-diagonalization" API; you still need a state from ED or from `apply`.
-
-### 1.6 Legacy `edlib` helpers
+### 1.5 Legacy `edlib` helpers
 
 The old `python/edlib/helper_*.py` family has been replaced by the
 `qed.input` builder (`HamiltonianBuilder`, `lattice.*`,
@@ -264,10 +253,10 @@ The remaining items are quality-of-life rather than capability gaps:
 
 | Document | Content |
 |----------|---------|
-| [usage.md](usage.md) | All invocation modes; legacy vs in-process; CLI tables |
+| [one_call_api.md](one_call_api.md) | solve / thermal / spectral reference incl. the CLI mapping |
 | [python_quickstart.md](python_quickstart.md) | Short examples: Hamiltonian, ground state, thermal, DSSF |
 | [python_advanced.md](python_advanced.md) | Advanced patterns: orchestrator internals, GPU, MPI, in-process symmetry, build introspection |
-| `python/qed/*.py` | Module docstrings (DSL, dssf, bfg, symmetry, mpi) |
+| `python/qed/*.py` | Module docstrings (input DSL, dssf, symmetry, thermal, discovery) |
 | `python/qed/_bindings/qed_bindings.cpp` | **Authoritative** list of C symbols exposed to Python |
 | `python/qed/_bindings/workflow_bindings.cpp` | Orchestrator bindings — `_core.workflows_{solve,thermal,spectral}` |
 | `README.md` | Install line for `pip install -v ./python` |

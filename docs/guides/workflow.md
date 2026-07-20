@@ -212,7 +212,7 @@ qed.solve(H,
          output_dir="",            # HDF5 output dir (empty = no writes)
          max_iterations=None,      # auto-tuned from num_eigenvalues
          block_size=None,          # only used by BLOCK_* solvers
-         # Thermal-method shortcuts (mTPQ / cTPQ / FTLM / LTLM):
+         # Thermal-method shortcuts (mTPQ / FTLM / LTLM / OFTLM):
          num_samples=None, target_beta=None, num_temp_points=None,
          temp_min=None, temp_max=None,
          # (no pre-flight planner: a memory guard catches over-budget
@@ -309,7 +309,7 @@ The catalogue is bucketed into:
 | `device`      | The orthogonal axes: `use_gpu`, `use_mpi`, `use_symmetry`, `use_fixed_sz` |
 | `ftlm`        | Finite-Temperature Lanczos                           |
 | `ltlm`        | Low-Temperature Lanczos                              |
-| `tpq`         | Thermal Pure Quantum / mTPQ / cTPQ                   |
+| `tpq`         | Thermal Pure Quantum / mTPQ                          |
 | `kpm`         | Kernel Polynomial Method DOS / thermodynamics        |
 | `thermal`     | Temperature-grid post-processing                     |
 | `observables` | Spectral / dynamical observables (`omega_*`, `dt`)   |
@@ -338,7 +338,7 @@ refers to the four basis choices the workflow can compose:
 | `KRYLOV_SCHUR`            | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `BLOCK_LANCZOS`           | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `FULL` (dense LAPACK)     | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `mTPQ` / `cTPQ`           | ✅ | ✅ | ❌¹ / ✅³ | ❌¹ / ✅³ | trajectory in `eigenvalues`; thermo curve in `output_dir`/`thermo_data` |
+| `mTPQ`                    | ✅ | ✅ | ❌¹ / ✅³ | ❌¹ / ✅³ | trajectory in `eigenvalues`; thermo curve in `output_dir`/`thermo_data` |
 | `FTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` (sectors are summed) |
 | `LTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
 | `KPM_DOS`                 | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
@@ -419,7 +419,6 @@ now.)
 | `KRYLOV_SCHUR`           |  ✅   |  ✅   | `qed.solve(H, solver="KRYLOV_SCHUR"[, device='gpu'])` |
 | `FULL`                   |  ✅   |  ✅   | `qed.solve(H, solver="FULL"[, device='gpu'])`         |
 | `mTPQ`                   |  ✅   |  ✅   | `qed.thermal(H, method="mTPQ"[, device='gpu'])` (fp32 GPU lane via `tpq_fp32=True`) |
-| `cTPQ`                   |  ✅   |  ✅   | `qed.thermal(H, method="cTPQ")`                       |
 | `FTLM`                   |  ✅   |  ✅   | `qed.thermal(H, method="FTLM")`                       |
 | `LTLM`                   |  ✅   |  ❌   | `qed.thermal(H, method="LTLM")`                       |
 | `KPM_DOS`                |  ✅   |  ✅   | `qed.thermal(H, method="KPM_DOS"[, device='gpu'])`    |
@@ -438,7 +437,7 @@ matrix (`cpu` / `gpu`) are **almost** orthogonal:
   projection lane (`point_group='auto'`) is CPU-side; an explicit
   `device='gpu'` request routes through the abelian rep lane's GPU
   mirror instead.
-* `mTPQ`/`cTPQ` × `symmetry=` raises (footnote ¹ above): use `sz=`.
+* `mTPQ` × `symmetry=` raises on `qed.solve` (footnote ¹ above): use `sz=`, or `qed.thermal`, which composes symmetry for TPQ via the sector pool.
 
 ### Build-aware introspection
 
@@ -656,7 +655,7 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    │      → ED_MEM_GUARD_OFF=1 bypasses                   │
    ├─────────────────────────────────────────────────────┤
    │ 6. Thermal-method bookkeeping                       │
-   │    if solver ∈ {mTPQ, cTPQ, FTLM, LTLM, KPM_DOS}:   │
+   │    if solver ∈ {mTPQ, FTLM, LTLM, KPM_DOS}:         │
    │      auto-create output_dir if empty                │
    │      forward num_samples / target_beta / temp_*     │
    │        / num_temp_points to params.tpq_*/ftlm_*/…   │
@@ -858,8 +857,11 @@ res = qed.solve(
 )
 ```
 
-For the distributed variant, switch to `solver="cTPQ"` and
-`device="mpi"` or `device="mpi_gpu"` with `mpi_n_ranks=...`.
+For the distributed variant, run the CLI under `mpirun`
+(`mpiexec -n R ./ED <dir> --use-symmetry ...`) — across-sector
+distribution (SectorDistributor + in-process MpiBackend) engages
+automatically; the `device="mpi"` subprocess lane and cTPQ were both
+retired.
 
 ---
 
@@ -1212,6 +1214,6 @@ checks, then scale to `N=32`, `opts.sz=16` for production:
 3. DSSF: build `DSSFRequest` for your directory and call
   `ed::workflows::spectral(req, dssf_opts)` with
   `dssf_opts.has_temperature = true; dssf_opts.has_frequency = true;`.
-4. mTPQ/cTPQ: `opts.solver = DiagonalizationMethod::mTPQ` (or `cTPQ`
-   for MPI sample-splitting), set `target_beta` + TPQ knobs in
-   `tune_params`.
+4. mTPQ: `opts.solver = DiagonalizationMethod::mTPQ`, set
+   `target_beta` + TPQ knobs in `tune_params` (the cTPQ enum value was
+   removed in the final consolidation).

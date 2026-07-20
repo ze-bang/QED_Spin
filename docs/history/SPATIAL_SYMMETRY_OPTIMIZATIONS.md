@@ -1,5 +1,12 @@
 # Spatial Symmetry Workflow: Architecture and Optimizations
 
+> **HISTORICAL (archived 2026-07-20).** This is the June 2026 optimization
+> record. It predates the Stage-11c single sector-construction lane, the
+> orbit-CSR lane deletion, and the Family-6 removal of the monolithic SAB
+> engine, so several referenced files (`orbit_reps.h`,
+> `symmetry_group_info.h`, ...) no longer exist. For the current picture read
+> `docs/architecture/UNIFIED_STACK.md` and `docs/architecture/SYMMETRY.md`.
+
 ## Overview
 
 This document covers the full call chain for spatial symmetry in the QED exact

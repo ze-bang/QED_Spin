@@ -27,12 +27,12 @@ The same shape is exposed in Python as
 | Feature | Status |
 |---------|--------|
 | Ground state / low-lying spectrum (Lanczos, Block-Lanczos, Krylov-Schur, dense LAPACK) | production |
-| Finite-temperature thermodynamics (FTLM, LTLM, mTPQ, cTPQ, KPM-DOS) | production |
+| Finite-temperature thermodynamics (FTLM, LTLM, OFTLM, mTPQ, KPM-DOS) | production |
 | Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
-| Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, SAB engine for d≥2 |
-| Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF, moderate-N (scale-guarded SAB engine) |
+| Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, factorized little-group engine for d≥2 |
+| Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF via the factorized little-group engine (one momentum per star + little-co-group isotypic projection, matrix-free); CPU and GPU (batched cuSOLVER block eigensolve) for GS/finite-T, CPU for the GS-DSSF continued fraction |
 | Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
-| Symmetry projection: spin-flip Z₂, time-reversal, SU(2) total-S | seam open, implementation deferred |
+| Symmetry projection: SU(2) total-S | seam open, implementation deferred (spin-flip Z₂ and time-reversal are production — see the row above) |
 | CPU (OpenMP), single-GPU (cuBLAS / cuSPARSE), multi-rank MPI, multi-GPU NCCL | production |
 | First-class Python bindings (`import qed`) | production |
 | HDF5 I/O for eigenvectors, thermodynamic curves, DSSF traces | production |
@@ -121,7 +121,9 @@ Hamiltonian you pass in: the automorphism search runs internally, the
 largest commuting spatial group is used, and it composes with the
 independently auto-detected U(1) Sz axis, the spin-flip
 transporter/projector and the time-reversal sector pairing. Works on
-all three verbs and every backend:
+all three verbs and every backend (one asymmetry: `qed.spectral` does
+not exploit time reversal — `time_reversal="require"` raises there
+instead of silently doing nothing):
 
 ```python
 qed.solve(H,  symmetry="auto", sz=N//2)               # GS
@@ -129,7 +131,7 @@ qed.thermal(H, method="mTPQ", symmetry="auto")        # finite T
 qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
              sz=N//2, momentum_transfer=[0.5])        # DSSF
 qed.full_spectrum(H, symmetry="auto")                 # complete dense spectrum
-                                                      # (non-abelian SAB route)
+                                                      # (little-group blocks)
 qed.solve(H, symmetry=gen, sz="even")                 # Sz-parity half (U(1)-broken H)
 qed.solve(H, symmetry=gen, point_group="full")        # true non-abelian d>=2 blocks
 qed.solve(H, symmetry="translation", lattice=lat)     # T projector + point-group stars
@@ -148,8 +150,8 @@ has:
 
 `point_group=` adds two more positions: `"auto"` (star folding — solve
 one momentum per point-group star, copy the spectrum) and `"full"`
-(genuine non-abelian projection: d≥2 irrep blocks ~dim/|G| on the SAB
-engine, composed with the diagonal axis). The Sz axis itself is
+(genuine non-abelian projection: d≥2 irrep blocks ~dim/|G| on the
+factorized little-group engine, composed with the diagonal axis). The Sz axis itself is
 three-state: integer `sz=`, `sz="even"/"odd"` (the Z₂ parity remnant
 when S⁺S⁺-type terms break U(1)), or auto; `auto_sz=False` disables
 the whole diagonal axis.
@@ -200,7 +202,10 @@ docs/
 │   └── python_api_coverage.md            # C++/Python/CLI capability matrix
 ├── architecture/
 │   ├── ARCHITECTURE.md                   # post-collapse architecture (read first)
+│   ├── UNIFIED_STACK.md                  # Stage-9 layer-by-layer stack + pipelines
 │   ├── SYMMETRY.md                       # Subspace × ProjectorChain math + workflows
+│   ├── SYMMETRY_V2_DESIGN.md             # symmetry-engine design + residual ledger
+│   ├── DSSF.md                           # structure-factor lanes
 │   ├── CODEMAP.md                        # directory-level tour
 │   ├── SCALING.md                        # memory + N envelope, env knobs
 │   ├── ADD_NEW_BASIS_POLICY.md           # extending the matvec
@@ -210,6 +215,7 @@ docs/
 │   ├── BENCHMARKS.md                     # head-to-head vs QuSpin / SciPy
 │   ├── bench_vs_xdiag.md                 # head-to-head vs XDiag
 │   └── ORTHOGONAL_SYMMETRY.md            # 4 × 6 symmetry × workflow sweep
+├── perf/                                 # dated benchmark snapshots + capability matrices
 ├── api/
 │   ├── cpp.rst                           # Doxygen + Breathe C++ ref
 │   └── python.rst                        # autodoc Python ref
@@ -235,7 +241,7 @@ docs/
 ## Examples
 
 [`examples/tour/`](examples/tour/) is the canonical usage
-documentation: six short, heavily-commented scripts that cover every
+documentation: five short, heavily-commented scripts that cover every
 real knob, one verb per file --
 
 | script | covers |
@@ -250,7 +256,7 @@ Each runs standalone in seconds (`python3 examples/tour/01_ground_state.py`)
 and the `linux-tour` CI lane executes all of them on every push.
 Exhaustive per-configuration coverage lives in the test suites and the
 dense-verified capability matrix
-([`docs/perf/capability_matrix_2026-07-15.md`](docs/perf/capability_matrix_2026-07-15.md)).
+([`docs/perf/capability_matrix_2026-07-20.md`](docs/perf/capability_matrix_2026-07-20.md)).
 ---
 
 ## Performance
@@ -293,7 +299,7 @@ QED/
 │   ├── symmetry/              # Subspace × ProjectorChain composition
 │   ├── krylov/                # Lanczos / Block-Lanczos / Krylov-Schur kernels
 │   ├── solvers/               # cpu drivers for the kernels
-│   ├── thermal/               # FTLM / LTLM / mTPQ / cTPQ / KPM-DOS kernels
+│   ├── thermal/               # FTLM / OFTLM / mTPQ / KPM-DOS kernels (LTLM = FTLM trace)
 │   ├── observables/           # expectation, static + dynamical correlator primitives
 │   ├── dssf/                  # cross-sector observables (Sz-resolved + orbit-basis)
 │   ├── parallel/              # NUMA + thread budget + NCCL multi-GPU comm

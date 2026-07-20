@@ -3,9 +3,9 @@
 // include/ed/observables/ftlm_cross_irrep_kernel.h
 //
 // FTLM (Finite-Temperature Lanczos Method) cross-irrep / cross-sector
-// dynamical spectral kernel. Generalises
-// ``compute_dynamical_correlation_multi_sample_multi_temperature``
-// (`src/solvers/cpu/ftlm.cpp`, the legacy same-dim multi-T kernel) to
+// dynamical spectral kernel. Generalises the same-dim multi-T FTLM
+// machinery (`compute_dynamical_correlation_multi_operator_multi_temperature`
+// in `src/solvers/cpu/ftlm_dynamical.cpp`) to
 // the case where the probe observable ``O`` is RECTANGULAR --
 // i.e., it maps a source-sector orbit basis (``dim_src``) to a
 // target-sector orbit basis (``dim_dst``). This is exactly the

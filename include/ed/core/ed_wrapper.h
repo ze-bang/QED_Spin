@@ -16,7 +16,8 @@
 // modernisation-audit-split parameter bag). Both live in dedicated
 // small headers so callers can include only what they need:
 //
-//   * `EDResults`   -> `<ed/core/ed_legacy_types.h>`
+//   * `EDResults`   -> `<ed/core/results.h>` (formerly ed_legacy_types.h,
+//                      retired into results.h in consolidation Family 10)
 //   * `EDParameters`-> `<ed/core/ed_parameters.h>`
 //
 // This shim file forwards to both so the historical include path keeps

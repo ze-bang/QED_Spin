@@ -16,10 +16,11 @@ Operators are built once via `ed::make_operator(OperatorSpec)` (or
 `qed.input.HamiltonianBuilder` in Python) and consumed by every
 backend (CPU / single-GPU / MPI / MPI+GPU) without further surgery.
 Symmetry projection is orthogonal: pick a `Subspace` (full Hilbert
-space or fixed total Sz) and a `ProjectorChain` (zero or more group
-representations such as the lattice point group); future axes
-(global Z₂ spin-flip, time-reversal antiunitary, SU(2) total-S) extend
-the chain through the same kwargs.
+space, fixed total Sz, or the Sz-parity half of a broken U(1)) and a
+`ProjectorChain` (zero or more group representations: the lattice
+space group, the global Z₂ spin-flip, time-reversal pairing, and the
+non-abelian little-group projection); a future SU(2) total-S axis
+would extend the chain through the same kwargs.
 
 This site combines the **C++ API reference** (auto-extracted from the
 headers under `include/ed/` via Doxygen + Breathe) with **prose

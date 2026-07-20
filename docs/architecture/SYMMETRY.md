@@ -114,20 +114,19 @@
 > (regular-representation Hermitian-commutant decomposition,
 > [`include/ed/symmetry/irreps.h`](../../include/ed/symmetry/irreps.h)) produces
 > the `d_Γ`-dimensional irrep matrices; the abelian (scalar-character) path is the
-> `d_Γ = 1` special case. The symmetry-adapted basis (Wigner projector + SVD,
-> [`build_sab_partition0`](../../src/symmetry/symmetry_adapted.cpp)) rides the
-> **same** production `CpuMatVecBackend` / `CudaMatVecBackend` as everything else
-> via a `multi_target` basis policy
-> ([`include/ed/matvec/nonabelian_symmetry_basis_policy.h`](../../include/ed/matvec/nonabelian_symmetry_basis_policy.h));
-> the old parallel `symmetry_adapted_*` matvec subsystem is gone. Reduction ⟂
+> `d_Γ = 1` special case. Since the July 2026 consolidation (Family 6) the sole
+> non-abelian engine is the factorized little-group solver
+> ([`include/ed/solvers/little_group_solve.h`](../../include/ed/solvers/little_group_solve.h)):
+> one momentum per residue star plus little-co-group isotypic projection inside
+> the star representative's matrix-free momentum sector. The monolithic
+> symmetry-adapted-basis (SAB) engine and the old parallel
+> `symmetry_adapted_*` matvec subsystem are gone. Reduction ⟂
 > method: GS (dense / Lanczos / Krylov-Schur), exact finite-T, and DSSF all consume
 > Sz / abelian / non-abelian / Sz+spatial, verified vs brute force to ~1e-15 on CPU
 > and GPU.
 >
-> **Scale class (important).** This SAB engine *enumerates and stores* the reduced
-> basis, so it is **moderate-N only**. `build_sab_partition0` refuses enumerations
-> above a cap (`2^22` default, override `ED_SYM_SAB_MAX_DIM`) with an error pointing
-> here. For large N use the **matrix-free abelian rep path** (`RepSymmetryBasisPolicy`),
+> **Scale class (important).** For large N the workhorse is the
+> **matrix-free abelian rep path** (`RepSymmetryBasisPolicy`),
 > which holds only `reps[]` and regenerates the projection arithmetically — that is
 > the at-scale machinery. The matrix-free *non-abelian* engine is the factorized
 > little-group solver (`little_group_solve.h`, Stage 7/9): little-co-group isotypic
@@ -206,7 +205,7 @@
 >    solve sector loop, recombines per-sector
 >    `ThermodynamicData` via the canonical
 >    `ed::core::combine_sector_thermodynamics`, and now powers
->    every method (FTLM / LTLM / KPM_DOS / mTPQ / cTPQ) in
+>    every method (FTLM / LTLM / KPM_DOS / mTPQ) in
 >    `qed.thermal(directory, ..., use_symmetry_if_available=True)`
 >    (which used to raise `NotImplementedError` for the non-TPQ
 >    methods and silently disable symmetry for TPQ).
@@ -300,10 +299,12 @@ codes (HPhi, EDLib, QuSpin, Pomerol). It complements
   from an `automorphism_results/` directory produced by the lattice
   build step. Block-diagonalises each Sz sector further by irrep
   (\( k \)-vector + point-group label).
-- **Sector matvec** — `applySymmetrized(sector_idx, in, out)` from
-  `SymmetrizedHamiltonian` (`include/ed/core/symmetrized_hamiltonian.h`).
-  Encodes both Sz and irrep projection in one CPU/GPU kernel; never
-  materialises the dense sector matrix.
+- **Sector matvec** — `SectorOperator::apply(in, out)`
+  (`include/ed/symmetry/sector_operator.h`), driven by the matrix-free
+  rep-walk (or reduced-CSR, per the policy hooks) on both CPU and GPU.
+  Encodes both Sz and irrep projection; never materialises the dense
+  sector matrix. (The historical `SymmetrizedHamiltonian::applySymmetrized`
+  entry point was retired with the pre-v2 engine.)
 - **Orbit basis** — the actual sector basis vectors are linear
   combinations \( |\psi_{\alpha}^{k,n_\uparrow}\rangle =
   (1/\mathcal{N}_\alpha) \sum_g \chi_k(g)^* g |s_\alpha\rangle \) over
@@ -355,7 +356,8 @@ Implementation: per-sector loop driven by
 `ed::make_sector_operators_tagged(streaming_symmetry=true) -> SectorOperator (per k) ->
 ed::workflows::solve(*sec, opts)`, where each tagged `SectorOperator` is
 a `SubspaceOperator<SymmetryBasisPolicy>`. Each sector gets its own
-`applySymmetrized` matvec, sector_dim, optional GPU operator. The
+projected matvec (`SectorOperator::apply`), sector_dim, optional GPU
+mirror. The
 all-sector eigenvalue pool is sorted globally and the lowest-k Ritz
 pairs are returned.
 
@@ -397,7 +399,7 @@ Krylov-Schur / Davidson with eigenvalue pool combination.
 ### What's implemented
 
 The canonical entry point is `workflows::thermal(...)`. It supports
-FTLM, LTLM, HYBRID, KPM_DOS, mTPQ, cTPQ on three backends
+FTLM, LTLM, OFTLM, KPM_DOS, mTPQ on three backends
 (in-memory operator, directory + no spatial symmetry, directory +
 spatial symmetry).
 
@@ -451,7 +453,8 @@ the per-irrep streaming sector loop and recombines via
   - Sz: ✓
   - Spatial: ✓
   - Combined: ✓
-- **mTPQ / cTPQ** (Sugiura-Shimizu thermal pure quantum states):
+- **mTPQ** (Sugiura-Shimizu thermal pure quantum states; the cTPQ
+  method was removed in the final consolidation):
   - Sz: ✓
   - Spatial: ✓ (May 2026 — see "Recent changes" below)
   - Combined: ✓
@@ -499,7 +502,7 @@ ed::workflows::thermal(*sec, opts)` for every non-empty sector
 contributions land in `ThermalResult::per_sector` with the SOTA
 `SectorTag` attached. `qed.thermal(directory, ...,
 use_symmetry_if_available=True)` is now end-to-end for FTLM /
-LTLM / KPM_DOS / mTPQ / cTPQ, and the
+LTLM / KPM_DOS / mTPQ, and the
 `used_symmetry_decomposition` flag on `ThermalResult` is now
 unconditionally `True` whenever `automorphism_results/` is loaded.
 
@@ -675,8 +678,9 @@ irrep decomposition, not in any of the math kernels.
 ## 4. Distributed / GPU notes
 
 - The streaming-symmetry kernel handles **both** CPU (matrix-free
-  `applySymmetrized`) and GPU (`GPUSymmetrizedOperator` via
-  `dispatchGPUSymmetrizedSector`) dispatch transparently. Sz is exact in
+  rep-walk / reduced-CSR via `SectorOperator::apply`) and GPU (the
+  resident rep mirror, `DeviceRepSymmetryBasisPolicy` +
+  `make_sector_matvec_gpu_rep`) dispatch transparently. Sz is exact in
   both backends; spatial irrep ditto.
 - MPI: across-sector distribution (SectorDistributor — each rank owns
   a dim-balanced subset of the irrep sectors and solves rank-locally)

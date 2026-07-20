@@ -40,8 +40,8 @@ enum class DiagonalizationMethod {
     // SHIFT_INVERT_ROBUST / DAVIDSON / BICG / LOBPCG /
     // BLOCK_KRYLOV_SCHUR / IMPLICIT_RESTART_LANCZOS /
     // THICK_RESTART_LANCZOS / OSS / SCALAPACK / SCALAPACK_MIXED /
-    // ARPACK_* / HYBRID solvers. See docs/architecture/STRUCTURAL_AUDIT.md
-    // Part IV.
+    // ARPACK_* / HYBRID solvers. (The STRUCTURAL_AUDIT document that
+    // recorded the rationale was itself retired; see git history.)
     // ------------------------------------------------------------------------
 
     // ===== Ground-state / spectrum =====

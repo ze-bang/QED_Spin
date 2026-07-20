@@ -53,7 +53,9 @@ binary (`src/cli/workflows.cpp`)
 now routes through `ed::make_operator(OperatorSpec)` +
 `ed::workflows::{solve, thermal, spectral}`, and `ed_wrapper.h` is
 retained as a thin shim that re-exports the result/parameter types
-in `ed_legacy_types.h`. The historical pre-collapse diagram lives in
+(`EDResults` from `ed/core/results.h` — the former `ed_legacy_types.h`,
+retired in consolidation Family 10 — and `EDParameters` from
+`ed/core/ed_parameters.h`). The historical pre-collapse diagram lives in
 [`CHANGELOG.md`](../../CHANGELOG.md) under the relevant wave entries
 (consult git history if you need the legacy graph).
 
@@ -115,9 +117,9 @@ polynomial vs coupled basis).
 | KrylovSchur      | `ed/krylov/krylov_schur_kernel.h`       |
 | Full diag        | `ed/solvers/full_diag.h` (LAPACK D&C)   |
 | FTLM             | `ed/thermal/ftlm_kernel.h`              |
-| LTLM             | `ed/thermal/ltlm_kernel.h`              |
+| LTLM             | `ed/thermal/ftlm_kernel.h` (consolidation Family 1: for thermodynamics the symmetric LTLM estimator reduces exactly to the FTLM trace, so LTLM dispatches through the FTLM kernel; the buggy GS-local-DOS `ltlm_kernel.h` was deleted) |
 | mTPQ             | `ed/thermal/mtpq_kernel.h`              |
-| cTPQ             | `ed/thermal/ctpq_kernel.h`              |
+| cTPQ             | *(removed as a user-facing method in the final consolidation; the CanonicalTaylor mechanism survives inside `ed/thermal/tpq_kernel.h`)* |
 | KPM-DOS          | `ed/thermal/kpm_dos_kernel.h`           |
 
 ### Correlator primitives (5)
@@ -271,10 +273,16 @@ The Gen-1 hand-rolled GPU bodies (`gpu_lanczos.cu`,
 `gpu_block_lanczos.cu`, `gpu_krylov_schur.cu`, `gpu_tpq.cu`,
 `gpu_full_diag.cu`, `gpu_dynamics.cu`) have all been retired: GPU
 Lanczos runs exclusively on `lanczos_kernel<CudaBackend>` via the
-facade, GPU mTPQ/cTPQ ride the backend-templated thermal kernels
-(plus the fp32 mTPQ lane in `mtpq_f32_impl.cuh`), and the remaining
-bespoke GPU code is `gpu_ftlm.cu` (GPUFTLMSolver), `kpm_dos_gpu.cu`,
-and the rep-walk symmetry kernels in `term_kernels_gpu.cuh`.
+facade, GPU mTPQ rides the backend-templated thermal kernels
+(plus the fp32 mTPQ lane in `mtpq_f32_impl.cuh`), GPU FTLM (thermo,
+dynamical, and static correlation) rides the backend-generic
+`via_backend` kernels (consolidation Family 3 retired
+`gpu_ftlm.cu` / `GPUFTLMSolver`), and the remaining bespoke GPU code
+is `kpm_dos_gpu.cu`, the rep-walk symmetry kernels in
+`term_kernels_gpu.cuh`, and `little_group_gpu.cu` (the little-group
+engine's batched cuSOLVER block eigensolve — recovered from the
+SAB-owned kernel Family 6 removed, re-homed SAB-free; drives
+`point_group="full"` GS / full-spectrum / exact-thermal on the GPU).
 `MpiCudaBackend` (NCCL + cuBLAS) exists for the MPI+GPU lane.
 
 ## Retired algorithms (Phase 1)

@@ -16,8 +16,8 @@ functions actually carry.
 | 2 FTLM thermo | ✅ CLEAN | CPU (legacy) vs GPU (via_backend) is a correct backend-split, not duplication; MPI throws. No change |
 | 5 Lanczos | ✅ CLEAN | Fast path already delegates to lanczos_kernel; slow path is a distinct no-reorth/no-basis memory-light variant. No change |
 | 4 term kernels | ✅ DONE (commit 9a6c1e8) | One `__host__ __device__` gate-math core (term_gate_math.h) now shared by apply_terms + apply_term_to_state (CPU) + process_source_terms (GPU). Verified CPU Δ=6.7e-15, GPU Δ=0.0 vs reference. Scatter/gather split kept (perf axis) |
-| 10 config adapters | ⏳ TODO | Low-value inline of ≤4-consumer shims |
-| 3 dynamical FTLM | ✅ DONE (commits b1523f2, 808b12e, a82c9c9, ee860c4) | GPUFTLMSolver (1843 LOC) retired: dynamical S(q,ω) AND static ⟨O₁†O₂⟩(T) each unified onto ONE backend-generic via_backend kernel (CPU+CUDA), both gated behaviour-preserving; gpu_ftlm.cu/.cuh deleted, CUDA-verified. Trivial follow-up: sweep 2 now-dead CPU multi-temp dynamical helpers (compute_dynamical_correlation_state_multi_temperature + the plain multi_sample wrapper; keep the _impl/_comm variants). |
+| 10 config adapters | ✅ DONE (commit d599c31) | `ed_legacy_types.h` retired into `results.h`; `matvec_types.h` / `thermal_types.h` gone. `ed_config_adapter.h` + `ed_parameters.h` remain as live focused headers (not migration shims) |
+| 3 dynamical FTLM | ✅ DONE (commits b1523f2, 808b12e, a82c9c9, ee860c4) | GPUFTLMSolver (1843 LOC) retired: dynamical S(q,ω) AND static ⟨O₁†O₂⟩(T) each unified onto ONE backend-generic via_backend kernel (CPU+CUDA), both gated behaviour-preserving; gpu_ftlm.cu/.cuh deleted, CUDA-verified. Follow-up sweep DONE (2026-07-20): `compute_dynamical_correlation_state_multi_temperature`, the plain `multi_sample` wrapper, AND their now-orphaned support chain (`LanczosSpectralData`, `compute_lanczos_spectral_data`, `compute_spectral_function_from_lanczos_data`) deleted; the P==1 `_impl` is now `WITH_MPI`-gated (its only caller is the `_comm` variant). `_impl`/`_comm` variants kept. |
 
 ### Family 3 — executable plan (analysis done 2026-07-15)
 

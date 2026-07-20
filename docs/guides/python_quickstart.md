@@ -8,7 +8,7 @@ verbs that mirror the C++ orchestrator:
 * `qed.solve(H, **kw)` — ground state, eigenvalues, a few low-lying
   states.
 * `qed.thermal(H, **kw)` — finite-temperature thermodynamics (FTLM,
-  LTLM, mTPQ, cTPQ, KPM-DOS).
+  LTLM, OFTLM, mTPQ, KPM-DOS).
 * `qed.spectral(H_or_dir, **kw)` — static and dynamical structure
   factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`).
 

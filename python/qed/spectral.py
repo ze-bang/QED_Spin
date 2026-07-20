@@ -973,10 +973,11 @@ def spectral(
     momentum_tolerance: float = 1e-6,
     selected_sectors: Optional[Sequence[int]] = None,
     # Stage 8e (SymmetryEngine v2): per-symmetry toggles. The spectral
-    # solver exploits the U(1) x spatial sector machinery; the discrete
-    # spin-flip / time-reversal mechanisms are NOT consumed by the
-    # spectral lanes yet (Stage 8d), so these kwargs only DETECT and
-    # REPORT: 'on' confirms or warns, 'require' throws when absent.
+    # solver exploits the U(1) x spatial sector machinery. Stage 8d:
+    # spin_flip= IS consumed (parity halves + flip sectors route DSSF
+    # end-to-end); time_reversal= is NOT exploited by the spectral verb
+    # -- 'require' raises a loud NotImplementedError instead of running
+    # degraded (no lane folds k <-> -k here), 'on' detects and reports.
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
     point_group: Union[str, bool, None] = "auto",

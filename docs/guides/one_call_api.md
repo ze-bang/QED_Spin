@@ -17,7 +17,7 @@ prefer the Python entry points below.
 | Need                                                           | Python                                  | C++                                         |
 |----------------------------------------------------------------|-----------------------------------------|---------------------------------------------|
 | Diagonalize H (eigenvalues / GS / a few states)                | `qed.solve(H, ...)`                     | `ed::workflows::solve(H, SolveOptions{...})`     |
-| Finite-temperature thermodynamics (mTPQ / cTPQ / FTLM / LTLM)  | `qed.thermal(H, ...)`                   | `ed::workflows::thermal(H, ThermalOptions{...})` |
+| Finite-temperature thermodynamics (mTPQ / FTLM / LTLM / OFTLM) | `qed.thermal(H, ...)`                   | `ed::workflows::thermal(H, ThermalOptions{...})` |
 | Structure factor (zero or finite T, static or dynamical, KPM)  | `qed.spectral(directory, T=, omega=)`   | `ed::workflows::spectral(req, SpectralOptions{...})` |
 | Pure heuristic helpers (η, ω, Krylov, R, KPM moments)          | `qed.auto_tune.*`                       | (Python-only)                               |
 
@@ -54,9 +54,12 @@ What `qed.solve` decides for you (override any of these via kwargs):
   each with its own four-state toggle `spin_flip=` / `time_reversal=`
   in {"auto", "on", "off", "require"}: `"on"` confirms the detection
   or warns-and-continues when H lacks the symmetry; `"require"`
-  throws. `point_group=` distinguishes star FOLDING (`"auto"`: copy
-  isospectral momentum sectors) from true non-abelian PROJECTION
-  (`"full"`: d>=2 irrep blocks on the SAB engine). The diagonal axis is
+  throws. `point_group=` distinguishes star FOLDING (copying
+  isospectral momentum sectors) from true non-abelian PROJECTION on
+  the factorized little-group engine (d>=2 irrep blocks): `"auto"`
+  (default) projects eigenvalue-only calls when the lane is available
+  and degrades to the abelian rep lane with folds otherwise; `"full"`
+  REQUIRES projection and raises with the decline reason. The diagonal axis is
   `sz=` (int, `"even"`/`"odd"` parity halves, or auto — including the
   Z2 parity remnant of a broken U(1)); `auto_sz=False` disables it
   entirely. `qed._core.detect_hamiltonian_symmetries(H)` exposes the
@@ -72,6 +75,19 @@ What `qed.solve` decides for you (override any of these via kwargs):
   [`examples/tour/04_symmetry_toolkit.py`](../../examples/tour/04_symmetry_toolkit.py).
   (Python kwargs are mirrored 1:1 in C++ via
   the new `ed::api::*` facade in [`include/ed/api.h`](../../include/ed/api.h)).
+* **Sector / irrep selection (quantum numbers, Jul 2026)**: `sector=`
+  names QUANTUM NUMBERS (one per generator), never raw sector indices;
+  an unnamed Sz means ALL Sz sectors (no half-filling assumption), and
+  naming a momentum PROJECTS onto it (the star filter engages — the
+  reported `k_raw` label is a residue index, not the momentum).
+  `irrep=` names a little-co-group irrep BY ITS CHARACTER — it is only
+  meaningful on the projection lane and RAISES on the abelian lane
+  instead of being silently ignored (the co-group character table on
+  the result is the naming vocabulary). `flip=` selects a ∏σˣ parity
+  half. `qed.thermal(sector=...)` gives per-irrep finite-T (loud
+  refusal where it cannot work), and `method="exact"` requests the
+  exact per-block spectrum route explicitly — `point_group=` no longer
+  smuggles a solver strategy.
 * **Memory guard** (no pre-flight planner): the workflow checks the dominant
   allocation against available RAM at the point of use and raises a clean error
   instead of OOM-killing the host. Bypass with `ED_MEM_GUARD_OFF=1`.

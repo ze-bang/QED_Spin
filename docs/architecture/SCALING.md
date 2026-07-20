@@ -122,7 +122,7 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
 
 ### What works *out of the box* (single workstation, ≤ 64 GB RAM)
 
-* **N ≤ 28**: every solver (Lanczos, FTLM, LTLM, mTPQ, cTPQ, Krylov–Schur,
+* **N ≤ 28**: every solver (Lanczos, FTLM, LTLM, OFTLM, mTPQ, Krylov–Schur,
   Davidson, LOBPCG, full diag, ScaLAPACK), CPU and GPU, with full
   re-orthogonalization, in seconds to minutes. This is QuSpin / EDLib
   territory.
@@ -531,10 +531,10 @@ Distributed memory. This is the regime change.
    driver `ed_distributed_main` (built when `WITH_MPI=ON`) at
    `src/cli/ed_distributed_main.cpp` exercises both
    `distributed_lanczos` and `distributed_ftlm` from the command line.
-   Wrappers in `scripts/distributed/`:
-   `run_dist.sh` for single-node `mpiexec`, `slurm_dist.sbatch` for
-   slurm, `README.md` for the CLI surface. Smoke-test on N=12 PBC
-   reproduces the exact ground state E0 = -5.387… on `np=4`.
+   Wrappers lived in `scripts/distributed/` (`run_dist.sh`,
+   `slurm_dist.sbatch`; deleted with the family — git history has
+   them). Smoke-test on N=12 PBC reproduced the exact ground state
+   E0 = -5.387… on `np=4`.
 7. **Symmetry-aware row partitioning.** — **OPEN (Phase 3b #7).** The
    current `balanced_slab` splits the unsymmetrised basis evenly. With
    full point-group + Sz the natural partition is by orbit, which is

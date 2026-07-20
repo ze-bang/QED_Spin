@@ -14,7 +14,7 @@ If your task is straightforward (build a Hamiltonian, run Lanczos, look
 at a few thermodynamic curves), use the quickstart. If you need:
 
 * A **specific solver** other than Lanczos (`BLOCK_LANCZOS`,
-  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`, `FULL`)
+  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`, `FULL`)
 * The **GPU** path (`device='gpu'` — auto-selects the right GPU
   kernel for the requested solver)
 * **Symmetry projection** in-process (without writing
@@ -39,7 +39,7 @@ verbs.
 | You want… | …call this | Lives in |
 |-----------|------------|----------|
 | eigenvalues / ground state / a few low-lying states | `qed.solve(H, ...)` | `qed.workflow` |
-| finite-temperature trajectories (mTPQ / cTPQ / FTLM / LTLM) | `qed.thermal(H, method=..., ...)` | `qed.thermal` |
+| finite-temperature trajectories (mTPQ / FTLM / LTLM / OFTLM) | `qed.thermal(H, method=..., ...)` | `qed.thermal` |
 | structure factors S(Q, ω) / S(Q, T) / KPM-DOS | `qed.spectral(dir, T=..., omega=..., ...)` | `qed.dssf` |
 
 The legacy `qed.exact_diagonalization_*` family was deleted in the
@@ -80,7 +80,7 @@ string name (case-insensitive). Retained backends only:
 | Lanczos | `LANCZOS`, `BLOCK_LANCZOS` |
 | Krylov-Schur | `KRYLOV_SCHUR` |
 | Dense | `FULL` |
-| Finite-temperature | `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS` (use via `qed.thermal` / `qed.spectral`) |
+| Finite-temperature | `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS` (use via `qed.thermal` / `qed.spectral`; cTPQ was removed in the final consolidation) |
 
 The May 2026 minimalist-solver-matrix cleanup retired `ARPACK_*`,
 `LOBPCG`, `DAVIDSON`, `CHEBYSHEV_FILTERED`, `SHIFT_INVERT*`, `IRL`,
@@ -258,7 +258,7 @@ result = qed.solve(
 )
 ```
 
-Finite-temperature trajectories (mTPQ / cTPQ / FTLM / LTLM) on the
+Finite-temperature trajectories (mTPQ / FTLM / LTLM / OFTLM) on the
 full Hilbert space go through `qed.thermal`:
 
 ```python
@@ -405,8 +405,8 @@ the CLI directly.
   `python/qed/_bindings/qed_bindings.cpp` (`Operator` /
   `FixedSzOperator` / `EDParameters` / `EDResults` / utility types).
 * **Capability matrix:** [`python_api_coverage.md`](python_api_coverage.md).
-* **CLI counterparts:** [`usage.md`](usage.md) §2 (single-process CLI),
-  §6 (`./ED dssf`).
+* **CLI counterparts:** [`one_call_api.md`](one_call_api.md) (each verb's
+  section maps the knobs onto the `./ED` CLI, including `./ED dssf`).
 * **Tests:** `python/tests/test_workflow.py` exercises `qed.solve` /
   `qed.thermal` end-to-end on a 6-site Heisenberg ring (full Hilbert,
   fixed-Sz, symmetry, combined) and checks ground-state recovery to

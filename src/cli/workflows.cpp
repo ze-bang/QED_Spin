@@ -87,7 +87,6 @@
 
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_ed_wrapper.h>
 #include <ed/gpu/kpm_dos_gpu.cuh>
 #include <cuda_runtime.h>
 #include <functional>
@@ -1534,7 +1533,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         if (size > 1 && use_optimized_multi_temp) {
             // ============================================================
             // SYNCHRONIZED MODE: All ranks process the same operator at once
-            // Required because compute_dynamical_correlation_multi_sample_multi_temperature
+            // Required because compute_dynamical_correlation_multi_sample_multi_temperature_comm
             // uses MPI collectives (Barrier, Reduce) internally for sample distribution.
             // The master-worker pattern would cause collective mismatches since
             // different ranks would be processing different operators.

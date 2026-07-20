@@ -72,10 +72,11 @@ acceptance cycle in CI before flipping the default. Until that cycle
 lands:
 - V1 remains the default for everyone.
 - V2 is exercised by anyone who sets `ED_GPU_SYMMETRY_MIRROR_V2=1`.
-- The unit test
-  [tests/unit/test_streaming_symmetry_gpu_mirror.cpp](../../tests/unit/test_streaming_symmetry_gpu_mirror.cpp)
-  passes byte-for-byte against the CPU `applySymmetrized` reference
+- The unit test `tests/unit/test_streaming_symmetry_gpu_mirror.cpp`
+  passed byte-for-byte against the CPU `applySymmetrized` reference
   under both V1 and V2 (manually verified May 2026, this snapshot).
+  *(Historical note: this test and the streaming-symmetry mirror lane it
+  covered were retired with the orbit-CSR lane in Stage 11c, Jul 2026.)*
 
 ## Deferred (Phase I "medium wins")
 

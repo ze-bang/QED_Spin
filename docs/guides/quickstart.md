@@ -66,7 +66,7 @@ target_link_libraries(heisenberg_demo PRIVATE ED::ed_solvers_cpu)
   covering in-memory / FixedSz / streaming-symmetry variants via one
   struct.
 - **Finite-temperature methods** — `ed::workflows::thermal(...)`
-  routes mTPQ / cTPQ / FTLM / LTLM / KPM-DOS through one entry point.
+  routes mTPQ / FTLM / LTLM / OFTLM / KPM-DOS through one entry point.
 - **DSSF / SSSF** — `ed::workflows::spectral(...)` is the single
   canonical entry point; the `(has_temperature, has_frequency)` truth
   table picks `SINGLE_EXPECTATION` / `GROUND_STATE_DSSF` /

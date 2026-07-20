@@ -1,6 +1,6 @@
 # `examples/` — the tour
 
-Six short, heavily-commented, runnable scripts cover every real knob
+Five short, heavily-commented, runnable scripts cover every real knob
 the library exposes. Each runs standalone in seconds:
 
 ```bash
@@ -22,5 +22,5 @@ For exhaustive per-configuration coverage — every
 (backend × symmetry × method) combination — the test suites are the
 reference: `python/tests/` + `tests/integration/` (Python) and
 `tests/unit/` (C++), plus the verified capability matrix in
-`docs/perf/capability_matrix_2026-07-15.md` /
+`docs/perf/capability_matrix_2026-07-20.md` /
 `benchmarks/bench_capability_matrix.py`.

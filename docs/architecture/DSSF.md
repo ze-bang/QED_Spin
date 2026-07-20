@@ -8,14 +8,13 @@ auto-router (`qed.spectral`) that picks between them based on the call
 shape. This document is the single source of truth for that wiring.
 
 > **Construction note.** All spectral lanes build their symmetry-projected
-> sectors **in-process**, via the orbit-walk reduced-CSR
-> (`include/ed/matvec/reduced_symmetry_csr.h`, OpenMP-parallel, O(dim·num_terms)
-> linear) — the same build the in-process GS / finite-T paths use. DSSF has **no
-> dedicated MPI mode** (`ed_distributed_main` exposes `lanczos | krylov_schur |
-> ftlm | tpq` only). The recent linearization of the *distributed*
-> `DistributedSymmetryOperator` construction (see [`SCALING.md`](SCALING.md))
-> therefore benefits distributed GS and finite-T directly; DSSF already used the
-> linear in-process build and is unaffected.
+> sectors **in-process** on the lazy rep-first lane — matrix-free rep walk or
+> reduced-CSR (`include/ed/matvec/reduced_symmetry_csr.h`, OpenMP-parallel,
+> O(dim·num_terms) linear), the same build the in-process GS / finite-T paths
+> use; Sz-parity and ∏σˣ flip sectors ride a CSR-free `RepSectorData` ref
+> (Stage 8d). DSSF has **no dedicated MPI mode** — MPI means the across-sector
+> SectorDistributor of the GS/finite-T verbs (the within-sector distributed
+> family was retired in Stage 11d).
 
 The four lanes solve different but overlapping problems:
 

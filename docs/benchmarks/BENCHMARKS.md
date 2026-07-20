@@ -143,8 +143,11 @@ SciPy ED idiom -- as the peer baseline.
 
 Notes:
 
-* All three columns return the same eigenvalue to ~`1e-8` (we cross-check
-  in `tests/integration/test_quspin_compare.cpp`). The speedup is therefore
+* All three columns return the same eigenvalue to ~`1e-8` (cross-checked
+  by the QuSpin-comparison integration test at the time of measurement;
+  that test rode with the retired legacy surface — today's equivalents
+  are the dense-oracle pins in `tests/unit/` and
+  `benchmarks/bench_capability_matrix.py`). The speedup is therefore
   a pure wall-clock comparison at fixed accuracy.
 * At `N <= 16` the CPU beats the GPU because the launch cost and
   device-host eigenvalue copy per outer iteration dominate. By `N = 18`

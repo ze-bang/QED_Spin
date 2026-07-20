@@ -87,24 +87,6 @@ struct DynamicalResponseResults {
 };
 
 /**
- * @brief Temperature-independent spectral data from Lanczos
- * 
- * This structure stores the results of the Lanczos iteration for dynamical
- * correlation functions. Since the Lanczos iteration and spectral decomposition
- * are temperature-independent, this data can be reused to compute the spectral
- * function at multiple temperatures by only changing the Boltzmann weights.
- * 
- * This enables efficient temperature scans without re-running Lanczos.
- */
-struct LanczosSpectralData {
-    std::vector<double> ritz_values;         // Eigenvalues from Krylov subspace (shifted to excitations)
-    std::vector<Complex> spectral_weights;   // Complex weights: ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
-    double ground_state_energy;              // Ground state energy (for reference)
-    uint64_t krylov_dim;                          // Krylov dimension used
-    uint64_t lanczos_iterations;                  // Actual Lanczos iterations performed
-};
-
-/**
  * @brief Parameters for static response calculation
  */
 struct StaticResponseParameters {
@@ -398,9 +380,7 @@ DynamicalResponseResults compute_dynamical_correlation(
  * The two-operator entry point `compute_dynamical_correlation_state(O1, O2, ...)`
  * was retired in the minimalist-architecture rev (May 2026); use
  * `ed::observables::cf_dynamical_correlator` for the self-correlator case
- * (O1==O2) and call it twice for the cross-correlator case. The multi-
- * temperature / multi-operator drivers below still use `compute_lanczos_spectral_data`
- * internally for the precomputed shared Krylov basis.
+ * (O1==O2) and call it twice for the cross-correlator case.
  */
 
 /**
@@ -546,173 +526,18 @@ StaticResponseResults compute_connected_qh_response(
 // HDF5IO::saveStaticResponse instead.
 
 // ============================================================================
-// TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION (OPTIMIZATION)
+// TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION -- RETIRED (Jul 2026)
 // ============================================================================
-
-/**
- * @brief Compute temperature-independent spectral decomposition via Lanczos
- * 
- * This function performs the Lanczos iteration and spectral decomposition once,
- * producing temperature-independent spectral data (eigenvalues and weights).
- * The result can then be reused to compute the spectral function at multiple
- * temperatures efficiently without re-running Lanczos.
- * 
- * This is a significant optimization for temperature scans, as the Lanczos
- * iteration is typically the most expensive step and is completely independent
- * of temperature. Only the final Boltzmann weighting depends on temperature.
- * 
- * Workflow:
- * 1. Apply O₂ to the given state: |φ⟩ = O₂|ψ⟩
- * 2. Build Krylov subspace starting from |φ⟩ via Lanczos
- * 3. Diagonalize H in the Krylov basis to get approximate eigenstates
- * 4. Compute spectral weights: w_n = ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
- * 5. Return eigenvalues and weights (temperature-independent)
- * 
- * The returned LanczosSpectralData can then be used with
- * compute_spectral_function_from_lanczos_data() to efficiently compute
- * S(ω,T) for multiple temperatures.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O1 First operator (O₁) matrix-vector product function
- * @param O2 Second operator (O₂) matrix-vector product function
- * @param state Input quantum state |ψ⟩ (must be normalized)
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param energy_shift Energy shift (typically ground state energy, 0 = auto-detect)
- * @return LanczosSpectralData containing temperature-independent eigenvalues and weights
- */
-LanczosSpectralData compute_lanczos_spectral_data(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    const ComplexVector& state,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double energy_shift = 0.0
-);
-
-/**
- * @brief Compute spectral function from pre-computed Lanczos data for multiple temperatures
- * 
- * This function takes the temperature-independent spectral data from
- * compute_lanczos_spectral_data() and efficiently computes the spectral
- * function S(ω,T) for multiple temperatures.
- * 
- * This enables efficient temperature scans: run Lanczos once, then compute
- * the spectral function for many temperatures with minimal additional cost.
- * 
- * The spectral function is computed as:
- * S(ω,T) = Σₙ w_n · exp(-βEₙ)/Z(T) · η/π / ((ω-Eₙ)² + η²)
- * 
- * where:
- * - w_n = |⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩| are the pre-computed spectral weights
- * - E_n are the excitation energies
- * - β = 1/T is the inverse temperature
- * - Z(T) = Σₙ exp(-βEₙ) is the partition function
- * - η is the Lorentzian broadening parameter
- * 
- * @param spectral_data Pre-computed Lanczos spectral data (eigenvalues and weights)
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperatures Vector of temperatures to compute S(ω,T) for
- * @param broadening Lorentzian broadening parameter (eta)
- * @return Map from temperature to DynamicalResponseResults
- */
-std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczos_data(
-    const LanczosSpectralData& spectral_data,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    const std::vector<double>& temperatures,
-    double broadening,
-    uint64_t num_samples = 1,
-    const std::vector<std::vector<Complex>>* per_sample_weights = nullptr
-);
-
-/**
- * @brief Optimized version of compute_dynamical_correlation_state for multiple temperatures
- * 
- * This is an optimized version that computes the dynamical correlation function
- * at multiple temperatures with a single Lanczos run. This is significantly more
- * efficient than calling compute_dynamical_correlation_state() separately for each
- * temperature.
- * 
- * Use this function when you need S(ω,T) for a series of temperatures with the
- * same operators and state.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O1 First operator (O₁) matrix-vector product function
- * @param O2 Second operator (O₂) matrix-vector product function
- * @param state Input quantum state |ψ⟩ (must be normalized)
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperatures Vector of temperatures to compute for
- * @param energy_shift Energy shift (typically ground state energy, 0 = auto-detect)
- * @return Map from temperature to DynamicalResponseResults
- */
-std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_multi_temperature(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    const ComplexVector& state,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    const std::vector<double>& temperatures,
-    double energy_shift = 0.0
-);
-
-/**
- * @brief Multi-sample version: compute dynamical correlation for multiple temperatures
- * 
- * This function extends the temperature scan optimization to handle multiple random
- * samples (FTLM thermal averaging). It runs Lanczos for each sample, accumulates
- * the spectral weights, then applies temperature-dependent Boltzmann factors.
- * 
- * This provides ~N× speedup for N temperature points compared to running separate
- * calculations for each temperature, even when averaging over multiple samples.
- * 
- * The workflow is:
- * 1. For each random sample:
- *    - Generate random state
- *    - Run Lanczos to get eigenvalues and spectral weights
- *    - Accumulate weights (average over samples)
- * 2. For each temperature:
- *    - Apply Boltzmann thermal weights to averaged spectral data
- *    - Compute S(ω,T)
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O1 First operator (O₁) matrix-vector product function
- * @param O2 Second operator (O₂) matrix-vector product function
- * @param N Hilbert space dimension
- * @param params Parameters (including num_samples, krylov_dim, etc.)
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperatures Vector of temperatures to compute for
- * @param energy_shift Energy shift (typically ground state energy, 0 = auto-detect)
- * @param output_dir Directory for debug output (optional)
- * @return Map from temperature to DynamicalResponseResults
- */
-std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_sample_multi_temperature(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    const std::vector<double>& temperatures,
-    double energy_shift = 0.0,
-    const std::string& output_dir = ""
-);
+//
+// `LanczosSpectralData`, `compute_lanczos_spectral_data`,
+// `compute_spectral_function_from_lanczos_data`,
+// `compute_dynamical_correlation_state_multi_temperature`, and the plain
+// `compute_dynamical_correlation_multi_sample_multi_temperature` wrapper were
+// deleted in the consolidation sweep (Family 3 follow-up): all multi-T DSSF
+// traffic now flows through the backend-generic
+// `ed::observables::ftlm_dynamical_kernel_via_backend` (in-memory API) or the
+// multi-operator core below (CLI workflow). The MPI `_comm` variants in
+// `ftlm_dist.h` remain the distributed entry points.
 
 /**
  * @brief Multi-operator extension of FTLM dynamical correlation.

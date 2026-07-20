@@ -499,8 +499,11 @@ explicitly dispositioned:
   compose with the little-group projection (9a/9b), `point_group=
   "auto"` projects by default on eigenvalue-only solve/full_spectrum
   (9c), and the factorized GS-DSSF (9d) closed the last vector-consumer
-  hole. The monolithic SAB engine is a pure TEST ORACLE — bindings
-  kept, ZERO production routes. Residual 9-series items: (a) the
+  hole. *(Update, consolidation sweep Jul 2026: the "test oracle"
+  status lasted a week — Family 6 removed the monolithic SAB engine
+  and its `_core.symmetry_adapted_*` bindings outright; the little-group
+  engine is the SOLE non-abelian engine and the test oracle is dense
+  diagonalization.)* Residual 9-series items: (a) the
   `is_real=false` hardwiring in `RepSectorMatVec` (real self-conjugate
   sectors could ride the real kernel — perf, revisit with a profile);
   (b) DSSF v1 runs raw sectors end-to-end — composing the 9a flip

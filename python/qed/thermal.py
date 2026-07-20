@@ -1555,7 +1555,7 @@ def thermal(
             sector_hdf5_paths=sector_hdf5_paths,
             used_sz_decomposition=True,
             # TPQ is NOT carved out here: since the May-2026 SOTA upgrade
-            # every method (incl. mTPQ/cTPQ) feeds the same all-Sz
+            # every method (incl. mTPQ) feeds the same all-Sz
             # streaming-symmetry loop above, so the flag is `has_sym`
             # unconditionally -- matching the sz-not-conserved return site
             # and the comment at the `p.use_symmetry` assignment. (The old

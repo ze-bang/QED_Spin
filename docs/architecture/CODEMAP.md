@@ -32,8 +32,6 @@ for `ED` typically come from JSON via `construct_ham` / file I/O).
 flowchart TB
   subgraph exe [Executables]
     ED["ED<br/>src/apps/ed_main.cpp"]
-    BFG["compute_bfg_order_parameters"]
-    BFGG["compute_bfg_order_parameters_gpu"]
   end
 
   subgraph corestack [Core link stack]
@@ -43,8 +41,8 @@ flowchart TB
     esc["ed_solvers_cpu<br/>lanczos KPM … TPQ FTLM …"]
     esg["ed_solvers_gpu<br/>.cu GPU solvers"]
     edssf["ed_dssf<br/>operator_spec dssf_method dssf_io"]
-    esym["ed_symmetry<br/>group.cpp"]
-    ebfg["ed_bfg<br/>cluster corr … order_parameters"]
+    esym["ed_symmetry<br/>group irreps sector_operator_gpu"]
+    emv["ed_matvec<br/>backend instantiations"]
     ecli["ed_cli<br/>workflows dssf_engine"]
     einp["ed_input<br/>lattice + HamiltonianBuilder + file_io"]
   end
@@ -59,11 +57,15 @@ flowchart TB
   ecli --> esg
   einp --> ec
 
+  emv --> ec
+
   ED --> ecli
   ED --> edssf
-  BFG --> ebfg
-  BFGG --> ebfg
 ```
+
+*(The BFG order-parameter pipeline -- `ed_bfg`, both
+`compute_bfg_order_parameters*` executables -- was removed in the July
+2026 consolidation sweep, Family 11.)*
 
 `ed_input` is **not** in the `ED` link line — it is a *standalone* lattice
 + Hamiltonian builder library consumed by the new `examples/`, by the
@@ -200,213 +202,144 @@ memory distribution is ever needed again. Only the NCCL
 ## 5. Exhaustive file leaves (`include/ed` + `src`)
 
 Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
-`include/ed` and `src` (repository snapshot; regrow with
-`find include/ed src -type f | sort` after refactors).
+`include/ed` and `src` (repository snapshot 2026-07-20; regrow with
+`find include/ed src -type f | sort` after refactors). One subsystem
+per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
+`UNIFIED_STACK.md`, `SYMMETRY.md`, and `DSSF.md`.
 
-### 5.1 `include/ed/bfg/`
+### `include/ed/` *(top level: the three workflow verbs + the typed one-call API)*
 
-- `cli.h`, `cluster.h`, `correlations.h`, `order_parameters.h`, `results_io.h`,
-  `ring_observables.h`, `spin_structure_factor.h`, `structure_factor.h`,
-  `topology.h`, `wavefunction_io.h`
+- `api.h`, `orchestrator.h`
 
-### 5.2 `include/ed/cli/`
+### `include/ed/api/`
+
+- `symmetry_helpers.h`
+
+### `include/ed/cli/`
 
 - `workflows.h`
 
-### 5.3 `include/ed/core/`
+### `include/ed/core/` *(Operator family, make_operator factory, results/parameters, select_backend, mem_guard)*
 
-- `basis_utils.h`, `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
-  Hamiltonian I/O, much symmetry wiring; `Operator` is the concrete base
-  and `SubspaceOperator<BasisPolicy, MemSpace>` derives from it — all
-  inherit from `ed::matvec::MatVecOperator` and from `ed::LinearOperator`),
-- `make_operator.h` (the single factory:
-  `ed::make_operator(OperatorSpec) -> std::unique_ptr<LinearOperator>`,
-  with three input alternatives — programmatic `Operator`, directory
-  path, or in-memory edge list — plus orthogonal axes
-  `use_fixed_sz` / `symmetry`),
-- `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
-  `ed_method_traits.h`, `ed_parameters.h`, `ed_legacy_types.h`,
-  `ed_types.h`,
-- `ed_wrapper.h` (thin shim re-exporting `EDResults` from
-  `ed_legacy_types.h`; the legacy `exact_diagonalization_*` family
-  and `ed_wrapper_streaming.h` were hard-removed in May 2026),
-- `subspace_operator.h` (the unified `SubspaceOperator<BasisPolicy, MemSpace>`
-  template, deriving from `Operator`; owns the producer member chosen by
-  `SubspaceProducerTraits<BasisPolicy>`),
-- `fixed_sz_operator.h` (now defines `FixedSzOperator` as a
-  `using`-alias for `SubspaceOperator<FixedSzBasisPolicy>` plus its
-  `make_backend_()` / `bind_cuda_impl_()` specializations),
-  `fixed_sz_operator_types.h`, `operator_fwd.h` (forward-decl of the
-  template + aliases for headers that only need an incomplete type),
-  `linear_operator.h`,
-- `hdf5_io.h`, `sorted_uint64_index.h`, `matvec_types.h`,
-- `operator.h`, `operator_types.h`, `operator_types_detail.h`, `results.h`,
-- `sector_loop.h`, `sector_thermo.h`, `select_backend.h`,
-- `symmetry_metadata.h`, `system_utils.h`, `thermal_types.h`
+- `basis_utils.h`, `blas_lapack_wrapper.h`, `combinadic.h`, `construct_ham.h`, `ed_config.h`, `ed_config_adapter.h`, `ed_parameters.h`, `ed_types.h`, `ed_wrapper.h`, `fixed_sz_operator.h`, `hdf5_io.h`, `linear_operator.h`, `make_operator.h`, `matvec_types.h`, `mem_guard.h`, `operator.h`, `operator_builders.h`, `operator_fwd.h`, `operator_types_detail.h`, `results.h`, `sector_loop.h`, `sector_thermo.h`, `select_backend.h`, `solver_defaults.h`, `sorted_uint64_index.h`, `subspace_operator.h`, `symmetry_metadata.h`, `system_utils.h`, `thermal_types.h`
 
-The streaming-symmetry carrier header (`streaming_symmetry.h`) was
-deleted in operator-collapse Phase 3; its KEEP structs
-(`SymmetrySector` / `SymBasisState` / `SectorLookupHandle`) moved to the
-leaf header `include/ed/symmetry/symmetry_sector_data.h`, and the
-`SectorOperator` alias now lives in `include/ed/symmetry/sector_operator.h`.
+### `include/ed/dssf/` *(cross-sector observables + the CLI DSSF engine surface)*
 
-The chunked-symmetry / disk-streaming triplet
-(`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
-`ed_wrapper_chunked.h`) was deleted in matvec-unification Phase 7.2
-(~2.4 kLOC of ultra-low-memory single-node CPU specialisations;
-the CSR-free rep lane is the answer at those scales).
+- `cross_sector_observable.h`, `cross_sector_orbit_observable.h`, `dssf_engine.h`, `dssf_io.h`, `operator_spec.h`
 
-### 5.4 `include/ed/distributed/`
+### `include/ed/gpu/` *(CUDA lane: device operator, kernels config, KPM-DOS GPU; `gpu_ed_wrapper.h` is the test-only legacy GPU Lanczos entry)*
 
-Retired in Stage 11d (Jul 2026) — see §4. `multi_gpu.h` survives at
-`include/ed/parallel/multi_gpu.h`.
+- `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_mixed_precision.h`, `gpu_operator.cuh`, `gpu_solvers.h`, `kernel_config.h`, `kpm_dos_gpu.cuh`
 
-### 5.5 `include/ed/dssf/`
+### `include/ed/input/` *(lattice + fluent HamiltonianBuilder + `.dat` writers; backs `qed.input`)*
 
-- `dssf_engine.h`, `dssf_io.h`, `operator_spec.h`
+- `file_io.h`, `hamiltonian_builder.h`, `input.h`, `lattice.h`, `types.h`
 
-### 5.6 `include/ed/gpu/`
+### `include/ed/io/`
 
-- `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_ftlm.cuh`,
-  `gpu_solvers.h`, `gpu_mixed_precision.h`,
-  `gpu_operator.cuh`, `kernel_config.h`, `kpm_dos_gpu.cuh`,
-  `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_ftlm.cuh`
+- `basis_vector_storage.h`, `lanczos_basis_buffer.h`, `lanczos_checkpoint.h`, `lanczos_reorth.h`
 
-### 5.7 `include/ed/input/`  *(Phase 4 — replaces `python/edlib/helper_*.py`)*
+### `include/ed/krylov/` *(backend-templated Lanczos / Block-Lanczos / Krylov-Schur kernels + Ritz convergence)*
 
-- `input.h` *(umbrella header — pulls the four below)*,
-- `types.h` *(`Op`, `Bond`, `Plaquette`, `Position`, `OneBodyTerm`,
-  `TwoBodyTerm`, `ThreeBodyTerm`)*,
-- `lattice.h` *(`Lattice` struct + `ed::input::lattice::{chain, square,
-  triangular, honeycomb, kagome, pyrochlore, from_neighbor_lists,
-  from_cluster_file}`)*,
-- `hamiltonian_builder.h` *(fluent `HamiltonianBuilder`: low-level
-  `add_one_body / add_two_body / add_three_body` + shortcuts
-  `heisenberg / xxz / xyz / ising / transverse_field_ising / kitaev /
-  dm / zeeman / zeeman_per_site / on_site_field / ring_exchange /
-  pyrochlore_non_kramers`, plus `to_operator()` and
-  `write_directory()`)*,
-- `file_io.h` *(low-level `Trans.dat / InterAll.dat / ThreeBodyG.dat /
-  positions.dat / one_body_correlations*.dat / two_body_correlations**.dat`
-  writers + momentum-projected observable writers — these back
-  `HamiltonianBuilder::write_directory`)*
+- `block_krylov_schur_kernel.h`, `block_lanczos_kernel.h`, `krylov_schur_kernel.h`, `lanczos_kernel.h`, `lanczos_tridiag.h`, `ritz_convergence.h`, `subspace_policy.h`, `tridiag_eigensolver.h`
 
-### 5.8 `include/ed/io/`
+### `include/ed/matvec/` *(BasisPolicy matvec family: term storage/kernels, rep-walk + reduced-CSR symmetry lanes, device twins)*
 
-- `basis_vector_storage.h`, `lanczos_basis_buffer.h`, `lanczos_checkpoint.h`,
-  `lanczos_reorth.h`
+- `backend.h`, `basis_policy.h`, `comm_plan.h`, `cuda_matvec_backend.cuh`, `device_basis_policy.cuh`, `matvec.h`, `matvec_backend.h`, `memory_space.h`, `mpi_matvec_impl.h`, `nonabelian_symmetry_basis_policy.h`, `reduced_symmetry_csr.h`, `rep_symmetry_basis_policy.h`, `symmetry_basis_policy.h`, `symmetry_matvec_backend.h`, `term_gate_math.h`, `term_kernels.h`, `term_kernels_assemble.h`, `term_kernels_gather.h`, `term_kernels_gpu.cuh`, `term_storage.h`
 
-### 5.9 `include/ed/parallel/`
+### `include/ed/matvec/backends/` *(CpuBackend / CudaBackend / MpiBackend / MpiCudaBackend)*
 
-- `numa.h`
+- `cpu_backend.h`, `cuda_backend.cuh`, `mpi_backend.h`, `mpi_cuda_backend.cuh`
 
-### 5.10 `include/ed/solvers/`
+### `include/ed/observables/` *(expectation, static + dynamical correlator kernels, cross-irrep FTLM)*
 
-- `dynamics.h`, `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`,
-  `kpm_dos.h`, `lanczos.h`, `ltlm.h`, `observables.h`, `TPQ.h`,
-  `tpq_seeding.h`
+- `cf_dynamical.h`, `cf_spectral_kernel.h`, `expectation.h`, `ftlm_cross_irrep_kernel.h`, `kpm_dynamical.h`, `static_correlator.h`
 
-### 5.11 `include/ed/symmetry/`
+### `include/ed/operators/`
 
-- `group.h` — group construction / character utilities consumed by
-  the lattice-side automorphism finder.
-- `subspace.h` *(May 2026)* — `FullSpaceSubspace` and
-  `FixedSzSubspace`, the two `Subspace` specialisations of the
-  orthogonal symmetry composition. `FixedSzOperator::subspace()`
-  returns a non-owning view backed by the operator's existing
-  sorted-basis vector and Lin (1990) index table; both Subspaces
-  expose `policy()` returning the matvec-side
-  `ed::matvec::basis::Full/FixedSzBasisPolicy` POD view.
-- `projector.h` *(May 2026)* — `SpatialProjector` (thin view over
-  `SymmetryGroupInfo` carrying the per-sector character and the
-  site-permutation `apply`), plus ABI placeholders
-  `InternalZ2Projector` and `AntiunitaryProjector` for global
-  spin-flip and antiunitary axes.
-- `projector_chain.h` *(May 2026)* — `ProjectorChain`
-  (heterogeneous `std::variant` container) and the templated
-  `compute_orbit_for_state<Subspace>(...)` orbit/character builder
-  that is now the single source of truth for symmetry orbit/character
-  data feeding the `SectorBasis` producer and the
-  `SymmetryBasisPolicy` matvec backend.
-  Byte-equality pinned by
-  [`tests/unit/test_projector_chain.cpp`](../../tests/unit/test_projector_chain.cpp);
-  ABI smoke for the future-axis placeholders pinned by
-  [`tests/unit/test_chain_extensibility.cpp`](../../tests/unit/test_chain_extensibility.cpp).
+- `operators.h`, `spin_ops.h`
 
-### 5.12 `src/apps/`
+### `include/ed/parallel/` *(NUMA, thread budget, NCCL MultiGpuCommunicator)*
 
-- `compute_bfg_order_parameters.cpp`, `compute_bfg_order_parameters_gpu.cu`,
-  `ed_main.cpp`
+- `fused_blas1.h`, `multi_gpu.h`, `numa.h`, `thread_budget.h`
 
-### 5.13 `src/bfg/`
+### `include/ed/planner/` *(env-override leaf policy hooks -- no planner; see ARCHITECTURE.md)*
 
-- `cli.cpp`, `cluster.cpp`, `correlations.cpp`, `order_parameters.cpp`,
-  `results_io.cpp`, `ring_observables.cpp`, `spin_structure_factor.cpp`,
-  `structure_factor.cpp`, `topology.cpp`, `wavefunction_io.cpp`
+- `basis_policy_hook.h`, `csr_policy_hook.h`, `sym_matvec_policy_hook.h`
 
-### 5.14 `src/cli/`
+### `include/ed/solvers/` *(CPU drivers incl. the factorized little-group engine `little_group_solve.h`)*
 
-- `dssf_engine.cpp`, `ed_distributed_main.cpp`, `workflows.cpp`
+- `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`, `kpm_dos.h`, `lanczos.h`, `little_group_blocks.h`, `little_group_solve.h`, `ltlm.h`, `observables.h`
 
-### 5.15 `src/core/`
+### `include/ed/symmetry/` *(Subspace x ProjectorChain composition, CompiledGroup, irreps, sector plan/set/basis, GPU mirrors)*
 
-- `ed_config.cpp`
+- `canonical_thermo.h`, `commute_check.h`, `compiled_group.h`, `env_gates.h`, `fixed_sz_membership.h`, `gosper.h`, `group.h`, `irreps.h`, `observable_character.h`, `orbit_table.h`, `projector.h`, `projector_chain.h`, `rep_projection.h`, `rep_sector_data.h`, `sector_basis.h`, `sector_gpu_mirror.h`, `sector_operator.h`, `sector_plan.h`, `sector_set.h`, `spin_flip.h`, `subspace.h`, `sym_profile.h`, `symmetry_cache.h`, `symmetry_sector_data.h`, `time_reversal.h`
 
-### 5.16 `src/distributed/`
+### `include/ed/thermal/` *(FTLM / LTLM-via-FTLM / OFTLM / mTPQ / KPM-DOS kernels; `tpq_kernel.h` also carries the CanonicalTaylor mechanism, but the user-facing cTPQ method was removed in the final consolidation)*
 
-- `distributed_ftlm.cpp`, `distributed_lanczos.cpp`,
-  `distributed_operator.cpp`, `distributed_symmetry_operator.cpp`,
-  `distributed_tpq.cpp`,
-- `orbit_partition.cpp`, `orbit_halo_plan.cpp`,
-- `distributed_lanczos_gpu.cu`, `distributed_gpu_operator.cu`,
-  `multi_gpu.cu` *(all CUDA TUs gated on `WITH_CUDA && WITH_MPI && NCCL_FOUND`)*
+- `ftlm_kernel.h`, `kpm_dos_kernel.h`, `mtpq_f32.h`, `mtpq_kernel.h`, `oftlm_kernel.h`, `tpq_kernel.h`, `tpq_seeding.h`, `tpq_thermo.h`
 
-### 5.17 `src/dssf/`
+### `src/api/`
 
-- `dssf_io.cpp`, `dssf_method.cpp`, `operator_spec.cpp`
+- `api_facade.cpp`, `build_introspection.cpp`, `symmetry_helpers.cpp`
 
-### 5.18 `src/input/`  *(Phase 4 — backs `ed_input` / `qed.input`)*
+### `src/apps/`
 
-- `lattice.cpp` *(implementations of every generator in
-  `ed::input::lattice::*`)*,
-- `hamiltonian_builder.cpp` *(fluent `HamiltonianBuilder` term
-  accumulator + shortcuts; `to_operator()` / `emit_into()` /
-  `write_directory()` finalisers)*,
-- `file_io.cpp` *(low-level `.dat` writers driving
-  `HamiltonianBuilder::write_directory`)*
+- `ed_main.cpp`
 
-### 5.19 `src/io/`
+### `src/cli/`
 
-- `basis_vector_storage.cpp`, `lanczos_basis_buffer.cpp`,
-  `lanczos_checkpoint.cpp`, `lanczos_reorth.cpp`
+- `dssf_engine.cpp`, `workflows.cpp`
 
-### 5.20 `src/parallel/`
+### `src/core/`
 
-- `numa.cpp`
+- `ed_config.cpp`, `operator_gpu.cpp`, `operator_gpu.cu`
 
-### 5.21 `src/solvers/cpu/`
+### `src/dssf/`
 
-- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`,
-  `lanczos.cpp`, `little_group_solve.cpp`, `ltlm.cpp`, `observables.cpp`,
-  `oftlm.cpp`, `symmetry_adapted_solve.cpp`
+- `cross_sector_observable.cpp`, `cross_sector_orbit_observable.cpp`, `dssf_io.cpp`, `dssf_method.cpp`, `operator_spec.cpp`
 
-### 5.22 `src/solvers/gpu/`
+### `src/input/`
 
-- `gpu_ed_wrapper.cu`, `gpu_ftlm.cu`, `gpu_kernels.cu`,
-  `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`,
-  `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `kpm_dos_gpu.cu`,
-  `mtpq_f32_impl.cuh` (fp32 mTPQ lane, #include'd into
-  `src/core/operator_gpu.cu`), `symmetry_adapted_gpu.cu`.
-  (The Gen-1 hand-rolled bodies -- `gpu_lanczos.cu`, `gpu_block_lanczos.cu`,
-  `gpu_krylov_schur.cu`, `gpu_tpq.cu`, `gpu_full_diag.cu`,
-  `gpu_fixed_sz_operator.cu`, `gpu_symmetrized_operator.cu` -- were retired
-  across the Jun-2026 operator collapse + Gen-1 GPULanczos retirement;
-  GPU Lanczos/FTLM/mTPQ run on `lanczos_kernel<CudaBackend>` + the
-  backend-templated thermal kernels.)
+- `file_io.cpp`, `hamiltonian_builder.cpp`, `lattice.cpp`
 
-### 5.23 `src/symmetry/`
+### `src/io/`
 
-- `group.cpp`
+- `basis_vector_storage.cpp`, `lanczos_basis_buffer.cpp`, `lanczos_checkpoint.cpp`, `lanczos_reorth.cpp`
+
+### `src/matvec/`
+
+- `cpu_backend_instantiations.cpp`, `sanity_check.cpp`
+
+### `src/observables/`
+
+- `ftlm_cross_irrep_kernel.cpp`
+
+### `src/parallel/`
+
+- `multi_gpu.cu`, `numa.cpp`, `thread_budget.cpp`
+
+### `src/solvers/cpu/`
+
+- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`, `lanczos.cpp`, `little_group_solve.cpp`, `ltlm.cpp`, `observables.cpp`, `oftlm.cpp`
+
+### `src/solvers/gpu/` *(the Gen-1 hand-rolled bodies and `gpu_ftlm.cu` (GPUFTLMSolver, consolidation Family 3) are gone; GPU Lanczos/FTLM/mTPQ ride `lanczos_kernel<CudaBackend>` + the backend-templated thermal kernels)*
+
+- `gpu_ed_wrapper.cu`, `gpu_kernels.cu`, `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`, `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `kpm_dos_gpu.cu`, `mtpq_f32_impl.cuh`
+
+### `src/symmetry/`
+
+- `group.cpp`, `irreps.cpp`, `sector_operator_gpu.cpp`, `sector_operator_gpu.cu`, `streaming_symmetry_gpu_mirror.cpp`, `streaming_symmetry_gpu_mirror.cu`
+
+- `src/orchestrator.cpp` *(the three verbs' implementation)*
+
+Retired wholesale (recoverable from git history): `include/ed/bfg` +
+`src/bfg` + both BFG apps (consolidation Family 11),
+`include/ed/distributed` + `src/distributed` + `ed_distributed_main`
+(Stage 11d -- across-sector SectorDistributor x MpiBackend is the MPI
+story), the chunked/disk-streaming triplet (Phase 7.2), and the
+monolithic SAB engine `symmetry_adapted*` (Family 6 -- the factorized
+little-group engine is the sole non-abelian engine).
 
 ---
 
@@ -414,7 +347,7 @@ Retired in Stage 11d (Jul 2026) — see §4. `multi_gpu.h` survives at
 
 | Path | Purpose |
 |------|---------|
-| `python/qed/` | `pybind11` `_core` + pure Python `hamiltonian`, `dssf`, `symmetry`, `bfg`, `helpers`, **`input`** *(Phase 4 — facade for the `ed_input` C++ library)* |
+| `python/qed/` | `pybind11` `_core` + pure Python `workflow` / `thermal` / `spectral` / `dssf` / `symmetry` / `discovery` / `point_group_routing` / `star_reduction` / `hamiltonian` + **`input`** *(facade for the `ed_input` C++ library)* |
 | `workflows/nlce/` | Python driver that **subprocess**-launches `ED` |
 | `examples/` | C++/MPI/CUDA/Python samples |
 | `benchmarks/` | Google Benchmark + `bench_all_backends.py` |
@@ -436,7 +369,6 @@ exactly the same dispatch axes as the ground-state solvers
 | `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
 | `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
 | `mTPQ`      | `include/ed/thermal/mtpq_kernel.h`      | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
-| `cTPQ`      | `include/ed/thermal/tpq_kernel.h`       | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
 
 Each of these solvers populates the same `ThermodynamicData` payload
 inside `EDResults` -- `temperatures`, `energy`, `specific_heat`,
@@ -444,22 +376,18 @@ inside `EDResults` -- `temperatures`, `energy`, `specific_heat`,
 `E_weighted`, `E2_weighted`, `e_min` used for sample-level averaging
 with proper Jensen-inequality handling.
 
-**Coverage of the unified `thermal()` entry point** (post-audit):
-
-| Method   | Auto-Sz iteration | Auto-spatial-symmetry      | T_min / T_max honoured | Notes                                                    |
-|----------|:-----------------:|:--------------------------:|:----------------------:|----------------------------------------------------------|
-| FTLM     | ✓                 | ✓ (directory form)         | ✓                      | Reference random-vector method; statistical match.       |
-| LTLM     | ✓                 | ✓ (directory form)         | ✓                      | Designed for T → 0; biased high at high T.               |
-| KPM_DOS  | ✓                 | ✓ (directory form)         | ✓                      | Polynomial DOS fit; needs enough moments for fine T.     |
-| mTPQ     | ✓                 | **silently disabled**      | ✓                      | Single random state per sector. `tpq_energy_shift = 0` triggers a Lanczos auto-pick for `LargeValue`. `dim == 1` sectors short-circuit to the exact single-eigenstate thermo. |
-| cTPQ     | ✓                 | **silently disabled**      | ✓                      | Same single-random-state restriction. Same `dim == 1` short-circuit. |
-
-The TPQ family doesn't factor cleanly through spatial irreps
-(a single random state cannot be projected to a sum of per-irrep
-trajectories whose recombination matches the unprojected result),
-so `thermal(...)` explicitly clears `use_symmetry` for TPQ runs.
-`used_symmetry_decomposition` returns `false` in the
-`ThermalResult` to expose the fallback.
+**Coverage of the unified `thermal()` entry point** (2026-07-20, verified
+by `benchmarks/bench_capability_matrix.py` against the exact partition
+sum): every method (FTLM / LTLM / OFTLM / mTPQ / KPM-DOS) rides the same
+flat sector pool — U(1) Sz (or the Sz-parity half), spatial irreps, the
+∏σˣ flip split, time-reversal pairing, and point-group star copies all
+compose, on CPU and GPU. Sectors with dim ≤ 512 take the exact
+small-block route (machine precision) for every sampling method whose
+deliverable is thermodynamics; larger sectors sample per-sector and
+Z-recombine. KPM-DOS is excluded from the exact fallback on purpose (its
+Chebyshev density of states is a deliverable the exact path does not
+produce). The historical "TPQ can't factor through spatial irreps"
+restriction is gone; `used_symmetry_decomposition` reports truthfully.
 
 ### How the auto-Sz / auto-symmetry layers integrate
 
@@ -480,76 +408,14 @@ auto thermo = ed::workflows::thermal(
       .sz_min = N/2 - 2, .sz_max = N/2 + 2 });   // optional Sz window
 ```
 
-`thermal(...)` is a thin orchestrator on top of the three lower layers
-listed below. It exists because none of the lower layers, on their own,
-covers "give me the proper thermodynamics, fully optimised by every
-symmetry the Hamiltonian possesses, in one call." Internally it:
-
-  * runs `detail::conserves_sz(op)` to decide whether to iterate the Sz
-    axis;
-  * runs `ed::detail::symmetry_data_present(directory)` to decide
-    whether to enable the streaming-symmetry kernel per Sz sector;
-  * dispatches `ed::exact_diagonalization(..., use_fixed_sz=true,
-    use_symmetry=auto, n_up=K)` for each `K` in `[sz_min, sz_max]`
-    (default `[0, N]`);
-  * Z-recombines the per-Sz `ThermodynamicData` blocks via
-    `ed::core::combine_sector_thermodynamics` to produce the
-    full-Hilbert thermo. Each per-Sz block has itself already been
-    irrep-recombined by the streaming kernel when symmetry was used.
-
-The lower layers are still there and still individually useful:
-
-1. **Auto-pilot (in-memory, single sector)** -- `ed::workflows::solve(
-   Operator&, SolveOptions)` (`include/ed/orchestrator.h`).
-
-   * Detects total-Sz conservation by inspecting `transform_data_`.
-   * With `auto_basis = On` (default) and no Zeeman field, projects to
-     the Marshall ground-state sector `n_up = N/2` and runs the
-     selected solver inside that sector. `Operator::apply` is virtual
-     (matvec-unification Phase 2) so the projected `FixedSzOperator`'s
-     `apply` is what the solver actually consumes.
-   * Auto-pilot's heuristic picks among FULL / LANCZOS /
-     BLOCK_LANCZOS / KRYLOV_SCHUR for ground-state requests, but the
-     caller can override with `opts.solver = FTLM` (or any other
-     method); the auto-Sz projection is independent of the solver
-     choice. For finite-T this gives the **sector-restricted**
-     thermodynamics, which is correct for "I want Z within the GS Sz
-     sector" but **not** the full-Hilbert thermo.
-
-2. **Canonical entry (file-based)** —
-   `ed::make_operator(OperatorSpec{ .source = DirectoryPath{...}, ... })`
-   followed by `ed::workflows::{solve,thermal,spectral}(*op, opts)`
-   (`include/ed/core/make_operator.h` +
-   `include/ed/orchestrator.h`).
-
-   * Auto-detects spatial symmetry by probing
-     `<directory>/automorphism_results/` for any of
-     `automorphisms.json`, `max_clique.json`, `sector_metadata.json`,
-     `minimal_generators.json` (the layout written by the Python
-     automorphism tool and by C++ `generate_automorphisms`), plus
-     the legacy `sectors.json` / `generators.json` names. When
-     present, the CLI helper `run_streaming_symmetry_workflow`
-     (`src/cli/workflows.cpp`) builds the symmetry-projected sector set
-     via `ed::make_sector_operators_tagged(spec)` (each tagged sector is
-     a `SectorOperator = SubspaceOperator<SymmetryBasisPolicy>`) and
-     iterates `ed::workflows::solve(*sector, opts)` once per sector.
-   * Per-sector recombination:
-       - For ground-state methods: collects per-sector eigenvalues
-         into a global pool and sorts.
-       - For finite-T methods (`FTLM`, `LTLM`, `KPM_DOS`, `mTPQ`,
-         `cTPQ`): collects per-sector `ThermodynamicData` and calls
-         `ed::core::combine_sector_thermodynamics`
-         (`include/ed/core/sector_thermo.h`) to produce the
-         full-Hilbert thermo via free-energy Z-recombination.
-
-3. **DSSF / workflow (file-based, multi-stage)** --
-   `compute_*_response_workflow` in `src/cli/workflows.cpp`. These are
-   the operator-resolved equivalents of the basic finite-T flow:
-   FTLM-style averaging with an outer operator `O` and inner `H`
-   matvec, eventually pulling DOS / spectral functions / correlators
-   out per-(q, ω) point. The same matvec interface is used; the
-   workflow layer manages the operator inventory, q-grid, and
-   per-sample HDF5 layout.
+`thermal(...)` iterates the sector pool planned by the composition
+layer (`sector_plan.h`): it detects the diagonal axis (U(1) Sz or
+Sz parity), builds one lazy `SectorOperator` per (diagonal, irrep)
+cell via `ed::make_sector_operators_tagged`, runs the selected kernel
+per sector (or copies the partner's result across flip transport /
+time-reversal pairing / star folds), and Z-recombines the per-sector
+`ThermodynamicData` blocks via `ed::core::combine_sector_thermodynamics`
+(`include/ed/core/sector_thermo.h`) into the full-Hilbert thermo.
 
 ### The sector-recombination math (used by both the streaming kernel and `combine_ftlm_sector_results`)
 
@@ -593,22 +459,20 @@ generic version is what the streaming kernel now calls.
   build covers the very-large-Hilbert case the chunked path was
   built for.
 - **CPU + GPU solvers**: the Krylov plane is unified
-  (`lanczos_kernel<CpuBackend|CudaBackend>`); the remaining split
-  surfaces (GPUFTLMSolver, KPM-DOS GPU) are bound by regression tests
-  (`test_cpu_gpu_equivalence.cpp`). Both paths plug into the unified
+  (`lanczos_kernel<CpuBackend|CudaBackend>`); the one remaining split
+  surface (KPM-DOS CPU vs `kpm_dos_gpu.cu`) is bound by regression
+  tests (`test_cpu_gpu_equivalence.cpp`); `GPUFTLMSolver` was retired
+  in consolidation Family 3 (dynamical + static FTLM unified onto the
+  backend-generic `via_backend` kernels). Both paths plug into the unified
   `ed::matvec::MatVecOperator` interface -- the Hamiltonian wrappers
   (`Operator`, `GPUOperator`, etc.) advertise their memory space tag
   so solvers can dispatch on it.
 - **DSSF** kernel overlap between `workflows.cpp` response helpers and
   `dssf_engine.cpp` was **unified** under `ed::dssf::run` (P2.x); remaining
   overlap should be only thin wrappers.
-- **Deprecated ARpack-style aliases** in `ed_types.h` (`LANCZOS_GPU_FIXED_SZ` …):
-  kept for Python-binding ABI / CLI compatibility. They are zero-cost
-  compile-time aliases that route to
-  `{method=X, use_gpu=true, use_fixed_sz=true}` via
-  `canonicalize_method_and_flags`; removing them requires a Python
-  binding deprecation window which the matvec-unification audit's
-  "aggressive cleanup" budget doesn't justify.
+- *(The deprecated ARpack-style `*_GPU` / `*_MPI` / `*_FIXED_SZ` enum
+  aliases were retired in the minimalist-architecture rev -- device and
+  parallelism are flags on `EDParameters`, not enum values.)*
 
 ### 7.2 Worth knowing (possible future consolidation)
 

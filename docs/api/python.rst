@@ -139,13 +139,3 @@ shared between :mod:`qed.input` and direct callers.
    :undoc-members:
    :show-inheritance:
 
-BFG post-processing (``qed.bfg``)
----------------------------------
-
-Bond-bilinear, structure-factor, and order-parameter post-processing
-on eigenstates.
-
-.. automodule:: qed.bfg
-   :members:
-   :undoc-members:
-   :show-inheritance:
