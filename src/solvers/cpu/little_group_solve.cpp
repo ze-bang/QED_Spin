@@ -1852,12 +1852,196 @@ std::vector<double> little_group_lowest_eigenvalues(
 
 namespace {
 
+// Dim floor above which the GS vector is built by the TWO-PASS no-reorth
+// Lanczos below instead of FullCGS2 + keep_basis. keep_basis stores every
+// Krylov vector (16 B * n per iteration): at frontier block dims (N=36 half
+// filling, n ~ 4e8) that is ~6 GB PER ITERATION and OOM-killed the first
+// 4x3 correlator campaign at 187 G around iteration ~30. Override with
+// ED_SYM_LG_TWO_PASS_MIN_DIM (validation suites set it to 1 to force the
+// two-pass lane at toy sizes).
+[[nodiscard]] inline std::size_t lg_two_pass_min_dim() {
+    if (const char* v = std::getenv("ED_SYM_LG_TWO_PASS_MIN_DIM")) {
+        const unsigned long long x = std::strtoull(v, nullptr, 10);
+        if (x > 0) return static_cast<std::size_t>(x);
+    }
+    return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
+}
+
+// TWO-PASS no-reorth ground-state Ritz vector (2026-07-19).
+//
+// Pass 1: pure three-term recurrence (no reorth, no stored basis), tridiag
+// only, with the same ghost-aware k=1 Paige-bound gate the star scan uses
+// (a ghost is a COPY of the converged extreme, so the FIRST converged
+// distinct Ritz value IS E0). Pass 2: replay the recurrence with the
+// STORED alpha/beta -- no inner products, so the trajectory is identical
+// arithmetic to pass 1 -- accumulating u = sum_j z_j V_j on the fly.
+// Memory: four n-vectors, independent of the iteration count. The caller's
+// residual guard stays the arbiter; on a miss we restart the whole
+// two-pass seeded by the current u (Lanczos restarted on an approximate
+// eigenvector converges rapidly), up to `restarts` times.
+[[nodiscard]] std::pair<double, std::vector<Complex>>
+solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
+                         std::size_t n)
+{
+    const std::size_t max_iter = std::min<std::size_t>(n, 400);
+    const int restarts = 3;
+
+    std::vector<Complex> v0(n);
+    {
+        std::mt19937_64 gen(0x51ED900DULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        for (auto& v : v0) v = Complex(nd(gen), nd(gen));
+    }
+    auto nrm2 = [](const std::vector<Complex>& x) {
+        double s = 0.0;
+#ifdef _OPENMP
+#   pragma omp parallel for reduction(+ : s) schedule(static)
+#endif
+        for (long long i = 0; i < static_cast<long long>(x.size()); ++i)
+            s += std::norm(x[static_cast<std::size_t>(i)]);
+        return std::sqrt(s);
+    };
+    auto scal = [](std::vector<Complex>& x, double a) {
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+        for (long long i = 0; i < static_cast<long long>(x.size()); ++i)
+            x[static_cast<std::size_t>(i)] *= a;
+    };
+
+    double E0 = 0.0;
+    std::vector<Complex> u;
+    std::vector<Complex> seed = std::move(v0);
+    {
+        const double s0 = nrm2(seed);
+        if (!(s0 > 0.0))
+            throw std::runtime_error("little_group two-pass: zero seed");
+        scal(seed, 1.0 / s0);
+    }
+
+    for (int attempt = 0; attempt <= restarts; ++attempt) {
+        // ---------------- pass 1: tridiag only -------------------------
+        std::vector<double> alpha, beta{0.0};
+        std::vector<Complex> vp(n, Complex(0, 0)), vc = seed, w(n);
+        bool done = false;
+        std::vector<double> ritz_z;   // column 0 at exit
+        std::size_t m = 0;
+        while (!done && m < max_iter) {
+            hk.apply(vc.data(), w.data(), n);
+            double a = 0.0;
+#ifdef _OPENMP
+#   pragma omp parallel for reduction(+ : a) schedule(static)
+#endif
+            for (long long i = 0; i < static_cast<long long>(n); ++i)
+                a += std::real(std::conj(vc[static_cast<std::size_t>(i)])
+                               * w[static_cast<std::size_t>(i)]);
+            alpha.push_back(a);
+            const double bprev = beta.back();
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+            for (long long i = 0; i < static_cast<long long>(n); ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                w[ii] -= a * vc[ii] + bprev * vp[ii];
+            }
+            const double b = nrm2(w);
+            beta.push_back(b);
+            ++m;
+            if (!(b > 1e-300)) { done = true; break; }   // invariant subspace
+            std::swap(vp, vc);
+            std::swap(vc, w);
+            scal(vc, 1.0 / b);
+            if (m >= 3 && m % 10 == 0) {
+                // Paige bound on the smallest Ritz value only.
+                std::vector<double> d(alpha), e(m > 1 ? m - 1 : 1, 0.0);
+                for (std::size_t i = 0; i + 1 < m; ++i) e[i] = beta[i + 1];
+                std::vector<double> zz(m * m, 0.0);
+                if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V',
+                                   static_cast<lapack_int>(m), d.data(),
+                                   e.data(), zz.data(),
+                                   static_cast<lapack_int>(m)) == 0) {
+                    const double scale = std::max(
+                        {std::abs(d[0]), std::abs(d[m - 1]), 1e-300});
+                    if (beta[m] * std::abs(zz[m - 1]) < 1e-9 * scale)
+                        done = true;
+                }
+            }
+        }
+        if (m == 0)
+            throw std::runtime_error("little_group two-pass: empty tridiag");
+        {
+            std::vector<double> d(alpha), e(m > 1 ? m - 1 : 1, 0.0);
+            for (std::size_t i = 0; i + 1 < m; ++i) e[i] = beta[i + 1];
+            std::vector<double> zz(m * m, 0.0);
+            if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V',
+                               static_cast<lapack_int>(m), d.data(), e.data(),
+                               zz.data(), static_cast<lapack_int>(m)) != 0)
+                throw std::runtime_error(
+                    "little_group two-pass: tridiag eigensolve failed");
+            E0 = d[0];
+            ritz_z.assign(zz.begin(), zz.begin() + m);
+        }
+        // ---------------- pass 2: replay + accumulate ------------------
+        u.assign(n, Complex(0, 0));
+        std::fill(vp.begin(), vp.end(), Complex(0, 0));
+        vc = seed;
+        for (std::size_t j = 0; j < m; ++j) {
+            const double zj = ritz_z[j];
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+            for (long long i = 0; i < static_cast<long long>(n); ++i)
+                u[static_cast<std::size_t>(i)] +=
+                    zj * vc[static_cast<std::size_t>(i)];
+            if (j + 1 >= m) break;
+            hk.apply(vc.data(), w.data(), n);
+            const double a = alpha[j], bprev = beta[j], bnext = beta[j + 1];
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+            for (long long i = 0; i < static_cast<long long>(n); ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                w[ii] -= a * vc[ii] + bprev * vp[ii];
+            }
+            std::swap(vp, vc);
+            std::swap(vc, w);
+            scal(vc, 1.0 / bnext);
+        }
+        const double un = nrm2(u);
+        if (!(un > 0.0))
+            throw std::runtime_error("little_group two-pass: zero Ritz vector");
+        scal(u, 1.0 / un);
+        // Residual check; restart seeded by u on a miss.
+        hk.apply(u.data(), w.data(), n);
+        double num = 0.0, ray = 0.0;
+#ifdef _OPENMP
+#   pragma omp parallel for reduction(+ : num, ray) schedule(static)
+#endif
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            ray += std::real(std::conj(u[ii]) * w[ii]);
+        }
+#ifdef _OPENMP
+#   pragma omp parallel for reduction(+ : num) schedule(static)
+#endif
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            num += std::norm(w[ii] - ray * u[ii]);
+        }
+        E0 = ray;
+        if (std::sqrt(num) <= 1e-8 || attempt == restarts) break;
+        seed = u;                       // restarted refinement
+    }
+    return {E0, std::move(u)};
+}
+
 // GS eigenpair of the PLAIN k0 sector with an in-memory eigenvector:
-// dense for small blocks, FullCGS2 Lanczos + Ritz vector otherwise (the
-// extreme pair is the only reliably converged one without reorth; with
-// FullCGS2 it is solid). Residual-guarded -- a failed vector THROWS
-// (the caller's point_group='full' contract is loud, and there is no
-// cheaper correct fallback for a vector consumer).
+// dense for small blocks; above the dense crossover either the two-pass
+// no-reorth lane (large n -- see lg_two_pass_min_dim) or FullCGS2 Lanczos
+// + kept-basis Ritz vector (small n, the historical path). Residual-
+// guarded -- a failed vector THROWS (the caller's point_group='full'
+// contract is loud, and there is no cheaper correct fallback for a
+// vector consumer).
 [[nodiscard]] std::pair<double, std::vector<Complex>>
 solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
 {
@@ -1870,6 +2054,10 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         E0 = es.eigenvalues()(0);
         for (std::size_t i = 0; i < n; ++i)
             u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
+    } else if (n > lg_two_pass_min_dim()) {
+        auto pr = solve_gs_vector_two_pass(hk, n);
+        E0 = pr.first;
+        u  = std::move(pr.second);
     } else {
         ed::matvec::CpuBackend be;
         std::vector<Complex> v0(n);

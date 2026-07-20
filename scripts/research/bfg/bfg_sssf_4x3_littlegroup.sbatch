@@ -3,9 +3,10 @@
 #SBATCH --account=def-ybkim
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=187G
-#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=96G
+#SBATCH --gres=gpu:h100:1
+#SBATCH --time=12:00:00
 #SBATCH --array=0-5
 #SBATCH --output=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.out
 #SBATCH --error=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.err
@@ -19,9 +20,11 @@
 #   Jpm grid: -0.05 .. -0.15 step 0.02, Jzz = 1.0
 #   Driver: run_bfg_sssf_littlegroup.py (validated exactly vs dense on
 #           2x3 and 3x2: E0 to 1e-10, S_zz(q) to <1e-6 at every q).
-#   CPU-only: the lane is host-side; no GPU request (cheaper queue).
-#   Upstream measurement (0461db3): ~96 star solves in 10 h at N=36
-#   unpinned => the pinned 12-star scan is ~1.5 h/point; 24 h is margin.
+#   GPU (2026-07-19 relaunch): the block matvec auto-engages the GPU
+#   rep-gather (>= 2^20 reps + CUDA present); the GS vector rides the new
+#   TWO-PASS no-reorth Lanczos (memory: 4 vectors) -- the FullCGS2
+#   kept-basis path banked ~6 GB/iteration at these dims and OOM-doomed
+#   the CPU attempt (49619841, cancelled at 87G RSS ~ 14 banked vectors).
 #
 # zz channel only (diagonal correlators). The S^{+-} channel needs the
 # cross-irrep spectral lane and a bigger-memory strategy -- future work.
@@ -45,8 +48,9 @@ source "${PROJ}/venvs/qed_prl/bin/activate"
 export FLEXIBLAS=AOCL
 export LD_LIBRARY_PATH="${EBROOTHDF5:+$EBROOTHDF5/lib:}${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="${PROJ}/QED/python:${PYTHONPATH:-}"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-64}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 export PYTHONUNBUFFERED=1
+export ED_SYM_PROFILE=1        # log per-block lane engagement (GPU/CSR/walk)
 
 JPM_VALUES=(-0.05 -0.07 -0.09 -0.11 -0.13 -0.15)
 TASK="${SLURM_ARRAY_TASK_ID}"
