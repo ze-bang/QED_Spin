@@ -28,9 +28,13 @@ the ≤512 exact fallback).
    `device='gpu'`, and the strict per-row GPU-lane assertion holds for
    every GS/thermal/full_spectrum row below — including the GS/na and
    thermal/na non-abelian cells and the U(1)-broken model's
-   nonabelian-full+parity cell, all new GPU rows this rev. GS-DSSF's
-   continued fraction (DSSF/na) remains CPU-only — not yet ported to
-   the batched lane.
+   nonabelian-full+parity cell, all new GPU rows this rev. GS-DSSF is a
+   GPU lane too: under `device='gpu'` every receiving sector's
+   continued-fraction matvec runs the forced device rep-gather
+   (dimension floor dropped, reduced CSR demoted to fallback) and the
+   GS-subspace scan batches its eigensolves on the device, with a
+   truthful `gpu_engaged` report — the DSSF/na row below is asserted on
+   it.
 2. **cTPQ rows are gone for good**: the user-facing cTPQ method was removed
    in the final consolidation (commit 9843ebb); `qed.thermal` supports
    FTLM / LTLM / OFTLM / mTPQ / KPM-DOS.
@@ -56,92 +60,93 @@ probed against dense `eigh` (`benchmarks/audit_capability_gaps.py`):
 
 | composition | device | lane | E0 | \|dE0\| | blocks | max dim | t [s] |
 |---|---|---|---|---|---|---|---|
-| none | cpu | cpu | -5.3873909174 | 5.5e-11 | 1 | 4096 | 0.210 |
-| U(1) | cpu | cpu | -5.3873909174 | 4.4e-15 | 1 | 4096 | 0.267 |
-| spatial | cpu | cpu | -5.3873909174 | 1.8e-11 | 1 | 352 | 0.060 |
-| U(1)+spatial | cpu | cpu | -5.3873909174 | 4.4e-11 | 1 | 80 | 0.057 |
-| U(1)+spatial+flip | cpu | cpu | -5.3873909174 | 7.8e-12 | 1 | 44 | 0.054 |
-| U(1)+spatial+TR | cpu | cpu | -5.3873909174 | 5.0e-12 | 1 | 80 | 0.019 |
-| U(1)+spatial+star | cpu | cpu | -5.3873909174 | 1.8e-14 | 1 | 4096 | 0.014 |
-| U(1)+translation+star | cpu | cpu | -5.3873909174 | 4.4e-11 | 1 | 80 | 0.027 |
-| U(1)+spatial+flip+TR+star | cpu | cpu | -5.3873909174 | 2.2e-14 | 1 | 4096 | 0.027 |
-| none | gpu | gpu | -5.3873909174 | 1.8e-15 | 1 | 4096 | 0.145 |
-| U(1) | gpu | gpu | -5.3873909174 | 5.3e-15 | 1 | 4096 | 0.082 |
-| spatial | gpu | gpu | -5.3873909174 | 8.9e-15 | 1 | 352 | 1.259 |
-| U(1)+spatial | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.628 |
-| U(1)+spatial+flip | gpu | gpu | -5.3873909174 | 2.0e-14 | 1 | 44 | 0.545 |
-| U(1)+spatial+TR | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.142 |
-| U(1)+spatial+star | gpu | gpu | -5.3873909174 | 2.7e-15 | 1 | 4096 | 0.087 |
-| U(1)+translation+star | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.209 |
-| U(1)+spatial+flip+TR+star | gpu | gpu | -5.3873909174 | 1.8e-15 | 1 | 4096 | 0.064 |
+| none | cpu | cpu | -5.3873909174 | 3.2e-11 | 1 | 4096 | 0.180 |
+| U(1) | cpu | cpu | -5.3873909174 | 4.4e-15 | 1 | 4096 | 0.059 |
+| spatial | cpu | cpu | -5.3873909174 | 1.3e-11 | 1 | 352 | 0.047 |
+| U(1)+spatial | cpu | cpu | -5.3873909174 | 1.5e-11 | 1 | 80 | 0.027 |
+| U(1)+spatial+flip | cpu | cpu | -5.3873909174 | 5.3e-13 | 1 | 44 | 0.023 |
+| U(1)+spatial+TR | cpu | cpu | -5.3873909174 | 1.2e-11 | 1 | 80 | 0.019 |
+| U(1)+spatial+star | cpu | cpu | -5.3873909174 | 1.8e-14 | 1 | 4096 | 0.019 |
+| U(1)+translation+star | cpu | cpu | -5.3873909174 | 5.3e-12 | 1 | 80 | 0.023 |
+| U(1)+spatial+flip+TR+star | cpu | cpu | -5.3873909174 | 2.2e-14 | 1 | 4096 | 0.025 |
+| none | gpu | gpu | -5.3873909174 | 1.8e-15 | 1 | 4096 | 0.063 |
+| U(1) | gpu | gpu | -5.3873909174 | 5.3e-15 | 1 | 4096 | 0.040 |
+| spatial | gpu | gpu | -5.3873909174 | 8.9e-15 | 1 | 352 | 0.279 |
+| U(1)+spatial | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.145 |
+| U(1)+spatial+flip | gpu | gpu | -5.3873909174 | 2.0e-14 | 1 | 44 | 0.273 |
+| U(1)+spatial+TR | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.085 |
+| U(1)+spatial+star | gpu | gpu | -5.3873909174 | 2.7e-15 | 1 | 4096 | 0.066 |
+| U(1)+translation+star | gpu | gpu | -5.3873909174 | 6.2e-15 | 1 | 80 | 0.142 |
+| U(1)+spatial+flip+TR+star | gpu | gpu | -5.3873909174 | 1.8e-15 | 1 | 4096 | 0.038 |
 
 ## Thermal mTPQ (E(T), C(T) vs exact partition sum)
 
 | composition | device | E(0.5) | C(0.5) | max rel dev E(T) | blocks | max dim | t [s] |
 |---|---|---|---|---|---|---|---|
-| none | cpu | -4.269779 | 3.901213 | 1.4e-02 | 1 | 4096 | 0.833 |
-| U(1) | cpu | -4.223071 | 3.835763 | 1.8e-02 | 13 | 924 | 1.283 |
-| U(1)+spatial | cpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.289 |
-| U(1)+spatial+flip | cpu | -4.297161 | 4.201155 | 1.2e-15 | 146 | 66 | 0.220 |
-| U(1)+spatial+TR | cpu | -4.297161 | 4.201155 | 1.2e-15 | 134 | 80 | 0.279 |
-| U(1)+spatial+star | cpu | -4.297161 | 4.201155 | 6.0e-16 | 95 | 78 | 0.627 |
-| U(1)+translation+star | cpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.462 |
-| U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 61 | 66 | 0.312 |
-| none | gpu | -4.268786 | 3.913682 | 1.4e-02 | 1 | 4096 | 6.247 |
-| U(1) | gpu | -4.222302 | 3.843498 | 1.8e-02 | 13 | 924 | 21.771 |
-| U(1)+spatial | gpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.240 |
-| U(1)+spatial+flip | gpu | -4.297161 | 4.201155 | 1.2e-15 | 146 | 66 | 0.168 |
-| U(1)+spatial+TR | gpu | -4.297161 | 4.201155 | 1.2e-15 | 134 | 80 | 0.266 |
-| U(1)+spatial+star | gpu | -4.297161 | 4.201155 | 6.0e-16 | 95 | 78 | 0.201 |
-| U(1)+translation+star | gpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.329 |
-| U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 61 | 66 | 0.122 |
+| none | cpu | -4.269779 | 3.901213 | 1.4e-02 | 1 | 4096 | 0.826 |
+| U(1) | cpu | -4.223071 | 3.835763 | 1.8e-02 | 13 | 924 | 1.203 |
+| U(1)+spatial | cpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.413 |
+| U(1)+spatial+flip | cpu | -4.297161 | 4.201155 | 1.2e-15 | 146 | 66 | 0.332 |
+| U(1)+spatial+TR | cpu | -4.297161 | 4.201155 | 1.2e-15 | 134 | 80 | 0.662 |
+| U(1)+spatial+star | cpu | -4.297161 | 4.201155 | 6.0e-16 | 95 | 78 | 0.428 |
+| U(1)+translation+star | cpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.381 |
+| U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 61 | 66 | 0.314 |
+| none | gpu | -4.268786 | 3.913682 | 1.4e-02 | 1 | 4096 | 4.402 |
+| U(1) | gpu | -4.222302 | 3.843498 | 1.8e-02 | 13 | 924 | 15.656 |
+| U(1)+spatial | gpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.207 |
+| U(1)+spatial+flip | gpu | -4.297161 | 4.201155 | 1.2e-15 | 146 | 66 | 0.128 |
+| U(1)+spatial+TR | gpu | -4.297161 | 4.201155 | 1.2e-15 | 134 | 80 | 0.125 |
+| U(1)+spatial+star | gpu | -4.297161 | 4.201155 | 6.0e-16 | 95 | 78 | 0.175 |
+| U(1)+translation+star | gpu | -4.297161 | 4.201155 | 1.0e-15 | 134 | 80 | 0.206 |
+| U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 61 | 66 | 0.112 |
 
 ## Other finite-T methods (fully composed vs none)
 
 | method | composition | device | E(0.5) | C(0.5) | max rel dev E(T) | t [s] |
 |---|---|---|---|---|---|---|
-| FTLM | none | cpu | -4.306562 | 4.170578 | 1.8e-03 | 4.452 |
-| FTLM | U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 0.445 |
-| LTLM | none | cpu | -4.306562 | 4.170578 | 1.8e-03 | 19.876 |
-| LTLM | U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 0.428 |
-| FTLM | none | gpu | -4.301863 | 4.283484 | 1.9e-03 | 2.103 |
-| FTLM | U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 0.107 |
-| LTLM | none | gpu | -4.301863 | 4.283484 | 1.9e-03 | 4.098 |
-| LTLM | U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 0.117 |
+| FTLM | none | cpu | -4.306562 | 4.170578 | 1.8e-03 | 4.634 |
+| FTLM | U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 0.295 |
+| LTLM | none | cpu | -4.306562 | 4.170578 | 1.8e-03 | 13.273 |
+| LTLM | U(1)+spatial+flip+TR+star | cpu | -4.297161 | 4.201155 | 2.7e-15 | 0.070 |
+| FTLM | none | gpu | -4.301863 | 4.283484 | 1.9e-03 | 1.531 |
+| FTLM | U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 0.061 |
+| LTLM | none | gpu | -4.301863 | 4.283484 | 1.9e-03 | 2.913 |
+| LTLM | U(1)+spatial+flip+TR+star | gpu | -4.297161 | 4.201155 | 2.7e-15 | 0.075 |
 
 ## DSSF S^z_{Q=pi}(omega) (vs dense Lehmann sum)
 
 | composition | device | peak S | peak omega | max \|dS\| | t [s] |
 |---|---|---|---|---|---|
-| none | cpu | 2.588236 | 0.370 | 1.9e-13 | 1.131 |
-| U(1)+spatial | cpu | 2.588236 | 0.370 | 6.7e-13 | 0.088 |
-| none | gpu | 2.588236 | 0.370 | 5.2e-13 | 1.306 |
-| U(1)+spatial | gpu | 2.588236 | 0.370 | 6.7e-13 | 0.024 |
+| none | cpu | 2.588236 | 0.370 | 1.9e-13 | 0.765 |
+| U(1)+spatial | cpu | 2.588236 | 0.370 | 6.7e-13 | 0.012 |
+| none | gpu | 2.588236 | 0.370 | 5.2e-13 | 0.965 |
+| U(1)+spatial | gpu | 2.588236 | 0.370 | 6.7e-13 | 0.015 |
 
 ## Extended cells: non-abelian full group + U(1)-broken model
 
 | verb | composition | device | E0 | max dev | blocks | max dim | t [s] |
 |---|---|---|---|---|---|---|---|
-| GS/na | nonabelian-full+U(1) | cpu | -5.38739092 | 2.2e-14 | -- | -- | 0.086 |
-| thermal/na | nonabelian-full(exact) | cpu | -5.18022550 | 1.4e-14 | -- | -- | 0.120 |
-| GS/na | nonabelian-full+U(1) | gpu | -5.38739092 | 1.8e-15 | -- | -- | 0.649 |
-| thermal/na | nonabelian-full(exact) | gpu | -5.18022550 | 1.4e-14 | -- | -- | 0.117 |
-| DSSF/na | nonabelian-full | cpu | -- | 2.7e-13 | -- | -- | 0.235 |
-| GS[U(1)-broken] | none | cpu | -5.72132542 | 5.3e-15 | 1 | 4096 | 2.830 |
-| GS[U(1)-broken] | spatial | cpu | -5.72132542 | 8.2e-14 | 12 | 352 | 0.229 |
-| GS[U(1)-broken] | spatial+flipfull | cpu | -5.72132542 | 7.7e-14 | 24 | 180 | 0.108 |
-| GS[U(1)-broken] | parity+spatial | cpu | -5.72132542 | 7.6e-14 | 24 | 180 | 0.175 |
-| GS[U(1)-broken] | parity+spatial+flip | cpu | -5.72132542 | 7.2e-14 | 48 | 94 | 0.104 |
-| GS[U(1)-broken] | parity+flip+TR+star | cpu | -5.72132542 | 1.3e-14 | 1 | 4096 | 0.090 |
-| GS[U(1)-broken] | nonabelian-full+parity | cpu | -5.72132542 | 1.3e-14 | -- | -- | 0.065 |
-| thermal[U(1)-broken] | parity(auto)+flip | cpu | -5.60894600 | 4.9e-15 | 18 | 176 | 0.128 |
-| fulldense[U(1)-broken] | parity(auto)+flip | cpu | -5.72132542 | 8.3e-14 | -- | -- | 0.040 |
-| GS[U(1)-broken] | none | gpu | -5.72132542 | 5.3e-15 | 1 | 4096 | 1.997 |
-| GS[U(1)-broken] | spatial | gpu | -5.72132542 | 8.2e-14 | 12 | 352 | 0.284 |
-| GS[U(1)-broken] | spatial+flipfull | gpu | -5.72132542 | 7.7e-14 | 24 | 180 | 0.420 |
-| GS[U(1)-broken] | parity+spatial | gpu | -5.72132542 | 7.6e-14 | 24 | 180 | 0.267 |
-| GS[U(1)-broken] | parity+spatial+flip | gpu | -5.72132542 | 7.2e-14 | 48 | 94 | 0.210 |
-| GS[U(1)-broken] | parity+flip+TR+star | gpu | -5.72132542 | 7.1e-15 | 1 | 4096 | 0.352 |
-| GS[U(1)-broken] | nonabelian-full+parity | gpu | -5.72132542 | 7.1e-15 | -- | -- | 0.244 |
-| thermal[U(1)-broken] | parity(auto)+flip | gpu | -5.60894600 | 4.9e-15 | 18 | 176 | 0.090 |
-| fulldense[U(1)-broken] | parity(auto)+flip | gpu | -5.72132542 | 7.7e-14 | -- | -- | 0.053 |
+| GS/na | nonabelian-full+U(1) | cpu | -5.38739092 | 2.2e-14 | -- | -- | 0.023 |
+| thermal/na | nonabelian-full(exact) | cpu | -5.18022550 | 1.4e-14 | -- | -- | 0.069 |
+| GS/na | nonabelian-full+U(1) | gpu | -5.38739092 | 1.8e-15 | -- | -- | 0.457 |
+| thermal/na | nonabelian-full(exact) | gpu | -5.18022550 | 1.4e-14 | -- | -- | 0.070 |
+| DSSF/na | nonabelian-full | cpu | -- | 2.7e-13 | -- | -- | 0.089 |
+| DSSF/na | nonabelian-full | gpu | -- | 2.8e-13 | -- | -- | 0.557 |
+| GS[U(1)-broken] | none | cpu | -5.72132542 | 5.3e-15 | 1 | 4096 | 1.685 |
+| GS[U(1)-broken] | spatial | cpu | -5.72132542 | 8.2e-14 | 12 | 352 | 0.254 |
+| GS[U(1)-broken] | spatial+flipfull | cpu | -5.72132542 | 7.7e-14 | 24 | 180 | 0.115 |
+| GS[U(1)-broken] | parity+spatial | cpu | -5.72132542 | 7.6e-14 | 24 | 180 | 0.123 |
+| GS[U(1)-broken] | parity+spatial+flip | cpu | -5.72132542 | 7.2e-14 | 48 | 94 | 0.096 |
+| GS[U(1)-broken] | parity+flip+TR+star | cpu | -5.72132542 | 1.3e-14 | 1 | 4096 | 0.087 |
+| GS[U(1)-broken] | nonabelian-full+parity | cpu | -5.72132542 | 1.3e-14 | -- | -- | 0.031 |
+| thermal[U(1)-broken] | parity(auto)+flip | cpu | -5.60894600 | 4.9e-15 | 18 | 176 | 0.063 |
+| fulldense[U(1)-broken] | parity(auto)+flip | cpu | -5.72132542 | 8.3e-14 | -- | -- | 0.025 |
+| GS[U(1)-broken] | none | gpu | -5.72132542 | 5.3e-15 | 1 | 4096 | 1.824 |
+| GS[U(1)-broken] | spatial | gpu | -5.72132542 | 8.2e-14 | 12 | 352 | 0.280 |
+| GS[U(1)-broken] | spatial+flipfull | gpu | -5.72132542 | 7.7e-14 | 24 | 180 | 0.244 |
+| GS[U(1)-broken] | parity+spatial | gpu | -5.72132542 | 7.6e-14 | 24 | 180 | 0.191 |
+| GS[U(1)-broken] | parity+spatial+flip | gpu | -5.72132542 | 7.2e-14 | 48 | 94 | 0.209 |
+| GS[U(1)-broken] | parity+flip+TR+star | gpu | -5.72132542 | 7.1e-15 | 1 | 4096 | 0.279 |
+| GS[U(1)-broken] | nonabelian-full+parity | gpu | -5.72132542 | 7.1e-15 | -- | -- | 0.101 |
+| thermal[U(1)-broken] | parity(auto)+flip | gpu | -5.60894600 | 4.9e-15 | 18 | 176 | 0.073 |
+| fulldense[U(1)-broken] | parity(auto)+flip | gpu | -5.72132542 | 8.3e-14 | -- | -- | 0.013 |

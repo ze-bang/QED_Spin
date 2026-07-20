@@ -20,8 +20,19 @@
   full-spectrum sweep; the sampled route already passes
   `backend.allow_gpu`. `use_gpu` threaded through the labeled binding
   (new kwarg) and `qed.solve`'s project lane; graceful degradation on
-  any GPU failure; `ED_SYM_LG_GPU=0` vetoes. GS-DSSF's continued
-  fraction remains CPU (unported corner, noted in the matrix).
+  any GPU failure; `ED_SYM_LG_GPU=0` vetoes.
+* **GS-DSSF on the GPU too**: `make_rep_sector_matvec` gained a
+  `force_gpu` mode — the device rep-gather is tried FIRST with the
+  dimension floor dropped and the reduced CSR demoted to fallback — and
+  `little_group_gs_dssf` drives every receiving sector's
+  continued-fraction matvec through it under `use_gpu` (plus batched
+  eigensolves on the GS-subspace scan), reporting a truthful
+  `gpu_engaged`; threaded through `qed.spectral`'s project lane keyed
+  on an explicit `device='gpu'`. `little_group_gs_correlators` (the
+  static-SSSF campaign lane) accepts `use_gpu` as well. Verified:
+  DSSF/na GPU == CPU at 1.6e-14, both == dense Lehmann at ~3e-14,
+  `gpu_engaged` truthful on both sides; the capability matrix's
+  DSSF/na row now sweeps both devices under assertion.
   **Verified GPU == CPU**: project-lane GS 1.5e-14, `point_group=
   'full'` lowest-4 exact match, full spectrum all 4096 values 2.3e-14,
   exact thermal E(T) identical, `lane='gpu'` truthfully reported; the

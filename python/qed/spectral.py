@@ -213,6 +213,8 @@ class _GsDssfResult:
     S_real: "np.ndarray"
     gs_energy: float
     total_weight: float
+    gpu_engaged: bool = False   # truthful: the CF matvecs ran the device
+                                # rep-gather (2026-07-20 GS-DSSF GPU lane)
 
 
 def _infer_delta_n_up(transforms: list) -> int:
@@ -1423,17 +1425,25 @@ def spectral(
         if lane.mode == "project":
             ws = list(omega)
             results = []
+            _dssf_gpu = (isinstance(device, str)
+                         and device.lower() in ("gpu", "cuda"))
             for obs in observables:
                 d = dict(_core.little_group_gs_dssf(
                     H_or_directory, obs, lane.A, lane.residues,
                     float(min(ws)), float(max(ws)), int(len(ws)),
                     float(eta if eta is not None else 0.1),
-                    krylov_dim=int(krylov_dim) if krylov_dim else 200))
+                    krylov_dim=int(krylov_dim) if krylov_dim else 200,
+                    # GS-DSSF GPU lane (2026-07-20): an explicit gpu request
+                    # forces the device rep-gather on every receiving
+                    # sector's continued-fraction matvec and batches the
+                    # GS-subspace scan's eigensolves on the device.
+                    use_gpu=_dssf_gpu))
                 r = _GsDssfResult(
                     omega=np.asarray(d["omega"], dtype=float),
                     S_real=np.asarray(d["s_omega"], dtype=float),
                     gs_energy=float(d["gs_energy"]),
-                    total_weight=float(d["total_weight"]))
+                    total_weight=float(d["total_weight"]),
+                    gpu_engaged=bool(d.get("gpu_engaged", False)))
                 results.append(r)
             if verbose:
                 print(f"[qed.spectral] non-abelian LITTLE-GROUP GS-DSSF "

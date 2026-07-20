@@ -122,9 +122,11 @@ public:
         ::Operator::DiagonalTwoBody,    ::Operator::MixedTwoBody,
         ::Operator::OffDiagonalTwoBody, ::Operator::ThreeBodyTransformData>;
 
-    RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd)
+    RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd,
+                    bool force_gpu = false)
         : rd_(std::make_unique<ed::symmetry::RepSectorData>(std::move(rd))),
-          terms_(op.getTerms())
+          terms_(op.getTerms()),
+          force_gpu_(force_gpu)
     {
         rd_->build_perm_lut();
         tv_.diag_one    = &terms_.diag_one_body;
@@ -149,10 +151,16 @@ public:
         // gather walk is the memory-budget fallback only. Without this,
         // every Lanczos iteration re-derives the matrix elements and
         // the gather cost eats the entire projection win.
-        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
-        if (csr_) {
-            csr_->spmv(in, out);
-            return;
+        // force_gpu_ (GS-DSSF GPU lane, 2026-07-20): an explicit GPU
+        // request tries the device rep-gather FIRST (dimension floor
+        // dropped) instead of letting the reduced CSR short-circuit it;
+        // if the device build fails the CSR is still built as fallback.
+        if (!force_gpu_) {
+            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+            if (csr_) {
+                csr_->spmv(in, out);
+                return;
+            }
         }
         // GPU rep gather (Jul 2026): when the reduced CSR is over budget
         // (the 36-site regime: ~0.5 TB per momentum block) the arithmetic
@@ -166,6 +174,13 @@ public:
         if (gpu_fn_) {
             gpu_fn_(in, out, n);
             return;
+        }
+        if (force_gpu_) {   // device declined: reduced CSR is the fallback
+            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+            if (csr_) {
+                csr_->spmv(in, out);
+                return;
+            }
         }
         backend_->apply_complex(&tv_, in, out, n);
     }
@@ -236,7 +251,8 @@ private:
     void maybe_build_gpu_() const {
         const char* gate = std::getenv("ED_SYM_LG_GPU");
         if (gate != nullptr && gate[0] == '0' && gate[1] == '\0') return;
-        const bool force = (gate != nullptr && gate[0] == '1' && gate[1] == '\0');
+        const bool force = force_gpu_
+            || (gate != nullptr && gate[0] == '1' && gate[1] == '\0');
         if (!force && rd_->reps.size() < (std::size_t{1} << 20)) return;
         if (!ed::have_cuda()) return;
         try {
@@ -263,6 +279,7 @@ private:
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
     mutable std::once_flag                         gpu_once_;
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
+    bool                                           force_gpu_ = false;
 public:
     /// Did the GPU rep-gather actually engage for this sector? Lazy, so this
     /// is only meaningful after the first apply(). Reported rather than
@@ -2406,9 +2423,15 @@ std::vector<ed::symmetry::RepSectorData> little_group_k_sectors(
 
 std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
     const ::Operator&             op,
-    ed::symmetry::RepSectorData   rd)
+    ed::symmetry::RepSectorData   rd,
+    bool                          force_gpu)
 {
-    return std::make_unique<RepSectorMatVec>(op, std::move(rd));
+    return std::make_unique<RepSectorMatVec>(op, std::move(rd), force_gpu);
+}
+
+bool rep_sector_matvec_gpu_engaged(const ed::matvec::MatVecOperator& mv) {
+    const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv);
+    return hk != nullptr && hk->gpu_engaged();
 }
 
 ThermodynamicData little_group_thermodynamics(

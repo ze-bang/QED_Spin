@@ -341,8 +341,9 @@ def run_nonabelian_section(n, truth, H, gen, rows, devices=("cpu",)):
     thermal / DSSF vs dense. Since 2026-07-20 the little-group engine's
     batched cuSOLVER block eigensolve (little_group_gpu.cu) makes the GS
     and exact-thermal cells GPU rows too; the reported lane is asserted
-    truthful. DSSF/na stays CPU (the GS-DSSF continued fraction is not
-    GPU-batched)."""
+    truthful. DSSF/na is a GPU row too since the GS-DSSF lane forces
+    the device rep-gather on every receiving sector's continued-fraction
+    matvec under device='gpu' (with a truthful gpu_engaged report)."""
     omega = np.linspace(0.0, 4.0, 120)
     w = truth["spectrum"]
     t_lo, t_hi, n_t = T_GRID
@@ -371,14 +372,18 @@ def run_nonabelian_section(n, truth, H, gen, rows, devices=("cpu",)):
                          dev=float(np.max(np.abs(E - exE))), t=t,
                          blocks=None, max_block=None))
 
-    t, r = timed(lambda: qed.spectral(
-        H, [build_probe(n)], omega=omega, eta=ETA, symmetry=gen,
-        point_group="full", verbose=False))
-    S = np.asarray(r.S_real)
-    rows.append(dict(verb="DSSF/na", config="nonabelian-full",
-                     device="cpu", E0=None,
-                     dev=float(np.max(np.abs(S - truth["S"]))), t=t,
-                     blocks=None, max_block=None))
+    for dev in devices:
+        t, r = timed(lambda: qed.spectral(
+            H, [build_probe(n)], omega=omega, eta=ETA, symmetry=gen,
+            point_group="full", device=dev, verbose=False))
+        S = np.asarray(r.S_real)
+        if dev == "gpu":
+            assert getattr(r, "gpu_engaged", False), \
+                "DSSF/na requested gpu but the CF matvecs stayed on the CPU"
+        rows.append(dict(verb="DSSF/na", config="nonabelian-full",
+                         device=dev, E0=None,
+                         dev=float(np.max(np.abs(S - truth["S"]))), t=t,
+                         blocks=None, max_block=None))
 
 
 def run_broken_section(n, devices, rows):

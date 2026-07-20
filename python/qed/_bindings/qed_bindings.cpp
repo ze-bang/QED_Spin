@@ -1157,7 +1157,7 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& residue_perms,
              double omega_min, double omega_max, int n_omega,
              double broadening, int krylov_dim, int dense_max_dim,
-             int time_reversal) {
+             bool use_gpu, int time_reversal) {
               // Stage 9d: FACTORIZED GS-DSSF. The ground state is
               // localized by the star walk (folds shrink the search) and
               // solved PLAIN in its momentum sector; O|0> is scattered
@@ -1196,6 +1196,10 @@ PYBIND11_MODULE(_core, m) {
                   o.n_up          = nu;
                   o.sz_parity     = par;
                   o.dense_max_dim = dense_max_dim;
+#ifdef WITH_CUDA
+                  o.use_gpu       = use_gpu;   // batched eigensolve on the
+                                               // GS-subspace scan
+#endif
                   // U2b-r1b: the SOURCE may be flip-extended (auto). The
                   // rep-lane scatter is flip-aware (Stage-5b masks ride
                   // the policy) and the cross-sector normalization
@@ -1255,6 +1259,8 @@ PYBIND11_MODULE(_core, m) {
 
               std::vector<double> s_omega(omega_grid.size(), 0.0);
               double total_weight = 0.0;
+              bool dssf_gpu = false;   // truthful: any receiving sector's
+                                       // CF matvec ran the device gather
               ed::matvec::CpuBackend be;
               using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
               const auto src_ref = Ref::from_rep(
@@ -1278,8 +1284,12 @@ PYBIND11_MODULE(_core, m) {
                       if (n2 < 1e-24) continue;   // selection rule says no
                       total_weight += n2;
 
+                      // GS-DSSF GPU lane (2026-07-20): an explicit GPU
+                      // request forces the device rep-gather on the
+                      // receiving sector's CF matvec (dimension floor
+                      // dropped, reduced CSR demoted to fallback).
                       auto mv = ed::solvers::make_rep_sector_matvec(
-                          op_h, rd_dst);
+                          op_h, rd_dst, /*force_gpu=*/use_gpu);
                       ed::observables::CfSpectralOptions cfopts;
                       cfopts.krylov_dim   = static_cast<std::size_t>(
                           std::max(krylov_dim, 2));
@@ -1297,6 +1307,8 @@ PYBIND11_MODULE(_core, m) {
                               omega_grid, cfopts);
                       for (std::size_t i = 0; i < s_omega.size(); ++i)
                           s_omega[i] += cf.spectral_function[i];
+                      dssf_gpu = dssf_gpu ||
+                          ed::solvers::rep_sector_matvec_gpu_engaged(*mv);
                   }
               }
 
@@ -1306,6 +1318,7 @@ PYBIND11_MODULE(_core, m) {
               d["gs_energy"]    = gs.energy;
               d["gs_k0"]        = gs.k0;
               d["total_weight"] = total_weight;
+              d["gpu_engaged"]  = dssf_gpu;
               return d;
           },
           py::arg("op"), py::arg("observable"),
@@ -1313,6 +1326,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("omega_min"), py::arg("omega_max"),
           py::arg("n_omega"), py::arg("broadening") = 0.1,
           py::arg("krylov_dim") = 200, py::arg("dense_max_dim") = 512,
+          py::arg("use_gpu") = false,
           py::arg("time_reversal") = -1,
           "Stage 9d: factorized ground-state DSSF -- GS localized by the "
           "star walk and solved matrix-free in its momentum sector; O|0> "
@@ -1326,7 +1340,8 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<std::vector<int>>& translations,
-             int n_up, int dense_max_dim, int time_reversal) {
+             int n_up, int dense_max_dim, bool use_gpu,
+             int time_reversal) {
               // STATIC structure factor without the DSSF machinery.
               //
               // S^zz(Q) needs only DIAGONAL, G-INVARIANT correlators:
@@ -1374,6 +1389,10 @@ PYBIND11_MODULE(_core, m) {
                   o.n_up          = nu;
                   o.sz_parity     = par;
                   o.dense_max_dim = dense_max_dim;
+#ifdef WITH_CUDA
+                  o.use_gpu       = use_gpu;   // batched eigensolve on the
+                                               // GS-subspace scan
+#endif
                   o.spin_flip     = -1;
                   o.time_reversal = time_reversal;
                   return o;
@@ -1461,7 +1480,8 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("op"), py::arg("abelian_group"), py::arg("residue_perms"),
           py::arg("translations"), py::arg("n_up") = -1,
-          py::arg("dense_max_dim") = 512, py::arg("time_reversal") = -1,
+          py::arg("dense_max_dim") = 512, py::arg("use_gpu") = false,
+          py::arg("time_reversal") = -1,
           "ONE ground-state solve -> energy AND the translation-averaged "
           "diagonal correlators C(d) = <sum_i S^z_i S^z_{i+d}>/N. Fourier "
           "transform C(d) for S^zz(Q) at EVERY momentum. Memory is one "

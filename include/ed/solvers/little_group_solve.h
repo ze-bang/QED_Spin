@@ -305,11 +305,22 @@ little_group_k_sectors(
     int                                   sz_parity = -1);
 
 /// Stage 9d: matrix-free H restricted to one rep-basis sector (public
-/// factory over the engine's internal RepSectorMatVec).
+/// factory over the engine's internal RepSectorMatVec). ``force_gpu``
+/// (GS-DSSF GPU lane, 2026-07-20) tries the device rep-gather FIRST with
+/// the dimension floor dropped -- reduced CSR becomes the fallback instead
+/// of the short-circuit; ED_SYM_LG_GPU=0 still vetoes and any device
+/// failure degrades gracefully.
 [[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
 make_rep_sector_matvec(
     const ::Operator&            op,
-    ed::symmetry::RepSectorData  rd);
+    ed::symmetry::RepSectorData  rd,
+    bool                         force_gpu = false);
+
+/// Truthful device report for a matvec built by make_rep_sector_matvec:
+/// did its GPU rep-gather actually engage? (Lazy -- meaningful only after
+/// the first apply(); false for foreign operator types.)
+[[nodiscard]] bool
+rep_sector_matvec_gpu_engaged(const ed::matvec::MatVecOperator& mv);
 
 /// Exact canonical thermodynamics from the factorized full spectrum.
 [[nodiscard]] ThermodynamicData
