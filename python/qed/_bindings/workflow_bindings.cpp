@@ -53,6 +53,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <exception>
 #include <thread>
 #include <vector>
 
@@ -1511,24 +1512,44 @@ void bind_workflows(py::module_& m) {
                   std::vector<ed::GroundStateResult> solve_results_p2(
                       static_cast<std::size_t>(n_iter_sec));
 
+                  // A per-sector solve can now legitimately THROW (e.g.
+                  // full_diagonalization refuses a full-spectrum request
+                  // above its dense window since the Eigen-sparse fallback
+                  // was retired, 2026-07-20). An exception escaping an OMP
+                  // worker is std::terminate, so latch the first one and
+                  // rethrow after the region -- the caller gets a clean
+                  // Python RuntimeError instead of a dead process.
+                  std::exception_ptr sector_solve_err = nullptr;
                   #pragma omp parallel for schedule(dynamic, 1) \
                       if(sector_parallel)
                   for (long ii = 0; ii < n_iter_sec; ++ii) {
-                      const std::size_t k =
-                          iter_sectors[static_cast<std::size_t>(ii)];
-                      auto sec = handle.sector(k);
-                      if (!sec || sec->dim() == 0) continue;
-                      ed::workflows::SolveOptions sopts = opts;
-                      sopts.num_eigs = std::min<std::size_t>(
-                          opts.num_eigs ? opts.num_eigs : 1, sec->dim());
-                      sopts.selected_sectors.clear();
-                      sopts.use_symmetry = false;
-                      if (need_per_sector_outdir) {
-                          sopts.output_dir = opts.output_dir
-                              + "/sector_k_" + std::to_string(k);
+                      try {
+                          const std::size_t k =
+                              iter_sectors[static_cast<std::size_t>(ii)];
+                          auto sec = handle.sector(k);
+                          if (!sec || sec->dim() == 0) continue;
+                          ed::workflows::SolveOptions sopts = opts;
+                          sopts.num_eigs = std::min<std::size_t>(
+                              opts.num_eigs ? opts.num_eigs : 1, sec->dim());
+                          sopts.selected_sectors.clear();
+                          sopts.use_symmetry = false;
+                          if (need_per_sector_outdir) {
+                              sopts.output_dir = opts.output_dir
+                                  + "/sector_k_" + std::to_string(k);
+                          }
+                          solve_results_p2[static_cast<std::size_t>(ii)] =
+                              ed::workflows::solve(*sec, sopts);
+                      } catch (...) {
+                          #pragma omp critical(sector_solve_err_latch)
+                          {
+                              if (!sector_solve_err) {
+                                  sector_solve_err = std::current_exception();
+                              }
+                          }
                       }
-                      solve_results_p2[static_cast<std::size_t>(ii)] =
-                          ed::workflows::solve(*sec, sopts);
+                  }
+                  if (sector_solve_err) {
+                      std::rethrow_exception(sector_solve_err);
                   }
 
                   // Serial collection: preserve iter_sectors ordering for

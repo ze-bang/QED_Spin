@@ -1393,18 +1393,20 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::filesystem::create_directories(dir, ec);
     }
 
-    // Detect if matrix is small enough for dense approach or needs sparse optimization
-    // Dense LAPACK (zheevd/dsyevd) computes the COMPLETE spectrum correctly and
-    // stably. The "sparse" fallback below builds an Eigen sparse matrix
-    // column-by-column and is BOTH wrong for a full spectrum (a sparse iterative
-    // solver cannot cheaply return all N eigenvalues) AND buggy: it heap-corrupts
-    // (glibc "malloc_consolidate(): invalid chunk size") at N=32768 on symmetry-
-    // free clusters -- e.g. a 15-site order-7 triangular cluster with a bond-
-    // dependent Jz+- term (breaks Sz-parity) and no spatial automorphisms.
-    // Raise the threshold so 2^15=32768 takes the dense path (~17 GB, minutes);
-    // stays below 2^16 so genuinely oversized blocks still divert. TODO: the
-    // sparse-full-diag branch should be removed or replaced outright.
-    const uint64_t DENSE_THRESHOLD = 40000;  // covers 2^15; dense is the correct full-spectrum solver
+    // Dense window: LAPACK (zheevd/dsyevd) computes the COMPLETE spectrum
+    // correctly and stably up to this dimension (40000 covers 2^15 = ~17 GB
+    // complex / ~8.5 GB real). Above it, a PARTIAL request (num_eigs < N/2)
+    // routes to matrix-free Lanczos; a FULL-spectrum request is a hard error
+    // (the historical Eigen-sparse "full diagonalization" fallback was both
+    // wrong -- an iterative solver cannot deliver all N eigenvalues -- and
+    // broken: glibc heap corruption at N=32768 on symmetry-free clusters;
+    // retired 2026-07-20). ED_FULLDIAG_DENSE_MAX raises the window
+    // deliberately on machines whose RAM genuinely fits the dense matrix.
+    uint64_t DENSE_THRESHOLD = 40000;
+    if (const char* env_max = std::getenv("ED_FULLDIAG_DENSE_MAX")) {
+        const unsigned long long v = std::strtoull(env_max, nullptr, 10);
+        if (v > 0) DENSE_THRESHOLD = static_cast<uint64_t>(v);
+    }
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
@@ -1672,134 +1674,40 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             }
         }
     } 
+    else if (num_eigs < N / 2) {
+        // Above the dense window with a PARTIAL request: matrix-free
+        // Lanczos directly on H. (The retired Eigen-sparse branch rebuilt
+        // the operator as a SparseMatrix via N unit-vector matvecs and then
+        // ran Lanczos on it with max_iter = 2*num_eigs -- far too few
+        // iterations to converge anything; same budget shape as
+        // lowest_dense_floor now.)
+        const uint64_t li = std::min<uint64_t>(
+            std::max<uint64_t>(40 * num_eigs, 400), N);
+        std::cout << "Dimension " << N << " exceeds the dense window ("
+                  << DENSE_THRESHOLD << "); solving " << num_eigs
+                  << " eigenvalues with matrix-free Lanczos (max_iter="
+                  << li << ")" << std::endl;
+        lanczos(H, N, li, num_eigs, 1e-10, eigenvalues, dir,
+                compute_eigenvectors);
+    }
     else {
-        // For larger matrices, use sparse approach with Eigen
-        std::cout << "Using sparse diagonalization with Eigen3" << std::endl;
-        
-        // Enable Eigen multithreading
-        Eigen::setNbThreads(std::thread::hardware_concurrency());
-        std::cout << "Eigen using " << Eigen::nbThreads() << " threads" << std::endl;
-        
-        // Create sparse matrix in triplet format
-        typedef Eigen::Triplet<Complex> Triplet;
-        std::vector<Triplet> triplets;
-        triplets.reserve(N * 10);  // Estimate ~10 non-zeros per row on average
-        
-        // Mutex for thread-safe triplet insertion
-        std::mutex triplet_mutex;
-        
-        // Estimate the sparsity pattern
-        #pragma omp parallel for schedule(dynamic)
-        for (int j = 0; j < N; j++) {
-            if (j % 1000 == 0) {
-                std::cout << "Processing column " << j << " of " << N << std::endl;
-            }
-            
-            // Create unit vector e_j
-            std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
-            unit_vec[j] = Complex(1.0, 0.0);
-            
-            // Compute H * e_j to get column j
-            std::vector<Complex> col_j(N);
-            H(unit_vec.data(), col_j.data(), N);
-            
-            // Identify non-zero elements (with threshold)
-            const double threshold = 1e-12;
-            std::vector<Triplet> local_triplets;
-            
-            for (int i = 0; i < N; i++) {
-                if (std::abs(col_j[i]) > threshold) {
-                    local_triplets.push_back(Triplet(i, j, col_j[i]));
-                }
-            }
-            
-            // Safely add triplets to shared vector
-            std::lock_guard<std::mutex> lock(triplet_mutex);
-            triplets.insert(triplets.end(), local_triplets.begin(), local_triplets.end());
-        }
-        
-        // Construct sparse matrix from triplets
-        Eigen::SparseMatrix<Complex> sparse_H(N, N);
-        sparse_H.setFromTriplets(triplets.begin(), triplets.end());
-        sparse_H.makeCompressed();
-        
-        std::cout << "Sparse matrix constructed with " << sparse_H.nonZeros() 
-                  << " non-zero elements (" 
-                  << (static_cast<double>(sparse_H.nonZeros()) / (N * N) * 100.0) 
-                  << "% fill)" << std::endl;
-        
-        // Use Spectra for partial eigendecomposition if available, otherwise fall back to full diagonalization
-        if (num_eigs < N / 2) {
-            std::cout << "Using sparse iterative eigensolver for partial eigendecomposition" << std::endl;
-            
-            // For partial eigendecomposition, we can use Eigen's iterative solvers
-            // or implement our own Lanczos on the sparse matrix
-            
-            // Define matrix-vector operation for the sparse matrix
-            auto sparse_mv = [&sparse_H, N](const Complex* v, Complex* result, uint64_t size) {
-                Eigen::Map<const Eigen::VectorXcd> v_eigen(v, size);
-                Eigen::Map<Eigen::VectorXcd> result_eigen(result, size);
-                result_eigen = sparse_H * v_eigen;
-            };
-            
-            // Use our Lanczos implementation with the sparse matrix operator
-            std::vector<double> sparse_eigenvalues;
-            lanczos(sparse_mv, N, std::min(2*num_eigs, static_cast<uint64_t>(1000)), num_eigs, 1e-10, 
-                   sparse_eigenvalues, dir, compute_eigenvectors);
-            
-            eigenvalues = sparse_eigenvalues;
-            
-        } else {
-            std::cout << "Using full sparse eigendecomposition" << std::endl;
-            
-            // For full or nearly-full spectrum, use direct sparse solver
-            Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<Complex>> eigensolver;
-            eigensolver.compute(sparse_H, compute_eigenvectors ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
-            
-            if (eigensolver.info() != Eigen::Success) {
-                std::cerr << "Eigen sparse eigenvalue decomposition failed" << std::endl;
-                return;
-            }
-            
-            // Extract eigenvalues
-            uint64_t actual_num_eigs = std::min(num_eigs, N);
-            eigenvalues.resize(actual_num_eigs);
-            for (int i = 0; i < actual_num_eigs; i++) {
-                eigenvalues[i] = eigensolver.eigenvalues()(i);
-            }
-            
-            // Save eigenvectors if requested - use HDF5 in main output directory (unified ed_results.h5)
-            if (compute_eigenvectors && !dir.empty()) {
-                std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
-                
-                // Create output directory if needed
-                {
-                    std::error_code ec;
-                    std::filesystem::create_directories(dir, ec);
-                }
-                
-                // Save to HDF5 in main output directory (primary format)
-                try {
-                    std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
-                    
-                    for (int i = 0; i < actual_num_eigs; i++) {
-                        // Convert Eigen vector to std::vector<Complex>
-                        std::vector<Complex> eigenvector(N);
-                        for (int j = 0; j < N; j++) {
-                            eigenvector[j] = eigensolver.eigenvectors().col(i)(j);
-                        }
-                        HDF5IO::saveEigenvector(hdf5_file, i, eigenvector);
-                    }
-                    
-                    // Also save eigenvalues to HDF5
-                    HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
-                    std::cout << "Saved " << actual_num_eigs << " eigenvectors and eigenvalues to HDF5" << std::endl;
-                    
-                } catch (const std::exception& e) {
-                    std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
-                }
-            }
-        }
+        // Full-spectrum request above the dense window: HARD ERROR.
+        // The old fallback here ("sparse full diagonalization",
+        // Eigen::SelfAdjointEigenSolver over a SparseMatrix) densified
+        // internally on one thread, heap-corrupted at N=32768 on
+        // symmetry-free clusters, and could not honestly deliver all N
+        // eigenvalues -- retired 2026-07-20. A complete spectrum needs the
+        // dense eigensolver; when the block does not fit the window the
+        // caller must shrink it (symmetry) or raise the window on purpose.
+        throw std::runtime_error(
+            "full_diagonalization: full-spectrum request at dimension " +
+            std::to_string(N) + " exceeds the dense limit (" +
+            std::to_string(DENSE_THRESHOLD) + "). No exact full-spectrum "
+            "solver exists past this size (the Eigen-sparse fallback was "
+            "removed as incorrect). Reduce the block with symmetry, request "
+            "num_eigs < dim/2 (routes to matrix-free Lanczos), or set "
+            "ED_FULLDIAG_DENSE_MAX above " + std::to_string(N) +
+            " if the dense matrix genuinely fits in RAM.");
     }
     
     std::cout << "Full diagonalization completed successfully" << std::endl;
