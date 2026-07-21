@@ -52,7 +52,15 @@ export PYTHONNOUSERSITE=1
 source "${PROJ}/venvs/qed_prl/bin/activate"
 export FLEXIBLAS=AOCL
 export LD_LIBRARY_PATH="${EBROOTHDF5:+$EBROOTHDF5/lib:}${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="${PROJ}/QED/python:${PYTHONPATH:-}"
+# Stage the QED python tree (incl. _core.so, ~25 MB) to node-local disk:
+# 2026-07-20 19:14:18 both running retries died with a SIMULTANEOUS
+# cross-node Bus error -- a Lustre/OST blip invalidating mmap'd pages of
+# some /project file. A node-local copy keeps every long-lived mapping
+# off the shared filesystem for the 10-24 h run.
+STAGE="${SLURM_TMPDIR:-/tmp}/qed_stage"
+mkdir -p "${STAGE}"
+cp -a "${PROJ}/QED/python" "${STAGE}/qed_python"
+export PYTHONPATH="${STAGE}/qed_python:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 export PYTHONUNBUFFERED=1
 export ED_SYM_PROFILE=1        # log per-block lane engagement (GPU/CSR/walk)
