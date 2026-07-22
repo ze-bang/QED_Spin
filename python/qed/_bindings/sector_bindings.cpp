@@ -25,6 +25,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <memory>
@@ -32,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include <ed/core/basis_utils.h>     // applyPermutation
 #include <ed/core/make_operator.h>  // OperatorSpec, SectorOperatorSet, make_sector_operators_tagged
 #include <ed/symmetry/sector_operator.h>
 
@@ -70,6 +73,14 @@ public:
         return set_->tags[index_].sector_index;
     }
 
+    // Diagnostic: how many orbits are actually materialised. The rep-lazy
+    // basis reports dim() from rep_dim_ while basis_states is still empty, so
+    // a zero here with a nonzero dimension means the orbit elements and
+    // coefficients do not exist yet.
+    [[nodiscard]] std::size_t materialized_orbits() const {
+        return op().basis().sector().basis_states.size();
+    }
+
     // H * v for a single vector.
     ComplexArray apply(const ComplexArray& vec) const {
         const auto dim = dimension();
@@ -85,6 +96,120 @@ public:
             op().apply(vec.data(), out.mutable_data(), static_cast<std::size_t>(dim));
         }
         return out;
+    }
+
+    // Amplitude of each requested full-space basis state on this sector.
+    //
+    // Returns ``(indices, amplitudes)``: the sector basis index each state
+    // lands on -- or -1 when its orbit cancels in this irrep -- and the
+    // amplitude <idx|state>.
+    //
+    // Reads the CSR-free ``RepSectorData`` (reps / inv_norms / characters /
+    // perms_flat), NOT ``SectorBasis::sector().basis_states``. On the
+    // production rep-lazy path the latter is empty and stays empty even after
+    // a matvec (an apply materialises the CSR, which is a different
+    // structure), so a projection built on it silently resolves every state to
+    // -1. The rep data is what the matvec itself consumes, so this shares the
+    // matvec's basis by construction and needs no materialisation.
+    //
+    // The orbit and its coefficients are rebuilt exactly as
+    // ``compute_orbit_for_state`` does -- accumulate conj(chi_g) over the group
+    // onto distinct images -- then normalised so the symmetrised vectors are
+    // orthonormal. That normalisation differs from the stored ``norm`` by the
+    // uniform factor sqrt(|G|), which cancels out of the polar pullback
+    // (h = G^-1/2 A G^-1/2 is invariant under a uniform rescaling of the
+    // gather), while any PER-ORBIT mismatch would not.
+    py::tuple project_states(const py::array_t<std::uint64_t,
+                                               py::array::c_style |
+                                               py::array::forcecast>& states) const {
+        auto requested = states.unchecked<1>();
+        const auto count = static_cast<std::size_t>(requested.shape(0));
+        py::array_t<std::int64_t> indices(static_cast<py::ssize_t>(count));
+        ComplexArray amplitudes(static_cast<py::ssize_t>(count));
+        auto* index_out = indices.mutable_data();
+        auto* amp_out   = amplitudes.mutable_data();
+
+        const auto& rep = op().basis().ensureRepData();
+        if (!rep.usable()) {
+            throw std::runtime_error(
+                "SectorOperator.project_states: RepSectorData is not usable "
+                "for this sector.");
+        }
+        const auto& reps       = rep.reps;
+        const auto& characters = rep.characters;
+        const auto& perms      = rep.perms_flat;
+        const int   n_sites    = rep.n_sites;
+        const std::size_t group = characters.size();
+        if (group == 0 || perms.size() != group * static_cast<std::size_t>(n_sites)) {
+            throw std::runtime_error(
+                "SectorOperator.project_states: inconsistent group data "
+                "(characters/perms_flat do not agree).");
+        }
+        // Binary search below needs ascending reps; the builders promise it,
+        // but a silent violation would mis-index every state.
+        if (!std::is_sorted(reps.begin(), reps.end())) {
+            throw std::runtime_error(
+                "SectorOperator.project_states: orbit representatives are not "
+                "ascending, so the index lookup would be wrong.");
+        }
+
+        auto permute = [&](std::uint64_t state, std::size_t g) {
+            std::uint64_t out = 0;
+            const int* row = perms.data() + g * static_cast<std::size_t>(n_sites);
+            for (int i = 0; i < n_sites; ++i) {
+                out |= ((state >> row[i]) & 1ULL) << i;
+            }
+            return out;
+        };
+
+        std::vector<std::uint64_t> orbit(group);
+        std::vector<Complex>       coeff(group);
+
+        // Scope the release to the compute loop only: the return below
+        // allocates a Python tuple, which segfaults if the GIL is still
+        // released when the function exits.
+        {
+        py::gil_scoped_release release;
+        for (std::size_t s = 0; s < count; ++s) {
+            const std::uint64_t state = requested(static_cast<py::ssize_t>(s));
+            index_out[s] = -1;
+            amp_out[s]   = Complex(0.0, 0.0);
+
+            std::uint64_t canonical = state;
+            for (std::size_t g = 0; g < group; ++g) {
+                canonical = std::min(canonical, permute(state, g));
+            }
+            const auto found = std::lower_bound(reps.begin(), reps.end(), canonical);
+            if (found == reps.end() || *found != canonical) {
+                continue;  // orbit cancels in this irrep
+            }
+            index_out[s] = static_cast<std::int64_t>(found - reps.begin());
+
+            // Rebuild the symmetrised combination on this orbit.
+            std::size_t distinct = 0;
+            for (std::size_t g = 0; g < group; ++g) {
+                const std::uint64_t image = permute(canonical, g);
+                const Complex contribution = std::conj(characters[g]);
+                bool seen = false;
+                for (std::size_t j = 0; j < distinct; ++j) {
+                    if (orbit[j] == image) { coeff[j] += contribution; seen = true; break; }
+                }
+                if (!seen) { orbit[distinct] = image; coeff[distinct] = contribution; ++distinct; }
+            }
+            double total = 0.0;
+            for (std::size_t j = 0; j < distinct; ++j) total += std::norm(coeff[j]);
+            if (total <= 0.0) {
+                continue;
+            }
+            for (std::size_t j = 0; j < distinct; ++j) {
+                if (orbit[j] == state) {
+                    amp_out[s] = std::conj(coeff[j]) / std::sqrt(total);
+                    break;
+                }
+            }
+        }
+        }  // GIL reacquired here, before the tuple is built
+        return py::make_tuple(indices, amplitudes);
     }
 
     // H * B for a block of vectors, ONE VECTOR PER ROW.
@@ -141,11 +266,26 @@ void bind_sectors(py::module_& m) {
                                "Irrep labels (e.g. momentum indices) of this sector.")
         .def_property_readonly("sector_index", &SectorHandle::sector_index,
                                "Raw irrep index within the symmetry group.")
+        .def_property_readonly("materialized_orbits", &SectorHandle::materialized_orbits,
+                               "Number of orbits with materialised elements/coefficients. "
+                               "Zero alongside a nonzero dimension means the rep-lazy "
+                               "basis has not built the orbit data.")
         .def("apply", &SectorHandle::apply, py::arg("vec"),
              "Compute H * v for a 1-D complex128 array of length ``dimension``.")
         .def("apply_block", &SectorHandle::apply_block, py::arg("block"),
              "Compute H * B for a complex128 array of shape ``(nvec, dimension)`` "
-             "-- one vector per row.");
+             "-- one vector per row.")
+        .def("project_states", &SectorHandle::project_states, py::arg("states"),
+             R"pbdoc(
+             Amplitudes of full-space basis states on this sector.
+
+             Takes a uint64 array of full-space bit states and returns
+             ``(indices, amplitudes)``: the sector basis index each state lands
+             on (``-1`` if its orbit cancels in this irrep) and the amplitude
+             ``<idx|state>``. Use it to gather a distinguished full-space
+             subspace into the symmetry-adapted basis without reproducing the
+             orbit normalisation convention by hand.
+             )pbdoc");
 
     m.def(
         "sector_operators",

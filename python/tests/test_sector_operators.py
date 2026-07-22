@@ -8,6 +8,7 @@ result from the solve workflows.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -143,3 +144,46 @@ def test_sector_labels_are_exposed(ring):
     sectors = core.sector_operators(root, n, 0.5, n_up)
     momenta = sorted(s.quantum_numbers[0] for s in sectors)
     assert momenta == list(range(n))
+
+
+def test_project_states_is_complete_over_sectors(ring):
+    """Every full-space state must carry total weight 1 across the sectors.
+
+    Convention-independent: it fails on a wrong internal-label mapping or a
+    wrong orbit normalisation without needing a reference operator. This is the
+    check that caught the rep-lazy basis returning -1 for everything.
+    """
+    root, n, n_up = ring
+    sectors = core.sector_operators(root, n, 0.5, n_up)
+    states = np.array(
+        sorted(
+            sum(1 << i for i in combo)
+            for combo in itertools.combinations(range(n), n_up)
+        ),
+        dtype=np.uint64,
+    )
+    weight = np.zeros(len(states))
+    for sector in sectors:
+        _, amplitudes = sector.project_states(states)
+        weight += np.abs(amplitudes) ** 2
+    assert np.abs(weight - 1.0).max() < 1.0e-12
+
+
+def test_project_states_resolves_non_representative_states(ring):
+    """States that are not the smallest element of their orbit must still resolve.
+
+    ``index_of`` is keyed by orbit representative, so a projection that skips
+    canonicalisation silently returns -1 for most of the space.
+    """
+    root, n, n_up = ring
+    sector = core.sector_operators(root, n, 0.5, n_up)[0]
+    states = np.array(
+        sorted(
+            sum(1 << i for i in combo)
+            for combo in itertools.combinations(range(n), n_up)
+        ),
+        dtype=np.uint64,
+    )
+    indices, _ = sector.project_states(states)
+    # far more states than orbits, so most are non-representatives
+    assert (indices >= 0).sum() > int(sector.dimension)
