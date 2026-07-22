@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <complex>
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,11 @@
 #include <vector>
 
 #include <ed/core/basis_utils.h>     // applyPermutation
+#include <ed/core/linear_operator.h> // LinearOperator::MatvecFn
+
+#ifdef WITH_CUDA
+#include <cuda_runtime.h>
+#endif
 #include <ed/core/make_operator.h>  // OperatorSpec, SectorOperatorSet, make_sector_operators_tagged
 #include <ed/symmetry/sector_operator.h>
 
@@ -52,6 +58,95 @@ class SectorHandle {
 public:
     SectorHandle(std::shared_ptr<ed::SectorOperatorSet> set, std::size_t index)
         : set_(std::move(set)), index_(index) {}
+
+    // Bind the device matvec once and reuse it: bind_cuda() uploads the rep
+    // data, so re-binding per call would dominate the matvec it enables.
+    // Throws on a build without WITH_CUDA, which is the honest failure -- the
+    // symmetry lane has no weak CPU fallback for the device path.
+    void use_device() {
+#ifndef WITH_CUDA
+        throw std::runtime_error(
+            "SectorOperator.use_device: built without WITH_CUDA.");
+#else
+        if (device_) return;
+        device_ = op().bind_cuda();
+        // bind_cuda() returns a MatvecFn taking DEVICE pointers (the contract
+        // is stated in streaming_symmetry_gpu_mirror.cu). Handing it host
+        // pointers does not error -- the kernel writes nothing and returns
+        // instantly, which reads as an enormous speedup producing zeros. So we
+        // own device buffers and stage through them.
+        const std::size_t bytes = static_cast<std::size_t>(op().dim()) * sizeof(Complex);
+        check_cuda_(cudaMalloc(&d_in_, bytes), "cudaMalloc(in)");
+        check_cuda_(cudaMalloc(&d_out_, bytes), "cudaMalloc(out)");
+#endif
+    }
+
+    ~SectorHandle() {
+#ifdef WITH_CUDA
+        // Interpreter teardown can retire the CUDA context before these
+        // handles are destroyed, so cudaFree returns cudaErrorCudartUnloading.
+        // Swallow it: throwing (or letting thrust throw) from a destructor at
+        // shutdown aborts the process and turns a clean run into a core dump.
+        if (d_in_)  { cudaFree(d_in_);  d_in_ = nullptr; }
+        if (d_out_) { cudaFree(d_out_); d_out_ = nullptr; }
+        cudaGetLastError();
+#endif
+    }
+    SectorHandle(const SectorHandle&) = delete;
+    SectorHandle& operator=(const SectorHandle&) = delete;
+    SectorHandle(SectorHandle&& other) noexcept
+        : set_(std::move(other.set_)), index_(other.index_),
+          device_(std::move(other.device_)) {
+#ifdef WITH_CUDA
+        d_in_ = other.d_in_; d_out_ = other.d_out_;
+        other.d_in_ = nullptr; other.d_out_ = nullptr;
+#endif
+    }
+
+    // Kernel-only cost: upload once, run the device matvec ``repeats`` times
+    // without touching host memory. Separates the kernel from the PCIe
+    // transfer, which at 1.2 GB per vector is not a rounding error.
+    double device_matvec_seconds(int repeats) const {
+#ifndef WITH_CUDA
+        throw std::runtime_error("built without WITH_CUDA");
+#else
+        if (!device_) throw std::runtime_error("call use_device() first");
+        const auto n = static_cast<std::size_t>(op().dim());
+        py::gil_scoped_release release;
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < repeats; ++r) {
+            device_(static_cast<const Complex*>(d_in_), static_cast<Complex*>(d_out_), n);
+        }
+        check_cuda_(cudaDeviceSynchronize(), "sync");
+        const auto t1 = std::chrono::steady_clock::now();
+        return std::chrono::duration<double>(t1 - t0).count() / repeats;
+#endif
+    }
+
+    [[nodiscard]] bool on_device() const { return static_cast<bool>(device_); }
+
+    void run(const Complex* in, Complex* out, std::size_t n) const {
+        if (!device_) {
+            op().apply(in, out, n);
+            return;
+        }
+#ifdef WITH_CUDA
+        const std::size_t bytes = n * sizeof(Complex);
+        check_cuda_(cudaMemcpy(d_in_, in, bytes, cudaMemcpyHostToDevice), "H2D");
+        device_(static_cast<const Complex*>(d_in_), static_cast<Complex*>(d_out_), n);
+        check_cuda_(cudaMemcpy(out, d_out_, bytes, cudaMemcpyDeviceToHost), "D2H");
+#endif
+    }
+
+#ifdef WITH_CUDA
+    static void check_cuda_(cudaError_t status, const char* what) {
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA ") + what + ": " +
+                                     cudaGetErrorString(status));
+        }
+    }
+#endif
 
     [[nodiscard]] ed::symmetry::SectorOperator& op() const {
         return *set_->operators[index_];
@@ -93,7 +188,7 @@ public:
         ComplexArray out(static_cast<py::ssize_t>(dim));
         {
             py::gil_scoped_release release;
-            op().apply(vec.data(), out.mutable_data(), static_cast<std::size_t>(dim));
+            run(vec.data(), out.mutable_data(), static_cast<std::size_t>(dim));
         }
         return out;
     }
@@ -239,7 +334,7 @@ public:
             // The kernel is itself threaded over the sector, so the column
             // loop stays serial; parallelising here would oversubscribe.
             for (std::size_t v = 0; v < nvec; ++v) {
-                op().apply(src + v * dim, dst + v * dim, static_cast<std::size_t>(dim));
+                run(src + v * dim, dst + v * dim, static_cast<std::size_t>(dim));
             }
         }
         return out;
@@ -248,6 +343,11 @@ public:
 private:
     std::shared_ptr<ed::SectorOperatorSet> set_;
     std::size_t                            index_;
+    ed::LinearOperator::MatvecFn           device_{};
+#ifdef WITH_CUDA
+    void*                                  d_in_{nullptr};
+    void*                                  d_out_{nullptr};
+#endif
 };
 
 }  // namespace
@@ -275,6 +375,15 @@ void bind_sectors(py::module_& m) {
         .def("apply_block", &SectorHandle::apply_block, py::arg("block"),
              "Compute H * B for a complex128 array of shape ``(nvec, dimension)`` "
              "-- one vector per row.")
+        .def("use_device", &SectorHandle::use_device,
+             "Bind the CUDA matvec for this sector and route apply/apply_block "
+             "through it. Raises on a build without WITH_CUDA.")
+        .def("device_matvec_seconds", &SectorHandle::device_matvec_seconds,
+             py::arg("repeats") = 10,
+             "Mean seconds per device matvec with the vectors already resident, "
+             "excluding host<->device transfer.")
+        .def_property_readonly("on_device", &SectorHandle::on_device,
+                               "True once use_device() has bound the device matvec.")
         .def("project_states", &SectorHandle::project_states, py::arg("states"),
              R"pbdoc(
              Amplitudes of full-space basis states on this sector.
