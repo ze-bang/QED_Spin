@@ -57,6 +57,7 @@
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
+#include "sector_bindings.h"
 #include "workflow_bindings.h"
 
 #include <complex>
@@ -1987,4 +1988,5 @@ PYBIND11_MODULE(_core, m) {
     // See workflow_bindings.cpp.
     // -------------------------------------------------------------------------
     bind_workflows(m);
+    bind_sectors(m);
 }
