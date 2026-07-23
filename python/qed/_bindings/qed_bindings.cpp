@@ -1335,6 +1335,144 @@ PYBIND11_MODULE(_core, m) {
           "Lanczos per receiving sector. Memory O(#reps): the scalable "
           "replacement for symmetry_adapted_gs_dssf.");
 
+    // STATIC transverse structure factor S^{+-}(q) for a LIST of probes,
+    // amortising the ONE (n_up-pinned) little-group GS solve across every q.
+    //
+    // The static structure factor is the ZEROTH frequency moment of the DSSF:
+    //   S_O = <GS| O^dagger O |GS> = || O|GS> ||^2
+    // (the ``total_weight`` little_group_gs_dssf already computes as a
+    // by-product before its continued fraction). For O_q = N^{-1/2} sum_j
+    // e^{-i q.r_j} S^-_j this is exactly S^{+-}(q). No omega grid, no CF --
+    // just the scatter norm per probe, so a whole q-mesh costs ONE GS solve.
+    //
+    // n_up pins the GS magnetisation (the AFM GS is a singlet at N/2); the
+    // unpinned U(1) sweep is ~sqrt(N)x more work for the same answer (mirrors
+    // little_group_gs_correlators 0461db3). Memory O(#reps): one source + one
+    // destination sector resident at a time.
+    m.def("little_group_gs_static_sf",
+          [](const Operator& op_h,
+             const std::vector<Operator>& observables,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int n_up, int dense_max_dim, bool use_gpu, int time_reversal) {
+              using Complex = std::complex<double>;
+              const int n_sites = static_cast<int>(op_h.getNumBits());
+              for (const Operator& o : observables)
+                  if (!o.three_body_data_.empty())
+                      throw std::runtime_error(
+                          "little_group_gs_static_sf: probes must be "
+                          "one/two-body operators.");
+
+              ed::matvec::TermStorage soa;
+              ed::matvec::TermStorage::classify_route(
+                  soa, op_h.transform_data_, op_h.three_body_data_,
+                  [](const std::complex<double>& c) { return c; });
+              const auto ax = ed::symmetry::sz_axis_of(soa);
+
+              std::vector<std::pair<int, int>> gs_subspaces;
+              if (n_up >= 0) {
+                  gs_subspaces = {{n_up, -1}};
+              } else if (ax == ed::symmetry::SzAxis::U1) {
+                  for (int k = 0; k <= n_sites; ++k)
+                      gs_subspaces.emplace_back(k, -1);
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  gs_subspaces = {{-1, 0}, {-1, 1}};
+              } else {
+                  gs_subspaces = {{-1, -1}};
+              }
+              auto lg_o = [&](int nu, int par) {
+                  ed::solvers::LittleGroupOptions o;
+                  o.n_up = nu; o.sz_parity = par;
+                  o.dense_max_dim = dense_max_dim;
+#ifdef WITH_CUDA
+                  o.use_gpu = use_gpu;
+#endif
+                  o.spin_flip = -1; o.time_reversal = time_reversal;
+                  return o;
+              };
+              int gs_nu = -1, gs_par = -1; double e_best = 0.0; bool have = false;
+              if (gs_subspaces.size() == 1) {
+                  gs_nu = gs_subspaces[0].first; gs_par = gs_subspaces[0].second;
+                  have = true;
+              } else {
+                  for (const auto& [nu, par] : gs_subspaces) {
+                      const auto ev = ed::solvers::little_group_lowest_eigenvalues(
+                          op_h, abelian_group, residue_perms, n_sites, 1, lg_o(nu, par));
+                      if (ev.empty()) continue;
+                      if (!have || ev[0] < e_best) {
+                          have = true; e_best = ev[0]; gs_nu = nu; gs_par = par;
+                      }
+                  }
+              }
+              if (!have)
+                  throw std::runtime_error(
+                      "little_group_gs_static_sf: no non-empty subspace.");
+
+              const auto gs = ed::solvers::little_group_ground_state(
+                  op_h, abelian_group, residue_perms, n_sites, lg_o(gs_nu, gs_par));
+
+              std::vector<std::pair<int, int>> dst_subspaces;
+              if (ax == ed::symmetry::SzAxis::U1) {
+                  for (int d = -2; d <= 2; ++d) {
+                      const int nu = gs_nu + d;
+                      if (nu >= 0 && nu <= n_sites) dst_subspaces.emplace_back(nu, -1);
+                  }
+              } else if (ax == ed::symmetry::SzAxis::Parity) {
+                  dst_subspaces = {{-1, 0}, {-1, 1}};
+              } else {
+                  dst_subspaces = {{-1, -1}};
+              }
+
+              using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
+              const auto src_ref = Ref::from_rep(
+                  gs.rd, static_cast<std::uint64_t>(n_sites));
+
+              // Build every destination sector's RepSectorData ONCE, reuse
+              // across all probes (destination depends only on delta_n_up,
+              // not the probe's q-phases).
+              std::vector<ed::symmetry::RepSectorData> dst_rds;
+              for (const auto& [dnu, dpar] : dst_subspaces) {
+                  auto sectors = ed::solvers::little_group_k_sectors(
+                      op_h, abelian_group, n_sites, dnu, dpar);
+                  for (auto& rd : sectors) dst_rds.push_back(std::move(rd));
+              }
+
+              std::vector<double> static_sf;
+              static_sf.reserve(observables.size());
+              for (const Operator& o : observables) {
+                  double s = 0.0;
+                  for (const auto& rd_dst : dst_rds) {
+                      const std::size_t dim_dst = rd_dst.reps.size();
+                      if (dim_dst == 0) continue;
+                      ed::dssf::CrossSectorOrbitObservable obs(
+                          src_ref, 0,
+                          Ref::from_rep(rd_dst, static_cast<std::uint64_t>(n_sites)),
+                          0, o.transform_data_,
+                          static_cast<float>(op_h.getSpin()));
+                      std::vector<Complex> phi(dim_dst, Complex(0, 0));
+                      obs.apply(gs.vec.data(), phi.data(), dim_dst);
+                      for (const Complex& c : phi) s += std::norm(c);
+                  }
+                  static_sf.push_back(s);
+              }
+
+              py::dict d;
+              d["gs_energy"] = gs.energy;
+              d["gs_k0"]     = gs.k0;
+              d["gs_n_up"]   = gs_nu;
+              d["n_reps"]    = static_cast<std::uint64_t>(gs.rd.reps.size());
+              d["static_sf"] = static_sf;
+              return d;
+          },
+          py::arg("op"), py::arg("observables"),
+          py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          py::arg("use_gpu") = false, py::arg("time_reversal") = -1,
+          "Static transverse structure factor S^{+-}(q) = ||O_q|GS>||^2 for a "
+          "LIST of probe operators, amortising ONE n_up-pinned little-group GS "
+          "solve across all q (no continued fraction / omega grid). Memory "
+          "O(#reps). Returns {gs_energy, gs_k0, gs_n_up, n_reps, static_sf[]}.");
+
     m.def("little_group_gs_correlators",
           [](const Operator& op_h,
              const std::vector<std::vector<int>>& abelian_group,
