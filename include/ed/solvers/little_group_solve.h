@@ -46,6 +46,7 @@
 #include <complex>
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <vector>
 
 namespace ed::solvers {
@@ -303,6 +304,18 @@ little_group_k_sectors(
     int                                   n_sites,
     int                                   n_up      = -1,
     int                                   sz_parity = -1);
+
+/// Streaming twin of ``little_group_k_sectors``: invoke ``fn`` on each
+/// non-empty raw momentum sector one at a time, freeing it before the next
+/// is built. Bounds the resident set to a single destination sector (each
+/// is ~15-20 GB at N=36 half-filling; holding all 12 OOMs a 128 GB node).
+void little_group_k_sectors_stream(
+    const ::Operator&                     op,
+    const std::vector<std::vector<int>>&  abelian_group,
+    int                                   n_sites,
+    int                                   n_up,
+    int                                   sz_parity,
+    const std::function<void(ed::symmetry::RepSectorData&)>& fn);
 
 /// Stage 9d: matrix-free H restricted to one rep-basis sector (public
 /// factory over the engine's internal RepSectorMatVec). ``force_gpu``

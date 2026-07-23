@@ -2435,6 +2435,34 @@ std::vector<ed::symmetry::RepSectorData> little_group_k_sectors(
     return out;
 }
 
+void little_group_k_sectors_stream(
+    const ::Operator&                    op,
+    const std::vector<std::vector<int>>& abelian_group,
+    int                                  n_sites,
+    int                                  n_up,
+    int                                  sz_parity,
+    const std::function<void(ed::symmetry::RepSectorData&)>& fn)
+{
+    // Streaming twin of little_group_k_sectors: build ONE raw momentum
+    // sector at a time, hand it to ``fn``, then free it before building the
+    // next. Holding every k-sector resident (as little_group_k_sectors
+    // returns) costs ~15-20 GB/sector at N=36 half-filling -- 12 sectors
+    // OOMs a 128 GB node. This keeps the resident set at one destination
+    // sector for the factorized static/dynamical structure-factor loops.
+    LittleGroupOptions o;
+    o.n_up          = n_up;
+    o.sz_parity     = sz_parity;
+    o.spin_flip     = 0;      // destination sectors are RAW (9d v1)
+    o.time_reversal = 0;
+    EngineContext cx;
+    bool tr_on = false;
+    make_engine_context(op, abelian_group, {}, n_sites, o, cx, tr_on);
+    for (int k = 0; k < cx.n_irr_raw; ++k) {
+        auto rd = build_k_sector(cx, k, n_up);
+        if (!rd.reps.empty()) fn(rd);
+    }
+}
+
 std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
     const ::Operator&             op,
     ed::symmetry::RepSectorData   rd,

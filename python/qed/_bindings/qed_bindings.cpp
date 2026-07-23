@@ -1354,7 +1354,8 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<Operator>& observables,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
-             int n_up, int dense_max_dim, bool use_gpu, int time_reversal) {
+             int n_up, int delta_n_up, int dense_max_dim, bool use_gpu,
+             int time_reversal) {
               using Complex = std::complex<double>;
               const int n_sites = static_cast<int>(op_h.getNumBits());
               for (const Operator& o : observables)
@@ -1411,12 +1412,19 @@ PYBIND11_MODULE(_core, m) {
               const auto gs = ed::solvers::little_group_ground_state(
                   op_h, abelian_group, residue_perms, n_sites, lg_o(gs_nu, gs_par));
 
+              // Destination = one subspace: A_q = sum e^{-iq.r} S^-_j raises
+              // n_up by delta_n_up (=+1 for a pure S^- probe in the set-bit
+              // convention). Build ONLY that subspace's k-sectors -- the
+              // old -2..+2 sweep built ~5x the (15-20 GB) sectors for
+              // nothing (the selection rule kills every other subspace).
               std::vector<std::pair<int, int>> dst_subspaces;
               if (ax == ed::symmetry::SzAxis::U1) {
-                  for (int d = -2; d <= 2; ++d) {
-                      const int nu = gs_nu + d;
-                      if (nu >= 0 && nu <= n_sites) dst_subspaces.emplace_back(nu, -1);
-                  }
+                  const int nu = gs_nu + delta_n_up;
+                  if (nu < 0 || nu > n_sites)
+                      throw std::runtime_error(
+                          "little_group_gs_static_sf: gs_n_up + delta_n_up "
+                          "out of range.");
+                  dst_subspaces = {{nu, -1}};
               } else if (ax == ed::symmetry::SzAxis::Parity) {
                   dst_subspaces = {{-1, 0}, {-1, 1}};
               } else {
@@ -1427,34 +1435,37 @@ PYBIND11_MODULE(_core, m) {
               const auto src_ref = Ref::from_rep(
                   gs.rd, static_cast<std::uint64_t>(n_sites));
 
-              // Build every destination sector's RepSectorData ONCE, reuse
-              // across all probes (destination depends only on delta_n_up,
-              // not the probe's q-phases).
-              std::vector<ed::symmetry::RepSectorData> dst_rds;
-              for (const auto& [dnu, dpar] : dst_subspaces) {
-                  auto sectors = ed::solvers::little_group_k_sectors(
-                      op_h, abelian_group, n_sites, dnu, dpar);
-                  for (auto& rd : sectors) dst_rds.push_back(std::move(rd));
-              }
-
-              std::vector<double> static_sf;
-              static_sf.reserve(observables.size());
-              for (const Operator& o : observables) {
-                  double s = 0.0;
-                  for (const auto& rd_dst : dst_rds) {
-                      const std::size_t dim_dst = rd_dst.reps.size();
-                      if (dim_dst == 0) continue;
+              // STREAM destination sectors one at a time: each RepSectorData
+              // is ~15-20 GB at N=36 half-filling, so holding all ~12 k-sectors
+              // (as little_group_k_sectors returns) OOMs a 128 GB node. For a
+              // fixed-momentum probe A_q the scatter A_q|GS> lands in exactly
+              // ONE destination sector (the selection rule zeroes the rest), so
+              // once a probe's norm is found it is marked resolved and skipped
+              // in later sectors -- keeping the resident set at one dst sector.
+              const std::size_t nobs = observables.size();
+              std::vector<double> static_sf(nobs, 0.0);
+              std::vector<char>   resolved(nobs, 0);
+              const float spin = static_cast<float>(op_h.getSpin());
+              auto scatter_into = [&](ed::symmetry::RepSectorData& rd_dst) {
+                  const std::size_t dim_dst = rd_dst.reps.size();
+                  if (dim_dst == 0) return;
+                  const auto dst_ref = Ref::from_rep(
+                      rd_dst, static_cast<std::uint64_t>(n_sites));
+                  std::vector<Complex> phi(dim_dst, Complex(0, 0));
+                  for (std::size_t i = 0; i < nobs; ++i) {
+                      if (resolved[i]) continue;
                       ed::dssf::CrossSectorOrbitObservable obs(
-                          src_ref, 0,
-                          Ref::from_rep(rd_dst, static_cast<std::uint64_t>(n_sites)),
-                          0, o.transform_data_,
-                          static_cast<float>(op_h.getSpin()));
-                      std::vector<Complex> phi(dim_dst, Complex(0, 0));
+                          src_ref, 0, dst_ref, 0,
+                          observables[i].transform_data_, spin);
                       obs.apply(gs.vec.data(), phi.data(), dim_dst);
+                      double s = 0.0;
                       for (const Complex& c : phi) s += std::norm(c);
+                      if (s > 1e-18) { static_sf[i] = s; resolved[i] = 1; }
                   }
-                  static_sf.push_back(s);
-              }
+              };
+              for (const auto& [dnu, dpar] : dst_subspaces)
+                  ed::solvers::little_group_k_sectors_stream(
+                      op_h, abelian_group, n_sites, dnu, dpar, scatter_into);
 
               py::dict d;
               d["gs_energy"] = gs.energy;
@@ -1466,7 +1477,8 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("op"), py::arg("observables"),
           py::arg("abelian_group"), py::arg("residue_perms"),
-          py::arg("n_up") = -1, py::arg("dense_max_dim") = 512,
+          py::arg("n_up") = -1, py::arg("delta_n_up") = 1,
+          py::arg("dense_max_dim") = 512,
           py::arg("use_gpu") = false, py::arg("time_reversal") = -1,
           "Static transverse structure factor S^{+-}(q) = ||O_q|GS>||^2 for a "
           "LIST of probe operators, amortising ONE n_up-pinned little-group GS "
