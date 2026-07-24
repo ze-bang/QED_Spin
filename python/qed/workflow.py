@@ -2145,6 +2145,128 @@ def _generators_nonabelian(gens: list[list[int]]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Stage 12e (SU(2) rollout): full-spectrum total-spin resolution via
+# highest-weight SPECTRAL DIFFERENCING -- no vectors, no dense S^2 blocks.
+#
+# For an SU(2)-invariant H, every spin-S multiplet contributes exactly one
+# level to each Sz block with |Sz| <= S, so per |2Sz| class m (using the
+# blocks the sweep already solved):
+#
+#     tower(two_S) = spectrum(m = two_S)  minus  spectrum(m = two_S + 2)
+#
+# as an exact multiset difference, and each Sz block's spectrum tiles as
+# the disjoint union of the towers with two_S >= m. Matching is by sorted
+# two-pointer walk with a tolerance; degenerate levels are interchangeable
+# within their cluster, so any consistent assignment is a valid labeling.
+# ---------------------------------------------------------------------------
+
+def _su2_multiset_diff(a: list, b: list, tol: float) -> list:
+    """Sorted-multiset a minus b (b known to embed in a within tol)."""
+    out, j = [], 0
+    for x in a:
+        if j < len(b) and abs(x - b[j]) <= tol:
+            j += 1
+        else:
+            out.append(x)
+    return out
+
+
+def _su2_label_blocks(
+    blocks: "list[tuple[Optional[int], list[float]]]",
+    n_sites: int,
+    tol: float = 1e-8,
+) -> "Optional[list[list[int]]]":
+    """Label every (n_up, sorted spectrum) block with per-level two_S.
+
+    Returns one int list per input block (parallel), or None when the
+    sweep is incomplete (a needed |Sz| class is missing). -1 marks a
+    level the tiling failed to match (should not happen for a genuine
+    SU(2)-invariant H; kept as a soft failure mode).
+    """
+    # Representative spectrum per |2Sz| class.
+    avail: dict[int, list[float]] = {}
+    for n_up, spec in blocks:
+        if n_up is None:
+            return None
+        m = abs(2 * n_up - n_sites)
+        avail.setdefault(m, sorted(spec))
+    # Need every class from N%2 up to N (missing top classes are fine
+    # only if no block needs them -- iterate what the tiling requires).
+    towers: dict[int, list[float]] = {}
+    for ts in range(n_sites, n_sites % 2 - 1, -2):
+        hi = avail.get(ts + 2, [] if ts + 2 > n_sites else None)
+        lo = avail.get(ts)
+        if lo is None or hi is None:
+            # A class the differencing needs was not solved: label only
+            # if no block references these towers -- conservatively bail.
+            return None
+        towers[ts] = _su2_multiset_diff(lo, hi, tol)
+    out: list[list[int]] = []
+    for n_up, spec in blocks:
+        m = abs(2 * n_up - n_sites)
+        pool = sorted(
+            (e, ts) for ts, lst in towers.items() if ts >= m for e in lst)
+        labels, j = [], 0
+        for x in sorted(spec):
+            if j < len(pool) and abs(x - pool[j][0]) <= tol:
+                labels.append(pool[j][1])
+                j += 1
+            else:
+                labels.append(-1)
+        out.append(labels)
+    return out
+
+
+def _attach_su2_full_spectrum_labels(
+    out: EDResults,
+    blocks: "list[tuple[Optional[int], list[float]]]",
+    n_sites: int,
+    operator: Operator,
+    *,
+    enabled: bool,
+    require: bool,
+) -> None:
+    """Attach ``out.spin`` / ``out.two_S`` (parallel to the merged sorted
+    ``out.eigenvalues``) via highest-weight spectral differencing. Soft
+    no-op when disabled / not SU(2)-invariant / sweep incomplete, unless
+    ``require`` (then raise on a non-SU(2) Hamiltonian)."""
+    import os as _os
+    if _os.environ.get("ED_SYM_SU2", "") == "0":
+        if require:
+            raise RuntimeError(
+                "qed.full_spectrum: total_spin='require' but the SU(2) "
+                "axis is vetoed by ED_SYM_SU2=0")
+        return
+    try:
+        su2 = bool(_core.detect_hamiltonian_symmetries(operator)["su2"])
+    except Exception:
+        su2 = False
+    if not su2:
+        if require:
+            raise RuntimeError(
+                "qed.full_spectrum: total_spin='require' but the "
+                "term-level [H, S_tot] check failed (H is not "
+                "SU(2)-invariant)")
+        return
+    if not enabled or not blocks:
+        return
+    labels = _su2_label_blocks(blocks, n_sites)
+    if labels is None:
+        return
+    pairs = sorted(
+        (e, ts)
+        for (nu, spec), labs in zip(blocks, labels)
+        for e, ts in zip(sorted(spec), labs))
+    if len(pairs) != len(out.eigenvalues):
+        return  # sweep/merge mismatch: leave unlabeled rather than lie
+    try:
+        out.two_S = [ts for _, ts in pairs]
+        out.spin = [(ts / 2.0 if ts >= 0 else None) for _, ts in pairs]
+    except AttributeError:
+        pass
+
+
 def full_spectrum(
     operator: Operator,
     *,
@@ -2336,6 +2458,7 @@ def full_spectrum(
                 "which is defined per momentum star -- pass sector= too.")
         try:
             eigs = []
+            _su2_blocks: list[tuple[Optional[int], list[float]]] = []
             if sz_conserved:
                 if sz is not None:
                     # ONE named magnetisation block: its complete spectrum,
@@ -2352,10 +2475,12 @@ def full_spectrum(
                         operator, _A, _res, n_up=int(n_up),
                         use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr,
                         only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
-                    block = [float(e) for e in d["eigenvalues"]]
+                    block = sorted(float(e) for e in d["eigenvalues"])
                     eigs.extend(block)
+                    _su2_blocks.append((int(n_up), block))
                     if _mirror and n_up * 2 != N:
                         eigs.extend(block)   # isospectral mirror
+                        _su2_blocks.append((N - int(n_up), block))
             else:
                 d = dict(_core.little_group_full_spectrum(
                     operator, _A, _res, use_gpu=use_gpu,
@@ -2369,6 +2494,13 @@ def full_spectrum(
                          if _flip_transport else ""))
             out = EDResults()
             out.eigenvalues = sorted(eigs)
+            # Stage 12e: total-spin resolution by spectral differencing
+            # (full sweep only; a restricted star walk breaks the tiling).
+            _attach_su2_full_spectrum_labels(
+                out, _su2_blocks, N, operator,
+                enabled=(_fs_label != 0 and sz is None and sz_conserved
+                         and not _fs_only_k0 and not _fs_only_irrep),
+                require=(_fs_label == 1))
             return out
         except Exception as exc:            # noqa: BLE001 -- graceful
             if isinstance(point_group, str) \
@@ -2458,6 +2590,7 @@ def full_spectrum(
         eigs: list[float] = []
         eigs_per_sector: list[list[float]] = []
         sector_tags: list[Any] = []
+        _su2_blocks: list[tuple[Optional[int], list[float]]] = []
         for n_up in sz_values:
             block_dim = (math.comb(N, n_up) if n_up is not None
                          else (1 << N))
@@ -2480,10 +2613,15 @@ def full_spectrum(
             gs = _core.workflows_solve_streaming_symmetry_directory(
                 tmpdir, N, float(spin_length), opts, n_up)
             eigs.extend(gs.eigenvalues)
+            _su2_blocks.append(
+                (int(n_up) if n_up is not None else None,
+                 sorted(gs.eigenvalues)))
             if (_flip_transport and n_up is not None
                     and int(n_up) * 2 != N):
                 # Isospectral N - n_up mirror of the whole Sz block.
                 eigs.extend(gs.eigenvalues)
+                _su2_blocks.append(
+                    (N - int(n_up), sorted(gs.eigenvalues)))
             _eps = getattr(gs, "eigenvalues_per_sector", None)
             if _eps:
                 eigs_per_sector.extend([list(s) for s in _eps])
@@ -2516,6 +2654,12 @@ def full_spectrum(
                 out.sector_tags = sector_tags
             except AttributeError:
                 pass
+        # Stage 12e: total-spin resolution by spectral differencing (needs
+        # the complete Sz sweep -- a named sz block has no adjacent data).
+        _attach_su2_full_spectrum_labels(
+            out, _su2_blocks, N, operator,
+            enabled=(_fs_label != 0 and sz is None and sz_conserved),
+            require=(_fs_label == 1))
         return out
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

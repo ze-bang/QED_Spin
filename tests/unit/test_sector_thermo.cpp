@@ -189,3 +189,58 @@ TEST_CASE("method_produces_sector_thermo: classifies the finite-T methods "
     REQUIRE_FALSE(method_produces_sector_thermo(DiagonalizationMethod::BLOCK_LANCZOS));
     REQUIRE_FALSE(method_produces_sector_thermo(DiagonalizationMethod::KRYLOV_SCHUR));
 }
+
+TEST_CASE("degeneracy-weighted recombination equals explicit duplication "
+          "(Stage 12f, SU(2) per-S thermal)",
+          "[sector_thermo]") {
+    // Two toy "towers" from a chain spectrum; tower B enters with
+    // degeneracy g = 3 (a spin-1 multiplet counted once per Sz). The
+    // g-weighted combiner must equal listing B three times explicitly,
+    // and equal the dense thermo of the union spectrum with B tripled.
+    const auto eigs = heisenberg_chain_spectrum(/*N=*/4);
+    const double T_min = 0.1, T_max = 10.0;
+    const std::uint64_t num_bins = 24;
+
+    auto parts = partition_spectrum(eigs, /*num_sectors=*/2);
+    const auto& A = parts.per_sector_eigs[0];
+    const auto& B = parts.per_sector_eigs[1];
+
+    const auto tA = calculate_thermodynamics_from_spectrum(A, T_min, T_max,
+                                                           num_bins);
+    const auto tB = calculate_thermodynamics_from_spectrum(B, T_min, T_max,
+                                                           num_bins);
+
+    const auto weighted = ed::core::combine_sector_thermodynamics(
+        {tA, tB}, {A.size(), B.size()}, /*degeneracy=*/{1.0, 3.0});
+    const auto duplicated = ed::core::combine_sector_thermodynamics(
+        {tA, tB, tB, tB}, {A.size(), B.size(), B.size(), B.size()});
+
+    // Dense reference: union with B included three times.
+    std::vector<double> uni = A;
+    for (int rep = 0; rep < 3; ++rep) uni.insert(uni.end(), B.begin(), B.end());
+    std::sort(uni.begin(), uni.end());
+    const auto ref = calculate_thermodynamics_from_spectrum(uni, T_min, T_max,
+                                                            num_bins);
+
+    for (std::size_t t = 0; t < num_bins; ++t) {
+        REQUIRE(std::abs(weighted.free_energy[t] - duplicated.free_energy[t])
+                < 1e-9);
+        REQUIRE(std::abs(weighted.energy[t] - duplicated.energy[t]) < 1e-9);
+        REQUIRE(std::abs(weighted.specific_heat[t]
+                         - duplicated.specific_heat[t]) < 1e-9);
+        REQUIRE(std::abs(weighted.free_energy[t] - ref.free_energy[t]) < 1e-6);
+        REQUIRE(std::abs(weighted.energy[t] - ref.energy[t]) < 1e-6);
+        REQUIRE(std::abs(weighted.specific_heat[t] - ref.specific_heat[t])
+                < 1e-5);
+        REQUIRE(std::abs(weighted.entropy[t] - ref.entropy[t]) < 1e-6);
+    }
+
+    // Guards.
+    REQUIRE_THROWS_AS(
+        ed::core::combine_sector_thermodynamics({tA, tB}, {1, 1}, {1.0}),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        ed::core::combine_sector_thermodynamics({tA, tB}, {1, 1},
+                                                {1.0, 0.0}),
+        std::invalid_argument);
+}

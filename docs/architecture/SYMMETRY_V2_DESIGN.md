@@ -392,9 +392,21 @@ sectors, max block 12 vs 36 spatial-only); thermal E(T) machine-exact
   mixed strings need the (−1)^{popcount(s&z)} phase added to
   `CompiledGroup` (one sign per element application). Highest-leverage
   future item: plaquette-flux models gain exponentially many sectors.
-* **SU(2) total-S** (Heisenberg points): genuine further reduction but
-  needs Clebsch–Gordan tower machinery orthogonal to everything here;
-  not planned.
+* **SU(2) total-S** (Heisenberg points): **BUILT — Stage 12 (Jul
+  2026)**, without any Clebsch–Gordan machinery (the earlier "needs CG
+  towers; not planned" assessment was superseded): S² is expressible
+  in the existing TermStorage ABI (all-pairs isotropic exchange + a
+  `diag(i,i)` identity shift), so a Lowdin polynomial in S² targets
+  and labels spin towers through the SAME per-sector matvec factories
+  H uses, composable with U(1)/momentum/flip/TR. Stages 12a–12f:
+  `operators/casimir.h`, `symmetry/su2.h`, `symmetry/su2_dims.h` +
+  `sector_dims_s_resolved`, `symmetry/casimir_projector.h` +
+  `SolveOptions::{two_total_spin,label_total_spin,seed_transform}`,
+  full-spectrum resolution by highest-weight spectral differencing
+  (Python), degeneracy-weighted thermo recombination. See
+  SYMMETRY.md §6.5 for the shipped design; remaining follow-ups:
+  sampling-thermal projected seeds (12f-b), little-group in-engine
+  targeting, ΔS-resolved DSSF (12g).
 * **Spectrum reflections** (bipartite E→−E sublattice rotations):
   niche; full_spectrum could halve; not planned.
 * **Little-group induced reps** (Stage 7): **done (Jul 2026)** — see
@@ -514,5 +526,6 @@ explicitly dispositioned:
   solve is exact.
 * **Assessed, not built** (unchanged priorities): general commuting
   Pauli-string sectors (plaquette / gauge fluxes — highest-leverage
-  next capability), SU(2) total-S towers, spectrum reflections, and
-  MPI support for the parity/flip lanes (mpi_size == 1 gated).
+  next capability), spectrum reflections, and MPI support for the
+  parity/flip lanes (mpi_size == 1 gated). *(SU(2) total-S towers
+  moved out of this list: built as Stage 12, Jul 2026 — see above.)*

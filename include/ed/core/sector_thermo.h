@@ -184,6 +184,44 @@ combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_therm
 }
 
 /**
+ * @brief Degeneracy-weighted recombination (Stage 12f, SU(2) rollout).
+ *
+ * ``Z = sum_s g_s * Z_s`` -- the per-S thermal formulation, where each
+ * spin-S tower is sampled once in its highest-weight sector and enters
+ * with multiplicity g_s = 2S + 1. Implemented by the exact identity
+ * ``g Z <=> F -> F - T ln g`` (with ``S -> S + ln g`` so the per-sector
+ * copies stay thermodynamically consistent) followed by the canonical
+ * shifted-F mixture above. Energies and specific heats are intensive to
+ * the g-scaling and pass through unchanged.
+ */
+inline ThermodynamicData
+combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_thermo,
+                              const std::vector<std::uint64_t>& sector_dims,
+                              const std::vector<double>& degeneracy) {
+    if (degeneracy.size() != sector_thermo.size()) {
+        throw std::invalid_argument(
+            "ed::core::combine_sector_thermodynamics: degeneracy.size() "
+            "must equal sector_thermo.size().");
+    }
+    std::vector<ThermodynamicData> weighted = sector_thermo;
+    for (std::size_t s = 0; s < weighted.size(); ++s) {
+        const double g = degeneracy[s];
+        if (!(g > 0.0)) {
+            throw std::invalid_argument(
+                "ed::core::combine_sector_thermodynamics: degeneracies "
+                "must be positive.");
+        }
+        const double ln_g = std::log(g);
+        for (std::size_t t = 0; t < weighted[s].temperatures.size(); ++t) {
+            const double T = weighted[s].temperatures[t];
+            weighted[s].free_energy[t] -= T * ln_g;
+            weighted[s].entropy[t]     += ln_g;
+        }
+    }
+    return combine_sector_thermodynamics(weighted, sector_dims);
+}
+
+/**
  * @brief Decide whether ``method`` should trigger sector thermodynamics
  *        recombination in the streaming-symmetry kernel.
  *

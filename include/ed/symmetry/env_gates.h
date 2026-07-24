@@ -98,7 +98,15 @@ namespace ed::symmetry {
     X("ED_SYM_SKIP_COMMUTE_CHECK", "0  [read in Python]",                      \
       "=1 skips the [H,U_g]=0 validation of explicit generators")              \
     X("ED_SYM_NO_DETECT_MEMO", "0  [read in Python]",                          \
-      "=1 disables the find_symmetries content memo")
+      "=1 disables the find_symmetries content memo")                          \
+    X("ED_SYM_SU2", "1  [also read in Python labeling]",                       \
+      "=0 vetoes the SU(2) total-spin axis (Stage 12: detection-driven "      \
+      "labels, Lowdin targeting, full-spectrum S-resolution)")                 \
+    X("ED_SYM_SU2_REPROJECT_FREQ", "1",                                        \
+      "Lowdin drift-scrub cadence for total-spin targeting: project every "   \
+      "k-th wrapped apply (0 = seed only -- ghost eigenvalues converge in "   \
+      "~30 unscrubbed iterations under local reorth; raise above 1 only "     \
+      "for drift-benign spectra)")
 
 /// Render every symmetry gate with its LIVE value (or "(unset)"), default,
 /// and meaning -- one call to paste into a bug report. Bound to Python as

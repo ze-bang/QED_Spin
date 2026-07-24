@@ -852,8 +852,7 @@ empty-chain identity orbit).
 |---------------------------------------|----------------|-----------------|
 | Spin-flip Z_2 (S → −S)                | full body for `InternalZ2Projector::apply / character` + `automorphism_results/internal_symmetries.json` loader | none — push onto chain |
 | Time reversal (antiunitary)            | full body for `AntiunitaryProjector` + a single `if constexpr` in `compute_orbit_for_state` for character conjugation | none |
-| SU(2) total-S (Route A — Casimir)     | new `FixedS2Subspace` with `index_of` that runs a Casimir polynomial; matvec ABI unchanged | none |
-| SU(2) total-S (Route B — coupled)     | new `CoupledSubspace` that enumerates Clebsch-Gordan coupled states; matvec unchanged but `state_of` / `index_of` interpret the basis differently | none |
+| SU(2) total-S — **BUILT, Stage 12 (Jul 2026)** | operator-level Route A: `operators/casimir.h` (S² in the term ABI) + `symmetry/casimir_projector.h` (Lowdin) + `symmetry/su2.h` (detector) + `symmetry/su2_dims.h` (highest-weight dims); see §6.5 | none — S² rides the existing term kernels in every basis |
 | Particle-hole (fermionic)             | another `InternalZ2Projector` with a different bitwise op | none |
 
 In every case the *operator class* surface is untouched — the
@@ -864,27 +863,81 @@ That is the central architectural payoff of the (Subspace,
 ProjectorChain) decomposition: matvec is a closed problem; the
 symmetry math is open-ended.
 
-### 6.5. SU(2) and non-abelianness
+### 6.5. SU(2) total spin — BUILT (Stage 12, Jul 2026)
 
-The user-facing question is "where does the non-abelianness come
-from?" — `[S_x, S_y] = i S_z`, so the joint eigenspaces of `S^2`
-and `S_z` are **not** spanned by single computational basis states.
-Two routes that both reuse the (Subspace, Chain) seam:
+The non-abelianness question — `[S_x, S_y] = i S_z`, so the joint
+eigenspaces of `S^2` and `S_z` are **not** spanned by single
+computational basis states — means SU(2) is *not* a Subspace at all:
+there is nothing for an `index_of` to filter (the old "Route A =
+`FixedS2Subspace` with a Casimir `index_of`" sketch here was the wrong
+shape). What shipped is **operator-level Route A**, built on one
+identity:
 
-* **Route A (Casimir polynomial filter).** Implement
-  `FixedS2Subspace`: enumerate fixed-Sz states, then `index_of(s)`
-  returns "in" iff the state's projection onto the target-S
-  Casimir polynomial is non-zero. Matvec stays scalar; each `apply`
-  pays for one polynomial-in-`S^2` application per term. Cheap to
-  implement (one new Subspace specialisation), expensive at
-  runtime. Useful for small-N verification.
-* **Route B (coupled basis).** Implement `CoupledSubspace`:
-  enumerate Clebsch-Gordan coupled states of total-S = s
-  explicitly. The basis SHRINKS (typically by `dim_S /
-  C(N, N/2)`), matvec gets cheaper, host-side basis construction
-  is recursive CG coupling. Heavy to implement, fast at runtime.
+> `S²_tot = 3N/4·Id + Σ_{i<j} [2 Sz_iSz_j + S⁺_iS⁻_j + S⁻_iS⁺_j]`
+> is expressible in the EXISTING TermStorage ABI — the `3N/4·Id` shift
+> via `diag_two_body(i,i,3.0)` (the gate math evaluates `spin_sq·(±1)²
+> = 1/4` per state, identically on CPU and GPU). Since `[S², g] = 0`
+> for every site permutation, flip mask, and Sz, the SAME per-sector
+> factories that restrict H restrict S²: `make_rep_sector_matvec(S²
+> carrier, RepSectorData)` for any momentum/irrep/flip block, a FixedSz
+> twin for magnetisation blocks. Composability with every other
+> symmetry is automatic at the operator level.
 
-Either way, you don't touch the operator hierarchy.
+Pieces (all Stage 12, `two_S = 2S` doubled-int convention throughout):
+
+* **`operators/casimir.h`** — `append_S2_total` / `make_S2_carrier`,
+  `s2_expectation` (+ certification residual; labels are only snapped
+  when `‖S²v − S(S+1)v‖/‖v‖ ≤ 1e-8`), `snap_two_S` (allowed-set-aware:
+  N-parity, `S ≥ |Sz|` floor, flip-parity mask via
+  `X|S,m=0⟩ = (−1)^{N/2−S}|S,m=0⟩`).
+* **`symmetry/su2.h`** — term-level `[H, S_tot] = 0` detector
+  (per-bond isotropy `c(+−) = c(−+) = c(zz)/2`; fields / DM / 3-body
+  reject conservatively). `detect_hamiltonian_symmetries` reports
+  `su2`; algebra containment `su2 ⇒ U1 ∧ flip ∧ TR` is test-pinned.
+* **`symmetry/casimir_projector.h`** — the Lowdin projector
+  `P_S = Π_{S'≠S} (S² − S'(S'+1))/(S(S+1) − S'(S'+1))`
+  (farthest-eigenvalue-first numerators, per-factor renormalisation,
+  exact log-space multiplier restore) + `CasimirProjectedOperator`
+  (Krylov targeting: seed projected through
+  `SolveOptions::seed_transform`, drift scrubbed every
+  `ED_SYM_SU2_REPROJECT_FREQ`-th apply — default 1, because under
+  bounded reorthogonalisation an off-tower roundoff component
+  amplifies into a fully-converged ghost within ~30 iterations).
+* **`symmetry/su2_dims.h`** + `detail::sector_dims_s_resolved`
+  (make_operator.h) — exact S-resolved per-(irrep) dims by
+  highest-weight Burnside differencing:
+  `dim(sector, S) = dim(sector, Sz=S) − dim(sector, Sz=S+1)`; drives
+  the MPI sector balance under targeting and the dimension oracles.
+* **Full-spectrum S-resolution** (Python,
+  `workflow._su2_label_blocks`) — the same highest-weight idea applied
+  to SPECTRA: `tower(S) = spectrum(|2Sz|=2S) ∖ spectrum(|2Sz|=2S+2)`
+  as exact multiset differences; every level of every block then tiles
+  into towers. No vectors, no dense S² blocks; works identically on
+  the little-group and abelian full-spectrum lanes.
+* **Thermal per-S foundation** —
+  `combine_sector_thermodynamics(…, degeneracy)` implements
+  `Z = Σ_S (2S+1) Z_S` via `g·Z ⇔ F → F − T·ln g` (duplication
+  equivalence test-pinned). The sampling seed hook (project FTLM/mTPQ
+  seeds by `P_S` at the highest-weight sector + pass the S-resolved
+  dim as the kernels' `hilbert_dim`) is the specified follow-up.
+
+User surface: `qed.solve(total_spin="auto"|"off"|"require"|S)` /
+`qed.full_spectrum(total_spin=…)`, `EDResults.spin` / `.s2`,
+`SectorTag.two_S`, `GroundStateResult.{s2,two_S}_of_eigenvalue`.
+Targeting rides the abelian rep lane (`point_group='full'` + numeric
+`total_spin` raises); labeling needs vectors on iterative lanes and is
+exact-by-differencing on full-spectrum sweeps.
+
+Cost model: one S² matvec ≈ `(N/2z)`× a short-range H matvec
+(~1.5 N² pair terms); one Lowdin application ≈ `degree` S² matvecs
+with `degree ≤ N/2 − |Sz|` (halved again in a flip block). This is why
+labeling and full-spectrum resolution are on under `"auto"` while
+iterative targeting is opt-in.
+
+Route B (Clebsch–Gordan coupled basis) remains unbuilt and
+deliberately so: it would fork the bit-based kernel ABI and cannot
+compose with the monomial spatial engine. The operator hierarchy is
+untouched either way.
 
 ### 6.6. The operator collapse (Jun 2026): one template
 
