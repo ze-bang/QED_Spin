@@ -54,17 +54,22 @@ def build_probes(dim1, dim2, pos, b1, b2, N):
     dropped here (it is exactly n_up on the fixed-Sz sector and added back
     analytically in post): S^{+-}(q) = <GS|O_q|GS>/N + n_up/N.
     """
+    # REAL cosine coefficients: S^{+-}(q)=S^{+-}(-q) (Hermitian, inversion-
+    # symmetric), so cos(q.(r_i-r_j)) = (1/2)(e^{iq..}+e^{-iq..}) gives the
+    # SAME expectation as the complex phase but a REAL operator. This matters
+    # because the GPU rep-gather matvec assumes real coefficients (the BFG H
+    # is real) and silently drops the imaginary part of a complex probe.
     q_list = [(m1, m2) for m1 in range(dim1) for m2 in range(dim2)]
     obs, q_carts = [], []
     for (m1, m2) in q_list:
         q = (m1 / dim1) * b1 + (m2 / dim2) * b2
-        phase = np.exp(1j * (pos @ q))          # e^{i q . r_i}
+        phr = pos @ q                            # q . r_i
         op = _core.Operator(N, 0.5)
         for i in range(N):
             for j in range(N):
                 if i == j:
                     continue
-                c = phase[i] * np.conj(phase[j])   # e^{iq(r_i - r_j)}
+                c = np.cos(phr[i] - phr[j])       # cos(q.(r_i - r_j))
                 op.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, complex(c))
         obs.append(op); q_carts.append(q)
     return q_list, obs, q_carts
