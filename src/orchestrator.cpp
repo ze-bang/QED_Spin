@@ -361,6 +361,22 @@ GroundStateResult solve_on(Backend& be,
         const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
         for (auto& z : seed_host) z *= inv;
     }
+    // Stage 12 (SU(2) rollout): caller-supplied seed transform (e.g. the
+    // Lowdin total-spin projection). Applied on the host copy before
+    // staging; the transform is responsible for leaving a usable
+    // (normalisable) vector or throwing.
+    if (opts.seed_transform) {
+        opts.seed_transform(seed_host.data(), seed_host.size());
+        double sumsq = 0.0;
+        for (const auto& z : seed_host) sumsq += std::norm(z);
+        if (!(sumsq > 0.0)) {
+            throw std::runtime_error(
+                "ed::solve: seed_transform produced a zero seed (the "
+                "targeted symmetry sector has no weight in this block)");
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : seed_host) z *= inv;
+    }
     auto seed_backend = be.make_zero_vector(geom.local_dim);
     be.copy_from_host(seed_host.data(), seed_backend.get(), geom.local_dim);
     const Complex* seed = seed_backend.get();
@@ -397,6 +413,7 @@ GroundStateResult solve_on(Backend& be,
             if (!force_complex
                     && opts.num_eigs == 1
                     && !opts.compute_vectors
+                    && !opts.seed_transform  // draws its own seed internally
                     && H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
                 std::vector<double> eigs;

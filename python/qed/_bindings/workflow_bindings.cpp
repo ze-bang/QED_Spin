@@ -42,6 +42,10 @@
 #include <ed/observables/cf_spectral_kernel.h>      // cf_spectral_from_vector
 #include <ed/observables/ftlm_cross_irrep_kernel.h>  // SOTA finite-T cross-irrep
 #include <ed/orchestrator.h>
+#include <ed/operators/casimir.h>                    // Stage 12: S^2 carrier + labels
+#include <ed/symmetry/casimir_projector.h>           // Stage 12: Lowdin targeting
+#include <ed/symmetry/su2.h>                         // Stage 12: SU(2) detection
+#include <ed/solvers/little_group_solve.h>           // make_rep_sector_matvec
 #include <ed/solvers/kpm_dos.h>                      // Wave B3: estimate_spectral_bounds
 
 #include <algorithm>
@@ -393,6 +397,142 @@ inline bool will_use_full_diag(const ed::LinearOperator& op,
     return geom.global_dim <= (1ULL << 12);
 }
 
+// -----------------------------------------------------------------------
+// Stage 12 (SU(2) rollout) shared helpers.
+// -----------------------------------------------------------------------
+
+/// Term-level SU(2) detection on an in-memory carrier operator.
+inline bool op_is_su2_symmetric(const Operator& op) {
+    ed::matvec::TermStorage soa;
+    ed::matvec::TermStorage::classify_route(
+        soa, op.transform_data_, op.three_body_data_,
+        [](const std::complex<double>& c) { return c; });
+    return ed::symmetry::hamiltonian_is_su2_symmetric(soa);
+}
+
+/// Resolve the su2 engagement for a solve call: returns true when the
+/// SU(2) machinery (targeting / labeling) should run. Throws when a
+/// hard request (targeting, or label_total_spin == 1) cannot be met.
+inline bool resolve_su2_engagement(const Operator& base,
+                                   int two_total_spin,
+                                   int label_total_spin,
+                                   const char* where) {
+    const bool wanted = (two_total_spin >= 0) || (label_total_spin != 0);
+    if (!wanted) return false;
+    if (!ed::symmetry::su2_enabled()) {
+        if (two_total_spin >= 0 || label_total_spin == 1) {
+            throw std::runtime_error(
+                std::string(where) +
+                ": total_spin requested but the SU(2) axis is vetoed by "
+                "ED_SYM_SU2=0");
+        }
+        return false;
+    }
+    const bool su2 = op_is_su2_symmetric(base);
+    if (!su2 && (two_total_spin >= 0 || label_total_spin == 1)) {
+        throw std::runtime_error(
+            std::string(where) +
+            ": total_spin requires an SU(2)-invariant Hamiltonian "
+            "(isotropic exchange, no fields / DM / anisotropy); the "
+            "term-level [H, S_tot] check failed");
+    }
+    return su2;
+}
+
+/// S^2 restricted to the SAME basis as `op` (dynamic-type probe):
+/// FixedSzOperator -> a FixedSz twin sharing n_up; plain Operator ->
+/// the full-space carrier. Symmetry sectors go through
+/// `make_rep_sector_matvec` instead (rep-basis restriction).
+inline std::shared_ptr<const ed::matvec::MatVecOperator>
+make_s2_like(const Operator& op) {
+    const std::uint64_t n = op.getNumBits();
+    if (const auto* fsz = dynamic_cast<const FixedSzOperator*>(&op)) {
+        auto s2 = std::make_shared<FixedSzOperator>(
+            n, 0.5f, fsz->producer().n_up());
+        s2->copyTermsFrom(*ed::ops::make_S2_carrier(n));
+        return s2;
+    }
+    return ed::ops::make_S2_carrier(n);
+}
+
+/// Label a batch of host eigenvectors with certified two_S / raw <S^2>.
+/// Appends one entry per vector to the result arrays (two_S = -1 when
+/// certification fails).
+inline void label_vectors_with_s2(
+    const ed::matvec::MatVecOperator& s2,
+    const std::vector<std::vector<Complex>>& vecs,
+    int n_sites, int n_up, int flip_parity,
+    std::vector<double>& s2_out, std::vector<int>& two_S_out) {
+    for (const auto& v : vecs) {
+        if (v.size() != s2.dim()) {
+            s2_out.push_back(-1.0);
+            two_S_out.push_back(-1);
+            continue;
+        }
+        double res = 0.0;
+        const double s2_exp =
+            ed::ops::s2_expectation(s2, v.data(), v.size(), &res);
+        s2_out.push_back(s2_exp);
+        two_S_out.push_back(
+            res <= ed::ops::kS2CertifyTol
+                ? ed::ops::snap_two_S(s2_exp, n_sites, n_up, flip_parity)
+                : -1);
+    }
+}
+
+/// Build the Lowdin projector + wrapped operator for one solve block.
+/// Returns {wrapped_operator, projector}; the caller installs
+/// ``seed_transform`` from the projector and solves the wrapper.
+struct Su2Targeting {
+    std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> wrapped;
+    std::shared_ptr<const ed::symmetry::LowdinS2Projector>        projector;
+};
+inline Su2Targeting make_su2_targeting(
+    std::shared_ptr<const ed::matvec::MatVecOperator> h,
+    std::shared_ptr<const ed::matvec::MatVecOperator> s2,
+    int n_sites, int n_up, int two_total_spin) {
+    // The full-Sz tower set stays EXACT inside flip/parity refinements:
+    // factors for absent towers multiply in-tower components by 1.
+    const auto towers =
+        ed::symmetry::allowed_two_S_in_block(n_sites, n_up);
+    if (std::find(towers.begin(), towers.end(), two_total_spin)
+        == towers.end()) {
+        return {};  // tower not admissible in this block: skip it
+    }
+    auto proj = std::make_shared<const ed::symmetry::LowdinS2Projector>(
+        std::move(s2), two_total_spin, towers);
+    auto wrapped =
+        std::make_shared<const ed::symmetry::CasimirProjectedOperator>(
+            std::move(h), proj);
+    return {std::move(wrapped), std::move(proj)};
+}
+
+/// Shared solve-one-block routine for the SU(2) targeting lane: installs
+/// the projected seed, forces the Krylov lane (FullDiag has no seed and
+/// would return every tower), and maps the "zero seed" refusal (empty
+/// tower in this block) to an empty result.
+inline ed::GroundStateResult solve_su2_targeted(
+    const ed::symmetry::CasimirProjectedOperator& wrapped,
+    const std::shared_ptr<const ed::symmetry::LowdinS2Projector>& proj,
+    ed::workflows::SolveOptions sopts) {
+    if (will_use_full_diag(wrapped, sopts)) {
+        sopts.method = ed::workflows::SolveMethod::Lanczos;
+    }
+    sopts.seed_transform = [proj](Complex* v, std::size_t n) {
+        proj->project_normalized(v, n);
+    };
+    try {
+        return ed::workflows::solve(
+            static_cast<const ed::LinearOperator&>(wrapped),
+            std::move(sopts));
+    } catch (const std::runtime_error& e) {
+        if (std::string(e.what()).find("zero seed") != std::string::npos) {
+            return {};  // no weight in the tower: empty block
+        }
+        throw;
+    }
+}
+
 /// The thermal lane has uneven GPU coverage:
 ///   * FTLM         : CPU only (orchestrator throws on CUDA).
 ///   * LTLM, KpmDos : CPU or CUDA.
@@ -731,7 +871,12 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::SolveOptions::precompute_basis_only)
         // SOTA streaming-symmetry filter (May 2026).
         .def_readwrite("selected_sectors",
-                       &ed::workflows::SolveOptions::selected_sectors);
+                       &ed::workflows::SolveOptions::selected_sectors)
+        // Stage 12 (SU(2) rollout): total-spin axis.
+        .def_readwrite("two_total_spin",
+                       &ed::workflows::SolveOptions::two_total_spin)
+        .def_readwrite("label_total_spin",
+                       &ed::workflows::SolveOptions::label_total_spin);
 
     py::class_<ed::BackendMetadata>(m, "BackendMetadata")
         .def(py::init<>())
@@ -764,6 +909,7 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("sector_dim",      &ed::SectorTag::sector_dim)
         .def_readwrite("quantum_numbers", &ed::SectorTag::quantum_numbers)
         .def_readwrite("n_up",            &ed::SectorTag::n_up)
+        .def_readwrite("two_S",           &ed::SectorTag::two_S)
         .def("__repr__", [](const ed::SectorTag& t) {
             std::string s = "SectorTag(index=" + std::to_string(t.sector_index)
                           + ", dim=" + std::to_string(t.sector_dim);
@@ -776,6 +922,7 @@ void bind_workflows(py::module_& m) {
                 s += "]";
             }
             if (t.n_up >= 0) s += ", n_up=" + std::to_string(t.n_up);
+            if (t.two_S >= 0) s += ", 2S=" + std::to_string(t.two_S);
             s += ")";
             return s;
         });
@@ -793,7 +940,13 @@ void bind_workflows(py::module_& m) {
         .def_readonly("eigenvalues_per_sector",
                       &ed::GroundStateResult::eigenvalues_per_sector)
         .def_readonly("sector_index_of_eigenvalue",
-                      &ed::GroundStateResult::sector_index_of_eigenvalue);
+                      &ed::GroundStateResult::sector_index_of_eigenvalue)
+        // Stage 12 (SU(2) rollout): total-spin labels, parallel to
+        // ``eigenvalues`` when present.
+        .def_readonly("s2_of_eigenvalue",
+                      &ed::GroundStateResult::s2_of_eigenvalue)
+        .def_readonly("two_S_of_eigenvalue",
+                      &ed::GroundStateResult::two_S_of_eigenvalue);
 
     // -----------------------------------------------------------------
     // ThermalOptions / ThermalResult.
@@ -1020,6 +1173,10 @@ void bind_workflows(py::module_& m) {
               out["u1"] = (ax == ed::symmetry::SzAxis::U1);
               out["sz_parity"] =
                   (ax != ed::symmetry::SzAxis::None);  // U1 implies parity
+              // Stage 12 (SU(2) rollout): full spin-rotation invariance
+              // (per-bond isotropic exchange, no fields / DM / 3-body).
+              out["su2"] =
+                  ed::symmetry::hamiltonian_is_su2_symmetric(soa);
               return out;
           },
           py::arg("op"),
@@ -1082,6 +1239,45 @@ void bind_workflows(py::module_& m) {
 
     m.def("workflows_solve",
           [](Operator& op, ed::workflows::SolveOptions opts) {
+              // Stage 12 (SU(2) rollout): total-spin axis for the plain /
+              // fixed-Sz lanes. Targeting wraps the operator in the Lowdin
+              // projector (Krylov lane, projected seed); auto labeling
+              // fills certified two_S when eigenvectors come back.
+              const bool su2_on = resolve_su2_engagement(
+                  op, opts.two_total_spin, opts.label_total_spin,
+                  "qed.solve");
+              int su2_n_up = -1;
+              if (su2_on) {
+                  if (const auto* fsz =
+                          dynamic_cast<const FixedSzOperator*>(&op)) {
+                      su2_n_up = static_cast<int>(fsz->producer().n_up());
+                  }
+              }
+              if (su2_on && opts.two_total_spin >= 0) {
+                  const int two_S = opts.two_total_spin;
+                  // Non-owning alias: the Python caller owns `op` for the
+                  // duration of the call.
+                  std::shared_ptr<const ed::matvec::MatVecOperator> h(
+                      &op, [](const ed::matvec::MatVecOperator*) {});
+                  auto t = make_su2_targeting(
+                      h, make_s2_like(op),
+                      static_cast<int>(op.getNumBits()), su2_n_up, two_S);
+                  if (!t.wrapped) {
+                      return ed::GroundStateResult{};  // inadmissible tower
+                  }
+                  ed::GroundStateResult res;
+                  {
+                      py::gil_scoped_release release;
+                      res = solve_su2_targeted(*t.wrapped, t.projector,
+                                               std::move(opts));
+                  }
+                  res.s2_of_eigenvalue.assign(
+                      res.eigenvalues.size(),
+                      ed::ops::s2_eigenvalue_of_two_S(two_S));
+                  res.two_S_of_eigenvalue.assign(res.eigenvalues.size(),
+                                                 two_S);
+                  return res;
+              }
               // GPU lane (operator-collapse Phase 2a): the host Operator /
               // FixedSzOperator advertise ``supports_device_matvec`` and
               // ``bind_cuda()`` builds a CudaMatVecBackend device mirror, so
@@ -1098,8 +1294,18 @@ void bind_workflows(py::module_& m) {
                       "qed.solve (FullDiag)", opts.backend);
                   opts.backend.allow_gpu = false;
               }
-              return ed::workflows::solve(
+              auto res = ed::workflows::solve(
                   static_cast<const ed::LinearOperator&>(op), std::move(opts));
+              if (su2_on && res.eigenvectors
+                  && !res.eigenvectors->host.empty()) {
+                  auto s2 = make_s2_like(op);
+                  label_vectors_with_s2(
+                      *s2, res.eigenvectors->host,
+                      static_cast<int>(op.getNumBits()), su2_n_up,
+                      /*flip_parity=*/-1,
+                      res.s2_of_eigenvalue, res.two_S_of_eigenvalue);
+              }
+              return res;
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::SolveOptions{},
@@ -1240,6 +1446,21 @@ void bind_workflows(py::module_& m) {
                       load_directory_probe(spec, directory);
                   ed::symmetry::SymmetryComposition comp =
                       resolve_comp_with_stars(probe, opts);
+                  // Stage 12 (SU(2) rollout): engagement + ONE carrier for
+                  // every sector. Targeting (two_total_spin >= 0) wraps each
+                  // sector matvec in the Lowdin projector and projects the
+                  // Krylov seed; labeling fills certified two_S per
+                  // eigenvalue when eigenvectors are available.
+                  const bool su2_on = resolve_su2_engagement(
+                      *probe.base, opts.two_total_spin,
+                      opts.label_total_spin, "qed.solve[symmetry]");
+                  const bool su2_target =
+                      su2_on && opts.two_total_spin >= 0;
+                  std::shared_ptr<::Operator> s2_carrier =
+                      su2_on ? ed::ops::make_S2_carrier(num_sites)
+                             : nullptr;
+                  spec.two_total_spin =
+                      su2_target ? opts.two_total_spin : -1;
                   // Requested n_up before any transport re-target; -1 when
                   // the fixed-Sz axis is off. Used to restore the caller's
                   // n_up on the emitted sector tags.
@@ -1350,6 +1571,12 @@ void bind_workflows(py::module_& m) {
                   std::vector<std::size_t>             touched_idx;
                   std::vector<ed::SectorTag>           touched_tags;
                   std::vector<std::vector<double>>     eigs_per_sector;
+                  // Stage 12: per-sector label arrays parallel to
+                  // ``eigs_per_sector`` (placeholders -1 / NaN where a
+                  // vector was unavailable or failed certification).
+                  const bool su2_label_arrays = su2_on;
+                  std::vector<std::vector<double>>     s2_per_sector;
+                  std::vector<std::vector<int>>        twoS_per_sector;
 
                   // -----------------------------------------------------
                   // Wave B1 (May 2026): GS two-phase irrep search.
@@ -1374,7 +1601,11 @@ void bind_workflows(py::module_& m) {
                   const bool enable_two_phase =
                       sector_indices.size() > 2
                       && target_num_eigs < 8
-                      && !opts.precompute_basis_only;
+                      && !opts.precompute_basis_only
+                      // Stage 12: the phase-1 scan solves the UNPROJECTED
+                      // sector and would prune by the wrong (all-tower)
+                      // minima under total-spin targeting.
+                      && !su2_target;
                   std::vector<std::size_t> phase2_sector_indices;
 
                   // Wave C3 (May 2026): opt-in OpenMP parallelism over
@@ -1537,8 +1768,48 @@ void bind_workflows(py::module_& m) {
                               sopts.output_dir = opts.output_dir
                                   + "/sector_k_" + std::to_string(k);
                           }
-                          solve_results_p2[static_cast<std::size_t>(ii)] =
-                              ed::workflows::solve(*sec, sopts);
+                          if (su2_target) {
+                              // Stage 12d: solve the spin-S tower of this
+                              // sector through the Lowdin-wrapped matvec.
+                              // S^2 rides the SAME rep-sector data as H
+                              // ([S^2, g] = 0 for every group element).
+                              const auto& rd =
+                                  sec->producer().ensureRepData();
+                              if (!rd.usable()) {
+                                  throw std::runtime_error(
+                                      "qed.solve[symmetry]: total_spin "
+                                      "targeting needs the rep-sector "
+                                      "lane (sector " + std::to_string(k)
+                                      + " has no usable rep data)");
+                              }
+                              std::shared_ptr<const
+                                  ed::matvec::MatVecOperator> s2_mv(
+                                  ed::solvers::make_rep_sector_matvec(
+                                      *s2_carrier, rd));
+                              // Non-owning alias: `handle` outlives the
+                              // sector loop.
+                              std::shared_ptr<const
+                                  ed::matvec::MatVecOperator> h_alias(
+                                  sec,
+                                  [](const ed::matvec::MatVecOperator*) {});
+                              auto t = make_su2_targeting(
+                                  std::move(h_alias),
+                                  std::move(s2_mv),
+                                  static_cast<int>(num_sites),
+                                  handle.sector_tag(k).n_up,
+                                  opts.two_total_spin);
+                              if (t.wrapped) {
+                                  solve_results_p2[
+                                      static_cast<std::size_t>(ii)] =
+                                      solve_su2_targeted(*t.wrapped,
+                                                         t.projector,
+                                                         sopts);
+                              }
+                              // inadmissible tower: leave the empty result
+                          } else {
+                              solve_results_p2[static_cast<std::size_t>(ii)] =
+                                  ed::workflows::solve(*sec, sopts);
+                          }
                       } catch (...) {
                           #pragma omp critical(sector_solve_err_latch)
                           {
@@ -1568,6 +1839,33 @@ void bind_workflows(py::module_& m) {
                       }
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(k));
+                      if (su2_target) {
+                          touched_tags.back().two_S = opts.two_total_spin;
+                      }
+                      // Stage 12a: post-hoc <S^2> labeling when the sector
+                      // returned host eigenvectors (auto/require toggle).
+                      // Under targeting the label is known by construction.
+                      if (su2_label_arrays && !su2_target
+                          && opts.label_total_spin != 0
+                          && sr.eigenvectors
+                          && !sr.eigenvectors->host.empty()) {
+                          const auto& rd = sec->producer().ensureRepData();
+                          if (rd.usable()) {
+                              std::shared_ptr<const
+                                  ed::matvec::MatVecOperator> s2_mv(
+                                  ed::solvers::make_rep_sector_matvec(
+                                      *s2_carrier, rd));
+                              sr.s2_of_eigenvalue.clear();
+                              sr.two_S_of_eigenvalue.clear();
+                              label_vectors_with_s2(
+                                  *s2_mv, sr.eigenvectors->host,
+                                  static_cast<int>(num_sites),
+                                  handle.sector_tag(k).n_up,
+                                  /*flip_parity=*/-1,
+                                  sr.s2_of_eigenvalue,
+                                  sr.two_S_of_eigenvalue);
+                          }
+                      }
                       // GAP-10 v2: the MERGED window is where an
                       // uncertified interior Ritz value does damage
                       // (a stalled value from one sector can shadow
@@ -1578,16 +1876,40 @@ void bind_workflows(py::module_& m) {
                       // checker). Direct single-operator calls keep
                       // their full num_eigs window + diagnostics.
                       std::vector<double> kept;
+                      std::vector<double> kept_s2;
+                      std::vector<int>    kept_twoS;
                       kept.reserve(sr.eigenvalues.size());
                       const auto& rb = sr.krylov.ritz_residuals;
+                      const double s2_target_val =
+                          su2_target ? ed::ops::s2_eigenvalue_of_two_S(
+                                           opts.two_total_spin)
+                                     : std::numeric_limits<double>::quiet_NaN();
                       for (std::size_t vi = 0;
                            vi < sr.eigenvalues.size(); ++vi) {
                           if (vi > 0 && vi < rb.size()
                               && rb[vi] > 1e-6)
                               continue;
                           kept.push_back(sr.eigenvalues[vi]);
+                          if (su2_label_arrays) {
+                              if (su2_target) {
+                                  kept_s2.push_back(s2_target_val);
+                                  kept_twoS.push_back(opts.two_total_spin);
+                              } else if (vi < sr.two_S_of_eigenvalue.size()) {
+                                  kept_s2.push_back(sr.s2_of_eigenvalue[vi]);
+                                  kept_twoS.push_back(
+                                      sr.two_S_of_eigenvalue[vi]);
+                              } else {
+                                  kept_s2.push_back(
+                                      std::numeric_limits<double>::quiet_NaN());
+                                  kept_twoS.push_back(-1);
+                              }
+                          }
                       }
                       eigs_per_sector.push_back(kept);
+                      if (su2_label_arrays) {
+                          s2_per_sector.push_back(std::move(kept_s2));
+                          twoS_per_sector.push_back(std::move(kept_twoS));
+                      }
                       all_eigs.insert(all_eigs.end(),
                                       kept.begin(), kept.end());
                       if (need_per_sector_outdir && !sr.hdf5_path.empty()) {
@@ -1614,9 +1936,19 @@ void bind_workflows(py::module_& m) {
                       std::vector<double> copy_eigs = eigs_per_sector[src_slot];
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(skipped_k));
+                      if (su2_target) {
+                          touched_tags.back().two_S = opts.two_total_spin;
+                      }
                       all_eigs.insert(all_eigs.end(),
                                       copy_eigs.begin(), copy_eigs.end());
                       eigs_per_sector.push_back(std::move(copy_eigs));
+                      // Stage 12: S is basis-independent, so labels copy
+                      // verbatim under the k <-> -k fold.
+                      if (su2_label_arrays) {
+                          s2_per_sector.push_back(s2_per_sector[src_slot]);
+                          twoS_per_sector.push_back(
+                              twoS_per_sector[src_slot]);
+                      }
                   }
 
                   // Stage 8c: when spin-flip transport re-targeted the
@@ -1658,16 +1990,60 @@ void bind_workflows(py::module_& m) {
                       sorted_eigs[i]   = all_eigs[perm[i]];
                       sorted_origin[i] = origin[perm[i]];
                   }
+                  // Stage 12: flatten the per-sector label arrays in the
+                  // same per-sector order all_eigs used, then apply the
+                  // same sort permutation so the labels stay parallel to
+                  // the merged eigenvalue list.
+                  std::vector<double> sorted_s2;
+                  std::vector<int>    sorted_twoS;
+                  if (su2_label_arrays) {
+                      std::vector<double> flat_s2;
+                      std::vector<int>    flat_twoS;
+                      flat_s2.reserve(all_eigs.size());
+                      flat_twoS.reserve(all_eigs.size());
+                      for (std::size_t s = 0; s < s2_per_sector.size();
+                           ++s) {
+                          flat_s2.insert(flat_s2.end(),
+                                         s2_per_sector[s].begin(),
+                                         s2_per_sector[s].end());
+                          flat_twoS.insert(flat_twoS.end(),
+                                           twoS_per_sector[s].begin(),
+                                           twoS_per_sector[s].end());
+                      }
+                      if (flat_s2.size() == all_eigs.size()) {
+                          sorted_s2.resize(all_eigs.size());
+                          sorted_twoS.resize(all_eigs.size());
+                          for (std::size_t i = 0; i < perm.size(); ++i) {
+                              sorted_s2[i]   = flat_s2[perm[i]];
+                              sorted_twoS[i] = flat_twoS[perm[i]];
+                          }
+                      }
+                  }
                   if (opts.num_eigs > 0
                       && sorted_eigs.size() > opts.num_eigs) {
                       sorted_eigs.resize(opts.num_eigs);
                       sorted_origin.resize(opts.num_eigs);
+                      if (!sorted_s2.empty()) {
+                          sorted_s2.resize(opts.num_eigs);
+                          sorted_twoS.resize(opts.num_eigs);
+                      }
                   }
 
                   agg.eigenvalues                = std::move(sorted_eigs);
                   agg.sector_tags                = std::move(touched_tags);
                   agg.eigenvalues_per_sector     = std::move(eigs_per_sector);
                   agg.sector_index_of_eigenvalue = std::move(sorted_origin);
+                  // Attach the label arrays only when something was
+                  // actually labeled (targeting counts); an auto run
+                  // with no eigenvectors leaves them empty rather than
+                  // all-placeholder.
+                  const bool any_label = su2_target
+                      || std::any_of(sorted_twoS.begin(), sorted_twoS.end(),
+                                     [](int t) { return t >= 0; });
+                  if (any_label) {
+                      agg.s2_of_eigenvalue    = std::move(sorted_s2);
+                      agg.two_S_of_eigenvalue = std::move(sorted_twoS);
+                  }
                   // Surface the parent ``output_dir`` on the aggregate
                   // when at least one sector wrote a real HDF5 file --
                   // mirrors the thermal binding's contract.

@@ -899,6 +899,14 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_little_group_blocks        tests/unit/test_little_group_blocks.cpp USE_CATCH2)
     # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
+    # Stage-12a SU(2) rollout: S^2 Casimir in the TermStorage schema + labeling
+    ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp USE_CATCH2)
+    # Stage-12b SU(2) rollout: term-level [H, S_tot] = 0 detector
+    ed_add_test(test_su2_detect                 tests/unit/test_su2_detect.cpp USE_CATCH2)
+    # Stage-12c SU(2) rollout: S-resolved dims (highest-weight Burnside differencing)
+    ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp USE_CATCH2)
+    # Stage-12d SU(2) rollout: Lowdin total-spin projector + targeting wrapper
+    ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp USE_CATCH2)
     # Stage-8 SymmetryEngine v2: composition planning (toggles, windows, TR actions)
     ed_add_test(test_sector_plan                tests/unit/test_sector_plan.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)

@@ -39,6 +39,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -160,6 +161,29 @@ struct SolveOptions {
     /// (the legacy / default behaviour). Used to probe a single
     /// irrep without paying for the rest of the spectrum.
     std::vector<std::size_t> selected_sectors;
+
+    // -----------------------------------------------------------------
+    // Stage 12 (SU(2) rollout): total-spin axis.
+    // -----------------------------------------------------------------
+
+    /// Target the spin-S tower (two_total_spin = 2S; -1 = off). Requires
+    /// an SU(2)-invariant Hamiltonian (term-level check throws otherwise).
+    /// The sector loops wrap each block in the Lowdin
+    /// ``CasimirProjectedOperator`` and project the Krylov seed; blocks
+    /// with no weight in the tower are skipped.
+    int two_total_spin   = -1;
+
+    /// Post-hoc <S^2> labeling toggle: -1 = auto (label whenever H is
+    /// SU(2)-invariant AND eigenvectors are available in-sector), 0 =
+    /// off, 1 = require (throw when H is not SU(2)-invariant). Fills
+    /// ``GroundStateResult::{s2_of_eigenvalue, two_S_of_eigenvalue}``.
+    int label_total_spin = -1;
+
+    /// Host-side transform applied to the randomly drawn Krylov seed
+    /// before it is staged into the backend (e.g. the Lowdin total-spin
+    /// projection). A non-null transform disables the ``lanczos_real``
+    /// fast lane, which draws its own seed internally.
+    std::function<void(Complex*, std::size_t)> seed_transform;
 };
 
 struct ThermalOptions {

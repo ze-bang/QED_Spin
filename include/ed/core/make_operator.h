@@ -71,6 +71,7 @@
 #include <ed/core/results.h>            // SectorTag
 #include <ed/symmetry/sector_operator.h>
 #include <ed/symmetry/sector_set.h>
+#include <ed/symmetry/su2_dims.h>       // Stage 12c: S-resolved dims
 
 
 namespace ed {
@@ -166,6 +167,15 @@ struct OperatorSpec {
     /// for in-memory sources). ``ED_SYM_CACHE=0`` disables the disk layer
     /// entirely. See ed::symmetry::resolve_sym_cache_dir.
     std::string           basis_cache_dir;
+
+    /// Stage 12c (SU(2) rollout): PLANNING HINT that the workflow will
+    /// target the spin-S tower (two_S = 2S) inside the fixed-Sz sectors
+    /// it builds. Does not change which basis is built -- the Casimir
+    /// route is operator-level -- but the across-sector MPI balance then
+    /// weighs each sector by its S-resolved dimension
+    /// (highest-weight differencing of the Burnside dims at adjacent
+    /// n_up) instead of the full fixed-Sz dimension. -1 = off.
+    int                   two_total_spin = -1;
 
 };
 
@@ -389,6 +399,32 @@ sector_dims_burnside(const ::SymmetryGroupInfo& info, int n_up) {
     return dims;
 }
 
+// Stage 12c (SU(2) rollout): exact S-RESOLVED per-sector dimensions via the
+// highest-weight trick. Every spin-S multiplet appears exactly once as a
+// highest-weight state in the Sz = S sector, and every spatial sector
+// commutes with the global raising operator S+, so per irrep:
+//   dim(sector, spin S) = dim(sector, n_up = (N+2S)/2)
+//                       - dim(sector, n_up = (N+2S)/2 + 1).
+// Two Burnside evaluations, no orbit walk. Feeds the MPI balance when the
+// workflow targets a spin tower, and doubles as the exact-integer oracle
+// the dense S-resolution validates against (Stage 12e).
+inline std::vector<std::uint64_t>
+sector_dims_s_resolved(const ::SymmetryGroupInfo& info, int n_sites,
+                       int two_S) {
+    const int n_up_hw =
+        ed::symmetry::n_up_of_highest_weight(n_sites, two_S);
+    auto dims = sector_dims_burnside(info, n_up_hw);
+    if (n_up_hw + 1 <= n_sites) {
+        const auto above = sector_dims_burnside(info, n_up_hw + 1);
+        for (std::size_t s = 0; s < dims.size(); ++s) {
+            // Exact integers: the difference can never be negative for a
+            // genuine symmetry group; clamp defensively anyway.
+            dims[s] = (dims[s] > above[s]) ? dims[s] - above[s] : 0;
+        }
+    }
+    return dims;
+}
+
 // Greedy longest-processing-time bin-packing: hand each raw sector (largest dim
 // first) to the currently least-loaded rank. Deterministic, so every rank
 // computes the IDENTICAL ``owner[raw_s] = rank`` map. Solve + construction cost
@@ -457,8 +493,15 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     if (mpi_size > 1) {
         const int n_up_for_dims = spec.fixed_sz.has_value()
             ? static_cast<int>(*spec.fixed_sz) : -1;
-        const auto dims =
-            detail::sector_dims_burnside(base->symmetry_info, n_up_for_dims);
+        // Stage 12c: when the workflow targets a spin-S tower, the work per
+        // sector scales with the S-resolved dimension (highest-weight
+        // differencing), not the full fixed-Sz dimension -- balance on that.
+        const auto dims = (spec.two_total_spin >= 0)
+            ? detail::sector_dims_s_resolved(
+                  base->symmetry_info,
+                  static_cast<int>(spec.num_sites), spec.two_total_spin)
+            : detail::sector_dims_burnside(base->symmetry_info,
+                                           n_up_for_dims);
         sector_owner = detail::greedy_sector_owner(dims, mpi_size);
         owner_ptr = &sector_owner;
         if (std::getenv("ED_DEBUG_BALANCE") && mpi_rank == 0) {
