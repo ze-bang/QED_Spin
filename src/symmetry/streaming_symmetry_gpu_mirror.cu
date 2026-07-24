@@ -459,6 +459,35 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
                 std::llround(t.offdiag_two_body.back().coefficient.real() * 1e9)));
         return h;
     };
+    // FULL term-content signature. The sector fingerprint below identifies
+    // the rep basis but NOT the operator terms -- fine when one operator
+    // (H) is mirrored per sector, WRONG when several operators share a
+    // sector (e.g. a q-mesh of transverse probes O_q on the GS sector): a
+    // content_key collision would reuse the first operator's device mirror.
+    // This hashes EVERY term field (sites, op types, coeffs) so distinct
+    // operators never alias.
+    auto term_signature = [](const ed::matvec::TermStorage& t) {
+        std::uint64_t h = 1469598103934665603ULL;
+        auto mix = [&h](std::uint64_t v) {
+            v += 0x9E3779B97F4A7C15ULL;
+            v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            v = (v ^ (v >> 27)) * 0x94D049BB133111EBULL;
+            v ^= v >> 31; h ^= v; h *= 1099511628211ULL;
+        };
+        auto mixc = [&](const std::complex<double>& c) {
+            mix(static_cast<std::uint64_t>(std::llround(c.real() * 1e9)));
+            mix(static_cast<std::uint64_t>(std::llround(c.imag() * 1e9)));
+        };
+        for (const auto& d : t.diag_one_body)   { mix(d.site_index); mixc(d.coefficient); }
+        for (const auto& o : t.offdiag_one_body){ mix(o.site_index); mix(o.op_type); mixc(o.coefficient); }
+        for (const auto& d : t.diag_two_body)   { mix(d.site_index_1); mix(d.site_index_2); mixc(d.coefficient); }
+        for (const auto& m : t.mixed_two_body)  { mix(m.sz_site); mix(m.flip_site); mix(m.flip_op_type); mixc(m.coefficient); }
+        for (const auto& o : t.offdiag_two_body){ mix(o.site_index_1); mix(o.site_index_2); mix(o.op_type_1); mix(o.op_type_2); mixc(o.coefficient); }
+        for (const auto& b : t.three_body)      { mix(b.site_index_1); mix(b.site_index_2); mix(b.site_index_3);
+                                                  mix(b.op_type_1); mix(b.op_type_2); mix(b.op_type_3); mixc(b.coefficient); }
+        return h;
+    };
+    const std::uint64_t terms_sig = term_signature(terms);
     // Registry entries carry a FULL fingerprint of what the mirror encodes:
     // reuse must never depend on hash quality (a silent wrong-mirror hit is
     // wrong PHYSICS with correct-looking norms). The fingerprint covers
@@ -469,6 +498,7 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
         int                                       n_up;
         double                                    spin;
         std::uint64_t                             reps_sig[4];
+        std::uint64_t                             terms_sig;
         std::vector<std::complex<double>>         chi;
         std::vector<int>                          perms;
         std::vector<std::uint64_t>                flips;
@@ -476,8 +506,9 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
     };
     auto fingerprint_matches = [](const MirrorSlot& s,
                                   const ed::symmetry::RepSectorData& r,
-                                  double sl) {
+                                  double sl, std::uint64_t tsig) {
         return s.n_up == r.n_up && s.spin == sl
+            && s.terms_sig == tsig            // operator terms, not just sector
             && s.reps_sig[0] == r.reps.size()
             && s.reps_sig[1] == (r.reps.empty() ? 0 : r.reps.front())
             && s.reps_sig[2] == (r.reps.empty() ? 0
@@ -509,7 +540,7 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
         for (auto it = bucket.begin(); it != bucket.end();) {
             auto locked = it->mirror.lock();
             if (!locked) { it = bucket.erase(it); continue; }   // expired
-            if (fingerprint_matches(*it, rep, spin_l)) {
+            if (fingerprint_matches(*it, rep, spin_l, terms_sig)) {
                 mirror = std::move(locked);
                 break;
             }
@@ -525,6 +556,7 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
             s.reps_sig[2] = rep.reps.empty() ? 0
                               : rep.reps[rep.reps.size() / 2];
             s.reps_sig[3] = rep.reps.empty() ? 0 : rep.reps.back();
+            s.terms_sig   = terms_sig;
             s.chi         = rep.characters;
             s.perms       = rep.perms_flat;
             s.flips       = rep.flip_masks;
