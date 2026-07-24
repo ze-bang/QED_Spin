@@ -47,15 +47,25 @@ except ImportError:
 
 
 def build_probes(dim1, dim2, pos, b1, b2, N):
-    """A_q = N^{-1/2} sum_j e^{-i q.r_j} S^-_j for each allowed momentum."""
+    """In-sector O_q = sum_{i!=j} e^{iq(r_i-r_j)} S^+_i S^-_j per allowed q.
+
+    O_q is Hermitian and conserves Sz + momentum, so <GS|O_q|GS> is a pure
+    GS-sector expectation (no cross-sector scatter). The i=j self-term is
+    dropped here (it is exactly n_up on the fixed-Sz sector and added back
+    analytically in post): S^{+-}(q) = <GS|O_q|GS>/N + n_up/N.
+    """
     q_list = [(m1, m2) for m1 in range(dim1) for m2 in range(dim2)]
     obs, q_carts = [], []
     for (m1, m2) in q_list:
         q = (m1 / dim1) * b1 + (m2 / dim2) * b2
-        ph = np.exp(-1j * (pos @ q)) / np.sqrt(N)
+        phase = np.exp(1j * (pos @ q))          # e^{i q . r_i}
         op = _core.Operator(N, 0.5)
-        for j in range(N):
-            op.add_one_body(qed.OP_SMINUS, j, complex(ph[j]))
+        for i in range(N):
+            for j in range(N):
+                if i == j:
+                    continue
+                c = phase[i] * np.conj(phase[j])   # e^{iq(r_i - r_j)}
+                op.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, complex(c))
         obs.append(op); q_carts.append(q)
     return q_list, obs, q_carts
 
@@ -127,7 +137,8 @@ def main():
         H, obs, A, [], n_up=n_up, dense_max_dim=args.dense_max_dim,
         use_gpu=(args.device == "gpu")))
     dt = time.perf_counter() - t0
-    spm = np.array(out["static_sf"])
+    # <GS|O_q|GS> = off-diagonal sum; add the exact i=j self-term (n_up) then /N
+    spm = (np.array(out["static_sf"]) + n_up) / N
     E0 = float(out["gs_energy"])
     print(f"  solved in {dt:.1f} s:  E0={E0:+.10f}  k0={out['gs_k0']}  "
           f"n_up={out['gs_n_up']}  n_reps={out['n_reps']}")

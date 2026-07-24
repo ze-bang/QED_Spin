@@ -1413,60 +1413,34 @@ PYBIND11_MODULE(_core, m) {
               const auto gs = ed::solvers::little_group_ground_state(
                   op_h, abelian_group, residue_perms, n_sites, lg_o(gs_nu, gs_par));
 
-              // Destination = one subspace: A_q = sum e^{-iq.r} S^-_j raises
-              // n_up by delta_n_up (=+1 for a pure S^- probe in the set-bit
-              // convention). Build ONLY that subspace's k-sectors -- the
-              // old -2..+2 sweep built ~5x the (15-20 GB) sectors for
-              // nothing (the selection rule kills every other subspace).
-              std::vector<std::pair<int, int>> dst_subspaces;
-              if (ax == ed::symmetry::SzAxis::U1) {
-                  const int nu = gs_nu + delta_n_up;
-                  if (nu < 0 || nu > n_sites)
-                      throw std::runtime_error(
-                          "little_group_gs_static_sf: gs_n_up + delta_n_up "
-                          "out of range.");
-                  dst_subspaces = {{nu, -1}};
-              } else if (ax == ed::symmetry::SzAxis::Parity) {
-                  dst_subspaces = {{-1, 0}, {-1, 1}};
-              } else {
-                  dst_subspaces = {{-1, -1}};
+              (void)delta_n_up;
+
+              // IN-SECTOR expectation <GS|O_q|GS>. Each observable O_q is an
+              // Sz- and momentum-CONSERVING operator (e.g. the transverse
+              // O_q = sum_{i!=j} e^{iq(r_i-r_j)} S^+_i S^-_j, Hermitian), so it
+              // maps the GS momentum sector to ITSELF -- only ONE sector is
+              // ever resident (memory O(#reps), no destination sector). The
+              // cross-sector norm route needed BOTH the GS source and a
+              // destination sector built at once: two ~40 GB sectors OOM a
+              // 128 GB node at N=36 (task 50220971 died building the 716M-orbit
+              // dst table). Here the rep-sector matvec (GPU rep-gather) applies
+              // O_q on the GS vector and we dot with <GS|.
+              const std::size_t dim = gs.vec.size();
+              std::vector<double> static_sf;
+              static_sf.reserve(observables.size());
+              std::vector<Complex> ov(dim);
+              for (const Operator& o : observables) {
+                  // rd is consumed by the matvec factory; copy so the GS sector
+                  // survives for the next probe (cheap vs. the GS solve).
+                  ed::symmetry::RepSectorData rd_copy = gs.rd;
+                  auto mv = ed::solvers::make_rep_sector_matvec(
+                      o, std::move(rd_copy), /*force_gpu=*/use_gpu);
+                  mv->apply(gs.vec.data(), ov.data(), dim);
+                  Complex c(0.0, 0.0);
+                  for (std::size_t i = 0; i < dim; ++i)
+                      c += std::conj(gs.vec[i]) * ov[i];
+                  static_sf.push_back(c.real());   // <GS|O_q|GS> (real: Hermitian)
               }
-
-              using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
-              const auto src_ref = Ref::from_rep(
-                  gs.rd, static_cast<std::uint64_t>(n_sites));
-
-              // STREAM destination sectors one at a time: each RepSectorData
-              // is ~15-20 GB at N=36 half-filling, so holding all ~12 k-sectors
-              // (as little_group_k_sectors returns) OOMs a 128 GB node. For a
-              // fixed-momentum probe A_q the scatter A_q|GS> lands in exactly
-              // ONE destination sector (the selection rule zeroes the rest), so
-              // once a probe's norm is found it is marked resolved and skipped
-              // in later sectors -- keeping the resident set at one dst sector.
-              const std::size_t nobs = observables.size();
-              std::vector<double> static_sf(nobs, 0.0);
-              std::vector<char>   resolved(nobs, 0);
-              const float spin = static_cast<float>(op_h.getSpin());
-              auto scatter_into = [&](ed::symmetry::RepSectorData& rd_dst) {
-                  const std::size_t dim_dst = rd_dst.reps.size();
-                  if (dim_dst == 0) return;
-                  const auto dst_ref = Ref::from_rep(
-                      rd_dst, static_cast<std::uint64_t>(n_sites));
-                  std::vector<Complex> phi(dim_dst, Complex(0, 0));
-                  for (std::size_t i = 0; i < nobs; ++i) {
-                      if (resolved[i]) continue;
-                      ed::dssf::CrossSectorOrbitObservable obs(
-                          src_ref, 0, dst_ref, 0,
-                          observables[i].transform_data_, spin);
-                      obs.apply(gs.vec.data(), phi.data(), dim_dst);
-                      double s = 0.0;
-                      for (const Complex& c : phi) s += std::norm(c);
-                      if (s > 1e-18) { static_sf[i] = s; resolved[i] = 1; }
-                  }
-              };
-              for (const auto& [dnu, dpar] : dst_subspaces)
-                  ed::solvers::little_group_k_sectors_stream(
-                      op_h, abelian_group, n_sites, dnu, dpar, scatter_into);
 
               py::dict d;
               d["gs_energy"] = gs.energy;
@@ -1481,10 +1455,18 @@ PYBIND11_MODULE(_core, m) {
           py::arg("n_up") = -1, py::arg("delta_n_up") = 1,
           py::arg("dense_max_dim") = 512,
           py::arg("use_gpu") = false, py::arg("time_reversal") = -1,
-          "Static transverse structure factor S^{+-}(q) = ||O_q|GS>||^2 for a "
-          "LIST of probe operators, amortising ONE n_up-pinned little-group GS "
-          "solve across all q (no continued fraction / omega grid). Memory "
-          "O(#reps). Returns {gs_energy, gs_k0, gs_n_up, n_reps, static_sf[]}.");
+          "IN-SECTOR ground-state expectations <GS|O_q|GS> for a LIST of "
+          "Sz- and momentum-conserving operators O_q, amortising ONE "
+          "n_up-pinned little-group GS solve. Each O_q is applied on the GS "
+          "vector by the rep-sector matvec (GPU rep-gather) and dotted with "
+          "<GS| -- only the GS momentum sector is ever resident (memory "
+          "O(#reps), no destination sector). For the transverse static "
+          "structure factor pass O_q = sum_{i!=j} e^{iq(r_i-r_j)} S^+_i S^-_j "
+          "(Hermitian); then S^{+-}(q) = <GS|O_q|GS>/N + n_up/N (the i=j "
+          "self-term is exactly n_up on the fixed-Sz sector). ``delta_n_up`` "
+          "is ignored (kept for call-site compatibility). Returns "
+          "{gs_energy, gs_k0, gs_n_up, n_reps, static_sf[]} with static_sf = "
+          "the raw <GS|O_q|GS>.");
 
     m.def("little_group_gs_correlators",
           [](const Operator& op_h,
