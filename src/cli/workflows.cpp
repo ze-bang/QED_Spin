@@ -1893,6 +1893,107 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     }
 }
 
+namespace {
+
+/**
+ * @brief Exact α_Q from a symmetry-sector FULL diagonalization + ⟨n|Q|n⟩.
+ *
+ * Reuses the same streaming orbit basis as thermodynamic FULL ED.  For each
+ * sector eigenstate |n⟩ we expand to the computational basis, apply Q, and
+ * accumulate (E_n, ⟨n|Q|n⟩) before the canonical thermal average in
+ * ``compute_connected_qh_from_spectrum``.
+ */
+StaticResponseResults compute_connected_qh_streaming_symmetry_exact(
+    const EDConfig& config,
+    Operator& q_op,
+    int rank)
+{
+    const std::string ham_dir = config.system.hamiltonian_dir;
+    const std::string interaction_file = ham_dir + "/" + config.system.interaction_file;
+    const std::string single_site_file = ham_dir + "/" + config.system.single_site_file;
+
+    StreamingSymmetryOperator hamiltonian(config.system.num_sites, config.system.spin_length);
+    hamiltonian.loadFromFile(single_site_file);
+    hamiltonian.loadFromInterAllFile(interaction_file);
+
+    if (!generate_automorphisms(ham_dir, config.workflow.translation_only)) {
+        throw std::runtime_error(
+            "compute_connected_qh_streaming_symmetry_exact: automorphism generation failed");
+    }
+    if (rank == 0) {
+        std::cout << "Generating symmetry sectors for exact connected Q-H...\n";
+    }
+    hamiltonian.generateSymmetrySectorsStreaming(ham_dir);
+
+    const size_t num_sectors = hamiltonian.getNumSectors();
+    const uint64_t full_dim = 1ULL << config.system.num_sites;
+
+    std::vector<double> all_E;
+    std::vector<double> all_q;
+    all_E.reserve(full_dim);
+    all_q.reserve(full_dim);
+
+    const std::string scratch_root = config.workflow.output_dir + "/_full_ed_qh_scratch";
+    safe_system_call("mkdir -p " + scratch_root);
+
+    for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+        const uint64_t sector_dim = hamiltonian.getSectorDimension(sector_idx);
+        if (sector_dim == 0) {
+            continue;
+        }
+
+        if (rank == 0) {
+            std::cout << "  Sector " << (sector_idx + 1) << "/" << num_sectors
+                      << " (dim=" << sector_dim << ") FULL + ⟨Q⟩\n";
+        }
+
+        auto matvec = [&hamiltonian, sector_idx](const Complex* in, Complex* out, int size) {
+            hamiltonian.applySymmetrized(sector_idx, in, out);
+        };
+
+        EDParameters sector_params;
+        sector_params.num_sites = config.system.num_sites;
+        sector_params.spin_length = config.system.spin_length;
+        sector_params.num_eigenvalues = sector_dim;
+        sector_params.compute_eigenvectors = true;
+        sector_params.output_dir = scratch_root + "/sector_" + std::to_string(sector_idx);
+        safe_system_call("mkdir -p " + sector_params.output_dir);
+
+        EDResults sector_results = exact_diagonalization_core(
+            matvec, sector_dim, DiagonalizationMethod::FULL, sector_params);
+
+        const std::string sector_h5 = HDF5IO::createOrOpenFile(sector_params.output_dir);
+
+        ComplexVector Opsi(full_dim, Complex(0.0, 0.0));
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+
+        for (size_t i = 0; i < sector_results.eigenvalues.size(); ++i) {
+            const auto sym_vec = HDF5IO::loadEigenvector(sector_h5, i);
+            full_vec = hamiltonian.expandToComputationalBasis(sector_idx, sym_vec);
+            q_op.apply(full_vec.data(), Opsi.data(), full_dim);
+            Complex q_c;
+            cblas_zdotc_sub(static_cast<int>(full_dim),
+                            full_vec.data(), 1, Opsi.data(), 1, &q_c);
+            all_E.push_back(sector_results.eigenvalues[i]);
+            all_q.push_back(std::real(q_c));
+        }
+    }
+
+    if (rank == 0) {
+        std::cout << "  Collected " << all_E.size()
+                  << " exact (E, ⟨Q⟩) pairs\n";
+    }
+
+    return compute_connected_qh_from_spectrum(
+        all_E,
+        all_q,
+        config.static_resp.temp_min,
+        config.static_resp.temp_max,
+        config.static_resp.num_temp_points);
+}
+
+} // namespace
+
 /**
  * @brief Compute static response (thermal expectation values)
  */
@@ -2343,7 +2444,13 @@ void compute_static_response_workflow(const EDConfig& config) {
                 std::cout << "Computing connected O-H thermal expansion "
                           << "(⟨OH⟩ - ⟨O⟩⟨H⟩) / T²...\n";
             }
-            if (config.method == DiagonalizationMethod::LTLM) {
+            if (config.method == DiagonalizationMethod::FULL) {
+                if (rank == 0) {
+                    std::cout << "Computing connected Q-H from exact spectrum "
+                              << "(streaming symmetry sectors + FULL diagonalization)...\n";
+                }
+                results = compute_connected_qh_streaming_symmetry_exact(config, op, rank);
+            } else if (config.method == DiagonalizationMethod::LTLM) {
                 LTLMParameters ltlm_params;
                 ltlm_params.krylov_dim = config.thermal.ltlm_krylov_dim;
                 ltlm_params.ground_state_krylov = config.thermal.ltlm_ground_krylov;

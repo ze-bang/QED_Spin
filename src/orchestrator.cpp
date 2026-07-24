@@ -1185,6 +1185,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
         !R.thermo.temperatures.empty() &&
+        // Stage 12f: a seed transform restricts the stochastic trace to a
+        // SUBSPACE (e.g. one spin tower). The exact fallback diagonalises
+        // the whole block and would silently ignore the restriction --
+        // stand down and let the sampling kernel honour the projection.
+        // (Callers wanting exact per-tower thermo use the differencing
+        // route in workflows_thermal_su2_tower instead.)
+        !opts.seed_transform &&
         // When the caller requested TPQ state snapshots (probe_betas), the exact
         // fallback cannot produce them -- run the real TPQ trajectory instead
         // (accepting the small-sector variance the user implicitly opted into).
@@ -1216,6 +1223,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             kopts.random_seed = opts.random_seed;
             kopts.output_dir  = opts.output_dir;
             kopts.probe_betas = opts.probe_betas;
+            kopts.seed_transform = opts.seed_transform;  // Stage 12f
             auto matvec = H.template bind<B>();
 
             // -------------------------------------------------------------
@@ -1433,6 +1441,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
                 kopts.output_dir  = opts.output_dir;
+                kopts.seed_transform = opts.seed_transform;  // Stage 12f
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
@@ -1511,6 +1520,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
                 kopts.output_dir  = opts.output_dir;
+                kopts.seed_transform = opts.seed_transform;  // Stage 12f
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,

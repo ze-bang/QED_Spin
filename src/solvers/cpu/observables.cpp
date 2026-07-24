@@ -97,4 +97,76 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     return results;
 }
 
+StaticResponseResults compute_connected_qh_from_spectrum(
+    const std::vector<double>& eigenvalues,
+    const std::vector<double>& q_expectations,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins
+) {
+    StaticResponseResults results;
+    if (eigenvalues.empty() || eigenvalues.size() != q_expectations.size()) {
+        return results;
+    }
+    if (temp_min <= 0.0 || temp_max <= 0.0 || num_temp_bins == 0) {
+        throw std::invalid_argument(
+            "compute_connected_qh_from_spectrum: temperatures must be positive");
+    }
+
+    results.total_samples = 1;
+    results.temperatures.resize(num_temp_bins);
+    const double log_T_min = std::log(temp_min);
+    const double log_T_max = std::log(temp_max);
+    const double log_T_step =
+        (num_temp_bins > 1) ? (log_T_max - log_T_min) / (num_temp_bins - 1) : 0.0;
+    for (uint64_t i = 0; i < num_temp_bins; ++i) {
+        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
+    }
+
+    results.expectation.assign(num_temp_bins, 0.0);
+    results.variance.assign(num_temp_bins, 0.0);
+    results.susceptibility.assign(num_temp_bins, 0.0);
+    results.expectation_error.assign(num_temp_bins, 0.0);
+    results.variance_error.assign(num_temp_bins, 0.0);
+    results.susceptibility_error.assign(num_temp_bins, 0.0);
+
+    const double e_min = *std::min_element(eigenvalues.begin(), eigenvalues.end());
+
+    for (uint64_t t = 0; t < num_temp_bins; ++t) {
+        const double T = results.temperatures[t];
+        const double beta = 1.0 / T;
+
+        double Z = 0.0;
+        double sum_Q = 0.0;
+        double sum_H = 0.0;
+        double sum_QH = 0.0;
+
+        for (size_t n = 0; n < eigenvalues.size(); ++n) {
+            const double boltz = std::exp(-beta * (eigenvalues[n] - e_min));
+            const double qn = q_expectations[n];
+            const double en = eigenvalues[n];
+            Z += boltz;
+            sum_Q += boltz * qn;
+            sum_H += boltz * en;
+            sum_QH += boltz * qn * en;
+        }
+
+        if (Z <= 0.0) {
+            continue;
+        }
+
+        const double inv_Z = 1.0 / Z;
+        const double q_avg = sum_Q * inv_Z;
+        const double h_avg = sum_H * inv_Z;
+        const double qh_avg = sum_QH * inv_Z;
+        const double connected = qh_avg - q_avg * h_avg;
+
+        results.variance[t] = connected;
+        results.susceptibility[t] = connected / T;
+        results.expectation[t] = connected / (T * T);
+    }
+
+    return results;
+}
+
 // Calculate thermal expectation value of operator A using eigenvalues and eigenvectors

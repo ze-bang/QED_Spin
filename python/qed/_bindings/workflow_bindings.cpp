@@ -38,6 +38,7 @@
 #include <ed/dssf/cross_sector_orbit_observable.h>  // SOTA cross-irrep observable
 #include <ed/matvec/backends/cpu_backend.h>          // CpuBackend for cf_spectral_from_vector
 #include <ed/krylov/lanczos_kernel.h>                // CGS2 GS refinement (ensure_gs_residual)
+#include <ed/solvers/lanczos.h>                      // full_diagonalization (Stage 12f exact tower route)
 #include <ed/core/blas_lapack_wrapper.h>             // LAPACKE_dstevd (GS refinement)
 #include <ed/observables/cf_spectral_kernel.h>      // cf_spectral_from_vector
 #include <ed/observables/ftlm_cross_irrep_kernel.h>  // SOTA finite-T cross-irrep
@@ -478,6 +479,46 @@ inline void label_vectors_with_s2(
                 ? ed::ops::snap_two_S(s2_exp, n_sites, n_up, flip_parity)
                 : -1);
     }
+}
+
+/// Exact canonical thermodynamics of a (small) spectrum on an explicit
+/// temperature grid. Twin of the orchestrator's static
+/// ``compute_canonical_thermo_from_eigs`` (kept file-local there);
+/// used by the tower binding's exact differencing route so every tower
+/// lands on the SAME grid the recombiner expects.
+inline ::ThermodynamicData su2_exact_thermo_from_eigs(
+    const std::vector<double>& eigs,
+    const std::vector<double>& temperatures) {
+    ::ThermodynamicData td;
+    if (eigs.empty() || temperatures.empty()) return td;
+    const std::size_t nT = temperatures.size();
+    td.temperatures = temperatures;
+    td.energy.assign(nT, 0.0);
+    td.specific_heat.assign(nT, 0.0);
+    td.free_energy.assign(nT, 0.0);
+    td.entropy.assign(nT, 0.0);
+    const double E0 = *std::min_element(eigs.begin(), eigs.end());
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double T = temperatures[t];
+        if (!(T > 0.0)) continue;
+        const double beta = 1.0 / T;
+        double Z = 0.0, ZE = 0.0, ZE2 = 0.0;
+        for (const double E : eigs) {
+            const double w = std::exp(-beta * (E - E0));
+            Z += w;
+            ZE += w * E;
+            ZE2 += w * E * E;
+        }
+        if (!(Z > 0.0)) continue;
+        const double E_avg = ZE / Z;
+        const double E2_avg = ZE2 / Z;
+        const double lnZ = std::log(Z) - beta * E0;
+        td.energy[t] = E_avg;
+        td.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+        td.free_energy[t] = -lnZ / beta;
+        td.entropy[t] = beta * (E_avg - td.free_energy[t]);
+    }
+    return td;
 }
 
 /// Build the Lowdin projector + wrapped operator for one solve block.
@@ -976,6 +1017,9 @@ void bind_workflows(py::module_& m) {
                        &ed::workflows::ThermalOptions::time_reversal)
         .def_readwrite("star_maps", &ed::workflows::ThermalOptions::star_maps)
         .def_readwrite("sz_parity", &ed::workflows::ThermalOptions::sz_parity)
+        // Stage 12f (SU(2) rollout): per-tower stochastic sampling.
+        .def_readwrite("two_total_spin",
+                       &ed::workflows::ThermalOptions::two_total_spin)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
         // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
@@ -1018,6 +1062,21 @@ void bind_workflows(py::module_& m) {
         // is set.
         .def_readwrite("probe_betas",
                        &ed::workflows::ThermalOptions::probe_betas);
+
+    // Stage 12f (SU(2) rollout): degeneracy-weighted recombination for
+    // the per-tower thermal driver -- Z = sum_S (2S+1) Z_S, implemented
+    // by the shifted-F mixture with F_S -> F_S - T ln(2S+1).
+    m.def("combine_thermo_weighted",
+          [](const std::vector<::ThermodynamicData>& blocks,
+             const std::vector<double>& degeneracy) {
+              std::vector<std::uint64_t> dims(blocks.size(), 1);
+              return ed::core::combine_sector_thermodynamics(
+                  blocks, dims, degeneracy);
+          },
+          py::arg("blocks"), py::arg("degeneracy"),
+          "Recombine per-block ThermodynamicData with positive weights "
+          "g_s (Z = sum_s g_s Z_s). Used by qed.thermal(total_spin=...) "
+          "to merge per-spin-tower curves with (2S+1) multiplicities.");
 
     py::class_<ed::ThermalResult>(m, "ThermalResult")
         .def(py::init<>())
@@ -1343,6 +1402,138 @@ void bind_workflows(py::module_& m) {
           "KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
           "routes the matvec through the host operator's lazy "
           "CudaMatVecBackend device mirror without manual conversion.");
+
+    // Stage 12f (SU(2) rollout): ONE spin tower's thermodynamics on the
+    // plain fixed-Sz lane. Highest-weight formulation: restrict to the
+    // Sz = +S sector (n_up = (N+2S)/2), Lowdin-project every FTLM/mTPQ
+    // sample seed onto the spin-S tower, drift-scrub the Krylov walk,
+    // and re-normalise the stochastic trace from the sector dim to the
+    // tower dim M(N,S). The qed.thermal driver loops towers and
+    // recombines with (2S+1) weights via ``combine_thermo_weighted``.
+    m.def("workflows_thermal_su2_tower",
+          [](Operator& op, ed::workflows::ThermalOptions opts) {
+              const int two_S = opts.two_total_spin;
+              if (two_S < 0) {
+                  throw std::invalid_argument(
+                      "workflows_thermal_su2_tower: set "
+                      "opts.two_total_spin = 2S");
+              }
+              (void)resolve_su2_engagement(op, two_S, /*label=*/0,
+                                           "qed.thermal");
+              const int N = static_cast<int>(op.getNumBits());
+              const std::uint64_t d_tower =
+                  ed::symmetry::multiplet_count(N, two_S);
+              if (d_tower == 0) return ed::ThermalResult{};
+              const int n_up =
+                  ed::symmetry::n_up_of_highest_weight(N, two_S);
+              auto h = std::make_shared<FixedSzOperator>(
+                  static_cast<std::uint64_t>(N), 0.5f, n_up);
+              h->copyTermsFrom(op);
+              // Small blocks: EXACT route via highest-weight spectral
+              // differencing -- tower spectrum = spec(Sz=S) \ spec(Sz=S+1)
+              // -- then direct Boltzmann sums. Beats projected sampling
+              // in both cost and accuracy wherever dense diagonalisation
+              // of the two adjacent blocks is cheap. Honours the same
+              // ED_THERMAL_EXACT_SMALL=0 kernel-gating escape as the
+              // orchestrator's small-D fallback (tests that mean to gate
+              // the projected SAMPLING kernel set it to 0).
+              const bool exact_small_ok = []() noexcept {
+                  const char* v = std::getenv("ED_THERMAL_EXACT_SMALL");
+                  return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+              }();
+              if (h->dim() <= (1ULL << 12) && exact_small_ok) {
+                  std::vector<double> lo_spec, hi_spec;
+                  {
+                      py::gil_scoped_release release;
+                      full_diagonalization(*h, h->dim(), h->dim(),
+                                           lo_spec, "", false);
+                      if (n_up + 1 <= N) {
+                          FixedSzOperator above(
+                              static_cast<std::uint64_t>(N), 0.5f,
+                              n_up + 1);
+                          above.copyTermsFrom(op);
+                          if (above.dim() > 0) {
+                              full_diagonalization(above, above.dim(),
+                                                   above.dim(), hi_spec,
+                                                   "", false);
+                          }
+                      }
+                  }
+                  std::sort(lo_spec.begin(), lo_spec.end());
+                  std::sort(hi_spec.begin(), hi_spec.end());
+                  std::vector<double> tower;
+                  std::size_t j = 0;
+                  for (double e : lo_spec) {
+                      if (j < hi_spec.size()
+                          && std::abs(e - hi_spec[j]) <= 1e-9) {
+                          ++j;
+                      } else {
+                          tower.push_back(e);
+                      }
+                  }
+                  if (tower.size() != d_tower) {
+                      throw std::runtime_error(
+                          "workflows_thermal_su2_tower: highest-weight "
+                          "differencing produced " +
+                          std::to_string(tower.size()) + " levels for "
+                          "two_S=" + std::to_string(two_S) +
+                          " but M(N,S)=" + std::to_string(d_tower) +
+                          " (degeneracy-tolerance mismatch?)");
+                  }
+                  ed::ThermalResult tr;
+                  std::vector<double> temps;
+                  for (double bta : opts.betas) {
+                      temps.push_back(bta > 0.0 ? 1.0 / bta : 0.0);
+                  }
+                  tr.thermo = su2_exact_thermo_from_eigs(tower, temps);
+                  tr.ground_state_energy =
+                      tower.empty() ? 0.0 : tower.front();
+                  tr.backend.lane = "cpu";
+                  return tr;
+              }
+              auto s2 = std::make_shared<FixedSzOperator>(
+                  static_cast<std::uint64_t>(N), 0.5f, n_up);
+              s2->copyTermsFrom(*ed::ops::make_S2_carrier(
+                  static_cast<std::uint64_t>(N)));
+              auto t = make_su2_targeting(
+                  std::static_pointer_cast<const
+                      ed::matvec::MatVecOperator>(h),
+                  std::static_pointer_cast<const
+                      ed::matvec::MatVecOperator>(s2),
+                  N, n_up, two_S);
+              if (!t.wrapped) return ed::ThermalResult{};
+              auto proj = t.projector;
+              opts.seed_transform = [proj](Complex* v, std::size_t n) {
+                  proj->project(v, n);
+              };
+              ed::ThermalResult tr;
+              {
+                  py::gil_scoped_release release;
+                  tr = ed::workflows::thermal(
+                      static_cast<const ed::LinearOperator&>(*t.wrapped),
+                      opts);
+                  // The kernel's free energy bakes in ln(dim) of the
+                  // block it sampled; the projected trace runs over the
+                  // TOWER: Z_tower = Z_est * d_tower/dim.
+                  const double lnr =
+                      std::log(static_cast<double>(d_tower)
+                               / static_cast<double>(h->dim()));
+                  for (std::size_t i = 0;
+                       i < tr.thermo.temperatures.size(); ++i) {
+                      tr.thermo.free_energy[i] -=
+                          tr.thermo.temperatures[i] * lnr;
+                      tr.thermo.entropy[i] += lnr;
+                  }
+              }
+              return tr;
+          },
+          py::arg("op"),
+          py::arg("opts"),
+          "Thermodynamics of ONE spin-S tower (opts.two_total_spin = 2S) "
+          "via Lowdin-projected sampling in the highest-weight Sz sector. "
+          "Free energy/entropy re-normalised to the tower dimension "
+          "M(N,S); recombine towers with (2S+1) weights via "
+          "combine_thermo_weighted.");
 
     m.def("workflows_spectral",
           [](Operator& op,
@@ -2167,6 +2358,37 @@ void bind_workflows(py::module_& m) {
                       spec.flip_sectors_full = true;
                   }
               }
+              // Stage 12f (SU(2) rollout): per-tower sampling. The Python
+              // driver loops the towers; this binding sees ONE tower per
+              // call (two_total_spin >= 0) and restricts every sample
+              // seed + Krylov walk to it via the Lowdin projector on the
+              // sector's own rep basis.
+              std::shared_ptr<::Operator> su2t_carrier;
+              std::vector<std::uint64_t> su2_tower_dims;
+              if (opts.two_total_spin >= 0) {
+                  (void)resolve_su2_engagement(
+                      *probe.base, opts.two_total_spin, /*label=*/0,
+                      "qed.thermal[symmetry]");
+                  if (!spec.fixed_sz
+                      || *spec.fixed_sz != ed::symmetry::n_up_of_highest_weight(
+                             static_cast<int>(num_sites),
+                             opts.two_total_spin)) {
+                      throw std::runtime_error(
+                          "qed.thermal[symmetry]: two_total_spin sampling "
+                          "uses the highest-weight formulation -- call with "
+                          "fixed_sz = (N + 2S)/2 (the qed.thermal driver "
+                          "does this per tower).");
+                  }
+                  su2t_carrier = ed::ops::make_S2_carrier(num_sites);
+                  spec.two_total_spin = opts.two_total_spin;
+                  // Exact per-raw-sector tower dims (Burnside differencing):
+                  // the sampled estimator averages over the TOWER, but the
+                  // kernel's free energy bakes in ln(D_sector) -- correct
+                  // to ln(D_tower) after each per-sector call.
+                  su2_tower_dims = ed::detail::sector_dims_s_resolved(
+                      probe.base->symmetry_info,
+                      static_cast<int>(num_sites), opts.two_total_spin);
+              }
 
               ed::ThermalResult agg;
               {
@@ -2403,8 +2625,61 @@ void bind_workflows(py::module_& m) {
                           topts.e_min_override = shared_e_min;
                           topts.e_max_override = shared_e_max;
                       }
-                      sec_results_th[static_cast<std::size_t>(ii)] =
-                          ed::workflows::thermal(*sec, topts);
+                      // Stage 12f: restrict this sector's stochastic trace
+                      // to the spin-S tower -- Lowdin-projected seeds +
+                      // drift-scrubbed matvec, S^2 on the SAME rep basis.
+                      std::shared_ptr<const
+                          ed::symmetry::CasimirProjectedOperator> su2_wrap;
+                      if (su2t_carrier) {
+                          const auto& rd = sec->producer().ensureRepData();
+                          if (!rd.usable()) {
+                              throw std::runtime_error(
+                                  "qed.thermal[symmetry]: total_spin "
+                                  "sampling needs the rep-sector lane "
+                                  "(sector " + std::to_string(k)
+                                  + " has no usable rep data)");
+                          }
+                          std::shared_ptr<const
+                              ed::matvec::MatVecOperator> s2_mv(
+                              ed::solvers::make_rep_sector_matvec(
+                                  *su2t_carrier, rd));
+                          std::shared_ptr<const
+                              ed::matvec::MatVecOperator> h_alias(
+                              sec,
+                              [](const ed::matvec::MatVecOperator*) {});
+                          auto t = make_su2_targeting(
+                              std::move(h_alias), std::move(s2_mv),
+                              static_cast<int>(num_sites),
+                              handle.sector_tag(k).n_up,
+                              opts.two_total_spin);
+                          if (!t.wrapped) continue;  // tower not admissible
+                          auto proj = t.projector;
+                          topts.seed_transform =
+                              [proj](Complex* v, std::size_t n) {
+                                  proj->project(v, n);
+                              };
+                          su2_wrap = t.wrapped;
+                      }
+                      try {
+                          sec_results_th[static_cast<std::size_t>(ii)] =
+                              ed::workflows::thermal(
+                                  su2_wrap
+                                      ? static_cast<const
+                                            ed::LinearOperator&>(*su2_wrap)
+                                      : static_cast<const
+                                            ed::LinearOperator&>(*sec),
+                                  topts);
+                      } catch (const std::runtime_error& e) {
+                          // A tower with zero weight in this sector
+                          // annihilates every seed: skip the sector (its
+                          // default-constructed slot is ignored) instead
+                          // of failing the whole sweep.
+                          if (!su2_wrap
+                              || std::string(e.what()).find("annihilated")
+                                     == std::string::npos) {
+                              throw;
+                          }
+                      }
                   }
 
                   // Serial post-processing: collect results in
@@ -2430,6 +2705,30 @@ void bind_workflows(py::module_& m) {
                           continue;
                       }
                       ed::SectorTag tag = handle.sector_tag(k);
+                      if (su2t_carrier) {
+                          // Stage 12f: re-normalise the stochastic trace
+                          // from the full sector dim (baked into the
+                          // kernel's F as ln D_k) to the tower dim:
+                          //   Z_tower = Z_est * D_S/D_k
+                          //   => F -= T ln(D_S/D_k), S += ln(D_S/D_k).
+                          const std::uint64_t d_tower =
+                              (tag.sector_index < su2_tower_dims.size())
+                                  ? su2_tower_dims[tag.sector_index]
+                                  : 0;
+                          if (d_tower == 0) continue;  // empty tower here
+                          const double lnr =
+                              std::log(static_cast<double>(d_tower)
+                                       / static_cast<double>(
+                                             tag.sector_dim));
+                          for (std::size_t t = 0;
+                               t < tr.thermo.temperatures.size(); ++t) {
+                              tr.thermo.free_energy[t] -=
+                                  tr.thermo.temperatures[t] * lnr;
+                              tr.thermo.entropy[t] += lnr;
+                          }
+                          tag.two_S = opts.two_total_spin;
+                          tag.sector_dim = d_tower;
+                      }
                       per_sector_thermo.push_back(tr.thermo);
                       per_sector_dims.push_back(tag.sector_dim);
                       ed::ThermalSectorEntry entry;

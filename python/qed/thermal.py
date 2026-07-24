@@ -278,6 +278,9 @@ class ThermalSectorEntry:
     irrep: int = -1
     irrep_dim: int = 1
     star_size: int = 1
+    # Stage 12f (SU(2) rollout): total-spin label 2S of this block when
+    # the per-tower thermal driver produced it (-1 = axis absent).
+    two_S: int = -1
 
 
 def _thermal_result_from_block_lane(out: dict, method) -> "ThermalResult":
@@ -525,6 +528,124 @@ def _combine_sector_thermodynamics(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def _thermal_su2_towers(
+    H,
+    *,
+    total_spin,
+    method,
+    T_min: float,
+    T_max: float,
+    num_T: int,
+    num_samples: int,
+    krylov_dim: int,
+    random_seed: int,
+    tpq_delta_beta: float,
+    tpq_taylor_order: int,
+    is_directory: bool,
+    verbose: bool,
+) -> "ThermalResult":
+    """Stage 12f: SU(2)-resolved thermodynamics, Z = sum_S (2S+1) Z_S.
+
+    Each spin-S tower is computed once in its highest-weight sector
+    (n_up = (N+2S)/2) via ``_core.workflows_thermal_su2_tower`` --
+    exact highest-weight spectral differencing for small blocks,
+    Lowdin-projected FTLM/mTPQ sampling above the dense window -- and
+    the towers recombine with (2S+1) degeneracy weights."""
+    import math
+
+    if is_directory:
+        raise NotImplementedError(
+            "qed.thermal: total_spin= is implemented for in-memory "
+            "Operators (pass the Operator; the directory form needs the "
+            "streaming per-tower wiring).")
+    op = H
+    det = _core.detect_hamiltonian_symmetries(op)
+    if not bool(det.get("su2", False)):
+        raise RuntimeError(
+            "qed.thermal: total_spin= requires an SU(2)-invariant "
+            "Hamiltonian (per-bond isotropic exchange, no fields / DM / "
+            "anisotropy); the term-level [H, S_tot] check failed.")
+    mname = str(getattr(method, "name", method)).upper()
+    method_map = {"FTLM": _core.ThermalMethod.FTLM,
+                  "LTLM": _core.ThermalMethod.LTLM,
+                  "MTPQ": _core.ThermalMethod.mTPQ}
+    if mname not in method_map:
+        raise ValueError(
+            f"qed.thermal: total_spin= supports methods FTLM / LTLM / "
+            f"mTPQ (got {method!r}). method='exact' gets per-S labels "
+            f"from the full-spectrum lane instead.")
+
+    N = int(op.num_sites)
+    # Identity checks: 1.0 == True and 0.0 == False in Python, so a
+    # membership test would misroute numeric spins.
+    if total_spin is True or (isinstance(total_spin, str)
+                              and total_spin.lower() in ("auto", "on")):
+        towers = list(range(N % 2, N + 1, 2))
+    else:
+        ts = int(round(2.0 * float(total_spin)))
+        if (abs(2.0 * float(total_spin) - ts) > 1e-9 or ts < 0
+                or ts > N or (ts % 2) != (N % 2)):
+            raise ValueError(
+                f"qed.thermal: total_spin={total_spin!r} is not an "
+                f"admissible spin for {N} spin-1/2 sites.")
+        towers = [ts]
+
+    temps = np.linspace(float(T_min), float(T_max), int(num_T))
+    betas = [1.0 / t for t in temps]
+
+    blocks, degs, entries = [], [], []
+    gs_E = float("inf")
+    for ts in towers:
+        o = _core.ThermalOptions()
+        o.method = method_map[mname]
+        o.num_samples = int(num_samples)
+        o.krylov_dim = int(krylov_dim)
+        o.random_seed = int(random_seed)
+        o.betas = betas
+        o.delta_beta = float(tpq_delta_beta)
+        o.taylor_order = int(tpq_taylor_order)
+        o.two_total_spin = int(ts)
+        tr = _core.workflows_thermal_su2_tower(op, o)
+        if not tr.thermo.temperatures:
+            continue
+        blocks.append(tr.thermo)
+        degs.append(float(ts + 1))
+        if np.isfinite(tr.ground_state_energy):
+            gs_E = min(gs_E, float(tr.ground_state_energy))
+        k = (N - ts) // 2
+        m_count = math.comb(N, k) - (math.comb(N, k - 1) if k >= 1 else 0)
+        entries.append(ThermalSectorEntry(
+            n_up=(N + ts) // 2,
+            sector_dim=int(m_count),
+            temperatures=np.asarray(tr.thermo.temperatures),
+            energy=np.asarray(tr.thermo.energy),
+            specific_heat=np.asarray(tr.thermo.specific_heat),
+            entropy=np.asarray(tr.thermo.entropy),
+            free_energy=np.asarray(tr.thermo.free_energy),
+            weight=int(ts + 1),
+            two_S=int(ts)))
+        if verbose:
+            print(f"[qed.thermal] tower 2S={ts}: M(N,S)={m_count}, "
+                  f"weight={ts + 1}")
+    if not blocks:
+        raise RuntimeError(
+            "qed.thermal: no spin tower produced thermodynamics "
+            "(all requested towers empty?).")
+    comb = _core.combine_thermo_weighted(blocks, degs)
+    return ThermalResult(
+        temperatures=np.asarray(comb.temperatures),
+        energy=np.asarray(comb.energy),
+        specific_heat=np.asarray(comb.specific_heat),
+        entropy=np.asarray(comb.entropy),
+        free_energy=np.asarray(comb.free_energy),
+        method=mname,
+        ground_state_energy=(gs_E if np.isfinite(gs_E) else 0.0),
+        used_sz_decomposition=True,
+        used_symmetry_decomposition=False,
+        per_sector=entries,
+    )
+
+
 def thermal(
     H: Union[Operator, str],
     *,
@@ -587,6 +708,13 @@ def thermal(
     # h5py at ``/tpq/samples/sample_<s>/state_beta_<b>`` for the
     # TPQ-to-CF spectral pipeline.
     probe_betas: Optional[List[float]] = None,
+    # Stage 12f (SU(2) rollout): per-spin-tower thermodynamics. OFF by
+    # default (plain Sz recombination is already exact for the total).
+    # ``"auto"``/True: resolve Z = sum_S (2S+1) Z_S over every tower;
+    # numeric S: that tower only. Requires an SU(2)-invariant H and an
+    # in-memory Operator; methods FTLM / LTLM / mTPQ (small blocks take
+    # an exact highest-weight-differencing route regardless of method).
+    total_spin: Union[int, float, str, bool, None] = None,
     # Directory-form-only knobs.
     num_sites: Optional[int] = None,
     spin: float = 0.5,
@@ -707,6 +835,25 @@ def thermal(
                        use_sz_if_conserved=use_sz_if_conserved)
 
     is_directory = isinstance(H, (str, os.PathLike))
+
+    # ------------------------------------------------------------------
+    # Stage 12f (SU(2) rollout): per-spin-tower thermodynamics.
+    # Z = sum_S (2S+1) Z_S with each tower sampled once in its
+    # highest-weight sector (small blocks: exact highest-weight
+    # spectral differencing). Opt-in; see the total_spin kwarg doc.
+    # ------------------------------------------------------------------
+    if not (total_spin is None or total_spin is False
+            or (isinstance(total_spin, str)
+                and total_spin.lower() == "off")):
+        return _thermal_su2_towers(
+            H, total_spin=total_spin, method=method,
+            T_min=T_min, T_max=T_max, num_T=num_T,
+            num_samples=num_samples,
+            krylov_dim=(krylov_dim or ftlm_krylov_dim or 100),
+            random_seed=random_seed,
+            tpq_delta_beta=tpq_delta_beta,
+            tpq_taylor_order=tpq_taylor_order,
+            is_directory=is_directory, verbose=verbose)
 
     # ------------------------------------------------------------------
     # method="exact": exact canonical thermodynamics from the block

@@ -20,6 +20,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <random>
 #include <string>
@@ -50,6 +51,12 @@ struct MtpqOptions {
     /// "no state snapshots" -- the kernel allocates no host buffers and
     /// runs identically to the pre-snapshot path.
     std::vector<double> probe_betas;
+
+    /// Stage 12f (SU(2) rollout): host-side transform applied to every
+    /// TPQ sample seed before staging (e.g. the Lowdin total-spin
+    /// projection). Must leave a normalisable vector; a zero result
+    /// throws (the targeted subspace has no weight in this block).
+    std::function<void(Complex*, std::size_t)> seed_transform;
 };
 
 struct MtpqResult {
@@ -133,6 +140,22 @@ MtpqResult mtpq_kernel(Backend&       backend,
                                     ? (opts.random_seed + s)
                                     : ed::tpq_per_sample_seed(s);
         auto host_seed = detail::mtpq_make_seed(local_n, seed);
+        // Stage 12f: subspace projection of the TPQ seed (e.g. Lowdin
+        // total-spin), renormalised so the microcanonical estimator's
+        // unit-norm contract holds.
+        if (opts.seed_transform) {
+            opts.seed_transform(host_seed.data(), local_n);
+            double sumsq = 0.0;
+            for (const auto& z : host_seed) sumsq += std::norm(z);
+            if (!(sumsq > 0.0)) {
+                throw std::runtime_error(
+                    "mtpq_kernel: the seed transform annihilated sample "
+                    + std::to_string(s) + " (the targeted subspace has "
+                    "no weight in this block)");
+            }
+            const double inv = 1.0 / std::sqrt(sumsq);
+            for (auto& z : host_seed) z *= inv;
+        }
 
         auto seed_dev = backend.make_zero_vector(local_n);
         backend.copy_from_host(host_seed.data(), seed_dev.get(), local_n);

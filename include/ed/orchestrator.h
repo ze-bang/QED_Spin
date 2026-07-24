@@ -203,6 +203,25 @@ struct ThermalOptions {
     /// upstream, 0 = even half, 1 = odd half, 2 = both halves.
     int sz_parity = -1;
 
+    // -----------------------------------------------------------------
+    // Stage 12f (SU(2) rollout): per-tower thermal sampling.
+    // -----------------------------------------------------------------
+
+    /// Restrict the stochastic trace to the spin-S tower (2S; -1 = off).
+    /// The sector loops wrap each block matvec in the Lowdin projector
+    /// and install `seed_transform` per sector; the caller recombines
+    /// the per-tower results with (2S+1) degeneracy weights via the
+    /// degeneracy overload of ``combine_sector_thermodynamics``.
+    /// Consumed by the FTLM and mTPQ kernels (their seeds carry the
+    /// projection); other methods ignore it.
+    int two_total_spin = -1;
+
+    /// Host-side transform applied to every sample seed the kernels
+    /// draw (see FtlmOptions/MtpqOptions::seed_transform). Installed by
+    /// the sector loops when `two_total_spin >= 0`; direct callers may
+    /// also set it for custom subspace-restricted sampling.
+    std::function<void(Complex*, std::size_t)> seed_transform;
+
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
         FTLM = 0, LTLM, mTPQ, KpmDos = 4, OFTLM,

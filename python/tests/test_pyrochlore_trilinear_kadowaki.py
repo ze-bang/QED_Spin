@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "python" / "edlib"))
 
 import helper_pyrochlore_super as h  # noqa: E402
+sys.path.insert(0, str(ROOT.parent / "twist_qsi_demo" / "scripts"))
+from twist_trilinear_helper import write_pyrochlore_twisted_xxz_trilinear  # noqa: E402
 
 
 def _cluster(dim: int = 1):
@@ -100,3 +102,35 @@ def test_ed_verbose_trilinear_counts_match_canonical(capsys):
         del os.environ["ED_VERBOSE_TRILINEAR"]
     out = capsys.readouterr().out
     assert "canonical = 3, 6, 6" in out
+
+
+def test_twisted_writer_preserves_three_spin_hermiticity(tmp_path):
+    write_pyrochlore_twisted_xxz_trilinear(
+        str(tmp_path),
+        Jxx=0.6,
+        Jyy=0.6,
+        Jzz=1.0,
+        twist=(0.0, 0.0, 0.0),
+        three_spin_coeff=0.08,
+    )
+
+    rows = []
+    with open(tmp_path / "ThreeBodyG.dat") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 8:
+                rows.append(parts)
+
+    plus: dict[tuple[int, int, int], complex] = {}
+    minus: dict[tuple[int, int, int], complex] = {}
+    for op1, s1, op2, s2, op3, s3, cr, ci in rows:
+        key = (int(s1), int(s2), int(s3))
+        z = complex(float(cr), float(ci))
+        if int(op2) == 0:
+            plus[key] = z
+        elif int(op2) == 1:
+            minus[key] = z
+
+    assert plus.keys() == minus.keys()
+    for key, z in plus.items():
+        assert abs(minus[key] - z.conjugate()) < 1e-8
