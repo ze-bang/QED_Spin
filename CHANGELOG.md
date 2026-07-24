@@ -38,16 +38,41 @@
   highest-weight SPECTRAL differencing (`tower(S) = spectrum(|Sz|=S) ∖
   spectrum(|Sz|=S+1)` as exact multiset differences) — no vectors, no
   dense S² blocks, spectrum multiset provably untouched.
-* **Thermal foundation**: `combine_sector_thermodynamics(...,
-  degeneracy)` — `Z = Σ_S (2S+1) Z_S` via `g·Z ⇔ F → F − T ln g`
-  (duplication-equivalence + dense-reference pinned). Sampling per-S
-  (projected FTLM/mTPQ seeds at the highest-weight sector + S-resolved
-  `hilbert_dim`) is the specified follow-up.
+* **Per-tower thermodynamics** (`qed.thermal(total_spin='auto'|S)`,
+  Stage 12f): `Z = Σ_S (2S+1) Z_S`, each tower computed once in its
+  highest-weight sector. Small blocks take an EXACT route (tower
+  spectrum = `spec(Sz=S) ∖ spec(Sz=S+1)` by highest-weight
+  differencing, then direct Boltzmann sums — machine-precision match
+  to the dense canonical reference); large blocks sample with
+  Lowdin-projected seeds (`FtlmOptions`/`MtpqOptions::seed_transform`,
+  threaded from `ThermalOptions`) and the stochastic trace
+  re-normalised from the block dim to the tower dim `M(N,S)`.
+  Recombination via `combine_sector_thermodynamics(..., degeneracy)`
+  (`g·Z ⇔ F → F − T ln g`), exposed as
+  `_core.combine_thermo_weighted`. The orchestrator's exact-small
+  fallback and the legacy CPU FTLM driver both stand down under a
+  seed transform (they cannot honour the restriction).
+* **Spectral source labels** (Stage 12g):
+  `SpectralResult.{gs_two_S, gs_s2}` — certified total spin of the
+  GroundStateCF seed (inner-solve GS or caller-staged
+  `initial_state`), via the `SpectralOptions::su2_labeler` hook the
+  bindings install for SU(2)-invariant H. Wigner–Eckart: a rank-1
+  spin probe reaches only `S' ∈ {S−1, S, S+1}`; per-pole labels and
+  ΔS-resolved DSSF (`P_{S'}` on `O|0⟩` before each continued
+  fraction) are the documented follow-up — the projector machinery is
+  complete.
+* **GPU/MPI**: the device term kernels share the gate math
+  (`ED_TERM_GATE_HD`), so the S² carrier — identity trick included —
+  runs unchanged on CUDA (parity test-pinned); targeting pins its
+  wrapper to the host lane (device-resident Lowdin is the Stage-12h
+  follow-up); the MPI SectorDistributor balances on S-resolved tower
+  dims under targeting.
 * Env gates `ED_SYM_SU2` (=0 vetoes the axis) and
   `ED_SYM_SU2_REPROJECT_FREQ` join the X-list. New tests:
   `test_casimir_operator`, `test_su2_detect`, `test_su2_dims`,
   `test_casimir_projector` (C++); `test_su2_labeling`,
-  `test_su2_targeting`, `test_full_spectrum_su2` (Python, dense-oracle
+  `test_su2_targeting`, `test_full_spectrum_su2`, `test_su2_thermal`,
+  `test_su2_spectral`, `test_su2_gpu_parity` (Python, dense-oracle
   pinned across all composition lanes).
 
 ## 2026-07-20 (later) — non-abelian little-group on the GPU; sector semantics confirmed

@@ -914,19 +914,39 @@ Pieces (all Stage 12, `two_S = 2S` doubled-int convention throughout):
   as exact multiset differences; every level of every block then tiles
   into towers. No vectors, no dense S² blocks; works identically on
   the little-group and abelian full-spectrum lanes.
-* **Thermal per-S foundation** —
-  `combine_sector_thermodynamics(…, degeneracy)` implements
-  `Z = Σ_S (2S+1) Z_S` via `g·Z ⇔ F → F − T·ln g` (duplication
-  equivalence test-pinned). The sampling seed hook (project FTLM/mTPQ
-  seeds by `P_S` at the highest-weight sector + pass the S-resolved
-  dim as the kernels' `hilbert_dim`) is the specified follow-up.
+* **Thermal per-S** (Stage 12f) — `qed.thermal(total_spin='auto'|S)`:
+  `Z = Σ_S (2S+1) Z_S`, one highest-weight computation per tower.
+  Small blocks: EXACT route (tower spectrum = `spec(Sz=S) ∖
+  spec(Sz=S+1)` by highest-weight differencing, direct Boltzmann sums
+  — machine-precision vs the dense canonical reference). Large
+  blocks: Lowdin-projected sample seeds
+  (`FtlmOptions`/`MtpqOptions::seed_transform`, threaded from
+  `ThermalOptions`; the legacy CPU FTLM driver and the orchestrator's
+  exact-small fallback both stand down under a transform) with the
+  stochastic trace re-normalised from the block dim to the tower dim
+  `M(N,S)`. Recombination: `combine_sector_thermodynamics(…,
+  degeneracy)` (`g·Z ⇔ F → F − T·ln g`, duplication equivalence
+  test-pinned), exposed as `_core.combine_thermo_weighted`.
+* **Spectral source labels** (Stage 12g) —
+  `SpectralResult.{gs_two_S, gs_s2}` label the GroundStateCF seed via
+  `SpectralOptions::su2_labeler` (installed by the bindings for
+  SU(2)-invariant H). Wigner–Eckart: a rank-1 spin probe reaches only
+  `S' ∈ {S−1, S, S+1}`. Per-pole labels + ΔS-resolved DSSF (`P_{S'}`
+  on `O|0⟩` per continued fraction) are the remaining follow-up; the
+  projector machinery is complete.
 
 User surface: `qed.solve(total_spin="auto"|"off"|"require"|S)` /
-`qed.full_spectrum(total_spin=…)`, `EDResults.spin` / `.s2`,
-`SectorTag.two_S`, `GroundStateResult.{s2,two_S}_of_eigenvalue`.
+`qed.full_spectrum(total_spin=…)` /
+`qed.thermal(total_spin=None|"auto"|S)`, `EDResults.spin` / `.s2`,
+`SectorTag.two_S`, `GroundStateResult.{s2,two_S}_of_eigenvalue`,
+`SpectralResult.{gs_two_S, gs_s2}`,
+`ThermalSectorEntry.two_S`/`weight`.
 Targeting rides the abelian rep lane (`point_group='full'` + numeric
 `total_spin` raises); labeling needs vectors on iterative lanes and is
-exact-by-differencing on full-spectrum sweeps.
+exact-by-differencing on full-spectrum sweeps. GPU: the S² carrier
+runs unchanged on the device kernels (shared gate math, parity
+test-pinned); the targeting wrapper is host-pinned (device-resident
+Lowdin = Stage 12h follow-up).
 
 Cost model: one S² matvec ≈ `(N/2z)`× a short-range H matvec
 (~1.5 N² pair terms); one Lowdin application ≈ `degree` S² matvecs

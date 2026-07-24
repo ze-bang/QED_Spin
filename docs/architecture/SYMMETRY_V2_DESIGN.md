@@ -403,10 +403,14 @@ sectors, max block 12 vs 36 spatial-only); thermal E(T) machine-exact
   `sector_dims_s_resolved`, `symmetry/casimir_projector.h` +
   `SolveOptions::{two_total_spin,label_total_spin,seed_transform}`,
   full-spectrum resolution by highest-weight spectral differencing
-  (Python), degeneracy-weighted thermo recombination. See
-  SYMMETRY.md §6.5 for the shipped design; remaining follow-ups:
-  sampling-thermal projected seeds (12f-b), little-group in-engine
-  targeting, ΔS-resolved DSSF (12g).
+  (Python), per-tower thermodynamics (12f: exact differencing route +
+  Lowdin-projected FTLM/mTPQ sampling, `qed.thermal(total_spin=…)`),
+  spectral source-state labels (12g:
+  `SpectralResult.{gs_two_S, gs_s2}` via `su2_labeler`), GPU parity
+  test-pinned. See SYMMETRY.md §6.5 for the shipped design; remaining
+  follow-ups: little-group in-engine targeting, ΔS-resolved DSSF
+  (per-pole `P_{S'}` projections), device-resident Lowdin (12h),
+  directory-form thermal towers.
 * **Spectrum reflections** (bipartite E→−E sublattice rotations):
   niche; full_spectrum could halve; not planned.
 * **Little-group induced reps** (Stage 7): **done (Jul 2026)** — see
