@@ -452,6 +452,14 @@ struct SpectralOptions {
     /// not fit the memory budget is REFUSED cleanly before any allocation. Set
     /// true (Python force=True) to dispatch anyway.
     bool        allow_infeasible = false;
+
+    /// Stage 12g (SU(2) rollout): optional labeler for the CF source
+    /// state. Called with the (host, unit-norm) seed after the inner GS
+    /// solve / initial_state staging; returns the certified two_S (-1 on
+    /// certification failure) and writes the raw <S^2> through the out
+    /// pointer. Installed by the workflow bindings whenever the
+    /// Hamiltonian is SU(2)-invariant; fills SpectralResult::gs_two_S.
+    std::function<int(const Complex*, std::size_t, double*)> su2_labeler;
 };
 
 // ---------------------------------------------------------------------------

@@ -1206,7 +1206,12 @@ void bind_workflows(py::module_& m) {
         .def_readonly("per_sector_pair",
                       &ed::SpectralResult::per_sector_pair)
         .def_readonly("selection_rule_label",
-                      &ed::SpectralResult::selection_rule_label);
+                      &ed::SpectralResult::selection_rule_label)
+        // Stage 12g (SU(2) rollout): total-spin label of the CF source
+        // state (-1 = unlabeled). Wigner-Eckart: a rank-1 spin probe
+        // reaches only final states with S' in {S-1, S, S+1}.
+        .def_readonly("gs_two_S", &ed::SpectralResult::gs_two_S)
+        .def_readonly("gs_s2",    &ed::SpectralResult::gs_s2);
 
     // -----------------------------------------------------------------
     // The three entry points.
@@ -1558,6 +1563,30 @@ void bind_workflows(py::module_& m) {
               for (auto* o : observables) {
                   if (!o) continue;
                   obs.push_back(static_cast<const ed::LinearOperator*>(o));
+              }
+              // Stage 12g (SU(2) rollout): label the CF source state's
+              // total spin when H is SU(2)-invariant. Cheap (one S^2
+              // matvec + certification residual) and purely additive.
+              if (ed::symmetry::su2_enabled() && op_is_su2_symmetric(op)) {
+                  auto s2 = make_s2_like(op);
+                  int n_up = -1;
+                  if (const auto* fsz =
+                          dynamic_cast<const FixedSzOperator*>(&op)) {
+                      n_up = static_cast<int>(fsz->producer().n_up());
+                  }
+                  const int n_sites = static_cast<int>(op.getNumBits());
+                  opts.su2_labeler = [s2, n_sites, n_up](
+                                         const Complex* v, std::size_t n,
+                                         double* s2_out) -> int {
+                      double res = 0.0;
+                      const double s2_exp =
+                          ed::ops::s2_expectation(*s2, v, n, &res);
+                      if (s2_out) *s2_out = s2_exp;
+                      return res <= ed::ops::kS2CertifyTol
+                                 ? ed::ops::snap_two_S(s2_exp, n_sites,
+                                                       n_up)
+                                 : -1;
+                  };
               }
               return ed::workflows::spectral(
                   static_cast<const ed::LinearOperator&>(op), obs,

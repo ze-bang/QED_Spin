@@ -343,6 +343,20 @@ struct SpectralResult {
     // exploited.
     std::vector<SpectralSectorEntry> per_sector_pair;
     std::string                       selection_rule_label;
+
+    // -----------------------------------------------------------------
+    // SU(2) total-spin label of the SOURCE ground state (Stage 12g).
+    // -----------------------------------------------------------------
+    //
+    // Filled by the GroundStateCF lane when the caller installed an
+    // ``SpectralOptions::su2_labeler`` (the workflow bindings do so
+    // whenever the Hamiltonian is SU(2)-invariant). ``gs_two_S = -1``
+    // means unlabeled (axis off, non-SU(2) H, or certification failed);
+    // ``gs_s2`` carries the raw <S^2> when a labeler ran (else NaN-free
+    // -1). Wigner-Eckart: a rank-1 (spin-operator) probe connects the
+    // GS only to final states with S' in {S-1, S, S+1}.
+    int    gs_two_S = -1;
+    double gs_s2    = -1.0;
 };
 
 }  // namespace ed

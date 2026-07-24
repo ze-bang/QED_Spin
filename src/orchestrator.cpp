@@ -1847,6 +1847,14 @@ SpectralResult spectral(const LinearOperator&                      H,
             // (unrefined GS => ~5% S(omega) error vs the exact reference).
             refine_gs_seed_host(H, seed_host, E0);
         }
+        // Stage 12g (SU(2) rollout): label the CF source state's total
+        // spin when the caller installed a labeler (the bindings do so
+        // for SU(2)-invariant H). Works for the inner-solve GS AND a
+        // caller-staged initial_state alike.
+        if (opts.su2_labeler) {
+            R.gs_two_S = opts.su2_labeler(seed_host.data(),
+                                          seed_host.size(), &R.gs_s2);
+        }
         const double shift = (std::abs(opts.energy_shift) > 1e-14)
             ? opts.energy_shift : E0;
         std::visit([&](auto& backend_uptr) {
