@@ -3,19 +3,18 @@
 little-group static-SF lane (little_group_gs_static_sf).
 
 ONE n_up-pinned little-group ground-state solve, then for each allowed
-momentum q the physical probe
+momentum q an IN-SECTOR expectation of
 
-    A_q = N^{-1/2} sum_j e^{-i q.r_j} S^-_j
+    O_q = sum_{i!=j} cos(q.(r_i-r_j)) S^+_i S^-_j   (real, Hermitian)
 
-is scattered into the n_up+1 sector and its norm returned:
+    S^{+-}(q) = <GS|O_q|GS>/N + n_up/N.
 
-    S^{+-}(q) = || A_q |GS> ||^2 = (1/N) sum_ij e^{iq(r_i-r_j)} <S^+_i S^-_j>.
-
-No continued fraction / omega grid -- just the equal-time norm, so the
-whole q-mesh costs one GS solve (memory O(#reps)). This is the transverse
-companion to run_bfg_sssf_littlegroup.py (the diagonal S^{zz} lane); the
-two together give S^{zz} and S^{+-} at the 12 cluster momenta of a 4x3
-(N=36) torus without ever leaving one momentum sector.
+O_q conserves Sz AND momentum, so it maps the GS sector to itself: the
+GPU rep-gather matvec applies it on the GS vector (only ONE sector ever
+resident -- no cross-sector scatter / destination sector, which OOMs at
+N=36). The i=j self-term is exactly n_up on the fixed-Sz sector and is
+added back analytically. Transverse companion to
+run_bfg_sssf_littlegroup.py (the diagonal S^{zz} lane).
 
 Validated vs dense on 2x3 / 3x2 to <1e-6 (--validate).
 
@@ -109,6 +108,10 @@ def main():
     p.add_argument("--Jpm", type=float, required=True)
     p.add_argument("--Jzz", type=float, default=1.0)
     p.add_argument("--n-up", type=int, default=None)
+    p.add_argument("--gs-k0", type=int, default=None,
+                   help="Pin the GS momentum star (little-group k0 index). Use to\n"
+                        "keep zz and pm channels on the SAME state at a\n"
+                        "near-degeneracy (e.g. Jpm=-0.13 k0=16 vs 20).")
     p.add_argument("--dense-max-dim", type=int, default=512)
     p.add_argument("--device", type=str, default="gpu", choices=["cpu", "gpu"])
     p.add_argument("--output-dir", type=str, required=True)
@@ -140,7 +143,8 @@ def main():
     t0 = time.perf_counter()
     out = dict(_core.little_group_gs_static_sf(
         H, obs, A, [], n_up=n_up, dense_max_dim=args.dense_max_dim,
-        use_gpu=(args.device == "gpu")))
+        use_gpu=(args.device == "gpu"),
+        only_k0=([args.gs_k0] if args.gs_k0 is not None else [])))
     dt = time.perf_counter() - t0
     # <GS|O_q|GS> = off-diagonal sum; add the exact i=j self-term (n_up) then /N
     spm = (np.array(out["static_sf"]) + n_up) / N

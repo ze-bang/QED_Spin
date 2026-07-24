@@ -1356,7 +1356,7 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int n_up, int delta_n_up, int dense_max_dim, bool use_gpu,
-             int time_reversal) {
+             int time_reversal, const std::vector<int>& only_k0) {
               using Complex = std::complex<double>;
               const int n_sites = static_cast<int>(op_h.getNumBits());
               for (const Operator& o : observables)
@@ -1390,6 +1390,13 @@ PYBIND11_MODULE(_core, m) {
                   o.use_gpu = use_gpu;
 #endif
                   o.spin_flip = -1; o.time_reversal = time_reversal;
+                  // Pin the GS to a named momentum star. Needed to keep both
+                  // structure-factor channels on the SAME ground state at a
+                  // near-degeneracy: two stars within ~1e-5 (e.g. the 4x3
+                  // kagome k0=16/20 crossing near Jpm=-0.13) are ranked
+                  // inconsistently by the two-phase scan across builds, so
+                  // one channel can land on a slightly-excited star.
+                  o.only_k0 = only_k0;
                   return o;
               };
               int gs_nu = -1, gs_par = -1; double e_best = 0.0; bool have = false;
@@ -1455,6 +1462,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("n_up") = -1, py::arg("delta_n_up") = 1,
           py::arg("dense_max_dim") = 512,
           py::arg("use_gpu") = false, py::arg("time_reversal") = -1,
+          py::arg("only_k0") = std::vector<int>{},
           "IN-SECTOR ground-state expectations <GS|O_q|GS> for a LIST of "
           "Sz- and momentum-conserving operators O_q, amortising ONE "
           "n_up-pinned little-group GS solve. Each O_q is applied on the GS "
