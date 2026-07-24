@@ -49,5 +49,5 @@ echo "=== BFG 4x3 S^+-(q) | task=${TASK} Jpm=${JPM} job=${SLURM_JOB_ID} node=$(h
 
 stdbuf -oL -eL python3 -u "${SCRIPT}" \
     --dim1 4 --dim2 3 --Jpm "${JPM}" --Jzz 1.0 \
-    --device gpu --output-dir "${OUT_BASE}"
+    --device gpu --output-dir "${OUT_BASE}" ${GS_K0:+--gs-k0 ${GS_K0}}
 echo "Done: task=${TASK} Jpm=${JPM}"
