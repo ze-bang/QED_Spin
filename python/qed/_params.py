@@ -213,6 +213,13 @@ def ed_result_from_gs_result(
     _tags = getattr(gs_result, "sector_tags", None)
     if _tags:
         out.sector_tags = list(_tags)
+    # Stage 12 (SU(2) rollout): certified total-spin labels, parallel to
+    # ``eigenvalues`` when the C++ side produced them. ``spin`` is S as a
+    # float (0.0, 0.5, 1.0, ...) or None where certification failed.
+    _twoS = list(getattr(gs_result, "two_S_of_eigenvalue", []) or [])
+    if _twoS:
+        out.spin = [(t / 2.0) if t >= 0 else None for t in _twoS]
+        out.s2 = list(getattr(gs_result, "s2_of_eigenvalue", []) or [])
     _bk = getattr(gs_result, "backend", None)
     if _bk is not None:
         out.backend = _bk

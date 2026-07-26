@@ -39,6 +39,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -160,6 +161,29 @@ struct SolveOptions {
     /// (the legacy / default behaviour). Used to probe a single
     /// irrep without paying for the rest of the spectrum.
     std::vector<std::size_t> selected_sectors;
+
+    // -----------------------------------------------------------------
+    // Stage 12 (SU(2) rollout): total-spin axis.
+    // -----------------------------------------------------------------
+
+    /// Target the spin-S tower (two_total_spin = 2S; -1 = off). Requires
+    /// an SU(2)-invariant Hamiltonian (term-level check throws otherwise).
+    /// The sector loops wrap each block in the Lowdin
+    /// ``CasimirProjectedOperator`` and project the Krylov seed; blocks
+    /// with no weight in the tower are skipped.
+    int two_total_spin   = -1;
+
+    /// Post-hoc <S^2> labeling toggle: -1 = auto (label whenever H is
+    /// SU(2)-invariant AND eigenvectors are available in-sector), 0 =
+    /// off, 1 = require (throw when H is not SU(2)-invariant). Fills
+    /// ``GroundStateResult::{s2_of_eigenvalue, two_S_of_eigenvalue}``.
+    int label_total_spin = -1;
+
+    /// Host-side transform applied to the randomly drawn Krylov seed
+    /// before it is staged into the backend (e.g. the Lowdin total-spin
+    /// projection). A non-null transform disables the ``lanczos_real``
+    /// fast lane, which draws its own seed internally.
+    std::function<void(Complex*, std::size_t)> seed_transform;
 };
 
 struct ThermalOptions {
@@ -178,6 +202,25 @@ struct ThermalOptions {
     /// Sz-parity sectors (diagonal Z2 remnant): -1 = off/auto-detect
     /// upstream, 0 = even half, 1 = odd half, 2 = both halves.
     int sz_parity = -1;
+
+    // -----------------------------------------------------------------
+    // Stage 12f (SU(2) rollout): per-tower thermal sampling.
+    // -----------------------------------------------------------------
+
+    /// Restrict the stochastic trace to the spin-S tower (2S; -1 = off).
+    /// The sector loops wrap each block matvec in the Lowdin projector
+    /// and install `seed_transform` per sector; the caller recombines
+    /// the per-tower results with (2S+1) degeneracy weights via the
+    /// degeneracy overload of ``combine_sector_thermodynamics``.
+    /// Consumed by the FTLM and mTPQ kernels (their seeds carry the
+    /// projection); other methods ignore it.
+    int two_total_spin = -1;
+
+    /// Host-side transform applied to every sample seed the kernels
+    /// draw (see FtlmOptions/MtpqOptions::seed_transform). Installed by
+    /// the sector loops when `two_total_spin >= 0`; direct callers may
+    /// also set it for custom subspace-restricted sampling.
+    std::function<void(Complex*, std::size_t)> seed_transform;
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
@@ -409,6 +452,14 @@ struct SpectralOptions {
     /// not fit the memory budget is REFUSED cleanly before any allocation. Set
     /// true (Python force=True) to dispatch anyway.
     bool        allow_infeasible = false;
+
+    /// Stage 12g (SU(2) rollout): optional labeler for the CF source
+    /// state. Called with the (host, unit-norm) seed after the inner GS
+    /// solve / initial_state staging; returns the certified two_S (-1 on
+    /// certification failure) and writes the raw <S^2> through the out
+    /// pointer. Installed by the workflow bindings whenever the
+    /// Hamiltonian is SU(2)-invariant; fills SpectralResult::gs_two_S.
+    std::function<int(const Complex*, std::size_t, double*)> su2_labeler;
 };
 
 // ---------------------------------------------------------------------------

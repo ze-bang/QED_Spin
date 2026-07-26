@@ -68,6 +68,13 @@ struct FtlmOptions {
     std::vector<double> betas;           ///< inverse-temperature grid (positive)
     std::uint64_t random_seed = 0;
     std::string output_dir;
+
+    /// Stage 12f (SU(2) rollout): host-side transform applied to every
+    /// Gaussian sample seed before it is normalised and staged (e.g. the
+    /// Lowdin total-spin projection, so the stochastic trace runs over
+    /// one spin tower). Must leave a normalisable vector; a zero result
+    /// throws (the targeted subspace has no weight in this block).
+    std::function<void(Complex*, std::size_t)> seed_transform;
 };
 
 struct FtlmResult {
@@ -172,13 +179,22 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         // ---- 1. Seed v_0 on the host, normalise, copy to backend ----
         std::vector<Complex> v0_host(local_n);
         for (auto& c : v0_host) c = Complex(gauss(rng), gauss(rng));
+        // Stage 12f: subspace projection of the stochastic seed (e.g.
+        // Lowdin total-spin), BEFORE normalisation.
+        if (opts.seed_transform) {
+            opts.seed_transform(v0_host.data(), local_n);
+        }
         double sum_sq = 0.0;
         for (auto c : v0_host) sum_sq += std::norm(c);
         const double v0_nrm = std::sqrt(sum_sq);
         if (!(v0_nrm > 0.0)) {
             throw std::runtime_error(
                 "ftlm_kernel: zero-norm random start vector for sample "
-                + std::to_string(s));
+                + std::to_string(s)
+                + (opts.seed_transform
+                       ? " (the seed transform annihilated it -- the "
+                         "targeted subspace has no weight in this block)"
+                       : ""));
         }
         const double inv = 1.0 / v0_nrm;
         for (auto& c : v0_host) c *= inv;
@@ -278,6 +294,16 @@ FtlmResult ftlm_kernel(const Backend&  backend,
                        const FtlmOptions& opts)
 {
     if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
+        // Stage 12f: the legacy CPU driver draws its own seeds and
+        // cannot honour a subspace-restricting ``seed_transform`` --
+        // route through the Backend-templated body (which applies the
+        // transform per sample) instead of silently sampling the
+        // whole block.
+        if (opts.seed_transform) {
+            return detail::ftlm_kernel_via_backend(
+                backend, std::forward<MatvecFn>(apply_H),
+                local_n, global_n, opts);
+        }
         // CPU lane: legacy driver with full I/O behaviour.
         FTLMParameters params;
         params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);

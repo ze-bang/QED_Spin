@@ -136,6 +136,10 @@ struct SectorTag {
     /// Number of "up" spins for the fixed-Sz sub-axis. -1 means
     /// "fixed-Sz axis is off" (full Hilbert per irrep).
     int              n_up         = -1;
+    /// SU(2) total-spin label as 2S (doubled so odd-N half-integer spins
+    /// stay exact; Stage 12 SU(2) rollout). -1 means "no total-spin
+    /// resolution on this block".
+    int              two_S        = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +184,22 @@ struct GroundStateResult {
     std::vector<SectorTag>              sector_tags;
     std::vector<std::vector<double>>    eigenvalues_per_sector;
     std::vector<std::size_t>            sector_index_of_eigenvalue;
+
+    // -----------------------------------------------------------------
+    // SU(2) total-spin labels (Stage 12a of the SU(2) rollout).
+    // -----------------------------------------------------------------
+    //
+    // Parallel to `eigenvalues` when non-empty, produced by the post-hoc
+    // <S^2> labeler on an SU(2)-invariant Hamiltonian:
+    //   * `s2_of_eigenvalue[i]`    -- raw <psi_i|S^2|psi_i>;
+    //   * `two_S_of_eigenvalue[i]` -- CERTIFIED snapped label 2S, or -1
+    //     when the vector failed certification (e.g. an accidental
+    //     energy degeneracy mixed different-S eigenvectors) or no
+    //     eigenvector was available to label.
+    // Empty when the Hamiltonian is not SU(2)-invariant, labeling is
+    // toggled off, or the lane never materializes vectors.
+    std::vector<double>                 s2_of_eigenvalue;
+    std::vector<int>                    two_S_of_eigenvalue;
 };
 
 // ---------------------------------------------------------------------------
@@ -323,6 +343,20 @@ struct SpectralResult {
     // exploited.
     std::vector<SpectralSectorEntry> per_sector_pair;
     std::string                       selection_rule_label;
+
+    // -----------------------------------------------------------------
+    // SU(2) total-spin label of the SOURCE ground state (Stage 12g).
+    // -----------------------------------------------------------------
+    //
+    // Filled by the GroundStateCF lane when the caller installed an
+    // ``SpectralOptions::su2_labeler`` (the workflow bindings do so
+    // whenever the Hamiltonian is SU(2)-invariant). ``gs_two_S = -1``
+    // means unlabeled (axis off, non-SU(2) H, or certification failed);
+    // ``gs_s2`` carries the raw <S^2> when a labeler ran (else NaN-free
+    // -1). Wigner-Eckart: a rank-1 (spin-operator) probe connects the
+    // GS only to final states with S' in {S-1, S, S+1}.
+    int    gs_two_S = -1;
+    double gs_s2    = -1.0;
 };
 
 }  // namespace ed

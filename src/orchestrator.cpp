@@ -361,6 +361,22 @@ GroundStateResult solve_on(Backend& be,
         const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
         for (auto& z : seed_host) z *= inv;
     }
+    // Stage 12 (SU(2) rollout): caller-supplied seed transform (e.g. the
+    // Lowdin total-spin projection). Applied on the host copy before
+    // staging; the transform is responsible for leaving a usable
+    // (normalisable) vector or throwing.
+    if (opts.seed_transform) {
+        opts.seed_transform(seed_host.data(), seed_host.size());
+        double sumsq = 0.0;
+        for (const auto& z : seed_host) sumsq += std::norm(z);
+        if (!(sumsq > 0.0)) {
+            throw std::runtime_error(
+                "ed::solve: seed_transform produced a zero seed (the "
+                "targeted symmetry sector has no weight in this block)");
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : seed_host) z *= inv;
+    }
     auto seed_backend = be.make_zero_vector(geom.local_dim);
     be.copy_from_host(seed_host.data(), seed_backend.get(), geom.local_dim);
     const Complex* seed = seed_backend.get();
@@ -397,6 +413,7 @@ GroundStateResult solve_on(Backend& be,
             if (!force_complex
                     && opts.num_eigs == 1
                     && !opts.compute_vectors
+                    && !opts.seed_transform  // draws its own seed internally
                     && H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
                 std::vector<double> eigs;
@@ -1168,6 +1185,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
         !R.thermo.temperatures.empty() &&
+        // Stage 12f: a seed transform restricts the stochastic trace to a
+        // SUBSPACE (e.g. one spin tower). The exact fallback diagonalises
+        // the whole block and would silently ignore the restriction --
+        // stand down and let the sampling kernel honour the projection.
+        // (Callers wanting exact per-tower thermo use the differencing
+        // route in workflows_thermal_su2_tower instead.)
+        !opts.seed_transform &&
         // When the caller requested TPQ state snapshots (probe_betas), the exact
         // fallback cannot produce them -- run the real TPQ trajectory instead
         // (accepting the small-sector variance the user implicitly opted into).
@@ -1199,6 +1223,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             kopts.random_seed = opts.random_seed;
             kopts.output_dir  = opts.output_dir;
             kopts.probe_betas = opts.probe_betas;
+            kopts.seed_transform = opts.seed_transform;  // Stage 12f
             auto matvec = H.template bind<B>();
 
             // -------------------------------------------------------------
@@ -1416,6 +1441,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
                 kopts.output_dir  = opts.output_dir;
+                kopts.seed_transform = opts.seed_transform;  // Stage 12f
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
@@ -1494,6 +1520,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
                 kopts.output_dir  = opts.output_dir;
+                kopts.seed_transform = opts.seed_transform;  // Stage 12f
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
@@ -1819,6 +1846,14 @@ SpectralResult spectral(const LinearOperator&                      H,
             // Guard the GS vector before it seeds the CF weight ||O|psi0>||^2
             // (unrefined GS => ~5% S(omega) error vs the exact reference).
             refine_gs_seed_host(H, seed_host, E0);
+        }
+        // Stage 12g (SU(2) rollout): label the CF source state's total
+        // spin when the caller installed a labeler (the bindings do so
+        // for SU(2)-invariant H). Works for the inner-solve GS AND a
+        // caller-staged initial_state alike.
+        if (opts.su2_labeler) {
+            R.gs_two_S = opts.su2_labeler(seed_host.data(),
+                                          seed_host.size(), &R.gs_s2);
         }
         const double shift = (std::abs(opts.energy_shift) > 1e-14)
             ? opts.energy_shift : E0;

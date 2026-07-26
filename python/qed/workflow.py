@@ -109,6 +109,63 @@ def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
 
 
 
+# ---------------------------------------------------------------------------
+# Stage 12 (SU(2) rollout): total-spin axis plumbing.
+#
+# ``qed.solve(total_spin=...)`` resolves to a (two_total_spin,
+# label_total_spin) pair carried through a context variable so every
+# SolveOptions the dispatch tree builds (plain, fixed-Sz, streaming-
+# symmetry) picks it up without threading a kwarg through each helper.
+# The context is (re)set at every public entry, so a raised call cannot
+# leak targeting into the next one.
+# ---------------------------------------------------------------------------
+import contextvars
+
+_TOTAL_SPIN_CTX: "contextvars.ContextVar[tuple[int, int]]" = \
+    contextvars.ContextVar("qed_total_spin", default=(-1, -1))
+
+
+def _normalize_total_spin(total_spin, num_sites: int) -> tuple[int, int]:
+    """Map the ``total_spin`` kwarg onto (two_total_spin, label_total_spin).
+
+    ``"auto"`` -> (-1, -1): label when SU(2) holds and vectors exist.
+    ``"off"`` / ``None`` / ``False`` -> (-1, 0): axis fully off.
+    ``"require"`` -> (-1, 1): throw when H is not SU(2)-invariant.
+    numeric S (int or half-integer) -> (2S, -1): target that tower.
+    """
+    if total_spin is None or total_spin is False:
+        return (-1, 0)
+    if isinstance(total_spin, str):
+        key = total_spin.strip().lower()
+        if key in ("auto", "on"):
+            return (-1, -1)
+        if key in ("off", "none", ""):
+            return (-1, 0)
+        if key == "require":
+            return (-1, 1)
+        raise ValueError(
+            f"qed: total_spin={total_spin!r} not understood; expected "
+            f"'auto', 'off', 'require', or a numeric S.")
+    two_S = int(round(2.0 * float(total_spin)))
+    if abs(2.0 * float(total_spin) - two_S) > 1e-9 or two_S < 0:
+        raise ValueError(
+            f"qed: total_spin={total_spin!r} must be a non-negative "
+            f"integer or half-integer.")
+    if two_S > num_sites or (two_S % 2) != (num_sites % 2):
+        raise ValueError(
+            f"qed: total_spin={total_spin!r} is not admissible for "
+            f"{num_sites} spin-1/2 sites (needs S <= N/2 with "
+            f"{'integer' if num_sites % 2 == 0 else 'half-integer'} S).")
+    return (two_S, -1)
+
+
+def _apply_total_spin_opts(opts) -> None:
+    """Stamp the resolved total-spin pair onto a ``SolveOptions``."""
+    two_S, label = _TOTAL_SPIN_CTX.get()
+    opts.two_total_spin = two_S
+    opts.label_total_spin = label
+
+
 def _diag_via_workflows_solve(
     operator: Operator,
     method: DiagonalizationMethod,
@@ -126,6 +183,7 @@ def _diag_via_workflows_solve(
     Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
         opts = _ed_params_to_solve_options(params, method, auto_method, allow_infeasible)
+        _apply_total_spin_opts(opts)
         # The orchestrator's `workflows_solve` accepts an `Operator&`;
         # if the caller already projected to a fixed-Sz sector we hand
         # it the `FixedSzOperator` directly (it derives from `Operator`).
@@ -252,6 +310,7 @@ def solve(
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
     point_group: Union[str, bool, None] = "auto",
+    total_spin: Union[int, float, str, None] = "auto",
     lattice: Optional[Any] = None,
     output_dir: str = "",
     max_iterations: Optional[int] = None,
@@ -357,6 +416,23 @@ def solve(
         naming a smaller block gets a smaller block. ``"full"``: REQUIRE
         projection -- raises with the decline reason instead of
         degrading. ``"off"``: abelian lane, star folds disabled.
+    total_spin : int, float, str, or None, optional
+        SU(2) total-spin axis (Stage 12). ``"auto"`` (default): when the
+        Hamiltonian is SU(2)-invariant (per-bond isotropic exchange, no
+        fields / DM / anisotropy), eigenstates returned with vectors are
+        labeled with their certified total spin (``EDResults.spin`` /
+        ``EDResults.s2``, parallel to ``eigenvalues``; ``None`` where an
+        accidental degeneracy defeats certification). Numeric ``S``
+        (integer or half-integer): TARGET the spin-S tower -- each block
+        is solved through the Lowdin Casimir projector (seed projected,
+        drift scrubbed per ``ED_SYM_SU2_REPROJECT_FREQ``), so the
+        returned window is the lowest states OF THAT TOWER. Composes
+        with ``sz=``, ``symmetry=``, ``spin_flip``, ``time_reversal``
+        (rides the abelian rep lane; ``point_group='full'`` +
+        targeting raises). ``"require"``: as auto but raise when H is
+        not SU(2)-invariant. ``"off"``/``None``: axis disabled.
+        Cost note: one projection costs ~(degree x N/2z) H-applies;
+        targeting is opt-in precisely because of this.
     irrep : dict, optional
         Little-co-group irrep, named BY ITS CHARACTER as
         ``{residue_index: value}`` (``-1`` keys the identity) and
@@ -538,6 +614,15 @@ def solve(
     base_dim = int(H.dimension)  # full Hilbert dim, even for FixedSz
 
     # ------------------------------------------------------------------
+    # Stage 12 (SU(2) rollout): resolve the total-spin axis ONCE and
+    # publish it through the context variable every SolveOptions build
+    # reads (_apply_total_spin_opts). Set unconditionally so a stale
+    # value from an interrupted earlier call can never leak in.
+    # ------------------------------------------------------------------
+    _ts2, _ts_label = _normalize_total_spin(total_spin, num_sites)
+    _TOTAL_SPIN_CTX.set((_ts2, _ts_label))
+
+    # ------------------------------------------------------------------
     # 1. Resolve the fixed-Sz axis. sz="even"/"odd" selects the
     #    Sz-PARITY halves instead (the Z2 remnant when U(1) is broken;
     #    also valid for U(1)-conserving H) -- handled by the symmetry
@@ -591,6 +676,7 @@ def solve(
                 device=device, symmetry=None, sector=sector, irrep=irrep,
                 flip=flip, sz=_nu_i, auto_sz=False, spin_flip=spin_flip,
                 time_reversal=time_reversal, point_group=point_group,
+                total_spin=total_spin,
                 lattice=lattice, output_dir=output_dir,
                 max_iterations=max_iterations, block_size=block_size,
                 num_samples=num_samples, target_beta=target_beta,
@@ -806,6 +892,7 @@ def solve(
         # representative vector (fold partners need U3 transport).
         if (compute_eigenvectors and not is_thermal
                 and sector is None and irrep is None and flip is None
+                and _ts2 < 0  # Stage 12: targeting rides the abelian lane
                 and isinstance(sz, int)):
             vlane = resolve_projection_lane(
                 symmetry, point_group=point_group, consumer="solve",
@@ -841,6 +928,12 @@ def solve(
             elif verbose:
                 print(f"[qed.solve] vector lane declined "
                       f"({vlane.reason}); abelian lane.")
+        if _ts2 >= 0 and point_group == "full":
+            raise ValueError(
+                "qed.solve: total_spin targeting is not implemented inside "
+                "the little-group projection engine yet -- it rides the "
+                "abelian rep lane (which still exploits the translation "
+                "clique). Drop point_group='full' or total_spin=.")
         lane = resolve_projection_lane(
             symmetry, point_group=point_group, consumer="solve",
             eigenvalues_only=(not compute_eigenvectors
@@ -852,7 +945,9 @@ def solve(
             # a device='gpu' request runs the non-abelian blocks ON the
             # device (plus the >= 2^20-rep gather for Lanczos-sized blocks)
             # and no longer vetoes projection.
-            prefer_abelian=False,
+            # Stage 12: total-spin TARGETING soft-vetoes projection (the
+            # Lowdin wrapper lives on the abelian rep lane).
+            prefer_abelian=(_ts2 >= 0),
             verbose=verbose)
         if irrep is not None and lane.mode != "project":
             # irrep= names a LITTLE-CO-GROUP irrep, which only the projection
@@ -1906,6 +2001,7 @@ def _diag_with_symmetry(
         # Ground-state lane (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
         # FULL) -- the original behaviour.
         opts = _ed_params_to_solve_options(params, method)
+        _apply_total_spin_opts(opts)
         opts.use_symmetry = True
         # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
         # with 'on' = auto + detection report (warn-and-continue when
@@ -2049,6 +2145,128 @@ def _generators_nonabelian(gens: list[list[int]]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Stage 12e (SU(2) rollout): full-spectrum total-spin resolution via
+# highest-weight SPECTRAL DIFFERENCING -- no vectors, no dense S^2 blocks.
+#
+# For an SU(2)-invariant H, every spin-S multiplet contributes exactly one
+# level to each Sz block with |Sz| <= S, so per |2Sz| class m (using the
+# blocks the sweep already solved):
+#
+#     tower(two_S) = spectrum(m = two_S)  minus  spectrum(m = two_S + 2)
+#
+# as an exact multiset difference, and each Sz block's spectrum tiles as
+# the disjoint union of the towers with two_S >= m. Matching is by sorted
+# two-pointer walk with a tolerance; degenerate levels are interchangeable
+# within their cluster, so any consistent assignment is a valid labeling.
+# ---------------------------------------------------------------------------
+
+def _su2_multiset_diff(a: list, b: list, tol: float) -> list:
+    """Sorted-multiset a minus b (b known to embed in a within tol)."""
+    out, j = [], 0
+    for x in a:
+        if j < len(b) and abs(x - b[j]) <= tol:
+            j += 1
+        else:
+            out.append(x)
+    return out
+
+
+def _su2_label_blocks(
+    blocks: "list[tuple[Optional[int], list[float]]]",
+    n_sites: int,
+    tol: float = 1e-8,
+) -> "Optional[list[list[int]]]":
+    """Label every (n_up, sorted spectrum) block with per-level two_S.
+
+    Returns one int list per input block (parallel), or None when the
+    sweep is incomplete (a needed |Sz| class is missing). -1 marks a
+    level the tiling failed to match (should not happen for a genuine
+    SU(2)-invariant H; kept as a soft failure mode).
+    """
+    # Representative spectrum per |2Sz| class.
+    avail: dict[int, list[float]] = {}
+    for n_up, spec in blocks:
+        if n_up is None:
+            return None
+        m = abs(2 * n_up - n_sites)
+        avail.setdefault(m, sorted(spec))
+    # Need every class from N%2 up to N (missing top classes are fine
+    # only if no block needs them -- iterate what the tiling requires).
+    towers: dict[int, list[float]] = {}
+    for ts in range(n_sites, n_sites % 2 - 1, -2):
+        hi = avail.get(ts + 2, [] if ts + 2 > n_sites else None)
+        lo = avail.get(ts)
+        if lo is None or hi is None:
+            # A class the differencing needs was not solved: label only
+            # if no block references these towers -- conservatively bail.
+            return None
+        towers[ts] = _su2_multiset_diff(lo, hi, tol)
+    out: list[list[int]] = []
+    for n_up, spec in blocks:
+        m = abs(2 * n_up - n_sites)
+        pool = sorted(
+            (e, ts) for ts, lst in towers.items() if ts >= m for e in lst)
+        labels, j = [], 0
+        for x in sorted(spec):
+            if j < len(pool) and abs(x - pool[j][0]) <= tol:
+                labels.append(pool[j][1])
+                j += 1
+            else:
+                labels.append(-1)
+        out.append(labels)
+    return out
+
+
+def _attach_su2_full_spectrum_labels(
+    out: EDResults,
+    blocks: "list[tuple[Optional[int], list[float]]]",
+    n_sites: int,
+    operator: Operator,
+    *,
+    enabled: bool,
+    require: bool,
+) -> None:
+    """Attach ``out.spin`` / ``out.two_S`` (parallel to the merged sorted
+    ``out.eigenvalues``) via highest-weight spectral differencing. Soft
+    no-op when disabled / not SU(2)-invariant / sweep incomplete, unless
+    ``require`` (then raise on a non-SU(2) Hamiltonian)."""
+    import os as _os
+    if _os.environ.get("ED_SYM_SU2", "") == "0":
+        if require:
+            raise RuntimeError(
+                "qed.full_spectrum: total_spin='require' but the SU(2) "
+                "axis is vetoed by ED_SYM_SU2=0")
+        return
+    try:
+        su2 = bool(_core.detect_hamiltonian_symmetries(operator)["su2"])
+    except Exception:
+        su2 = False
+    if not su2:
+        if require:
+            raise RuntimeError(
+                "qed.full_spectrum: total_spin='require' but the "
+                "term-level [H, S_tot] check failed (H is not "
+                "SU(2)-invariant)")
+        return
+    if not enabled or not blocks:
+        return
+    labels = _su2_label_blocks(blocks, n_sites)
+    if labels is None:
+        return
+    pairs = sorted(
+        (e, ts)
+        for (nu, spec), labs in zip(blocks, labels)
+        for e, ts in zip(sorted(spec), labs))
+    if len(pairs) != len(out.eigenvalues):
+        return  # sweep/merge mismatch: leave unlabeled rather than lie
+    try:
+        out.two_S = [ts for _, ts in pairs]
+        out.spin = [(ts / 2.0 if ts >= 0 else None) for _, ts in pairs]
+    except AttributeError:
+        pass
+
+
 def full_spectrum(
     operator: Operator,
     *,
@@ -2063,6 +2281,7 @@ def full_spectrum(
     spin_flip: Union[str, bool, int, None] = "auto",
     time_reversal: Union[str, bool, int, None] = "auto",
     point_group: Union[str, bool, None] = "auto",
+    total_spin: Union[int, float, str, None] = "auto",
     lattice: Optional[Any] = None,
     verbose: bool = False,
 ) -> EDResults:
@@ -2107,6 +2326,19 @@ def full_spectrum(
     import math
 
     N = int(operator.num_sites)
+    # Stage 12 (SU(2) rollout): publish the total-spin axis for every
+    # SolveOptions this verb builds. Targeting (numeric S) is not
+    # meaningful for a COMPLETE spectrum -- refuse it; auto labeling
+    # rides the dense S-resolution (Stage 12e) where implemented.
+    _fs_ts2, _fs_label = _normalize_total_spin(
+        total_spin, int(operator.num_sites))
+    if _fs_ts2 >= 0:
+        raise ValueError(
+            "qed.full_spectrum: total_spin=<S> targeting selects one "
+            "tower, which contradicts a full-spectrum request. Use "
+            "qed.solve(total_spin=S) for tower minima, or "
+            "total_spin='auto' here for labels.")
+    _TOTAL_SPIN_CTX.set((_fs_ts2, _fs_label))
     # ONE Sz spelling (Jul 2026): int | "auto" | "off" ((lo, hi) windows
     # interact with the flip-transport mirror -- not supported here yet).
     _szmode = normalize_sz(sz, verb="full_spectrum",
@@ -2226,6 +2458,7 @@ def full_spectrum(
                 "which is defined per momentum star -- pass sector= too.")
         try:
             eigs = []
+            _su2_blocks: list[tuple[Optional[int], list[float]]] = []
             if sz_conserved:
                 if sz is not None:
                     # ONE named magnetisation block: its complete spectrum,
@@ -2242,10 +2475,12 @@ def full_spectrum(
                         operator, _A, _res, n_up=int(n_up),
                         use_gpu=use_gpu, spin_flip=_sf, time_reversal=_tr,
                         only_k0=_fs_only_k0, only_irrep=_fs_only_irrep))
-                    block = [float(e) for e in d["eigenvalues"]]
+                    block = sorted(float(e) for e in d["eigenvalues"])
                     eigs.extend(block)
+                    _su2_blocks.append((int(n_up), block))
                     if _mirror and n_up * 2 != N:
                         eigs.extend(block)   # isospectral mirror
+                        _su2_blocks.append((N - int(n_up), block))
             else:
                 d = dict(_core.little_group_full_spectrum(
                     operator, _A, _res, use_gpu=use_gpu,
@@ -2259,6 +2494,13 @@ def full_spectrum(
                          if _flip_transport else ""))
             out = EDResults()
             out.eigenvalues = sorted(eigs)
+            # Stage 12e: total-spin resolution by spectral differencing
+            # (full sweep only; a restricted star walk breaks the tiling).
+            _attach_su2_full_spectrum_labels(
+                out, _su2_blocks, N, operator,
+                enabled=(_fs_label != 0 and sz is None and sz_conserved
+                         and not _fs_only_k0 and not _fs_only_irrep),
+                require=(_fs_label == 1))
             return out
         except Exception as exc:            # noqa: BLE001 -- graceful
             if isinstance(point_group, str) \
@@ -2348,6 +2590,7 @@ def full_spectrum(
         eigs: list[float] = []
         eigs_per_sector: list[list[float]] = []
         sector_tags: list[Any] = []
+        _su2_blocks: list[tuple[Optional[int], list[float]]] = []
         for n_up in sz_values:
             block_dim = (math.comb(N, n_up) if n_up is not None
                          else (1 << N))
@@ -2370,10 +2613,15 @@ def full_spectrum(
             gs = _core.workflows_solve_streaming_symmetry_directory(
                 tmpdir, N, float(spin_length), opts, n_up)
             eigs.extend(gs.eigenvalues)
+            _su2_blocks.append(
+                (int(n_up) if n_up is not None else None,
+                 sorted(gs.eigenvalues)))
             if (_flip_transport and n_up is not None
                     and int(n_up) * 2 != N):
                 # Isospectral N - n_up mirror of the whole Sz block.
                 eigs.extend(gs.eigenvalues)
+                _su2_blocks.append(
+                    (N - int(n_up), sorted(gs.eigenvalues)))
             _eps = getattr(gs, "eigenvalues_per_sector", None)
             if _eps:
                 eigs_per_sector.extend([list(s) for s in _eps])
@@ -2406,6 +2654,12 @@ def full_spectrum(
                 out.sector_tags = sector_tags
             except AttributeError:
                 pass
+        # Stage 12e: total-spin resolution by spectral differencing (needs
+        # the complete Sz sweep -- a named sz block has no adjacent data).
+        _attach_su2_full_spectrum_labels(
+            out, _su2_blocks, N, operator,
+            enabled=(_fs_label != 0 and sz is None and sz_conserved),
+            require=(_fs_label == 1))
         return out
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
