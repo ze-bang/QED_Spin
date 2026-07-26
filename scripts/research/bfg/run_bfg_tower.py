@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""BFG kagome: Anderson tower of states -- lowest-k eigenvalues per total-Sz
-sector, via the little-group factorized reduction (GPU).
+"""BFG kagome: Anderson tower of states -- the sector-minimum energy E_min(S)
+of each total-Sz sector n_up = N/2 + S, via the VALIDATED little-group
+ground-state lane (little_group_gs_static_sf -> little_group_ground_state).
 
 For spontaneous SU(2) breaking the low-lying spectrum forms a "tower":
 the lowest state of total spin S first appears in the Sz=S sector, and
@@ -8,18 +9,26 @@ the lowest state of total spin S first appears in the Sz=S sector, and
 collapses onto the thermodynamic ground state as N->inf. A flat / non-
 S(S+1) low-energy structure instead points to a spin liquid.
 
-This driver solves ONE magnetization sector n_up = N/2 + S (i.e. total
-Sz = S) and returns its lowest ``--k`` eigenvalues with the momentum-star
-label + multiplicity of each -- scanning EVERY momentum star (only_k0
-empty), so E_min is the true sector minimum. Run once per (Jpm, S); the
-tower E(S) is assembled in post from E_min of each sector.
+This driver solves ONE magnetization sector (total Sz = S) and returns its
+GROUND energy E_min(S) with the winning momentum-star label -- scanning
+EVERY star (no only_k0 pin), so E_min is the true sector minimum. Run once
+per (Jpm, S); the tower is assembled in post from E_min of each sector.
 
-Eigenvalues only (no eigenvector), so it never leaves one sector: memory
-O(#reps), same footprint as the GS-energy scan.
+WHY THIS LANE (2026-07-24): the multi-eigenvalue lane
+little_group_lowest_eigenvalues_labeled (-> little_group_lowest_spectrum) is
+CORRECT at small N (dense-validated <1e-12 on 2x3/3x2) but BROKEN on the GPU
+at N=36: every momentum block returns a bit-identical constant E_min
+(observed +18.8063980277 for all 14 stars at 4x3, incl. the true GS star,
+whose real E_min is -9.144). The ground-state lane used here is unaffected --
+its answer comes from solve_gs_vector on the winning block (a different
+solver) and reproduces the pm/zz campaign E0 (k0=16) exactly. So the tower is
+delivered as E_min(S) (k=1 per sector) from the trusted lane. Per-sector
+lowest-k (the quasi-degenerate multiplet) needs the spectrum-lane GPU bug
+fixed first; tracked separately.
 
 Usage (one sector):
     python run_bfg_tower.py --dim1 4 --dim2 3 --Jpm -0.11 --S 1 \
-        --k 4 --device gpu --output-dir <outdir>
+        --device gpu --output-dir <outdir>
 """
 
 from __future__ import annotations
@@ -81,6 +90,14 @@ def _dense_sector_lowest(dim1, dim2, Jpm, Jzz, n_up, k):
     return np.asarray(w)
 
 
+def _trivial_observable(N):
+    """A single harmless in-sector probe so the static-SF binding has an
+    observable to carry; only its host GS solve (gs_energy = E_min) is used."""
+    op = _core.Operator(N, 0.5)
+    op.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, complex(1.0))
+    return op
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -89,7 +106,6 @@ def main():
     p.add_argument("--Jpm", type=float, required=True)
     p.add_argument("--Jzz", type=float, default=1.0)
     p.add_argument("--S", type=int, required=True, help="total Sz sector (n_up=N/2+S)")
-    p.add_argument("--k", type=int, default=4, help="lowest-k eigenvalues per sector")
     p.add_argument("--dense-max-dim", type=int, default=512)
     p.add_argument("--device", type=str, default="gpu", choices=["cpu", "gpu"])
     p.add_argument("--output-dir", type=str, required=True)
@@ -110,52 +126,43 @@ def main():
     print("=" * 72)
     print(f"  BFG Anderson tower  {dim1}x{dim2} PBC  N={N}  "
           f"Jpm={args.Jpm:+.4f} Jzz={args.Jzz:.4f}  S={args.S} (n_up={n_up})  "
-          f"k={args.k}  device={args.device}")
+          f"device={args.device}  [GS-solve lane: E_min(S)]")
     print("=" * 72)
 
     H, lat = gs_mod.build_bfg_operator(dim1, dim2, args.Jpm, args.Jzz, pbc=True)
     A = translation_group(dim1, dim2)
+    obs = [_trivial_observable(N)]
 
     t0 = time.perf_counter()
-    out = dict(_core.little_group_lowest_eigenvalues_labeled(
-        H, A, [], k=args.k, n_up=n_up, dense_max_dim=args.dense_max_dim,
+    out = dict(_core.little_group_gs_static_sf(
+        H, obs, A, [], n_up=n_up, dense_max_dim=args.dense_max_dim,
         use_gpu=(args.device == "gpu")))
     dt = time.perf_counter() - t0
-    ev = np.array(out["eigenvalues"], dtype=float)
-    kraw = list(out.get("k_raw", []))
-    mult = list(out.get("multiplicity", []))
-    conv = list(out.get("converged", []))
-    print(f"  solved in {dt:.1f} s  (gpu_engaged={out.get('gpu_engaged')})")
-    for i, e in enumerate(ev):
-        km = kraw[i] if i < len(kraw) else "?"
-        mm = mult[i] if i < len(mult) else "?"
-        cc = conv[i] if i < len(conv) else "?"
-        print(f"    E[{i}] = {e:+.10f}   k_raw={km}  mult={mm}  conv={cc}")
+    e_min = float(out["gs_energy"])
+    k0 = int(out["gs_k0"])
+    n_reps = int(out["n_reps"])
+    print(f"  solved in {dt:.1f} s:  E_min(S={args.S}) = {e_min:+.10f}   "
+          f"k0={k0}  n_up={out['gs_n_up']}  n_reps={n_reps}")
 
     if _HAS_H5PY:
         with h5py.File(run_dir / f"tower_S{args.S}.h5", "w") as f:
             f.attrs.update({"model": "BFG_kagome", "dim1": dim1, "dim2": dim2,
                 "N_sites": N, "Jpm": args.Jpm, "Jzz": args.Jzz, "S": args.S,
-                "n_up": n_up, "k": args.k, "elapsed_s": dt,
-                "gpu_engaged": bool(out.get("gpu_engaged", False))})
-            f.create_dataset("eigenvalues", data=ev)
-            f.attrs["k_raw"] = json.dumps([int(x) for x in kraw])
-            f.attrs["multiplicity"] = json.dumps([int(x) for x in mult])
+                "n_up": n_up, "elapsed_s": dt, "method": "little_group_ground_state",
+                "gs_k0": k0, "n_reps": n_reps})
+            f.create_dataset("eigenvalues", data=np.array([e_min]))
         print(f"  saved to {run_dir / f'tower_S{args.S}.h5'}")
-    np.savez(run_dir / f"tower_S{args.S}.npz", eigenvalues=ev,
-             k_raw=np.array([int(x) for x in kraw]) if kraw else np.array([]),
-             S=args.S, n_up=n_up)
+    np.savez(run_dir / f"tower_S{args.S}.npz", eigenvalues=np.array([e_min]),
+             k0=k0, S=args.S, n_up=n_up)
 
     if args.validate:
         if N > 20:
             print("  [validate] N>20, dense skip."); sys.exit(0)
-        ref = _dense_sector_lowest(dim1, dim2, args.Jpm, args.Jzz, n_up, args.k)
-        m = min(len(ev), len(ref))
-        err = float(np.max(np.abs(np.sort(ev)[:m] - np.sort(ref)[:m])))
-        for i in range(m):
-            fl = "" if abs(ev[i] - ref[i]) < 1e-6 else "  <-- MISMATCH"
-            print(f"    E[{i}] lg={ev[i]:+.10f}  dense={ref[i]:+.10f}{fl}")
-        print(f"  [validate] S={args.S} max |dE| = {err:.3e} -> "
+        ref = _dense_sector_lowest(dim1, dim2, args.Jpm, args.Jzz, n_up, 1)
+        err = abs(e_min - float(ref[0]))
+        fl = "" if err < 1e-6 else "  <-- MISMATCH"
+        print(f"    E_min lg={e_min:+.10f}  dense={float(ref[0]):+.10f}{fl}")
+        print(f"  [validate] S={args.S} |dE_min| = {err:.3e} -> "
               f"{'OK' if err < 1e-6 else 'MISMATCH'}")
         sys.exit(0 if err < 1e-6 else 2)
     sys.exit(0)

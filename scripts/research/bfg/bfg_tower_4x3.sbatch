@@ -6,14 +6,16 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:h100:1
-#SBATCH --time=12:00:00
-#SBATCH --array=0-17
+#SBATCH --time=24:00:00
+#SBATCH --array=0-11
 #SBATCH --output=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.out
 #SBATCH --error=/project/6003507/zhouzb79/data/bfg_gs_sssf_4x3/logs/%x_%A_%a.err
 #
-# BFG kagome 4x3 (N=36): Anderson tower of states, S=0,1,2, lowest-4 per
-# sector. 18 tasks = 6 Jpm x 3 spins; task = jpm_idx*3 + S.
-# Eigenvalues-only little-group solve (in-sector, GPU, ~40G) per sector.
+# BFG kagome 4x3 (N=36): Anderson tower E_min(S) via the little-group
+# GROUND-STATE lane (little_group_gs_static_sf -> little_group_ground_state).
+# Only S=1,2 here: E_min(S=0) is the GS energy already computed by the
+# zz/pm campaigns (same lane, n_up=18). 12 tasks = 6 Jpm x {S=1,S=2};
+# task = jpm_idx*2 + (S-1).
 set -euo pipefail
 PROJ="/project/6003507/zhouzb79"; OUT_BASE="${PROJ}/data/bfg_gs_sssf_4x3"
 SCRIPT="${PROJ}/QED/scripts/research/bfg/run_bfg_tower.py"; mkdir -p "${OUT_BASE}/logs"
@@ -29,8 +31,8 @@ cp -a "${PROJ}/QED/python" "${STAGE}/qed_python"
 export PYTHONPATH="${STAGE}/qed_python:${PROJ}/QED/scripts/research/bfg:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=12 PYTHONUNBUFFERED=1 ED_SYM_PROFILE=1
 JPM_VALUES=(-0.05 -0.07 -0.09 -0.11 -0.13 -0.15)
-T="${SLURM_ARRAY_TASK_ID}"; JPM="${JPM_VALUES[$((T/3))]}"; S=$((T%3))
+T="${SLURM_ARRAY_TASK_ID}"; JPM="${JPM_VALUES[$((T/2))]}"; S=$((1 + T%2))
 echo "=== BFG 4x3 tower | task=$T Jpm=${JPM} S=${S} job=${SLURM_JOB_ID} node=$(hostname) ==="
 stdbuf -oL -eL python3 -u "${SCRIPT}" --dim1 4 --dim2 3 --Jpm "${JPM}" --Jzz 1.0 \
-    --S "${S}" --k 4 --device gpu --output-dir "${OUT_BASE}"
+    --S "${S}" --device gpu --output-dir "${OUT_BASE}"
 echo "Done: task=$T Jpm=${JPM} S=${S}"
