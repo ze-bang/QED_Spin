@@ -27,7 +27,7 @@ export PYTHONNOUSERSITE=1; source "${PROJ}/venvs/qed_prl/bin/activate"
 export FLEXIBLAS=AOCL
 export LD_LIBRARY_PATH="${EBROOTHDF5:+$EBROOTHDF5/lib:}${LD_LIBRARY_PATH:-}"
 STAGE="${SLURM_TMPDIR:-/tmp}/qed_stage"; mkdir -p "${STAGE}"
-cp -a "${PROJ}/QED/python" "${STAGE}/qed_python"
+cp -RL "${PROJ}/QED/python" "${STAGE}/qed_python"
 export PYTHONPATH="${STAGE}/qed_python:${PROJ}/QED/scripts/research/bfg:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=12 PYTHONUNBUFFERED=1 ED_SYM_PROFILE=1
 JPM_VALUES=(-0.05 -0.07 -0.09 -0.11 -0.13 -0.15)

@@ -37,7 +37,7 @@ export LD_LIBRARY_PATH="${EBROOTHDF5:+$EBROOTHDF5/lib:}${LD_LIBRARY_PATH:-}"
 # node-local stage of the python tree (incl. _core.so) -- /project Lustre
 # threw a cross-node Bus error mid-run on 2026-07-20 (see zz sbatch).
 STAGE="${SLURM_TMPDIR:-/tmp}/qed_stage"; mkdir -p "${STAGE}"
-cp -a "${PROJ}/QED/python" "${STAGE}/qed_python"
+cp -RL "${PROJ}/QED/python" "${STAGE}/qed_python"
 export PYTHONPATH="${STAGE}/qed_python:${PROJ}/QED/scripts/research/bfg:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 export PYTHONUNBUFFERED=1
