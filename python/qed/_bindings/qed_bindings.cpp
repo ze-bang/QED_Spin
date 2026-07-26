@@ -953,6 +953,73 @@ PYBIND11_MODULE(_core, m) {
           "that star's work instead of forcing the call off the projection "
           "lane onto the (larger) abelian block.");
 
+    m.def("little_group_block_grounds",
+          [lg_opts, lg_stars_dict](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int n_up, int sz_parity, int dense_max_dim,
+             bool use_gpu, int spin_flip, int time_reversal,
+             const std::vector<int>& only_k0,
+             const std::vector<int>& only_irrep) {
+              // Lowest eigenvalue of EVERY (momentum, little-co-group irrep)
+              // block -- k=1 PER BLOCK, so the no-reorth Lanczos early-exits
+              // the instant the lowest Ritz value converges, BEFORE the
+              // three-term recurrence loses orthogonality. (The k>1 path of
+              // little_group_lowest_spectrum runs to ~400 iters and returns a
+              // ghost at N=36 -- a bit-identical spurious constant across all
+              // stars; this lane avoids it entirely by never asking a block
+              // for more than its ground.) Returns ALL blocks, no global
+              // truncation: the per-(k,irrep) minima ARE the Anderson tower's
+              // momentum/irrep-resolved low-energy structure -- collect the
+              // lowest-few across blocks for the tower multiplet, each entry
+              // already carrying (k_raw, irrep, flip_parity).
+              const int n_sites = static_cast<int>(op.getNumBits());
+              const auto s = ed::solvers::little_group_lowest_spectrum(
+                  op, abelian_group, residue_perms, n_sites, /*k=*/1,
+                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                          spin_flip, time_reversal, only_k0, false,
+                          only_irrep));
+              std::vector<double> ev;
+              std::vector<int> kraw, fpar, irr, irrd, mult;
+              std::vector<bool> conv;
+              for (std::size_t idx = 0; idx < s.eigenvalues.size(); ++idx) {
+                  const auto& L = s.labels[idx];
+                  ev.push_back(s.eigenvalues[idx]);
+                  kraw.push_back(L.k_raw);
+                  fpar.push_back(L.flip_parity);
+                  irr.push_back(L.irrep);
+                  irrd.push_back(L.irrep_dim);
+                  mult.push_back(s.multiplicities[idx]);
+                  conv.push_back(L.converged);
+              }
+              py::dict d;
+              d["eigenvalues"]  = ev;
+              d["k_raw"]        = kraw;
+              d["flip_parity"]  = fpar;
+              d["irrep"]        = irr;
+              d["irrep_dim"]    = irrd;
+              d["multiplicity"] = mult;
+              d["converged"]    = conv;
+              d["irrep_characters"] = s.irrep_characters;
+              d["stars"]        = lg_stars_dict(s);
+              d["flip_engaged"] = s.flip_engaged;
+              d["tr_engaged"]   = s.tr_engaged;
+              d["gpu_engaged"]  = s.gpu_engaged;
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("n_up") = -1,
+          py::arg("sz_parity") = -1, py::arg("dense_max_dim") = 64,
+          py::arg("use_gpu") = false, py::arg("spin_flip") = -1,
+          py::arg("time_reversal") = -1,
+          py::arg("only_k0") = std::vector<int>{},
+          py::arg("only_irrep") = std::vector<int>{},
+          "Lowest eigenvalue of EVERY (momentum, irrep) block -- k=1 per "
+          "block (reliable early-exit, unlike the k>1 spectrum lane which "
+          "ghosts at N=36). Aligned per-block arrays {eigenvalues, k_raw, "
+          "irrep, irrep_dim, flip_parity, multiplicity, converged} plus "
+          "stars, irrep_characters. The momentum/irrep-resolved tower.");
+
     m.def("little_group_thermodynamics",
           [lg_opts](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
