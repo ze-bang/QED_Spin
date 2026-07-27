@@ -196,3 +196,6 @@ local.cmake.user
 
 # Vendored ezARPACK checkout (local dependency clone)
 ezARPACK.git/
+
+# GPU module staging tree (created by scripts/build_core_gpu.sbatch)
+python_gpu/

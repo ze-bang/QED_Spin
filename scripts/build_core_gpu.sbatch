@@ -15,5 +15,15 @@ cd "${SLURM_SUBMIT_DIR}"
 echo "host=$(hostname) commit=$(git rev-parse --short HEAD)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 cmake --build build_gpu -j"${SLURM_CPUS_PER_TASK}" --target _core 2>&1 | tail -25
+
+# CMake links _core.so into python/qed/ -- the SAME path the CPU build uses, so
+# whichever built last wins and a GPU job silently gets a module whose
+# use_device() throws "built without WITH_CUDA". Stage the CUDA module into a
+# parallel tree and let PYTHONPATH choose.
+rm -rf python_gpu
+mkdir -p python_gpu
+cp -r python/qed python_gpu/qed
+echo "staged CUDA module:"
+ls -la python_gpu/qed/_core*.so
 echo "=== GPU BUILD DONE ==="
 ls -la python/qed/_core*.so

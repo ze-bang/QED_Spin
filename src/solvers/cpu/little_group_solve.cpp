@@ -1047,14 +1047,45 @@ star_partition(const EngineContext& cx, bool tr_on)
 // Per-block solve callbacks -----------------------------------------------
 
 // Full-spectrum: dense eigenvalues of the (projected or plain) block.
+//
+// Dense LAPACK divide-and-conquer (dsyevd/zheevd), threaded through the linked
+// BLAS/LAPACK (AOCL here) -- the SAME solver the abelian / full-diag lane uses
+// (lanczos.cpp, orchestrator.cpp). The previous Eigen SelfAdjointEigenSolver is
+// single-threaded: on a 19,264-dim projected block it spun for hours on ONE
+// core while the whole OpenMP pool sat idle, so the non-abelian little-group
+// lane lost to the abelian lane it is supposed to beat (gdb-confirmed
+// 2026-07-24). Real blocks (real momenta under time reversal) take the ~2x
+// cheaper real path, matching the abelian lane's real arithmetic.
 [[nodiscard]] std::vector<double>
 solve_block_full(const ed::matvec::MatVecOperator& mv) {
-    if (mv.dim() == 0) return {};
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(mv));
-    std::vector<double> out(static_cast<std::size_t>(es.eigenvalues().size()));
-    for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i)
-        out[static_cast<std::size_t>(i)] = es.eigenvalues()(i);
-    return out;
+    const std::size_t n = mv.dim();
+    if (n == 0) return {};
+    Eigen::MatrixXcd H = materialize(mv);   // column-major dense Hermitian block
+    const lapack_int N = static_cast<lapack_int>(n);
+    std::vector<double> evals(n);
+
+    double max_imag = 0.0;                   // is this block real (up to roundoff)?
+    for (Eigen::Index j = 0; j < H.cols(); ++j)
+        for (Eigen::Index i = j; i < H.rows(); ++i) {
+            const double a = std::abs(H(i, j).imag());
+            if (a > max_imag) max_imag = a;
+        }
+
+    lapack_int info;
+    if (max_imag <= 1.0e-12) {
+        Eigen::MatrixXd R = H.real();        // symmetric; LAPACK reads upper only
+        info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'N', 'U', N, R.data(), N,
+                              evals.data());
+    } else {
+        info = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'N', 'U', N,
+                              reinterpret_cast<lapack_complex_double*>(H.data()),
+                              N, evals.data());
+    }
+    if (info != 0)
+        throw std::runtime_error(
+            "little_group solve_block_full: LAPACK eigensolve failed (info="
+            + std::to_string(info) + ")");
+    return evals;
 }
 
 // Lowest-k: dense on small blocks, Lanczos otherwise.
