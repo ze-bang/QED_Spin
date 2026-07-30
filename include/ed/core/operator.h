@@ -346,6 +346,13 @@ public:
         // path that constructs an Operator (Heisenberg / BFG / etc.)
         // emits its terms in Hermitian-symmetric pairs. Override on
         // future asymmetric subclasses if that changes.
+        //
+        // LOAD-BEARING for the GPU rep lane (audit 2026-07-30): the
+        // device rep-scatter kernel applies the ADJOINT of the reduced-
+        // CSR gather's matrix, so the two lanes agree ONLY under this
+        // contract -- see the HERMITIAN-ONLY note on
+        // apply_terms_rep_symmetry_scatter (term_kernels_gpu.cuh)
+        // before overriding this to return anything else.
         return true;
     }
     [[nodiscard]] std::string description() const override {

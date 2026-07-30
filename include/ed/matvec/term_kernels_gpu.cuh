@@ -463,6 +463,23 @@ __global__ void apply_terms_gpu_scatter(
 // ---------------------------------------------------------------------------
 // apply_terms_rep_symmetry_scatter -- on-the-fly representative SpMV.
 //
+// HERMITIAN-ONLY CONTRACT (audit 2026-07-30): this scatter emits
+// ``in[i] * inv_norm_i * (h * proj)`` with NO conjugation, while the
+// reduced-CSR gather assembles ``A[r,c] = inv_norm_r * conj(h * proj)``.
+// For a Hermitian operator the two apply the SAME matrix (the scatter's
+// forward walk from source i reproduces column i of A via
+// conj(A[i,k]) == A[k,i]); for a NON-Hermitian operator they apply
+// mutually ADJOINT matrices, and neither convention is validated against
+// a dense reference. This is intrinsic to scatter-from-source under this
+// normalisation -- do NOT "fix" it by conjugating the emit (that flips
+// which lane is the adjoint, it does not reconcile them). Every operator
+// that reaches this kernel today honours MatVecOperator::is_hermitian()
+// == true (all construction paths emit Hermitian-paired terms;
+// CrossSectorOrbitObservable, the non-Hermitian-probe carrier, is
+// CPU-only). If a future carrier routes unpaired terms here, add a
+// fingerprint-time Hermitian-pairing scan to the mirror registry and
+// refuse the device lane for unpaired term decks.
+//
 // "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
 //
 // One thread per orbit representative ``i``. Unlike
