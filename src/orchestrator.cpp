@@ -40,6 +40,7 @@
 // (csr_policy_hook, sym_matvec_policy_hook, basis_policy_hook) still provide
 // the default + env-override behaviour, consumed lazily inside the operator
 // backends; the orchestrator no longer overrides them.
+#include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (refine_gs_seed_host)
 #include <ed/core/operator.h>               // Operator introspection (term SoA, N)
 #include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
 
@@ -943,6 +944,15 @@ inline void refine_gs_seed_host(const LinearOperator&        H,
     using Complex = std::complex<double>;
     const std::size_t n = seed_host.size();
     if (n == 0) return;
+    // Audit fix (2026-07-30): force the matrix-free apply for this bind.
+    // The refine performs at most ~300 matvecs on a FRESH function-local
+    // backend, so a CSR assembled here can never amortise -- and at
+    // dim 2.7e6 (N=24 fixed-Sz, under the 2^22 lane cutoff) the build
+    // alone cost ~47 s of the GPU spectral gate's wall. Explicit env
+    // vars (ED_CSR_FORCE / ED_CSR_DIM_MAX) still take precedence over
+    // this scoped override, per csr_policy_hook.h.
+    ed::planner::ScopedCsrOverride no_csr(
+        ed::planner::CsrOverride::MatrixFree);
     ed::matvec::CpuBackend be;
     auto apply_H = H.template bind<ed::matvec::CpuBackend>();
 
@@ -965,6 +975,17 @@ inline void refine_gs_seed_host(const LinearOperator&        H,
     kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
     kopts.keep_basis = true;
     kopts.dim_cap    = n;
+    // Audit fix (2026-07-30): early-exit when the smallest Ritz value
+    // stabilises instead of always burning the full 300 FullCGS2
+    // iterations. Profiled at N=24 (dim 2.7e6): the flat-300 refine cost
+    // 351 s (94% CPU reorthogonalisation) and was the dominant term in
+    // the GPU spectral lane's 407 s wall (kill-hash gate budget: 30 s).
+    // Ritz-stabilisation at 1e-13 checked every 5 steps reproduces the
+    // same refined vector for any seed the inner solve hands over while
+    // stopping as soon as the tower has converged.
+    kopts.convergence_check =
+        ed::krylov::make_smallest_ritz_convergence(1, 1e-13);
+    kopts.convergence_check_interval = 5;
     auto kres = ed::krylov::lanczos_kernel(be, apply_H, n,
                                            seed_host.data(), kopts);
     const std::size_t m = kres.alpha.size();

@@ -320,14 +320,26 @@ def test_phase_d_kpm_dynamical_gpu(tmp_path):
 # ---- FtlmDynamical (DSSF) -------------------------------------------------
 @_REQUIRES_GPU
 def test_phase_d_ftlm_dynamical_gpu(tmp_path):
-    """FtlmDynamical / qed.spectral, method='ftlm_dynamical', device='gpu'."""
+    """FtlmDynamical / qed.spectral, method='ftlm_dynamical', device='gpu'.
+
+    Audit 2026-07-30: a finite ``T=`` on the plain in-memory lane now
+    raises loudly -- the lane's kernels hardcode temperature 0 in the
+    orchestrator, so the old ``T=1.0`` spelling of this gate was timing a
+    computation that silently answered a different physical question
+    (the finite-T machinery lives on the symmetry / directory lanes).
+    The perf gate keeps its kill-hash purpose on the T-less spelling and
+    additionally pins the loud-refusal contract.
+    """
     H = _ring_operator()
     Op, Od = _make_sz_pair(N_SITES_TEST, N_UP_TEST)
     omega = np.linspace(-2.0, 4.0, 16)
+    with pytest.raises(NotImplementedError):
+        qed.spectral(H, [Op, Od], T=1.0, method="ftlm_dynamical",
+                     omega=omega, eta=0.05, krylov_dim=20,
+                     num_random_vectors=1, device="gpu", verbose=False)
     def go():
         return qed.spectral(
             H, [Op, Od],
-            T=1.0,
             method="ftlm_dynamical",
             omega=omega,
             eta=0.05,

@@ -40,6 +40,7 @@
 
 #include <ed/core/operator.h>
 #include <ed/matvec/matvec.h>
+#include <ed/planner/csr_policy_hook.h>  // ScopedCsrOverride (one-shot applies)
 #include <ed/matvec/term_storage.h>
 
 namespace ed::ops {
@@ -150,6 +151,15 @@ s2_expectation(const ed::matvec::MatVecOperator& s2,
             "s2_expectation: dim mismatch with the S^2 operator");
     }
     std::vector<Cx> w(dim);
+    // Audit fix (2026-07-30): labeling is a ONE-SHOT apply, so if this
+    // call is the first touch of a lazily-backed S^2 operator, a CSR
+    // assembled here can never amortise. At N=24 fixed-Sz (dim 2.7e6,
+    // under the 2^22 lane cutoff) the ~1.5*N^2-term S^2 CSR build alone
+    // cost ~48 s of every qed.spectral call on an SU(2)-invariant H
+    // (Stage 12g labeler). Explicit ED_CSR_FORCE/ED_CSR_DIM_MAX still
+    // override this scoped hint.
+    ed::planner::ScopedCsrOverride no_csr(
+        ed::planner::CsrOverride::MatrixFree);
     s2.apply(v, w.data(), dim);
     double norm2 = 0.0;
     Cx dot(0.0, 0.0);
