@@ -2115,7 +2115,9 @@ SpectralResult spectral(const LinearOperator&                      H,
                 // CudaBackend lane: backend-templated body.
                 ed::observables::FtlmDynamicalOptions kopts;
                 kopts.krylov_dim   = opts.krylov_dim;
-                kopts.num_samples  = (opts.kpm_moments > 0 ? 1u : 1u);
+                kopts.num_samples  = 1u;  // GS-CF is deterministic (one
+                                          // seed); the old both-arms-1u
+                                          // ternary was dead
                 kopts.broadening   = opts.broadening;
                 kopts.temperature  = 0.0;
                 kopts.energy_shift = opts.energy_shift;

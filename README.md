@@ -32,7 +32,7 @@ The same shape is exposed in Python as
 | Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, factorized little-group engine for d≥2 |
 | Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF via the factorized little-group engine (one momentum per star + little-co-group isotypic projection, matrix-free); CPU and GPU (batched cuSOLVER block eigensolve) for GS/finite-T, CPU for the GS-DSSF continued fraction |
 | Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
-| Symmetry projection: SU(2) total-S | seam open, implementation deferred (spin-flip Z₂ and time-reversal are production — see the row above) |
+| Symmetry projection: SU(2) total-S | production (Stage 12, Jul 2026): `total_spin=` on `qed.solve` (Lowdin/Casimir targeting + certified labels), `qed.full_spectrum` (highest-weight spectral differencing), `qed.thermal` (per-tower Z = Σ_S (2S+1) Z_S); operator-level S² route, host-side targeting (device-resident Lowdin is the named follow-up) |
 | CPU (OpenMP), single-GPU (cuBLAS / cuSPARSE), multi-rank MPI, multi-GPU NCCL | production |
 | First-class Python bindings (`import qed`) | production |
 | HDF5 I/O for eigenvectors, thermodynamic curves, DSSF traces | production |

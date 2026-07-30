@@ -363,17 +363,14 @@ def solve(
           thermodynamic curve on disk in ``output_dir``):
           ``mTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
     device : str, optional
-        Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"`` /
-        ``"mpi"`` / ``"mpi_gpu"``. ``None`` (default) means ``"auto"``.
-        ``"mpi"`` / ``"mpi_gpu"`` are first-class: the workflow
-        writes ``H`` (and the symmetry directory if ``symmetry=`` is
-        set) to a temp directory, shells out to ``mpiexec
-        ed_distributed_main`` (with ``--gpu`` for ``mpi_gpu``), and
-        parses the HDF5 result back into an :class:`EDResults`. The
-        binary itself, ``mpiexec``, and the MPI-rank count come from
-        the ``mpi_*`` kwargs (or sensible defaults). Python never
-        calls ``MPI_Init`` directly; the launcher does, in a
-        separate process tree.
+        Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"``.
+        ``None`` (default) means ``"auto"``. ``"mpi"`` / ``"mpi_gpu"``
+        RAISE on this in-process surface (the ed_distributed_main
+        launcher was retired in Stage 11d): distributed runs go through
+        ``mpirun`` on the CLI ``ED`` binary, whose sector factory
+        dim-balances (n_up, irrep) sectors across ranks and Allgathers
+        the results (rank-local solves; see
+        ``ed::make_sector_operators_tagged``).
     symmetry : GeneratorSet, list[Permutation], or dict, optional
         If provided, the diagonalization runs in the symmetry-projected
         basis via the streaming symmetry kernel (per-sector matrix-free
@@ -1337,22 +1334,28 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
 # "device" axis values:
 #   "cpu"     -> single-process CPU
 #   "gpu"     -> single GPU (cuSPARSE / per-sector dispatch)
-#   "mpi"     -> distributed CPU via ed_distributed_main
+#   "mpi"     -> distributed via mpirun on the CLI `ED` binary (the
+#                ed_distributed_main binary was retired in Stage 11d;
+#                the in-process qed.solve surface raises for 'mpi')
 #   "mpi_gpu" -> distributed CPU + per-rank GPU (multi-GPU)
 #
-# Coverage current as of Phase 9: the table mirrors what
-# ed/core/ed_method_traits.h + include/ed/distributed/ + the
-# ed_distributed_main CLI actually expose.
+# Coverage refreshed 2026-07-30 against src/orchestrator.cpp dispatch.
 _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "BLOCK_LANCZOS":   {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
+    "BLOCK_KRYLOV_SCHUR": {"cpu": True, "gpu": True, "mpi": False, "mpi_gpu": False},
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
+    # Audit 2026-07-30: LTLM and KPM_DOS dispatch on CudaBackend in the
+    # orchestrator (src/orchestrator.cpp LTLM/KpmDos lanes + kpm_dos_gpu.cu),
+    # and the capability matrix publishes passing gpu rows for both -- the
+    # old False entries contradicted the shipped kernels. OFTLM remains the
+    # sole CPU-only thermal lane (H.bind_cpu() in its orchestrator branch).
+    "LTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
+    "KPM_DOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
 }
 
 

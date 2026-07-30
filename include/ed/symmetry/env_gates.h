@@ -78,9 +78,21 @@ namespace ed::symmetry {
       "keep the abelian sector lane")                                          \
     X("ED_SYM_LG_SEED", "0",                                                   \
       "offsets the lowest-k Lanczos start vector (multi-seed verification)")   \
-    X("ED_SYM_LG_DENSE_FLOOR", "auto (32x Lanczos cap)",                       \
+    X("ED_SYM_LG_DENSE_FLOOR", "auto (4x Lanczos cap)",                        \
       "raise the dense/Lanczos crossover so larger (e.g. degenerate) blocks "  \
-      "solve dense/exactly, at the cost of memory (S1 mitigation)")            \
+      "solve dense/exactly, at the cost of memory (S1 mitigation); =1 in "     \
+      "tests forces the Lanczos path at toy dims")                             \
+    X("ED_SYM_LG_DENSE_BATCH_GIB", "8",                                        \
+      "byte budget for the CPU deferred dense batch (parallel-across-blocks "  \
+      "eigensolves in the lowest-k walk); =0 solves every block inline")       \
+    X("ED_SYM_LG_TWO_PASS_MIN_DIM", "2^22",                                    \
+      "dim floor above which the GS vector uses the two-pass no-reorth "       \
+      "Lanczos instead of FullCGS2 + kept basis (memory cap)")                 \
+    X("ED_SYM_LG_GS_RESID_TOL", "1e-8",                                        \
+      "residual tolerance for the certified little-group GS vector")           \
+    X("ED_SYM_CLIQUE_BUDGET", "512",                                           \
+      "|Aut| above which find_symmetries switches to the greedy maximal-"      \
+      "abelian construction instead of exact max-clique (hang guard)")         \
     X("ED_SYM_PERM_LUT", "1",                                                  \
       "=0 keeps the scalar bit walk (test gate: pin LUT == scalar)")           \
     X("ED_SYM_LG_ONLY_K0", "unset (solve every star)",                         \

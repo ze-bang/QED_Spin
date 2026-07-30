@@ -22,7 +22,14 @@ sys.path.insert(0, str(ROOT / "python" / "edlib"))
 
 import helper_pyrochlore_super as h  # noqa: E402
 sys.path.insert(0, str(ROOT.parent / "twist_qsi_demo" / "scripts"))
-from twist_trilinear_helper import write_pyrochlore_twisted_xxz_trilinear  # noqa: E402
+# Campaign-local helper living OUTSIDE this repo (../twist_qsi_demo). On a
+# machine without that checkout the import used to raise at COLLECTION
+# time, killing every `pytest -x` run of the whole suite -- skip instead.
+twist_helper = pytest.importorskip(
+    "twist_trilinear_helper",
+    reason="needs the twist_qsi_demo campaign checkout next to this repo")
+write_pyrochlore_twisted_xxz_trilinear = (
+    twist_helper.write_pyrochlore_twisted_xxz_trilinear)
 
 
 def _cluster(dim: int = 1):

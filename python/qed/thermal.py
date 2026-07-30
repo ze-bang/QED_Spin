@@ -1148,9 +1148,10 @@ def thermal(
         # thermal binding is rank-local. We surface a clear error
         # rather than silently dropping the MPI request.
         raise NotImplementedError(
-            "qed.thermal(device={!r}): MPI thermal is not wired yet "
-            "(use the standalone ed_distributed_main binary). Pass "
-            "device='cpu' or device='gpu'.".format(device)
+            "qed.thermal(device={!r}): MPI thermal is not wired on the "
+            "in-process surface. Launch `mpirun ... ED <dir>` (the CLI "
+            "sector factory dim-balances sectors across ranks), or pass "
+            "device='cpu' / device='gpu'.".format(device)
         )
 
     # ------------------------------------------------------------------
