@@ -197,7 +197,21 @@ inline BackendVariant select_backend(const Geometry& geom,
     // alternative; this auto-dispatch returns MpiBackend (host-staged
     // collectives over CUDA-aware MPI) when only mpi_size > 1 is true,
     // and CudaBackend when only the GPU is available.
-    if (nmpi > 1 && c.allow_mpi && !op_is_device) {
+    // Audit 2026-07-30 (H4): require a genuinely DISTRIBUTED operator
+    // geometry before auto-picking MpiBackend. Since DistributedOperator
+    // was retired (Stage 11d) no operator produces a distributed
+    // geometry, and the old `mpi_size > 1` test alone put every rank of
+    // `mpirun -n P ed` through an MpiBackend wrapped around a fully
+    // REPLICATED operator: P identical full-dim solves whose every
+    // dot/nrm2 was Allreduce-inflated by P (eigenvalues survive --
+    // Lanczos is invariant under a uniform inner-product scale and the
+    // fixed seed makes the ranks bit-identical replicas -- but Ritz
+    // vectors carried true norm 1/sqrt(P) and every rank wrote results
+    // concurrently). Replicated ranks now solve on their local
+    // CPU/CUDA lane; across-sector MPI distribution is handled ABOVE
+    // this dispatch by make_sector_operators_tagged ownership.
+    if (nmpi > 1 && c.allow_mpi && !op_is_device
+            && geom.is_distributed()) {
         return BackendVariant{std::make_unique<ed::matvec::MpiBackend>(
             MPI_COMM_WORLD)};
     }
