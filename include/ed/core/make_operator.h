@@ -554,6 +554,40 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             (*spec.sz_parity >= 2) ? -1 : *spec.sz_parity,
             base->symmetry_info, term_builder, &sector_ids, cache_dir,
             spec.flip_sectors_full);
+        // Audit 2026-07-30 (H1): the parity builder has no per-sector
+        // owner hook, and its SYNTHETIC (parity, irrep[, flip]) slot ids
+        // cannot index the raw-irrep Burnside owner table computed
+        // above. Without ownership every rank built AND solved every
+        // parity sector, and mpi_allgather_sector_thermo then summed
+        // each sector P times -- Z -> P*Z, i.e. F and S silently wrong
+        // by ln P under mpirun (E and Cv survived only because the
+        // duplication scales all weights uniformly). Enforce the same
+        // rank-local-solve invariant as the fixed-Sz / full lanes by
+        // greedy-packing the EMITTED sectors on their exact dims (known
+        // up-front from the fused scan) and keeping only this rank's
+        // share. The per-parity orbit tables are still built on every
+        // rank (cheap relative to the solves, and deterministic input
+        // to the pack, so all ranks agree on the assignment with zero
+        // communication).
+        if (owner_ptr != nullptr) {
+            std::vector<std::uint64_t> pdims;
+            pdims.reserve(set.operators.size());
+            for (const auto& op : set.operators)
+                pdims.push_back(static_cast<std::uint64_t>(op->dim()));
+            const std::vector<int> powner =
+                detail::greedy_sector_owner(pdims, mpi_size);
+            std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> kept;
+            std::vector<std::size_t> kept_ids;
+            kept.reserve(set.operators.size());
+            kept_ids.reserve(sector_ids.size());
+            for (std::size_t i = 0; i < set.operators.size(); ++i) {
+                if (powner[i] != mpi_rank) continue;
+                kept.push_back(std::move(set.operators[i]));
+                kept_ids.push_back(sector_ids[i]);
+            }
+            set.operators = std::move(kept);
+            sector_ids    = std::move(kept_ids);
+        }
     } else if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime -- THE fixed-Sz construction lane
         // (Stage 11c-1): operators know their dim up-front (Pass 1.5) and
