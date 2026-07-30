@@ -81,3 +81,71 @@ def test_projected_lowest_window_multiset_matches_dense():
     # duplicate shifts every subsequent entry and fails loudly.
     np.testing.assert_allclose(got, DENSE_LOWEST_12[:10], rtol=0.0,
                                atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Contiguity regression (2026-07-30): the k-lowest gate + keep loop must
+# demand the k LOWEST distinct Ritz values contiguously from the bottom.
+# The pre-fix gate stopped once ANY k distinct Ritz values carried
+# converged Paige bounds; Lanczos converges the TOP extreme first, so on
+# Ising-dominated blocks the scan exited with k converged top-of-spectrum
+# values and the keep loop -- which skipped unconverged low values --
+# returned them AS the lowest k, flagged converged (measured on the 4x2
+# kagome BFG campaign: block min reported +11.58, true sector min -6.57,
+# near-identical across every momentum star). The smoke coverage could
+# not catch this: its blocks sat under the dense crossover. This test
+# forces the Lanczos path at toy dims via ED_SYM_LG_DENSE_FLOOR=1 and
+# pins (a) the block minimum and (b) that EVERY returned value is a
+# genuine dense eigenvalue of its star -- a fabricated top-of-spectrum
+# value fails both instantly.
+# ---------------------------------------------------------------------------
+
+def _xxz_ring_operator(n, jz):
+    b = qed.input.HamiltonianBuilder(n)
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b.heisenberg(bonds, J=1.0)
+    for (i, j) in bonds:
+        b.add_two_body(qed.input.Op.Sz, i, qed.input.Op.Sz, j, jz - 1.0)
+    return b.to_operator()
+
+
+def test_lowest_k_lanczos_path_returns_genuine_bottom_values(monkeypatch):
+    from qed import _core
+
+    n = 14
+    H = _xxz_ring_operator(n, jz=2.5)   # Ising-dominated: top converges first
+    A = [[(i + 1) % n for i in range(n)]]  # translation group generator orbit
+    # full cyclic group
+    A = []
+    perm = list(range(n))
+    for _ in range(n - 1):
+        perm = [(p + 1) % n for p in perm]
+        A.append(list(perm))
+    A = [list(range(n))] + A[:0] + A  # identity + rotations
+
+    k = 4
+    # Dense reference per star (dense branch is exact).
+    monkeypatch.delenv("ED_SYM_LG_DENSE_FLOOR", raising=False)
+    ref = dict(_core.little_group_lowest_eigenvalues_labeled(
+        H, A, [], k=64, n_up=n // 2, dense_max_dim=4096, use_gpu=False))
+    ref_vals = np.sort(np.asarray(ref["eigenvalues"], dtype=float))
+
+    # Forced-Lanczos run (the production path for blocks above the
+    # crossover -- here forced at toy dims so the test runs in seconds).
+    monkeypatch.setenv("ED_SYM_LG_DENSE_FLOOR", "1")
+    got = dict(_core.little_group_lowest_eigenvalues_labeled(
+        H, A, [], k=k, n_up=n // 2, dense_max_dim=4096, use_gpu=False))
+    vals = np.sort(np.asarray(got["eigenvalues"], dtype=float))
+    assert vals.size > 0
+
+    # (a) The reported minimum is the true sector minimum.
+    np.testing.assert_allclose(vals[0], ref_vals[0], rtol=0.0, atol=1e-7)
+
+    # (b) Every reported value is a genuine eigenvalue of the sector
+    # (within Lanczos tolerance). A fabricated top-of-spectrum value
+    # sits far from every entry of the lowest-64 reference window.
+    for v in vals:
+        assert np.min(np.abs(ref_vals - v)) < 1e-6, (
+            f"reported value {v:.9f} is not a genuine low-window "
+            f"eigenvalue (closest reference "
+            f"{ref_vals[np.argmin(np.abs(ref_vals - v))]:.9f})")
