@@ -856,6 +856,23 @@ def _spectral_in_memory(
             opts.temperatures = [float(t) for t in T]
         else:
             opts.temperatures = [float(T)]
+        # Audit fix (2026-07-30): the plain in-memory lane has NO working
+        # finite-T estimator. GroundStateCF ignores `temperatures` outright
+        # (measured: T=1.0 and T=0.5 both returned the T=0 spectrum,
+        # machine-identical), and the in-memory FtlmDynamical/KpmDynamical
+        # kernels hardcode temperature=0.0 in the orchestrator (measured:
+        # the returned spectrum equals the T=infinity correlator for any
+        # requested T). Refuse loudly instead of silently answering a
+        # different physical question. The finite-T machinery that IS
+        # verified correct lives on the symmetry lane (ftlm cross-irrep
+        # kernel) and the directory form.
+        if any(t > 0.0 for t in opts.temperatures):
+            raise NotImplementedError(
+                "qed.spectral: finite-T spectra are not implemented on the "
+                "plain in-memory lane (the requested T would be silently "
+                "ignored). Pass symmetry= (the verified finite-T FTLM "
+                "cross-irrep lane) or use the directory form with "
+                "method='dynamical_thermal'.")
 
     # Phase D of the "Backend x Symmetries x Workflows" plan
     # (May 2026): map ``device=`` to ``opts.backend.allow_gpu``. The
