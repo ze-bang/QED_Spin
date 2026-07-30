@@ -145,9 +145,16 @@ def _cuda_available() -> bool:
 
 @pytest.mark.skipif(not _cuda_available(),
                     reason="Requires a CUDA build and a visible device.")
-def test_full_space_flip_sectors_gpu(dense_spectrum):
+def test_full_space_flip_sectors_gpu(dense_spectrum, monkeypatch):
     """The device rep policy's full-space extension (n_up = -1:
     popcount filter off, state-indexed reverse table)."""
+    # Same pin as the CPU twin: ED_SYM_LITTLE_GROUP=0 keeps the ABELIAN
+    # lane's per-sector output; Stage 9c 'auto' would otherwise PROJECT
+    # and return per-eigenvalue block labels instead of
+    # eigenvalues_per_sector (audit 2026-07-30: the gpu twins were never
+    # updated when 'auto' started projecting, so they chased a contract
+    # the project lane deliberately does not provide).
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _u1_broken_ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
     r = qed.solve(H, symmetry=gen, num_eigenvalues=1 << N_SITES,
@@ -239,7 +246,9 @@ def test_parity_full_spectrum(dense_spectrum):
 
 @pytest.mark.skipif(not _cuda_available(),
                     reason="Requires a CUDA build and a visible device.")
-def test_parity_gs_gpu(dense_spectrum):
+def test_parity_gs_gpu(dense_spectrum, monkeypatch):
+    # Abelian-lane pin -- see test_full_space_flip_sectors_gpu.
+    monkeypatch.setenv("ED_SYM_LITTLE_GROUP", "0")
     H = _u1_broken_ring()
     gen = qed.find_symmetries(H, verbose=False).full_set
     r = qed.solve(H, symmetry=gen, num_eigenvalues=1 << N_SITES,
