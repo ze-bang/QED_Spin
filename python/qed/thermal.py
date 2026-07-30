@@ -858,6 +858,38 @@ def thermal(
     if not (total_spin is None or total_spin is False
             or (isinstance(total_spin, str)
                 and total_spin.lower() == "off")):
+        # Audit fix (2026-07-30): the tower lane used to silently drop
+        # every kwarg its helper does not thread -- including symmetry
+        # composition and Sz windows the caller may believe are active.
+        # Refuse the named ones loudly; warn on device='gpu' (the Lowdin
+        # targeting is host-only for now -- the documented Stage-12h
+        # follow-up -- and the fallback is graceful but should not be
+        # silent).
+        _unsupported = [name for name, val in (
+            ("symmetry", symmetry), ("sector", sector),
+            ("sz", sz), ("sz_min", sz_min), ("sz_max", sz_max),
+            ("star_maps", star_maps),
+            ("output_dir", output_dir or None),
+            ("probe_betas", probe_betas),
+        ) if val is not None]
+        for name, val in (("spin_flip", spin_flip),
+                          ("time_reversal", time_reversal)):
+            if isinstance(val, str) and val.lower() == "require":
+                _unsupported.append(name + "='require'")
+        if isinstance(point_group, str) and point_group.lower() == "full":
+            _unsupported.append("point_group='full'")
+        if _unsupported:
+            raise NotImplementedError(
+                f"qed.thermal(total_spin=...): {_unsupported} are not "
+                f"threaded through the SU(2) tower lane (each spin-S "
+                f"tower runs in its highest-weight sector with its own "
+                f"Lowdin projection). Drop them, or drop total_spin= to "
+                f"use the composed symmetry lanes.")
+        if isinstance(device, str) and device.lower() == "gpu":
+            warnings.warn(
+                "qed.thermal(total_spin=...): the Lowdin tower targeting "
+                "is host-only (Stage-12h follow-up); device='gpu' runs "
+                "this lane on the CPU.", RuntimeWarning, stacklevel=2)
         return _thermal_su2_towers(
             H, total_spin=total_spin, method=method,
             T_min=T_min, T_max=T_max, num_T=num_T,
@@ -1270,6 +1302,17 @@ def thermal(
     # space so ThermalResult.dos_* is the complete DOS; the derived
     # thermodynamics are identical (the DOS is Sz-summed either way).
     if method_enum == DiagonalizationMethod.KPM_DOS:
+        # Audit fix (2026-07-30): say so when this overrides an EXPLICIT
+        # Sz request -- the derived thermodynamics are identical, but a
+        # caller who named a window deserves to know it was widened.
+        if (isinstance(sz, int) or sz_min is not None
+                or sz_max is not None):
+            warnings.warn(
+                "qed.thermal(method='KPM_DOS'): the KPM density of "
+                "states runs on the FULL Hilbert space so dos_* is "
+                "complete; the requested Sz window is ignored (the "
+                "Sz-summed thermodynamics are identical).",
+                RuntimeWarning, stacklevel=2)
         sz_conserved = False
 
     if verbose:

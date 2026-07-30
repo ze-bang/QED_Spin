@@ -588,14 +588,34 @@ def solve(
                 "full_spectrum=True spans every Sz sector; pass the full "
                 "Operator (not a FixedSzOperator) so the sweep can loop "
                 "magnetisation blocks.")
+        # Audit fix (2026-07-30): this branch used to run BEFORE the
+        # quantum-number guards below and silently discarded every named
+        # selector -- qed.solve(H, full_spectrum=True, sz=6) returned the
+        # complete spectrum of every magnetisation block, not block 6.
+        # FORWARD the selectors qed.full_spectrum understands (it has its
+        # own loud guards for unsupported compositions) and refuse the
+        # two that are genuinely inapplicable to a dense sweep.
+        _dropped = [name for name, val in (
+            ("solver", solver), ("output_dir", output_dir or None),
+        ) if val is not None]
+        if _dropped:
+            raise ValueError(
+                f"qed.solve(full_spectrum=True): {_dropped} cannot be "
+                f"honoured by the full-spectrum sweep (every block runs "
+                f"the dense block engine; nothing is written). Drop "
+                f"full_spectrum=True to solve with those knobs.")
         spin_l = float(getattr(H, "spin", 0.5))
         _dev = device if isinstance(device, str) else "cpu"
         return full_spectrum_compute(
             H, symmetry=symmetry,
-            sz=("off" if not auto_sz else None),
+            sz=(sz if isinstance(sz, int)
+                else ("off" if not auto_sz else None)),
+            sector=sector, irrep=irrep, flip=flip,
             spin_length=spin_l, device=_dev,
             spin_flip=spin_flip, time_reversal=time_reversal,
-            point_group=point_group, lattice=lattice, verbose=verbose)
+            point_group=point_group,
+            total_spin=(total_spin if total_spin is not None else "auto"),
+            lattice=lattice, verbose=verbose)
 
     if flip is not None and sector is None:
         raise ValueError(
@@ -868,6 +888,27 @@ def solve(
     # ------------------------------------------------------------------
     symmetry = resolve_auto_symmetry(op_to_use, symmetry, verbose=verbose,
                                      lattice=lattice)
+    if symmetry is None:
+        # Audit fix (2026-07-30): with no spatial group resolved, the
+        # discrete-symmetry toggles were accepted and never consulted --
+        # including the 'require' / 'full' HARD contracts, which
+        # became silent no-ops (the worst case: the caller believes the
+        # composition is enforced). Refuse the hard spellings loudly;
+        # the soft spellings ('auto'/'on'/'off') stay permissive by
+        # design on this lane.
+        _hard = [name for name, val, hard in (
+            ("spin_flip", spin_flip, "require"),
+            ("time_reversal", time_reversal, "require"),
+            ("point_group", point_group, "full"),
+        ) if isinstance(val, str) and val.lower() == hard]
+        if _hard:
+            raise ValueError(
+                f"qed.solve: {_hard} demand their symmetry be CONSUMED, "
+                f"but no spatial symmetry group resolved on this call "
+                f"(symmetry=None/'off', or the model has only the trivial "
+                f"automorphism), so there is no lane that can honour "
+                f"them. Pass symmetry='auto' (or an explicit "
+                f"GeneratorSet), or drop the 'require'/'full' spelling.")
     if symmetry is not None:
         # Stage 9c: ONE routing decision. point_group='auto' (default)
         # PROJECTS through the factorized little-group engine whenever
