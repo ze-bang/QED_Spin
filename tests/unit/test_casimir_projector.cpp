@@ -262,14 +262,31 @@ TEST_CASE("CasimirProjectedOperator preserves H on the tower and scrubs "
     }
     REQUIRE(std::sqrt(d2 / n2) < 1e-10);
 
-    // Drift scrubbing: contaminate the input with an S = 1 component; the
-    // wrapper's output stays in the S = 0 eigenspace, plain H's does not.
+    // Drift handling (ghost-shift contract, audit 2026-07-30): contaminate
+    // the input with an S = 1 component. The wrapper maps the off-tower
+    // part to mu * (that part) -- NOT to zero: annihilating it left the
+    // complement as an exact eigenvalue-0 kernel, and Lanczos converged a
+    // ghost 0 below any tower whose true minimum is positive. Subtracting
+    // mu * dirt from the output must land back in the S = 0 eigenspace,
+    // and mu must sit above the block's spectral radius so no
+    // lowest-eigenvalue lane can mistake a ghost for physics.
     auto dirt = random_vector(dim, 6);
     LowdinS2Projector P1(s2, 2, towers);
     P1.project(dirt.data(), dim);
     for (std::uint64_t i = 0; i < dim; ++i) v[i] += 0.05 * dirt[i];
     wrapped.apply(v.data(), wv.data(), dim);
-    REQUIRE(eigen_residual(*s2, wv, 0.0) < 1e-10);
+    const double mu = wrapped.ghost_shift();
+    REQUIRE(mu > 0.0);
+    std::vector<Cx> tower_part(dim);
+    for (std::uint64_t i = 0; i < dim; ++i) {
+        tower_part[i] = wv[i] - mu * 0.05 * dirt[i];
+    }
+    REQUIRE(eigen_residual(*s2, tower_part, 0.0) < 1e-8);
     h->apply(v.data(), hv.data(), dim);
     REQUIRE(eigen_residual(*s2, hv, 0.0) > 1e-4);
+
+    // The ghost sits ABOVE the tower minimum for the N=6 Heisenberg ring
+    // (E0(S=0) ~ -2.803, ||H|| ~ a few): a positively shifted spectrum
+    // stays below mu too, by the 2x margin on the power-iteration bound.
+    REQUIRE(mu > 2.0);
 }

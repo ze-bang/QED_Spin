@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -225,8 +226,24 @@ private:
 // ---------------------------------------------------------------------------
 /// Wraps any host sector matvec H with periodic P_S drift scrubbing.
 /// Spectrally H and the wrapper agree on the targeted tower ([H, P_S] = 0
-/// and P_S == Id there); off-tower roundoff components introduced by
-/// finite arithmetic are annihilated every `reproject_freq`-th apply.
+/// and P_S == Id there).
+///
+/// GHOST SHIFT (audit fix, Jul 2026): the naive scrub `out = P(H v)`
+/// leaves the ENTIRE off-tower complement as an exact eigenvalue-0
+/// kernel of the effective operator (P H = P H P, and P H Q = 0). The
+/// Lanczos recurrence recycles off-tower roundoff through its -alpha*v
+/// terms, so a ghost Ritz value converges at 0 -- BELOW the tower
+/// whenever the tower minimum is positive (measured: total_spin=3 on the
+/// N=6 ring returned 0 instead of +1.5; any positively shifted H
+/// reproduces it for every tower). The scrubbed apply therefore computes
+///
+///     out = P((H - mu) v) + mu v
+///
+/// which equals H exactly on the tower and mu*Id on the complement --
+/// same cost (one Lowdin projection per apply), but the ghost spectrum
+/// sits at mu, placed ABOVE the block's spectral radius by a one-time
+/// power-iteration estimate, where no lowest-eigenvalue or Boltzmann-
+/// weighted lane can mistake it for physics.
 class CasimirProjectedOperator : public ed::LinearOperator {
 public:
     CasimirProjectedOperator(
@@ -246,13 +263,18 @@ public:
                 "CasimirProjectedOperator: host memory space only "
                 "(device-resident targeting is the Stage-12h follow-up)");
         }
+        ghost_shift_ = estimate_ghost_shift();
     }
 
     void apply(const Complex* in, Complex* out,
                std::size_t size) const override {
         h_->apply(in, out, size);
         if (freq_ > 0 && (++apply_count_ % freq_) == 0) {
+            // out = P((H - mu) in) + mu in  (== H on tower, mu off it)
+            const double mu = ghost_shift_;
+            for (std::size_t i = 0; i < size; ++i) out[i] -= mu * in[i];
             projector_->project(out, size);
+            for (std::size_t i = 0; i < size; ++i) out[i] += mu * in[i];
         }
     }
 
@@ -277,10 +299,47 @@ public:
         return *projector_;
     }
 
+    /// The mu placing the off-tower ghost spectrum (see class comment).
+    [[nodiscard]] double ghost_shift() const noexcept { return ghost_shift_; }
+
 private:
+    /// One-time spectral-radius estimate for the ghost shift: a dozen
+    /// power iterations from a fixed-seed random start give |lambda|_max
+    /// from below; the 2x + 1 margin keeps mu above the true radius (and
+    /// therefore above every tower eigenvalue) for any realistic
+    /// convergence deficit. Cost: 12 H matvecs, once per wrapper.
+    [[nodiscard]] double estimate_ghost_shift() const {
+        const std::uint64_t n = h_->dim();
+        if (n == 0) return 1.0;
+        std::vector<Complex> v(n), w(n);
+        std::mt19937_64 gen(0x5EEDC0DEULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (auto& z : v) {
+            z = Complex(nd(gen), nd(gen));
+            sumsq += std::norm(z);
+        }
+        if (!(sumsq > 0.0)) return 1.0;
+        double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v) z *= inv;
+        double rho = 0.0;
+        for (int it = 0; it < 12; ++it) {
+            h_->apply(v.data(), w.data(), n);
+            double n2 = 0.0;
+            for (std::uint64_t i = 0; i < n; ++i) n2 += std::norm(w[i]);
+            const double nw = std::sqrt(n2);
+            if (!(nw > 0.0)) break;  // v in the kernel: rho stays put
+            rho = nw;  // ||H v||, v unit: converges to |lambda|_max
+            inv = 1.0 / nw;
+            for (std::uint64_t i = 0; i < n; ++i) v[i] = w[i] * inv;
+        }
+        return 2.0 * rho + 1.0;
+    }
+
     std::shared_ptr<const ed::matvec::MatVecOperator> h_;
     std::shared_ptr<const LowdinS2Projector> projector_;
     int freq_;
+    double ghost_shift_ = 1.0;
     mutable std::uint64_t apply_count_ = 0;
 };
 
