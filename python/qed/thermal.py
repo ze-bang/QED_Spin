@@ -538,6 +538,7 @@ def _thermal_su2_towers(
     num_T: int,
     num_samples: int,
     krylov_dim: int,
+    krylov_dim_explicit: bool,
     random_seed: int,
     tpq_delta_beta: float,
     tpq_taylor_order: int,
@@ -599,7 +600,19 @@ def _thermal_su2_towers(
         o = _core.ThermalOptions()
         o.method = method_map[mname]
         o.num_samples = int(num_samples)
-        o.krylov_dim = int(krylov_dim)
+        # Audit fix (2026-07-30): for mTPQ a nonzero krylov_dim is an
+        # EXPLICIT step budget that disables the orchestrator's cold-reach
+        # auto-sizing; the old unconditional `int(krylov_dim)` (defaulted
+        # to 100 by the caller) capped every tower trajectory at beta ~ 2
+        # and silently clamped all colder targets (measured: E(T) off by
+        # 0.4-0.6 at T <= 0.5). Pass 0 unless the caller really named a
+        # budget, and always thread the T grid so beta_max = 1/T_min.
+        if mname == "MTPQ":
+            o.krylov_dim = int(krylov_dim) if krylov_dim_explicit else 0
+        else:
+            o.krylov_dim = int(krylov_dim)
+        o.temp_min = float(T_min)
+        o.temp_max = float(T_max)
         o.random_seed = int(random_seed)
         o.betas = betas
         o.delta_beta = float(tpq_delta_beta)
@@ -850,6 +863,7 @@ def thermal(
             T_min=T_min, T_max=T_max, num_T=num_T,
             num_samples=num_samples,
             krylov_dim=(krylov_dim or ftlm_krylov_dim or 100),
+            krylov_dim_explicit=bool(krylov_dim or ftlm_krylov_dim),
             random_seed=random_seed,
             tpq_delta_beta=tpq_delta_beta,
             tpq_taylor_order=tpq_taylor_order,
@@ -1454,13 +1468,17 @@ def thermal(
             # than assuming the two axes coincide -- they only do for a
             # single-generator group.
             if _sector_sid is not None:
-                # GAP 9: with the flip projection engaged the sector set
-                # is EXTENDED (k and k + n_raw are the two parities of one
-                # momentum). Select both; filter_sectors drops the partner
-                # silently when the flip is off.
+                # GAP 9 (extended 2026-07): the sector set may be EXTENDED
+                # in SLOTS of n_raw -- 2 slots for flip halves or Sz-parity
+                # halves, 4 slots for Sz-parity x flip (slot = 2*parity +
+                # sign). Naming a momentum means every slot at that
+                # momentum; filter_sectors drops out-of-range candidates
+                # silently, so selecting all four is a no-op for the
+                # smaller layouts. [k, k+n] alone silently dropped the
+                # odd-parity half of the partition sum in the 4-slot case.
                 _n_raw = len((_tbl or {}).get("sectors", []) or [])
-                p.selected_sectors = [int(_sector_sid),
-                                      int(_sector_sid) + _n_raw]
+                p.selected_sectors = [int(_sector_sid) + _s * _n_raw
+                                      for _s in range(4)]
             for k, v in merged_extra.items():
                 setattr(p, k, v)
             return p

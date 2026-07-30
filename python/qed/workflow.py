@@ -963,6 +963,19 @@ def solve(
                 f"blocks are (n_up, k) with no irrep axis to select on. Pass "
                 f"point_group='full' to require projection (it raises with the "
                 f"reason if it cannot), or drop irrep=.")
+        if flip is not None and lane.mode != "project":
+            # Same contract as irrep= above: flip= names a spin-flip parity,
+            # which only the projection lane's star decoder consumes. The
+            # abelian lane solves BOTH flip halves and merges, so accepting
+            # flip= there silently returned the union (measured 2026-07-30:
+            # flip=0 and flip=1 byte-identical on an 8-ring). Refuse instead.
+            raise ValueError(
+                f"qed.solve: flip= names a spin-flip parity, which only the "
+                f"projection lane selects on -- this call resolved to the "
+                f"abelian lane ({lane.reason or 'point_group is off'}), which "
+                f"solves both flip halves and merges them. Pass "
+                f"point_group='full' to require projection (it raises with "
+                f"the reason if it cannot), or drop flip=.")
         if lane.mode == "project":
             _k = int(num_eigenvalues) if num_eigenvalues else 1
             _nu = int(sz) if isinstance(sz, int) else -1
@@ -1167,6 +1180,18 @@ def solve(
                 if isinstance(point_group, str) \
                         and point_group.lower() == "full":
                     raise
+                if irrep is not None or flip is not None:
+                    # The abelian fallback cannot honour a named irrep or
+                    # flip parity (see the guards above, which ran BEFORE
+                    # lane resolution and cannot re-fire here). Falling
+                    # back would silently return the whole star's result
+                    # for every named character. Refuse instead.
+                    raise RuntimeError(
+                        f"qed.solve: the little-group projection lane "
+                        f"failed ({exc}) and the abelian fallback cannot "
+                        f"honour irrep=/flip=. Drop those arguments to "
+                        f"accept the abelian merge, or fix the projection "
+                        f"failure.") from exc
                 if verbose:
                     print(f"[qed.solve] little-group lane declined "
                           f"({exc}); falling back to the abelian rep "
@@ -1530,6 +1555,7 @@ def _thermal_method_names() -> set[str]:
         "mTPQ",
         "FTLM",
         "LTLM",
+        "OFTLM",
         "KPM_DOS",
     }
 
@@ -1908,17 +1934,25 @@ def _diag_with_symmetry(
     # sector_metadata.json), so resolve here -- the first point where it exists.
     if sector is not None:
         _sid = _resolve_sector_quantum_numbers(info, sector)
-        # GAP 9 fix: when the lane-B flip projection engages (n_up = N/2,
-        # flip-symmetric H) the sector set carries EXTENDED indices
-        # (k, +) = k and (k, -) = k + n_raw. Naming a momentum means BOTH
-        # parities -- the same contract the project lane's decoder honours.
-        # filter_sectors silently drops out-of-range ids, so selecting the
-        # partner unconditionally is a no-op when the flip is off.
+        # GAP 9 fix (extended 2026-07): the sector set may carry EXTENDED
+        # indices in SLOTS of n_raw. Naming a momentum means every slot at
+        # that momentum -- the same contract the project lane's decoder
+        # honours. Slot layouts emitted by the factories:
+        #   1 slot  -- no discrete extension
+        #   2 slots -- flip halves (k,+)=k, (k,-)=k+n_raw  OR the two
+        #              Sz-parity halves
+        #   4 slots -- Sz-parity x flip: slot = 2*parity + sign, index =
+        #              slot*n_raw + k
+        # filter_sectors silently drops out-of-range ids, so selecting all
+        # four candidates is a no-op for the smaller layouts. Selecting
+        # only [k, k+n] silently dropped the odd-parity half in the 4-slot
+        # layout (audit 2026-07-30: 120/256 states missing on a J++ ring).
         _n_raw = len(info.get("sectors", []) or [])
-        params.selected_sectors = [_sid, _sid + _n_raw]
+        params.selected_sectors = [_sid + _s * _n_raw for _s in range(4)]
         if verbose:
             print(f"[qed.solve] sector={list(sector)} -> raw sector index "
-                  f"{_sid} (+ flip partner {_sid + _n_raw} when projected)")
+                  f"{_sid} (+ extended slot partners "
+                  f"{[_sid + _s * _n_raw for _s in range(1, 4)]} when engaged)")
 
     # ------------------------------------------------------------------
     # 2. Materialise operator + symmetry into a temp directory the
