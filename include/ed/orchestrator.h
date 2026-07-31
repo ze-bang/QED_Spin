@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -48,6 +49,15 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/results.h>
 #include <ed/core/select_backend.h>
+
+// Stage-12 helper forward declarations (audit 2026-07-31): the SU(2)
+// workflow surface below names these by shared_ptr / reference only.
+class Operator;
+namespace ed::matvec { class MatVecOperator; }
+namespace ed::symmetry {
+class CasimirProjectedOperator;
+class LowdinS2Projector;
+}  // namespace ed::symmetry
 
 // `ed::thermal` and `ed::observables` already exist as namespaces (the
 // per-kernel headers from Phase 2). To avoid a function/namespace
@@ -487,6 +497,62 @@ ThermalResult     thermal(const LinearOperator& H,
 SpectralResult    spectral(const LinearOperator&                          H,
                             const std::vector<const LinearOperator*>&     observables,
                             SpectralOptions                               opts = {});
+
+// ---------------------------------------------------------------------------
+// Stage 12 (SU(2) rollout) workflow helpers -- hoisted from the pybind TU
+// (audit 2026-07-31): the tower-thermodynamics driver and the Lowdin
+// targeting plumbing were business logic living only in the Python
+// bindings, unreachable from the C++ API or the CLI. They are now part
+// of the ed::workflows surface; the bindings wrap them thinly.
+// ---------------------------------------------------------------------------
+
+/// Would `solve(op, opts)` take the FullDiag route? (method == FullDiag,
+/// or Auto with global_dim <= 2^12 -- keep in sync with the Auto
+/// resolution inside solve().) Policy consumers: the bindings pin
+/// allow_gpu=false for FullDiag; the SU(2) targeting forces the Krylov
+/// lane (FullDiag has no seed and would return every tower).
+[[nodiscard]] bool will_use_full_diag(const LinearOperator& op,
+                                      const SolveOptions&   opts) noexcept;
+
+/// Term-level SU(2) detection on an in-memory carrier operator.
+[[nodiscard]] bool op_is_su2_symmetric(const ::Operator& op);
+
+/// Resolve the SU(2) engagement for a call: true when the machinery
+/// (targeting / labeling) should run. Throws when a hard request
+/// (numeric total_spin, or label_total_spin == 1) cannot be met --
+/// either the ED_SYM_SU2=0 veto or a non-SU(2)-invariant Hamiltonian.
+[[nodiscard]] bool resolve_su2_engagement(const ::Operator& base,
+                                          int   two_total_spin,
+                                          int   label_total_spin,
+                                          const char* where);
+
+/// The Lowdin projector + ghost-shifted wrapped operator for one solve
+/// block. `wrapped == nullptr` marks a tower not admissible in the block.
+struct Su2Targeting {
+    std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> wrapped;
+    std::shared_ptr<const ed::symmetry::LowdinS2Projector>        projector;
+};
+[[nodiscard]] Su2Targeting make_su2_targeting(
+    std::shared_ptr<const ed::matvec::MatVecOperator> h,
+    std::shared_ptr<const ed::matvec::MatVecOperator> s2,
+    int n_sites, int n_up, int two_total_spin);
+
+/// Solve one block on the SU(2) targeting lane: projected seed, Krylov
+/// lane forced, the "zero seed" refusal (no tower weight in this block)
+/// mapped to an empty result.
+[[nodiscard]] GroundStateResult solve_su2_targeted(
+    const ed::symmetry::CasimirProjectedOperator&                 wrapped,
+    const std::shared_ptr<const ed::symmetry::LowdinS2Projector>& projector,
+    SolveOptions opts);
+
+/// Thermodynamics of ONE spin-S tower (opts.two_total_spin = 2S) in its
+/// highest-weight Sz sector: exact highest-weight spectral differencing
+/// for small blocks (honours ED_THERMAL_EXACT_SMALL=0), Lowdin-projected
+/// sampling above the dense window with F/S re-normalised from the
+/// sector dim to the tower dim M(N,S). Recombine towers with (2S+1)
+/// weights (combine_sector_thermodynamics degeneracy overload).
+[[nodiscard]] ThermalResult thermal_su2_tower(const ::Operator& op,
+                                              ThermalOptions    opts);
 
 }  // namespace ed::workflows
 

@@ -391,55 +391,19 @@ inline bool gpu_runtime_available() noexcept {
 /// measurable win, so the binding pins ``allow_gpu=false`` for FullDiag
 /// to avoid spinning up an unused CudaBackend (and a misleading "gpu"
 /// lane label).
-inline bool will_use_full_diag(const ed::LinearOperator& op,
-                               const ed::workflows::SolveOptions& opts) noexcept {
-    if (opts.method == ed::workflows::SolveMethod::FullDiag) return true;
-    if (opts.method != ed::workflows::SolveMethod::Auto)     return false;
-    const auto geom = op.geometry();
-    return geom.global_dim <= (1ULL << 12);
-}
+using ed::workflows::will_use_full_diag;  // hoisted (audit 2026-07-31)
 
 // -----------------------------------------------------------------------
 // Stage 12 (SU(2) rollout) shared helpers.
 // -----------------------------------------------------------------------
 
 /// Term-level SU(2) detection on an in-memory carrier operator.
-inline bool op_is_su2_symmetric(const Operator& op) {
-    ed::matvec::TermStorage soa;
-    ed::matvec::TermStorage::classify_route(
-        soa, op.transform_data_, op.three_body_data_,
-        [](const std::complex<double>& c) { return c; });
-    return ed::symmetry::hamiltonian_is_su2_symmetric(soa);
-}
+using ed::workflows::op_is_su2_symmetric;  // hoisted (audit 2026-07-31)
 
 /// Resolve the su2 engagement for a solve call: returns true when the
 /// SU(2) machinery (targeting / labeling) should run. Throws when a
 /// hard request (targeting, or label_total_spin == 1) cannot be met.
-inline bool resolve_su2_engagement(const Operator& base,
-                                   int two_total_spin,
-                                   int label_total_spin,
-                                   const char* where) {
-    const bool wanted = (two_total_spin >= 0) || (label_total_spin != 0);
-    if (!wanted) return false;
-    if (!ed::symmetry::su2_enabled()) {
-        if (two_total_spin >= 0 || label_total_spin == 1) {
-            throw std::runtime_error(
-                std::string(where) +
-                ": total_spin requested but the SU(2) axis is vetoed by "
-                "ED_SYM_SU2=0");
-        }
-        return false;
-    }
-    const bool su2 = op_is_su2_symmetric(base);
-    if (!su2 && (two_total_spin >= 0 || label_total_spin == 1)) {
-        throw std::runtime_error(
-            std::string(where) +
-            ": total_spin requires an SU(2)-invariant Hamiltonian "
-            "(isotropic exchange, no fields / DM / anisotropy); the "
-            "term-level [H, S_tot] check failed");
-    }
-    return su2;
-}
+using ed::workflows::resolve_su2_engagement;  // hoisted
 
 /// S^2 restricted to the SAME basis as `op` (dynamic-type probe):
 /// FixedSzOperator -> a FixedSz twin sharing n_up; plain Operator ->
@@ -487,66 +451,18 @@ inline void label_vectors_with_s2(
 /// ``compute_canonical_thermo_from_eigs`` (kept file-local there);
 /// used by the tower binding's exact differencing route so every tower
 /// lands on the SAME grid the recombiner expects.
-inline ::ThermodynamicData su2_exact_thermo_from_eigs(
-    const std::vector<double>& eigs,
-    const std::vector<double>& temperatures) {
-    // Audit 2026-07-31: forwards to the single canonical implementation
-    // (this was the third byte-equivalent copy).
-    return ed::symmetry::canonical_thermo_from_eigs(eigs, temperatures);
-}
 
 /// Build the Lowdin projector + wrapped operator for one solve block.
 /// Returns {wrapped_operator, projector}; the caller installs
 /// ``seed_transform`` from the projector and solves the wrapper.
-struct Su2Targeting {
-    std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> wrapped;
-    std::shared_ptr<const ed::symmetry::LowdinS2Projector>        projector;
-};
-inline Su2Targeting make_su2_targeting(
-    std::shared_ptr<const ed::matvec::MatVecOperator> h,
-    std::shared_ptr<const ed::matvec::MatVecOperator> s2,
-    int n_sites, int n_up, int two_total_spin) {
-    // The full-Sz tower set stays EXACT inside flip/parity refinements:
-    // factors for absent towers multiply in-tower components by 1.
-    const auto towers =
-        ed::symmetry::allowed_two_S_in_block(n_sites, n_up);
-    if (std::find(towers.begin(), towers.end(), two_total_spin)
-        == towers.end()) {
-        return {};  // tower not admissible in this block: skip it
-    }
-    auto proj = std::make_shared<const ed::symmetry::LowdinS2Projector>(
-        std::move(s2), two_total_spin, towers);
-    auto wrapped =
-        std::make_shared<const ed::symmetry::CasimirProjectedOperator>(
-            std::move(h), proj);
-    return {std::move(wrapped), std::move(proj)};
-}
+using ed::workflows::Su2Targeting;        // hoisted
+using ed::workflows::make_su2_targeting;  // hoisted
 
 /// Shared solve-one-block routine for the SU(2) targeting lane: installs
 /// the projected seed, forces the Krylov lane (FullDiag has no seed and
 /// would return every tower), and maps the "zero seed" refusal (empty
 /// tower in this block) to an empty result.
-inline ed::GroundStateResult solve_su2_targeted(
-    const ed::symmetry::CasimirProjectedOperator& wrapped,
-    const std::shared_ptr<const ed::symmetry::LowdinS2Projector>& proj,
-    ed::workflows::SolveOptions sopts) {
-    if (will_use_full_diag(wrapped, sopts)) {
-        sopts.method = ed::workflows::SolveMethod::Lanczos;
-    }
-    sopts.seed_transform = [proj](Complex* v, std::size_t n) {
-        proj->project_normalized(v, n);
-    };
-    try {
-        return ed::workflows::solve(
-            static_cast<const ed::LinearOperator&>(wrapped),
-            std::move(sopts));
-    } catch (const std::runtime_error& e) {
-        if (std::string(e.what()).find("zero seed") != std::string::npos) {
-            return {};  // no weight in the tower: empty block
-        }
-        throw;
-    }
-}
+using ed::workflows::solve_su2_targeted;  // hoisted
 
 /// The thermal lane has uneven GPU coverage:
 ///   * FTLM         : CPU only (orchestrator throws on CUDA).
@@ -1391,120 +1307,11 @@ void bind_workflows(py::module_& m) {
     // recombines with (2S+1) weights via ``combine_thermo_weighted``.
     m.def("workflows_thermal_su2_tower",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
-              const int two_S = opts.two_total_spin;
-              if (two_S < 0) {
-                  throw std::invalid_argument(
-                      "workflows_thermal_su2_tower: set "
-                      "opts.two_total_spin = 2S");
-              }
-              (void)resolve_su2_engagement(op, two_S, /*label=*/0,
-                                           "qed.thermal");
-              const int N = static_cast<int>(op.getNumBits());
-              const std::uint64_t d_tower =
-                  ed::symmetry::multiplet_count(N, two_S);
-              if (d_tower == 0) return ed::ThermalResult{};
-              const int n_up =
-                  ed::symmetry::n_up_of_highest_weight(N, two_S);
-              auto h = std::make_shared<FixedSzOperator>(
-                  static_cast<std::uint64_t>(N), 0.5f, n_up);
-              h->copyTermsFrom(op);
-              // Small blocks: EXACT route via highest-weight spectral
-              // differencing -- tower spectrum = spec(Sz=S) \ spec(Sz=S+1)
-              // -- then direct Boltzmann sums. Beats projected sampling
-              // in both cost and accuracy wherever dense diagonalisation
-              // of the two adjacent blocks is cheap. Honours the same
-              // ED_THERMAL_EXACT_SMALL=0 kernel-gating escape as the
-              // orchestrator's small-D fallback (tests that mean to gate
-              // the projected SAMPLING kernel set it to 0).
-              const bool exact_small_ok = []() noexcept {
-                  const char* v = std::getenv("ED_THERMAL_EXACT_SMALL");
-                  return !(v != nullptr && v[0] == '0' && v[1] == '\0');
-              }();
-              if (h->dim() <= (1ULL << 12) && exact_small_ok) {
-                  std::vector<double> lo_spec, hi_spec;
-                  {
-                      py::gil_scoped_release release;
-                      full_diagonalization(*h, h->dim(), h->dim(),
-                                           lo_spec, "", false);
-                      if (n_up + 1 <= N) {
-                          FixedSzOperator above(
-                              static_cast<std::uint64_t>(N), 0.5f,
-                              n_up + 1);
-                          above.copyTermsFrom(op);
-                          if (above.dim() > 0) {
-                              full_diagonalization(above, above.dim(),
-                                                   above.dim(), hi_spec,
-                                                   "", false);
-                          }
-                      }
-                  }
-                  std::sort(lo_spec.begin(), lo_spec.end());
-                  std::sort(hi_spec.begin(), hi_spec.end());
-                  std::vector<double> tower;
-                  std::size_t j = 0;
-                  for (double e : lo_spec) {
-                      if (j < hi_spec.size()
-                          && std::abs(e - hi_spec[j]) <= 1e-9) {
-                          ++j;
-                      } else {
-                          tower.push_back(e);
-                      }
-                  }
-                  if (tower.size() != d_tower) {
-                      throw std::runtime_error(
-                          "workflows_thermal_su2_tower: highest-weight "
-                          "differencing produced " +
-                          std::to_string(tower.size()) + " levels for "
-                          "two_S=" + std::to_string(two_S) +
-                          " but M(N,S)=" + std::to_string(d_tower) +
-                          " (degeneracy-tolerance mismatch?)");
-                  }
-                  ed::ThermalResult tr;
-                  std::vector<double> temps;
-                  for (double bta : opts.betas) {
-                      temps.push_back(bta > 0.0 ? 1.0 / bta : 0.0);
-                  }
-                  tr.thermo = su2_exact_thermo_from_eigs(tower, temps);
-                  tr.ground_state_energy =
-                      tower.empty() ? 0.0 : tower.front();
-                  tr.backend.lane = "cpu";
-                  return tr;
-              }
-              auto s2 = std::make_shared<FixedSzOperator>(
-                  static_cast<std::uint64_t>(N), 0.5f, n_up);
-              s2->copyTermsFrom(*ed::ops::make_S2_carrier(
-                  static_cast<std::uint64_t>(N)));
-              auto t = make_su2_targeting(
-                  std::static_pointer_cast<const
-                      ed::matvec::MatVecOperator>(h),
-                  std::static_pointer_cast<const
-                      ed::matvec::MatVecOperator>(s2),
-                  N, n_up, two_S);
-              if (!t.wrapped) return ed::ThermalResult{};
-              auto proj = t.projector;
-              opts.seed_transform = [proj](Complex* v, std::size_t n) {
-                  proj->project(v, n);
-              };
-              ed::ThermalResult tr;
-              {
-                  py::gil_scoped_release release;
-                  tr = ed::workflows::thermal(
-                      static_cast<const ed::LinearOperator&>(*t.wrapped),
-                      opts);
-                  // The kernel's free energy bakes in ln(dim) of the
-                  // block it sampled; the projected trace runs over the
-                  // TOWER: Z_tower = Z_est * d_tower/dim.
-                  const double lnr =
-                      std::log(static_cast<double>(d_tower)
-                               / static_cast<double>(h->dim()));
-                  for (std::size_t i = 0;
-                       i < tr.thermo.temperatures.size(); ++i) {
-                      tr.thermo.free_energy[i] -=
-                          tr.thermo.temperatures[i] * lnr;
-                      tr.thermo.entropy[i] += lnr;
-                  }
-              }
-              return tr;
+              // Hoisted (audit 2026-07-31): the tower driver lives on the
+              // ed::workflows surface now; this is a thin GIL-releasing
+              // wrapper.
+              py::gil_scoped_release release;
+              return ed::workflows::thermal_su2_tower(op, std::move(opts));
           },
           py::arg("op"),
           py::arg("opts"),
