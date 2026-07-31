@@ -1236,34 +1236,82 @@ compute_dynamical_correlation_multi_operator_multi_temperature_impl(
                     r.spectral_function_imag[iw] =
                         accumulated_spectral_imag[p][T][iw] / Zt;
                 }
-                const uint64_t ns = per_sample_spectral[p][T].size();
-                if (ns > 1 && mpi_size == 1) {
+            }
+            // Standard error across samples (audit 2026-07-31): this used
+            // to run ONLY at mpi_size == 1, so every MPI run silently
+            // shipped zero error bars. Two-pass across the comm: (1)
+            // Allreduce the per-sample sums so every rank holds the
+            // GLOBAL mean, (2) each rank accumulates its local squared
+            // deviations against that mean, Reduced to rank 0. Same
+            // formula and summation shape as the serial path (identical
+            // bits at mpi_size == 1; Reduce reassociation only under
+            // MPI). Collectives run on EVERY rank for every (p, T) --
+            // the loop bounds are rank-uniform.
+            {
+                const uint64_t ns_loc = per_sample_spectral[p][T].size();
+                uint64_t ns_tot = ns_loc;
+#ifdef WITH_MPI
+                if (mpi_size > 1) {
+                    unsigned long long l =
+                        static_cast<unsigned long long>(ns_loc);
+                    unsigned long long g = 0;
+                    MPI_Allreduce(&l, &g, 1, MPI_UNSIGNED_LONG_LONG,
+                                  MPI_SUM, comm);
+                    ns_tot = static_cast<uint64_t>(g);
+                }
+#endif
+                if (ns_tot > 1) {
                     Vec mean(num_omega_bins, 0.0), mean_i(num_omega_bins, 0.0);
-                    for (uint64_t s = 0; s < ns; s++) {
+                    for (uint64_t s = 0; s < ns_loc; s++) {
                         for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                             mean[iw]   += per_sample_spectral[p][T][s][iw];
                             mean_i[iw] += per_sample_spectral_imag[p][T][s][iw];
                         }
                     }
-                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
-                        mean[iw]   /= ns;
-                        mean_i[iw] /= ns;
+#ifdef WITH_MPI
+                    if (mpi_size > 1) {
+                        MPI_Allreduce(MPI_IN_PLACE, mean.data(),
+                                      static_cast<int>(num_omega_bins),
+                                      MPI_DOUBLE, MPI_SUM, comm);
+                        MPI_Allreduce(MPI_IN_PLACE, mean_i.data(),
+                                      static_cast<int>(num_omega_bins),
+                                      MPI_DOUBLE, MPI_SUM, comm);
                     }
-                    for (uint64_t s = 0; s < ns; s++) {
+#endif
+                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                        mean[iw]   /= static_cast<double>(ns_tot);
+                        mean_i[iw] /= static_cast<double>(ns_tot);
+                    }
+                    Vec err(num_omega_bins, 0.0), err_i(num_omega_bins, 0.0);
+                    for (uint64_t s = 0; s < ns_loc; s++) {
                         for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                             const double d  = per_sample_spectral[p][T][s][iw]
                                               - mean[iw];
                             const double di = per_sample_spectral_imag[p][T][s][iw]
                                               - mean_i[iw];
-                            r.spectral_error[iw]      += d * d;
-                            r.spectral_error_imag[iw] += di * di;
+                            err[iw]   += d * d;
+                            err_i[iw] += di * di;
                         }
                     }
-                    const double nrm =
-                        std::sqrt(static_cast<double>(ns * (ns - 1)));
-                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
-                        r.spectral_error[iw]      = std::sqrt(r.spectral_error[iw]) / nrm;
-                        r.spectral_error_imag[iw] = std::sqrt(r.spectral_error_imag[iw]) / nrm;
+#ifdef WITH_MPI
+                    if (mpi_size > 1) {
+                        MPI_Reduce(mpi_rank == 0 ? MPI_IN_PLACE : err.data(),
+                                   err.data(),
+                                   static_cast<int>(num_omega_bins),
+                                   MPI_DOUBLE, MPI_SUM, 0, comm);
+                        MPI_Reduce(mpi_rank == 0 ? MPI_IN_PLACE : err_i.data(),
+                                   err_i.data(),
+                                   static_cast<int>(num_omega_bins),
+                                   MPI_DOUBLE, MPI_SUM, 0, comm);
+                    }
+#endif
+                    if (mpi_rank == 0) {
+                        const double nrm = std::sqrt(
+                            static_cast<double>(ns_tot * (ns_tot - 1)));
+                        for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                            r.spectral_error[iw]      = std::sqrt(err[iw]) / nrm;
+                            r.spectral_error_imag[iw] = std::sqrt(err_i[iw]) / nrm;
+                        }
                     }
                 }
             }

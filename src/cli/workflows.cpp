@@ -1741,18 +1741,19 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     }
                 }
             }
-            return P;
+            // Count once globally: the kernel is collective (every rank
+            // participates), but the MPI_Reduce'd "Processed X/N" total
+            // must not multiply by the rank count.
+            return (rank == 0) ? P : 0;
         };
 
         // Decide whether the multi-operator shared-Lanczos path applies.
-        // NOTE (audit 2026-07-31): this optimization engages on the
-        // SEQUENTIAL lane only -- the single-T MPI master-worker always
-        // runs the per-task kernel. Both are valid FTLM estimators, but
-        // their random-sample streams differ, so serial and mpirun
-        // spectra of the same config agree only statistically (exactly
-        // at num_samples == 1, which is what the mpi integration test
-        // pins). Porting the shared-chain optimization into the MPI
-        // task shape is possible future work.
+        // Engages on the sequential lane AND (since the 2026-07-31 port)
+        // on both MPI modes: the multi-op kernel is comm-collective with
+        // global-index per-sample seeds, so serial and mpirun agree to
+        // Reduce-reassociation roundoff at a fixed seed. The per-task
+        // master-worker remains the lane for single-sample or
+        // single-operator task sets (and the GPU path).
         bool use_shared_lanczos_multi_op = false;
         {
             const bool cpu_only =
@@ -1903,6 +1904,19 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 }
                 MPI_Barrier(MPI_COMM_WORLD);
             }
+        } else if (size > 1 && !use_optimized_multi_temp
+                   && use_shared_lanczos_multi_op) {
+            // Shared-Lanczos port to the MPI shape (audit 2026-07-31,
+            // the final consolidation-plan residue): the multi-operator
+            // kernel is comm-collective over MPI_COMM_WORLD (samples
+            // split by GLOBAL index across ranks, spectra Reduced), so
+            // the single-T multi-op case now amortizes ONE H-Krylov
+            // chain per sample across every operator pair under mpirun
+            // exactly like the sequential lane -- same estimator, and
+            // bit-identical to serial up to Reduce reassociation
+            // (per-sample seeds key on the global sample index). All
+            // ranks enter synchronously (the gate is config-derived).
+            local_processed_count += process_all_operators_at_once_cpu();
         } else if (size > 1 && !use_optimized_multi_temp) {
             // Audit 2026-07-31 (H2): single-writer master-worker. Workers
             // compute and SHIP their packed spectra; rank 0 is the only
