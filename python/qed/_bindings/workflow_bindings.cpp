@@ -99,6 +99,17 @@ inline std::pair<int, int> binding_mpi_rank_size() {
 inline bool resolve_sector_parallel(std::size_t   num_sectors,
                                     std::uint64_t max_sector_dim,
                                     bool          gpu_lane) {
+    // Audit 2026-07-31: a single-sector call gains NOTHING from a
+    // 1-iteration parallel region but loses everything to its side
+    // effect -- full_diagonalization sees omp_in_parallel() and pins
+    // the dense eigensolve to ONE thread. qed.full_spectrum's forced
+    // ED_SYM_SECTOR_PARALLEL=1 hit exactly this on trivial-symmetry
+    // clusters (one identity-irrep sector per Sz call): 17 serial
+    // blocks x single-threaded dsyevd, measured 283 s at N=16 where
+    // threaded LAPACK does it in a fraction. Declining here is
+    // semantics-preserving (there is no parallelism to enable), so it
+    // outranks even the explicit env.
+    if (num_sectors <= 1) return false;
     if (const char* env = std::getenv("ED_SYM_SECTOR_PARALLEL"))
         return env[0] == '1';   // explicit override always wins (user's risk)
     // NEVER auto-enable on the GPU lane: the per-sector solves launch CUDA
