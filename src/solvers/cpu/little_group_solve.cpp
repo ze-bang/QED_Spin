@@ -2000,7 +2000,12 @@ LittleGroupSpectrum little_group_full_spectrum(
             out.total_dim = 0;
             for (int m : out.multiplicities)
                 out.total_dim += static_cast<std::uint64_t>(m);
-            out.gpu_engaged = true;   // the batched eigensolve ran on device
+            // Audit 2026-07-31: truthful only when the deferred batch
+            // actually held blocks -- an all-Lanczos walk hands the GPU
+            // eigensolve an EMPTY pack (it returns without touching the
+            // device), and stamping true regardless made every GPU-lane
+            // assertion keyed on this flag toothless.
+            if (!P.block_dim.empty()) out.gpu_engaged = true;
             check_sum_rule(out, n_sites, opt);
             return out;
         } catch (const std::exception& e) {
@@ -2089,7 +2094,12 @@ LittleGroupSpectrum little_group_lowest_spectrum(
                 }
                 off += static_cast<std::size_t>(P.block_dim[b]);
             }
-            out.gpu_engaged = true;   // the batched eigensolve ran on device
+            // Audit 2026-07-31: truthful only when the deferred batch
+            // actually held blocks -- an all-Lanczos walk hands the GPU
+            // eigensolve an EMPTY pack (it returns without touching the
+            // device), and stamping true regardless made every GPU-lane
+            // assertion keyed on this flag toothless.
+            if (!P.block_dim.empty()) out.gpu_engaged = true;
             return out;
         } catch (const std::exception& e) {
             std::fprintf(stderr,

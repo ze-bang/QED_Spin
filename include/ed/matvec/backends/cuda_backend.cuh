@@ -50,6 +50,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -120,6 +121,37 @@ inline cublasOperation_t to_cublas_op(char op) {
 // configuration we don't actually have in the codebase.
 class CudaBackend : public Backend {
 public:
+    /// Audit 2026-07-31: every cuBLAS BLAS-1 entry point takes a 32-bit
+    /// count. The old bare `static_cast<int>` silently wrapped at
+    /// n >= 2^31 (a 32 GiB complex vector -- reachable on 80 GB parts)
+    /// and computed garbage; guard the narrowing once, loudly.
+    [[nodiscard]] static int as_blas_int(std::size_t n) {
+        if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::length_error(
+                "CudaBackend: vector length " + std::to_string(n) +
+                " exceeds the 32-bit cuBLAS count limit (2^31 - 1); "
+                "split the operation or use a 64-bit BLAS path.");
+        }
+        return static_cast<int>(n);
+    }
+
+    /// Audit 2026-07-31: the dot_many/axpy_many staging cache is keyed
+    /// on the basis POINTER array only (see `stage_basis_`) -- it has no
+    /// content epoch. If a caller mutates an already-staged basis
+    /// vector's CONTENTS in place (same address, same count -- e.g. a
+    /// thick-restart driver recombining locked Ritz vectors, then
+    /// reusing this backend instance), the stale staged column is
+    /// silently reused and orthogonality quietly degrades. Call this
+    /// after any in-place mutation of vectors previously passed to
+    /// `dot_many` / `axpy_many` on this instance; the next batched call
+    /// re-stages everything. (The in-repo kernels construct a fresh
+    /// backend per run and never hit this; the hazard is the class
+    /// contract for external reuse.)
+    void invalidate_staging() const {
+        staging_fingerprint_.clear();
+        staging_n_ = 0;
+    }
+
     /// Construct a CudaBackend on the *current* CUDA device. Set the
     /// device with `cudaSetDevice(id)` BEFORE constructing if you want
     /// to pin to a specific GPU; the handle binds to whichever device
@@ -341,7 +373,7 @@ public:
         if (n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
-            cublasZaxpy(handle_, static_cast<int>(n), &a,
+            cublasZaxpy(handle_, as_blas_int(n), &a,
                         reinterpret_cast<const cuDoubleComplex*>(x), 1,
                         reinterpret_cast<cuDoubleComplex*>(y), 1),
             "cublasZaxpy");
@@ -350,7 +382,7 @@ public:
         if (n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
-            cublasZscal(handle_, static_cast<int>(n), &a,
+            cublasZscal(handle_, as_blas_int(n), &a,
                         reinterpret_cast<cuDoubleComplex*>(x), 1),
             "cublasZscal");
     }
@@ -359,7 +391,7 @@ public:
         if (n == 0) return Complex{0.0, 0.0};
         cuDoubleComplex result{0.0, 0.0};
         cuda_backend_detail::check_cublas(
-            cublasZdotc(handle_, static_cast<int>(n),
+            cublasZdotc(handle_, as_blas_int(n),
                         reinterpret_cast<const cuDoubleComplex*>(x), 1,
                         reinterpret_cast<const cuDoubleComplex*>(y), 1,
                         &result),
@@ -370,7 +402,7 @@ public:
         if (n == 0) return 0.0;
         double result = 0.0;
         cuda_backend_detail::check_cublas(
-            cublasDznrm2(handle_, static_cast<int>(n),
+            cublasDznrm2(handle_, as_blas_int(n),
                          reinterpret_cast<const cuDoubleComplex*>(x), 1,
                          &result),
             "cublasDznrm2");
@@ -395,10 +427,10 @@ public:
         cuda_backend_detail::check_cublas(
             cublasZgeam(handle_,
                 CUBLAS_OP_N, CUBLAS_OP_N,
-                static_cast<int>(n), /*cols=*/1,
-                &a, reinterpret_cast<const cuDoubleComplex*>(x), static_cast<int>(n),
-                &b, reinterpret_cast<const cuDoubleComplex*>(y), static_cast<int>(n),
-                    reinterpret_cast<cuDoubleComplex*>(y),       static_cast<int>(n)),
+                as_blas_int(n), /*cols=*/1,
+                &a, reinterpret_cast<const cuDoubleComplex*>(x), as_blas_int(n),
+                &b, reinterpret_cast<const cuDoubleComplex*>(y), as_blas_int(n),
+                    reinterpret_cast<cuDoubleComplex*>(y),       as_blas_int(n)),
             "cublasZgeam(axpby)");
     }
 
@@ -446,10 +478,10 @@ public:
         cuda_backend_detail::check_cublas(
             cublasZgemv(handle_,
                 CUBLAS_OP_C,
-                static_cast<int>(n), static_cast<int>(num_basis),
+                as_blas_int(n), static_cast<int>(num_basis),
                 &one,
                 reinterpret_cast<const cuDoubleComplex*>(staging_buf_),
-                static_cast<int>(n),
+                as_blas_int(n),
                 reinterpret_cast<const cuDoubleComplex*>(v), 1,
                 &zero,
                 reinterpret_cast<cuDoubleComplex*>(coeffs_dev_), 1),
@@ -486,10 +518,10 @@ public:
         cuda_backend_detail::check_cublas(
             cublasZgemv(handle_,
                 CUBLAS_OP_N,
-                static_cast<int>(n), static_cast<int>(num_basis),
+                as_blas_int(n), static_cast<int>(num_basis),
                 &one,
                 reinterpret_cast<const cuDoubleComplex*>(staging_buf_),
-                static_cast<int>(n),
+                as_blas_int(n),
                 reinterpret_cast<const cuDoubleComplex*>(coeffs_dev_), 1,
                 &one,
                 reinterpret_cast<cuDoubleComplex*>(v), 1),
@@ -515,7 +547,7 @@ public:
             cublasZgemm(handle_,
                 cuda_backend_detail::to_cublas_op(opA),
                 cuda_backend_detail::to_cublas_op(opB),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                static_cast<int>(m), as_blas_int(n), static_cast<int>(k),
                 &a,
                 reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
                 reinterpret_cast<const cuDoubleComplex*>(B), static_cast<int>(ldb),
@@ -537,7 +569,7 @@ public:
         cuda_backend_detail::check_cublas(
             cublasZgemv(handle_,
                 cuda_backend_detail::to_cublas_op(opA),
-                static_cast<int>(m), static_cast<int>(n),
+                static_cast<int>(m), as_blas_int(n),
                 &a,
                 reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
                 reinterpret_cast<const cuDoubleComplex*>(x), static_cast<int>(incx),
@@ -562,7 +594,7 @@ public:
         const cuDoubleComplex   a  = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
             cublasZtrsm(handle_, sd, up, tr, dg,
-                static_cast<int>(m), static_cast<int>(n),
+                static_cast<int>(m), as_blas_int(n),
                 &a,
                 reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
                 reinterpret_cast<cuDoubleComplex*>(B), static_cast<int>(ldb)),
@@ -793,8 +825,16 @@ private:
 /// function-local static storage so cublasCreate/Destroy are deferred
 /// to first use (avoids a constructor-time CUDA dependency for binaries
 /// that link the header but never touch the GPU).
+///
+/// thread_local (audit 2026-07-31, matching the CPU twin): the instance
+/// carries mutable staging state (`staging_fingerprint_` /
+/// `staging_buf_` / `coeffs_dev_`) that two threads would race --
+/// exactly the corruption the CPU accessor's thread_local fixed for
+/// ED_SYM_SECTOR_PARALLEL. One cuBLAS handle per calling thread is the
+/// supported cuBLAS threading model. (No in-repo call site exists today;
+/// this de-arms the landmine before one appears.)
 [[nodiscard]] inline CudaBackend& default_cuda_backend() {
-    static CudaBackend instance;
+    static thread_local CudaBackend instance;
     return instance;
 }
 
