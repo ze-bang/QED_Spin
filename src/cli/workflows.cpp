@@ -1420,27 +1420,80 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             int op_idx = task.op_idx;
             double temperature = temperatures[t_idx];
 
-            // Create function wrappers for this operator pair (audit #2:
-            // dispatch via apply_obs* so fixed-Sz uses the typed override).
-            auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                apply_obs1(op_idx, in, out, dim);
-            };
+            // Family-3 consolidation (audit 2026-07-31): single-T tasks
+            // route through the SAME backend-generic multitemp kernel as
+            // the multi-T path (temperatures = {T}), retiring the
+            // per-task legacy ::compute_dynamical_correlation -- and
+            // incidentally giving single-T tasks the GPU lane the old
+            // CPU-only body never had. Random stream changes vs the
+            // legacy driver (same estimator, different draws).
+            const uint64_t n_omega = config.dynamical.num_omega_points;
+            std::vector<double> omega_grid(n_omega);
+            const double omega_step = (config.dynamical.omega_max -
+                config.dynamical.omega_min) /
+                static_cast<double>(std::max<uint64_t>(1, n_omega - 1));
+            for (uint64_t i = 0; i < n_omega; ++i)
+                omega_grid[i] = config.dynamical.omega_min +
+                                static_cast<double>(i) * omega_step;
+            const std::vector<double> one_T{temperature};
 
-            auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                apply_obs2(op_idx, in, out, dim);
-            };
+            ed::LinearOperator& H_op = ham;
+            ed::LinearOperator& O1_op = config.system.use_fixed_sz
+                ? static_cast<ed::LinearOperator&>(*obs_1_fs[op_idx])
+                : static_cast<ed::LinearOperator&>(obs_1[op_idx]);
+            ed::LinearOperator& O2_op = config.system.use_fixed_sz
+                ? static_cast<ed::LinearOperator&>(*obs_2_fs[op_idx])
+                : static_cast<ed::LinearOperator&>(obs_2[op_idx]);
 
-            // Compute response on CPU (the only supported path for
-            // single-T tasks).
-            return compute_dynamical_correlation(
-                H_func, O1_func, O2_func, N, params,
-                config.dynamical.omega_min,
-                config.dynamical.omega_max,
-                config.dynamical.num_omega_points,
-                temperature,
-                config.workflow.output_dir,
-                ground_state_energy
-            );
+            ed::BackendConstraints bc;
+            bc.allow_gpu     = config.dynamical.use_gpu;
+            bc.allow_mpi     = false;   // rank-local task; results are
+            bc.allow_mpi_gpu = false;   // shipped by the master-worker
+            auto variant = ed::select_backend(H_op.geometry(), bc);
+
+            DynamicalResponseResults out;
+            std::visit([&](auto& backend_uptr) {
+                using BPtr = std::decay_t<decltype(backend_uptr)>;
+                using B    = typename BPtr::element_type;
+                constexpr bool is_cpu =
+                    std::is_same_v<B, ed::matvec::CpuBackend>;
+#ifdef WITH_CUDA
+                constexpr bool is_cuda =
+                    std::is_same_v<B, ed::matvec::CudaBackend>;
+#else
+                constexpr bool is_cuda = false;
+#endif
+                if constexpr (!(is_cpu || is_cuda)) {
+                    throw std::runtime_error(
+                        "dynamical FTLM: requires a CpuBackend or "
+                        "CudaBackend; distributed backends are not wired.");
+                } else {
+                    ed::observables::FtlmDynamicalOptions kopts;
+                    kopts.krylov_dim   = params.krylov_dim;
+                    kopts.num_samples  = params.num_samples;
+                    kopts.broadening   = params.broadening;
+                    kopts.energy_shift = ground_state_energy;
+                    kopts.tolerance    = params.tolerance;
+                    kopts.random_seed  = params.random_seed;
+                    kopts.global_n     = H_op.geometry().global_dim;
+
+                    auto mv_h  = H_op.template bind<B>();
+                    auto mv_o1 = O1_op.template bind<B>();
+                    auto mv_o2 = O2_op.template bind<B>();
+                    auto res = ed::observables::detail::
+                        ftlm_dynamical_kernel_via_backend_multitemp(
+                            *backend_uptr, mv_h, mv_o1, mv_o2,
+                            H_op.geometry().local_dim, omega_grid,
+                            one_T, kopts);
+                    out.frequencies            = res[0].omega;
+                    out.spectral_function      = res[0].spectral_real;
+                    out.spectral_function_imag = res[0].spectral_imag;
+                    out.spectral_error         = res[0].spectral_error_real;
+                    out.spectral_error_imag    = res[0].spectral_error_imag;
+                    out.total_samples          = res[0].total_samples;
+                }
+            }, variant);
+            return out;
         };
 
         auto write_task_single = [&](const DynTask& task,
@@ -2002,27 +2055,55 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
 
             DynamicalResponseResults results;
 
-            if (have_op2) {
-                if (rank == 0) std::cout << "Computing two-operator dynamical correlation ⟨O₁†(t)O₂⟩...\n";
-                results = compute_dynamical_correlation(
-                    H_func, O_func, O2_func, N, params,
-                    config.dynamical.omega_min,
-                    config.dynamical.omega_max,
-                    config.dynamical.num_omega_points,
-                    temperature,
-                    config.workflow.output_dir,
-                    ground_state_energy
-                );
-            } else {
-                if (rank == 0) std::cout << "Computing dynamical response ⟨O†(t)O⟩...\n";
-                results = compute_dynamical_response_thermal(
-                    H_func, O_func, N, params,
-                    config.dynamical.omega_min,
-                    config.dynamical.omega_max,
-                    config.dynamical.num_omega_points,
-                    temperature,
-                    config.workflow.output_dir
-                );
+            // Family-3 consolidation (audit 2026-07-31): both the
+            // two-operator and the single-operator legacy calls route
+            // through the backend-generic multitemp kernel (one-element
+            // T grid; O1 = O2 = O reproduces <O†(t)O>). This branch is
+            // host-functor based (legacy file-loaded operators), so the
+            // CPU backend is pinned. Random stream changes vs the legacy
+            // driver (same estimator, different draws).
+            {
+                if (rank == 0) {
+                    std::cout << (have_op2
+                        ? "Computing two-operator dynamical correlation "
+                          "⟨O₁†(t)O₂⟩...\n"
+                        : "Computing dynamical response ⟨O†(t)O⟩...\n");
+                }
+                const uint64_t n_omega = config.dynamical.num_omega_points;
+                std::vector<double> omega_grid(n_omega);
+                const double omega_step = (config.dynamical.omega_max -
+                    config.dynamical.omega_min) /
+                    static_cast<double>(std::max<uint64_t>(1, n_omega - 1));
+                for (uint64_t i = 0; i < n_omega; ++i)
+                    omega_grid[i] = config.dynamical.omega_min +
+                                    static_cast<double>(i) * omega_step;
+                const std::vector<double> one_T{temperature};
+                ed::observables::FtlmDynamicalOptions kopts;
+                kopts.krylov_dim   = params.krylov_dim;
+                kopts.num_samples  = params.num_samples;
+                kopts.broadening   = params.broadening;
+                kopts.energy_shift = ground_state_energy;
+                kopts.tolerance    = params.tolerance;
+                kopts.random_seed  = params.random_seed;
+                kopts.global_n     = N;
+                ed::matvec::CpuBackend be;
+                // Both observable slots must deduce ONE ApplyO type:
+                // wrap the lambdas uniformly.
+                std::function<void(const Complex*, Complex*, uint64_t)>
+                    O1_sel = O_func;
+                std::function<void(const Complex*, Complex*, uint64_t)>
+                    O2_sel = O_func;
+                if (have_op2) O2_sel = O2_func;
+                auto res = ed::observables::detail::
+                    ftlm_dynamical_kernel_via_backend_multitemp(
+                        be, H_func, O1_sel, O2_sel,
+                        N, omega_grid, one_T, kopts);
+                results.frequencies            = res[0].omega;
+                results.spectral_function      = res[0].spectral_real;
+                results.spectral_function_imag = res[0].spectral_imag;
+                results.spectral_error         = res[0].spectral_error_real;
+                results.spectral_error_imag    = res[0].spectral_error_imag;
+                results.total_samples          = res[0].total_samples;
             }
 
             // Save results for this temperature to HDF5 (rank 0 only -- the

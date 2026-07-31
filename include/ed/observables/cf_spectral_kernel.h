@@ -9,9 +9,9 @@
 // where G(z) = <phi| (z - H + E_shift)^-1 |phi> and |phi> = O|psi> / ||O|psi>||.
 //
 // Same algorithmic content as the legacy
-// `::compute_dynamical_correlation_state_cf` in
-// `src/solvers/cpu/ftlm.cpp:1530`, but lifted out so any Backend can drive
-// it: the only Backend-specific operations are the Lanczos tridiag build
+// `::compute_dynamical_correlation_state_cf` (retired 2026-07-31 in the
+// Family-3 consolidation; this kernel is its surviving lift), templated
+// so any Backend can drive it: the only Backend-specific operations are the Lanczos tridiag build
 // (already templated via `lanczos_kernel<Backend>`) and the |phi>
 // preparation (axpy / nrm2 / scale / matvec --- all in `Backend`).
 //

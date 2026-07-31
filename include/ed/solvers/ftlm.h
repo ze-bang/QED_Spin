@@ -287,85 +287,14 @@ ThermodynamicData combine_ftlm_sector_results(
     const std::vector<uint64_t>& sector_dims
 );
 
-// The single-state `compute_dynamical_response(psi, ...)` overload was retired
-// in the minimalist-architecture rev (May 2026); use
-// `ed::observables::cf_dynamical_correlator` for the |psi> -> S(omega) primitive.
-
-/**
- * @brief Compute dynamical response with random initial states (finite temperature)
- * 
- * Similar to compute_dynamical_response but averages over multiple random initial states
- * to approximate finite temperature response. This is useful when the initial state
- * is not known or when computing thermal averages.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O Operator matrix-vector product function
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperature Temperature for thermal weighting (0 = no thermal weighting)
- * @param output_dir Directory for output files
- * @return DynamicalResponseResults containing averaged S(ω) vs frequency
- */
-DynamicalResponseResults compute_dynamical_response_thermal(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature = 0.0,
-    const std::string& output_dir = ""
-);
-
-/**
- * @brief Compute dynamical correlation S_{O1,O2}(ω) = ⟨O₁†(t)O₂⟩
- * 
- * Computes the time-dependent correlation function in the frequency domain.
- * This is the Fourier transform of ⟨O₁†(t)O₂⟩ where time evolution is via H.
- * 
- * For the same operator (O1=O2=O), this gives the auto-correlation/spectral density.
- * For different operators, it gives cross-correlations useful for:
- * - Dynamical structure factors S(q,ω)
- * - Current-current correlations
- * - Conductivity σ(ω)
- * 
- * The calculation proceeds by:
- * 1. Apply O2 to random initial states: |φ⟩ = O2|ψ⟩
- * 2. Build Krylov subspace from |φ⟩ using Hamiltonian H
- * 3. Compute matrix elements ⟨v_k|O1|v_l⟩ in Krylov basis
- * 4. Transform to energy eigenbasis to get spectral weights |⟨n|O1|φ⟩|²
- * 5. Construct S(ω) = Σ_n |⟨n|O1|O2ψ⟩|² · Lorentzian(ω - E_n)
- * 6. Average over random samples for thermal ensemble
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O1 First operator matrix-vector product function
- * @param O2 Second operator matrix-vector product function
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperature Temperature for thermal weighting (0 = no thermal weighting)
- * @param output_dir Directory for output files
- * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
- */
-DynamicalResponseResults compute_dynamical_correlation(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature = 0.0,
-    const std::string& output_dir = "",
-    double energy_shift = 0.0
-);
+// Family-3 retirement (audit 2026-07-31): the Gen-1 dynamical-DSSF entry
+// points (compute_dynamical_response_thermal, compute_dynamical_correlation,
+// compute_dynamical_correlation_state_cf, and the earlier single-state
+// compute_dynamical_response overload) are deleted. Use the backend-generic
+// ed::observables::ftlm_dynamical_kernel_via_backend[_multitemp]
+// (cf_dynamical.h) for random-sample S(q, omega), and
+// ed::observables::cf_spectral_from_vector (cf_spectral_kernel.h) for the
+// |psi> -> S(omega) continued-fraction primitive.
 
 /**
  * @brief Compute dynamical correlation S_{O1,O2}(ω) = ⟨O₁†(ω)O₂⟩ for a given state
@@ -382,47 +311,6 @@ DynamicalResponseResults compute_dynamical_correlation(
  * `ed::observables::cf_dynamical_correlator` for the self-correlator case
  * (O1==O2) and call it twice for the cross-correlator case.
  */
-
-/**
- * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
- * 
- * This version DOES NOT store Lanczos basis vectors, making it suitable for
- * very large Hilbert spaces (>16M states) where storing krylov_dim vectors
- * would require prohibitive memory (e.g., 100GB for 27 sites with krylov_dim=50).
- * 
- * LIMITATION: Only works when O1 = O2 (self-correlation).
- * For O1 ≠ O2, use compute_dynamical_correlation_state which requires basis storage.
- * 
- * Algorithm:
- * 1. Applies O to the given state: |φ⟩ = O|ψ⟩
- * 2. Builds Lanczos tridiagonal WITHOUT storing basis vectors (3-term recurrence only)
- * 3. Computes spectral function via continued fraction: G(z) = ||φ||²/(z-α₀-β₁²/...)
- * 4. S(ω) = -Im[G(ω + iη)] / π
- * 
- * Memory: O(N) instead of O(krylov_dim × N)
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O Operator for self-correlation (O₁ = O₂ = O)
- * @param state Input quantum state |ψ⟩ (should be normalized)
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param energy_shift Energy shift to apply (typically ground state energy, 0 = auto-detect from Krylov)
- * @return DynamicalResponseResults containing S(ω) vs frequency
- */
-DynamicalResponseResults compute_dynamical_correlation_state_cf(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& state,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double energy_shift = 0.0
-);
 
 // save_dynamical_response_results was retired in the minimalist-
 // architecture rev (May 2026): no external callers. Persist directly via

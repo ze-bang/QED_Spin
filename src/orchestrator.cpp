@@ -2020,17 +2020,17 @@ SpectralResult spectral(const LinearOperator&                      H,
     } else {
         // Phase F of the "Close CPU/GPU Gaps" plan (May 2026):
         // finite-temperature dynamical correlator via FTLM CF-Lanczos.
-        // The CPU lane keeps the legacy ``::compute_dynamical_correlation``
-        // body (preserves intermediate HDF5 sample dumps when
-        // ``output_dir`` is set + matches existing per-sample
-        // diagnostics). The CUDA lane routes through
-        // ``detail::ftlm_dynamical_kernel_via_backend``, which mirrors
-        // the LTLM dual-backend pattern: device-resident O2 / O1 /
-        // Lanczos, host-side tridiag diagonalisation + Lorentzian sum.
-        // Distributed backends (MpiBackend / MpiCudaBackend) still
-        // require the cross-rank reduction story for FTLM sample
-        // averaging; pin BackendConstraints to a single-rank lane until
-        // that lands.
+        // Family-3 consolidation (audit 2026-07-31): ONE backend-generic
+        // arm. The old split kept the legacy ``::compute_dynamical_
+        // correlation`` on CPU "for HDF5 sample dumps" that were never
+        // enabled (store_intermediate defaulted false and was never
+        // set), silently used the legacy default of 40 samples on CPU
+        // while the CUDA arm hardcoded 1 sample regardless of the
+        // caller's request, and duplicated tolerance/seed constants per
+        // arm (they had already drifted once). Both lanes now run
+        // ``ftlm_dynamical_kernel_via_backend`` -- gated equivalent to
+        // the legacy body at matching T (~5 decimals, Family-3 step 3)
+        // -- and honour ``opts.num_samples``.
         if (observables.size() < 1) {
             throw std::invalid_argument(
                 "ed::spectral: FtlmDynamical requires at least one "
@@ -2057,47 +2057,11 @@ SpectralResult spectral(const LinearOperator&                      H,
                     "or CudaBackend; distributed backends are not yet "
                     "wired. Pin BackendConstraints to route through "
                     "the CPU/CUDA lanes.");
-            } else if constexpr (is_cpu) {
-                std::function<void(const Complex*, Complex*, int)> H_apply =
-                    [&H](const Complex* in, Complex* out, int n) {
-                        H.apply(in, out, static_cast<std::size_t>(n));
-                    };
-                std::function<void(const Complex*, Complex*, int)> O1_apply =
-                    [&O1](const Complex* in, Complex* out, int n) {
-                        O1.apply(in, out, static_cast<std::size_t>(n));
-                    };
-                std::function<void(const Complex*, Complex*, int)> O2_apply =
-                    [&O2](const Complex* in, Complex* out, int n) {
-                        O2.apply(in, out, static_cast<std::size_t>(n));
-                    };
-
-                DynamicalResponseParameters params;
-                params.krylov_dim               =
-                    static_cast<std::uint64_t>(opts.krylov_dim);
-                params.broadening               = opts.broadening;
-                params.tolerance                = 1e-10;
-                params.full_reorthogonalization = true;
-                params.random_seed              = 0;
-
-                const auto legacy = ::compute_dynamical_correlation(
-                    H_apply, O1_apply, O2_apply,
-                    static_cast<std::uint64_t>(H.geometry().local_dim),
-                    params,
-                    opts.omega_min, opts.omega_max,
-                    static_cast<std::uint64_t>(opts.num_omega),
-                    /*temperature=*/0.0,
-                    opts.output_dir,
-                    opts.energy_shift);
-
-                R.S_real = legacy.spectral_function;
-                R.S_imag = legacy.spectral_function_imag;
             } else {
-                // CudaBackend lane: backend-templated body.
                 ed::observables::FtlmDynamicalOptions kopts;
                 kopts.krylov_dim   = opts.krylov_dim;
-                kopts.num_samples  = 1u;  // GS-CF is deterministic (one
-                                          // seed); the old both-arms-1u
-                                          // ternary was dead
+                kopts.num_samples  = std::max<std::size_t>(
+                    1, opts.num_samples);
                 kopts.broadening   = opts.broadening;
                 kopts.temperature  = 0.0;
                 kopts.energy_shift = opts.energy_shift;
