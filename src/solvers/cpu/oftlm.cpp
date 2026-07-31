@@ -58,8 +58,15 @@ FtlmResult oftlm_cpu(
     std::size_t       Nv = std::min<std::uint64_t>(
         opts.num_exact, (N > 1 ? N - 1 : 0));
 
+    // Audit 2026-07-31: seed == 0 == NONDETERMINISTIC (random_device),
+    // matching the legacy FTLM driver's public contract; explicit seeds
+    // keep bit-reproducibility. (Was a fixed 0xFEEDFACE, which made
+    // "independent" default runs draw identical samples.)
     const std::uint64_t base_seed =
-        opts.random_seed != 0 ? opts.random_seed : 0xFEEDFACEULL;
+        opts.random_seed != 0
+            ? opts.random_seed
+            : (static_cast<std::uint64_t>(std::random_device{}()) << 32
+               | std::random_device{}());
 
     // -------------------------------------------------------------------------
     // 1. N_V lowest exact eigenpairs via one long full-reorthogonalized Lanczos

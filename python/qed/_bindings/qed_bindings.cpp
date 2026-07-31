@@ -54,6 +54,7 @@
 #include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
 #include <ed/observables/cf_spectral_kernel.h>      // 9d: cf_spectral_from_vector
 #include <ed/matvec/backends/cpu_backend.h>         // 9d: CF backend
+#include <ed/thermal/ftlm_kernel.h>                 // Family-2 front door
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
@@ -503,23 +504,80 @@ py::dict py_compute_thermo_from_spectrum(const py::array_t<double>& eigs,
     return thermo_to_dict(t);
 }
 
+// Family-2 front-door rebind (audit 2026-07-31): the direct bindings
+// used to call the legacy ::finite_temperature_lanczos, bypassing the
+// ed::thermal::ftlm_kernel front door entirely -- the seam this repo's
+// consolidation essay warns about (the Stage-12f seed_transform feature
+// exists only behind the front door). Both bindings now route through
+// ftlm_kernel<CpuBackend>, which delegates to the SAME legacy driver
+// with the SAME log-spaced grid and (newly knob-complete) parameters,
+// so the public output is unchanged byte-for-byte.
+template <class OpT>
+py::dict ftlm_via_front_door(const OpT& op,
+                             const FTLMParameters& params,
+                             double temp_min,
+                             double temp_max,
+                             uint64_t num_temp_bins,
+                             const std::string& output_dir) {
+    if (!(temp_min > 0.0) || !(temp_max > 0.0)) {
+        throw std::invalid_argument(
+            "finite_temperature_lanczos: temp_min and temp_max must both "
+            "be > 0.");
+    }
+    const uint64_t n = hv_dim(op);
+    // The exact log-spaced grid the legacy min/max/bins overload built
+    // internally (public-output compatibility).
+    std::vector<double> betas(num_temp_bins);
+    const double log_tmin = std::log(temp_min);
+    const double log_step = (std::log(temp_max) - log_tmin)
+        / static_cast<double>(std::max<uint64_t>(1, num_temp_bins - 1));
+    for (uint64_t i = 0; i < num_temp_bins; ++i) {
+        betas[i] = 1.0 / std::exp(log_tmin
+                                  + static_cast<double>(i) * log_step);
+    }
+    ed::thermal::FtlmOptions kopts;
+    kopts.num_samples              = params.num_samples;
+    kopts.krylov_dim               = params.krylov_dim;
+    kopts.betas                    = std::move(betas);
+    kopts.random_seed              = params.random_seed;
+    kopts.output_dir               = output_dir_or_devnull(output_dir);
+    kopts.max_iterations           = params.max_iterations;
+    kopts.tolerance                = params.tolerance;
+    kopts.full_reorthogonalization = params.full_reorthogonalization;
+    kopts.reorth_frequency         = params.reorth_frequency;
+    kopts.store_intermediate       = params.store_intermediate;
+    kopts.compute_error_bars       = params.compute_error_bars;
+
+    ed::thermal::FtlmResult res;
+    {
+        py::gil_scoped_release release;
+        ed::matvec::CpuBackend be;
+        auto hv = make_hv(op);
+        res = ed::thermal::ftlm_kernel(
+            be,
+            [&hv](const Complex* in, Complex* out, std::size_t nn) {
+                hv(in, out, static_cast<int>(nn));
+            },
+            static_cast<std::size_t>(n), n, kopts);
+    }
+    py::dict d;
+    d["temperatures"]           = to_numpy_d(res.temperatures);
+    d["energy"]                 = to_numpy_d(res.energy);
+    d["specific_heat"]          = to_numpy_d(res.heat_capacity);
+    d["entropy"]                = to_numpy_d(res.entropy);
+    d["free_energy"]            = to_numpy_d(res.free_energy);
+    d["ground_state_estimate"]  = res.ground_state_estimate;
+    return d;
+}
+
 py::dict py_finite_temperature_lanczos(const Operator& op,
                                        const FTLMParameters& params,
                                        double temp_min,
                                        double temp_max,
                                        uint64_t num_temp_bins,
                                        const std::string& output_dir) {
-    const uint64_t n = hv_dim(op);
-    const std::string dir = output_dir_or_devnull(output_dir);
-    FTLMResults res;
-    {
-        py::gil_scoped_release release;
-        res = finite_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                         temp_max, num_temp_bins, dir);
-    }
-    py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_estimate"] = res.ground_state_estimate;
-    return d;
+    return ftlm_via_front_door(op, params, temp_min, temp_max,
+                               num_temp_bins, output_dir);
 }
 
 py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
@@ -528,17 +586,8 @@ py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
                                                 double temp_max,
                                                 uint64_t num_temp_bins,
                                                 const std::string& output_dir) {
-    const uint64_t n = hv_dim(op);
-    const std::string dir = output_dir_or_devnull(output_dir);
-    FTLMResults res;
-    {
-        py::gil_scoped_release release;
-        res = finite_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                         temp_max, num_temp_bins, dir);
-    }
-    py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_estimate"] = res.ground_state_estimate;
-    return d;
+    return ftlm_via_front_door(op, params, temp_min, temp_max,
+                               num_temp_bins, output_dir);
 }
 
 // LTLM thermodynamics == FTLM trace for any function of H. The old

@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -66,8 +67,23 @@ struct FtlmOptions {
     std::size_t num_samples  = 40;
     std::size_t krylov_dim   = 100;
     std::vector<double> betas;           ///< inverse-temperature grid (positive)
-    std::uint64_t random_seed = 0;
+    std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
     std::string output_dir;
+
+    /// Knob parity with the legacy FTLMParameters (audit 2026-07-31):
+    /// the CPU lane used to forward only krylov/samples/seed and let
+    /// everything else silently take legacy defaults, which blocked the
+    /// direct Python bindings from routing through this front door.
+    /// The CPU lane maps all of these; the Backend-templated body
+    /// honours tolerance (Lanczos breakdown) and treats the reorth
+    /// fields as documentation of the CPU contract (its kernel is
+    /// FullCGS2).
+    std::uint64_t max_iterations           = 1000;
+    double        tolerance                = 1e-10;
+    bool          full_reorthogonalization = true;
+    std::uint64_t reorth_frequency         = 10;
+    bool          store_intermediate       = false;
+    bool          compute_error_bars       = true;
 
     /// Stage 12f (SU(2) rollout): host-side transform applied to every
     /// Gaussian sample seed before it is normalised and staged (e.g. the
@@ -79,10 +95,14 @@ struct FtlmOptions {
 
 struct FtlmResult {
     std::vector<double> betas;
+    std::vector<double> temperatures;        ///< 1/betas (grid order)
     std::vector<double> partition_function;
     std::vector<double> energy;
     std::vector<double> heat_capacity;
     std::vector<double> entropy;
+    std::vector<double> free_energy;
+    double ground_state_estimate =
+        std::numeric_limits<double>::quiet_NaN();
 };
 
 namespace detail {
@@ -91,10 +111,13 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
                                  const std::vector<double>& betas) {
     FtlmResult out;
     out.betas              = betas;
+    out.temperatures       = legacy.thermo_data.temperatures;
     out.partition_function = legacy.thermo_data.Z_sample;
     out.energy             = legacy.thermo_data.energy;
     out.heat_capacity      = legacy.thermo_data.specific_heat;
     out.entropy            = legacy.thermo_data.entropy;
+    out.free_energy        = legacy.thermo_data.free_energy;
+    out.ground_state_estimate = legacy.ground_state_estimate;
     return out;
 }
 
@@ -162,9 +185,16 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         temperatures.push_back(1.0 / b);
     }
 
+    // Audit 2026-07-31 (seed-contract alignment): seed == 0 means
+    // NONDETERMINISTIC, matching the legacy CPU driver's documented
+    // public contract ("0 = use random_device") -- the old fixed
+    // 0xFEEDFACE fallback made two "independent" default-seeded runs
+    // draw identical samples, silently defeating averaging. Explicit
+    // seeds keep bit-reproducibility.
     const std::uint64_t base_seed = (opts.random_seed != 0)
         ? opts.random_seed
-        : 0xFEEDFACEULL;
+        : (static_cast<std::uint64_t>(std::random_device{}()) << 32
+           | std::random_device{}());
 
     std::vector<::ThermodynamicData> per_sample;
     per_sample.reserve(opts.num_samples);
@@ -309,6 +339,12 @@ FtlmResult ftlm_kernel(const Backend&  backend,
         params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);
         params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);
         params.random_seed  = opts.random_seed;
+        params.max_iterations           = opts.max_iterations;
+        params.tolerance                = opts.tolerance;
+        params.full_reorthogonalization = opts.full_reorthogonalization;
+        params.reorth_frequency         = opts.reorth_frequency;
+        params.store_intermediate       = opts.store_intermediate;
+        params.compute_error_bars       = opts.compute_error_bars;
 
         // Evaluate the thermodynamics on the EXACT temperature grid the
         // caller supplied via ``opts.betas`` (T_k = 1/beta_k), preserving
