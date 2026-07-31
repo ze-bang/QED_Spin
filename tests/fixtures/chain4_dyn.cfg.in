@@ -1,0 +1,56 @@
+# =============================================================================
+# MPI master-worker smoke fixture: single-T dynamical response on the
+# 4-site Heisenberg ring (audit 2026-07-31, H2).
+#
+# num_temp_bins = 1 forces the SINGLE-temperature task shape, i.e. the
+# master-worker distribution path (multi-T takes the synchronized lane).
+# 3 spin combinations x 3 momentum points = 9 tasks; the run script
+# executes this once serially and once under mpirun and compares the
+# HDF5 spectra dataset-for-dataset. random_seed is fixed so every task
+# is bit-reproducible regardless of which rank computes it.
+#
+# `output_dir = __OUTDIR__` is substituted by the run script per launch.
+# =============================================================================
+
+[System]
+hamiltonian_dir = @TEST_CHAIN4_DYN_DIR@
+num_sites = 4
+spin_length = 0.5
+sublattice_size = 2
+use_fixed_sz = true
+n_up = 2
+
+[Workflow]
+compute_dynamical_response = true
+
+[DynamicalResponse]
+compute = true
+thermal_average = true
+use_gpu = false
+# num_samples = 1: with >1 samples AND >1 operators the SERIAL lane
+# takes the shared-Lanczos multi-op kernel while the MPI master-worker
+# runs the per-task kernel -- two different (both valid) stochastic
+# estimators whose draws differ. One sample pins both lanes onto the
+# identical per-task code path so the comparison is exact.
+# krylov_dim strictly BELOW the 6-dim sector: at exhaustion the Lanczos
+# breakdown iteration is reduction-order sensitive.
+num_samples = 1
+krylov_dim = 4
+random_seed = 4242
+omega_min = -4.0
+omega_max = 4.0
+num_omega_points = 64
+broadening = 0.1
+temp_min = 0.5
+temp_max = 0.5
+num_temp_bins = 1
+
+[Operators]
+operator_type = sum
+basis = xyz
+spin_combinations = 0,0;1,1;2,2
+momentum_points = 0,0,0;0.5,0,0;1,0,0
+unit_cell_size = 2
+
+[Output]
+output_dir = __OUTDIR__

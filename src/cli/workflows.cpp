@@ -939,6 +939,178 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
 /**
  * @brief Compute dynamical response (spectral functions)
  */
+#ifdef WITH_MPI
+namespace {
+// ============================================================================
+// Audit 2026-07-31 (H2): shared MPI master-worker driver with a SINGLE
+// HDF5 writer and worker-failure containment.
+//
+// The previous protocol had every worker write its own results into the
+// shared ed_results.h5: HDF5's file locking made concurrent writers race
+// (the loser threw "unable to lock file"), and a worker dying on ANY
+// exception never sent DONE_TAG -- the master then spun forever in
+// `while (completed < num_tasks)`. This driver fixes both:
+//
+//   * workers COMPUTE only and ship the packed result (vector<double>)
+//     to the master; the master is the only rank that touches the file;
+//   * every worker task is wrapped in try/catch and the DONE message
+//     carries {task_id, ok} -- a failed task completes the protocol,
+//     is recorded, and is reported as PARTIAL RESULTS at the end
+//     instead of hanging the job.
+//
+// `compute(task_id)` -> packed payload (throws on failure; runs on the
+// owning rank). `write(task_id, payload)` -> HDF5 (master only; a write
+// failure is recorded like a compute failure). Returns this rank's
+// successfully processed count under the legacy semantics (each rank
+// counts the tasks IT computed), so the existing MPI_Reduce total and
+// "Processed X/N" print stay meaningful.
+// ============================================================================
+template <class ComputeFn, class WriteFn>
+int run_mpi_master_worker_single_writer(int rank, int size, int num_tasks,
+                                        ComputeFn&& compute,
+                                        WriteFn&&   write,
+                                        const char* what)
+{
+    constexpr int TASK_TAG = 1, DONE_TAG = 2, STOP_TAG = 3, RESULT_TAG = 4;
+    int ok_count = 0;
+    if (rank == 0) {
+        std::vector<int> failed;
+        int next_task = 0;
+        int first_idle_worker = size;
+        for (int r = 1; r < size && next_task < num_tasks; r++) {
+            MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
+            next_task++;
+            first_idle_worker = r + 1;
+        }
+        for (int r = first_idle_worker; r < size; r++) {
+            int dummy = -1;
+            MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
+        }
+        int completed = 0;
+        while (completed < num_tasks) {
+            if (next_task < num_tasks) {
+                const int my_task = next_task++;
+                std::cout << "Rank 0 processing task " << (my_task + 1)
+                          << "/" << num_tasks << "\n";
+                try {
+                    auto payload = compute(my_task);
+                    write(my_task, payload);
+                    ++ok_count;
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[%s] rank 0: task %d FAILED: %s\n",
+                                 what, my_task, e.what());
+                    failed.push_back(my_task);
+                }
+                ++completed;
+            }
+            int flag = 0;
+            MPI_Status status;
+            MPI_Iprobe(MPI_ANY_SOURCE, DONE_TAG, MPI_COMM_WORLD, &flag,
+                       &status);
+            if (flag) {
+                int hdr[2];
+                MPI_Recv(hdr, 2, MPI_INT, status.MPI_SOURCE, DONE_TAG,
+                         MPI_COMM_WORLD, &status);
+                ++completed;
+                if (hdr[1]) {
+                    MPI_Status rs;
+                    MPI_Probe(status.MPI_SOURCE, RESULT_TAG, MPI_COMM_WORLD,
+                              &rs);
+                    int count = 0;
+                    MPI_Get_count(&rs, MPI_DOUBLE, &count);
+                    std::vector<double> payload(
+                        static_cast<std::size_t>(count));
+                    MPI_Recv(payload.data(), count, MPI_DOUBLE,
+                             status.MPI_SOURCE, RESULT_TAG, MPI_COMM_WORLD,
+                             MPI_STATUS_IGNORE);
+                    try {
+                        write(hdr[0], payload);
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                                     "[%s] rank 0: HDF5 write of task %d "
+                                     "(from rank %d) FAILED: %s\n",
+                                     what, hdr[0], status.MPI_SOURCE,
+                                     e.what());
+                        failed.push_back(hdr[0]);
+                    }
+                } else {
+                    failed.push_back(hdr[0]);
+                }
+                if (next_task < num_tasks) {
+                    MPI_Send(&next_task, 1, MPI_INT, status.MPI_SOURCE,
+                             TASK_TAG, MPI_COMM_WORLD);
+                    next_task++;
+                } else {
+                    int dummy = -1;
+                    MPI_Send(&dummy, 1, MPI_INT, status.MPI_SOURCE,
+                             STOP_TAG, MPI_COMM_WORLD);
+                }
+            }
+        }
+        if (!failed.empty()) {
+            std::fprintf(stderr,
+                         "[%s] PARTIAL RESULTS: %zu of %d task(s) failed"
+                         " (ids:", what, failed.size(), num_tasks);
+            for (int t : failed) std::fprintf(stderr, " %d", t);
+            std::fprintf(stderr,
+                         "); their datasets are absent from the HDF5 "
+                         "output.\n");
+        }
+    } else {
+        while (true) {
+            int task_id;
+            MPI_Status status;
+            MPI_Recv(&task_id, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD,
+                     &status);
+            if (status.MPI_TAG == STOP_TAG) break;
+            std::vector<double> payload;
+            int ok = 1;
+            try {
+                payload = compute(task_id);
+            } catch (const std::exception& e) {
+                ok = 0;
+                std::fprintf(stderr, "[%s] rank %d: task %d FAILED: %s\n",
+                             what, rank, task_id, e.what());
+            } catch (...) {
+                ok = 0;
+                std::fprintf(stderr,
+                             "[%s] rank %d: task %d FAILED "
+                             "(non-std exception)\n",
+                             what, rank, task_id);
+            }
+            int hdr[2] = {task_id, ok};
+            MPI_Send(hdr, 2, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
+            if (ok) {
+                MPI_Send(payload.data(), static_cast<int>(payload.size()),
+                         MPI_DOUBLE, 0, RESULT_TAG, MPI_COMM_WORLD);
+                ++ok_count;
+            }
+        }
+    }
+    return ok_count;
+}
+
+// Payload packing for the driver above: [n_arrays fields...] as flat
+// doubles. Each array is emitted as (len, data...); scalars first.
+inline void pack_scalar(std::vector<double>& p, double v) { p.push_back(v); }
+inline void pack_array(std::vector<double>& p, const std::vector<double>& v) {
+    p.push_back(static_cast<double>(v.size()));
+    p.insert(p.end(), v.begin(), v.end());
+}
+inline double unpack_scalar(const std::vector<double>& p, std::size_t& pos) {
+    return p.at(pos++);
+}
+inline std::vector<double> unpack_array(const std::vector<double>& p,
+                                        std::size_t& pos) {
+    const std::size_t n = static_cast<std::size_t>(p.at(pos++));
+    std::vector<double> v(p.begin() + static_cast<std::ptrdiff_t>(pos),
+                          p.begin() + static_cast<std::ptrdiff_t>(pos + n));
+    pos += n;
+    return v;
+}
+}  // namespace
+#endif  // WITH_MPI
+
 void compute_dynamical_response_workflow(const EDConfig& config) {
     // Plain locals (not a structured binding): C++17 forbids capturing
     // structured bindings in lambdas (clang enforces; gcc extension).
@@ -1237,40 +1409,45 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         // tasks silently use the CPU kernel; the relevant heads-up is printed
         // once at the workflow banner above (`config.dynamical.use_gpu`
         // summary), so we do not repeat it per task here.
-        auto process_task_single = [&](const DynTask& task) -> bool {
+        // Audit 2026-07-31 (H2): split into compute / write halves so the
+        // MPI master-worker path can keep computes distributed while rank
+        // 0 stays the ONLY HDF5 writer (concurrent writers raced on the
+        // shared ed_results.h5 file lock). The sequential lane composes
+        // the two halves and is byte-identical to the old body.
+        auto compute_task_single =
+            [&](const DynTask& task) -> DynamicalResponseResults {
             int t_idx = task.temp_idx;
             int op_idx = task.op_idx;
             double temperature = temperatures[t_idx];
 
-            DynamicalResponseResults results;
+            // Create function wrappers for this operator pair (audit #2:
+            // dispatch via apply_obs* so fixed-Sz uses the typed override).
+            auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                apply_obs1(op_idx, in, out, dim);
+            };
 
-            // CPU computation path (the only supported path for single-T tasks).
-            {
-                // Create function wrappers for this operator pair (audit #2:
-                // dispatch via apply_obs* so fixed-Sz uses the typed override).
-                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs1(op_idx, in, out, dim);
-                };
+            auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                apply_obs2(op_idx, in, out, dim);
+            };
 
-                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    apply_obs2(op_idx, in, out, dim);
-                };
-                
-                // Compute response on CPU
-                results = compute_dynamical_correlation(
-                    H_func, O1_func, O2_func, N, params,
-                    config.dynamical.omega_min,
-                    config.dynamical.omega_max,
-                    config.dynamical.num_omega_points,
-                    temperature,
-                    config.workflow.output_dir,
-                    ground_state_energy
-                );
-            }
-            
-            // Save results to HDF5
+            // Compute response on CPU (the only supported path for
+            // single-T tasks).
+            return compute_dynamical_correlation(
+                H_func, O1_func, O2_func, N, params,
+                config.dynamical.omega_min,
+                config.dynamical.omega_max,
+                config.dynamical.num_omega_points,
+                temperature,
+                config.workflow.output_dir,
+                ground_state_energy
+            );
+        };
+
+        auto write_task_single = [&](const DynTask& task,
+                                     const DynamicalResponseResults& results) {
+            double temperature = temperatures[task.temp_idx];
             std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-            std::string op_name = names[op_idx];
+            std::string op_name = names[task.op_idx];
             if (config.dynamical.num_temp_bins > 1) {
                 op_name += "_T" + std::to_string(temperature);
             }
@@ -1280,7 +1457,10 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 results.spectral_error, results.spectral_error_imag,
                 results.total_samples, temperature
             );
-            
+        };
+
+        auto process_task_single = [&](const DynTask& task) -> bool {
+            write_task_single(task, compute_task_single(task));
             return true;
         };
         
@@ -1512,6 +1692,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         };
 
         // Decide whether the multi-operator shared-Lanczos path applies.
+        // NOTE (audit 2026-07-31): this optimization engages on the
+        // SEQUENTIAL lane only -- the single-T MPI master-worker always
+        // runs the per-task kernel. Both are valid FTLM estimators, but
+        // their random-sample streams differ, so serial and mpirun
+        // spectra of the same config agree only statistically (exactly
+        // at num_samples == 1, which is what the mpi integration test
+        // pins). Porting the shared-chain optimization into the MPI
+        // task shape is possible future work.
         bool use_shared_lanczos_multi_op = false;
         {
             const bool cpu_only =
@@ -1638,98 +1826,69 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 }
                 MPI_Comm_free(&op_comm);
             } else {
-                for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
-                    const auto& task = all_tasks[task_idx];
-                    if (rank == 0) {
+                // Audit 2026-07-31 (H3): this fallback used to run
+                // process_operator_all_temps on EVERY rank behind a stale
+                // comment claiming internal collectives -- the current
+                // body pins allow_mpi=false and runs the single-node
+                // kernel, so mpirun -n P computed the identical FTLM P
+                // times and raced P concurrent writers on the shared
+                // HDF5 file. Rank 0 now computes and writes alone (same
+                // wall time as before -- the other ranks were doing
+                // redundant copies of the same work); everyone else
+                // waits at the barrier.
+                if (rank == 0) {
+                    for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
+                        const auto& task = all_tasks[task_idx];
                         std::cout << "\n--- Task " << (task_idx + 1) << " / " << num_tasks
-                                  << ": Operator " << names[task.op_idx] << " (ALL temperatures, " << size << " MPI ranks) ---\n";
-                    }
-                    if (process_operator_all_temps(task.op_idx)) {
-                        local_processed_count++;
-                    }
-                }
-            }
-        } else if (size > 1 && !use_optimized_multi_temp) {
-            // Master-worker pattern: safe for single-temperature tasks
-            // (process_task_single does NOT use MPI collectives internally)
-            const int TASK_TAG = 1;
-            const int DONE_TAG = 2;
-            const int STOP_TAG = 3;
-            
-            if (rank == 0) {
-                // Master: distribute tasks dynamically
-                int next_task = 0;
-                
-                // Send initial tasks to all workers
-                int first_idle_worker = size;  // track workers that got no task
-                for (int r = 1; r < size && next_task < num_tasks; r++) {
-                    MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
-                    next_task++;
-                    first_idle_worker = r + 1;
-                }
-                
-                // Send STOP_TAG to workers that didn't get any task
-                for (int r = first_idle_worker; r < size; r++) {
-                    int dummy = -1;
-                    MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
-                }
-                
-                // Process tasks on rank 0 while managing other workers
-                int completed = 0;
-                while (completed < num_tasks) {
-                    // Check if rank 0 can grab a task
-                    if (next_task < num_tasks) {
-                        int my_task = next_task;
-                        next_task++;
-                        
-                        const auto& task = all_tasks[my_task];
-                        std::cout << "Rank 0 processing task " << (my_task + 1) << "/" << num_tasks
-                                  << " (T=" << temperatures[task.temp_idx]
-                                  << ", op=" << names[task.op_idx] << ")\n";
-                        if (process_task_single(task)) {
+                                  << ": Operator " << names[task.op_idx]
+                                  << " (ALL temperatures, rank 0 of "
+                                  << size << " -- unsplittable task set) ---\n";
+                        if (process_operator_all_temps(task.op_idx)) {
                             local_processed_count++;
                         }
-                        completed++;
-                    }
-                    
-                    // Check for completed tasks from other workers (non-blocking)
-                    int flag;
-                    MPI_Status status;
-                    MPI_Iprobe(MPI_ANY_SOURCE, DONE_TAG, MPI_COMM_WORLD, &flag, &status);
-                    
-                    if (flag) {
-                        int done_task;
-                        MPI_Recv(&done_task, 1, MPI_INT, status.MPI_SOURCE, DONE_TAG, MPI_COMM_WORLD, &status);
-                        completed++;
-                        
-                        if (next_task < num_tasks) {
-                            MPI_Send(&next_task, 1, MPI_INT, status.MPI_SOURCE, TASK_TAG, MPI_COMM_WORLD);
-                            next_task++;
-                        } else {
-                            int dummy = -1;
-                            MPI_Send(&dummy, 1, MPI_INT, status.MPI_SOURCE, STOP_TAG, MPI_COMM_WORLD);
-                        }
                     }
                 }
-            } else {
-                // Worker: request and process tasks. Quiet by design --
-                // the master log on rank 0 narrates progress.
-                while (true) {
-                    int task_id;
-                    MPI_Status status;
-                    MPI_Recv(&task_id, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-
-                    if (status.MPI_TAG == STOP_TAG) {
-                        break;
-                    }
-
-                    if (process_task_single(all_tasks[task_id])) {
-                        local_processed_count++;
-                    }
-
-                    MPI_Send(&task_id, 1, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
-                }
+                MPI_Barrier(MPI_COMM_WORLD);
             }
+        } else if (size > 1 && !use_optimized_multi_temp) {
+            // Audit 2026-07-31 (H2): single-writer master-worker. Workers
+            // compute and SHIP their packed spectra; rank 0 is the only
+            // rank that opens ed_results.h5 (the old protocol had every
+            // worker write into the shared file -- HDF5 file locking made
+            // that a race -- and a worker dying on any exception never
+            // sent DONE, spinning the master forever). See
+            // run_mpi_master_worker_single_writer for the protocol.
+            auto pack_dyn = [](const DynamicalResponseResults& r) {
+                std::vector<double> p;
+                pack_scalar(p, static_cast<double>(r.total_samples));
+                pack_array(p, r.frequencies);
+                pack_array(p, r.spectral_function);
+                pack_array(p, r.spectral_function_imag);
+                pack_array(p, r.spectral_error);
+                pack_array(p, r.spectral_error_imag);
+                return p;
+            };
+            auto unpack_dyn = [](const std::vector<double>& p) {
+                DynamicalResponseResults r;
+                std::size_t pos = 0;
+                r.total_samples =
+                    static_cast<uint64_t>(unpack_scalar(p, pos));
+                r.frequencies            = unpack_array(p, pos);
+                r.spectral_function      = unpack_array(p, pos);
+                r.spectral_function_imag = unpack_array(p, pos);
+                r.spectral_error         = unpack_array(p, pos);
+                r.spectral_error_imag    = unpack_array(p, pos);
+                return r;
+            };
+            local_processed_count += run_mpi_master_worker_single_writer(
+                rank, size, num_tasks,
+                [&](int t) {
+                    return pack_dyn(compute_task_single(all_tasks[t]));
+                },
+                [&](int t, const std::vector<double>& p) {
+                    write_task_single(all_tasks[t], unpack_dyn(p));
+                },
+                "dynamical-response master-worker");
         } else
         #endif
         {
@@ -2076,9 +2235,13 @@ void compute_static_response_workflow(const EDConfig& config) {
         #endif
         
         // Lambda to process a single task
-        auto process_task = [&](const StaticTask& task) -> bool {
+        // Audit 2026-07-31 (H2): compute/write halves -- see the
+        // dynamical lane's compute_task_single for the rationale (single
+        // HDF5 writer under MPI).
+        auto compute_static_task =
+            [&](const StaticTask& task) -> StaticResponseResults {
             int op_idx = task.op_idx;
-            
+
             StaticResponseResults results;
             
             // Consolidation Family 3: one backend-generic FTLM static kernel
@@ -2152,16 +2315,23 @@ void compute_static_response_workflow(const EDConfig& config) {
                 }, variant);
             }
             
-            // Save results to HDF5
+            return results;
+        };
+
+        auto write_static_task = [&](const StaticTask& task,
+                                     const StaticResponseResults& results) {
             std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
             HDF5IO::saveStaticResponse(
-                h5_file, names[op_idx],
+                h5_file, names[task.op_idx],
                 results.temperatures, results.expectation, results.expectation_error,
                 results.variance, results.variance_error,
                 results.susceptibility, results.susceptibility_error,
                 results.total_samples
             );
-            
+        };
+
+        auto process_task = [&](const StaticTask& task) -> bool {
+            write_static_task(task, compute_static_task(task));
             return true;
         };
         
@@ -2170,85 +2340,46 @@ void compute_static_response_workflow(const EDConfig& config) {
         
         #ifdef WITH_MPI
         if (size > 1) {
-            // MPI tags for communication
-            const int TASK_TAG = 1;
-            const int DONE_TAG = 2;
-            const int STOP_TAG = 3;
-            
-            if (rank == 0) {
-                // Master: distribute tasks dynamically
-                int next_task = 0;
-                
-                // Send initial tasks to all workers
-                int first_idle_worker = size;  // track workers that got no task
-                for (int r = 1; r < size && next_task < num_tasks; r++) {
-                    MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
-                    next_task++;
-                    first_idle_worker = r + 1;
-                }
-                
-                // Send STOP_TAG to workers that didn't get any task
-                for (int r = first_idle_worker; r < size; r++) {
-                    int dummy = -1;
-                    MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
-                }
-                
-                // Process tasks on rank 0 while managing other workers
-                int completed = 0;
-                while (completed < num_tasks) {
-                    // Check if rank 0 can grab a task
-                    if (next_task < num_tasks) {
-                        int my_task = next_task;
-                        next_task++;
-                        
-                        std::cout << "Rank 0 processing task " << (my_task + 1) << "/" << num_tasks
-                                  << " (op=" << names[all_tasks[my_task].op_idx] << ")\n";
-                        
-                        if (process_task(all_tasks[my_task])) {
-                            local_processed_count++;
-                        }
-                        completed++;
-                    }
-                    
-                    // Check for completed tasks from other workers (non-blocking)
-                    int flag;
-                    MPI_Status status;
-                    MPI_Iprobe(MPI_ANY_SOURCE, DONE_TAG, MPI_COMM_WORLD, &flag, &status);
-                    
-                    if (flag) {
-                        int done_task;
-                        MPI_Recv(&done_task, 1, MPI_INT, status.MPI_SOURCE, DONE_TAG, MPI_COMM_WORLD, &status);
-                        completed++;
-                        
-                        if (next_task < num_tasks) {
-                            MPI_Send(&next_task, 1, MPI_INT, status.MPI_SOURCE, TASK_TAG, MPI_COMM_WORLD);
-                            next_task++;
-                        } else {
-                            int dummy = -1;
-                            MPI_Send(&dummy, 1, MPI_INT, status.MPI_SOURCE, STOP_TAG, MPI_COMM_WORLD);
-                        }
-                    }
-                }
-            } else {
-                // Worker: request and process tasks. Workers stay quiet so
-                // the rank-0 master log remains the single source of truth;
-                // task progress is tracked there via DONE_TAG.
-                while (true) {
-                    int task_id;
-                    MPI_Status status;
-                    MPI_Recv(&task_id, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-
-                    if (status.MPI_TAG == STOP_TAG) {
-                        break;
-                    }
-
-                    if (process_task(all_tasks[task_id])) {
-                        local_processed_count++;
-                    }
-
-                    MPI_Send(&task_id, 1, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
-                }
-            }
+            // Audit 2026-07-31 (H2): single-writer master-worker -- see
+            // run_mpi_master_worker_single_writer. Workers compute and
+            // ship packed results; only rank 0 touches ed_results.h5;
+            // failed tasks complete the protocol (recorded + reported)
+            // instead of hanging the master.
+            auto pack_static = [](const StaticResponseResults& r) {
+                std::vector<double> p;
+                pack_scalar(p, static_cast<double>(r.total_samples));
+                pack_array(p, r.temperatures);
+                pack_array(p, r.expectation);
+                pack_array(p, r.expectation_error);
+                pack_array(p, r.variance);
+                pack_array(p, r.variance_error);
+                pack_array(p, r.susceptibility);
+                pack_array(p, r.susceptibility_error);
+                return p;
+            };
+            auto unpack_static = [](const std::vector<double>& p) {
+                StaticResponseResults r;
+                std::size_t pos = 0;
+                r.total_samples =
+                    static_cast<uint64_t>(unpack_scalar(p, pos));
+                r.temperatures         = unpack_array(p, pos);
+                r.expectation          = unpack_array(p, pos);
+                r.expectation_error    = unpack_array(p, pos);
+                r.variance             = unpack_array(p, pos);
+                r.variance_error       = unpack_array(p, pos);
+                r.susceptibility       = unpack_array(p, pos);
+                r.susceptibility_error = unpack_array(p, pos);
+                return r;
+            };
+            local_processed_count += run_mpi_master_worker_single_writer(
+                rank, size, num_tasks,
+                [&](int t) {
+                    return pack_static(compute_static_task(all_tasks[t]));
+                },
+                [&](int t, const std::vector<double>& p) {
+                    write_static_task(all_tasks[t], unpack_static(p));
+                },
+                "static-response master-worker");
         } else
         #endif
         {
@@ -2703,6 +2834,12 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
 #endif
     }
 
+    // Audit 2026-07-31 (H2): buffer per-pair results and write AFTER the
+    // loop through a rank token ring. The old in-loop write was thread-
+    // serialized (omp critical) but rank-CONCURRENT on the shared
+    // ed_results.h5 -- HDF5 file locking races across processes.
+    std::vector<DynamicalResponseResults> pair_results(
+        static_cast<std::size_t>(n_my_pairs));
     #pragma omp parallel for num_threads(pair_threads) \
         if (pair_threads > 1) schedule(dynamic, 1)
     for (int t = 0; t < n_my_pairs; ++t) {
@@ -2725,21 +2862,39 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             if (use_fixed_sz) obs_2_fs[op_idx]->apply(in, out, static_cast<uint64_t>(dim));
             else              obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-        auto results = compute_ground_state_cross_correlation(
-            H_apply_int, O1_func, O2_func, ground_state, ground_state_energy,
-            N, gs_params);
-        #pragma omp critical(hdf5_lock)
-        {
-            std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-            std::string op_name = "ground_state_dssf/" + names[op_idx];
-            HDF5IO::saveDynamicalResponseFull(
-                h5_path, op_name,
-                results.frequencies, results.spectral_function, results.spectral_function_imag,
-                results.spectral_error, results.spectral_error_imag,
-                1, 0.0);
-            if (rank == 0) {
-                std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+        pair_results[static_cast<std::size_t>(t)] =
+            compute_ground_state_cross_correlation(
+                H_apply_int, O1_func, O2_func, ground_state,
+                ground_state_energy, N, gs_params);
+    }
+
+    // Token-ring write: one rank in the file at a time (uniform barrier
+    // count on every rank -- my_tasks lengths differ per rank, so the
+    // ring must sit OUTSIDE the task loop).
+    {
+        const int ring = std::max(size, 1);
+        for (int r = 0; r < ring; ++r) {
+            if (rank == r) {
+                for (int t = 0; t < n_my_pairs; ++t) {
+                    const int op_idx = my_tasks[t];
+                    const auto& results =
+                        pair_results[static_cast<std::size_t>(t)];
+                    std::string h5_path =
+                        HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                    std::string op_name = "ground_state_dssf/" + names[op_idx];
+                    HDF5IO::saveDynamicalResponseFull(
+                        h5_path, op_name,
+                        results.frequencies, results.spectral_function,
+                        results.spectral_function_imag,
+                        results.spectral_error, results.spectral_error_imag,
+                        1, 0.0);
+                    std::cout << "[Rank " << rank << "] Saved to HDF5: "
+                              << op_name << "\n";
+                }
             }
+            #ifdef WITH_MPI
+            if (size > 1) MPI_Barrier(MPI_COMM_WORLD);
+            #endif
         }
     }
 
@@ -2817,6 +2972,9 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         for (int i = rank; i < (int)cross_tasks.size(); i += size) {
             my_cross_tasks.push_back(i);
         }
+        std::vector<std::pair<std::string, DynamicalResponseResults>>
+            cross_results;
+        cross_results.reserve(my_cross_tasks.size());
 
         for (int idx : my_cross_tasks) {
             const auto& task = cross_tasks[idx];
@@ -2875,22 +3033,39 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
                 O2_apply(in, out, static_cast<std::size_t>(dim));
             };
 
-            auto results = compute_ground_state_dssf_cross_sector(
-                H_inner_apply, O1_apply_int, O2_apply_int,
-                ground_state, ground_state_energy, N, dst_dim, gs_params);
+            // Audit 2026-07-31 (H2): buffer, write in the token ring
+            // below -- the in-loop write was rank-concurrent on the
+            // shared HDF5 file.
+            cross_results.emplace_back(
+                "ground_state_dssf/" + task.name,
+                compute_ground_state_dssf_cross_sector(
+                    H_inner_apply, O1_apply_int, O2_apply_int,
+                    ground_state, ground_state_energy, N, dst_dim,
+                    gs_params));
+        }
 
-            std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-            std::string op_name = "ground_state_dssf/" + task.name;
-            HDF5IO::saveDynamicalResponseFull(
-                h5_path, op_name,
-                results.frequencies, results.spectral_function,
-                results.spectral_function_imag,
-                results.spectral_error, results.spectral_error_imag,
-                1, 0.0);
-            if (rank == 0) {
-                std::cout << "[Rank " << rank << "] Saved to HDF5: "
-                          << op_name << "\n";
+        // Token-ring write (H2): one rank in the shared file at a time.
+        // The `cross_sector_pairs.empty()` gate above is config-derived
+        // and therefore uniform across ranks, so the barrier counts
+        // match on every rank.
+        for (int r = 0; r < std::max(size, 1); ++r) {
+            if (rank == r) {
+                for (const auto& [op_name, results] : cross_results) {
+                    std::string h5_path = HDF5IO::createOrOpenFile(
+                        config.workflow.output_dir);
+                    HDF5IO::saveDynamicalResponseFull(
+                        h5_path, op_name,
+                        results.frequencies, results.spectral_function,
+                        results.spectral_function_imag,
+                        results.spectral_error, results.spectral_error_imag,
+                        1, 0.0);
+                    std::cout << "[Rank " << rank << "] Saved to HDF5: "
+                              << op_name << "\n";
+                }
             }
+            #ifdef WITH_MPI
+            if (size > 1) MPI_Barrier(MPI_COMM_WORLD);
+            #endif
         }
     }
 

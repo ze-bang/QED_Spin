@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# =============================================================================
+# MPI master-worker integration test for the dynamical-response workflow
+# (audit 2026-07-31, H2).
+#
+# The pre-fix protocol had every MPI worker write its own spectra into the
+# shared ed_results.h5 (HDF5 file-lock race) and hung the master forever if
+# a worker died before sending DONE. The fixed protocol ships worker
+# results to rank 0, the single writer. This test runs the same 9-task
+# single-temperature dynamical config once serially and once under
+# `mpirun -n 3`, then compares the two HDF5 outputs dataset-for-dataset:
+# identical names, identical values (the FTLM seed is fixed per task, so
+# results are independent of which rank computes a task).
+#
+# Exit 77 = SKIP (no h5py available for the comparison).
+# =============================================================================
+
+set -euo pipefail
+
+ED_BIN="${ED_BINARY:-@ED_BINARY_FALLBACK@}"
+CFG_TEMPLATE="@TEST_CHAIN4_DYN_CFG@"
+SCRATCH="@TEST_CHAIN4_DYN_SCRATCH@"
+FIXTURE_DIR="@TEST_CHAIN4_SRC_DIR@"
+POSITIONS="@TEST_POSITIONS_4SITE@"
+MPIEXEC="@MPIEXEC_EXECUTABLE@"
+NPFLAG="@MPIEXEC_NUMPROC_FLAG@"
+
+if [[ ! -x "$ED_BIN" ]]; then
+    echo "FAIL: ED binary not found at $ED_BIN" >&2
+    exit 2
+fi
+if ! python3 -c "import h5py" 2>/dev/null; then
+    echo "SKIP: python3 h5py not available for the HDF5 comparison" >&2
+    exit 77
+fi
+
+rm -rf "$SCRATCH"
+mkdir -p "$SCRATCH/ham" "$SCRATCH/out_serial" "$SCRATCH/out_mpi"
+
+# One OMP thread everywhere: mpirun core-binding would otherwise give the
+# ranks a different reduction width than the serial reference, and the
+# comparison is exact-equality.
+export OMP_NUM_THREADS=1
+
+# Stage the Hamiltonian directory: chain4 terms + the positions file the
+# momentum-sum operators read from <hamiltonian_dir>/positions.dat.
+cp "$FIXTURE_DIR"/InterAll.dat "$FIXTURE_DIR"/Trans.dat "$SCRATCH/ham/"
+if [[ -d "$FIXTURE_DIR/automorphism_results" ]]; then
+    cp -r "$FIXTURE_DIR/automorphism_results" "$SCRATCH/ham/"
+fi
+cp "$POSITIONS" "$SCRATCH/ham/positions.dat"
+
+make_cfg() {  # $1 = outdir, $2 = cfg path
+    sed "s#__OUTDIR__#$1#" "$CFG_TEMPLATE" > "$2"
+}
+
+make_cfg "$SCRATCH/out_serial" "$SCRATCH/serial.cfg"
+make_cfg "$SCRATCH/out_mpi"    "$SCRATCH/mpi.cfg"
+
+echo "[mpi-dyn] serial run"
+"$ED_BIN" "$SCRATCH/serial.cfg" \
+    > "$SCRATCH/serial.log" 2>&1 || {
+    echo "FAIL: serial ED run exited nonzero" >&2
+    tail -n 40 "$SCRATCH/serial.log" >&2
+    exit 3
+}
+
+echo "[mpi-dyn] mpirun -n 3 run"
+"$MPIEXEC" $NPFLAG 3 @MPIEXEC_PREFLAGS@ "$ED_BIN" "$SCRATCH/mpi.cfg" \
+    > "$SCRATCH/mpi.log" 2>&1 || {
+    echo "FAIL: mpirun ED run exited nonzero" >&2
+    tail -n 40 "$SCRATCH/mpi.log" >&2
+    exit 4
+}
+
+echo "[mpi-dyn] comparing HDF5 outputs"
+python3 - "$SCRATCH/out_serial/ed_results.h5" \
+          "$SCRATCH/out_mpi/ed_results.h5" <<'EOF'
+import sys
+import numpy as np
+import h5py
+
+a_path, b_path = sys.argv[1], sys.argv[2]
+
+def collect(path):
+    out = {}
+    with h5py.File(path, "r") as f:
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                out[name] = np.asarray(obj[()])
+        f.visititems(visit)
+    return out
+
+a, b = collect(a_path), collect(b_path)
+if not a:
+    sys.exit("FAIL: serial HDF5 contains no datasets")
+if set(a) != set(b):
+    only_a = sorted(set(a) - set(b))
+    only_b = sorted(set(b) - set(a))
+    sys.exit(f"FAIL: dataset sets differ.\n  serial-only: {only_a}\n"
+             f"  mpi-only: {only_b}")
+bad = []
+for k in sorted(a):
+    va, vb = a[k], b[k]
+    if va.shape != vb.shape:
+        bad.append(f"{k}: shape {va.shape} vs {vb.shape}")
+    elif va.dtype.kind in "fc" and not np.allclose(va, vb, rtol=1e-12,
+                                                  atol=1e-12):
+        bad.append(f"{k}: max |diff| = {np.max(np.abs(va - vb)):.3e}")
+    elif va.dtype.kind not in "fc" and not np.array_equal(va, vb):
+        bad.append(f"{k}: non-float mismatch")
+if bad:
+    sys.exit("FAIL: dataset values differ between serial and MPI runs:\n  "
+             + "\n  ".join(bad))
+print(f"OK: {len(a)} datasets identical between serial and mpirun -n 3")
+EOF
+
+echo "PASS: MPI master-worker dynamical response matches the serial run"

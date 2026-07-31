@@ -1112,4 +1112,44 @@ if(BUILD_ED_TESTS)
         DEPENDS "ED"
         TIMEOUT 120
     )
+
+    # -------------------------------------------------------------------------
+    # Audit 2026-07-31 (H2): MPI master-worker integration test. Runs the
+    # 9-task single-T dynamical-response config serially and under
+    # `mpirun -n 3` and pins the two ed_results.h5 outputs dataset-for-
+    # dataset (fixed per-task FTLM seed => rank-placement independent).
+    # Guards the single-writer protocol: pre-fix, concurrent worker writes
+    # raced the HDF5 file lock and a worker death hung the master.
+    # -------------------------------------------------------------------------
+    if(WITH_MPI AND MPIEXEC_EXECUTABLE)
+        set(TEST_CHAIN4_SRC_DIR
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4)
+        set(TEST_POSITIONS_4SITE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat)
+        set(TEST_CHAIN4_DYN_SCRATCH
+            ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_dyn_mpi)
+        set(TEST_CHAIN4_DYN_DIR
+            ${TEST_CHAIN4_DYN_SCRATCH}/ham)
+        set(TEST_CHAIN4_DYN_CFG
+            ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_dyn.cfg)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4_dyn.cfg.in
+            ${TEST_CHAIN4_DYN_CFG}
+            @ONLY
+        )
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ed_mpi_dynamical.sh.in
+            ${CMAKE_CURRENT_BINARY_DIR}/run_ed_mpi_dynamical.sh
+            @ONLY
+        )
+        add_test(NAME test_ed_mpi_dynamical_master_worker
+                 COMMAND bash ${CMAKE_CURRENT_BINARY_DIR}/run_ed_mpi_dynamical.sh)
+        set_tests_properties(test_ed_mpi_dynamical_master_worker PROPERTIES
+            ENVIRONMENT "ED_BINARY=$<TARGET_FILE:ED>"
+            DEPENDS "ED"
+            LABELS "mpi"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
+        )
+    endif()
 endif()

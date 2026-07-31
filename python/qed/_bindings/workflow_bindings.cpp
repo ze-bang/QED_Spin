@@ -2624,9 +2624,18 @@ void bind_workflows(py::module_& m) {
                   std::vector<ed::ThermalResult> sec_results_th(
                       static_cast<std::size_t>(n_sec_th));
 
+                  // Audit 2026-07-31 (M1): a throw escaping an OpenMP
+                  // parallel region is UB (std::terminate in practice),
+                  // and under across-sector MPI a rank dying here skips
+                  // the Allgather below and hangs every peer in the
+                  // collective. Capture per-sector exceptions, then
+                  // coordinate a consistent failure across ranks BEFORE
+                  // rethrowing, so either every rank raises or none does.
+                  std::exception_ptr sec_eptr;
                   #pragma omp parallel for schedule(dynamic, 1) \
                       if(thermal_sector_parallel)
                   for (long ii = 0; ii < n_sec_th; ++ii) {
+                      try {
                       const std::size_t k =
                           sector_indices[static_cast<std::size_t>(ii)];
                       auto sec = handle.sector(k);
@@ -2709,7 +2718,36 @@ void bind_workflows(py::module_& m) {
                               throw;
                           }
                       }
+                      } catch (...) {   // M1: never escape the OMP region
+                          #pragma omp critical(qed_thermal_sector_eptr)
+                          { if (!sec_eptr) sec_eptr = std::current_exception(); }
+                      }
                   }
+#ifdef WITH_MPI
+                  if (mpi_size > 1) {
+                      // Every rank reaches this collective whether its own
+                      // loop failed or not; a failure anywhere then raises
+                      // everywhere (peers get a descriptive error instead
+                      // of hanging in the Allgather below).
+                      int local_fail = sec_eptr ? 1 : 0;
+                      int any_fail   = 0;
+                      MPI_Allreduce(&local_fail, &any_fail, 1, MPI_INT,
+                                    MPI_MAX, MPI_COMM_WORLD);
+                      if (any_fail) {
+                          if (sec_eptr) std::rethrow_exception(sec_eptr);
+                          throw std::runtime_error(
+                              "workflows_thermal_streaming_symmetry_"
+                              "directory: a peer MPI rank failed inside "
+                              "its sector loop (see its stderr); raising "
+                              "on every rank instead of deadlocking in "
+                              "the thermo Allgather.");
+                      }
+                  } else if (sec_eptr) {
+                      std::rethrow_exception(sec_eptr);
+                  }
+#else
+                  if (sec_eptr) std::rethrow_exception(sec_eptr);
+#endif
 
                   // Serial post-processing: collect results in
                   // sector_indices order. The same dim==0 guard filters
