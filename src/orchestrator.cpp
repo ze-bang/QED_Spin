@@ -43,6 +43,7 @@
 #include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (refine_gs_seed_host)
 #include <ed/core/operator.h>               // Operator introspection (term SoA, N)
 #include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
+#include <ed/symmetry/canonical_thermo.h>   // canonical_thermo_from_eigs (single impl)
 
 #include <fstream>   // /proc/meminfo
 #include <string>
@@ -256,41 +257,14 @@ constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
     return true;
 }
 
+// Audit 2026-07-31: forwards to the single canonical implementation in
+// ed/symmetry/canonical_thermo.h (this used to be one of three
+// byte-equivalent copies; the guards live there now).
 static ThermodynamicData compute_canonical_thermo_from_eigs(
     const std::vector<double>& eigs,
     const std::vector<double>& temperatures)
 {
-    ThermodynamicData td;
-    if (eigs.empty() || temperatures.empty()) return td;
-    const std::size_t nT = temperatures.size();
-    td.temperatures = temperatures;
-    td.energy.assign(nT, 0.0);
-    td.specific_heat.assign(nT, 0.0);
-    td.free_energy.assign(nT, 0.0);
-    td.entropy.assign(nT, 0.0);
-
-    const double E0 = *std::min_element(eigs.begin(), eigs.end());
-    for (std::size_t t = 0; t < nT; ++t) {
-        const double T = temperatures[t];
-        if (!(T > 0.0)) continue;
-        const double beta = 1.0 / T;
-        double Z = 0.0, ZE = 0.0, ZE2 = 0.0;
-        for (const double E : eigs) {
-            const double w = std::exp(-beta * (E - E0));
-            Z   += w;
-            ZE  += w * E;
-            ZE2 += w * E * E;
-        }
-        if (!(Z > 0.0)) continue;
-        const double E_avg  = ZE  / Z;
-        const double E2_avg = ZE2 / Z;
-        const double lnZ    = std::log(Z) - beta * E0;
-        td.energy[t]        = E_avg;
-        td.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
-        td.free_energy[t]   = -lnZ / beta;
-        td.entropy[t]       = beta * (E_avg - td.free_energy[t]);
-    }
-    return td;
+    return ed::symmetry::canonical_thermo_from_eigs(eigs, temperatures);
 }
 
 template <typename Backend>

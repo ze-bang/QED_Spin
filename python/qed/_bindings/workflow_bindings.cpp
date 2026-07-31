@@ -24,6 +24,7 @@
 #include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
 #include <ed/core/make_operator.h>
+#include <ed/symmetry/canonical_thermo.h>      // single canonical-thermo impl
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/observable_character.h>  // Stage 8d probe classifiers
 #include <ed/symmetry/commute_check.h>         // A2 [H,g]=0 validation
@@ -489,36 +490,9 @@ inline void label_vectors_with_s2(
 inline ::ThermodynamicData su2_exact_thermo_from_eigs(
     const std::vector<double>& eigs,
     const std::vector<double>& temperatures) {
-    ::ThermodynamicData td;
-    if (eigs.empty() || temperatures.empty()) return td;
-    const std::size_t nT = temperatures.size();
-    td.temperatures = temperatures;
-    td.energy.assign(nT, 0.0);
-    td.specific_heat.assign(nT, 0.0);
-    td.free_energy.assign(nT, 0.0);
-    td.entropy.assign(nT, 0.0);
-    const double E0 = *std::min_element(eigs.begin(), eigs.end());
-    for (std::size_t t = 0; t < nT; ++t) {
-        const double T = temperatures[t];
-        if (!(T > 0.0)) continue;
-        const double beta = 1.0 / T;
-        double Z = 0.0, ZE = 0.0, ZE2 = 0.0;
-        for (const double E : eigs) {
-            const double w = std::exp(-beta * (E - E0));
-            Z += w;
-            ZE += w * E;
-            ZE2 += w * E * E;
-        }
-        if (!(Z > 0.0)) continue;
-        const double E_avg = ZE / Z;
-        const double E2_avg = ZE2 / Z;
-        const double lnZ = std::log(Z) - beta * E0;
-        td.energy[t] = E_avg;
-        td.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
-        td.free_energy[t] = -lnZ / beta;
-        td.entropy[t] = beta * (E_avg - td.free_energy[t]);
-    }
-    return td;
+    // Audit 2026-07-31: forwards to the single canonical implementation
+    // (this was the third byte-equivalent copy).
+    return ed::symmetry::canonical_thermo_from_eigs(eigs, temperatures);
 }
 
 /// Build the Lowdin projector + wrapped operator for one solve block.
@@ -2520,11 +2494,21 @@ void bind_workflows(py::module_& m) {
                       std::numeric_limits<double>::quiet_NaN();
                   double shared_e_max =
                       std::numeric_limits<double>::quiet_NaN();
+                  // Audit 2026-07-31 (M2): under across-sector MPI the
+                  // gate must be RANK-UNIFORM (sector_indices is this
+                  // rank's owned subset -- a rank owning one sector
+                  // still has to join the Allreduce below), and the
+                  // locally estimated bounds must be MIN/MAX-combined
+                  // across ranks: each rank used to run KPM with bounds
+                  // from its LOCAL largest sector, breaking the
+                  // bit-identical-to-single-node combine and clipping a
+                  // rank's other sectors when its local largest bounded
+                  // them poorly.
                   if (opts.method ==
                           ed::workflows::ThermalOptions::Method::KpmDos
                       && !(std::isfinite(opts.e_min_override)
                            && std::isfinite(opts.e_max_override))
-                      && sector_indices.size() > 1) {
+                      && (sector_indices.size() > 1 || mpi_size > 1)) {
                       std::size_t best_k   = sector_indices.front();
                       std::size_t best_dim = 0;
                       for (std::size_t k : sector_indices) {
@@ -2562,6 +2546,34 @@ void bind_workflows(py::module_& m) {
                               // Silent fallback: kernel estimates.
                           }
                       }
+#ifdef WITH_MPI
+                      if (mpi_size > 1) {
+                          // Global bounds: MIN/MAX over every rank's
+                          // local estimate (non-finite locals contribute
+                          // inert sentinels; every rank participates).
+                          const double inf =
+                              std::numeric_limits<double>::infinity();
+                          double lo_s = std::isfinite(shared_e_min)
+                                            ? shared_e_min : inf;
+                          double hi_s = std::isfinite(shared_e_max)
+                                            ? shared_e_max : -inf;
+                          double lo_g = 0.0, hi_g = 0.0;
+                          MPI_Allreduce(&lo_s, &lo_g, 1, MPI_DOUBLE,
+                                        MPI_MIN, MPI_COMM_WORLD);
+                          MPI_Allreduce(&hi_s, &hi_g, 1, MPI_DOUBLE,
+                                        MPI_MAX, MPI_COMM_WORLD);
+                          if (std::isfinite(lo_g) && std::isfinite(hi_g)
+                              && hi_g > lo_g) {
+                              shared_e_min = lo_g;
+                              shared_e_max = hi_g;
+                          } else {
+                              shared_e_min = std::numeric_limits<
+                                  double>::quiet_NaN();
+                              shared_e_max = std::numeric_limits<
+                                  double>::quiet_NaN();
+                          }
+                      }
+#endif
                   }
 
                   // Save & DSSF Upgrades follow-up (May 2026): when the
