@@ -97,6 +97,9 @@ namespace ed::symmetry {
     X("ED_SYM_LG_GS_MAX_ITER", "600 two-pass / 200 small-n",                   \
       "per-attempt Lanczos budget for the certified GS vector; the small-n "   \
       "lane stores the basis (memory = 16 B x dim x iterations)")              \
+    X("ED_SYM_LG_GS_RESTARTS", "4",                                            \
+      "restart count for the two-pass GS lane (the 4x3 kagome post-mortem's "  \
+      "binding constraint); total work <= (1+restarts) x GS_MAX_ITER")         \
     X("ED_SYM_CLIQUE_BUDGET", "512",                                           \
       "|Aut| above which find_symmetries switches to the greedy maximal-"      \
       "abelian construction instead of exact max-clique (hang guard)")         \

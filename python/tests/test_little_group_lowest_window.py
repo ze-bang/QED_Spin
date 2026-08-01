@@ -239,3 +239,67 @@ def test_gs_scan_starved_budget_is_loud_not_wrong(monkeypatch):
         _core.little_group_gs_static_sf(
             H, [obs], trans, [], n_up=n_up, dense_max_dim=4096,
             use_gpu=False)
+
+
+def _xxz_ring_core(N, jz):
+    from qed import _core
+    H = _core.Operator(N, 0.5)
+    for j in range(N):
+        kk = (j + 1) % N
+        H.add_two_body(_core.OP_SZ, j, _core.OP_SZ, kk, jz)
+        H.add_two_body(_core.OP_SPLUS, j, _core.OP_SMINUS, kk, 0.5)
+        H.add_two_body(_core.OP_SMINUS, j, _core.OP_SPLUS, kk, 0.5)
+    trans = [[(j + s) % N for j in range(N)] for s in range(N)]
+    return H, trans
+
+
+def test_gs_subspace_scan_starved_budget_is_loud(monkeypatch):
+    """Audit 2026-08-01 batch 2: the Sz-SUBSPACE argmin inside the GS
+    verbs (gs_dssf/static_sf/correlators) used to treat an unconverged
+    subspace's empty return as "nothing here" -- the certified eigenpair
+    could come from the wrong subspace. With n_up unpinned and a starved
+    budget the scan must throw, naming the refusal."""
+    import pytest
+    from qed import _core
+
+    H, trans = _xxz_ring_core(10, 2.5)
+    obs = _core.Operator(10, 0.5)
+    for i in range(10):
+        for j in range(10):
+            if i != j:
+                obs.add_two_body(_core.OP_SPLUS, i, _core.OP_SMINUS, j,
+                                 complex(1.0))
+
+    monkeypatch.setenv("ED_SYM_LG_DENSE_FLOOR", "1")
+    monkeypatch.setenv("ED_SYM_LG_LOWEST_MAX_ITER", "2")
+    with pytest.raises(RuntimeError, match="subspace E0 scan"):
+        _core.little_group_gs_static_sf(
+            H, [obs], trans, [], n_up=-1, dense_max_dim=4096,
+            use_gpu=False)
+
+
+def test_lowest_vectors_incomplete_window_is_loud(monkeypatch):
+    """Audit 2026-08-01 batch 2: little_group_lowest_vectors used to
+    return the k lowest OF THE SURVIVORS when blocks refused rows --
+    a short window with refusals must now throw, and a healthy run must
+    report zero refusals through the binding."""
+    import pytest
+    from qed import _core
+
+    n = 14
+    H = _xxz_ring_operator(n, jz=2.5)
+    A = _cyclic_group(n)
+
+    # dense_max_dim=1 forces the Lanczos branch of solve_block_pairs
+    # (this lane's crossover is the ARGUMENT, not ED_SYM_LG_DENSE_FLOOR).
+    monkeypatch.setenv("ED_SYM_LG_LOWEST_MAX_ITER", "2")
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _core.little_group_lowest_vectors(
+            H, A, [], k=4, n_up=n // 2, dense_max_dim=1)
+
+    monkeypatch.delenv("ED_SYM_LG_LOWEST_MAX_ITER", raising=False)
+    d = dict(_core.little_group_lowest_vectors(
+        H, A, [], k=2, n_up=n // 2, dense_max_dim=4096))
+    assert d["refused_blocks"] == 0
+    assert d["refused_rows"] == 0
+    assert len(d["eigenvalues"]) == 2

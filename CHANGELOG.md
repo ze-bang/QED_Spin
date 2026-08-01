@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-08-01 (batch 2) — the same weakness class, swept codebase-wide
+
+Three parallel audits hunted the classes the runner's finding defined:
+hardcoded solver knobs with no escape, ignored convergence flags, and
+silent skip/degrade sites. Fixed in this batch (the little-group family
+completions); the remaining ranked findings live in the audit report.
+
+* **`ED_SYM_LG_GS_RESTARTS`** (new env): the two-pass GS lane's restart
+  count was hardcoded at 4 — the 4×3 kagome post-mortem's actual
+  binding constraint (task 49669202_2 died at restart exhaustion near
+  residual 1e-7, 11.8 h in; the shipped mitigation was loosening the
+  tolerance because this number needed a rebuild).
+* **`ED_SYM_LG_GS_RESID_TOL` now reaches the inner loop**: the two-pass
+  accept-or-restart check hardcoded 1e-8, so relaxing the env still
+  burned every restart chasing a tolerance the caller had waived; the
+  env only gated the final throw. One shared helper now feeds both.
+* **Sz-subspace argmin in the GS verbs is loud**
+  (`little_group_gs_dssf` / `gs_static_sf` / `gs_correlators`): the
+  scan treated an unconverged subspace's empty return as "nothing
+  here", so the certified eigenpair could belong to the wrong
+  subspace — the same bug as the star scan, one level up. The shared
+  `scan_gs_subspace` helper distinguishes genuinely-empty (all stars
+  dimension-0) from refused and throws on refusal.
+* **`little_group_lowest_vectors` refusal accounting**: a block whose
+  rows failed certification silently vanished, so the returned "lowest
+  k" could start above a refused true level. `solve_block_pairs` now
+  reports refusals; a short window with refusals throws;
+  `refused_blocks`/`refused_rows` ride the struct and the pybind dict.
+  Its Lanczos budget also honours `ED_SYM_LG_LOWEST_MAX_ITER` (default
+  unchanged; stored-basis lane, memory = 16 B × dim × iterations).
+
 ## 2026-08-01 — little-group iteration budgets exposed; GS scan made loud
 
 * **`ED_SYM_LG_LOWEST_MAX_ITER`** (new env): absolute Lanczos budget

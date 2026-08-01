@@ -230,6 +230,16 @@ struct LittleGroupVectors {
     std::vector<ed::symmetry::RepSectorData> sectors;  ///< one per touched star
     bool flip_engaged = false;
     bool tr_engaged   = false;
+    /// Audit 2026-08-01: refusal accounting. ``refused_blocks`` counts
+    /// blocks that refused rows they might hold (Lanczos breakdown,
+    /// dstevd failure, or an uncertified row inside the requested
+    /// window); ``refused_rows`` counts rows whose LIFT failed the
+    /// residual guard. A SHORT window with refusals throws in
+    /// ``little_group_lowest_vectors``; a full window with nonzero
+    /// counts means the returned "lowest k" may start above a refused
+    /// true level -- consumers must check.
+    std::size_t refused_blocks = 0;
+    std::size_t refused_rows   = 0;
 };
 
 [[nodiscard]] LittleGroupVectors

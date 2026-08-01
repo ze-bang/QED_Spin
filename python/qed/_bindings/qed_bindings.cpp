@@ -807,6 +807,64 @@ PYBIND11_MODULE(_core, m) {
 #endif
         return o;
     };
+    // Audit 2026-08-01: subspace argmin for the little-group GS verbs
+    // (gs_dssf / gs_static_sf / gs_correlators). The old per-verb loops
+    // called little_group_lowest_eigenvalues (k=1) and treated an EMPTY
+    // return as "nothing here" -- but the flattened API also returns
+    // empty when the E0 scan did NOT CONVERGE (the honest-refusal
+    // convention), so at frontier dims the true GS subspace could
+    // silently lose the argmin and the verb would then certify a
+    // beautiful eigenpair of the WRONG Sz subspace. Scan the LABELED
+    // spectrum instead: an unconverged label, or an empty spectrum over
+    // stars that hold states (dim_k0 > 0), is a refusal and throws --
+    // mirroring little_group_ground_state's star-scan contract. Only a
+    // subspace whose stars are all dimension-0 is genuinely empty.
+    auto scan_gs_subspace = [](const Operator& op_h,
+                               const std::vector<std::vector<int>>& ag,
+                               const std::vector<std::vector<int>>& rp,
+                               int n_sites_,
+                               const std::vector<std::pair<int, int>>& subs,
+                               const auto& lg_o,
+                               const char* who) -> std::pair<int, int> {
+        if (subs.size() == 1) return subs[0];
+        int gs_nu = -1, gs_par = -1;
+        double e_best = 0.0;
+        bool have = false;
+        std::size_t n_refused = 0;
+        for (const auto& [nu, par] : subs) {
+            const auto spec = ed::solvers::little_group_lowest_spectrum(
+                op_h, ag, rp, n_sites_, 1, lg_o(nu, par));
+            bool conv = true;
+            for (const auto& lab : spec.labels)
+                if (!lab.converged) conv = false;
+            if (!conv) { ++n_refused; continue; }
+            if (spec.eigenvalues.empty()) {
+                bool has_states = false;
+                for (const auto& st : spec.stars)
+                    if (st.dim_k0 > 0) has_states = true;
+                if (has_states) ++n_refused;
+                continue;                        // else genuinely empty
+            }
+            const double e0 = *std::min_element(spec.eigenvalues.begin(),
+                                                spec.eigenvalues.end());
+            if (!have || e0 < e_best) {
+                have = true; e_best = e0; gs_nu = nu; gs_par = par;
+            }
+        }
+        if (n_refused > 0)
+            throw std::runtime_error(
+                std::string(who) + ": the subspace E0 scan failed to "
+                "converge on " + std::to_string(n_refused) + " subspace(s)"
+                " -- the winner would be chosen among the remainder, i.e."
+                " the certified ground state could belong to the WRONG"
+                " subspace. Raise ED_SYM_LG_LOWEST_MAX_ITER, or pin the"
+                " ground-state subspace (n_up / sz_parity) if it is"
+                " known.");
+        if (!have)
+            throw std::runtime_error(std::string(who)
+                                     + ": no non-empty subspace.");
+        return {gs_nu, gs_par};
+    };
     // Stage 9f: per-BLOCK quantum-number labels, parallel to
     // block_values / multiplicities. k_raw is the star REPRESENTATIVE's
     // abelian irrep (fold partners share it; membership is in "stars").
@@ -1256,6 +1314,10 @@ PYBIND11_MODULE(_core, m) {
               d["vectors"]       = vecs;
               d["flip_engaged"]  = lv.flip_engaged;
               d["tr_engaged"]    = lv.tr_engaged;
+              // Audit 2026-08-01: refusal accounting (a full window with
+              // nonzero counts may still start above a refused level).
+              d["refused_blocks"] = lv.refused_blocks;
+              d["refused_rows"]   = lv.refused_rows;
               return d;
           },
           py::arg("operator"), py::arg("abelian_group"),
@@ -1269,7 +1331,7 @@ PYBIND11_MODULE(_core, m) {
           "(persisted to <output_dir>/ed_results.h5 when given).");
 
     m.def("little_group_gs_dssf",
-          [](const Operator& op_h, const Operator& op_o,
+          [scan_gs_subspace](const Operator& op_h, const Operator& op_o,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              double omega_min, double omega_max, int n_omega,
@@ -1327,24 +1389,9 @@ PYBIND11_MODULE(_core, m) {
                   o.time_reversal = time_reversal;
                   return o;
               };
-              int gs_nu = -1, gs_par = -1;
-              double e_best = 0.0;
-              bool have = false;
-              for (const auto& [nu, par] : gs_subspaces) {
-                  const auto ev = ed::solvers::little_group_lowest_eigenvalues(
-                      op_h, abelian_group, residue_perms, n_sites, 1,
-                      lg_o(nu, par));
-                  if (ev.empty()) continue;
-                  if (!have || ev[0] < e_best) {
-                      have = true;
-                      e_best = ev[0];
-                      gs_nu = nu;
-                      gs_par = par;
-                  }
-              }
-              if (!have)
-                  throw std::runtime_error(
-                      "little_group_gs_dssf: no non-empty subspace.");
+              const auto [gs_nu, gs_par] = scan_gs_subspace(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  gs_subspaces, lg_o, "little_group_gs_dssf");
 
               // (2) The GS eigenvector in its momentum sector.
               const auto gs = ed::solvers::little_group_ground_state(
@@ -1467,7 +1514,7 @@ PYBIND11_MODULE(_core, m) {
     // little_group_gs_correlators 0461db3). Memory O(#reps): one source + one
     // destination sector resident at a time.
     m.def("little_group_gs_static_sf",
-          [](const Operator& op_h,
+          [scan_gs_subspace](const Operator& op_h,
              const std::vector<Operator>& observables,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
@@ -1515,23 +1562,9 @@ PYBIND11_MODULE(_core, m) {
                   o.only_k0 = only_k0;
                   return o;
               };
-              int gs_nu = -1, gs_par = -1; double e_best = 0.0; bool have = false;
-              if (gs_subspaces.size() == 1) {
-                  gs_nu = gs_subspaces[0].first; gs_par = gs_subspaces[0].second;
-                  have = true;
-              } else {
-                  for (const auto& [nu, par] : gs_subspaces) {
-                      const auto ev = ed::solvers::little_group_lowest_eigenvalues(
-                          op_h, abelian_group, residue_perms, n_sites, 1, lg_o(nu, par));
-                      if (ev.empty()) continue;
-                      if (!have || ev[0] < e_best) {
-                          have = true; e_best = ev[0]; gs_nu = nu; gs_par = par;
-                      }
-                  }
-              }
-              if (!have)
-                  throw std::runtime_error(
-                      "little_group_gs_static_sf: no non-empty subspace.");
+              const auto [gs_nu, gs_par] = scan_gs_subspace(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  gs_subspaces, lg_o, "little_group_gs_static_sf");
 
               const auto gs = ed::solvers::little_group_ground_state(
                   op_h, abelian_group, residue_perms, n_sites, lg_o(gs_nu, gs_par));
@@ -1593,7 +1626,7 @@ PYBIND11_MODULE(_core, m) {
           "the raw <GS|O_q|GS>.");
 
     m.def("little_group_gs_correlators",
-          [](const Operator& op_h,
+          [scan_gs_subspace](const Operator& op_h,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              const std::vector<std::vector<int>>& translations,
@@ -1654,34 +1687,13 @@ PYBIND11_MODULE(_core, m) {
                   o.time_reversal = time_reversal;
                   return o;
               };
-              int gs_nu = -1, gs_par = -1;
-              double e_best = 0.0;
-              bool have = false;
-              if (gs_subspaces.size() == 1) {
-                  // Only ONE candidate subspace (the caller pinned n_up), so
-                  // the localization scan can only return that subspace --
-                  // running it would solve the very same blocks that
-                  // little_group_ground_state re-solves below, DOUBLING the
-                  // cost of the whole call. Skip straight to the eigenvector.
-                  gs_nu = gs_subspaces[0].first;
-                  gs_par = gs_subspaces[0].second;
-                  have = true;
-              } else {
-                  for (const auto& [nu, par] : gs_subspaces) {
-                      const auto ev =
-                          ed::solvers::little_group_lowest_eigenvalues(
-                              op_h, abelian_group, residue_perms, n_sites, 1,
-                              lg_o(nu, par));
-                      if (ev.empty()) continue;
-                      if (!have || ev[0] < e_best) {
-                          have = true; e_best = ev[0];
-                          gs_nu = nu; gs_par = par;
-                      }
-                  }
-              }
-              if (!have)
-                  throw std::runtime_error(
-                      "little_group_gs_correlators: no non-empty subspace.");
+              // (single-candidate fast path lives inside the helper: the
+              // localization scan would solve the very same blocks that
+              // little_group_ground_state re-solves below, DOUBLING the
+              // cost of the whole call.)
+              const auto [gs_nu, gs_par] = scan_gs_subspace(
+                  op_h, abelian_group, residue_perms, n_sites,
+                  gs_subspaces, lg_o, "little_group_gs_correlators");
 
               const auto gs = ed::solvers::little_group_ground_state(
                   op_h, abelian_group, residue_perms, n_sites,

@@ -104,11 +104,15 @@ namespace {
 // crossover (lowest_dense_floor) deliberately stays sized by the DEFAULT
 // cap: a frontier budget raise must not drag mid-band blocks into
 // minutes-long dense eigensolves.
-[[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k) {
+// ``dflt`` = 0 selects the eigenvalue-scan default max(40k, 400); the
+// vector lane passes its own tighter default (stored-basis memory).
+[[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k,
+                                                      std::uint64_t dflt = 0) {
     if (const char* v = std::getenv("ED_SYM_LG_LOWEST_MAX_ITER")) {
         const unsigned long long x = std::strtoull(v, nullptr, 10);
         if (x > 0) return static_cast<std::uint64_t>(x);
     }
+    if (dflt > 0) return dflt;
     return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
 }
 
@@ -127,6 +131,34 @@ namespace {
         if (x > 0) return static_cast<std::size_t>(x);
     }
     return dflt;
+}
+
+// Restart count for the two-pass GS lane (audit 2026-08-01, second half
+// of the ED_SYM_LG_GS_MAX_ITER fix): the 4x3 kagome post-mortem showed
+// the RESTART count, not the per-attempt budget, was the binding
+// constraint (task 49669202_2 exhausted 4 restarts near residual ~1e-7,
+// 11.8 h in) -- and the shipped mitigation was loosening the acceptance
+// tolerance because this number needed a rebuild to change.
+[[nodiscard]] inline int lg_gs_restarts() {
+    if (const char* v = std::getenv("ED_SYM_LG_GS_RESTARTS")) {
+        const long x = std::strtol(v, nullptr, 10);
+        if (x >= 0) return static_cast<int>(x);
+    }
+    return 4;
+}
+
+// Residual acceptance for the certified GS vector. 1e-8 is calibrated
+// for the CF/DSSF consumer; diagonal-correlator consumers may relax via
+// ED_SYM_LG_GS_RESID_TOL. Shared by the two-pass INNER accept-or-restart
+// loop and the outer guard in solve_gs_vector -- before 2026-08-01 the
+// inner loop hardcoded 1e-8, so relaxing the env still burned every
+// restart chasing a tolerance the caller had explicitly waived.
+[[nodiscard]] inline double lg_gs_resid_tol() {
+    if (const char* v = std::getenv("ED_SYM_LG_GS_RESID_TOL")) {
+        const double t = std::atof(v);
+        if (t > 0.0) return t;
+    }
+    return 1e-8;
 }
 
 
@@ -2289,7 +2321,7 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
                          std::size_t n)
 {
     const std::size_t max_iter = std::min<std::size_t>(n, lg_gs_max_iter(600));
-    const int restarts = 4;
+    const int restarts = lg_gs_restarts();
 
     std::vector<Complex> v0(n);
     {
@@ -2434,7 +2466,7 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
             num += std::norm(w[ii] - ray * u[ii]);
         }
         E0 = ray;
-        if (std::sqrt(num) <= 1e-8 || attempt == restarts) break;
+        if (std::sqrt(num) <= lg_gs_resid_tol() || attempt == restarts) break;
         seed = u;                       // restarted refinement
     }
     return {E0, std::move(u)};
@@ -2510,16 +2542,10 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         num += std::norm(hu[i] - E0 * u[i]);
         den += std::norm(u[i]);
     }
-    // Residual acceptance. 1e-8 is calibrated for the CF/DSSF consumer;
-    // diagonal-correlator consumers (weights |c_r|^2) are first-order
-    // insensitive and may relax via ED_SYM_LG_GS_RESID_TOL (the 4x3
-    // kagome campaign's small-|Jpm| points exhaust the two-pass restarts
-    // near ~1e-7 -- task 49669202_2 died on this guard 11.8 h in).
-    double resid_tol = 1e-8;
-    if (const char* v = std::getenv("ED_SYM_LG_GS_RESID_TOL")) {
-        const double t = std::atof(v);
-        if (t > 0.0) resid_tol = t;
-    }
+    // Residual acceptance -- shared with the two-pass inner loop via
+    // lg_gs_resid_tol() (see its comment for the calibration and the 4x3
+    // kagome post-mortem).
+    const double resid_tol = lg_gs_resid_tol();
     if (std::sqrt(num / den) > resid_tol) {
         char buf[64];
         std::snprintf(buf, sizeof buf, "%.3e", std::sqrt(num / den));
@@ -2919,8 +2945,16 @@ namespace {
 [[nodiscard]] std::pair<std::vector<double>,
                         std::vector<std::vector<Complex>>>
 solve_block_pairs(const ed::matvec::MatVecOperator& mv, int want,
-                  int dense_max_dim)
+                  int dense_max_dim, bool* refused_out = nullptr)
 {
+    // ``*refused_out`` (when non-null) is set true iff this block REFUSED
+    // rows it might genuinely hold: Lanczos breakdown/empty tridiag,
+    // dstevd failure, or the certified-prefix break firing before the
+    // requested window was exhausted. A block that simply holds fewer
+    // states than requested is NOT a refusal. Audit 2026-08-01: the
+    // caller used to have no way to tell those apart, so the "lowest k"
+    // could silently start above refused true-lowest rows.
+    if (refused_out) *refused_out = false;
     std::vector<double>               evals;
     std::vector<std::vector<Complex>> vecs;
     const std::size_t n = mv.dim();
@@ -2945,8 +2979,12 @@ solve_block_pairs(const ed::matvec::MatVecOperator& mv, int want,
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& c : v0) c = Complex(nd(gen), nd(gen));
     ed::krylov::LanczosKernelOptions kopts;
-    kopts.max_iter   = std::min<std::size_t>(
-        n, std::max<std::size_t>(200, 8 * k));
+    // Default budget max(200, 8k) is deliberately tighter than the
+    // eigenvalue scan's (keep_basis stores 16 B x n per iteration);
+    // ED_SYM_LG_LOWEST_MAX_ITER overrides absolutely -- mind the memory.
+    kopts.max_iter   = static_cast<std::size_t>(std::min<std::uint64_t>(
+        n, lg_lowest_max_iter(
+               k, std::max<std::uint64_t>(200u, 8u * static_cast<std::uint64_t>(k)))));
     kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
     kopts.keep_basis = true;
     kopts.dim_cap    = n;
@@ -2955,15 +2993,20 @@ solve_block_pairs(const ed::matvec::MatVecOperator& mv, int want,
     };
     auto kres = ed::krylov::lanczos_kernel(be, apply_H, n, v0.data(), kopts);
     const std::size_t m = kres.alpha.size();
-    if (m == 0) return {evals, vecs};
+    if (m == 0) {
+        if (refused_out) *refused_out = true;
+        return {evals, vecs};
+    }
     std::vector<double> diag = kres.alpha;
     std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
     for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
     std::vector<double> z(m * m, 0.0);
     if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
                        diag.data(), off.data(), z.data(),
-                       static_cast<lapack_int>(m)) != 0)
+                       static_cast<lapack_int>(m)) != 0) {
+        if (refused_out) *refused_out = true;
         return {evals, vecs};
+    }
     std::vector<Complex> u(n), hu(n);
     for (std::size_t i = 0; i < k && i < m; ++i) {
         std::fill(u.begin(), u.end(), Complex(0, 0));
@@ -2979,7 +3022,13 @@ solve_block_pairs(const ed::matvec::MatVecOperator& mv, int want,
             num += std::norm(hu[r] - diag[i] * u[r]);
             den += std::norm(u[r]);
         }
-        if (std::sqrt(num / den) > 1e-8) break;   // certified PREFIX only
+        if (std::sqrt(num / den) > 1e-8) {        // certified PREFIX only
+            // Row i is a genuine Ritz value inside the requested window
+            // whose vector failed certification -- it and everything
+            // after it are REFUSED, not absent.
+            if (refused_out) *refused_out = true;
+            break;
+        }
         const double inv = 1.0 / std::sqrt(den);
         std::vector<Complex> v(n);
         for (std::size_t r = 0; r < n; ++r) v[r] = inv * u[r];
@@ -3034,7 +3083,10 @@ LittleGroupVectors little_group_lowest_vectors(
                               *bi->pop)
                         : static_cast<const ed::matvec::MatVecOperator&>(
                               *bi->hk);
-            auto [ev, vv] = solve_block_pairs(mv, k, opt.dense_max_dim);
+            bool refused = false;
+            auto [ev, vv] = solve_block_pairs(mv, k, opt.dense_max_dim,
+                                              &refused);
+            if (refused) ++out.refused_blocks;
             LittleGroupBlock blk(bi);
             for (std::size_t i = 0; i < ev.size(); ++i) {
                 auto u = blk.lift_to_rep(vv[i].data());
@@ -3048,7 +3100,13 @@ LittleGroupVectors little_group_lowest_vectors(
                     num += std::norm(hu[r] - ev[i] * u[r]);
                     den += std::norm(u[r]);
                 }
-                if (std::sqrt(num / den) > 1e-8) continue;
+                if (std::sqrt(num / den) > 1e-8) {
+                    // The sandwich residual certified this row but the
+                    // LIFT did not -- refused, not absent (audit
+                    // 2026-08-01: used to vanish without a trace).
+                    ++out.refused_rows;
+                    continue;
+                }
                 const double inv = 1.0 / std::sqrt(den);
                 for (auto& c : u) c *= inv;
                 if (slot == static_cast<std::size_t>(-1)) {
@@ -3070,6 +3128,25 @@ LittleGroupVectors little_group_lowest_vectors(
                      });
     if (out.rows.size() > static_cast<std::size_t>(std::max(k, 0)))
         out.rows.resize(static_cast<std::size_t>(std::max(k, 0)));
+    // Audit 2026-08-01: refusals used to vanish -- if the block holding
+    // the true lowest rows certified nothing, the returned rows were the
+    // k lowest OF THE SURVIVORS presented as the k lowest overall.
+    // A short window with refusals present is provably incomplete: loud.
+    // A full window with refusals is still suspect; the counts ride the
+    // struct so callers (and the pybind dict) can see them.
+    if (out.rows.size() < static_cast<std::size_t>(std::max(k, 0))
+        && (out.refused_rows > 0 || out.refused_blocks > 0)) {
+        throw std::runtime_error(
+            "little_group_lowest_vectors: only "
+            + std::to_string(out.rows.size()) + " of " + std::to_string(k)
+            + " requested rows certified, with "
+            + std::to_string(out.refused_blocks) + " refusing block(s) and "
+            + std::to_string(out.refused_rows)
+            + " uncertified lift(s) -- the window is incomplete, not "
+            "exhausted. Raise ED_SYM_LG_LOWEST_MAX_ITER (stored-basis "
+            "lane: memory = 16 B x dim x iterations) or dense_max_dim "
+            "to solve the refusing blocks densely.");
+    }
     return out;
 }
 
