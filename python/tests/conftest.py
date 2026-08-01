@@ -33,8 +33,15 @@ _candidates.append(PROJECT_ROOT / "python" / "qed")
 for cand in _candidates:
     if cand.is_dir() and _has_built_core(cand):
         py_root = str(cand.parent)
-        if py_root not in sys.path:
-            sys.path.insert(0, py_root)
+        # Force FRONT position: the path may already be present at a
+        # LOSING position (behind site-packages, e.g. via a stale
+        # editable .pth), where a membership-guarded insert would
+        # silently keep the wrong winner. Observed 2026-08-01 under
+        # pytest 9: the editable meta-finder that used to mask this is
+        # no longer on sys.meta_path, so a stale site-packages qed COPY
+        # (not a redirect) won resolution and tripped the pin below.
+        sys.path = [p for p in sys.path if p != py_root]
+        sys.path.insert(0, py_root)
         # A scikit-build EDITABLE FINDER on sys.meta_path (installed by
         # `pip install -e` of a sibling checkout) outranks sys.path and
         # silently redirects `import qed` to a stale site-packages build --

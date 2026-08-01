@@ -149,3 +149,93 @@ def test_lowest_k_lanczos_path_returns_genuine_bottom_values(monkeypatch):
             f"reported value {v:.9f} is not a genuine low-window "
             f"eigenvalue (closest reference "
             f"{ref_vals[np.argmin(np.abs(ref_vals - v))]:.9f})")
+
+
+# ---------------------------------------------------------------------------
+# Budget-knob regression (2026-08-01): the lowest-k Lanczos budget was
+# hardcoded max(40k, 400) with NO env escape -- a frontier block needing
+# more iterations could only be fixed by editing C++ and rebuilding
+# (found on a 7.16e8-dim tower campaign: 400 no-reorth steps leave even
+# E0's Paige bound unconverged, and the honest gate correctly reports
+# nothing at all). ED_SYM_LG_LOWEST_MAX_ITER is the new lever. Pin both
+# directions: a starved budget must yield converged=False (never a wrong
+# value), and a raised budget must actually reach the kernel and recover
+# the exact window.
+# ---------------------------------------------------------------------------
+
+def _cyclic_group(n):
+    grp = [list(range(n))]
+    perm = list(range(n))
+    for _ in range(n - 1):
+        perm = [(p + 1) % n for p in perm]
+        grp.append(list(perm))
+    return grp
+
+
+def test_lowest_max_iter_env_is_the_budget_lever(monkeypatch):
+    from qed import _core
+
+    n = 14
+    H = _xxz_ring_operator(n, jz=2.5)
+    A = _cyclic_group(n)
+    k = 4
+
+    monkeypatch.delenv("ED_SYM_LG_DENSE_FLOOR", raising=False)
+    monkeypatch.delenv("ED_SYM_LG_LOWEST_MAX_ITER", raising=False)
+    ref = dict(_core.little_group_lowest_eigenvalues_labeled(
+        H, A, [], k=64, n_up=n // 2, dense_max_dim=4096, use_gpu=False))
+    ref_vals = np.sort(np.asarray(ref["eigenvalues"], dtype=float))
+
+    monkeypatch.setenv("ED_SYM_LG_DENSE_FLOOR", "1")
+
+    # Starved: 3 iterations cannot converge a Paige bound on ~200-dim
+    # blocks. Honest contract: fewer/no values, flagged unconverged.
+    monkeypatch.setenv("ED_SYM_LG_LOWEST_MAX_ITER", "3")
+    starved = dict(_core.little_group_lowest_eigenvalues_labeled(
+        H, A, [], k=k, n_up=n // 2, dense_max_dim=4096, use_gpu=False))
+    assert not bool(starved["converged"]), (
+        "a 3-iteration budget must not report a converged window")
+
+    # Raised: with a generous env budget the forced-Lanczos window must
+    # converge and match the dense reference (the env reaching the kernel
+    # is exactly what was impossible before).
+    monkeypatch.setenv("ED_SYM_LG_LOWEST_MAX_ITER", "5000")
+    full = dict(_core.little_group_lowest_eigenvalues_labeled(
+        H, A, [], k=k, n_up=n // 2, dense_max_dim=4096, use_gpu=False))
+    assert bool(full["converged"])
+    vals = np.sort(np.asarray(full["eigenvalues"], dtype=float))
+    np.testing.assert_allclose(vals[0], ref_vals[0], rtol=0.0, atol=1e-7)
+
+
+def test_gs_scan_starved_budget_is_loud_not_wrong(monkeypatch):
+    """little_group_ground_state's E0 star scan used to SILENTLY SKIP a
+    block whose lowest-1 scan did not converge, so at frontier dims the
+    true GS block could lose the scan to a smaller converged block -- and
+    solve_gs_vector would then certify a beautiful eigenpair of the
+    WRONG block. The scan must now throw, naming the budget knob."""
+    import math
+    import pytest
+    from qed import _core
+
+    N, n_up = 10, 5
+    H = _core.Operator(N, 0.5)
+    for j in range(N):
+        kk = (j + 1) % N
+        H.add_two_body(_core.OP_SZ, j, _core.OP_SZ, kk, 2.5)
+        H.add_two_body(_core.OP_SPLUS, j, _core.OP_SMINUS, kk, 0.5)
+        H.add_two_body(_core.OP_SMINUS, j, _core.OP_SPLUS, kk, 0.5)
+    trans = [[(j + s) % N for j in range(N)] for s in range(N)]
+    obs = _core.Operator(N, 0.5)
+    for i in range(N):
+        for j in range(N):
+            if i != j:
+                obs.add_two_body(_core.OP_SPLUS, i, _core.OP_SMINUS, j,
+                                 complex(math.cos(0.0)))
+
+    monkeypatch.setenv("ED_SYM_LG_DENSE_FLOOR", "1")
+    monkeypatch.setenv("ED_SYM_LG_LOWEST_MAX_ITER", "2")
+    with pytest.raises(RuntimeError,
+                       match="ED_SYM_LG_LOWEST_MAX_ITER"):
+        _core.little_group_gs_static_sf(
+            H, [obs], trans, [], n_up=n_up, dense_max_dim=4096,
+            use_gpu=False)

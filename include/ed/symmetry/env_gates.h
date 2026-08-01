@@ -90,6 +90,13 @@ namespace ed::symmetry {
       "Lanczos instead of FullCGS2 + kept basis (memory cap)")                 \
     X("ED_SYM_LG_GS_RESID_TOL", "1e-8",                                        \
       "residual tolerance for the certified little-group GS vector")           \
+    X("ED_SYM_LG_LOWEST_MAX_ITER", "max(40k, 400)",                            \
+      "absolute Lanczos budget for the lowest-k eigenvalue scan; frontier "    \
+      "(~1e8+) blocks need more than the default. Does NOT move the dense "    \
+      "crossover (that is ED_SYM_LG_DENSE_FLOOR)")                             \
+    X("ED_SYM_LG_GS_MAX_ITER", "600 two-pass / 200 small-n",                   \
+      "per-attempt Lanczos budget for the certified GS vector; the small-n "   \
+      "lane stores the basis (memory = 16 B x dim x iterations)")              \
     X("ED_SYM_CLIQUE_BUDGET", "512",                                           \
       "|Aut| above which find_symmetries switches to the greedy maximal-"      \
       "abelian construction instead of exact max-clique (hang guard)")         \

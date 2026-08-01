@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-08-01 — little-group iteration budgets exposed; GS scan made loud
+
+* **`ED_SYM_LG_LOWEST_MAX_ITER`** (new env): absolute Lanczos budget
+  for the lowest-k eigenvalue scan (`solve_block_lowest`). The budget
+  was hardcoded `max(40k, 400)` with no escape — at frontier tower dims
+  (~7×10⁸) 400 no-reorth steps cannot converge even E0's Paige bound,
+  so the honest gate correctly returned *nothing* and the only fix was
+  editing C++ and rebuilding. The dense crossover deliberately stays on
+  the default cap (`ED_SYM_LG_DENSE_FLOOR` remains its override), so a
+  frontier budget raise cannot drag mid-band blocks into dense solves.
+* **`ED_SYM_LG_GS_MAX_ITER`** (new env): per-attempt budget for the
+  certified GS-vector lanes (default 600 two-pass / 200 small-n
+  FullCGS2). Previously the only lever when the restarts exhausted near
+  the residual tolerance was relaxing `ED_SYM_LG_GS_RESID_TOL`.
+* **`little_group_ground_state` E0 scan is now loud**: a block whose
+  lowest-1 scan failed to converge used to be *silently skipped*, so
+  the true GS block could lose the scan to a smaller converged block —
+  and `solve_gs_vector` would then certify a beautiful eigenpair of the
+  wrong block. The scan now throws, naming the block count, worst dim,
+  and the budget knob. Both behaviours are regression-pinned in
+  `test_little_group_lowest_window.py`.
+* **conftest**: the source-tree `python/` path is now forced to the
+  FRONT of `sys.path` (a stale editable `.pth` can hold it at a losing
+  position behind site-packages; under pytest 9 the editable
+  meta-finder that masked this is gone, and a stale site-packages copy
+  won resolution).
+
 ## 2026-07-24 — SU(2) total-spin symmetry (Stage 12), composable across the stack
 
 * **New symmetry axis: SU(2) total spin**, operator-level Route A —

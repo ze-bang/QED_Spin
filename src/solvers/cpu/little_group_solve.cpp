@@ -92,6 +92,43 @@ namespace {
     return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
 }
 
+// Iteration budget for the lowest-k eigenvalue Lanczos scan
+// (solve_block_lowest). The default max(40k, 400) converges every
+// validated campaign block; at frontier tower dims (~7e8, kagome 4x3
+// N=36) 400 no-reorth steps cannot pull even E0's Paige bound under the
+// gate, so the honest contiguous gate returns NOTHING (correct refusal,
+// nothing to report). There is no restart lane here -- the scan is
+// eigenvalues-only with no stored basis to reseed from -- so the budget
+// is the only lever, and it was previously not reachable from a job
+// script. ED_SYM_LG_LOWEST_MAX_ITER overrides ABSOLUTELY. The dense
+// crossover (lowest_dense_floor) deliberately stays sized by the DEFAULT
+// cap: a frontier budget raise must not drag mid-band blocks into
+// minutes-long dense eigensolves.
+[[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k) {
+    if (const char* v = std::getenv("ED_SYM_LG_LOWEST_MAX_ITER")) {
+        const unsigned long long x = std::strtoull(v, nullptr, 10);
+        if (x > 0) return static_cast<std::uint64_t>(x);
+    }
+    return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
+}
+
+// Per-attempt iteration budget for the certified GS-vector lanes
+// (solve_gs_vector / solve_gs_vector_two_pass). Defaults: 600 for the
+// two-pass no-reorth lane (x (1 + restarts) attempts), 200 for the
+// small-n FullCGS2 lane. Both lanes are residual-guarded and THROW on a
+// miss, so exhausting the budget is loud -- but before this knob the
+// only lever was relaxing ED_SYM_LG_GS_RESID_TOL (the 4x3 kagome
+// campaign's small-|Jpm| points died at ~1e-7 after exhausting the
+// restarts, 11.8 h in). NOTE: the small-n lane STORES the Krylov basis
+// -- memory there is 16 B x dim x iterations.
+[[nodiscard]] inline std::size_t lg_gs_max_iter(std::size_t dflt) {
+    if (const char* v = std::getenv("ED_SYM_LG_GS_MAX_ITER")) {
+        const unsigned long long x = std::strtoull(v, nullptr, 10);
+        if (x > 0) return static_cast<std::size_t>(x);
+    }
+    return dflt;
+}
+
 
 // U-composition convention (matches irreps.cpp): U(g)U(h) = U(g·h) with
 // (g·h)[i] = h[g[i]].
@@ -1127,6 +1164,10 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // the GPU deferred-batch lane below makes exactly the same dense-vs-Lanczos
 // decision as the CPU ``solve_block_lowest``.
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
+    // DEFAULT iteration cap on purpose (not lg_lowest_max_iter): raising
+    // ED_SYM_LG_LOWEST_MAX_ITER for a frontier campaign must not widen
+    // the dense band 4x with it. ED_SYM_LG_DENSE_FLOOR remains the
+    // explicit dense-crossover override.
     const std::uint64_t max_iter_cap =
         std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
     // Audit 2026-07-30: the crossover was 32x the Lanczos cap (~1.3e4 at
@@ -1231,7 +1272,7 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
 
     ed::krylov::LanczosKernelOptions kopts;
     kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
-        nb, std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u)));
+        nb, lg_lowest_max_iter(k)));
     // Ring reorth is a MEMORY term at frontier dims: 8 ring vectors x 16 B
     // x nb is ~48 GB per 3.8e8-dim block (measured 81 G RSS against a 96 G
     // budget on the 4x3 kagome campaign, 2026-07-19). This scan is
@@ -2247,7 +2288,7 @@ namespace {
 solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
                          std::size_t n)
 {
-    const std::size_t max_iter = std::min<std::size_t>(n, 600);
+    const std::size_t max_iter = std::min<std::size_t>(n, lg_gs_max_iter(600));
     const int restarts = 4;
 
     std::vector<Complex> v0(n);
@@ -2429,7 +2470,7 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         std::normal_distribution<double> nd(0.0, 1.0);
         for (auto& v : v0) v = Complex(nd(gen), nd(gen));
         ed::krylov::LanczosKernelOptions kopts;
-        kopts.max_iter   = std::min<std::size_t>(n, 200);
+        kopts.max_iter   = std::min<std::size_t>(n, lg_gs_max_iter(200));
         kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
         kopts.keep_basis = true;
         kopts.dim_cap    = n;
@@ -2527,6 +2568,8 @@ LittleGroupGroundState little_group_ground_state(
         bool ignore_plan = false;
         parse_only_k0_env(gs_only_k0, ignore_plan);
     }
+    std::size_t   n_unconverged  = 0;
+    std::uint64_t worst_scan_dim = 0;
     for (const auto& [k0, members] : stars) {
         if (!gs_only_k0.empty() && gs_only_k0.count(k0) == 0) continue;
         StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
@@ -2539,14 +2582,36 @@ LittleGroupGroundState little_group_ground_state(
                                *impl.pop)
                          : static_cast<const ed::matvec::MatVecOperator&>(
                                *impl.hk);
-            const auto ev = solve_block_lowest(mv, 1, opt.dense_max_dim);
-            if (!ev.empty() && (best_k0 < 0 || ev[0] < best_e)) {
+            bool conv = true;
+            const auto ev = solve_block_lowest(mv, 1, opt.dense_max_dim,
+                                               &conv);
+            if (!conv || ev.empty()) {
+                // An unconverged E0 scan used to be SILENTLY skipped here
+                // (the honest gate returns nothing), so at frontier dims
+                // the true GS block could lose the scan to a smaller
+                // converged block -- and solve_gs_vector would then
+                // certify a beautiful eigenpair of the WRONG block.
+                // Loud, per the point_group='full' contract.
+                ++n_unconverged;
+                worst_scan_dim = std::max(worst_scan_dim, mv.dim());
+                continue;
+            }
+            if (best_k0 < 0 || ev[0] < best_e) {
                 best_e   = ev[0];
                 best_k0  = k0;
                 best_blk = bi;
             }
         }
     }
+    if (n_unconverged > 0)
+        throw std::runtime_error(
+            "little_group_ground_state: the E0 block scan failed to "
+            "converge on " + std::to_string(n_unconverged) + " block(s) "
+            "(largest dim " + std::to_string(worst_scan_dim) + ") within "
+            "the Lanczos budget, so the winner would be chosen among the "
+            "remainder and the reported ground state could be wrong. "
+            "Raise ED_SYM_LG_LOWEST_MAX_ITER (default max(40k, 400)) or "
+            "split the scan by star via ED_SYM_LG_ONLY_K0.");
     if (best_k0 < 0)
         throw std::runtime_error("little_group_ground_state: no non-empty "
                                  "momentum sector in this subspace.");
