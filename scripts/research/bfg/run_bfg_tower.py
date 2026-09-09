@@ -139,17 +139,18 @@ def main():
     fpar = np.array(out["flip_parity"], dtype=int)
     mult = np.array(out["multiplicity"], dtype=int)
     conv = np.array([bool(x) for x in out["converged"]])
+    idim = np.array(out["irrep_dim"], dtype=int)
     chars = out["irrep_characters"]  # list of per-star character vectors
 
     order = np.argsort(ev)
     print(f"  solved in {dt:.1f} s  ({len(ev)} (k,irrep) blocks, "
           f"gpu_engaged={out.get('gpu_engaged')})")
     print(f"  {'#':>2} {'E':>13} {'E-Emin':>10} {'k_raw':>6} {'irrep':>6} "
-          f"{'flip':>5} {'mult':>5} {'conv':>5}")
+          f"{'flip':>5} {'mult':>5} {'idim':>5} {'conv':>5}")
     emin = ev.min()
     for r, i in enumerate(order[:12]):
         print(f"  {r:>2} {ev[i]:>13.7f} {ev[i]-emin:>10.6f} {kraw[i]:>6} "
-              f"{irr[i]:>6} {fpar[i]:>5} {mult[i]:>5} {str(bool(conv[i])):>5}")
+              f"{irr[i]:>6} {fpar[i]:>5} {mult[i]:>5} {idim[i]:>5} {str(bool(conv[i])):>5}")
 
     if _HAS_H5PY:
         with h5py.File(run_dir / f"tower_S{args.S}.h5", "w") as f:
@@ -165,11 +166,23 @@ def main():
             f.create_dataset("flip_parity", data=fpar)
             f.create_dataset("multiplicity", data=mult)
             f.create_dataset("converged", data=conv)
+            # irrep_dim is REQUIRED to reconstruct a level's physical
+            # degeneracy: deg = irrep_dim * multiplicity * |star|. Without it
+            # (and the star sizes below) the tower's degeneracy counting -- the
+            # whole point of a momentum/irrep-resolved tower -- cannot be done
+            # from the saved file.
+            f.create_dataset("irrep_dim", data=idim)
             # characters for decoding k_raw -> physical momentum in post
             f.attrs["irrep_characters"] = json.dumps(
                 [[[cc.real, cc.imag] for cc in row] for row in chars])
             f.attrs["translations"] = json.dumps([list(map(int, t)) for t in A])
             f.attrs["residues"] = json.dumps([list(map(int, r)) for r in residues])
+            # star membership (k_raw -> the momenta in its star) + which
+            # extra Z2s the engine actually engaged, so post-processing can
+            # weight levels correctly and know the label semantics.
+            f.attrs["stars"] = json.dumps(out.get("stars"), default=str)
+            f.attrs["flip_engaged"] = bool(out.get("flip_engaged", False))
+            f.attrs["tr_engaged"] = bool(out.get("tr_engaged", False))
         print(f"  saved {run_dir / f'tower_S{args.S}.h5'}")
     sys.exit(0)
 
