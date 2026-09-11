@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-09-10 — performance-audit fixes (branch `perf/audit-fixes`)
+
+Measured on the periodic Heisenberg chain, Sz = 0, 16 OpenMP threads, CPU
+lane (`benchmarks/bench_audit_solve`, `benchmarks/bench_audit_thermal`).
+
+* **Krylov iteration cap** (`ed::workflows::solve`): the default
+  `max_iter = 2*num_eigs + 30` stopped every Lanczos / Krylov-Schur solve at
+  32 iterations, before convergence (eigenvector residuals 5e-4 .. 2e-2,
+  E0 off by 1e-4 at N = 22). Single-vector methods now cap at
+  `min(dim, 1000)` and `krylov.converged` is reported truthfully.
+* **Real-storage Lanczos for everything real**: `lanczos_real` now serves
+  eigenvalue windows (`num_eigs > 1`, with the Ritz residual bounds
+  `krylov.ritz_residuals`) and eigenvectors via a two-pass reconstruction
+  (replay the recurrence from the same deterministic seed, stream
+  `psi = sum_j z_j V_j`, certify with one matvec against the free bound
+  `|beta_m||z_m|`). The complex kernel's kept-basis FullCGS2 lane is now the
+  fallback only. E0 + eigenvector, N = 22: 1683 ms (uncertified) -> 406 ms
+  (residual 4e-5); N = 24: 2.6 s.
+* **Fused BLAS-1 in `lanczos_kernel`** (`Backend::axpy_dot`, `axpy_nrm2`,
+  DGKS-gated CGS2 second pass, parallel `fill_zero`); Hermiticity check for
+  the symmetry lanes (their gather kernels compute H^dagger v).
+* **Direct CSR assembly**: two-pass gather-form build (count / prefix /
+  fill, parallel, sorted + merged columns) replaces the Eigen triplet path.
+  CSR build at N = 22: ~800 ms -> ~90 ms.
+* **Tableless fixed-Sz basis**: implicit Lin table (`build_implicit`, 3 MB at
+  N = 36) gives O(1) `index_of`; Gosper stepping per row chunk
+  (`for_each_row_state`) removes the O(N) unrank per row. Matrix-free
+  tableless SpMV at N = 22: 2779 ms -> 412 ms per solve, now equal to the
+  materialised basis.
+* **Thermal lanes**: FTLM CPU lane defaults to local reorthogonalisation
+  without a stored basis; its serial sample loop no longer sits inside an
+  inactive `omp parallel for if(...)` (every BLAS-1 call inside the kernel
+  became a nested team, ~1-2 ms each). FTLM N = 20 (4 x 100): 14.0 s ->
+  0.32 s. mTPQ does one matvec per microcanonical step (`TpqStepInfo`
+  carries the moments): N = 20, 200 steps: 400 ms -> 203 ms.
+
 ## 2026-08-01 (batch 2) — the same weakness class, swept codebase-wide
 
 Three parallel audits hunted the classes the runner's finding defined:

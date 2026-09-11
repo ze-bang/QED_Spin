@@ -180,10 +180,32 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 // ``iters_out`` / ``converged_out`` (optional): number of Lanczos steps taken
 // and whether the Ritz-value test fired before ``max_iter`` (audit 2026-09:
 // the orchestrator used to report ``converged = true`` unconditionally).
+//
+// ``LanczosRealExtras`` (audit 2026-09, optional): deterministic start vector,
+// a per-iteration basis-vector hook (two-pass eigenvector reconstruction),
+// a fixed-iteration mode (pass 2 replays pass 1 exactly), and the final
+// tridiagonal + Ritz residual bounds |beta_m| |z_{m,i}| on output.
+struct LanczosRealExtras {
+    // ---- inputs ----
+    const double* v0 = nullptr;          ///< start vector (length N), nullptr => random
+    bool fixed_iterations = false;       ///< run exactly max_iter steps, no convergence test
+    /// Called at the top of iteration j with V_j (unit norm, length N),
+    /// before the vector is consumed; j = 0, 1, ..., m-1.
+    std::function<void(uint64_t j, const double* v_j)> on_basis_vector;
+    bool want_ritz = false;              ///< fill ritz_bounds / ritz_vectors below
+    // ---- outputs ----
+    std::vector<double> alpha;           ///< tridiagonal diagonal (m)
+    std::vector<double> beta;            ///< off-diagonal, beta[0] = 0 (m or m+1 entries)
+    double beta_last = 0.0;              ///< |beta_m| (norm after the last step)
+    std::vector<double> ritz_bounds;     ///< |beta_m| |z_{m,i}|, i < n_eig
+    std::vector<double> ritz_vectors;    ///< column-major m x n_eig tridiag eigenvectors
+};
+
 void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t N, uint64_t max_iter, uint64_t exct,
                   double tol, std::vector<double>& eigenvalues,
-                  uint64_t* iters_out = nullptr, bool* converged_out = nullptr);
+                  uint64_t* iters_out = nullptr, bool* converged_out = nullptr,
+                  LanczosRealExtras* extras = nullptr);
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 

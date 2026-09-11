@@ -1027,9 +1027,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t N, uint64_t max_iter, uint64_t exct,
                   double tol, std::vector<double>& eigenvalues,
-                  uint64_t* iters_out, bool* converged_out) {
+                  uint64_t* iters_out, bool* converged_out,
+                  LanczosRealExtras* extras) {
     if (iters_out) *iters_out = 0;
     if (converged_out) *converged_out = false;
+    const bool fixed_iters = extras && extras->fixed_iterations;
     // Mirror the Lanczos thread-budget heuristic so the OMP+BLAS thread cap
     // is consistent with the complex path (see lanczos() above).
     const ed::parallel::ThreadBudgetScope budget(
@@ -1086,7 +1088,13 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     double* v_current = slab(0);
-    for (uint64_t i = 0; i < N; ++i) v_current[i] = dist(gen);
+    if (extras && extras->v0) {
+        // Deterministic start (reproducible runs; identical in both passes
+        // of the two-pass eigenvector reconstruction).
+        std::copy(extras->v0, extras->v0 + N, v_current);
+    } else {
+        for (uint64_t i = 0; i < N; ++i) v_current[i] = dist(gen);
+    }
     double norm = cblas_dnrm2(N, v_current, 1);
     if (norm == 0.0) {
         std::cerr << "lanczos_real: zero starting vector" << std::endl;
@@ -1145,6 +1153,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     };
 
     for (uint64_t j = 0; j < max_iter; ++j) {
+        if (extras && extras->on_basis_vector) extras->on_basis_vector(j, v_current);
         // w = H * v_j  (real SpMV; uses our OMP team)
         double t0 = profile ? now_us() : 0.0;
         H_real(v_current, w.data(), static_cast<int>(N));
@@ -1216,7 +1225,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
         // Skip the first ``exct`` iters: the tridiagonal isn't large
         // enough yet to host ``exct`` Ritz values.
         const double t_tri0 = profile ? now_us() : 0.0;
-        if (j >= exct) {
+        if (!fixed_iters && j >= exct) {
             const uint64_t m_cur = alpha.size();
             std::vector<double> diag = alpha;
             std::vector<double> offd(m_cur - 1);
@@ -1298,6 +1307,24 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
 
     const uint64_t n_eig = std::min<uint64_t>(exct, m);
     eigenvalues.assign(diag.begin(), diag.begin() + n_eig);
+    if (extras) {
+        extras->alpha     = alpha;
+        extras->beta      = beta;
+        extras->beta_last = norm;   // beta_m: the norm computed in the last step
+        extras->ritz_bounds.clear();
+        extras->ritz_vectors.clear();
+        if (extras->want_ritz && m > 0) {
+            std::vector<double> d2 = alpha, o2(m > 1 ? m - 1 : 0), z(m * m);
+            for (uint64_t ii = 0; ii + 1 < m; ++ii) o2[ii] = beta[ii + 1];
+            const int info2 = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, d2.data(),
+                                             o2.data(), z.data(), m);
+            if (info2 == 0) {
+                extras->ritz_vectors.assign(z.begin(), z.begin() + m * n_eig);
+                for (uint64_t i = 0; i < n_eig; ++i)
+                    extras->ritz_bounds.push_back(std::abs(norm) * std::abs(z[(m - 1) + i * m]));
+            }
+        }
+    }
     if (iters_out) *iters_out = m;
     // A run that exhausted the full space (m == N) is exact by construction.
     if (converged_out) *converged_out = converged || (m == N);

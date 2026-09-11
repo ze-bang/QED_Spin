@@ -417,31 +417,118 @@ GroundStateResult solve_on(Backend& be,
                 const char* env = std::getenv("ED_FORCE_COMPLEX_LANCZOS");
                 return env && env[0] == '1';
             }();
+            // Audit F3/F5 (2026-09): the real-storage lane now also serves
+            // eigenvalue WINDOWS (num_eigs > 1, with the Ritz residual
+            // bounds the window contract requires) and EIGENVECTORS via a
+            // real two-pass reconstruction, so the complex kernel is only
+            // used when the operator is genuinely complex, a seed transform
+            // is installed, or the two-pass lane is disabled by env.
+            bool real_done = false;
             if (!force_complex
-                    && opts.num_eigs == 1
-                    && !opts.compute_vectors
                     && !opts.seed_transform  // draws its own seed internally
+                    && (!opts.compute_vectors || eigvec_two_pass)
                     && H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
+                auto H_fn = [Hv_real](const double* in, double* out, int n) {
+                    Hv_real(in, out, static_cast<std::size_t>(n));
+                };
+                const std::size_t n = geom.local_dim;
+                // Real start vector: Re(seed); the seed is unit-norm complex
+                // Gaussian so the real part is a perfectly good (renormalised
+                // inside) random start. Deterministic => pass 2 replays pass 1.
+                std::vector<double> v0(n);
+                double v0_sq = 0.0;
+                for (std::size_t i = 0; i < n; ++i) { v0[i] = seed_host[i].real(); v0_sq += v0[i] * v0[i]; }
+                LanczosRealExtras ex;
+                ex.v0        = (v0_sq > 0.0) ? v0.data() : nullptr;
+                ex.want_ritz = opts.compute_vectors || opts.num_eigs > 1;
                 std::vector<double> eigs;
                 std::uint64_t real_iters = 0;
                 bool real_converged = false;
-                ::lanczos_real(
-                    [Hv_real](const double* in, double* out, int n) {
-                        Hv_real(in, out, static_cast<std::size_t>(n));
-                    },
-                    static_cast<std::uint64_t>(geom.local_dim),
-                    static_cast<std::uint64_t>(max_iter),
-                    /*exct=*/1u,
-                    opts.tolerance,
-                    eigs, &real_iters, &real_converged);
-                if (!eigs.empty()) {
-                    R.eigenvalues.assign(eigs.begin(),
-                                         eigs.begin() + std::min<std::size_t>(
-                                             opts.num_eigs, eigs.size()));
+                ::lanczos_real(H_fn, static_cast<std::uint64_t>(n),
+                               static_cast<std::uint64_t>(max_iter),
+                               static_cast<std::uint64_t>(opts.num_eigs),
+                               opts.tolerance, eigs, &real_iters, &real_converged, &ex);
+                const std::size_t m = ex.alpha.size();
+                const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, eigs.size());
+                real_done = !eigs.empty() && (!ex.want_ritz || ex.ritz_vectors.size() >= m * n_keep);
+                if (real_done && opts.compute_vectors && n_keep > 0) {
+                    // ---- Pass 2 (real): psi_k = sum_j z_{j,k} V_j streamed. ----
+                    std::vector<std::vector<double>> acc(n_keep, std::vector<double>(n, 0.0));
+                    std::size_t added = 0;
+                    LanczosRealExtras ex2;
+                    ex2.v0 = ex.v0;
+                    ex2.fixed_iterations = true;
+                    ex2.on_basis_vector = [&](std::uint64_t j, const double* vj) {
+                        if (j >= m || j != added) return;
+                        for (std::size_t k = 0; k < n_keep; ++k) {
+                            const double c = ex.ritz_vectors[j + k * m];
+                            double* a = acc[k].data();
+                            #pragma omp parallel for schedule(static) if(n > 8192)
+                            for (long long i = 0; i < static_cast<long long>(n); ++i)
+                                a[i] += c * vj[i];
+                        }
+                        ++added;
+                    };
+                    std::vector<double> eigs2;
+                    ::lanczos_real(H_fn, static_cast<std::uint64_t>(n),
+                                   static_cast<std::uint64_t>(m),
+                                   static_cast<std::uint64_t>(opts.num_eigs),
+                                   opts.tolerance, eigs2, nullptr, nullptr, &ex2);
+                    double resid = std::numeric_limits<double>::quiet_NaN();
+                    bool ok = (added == m);
+                    if (ok) {
+                        // Certify the ground-state vector against the pass-1
+                        // Ritz bound (see the complex two-pass lane below).
+                        std::vector<double> hpsi(n);
+                        H_fn(acc[0].data(), hpsi.data(), static_cast<int>(n));
+                        double num = 0.0, den = 0.0;
+                        const double E0 = eigs[0];
+                        #pragma omp parallel for reduction(+:num,den) schedule(static) if(n > 8192)
+                        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+                            const double r = hpsi[i] - E0 * acc[0][i];
+                            num += r * r; den += acc[0][i] * acc[0][i];
+                        }
+                        resid = (den > 0.0) ? std::sqrt(num / den)
+                                            : std::numeric_limits<double>::infinity();
+                        const double scale  = std::max(1.0, std::abs(E0));
+                        const double bound0 = ex.ritz_bounds.empty() ? 0.0 : ex.ritz_bounds[0];
+                        const double gate   = std::max({10.0 * bound0,
+                                                        1e3 * opts.tolerance * scale,
+                                                        1e-12 * scale});
+                        ok = std::isfinite(resid) && (resid <= gate || !real_converged);
+                    }
+                    if (ok) {
+                        EigenvectorRef evref;
+                        evref.host.resize(n_keep, std::vector<Complex>(n, Complex{0.0, 0.0}));
+                        for (std::size_t k = 0; k < n_keep; ++k) {
+                            double nk = 0.0;
+                            for (std::size_t i = 0; i < n; ++i) nk += acc[k][i] * acc[k][i];
+                            const double inv = (nk > 0.0) ? 1.0 / std::sqrt(nk) : 1.0;
+                            for (std::size_t i = 0; i < n; ++i)
+                                evref.host[k][i] = Complex(acc[k][i] * inv, 0.0);
+                        }
+                        R.eigenvectors = std::move(evref);
+                        R.krylov.residual_norm = resid;
+                    } else {
+                        std::cout << "Lanczos[real]: two-pass eigenvector not certified "
+                                     "(residual = " << resid << "); using the complex "
+                                     "kept-basis lane" << std::endl;
+                        real_done = false;
+                    }
                 }
-                R.krylov.iters_done = static_cast<std::size_t>(real_iters);
-                R.krylov.converged  = real_converged;
+                if (real_done) {
+                    R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
+                    if (opts.num_eigs > 1 && !ex.ritz_bounds.empty())
+                        R.krylov.ritz_residuals.assign(ex.ritz_bounds.begin(),
+                                                       ex.ritz_bounds.begin() + n_keep);
+                    R.krylov.alpha = std::move(ex.alpha);
+                    R.krylov.beta  = std::move(ex.beta);
+                    R.krylov.iters_done = static_cast<std::size_t>(real_iters);
+                    R.krylov.converged  = real_converged;
+                }
+            }
+            if (real_done) {
                 const auto t1 = std::chrono::steady_clock::now();
                 R.backend.wall_seconds =
                     std::chrono::duration<double>(t1 - t0).count();
