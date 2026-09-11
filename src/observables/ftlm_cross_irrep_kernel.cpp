@@ -39,16 +39,19 @@
 #include <ed/solvers/lanczos.h>   // generateGaussianRandomVector, build_lanczos_*, diagonalize_tridiagonal_ritz
 #include <ed/core/blas_lapack_wrapper.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 namespace ed::observables {
 
 namespace {
 
 constexpr double  kInvPi          = 0.3183098861837907;  // 1 / pi
-constexpr double  kPsiNormCutoff  = 1e-14;
 constexpr double  kPhiNormCutoff  = 1e-14;
 
 }  // namespace
@@ -109,13 +112,33 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
     // sectors with disparate E_min values via the F-shift.
     double E_min_sector = std::numeric_limits<double>::infinity();
 
-    // Cap the per-sample Ritz-state iteration the same way the legacy
-    // multi-sample kernel does: 50 is more than enough for the highest
-    // temperature shown in typical FTLM benchmarks.
-    const std::size_t max_ritz_states = std::min<std::size_t>(
-        opts.krylov_dim, 50);
-
     const auto start_time = std::chrono::high_resolution_clock::now();
+
+    // ---------------------------------------------------------------------
+    // Audit 2026-09: standard FTLM dynamical estimator (Jaklic & Prelovsek).
+    //
+    //   S(w) = (1/Z) sum_r sum_{i,j} e^{-beta eps_i} <r|psi_i> <psi_i|O^+|phi_j>
+    //                                 <phi_j|O|r>  L_eta(w - (eps~_j - eps_i)),
+    //   Z    = sum_r sum_i e^{-beta eps_i} |<r|psi_i>|^2,
+    //
+    // |psi_i> (eps_i) are the Ritz pairs of a Lanczos run on H_src started at
+    // |r>, |phi_j> (eps~_j) those of a run on H_dst started at O|r>. The
+    // estimator is exact in expectation over r for ANY block dimension.
+    //
+    // The previous body used, per source Ritz state, an inner Lanczos from
+    // O|psi_i> and the weight |<r|psi_i>|^2 -- O(M^3 D) instead of O(M^2 D),
+    // and BIASED: it drops the i != i' cross terms of O|r> = sum_i' O|psi_i'>
+    // <psi_i'|r>, which only vanish as D -> infinity. Measured on the N = 8
+    // Heisenberg ring at T = 1 against the dense Lehmann sum: peak 2x too high,
+    // unchanged from 4 to 128 samples.
+    //
+    // Both Lanczos runs keep their basis and are FULLY reorthogonalised: the
+    // Ritz vectors enter the overlap matrix explicitly, so ghost copies from
+    // a local-reorth run would double-count weight.
+    // ---------------------------------------------------------------------
+    std::vector<ComplexVector> basis_S_scratch;
+    const double eta    = opts.broadening;
+    const double eta_sq = eta * eta;
 
     for (std::size_t sample_idx = 0; sample_idx < opts.num_samples; ++sample_idx) {
         if (opts.verbose) {
@@ -124,75 +147,42 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
                       << "  (dim_src=" << dim_src
                       << ", dim_dst=" << dim_dst << ")\n";
         }
-
-        // -------------------------------------------------------------
-        // Outer Lanczos on H_src starting from |r> in dim_src.
-        // Matches the legacy multi-sample seed convention exactly so
-        // a single-sector FTLM call routed through this kernel is
-        // bit-identical (up to floating-point rounding) to the legacy
-        // path.
-        // -------------------------------------------------------------
         std::mt19937 sample_gen(opts.random_seed + sample_idx * 12345ULL);
         ComplexVector r_state = generateGaussianRandomVector(
-            static_cast<int>(dim_src), sample_gen);
+            static_cast<int>(dim_src), sample_gen);   // unit norm
 
-        std::vector<double>          alpha_H, beta_H;
-        // Wave C4: clear (preserves capacity) instead of fresh
-        // ``std::vector<ComplexVector> basis_H;`` per sample. The
-        // per-vector heap blocks survive across the inner clear()
-        // (clear() does not run ~ComplexVector() on the held
-        // elements; resize/push_back simply rewrites them).
+        // ---- outer Lanczos on H_src from |r> ----
+        std::vector<double> alpha_H, beta_H;
         basis_H_scratch.clear();
         const int H_iters = build_lanczos_tridiagonal_with_basis(
             H_src, r_state, static_cast<std::uint64_t>(dim_src),
             opts.krylov_dim, opts.tolerance,
-            opts.full_reorthogonalization, opts.reorth_frequency,
+            /*full_reorth=*/true, opts.reorth_frequency,
             alpha_H, beta_H, &basis_H_scratch);
         auto& basis_H = basis_H_scratch;
         if (H_iters == 0 || alpha_H.empty()) {
-            if (opts.verbose) {
-                std::cout << "  outer Lanczos failed; skipping sample\n";
-            }
+            if (opts.verbose) std::cout << "  outer Lanczos failed; skipping sample\n";
             continue;
         }
         const std::size_t m_H = alpha_H.size();
-
-        // Diagonalise the outer tridiag for Ritz energies + the
-        // (m_H x m_H) eigenvector matrix V in row-major form.
-        std::vector<double> ritz_values, dummy_weights, V_H;
-        diagonalize_tridiagonal_ritz(alpha_H, beta_H, ritz_values,
-                                     dummy_weights, &V_H);
+        if (basis_H.size() < m_H) {
+            if (opts.verbose) std::cout << "  outer basis short; skipping sample\n";
+            continue;
+        }
+        std::vector<double> ritz_values, dummy_weights, V_H;   // V_H[i*m_H + a]
+        diagonalize_tridiagonal_ritz(alpha_H, beta_H, ritz_values, dummy_weights, &V_H);
         if (ritz_values.empty()) {
-            if (opts.verbose) {
-                std::cout << "  outer diag failed; skipping sample\n";
-            }
+            if (opts.verbose) std::cout << "  outer diag failed; skipping sample\n";
             continue;
         }
 
-        // c_i = <psi_i | r> = V[i, 0]  (real because the tridiag is real)
-        std::vector<double> c_sq(m_H);
-        for (std::size_t i = 0; i < m_H; ++i) {
-            const double v0 = V_H[i * m_H + 0];
-            c_sq[i] = v0 * v0;
-        }
-
-        // Update the sector-wide E_min using *this* sample's Ritz
-        // spectrum. Subsequent samples share the same reference for
-        // the thermal exponent so all S_i contributions accumulate
-        // consistently in `R.S_real[T]` / `R.S_imag[T]`.
-        const double sample_E_min = *std::min_element(
-            ritz_values.begin(), ritz_values.end());
+        // ---- sector-wide E_min bookkeeping (rescale earlier accumulators) ----
+        const double sample_E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         if (sample_E_min < E_min_sector) {
-            // If E_min shifts downward mid-run we need to retroactively
-            // rescale the previously accumulated arrays by
-            // exp(-beta * (old_E_min - new_E_min)). This is the same
-            // trick combine_sector_thermodynamics uses to keep the
-            // partition-function exponents in float-safe range.
             if (std::isfinite(E_min_sector)) {
                 for (double T : temperatures) {
                     const double beta  = 1.0 / T;
-                    const double scale = std::exp(
-                        -beta * (E_min_sector - sample_E_min));
+                    const double scale = std::exp(-beta * (E_min_sector - sample_E_min));
                     for (auto& v : R.S_real[T]) v *= scale;
                     for (auto& v : R.S_imag[T]) v *= scale;
                     R.Z[T] *= scale;
@@ -201,165 +191,111 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
             E_min_sector = sample_E_min;
         }
 
-        // -------------------------------------------------------------
-        // Identify "significant" Ritz states. We look at the highest
-        // temperature to set the inclusiveness threshold, identical to
-        // the legacy kernel's significant_states logic.
-        // -------------------------------------------------------------
-        const double T_max     = *std::max_element(
-            temperatures.begin(), temperatures.end());
-        const double beta_min  = 1.0 / T_max;
-        std::vector<double> max_w(m_H);
-        double              max_Z = 0.0;
-        for (std::size_t i = 0; i < m_H; ++i) {
-            const double b = std::exp(-beta_min * (ritz_values[i] - sample_E_min));
-            max_w[i] = c_sq[i] * b;
-            max_Z   += max_w[i];
-        }
-        const double thr = 1e-10 * std::max(max_Z, 1e-300);
-        std::vector<std::size_t> significant;
-        significant.reserve(max_ritz_states);
-        for (std::size_t i = 0; i < std::min(m_H, max_ritz_states); ++i) {
-            if (max_w[i] >= thr || c_sq[i] > 1e-12) {
-                significant.push_back(i);
-            }
-        }
-
-        // -------------------------------------------------------------
-        // Precompute per-Ritz S_i(omega) in the TARGET sector via
-        // CrossSectorOrbitObservable (rectangular) + inner Lanczos
-        // on H_dst + Lehmann sum. We reuse the legacy two-overlap
-        // formulation so this implementation also supports a
-        // (future) extension to O_1 != O_2 by simply taking two
-        // user lambdas; for now O_apply is both phi_1 and phi_2
-        // and we exploit the autocorrelator simplification
-        // w_k = V_S[0,k]^2 * ||phi||^2 derived in the header.
-        // -------------------------------------------------------------
-        std::vector<std::vector<double>> S_i_real(significant.size());
-        std::vector<std::vector<double>> S_i_imag(significant.size());
-        std::vector<double>              E_i_arr(significant.size(), 0.0);
-        std::vector<double>              c_sq_arr(significant.size(), 0.0);
-        std::vector<unsigned char>       i_valid(significant.size(), 0u);
-
-        const double eta    = opts.broadening;
-        const double eta_sq = eta * eta;
-
-        for (std::size_t idx = 0; idx < significant.size(); ++idx) {
-            const std::size_t i = significant[idx];
-
-            // Reconstruct |psi_i> in dim_src orbit basis from the
-            // outer Lanczos basis: psi_i = sum_j V[i,j] * basis_H[j].
-            ComplexVector psi_src(dim_src, Complex(0.0, 0.0));
-            for (std::size_t j = 0; j < m_H; ++j) {
-                const double   c    = V_H[i * m_H + j];
-                const Complex  cc(c, 0.0);
-                cblas_zaxpy(static_cast<int>(dim_src), &cc,
-                            basis_H[j].data(), 1,
-                            psi_src.data(),     1);
-            }
-            const double psi_norm = cblas_dznrm2(
-                static_cast<int>(dim_src), psi_src.data(), 1);
-            if (psi_norm < kPsiNormCutoff) continue;
-            const Complex inv_psi(1.0 / psi_norm, 0.0);
-            cblas_zscal(static_cast<int>(dim_src), &inv_psi,
-                        psi_src.data(), 1);
-
-            // Rectangular scatter: phi = O |psi_i> in dim_dst.
-            ComplexVector phi_dst(dim_dst, Complex(0.0, 0.0));
-            O_apply(psi_src.data(), phi_dst.data(),
-                    static_cast<int>(dim_dst));
-            const double phi_norm = cblas_dznrm2(
-                static_cast<int>(dim_dst), phi_dst.data(), 1);
-            if (phi_norm < kPhiNormCutoff) continue;
-            const Complex inv_phi(1.0 / phi_norm, 0.0);
-            cblas_zscal(static_cast<int>(dim_dst), &inv_phi,
-                        phi_dst.data(), 1);
-
-            // Inner Lanczos on H_dst from phi/||phi||, keep basis only
-            // so we can read off V_S[0,k] after diagonalisation; we
-            // can free the basis immediately because the
-            // autocorrelator weights w_k = V_S[0,k]^2 * ||phi||^2 do
-            // not need the basis vectors themselves.
-            std::vector<double>        alpha_S, beta_S;
-            std::vector<ComplexVector> basis_S;
-            build_lanczos_tridiagonal_with_basis(
-                H_dst, phi_dst, static_cast<std::uint64_t>(dim_dst),
-                opts.krylov_dim, opts.tolerance,
-                opts.full_reorthogonalization, opts.reorth_frequency,
-                alpha_S, beta_S, &basis_S);
-            basis_S.clear();
-            basis_S.shrink_to_fit();
-            if (alpha_S.empty()) continue;
-
-            std::vector<double> ritz_S, dummy_S, V_S;
-            diagonalize_tridiagonal_ritz(alpha_S, beta_S, ritz_S,
-                                         dummy_S, &V_S);
-            if (ritz_S.empty()) continue;
-            const std::size_t m_S = ritz_S.size();
-
-            // Build the Lehmann poles for THIS source Ritz state. The
-            // resolvent reference is E_i (NOT E_gs), so the poles sit
-            // at omega = lambda_k - E_i. This is the genuine finite-T
-            // convention; the legacy kernel uses E_gs as a global
-            // reference, but for finite-T cross-correlators that
-            // amounts to a constant omega shift -- we choose the
-            // physically correct E_i shift so callers do not have to
-            // re-zero the omega axis.
-            const double E_i      = ritz_values[i];
-            const double w_const  = phi_norm * phi_norm;  // ||phi||^2
-            std::vector<double> w_arr(m_S);
-            std::vector<double> E_arr(m_S);
-            for (std::size_t k = 0; k < m_S; ++k) {
-                const double v0 = V_S[k * m_S + 0];
-                w_arr[k] = w_const * v0 * v0;
-                E_arr[k] = ritz_S[k] - E_i;
-            }
-            std::vector<double>& S_i = S_i_real[idx];
-            std::vector<double>& S_q = S_i_imag[idx];
-            S_i.assign(num_omega, 0.0);
-            S_q.assign(num_omega, 0.0);
-            #pragma omp parallel for schedule(static)
-            for (std::int64_t iw = 0;
-                 iw < static_cast<std::int64_t>(num_omega); ++iw) {
-                const double omega = omega_grid[iw];
-                double sum_r = 0.0;
-                for (std::size_t k = 0; k < m_S; ++k) {
-                    const double d   = omega - E_arr[k];
-                    const double lor = (eta * kInvPi) / (d * d + eta_sq);
-                    sum_r += w_arr[k] * lor;
-                }
-                S_i[iw] = sum_r;
-                S_q[iw] = 0.0;  // real-only autocorrelator (O_1 = O_2)
-            }
-            E_i_arr[idx]  = E_i;
-            c_sq_arr[idx] = c_sq[i];
-            i_valid[idx]  = 1u;
-        }
-
-        // -------------------------------------------------------------
-        // Per-temperature accumulation. Multiply each S_i by
-        // exp(-beta * (E_i - E_min_sector)) * c_i^2 and add to the
-        // sector accumulators. Z gets the same Boltzmann weight.
-        // The final dim_src multiplication happens once at the very
-        // end -- it would be applied to BOTH numerator and
-        // denominator and cancel, but downstream sector combination
-        // needs the dim_src-weighted version (see header).
-        // -------------------------------------------------------------
+        // ---- Z contribution: sum_i e^{-beta dE_i} c_i^2, c_i = <r|psi_i> = V_H[i,0] ----
+        std::vector<double> c_i(m_H);
+        for (std::size_t i = 0; i < m_H; ++i) c_i[i] = V_H[i * m_H + 0];
         for (double T : temperatures) {
             const double beta = 1.0 / T;
-            for (std::size_t idx = 0; idx < significant.size(); ++idx) {
-                if (!i_valid[idx]) continue;
-                const double dE = E_i_arr[idx] - E_min_sector;
-                const double wt = c_sq_arr[idx] * std::exp(-beta * dE);
-                if (wt < 1e-300) continue;
-                R.Z[T] += wt;
-                const auto& Si = S_i_real[idx];
-                const auto& Sq = S_i_imag[idx];
-                auto&       Rr = R.S_real[T];
-                auto&       Rq = R.S_imag[T];
+            double z = 0.0;
+            for (std::size_t i = 0; i < m_H; ++i)
+                z += c_i[i] * c_i[i] * std::exp(-beta * (ritz_values[i] - E_min_sector));
+            R.Z[T] += z;
+        }
+
+        // ---- phi0 = O|r> in the target sector ----
+        ComplexVector phi0(dim_dst, Complex(0.0, 0.0));
+        O_apply(r_state.data(), phi0.data(), static_cast<int>(dim_dst));
+        const double nphi = cblas_dznrm2(static_cast<int>(dim_dst), phi0.data(), 1);
+        if (nphi < kPhiNormCutoff) {          // O annihilates |r>: no spectral weight
+            R.samples_done++;
+            continue;
+        }
+        {
+            const Complex inv(1.0 / nphi, 0.0);
+            cblas_zscal(static_cast<int>(dim_dst), &inv, phi0.data(), 1);
+        }
+
+        // ---- inner Lanczos on H_dst from O|r>/||O r|| ----
+        std::vector<double> alpha_S, beta_S;
+        basis_S_scratch.clear();
+        build_lanczos_tridiagonal_with_basis(
+            H_dst, phi0, static_cast<std::uint64_t>(dim_dst),
+            opts.krylov_dim, opts.tolerance,
+            /*full_reorth=*/true, opts.reorth_frequency,
+            alpha_S, beta_S, &basis_S_scratch);
+        auto& basis_S = basis_S_scratch;
+        if (alpha_S.empty() || basis_S.size() < alpha_S.size()) {
+            R.samples_done++;
+            continue;
+        }
+        const std::size_t m_S = alpha_S.size();
+        std::vector<double> ritz_S, dummy_S, V_S;              // V_S[j*m_S + b]
+        diagonalize_tridiagonal_ritz(alpha_S, beta_S, ritz_S, dummy_S, &V_S);
+        if (ritz_S.empty()) {
+            R.samples_done++;
+            continue;
+        }
+
+        // ---- W[a,b] = <O v_a | u_b>  (m_H x m_S), one zgemm ----
+        //      A = [O v_0 ... O v_{m_H-1}] (dim_dst x m_H), B = [u_0 ... u_{m_S-1}]
+        std::vector<Complex> A(static_cast<std::size_t>(dim_dst) * m_H);
+        std::vector<Complex> B(static_cast<std::size_t>(dim_dst) * m_S);
+        for (std::size_t a = 0; a < m_H; ++a)
+            O_apply(basis_H[a].data(), A.data() + a * dim_dst, static_cast<int>(dim_dst));
+        for (std::size_t b = 0; b < m_S; ++b)
+            std::copy(basis_S[b].begin(), basis_S[b].begin() + static_cast<std::ptrdiff_t>(dim_dst),
+                      B.begin() + static_cast<std::ptrdiff_t>(b * dim_dst));
+        std::vector<Complex> W(m_H * m_S);                      // column-major: W[a + b*m_H]
+        {
+            const Complex one(1.0, 0.0), zero(0.0, 0.0);
+            cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
+                        static_cast<int>(m_H), static_cast<int>(m_S), static_cast<int>(dim_dst),
+                        &one, A.data(), static_cast<int>(dim_dst),
+                        B.data(), static_cast<int>(dim_dst),
+                        &zero, W.data(), static_cast<int>(m_H));
+        }
+        std::vector<Complex>().swap(A);
+        std::vector<Complex>().swap(B);
+
+        // ---- Obar[i,j] = sum_a V_H[i,a] W[a,b] V_S[j,b] ----
+        std::vector<Complex> Tm(m_H * m_S, Complex(0.0, 0.0));  // Tm[i*m_S + b] = sum_a V_H[i,a] W[a,b]
+        for (std::size_t i = 0; i < m_H; ++i)
+            for (std::size_t b = 0; b < m_S; ++b) {
+                Complex acc(0.0, 0.0);
+                for (std::size_t a = 0; a < m_H; ++a) acc += V_H[i * m_H + a] * W[a + b * m_H];
+                Tm[i * m_S + b] = acc;
+            }
+        // ---- per-source-Ritz spectral rows s_i(w) = sum_j Re/Im(w_ij) L_eta(w - E_ij) ----
+        //      w_ij = c_i * Obar[i,j] * ||O r|| * V_S[j,0]
+        std::vector<double> s_re(m_H * num_omega, 0.0), s_im(m_H * num_omega, 0.0);
+        #pragma omp parallel for schedule(static)
+        for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(m_H); ++ii) {
+            const std::size_t i = static_cast<std::size_t>(ii);
+            for (std::size_t j = 0; j < m_S; ++j) {
+                Complex obar(0.0, 0.0);
+                for (std::size_t b = 0; b < m_S; ++b) obar += Tm[i * m_S + b] * V_S[j * m_S + b];
+                const Complex w_ij = c_i[i] * obar * (nphi * V_S[j * m_S + 0]);
+                if (std::abs(w_ij) < 1e-300) continue;
+                const double E_ij = ritz_S[j] - ritz_values[i];
                 for (std::size_t iw = 0; iw < num_omega; ++iw) {
-                    Rr[iw] += wt * Si[iw];
-                    Rq[iw] += wt * Sq[iw];
+                    const double d   = omega_grid[iw] - E_ij;
+                    const double lor = (eta * kInvPi) / (d * d + eta_sq);
+                    s_re[i * num_omega + iw] += w_ij.real() * lor;
+                    s_im[i * num_omega + iw] += w_ij.imag() * lor;
+                }
+            }
+        }
+        // ---- thermal accumulation ----
+        for (double T : temperatures) {
+            const double beta = 1.0 / T;
+            auto& Rr = R.S_real[T];
+            auto& Rq = R.S_imag[T];
+            for (std::size_t i = 0; i < m_H; ++i) {
+                const double wt = std::exp(-beta * (ritz_values[i] - E_min_sector));
+                if (wt < 1e-300) continue;
+                for (std::size_t iw = 0; iw < num_omega; ++iw) {
+                    Rr[iw] += wt * s_re[i * num_omega + iw];
+                    Rq[iw] += wt * s_im[i * num_omega + iw];
                 }
             }
         }

@@ -652,6 +652,26 @@ GroundStateResult solve_on(Backend& be,
             evals = ed::krylov::detail::solve_tridiag(
                 kres.alpha, kres.beta, kres.alpha.size());
         }
+        if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
+            // Audit 2026-09: drop Lanczos ghosts (Cullum-Willoughby) so a
+            // window never reports a converged level twice; the tridiag
+            // eigenvector columns are repacked to match.
+            const std::size_t m = kres.alpha.size();
+            const auto keep = ed::krylov::detail::cullum_willoughby_keep(
+                kres.alpha, kres.beta, m, evals);
+            if (keep.size() < evals.size()) {
+                std::vector<double> ev2; ev2.reserve(keep.size());
+                std::vector<double> z2(m * keep.size());
+                for (std::size_t c = 0; c < keep.size(); ++c) {
+                    ev2.push_back(evals[keep[c]]);
+                    std::copy(evec_coeffs.begin() + static_cast<std::ptrdiff_t>(keep[c] * m),
+                              evec_coeffs.begin() + static_cast<std::ptrdiff_t>((keep[c] + 1) * m),
+                              z2.begin() + static_cast<std::ptrdiff_t>(c * m));
+                }
+                evals = std::move(ev2);
+                evec_coeffs = std::move(z2);
+            }
+        }
         const std::size_t n_keep =
             std::min<std::size_t>(opts.num_eigs, evals.size());
         // GAP-10 v2 (2026-07-17): the first fix TRUNCATED to the certified
@@ -1037,10 +1057,19 @@ GroundStateResult solve_on(Backend& be,
             // full matvecs. Symmetry lanes (and any operator without direct
             // support) return false and fall back to the Hv column build, which
             // stays SEQUENTIAL because the CPU matvec is not reentrant.
+            std::vector<std::vector<Complex>> fd_vecs;
             full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
                                  opts.output_dir,
                                  opts.compute_vectors,
-                                 /*op_for_dense=*/&H);
+                                 /*op_for_dense=*/&H,
+                                 opts.compute_vectors ? &fd_vecs : nullptr);
+            if (opts.compute_vectors && !fd_vecs.empty()) {
+                // Audit 2026-09: the dense lane used to persist vectors to
+                // HDF5 only; with output_dir empty the caller got nothing.
+                EigenvectorRef evref;
+                evref.host = std::move(fd_vecs);
+                R.eigenvectors = std::move(evref);
+            }
             if (!opts.output_dir.empty()
                     && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
                 R.hdf5_path = opts.output_dir + "/ed_results.h5";
@@ -1589,10 +1618,27 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             // Closes the gap where mTPQ via qed.thermal raised
             // ``RuntimeError: solver returned no thermodynamic data``.
             if (!R.thermo.temperatures.empty()) {
-                // Pass the (sub)space dimension so the aggregator can
-                // reconstruct ABSOLUTE entropy / free energy (ln(D)
-                // baseline). This is what makes per-sector F_s a valid
-                // Boltzmann weight for U(1)/Sz + spatial recombination.
+                // Audit 2026-09: say so when the trajectory never reached the
+                // coldest requested temperature -- the aggregator otherwise
+                // extrapolates silently (measured: E(T=0.2) off by 12% at
+                // N = 20 with a 100-step cap).
+                double beta_reached = 0.0;
+                for (const auto& tr : kres.sample_inv_temps)
+                    for (double b : tr) beta_reached = std::max(beta_reached, b);
+                double beta_wanted = 0.0;
+                for (double T : R.thermo.temperatures)
+                    if (T > 0.0) beta_wanted = std::max(beta_wanted, 1.0 / T);
+                if (beta_wanted > 0.0 && beta_reached < 0.999 * beta_wanted) {
+                    std::cerr << "[mTPQ] WARNING: the trajectory reached beta = "
+                              << beta_reached << " but the temperature grid asks for beta = "
+                              << beta_wanted << " (T_min = " << 1.0 / beta_wanted
+                              << "); results below T = " << 1.0 / std::max(beta_reached, 1e-300)
+                              << " are extrapolated. Raise max_iterations / leave krylov_dim "
+                                 "unset so the step count is sized automatically." << std::endl;
+                    R.backend.notes.emplace_back(
+                        "mtpq_beta_reached", std::to_string(beta_reached) + " < wanted "
+                        + std::to_string(beta_wanted));
+                }
                 ThermodynamicData td = ed::thermal::compute_tpq_thermo_from_trajectories(
                     kres.sample_inv_temps, kres.sample_energies,
                     kres.sample_variances, R.thermo.temperatures,
@@ -2405,7 +2451,46 @@ bool op_is_su2_symmetric(const ::Operator& op) {
     ed::matvec::TermStorage::classify_route(
         soa, op.transform_data_, op.three_body_data_,
         [](const std::complex<double>& c) { return c; });
-    return ed::symmetry::hamiltonian_is_su2_symmetric(soa);
+    if (ed::symmetry::hamiltonian_is_su2_symmetric(soa)) return true;
+    // Audit 2026-09: numerical fallback. The term-level test only recognises
+    // isotropic two-body exchange, so SU(2)-invariant three-body terms (the
+    // scalar chirality S_i.(S_j x S_k) of chiral spin liquids), ring exchange
+    // and other rotationally invariant products were reported as non-invariant
+    // and total_spin= refused. Test [H, S^-_tot] v = 0 on two random vectors
+    // of the full 2^N space (four matvecs each; exact up to round-off). Only
+    // attempted when the operator acts on the full space and N <= 24.
+    const std::uint64_t n = op.getNumBits();
+    if (n == 0 || n > 24) return false;
+    const std::size_t dim = static_cast<std::size_t>(1ULL) << n;
+    if (op.three_body_data_.empty()) return false;   // two-body case: term test is exact
+    try {
+        // The caller may hand us a fixed-Sz / sector operator; the commutator
+        // test needs the full 2^N action, so re-host the term list.
+        ::Operator full(n, op.getSpin());
+        full.copyTermsFrom(op);
+        ::Operator sminus(n, op.getSpin());
+        for (std::uint64_t i = 0; i < n; ++i)
+            sminus.addOneBodyTerm(/*S-=*/1, i, std::complex<double>(1.0, 0.0));
+        std::mt19937_64 gen(0x5152ULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        std::vector<std::complex<double>> v(dim), hv(dim), shv(dim), sv(dim), hsv(dim);
+        for (int trial = 0; trial < 2; ++trial) {
+            for (auto& z : v) z = std::complex<double>(nd(gen), nd(gen));
+            full.apply(v.data(), hv.data(), dim);     // H v
+            sminus.apply(hv.data(), shv.data(), dim); // S- H v
+            sminus.apply(v.data(), sv.data(), dim);   // S- v
+            full.apply(sv.data(), hsv.data(), dim);   // H S- v
+            double num = 0.0, den = 0.0;
+            for (std::size_t k = 0; k < dim; ++k) {
+                num += std::norm(shv[k] - hsv[k]);
+                den += std::norm(shv[k]) + std::norm(hsv[k]);
+            }
+            if (!(std::sqrt(num) <= 1e-9 * (std::sqrt(den) + 1.0))) return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool resolve_su2_engagement(const ::Operator& base,

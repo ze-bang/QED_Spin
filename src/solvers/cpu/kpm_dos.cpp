@@ -99,41 +99,38 @@ void accumulate_dos_moments_one_vector(
         mu_acc[0] += z.real();
     }
 
-    auto apply_Hsc = [&](const ComplexVector& in, ComplexVector& out) {
-        // out = (H |in⟩ - b |in⟩) / a
-        H(in.data(), out.data(), d);
-        const double inv_a = 1.0 / a;
-        const Complex c_neg_boa(-b / a, 0.0);
-        // out = (1/a) * out + (-b/a) * in
-        const Complex c_inv_a(inv_a, 0.0);
-        cblas_zscal(d, &c_inv_a, out.data(), 1);
-        cblas_zaxpy(d, &c_neg_boa, in.data(), 1, out.data(), 1);
+    // Audit 2026-09: the recurrence used six threaded OpenBLAS BLAS-1 calls
+    // per moment (zscal, zaxpy, zcopy, zscal, zaxpy, zdotc) on top of the
+    // OpenMP matvec. OpenBLAS's pthread pool spins between calls and fights
+    // the OpenMP team: measured 15 ms per moment at dim 1.8e5 against ~1 ms
+    // for the matvec itself (49 s for a 200-moment, 16-vector run at N=20).
+    // One fused OpenMP pass per moment now forms
+    //   v_next = c1 * H v_curr + c0 * v_curr - v_prev,   mu_k += Re <r|v_next>
+    // (c1 = 2/a, c0 = -2b/a; first step c1 = 1/a, c0 = -b/a, no v_prev).
+    const double inv_a = 1.0 / a;
+    auto step = [&](double c1, double c0, bool subtract_prev, int k) {
+        H(v_curr.data(), Hv.data(), d);
+        const Complex* __restrict__ hv = Hv.data();
+        const Complex* __restrict__ vc = v_curr.data();
+        const Complex* __restrict__ vp = v_prev.data();
+        const Complex* __restrict__ rr = r_vec.data();
+        Complex* __restrict__ vn = v_next.data();
+        double zr = 0.0, zi = 0.0;
+        #pragma omp parallel for reduction(+:zr,zi) schedule(static) if(d > 8192)
+        for (int i = 0; i < d; ++i) {
+            Complex x = c1 * hv[i] + c0 * vc[i];
+            if (subtract_prev) x -= vp[i];
+            vn[i] = x;
+            const Complex t = std::conj(rr[i]) * x;
+            zr += t.real(); zi += t.imag();
+        }
+        (void)zi;
+        mu_acc[k] += zr;
+        std::swap(v_prev, v_curr);
+        std::swap(v_curr, v_next);
     };
-
-    if (M > 1) {
-        apply_Hsc(v_curr, v_next);  // v_1 = H_sc |v_0⟩
-        Complex z;
-        cblas_zdotc_sub(d, r_vec.data(), 1, v_next.data(), 1, &z);
-        mu_acc[1] += z.real();
-        std::swap(v_prev, v_curr);
-        std::swap(v_curr, v_next);
-    }
-
-    for (int k = 2; k < M; ++k) {
-        // v_next = 2 H_sc v_curr - v_prev
-        apply_Hsc(v_curr, Hv);
-        const Complex c2(2.0, 0.0), c_m1(-1.0, 0.0);
-        cblas_zcopy(d, Hv.data(), 1, v_next.data(), 1);
-        cblas_zscal(d, &c2, v_next.data(), 1);
-        cblas_zaxpy(d, &c_m1, v_prev.data(), 1, v_next.data(), 1);
-
-        Complex z;
-        cblas_zdotc_sub(d, r_vec.data(), 1, v_next.data(), 1, &z);
-        mu_acc[k] += z.real();
-
-        std::swap(v_prev, v_curr);
-        std::swap(v_curr, v_next);
-    }
+    if (M > 1) step(inv_a, -b * inv_a, /*subtract_prev=*/false, 1);   // v_1 = H_sc v_0
+    for (int k = 2; k < M; ++k) step(2.0 * inv_a, -2.0 * b * inv_a, /*subtract_prev=*/true, k);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,9 +296,13 @@ KPMDOSResult compute_kpm_dos(
         e_min = params.e_min_override;
         e_max = params.e_max_override;
     } else {
+        // Audit 2026-09: the extreme Ritz values converge without a kept
+        // basis; requesting full reorthogonalisation here only produced a
+        // "silently skipped" warning (the legacy body has no basis to
+        // reorthogonalise against) and no reorthogonalisation at all.
         estimate_spectral_bounds(
             H, dim, params.spectral_bounds_krylov,
-            params.full_reorthogonalization, params.reorth_frequency,
+            /*full_reorth=*/false, params.reorth_frequency,
             params.tolerance, gen, e_min, e_max);
     }
 

@@ -220,10 +220,15 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 // O(dim*nnz)) of the `H` column build, which dominates for large sparse H. Pass
 // the LinearOperator being solved; nullptr keeps the matvec column build (used
 // by distributed / GPU / wrapped-matvec callers that have no operator handle).
+// ``eigenvectors_out`` (optional, audit 2026-09): receives the requested
+// eigenvectors in memory (one std::vector<Complex> per eigenvalue, in the
+// operator's basis) when ``compute_eigenvectors`` is set -- independent of
+// whether ``dir`` persists them to HDF5.
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir = "",
                        bool compute_eigenvectors = true,
-                       const ed::matvec::MatVecOperator* op_for_dense = nullptr);
+                       const ed::matvec::MatVecOperator* op_for_dense = nullptr,
+                       std::vector<std::vector<Complex>>* eigenvectors_out = nullptr);
 
 // Krylov-Schur algorithm implementation
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 

@@ -207,6 +207,19 @@ def ed_result_from_gs_result(
     out.eigenvalues = list(gs_result.eigenvalues)
     out.eigenvectors_computed = bool(params.compute_eigenvectors)
     out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
+    # Audit 2026-09: the orchestrator returns host eigenvectors in
+    # GroundStateResult.eigenvectors.host; they were dropped here, so a
+    # compute_eigenvectors=True call with output_dir="" paid for the vectors
+    # and returned nothing. Expose them as numpy arrays (one per eigenvalue,
+    # in the operator's own basis: the fixed-Sz block when sz= was given).
+    _ev = getattr(gs_result, "eigenvectors", None)
+    _host = getattr(_ev, "host", None) if _ev is not None else None
+    if _host:
+        try:
+            import numpy as _np
+            out.eigenvectors = [_np.asarray(v, dtype=complex) for v in _host]
+        except Exception:  # pragma: no cover - defensive
+            out.eigenvectors = [list(v) for v in _host]
     _eps = getattr(gs_result, "eigenvalues_per_sector", None)
     if _eps:
         out.eigenvalues_per_sector = [list(s) for s in _eps]

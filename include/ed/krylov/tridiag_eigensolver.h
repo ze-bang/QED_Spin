@@ -54,6 +54,53 @@ inline std::vector<double> solve_tridiag(const std::vector<double>& alpha,
     return evals;
 }
 
+/// Cullum-Willoughby ghost test (audit 2026-09). ``evals`` are the sorted
+/// Ritz values of the m x m tridiagonal (alpha, beta[1..m-1]). Returns the
+/// indices (into ``evals``) of the Ritz values to KEEP: multiple copies of a
+/// converged level collapse to their first index, and a SIMPLE Ritz value
+/// that is also an eigenvalue of the (m-1) x (m-1) tridiagonal with the first
+/// row and column deleted is spurious and dropped. Local reorthogonalisation
+/// lets converged levels re-emerge as such ghosts, and an eigenvalue-change
+/// convergence test happily converges on them (measured: E[0] == E[1]
+/// returned on a non-degenerate chiral model). Genuine degeneracies of H are
+/// not resolved by single-vector Lanczos either way (use block Lanczos).
+inline std::vector<std::size_t>
+cullum_willoughby_keep(const std::vector<double>& alpha,
+                       const std::vector<double>& beta,
+                       std::size_t m,
+                       const std::vector<double>& evals) {
+    std::vector<std::size_t> keep;
+    keep.reserve(evals.size());
+    if (m < 3 || evals.size() != m) {
+        for (std::size_t i = 0; i < evals.size(); ++i) keep.push_back(i);
+        return keep;
+    }
+    // Deleted tridiagonal: alpha[1..m-1], off-diagonals beta[2..m-1]; the
+    // convention T'(i,i+1) = beta'[i+1] is met by the shifted view beta'[k] = beta[k+1].
+    std::vector<double> a2(alpha.begin() + 1, alpha.begin() + static_cast<std::ptrdiff_t>(m));
+    std::vector<double> b2(beta.begin() + 1, beta.end());
+    const std::vector<double> ghosts = solve_tridiag(a2, b2, m - 1);
+    double scale = 0.0;
+    for (std::size_t i = 0; i < m; ++i) scale = std::max(scale, std::abs(alpha[i]));
+    for (double b : beta) scale = std::max(scale, std::abs(b));
+    const double tol = 1e-10 * std::max(1.0, scale);
+    std::size_t i = 0;
+    while (i < m) {
+        std::size_t j = i + 1;
+        while (j < m && std::abs(evals[j] - evals[i]) <= tol) ++j;
+        if (j - i > 1) {
+            keep.push_back(i);
+        } else {
+            const auto it = std::lower_bound(ghosts.begin(), ghosts.end(), evals[i] - tol);
+            const bool spurious = (it != ghosts.end() && std::abs(*it - evals[i]) <= tol);
+            if (!spurious) keep.push_back(i);
+        }
+        i = j;
+    }
+    if (keep.empty()) for (std::size_t k = 0; k < m; ++k) keep.push_back(k);
+    return keep;
+}
+
 /// Eigenvalues + first-component weights `|<e_0, y_k>|^2` (the FTLM / TPQ
 /// Jacobi-and-Pratt trace-estimator coefficient).
 inline void solve_tridiag_with_weights(const std::vector<double>& alpha,

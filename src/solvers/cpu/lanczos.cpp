@@ -1024,6 +1024,47 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 // periodic eigenvalue convergence on the Lanczos tridiagonal every 10 iters,
 // breakdown on beta < tol. Eigenvalues only -- no basis I/O.
 // =============================================================================
+// Cullum-Willoughby ghost filter on the ascending Ritz values ``theta`` of the
+// m x m Lanczos tridiagonal (alpha, beta[1..m-1]). Returns the ascending list
+// of distinct, non-spurious Ritz values: multiple copies collapse to one and a
+// simple Ritz value that coincides with an eigenvalue of the (m-1) x (m-1)
+// tridiagonal obtained by deleting the first row and column is dropped.
+static std::vector<double>
+cullum_willoughby_filter(const std::vector<double>& theta,
+                         const std::vector<double>& alpha,
+                         const std::vector<double>& beta,
+                         uint64_t m) {
+    if (m < 3) return theta;
+    std::vector<double> d2(alpha.begin() + 1, alpha.begin() + static_cast<std::ptrdiff_t>(m));
+    std::vector<double> e2(m - 2);
+    for (uint64_t ii = 0; ii + 2 < m; ++ii) e2[ii] = beta[ii + 2];
+    const int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m - 1,
+                                    d2.data(), e2.data(), nullptr, m - 1);
+    if (info != 0) return theta;
+    double scale = 0.0;
+    for (double a : alpha) scale = std::max(scale, std::abs(a));
+    for (double b : beta) scale = std::max(scale, std::abs(b));
+    const double tol_eq = 1e-10 * std::max(1.0, scale);
+    std::vector<double> out;
+    out.reserve(theta.size());
+    uint64_t i = 0;
+    while (i < theta.size()) {
+        uint64_t jj = i + 1;
+        while (jj < theta.size() && std::abs(theta[jj] - theta[i]) <= tol_eq) ++jj;
+        const bool multiple = (jj - i) > 1;
+        if (multiple) {
+            out.push_back(theta[i]);            // converged level, copies collapsed
+        } else {
+            // simple: spurious iff it is an eigenvalue of the deleted tridiagonal
+            const auto it = std::lower_bound(d2.begin(), d2.end(), theta[i] - tol_eq);
+            const bool spurious = (it != d2.end() && std::abs(*it - theta[i]) <= tol_eq);
+            if (!spurious) out.push_back(theta[i]);
+        }
+        i = jj;
+    }
+    return out.empty() ? theta : out;
+}
+
 void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t N, uint64_t max_iter, uint64_t exct,
                   double tol, std::vector<double>& eigenvalues,
@@ -1234,9 +1275,22 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                                             diag.data(), offd.data(), nullptr,
                                             m_cur);
             if (info == 0) {
+                // Audit 2026-09: ghost filter for eigenvalue WINDOWS. With
+                // local reorthogonalisation a converged eigenvalue re-emerges
+                // as extra copies ("ghosts"), and the eigenvalue-change test
+                // happily converges on them: the CLI returned E[0] == E[1] on
+                // a non-degenerate chiral model. Apply the Cullum-Willoughby
+                // test (Lanczos Algorithms for Large Symmetric Eigenvalue
+                // Computations, ch. 4): a SIMPLE Ritz value of T that is also
+                // an eigenvalue of T with its first row/column deleted is
+                // spurious; multiple Ritz values are one converged level.
+                // Only for exct > 1 (the extreme pair is never a ghost).
+                if (exct > 1 && m_cur >= 3) {
+                    diag = cullum_willoughby_filter(diag, alpha, beta, m_cur);
+                }
                 const uint64_t n_check = std::min<uint64_t>(exct, m_cur);
                 std::vector<double> current(diag.begin(),
-                                            diag.begin() + n_check);
+                                            diag.begin() + std::min<uint64_t>(n_check, diag.size()));
                 if (!prev_eigenvalues.empty()
                     && prev_eigenvalues.size() >= n_check) {
                     double max_rel_change = 0.0;
@@ -1304,8 +1358,13 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   << info << ")" << std::endl;
         return;
     }
+    // Ghost filter (see the convergence check above). The Ritz bounds /
+    // vectors requested through ``extras`` are computed for the UNFILTERED
+    // tridiagonal below and then aligned to the filtered eigenvalue list.
+    std::vector<double> unfiltered = diag;
+    if (exct > 1 && m >= 3) diag = cullum_willoughby_filter(diag, alpha, beta, m);
 
-    const uint64_t n_eig = std::min<uint64_t>(exct, m);
+    const uint64_t n_eig = std::min<uint64_t>(exct, static_cast<uint64_t>(diag.size()));
     eigenvalues.assign(diag.begin(), diag.begin() + n_eig);
     if (extras) {
         extras->alpha     = alpha;
@@ -1319,9 +1378,19 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
             const int info2 = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, d2.data(),
                                              o2.data(), z.data(), m);
             if (info2 == 0) {
-                extras->ritz_vectors.assign(z.begin(), z.begin() + m * n_eig);
-                for (uint64_t i = 0; i < n_eig; ++i)
-                    extras->ritz_bounds.push_back(std::abs(norm) * std::abs(z[(m - 1) + i * m]));
+                // Map each kept (filtered) eigenvalue back to its column of the
+                // unfiltered eigendecomposition (first match by value).
+                extras->ritz_vectors.assign(m * n_eig, 0.0);
+                uint64_t start = 0;
+                for (uint64_t i = 0; i < n_eig; ++i) {
+                    uint64_t col = start;
+                    while (col + 1 < m && std::abs(unfiltered[col] - eigenvalues[i])
+                           > 1e-12 * (1.0 + std::abs(eigenvalues[i]))) ++col;
+                    start = col + 1;
+                    std::copy(z.begin() + col * m, z.begin() + (col + 1) * m,
+                              extras->ritz_vectors.begin() + i * m);
+                    extras->ritz_bounds.push_back(std::abs(norm) * std::abs(z[(m - 1) + col * m]));
+                }
             }
         }
     }
@@ -1399,8 +1468,10 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir,
                        bool compute_eigenvectors,
-                       const ed::matvec::MatVecOperator* op_for_dense) {
+                       const ed::matvec::MatVecOperator* op_for_dense,
+                       std::vector<std::vector<Complex>>* eigenvectors_out) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
+    if (eigenvectors_out) eigenvectors_out->clear();
 
     // Phase 6.1: dim-aware OMP+BLAS thread cap. Full diag is BLAS-3 dense
     // LAPACK -- the cap rarely hurts (LAPACK already saturates) but
@@ -1537,11 +1608,22 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // via `omp parallel for if(ED_SYM_SECTOR_PARALLEL)`), keep the eigensolve
         // single-threaded -- otherwise N_sectors x P_cores oversubscribes. A
         // standalone FULL solve takes all cores.
-        int dense_threads = 1 << 20;
+        // Audit 2026-09: "all cores" is wrong for small blocks. OpenBLAS's
+        // dsytrd/zhetrd is a chain of O(N) BLAS-2 calls, and every one of them
+        // fans out to the whole (spinning) thread pool: measured 0.13 s .. 10 s
+        // for the SAME dim-924 block depending on what else was running, vs
+        // ~40 ms single-threaded. Scale the team with the block: one thread
+        // per ~1024 rows, all cores from ~32k rows on. ED_FULLDIAG_THREADS
+        // overrides.
+        int dense_threads = static_cast<int>(std::max<uint64_t>(1, N / 1024));
+        if (const char* e = std::getenv("ED_FULLDIAG_THREADS")) {
+            const int v = std::atoi(e);
+            if (v > 0) dense_threads = v;
+        }
 #ifdef _OPENMP
         if (omp_in_parallel()) dense_threads = 1;
 #endif
-        ed::parallel::ThreadBudgetScope dense_solve_budget(dense_threads);
+        ed::parallel::ThreadBudgetScope dense_solve_budget(dense_threads, dense_threads);
 
         // Allocate array for eigenvalues
         std::vector<double> evals(N);
@@ -1580,13 +1662,14 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
                 eigenvalues.resize(m_found);
                 for (lapack_int i = 0; i < m_found; ++i) eigenvalues[i] = evals[i];
-                if (compute_eigenvectors && !dir.empty()) {
+                if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
                     std::vector<std::vector<Complex>> eigenvector_list(m_found);
                     for (lapack_int i = 0; i < m_found; ++i) {
                         eigenvector_list[i].resize(N);
                         for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(revecs[static_cast<size_t>(i) * N + j], 0.0);
                     }
-                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial, real)");
+                    if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial, real)");
+                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
                 } else if (!dir.empty()) {
                     HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial, real)");
                 }
@@ -1597,13 +1680,14 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 std::cout << "Eigenvalue decomposition completed (divide-and-conquer, real)" << std::endl;
                 eigenvalues.resize(actual_num_eigs);
                 for (size_t i = 0; i < actual_num_eigs; ++i) eigenvalues[i] = evals[i];
-                if (compute_eigenvectors && !dir.empty()) {
+                if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
                     std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
                     for (size_t i = 0; i < actual_num_eigs; ++i) {
                         eigenvector_list[i].resize(N);
                         for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(rdense[i * N + j], 0.0);
                     }
-                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (real)");
+                    if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (real)");
+                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
                 } else if (!dir.empty()) {
                     HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (real)");
                 }
@@ -1652,7 +1736,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             }
             
             // Save results using unified HDF5 function
-            if (compute_eigenvectors && !dir.empty()) {
+            if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
                 std::cout << "Saving " << m_found << " eigenvectors to disk..." << std::endl;
                 
                 // Convert to vector of vectors format - read directly from evecs_partial
@@ -1665,7 +1749,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                     }
                 }
                 
-                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial)");
+                if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial)");
+                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
             } else if (!dir.empty()) {
                 HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial)");
             }
@@ -1697,7 +1782,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Save results using unified HDF5 function
             // Note: eigenvectors are now stored IN dense_matrix (column-major)
-            if (compute_eigenvectors && !dir.empty()) {
+            if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
                 std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
                 
                 // Convert dense_matrix (which now contains eigenvectors) to vector of vectors format
@@ -1711,7 +1796,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                     }
                 }
                 
-                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
+                if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
+                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
             } else if (!dir.empty()) {
                 HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization");
             }

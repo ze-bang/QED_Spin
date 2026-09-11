@@ -195,14 +195,19 @@ inline void populate_operator_from_files(Operator& op, const FilePaths& f) {
     if (!f.single_site_file.empty() && fs::exists(f.single_site_file)) {
         op.loadFromFile(f.single_site_file);
     }
-    // CounterTerm.dat and ThreeBodyG.dat use the same `loadFromFile`
-    // header format (op_type, site, complex coeff). Presence-check above
-    // covers the common case where these auxiliary decks are absent.
+    // CounterTerm.dat shares the one-body `loadFromFile` format
+    // (op_type, site, complex coeff). ThreeBodyG.dat does NOT: its rows are
+    // (op_i s_i op_j s_j op_k s_k Re Im) and need the dedicated parser.
+    // Audit 2026-09: this used to call loadFromFile on the three-body deck,
+    // which read each row as "Sz_{site} * (0 + i*op_j)" -- every directory
+    // lane (streaming symmetry solve/thermal/spectral, full_spectrum's
+    // Sz-blocked sweep, the CLI) silently dropped the chiral / ring terms
+    // and injected complex diagonal garbage instead.
     if (!f.counterterm_file.empty() && fs::exists(f.counterterm_file)) {
         op.loadFromFile(f.counterterm_file);
     }
     if (!f.three_body_file.empty() && fs::exists(f.three_body_file)) {
-        op.loadFromFile(f.three_body_file);
+        op.loadThreeBodyTerm(f.three_body_file);
     }
 }
 

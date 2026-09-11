@@ -74,8 +74,10 @@
 #include <complex>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <vector>
 
 namespace ed::dssf {
@@ -239,6 +241,23 @@ private:
     // RepSectorData; valid only when the matching ref ``is_rep()``).
     ed::matvec::basis::RepSymmetryBasisPolicy src_pol_{};
     ed::matvec::basis::RepSymmetryBasisPolicy dst_pol_{};
+
+    // Audit 2026-09: cached rectangular reduced matrix A[k, alpha] (dst rows x
+    // src cols), assembled on the first apply() by the same walk and reused
+    // afterwards. The finite-T FTLM lane applies the probe M x R times per
+    // sector pair and the walk costs |G|^2 x terms x index lookups per source
+    // row (measured: 70 ms per apply at N = 20, 12 min per spectral call);
+    // the CSR apply is a memory-bound gather. Refused (walk kept) when the
+    // pre-merge triplet estimate exceeds ED_XSEC_CSR_BUDGET_GIB (default 4).
+    mutable std::mutex                 csr_mutex_;
+    mutable bool                       csr_built_   = false;
+    mutable bool                       csr_refused_ = false;
+    mutable std::vector<std::int64_t>  csr_row_ptr_;
+    mutable std::vector<std::uint32_t> csr_col_;
+    mutable std::vector<Complex>       csr_val_;
+    template <class Emit> void walk_columns_(Emit&& emit) const;
+    void build_csr_() const;
+    void apply_walk_(const Complex* in, Complex* out) const;
 };
 
 }  // namespace ed::dssf

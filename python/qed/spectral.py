@@ -1488,6 +1488,33 @@ def spectral(
                   "(trivial group / non-transform observable / "
                   "unsupported method); running the plain in-memory "
                   "lane.")
+    # Audit 2026-09: ``sz=`` used to be consumed only by the symmetry lanes;
+    # the plain in-memory lane silently ignored it and solved the GLOBAL
+    # ground state (measured on an XXZ chain in a field: the block GS and the
+    # global GS differ, and the returned S(omega) belonged to the latter).
+    # Project H and every Sz-conserving probe onto the named block here.
+    if sz is not None and isinstance(H_or_directory, Operator) \
+            and not isinstance(H_or_directory, FixedSzOperator):
+        _n_up = int(sz)
+        _obs_proj = []
+        for _o in (observables or []):
+            _u1 = False
+            try:
+                _u1 = bool(dict(_core.detect_hamiltonian_symmetries(_o)).get("u1", False))
+            except Exception:
+                _u1 = False
+            if not _u1:
+                raise ValueError(
+                    "qed.spectral: sz= names a fixed-Sz block but an observable does "
+                    "not conserve Sz, so it cannot act inside that block; pass "
+                    "symmetry='auto' (the cross-sector lane routes k_final = "
+                    "k_initial + Q and delta_n_up) or drop sz=.")
+            _obs_proj.append(_o.make_fixed_sz(_n_up))
+        H_or_directory = H_or_directory.make_fixed_sz(_n_up)
+        observables = _obs_proj
+        if verbose:
+            print(f"[qed.spectral] sz={_n_up}: H and probes projected onto the "
+                  f"fixed-Sz block.")
     return _spectral_in_memory(
         H_or_directory,
         observables,

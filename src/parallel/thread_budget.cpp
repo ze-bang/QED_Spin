@@ -110,7 +110,7 @@ int auto_threads_for_dim(std::uint64_t dim) {
     return std::clamp(want, 1, std::min(ceil, max_t));
 }
 
-ThreadBudgetScope::ThreadBudgetScope(int threads) {
+ThreadBudgetScope::ThreadBudgetScope(int threads, int blas_threads) {
     if (threads <= 0) return;
     // Clamp to hardware concurrency. Callers pass a large sentinel (e.g. 1<<20)
     // to mean "use all cores"; without this, omp_set_num_threads(1<<20) asks the
@@ -133,10 +133,17 @@ ThreadBudgetScope::ThreadBudgetScope(int threads) {
     }
 #endif
 
+    int blas = (blas_threads > 0) ? blas_threads : 1;
+#ifdef _OPENMP
+    {
+        const int hw = omp_get_num_procs();
+        if (hw > 0 && blas > hw) blas = hw;
+    }
+#endif
     if (openblas_get_num_threads && openblas_set_num_threads) {
         prev_openblas_ = openblas_get_num_threads();
-        if (prev_openblas_ != threads) {
-            openblas_set_num_threads(threads);
+        if (prev_openblas_ != blas) {
+            openblas_set_num_threads(blas);
             restore_blas_ = true;
         }
     }

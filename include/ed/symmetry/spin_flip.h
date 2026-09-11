@@ -73,30 +73,32 @@ enum class SzAxis : std::uint8_t { None = 0, Parity = 1, U1 = 2 };
 
 [[nodiscard]] inline SzAxis
 sz_axis_of(const ed::matvec::TermStorage& t) noexcept {
-    // odd popcount changes -> None
-    if (!t.offdiag_one_body.empty() || !t.mixed_two_body.empty()) {
-        return SzAxis::None;
-    }
-    auto dpop = [](std::uint8_t op) -> int {
-        // op codes: 0 = S+, 1 = S-, 2 = Sz (see term_storage.h);
-        // only parity of the total change matters here.
-        return (op == 2) ? 0 : 1;
+    // Net change of the set-bit count per term: S+ clears a bit (-1),
+    // S- sets one (+1), Sz none. U(1) iff every term has net 0; the Z2
+    // parity survives iff every net change is even; otherwise nothing.
+    // Audit 2026-09: the previous version demoted ANY three-body term with
+    // off-diagonal content to Parity, so Sz-conserving chiral terms
+    // Sz_i S+_j S-_k were reported as U(1)-breaking and every Sz-blocked
+    // lane (thermal sweeps, full_spectrum, streaming symmetry) fell back
+    // to parity halves for chiral spin liquids.
+    auto dnet = [](std::uint8_t op) -> int {
+        return (op == 0) ? -1 : (op == 1) ? +1 : 0;
     };
     bool u1 = true;
-    for (const auto& tb : t.offdiag_two_body) {
-        // Both ops are off-diagonal S+- here; S+S- conserves, S+S+ /
-        // S-S- changes popcount by 2 (even either way).
-        if (tb.op_type_1 == tb.op_type_2) u1 = false;
-    }
-    for (const auto& tb : t.three_body) {
-        const int d = dpop(tb.op_type_1) + dpop(tb.op_type_2)
-                    + dpop(tb.op_type_3);
-        if (d % 2 != 0) return SzAxis::None;
-        // Even but possibly nonzero: S+S+SzSz-free 3-body raising pairs
-        // etc. break U(1) unless the +/- content pairs off exactly;
-        // conservative: any off-diagonal 3-body content demotes U(1).
-        if (d != 0) u1 = false;
-    }
+    auto account = [&](int net) {
+        if (net % 2 != 0) return false;
+        if (net != 0) u1 = false;
+        return true;
+    };
+    for (const auto& tb : t.offdiag_one_body)
+        if (!account(dnet(tb.op_type))) return SzAxis::None;
+    for (const auto& tb : t.mixed_two_body)
+        if (!account(dnet(tb.flip_op_type))) return SzAxis::None;
+    for (const auto& tb : t.offdiag_two_body)
+        if (!account(dnet(tb.op_type_1) + dnet(tb.op_type_2))) return SzAxis::None;
+    for (const auto& tb : t.three_body)
+        if (!account(dnet(tb.op_type_1) + dnet(tb.op_type_2) + dnet(tb.op_type_3)))
+            return SzAxis::None;
     return u1 ? SzAxis::U1 : SzAxis::Parity;
 }
 

@@ -1140,8 +1140,9 @@ void bind_workflows(py::module_& m) {
                   (ax != ed::symmetry::SzAxis::None);  // U1 implies parity
               // Stage 12 (SU(2) rollout): full spin-rotation invariance
               // (per-bond isotropic exchange, no fields / DM / 3-body).
-              out["su2"] =
-                  ed::symmetry::hamiltonian_is_su2_symmetric(soa);
+              // Audit 2026-09: term test plus the numerical [H, S^-] fallback
+              // (SU(2)-invariant three-body terms such as scalar chirality).
+              out["su2"] = ed::workflows::op_is_su2_symmetric(op);
               return out;
           },
           py::arg("op"),

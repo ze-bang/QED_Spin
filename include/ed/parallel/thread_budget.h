@@ -62,7 +62,12 @@ int auto_threads_for_dim(std::uint64_t dim);
 /// at the top of any solver entry point that drives BLAS-1 / SpMV kernels.
 class ThreadBudgetScope {
 public:
-    explicit ThreadBudgetScope(int threads);
+    /// ``threads``: OpenMP team size. ``blas_threads``: OpenBLAS pool size,
+    /// default 1 (audit 2026-09: QED's BLAS-1 work runs on OpenMP; a
+    /// threaded OpenBLAS pool spinning between calls oversubscribes the
+    /// cores and was measured to slow BLAS-2/3-light lanes by 10-100x).
+    /// Pass a larger value only around dense LAPACK solves.
+    explicit ThreadBudgetScope(int threads, int blas_threads = 1);
     ~ThreadBudgetScope();
 
     ThreadBudgetScope(const ThreadBudgetScope&)            = delete;

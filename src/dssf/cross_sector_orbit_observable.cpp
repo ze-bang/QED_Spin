@@ -33,7 +33,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -202,19 +204,14 @@ inline TermResult applyOneTerm(
 
 }  // namespace
 
-void CrossSectorOrbitObservable::apply(const Complex* in,
-                                       Complex*       out,
-                                       std::size_t    dst_size) const {
-    if (dst_size != dim_dst_) {
-        throw std::invalid_argument(
-            "CrossSectorOrbitObservable::apply: dst_size mismatch ("
-            "got " + std::to_string(dst_size) +
-            ", expected " + std::to_string(dim_dst_) + ").");
-    }
-
-    std::fill(out, out + dim_dst_, Complex(0.0, 0.0));
-    if (dim_src_ == 0 || dim_dst_ == 0) return;
-
+// ---------------------------------------------------------------------------
+// The walk. ``emit(alpha, k, value)`` receives every non-zero reduced matrix
+// element A[k, alpha] (value EXCLUDES the input coefficient in[alpha]); it is
+// called from inside an OpenMP team, so the emitter must be thread-safe (the
+// callers below use per-thread buffers).
+// ---------------------------------------------------------------------------
+template <class Emit>
+void CrossSectorOrbitObservable::walk_columns_(Emit&& emit) const {
     const SymmetrySector* src_sec =
         src_.is_rep() ? nullptr : &src_.sector(src_sector_);
     const SymmetrySector* dst_sec =
@@ -224,37 +221,18 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
     const bool dst_rep = dst_.is_rep();
     const int  G_src   = static_cast<int>(src_.group_size());
 
-    // OpenMP-parallel walk over source orbit-basis indices, with
-    // per-thread output accumulators. Avoids the per-update atomic
-    // contention on dst entries; the merge at the end is O(dim_dst).
-#ifdef _OPENMP
-    const int max_threads = omp_get_max_threads();
-#else
-    const int max_threads = 1;
-#endif
-    std::vector<std::vector<Complex>> tls(
-        max_threads, std::vector<Complex>(dim_dst_, Complex(0.0, 0.0)));
-
     #pragma omp parallel
     {
-#ifdef _OPENMP
-        const int tid = omp_get_thread_num();
-#else
-        const int tid = 0;
-#endif
-        auto& local_out = tls[tid];
-
         // Destination projection, shared by both source lanes. Orbit lane:
         // sorted-index lookup + findCoeff; rep lane: index_and_projection
         // (identical arithmetic, pinned by test_rep_cross_sector.cpp).
-        auto scatter_dst = [&](Complex weighted, std::uint64_t s_prime) {
+        auto scatter_dst = [&](std::uint64_t alpha, Complex weighted, std::uint64_t s_prime) {
             if (dst_rep) {
                 Complex proj;
                 const std::int64_t k =
                     dst_pol_.index_and_projection(s_prime, proj);
                 if (k < 0) return;
-                local_out[static_cast<std::size_t>(k)] +=
-                    weighted * proj * group_norm_;
+                emit(alpha, static_cast<std::size_t>(k), weighted * proj * group_norm_);
                 return;
             }
             const std::size_t k = dst_.lookupBasisIndex(dst_sector_, s_prime);
@@ -265,33 +243,26 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
             // Same projection formula as applyHamiltonianTermsFullSpace
             // (streaming_symmetry.h:1288) with the destination orbit
             // basis providing beta_s_prime / norm_k.
-            local_out[k] += weighted * std::conj(beta_s_prime)
-                          * group_norm_ / state_k.norm;
+            emit(alpha, k, weighted * std::conj(beta_s_prime) * group_norm_ / state_k.norm);
         };
 
         #pragma omp for schedule(dynamic, 64)
-        for (std::int64_t alpha = 0;
-             alpha < static_cast<std::int64_t>(dim_src_); ++alpha) {
-            const Complex c_alpha = in[alpha];
-            if (std::abs(c_alpha) < 1e-15) continue;
-
+        for (std::int64_t ia = 0; ia < static_cast<std::int64_t>(dim_src_); ++ia) {
+            const std::uint64_t alpha = static_cast<std::uint64_t>(ia);
             if (src_rep) {
                 // Rep lane: regenerate the source orbit per group element.
                 // The per-state expansion coefficient alpha_s of the orbit
                 // basis is sum_{g: g(rep)=s} conj(chi(g)); summing per-g is
                 // the same sum without the dedup.
-                const std::uint64_t rep = src_pol_.state_of(
-                    static_cast<std::uint64_t>(alpha));
-                const double inv_norm_alpha = src_pol_.inv_norm_of(
-                    static_cast<std::uint64_t>(alpha));
+                const std::uint64_t rep = src_pol_.state_of(alpha);
+                const double inv_norm_alpha = src_pol_.inv_norm_of(alpha);
                 for (int g = 0; g < G_src; ++g) {
                     const std::uint64_t s = src_pol_.apply_perm(rep, g);
                     const Complex chi_g   = src_pol_.characters[g];
-                    const Complex weighted =
-                        c_alpha * std::conj(chi_g) * inv_norm_alpha;
+                    const Complex weighted = std::conj(chi_g) * inv_norm_alpha;
                     for (const auto& t : transforms_) {
                         const TermResult r = applyOneTerm(s, t, S);
-                        if (r.valid) scatter_dst(weighted * r.amp, r.s_prime);
+                        if (r.valid) scatter_dst(alpha, weighted * r.amp, r.s_prime);
                     }
                 }
                 continue;
@@ -309,23 +280,135 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
                 const std::uint64_t s        = state_alpha.orbit_elements[orbit_idx];
                 const Complex       alpha_s  = state_alpha.orbit_coefficients[orbit_idx];
                 if (std::abs(alpha_s) < 1e-15) continue;
-
-                const Complex weighted = c_alpha * alpha_s / norm_alpha;
-
+                const Complex weighted = alpha_s / norm_alpha;
                 for (const auto& t : transforms_) {
                     const TermResult r = applyOneTerm(s, t, S);
-                    if (r.valid) scatter_dst(weighted * r.amp, r.s_prime);
+                    if (r.valid) scatter_dst(alpha, weighted * r.amp, r.s_prime);
                 }
             }
         }
     }  // end omp parallel
+}
 
-    // Merge the per-thread accumulators into out[].
+// Fallback (no cache): scatter walk with per-thread output accumulators.
+void CrossSectorOrbitObservable::apply_walk_(const Complex* in, Complex* out) const {
+#ifdef _OPENMP
+    const int max_threads = omp_get_max_threads();
+#else
+    const int max_threads = 1;
+#endif
+    std::vector<std::vector<Complex>> tls(
+        max_threads, std::vector<Complex>(dim_dst_, Complex(0.0, 0.0)));
+    walk_columns_([&](std::uint64_t alpha, std::size_t k, Complex v) {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+#else
+        const int tid = 0;
+#endif
+        tls[tid][k] += in[alpha] * v;
+    });
     for (int t = 0; t < max_threads; ++t) {
         const auto& src = tls[t];
-        for (std::size_t k = 0; k < dim_dst_; ++k) {
-            out[k] += src[k];
+        for (std::size_t k = 0; k < dim_dst_; ++k) out[k] += src[k];
+    }
+}
+
+void CrossSectorOrbitObservable::build_csr_() const {
+    // Budget on the pre-merge triplet stream (upper bound: every group
+    // element x term of every source row emits one entry).
+    const double est = static_cast<double>(dim_src_)
+                     * static_cast<double>(std::max<std::uint64_t>(src_.group_size(), 1))
+                     * static_cast<double>(std::max<std::size_t>(transforms_.size(), 1))
+                     * 24.0;
+    double budget_gib = 4.0;
+    if (const char* v = std::getenv("ED_XSEC_CSR_BUDGET_GIB")) {
+        const double b = std::atof(v);
+        if (b > 0.0) budget_gib = b;
+    }
+    if (est > budget_gib * 1073741824.0 || dim_src_ > 0xFFFFFFFFull) {
+        csr_refused_ = true;
+        return;
+    }
+    struct Entry { std::uint32_t row; std::uint32_t col; Complex val; };
+#ifdef _OPENMP
+    const int max_threads = omp_get_max_threads();
+#else
+    const int max_threads = 1;
+#endif
+    std::vector<std::vector<Entry>> tls(static_cast<std::size_t>(max_threads));
+    walk_columns_([&](std::uint64_t alpha, std::size_t k, Complex v) {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+#else
+        const int tid = 0;
+#endif
+        tls[static_cast<std::size_t>(tid)].push_back(
+            Entry{static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(alpha), v});
+    });
+    std::size_t total = 0;
+    for (const auto& v : tls) total += v.size();
+    std::vector<Entry> all;
+    all.reserve(total);
+    for (auto& v : tls) {
+        all.insert(all.end(), v.begin(), v.end());
+        std::vector<Entry>().swap(v);
+    }
+    std::sort(all.begin(), all.end(), [](const Entry& a, const Entry& b) {
+        return (a.row != b.row) ? a.row < b.row : a.col < b.col;
+    });
+    csr_row_ptr_.assign(dim_dst_ + 1, 0);
+    csr_col_.clear();
+    csr_val_.clear();
+    csr_col_.reserve(all.size());
+    csr_val_.reserve(all.size());
+    for (std::size_t i = 0; i < all.size();) {
+        std::size_t j = i + 1;
+        Complex acc = all[i].val;
+        while (j < all.size() && all[j].row == all[i].row && all[j].col == all[i].col) {
+            acc += all[j].val;
+            ++j;
         }
+        if (std::abs(acc) > 1e-15) {
+            csr_col_.push_back(all[i].col);
+            csr_val_.push_back(acc);
+            csr_row_ptr_[all[i].row + 1] += 1;
+        }
+        i = j;
+    }
+    for (std::size_t r = 0; r < dim_dst_; ++r) csr_row_ptr_[r + 1] += csr_row_ptr_[r];
+    csr_built_ = true;
+}
+
+void CrossSectorOrbitObservable::apply(const Complex* in,
+                                       Complex*       out,
+                                       std::size_t    dst_size) const {
+    if (dst_size != dim_dst_) {
+        throw std::invalid_argument(
+            "CrossSectorOrbitObservable::apply: dst_size mismatch ("
+            "got " + std::to_string(dst_size) +
+            ", expected " + std::to_string(dim_dst_) + ").");
+    }
+
+    std::fill(out, out + dim_dst_, Complex(0.0, 0.0));
+    if (dim_src_ == 0 || dim_dst_ == 0) return;
+
+    if (!csr_built_ && !csr_refused_) {
+        std::lock_guard<std::mutex> lock(csr_mutex_);
+        if (!csr_built_ && !csr_refused_) build_csr_();
+    }
+    if (!csr_built_) {
+        apply_walk_(in, out);
+        return;
+    }
+    const std::int64_t*  rp  = csr_row_ptr_.data();
+    const std::uint32_t* col = csr_col_.data();
+    const Complex*       val = csr_val_.data();
+    const std::int64_t   R   = static_cast<std::int64_t>(dim_dst_);
+    #pragma omp parallel for schedule(static) if(R > 4096)
+    for (std::int64_t k = 0; k < R; ++k) {
+        Complex acc(0.0, 0.0);
+        for (std::int64_t q = rp[k]; q < rp[k + 1]; ++q) acc += val[q] * in[col[q]];
+        out[k] = acc;
     }
 }
 

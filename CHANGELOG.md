@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-09-10 — workflow audit: every verb x lane x symmetry against a dense reference
+
+`benchmarks/audit_workflows.py` (new) runs ground-state, full-spectrum, thermal (FTLM /
+LTLM / mTPQ / KPM-DOS / OFTLM) and spectral (GS continued fraction, KPM dynamical, finite-T
+FTLM) workflows on four 12-site models (Heisenberg ring; XXZ in a field; J+-+- without U(1);
+triangular J1-J2-Jchi with scalar chirality) through every lane the Python API exposes
+(plain, fixed Sz, Sz sweep, symmetry='auto' with point_group auto/off/full, spin-flip /
+time-reversal toggles, SU(2) targeting, TPQ-state-seeded CF), and checks each result against
+an independent numpy diagonalisation (per-Sz spectra, exact thermodynamics, Lehmann spectral
+functions). `--timing` adds 16- and 20-site wall-clock rows. Fixed on the way:
+
+* **Three-body terms were dropped by every directory lane.** `populate_operator_from_files`
+  parsed `ThreeBodyG.dat` with the one-body reader, turning each chiral term into a complex
+  `Sz` garbage term. Streaming-symmetry solve / thermal / spectral, `full_spectrum`'s
+  Sz-blocked sweep and the CLI all returned the J1-J2 spectrum for a J1-J2-Jchi deck
+  (E0 = -6.358 instead of -7.582 on the 3x4 triangular torus). Now uses `loadThreeBodyTerm`.
+* **U(1) detection for three-body terms** (`sz_axis_of`) demoted any off-diagonal 3-body
+  content to Sz-parity; the chiral term conserves Sz. Net set-bit change per term now.
+* **SU(2) detection** gains a numerical `[H, S^-_tot] v = 0` fallback (full space, N <= 24),
+  so `total_spin=` works for scalar-chirality and ring-exchange models.
+* **Lanczos ghosts in eigenvalue windows**: with local reorthogonalisation a converged
+  level re-emerges as copies and the eigenvalue-change test converged on them (the CLI
+  returned E[0] == E[1] on a non-degenerate model). Cullum-Willoughby filter in the real
+  lane and in the orchestrator's complex window lane.
+* **FullDiag lane**: the dense LAPACK solve asked OpenBLAS for every core; dsytrd's BLAS-2
+  chain then paid a 32-thread spin-sync per call (0.13 s .. 17 s for the SAME 924-dim
+  block, depending on load). Threads scale with the block (one per ~1024 rows;
+  `ED_FULLDIAG_THREADS`). 924-dim block: 8.5 s -> 46 ms. `ThreadBudgetScope` now keeps
+  OpenBLAS single-threaded outside dense solves (QED's BLAS-1 runs on OpenMP; a spinning
+  OpenBLAS pool oversubscribes the cores).
+* **KPM-DOS**: the Chebyshev recurrence ran six threaded OpenBLAS BLAS-1 calls per moment
+  (15 ms per moment at dim 1.8e5); one fused OpenMP pass now: N = 16 1.34 s -> 0.44 s.
+  (KPM-DOS deliberately runs on the full 2^N space so the returned DOS is complete; at
+  N = 20 that is a 1M-dim complex SpMV per moment, 34 s per run -- summing per-Sz DOS
+  on a shared grid would cut it ~5x and is left as a follow-up.)
+  The spectral-bound estimator no longer requests a basisless full reorthogonalisation
+  (which only printed "silently skipped").
+* **Finite-T FTLM dynamical (cross-irrep)**: the estimator ran an inner Lanczos per source
+  Ritz state (O(M^3 D)); it now uses the standard Jaklic-Prelovsek form with one Lanczos from
+  O|r> and the M x M overlap matrix (one zgemm), O(M^2 D): N = 12, 24 samples, M = 150:
+  81 s -> 14 s. The rectangular probe `CrossSectorOrbitObservable` caches its reduced
+  matrix after the first application (the walk cost |G|^2 x terms per source row and was
+  applied M x R times per sector pair). Heisenberg ring, Sz = N/2, 8 samples, M = 150,
+  16 threads: N = 16 43 s -> 6.4 s, N = 20 728 s -> 40 s.
+* **mTPQ** warns (stderr + backend note) when the trajectory stops before the coldest
+  requested temperature instead of extrapolating silently.
+* **Python surface**: `qed.solve(compute_eigenvectors=True)` returns the vectors in
+  memory (`EDResults.eigenvectors`, numpy arrays in the operator's basis) including from
+  the dense lane; `qed.spectral(sz=...)` on the plain in-memory lane projects H and the
+  probes onto the block instead of silently ignoring `sz`.
+
+Known, documented, not changed: `sz=` thermal / finite-T spectral averages are the
+block-restricted canonical ensemble; single-vector Lanczos does not resolve genuine
+degeneracies (use block_lanczos / krylov_schur); the symmetry lanes return eigenvectors in
+the 2^N basis and the Sz-parity lane returns none; finite-T spectra are only available
+through the symmetry lane; GPU lanes were not exercised (no GPU access on the audit host).
+
 ## 2026-09-10 — performance-audit fixes (branch `perf/audit-fixes`)
 
 Measured on the periodic Heisenberg chain, Sz = 0, 16 OpenMP threads, CPU
