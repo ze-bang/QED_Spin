@@ -1026,7 +1026,10 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 // =============================================================================
 void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t N, uint64_t max_iter, uint64_t exct,
-                  double tol, std::vector<double>& eigenvalues) {
+                  double tol, std::vector<double>& eigenvalues,
+                  uint64_t* iters_out, bool* converged_out) {
+    if (iters_out) *iters_out = 0;
+    if (converged_out) *converged_out = false;
     // Mirror the Lanczos thread-budget heuristic so the OMP+BLAS thread cap
     // is consistent with the complex path (see lanczos() above).
     const ed::parallel::ThreadBudgetScope budget(
@@ -1295,6 +1298,9 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
 
     const uint64_t n_eig = std::min<uint64_t>(exct, m);
     eigenvalues.assign(diag.begin(), diag.begin() + n_eig);
+    if (iters_out) *iters_out = m;
+    // A run that exhausted the full space (m == N) is exact by construction.
+    if (converged_out) *converged_out = converged || (m == N);
 
     std::cout << "Lanczos[real]: " << m << " iterations, "
               << total_reorth_count << " local-reorth axpys ("

@@ -194,14 +194,17 @@ MtpqResult mtpq_kernel(Backend&       backend,
                              std::numeric_limits<double>::infinity());
         }
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
-            apply_H(info.psi, scratch.get(), info.local_n);
-            const Complex e = backend.dot(info.psi, scratch.get(), info.local_n);
-            const double E_k = std::real(e);
+            double E_k, H2_k;
+            if (info.moments_valid) {
+                // Audit H4: moments come from the step's own matvec.
+                E_k = info.energy; H2_k = info.h2;
+            } else {
+                apply_H(info.psi, scratch.get(), info.local_n);
+                E_k = std::real(backend.dot(info.psi, scratch.get(), info.local_n));
+                // <H^2> = ||H psi||^2 since H is Hermitian and psi is normalised.
+                H2_k = std::real(backend.dot(scratch.get(), scratch.get(), info.local_n));
+            }
             final_E = E_k;
-            // <H^2> = ||H psi||^2 since H is Hermitian and psi is normalised.
-            const Complex hh = backend.dot(scratch.get(), scratch.get(),
-                                           info.local_n);
-            const double H2_k = std::real(hh);
             const double var_k = std::max(H2_k - E_k * E_k, 0.0);
             // mTPQ effective inverse temperature.
             //   step == 0: beta = 0 (high-T baseline anchor)

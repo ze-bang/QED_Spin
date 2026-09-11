@@ -60,6 +60,8 @@
 // =============================================================================
 
 #include <algorithm>
+#include <limits>
+#include <map>
 #include <atomic>
 #include <complex>
 #include <cstdint>
@@ -411,6 +413,60 @@ inline MatVecTunables read_symmetry_tunables(
     return t;
 }
 
+// ---------------------------------------------------------------------------
+// Structural Hermiticity check (audit 2026-09, correctness R1).
+//
+// The symmetry gather kernels (`apply_terms_rep_symmetry_gather`,
+// `apply_terms_gather_symmetry`) evaluate <r| H |s'> through the adjoint of
+// the emitted element and therefore compute H^dagger v. That is only H v
+// when the term list is Hermitian. Every off-diagonal term must have an
+// adjoint partner with the conjugate coefficient: (S+_i S-_j, c) needs
+// (S-_i S+_j, conj c), (Sz_i S+_j, c) needs (Sz_i S-_j, conj c), etc.
+// Diagonal (Sz-only) terms need real coefficients. Terms are aggregated by a
+// canonical key (sorted site/op pairs) so split or duplicated records are
+// handled. O(#terms log #terms); runs once per backend instance.
+// ---------------------------------------------------------------------------
+inline void require_hermitian_terms(const std::vector<OffDiagOneBody>& one,
+                                    const std::vector<MixedTwoBody>&   mixed,
+                                    const std::vector<OffDiagTwoBody>& two,
+                                    const std::vector<ThreeBodyTerm>&  three,
+                                    const std::vector<DiagOneBody>&    d1,
+                                    const std::vector<DiagTwoBody>&    d2)
+{
+    using Key = std::vector<std::pair<std::uint64_t, std::uint8_t>>;   // (site, op): 0 S+, 1 S-, 2 Sz
+    std::map<Key, Complex> sum;
+    auto canon = [](Key k) { std::sort(k.begin(), k.end()); return k; };
+    auto add = [&](Key k, Complex c) { sum[canon(std::move(k))] += c; };
+    for (const auto& t : one)   add({{t.site_index, t.op_type}}, t.coefficient);
+    for (const auto& t : mixed) add({{t.sz_site, 2}, {t.flip_site, t.flip_op_type}}, t.coefficient);
+    for (const auto& t : two)   add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2}}, t.coefficient);
+    for (const auto& t : three) add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2},
+                                     {t.site_index_3, t.op_type_3}}, t.coefficient);
+    for (const auto& t : d1)
+        if (std::abs(t.coefficient.imag()) > 1e-12 * (1.0 + std::abs(t.coefficient.real())))
+            throw std::runtime_error("symmetry lane requires a Hermitian operator: "
+                                     "diagonal Sz term with a complex coefficient");
+    for (const auto& t : d2)
+        if (std::abs(t.coefficient.imag()) > 1e-12 * (1.0 + std::abs(t.coefficient.real())))
+            throw std::runtime_error("symmetry lane requires a Hermitian operator: "
+                                     "diagonal SzSz term with a complex coefficient");
+    for (const auto& [key, c] : sum) {
+        Key adj = key;
+        for (auto& [site, op] : adj) if (op != 2) op = static_cast<std::uint8_t>(1 - op);
+        adj = canon(std::move(adj));
+        const auto it = sum.find(adj);
+        const Complex partner = (it == sum.end()) ? Complex{0.0, 0.0} : it->second;
+        const double scale = 1.0 + std::abs(c) + std::abs(partner);
+        if (std::abs(partner - std::conj(c)) > 1e-10 * scale) {
+            throw std::runtime_error(
+                "symmetry lane requires a Hermitian operator: an off-diagonal term "
+                "has no adjoint partner with the conjugate coefficient (the "
+                "representative-walk kernels compute H^dagger v). Route non-Hermitian "
+                "probes through the full/fixed-Sz operator, or symmetrise the term list.");
+        }
+    }
+}
+
 inline bool csr_eligible(const MatVecTunables& t, std::uint64_t dim, bool already_built) noexcept {
     if (already_built) return true;
     if (t.csr_force == 0) return false;
@@ -468,6 +524,15 @@ public:
         // Full / FixedSz policies (needs_orbit_walk == false).
         if constexpr (BasisPolicy::needs_orbit_walk
                       || detail::policy_is_rep_v<BasisPolicy>) {
+            // Audit 2026-09 (correctness R1): the symmetry gather kernels
+            // compute H^dagger v and rely on H being Hermitian; check the
+            // term list structurally once per backend instance.
+            if (!hermiticity_checked_) {
+                detail::require_hermitian_terms(*terms.offdiag_one, *terms.mixed_two,
+                                                *terms.offdiag_two, *terms.three_body,
+                                                *terms.diag_one, *terms.diag_two);
+                hermiticity_checked_ = true;
+            }
             // GATHER (default) overwrites every row; the SCATTER fallback and the
             // multi-target (non-abelian) path accumulate, so they pre-zero.
             if (tunables_.matvec_scatter
@@ -848,40 +913,46 @@ private:
     // ------------------------------------------------------------------
     // Assembled-CSR build + parallel SpMV.
     // ------------------------------------------------------------------
+    void check_csr_index_range_() const {
+        // Audit R2: column indices are 32-bit; refuse instead of overflowing.
+        if (basis_.dim() > 0xFFFFFFFFull) {
+            throw std::runtime_error(
+                "assembled CSR requested for dim > 2^32-1 (32-bit column indices); "
+                "use the matrix-free apply (ED_CSR_FORCE=0)");
+        }
+    }
+
+    // Audit F4 (2026-09): direct two-pass CSR assembly in GATHER form
+    // (count / prefix / fill, parallel over rows, sorted+merged columns) --
+    // no Eigen triplet vector (24 B/nnz), no serial setFromTriplets sort.
     void ensure_csr_complex(const term_view_t& t) {
         if (csr_complex_built_) return;
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        ed::matvec::kernel::emit_term_triplets<BasisPolicy, Complex>(
+        check_csr_index_range_();
+        ed::matvec::kernel::build_csr_gather<BasisPolicy, Complex>(
             basis_, t.spin_l,
             *t.diag_one, *t.offdiag_one,
             *t.diag_two, *t.mixed_two, *t.offdiag_two,
             *t.three_body,
-            triplets);
-        csr_complex_.resize(basis_.dim(), basis_.dim());
-        csr_complex_.setFromTriplets(triplets.begin(), triplets.end());
-        csr_complex_.makeCompressed();
+            csr_complex_);
         csr_complex_built_ = true;
     }
 
     void ensure_csr_real(const term_view_t& t) {
         if (csr_real_built_) return;
-        std::vector<Eigen::Triplet<double>> triplets;
-        ed::matvec::kernel::emit_term_triplets<BasisPolicy, double>(
+        check_csr_index_range_();
+        ed::matvec::kernel::build_csr_gather<BasisPolicy, double>(
             basis_, t.spin_l,
             *t.diag_one, *t.offdiag_one,
             *t.diag_two, *t.mixed_two, *t.offdiag_two,
             *t.three_body,
-            triplets);
-        csr_real_.resize(basis_.dim(), basis_.dim());
-        csr_real_.setFromTriplets(triplets.begin(), triplets.end());
-        csr_real_.makeCompressed();
+            csr_real_);
         csr_real_built_ = true;
     }
 
     void csr_spmv_complex(const Complex* in, Complex* out, std::size_t n) const {
-        const auto* outer = csr_complex_.outerIndexPtr();
-        const auto* inner = csr_complex_.innerIndexPtr();
-        const auto* vals  = csr_complex_.valuePtr();
+        const auto* outer = csr_complex_.row_ptr.data();
+        const auto* inner = csr_complex_.col.data();
+        const auto* vals  = csr_complex_.val.data();
         const long long N = static_cast<long long>(n);
 
 #ifdef _OPENMP
@@ -903,9 +974,9 @@ private:
     }
 
     void csr_spmv_real(const double* in, double* out, std::size_t n) const {
-        const auto* outer = csr_real_.outerIndexPtr();
-        const auto* inner = csr_real_.innerIndexPtr();
-        const auto* vals  = csr_real_.valuePtr();
+        const auto* outer = csr_real_.row_ptr.data();
+        const auto* inner = csr_real_.col.data();
+        const auto* vals  = csr_real_.val.data();
         const long long N = static_cast<long long>(n);
 
 #ifdef _OPENMP
@@ -991,8 +1062,10 @@ private:
     std::string            label_;
 
     // Assembled-CSR caches. Lazy-built on first apply that's CSR-eligible.
-    Eigen::SparseMatrix<Complex, Eigen::RowMajor> csr_complex_{};
-    Eigen::SparseMatrix<double,  Eigen::RowMajor> csr_real_{};
+    // Audit F4: self-owned CSR (int64 row_ptr, uint32 col) built directly
+    // in gather form; see term_kernels_assemble.h.
+    ed::matvec::kernel::OwnedCsr<Complex> csr_complex_{};
+    ed::matvec::kernel::OwnedCsr<double>  csr_real_{};
     bool csr_complex_built_ = false;
     bool csr_real_built_    = false;
 
@@ -1012,6 +1085,10 @@ private:
     // Persistent scratch for the real-input/complex-output fast path.
     std::vector<double> real_in_buf_;
     std::vector<double> real_out_buf_;
+
+    // Audit R1: set once the term list has been verified to be Hermitian
+    // (symmetry lanes only).
+    mutable bool hermiticity_checked_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1067,14 +1144,15 @@ make_cpu_combinadic_fixed_sz_backend(
     int                                        n_up,
     const ed::core::combinadic::BinomialTable& binom,
     std::uint64_t                              dim,
-    std::uint64_t default_csr_cutoff = (1ULL << 22))
+    std::uint64_t default_csr_cutoff = (1ULL << 22),
+    const LinIndexTable*                       lin = nullptr)
 {
     using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
                                      DiagOne, OffDiagOne, DiagTwo, MixedTwo,
                                      OffDiagTwo, ThreeBody>;
     auto tunables = detail::read_tunables(default_csr_cutoff);
     return std::make_unique<Backend>(
-        basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim),
+        basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim, lin),
         tunables,
         "CpuCombinadicFixedSz(dim=" + std::to_string(dim) + ")");
 }

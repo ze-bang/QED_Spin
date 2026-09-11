@@ -84,13 +84,27 @@ int build_lanczos_tridiagonal(
         return static_cast<int>(alpha.size());
     }
 
-    std::vector<ComplexVector> basis_storage;
-    std::vector<ComplexVector>* basis_ptr =
-        (reorth_freq > 0) ? &basis_storage : nullptr;
-    return build_lanczos_tridiagonal_with_basis(
-        std::move(H), v0, N, max_iter, tol,
-        full_reorth, reorth_freq,
-        alpha, beta, basis_ptr);
+    // Audit H5: without full reorthogonalisation use the unified kernel with
+    // local DGKS reorth and NO stored basis (same algorithm as the backend
+    // lane), instead of the legacy periodic-reorth body that kept the whole
+    // basis in memory. `reorth_freq` is retained for API compatibility.
+    (void)reorth_freq;
+    (void)tol;
+    {
+        ed::krylov::LanczosKernelOptions opts;
+        opts.max_iter        = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
+        opts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
+        opts.local_ring_size = 1;
+        opts.keep_basis      = false;
+        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+            H(in, out, static_cast<int>(n));
+        };
+        auto result = ed::krylov::lanczos_tridiag(matvec, static_cast<std::size_t>(N),
+                                                  v0.data(), opts);
+        alpha = std::move(result.alpha);
+        beta  = std::move(result.beta);
+        return static_cast<int>(alpha.size());
+    }
 }
 
 /**
@@ -479,8 +493,17 @@ FTLMResults finite_temperature_lanczos(
     }();
     const bool run_parallel = ftlm_omp_enabled && (params.num_samples > 1);
 
-    #pragma omp parallel for schedule(dynamic) if(run_parallel)
-    for (int sample = 0; sample < params.num_samples; sample++) {
+    // Audit (2026-09): the serial default used to be expressed as
+    //   #pragma omp parallel for if(run_parallel)
+    // An *inactive* parallel region still puts the master inside a team of
+    // one, so every OpenMP region reached from the Lanczos kernel (axpy,
+    // dot, nrm2, the SpMV) became a NESTED team -- libgomp spawns fresh
+    // threads for nested teams instead of reusing its pool, which cost
+    // ~1-2 ms per BLAS-1 call at dim 2e5 (measured: recurrence 2.0 ms/it
+    // with 8 threads, 6.0 ms/it with 16, vs 0.09 ms/it in the mTPQ lane).
+    // Run the serial loop as a plain loop; the opt-in parallel loop keeps
+    // its own region.
+    auto run_sample = [&](int sample) {
         if (verbose) {
             #pragma omp critical(ftlm_log)
             std::cout << "\n--- FTLM Sample " << sample + 1 << " / "
@@ -516,7 +539,7 @@ FTLMResults finite_temperature_lanczos(
             #pragma omp critical(ftlm_log)
             std::cerr << "  Warning: Tridiagonal diagonalization failed (sample "
                       << sample << ")" << std::endl;
-            continue;
+            return;
         }
 
         ground_state_indexed[sample] = ritz_values[0];
@@ -546,6 +569,12 @@ FTLMResults finite_temperature_lanczos(
                 }
             }
         }
+    };
+    if (run_parallel) {
+        #pragma omp parallel for schedule(dynamic)
+        for (int sample = 0; sample < params.num_samples; sample++) run_sample(sample);
+    } else {
+        for (int sample = 0; sample < params.num_samples; sample++) run_sample(sample);
     }
 
     // Compact valid samples into the dense vectors expected by the rest

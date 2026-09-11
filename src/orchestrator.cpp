@@ -72,6 +72,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdlib>      // getenv (Wave 1.1 real-H fast-path opt-out)
 #include <filesystem>
 #include <iostream>
@@ -279,6 +280,10 @@ GroundStateResult solve_on(Backend& be,
                            const SolveOptions& opts) {
     using Complex = std::complex<double>;
     const auto geom = H.geometry();
+    // Audit F4: the assembled CSR is now built directly (two-pass gather
+    // form, parallel) at a cost of a few matvecs, so it pays off for every
+    // Krylov solve inside the memory cutoff (ED_CSR_DIM_MAX, default 2^22);
+    // the planner's dim-based decision stands.
     auto matvec = H.template bind<Backend>();
 
     GroundStateResult R;
@@ -294,8 +299,29 @@ GroundStateResult solve_on(Backend& be,
     const SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
         : default_method_for(H);
+    // Audit 2026-09 (correctness): the previous default of 2*num_eigs+30
+    // (= 32 for the ground state) silently returned UNCONVERGED results
+    // for every problem that needs more than 32 Krylov iterations (i.e.
+    // any dim above ~1e4): energies wrong at 1e-7 and "eigenvectors" with
+    // residuals of 1e-3..1e-2 at tolerance 1e-10. The Krylov lanes all
+    // have Ritz-value early exit, so the cap only has to be generous; the
+    // block methods count blocks and keep the old default.
+    const bool krylov_single_vector =
+        (method == SolveMethod::Lanczos) || (method == SolveMethod::KrylovSchur);
     const std::size_t max_iter =
-        (opts.max_iter > 0) ? opts.max_iter : 2 * opts.num_eigs + 30;
+        (opts.max_iter > 0) ? opts.max_iter
+        : krylov_single_vector
+            ? std::min<std::size_t>(std::max<std::uint64_t>(H.global_dim(), 1), 1000)
+            : 2 * opts.num_eigs + 30;
+    // Two-pass Lanczos for eigenvectors (audit F3): no kept basis, no
+    // O(m^2 n) reorthogonalisation; the recurrence is rerun once and the
+    // Ritz vectors accumulated on the fly. ED_LANCZOS_EIGVEC_TWOPASS=0
+    // restores the kept-basis FullCGS2 lane.
+    const bool eigvec_two_pass = [&] {
+        if (!(opts.compute_vectors && method == SolveMethod::Lanczos)) return false;
+        const char* e = std::getenv("ED_LANCZOS_EIGVEC_TWOPASS");
+        return !(e && e[0] == '0' && e[1] == '\0');
+    }();
     const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
 
     // Leaf memory guard: throw cleanly before the dominant allocation rather
@@ -309,7 +335,7 @@ GroundStateResult solve_on(Backend& be,
         std::uint64_t est;
         if (method == SolveMethod::FullDiag) {
             est = D * D * CX;
-        } else if (opts.compute_vectors) {
+        } else if (opts.compute_vectors && !eigvec_two_pass) {
             std::uint64_t vecs = std::max<std::uint64_t>(max_iter, 4);
             if (method == SolveMethod::BlockLanczos ||
                 method == SolveMethod::BlockKrylovSchur)
@@ -398,6 +424,8 @@ GroundStateResult solve_on(Backend& be,
                     && H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
                 std::vector<double> eigs;
+                std::uint64_t real_iters = 0;
+                bool real_converged = false;
                 ::lanczos_real(
                     [Hv_real](const double* in, double* out, int n) {
                         Hv_real(in, out, static_cast<std::size_t>(n));
@@ -406,14 +434,14 @@ GroundStateResult solve_on(Backend& be,
                     static_cast<std::uint64_t>(max_iter),
                     /*exct=*/1u,
                     opts.tolerance,
-                    eigs);
+                    eigs, &real_iters, &real_converged);
                 if (!eigs.empty()) {
                     R.eigenvalues.assign(eigs.begin(),
                                          eigs.begin() + std::min<std::size_t>(
                                              opts.num_eigs, eigs.size()));
                 }
-                R.krylov.iters_done = 0;  // lanczos_real does not expose this
-                R.krylov.converged  = true;
+                R.krylov.iters_done = static_cast<std::size_t>(real_iters);
+                R.krylov.converged  = real_converged;
                 const auto t1 = std::chrono::steady_clock::now();
                 R.backend.wall_seconds =
                     std::chrono::duration<double>(t1 - t0).count();
@@ -442,7 +470,7 @@ GroundStateResult solve_on(Backend& be,
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter      = max_iter;
         kopts.dim_cap       = static_cast<std::size_t>(geom.global_dim);
-        kopts.keep_basis    = opts.compute_vectors;
+        kopts.keep_basis    = opts.compute_vectors && !eigvec_two_pass;
 
         // Wave 2.1 + correction: LocalDGKS3 K=1 only ortho-projects
         // against the most recent two basis vectors. That is enough
@@ -504,6 +532,13 @@ GroundStateResult solve_on(Backend& be,
         }
         auto kres = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim,
                                                seed, kopts);
+        // Convergence bookkeeping (audit): the lane used to leave
+        // `krylov.converged` false even when the Ritz check fired, and
+        // said nothing when the cap was hit.
+        const std::size_t cap_hit_m = std::min<std::size_t>(
+            max_iter, static_cast<std::size_t>(geom.global_dim));
+        R.krylov.converged = (kres.alpha.size() < cap_hit_m) ||
+                             (kres.alpha.size() == static_cast<std::size_t>(geom.global_dim));
         // Solve the small (m x m) real-symmetric tridiagonal for the
         // lowest `num_eigs` eigenvalues. When the caller didn't request
         // eigenvectors, use the eigenvalues-only Eigen path -- the
@@ -542,13 +577,19 @@ GroundStateResult solve_on(Backend& be,
         // the original garbage did its damage) filter on the bound; a
         // direct caller keeps num_eigs values plus the diagnostics.
         std::vector<double> ritz_bounds;
+        // |beta_m| of pass 1: the last (unused) recurrence coefficient that
+        // turns the tridiag eigenvector bottom component into the residual
+        // bound ||H y - theta y|| = |beta_m| |z_{m,i}| (exact in exact
+        // arithmetic; also used below to certify the two-pass vector).
+        const double beta_last = [&] {
+            const std::size_t m = kres.alpha.size();
+            return (kres.beta.size() > m) ? std::abs(kres.beta[m])
+                                          : (m < geom.local_dim && !kres.beta.empty()
+                                                 ? std::abs(kres.beta.back())
+                                                 : 0.0);
+        }();
         if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
             const std::size_t m = kres.alpha.size();
-            const double beta_last =
-                (kres.beta.size() > m) ? std::abs(kres.beta[m])
-                                       : (m < geom.local_dim && !kres.beta.empty()
-                                              ? std::abs(kres.beta.back())
-                                              : 0.0);
             ritz_bounds.reserve(n_keep);
             for (std::size_t i2 = 0; i2 < n_keep; ++i2)
                 ritz_bounds.push_back(
@@ -561,7 +602,93 @@ GroundStateResult solve_on(Backend& be,
         // eigenvector matrix of the tridiag in column-major order; the
         // k-th eigenvector in the original Hilbert space is the linear
         // combination psi_k = sum_i evec_coeffs(i, k) * basis[i].
-        if (opts.compute_vectors && !kres.basis.empty()) {
+        if (opts.compute_vectors && eigvec_two_pass && !evec_coeffs.empty()) {
+            // ---- Pass 2: rerun the identical recurrence and accumulate
+            //      psi_k = sum_j y_{j,k} V_j as the basis vectors stream by.
+            const std::size_t m = kres.alpha.size();
+            std::vector<ed::matvec::Backend::UniqueVec> acc;
+            for (std::size_t k = 0; k < n_keep; ++k)
+                acc.push_back(be.make_zero_vector(geom.local_dim));
+            std::size_t added = 0;
+            ed::krylov::LanczosKernelOptions k2 = kopts;
+            k2.convergence_check = nullptr;
+            k2.max_iter          = m;
+            k2.on_step_interval  = 1;
+            k2.on_step = [&](std::size_t it, const std::vector<double>&,
+                             const std::vector<double>&, const Complex*,
+                             const Complex* v_prev, std::size_t n,
+                             const std::vector<const Complex*>*) {
+                const std::size_t jidx = it - 1;          // v_prev = V_j
+                if (jidx < m && jidx == added) {
+                    for (std::size_t k = 0; k < n_keep; ++k)
+                        be.axpy(Complex(evec_coeffs[jidx + k * m], 0.0),
+                                v_prev, acc[k].get(), n);
+                    ++added;
+                }
+            };
+            (void)ed::krylov::lanczos_kernel(be, matvec, geom.local_dim, seed, k2);
+            bool ok = (added == m);
+            double resid = std::numeric_limits<double>::quiet_NaN();
+            if (ok) {
+                // Certify the ground-state vector: ||H psi - E psi|| / ||psi||.
+                auto hpsi = be.make_zero_vector(geom.local_dim);
+                matvec(acc[0].get(), hpsi.get(), geom.local_dim);
+                const double npsi = be.nrm2(acc[0].get(), geom.local_dim);
+                const double r = be.axpy_nrm2(Complex(-evals[0], 0.0), acc[0].get(),
+                                              hpsi.get(), geom.local_dim);
+                resid = (npsi > 0.0) ? r / npsi : std::numeric_limits<double>::infinity();
+                R.krylov.residual_norm = resid;
+                // Certification. The Ritz-value stop at `tolerance` gives a
+                // vector whose residual scales like sqrt(tolerance) * |E|,
+                // so an absolute gate (the first cut used 1e-6) is never met
+                // at tol = 1e-10 and sent every N >= 20 run through the slow
+                // kept-basis fallback. The right yardstick is the free
+                // Lanczos bound |beta_m| |z_{m,0}| from pass 1: a faithful
+                // reconstruction reproduces it to O(1); loss of orthogonality
+                // (a ghost Ritz vector) violates it by orders of magnitude.
+                const double scale  = std::max(1.0, std::abs(evals[0]));
+                const double bound0 = beta_last * std::abs(evec_coeffs[m - 1]);
+                const double gate   = std::max({10.0 * bound0,
+                                                1e3 * opts.tolerance * scale,
+                                                1e-12 * scale});
+                ok = std::isfinite(resid) && (resid <= gate || !R.krylov.converged);
+            }
+            if (ok) {
+                EigenvectorRef evref;
+                evref.host.resize(n_keep, std::vector<Complex>(geom.local_dim, Complex{0.0, 0.0}));
+                for (std::size_t k = 0; k < n_keep; ++k) {
+                    const double nk = be.nrm2(acc[k].get(), geom.local_dim);
+                    if (nk > 0.0) be.scale(Complex(1.0 / nk, 0.0), acc[k].get(), geom.local_dim);
+                    be.copy_to_host(acc[k].get(), evref.host[k].data(), geom.local_dim);
+                }
+                R.eigenvectors = std::move(evref);
+            } else {
+                // Fallback (breakdown in pass 2 or an uncertified vector):
+                // the kept-basis FullCGS2 lane.
+                ed::krylov::LanczosKernelOptions k3 = kopts;
+                k3.keep_basis = true;
+                k3.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+                k3.max_iter   = m;
+                k3.convergence_check = nullptr;
+                auto kres3 = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim, seed, k3);
+                std::vector<double> ev3, w3, z3;
+                ed::krylov::detail::solve_tridiag_with_eigenvectors(
+                    kres3.alpha, kres3.beta, kres3.alpha.size(), ev3, w3, z3);
+                const std::size_t m3 = kres3.alpha.size();
+                EigenvectorRef evref;
+                evref.host.resize(n_keep, std::vector<Complex>(geom.local_dim, Complex{0.0, 0.0}));
+                std::vector<Complex> basis_host(geom.local_dim);
+                for (std::size_t i = 0; i < m3 && i < kres3.basis.size(); ++i) {
+                    be.copy_to_host(kres3.basis[i].get(), basis_host.data(), geom.local_dim);
+                    for (std::size_t k = 0; k < n_keep && k < ev3.size(); ++k) {
+                        const double c = z3[i + k * m3];
+                        auto& out = evref.host[k];
+                        for (std::size_t r = 0; r < geom.local_dim; ++r) out[r] += c * basis_host[r];
+                    }
+                }
+                R.eigenvectors = std::move(evref);
+            }
+        } else if (opts.compute_vectors && !kres.basis.empty()) {
             const std::size_t m = kres.alpha.size();
             EigenvectorRef evref;
             evref.host.resize(n_keep,

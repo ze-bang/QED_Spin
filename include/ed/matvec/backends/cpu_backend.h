@@ -71,7 +71,14 @@ public:
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;
-        std::memset(p, 0, n * sizeof(Complex));
+        // Audit F8: parallel first touch so Krylov vectors are distributed
+        // across NUMA nodes with the same static chunking the BLAS-1 and
+        // matvec kernels use (a serial memset places every page on the
+        // calling thread's node).
+        #pragma omp parallel for schedule(static) if(n > 65536)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            p[i] = Complex{0.0, 0.0};
+        }
     }
     void copy(const Complex* src, Complex* dst, std::size_t n) const override {
         if (n == 0) return;
@@ -140,6 +147,52 @@ public:
         for (long long i = 0; i < static_cast<long long>(n); ++i) {
             y[i] = alpha * x[i] + beta * y[i];
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Fused Lanczos primitives (audit F5): single streaming pass.
+    // `axpy_dot_local` / `axpy_nrm2sq_local` are the rank-local pieces
+    // so MpiBackend can reuse them and reduce the scalar once.
+    // ----------------------------------------------------------------
+    [[nodiscard]] Complex axpy_dot_local(Complex alpha, const Complex* x, Complex* y,
+                                         const Complex* z, std::size_t n) const {
+        if (n == 0) return Complex{0.0, 0.0};
+        double re = 0.0, im = 0.0;
+        const double ar = alpha.real(), ai = alpha.imag();
+        #pragma omp parallel for reduction(+:re,im) schedule(static) if(n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const Complex xi = x[i];
+            const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
+            const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
+            y[i] = Complex(yr, yi);
+            const Complex zi = z[i];
+            re += zi.real() * yr + zi.imag() * yi;
+            im += zi.real() * yi - zi.imag() * yr;
+        }
+        return Complex{re, im};
+    }
+    [[nodiscard]] double axpy_nrm2sq_local(Complex alpha, const Complex* x, Complex* y,
+                                           std::size_t n) const {
+        if (n == 0) return 0.0;
+        double sq = 0.0;
+        const double ar = alpha.real(), ai = alpha.imag();
+        #pragma omp parallel for reduction(+:sq) schedule(static) if(n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const Complex xi = x[i];
+            const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
+            const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
+            y[i] = Complex(yr, yi);
+            sq += yr * yr + yi * yi;
+        }
+        return sq;
+    }
+    [[nodiscard]] Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
+                                   const Complex* z, std::size_t n) const override {
+        return axpy_dot_local(alpha, x, y, z, n);
+    }
+    [[nodiscard]] double axpy_nrm2(Complex alpha, const Complex* x, Complex* y,
+                                   std::size_t n) const override {
+        return std::sqrt(axpy_nrm2sq_local(alpha, x, y, n));
     }
 
     // ----------------------------------------------------------------

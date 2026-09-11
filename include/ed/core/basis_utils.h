@@ -160,6 +160,54 @@ public:
     }
 
     /**
+     * Audit F1 (2026-09): build the same two tables WITHOUT a materialised
+     * basis. The basis is the ascending list of all n_bits-bit words with
+     * popcount n_up, so the first index at which upper half ``u`` appears
+     * is the prefix sum  sum_{u' < u} C(n_lower, n_up - popcount(u')) --
+     * an O(2^(n_upper)) pass over the upper words (3 MB of tables at
+     * N = 36, versus the 72 GB basis list the tableless mode exists to
+     * avoid). ``lookup`` is then the same O(1) two-table read as after
+     * ``build``.
+     */
+    void build_implicit(uint64_t n_bits, int64_t n_up) {
+        n_bits_ = n_bits;
+        n_up_ = n_up;
+        if (n_bits == 0) {
+            J_l_.clear();
+            J_r_.clear();
+            return;
+        }
+        n_lower_ = n_bits / 2;
+        n_upper_ = n_bits - n_lower_;
+        lower_mask_ = (n_lower_ == 0) ? 0ULL : ((1ULL << n_lower_) - 1ULL);
+
+        const uint64_t upper_size = 1ULL << n_upper_;
+        const uint64_t lower_size = 1ULL << n_lower_;
+
+        J_r_.assign(lower_size, 0);
+        std::vector<uint32_t> per_pop(n_lower_ + 1, 0);
+        for (uint64_t l = 0; l < lower_size; ++l) {
+            int p = __builtin_popcountll(l);
+            J_r_[l] = per_pop[p]++;
+        }
+
+        // C(n_lower, k) for k = 0..n_lower (exact in 64 bits for n_lower < 64).
+        std::vector<uint64_t> c_low(n_lower_ + 1, 0);
+        c_low[0] = 1;
+        for (uint64_t k = 1; k <= n_lower_; ++k)
+            c_low[k] = c_low[k - 1] * (n_lower_ - k + 1) / k;
+
+        J_l_.assign(upper_size, kInvalid);
+        uint64_t running = 0;
+        for (uint64_t u = 0; u < upper_size; ++u) {
+            const int64_t k = n_up - __builtin_popcountll(u);
+            if (k < 0 || k > static_cast<int64_t>(n_lower_)) continue;
+            J_l_[u] = running;
+            running += c_low[static_cast<uint64_t>(k)];
+        }
+    }
+
+    /**
      * Look up a state. Returns -1 if the state is not in the basis (either
      * the popcount disagrees with n_up, or the upper-half slot is empty).
      */

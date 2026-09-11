@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 #ifdef _OPENMP
 #  include <omp.h>
@@ -282,22 +283,26 @@ gather_row_basis(std::uint64_t r_idx,
 // ``diag_two_body`` bins here and add ``diag[r] * v[r]`` themselves, so the
 // per-row term loop only walks the off-diagonal bins.
 // ===========================================================================
+// Audit F1 (2026-09): the row bitstring is now a parameter so a driver that
+// enumerates rows sequentially (Gosper stepping in the tableless fixed-Sz
+// mode) can hand it in; ``gather_row_terms`` below keeps the old signature
+// and resolves ``state_of`` itself.
 template <class BasisPolicy, class Scalar,
           class DiagOneBodyVec, class OffDiagOneBodyVec, class DiagTwoBodyVec,
           class MixedTwoBodyVec, class OffDiagTwoBodyVec, class ThreeBodyVec,
           class GetV>
 inline Scalar
-gather_row_terms(std::uint64_t r_idx,
-                 Scalar v_local_at_r,
-                 BasisPolicy basis,
-                 double spin_l,
-                 const DiagOneBodyVec&    diag_one_body,
-                 const OffDiagOneBodyVec& offdiag_one_body,
-                 const DiagTwoBodyVec&    diag_two_body,
-                 const MixedTwoBodyVec&   mixed_two_body,
-                 const OffDiagTwoBodyVec& offdiag_two_body,
-                 const ThreeBodyVec&      three_body,
-                 GetV&&                   get_v) noexcept
+gather_row_terms_state(std::uint64_t r_state,
+                       Scalar v_local_at_r,
+                       BasisPolicy basis,
+                       double spin_l,
+                       const DiagOneBodyVec&    diag_one_body,
+                       const OffDiagOneBodyVec& offdiag_one_body,
+                       const DiagTwoBodyVec&    diag_two_body,
+                       const MixedTwoBodyVec&   mixed_two_body,
+                       const OffDiagTwoBodyVec& offdiag_two_body,
+                       const ThreeBodyVec&      three_body,
+                       GetV&&                   get_v) noexcept
 {
     using Cplx = std::complex<double>;
     const double spin    = spin_l;
@@ -314,10 +319,6 @@ gather_row_terms(std::uint64_t r_idx,
             return c.real();
         }
     };
-
-    // Get the bitstring of the row. For FullBasisPolicy this is the
-    // identity; for FixedSzBasisPolicy it reads basis_states[r_idx].
-    const std::uint64_t r_state = basis.state_of(r_idx);
 
     // ---- Diagonal one-body (Sz) ---------------------------------------
     for (const auto& t : diag_one_body) {
@@ -430,6 +431,91 @@ gather_row_terms(std::uint64_t r_idx,
     return acc;
 }
 
+template <class BasisPolicy, class Scalar,
+          class DiagOneBodyVec, class OffDiagOneBodyVec, class DiagTwoBodyVec,
+          class MixedTwoBodyVec, class OffDiagTwoBodyVec, class ThreeBodyVec,
+          class GetV>
+inline Scalar
+gather_row_terms(std::uint64_t r_idx,
+                 Scalar v_local_at_r,
+                 BasisPolicy basis,
+                 double spin_l,
+                 const DiagOneBodyVec&    diag_one_body,
+                 const OffDiagOneBodyVec& offdiag_one_body,
+                 const DiagTwoBodyVec&    diag_two_body,
+                 const MixedTwoBodyVec&   mixed_two_body,
+                 const OffDiagTwoBodyVec& offdiag_two_body,
+                 const ThreeBodyVec&      three_body,
+                 GetV&&                   get_v) noexcept
+{
+    // Get the bitstring of the row. For FullBasisPolicy this is the
+    // identity; for FixedSzBasisPolicy it reads basis_states[r_idx] (or
+    // unranks it in tableless mode -- sequential drivers avoid that via
+    // ``for_each_row_state`` + ``gather_row_terms_state``).
+    return gather_row_terms_state<BasisPolicy, Scalar>(
+        basis.state_of(r_idx), v_local_at_r, basis, spin_l,
+        diag_one_body, offdiag_one_body, diag_two_body, mixed_two_body,
+        offdiag_two_body, three_body, std::forward<GetV>(get_v));
+}
+
+// ===========================================================================
+// for_each_row_state<BasisPolicy>(basis, f): call f(r, r_state) for every
+// row r in [0, dim) with the SAME static contiguous partition as
+// ``#pragma omp for schedule(static)``. Policies that expose
+// ``sequential_states()`` / ``next_state()`` (the tableless fixed-Sz basis,
+// audit F1) get one ``state_of`` per thread chunk and Gosper stepping for
+// the rest; every other policy calls ``state_of`` per row as before.
+// ===========================================================================
+namespace detail {
+template <class P, class = void>
+struct has_sequential_states : std::false_type {};
+template <class P>
+struct has_sequential_states<P, std::void_t<
+    decltype(std::declval<const P&>().sequential_states()),
+    decltype(std::declval<const P&>().next_state(std::uint64_t{}))>>
+    : std::true_type {};
+} // namespace detail
+
+template <class BasisPolicy, class F>
+inline void for_each_row_state(const BasisPolicy& basis, F&& f)
+{
+    const std::uint64_t dim = basis.dim();
+#ifdef _OPENMP
+    const std::uint64_t par_threshold =
+        static_cast<std::uint64_t>(omp_get_max_threads()) * 1024ULL;
+    #pragma omp parallel if(dim > par_threshold)
+#endif
+    {
+#ifdef _OPENMP
+        const std::uint64_t nt  = static_cast<std::uint64_t>(omp_get_num_threads());
+        const std::uint64_t tid = static_cast<std::uint64_t>(omp_get_thread_num());
+#else
+        const std::uint64_t nt = 1, tid = 0;
+#endif
+        const std::uint64_t chunk = (dim + nt - 1) / nt;
+        const std::uint64_t r0 = std::min(dim, tid * chunk);
+        const std::uint64_t r1 = std::min(dim, r0 + chunk);
+        auto generic = [&]() {
+            for (std::uint64_t r = r0; r < r1; ++r) f(r, basis.state_of(r));
+        };
+        if constexpr (detail::has_sequential_states<BasisPolicy>::value) {
+            if (basis.sequential_states()) {
+                if (r0 < r1) {
+                    std::uint64_t s = basis.state_of(r0);
+                    for (std::uint64_t r = r0; r < r1; ++r) {
+                        f(r, s);
+                        if (r + 1 < r1) s = BasisPolicy::next_state(s);
+                    }
+                }
+            } else {
+                generic();
+            }
+        } else {
+            generic();
+        }
+    }
+}
+
 // ===========================================================================
 // apply_terms_gather<BasisPolicy, Scalar, ...SoA vecs>:
 //
@@ -494,18 +580,19 @@ inline void apply_terms_gather(
 #endif
 
     auto get_v = [in](std::uint64_t c) noexcept -> Scalar { return in[c]; };
+    (void)par_threshold;
 
-    #pragma omp parallel for schedule(static) if(dim > par_threshold)
-    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
-        const std::uint64_t r = static_cast<std::uint64_t>(ir);
+    // Same static row partition as the former ``omp for schedule(static)``;
+    // sequential policies (tableless fixed-Sz) step rows with Gosper's hack.
+    for_each_row_state(basis, [&](std::uint64_t r, std::uint64_t r_state) {
         const Scalar v_r = in[r];
-        Scalar acc = gather_row_terms<BasisPolicy, Scalar>(
-            r, v_r, basis, spin_l,
+        Scalar acc = gather_row_terms_state<BasisPolicy, Scalar>(
+            r_state, v_r, basis, spin_l,
             d1, offdiag_one_body, d2, mixed_two_body, offdiag_two_body,
             three_body, get_v);
         if (use_cache) acc += diag_cache[r] * v_r;
         out[r] = acc;
-    }
+    });
 }
 
 } // namespace ed::matvec::kernel

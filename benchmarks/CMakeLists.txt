@@ -138,3 +138,24 @@ add_custom_target(ed_benchmarks DEPENDS ${_ed_bench_targets})
 message(STATUS
     "Benchmarks enabled: build with `cmake --build build --target ed_benchmarks`."
 )
+
+# 2026-09 performance-audit driver: times ed::workflows::solve on fixed-Sz Heisenberg
+# chains (eigenvalues / eigenvectors / window) and prints one JSON line per case.
+add_executable(bench_audit_solve bench_audit_solve.cpp)
+target_link_libraries(bench_audit_solve PRIVATE ed_solvers_cpu ed_symmetry)
+if(WITH_CUDA)
+    target_link_libraries(bench_audit_solve PRIVATE ed_solvers_gpu
+        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
+endif()
+target_compile_options(bench_audit_solve PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
+set_target_properties(bench_audit_solve PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# 2026-09 performance-audit driver for the thermal lanes (FTLM / mTPQ).
+add_executable(bench_audit_thermal bench_audit_thermal.cpp)
+target_link_libraries(bench_audit_thermal PRIVATE ed_solvers_cpu ed_symmetry)
+if(WITH_CUDA)
+    target_link_libraries(bench_audit_thermal PRIVATE ed_solvers_gpu
+        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
+endif()
+target_compile_options(bench_audit_thermal PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
+set_target_properties(bench_audit_thermal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")

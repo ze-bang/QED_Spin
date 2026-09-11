@@ -352,6 +352,11 @@ struct LanczosKernelResult {
 ///
 /// Throws `std::invalid_argument` if `v0_local` has zero norm or if a
 /// reorth policy other than `None` is requested without `keep_basis`.
+/// DGKS "twice is enough" threshold for the CGS2 reprojection: a second
+/// pass is performed only if the first removed more than a fraction
+/// 1 - kappa of the norm (kappa = 1/sqrt(2) is the classical choice).
+inline constexpr double kDgksKappa = 0.7071067811865476;
+
 template <typename MatvecFn>
 LanczosKernelResult lanczos_kernel(
     const ed::matvec::Backend& be,
@@ -535,20 +540,33 @@ LanczosKernelResult lanczos_kernel(
         const double t1 = profile_on ? now_us() : 0.0;
         if (profile_on) t_apply_us += (t1 - t0);
 
-        // w -= beta[j] * v_prev   (skipped for j == 0; beta[0] is the
-        // sentinel zero pushed above).
-        if (j > 0) {
-            be.axpy(Complex(-R.beta[j], 0.0),
-                    v_prev.get(), w.get(), local_n);
-        }
-
-        // alpha[j] = <v_curr, w>  (already-reduced for distributed backends)
-        const Complex aj = be.dot(v_curr.get(), w.get(), local_n);
+        // Fused recurrence (performance audit 2026-09, F5): the four
+        // BLAS-1 sweeps {w -= beta v_prev; alpha = <v_curr,w>; w -= alpha
+        // v_curr; overlap = <v_curr,w>} become two single-pass calls, and
+        // for LocalDGKS3 with K <= 2 the projection onto v_curr is folded
+        // into the norm pass below (three fused regions per iteration).
+        const Complex aj = (j > 0)
+            ? be.axpy_dot(Complex(-R.beta[j], 0.0), v_prev.get(), w.get(),
+                          v_curr.get(), local_n)
+            : be.dot(v_curr.get(), w.get(), local_n);
         R.alpha.push_back(aj.real());
 
-        // w -= alpha[j] * v_curr
-        be.axpy(Complex(-R.alpha[j], 0.0),
-                v_curr.get(), w.get(), local_n);
+        const bool fuse_local_k12 =
+            (opts.reorth == ReorthPolicy::LocalDGKS3) &&
+            (opts.local_ring_size <= 2) && (j > 0 || j_start > 0);
+        Complex overlap_curr{0.0, 0.0};
+        if (fuse_local_k12) {
+            // w -= alpha[j] * v_curr, and the LocalDGKS3 overlap <v_curr, w>
+            overlap_curr = be.axpy_dot(Complex(-R.alpha[j], 0.0), v_curr.get(),
+                                       w.get(), v_curr.get(), local_n);
+        } else {
+            // w -= alpha[j] * v_curr
+            be.axpy(Complex(-R.alpha[j], 0.0),
+                    v_curr.get(), w.get(), local_n);
+        }
+        // Deferred projection coefficient folded into the norm pass (K == 1).
+        bool    defer_axpy = false;
+        Complex defer_coef{0.0, 0.0};
         const double t2 = profile_on ? now_us() : 0.0;
         if (profile_on) t_recur_us += (t2 - t1);
 
@@ -572,18 +590,26 @@ LanczosKernelResult lanczos_kernel(
             coeffs.resize(ortho_ptrs.size());
 
             // ----- CGS2 pass 1 -----
+            const double n_before = be.nrm2(w.get(), local_n);
             be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
                         w.get(), local_n, coeffs.data());
             for (auto& c : coeffs) c = -c;
             be.axpy_many(coeffs.data(), ortho_ptrs.data(),
                          ortho_ptrs.size(), w.get(), local_n);
 
-            // ----- CGS2 pass 2 (reprojection) -----
-            be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
-                        w.get(), local_n, coeffs.data());
-            for (auto& c : coeffs) c = -c;
-            be.axpy_many(coeffs.data(), ortho_ptrs.data(),
-                         ortho_ptrs.size(), w.get(), local_n);
+            // ----- CGS2 pass 2 (reprojection), DGKS-gated -----
+            // "Twice is enough" (Daniel-Gragg-Kaufman-Stewart): a second
+            // projection is only needed when the first one removed a
+            // substantial part of w. Two norms (two sweeps over w) replace
+            // an unconditional 2m-sweep second pass (audit F3).
+            const double n_after = be.nrm2(w.get(), local_n);
+            if (n_after < kDgksKappa * n_before) {
+                be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
+                            w.get(), local_n, coeffs.data());
+                for (auto& c : coeffs) c = -c;
+                be.axpy_many(coeffs.data(), ortho_ptrs.data(),
+                             ortho_ptrs.size(), w.get(), local_n);
+            }
         } else if (opts.reorth == ReorthPolicy::LocalDGKS3) {
             // Wave 2.3 of the SOTA Performance rollout (May 2026):
             // for the common cases K=1 and K=2 (the new defaults
@@ -599,12 +625,20 @@ LanczosKernelResult lanczos_kernel(
             // dominant for large-N small-state-space workloads.
             const std::size_t K = opts.local_ring_size;
             if (K <= 2) {
-                // K>=1: project against V_j (= v_curr).
+                // K>=1: project against V_j (= v_curr). The overlap was
+                // computed in the fused recurrence pass above; for K == 1
+                // the projection itself is folded into the norm pass.
                 if (j > 0 || j_start > 0) {
-                    const Complex overlap =
-                        be.dot(v_curr.get(), w.get(), local_n);
+                    const Complex overlap = fuse_local_k12
+                        ? overlap_curr
+                        : be.dot(v_curr.get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
-                        be.axpy(-overlap, v_curr.get(), w.get(), local_n);
+                        if (K == 1) {
+                            defer_axpy = true;
+                            defer_coef = -overlap;
+                        } else {
+                            be.axpy(-overlap, v_curr.get(), w.get(), local_n);
+                        }
                     }
                 }
                 // K==2: also project against V_{j-1} (= v_prev) when
@@ -637,8 +671,11 @@ LanczosKernelResult lanczos_kernel(
         const double t3 = profile_on ? now_us() : 0.0;
         if (profile_on) t_reorth_us += (t3 - t2);
 
-        // beta[j+1] = ||w||  (already-reduced for distributed backends)
-        const double bnext = be.nrm2(w.get(), local_n);
+        // beta[j+1] = ||w||  (already-reduced for distributed backends),
+        // fused with the deferred K == 1 projection when there is one.
+        const double bnext = defer_axpy
+            ? be.axpy_nrm2(defer_coef, v_curr.get(), w.get(), local_n)
+            : be.nrm2(w.get(), local_n);
         R.beta.push_back(bnext);
         const double t4 = profile_on ? now_us() : 0.0;
         if (profile_on) t_norm_us += (t4 - t3);

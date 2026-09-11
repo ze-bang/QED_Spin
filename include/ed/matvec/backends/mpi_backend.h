@@ -147,6 +147,17 @@ public:
         return std::sqrt(sq);
     }
 
+    // Fused Lanczos primitives (audit F5): rank-local fused pass, one
+    // Allreduce of the scalar.
+    [[nodiscard]] Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
+                                   const Complex* z, std::size_t n) const override {
+        return all_reduce_sum(CpuBackend::axpy_dot_local(alpha, x, y, z, n));
+    }
+    [[nodiscard]] double axpy_nrm2(Complex alpha, const Complex* x, Complex* y,
+                                   std::size_t n) const override {
+        return std::sqrt(all_reduce_sum(CpuBackend::axpy_nrm2sq_local(alpha, x, y, n)));
+    }
+
     // ------------------------------------------------------------------
     // Batched dot_many: local partial products via CpuBackend::dot_many,
     // followed by ONE Allreduce over the entire k-element coefficient

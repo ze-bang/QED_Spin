@@ -49,7 +49,9 @@ SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
                 static_cast<int>(producer_.n_bits()),
                 static_cast<int>(producer_.n_up()),
                 producer_.binom(),
-                producer_.dim());
+                producer_.dim(),
+                /*default_csr_cutoff=*/(1ULL << 22),
+                /*lin=*/&producer_.lin_index());   // audit F1: implicit Lin table
     }
     return ed::matvec::make_cpu_fixed_sz_backend<
         DiagonalOneBody, OffDiagonalOneBody,

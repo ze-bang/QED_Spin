@@ -88,6 +88,13 @@ struct TpqStepInfo {
     std::size_t    step;       ///< 0-based step counter
     double         beta;       ///< current inverse temperature or 0 (mTPQ)
     double         norm_before_normalize;
+    /// Audit H4 (2026-09): the microcanonical lane computes H psi_k once
+    /// per step and hands the moments to the callback, so drivers no
+    /// longer need a second matvec. `moments_valid == false` on the
+    /// canonical-Taylor lane (drivers fall back to their own matvec).
+    bool           moments_valid = false;
+    double         energy        = 0.0;   ///< Re <psi|H|psi>   (psi normalised)
+    double         h2            = 0.0;   ///< <psi|H^2|psi> = ||H psi||^2
 };
 
 /// Optional convergence/early-stop callback. Return `false` to halt the
@@ -166,38 +173,64 @@ TpqKernelResult tpq_kernel(Backend&                        be,
         if (n0 > 0.0) be.scale(Complex(1.0 / n0, 0.0), psi.get(), local_n);
     }
 
-    // Step 0 callback so drivers can record the beta=0 baseline.
-    if (on_step) {
-        TpqStepInfo<Backend> info{&be, psi.get(), local_n,
-                                  /*step=*/0, /*beta=*/0.0,
-                                  /*norm_before_normalize=*/1.0};
-        if (!on_step(info)) {
-            TpqKernelResult R;
-            R.psi_final = std::move(psi);
-            R.steps_done = 0;
-            return R;
-        }
-    }
-
     std::size_t steps = 0;
     if (opts.method == TpqMethod::Microcanonical) {
+        // Audit H4: one matvec per step. The product H psi_k that forms
+        // psi_{k+1} = (L - H) psi_k also yields the moments E_k = Re<psi_k|H psi_k>
+        // and <H^2>_k = ||H psi_k||^2 handed to the callback; the state
+        // update is one axpby plus a pointer swap (no copy).
+        auto moments = [&](double& E, double& H2) {
+            apply_H(psi.get(), scratchA.get(), local_n);          // scratchA = H psi
+            E  = std::real(be.dot(psi.get(), scratchA.get(), local_n));
+            H2 = std::real(be.dot(scratchA.get(), scratchA.get(), local_n));
+        };
+        double E0 = 0.0, H20 = 0.0;
+        moments(E0, H20);
+        if (on_step) {
+            TpqStepInfo<Backend> info{&be, psi.get(), local_n,
+                                      /*step=*/0, /*beta=*/0.0,
+                                      /*norm_before_normalize=*/1.0};
+            info.moments_valid = true; info.energy = E0; info.h2 = H20;
+            if (!on_step(info)) {
+                TpqKernelResult R;
+                R.psi_final = std::move(psi);
+                R.steps_done = 0;
+                return R;
+            }
+        }
         const std::size_t total = opts.max_iter;
         for (std::size_t k = 1; k <= total; ++k) {
-            detail::apply_microcanonical_step(be, apply_H, opts.large_value,
-                                              psi.get(), scratchA.get(),
-                                              local_n);
+            // scratchA = L psi - H psi  (H psi already in scratchA)
+            be.axpby(Complex(opts.large_value, 0.0), psi.get(),
+                     Complex(-1.0, 0.0), scratchA.get(), local_n);
+            std::swap(psi, scratchA);
             const double nrm = be.nrm2(psi.get(), local_n);
             if (opts.normalize_each_step && nrm > 0.0) {
                 be.scale(Complex(1.0 / nrm, 0.0), psi.get(), local_n);
             }
             ++steps;
+            double Ek = 0.0, H2k = 0.0;
+            moments(Ek, H2k);                                      // also prepares the next step
             if (on_step) {
                 TpqStepInfo<Backend> info{&be, psi.get(), local_n,
                                           k, /*beta=*/0.0, nrm};
+                info.moments_valid = true; info.energy = Ek; info.h2 = H2k;
                 if (!on_step(info)) break;
             }
         }
     } else {
+        // Step 0 callback so drivers can record the beta=0 baseline.
+        if (on_step) {
+            TpqStepInfo<Backend> info{&be, psi.get(), local_n,
+                                      /*step=*/0, /*beta=*/0.0,
+                                      /*norm_before_normalize=*/1.0};
+            if (!on_step(info)) {
+                TpqKernelResult R;
+                R.psi_final = std::move(psi);
+                R.steps_done = 0;
+                return R;
+            }
+        }
         const std::size_t total = opts.beta_steps;
         double beta = 0.0;
         for (std::size_t k = 1; k <= total; ++k) {

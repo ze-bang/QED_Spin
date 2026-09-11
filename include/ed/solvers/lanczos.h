@@ -176,9 +176,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 // reorth, periodic eigenvalue convergence check on the Lanczos tridiagonal
 // every 10 iters, breakdown on beta < tol.
 // -----------------------------------------------------------------------------
+//
+// ``iters_out`` / ``converged_out`` (optional): number of Lanczos steps taken
+// and whether the Ritz-value test fired before ``max_iter`` (audit 2026-09:
+// the orchestrator used to report ``converged = true`` unconditionally).
 void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t N, uint64_t max_iter, uint64_t exct,
-                  double tol, std::vector<double>& eigenvalues);
+                  double tol, std::vector<double>& eigenvalues,
+                  uint64_t* iters_out = nullptr, bool* converged_out = nullptr);
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 

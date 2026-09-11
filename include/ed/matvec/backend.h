@@ -106,6 +106,27 @@ public:
                        Complex beta,  Complex* y, std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
+    // Fused Lanczos-recurrence primitives (performance audit 2026-09, F5).
+    // One streaming pass each instead of two:
+    //   axpy_dot : y <- y + alpha*x ; returns z^H * y      (reduced)
+    //   axpy_nrm2: y <- y + alpha*x ; returns ||y||_2      (reduced)
+    // The defaults compose the primitives above so every backend stays
+    // correct; CpuBackend / MpiBackend override them with single-pass
+    // kernels (the unified `lanczos_kernel` issues three fused calls per
+    // iteration instead of seven separate BLAS-1 calls).
+    // ------------------------------------------------------------------
+    [[nodiscard]] virtual Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
+                                           const Complex* z, std::size_t n) const {
+        axpy(alpha, x, y, n);
+        return dot(z, y, n);
+    }
+    [[nodiscard]] virtual double axpy_nrm2(Complex alpha, const Complex* x, Complex* y,
+                                           std::size_t n) const {
+        axpy(alpha, x, y, n);
+        return nrm2(y, n);
+    }
+
+    // ------------------------------------------------------------------
     // Reductions. For non-distributed backends these are no-ops returning
     // their argument; for MPI / NCCL backends they MPI_Allreduce /
     // ncclAllReduce across the communicator.

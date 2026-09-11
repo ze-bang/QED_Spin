@@ -166,12 +166,31 @@ struct FixedSzBasisPolicy {
             : (*basis_states)[idx];
     }
     [[nodiscard]] inline int64_t index_of(uint64_t state) const noexcept {
+        // Audit F1: the tableless mode now carries an implicit Lin table
+        // (``LinIndexTable::build_implicit``), so the O(1) two-table read is
+        // the primary path in BOTH modes; the O(N) combinadic rank is only
+        // the fallback for a policy constructed without a table.
+        if (lin_index) return lin_index->lookup(state);
         if (binom) {
             return (__builtin_popcountll(state) == n_up_)
                 ? ed::core::combinadic::rank_state(state, n_bits_, n_up_, *binom)
                 : int64_t{-1};
         }
-        return lin_index->lookup(state);
+        return int64_t{-1};
+    }
+
+    // Audit F1: sequential row enumeration. In tableless mode the basis is
+    // the ascending list of popcount-n_up words, so a contiguous row chunk
+    // can be walked with Gosper's hack from ONE unrank at the chunk start
+    // instead of an O(N) unrank per row. ``for_each_row_state`` (gather
+    // driver / CSR assembly / diagonal build) consults these.
+    [[nodiscard]] inline bool sequential_states() const noexcept {
+        return binom != nullptr;
+    }
+    [[nodiscard]] static inline uint64_t next_state(uint64_t v) noexcept {
+        // Gosper's hack: next larger word with the same popcount (v != 0).
+        const uint64_t t = v | (v - 1);
+        return (t + 1) | (((~t & (t + 1)) - 1) >> (__builtin_ctzll(v) + 1));
     }
 
     static constexpr bool may_leave_basis  = true;
@@ -222,11 +241,12 @@ struct FixedSzBasisPolicy {
     int                                        n_bits,
     int                                        n_up,
     const ed::core::combinadic::BinomialTable& binom,
-    uint64_t                                   dim) noexcept
+    uint64_t                                   dim,
+    const LinIndexTable*                       lin = nullptr) noexcept
 {
     FixedSzBasisPolicy p{};
     p.basis_states = nullptr;
-    p.lin_index    = nullptr;
+    p.lin_index    = lin;   // implicit Lin table (audit F1); nullptr => rank fallback
     p.dim_         = dim;
     p.binom        = &binom;
     p.n_bits_      = n_bits;

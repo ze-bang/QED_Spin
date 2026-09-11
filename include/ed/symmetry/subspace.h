@@ -228,6 +228,10 @@ public:
         s.owned_binom_.resize(static_cast<int>(n_bits));
         s.tableless_dim_ = s.owned_binom_.at(static_cast<int>(n_bits),
                                              static_cast<int>(n_up));
+        // Audit F1: O(1) state->index lookup without the basis list
+        // (12 * 2^(N/2) bytes; 3 MB at N = 36).
+        s.owned_lin_.build_implicit(n_bits, n_up);
+        s.lin_ptr_ = &s.owned_lin_;
         return s;
     }
 
@@ -270,13 +274,15 @@ public:
     }
 
     [[nodiscard]] std::int64_t index_of(std::uint64_t state) const noexcept {
+        // Both modes own a Lin table now (tableless: the implicit build).
+        if (lin_ptr_ != nullptr) return lin_ptr_->lookup(state);
         if (tableless_) {
             return (__builtin_popcountll(state) == static_cast<int>(n_up_))
                 ? ed::core::combinadic::rank_state(
                       state, static_cast<int>(n_bits_), static_cast<int>(n_up_), owned_binom_)
                 : std::int64_t{-1};
         }
-        return lin_ptr_->lookup(state);
+        return std::int64_t{-1};
     }
 
     [[nodiscard]] const std::vector<std::uint64_t>& basis_states() const noexcept {
@@ -295,7 +301,7 @@ public:
         if (tableless_) {
             return ed::matvec::basis::make_combinadic_fixed_sz_basis(
                 static_cast<int>(n_bits_), static_cast<int>(n_up_),
-                owned_binom_, tableless_dim_);
+                owned_binom_, tableless_dim_, lin_ptr_);
         }
         return ed::matvec::basis::make_fixed_sz_basis(*basis_ptr_, *lin_ptr_);
     }
@@ -312,6 +318,10 @@ private:
     void rehome_from_(const FixedSzSubspace& o) noexcept {
         if (o.basis_ptr_ == &o.owned_basis_) {
             basis_ptr_ = &owned_basis_;
+            lin_ptr_   = &owned_lin_;
+        } else if (o.tableless_ && o.lin_ptr_ == &o.owned_lin_) {
+            // Tableless owner: no basis list, but the implicit Lin table is ours.
+            basis_ptr_ = nullptr;
             lin_ptr_   = &owned_lin_;
         } else {
             basis_ptr_ = o.basis_ptr_;

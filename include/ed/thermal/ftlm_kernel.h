@@ -80,7 +80,13 @@ struct FtlmOptions {
     /// FullCGS2).
     std::uint64_t max_iterations           = 1000;
     double        tolerance                = 1e-10;
-    bool          full_reorthogonalization = true;
+    /// Audit H5 (2026-09): stochastic-trace samples do not need a mutually
+    /// orthogonal Krylov basis (ghost Ritz values only redistribute
+    /// weight); the default is now local reorthogonalisation without a
+    /// stored basis, which is what the backend (GPU) lane always did and
+    /// removes the O(M^2 N) CGS2 traffic and the M x N basis of the CPU
+    /// lane. Set true to restore the kept-basis FullCGS2 behaviour.
+    bool          full_reorthogonalization = false;
     std::uint64_t reorth_frequency         = 10;
     bool          store_intermediate       = false;
     bool          compute_error_bars       = true;
