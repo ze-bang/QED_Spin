@@ -35,6 +35,11 @@ from qed.input import HamiltonianBuilder, Op  # noqa: E402
 
 warnings.simplefilter("ignore")
 
+# Backend for every case: "cpu" (default) or "gpu" (--device gpu). The GPU matrix could not
+# be run during the 2026-09-10 audit (WSL reported "GPU access blocked by the operating
+# system"); run `--device gpu` on a host with a working driver to cover CudaBackend lanes.
+DEVICE = "cpu"
+
 
 # =============================================================================
 # Models.  Each model is a list of terms (ops, sites, coeff) with ops in {"+","-","z"};
@@ -343,7 +348,7 @@ def solve_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool):
         if solver == "full" and N > 14: continue
         sz = half if m.u1 else "off"
         run(Case(f"{m.name}/solve/{solver}/sz={sz}/k={k}",
-                 lambda solver=solver, sz=sz: qed.solve(H, sz=sz, num_eigenvalues=k, solver=solver, verbose=False),
+                 lambda solver=solver, sz=sz: qed.solve(H, sz=sz, num_eigenvalues=k, solver=solver, device=DEVICE, verbose=False),
                  chk_eigs(half if m.u1 else None), tags=("solve",)))
     # --- no Sz block at all (full Hilbert space) ---
     if N <= 16:
@@ -439,7 +444,7 @@ def thermal_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool)
             return (dE < tol_E and dC < tol_C), f"dE/N={dE:.1e} dC/N={dC:.1e}"
         return f
 
-    common = dict(T_min=float(temps[0]), T_max=float(temps[-1]), num_T=len(temps), random_seed=7, verbose=False, device="cpu")
+    common = dict(T_min=float(temps[0]), T_max=float(temps[-1]), num_T=len(temps), random_seed=7, verbose=False, device=DEVICE)
     for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS", "OFTLM"):
         kw = dict(common)
         if method in ("FTLM", "LTLM", "OFTLM"):
@@ -554,7 +559,7 @@ def spectral_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool
         ok = abs(I - M0_ex) < 0.1 * max(M0_ex, 1e-12) and abs(c - M1_ex) < 0.1
         return ok, f"weight={I:.4f} (sum rule {M0_ex:.4f}) centroid={c:.3f} (exact {M1_ex:.3f})"
 
-    common = dict(omega=omega, eta=eta, verbose=False, device="cpu", krylov_dim=150)
+    common = dict(omega=omega, eta=eta, verbose=False, device=DEVICE, krylov_dim=150)
     run(Case(f"{m.name}/spectral/ground_state_cf/plain", lambda: qed.spectral(H, [O], method="ground_state_cf", **common),
              chk_gs(use_global=True), tags=("spectral",)))
     if m.u1:
@@ -601,7 +606,7 @@ def spectral_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool
         try:
             tres = qed.thermal(H, method="mTPQ", T_min=0.5, T_max=5.0, num_T=8, num_samples=1, random_seed=3,
                                max_iterations=200, probe_betas=[1.0], use_sz_if_conserved=False, output_dir=d,
-                               device="cpu", verbose=False)
+                               device=DEVICE, verbose=False)
             with h5py.File(tres.hdf5_path, "r") as f:
                 key = list(f["/tpq/samples/sample_0/states"])[0]
                 raw = np.asarray(f[f"/tpq/samples/sample_0/states/{key}"][...])
@@ -630,7 +635,7 @@ def timing_cases(run: Runner):
                  lambda r: (True, f"E0={r.eigenvalues[0]:.10f}")))
         for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS"):
             for sym in (None, "auto"):
-                kw = dict(T_min=0.2, T_max=4.0, num_T=12, num_samples=8, random_seed=7, verbose=False, device="cpu")
+                kw = dict(T_min=0.2, T_max=4.0, num_T=12, num_samples=8, random_seed=7, verbose=False, device=DEVICE)
                 if method != "mTPQ":
                     kw["krylov_dim"] = 100        # mTPQ: leave the step count to the auto-sizer
                 run(Case(f"{m.name}/thermal/{method}/symmetry={sym}", lambda H=H, method=method, sym=sym, kw=kw: qed.thermal(
@@ -641,14 +646,14 @@ def timing_cases(run: Runner):
         O = pb.to_operator()
         omega = np.linspace(0, 4, 81)
         run(Case(f"{m.name}/spectral/ground_state_cf/sz={half}", lambda H=H, O=O, half=half: qed.spectral(
-            H, [O], method="ground_state_cf", sz=half, omega=omega, eta=0.1, krylov_dim=150, verbose=False, device="cpu"),
+            H, [O], method="ground_state_cf", sz=half, omega=omega, eta=0.1, krylov_dim=150, verbose=False, device=DEVICE),
             lambda r: (True, f"peak={np.asarray(r.S_real).max():.4f}")))
         run(Case(f"{m.name}/spectral/ground_state_cf/symmetry=auto/sz={half}/Q=pi", lambda H=H, O=O, half=half: qed.spectral(
             H, [O], method="ground_state_cf", sz=half, symmetry="auto", momentum_transfer=[0.5], omega=omega, eta=0.1,
-            krylov_dim=150, verbose=False, device="cpu"), lambda r: (True, f"peak={np.asarray(r.S_real).max():.4f}")))
+            krylov_dim=150, verbose=False, device=DEVICE), lambda r: (True, f"peak={np.asarray(r.S_real).max():.4f}")))
         run(Case(f"{m.name}/spectral/ftlm_dynamical/symmetry=auto/sz={half}/T=1", lambda H=H, O=O, half=half: qed.spectral(
             H, [O], method="ftlm_dynamical", T=[1.0], num_random_vectors=8, sz=half, symmetry="auto", momentum_transfer=[0.5],
-            omega=omega, eta=0.1, krylov_dim=150, verbose=False, device="cpu"), lambda r: (True, f"peak={np.asarray(r.S_real).max():.4f}")))
+            omega=omega, eta=0.1, krylov_dim=150, verbose=False, device=DEVICE), lambda r: (True, f"peak={np.asarray(r.S_real).max():.4f}")))
     # triangular chiral 4x4 (complex operator)
     Lx, Ly = 4, 4
     nn, nnn, tri = triangular_torus(Lx, Ly)
@@ -661,7 +666,7 @@ def timing_cases(run: Runner):
     run(Case(f"{m.name}/solve/symmetry=auto/sz=8/k=2", lambda: qed.solve(H, sz=8, num_eigenvalues=2, symmetry="auto", verbose=False),
              lambda r: (True, f"E={np.asarray(r.eigenvalues)[:2]}")))
     run(Case(f"{m.name}/thermal/FTLM/symmetry=auto", lambda: qed.thermal(H, method="FTLM", symmetry="auto", T_min=0.2, T_max=4.0,
-             num_T=12, num_samples=8, krylov_dim=100, random_seed=7, verbose=False, device="cpu"),
+             num_T=12, num_samples=8, krylov_dim=100, random_seed=7, verbose=False, device=DEVICE),
              lambda r: (True, f"E(Tmin)={r.energy[0]:.5f}")))
 
 
@@ -673,7 +678,12 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--N", type=int, default=12)
+    ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"])
     a = ap.parse_args()
+    global DEVICE
+    DEVICE = a.device
+    if DEVICE == "gpu" and not qed.has_cuda_build():
+        sys.exit("this qed build has no CUDA support")
     run = Runner(only=a.only, verbose=a.verbose)
     models = make_models(N_chain=a.N, tri=(3, 4) if a.N <= 12 else (4, 4))
     for m in models:
