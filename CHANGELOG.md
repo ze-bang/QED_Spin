@@ -1,5 +1,80 @@
 # Changelog
 
+## 2026-09-11 — Correctness campaign: every verb x option x edge case
+
+`benchmarks/audit_correctness.py` (new) runs every public verb (`qed.solve`, `qed.thermal`,
+`qed.spectral`, `qed.full_spectrum`, the CLI, save/load) over 14 models (dimers, odd chains,
+open chains, frustrated J1-J2, XY, staggered field, transverse-field Ising, random real and
+complex couplings, square, kagome, chiral triangular) against an independent dense reference
+(exact spectra, exact thermodynamics, Lehmann S(w) at T = 0 and T > 0), plus a robustness
+battery of invalid inputs. Final state: 1017 cases on the CPU lane and 1017 on the CUDA lane,
+1010 passing on each, 0 failing, 7 expected rejections (point-group / spin-flip / time-reversal
+`'require'` on models without the symmetry); 361/361 C++ tests; 589 Python tests passing, 22
+skipped. Defects found and fixed:
+
+* **Same-site two-body products were silently dropped** (`S+_i S-_i`, `Sz_i S+_i`, ...):
+  `TermStorage::classify_route` now rewrites them with the spin-1/2 identities
+  (`S+S- = 1/2 + Sz`, `Sz S+ = +S+/2`, `S+S+ = 0`, ...); a three-body term with a
+  repeated site throws `std::invalid_argument` instead of being ignored.
+* **Non-Hermitian input was accepted silently** and produced complex "energies":
+  `Operator::is_hermitian()` is now a cached structural check of the term list, and
+  `solve` / `thermal` / `spectral` reject non-Hermitian Hamiltonians with a message.
+* **Single-vector Lanczos in an eigenvalue window drops degenerate copies**: the default
+  method for `num_eigenvalues > 1` is Krylov-Schur (`solver=None`), `auto_tune.pick_solver`
+  follows, and `qed.solve(solver='lanczos', num_eigenvalues>1)` emits a RuntimeWarning.
+  Blocks with `dim <= 32` or `2 * num_eigs >= dim` are always diagonalised densely
+  (every Krylov lane was wrong on 2- to 10-state blocks). The abelian-symmetry lane
+  honours `solver=None` as `SolveMethod::Auto` per sector instead of forcing Lanczos.
+* **Lanczos window vectors** with `num_eigenvalues > 1` were returned with residuals up to
+  1e-2: the stop is gated on the Ritz bound `|beta_m z_{m,i}| <= tol max(1,|E0|)` for
+  every requested vector.
+* **KPM-DOS on small blocks** (`dim <= 512`, i.e. most symmetry sectors) was biased by up
+  to 20 % and returned NaN on 1- and 2-state sectors (`a = 0` from another sector's
+  bounds): those blocks now use the dense spectrum (exact thermodynamics, exact
+  trace-normalised moments, Gaussian-broadened DOS integrating to `dim`); a caller-pinned
+  window is kept when it encloses the spectrum. `KPMDOSParameters::exact_small_block`.
+* **Sz-parity halves on operators without Sz-parity** (`sz='even'/'odd'` on a
+  transverse-field Ising or staggered-field model) returned wrong spectra: rejected with
+  a ValueError unless `detect_hamiltonian_symmetries` reports the symmetry.
+* **`compute_eigenvectors=True` with `symmetry='auto'`** returned no vectors (spin-flip
+  and little-group lanes): the abelian lane disables spin-flip when vectors are
+  requested (raises on `'require'`) and the little-group lane falls back to the plain
+  vector-capable solve.
+* **Degenerate multiplets** got wrong SU(2) labels: `label_vectors_with_s2` rotates each
+  degenerate group (|dE| <= 1e-8) into S^2 eigenstates before labelling.
+* **Finite-temperature spectra without a symmetry group** were not reachable in memory:
+  new binding `workflows_spectral_ftlm_plain`; `qed.spectral(temperatures=[...])` routes
+  to it (`FiniteTSpectralResult`). Both FTLM cross-irrep estimators use full
+  reorthogonalisation (ghost Ritz copies biased the XY-chain weight by 15 %).
+* **Unconverged continued fractions** were reported as converged: `CfSpectralResult::
+  convergence_change` compares the half-depth and full-depth fractions; `res.krylov`
+  carries it and `qed.spectral` warns when the spectrum moved by more than 5 %
+  (the previous GPU/CPU 26 % disagreement at `krylov_dim=40` was this, not the GPU).
+* **Krylov-Schur with an unset iteration cap** (the CLI, `ed::workflows::solve` callers)
+  used `min(dim, 1000)` as the PER-CYCLE subspace, each cycle O(m^2 n) with full
+  reorthogonalisation: three eigenvalues of a 4096-state chiral model took 592 s
+  (0.5 s from Python, whose facade defaults to `max(200, 8k + 80)`). The orchestrator
+  now uses the same default.
+* **GPU lane differences** found by the same harness with `--device gpu`: `qed.solve(device='gpu')`
+  with an eigenvalue window forced Lanczos (the Auto -> Krylov-Schur default was only applied on
+  the CPU dispatch), and the CUDA KPM-DOS driver had no exact small-block path (NaN on 1- and
+  2-state sectors, 20 % bias on 32-state ones). Both lanes now behave like the CPU lane.
+  The kernel-lane Lanczos (CudaBackend eigenvectors) returned vectors with residuals of 1e-6
+  at tol 1e-10 because its early exit only watched the Ritz value; with vectors requested it
+  now also requires the Ritz residual bound for every pair
+  (`make_smallest_ritz_convergence(..., require_residual_bound)`), giving 5e-11..8e-10.
+* **Performance re-measured after the fixes** (`bench_audit_solve` / `bench_audit_thermal`,
+  best-of-2 ms, E0 only / E0 + certified eigenvector, with ~7 of 32 cores busy with
+  unrelated jobs): CPU 5 / 16 at N = 18, 27 / 60 at N = 20, 221 / 512 at N = 22,
+  1278 / 3686 at N = 24; GPU 15 / 34, 26 / 65, 69 / 171, 284 / 732. Eigenvalue-only and
+  thermal timings (FTLM N = 20: 314 ms, mTPQ N = 20: 218 ms) are unchanged from the
+  2026-09-11 GPU entry. The eigenvector lanes are slower (CPU 1.3-1.4x, GPU 1.3x at N = 24)
+  because they now run until the vector residual meets the requested tolerance (CPU 7e-10,
+  GPU 8e-10 at tol 1e-10; previously 4e-5 and 5e-6 at the same setting).
+* **Input validation**: `num_eigenvalues >= 1`, `tolerance > 0`, `max_iterations >= 1`,
+  thermal sample / Krylov counts and temperature grids, spectral `eta > 0`, finite
+  non-empty omega grids, `krylov_dim >= 2`, `num_random_vectors >= 1`.
+
 ## 2026-09-11 — GPU lanes: matrix run, three fixes, device Lin table
 
 The workflow matrix (`benchmarks/audit_workflows.py --device gpu`, 153 cases on four

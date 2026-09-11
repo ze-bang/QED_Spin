@@ -232,7 +232,9 @@ def test_tune_dssf_omega_too_short_raises():
 
 def test_pick_solver_thresholds():
     assert auto_tune.pick_solver(num_eigenvalues=1, sector_dim=512) == "FULL"
-    assert auto_tune.pick_solver(num_eigenvalues=3, sector_dim=1 << 14) == "LANCZOS"
+    assert auto_tune.pick_solver(num_eigenvalues=1, sector_dim=1 << 14) == "LANCZOS"
+    # windows default to Krylov-Schur (Lanczos reports degenerate levels once)
+    assert auto_tune.pick_solver(num_eigenvalues=3, sector_dim=1 << 14) == "KRYLOV_SCHUR"
     assert auto_tune.pick_solver(num_eigenvalues=10, sector_dim=1 << 14) == "KRYLOV_SCHUR"
     assert auto_tune.pick_solver(num_eigenvalues=50, sector_dim=1 << 14) == "BLOCK_LANCZOS"
 
@@ -316,9 +318,10 @@ def test_pick_num_thermal_samples_decreases_with_dim():
 
 
 def test_tune_diag_returns_consistent_bundle():
+    # windows (num_eigenvalues > 1) default to Krylov-Schur since 2026-09-11
     knobs = auto_tune.tune_diag(num_eigenvalues=4, sector_dim=1 << 14,
                                 bandwidth=8.0)
-    assert knobs.solver == "LANCZOS"
+    assert knobs.solver == "KRYLOV_SCHUR"
     assert knobs.tolerance == pytest.approx(1e-10)
     assert knobs.ftlm_krylov_dim == 100
     assert knobs.ltlm_krylov_dim == 200

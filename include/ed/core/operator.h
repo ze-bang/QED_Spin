@@ -277,6 +277,7 @@ public:
         self->terms_committed_aos_size_       = aos_n;
         self->terms_committed_three_aos_size_ = aos3_n;
         // SoA changed -> backend CSR is stale; isReal() must rescan.
+        hermitian_check_done_ = false;
         if (backend_) self->backend_->invalidate_caches();
         self->terms_fresh_.store(true, std::memory_order_release);
         self->real_check_done_ = false;
@@ -289,6 +290,7 @@ public:
     /// historical invalidation bug.
     virtual void invalidateMatrixCaches() {
         real_check_done_                = false;
+        hermitian_check_done_           = false;
         terms_fresh_                    = false;
         terms_committed_aos_size_       = 0;
         terms_committed_three_aos_size_ = 0;
@@ -342,18 +344,18 @@ public:
         return ed::matvec::MemorySpace::Host;
     }
     [[nodiscard]] bool is_hermitian() const override {
-        // We do not currently track non-Hermitian operators; every
-        // path that constructs an Operator (Heisenberg / BFG / etc.)
-        // emits its terms in Hermitian-symmetric pairs. Override on
-        // future asymmetric subclasses if that changes.
-        //
-        // LOAD-BEARING for the GPU rep lane (audit 2026-07-30): the
-        // device rep-scatter kernel applies the ADJOINT of the reduced-
-        // CSR gather's matrix, so the two lanes agree ONLY under this
-        // contract -- see the HERMITIAN-ONLY note on
-        // apply_terms_rep_symmetry_scatter (term_kernels_gpu.cuh)
-        // before overriding this to return anything else.
-        return true;
+        // Correctness (2026-09-11): a structural check on the committed term
+        // list (adjoint partners with conjugate coefficients, real diagonal),
+        // cached until the term list changes. Every solver lane assumes
+        // Hermiticity (the rep kernels apply H^dagger; Lanczos tridiagonalises
+        // the symmetric part silently), so the orchestrator refuses
+        // non-Hermitian input up front instead of returning numbers.
+        commitPendingTransforms();
+        if (!hermitian_check_done_) {
+            hermitian_cached_      = terms_.is_hermitian();
+            hermitian_check_done_  = true;
+        }
+        return hermitian_cached_;
     }
     [[nodiscard]] std::string description() const override {
         return "Operator(n_bits=" + std::to_string(n_bits_) + ")";
@@ -880,6 +882,8 @@ protected:
 
     // Cache for ``isReal()``. Invalidated by ``invalidateMatrixCaches()``.
     mutable bool real_check_done_ = false;
+    mutable bool hermitian_check_done_ = false;   // audit 2026-09-11
+    mutable bool hermitian_cached_     = true;
     mutable bool real_cache_      = false;
 
     // -------------------------------------------------------------------

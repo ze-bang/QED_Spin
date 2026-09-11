@@ -545,6 +545,22 @@ def solve(
             f"qed.solve(H, ...) expected Operator or FixedSzOperator, "
             f"got {type(H).__name__}"
         )
+    # Input validation (2026-09-11): these used to be clamped or passed through
+    # silently (num_eigenvalues=0 -> 1, a negative tolerance -> the kernels).
+    if num_eigenvalues is not None and int(num_eigenvalues) < 1:
+        raise ValueError(f"qed.solve: num_eigenvalues must be >= 1, got {num_eigenvalues!r}")
+    if not (float(tolerance) > 0.0):
+        raise ValueError(f"qed.solve: tolerance must be > 0, got {tolerance!r}")
+    if max_iterations is not None and int(max_iterations) < 1:
+        raise ValueError(f"qed.solve: max_iterations must be >= 1, got {max_iterations!r}")
+    if (solver is not None and str(getattr(solver, "name", solver)).upper() == "LANCZOS"
+            and num_eigenvalues is not None and int(num_eigenvalues) > 1):
+        warnings.warn(
+            "qed.solve(solver='lanczos', num_eigenvalues>1): single-vector Lanczos "
+            "reports each degenerate level ONCE, so a window can miss multiplet "
+            "copies. Leave solver unset (windows default to Krylov-Schur) or use "
+            "'krylov_schur' / 'block_lanczos' when levels may be degenerate.",
+            RuntimeWarning, stacklevel=2)
 
     # ------------------------------------------------------------------
     # ONE Sz spelling (diction consolidation, Jul 2026): sz= accepts
@@ -654,6 +670,19 @@ def solve(
                 "halves) or pass an integer n_up.")
         _sz_parity_str = 0 if _key == "even" else 1
         sz = None
+        # Correctness (2026-09-11): a parity half is only a valid block when
+        # (-1)^{n_down} is conserved. The TFIM (single S+/S- terms) is not,
+        # and the parity lane returned wrong eigenvalues instead of refusing.
+        try:
+            _det_par = dict(_core.detect_hamiltonian_symmetries(H))
+            _par_ok = bool(_det_par.get("sz_parity", False)) or bool(_det_par.get("u1", False))
+        except Exception:  # noqa: BLE001
+            _par_ok = True
+        if not _par_ok:
+            raise ValueError(
+                f"qed.solve: sz={_key!r} names an Sz-parity half, but this operator "
+                "does not conserve Sz parity (a term changes the number of down "
+                "spins by an odd amount); use sz='off'.")
 
     # ------------------------------------------------------------------
     # 1a. Sz unnamed on the PLAIN lane -> sweep every magnetisation sector.
@@ -930,13 +959,12 @@ def solve(
         # representative vector (fold partners need U3 transport).
         if (compute_eigenvectors and not is_thermal
                 and sector is None and irrep is None and flip is None
-                and _ts2 < 0  # Stage 12: targeting rides the abelian lane
-                and isinstance(sz, int)):
+                and _ts2 < 0):  # Stage 12: targeting rides the abelian lane
             vlane = resolve_projection_lane(
                 symmetry, point_group=point_group, consumer="solve",
                 eigenvalues_only=True,   # the capability exists as of r2
                 prefer_abelian=False, verbose=verbose)
-            if vlane.mode == "project":
+            if vlane.mode == "project" and isinstance(sz, int):
                 _sfv = resolve_discrete_toggle(
                     op_to_use, spin_flip, "spin_flip", verbose=verbose)
                 _trv = resolve_discrete_toggle(
@@ -963,9 +991,25 @@ def solve(
                           f"{len(out.eigenvalues)} certified pairs, "
                           f"computational basis.")
                 return out
-            elif verbose:
-                print(f"[qed.solve] vector lane declined "
-                      f"({vlane.reason}); abelian lane.")
+            elif point_group != "full" and not output_dir:
+                # Correctness (2026-09-11): the abelian rep lane never returns
+                # eigenvectors in memory (only per-sector HDF5 when output_dir
+                # is set), so a vector request silently came back without
+                # vectors. Use the plain fixed-Sz lane, which does. With an
+                # output_dir the per-sector HDF5 contract stands, and
+                # point_group='full' keeps raising on a decline (below).
+                if verbose:
+                    print(f"[qed.solve] vector lane declined ({vlane.reason}); "
+                          f"eigenvectors requested -> plain fixed-Sz lane "
+                          f"(the abelian symmetry lane returns vectors only via output_dir).")
+                return solve(
+                    H, num_eigenvalues=num_eigenvalues, tolerance=tolerance,
+                    compute_eigenvectors=True, solver=solver, device=device,
+                    symmetry=None, sz=sz, auto_sz=auto_sz, spin_flip="off",
+                    time_reversal="off", point_group="off", total_spin=total_spin,
+                    lattice=lattice, output_dir=output_dir,
+                    max_iterations=max_iterations, block_size=block_size,
+                    verbose=verbose, extra_params=extra_params)
         if _ts2 >= 0 and point_group == "full":
             raise ValueError(
                 "qed.solve: total_spin targeting is not implemented inside "
@@ -1259,11 +1303,16 @@ def solve(
             spin_flip=spin_flip,
             time_reversal=time_reversal,
             point_group=point_group,
+            auto_method=(solver is None),
         )
 
 
     if use_gpu:
-        return _diag_via_directory(op_to_use, method, params, verbose=verbose)
+        # 2026-09-11: honour "no solver named" as Auto here too (windows ->
+        # Krylov-Schur); forcing Lanczos dropped degenerate copies on the GPU
+        # lane while the CPU lane got them right.
+        return _diag_via_directory(op_to_use, method, params, verbose=verbose,
+                                   auto_method=(solver is None))
 
     # solver=None => let the orchestrator pick the ground-state eigensolver
     # default (full diag for tiny dims, Lanczos otherwise).
@@ -1824,6 +1873,7 @@ def _diag_via_directory(
     params: EDParameters,
     *,
     verbose: bool,
+    auto_method: bool = False,
 ) -> EDResults:
     """Route a GPU request for an in-memory Operator through the orchestrator.
 
@@ -1838,7 +1888,8 @@ def _diag_via_directory(
     if verbose:
         print(f"[qed.solve] GPU dispatch via _core.workflows_solve "
               f"(backend selection: allow_gpu=True)")
-    return _diag_via_workflows_solve(operator, method, params)
+    return _diag_via_workflows_solve(operator, method, params,
+                                     auto_method=auto_method)
 
 
 # ---------------------------------------------------------------------------
@@ -1924,6 +1975,7 @@ def _diag_with_symmetry(
     point_group="auto",
     sz_parity: Optional[int] = None,
     auto_sz_axis: bool = True,
+    auto_method: bool = False,
 ) -> EDResults:
     """Route a symmetry-projected diagonalisation through the C++
     streaming-symmetry pipeline.
@@ -2082,7 +2134,10 @@ def _diag_with_symmetry(
 
         # Ground-state lane (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
         # FULL) -- the original behaviour.
-        opts = _ed_params_to_solve_options(params, method)
+        # 2026-09-11: honour "no solver named" as SolveMethod::Auto so per-sector
+        # windows get Krylov-Schur (single-vector Lanczos drops degenerate
+        # copies: measured 2e-2 on a staggered-field chain window).
+        opts = _ed_params_to_solve_options(params, method, auto_method=auto_method)
         _apply_total_spin_opts(opts)
         opts.use_symmetry = True
         # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
@@ -2090,6 +2145,21 @@ def _diag_with_symmetry(
         # the Hamiltonian lacks the symmetry).
         opts.spin_flip = resolve_discrete_toggle(
             operator, spin_flip, "spin_flip", verbose=verbose)
+        # Correctness (2026-09-11): the in-sector flip projection of the abelian
+        # lane is eigenvalues-only (it has no orbit form to reconstruct vectors
+        # from), so a vector request silently came back WITHOUT vectors. Keep
+        # flip transport but disable the projection when vectors are wanted;
+        # 'require' + vectors is a contradiction and raises.
+        if bool(getattr(params, "compute_eigenvectors", False)) and opts.spin_flip != 0:
+            if opts.spin_flip == 1:
+                raise ValueError(
+                    "qed.solve: spin_flip='require' with compute_eigenvectors=True is not "
+                    "supported on the abelian symmetry lane (the flip projection is "
+                    "eigenvalues-only); use spin_flip='off' or point_group='full'.")
+            if verbose:
+                print("[qed.solve] compute_eigenvectors: in-sector spin-flip projection "
+                      "disabled (eigenvalues-only lane); flip transport is kept.")
+            opts.spin_flip = 0
         opts.time_reversal = resolve_discrete_toggle(
             operator, time_reversal, "time_reversal", verbose=verbose)
         if _parity_mode is not None:

@@ -514,6 +514,36 @@ KPMDOSResult compute_kpm_dos_gpu_with_matvec(
     }
 
     const int n = static_cast<int>(dim);
+
+    // Correctness (2026-09-11): blocks small enough to diagonalise densely
+    // take the CPU driver's exact path (exact thermodynamics and moments;
+    // the stochastic estimator was 20 % off on 32-state sectors and NaN on
+    // 1- and 2-state ones). The device matvec is wrapped for the host: at
+    // dim <= 512 the copies are negligible.
+    if (dim <= 512 && params.exact_small_block) {
+        cuDoubleComplex* d_in  = nullptr;
+        cuDoubleComplex* d_out = nullptr;
+        ED_KPM_CHECK_CUDA(cudaMalloc(&d_in,  dim * sizeof(cuDoubleComplex)));
+        ED_KPM_CHECK_CUDA(cudaMalloc(&d_out, dim * sizeof(cuDoubleComplex)));
+        auto host_apply = [&](const Complex* x, Complex* y, int nn) {
+            ED_KPM_CHECK_CUDA(cudaMemcpy(d_in, x, static_cast<std::size_t>(nn) * sizeof(cuDoubleComplex),
+                                         cudaMemcpyHostToDevice));
+            matvec(d_in, d_out, nn);
+            ED_KPM_CHECK_CUDA(cudaDeviceSynchronize());
+            ED_KPM_CHECK_CUDA(cudaMemcpy(y, d_out, static_cast<std::size_t>(nn) * sizeof(cuDoubleComplex),
+                                         cudaMemcpyDeviceToHost));
+        };
+        KPMDOSResult exact;
+        try {
+            exact = ed::kpm_dos::compute_kpm_dos(host_apply, dim, betas, dos_energies, params);
+        } catch (...) {
+            cudaFree(d_in); cudaFree(d_out);
+            throw;
+        }
+        cudaFree(d_in); cudaFree(d_out);
+        return exact;
+    }
+
     const std::uint64_t seed = (params.random_seed != 0)
         ? params.random_seed
         : std::random_device{}();

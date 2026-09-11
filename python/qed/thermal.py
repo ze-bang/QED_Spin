@@ -1307,6 +1307,15 @@ def thermal(
         # in-memory path through plain Sz iteration only.
 
     N = int(H_op.num_sites)
+    # Input validation (2026-09-11).
+    if int(num_samples) < 1:
+        raise ValueError(f"qed.thermal: num_samples must be >= 1, got {num_samples!r}")
+    for _name, _v in (("krylov_dim", krylov_dim), ("ftlm_krylov_dim", ftlm_krylov_dim),
+                      ("ltlm_krylov_dim", ltlm_krylov_dim), ("max_iterations", max_iterations)):
+        if _v is not None and int(_v) < 1:
+            raise ValueError(f"qed.thermal: {_name} must be >= 1, got {_v!r}")
+    if not (float(T_min) > 0.0) or not (float(T_max) >= float(T_min)) or int(num_T) < 1:
+        raise ValueError(f"qed.thermal: need 0 < T_min <= T_max and num_T >= 1 (got T_min={T_min}, T_max={T_max}, num_T={num_T})")
     sz_conserved = use_sz_if_conserved and bool(H_op.conserves_sz())
     # KPM_DOS produces a density of states -- a full-SPECTRUM quantity. Sz
     # decomposition would yield per-sector sub-DOS on different Chebyshev

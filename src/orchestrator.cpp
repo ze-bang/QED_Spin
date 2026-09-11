@@ -225,9 +225,23 @@ inline void apply_solve_save_finalizer(GroundStateResult& R,
 // Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full
 // diagonalization for tiny spaces, Lanczos otherwise. (Replaces the planner's
 // cost-model method choice.)
-[[nodiscard]] SolveMethod default_method_for(const LinearOperator& H) {
-    return (H.global_dim() <= 1024) ? SolveMethod::FullDiag : SolveMethod::Lanczos;
+[[nodiscard]] SolveMethod default_method_for(const LinearOperator& H,
+                                             std::size_t num_eigs = 1) {
+    if (H.global_dim() <= 1024) return SolveMethod::FullDiag;
+    // Correctness (2026-09-11): single-vector Lanczos reports every degenerate
+    // level ONCE (measured: k = 6 on the 14-site ring, dim 3432, returns the
+    // 5th level wrong), while Krylov-Schur resolves the multiplicities. A
+    // window therefore defaults to Krylov-Schur; a single ground state keeps
+    // the faster Lanczos lane.
+    return (num_eigs > 1) ? SolveMethod::KrylovSchur : SolveMethod::Lanczos;
 }
+
+// Blocks this small are solved densely whatever Krylov method was requested:
+// every Krylov lane measured wrong on dim 2..10 (E0 off by up to 96 % on a
+// 2-state block, degenerate copies missing, k > dim), and dense LAPACK is
+// exact in microseconds there. Windows covering half the block or more are
+// treated the same way (a single-vector Krylov method cannot resolve them).
+inline constexpr std::uint64_t kDenseAlwaysDim = 32;
 
 // ---------------------------------------------------------------------------
 // Exact canonical thermodynamics from a complete eigenspectrum.
@@ -296,9 +310,18 @@ GroundStateResult solve_on(Backend& be,
     // keep their default + env-override behaviour, consumed lazily at first
     // matvec.
     // -----------------------------------------------------------------------
-    const SolveMethod method = (opts.method != SolveMethod::Auto)
+    SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
-        : default_method_for(H);
+        : default_method_for(H, opts.num_eigs);
+    if (method != SolveMethod::FullDiag
+            && (H.global_dim() <= kDenseAlwaysDim
+                || 2 * static_cast<std::uint64_t>(opts.num_eigs) >= H.global_dim())) {
+        R.backend.notes.emplace_back(
+            "method", "requested Krylov method replaced by FullDiag: block dim "
+                      + std::to_string(H.global_dim()) + " <= " + std::to_string(kDenseAlwaysDim)
+                      + " or num_eigs >= dim/2 (Krylov lanes cannot resolve such windows)");
+        method = SolveMethod::FullDiag;
+    }
     // Audit 2026-09 (correctness): the previous default of 2*num_eigs+30
     // (= 32 for the ground state) silently returned UNCONVERGED results
     // for every problem that needs more than 32 Krylov iterations (i.e.
@@ -306,12 +329,21 @@ GroundStateResult solve_on(Backend& be,
     // residuals of 1e-3..1e-2 at tolerance 1e-10. The Krylov lanes all
     // have Ritz-value early exit, so the cap only has to be generous; the
     // block methods count blocks and keep the old default.
-    const bool krylov_single_vector =
-        (method == SolveMethod::Lanczos) || (method == SolveMethod::KrylovSchur);
+    // Default iteration budget when the caller left it at 0. For the
+    // restarted lanes ``max_iter`` is the PER-CYCLE Krylov dimension (each
+    // cycle costs O(m^2 n) with full reorthogonalisation and runs to m
+    // regardless of convergence), so it must not scale with the dimension:
+    // the CLI's unset cap became min(dim, 1000) and a 4096-state chiral
+    // model took 592 s for three eigenvalues (0.5 s at m = 200; the Python
+    // facade already defaults to max(200, 8k + 80)). Single-vector Lanczos
+    // stops on convergence, so its cap may stay at min(dim, 1000).
     const std::size_t max_iter =
         (opts.max_iter > 0) ? opts.max_iter
-        : krylov_single_vector
+        : (method == SolveMethod::Lanczos)
             ? std::min<std::size_t>(std::max<std::uint64_t>(H.global_dim(), 1), 1000)
+        : (method == SolveMethod::KrylovSchur)
+            ? std::min<std::size_t>(std::max<std::uint64_t>(H.global_dim(), 1),
+                                    std::max<std::size_t>(200, 8 * opts.num_eigs + 80))
             : 2 * opts.num_eigs + 30;
     // Two-pass Lanczos for eigenvectors (audit F3): no kept basis, no
     // O(m^2 n) reorthogonalisation; the recurrence is rerun once and the
@@ -599,7 +631,8 @@ GroundStateResult solve_on(Backend& be,
         kopts.convergence_check =
             ed::krylov::make_smallest_ritz_convergence(opts.num_eigs,
                                                        opts.tolerance,
-                                                       /*min_iters=*/0);
+                                                       /*min_iters=*/0,
+                                                       /*require_residual_bound=*/opts.compute_vectors);
         // Wave 2.6: check every-5 iterations to amortise the O(m^2)
         // LAPACK tridiag eigensolve. A few extra Lanczos iterations
         // (~ check_interval / 2) are cheaper than one extra dstevd
@@ -1247,7 +1280,21 @@ inline void refine_gs_seed_host(const LinearOperator&        H,
 // Public entry points.
 // ---------------------------------------------------------------------------
 
+// Correctness (2026-09-11): every solver lane assumes a Hermitian operator
+// (Lanczos tridiagonalises the symmetric part silently; the rep kernels apply
+// H^dagger). ``LinearOperator::is_hermitian`` is now a structural check on the
+// term list for ``Operator`` and its subclasses; refuse early and loudly.
+inline void require_hermitian_input(const LinearOperator& H, const char* verb) {
+    if (!H.is_hermitian()) {
+        throw std::invalid_argument(
+            std::string(verb) + ": the operator is not Hermitian (an off-diagonal term "
+            "has no adjoint partner with the conjugate coefficient, or a diagonal term "
+            "carries a complex coefficient). Add the Hermitian-conjugate terms.");
+    }
+}
+
 GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
+    require_hermitian_input(H, "ed::solve");
     // Apply the same thread-budget hygiene the legacy `lanczos()` /
     // `block_lanczos()` / `krylov_schur()` entries do (Phase 6.1 of the
     // matvec-unification arc; see docs/history/PHASE_8_GPU_MPI_OPT.md).
@@ -1270,6 +1317,7 @@ GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
 }
 
 ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
+    require_hermitian_input(H, "ed::thermal");
     // All lanes are wired: mTPQ dispatches through the unified
     // `tpq_kernel` via the Phase 2.4 facades; FTLM / LTLM / KpmDos
     // dispatch through their own `*_kernel<Backend>` templates (CPU
@@ -2012,6 +2060,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 SpectralResult spectral(const LinearOperator&                      H,
                          const std::vector<const LinearOperator*>&  observables,
                          SpectralOptions                            opts) {
+    require_hermitian_input(H, "ed::spectral");
     if (observables.empty()) {
         throw std::invalid_argument(
             "ed::spectral: at least one observable is required.");
@@ -2140,6 +2189,11 @@ SpectralResult spectral(const LinearOperator&                      H,
                 H.geometry().local_dim,
                 seed_backend.get(), R.omega, cfopts);
             R.S_real = std::move(kres.spectral_function);
+            // Convergence bookkeeping (2026-09-11): the CF change between
+            // half and full Krylov depth; > 5 % means "raise krylov_dim".
+            R.krylov.iters_done    = kres.tridiag_size;
+            R.krylov.residual_norm = kres.convergence_change;
+            R.krylov.converged     = kres.convergence_change < 0.05;
         }, variant);
         R.S_imag.assign(opts.num_omega, 0.0);
     } else if (opts.method == SpectralOptions::Method::KpmDynamical) {

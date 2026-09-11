@@ -23,6 +23,8 @@ removed during the May-2026 surface unification.
 
 from __future__ import annotations
 
+import numpy as np
+
 import os
 import shutil
 import subprocess
@@ -203,6 +205,21 @@ def _extract_transforms(observable: Any) -> list:
 
 
 from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class FiniteTSpectralResult:
+    """Plain-lane finite-temperature S(omega, T) (2026-09-11): ``S_real`` is the
+    spectrum at the FIRST temperature (mirrors the symmetry lane's convention),
+    ``S_real_by_T`` holds every requested temperature."""
+    omega: "np.ndarray"
+    temperatures: list
+    S_real_by_T: dict
+
+    @property
+    def S_real(self):
+        return self.S_real_by_T[float(self.temperatures[0])]
+
 
 
 @_dataclass
@@ -867,12 +884,23 @@ def _spectral_in_memory(
         # verified correct lives on the symmetry lane (ftlm cross-irrep
         # kernel) and the directory form.
         if any(t > 0.0 for t in opts.temperatures):
-            raise NotImplementedError(
-                "qed.spectral: finite-T spectra are not implemented on the "
-                "plain in-memory lane (the requested T would be silently "
-                "ignored). Pass symmetry= (the verified finite-T FTLM "
-                "cross-irrep lane) or use the directory form with "
-                "method='dynamical_thermal'.")
+            # 2026-09-11: route finite T through the same FTLM estimator the
+            # symmetry lane uses (ftlm_cross_irrep_kernel with source = target
+            # = this block). Without symmetry this was refused outright.
+            if len(observables) != 1:
+                raise NotImplementedError(
+                    "qed.spectral: finite-T on the plain lane takes one observable per call.")
+            _ws = [float(w) for w in omega]
+            _ns = int(num_random_vectors) if num_random_vectors is not None else 30
+            _kd = int(krylov_dim) if krylov_dim is not None else 100
+            d = _core.workflows_spectral_ftlm_plain(
+                H, observables[0], [float(t) for t in opts.temperatures], _ws,
+                float(opts.broadening), _ns, _kd, 0)
+            return FiniteTSpectralResult(
+                omega=np.asarray(d["omega"], dtype=float),
+                temperatures=list(d["temperatures"]),
+                S_real_by_T={float(t): np.asarray(s, dtype=float) for t, s in zip(d["temperatures"], d["S_real"])},
+            )
 
     # Phase D of the "Backend x Symmetries x Workflows" plan
     # (May 2026): map ``device=`` to ``opts.backend.allow_gpu``. The
@@ -945,7 +973,18 @@ def _spectral_in_memory(
             f"[qed.spectral] in-memory: dim={H.dimension}, "
             f"observables={len(obs_list)}, method={opts.method}"
         )
-    return _core.workflows_spectral(H, obs_list, opts)
+    res = _core.workflows_spectral(H, obs_list, opts)
+    _kry = getattr(res, "krylov", None)
+    if (opts.method == _core.SpectralMethod.GroundStateCF and _kry is not None
+            and getattr(_kry, "iters_done", 0) > 0 and not getattr(_kry, "converged", True)):
+        import warnings as _warnings
+        _warnings.warn(
+            f"qed.spectral: the continued fraction is not converged at krylov_dim="
+            f"{opts.krylov_dim} (the spectrum changed by "
+            f"{100.0 * float(getattr(_kry, 'residual_norm', float('nan'))):.0f}% between "
+            f"half and full Krylov depth at eta={opts.broadening:g}); increase krylov_dim.",
+            RuntimeWarning, stacklevel=3)
+    return res
 
 
 def spectral(
@@ -1133,6 +1172,18 @@ def spectral(
         print(res.selection_rule_label)         # selection-rule annotation
         print(res.per_sector_pair[0].initial)   # SectorTag of the GS irrep
     """
+    # Input validation (2026-09-11).
+    if eta is not None and not (float(eta) > 0.0):
+        raise ValueError(f"qed.spectral: eta (broadening) must be > 0, got {eta!r}")
+    if omega is not None:
+        import numpy as _npv
+        _w = _npv.asarray(list(omega), dtype=float)
+        if _w.size == 0 or not _npv.all(_npv.isfinite(_w)):
+            raise ValueError("qed.spectral: omega must be a non-empty finite grid")
+    if krylov_dim is not None and int(krylov_dim) < 2:
+        raise ValueError(f"qed.spectral: krylov_dim must be >= 2, got {krylov_dim!r}")
+    if num_random_vectors is not None and int(num_random_vectors) < 1:
+        raise ValueError(f"qed.spectral: num_random_vectors must be >= 1, got {num_random_vectors!r}")
     if isinstance(H_or_directory, str):
         # SOTA streaming-symmetry path (May 2026). Engaged when the
         # caller asks for it via ``symmetry=`` and the workflow is

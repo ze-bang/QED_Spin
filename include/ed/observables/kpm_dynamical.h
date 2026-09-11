@@ -126,7 +126,10 @@ KpmDynamicalResult kpm_dynamical_correlator(
         ed::kpm_dos::estimate_spectral_bounds(
             H_apply, static_cast<std::uint64_t>(local_n),
             opts.spectral_bounds_krylov,
-            /*full_reorth=*/true, /*reorth_freq=*/0,
+            // The extreme Ritz values converge without a kept basis; asking
+            // for full reorthogonalisation here only produced a "silently
+            // skipped" warning per call (no basis is stored for a bound sweep).
+            /*full_reorth=*/false, /*reorth_freq=*/0,
             /*tol=*/1e-10, gen,
             e_lo, e_hi);
     }

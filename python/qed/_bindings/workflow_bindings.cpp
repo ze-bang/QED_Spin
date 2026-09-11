@@ -20,6 +20,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/complex.h>
 
+#include <Eigen/Dense>                   // degenerate-multiplet S^2 rotation (2026-09-11)
 #include <ed/core/hdf5_io.h>             // isDisabledOutputPath
 #include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
@@ -437,9 +438,51 @@ make_s2_like(const Operator& op) {
 /// certification fails).
 inline void label_vectors_with_s2(
     const ed::matvec::MatVecOperator& s2,
-    const std::vector<std::vector<Complex>>& vecs,
+    std::vector<std::vector<Complex>>& vecs,
     int n_sites, int n_up, int flip_parity,
-    std::vector<double>& s2_out, std::vector<int>& two_S_out) {
+    std::vector<double>& s2_out, std::vector<int>& two_S_out,
+    const std::vector<double>* eigenvalues = nullptr) {
+    // Correctness (2026-09-11): within a DEGENERATE multiplet the solver's
+    // vectors are arbitrary mixtures of different total-spin components, so
+    // the certification failed (e.g. E = 0 on the 4-site ring mixes S = 0 and
+    // S = 1). Diagonalise S^2 inside each degenerate group first and rotate
+    // the vectors -- they stay eigenvectors of H and become S^2 eigenstates.
+    if (eigenvalues && eigenvalues->size() == vecs.size() && !vecs.empty()) {
+        const std::size_t n = vecs.size();
+        std::size_t i = 0;
+        while (i < n) {
+            std::size_t j = i + 1;
+            const double e0 = (*eigenvalues)[i];
+            while (j < n && std::abs((*eigenvalues)[j] - e0) <= 1e-8 * (1.0 + std::abs(e0))) ++j;
+            const std::size_t g = j - i;
+            const std::size_t dim = vecs[i].size();
+            if (g > 1 && dim == s2.dim()) {
+                std::vector<std::vector<Complex>> s2v(g, std::vector<Complex>(dim));
+                for (std::size_t a = 0; a < g; ++a) s2.apply(vecs[i + a].data(), s2v[a].data(), dim);
+                Eigen::MatrixXcd M(g, g);
+                for (std::size_t a = 0; a < g; ++a)
+                    for (std::size_t b = 0; b < g; ++b) {
+                        Complex acc{0.0, 0.0};
+                        for (std::size_t r = 0; r < dim; ++r) acc += std::conj(vecs[i + a][r]) * s2v[b][r];
+                        M(static_cast<Eigen::Index>(a), static_cast<Eigen::Index>(b)) = acc;
+                    }
+                M = 0.5 * (M + M.adjoint().eval());
+                Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+                if (es.info() == Eigen::Success) {
+                    const Eigen::MatrixXcd U = es.eigenvectors();   // columns: S^2 eigenstates
+                    std::vector<std::vector<Complex>> rot(g, std::vector<Complex>(dim, Complex{0.0, 0.0}));
+                    for (std::size_t c = 0; c < g; ++c)
+                        for (std::size_t a = 0; a < g; ++a) {
+                            const Complex u = U(static_cast<Eigen::Index>(a), static_cast<Eigen::Index>(c));
+                            if (std::abs(u) < 1e-15) continue;
+                            for (std::size_t r = 0; r < dim; ++r) rot[c][r] += u * vecs[i + a][r];
+                        }
+                    for (std::size_t c = 0; c < g; ++c) vecs[i + c] = std::move(rot[c]);
+                }
+            }
+            i = j;
+        }
+    }
     for (const auto& v : vecs) {
         if (v.size() != s2.dim()) {
             s2_out.push_back(-1.0);
@@ -1269,7 +1312,7 @@ void bind_workflows(py::module_& m) {
                       *s2, res.eigenvectors->host,
                       static_cast<int>(op.getNumBits()), su2_n_up,
                       /*flip_parity=*/-1,
-                      res.s2_of_eigenvalue, res.two_S_of_eigenvalue);
+                      res.s2_of_eigenvalue, res.two_S_of_eigenvalue, &res.eigenvalues);
               }
               return res;
           },
@@ -1876,7 +1919,7 @@ void bind_workflows(py::module_& m) {
                                   handle.sector_tag(k).n_up,
                                   /*flip_parity=*/-1,
                                   sr.s2_of_eigenvalue,
-                                  sr.two_S_of_eigenvalue);
+                                  sr.two_S_of_eigenvalue, &sr.eigenvalues);
                           }
                       }
                       // GAP-10 v2: the MERGED window is where an
@@ -3912,6 +3955,55 @@ void bind_workflows(py::module_& m) {
     // ``per_sector_pair`` for now; the GS entry sits at index 0 for
     // backwards compat with consumers that read agg.S_real).
     // -----------------------------------------------------------------
+    // 2026-09-11: finite-T dynamical spectra WITHOUT spatial symmetry. Source
+    // and target blocks are the operator itself (it may be a FixedSzOperator
+    // when the probe conserves Sz); the estimator is the verified
+    // ftlm_cross_irrep_kernel_one_sector, so the plain lane no longer refuses.
+    m.def("workflows_spectral_ftlm_plain",
+          [](const Operator& op, const Operator& obs,
+             std::vector<double> temperatures, std::vector<double> omega,
+             double eta, int num_samples, int krylov_dim, std::uint64_t seed) {
+              const std::size_t dim = static_cast<std::size_t>(op.dim());
+              if (static_cast<std::size_t>(obs.dim()) != dim)
+                  throw std::invalid_argument("workflows_spectral_ftlm_plain: observable and "
+                                              "Hamiltonian act on different spaces");
+              for (double T : temperatures)
+                  if (!(T > 0.0)) throw std::invalid_argument("temperatures must be > 0");
+              auto Hmv = op.bind_cpu();
+              auto Omv = obs.bind_cpu();
+              auto apply_H = [&Hmv](const Complex* x, Complex* y, int n) { Hmv(x, y, static_cast<std::size_t>(n)); };
+              auto apply_O = [&Omv](const Complex* x, Complex* y, int n) { Omv(x, y, static_cast<std::size_t>(n)); };
+              ed::observables::FtlmCrossIrrepOptions kopts;
+              kopts.krylov_dim  = static_cast<std::size_t>(std::max(krylov_dim, 2));
+              kopts.num_samples = static_cast<std::size_t>(std::max(num_samples, 1));
+              kopts.broadening  = eta;
+              kopts.tolerance   = 1e-12;
+              kopts.random_seed = seed;
+              kopts.verbose     = false;
+              kopts.full_reorthogonalization = true;   // 2026-09-11: ghosts on degenerate spectra biased the trace by 15 % (XY chain)
+              kopts.reorth_frequency = 1;
+              std::vector<ed::observables::FtlmCrossIrrepSectorResult> secs;
+              {
+                  py::gil_scoped_release release;
+                  secs.push_back(ed::observables::ftlm_cross_irrep_kernel_one_sector(
+                      apply_H, apply_H, apply_O, dim, dim, temperatures, omega, kopts));
+              }
+              auto merged = ed::observables::combine_sector_dynamical_spectra(
+                  secs, temperatures, omega.size());
+              py::dict out;
+              out["omega"] = omega;
+              out["temperatures"] = temperatures;
+              py::list S;
+              for (double T : temperatures) S.append(merged.S_real[T]);
+              out["S_real"] = S;
+              return out;
+          },
+          py::arg("op"), py::arg("observable"), py::arg("temperatures"), py::arg("omega"),
+          py::arg("eta"), py::arg("num_samples") = 30, py::arg("krylov_dim") = 100,
+          py::arg("seed") = 0,
+          "Finite-temperature S(omega, T) of one observable on the operator's own block "
+          "via the FTLM cross-irrep estimator with source = target = this block.");
+
     m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory",
           [](const std::string&                    directory,
              std::uint64_t                          num_sites,
@@ -4116,7 +4208,7 @@ void bind_workflows(py::module_& m) {
                       kopts.tolerance        = 1e-12;
                       kopts.random_seed      = random_seed;
                       kopts.verbose          = false;
-                      kopts.full_reorthogonalization = false;
+                      kopts.full_reorthogonalization = true;   // 2026-09-11: ghosts on degenerate spectra biased the trace by 15 % (XY chain)
                       kopts.reorth_frequency = 1;
 
                       auto sec_res =

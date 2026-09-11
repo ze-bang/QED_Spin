@@ -62,8 +62,15 @@ inline std::function<bool(const std::vector<double>&,
                           const std::vector<double>&)>
 make_smallest_ritz_convergence(std::size_t exct = 1,
                                double tol = 1e-12,
-                               std::size_t min_iters = 0)
+                               std::size_t min_iters = 0,
+                               bool require_residual_bound = false)
 {
+    // ``require_residual_bound`` (2026-09-11): callers that reconstruct
+    // eigenvectors from the kept basis need the Ritz RESIDUAL bound
+    // |beta_m z_{m,i}| <= tol max(1, |E_i|) for every requested pair, not
+    // only the value stall: the CudaBackend vector lane returned residuals
+    // of 1e-6 at tol 1e-10 while the CPU two-pass lane (which gates on the
+    // same bound) returned 7e-10.
     struct State {
         double prev = std::numeric_limits<double>::infinity();
     };
@@ -71,7 +78,7 @@ make_smallest_ritz_convergence(std::size_t exct = 1,
 
     const std::size_t gate = (min_iters == 0) ? (exct + 1) : min_iters;
 
-    return [st, gate, tol, exct]
+    return [st, gate, tol, exct, require_residual_bound]
            (const std::vector<double>& alpha,
             const std::vector<double>& beta) -> bool
     {
@@ -99,8 +106,9 @@ make_smallest_ritz_convergence(std::size_t exct = 1,
         // construction; the downstream merge filter becomes a
         // tripwire instead of a load-bearing patch.
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
-        es.compute(T, exct > 1 ? Eigen::ComputeEigenvectors
-                               : Eigen::EigenvaluesOnly);
+        es.compute(T, (exct > 1 || require_residual_bound)
+                           ? Eigen::ComputeEigenvectors
+                           : Eigen::EigenvaluesOnly);
         if (es.info() != Eigen::Success) return false;
 
         const double smallest = es.eigenvalues()(0);
@@ -108,11 +116,19 @@ make_smallest_ritz_convergence(std::size_t exct = 1,
         const double delta    = std::abs(smallest - st->prev) / denom;
         st->prev = smallest;
         if (delta >= tol) return false;
-        if (exct <= 1) return true;
+        if (exct <= 1 && !require_residual_bound) return true;
         const double beta_m =
             (beta.size() > static_cast<std::size_t>(m))
                 ? std::abs(beta[static_cast<std::size_t>(m)]) : 0.0;
         if (beta_m == 0.0) return true;   // exhausted the space: exact
+        if (require_residual_bound) {
+            const int want_v = std::min<int>(static_cast<int>(std::max<std::size_t>(exct, 1)), m);
+            for (int i2 = 0; i2 < want_v; ++i2) {
+                const double bound = beta_m * std::abs(es.eigenvectors()(m - 1, i2));
+                if (bound > tol * std::max(1.0, std::abs(es.eigenvalues()(i2)))) return false;
+            }
+            if (exct <= 1) return true;
+        }
         const double btol = std::max(tol * 10.0, 1e-8);
         const int want = std::min<int>(static_cast<int>(exct), m);
         for (int i2 = 0; i2 < want; ++i2) {

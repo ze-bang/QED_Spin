@@ -241,6 +241,7 @@ TEST_CASE("kpm_dos: increasing R reduces error (Hutchinson variance)",
         ed::kpm_dos::KPMDOSParameters p;
         p.num_moments              = 1024;
         p.num_random_vectors       = R;
+        p.exact_small_block        = false;   // exercise the stochastic estimator itself
         p.spectral_bounds_krylov   = 150;
         p.random_seed              = 31337;
         return ed::kpm_dos::compute_kpm_dos(f.Hv, f.dim, betas, {}, p);

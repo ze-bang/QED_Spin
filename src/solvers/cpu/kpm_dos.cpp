@@ -232,8 +232,39 @@ void estimate_spectral_bounds(
     double tol,
     std::mt19937& gen,
     double& e_min,
-    double& e_max)
+    double& e_max,
+    std::vector<double>* spectrum_out)
 {
+    if (spectrum_out) spectrum_out->clear();
+    // Correctness (2026-09-11): on small blocks the Lanczos sweep with
+    // krylov_dim > dim returned garbage bounds (KPM weights off by 10x on a
+    // dimer; wrong thermodynamics in small symmetry sectors). Below 512 states
+    // assemble the block densely (dim matvecs) and take the exact extremes;
+    // above, clamp the sweep to dim.
+    if (dim <= 512) {
+        const int n = static_cast<int>(dim);
+        std::vector<Complex> dense(static_cast<std::size_t>(n) * n), unit(n), col(n);
+        for (int j = 0; j < n; ++j) {
+            std::fill(unit.begin(), unit.end(), Complex(0.0, 0.0));
+            unit[j] = Complex(1.0, 0.0);
+            H(unit.data(), col.data(), n);
+            for (int i = 0; i < n; ++i) dense[static_cast<std::size_t>(j) * n + i] = col[i];
+        }
+        std::vector<double> w(n);
+        const int info = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'N', 'U', n,
+                                        reinterpret_cast<lapack_complex_double*>(dense.data()),
+                                        n, w.data());
+        if (info == 0) {
+            e_min = w.front();
+            e_max = w.back();
+            if (spectrum_out) *spectrum_out = w;
+            return;
+        }
+        // fall through to the Krylov estimate on a LAPACK failure
+    }
+    krylov_dim = static_cast<int>(std::min<std::uint64_t>(
+        static_cast<std::uint64_t>(std::max(krylov_dim, 2)), dim));
+
     ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
 
     std::vector<double> alpha, beta;
@@ -287,6 +318,24 @@ KPMDOSResult compute_kpm_dos(
     // call), skip this 150-iteration Lanczos pass entirely. NaN means
     // "estimate" -- both must be finite to take the shortcut.
     // -----------------------------------------------------------------
+    std::vector<double> exact_spectrum;   // exact spectrum on small blocks (2026-09-11)
+    if (dim <= 512 && params.exact_small_block) {
+        // Independent of caller-supplied bound overrides (the streaming-symmetry
+        // lane passes the largest sector's bounds to every sector, which made
+        // 1- and 2-state sectors run the stochastic estimator with a = 0 -> NaN).
+        const int n = static_cast<int>(dim);
+        std::vector<Complex> dense(static_cast<std::size_t>(n) * n), unit(n), col(n);
+        for (int j = 0; j < n; ++j) {
+            std::fill(unit.begin(), unit.end(), Complex(0.0, 0.0));
+            unit[j] = Complex(1.0, 0.0);
+            H(unit.data(), col.data(), n);
+            for (int i = 0; i < n; ++i) dense[static_cast<std::size_t>(j) * n + i] = col[i];
+        }
+        std::vector<double> w(n);
+        if (LAPACKE_zheevd(LAPACK_COL_MAJOR, 'N', 'U', n,
+                           reinterpret_cast<lapack_complex_double*>(dense.data()), n, w.data()) == 0)
+            exact_spectrum = std::move(w);
+    }
     double e_min = 0.0, e_max = 0.0;
     const bool have_override =
         std::isfinite(params.e_min_override)
@@ -303,14 +352,28 @@ KPMDOSResult compute_kpm_dos(
         estimate_spectral_bounds(
             H, dim, params.spectral_bounds_krylov,
             /*full_reorth=*/false, params.reorth_frequency,
-            params.tolerance, gen, e_min, e_max);
+            params.tolerance, gen, e_min, e_max,
+            exact_spectrum.empty() ? &exact_spectrum : nullptr);
     }
 
-    if (e_max <= e_min) {
-        // Degenerate spectrum (one point or numerical failure): nudge bounds.
+    if (!exact_spectrum.empty()) {
+        // Keep a caller-pinned window when it encloses the exact spectrum
+        // (callers pin it to put two lanes on the same rescaling); replace it
+        // only when it would clip levels or collapse (a = 0) -- the sector-
+        // bounds mismatch that produced NaN on 1- and 2-state blocks.
+        const double lo = exact_spectrum.front(), hi = exact_spectrum.back();
+        const double tol = 1e-9 * (1.0 + std::abs(hi - lo));
+        const bool override_ok = have_override && e_min <= lo + tol && e_max >= hi - tol
+                                 && (e_max - e_min) > 1e-12 * (1.0 + std::abs(e_min));
+        if (!override_ok) { e_min = lo; e_max = hi; }
+    }
+    if (e_max - e_min <= 1e-12 * (1.0 + std::abs(e_min))) {
+        // Degenerate spectrum (one level, or overrides from another sector that
+        // coincide): nudge the bounds so the rescaling a = (hi - lo)/2 is finite.
         const double eps = 1.0;
         e_max = e_min + eps;
     }
+
 
     const double BW     = e_max - e_min;
     const double buffer = std::max(params.spectral_bound_buffer, 1e-6) * BW;
@@ -324,6 +387,83 @@ KPMDOSResult compute_kpm_dos(
         std::fprintf(stderr,
             "[kpm_dos] dim=%llu  E_min=%.6e  E_max=%.6e  a=%.6e  b=%.6e\n",
             static_cast<unsigned long long>(dim), e_min, e_max, a, b);
+    }
+
+    // Correctness (2026-09-11): a block small enough to diagonalise densely
+    // (dim <= 512, the bound estimator already did) gets EXACT thermodynamics,
+    // exact Chebyshev moments (trace normalisation, mu_0 = dim) and an
+    // exact-level DOS broadened to the Chebyshev resolution. The stochastic
+    // estimator on such blocks was biased by up to 20 % and produced NaN on
+    // 1- and 2-state symmetry sectors.
+    if (!exact_spectrum.empty() && params.exact_small_block) {
+        const std::vector<double>& ev = exact_spectrum;
+        const int M = params.num_moments;
+        const double e0 = ev.front();
+        KPMDOSResult result;
+        result.betas = betas;
+        result.partition_function.assign(betas.size(), 0.0);
+        result.energy.assign(betas.size(), 0.0);
+        result.specific_heat.assign(betas.size(), 0.0);
+        result.entropy.assign(betas.size(), 0.0);
+        result.free_energy.assign(betas.size(), 0.0);
+        for (std::size_t t = 0; t < betas.size(); ++t) {
+            const double beta = betas[t];
+            double Z = 0.0, E1 = 0.0, E2 = 0.0;
+            for (double e : ev) {
+                const double w = std::exp(-beta * (e - e0));
+                Z += w; E1 += w * e; E2 += w * e * e;
+            }
+            const double E_mean = E1 / Z, E2_mean = E2 / Z;
+            const double log_Z  = std::log(Z) - beta * e0;
+            const double F_val  = -log_Z / beta;
+            result.partition_function[t] = Z * std::exp(-beta * e0);
+            result.energy[t]             = E_mean;
+            result.specific_heat[t]      = (E2_mean - E_mean * E_mean) * beta * beta;
+            result.free_energy[t]        = F_val;
+            result.entropy[t]            = (E_mean - F_val) * beta;
+        }
+        // Exact Chebyshev moments of the rescaled spectrum (trace normalisation).
+        std::vector<double> mu_raw(M, 0.0);
+        for (double e : ev) {
+            const double x = std::max(-1.0, std::min(1.0, (e - b) / a));
+            double t0 = 1.0, t1 = x;
+            mu_raw[0] += t0;
+            if (M > 1) mu_raw[1] += t1;
+            for (int k = 2; k < M; ++k) { const double t2 = 2.0 * x * t1 - t0; mu_raw[k] += t2; t0 = t1; t1 = t2; }
+        }
+        const std::vector<double> kernel = params.use_jackson_kernel
+            ? make_jackson_kernel(M) : make_lorentz_kernel(M, params.lorentz_lambda);
+        std::vector<double> mu_w(M);
+        for (int k = 0; k < M; ++k) mu_w[k] = kernel[k] * mu_raw[k];
+        // DOS: exact levels, Gaussian-broadened to the Jackson resolution pi*a/M,
+        // normalised to the block dimension (sum rule: integral = dim).
+        const double sigma = std::max(M_PI * a / std::max(M, 4), 1e-6);
+        std::vector<double> grid = dos_energies;
+        if (grid.empty()) {
+            const int npts = std::max((params.num_quadrature_nodes > 0) ? params.num_quadrature_nodes : 2 * M, 2);
+            grid.resize(static_cast<std::size_t>(npts));
+            const double lo = b - a * 0.995, hi = b + a * 0.995;
+            for (int i = 0; i < npts; ++i) grid[static_cast<std::size_t>(i)] = lo + (hi - lo) * i / (npts - 1);
+        }
+        result.dos_grid_values.assign(grid.size(), 0.0);
+        const double norm = 1.0 / (sigma * std::sqrt(2.0 * M_PI));
+        for (std::size_t i = 0; i < grid.size(); ++i) {
+            double acc = 0.0;
+            for (double e : ev) { const double x = (grid[i] - e) / sigma; acc += std::exp(-0.5 * x * x); }
+            result.dos_grid_values[i] = norm * acc;
+        }
+        result.dos_grid_energies = std::move(grid);
+        result.moments_weighted  = std::move(mu_w);
+        result.moments_raw       = std::move(mu_raw);
+        result.kpm_a             = a;
+        result.kpm_b             = b;
+        result.e_min_estimate    = e_min;
+        result.e_max_estimate    = e_max;
+        result.energy_shift_used = shift;
+        result.hilbert_dim       = dim;
+        result.num_moments_used  = M;
+        result.jackson_kernel_used = params.use_jackson_kernel;
+        return result;
     }
 
     // -----------------------------------------------------------------

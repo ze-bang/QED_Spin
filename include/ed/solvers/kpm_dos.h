@@ -99,6 +99,10 @@ struct KPMDOSParameters {
     /// Wave B3 (May 2026): caller-supplied spectral-bound overrides.
     /// When BOTH are finite the kernel skips the 150-iteration
     /// Lanczos pre-pass. NaN means "estimate per call".
+    /// 2026-09-11: blocks with dim <= 512 are diagonalised densely and the
+    /// thermodynamics / moments / DOS are exact. Set false to force the
+    /// stochastic Chebyshev estimator (tests of the estimator itself).
+    bool exact_small_block = true;
     double e_min_override = std::numeric_limits<double>::quiet_NaN();
     double e_max_override = std::numeric_limits<double>::quiet_NaN();
 
@@ -189,7 +193,8 @@ void estimate_spectral_bounds(
     double tol,
     std::mt19937& gen,
     double& e_min,
-    double& e_max);
+    double& e_max,
+    std::vector<double>* spectrum_out = nullptr);   ///< filled with the exact spectrum when dim <= 512
 
 /// Compute Chebyshev DOS moments + thermodynamics for a Hermitian H.
 ///

@@ -54,6 +54,11 @@ struct CfSpectralResult {
     std::vector<double> frequencies;
     std::vector<double> spectral_function;
     std::size_t         tridiag_size = 0;
+    /// 2026-09-11: max |S_m - S_{m/2}| / max S_m -- the change of the continued
+    /// fraction between half and full Krylov depth. Above ~0.05 the spectrum
+    /// is not converged at this krylov_dim (an unconverged CF at eta = 0.05 on a
+    /// 2.7e6-state block varied by 30 % between otherwise identical runs).
+    double              convergence_change = 0.0;
     double              phi_norm     = 0.0;
     double              energy_shift = 0.0;
 };
@@ -152,6 +157,19 @@ CfSpectralResult cf_spectral_kernel(Backend&                   be,
     // ------------------------------------------------------------------
     R.spectral_function = ::continued_fraction_spectral_function(
         alpha, beta, omega_grid, opts.broadening, phi_norm * phi_norm);
+    if (alpha.size() >= 4) {
+        const std::size_t h = alpha.size() / 2;
+        std::vector<double> a2(alpha.begin(), alpha.begin() + h);
+        std::vector<double> b2(beta.begin(), beta.begin() + std::min(beta.size(), h + 1));
+        const auto S_half = ::continued_fraction_spectral_function(
+            a2, b2, omega_grid, opts.broadening, phi_norm * phi_norm);
+        double smax = 0.0, dmax = 0.0;
+        for (std::size_t i = 0; i < R.spectral_function.size() && i < S_half.size(); ++i) {
+            smax = std::max(smax, std::abs(R.spectral_function[i]));
+            dmax = std::max(dmax, std::abs(R.spectral_function[i] - S_half[i]));
+        }
+        R.convergence_change = (smax > 0.0) ? dmax / smax : 0.0;
+    }
     return R;
 }
 
@@ -249,6 +267,19 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
 
     R.spectral_function = ::continued_fraction_spectral_function(
         alpha, beta, omega_grid, opts.broadening, phi_norm * phi_norm);
+    if (alpha.size() >= 4) {
+        const std::size_t h = alpha.size() / 2;
+        std::vector<double> a2(alpha.begin(), alpha.begin() + h);
+        std::vector<double> b2(beta.begin(), beta.begin() + std::min(beta.size(), h + 1));
+        const auto S_half = ::continued_fraction_spectral_function(
+            a2, b2, omega_grid, opts.broadening, phi_norm * phi_norm);
+        double smax = 0.0, dmax = 0.0;
+        for (std::size_t i = 0; i < R.spectral_function.size() && i < S_half.size(); ++i) {
+            smax = std::max(smax, std::abs(R.spectral_function[i]));
+            dmax = std::max(dmax, std::abs(R.spectral_function[i] - S_half[i]));
+        }
+        R.convergence_change = (smax > 0.0) ? dmax / smax : 0.0;
+    }
     return R;
 }
 

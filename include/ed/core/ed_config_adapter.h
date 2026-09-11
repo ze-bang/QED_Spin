@@ -230,7 +230,12 @@ toSolveOptions(const EDParameters& params,
     ed::workflows::SolveOptions opts;
 
     opts.num_eigs       = static_cast<std::size_t>(params.num_eigenvalues);
-    opts.max_iter       = static_cast<std::size_t>(params.max_iterations);
+    // The EDParameters default (10000; ed_config.cpp treats the same value as
+    // "not set" when merging configs) means "let the orchestrator choose".
+    // Passing it through made the CLI's Krylov-Schur per-cycle subspace the
+    // full dimension (2026-09-11: 592 s for three eigenvalues at dim 4096).
+    opts.max_iter       = (params.max_iterations == EDParameters{}.max_iterations)
+                              ? 0 : static_cast<std::size_t>(params.max_iterations);
     opts.block_size     = static_cast<std::size_t>(params.block_size);
     opts.tolerance      = params.tolerance;
     opts.compute_vectors = params.compute_eigenvectors;

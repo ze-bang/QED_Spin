@@ -47,6 +47,9 @@
 
 #include <algorithm>
 #include <complex>
+#include <type_traits>
+#include <map>
+#include <utility>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -277,6 +280,38 @@ struct TermStorage {
                 } else {
                     sink.add_offdiag_one_body(t.site_index, t.op_type, coeff);
                 }
+            } else if (t.site_index == t.site_index_2 && !(t.op_type == 2 && t.op_type_2 == 2)) {
+                // Correctness (2026-09-11): a product of two operators on the SAME
+                // site. The gather/scatter gates test the row bit for both factors
+                // at once, which no state satisfies for S+S-, so these terms were
+                // silently DROPPED. Rewrite with the spin-1/2 identities (product
+                // O1 O2, O2 acting first; set bit = down):
+                //   S+S- = 1/2 + Sz   S-S+ = 1/2 - Sz   S+S+ = S-S- = 0
+                //   Sz S+ = +S+/2     S+ Sz = -S+/2     Sz S- = -S-/2    S- Sz = +S-/2
+                // The identity is expressed as Sz_i Sz_i = 1/4 (the diagonal two-body
+                // kernel evaluates the same-site sign product to +1).
+                const std::uint64_t s = t.site_index;
+                const std::uint8_t a = t.op_type, b = t.op_type_2;   // 0 S+, 1 S-, 2 Sz
+                // The coefficient type is the sink's (std::complex<double> on the
+                // host, cuDoubleComplex on the device sink); both are two
+                // consecutive doubles, so scale through that layout.
+                auto scaled = [&coeff](double f) {
+                    using C = std::decay_t<decltype(coeff)>;
+                    const double* pr = reinterpret_cast<const double*>(&coeff);
+                    return C{pr[0] * f, pr[1] * f};
+                };
+                if (a != 2 && b != 2) {
+                    if (a == b) continue;                              // S+S+ = S-S- = 0
+                    sink.add_diag_two_body(s, s, scaled(2.0));         // + coeff/2 * I
+                    sink.add_diag_one_body(s, scaled((a == 0) ? 1.0 : -1.0));   // +- coeff Sz
+                } else {
+                    const std::uint8_t flip = (a == 2) ? b : a;        // the S+/S- factor
+                    const bool sz_first = (b == 2);                    // O2 = Sz acts first
+                    double sign;
+                    if (flip == 0) sign = sz_first ? -0.5 : +0.5;      // S+ Sz = -S+/2, Sz S+ = +S+/2
+                    else           sign = sz_first ? +0.5 : -0.5;      // S- Sz = +S-/2, Sz S- = -S-/2
+                    sink.add_offdiag_one_body(s, flip, scaled(sign));
+                }
             } else {
                 if (t.op_type == 2 && t.op_type_2 == 2) {
                     sink.add_diag_two_body(t.site_index, t.site_index_2, coeff);
@@ -293,6 +328,13 @@ struct TermStorage {
             }
         }
         for (const auto& t : aos3) {
+            if (t.site_index_1 == t.site_index_2 || t.site_index_2 == t.site_index_3
+                    || t.site_index_1 == t.site_index_3) {
+                throw std::invalid_argument(
+                    "three-body term with a repeated site is not supported (the kernels "
+                    "gate every factor on the row bit at once); reduce the product with the "
+                    "spin-1/2 identities to a one- or two-body term first");
+            }
             sink.add_three_body(t.op_type_1, t.site_index_1,
                                 t.op_type_2, t.site_index_2,
                                 t.op_type_3, t.site_index_3,
@@ -304,6 +346,38 @@ struct TermStorage {
      * @brief Returns true iff every coupling in every bin is purely real
      *        (|imag| <= tol). Linear in the number of terms.
      */
+    /**
+     * @brief Structural Hermiticity check (2026-09-11): every off-diagonal
+     *        product must have an adjoint partner (S+ <-> S-, Sz fixed, sites
+     *        as a multiset) carrying the conjugate coefficient, and every
+     *        diagonal coefficient must be real. Split / duplicated records are
+     *        aggregated by canonical key first. O(#terms log #terms).
+     */
+    [[nodiscard]] bool is_hermitian(double tol = 1e-10) const {
+        using Key = std::vector<std::pair<std::uint64_t, std::uint8_t>>;
+        std::map<Key, Complex> sum;
+        auto canon = [](Key k) { std::sort(k.begin(), k.end()); return k; };
+        auto add = [&](Key k, Complex c) { sum[canon(std::move(k))] += c; };
+        for (const auto& t : offdiag_one_body) add({{t.site_index, t.op_type}}, t.coefficient);
+        for (const auto& t : mixed_two_body)   add({{t.sz_site, 2}, {t.flip_site, t.flip_op_type}}, t.coefficient);
+        for (const auto& t : offdiag_two_body) add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2}}, t.coefficient);
+        for (const auto& t : three_body)       add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2},
+                                                    {t.site_index_3, t.op_type_3}}, t.coefficient);
+        for (const auto& t : diag_one_body)
+            if (std::abs(t.coefficient.imag()) > tol * (1.0 + std::abs(t.coefficient.real()))) return false;
+        for (const auto& t : diag_two_body)
+            if (std::abs(t.coefficient.imag()) > tol * (1.0 + std::abs(t.coefficient.real()))) return false;
+        for (const auto& [key, c] : sum) {
+            Key adj = key;
+            for (auto& [site, op] : adj) if (op != 2) op = static_cast<std::uint8_t>(1 - op);
+            adj = canon(std::move(adj));
+            const auto it = sum.find(adj);
+            const Complex partner = (it == sum.end()) ? Complex{0.0, 0.0} : it->second;
+            if (std::abs(partner - std::conj(c)) > tol * (1.0 + std::abs(c) + std::abs(partner))) return false;
+        }
+        return true;
+    }
+
     [[nodiscard]] bool is_real(double tol = 1e-15) const noexcept {
         auto real_run = [tol](const auto& vec) {
             for (const auto& t : vec) {

@@ -54,6 +54,7 @@ class Model:
     real: bool                        # real Hamiltonian (time-reversal symmetric)
     su2: bool = False
     flip: bool = True                 # [H, prod sigma^x] = 0
+    parity: bool = True               # (-1)^{n_down} conserved (true when u1 is true)
     lattice: Optional[tuple] = None   # (Lx, Ly) for 2D models, site = x + Lx*y
     notes: str = ""
 
@@ -306,7 +307,8 @@ class Runner:
             row = Row(case.name, "unsupported", time.perf_counter() - t0, str(e).splitlines()[0][:160])
         except Exception as e:  # noqa: BLE001
             msg = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
-            if "not supported" in msg.lower() or "unsupported" in msg.lower() or "not yet" in msg.lower():
+            if any(s in msg.lower() for s in ("not supported", "unsupported", "not yet", "cannot engage", "not admissible",
+                                              "demand their symmetry be consumed")):
                 row = Row(case.name, "unsupported", time.perf_counter() - t0, msg)
             else:
                 row = Row(case.name, "ERROR", time.perf_counter() - t0, f"{type(e).__name__}: {msg}")

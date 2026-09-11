@@ -523,7 +523,10 @@ def pick_solver(num_eigenvalues: int, sector_dim: int) -> str:
     """
     if sector_dim <= _SMALL_DIM_THRESHOLD:
         return "FULL"
-    if num_eigenvalues <= _LANCZOS_NEIG_THRESHOLD:
+    # Correctness (2026-09-11): single-vector Lanczos reports each degenerate
+    # level once, so a WINDOW (num_eigenvalues > 1) can miss multiplet copies
+    # (measured on the 14-site ring). Windows default to Krylov-Schur.
+    if num_eigenvalues <= 1:
         return "LANCZOS"
     if num_eigenvalues <= _KRYLOV_SCHUR_NEIG_THRESHOLD:
         return "KRYLOV_SCHUR"

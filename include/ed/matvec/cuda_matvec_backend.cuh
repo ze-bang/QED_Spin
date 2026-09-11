@@ -68,6 +68,13 @@ namespace ed::matvec {
 
 namespace cuda_matvec_detail {
 
+// ED_GPU_SYNC_LAUNCH=1 restores a host synchronisation after every matvec launch
+// (diagnostic switch for the 2026-09-11 async-launch change).
+inline bool sync_every_launch() {
+    static const bool v = [] { const char* e = std::getenv("ED_GPU_SYNC_LAUNCH"); return e && e[0] == '1'; }();
+    return v;
+}
+
 inline void check(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CudaMatVecBackend: ") + what +
@@ -289,6 +296,7 @@ private:
                       "launch (complex)");
         }
         cd::check(cudaGetLastError(), "launch check (complex)");  // no host sync: stream-ordered consumers
+        if (cuda_matvec_detail::sync_every_launch()) cd::check(cudaDeviceSynchronize(), "sync (complex, ED_GPU_SYNC_LAUNCH)");
     }
 
     // fp32 twin of launch_complex_. Same gather-vs-scatter selection; the
@@ -316,6 +324,7 @@ private:
                       "launch (complex f32)");
         }
         cd::check(cudaGetLastError(), "launch check (complex f32)");
+        if (cuda_matvec_detail::sync_every_launch()) cd::check(cudaDeviceSynchronize(), "sync (f32, ED_GPU_SYNC_LAUNCH)");
     }
 
     void launch_real_(const double* d_in, double* d_out, std::size_t n) {
@@ -339,6 +348,7 @@ private:
                       "launch (real)");
         }
         cd::check(cudaGetLastError(), "launch check (real)");
+        if (cuda_matvec_detail::sync_every_launch()) cd::check(cudaDeviceSynchronize(), "sync (real, ED_GPU_SYNC_LAUNCH)");
     }
 
     void check_size(std::size_t n) const {

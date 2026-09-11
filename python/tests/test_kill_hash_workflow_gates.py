@@ -365,6 +365,10 @@ def test_phase_d_groundstate_cf_gpu(tmp_path):
     H = _ring_operator()
     Op, Od = _make_sz_pair(N_SITES_TEST, N_UP_TEST)
     omega = np.linspace(-2.0, 4.0, 16)
+    # 2026-09-11: krylov_dim=40 is NOT converged at eta=0.05 on this block (the
+    # continued fraction changed by 30 % between runs whose ground-state
+    # vectors agreed to 1e-12); the lanes agree only once the CF has converged.
+    _KD = 300
 
     def go_gpu():
         return qed.spectral(
@@ -372,7 +376,7 @@ def test_phase_d_groundstate_cf_gpu(tmp_path):
             method="ground_state_cf",
             omega=omega,
             eta=0.05,
-            krylov_dim=40,
+            krylov_dim=_KD,
             device="gpu",
             verbose=False,
             output_dir=str(tmp_path / "gscf_gpu"),
@@ -387,12 +391,15 @@ def test_phase_d_groundstate_cf_gpu(tmp_path):
             method="ground_state_cf",
             omega=omega,
             eta=0.05,
-            krylov_dim=40,
+            krylov_dim=_KD,
             device="cpu",
             verbose=False,
             output_dir=str(tmp_path / "gscf_cpu"),
         )
-    res_cpu, _ = _time_and_check(go_cpu, "GroundStateCF[CPU]")
+    # The CPU lane is the reference, not the gate: give it the budget scaled
+    # to the Krylov depth (the 30 s figure was set for 40 steps).
+    res_cpu, _ = _time_and_check(go_cpu, "GroundStateCF[CPU]",
+                                 budget_s=WORKFLOW_WALL_BUDGET_S * _KD / 40.0)
     s_cpu = np.asarray(res_cpu.S_real, dtype=float)
     denom = max(float(np.max(np.abs(s_cpu))), 1e-12)
     max_rel_err = float(np.max(np.abs(s_gpu - s_cpu))) / denom
