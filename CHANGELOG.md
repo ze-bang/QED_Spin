@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-09-11 — CI: GIL-released Python access crashed the wheel lanes; correctness lane added
+
+* The CI "Python wheel + pytest" and "Examples tour" jobs had been failing with a segfault
+  in `qed.spectral(symmetry='auto')`: `make_cross_irrep_src_spec` read the `fixed_sz_n_up`
+  `py::object` (`is_none` / `cast<int>`) inside `py::gil_scoped_release`, which dereferences
+  a detached thread state on Python 3.11+. The workstation build happened to survive it.
+  The three cross-irrep bindings now decode their Python arguments before dropping the GIL,
+  and every binding file was scanned for the pattern.
+* New CI job "Linux / correctness harness (CPU, <= 10 sites)": the wheel plus the `ED`
+  binary, then `benchmarks/audit_correctness.py --max-sites 10 --fail-on-mismatch`
+  (~900 cases against the dense reference, invalid-input battery included). The harness
+  gained `--max-sites`, `--fail-on-mismatch` and the `QED_ED_BIN` override.
+* GitHub Pages was enabled on the mirror so the Docs deploy job can succeed.
+
 ## 2026-09-11 — Correctness campaign: every verb x option x edge case
 
 `benchmarks/audit_correctness.py` (new) runs every public verb (`qed.solve`, `qed.thermal`,

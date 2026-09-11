@@ -62,6 +62,7 @@
 #include <string>
 #include <exception>
 #include <thread>
+#include <optional>
 #include <vector>
 
 #ifdef WITH_MPI
@@ -593,17 +594,27 @@ inline void warn_silent_cpu_fallback(const char* what,
 // ---------------------------------------------------------------------------
 
 // Source-operator spec shared by all three cross-irrep bindings.
+// Takes the ALREADY-DECODED optional: every caller runs this inside a
+// ``py::gil_scoped_release`` block, and reading a ``py::object`` there
+// (``is_none`` / ``cast<int>``) touches the interpreter without the GIL --
+// a segfault in ``PyErr_Occurred`` on Python 3.11+ (CI, 2026-09-11) that the
+// workstation build happened to survive.
+[[nodiscard]] inline std::optional<int> decode_optional_n_up(const py::object& o) {
+    if (o.is_none()) return std::nullopt;
+    return o.cast<int>();
+}
+
 [[nodiscard]] inline ed::OperatorSpec make_cross_irrep_src_spec(
     const std::string& directory, std::uint64_t num_sites, double spin_l,
-    const py::object& fixed_sz_n_up, int sz_parity, bool flip_sectors)
+    std::optional<int> fixed_sz_n_up, int sz_parity, bool flip_sectors)
 {
     ed::OperatorSpec spec;
     spec.source             = ed::DirectoryPath{directory};
     spec.num_sites          = num_sites;
     spec.spin_l             = static_cast<float>(spin_l);
     spec.streaming_symmetry = true;
-    if (!fixed_sz_n_up.is_none()) {
-        spec.fixed_sz = fixed_sz_n_up.cast<int>();
+    if (fixed_sz_n_up.has_value()) {
+        spec.fixed_sz = *fixed_sz_n_up;
     } else {
         // Stage 8d: Sz-parity halves + full-space prod-sigma^x flip
         // sectors (the factory validates the closure rules; the probe's
@@ -3070,6 +3081,8 @@ void bind_workflows(py::module_& m) {
                       "cross-irrep walk needs at least one term.");
               }
 
+              // Decode Python arguments BEFORE dropping the GIL.
+              const std::optional<int> fixed_sz_opt = decode_optional_n_up(fixed_sz_n_up);
               ed::SpectralResult agg;
               {
                   py::gil_scoped_release release;
@@ -3079,7 +3092,7 @@ void bind_workflows(py::module_& m) {
                   //     same-irrep binding's OperatorSpec layout.
                   // -----------------------------------------------------
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      directory, num_sites, spin_l, fixed_sz_opt,
                       sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
@@ -3576,13 +3589,15 @@ void bind_workflows(py::module_& m) {
                   tlist_per_q.push_back(std::move(tlist));
               }
 
+              // Decode Python arguments BEFORE dropping the GIL.
+              const std::optional<int> fixed_sz_opt = decode_optional_n_up(fixed_sz_n_up);
               ed::SpectralResult agg;
               {
                   py::gil_scoped_release release;
 
                   // (1) Source streaming operator + OperatorRef.
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      directory, num_sites, spin_l, fixed_sz_opt,
                       sz_parity, flip_sectors);
                   // Stage 8d TR panel gate: for a REAL H, the -Q panel of an
                   // adjoint probe pair equals the +Q panel (S(-Q, omega) =
@@ -4036,6 +4051,8 @@ void bind_workflows(py::module_& m) {
                       "irrep_directory: temperatures is empty.");
               }
 
+              // Decode Python arguments BEFORE dropping the GIL.
+              const std::optional<int> fixed_sz_opt = decode_optional_n_up(fixed_sz_n_up);
               ed::SpectralResult agg;
               {
                   py::gil_scoped_release release;
@@ -4044,7 +4061,7 @@ void bind_workflows(py::module_& m) {
                   // (1) Build source streaming operator.
                   // -----------------------------------------------
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_n_up,
+                      directory, num_sites, spin_l, fixed_sz_opt,
                       sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,

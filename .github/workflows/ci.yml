@@ -234,6 +234,73 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
+  # Correctness lane: benchmarks/audit_correctness.py runs every verb (solve /
+  # thermal / spectral / full_spectrum, the CLI, save/load) over the small
+  # models against an independent dense reference plus the invalid-input
+  # battery. Full runs (14 models, 12-site references) take an hour on a
+  # workstation; the hosted runner gets the <= 10-site models (720 cases, about a minute of solver time).
+  # ---------------------------------------------------------------------------
+  linux-correctness:
+    name: Linux / correctness harness (CPU, <= 10 sites)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        env:
+          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=OPENBLAS"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy h5py networkx pynauty
+          python -m pip install -v .
+
+      - name: Build the ED command-line binary (for the CLI cases)
+        run: |
+          cmake -S . -B build-cli -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS
+          cmake --build build-cli --target ED -- -j$(nproc)
+
+      - name: Run the correctness harness
+        env:
+          QED_ED_BIN: ${{ github.workspace }}/build-cli/ED
+          OMP_NUM_THREADS: "4"
+        run: |
+          set -o pipefail
+          python benchmarks/audit_correctness.py --max-sites 10 --fail-on-mismatch \
+            --json correctness-cpu.json | grep -vE "^(\[|Lanczos|Iteration|Fixed Sz|Progress|Full diag|Constructing|Dense matrix|Using dense|Eigenvalue decomp|Matrix )"
+
+      - name: Upload the case table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: correctness-cpu
+          path: correctness-cpu.json
+
+  # ---------------------------------------------------------------------------
   # Clang Debug lane: catch UB / signed-overflow / strict-aliasing issues that
   # GCC Release silently optimizes away. Builds the same TUs and runs ctest
   # again so we get coverage on the alternate compiler.

@@ -41,7 +41,7 @@ from qed.input import HamiltonianBuilder, Op  # noqa: E402
 
 warnings.simplefilter("ignore")
 DEVICE = "cpu"
-ED_BIN = os.path.join(HERE, "..", "build", "ED")
+ED_BIN = os.environ.get("QED_ED_BIN", os.path.join(HERE, "..", "build", "ED"))
 
 
 # =============================================================================
@@ -634,6 +634,11 @@ def main():
     ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"])
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--skip-cli", action="store_true")
+    ap.add_argument("--max-sites", type=int, default=None,
+                    help="skip models with more sites than this (CI uses 10: the 12-site "
+                         "dense references take minutes each on a hosted runner)")
+    ap.add_argument("--fail-on-mismatch", action="store_true",
+                    help="exit 1 when any case mismatches or errors (CI gate)")
     a = ap.parse_args()
     global DEVICE
     DEVICE = a.device
@@ -641,6 +646,8 @@ def main():
     run = Runner(only=a.only, verbose=a.verbose)
     robustness_cases(run)
     for m in make_models():
+        if a.max_sites is not None and m.N > a.max_sites:
+            continue
         t0 = time.perf_counter(); ref = Reference(m)
         print(f"# reference {m.name}: N={m.N} dim={ref.D} E0={ref.evals[0]:.10f} ({time.perf_counter()-t0:.1f}s) [{m.notes}]", flush=True)
         solve_battery(m, ref, run)
@@ -659,6 +666,8 @@ def main():
     if a.json:
         with open(a.json, "w") as f:
             json.dump([r.__dict__ for r in run.rows], f, indent=1)
+    if a.fail_on_mismatch and bad:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
