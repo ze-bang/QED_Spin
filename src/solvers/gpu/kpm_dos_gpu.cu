@@ -230,7 +230,7 @@ void estimate_spectral_bounds_gpu(
 
     // Generate v_curr ~ Gaussian complex; normalise.
     ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
-        curand_gen, d_real_scratch, static_cast<size_t>(n), 0.0, 1.0));
+        curand_gen, d_real_scratch, static_cast<size_t>(n + (n & 1)), 0.0, 1.0));
     // Reuse d_v_next memory as a temporary "imag" buffer (length n doubles fits
     // in n cuDoubleComplex of length 2*n doubles).  But to keep things simple
     // and safe, generate a separate batch.
@@ -238,9 +238,9 @@ void estimate_spectral_bounds_gpu(
     (void)dummy_unused;
     // Allocate a small temporary device vector for imaginary parts.
     double* d_imag = nullptr;
-    ED_KPM_CHECK_CUDA(cudaMalloc(&d_imag, n * sizeof(double)));
+    ED_KPM_CHECK_CUDA(cudaMalloc(&d_imag, static_cast<size_t>(n + (n & 1)) * sizeof(double)));
     ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
-        curand_gen, d_imag, static_cast<size_t>(n), 0.0, 1.0));
+        curand_gen, d_imag, static_cast<size_t>(n + (n & 1)), 0.0, 1.0));
     kpm_finalize_random_complex<<<kpm_blocks(n), 256>>>(
         d_v_curr, d_real_scratch, d_imag, n);
     ED_KPM_CHECK_CUDA(cudaGetLastError());
@@ -544,8 +544,11 @@ KPMDOSResult compute_kpm_dos_gpu_with_matvec(
         ED_KPM_CHECK_CUDA(cudaMalloc(&d_v_prev, bytes_z));
         ED_KPM_CHECK_CUDA(cudaMalloc(&d_v_curr, bytes_z));
         ED_KPM_CHECK_CUDA(cudaMalloc(&d_v_next, bytes_z));
+        // cuRAND's normal generators require an EVEN count (error 105,
+        // CURAND_STATUS_LENGTH_NOT_MULTIPLE, for odd n -- every odd-dimensional
+        // symmetry sector hit it). Pad the scratch buffers to n_even.
         ED_KPM_CHECK_CUDA(cudaMalloc(&d_real_scratch,
-            static_cast<size_t>(n) * sizeof(double)));
+            static_cast<size_t>(n + (n & 1)) * sizeof(double)));
 
         // ---- Step 1: spectral bounds ---------------------------------
         double e_min = 0.0, e_max = 0.0;
@@ -596,12 +599,12 @@ KPMDOSResult compute_kpm_dos_gpu_with_matvec(
         for (int r = 0; r < R; ++r) {
             // Generate complex Gaussian into d_v_curr.
             ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
-                curand_gen, d_real_scratch, static_cast<size_t>(n), 0.0, 1.0));
+                curand_gen, d_real_scratch, static_cast<size_t>(n + (n & 1)), 0.0, 1.0));
             double* d_imag = nullptr;
             ED_KPM_CHECK_CUDA(cudaMalloc(&d_imag,
-                static_cast<size_t>(n) * sizeof(double)));
+                static_cast<size_t>(n + (n & 1)) * sizeof(double)));
             ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
-                curand_gen, d_imag, static_cast<size_t>(n), 0.0, 1.0));
+                curand_gen, d_imag, static_cast<size_t>(n + (n & 1)), 0.0, 1.0));
             kpm_finalize_random_complex<<<kpm_blocks(n), 256>>>(
                 d_v_curr, d_real_scratch, d_imag, n);
             ED_KPM_CHECK_CUDA(cudaGetLastError());

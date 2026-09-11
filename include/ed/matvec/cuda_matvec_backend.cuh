@@ -288,7 +288,7 @@ private:
                           basis_, spin_l_, device_terms_(), d_in, d_out),
                       "launch (complex)");
         }
-        cd::check(cudaDeviceSynchronize(), "sync (complex)");
+        cd::check(cudaGetLastError(), "launch check (complex)");  // no host sync: stream-ordered consumers
     }
 
     // fp32 twin of launch_complex_. Same gather-vs-scatter selection; the
@@ -315,7 +315,7 @@ private:
                           basis_, spin_l_, device_terms_(), d_in, d_out),
                       "launch (complex f32)");
         }
-        cd::check(cudaDeviceSynchronize(), "sync (complex f32)");
+        cd::check(cudaGetLastError(), "launch check (complex f32)");
     }
 
     void launch_real_(const double* d_in, double* d_out, std::size_t n) {
@@ -338,7 +338,7 @@ private:
                           basis_, spin_l_, device_terms_(), d_in, d_out),
                       "launch (real)");
         }
-        cd::check(cudaDeviceSynchronize(), "sync (real)");
+        cd::check(cudaGetLastError(), "launch check (real)");
     }
 
     void check_size(std::size_t n) const {
@@ -444,11 +444,12 @@ template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
 [[nodiscard]] std::unique_ptr<MatVecBackendBase>
 make_cuda_fixed_sz_backend(const std::vector<std::uint64_t>& sorted_basis_states,
                            double      spin_l,
-                           std::string label = "CudaMatVecBackend<FixedSz>")
+                           std::string label = "CudaMatVecBackend<FixedSz>",
+                           const LinIndexTable* lin = nullptr)
 {
     auto holder = std::make_shared<
         ed::matvec::basis::DeviceFixedSzBasisPolicyHolder>();
-    holder->build(sorted_basis_states);
+    holder->build(sorted_basis_states, lin);
     auto view = holder->view();
     return std::make_unique<CudaMatVecBackend<
         ed::matvec::basis::DeviceFixedSzBasisPolicy,

@@ -116,6 +116,18 @@ struct DeviceFixedSzBasisPolicy {
     const HashEntry* hash_table   = nullptr;
     std::uint32_t    hash_mask    = 0;  // table size = hash_mask + 1, must be power of 2
 
+    // GPU audit (2026-09): Lin (1990) two-table lookup, the same construction
+    // the host FixedSzBasisPolicy uses. J_l has 2^(N-N/2) entries (8 B each),
+    // J_r 2^(N/2) entries (4 B): 3 MB at N = 36, resident in L2 for every N,
+    // versus the 2 x dim x 16 B hash table (86 MB at N = 24) it replaces.
+    // When ``lin_jl != nullptr`` this path is taken; the hash stays as the
+    // fallback for callers that only supply a sorted basis list.
+    const std::uint64_t* lin_jl      = nullptr;
+    const std::uint32_t* lin_jr      = nullptr;
+    std::uint32_t        lin_n_lower = 0;
+    std::uint64_t        lin_mask    = 0;
+    int                  lin_n_up    = -1;
+
     __host__ __device__ inline std::uint64_t dim() const noexcept {
         return dim_;
     }
@@ -123,6 +135,12 @@ struct DeviceFixedSzBasisPolicy {
         return basis_states[idx];
     }
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
+        if (lin_jl != nullptr) {
+            if (__popcll(state) != lin_n_up) return kDeviceNotFound;
+            const std::uint64_t base = lin_jl[state >> lin_n_lower];
+            if (base == static_cast<std::uint64_t>(-1)) return kDeviceNotFound;
+            return base + lin_jr[state & lin_mask];
+        }
         // Open-addressing linear probing on a power-of-two table.
         std::uint64_t h = (state * 11400714819323198485ULL) & hash_mask;  // Fibonacci hash
         for (;;) {
@@ -175,10 +193,33 @@ public:
 
     // Build + upload the device tables from a lexicographically sorted
     // fixed-Sz basis. Throws std::runtime_error on any CUDA failure.
-    void build(const std::vector<std::uint64_t>& sorted_basis_states) {
+    void build(const std::vector<std::uint64_t>& sorted_basis_states,
+               const LinIndexTable* lin = nullptr) {
         reset();
         dim_ = sorted_basis_states.size();
         if (dim_ == 0) return;
+
+        check_(cudaMalloc(&d_states_, dim_ * sizeof(std::uint64_t)),
+               "cudaMalloc(basis_states)");
+        check_(cudaMemcpy(d_states_, sorted_basis_states.data(),
+                          dim_ * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
+               "cudaMemcpy(basis_states)");
+
+        if (lin != nullptr && !lin->J_l().empty()) {
+            // Lin two-table lookup (GPU audit 2026-09): no hash at all.
+            const auto& jl = lin->J_l();
+            const auto& jr = lin->J_r();
+            check_(cudaMalloc(&d_jl_, jl.size() * sizeof(std::uint64_t)), "cudaMalloc(J_l)");
+            check_(cudaMemcpy(d_jl_, jl.data(), jl.size() * sizeof(std::uint64_t),
+                              cudaMemcpyHostToDevice), "cudaMemcpy(J_l)");
+            check_(cudaMalloc(&d_jr_, jr.size() * sizeof(std::uint32_t)), "cudaMalloc(J_r)");
+            check_(cudaMemcpy(d_jr_, jr.data(), jr.size() * sizeof(std::uint32_t),
+                              cudaMemcpyHostToDevice), "cudaMemcpy(J_r)");
+            lin_n_lower_ = static_cast<std::uint32_t>(lin->n_lower());
+            lin_mask_    = lin->lower_mask();
+            lin_n_up_    = static_cast<int>(lin->n_up());
+            return;
+        }
 
         // Power-of-two table sized for a <=0.5 load factor.
         std::uint64_t table_size = 1;
@@ -196,11 +237,6 @@ public:
             host_hash[h].value = static_cast<std::uint32_t>(idx);
         }
 
-        check_(cudaMalloc(&d_states_, dim_ * sizeof(std::uint64_t)),
-               "cudaMalloc(basis_states)");
-        check_(cudaMemcpy(d_states_, sorted_basis_states.data(),
-                          dim_ * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
-               "cudaMemcpy(basis_states)");
         check_(cudaMalloc(&d_hash_, table_size * sizeof(HashEntry)),
                "cudaMalloc(hash_table)");
         check_(cudaMemcpy(d_hash_, host_hash.data(),
@@ -214,6 +250,11 @@ public:
         p.dim_         = dim_;
         p.hash_table   = d_hash_;
         p.hash_mask    = hash_mask_;
+        p.lin_jl       = d_jl_;
+        p.lin_jr       = d_jr_;
+        p.lin_n_lower  = lin_n_lower_;
+        p.lin_mask     = lin_mask_;
+        p.lin_n_up     = lin_n_up_;
         return p;
     }
 
@@ -230,20 +271,31 @@ private:
     void reset() noexcept {
         if (d_states_) { cudaFree(d_states_); d_states_ = nullptr; }
         if (d_hash_)   { cudaFree(d_hash_);   d_hash_   = nullptr; }
+        if (d_jl_)     { cudaFree(d_jl_);     d_jl_     = nullptr; }
+        if (d_jr_)     { cudaFree(d_jr_);     d_jr_     = nullptr; }
         dim_ = 0;
         hash_mask_ = 0;
+        lin_n_lower_ = 0; lin_mask_ = 0; lin_n_up_ = -1;
     }
     void steal(DeviceFixedSzBasisPolicyHolder& o) noexcept {
         d_states_  = o.d_states_;  o.d_states_ = nullptr;
         d_hash_    = o.d_hash_;    o.d_hash_   = nullptr;
+        d_jl_      = o.d_jl_;      o.d_jl_     = nullptr;
+        d_jr_      = o.d_jr_;      o.d_jr_     = nullptr;
         dim_       = o.dim_;       o.dim_      = 0;
         hash_mask_ = o.hash_mask_; o.hash_mask_ = 0;
+        lin_n_lower_ = o.lin_n_lower_; lin_mask_ = o.lin_mask_; lin_n_up_ = o.lin_n_up_;
     }
 
     std::uint64_t*                       d_states_  = nullptr;
     DeviceFixedSzBasisPolicy::HashEntry* d_hash_    = nullptr;
+    std::uint64_t*                       d_jl_      = nullptr;
+    std::uint32_t*                       d_jr_      = nullptr;
     std::uint64_t                        dim_       = 0;
     std::uint32_t                        hash_mask_ = 0;
+    std::uint32_t                        lin_n_lower_ = 0;
+    std::uint64_t                        lin_mask_    = 0;
+    int                                  lin_n_up_    = -1;
 };
 
 // ===========================================================================

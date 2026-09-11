@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 // =============================================================================
 // include/ed/core/select_backend.h
 //
@@ -150,12 +151,23 @@ inline bool gpu_mem_fits(const Geometry& geom,
     if (c.gpu_mem_bytes.has_value()) {
         budget = c.gpu_mem_bytes.value();
     } else {
-        std::size_t free_bytes = 0, total_bytes = 0;
-        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-            cudaGetLastError();
-            return false;
+        // cudaMemGetInfo costs 20-100 ms per call under WSL2 (measured: 6
+        // calls = 116 ms in a 6-solve benchmark). Cache the answer for one
+        // second; the feasibility check only needs an order of magnitude.
+        static std::size_t cached_free = 0;
+        static std::chrono::steady_clock::time_point cached_at{};
+        const auto now = std::chrono::steady_clock::now();
+        if (cached_at == std::chrono::steady_clock::time_point{}
+                || now - cached_at > std::chrono::seconds(1)) {
+            std::size_t free_bytes = 0, total_bytes = 0;
+            if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
+            cached_free = free_bytes;
+            cached_at   = now;
         }
-        budget = free_bytes;
+        budget = cached_free;
     }
     const std::size_t per_complex = sizeof(std::complex<double>);
     const std::size_t need = static_cast<std::size_t>(

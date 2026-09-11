@@ -58,7 +58,7 @@ void run_case(const char* label, const ed::LinearOperator& H, std::uint64_t N,
         opts.num_samples = samples;
         opts.krylov_dim  = krylov;
         opts.random_seed = 12345;
-        opts.backend.allow_gpu = false;
+        opts.backend.allow_gpu = (std::getenv("BENCH_GPU") != nullptr);  // BENCH_GPU=1 => CudaBackend lane
         opts.backend.allow_mpi = false;
         const auto t0 = std::chrono::steady_clock::now();
         res = ed::workflows::thermal(H, opts);

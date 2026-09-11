@@ -134,13 +134,17 @@ ed::SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
                 DiagonalOneBody, OffDiagonalOneBody,
                 DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
                 ThreeBodyTransformData>(states,
-                                        static_cast<double>(spin_l_));
+                                        static_cast<double>(spin_l_),
+                                        "CudaMatVecBackend<FixedSz>",
+                                        &producer_.lin_index());   // implicit Lin table
         } else {
             cuda_backend_ = ed::matvec::make_cuda_fixed_sz_backend<
                 DiagonalOneBody, OffDiagonalOneBody,
                 DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
                 ThreeBodyTransformData>(producer_.basis_states(),
-                                        static_cast<double>(spin_l_));
+                                        static_cast<double>(spin_l_),
+                                        "CudaMatVecBackend<FixedSz>",
+                                        &producer_.lin_index());
         }
     }
     const auto tv = term_view_();

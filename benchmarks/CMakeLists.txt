@@ -159,3 +159,12 @@ if(WITH_CUDA)
 endif()
 target_compile_options(bench_audit_thermal PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
 set_target_properties(bench_audit_thermal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+if(WITH_CUDA)
+    # 2026-09 GPU audit: raw CudaMatVecBackend gather SpMV throughput.
+    add_executable(bench_gpu_gather_apply bench_gpu_gather_apply.cpp)
+    target_link_libraries(bench_gpu_gather_apply PRIVATE ed_solvers_cpu ed_symmetry ed_solvers_gpu
+        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
+    target_compile_options(bench_gpu_gather_apply PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
+    set_target_properties(bench_gpu_gather_apply PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endif()

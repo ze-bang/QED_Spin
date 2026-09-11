@@ -72,7 +72,7 @@ void run_case(const char* label, const ed::LinearOperator& H, std::uint64_t N,
         opts.tolerance = 1e-10;
         opts.compute_vectors = vectors;
         opts.method = ed::SolveMethod::Lanczos;
-        opts.backend.allow_gpu = false;
+        opts.backend.allow_gpu = (std::getenv("BENCH_GPU") != nullptr);  // BENCH_GPU=1 => CudaBackend lane
         opts.backend.allow_mpi = false;
         const auto t0 = std::chrono::steady_clock::now();
         res = ed::workflows::solve(H, opts);

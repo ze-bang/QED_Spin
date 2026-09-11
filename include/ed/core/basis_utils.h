@@ -224,6 +224,16 @@ public:
     }
 
     bool empty() const { return J_l_.empty() && J_r_.empty(); }
+
+    // Raw table access for device mirrors (GPU audit 2026-09): the CUDA
+    // fixed-Sz policy uploads J_l / J_r and performs the same two-table read.
+    [[nodiscard]] uint64_t n_lower() const noexcept { return n_lower_; }
+    [[nodiscard]] uint64_t n_upper() const noexcept { return n_upper_; }
+    [[nodiscard]] int64_t  n_up()    const noexcept { return n_up_; }
+    [[nodiscard]] uint64_t lower_mask() const noexcept { return lower_mask_; }
+    [[nodiscard]] const std::vector<uint64_t>& J_l() const noexcept { return J_l_; }
+    [[nodiscard]] const std::vector<uint32_t>& J_r() const noexcept { return J_r_; }
+    static constexpr uint64_t invalid_index() noexcept { return ~uint64_t(0); }
     size_t memoryBytes() const {
         return J_l_.size() * sizeof(uint64_t) + J_r_.size() * sizeof(uint32_t);
     }
