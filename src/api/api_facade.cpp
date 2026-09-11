@@ -107,8 +107,10 @@ device_constraints(std::string_view device, std::uint64_t dim_hint) {
         c.allow_gpu     = true;
         c.allow_mpi     = true;
         c.allow_mpi_gpu = true;
-        // Below 2^14 dim => keep CPU only (Python `workflow.py` threshold).
-        if (dim_hint > 0 && dim_hint < (std::uint64_t(1) << 14)) {
+        // Below 2^18 dim => keep CPU only (Python `workflow.py` threshold;
+        // GPU audit 2026-09-11: the CudaBackend lane overtakes the CPU lane
+        // at dim ~ 7e5 and is slower below ~2e5).
+        if (dim_hint > 0 && dim_hint < (std::uint64_t(1) << 18)) {
             c.allow_gpu     = false;
             c.allow_mpi_gpu = false;
         }

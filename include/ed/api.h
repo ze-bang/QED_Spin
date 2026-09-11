@@ -24,7 +24,7 @@
 //     ("LANCZOS" / "lanczos" / "Lanczos" / "FTLM" / "ftlm" / ...).
 //   * `device=` accepts "auto" / "cpu" / "gpu" / "mpi" / "mpi_gpu" and
 //     converts to `BackendConstraints` via the same threshold heuristic
-//     Python uses (`global_dim >= 1 << 14` for "auto" => GPU).
+//     Python uses (`global_dim >= 1 << 18` for "auto" => GPU).
 //
 // The actual kernel work is delegated to `ed::workflows::solve / thermal /
 // spectral`, which keeps its C++-style option structs untouched (no ABI
@@ -70,7 +70,7 @@ parse_spectral_method(std::string_view name);
 // ---------------------------------------------------------------------------
 // `device_constraints(device_str, dim_hint)` -- map a Python-style
 // `device=` string to a `BackendConstraints`. Threshold for "auto"
-// matches the Python facade (`global_dim >= 1 << 14` => GPU preferred).
+// matches the Python facade (`global_dim >= 1 << 18` => GPU preferred).
 // ---------------------------------------------------------------------------
 [[nodiscard]] ed::BackendConstraints
 device_constraints(std::string_view device, std::uint64_t dim_hint = 0);

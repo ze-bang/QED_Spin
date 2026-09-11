@@ -110,6 +110,7 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     *,
     use_gpu: bool = False,
     use_mpi: bool = False,
+    gpu_dim_floor: int = 0,
     spin_flip: int = -1,
     time_reversal: int = -1,
     star_maps: Optional[list] = None,
@@ -132,7 +133,11 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
     if use_gpu:
-        opts.backend.gpu_dim_floor = 0
+        # GPU audit (2026-09-11): per-sector dispatch. Sectors below the floor
+        # run on the CPU -- a 150-iteration bound estimate plus ~200 cuBLAS syncs
+        # per sector made the GPU KPM-DOS symmetry lane 17x slower than the CPU
+        # at N = 16. device='gpu' (explicit) passes floor 0 and forces every sector.
+        opts.backend.gpu_dim_floor = int(gpu_dim_floor)
     opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
     opts.time_reversal = int(time_reversal)
     if star_maps:
@@ -217,6 +222,7 @@ def _thermal_via_workflows_streaming_symmetry(
     *,
     use_gpu: bool = False,
     use_mpi: bool = False,
+    gpu_dim_floor: int = 0,
 ) -> EDResults:
     """Route a directory + ``automorphism_results/`` through the
     SOTA C++ streaming-symmetry thermal binding
@@ -237,7 +243,11 @@ def _thermal_via_workflows_streaming_symmetry(
     opts.backend.allow_gpu = bool(use_gpu)
     opts.backend.allow_mpi = bool(use_mpi)
     if use_gpu:
-        opts.backend.gpu_dim_floor = 0
+        # GPU audit (2026-09-11): per-sector dispatch. Sectors below the floor
+        # run on the CPU -- a 150-iteration bound estimate plus ~200 cuBLAS syncs
+        # per sector made the GPU KPM-DOS symmetry lane 17x slower than the CPU
+        # at N = 16. device='gpu' (explicit) passes floor 0 and forces every sector.
+        opts.backend.gpu_dim_floor = int(gpu_dim_floor)
     fixed_sz = int(params.n_up) if params.use_fixed_sz else None
     tr = _core.workflows_thermal_streaming_symmetry_directory(
         directory,
@@ -1143,6 +1153,8 @@ def thermal(
     else:
         _dim_hint = 1 << int(H.num_sites)
     _use_gpu, _use_mpi = _resolve_device(device, _dim_hint)
+    _gpu_forced = isinstance(device, str) and device.lower() in ("gpu", "cuda")
+    _gpu_floor = 0 if _gpu_forced else (1 << 14)
     if _use_mpi:
         # qed.thermal does not have an MPI route today -- the C++
         # thermal binding is rank-local. We surface a clear error
@@ -1545,7 +1557,7 @@ def thermal(
                     res = _thermal_via_workflows_streaming_symmetry(
                         directory, N, float(spin),
                         method_enum, p,
-                        use_gpu=_use_gpu, use_mpi=_use_mpi,
+                        use_gpu=_use_gpu, use_mpi=_use_mpi, gpu_dim_floor=_gpu_floor,
                     )
                 else:
                     res = _thermal_via_workflows_thermal(
@@ -1633,7 +1645,7 @@ def thermal(
                 p = _make_dir_params(None)
                 tr = _thermal_via_workflows_all_sz_streaming_symmetry(
                     directory, N, float(spin), method_enum, p,
-                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi,
+                    lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi, gpu_dim_floor=_gpu_floor,
                     spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
                     time_reversal=_sym_toggle_int(time_reversal,
                                                   "time_reversal"),

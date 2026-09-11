@@ -193,6 +193,7 @@ struct LanczosRealExtras {
     /// before the vector is consumed; j = 0, 1, ..., m-1.
     std::function<void(uint64_t j, const double* v_j)> on_basis_vector;
     bool want_ritz = false;              ///< fill ritz_bounds / ritz_vectors below
+    bool converge_vectors = false;       ///< also stop only when every requested level's residual bound <= tol*max(1,|E0|)
     // ---- outputs ----
     std::vector<double> alpha;           ///< tridiagonal diagonal (m)
     std::vector<double> beta;            ///< off-diagonal, beta[0] = 0 (m or m+1 entries)

@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-09-11 — GPU lanes: matrix run, three fixes, device Lin table
+
+The workflow matrix (`benchmarks/audit_workflows.py --device gpu`, 153 cases on four
+12-site models) and the 361-test suite were run with the RTX 4080 SUPER back after the
+host had blocked GPU access during the 2026-09-10 audit. GPU result now equals the CPU
+result: 147 ok, 4 expected-unsupported, and the same 2 documented gaps (Sz-parity lane
+returns no eigenvectors; the finite-T cross-irrep estimate on the chiral model at 24
+samples is outside the 20 % tolerance -- statistical).
+
+* **KPM-DOS on the GPU crashed on every odd-dimensional sector** (`kpm_dos_gpu: cuRAND
+  error code 105` = `CURAND_STATUS_LENGTH_NOT_MULTIPLE`): `curandGenerateNormalDouble`
+  requires an even count. Scratch buffers are padded to `n + (n & 1)`. Every
+  `qed.thermal(method="KPM_DOS", symmetry="auto", device="gpu")` call failed before.
+* **No host synchronisation after every matvec launch** (`CudaMatVecBackend`): the
+  three `cudaDeviceSynchronize` calls after the gather / scatter launches were
+  replaced by launch-error checks; consumers are stream-ordered. `select_backend`
+  caches `cudaMemGetInfo` for one second (20-100 ms per call under WSL2, once per
+  solve).
+* **Device Lin table** for the fixed-Sz CUDA mirror: `DeviceFixedSzBasisPolicy`
+  performs the same two-table lookup as the host (`J_l` / `J_r` uploaded from the
+  `LinIndexTable`, 3 MB at N = 36) instead of probing an open-addressing hash whose
+  `2 x dim x 16 B` table (86 MB at N = 24) lived outside L2. The hash remains as the
+  fallback for callers without a Lin table.
+* **Measured** (`BENCH_GPU=1 build/benchmarks/bench_audit_solve`, best-of-2 ms, E0 only /
+  E0 + certified eigenvector; CPU column is the 16-thread real-storage lane):
+
+  | N  | GPU before   | GPU after    | CPU          |
+  |----|--------------|--------------|--------------|
+  | 18 | 53.6 / 98.0  | 13.1 / 27.7  | 6.6 / 8.4    |
+  | 20 | 63.7 / 126   | 27.0 / 46.3  | 23.5 / 38    |
+  | 22 | 127 / 255    | 69.1 / 133   | 231 / 406    |
+  | 24 | 457 / 943    | 287 / 567    | 1296 / 2596  |
+
+  The CudaBackend lane overtakes the CPU lane at N = 22; the auto device threshold
+  (dim >= 2^14) is therefore too low for the ground-state verb on this machine.
+* **Raw gather SpMV** (`bench_gpu_gather_apply`, complex vectors): 183 us at N = 20,
+  677 us at N = 22, 3.2 ms at N = 24 (thread per row). A warp-per-row variant was
+  written and measured 3x slower (the per-term struct loads stop being warp
+  broadcasts); it is kept behind `ED_GPU_GATHER_WARP=1` for long-range models.
+  The remaining per-iteration cost at N <= 20 is the two host-pointer cuBLAS
+  reductions per Lanczos step (~250 us of sync latency per iteration); a device-
+  scalar recurrence would remove it but only matters where the CPU lane is already
+  faster.
+* **GPU KPM-DOS symmetry lane**: the kernel created a cuBLAS handle and a cuRAND
+  generator per call (~100 ms); the streaming lane calls it once per (n_up, k) sector.
+  Handles are now cached per thread (N = 16, 200 sectors: 34 s -> 17 s; the rest is the
+  150-iteration bound estimate per tiny sector, so sectors below 2^14 states now stay on
+  the CPU unless `device="gpu"` is explicit: 1.0 s).
+* **Automatic device choice** raised from 2^14 to 2^18 states (`qed.solve/thermal/spectral`
+  and `ed::api::device_constraints`): measured crossover is ~7e5 states for the Krylov
+  verbs; below 2e5 the GPU lane was 1.5-3x slower than the 16-thread CPU lane.
+* **CPU parity regression caught by the GPU tests**: `test_su2_gpu_parity` was skipped
+  while the device was blocked. The real-storage lane's eigenvector windows stopped on
+  the Ritz-value test alone, leaving levels 2-3 with residuals 5e-8 / 6e-6 that fail the
+  SU(2) label certification (needs <= 1e-8) the complex kernel's vectors pass. When
+  vectors are requested the stop is now additionally gated on the free bound
+  |beta_m||z_{m,i}| <= tol * max(1, |E0|) for every requested level (N = 22, E0 + vector:
+  406 -> 546 ms, residual 6.6e-6 -> 7.7e-10; windows without vectors unchanged).
+* Still not exercised: MPI+CUDA (no multi-rank run in this environment) and the fp32
+  mTPQ lane beyond its unit tests.
+
 ## 2026-09-10 — workflow audit: every verb x lane x symmetry against a dense reference
 
 `benchmarks/audit_workflows.py` (new) runs ground-state, full-spectrum, thermal (FTLM /

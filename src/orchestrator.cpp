@@ -442,6 +442,7 @@ GroundStateResult solve_on(Backend& be,
                 LanczosRealExtras ex;
                 ex.v0        = (v0_sq > 0.0) ? v0.data() : nullptr;
                 ex.want_ritz = opts.compute_vectors || opts.num_eigs > 1;
+                ex.converge_vectors = opts.compute_vectors;   // windows without vectors keep the Ritz-value stop
                 std::vector<double> eigs;
                 std::uint64_t real_iters = 0;
                 bool real_converged = false;

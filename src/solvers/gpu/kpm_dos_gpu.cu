@@ -519,12 +519,21 @@ KPMDOSResult compute_kpm_dos_gpu_with_matvec(
         : std::random_device{}();
 
     // ---- cuBLAS / cuRAND handles --------------------------------------
-    cublasHandle_t cublas_handle = nullptr;
-    curandGenerator_t curand_gen = nullptr;
-    ED_KPM_CHECK_CUBLAS(cublasCreate(&cublas_handle));
-    ED_KPM_CHECK_CURAND(curandCreateGenerator(
-        &curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+    // GPU audit (2026-09): created ONCE per thread and reused. cublasCreate +
+    // curandCreateGenerator cost ~100 ms per pair; the streaming-symmetry
+    // thermal lane calls this kernel once per (n_up, k) sector -- ~200 sectors
+    // at N = 16 -- so the per-call creation dominated (34 s vs 1.9 s on CPU).
+    // The generator is reseeded per call so results stay reproducible; the
+    // handles live until process exit (cudaDeviceReset is never called here).
+    static thread_local cublasHandle_t    cublas_handle = nullptr;
+    static thread_local curandGenerator_t curand_gen    = nullptr;
+    if (!cublas_handle) ED_KPM_CHECK_CUBLAS(cublasCreate(&cublas_handle));
+    if (!curand_gen) {
+        ED_KPM_CHECK_CURAND(curandCreateGenerator(
+            &curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+    }
     ED_KPM_CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(curand_gen, seed));
+    ED_KPM_CHECK_CURAND(curandSetGeneratorOffset(curand_gen, 0ULL));
 
     // ---- Allocate device memory ---------------------------------------
     cuDoubleComplex* d_v_prev = nullptr;
@@ -536,8 +545,7 @@ KPMDOSResult compute_kpm_dos_gpu_with_matvec(
         if (d_v_curr) cudaFree(d_v_curr);
         if (d_v_next) cudaFree(d_v_next);
         if (d_real_scratch) cudaFree(d_real_scratch);
-        if (curand_gen) curandDestroyGenerator(curand_gen);
-        if (cublas_handle) cublasDestroy(cublas_handle);
+        // handles are cached (see above) -- not destroyed per call.
     };
     try {
         const size_t bytes_z = static_cast<size_t>(n) * sizeof(cuDoubleComplex);

@@ -1301,7 +1301,38 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                             current[ii] - prev_eigenvalues[ii]) / denom;
                         max_rel_change = std::max(max_rel_change, rel_change);
                     }
-                    if (max_rel_change < tol) {
+                    // GPU-parity fix (2026-09-11): when eigenvectors are
+                    // requested, the Ritz-value stop alone leaves the
+                    // higher members of the window with residuals ~sqrt(tol)
+                    // (measured 5e-8 / 6e-6 for levels 2-3 at tol = 1e-10),
+                    // which fails the SU(2) label certification (needs
+                    // <= 1e-8) that the complex kernel's vectors pass. Gate
+                    // the stop additionally on the free Lanczos bound
+                    // |beta_m| |z_{m,i}| <= tol * max(1, |E_0|) for every
+                    // requested level -- a few extra iterations.
+                    bool vec_ok = true;
+                    if (max_rel_change < tol && extras && extras->converge_vectors) {
+                        std::vector<double> d2 = alpha, o2(m_cur > 1 ? m_cur - 1 : 0),
+                                            z(m_cur * m_cur);
+                        for (uint64_t ii = 0; ii + 1 < m_cur; ++ii) o2[ii] = beta[ii + 1];
+                        if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m_cur, d2.data(),
+                                           o2.data(), z.data(), m_cur) == 0) {
+                            const double vec_tol =
+                                tol * std::max(1.0, std::abs(current[0]));
+                            for (uint64_t ii = 0; ii < n_check && vec_ok; ++ii) {
+                                double best = std::numeric_limits<double>::infinity();
+                                for (uint64_t k = 0; k < m_cur; ++k) {
+                                    if (std::abs(d2[k] - current[ii])
+                                            <= 1e-10 * (1.0 + std::abs(current[ii]))) {
+                                        best = std::min(best,
+                                            norm * std::abs(z[(m_cur - 1) + k * m_cur]));
+                                    }
+                                }
+                                if (best > vec_tol) vec_ok = false;
+                            }
+                        }
+                    }
+                    if (max_rel_change < tol && vec_ok) {
                         std::cout << "Lanczos[real]: Eigenvalues converged at "
                                      "iteration " << j + 1
                                   << " (max rel change = " << std::scientific

@@ -1670,7 +1670,11 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
     Returns ``(use_gpu, use_mpi)``; ``use_mpi`` is always False now.
     """
     if device is None or device == "auto":
-        use_gpu = bool(has_cuda_build()) and dim >= (1 << 14)
+        # GPU audit (2026-09-11): the CudaBackend lane overtakes the 16-thread
+        # CPU lane at dim ~ 7e5 (N = 22 half filling) for the Krylov verbs and
+        # is 1.5-3x SLOWER below ~2e5 (launch + sync latency per iteration), so
+        # "auto" keeps dim < 2^18 on the CPU. Pass device="gpu" to force it.
+        use_gpu = bool(has_cuda_build()) and dim >= (1 << 18)
         return use_gpu, False
     device_lc = device.lower()
     if device_lc == "cpu":
