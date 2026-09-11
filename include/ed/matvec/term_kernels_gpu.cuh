@@ -42,6 +42,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cstdint>
+#include <cstdlib>
 #include <type_traits>
 
 #include <ed/matvec/device_basis_policy.cuh>
@@ -740,6 +741,183 @@ __global__ void apply_terms_gpu_gather(
 // Host-side launcher for the GATHER kernel. Unlike the scatter launcher, the
 // caller does NOT need to pre-zero ``d_out`` (every row is overwritten).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GPU audit (2026-09): WARP-per-row gather. The thread-per-row kernel above
+// issues one dependent random load at a time per row (Lin lookup -> in[j]),
+// with warp divergence on every gate test, so it runs ~10x below the L2
+// random-access rate. Here the 32 lanes of a warp take the row's terms in
+// parallel (lane l handles flattened term indices l, l+32, ...), which puts
+// up to 32 independent gathers in flight per row; the partial sums are
+// warp-reduced with shuffles and lane 0 writes out[r]. Rows of local spin
+// models carry ~N terms, so one pass over the lanes covers N <= 32.
+// ``ED_GPU_GATHER_WARP=1`` selects this kernel; thread-per-row is the default (see below).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ double warp_shfl_down_scalar(double v, int off) {
+    return __shfl_down_sync(0xffffffffu, v, off);
+}
+__device__ __forceinline__ cuDoubleComplex warp_shfl_down_scalar(cuDoubleComplex v, int off) {
+    return make_cuDoubleComplex(__shfl_down_sync(0xffffffffu, cuCreal(v), off),
+                                __shfl_down_sync(0xffffffffu, cuCimag(v), off));
+}
+__device__ __forceinline__ cuFloatComplex warp_shfl_down_scalar(cuFloatComplex v, int off) {
+    return make_cuFloatComplex(__shfl_down_sync(0xffffffffu, cuCrealf(v), off),
+                               __shfl_down_sync(0xffffffffu, cuCimagf(v), off));
+}
+
+template <class BasisPolicy, class Scalar>
+__global__ void __launch_bounds__(256)
+apply_terms_gpu_gather_warp(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    using ST = ScalarTraits<Scalar>;
+    static_assert(!BasisPolicy::needs_orbit_walk && !BasisPolicy::has_coeff_modifier,
+                  "apply_terms_gpu_gather_warp supports only trivial / fixed-Sz policies");
+    const std::uint64_t dim  = basis.dim();
+    const unsigned      lane = threadIdx.x & 31u;
+    const std::uint64_t r    =
+        (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+    if (r >= dim) return;                       // whole warp exits together (dim-aligned)
+
+    const std::uint64_t r_state = basis.state_of(r);
+    const Scalar        v_r     = in[r];
+    const double        spin_sq = spin_l * spin_l;
+    Scalar acc = ST::zero();
+
+    auto col_val = [&](std::uint64_t c_state, bool& ok) -> Scalar {
+        if constexpr (BasisPolicy::may_leave_basis) {
+            const std::uint64_t j = basis.index_of(c_state);
+            if (j == ed::matvec::basis::kDeviceNotFound) { ok = false; return ST::zero(); }
+            ok = true;
+            return in[j];
+        } else {
+            ok = true;
+            return in[c_state];
+        }
+    };
+
+    const std::uint32_t n1 = terms.num_diag_one_body;
+    const std::uint32_t n2 = terms.num_offdiag_one_body;
+    const std::uint32_t n3 = terms.num_diag_two_body;
+    const std::uint32_t n4 = terms.num_mixed_two_body;
+    const std::uint32_t n5 = terms.num_offdiag_two_body;
+    const std::uint32_t n6 = terms.num_three_body;
+    const std::uint32_t total = n1 + n2 + n3 + n4 + n5 + n6;
+
+    for (std::uint32_t i = lane; i < total; i += 32u) {
+        std::uint32_t t = i;
+        if (t < n1) {
+            const auto& term = terms.diag_one_body[t];
+            const double sign = ((r_state >> term.site_index) & 1) ? -1.0 : 1.0;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
+                                       ST::mul_real(v_r, spin_l * sign)));
+            continue;
+        }
+        t -= n1;
+        if (t < n2) {
+            const auto& term = terms.offdiag_one_body[t];
+            const std::uint64_t bit = (r_state >> term.site_index) & 1ULL;
+            if (bit != term.op_type) continue;
+            bool ok; const Scalar vc = col_val(r_state ^ (1ULL << term.site_index), ok);
+            if (!ok) continue;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)), vc));
+            continue;
+        }
+        t -= n2;
+        if (t < n3) {
+            const auto& term = terms.diag_two_body[t];
+            const double sa = ((r_state >> term.site_index_1) & 1) ? -1.0 : 1.0;
+            const double sb = ((r_state >> term.site_index_2) & 1) ? -1.0 : 1.0;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
+                                       ST::mul_real(v_r, spin_sq * sa * sb)));
+            continue;
+        }
+        t -= n3;
+        if (t < n4) {
+            const auto& term = terms.mixed_two_body[t];
+            const std::uint64_t flip_bit = (r_state >> term.flip_site) & 1ULL;
+            if (flip_bit != term.flip_op_type) continue;
+            const std::uint64_t b_state = r_state ^ (1ULL << term.flip_site);
+            const double sz_sign = ((b_state >> term.sz_site) & 1) ? -1.0 : 1.0;
+            bool ok; const Scalar vc = col_val(b_state, ok);
+            if (!ok) continue;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
+                                       ST::mul_real(vc, spin_l * sz_sign)));
+            continue;
+        }
+        t -= n4;
+        if (t < n5) {
+            const auto& term = terms.offdiag_two_body[t];
+            const std::uint64_t b1 = (r_state >> term.site_index_1) & 1ULL;
+            const std::uint64_t b2 = (r_state >> term.site_index_2) & 1ULL;
+            if (!(b1 == term.op_type_1 && b2 == term.op_type_2)) continue;
+            const std::uint64_t c_state =
+                r_state ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
+            bool ok; const Scalar vc = col_val(c_state, ok);
+            if (!ok) continue;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)), vc));
+            continue;
+        }
+        t -= n5;
+        {
+            const auto& term = terms.three_body[t];
+            std::uint64_t flip_xor = 0;
+            if (term.op_type_1 != kOpSz) flip_xor ^= (1ULL << term.site_index_1);
+            if (term.op_type_2 != kOpSz) flip_xor ^= (1ULL << term.site_index_2);
+            if (term.op_type_3 != kOpSz) flip_xor ^= (1ULL << term.site_index_3);
+            const std::uint64_t b_state = r_state ^ flip_xor;
+            std::uint64_t walking = b_state;
+            cuDoubleComplex scalar = load_coeff(term.coefficient);
+            bool valid = true;
+            auto step = [&](std::uint8_t op_type, std::uint64_t site) {
+                if (!valid) return;
+                if (op_type == kOpSz) {
+                    const double sg = ((walking >> site) & 1) ? -1.0 : 1.0;
+                    scalar = make_cuDoubleComplex(cuCreal(scalar) * spin_l * sg,
+                                                  cuCimag(scalar) * spin_l * sg);
+                } else {
+                    const std::uint64_t b = (walking >> site) & 1ULL;
+                    if (b != op_type) walking ^= (1ULL << site);
+                    else              valid = false;
+                }
+            };
+            step(term.op_type_1, term.site_index_1);
+            step(term.op_type_2, term.site_index_2);
+            step(term.op_type_3, term.site_index_3);
+            if (!valid || walking != r_state) continue;
+            if (cuCreal(scalar) * cuCreal(scalar) +
+                cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
+            bool ok; const Scalar vc = col_val(b_state, ok);
+            if (!ok) continue;
+            acc = ST::add(acc, ST::mul(ST::from_coeff(scalar), vc));
+        }
+    }
+    // Warp reduction (all 32 lanes are active: the early exit above is per warp).
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        acc = ST::add(acc, warp_shfl_down_scalar(acc, off));
+    if (lane == 0) out[r] = acc;
+}
+
+// Measured on an RTX 4080 SUPER (Heisenberg chain, fixed Sz, complex vectors):
+// the warp-per-row kernel is ~3x SLOWER than thread-per-row (637 vs 183 us at
+// N = 20, 8.8 vs 3.2 ms at N = 24) -- spreading a row's terms over the lanes
+// turns the per-term struct loads from one broadcast per warp into 32 scattered
+// loads, and the extra instruction count outweighs the added memory-level
+// parallelism. Thread-per-row stays the default; ED_GPU_GATHER_WARP=1 selects
+// the warp kernel for further experiments (e.g. long-range models with
+// hundreds of terms per row, where the lane split may pay off).
+inline bool gpu_gather_use_thread_kernel() {
+    static const bool v = [] {
+        const char* e = std::getenv("ED_GPU_GATHER_WARP");
+        return !(e && e[0] == '1');
+    }();
+    return v;
+}
+
 template <class BasisPolicy, class Scalar>
 inline cudaError_t launch_apply_terms_gpu_gather(
     BasisPolicy           basis,
@@ -752,6 +930,15 @@ inline cudaError_t launch_apply_terms_gpu_gather(
 {
     const std::uint64_t dim = basis.dim();
     if (dim == 0) return cudaSuccess;
+    if (!gpu_gather_use_thread_kernel()) {
+        // Warp per row: 8 rows per 256-thread block.
+        const std::uint64_t warps_per_block = 256ull / 32ull;
+        const std::uint64_t blocks = (dim + warps_per_block - 1) / warps_per_block;
+        apply_terms_gpu_gather_warp<BasisPolicy, Scalar>
+            <<<static_cast<unsigned int>(blocks), 256u, 0, stream>>>
+            (basis, spin_l, terms, d_in, d_out);
+        return cudaGetLastError();
+    }
     const std::uint64_t blocks =
         (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
         static_cast<std::uint64_t>(threads_per_block);
