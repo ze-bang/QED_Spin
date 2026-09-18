@@ -51,7 +51,14 @@ Submodules
 
 from __future__ import annotations
 
+import os as _os
 from typing import Final
+
+# The compiled extension lives in a build directory, not in the source tree; see
+# _locate_core for the QED_CORE_DIR contract. Must run before the first `_core` import.
+from ._locate_core import extend_package_path as _extend_package_path
+
+__path__ = _extend_package_path(__path__, _os.path.dirname(_os.path.abspath(__file__)))
 
 from . import _core as _core
 from ._core import (

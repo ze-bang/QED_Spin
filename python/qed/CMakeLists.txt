@@ -83,15 +83,28 @@ target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 
-# Ensure the .so ends up beside the package's __init__.py so editable
-# installs and in-tree imports both work.
+# The extension is a BUILD product and never lands in the source tree: two
+# configurations (CPU and CUDA, say) would otherwise overwrite each other's
+# python/qed/_core*.so, and whichever built last would silently win. It goes to
+# <build>/python/qed/, and the source package finds it through QED_CORE_DIR
+# (see python/qed/__init__.py):
+#
+#     export PYTHONPATH=<src>/python  QED_CORE_DIR=<build>/python/qed
+#
+# `cmake --install` and the wheel place it inside the installed package, where
+# no environment variable is needed.
 set_target_properties(_core PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/qed
 )
 
-# scikit-build-core installs the extension into the wheel under
-# qed/_core*.so; ED_PYTHON_INSTALL_DIR is the wheel install prefix
-# scikit-build-core selects (defaults to site-packages/qed).
 if(DEFINED SKBUILD_PROJECT_NAME)
+    # scikit-build-core: the wheel install prefix is site-packages.
     install(TARGETS _core LIBRARY DESTINATION qed)
+else()
+    install(TARGETS _core LIBRARY DESTINATION python/qed)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ DESTINATION python/qed
+            FILES_MATCHING PATTERN "*.py"
+            PATTERN "_bindings" EXCLUDE PATTERN "__pycache__" EXCLUDE)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../edlib/ DESTINATION python/edlib
+            FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
 endif()

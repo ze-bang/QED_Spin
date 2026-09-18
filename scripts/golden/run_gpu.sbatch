@@ -12,9 +12,8 @@ cd "${SLURM_SUBMIT_DIR}"
 source scripts/golden/env.sh
 export ED_SYM_LG_GPU=1   # drop the dimension floor so toy blocks exercise the GPU lane
 nvidia-smi -L
-export PYTHONPATH="${QED_PYTHONPATH:-${PWD}/python}:${PYTHONPATH:-}"
 MODE="${MODE:-compare}"; REF="${REF:?set REF=<reference file>}"
-echo "host=$(hostname) commit=$(git rev-parse --short HEAD) mode=${MODE} ref=${REF} pythonpath=${PYTHONPATH%%:*}"
+echo "host=$(hostname) commit=$(git rev-parse --short HEAD) mode=${MODE} ref=${REF} pythonpath=${PYTHONPATH%%:*} core=${QED_CORE_DIR:-<in package>}"
 if [ "${MODE}" = record ]; then
     python -u tests/golden/golden.py record --device gpu --out "${REF}" ${ONLY:+--only ${ONLY}}
 else

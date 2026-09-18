@@ -141,7 +141,7 @@ def cmd_compare(args):
     cases = select(build_cases(args.device), args.only)
     print(f"reference {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}); "
           f"this run {git_sha()[:10]} ({args.device}); qed from {_qed_file()}")
-    bad, new = [], []
+    bad, new, qdiff = [], [], []
     names = set()
     for c in cases:
         names.add(c.name)
@@ -153,11 +153,13 @@ def cmd_compare(args):
         gated = c.name not in quarantine
         flag = " " if not d else ("!" if gated else "q")
         print(f"{flag} {c.name:90s} {got['seconds']:8.2f}s  {d[0] if d else ''}", flush=True)
+        if d and not gated:
+            qdiff.append(c.name)
         if d and gated:
             bad.append((c.name, d))
     missing = [] if args.only else sorted(set(ref) - names)
-    print(f"\n{len(cases) - len(bad) - len(new)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
-          f"{len(missing)} missing from this run, {len(quarantine)} quarantined")
+    print(f"\n{len(cases) - len(bad) - len(new) - len(qdiff)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
+          f"{len(missing)} missing from this run, {len(qdiff)} of {len(quarantine)} quarantined cases differ (not gating)")
     for name, d in bad:
         print(f"\n  {name}")
         for line in d[:6]:
@@ -177,7 +179,7 @@ def cmd_list(args):
 def _qed_file():
     try:
         import qed
-        return os.path.dirname(qed.__file__)
+        return f"{os.path.dirname(qed.__file__)} [core: {qed._core.__file__}]"
     except Exception:  # noqa: BLE001
         return "unimportable"
 

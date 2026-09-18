@@ -12,7 +12,7 @@ set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 source scripts/golden/env.sh
 NLCE="${QED_NLCE_DIR:-$(cd .. && pwd)/QED_NLCE_Spin}"
-export PYTHONPATH="${QED_PYTHONPATH:-${PWD}/python}:${NLCE}:${PYTHONPATH:-}"
+export PYTHONPATH="${PYTHONPATH}:${NLCE}"
 # never write the per-cluster cache under $HOME (inode quota)
 export QED_NLCE_CACHE="${SLURM_TMPDIR:-/tmp}/qed_nlce_cache"
 echo "host=$(hostname) qed_commit=$(git rev-parse --short HEAD) nlce_commit=$(git -C "${NLCE}" rev-parse --short HEAD)"

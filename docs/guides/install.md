@@ -99,6 +99,33 @@ op = qed.Operator(num_sites=2, spin_length=0.5)
 print(op.dimension)   # -> 4
 ```
 
+(use-a-source-checkout)=
+## Use a source checkout without installing (clusters)
+
+On a cluster you usually want several builds of one checkout side by side -- CPU and
+CUDA, say -- and no install step. `scripts/build.sh` gives each variant its own build
+directory and writes the extension to `<build>/python/qed/`, never into the source
+tree, so variants cannot overwrite each other:
+
+```bash
+sbatch scripts/golden/build.sbatch                     # or, inside a job:
+scripts/build.sh --cluster alliance --variant cuda --mpi --target _core
+scripts/build.sh --cluster alliance --variant cpu  --target _core
+```
+
+Select a build with two environment variables:
+
+```bash
+export PYTHONPATH=$REPO/python
+export QED_CORE_DIR=$REPO/build/cuda/python/qed        # or build/cpu/python/qed
+python -c "import qed; print(qed._core.__file__, qed.has_cuda_build())"
+```
+
+`import qed` fails with an explicit message if `QED_CORE_DIR` holds no extension, and
+warns if a stale `_core*.so` from an old in-tree build is still lying in `python/qed/`.
+Site toolchains live in `scripts/clusters/<name>.env`; `--arch x86-64-v3` (instead of
+the default `native`) produces a binary that runs on every node type of a mixed cluster.
+
 (docker-and-dev-containers)=
 ## Docker and dev containers
 

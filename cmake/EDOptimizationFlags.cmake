@@ -27,13 +27,24 @@ option(ED_ENABLE_FAST_MATH
 P0.16 / audit Q12."
     OFF)
 
+# The instruction set the objects are compiled for. "native" is fastest but ties the
+# binary to the BUILD host: a module built on one node type can die with SIGILL, or
+# round differently, on another (login vs compute, CPU vs GPU partition). Set e.g.
+# -DED_MARCH=x86-64-v3 for a binary that must run on every node of a mixed cluster.
+set(ED_MARCH "native" CACHE STRING "Value passed to -march / -mtune (default: native)")
+
 set(CPU_OPT_FLAGS "")
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(ED_MARCH STREQUAL "native")
+        set(_ed_mtune native)
+    else()
+        set(_ed_mtune generic)
+    endif()
     list(APPEND CPU_OPT_FLAGS
         -O3                          # Maximum optimization
-        -march=native                # Optimize for the build machine's CPU
-        -mtune=native                # Tune for the build machine's CPU
+        -march=${ED_MARCH}           # Instruction set (see ED_MARCH above)
+        -mtune=${_ed_mtune}          # Scheduling model
         -funroll-loops               # Unroll loops for better performance
         -ftree-vectorize             # Enable auto-vectorization
         -fomit-frame-pointer         # Remove frame pointer for extra register
