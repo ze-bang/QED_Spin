@@ -199,3 +199,7 @@ ezARPACK.git/
 
 # GPU module staging tree (created by scripts/build_core_gpu.sbatch)
 python_gpu/
+
+# job logs and scratch golden recordings
+/logs/
+/tests/golden/refs/smoke/
