@@ -21,12 +21,13 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <ed/config/env_registry.h>
+
 namespace ed::symmetry {
 
 [[nodiscard]] inline bool sym_profile_enabled() noexcept {
     static const bool on = [] {
-        const char* v = std::getenv("ED_SYM_PROFILE");
-        return v != nullptr && v[0] == '1';
+        return ed::env::flag("ED_SYM_PROFILE", false);
     }();
     return on;
 }

@@ -50,6 +50,7 @@
 // pointer covers the matrix without losing dispatchability.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -509,7 +510,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
                                            n_up_for_dims);
         sector_owner = detail::greedy_sector_owner(dims, mpi_size);
         owner_ptr = &sector_owner;
-        if (std::getenv("ED_DEBUG_BALANCE") && mpi_rank == 0) {
+        if (ed::env::flag("ED_DEBUG_BALANCE", false) && mpi_rank == 0) {
             std::vector<std::uint64_t> load(static_cast<std::size_t>(mpi_size), 0);
             for (std::size_t s = 0; s < dims.size(); ++s) load[static_cast<std::size_t>(sector_owner[s])] += dims[s];
             fprintf(stderr, "[BALANCE] burnside dims:");
@@ -549,7 +550,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             "even N (closure rule).");
     }
 
-    const bool time_ctor = std::getenv("ED_TIME_CONSTRUCTION") != nullptr;
+    const bool time_ctor = ed::env::flag("ED_TIME_CONSTRUCTION", false);
     const auto ctor_t0 = std::chrono::steady_clock::now();
     if (spec.sz_parity.has_value()) {
         // Sz-parity halves (diagonal Z2 remnant), one RepSectorData per

@@ -1376,7 +1376,8 @@ PYBIND11_MODULE(_core, m) {
              const std::vector<std::vector<int>>& residue_perms,
              int n_up, int sz_parity, int spin_flip,
              int time_reversal, int dense_max_dim,
-             const std::vector<int>& only_irrep) {
+             const std::vector<int>& only_irrep,
+             const std::vector<int>& only_k0) {
               const int n_sites = static_cast<int>(op.getNumBits());
               ed::solvers::LittleGroupGroundState gs;
               {
@@ -1389,6 +1390,7 @@ PYBIND11_MODULE(_core, m) {
                                    /*use_gpu=*/false, spin_flip,
                                    time_reversal);
                   o.only_irrep = only_irrep;
+                  o.only_k0    = only_k0;
                   gs = ed::solvers::little_group_ground_state(
                       op, abelian_group, residue_perms, n_sites, o);
               }
@@ -1433,10 +1435,12 @@ PYBIND11_MODULE(_core, m) {
           py::arg("sz_parity") = -1, py::arg("spin_flip") = -1,
           py::arg("time_reversal") = -1, py::arg("dense_max_dim") = 256,
           py::arg("only_irrep") = std::vector<int>{},
+          py::arg("only_k0") = std::vector<int>{},
           "Ground state in the representative basis of its own momentum "
           "sector (NOT expanded to 2^N), with the orbit data needed to "
-          "expand or measure it elsewhere. Pin a block with "
-          "ED_SYM_LG_ONLY_K0; unfiltered returns the global ground state.");
+          "expand or measure it elsewhere. Pin a block with only_k0 / only_irrep "
+          "(or ED_SYM_LG_ONLY_K0 when only_k0 is empty); unfiltered returns the "
+          "global ground state.");
 
     m.def("little_group_gs_dssf",
           [scan_gs_subspace](const Operator& op_h, const Operator& op_o,

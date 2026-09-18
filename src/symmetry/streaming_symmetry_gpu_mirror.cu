@@ -33,6 +33,7 @@
 
 #ifdef WITH_CUDA
 
+#include <ed/config/env_registry.h>
 #include <ed/symmetry/symmetry_sector_data.h>
 #include <ed/matvec/device_basis_policy.cuh>
 #include <ed/matvec/term_kernels_gpu.cuh>
@@ -130,7 +131,7 @@ acquire_gpu_shared_rank(
     if (auto sp = slot.lock()) return sp;
     auto sp = std::make_shared<GpuSharedRankTable>();
     sp->d_shared_of_rank = srl->shared_of_rank;   // one H2D per (N, n_up)
-    if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+    if (ed::env::flag("ED_SYM_PROFILE", false)) {
         std::fprintf(stderr,
                      "[sym_profile] GPU shared rank table uploaded: "
                      "%zu entries (N=%d, n_up=%d), co-owned by mirrors\n",
@@ -297,7 +298,7 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     if (data.has_two_level()) {
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
-    } else if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+    } else if (ed::env::flag("ED_SYM_PROFILE", false)) {
         std::fprintf(stderr,
                      "[sym_profile] GPU rep mirror: binary-search lookup over "
                      "%zu reps (rank space %llu)\n",

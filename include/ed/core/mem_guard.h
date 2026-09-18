@@ -12,6 +12,7 @@
 // =============================================================================
 #pragma once
 
+#include <ed/config/env_registry.h>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -51,7 +52,7 @@ namespace ed::core {
 /// Throw a clean error if `est_bytes` would not fit in ~90% of available RAM.
 /// No-op when ED_MEM_GUARD_OFF is set or RAM is unknown.
 inline void guard_working_set(std::uint64_t est_bytes, const char* what) {
-    if (std::getenv("ED_MEM_GUARD_OFF")) return;
+    if (ed::env::flag("ED_MEM_GUARD_OFF", false)) return;
     const std::uint64_t avail = available_ram_bytes();
     if (avail == 0) return;  // can't tell -> don't block
     const double budget = 0.90 * static_cast<double>(avail);

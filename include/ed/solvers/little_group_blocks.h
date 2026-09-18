@@ -136,7 +136,7 @@ struct LittleGroupBlockSet {
 /// Build the block decomposition WITHOUT solving anything. Honours
 /// LittleGroupOptions the same way the spectrum entry points do
 /// (n_up / sz_parity / spin_flip / time_reversal / only_k0 / only_irrep;
-/// the ED_SYM_LG_ONLY_K0 env override wins, "plan" is ignored here --
+/// ED_SYM_LG_ONLY_K0 applies only when opt.only_k0 is empty; "plan" is ignored here --
 /// this factory never solves).
 [[nodiscard]] LittleGroupBlockSet
 build_little_group_blocks(const ::Operator&                    op,

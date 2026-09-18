@@ -9,6 +9,7 @@
 // =============================================================================
 
 #include <ed/solvers/little_group_solve.h>
+#include <ed/config/env_registry.h>              // typed environment accessors
 #include <ed/solvers/little_group_blocks.h>      // U1a: owned block handles
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
@@ -308,7 +309,7 @@ private:
             return;
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             reduced_csr());
-        if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+        if (ed::env::flag("ED_SYM_PROFILE", false)) {
             std::fprintf(stderr,
                          "[sym_profile] little-group block dim=%llu: "
                          "reduced CSR engaged (nnz=%llu)\n",
@@ -332,7 +333,7 @@ private:
         try {
             gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
                 *rd_, tv_.spin_l, terms_);
-            if (std::getenv("ED_SYM_PROFILE") != nullptr) {
+            if (ed::env::flag("ED_SYM_PROFILE", false)) {
                 std::fprintf(stderr,
                              "[sym_profile] little-group block dim=%zu: "
                              "GPU rep gather engaged\n", rd_->reps.size());
@@ -1457,27 +1458,41 @@ subspace_dim_of(int n_sites, const LittleGroupOptions& opt) {
 }
 
 // -----------------------------------------------------------------------------
-// U1a: shared parser for the ED_SYM_LG_ONLY_K0 job-splitting override. The env
-// var WINS over opt.only_k0 (replace, don't union -- a split job must run
-// exactly its share); "plan" flips plan mode where the caller honours it.
+// Star selection from the environment (ED_SYM_LG_ONLY_K0), the job-splitting form
+// of LittleGroupOptions::only_k0.
+//
+// Precedence: an explicit opt.only_k0 WINS -- the environment is consulted only when
+// the caller named no star. (It used to be the other way round: an exported variable
+// silently replaced the argument, so a driver that passed only_k0 could be made to
+// solve a different star by a leftover export in the job script.) When both are
+// present the variable is ignored, with one line on stderr saying so.
+// "plan" flips plan mode where the caller honours it; prefer opt.plan_only.
 // -----------------------------------------------------------------------------
 void parse_only_k0_env(std::set<int>& only_k0, bool& plan_only) {
-    if (const char* fenv = std::getenv("ED_SYM_LG_ONLY_K0")) {
-        const std::string fs(fenv);
-        if (fs == "plan") {
-            plan_only = true;
-        } else if (!fs.empty()) {
-            only_k0.clear();
-            std::size_t pos = 0;
-            while (pos < fs.size()) {
-                const std::size_t c = fs.find(',', pos);
-                const std::string tok =
-                    fs.substr(pos, c == std::string::npos ? c : c - pos);
-                if (!tok.empty()) only_k0.insert(std::stoi(tok));
-                if (c == std::string::npos) break;
-                pos = c + 1;
-            }
+    const std::string fs = ed::env::text("ED_SYM_LG_ONLY_K0");
+    if (fs.empty()) return;
+    if (!only_k0.empty()) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::fprintf(stderr,
+                "[little_group] ED_SYM_LG_ONLY_K0=%s ignored: the caller passed only_k0 "
+                "explicitly, and an argument takes precedence over the environment\n",
+                fs.c_str());
         }
+        return;
+    }
+    if (fs == "plan") {
+        plan_only = true;
+        return;
+    }
+    std::size_t pos = 0;
+    while (pos < fs.size()) {
+        const std::size_t c = fs.find(',', pos);
+        const std::string tok = fs.substr(pos, c == std::string::npos ? c : c - pos);
+        if (!tok.empty()) only_k0.insert(std::stoi(tok));
+        if (c == std::string::npos) break;
+        pos = c + 1;
     }
 }
 
@@ -1607,8 +1622,7 @@ build_star_blocks(const ::Operator&         op,
     // signal was `projected=0` in the ED_SYM_PROFILE line. Each path now
     // says WHY under ED_SYM_PROFILE=1 / verbose.
     const bool lg_diag = [&] {
-        const char* v = std::getenv("ED_SYM_PROFILE");
-        return (v != nullptr && v[0] == '1') || opt.verbose;
+        return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
     }();
     auto decline = [&](const char* why) {
         if (lg_diag)
@@ -1802,8 +1816,7 @@ LittleGroupSpectrum run_little_group(
     // make the cost visible; the little-group engine is CONSTRUCTION-
     // dominated at small-mid N, and this is how you see it).
     const bool profile = [] {
-        const char* v = std::getenv("ED_SYM_PROFILE");
-        return v != nullptr && v[0] == '1';
+        return ed::env::flag("ED_SYM_PROFILE", false);
     }();
     double t_sector = 0, t_monomial = 0, t_isotypic = 0, t_solve = 0;
     auto tick = [] { return std::chrono::steady_clock::now(); };
@@ -1822,8 +1835,8 @@ LittleGroupSpectrum run_little_group(
     // tells the job scripts which k0 values exist.
     // opt.plan_only / opt.only_k0 are the PROGRAMMATIC forms: a caller reading
     // the star table, or naming a momentum block so the engine does only that
-    // block's work. The env var below is the job-splitting override and still
-    // wins when set, so existing job scripts keep working unchanged.
+    // block's work. ED_SYM_LG_ONLY_K0 is the job-splitting form and applies when the
+    // caller named no star, so job scripts that export it keep working unchanged.
     bool plan_only = opt.plan_only;
     std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
     parse_only_k0_env(only_k0, plan_only);
@@ -1956,7 +1969,7 @@ void check_sum_rule(const LittleGroupSpectrum& out, int n_sites,
         // these two causes: the sum rule is THE tripwire that catches a real
         // covering bug, so it must still fire for every unrestricted call.
         const bool restricted =
-            std::getenv("ED_SYM_LG_ONLY_K0") != nullptr
+            !ed::env::text("ED_SYM_LG_ONLY_K0").empty()
             || !opt.only_k0.empty() || !opt.only_irrep.empty()
             || opt.plan_only;
         if (restricted) {
@@ -2588,7 +2601,7 @@ LittleGroupGroundState little_group_ground_state(
     // honour it via run_little_group, but this vector path walked EVERY star
     // unconditionally, so naming a momentum block here was silently ignored
     // -- at 36 sites that is ~14 stars x ~10 h instead of the one the caller
-    // asked for. Same precedence as elsewhere: the env var wins over opt.
+    // asked for. Same precedence as elsewhere: opt.only_k0 wins over the env var.
     std::set<int> gs_only_k0(opt.only_k0.begin(), opt.only_k0.end());
     {
         bool ignore_plan = false;

@@ -40,7 +40,9 @@
 #include <utility>
 #include <vector>
 
-extern char** environ;
+extern "C" {
+extern char** environ;   // POSIX; C linkage so it agrees with <unistd.h> when that is included too
+}
 
 namespace ed::env {
 

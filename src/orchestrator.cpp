@@ -23,6 +23,7 @@
 // shape from `include/ed/core/results.h`.
 // =============================================================================
 
+#include <ed/config/env_registry.h>   // typed environment accessors
 #include <ed/orchestrator.h>
 #include <ed/core/solver_defaults.h>
 
@@ -870,11 +871,12 @@ GroundStateResult solve_on(Backend& be,
         if (opts.compute_vectors) {
             kopts.keep_basis = true;   // eigenvectors require the stored basis
         } else {
-            // Planner removed: honour the caller's flag; ED_BLOCK_LANCZOS_LEAN=1
-            // is the explicit lean override.
+            // Honour the caller's flag; ED_BLOCK_LANCZOS_LEAN=1 forces the lean
+            // (no stored basis) mode. Any other value leaves the caller's choice alone
+            // -- the variable used to FORCE keep_basis=true whenever it was set to
+            // anything but "1", including "0" and "".
             kopts.keep_basis = opts.block_lanczos_keep_basis;
-            if (const char* e = std::getenv("ED_BLOCK_LANCZOS_LEAN"))
-                kopts.keep_basis = !(e[0] == '1' && e[1] == '\0');
+            if (ed::env::flag("ED_BLOCK_LANCZOS_LEAN", false)) kopts.keep_basis = false;
         }
         auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
             geom.local_dim, geom.global_dim, kopts);
@@ -1643,7 +1645,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             // 2^32 Hilbert space run mTPQ on one 80 GB H100. Reuses the L /
             // max_iter auto-tune computed above (kopts); the driver manages its
             // own device memory (bypasses the double CudaBackend vectors).
-            if (std::getenv("ED_MTPQ_VERBOSE")) {
+            if (ed::env::flag("ED_MTPQ_VERBOSE", false)) {
                 std::fprintf(stderr,
                     "[mtpq-lane] mtpq_fp32=%d supports_cuda_f32=%d -> %s\n",
                     (int)opts.mtpq_fp32, (int)H.supports_cuda_f32(),

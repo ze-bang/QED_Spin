@@ -1,3 +1,4 @@
+#include <ed/config/env_registry.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/io/lanczos_basis_buffer.h>
@@ -1675,7 +1676,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // eigenvalues. Detect once (O(N^2), trivial next to the O(N^3) solve).
         // ED_FULLDIAG_FORCE_COMPLEX forces the complex driver (A/B timing +
         // real-vs-complex equivalence checks).
-        bool matrix_is_real = (std::getenv("ED_FULLDIAG_FORCE_COMPLEX") == nullptr);
+        bool matrix_is_real = !ed::env::flag("ED_FULLDIAG_FORCE_COMPLEX", false);
         for (size_t i = 0; i < matrix_size && matrix_is_real; ++i)
             if (std::abs(dense_matrix[i].imag()) > 1e-12) matrix_is_real = false;
 
