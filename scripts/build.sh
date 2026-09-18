@@ -20,6 +20,7 @@
 #   --target T       build only target T (repeatable)
 #   --clean          remove the build directory first
 #   --jobs N         parallel jobs (default: SLURM_CPUS_PER_TASK, else 4)
+#   --name S         build into build/<variant>-S (keeps differently configured trees apart)
 #   --arch A         value for -march (default: native; use e.g. x86-64-v3 when the
 #                    build host and the run hosts have different CPUs)
 # Extra arguments after `--` go to the cmake configure step.
@@ -29,7 +30,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER=local VARIANT=cpu MPI=OFF TESTS=OFF PYTHON=ON CLEAN=0 ARCH=""
+CLUSTER=local VARIANT=cpu MPI=OFF TESTS=OFF PYTHON=ON CLEAN=0 ARCH="" NAME=""
 JOBS="${SLURM_CPUS_PER_TASK:-4}"
 TARGETS=() EXTRA=()
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --clean)     CLEAN=1; shift ;;
         --jobs)      JOBS="$2"; shift 2 ;;
         --arch)      ARCH="$2"; shift 2 ;;
+        --name)      NAME="$2"; shift 2 ;;
         --)          shift; EXTRA=("$@"); break ;;
         -h|--help)   sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -57,7 +59,7 @@ ENVFILE="${ROOT}/scripts/clusters/${CLUSTER}.env"
 [[ -f "${ENVFILE}" ]] || { echo "no such cluster file: ${ENVFILE}" >&2; exit 2; }
 set +u; source "${ENVFILE}"; set -u
 
-BUILD="${ROOT}/build/${VARIANT}"
+BUILD="${ROOT}/build/${VARIANT}${NAME:+-${NAME}}"
 [[ "${CLEAN}" == 1 ]] && rm -rf "${BUILD}"
 
 ARGS=(-S "${ROOT}" -B "${BUILD}"

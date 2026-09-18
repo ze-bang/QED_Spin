@@ -43,7 +43,6 @@
 
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/symmetry_basis_policy.h>
-#include <ed/matvec/nonabelian_symmetry_basis_policy.h>
 #include <ed/matvec/rep_symmetry_basis_policy.h>
 #include <ed/symmetry/rep_sector_data.h>
 
@@ -52,28 +51,6 @@ namespace ed::matvec {
 // (Stage 11c-2b: ``make_cpu_symmetry_backend`` -- the orbit-CSR walk over a
 // ``SymmetryBasisPolicy`` view -- was deleted with the legacy orbit matvec
 // lane; the rep factory below is THE CPU symmetry backend.)
-
-// ---------------------------------------------------------------------------
-// make_cpu_nonabelian_symmetry_backend: same engine, the d≥2 (non-abelian)
-// policy. The SAB sector (norm = 1) + multi-target lookup are viewed by the
-// policy; the matvec forces the SCATTER kernel (multiplicity emits to several
-// targets). Identical construction to the abelian factory above — non-abelian
-// is just another BasisPolicy on CpuMatVecBackend.
-// ---------------------------------------------------------------------------
-template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
-          class OffDiagTwo, class ThreeBody>
-[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
-make_cpu_nonabelian_symmetry_backend(basis::NonAbelianSymmetryBasisPolicy policy)
-{
-    using Backend = CpuMatVecBackend<basis::NonAbelianSymmetryBasisPolicy,
-                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
-                                     OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_symmetry_tunables(1ULL << 13);
-    const std::uint64_t dim = policy.dim();
-    return std::make_unique<Backend>(
-        std::move(policy), tunables,
-        "CpuNonAbelian(dim=" + std::to_string(dim) + ")");
-}
 
 // ---------------------------------------------------------------------------
 // make_cpu_rep_symmetry_backend: the CPU on-the-fly representative SpMV

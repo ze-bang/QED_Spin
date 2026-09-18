@@ -323,9 +323,9 @@ public:
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
     /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
-    /// Public so an alternative-basis matvec backend (e.g. a non-abelian
-    /// symmetry sector via NonAbelianSymmetryBasisPolicy) can be built over the
-    /// SAME terms as the operator's own matvec.
+    /// Public so an alternative-basis matvec backend (the representative-basis
+    /// symmetry sector, for one) can be built over the SAME terms as the
+    /// operator's own matvec.
     const ed::matvec::TermStorage& getTerms() const {
         commitPendingTransforms();
         return terms_;

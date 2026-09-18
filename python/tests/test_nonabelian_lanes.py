@@ -3,8 +3,8 @@
 The full (non-abelian) spatial group -- abelian clique + retained
 residue, e.g. the ring's dihedral D_N -- projects with its ACTUAL
 representation theory: numerically decomposed irreps including
-d_Gamma >= 2, one block per irrep on the production multi-target
-matvec (NonAbelianSymmetryBasisPolicy), block-size-adaptive
+d_Gamma >= 2, one block per irrep on the little-group projection lane,
+block-size-adaptive
 dense/Lanczos solves, eigenvalues recombined with their d_Gamma
 multiplicities. This is block-SIZE reduction (~dim/|G|), not the
 star-folding solve-count reduction.

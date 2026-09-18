@@ -245,7 +245,7 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 ### `include/ed/matvec/` *(BasisPolicy matvec family: term storage/kernels, rep-walk + reduced-CSR symmetry lanes, device twins)*
 
-- `backend.h`, `basis_policy.h`, `comm_plan.h`, `cuda_matvec_backend.cuh`, `device_basis_policy.cuh`, `matvec.h`, `matvec_backend.h`, `memory_space.h`, `mpi_matvec_impl.h`, `nonabelian_symmetry_basis_policy.h`, `reduced_symmetry_csr.h`, `rep_symmetry_basis_policy.h`, `symmetry_basis_policy.h`, `symmetry_matvec_backend.h`, `term_gate_math.h`, `term_kernels.h`, `term_kernels_assemble.h`, `term_kernels_gather.h`, `term_kernels_gpu.cuh`, `term_storage.h`
+- `backend.h`, `basis_policy.h`, `comm_plan.h`, `cuda_matvec_backend.cuh`, `device_basis_policy.cuh`, `matvec.h`, `matvec_backend.h`, `memory_space.h`, `mpi_matvec_impl.h`, `reduced_symmetry_csr.h`, `rep_symmetry_basis_policy.h`, `symmetry_basis_policy.h`, `symmetry_matvec_backend.h`, `term_gate_math.h`, `term_kernels.h`, `term_kernels_assemble.h`, `term_kernels_gather.h`, `term_kernels_gpu.cuh`, `term_storage.h`
 
 ### `include/ed/matvec/backends/` *(CpuBackend / CudaBackend / MpiBackend / MpiCudaBackend)*
 
