@@ -67,7 +67,7 @@
 >   — the host rep kernel mirroring the GPU `apply_terms_rep_symmetry_scatter`.
 > * `make_cpu_rep_symmetry_backend` in
 >   [`include/ed/matvec/symmetry_matvec_backend.h`](../../include/ed/matvec/symmetry_matvec_backend.h).
-> **Env knobs.** (Full inventory: `include/ed/symmetry/env_gates.h` /
+> **Env knobs.** (Full inventory: `include/ed/config/env_registry.h` /
 > `qed.debug_env()`.)
 >
 > | Env var        | Default | Effect                                            |

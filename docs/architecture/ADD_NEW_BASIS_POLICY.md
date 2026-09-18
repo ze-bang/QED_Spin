@@ -107,7 +107,7 @@ host operator constructs a backend via the helper:
 
 ```cpp
 auto tunables = ed::matvec::detail::read_symmetry_tunables();
-// ... or ::detail::read_tunables(default_cutoff, "ED_X_USE_CSR", "ED_X_CSR_DIM_MAX") ...
+// ... or ::detail::read_tunables(default_cutoff) for the ED_CSR_FORCE / ED_CSR_DIM_MAX pair ...
 ```
 
 and emits triplets via the existing

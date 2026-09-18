@@ -468,7 +468,7 @@ There is **no** pre-flight planner — `qed.estimate_resources`,
 `qed.solve` / `qed.thermal` / `qed.spectral` pick the method from the problem
 size (full diagonalization for `dim ≤ 1024`, Lanczos otherwise) and the
 representation from static leaf-policy hooks (reduced-CSR symmetry matvec by
-default; override with `ED_SYM_REDUCED_CSR` / `ED_SYM_REP`).
+default; override with `ED_SYM_REDUCED_CSR`).
 
 Instead of *predicting* feasibility, the orchestrator **guards the actual
 allocation**: `ed::core::guard_working_set` checks the dominant working set
