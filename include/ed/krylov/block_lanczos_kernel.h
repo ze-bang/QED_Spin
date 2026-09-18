@@ -85,6 +85,10 @@ struct BlockLanczosOptions {
     /// eigenvectors). The planner flips this off for large-N eigenvalue runs
     /// whose full basis would not fit the memory budget.
     bool        keep_basis      = true;
+    /// Seed of the random start block. Fixed by default so a run is reproducible; the
+    /// block used to be drawn from std::random_device, which made two identical calls
+    /// return different (and differently converged) Ritz values.
+    std::uint64_t seed          = 0x51ED0B70ULL;
 };
 
 struct BlockLanczosResult {
@@ -198,18 +202,18 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
     const std::size_t b           = std::max<std::size_t>(1, std::min<std::size_t>(opts.block_size, N));
     const std::size_t target_eigs = std::max<std::size_t>(1, std::min<std::size_t>(opts.num_eigs, N));
     const std::size_t max_blocks  = (opts.max_iter == 0)
-        ? (N + b - 1) / b
-        : std::min<std::size_t>(opts.max_iter, (N + b - 1) / b);
+        ? std::max<std::size_t>(1, N / b)
+        : std::min<std::size_t>(opts.max_iter, std::max<std::size_t>(1, N / b));
     const double conv_tol      = (opts.tolerance <= 0.0) ? 1e-12 : opts.tolerance;
     constexpr double breakdown = 1e-12;
 
     // -------------------------------------------------------------------
-    // Random initial block on host (uniform [-1,1]^2, complex), then a
+    // Seeded random initial block on host (uniform [-1,1]^2, complex), then a
     // round-trip into Backend memory + qr_thin for the orthonormal V_0.
     // -------------------------------------------------------------------
     std::vector<Complex> host_block(N * b);
     {
-        std::mt19937 gen(std::random_device{}());
+        std::mt19937_64 gen(opts.seed);
         std::uniform_real_distribution<double> dist(-1.0, 1.0);
         for (auto& z : host_block) z = Complex(dist(gen), dist(gen));
     }
@@ -370,13 +374,10 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                 static_cast<lapack_int>(total_dim),
                 evals.data());
             if (info == 0) {
-                const bool have_next_block = (min_diag > breakdown)
-                                          && (j + 1 < max_blocks);
                 std::size_t ok = 0;
                 double max_resid = 0.0;
                 std::vector<Complex> res_block(b);
                 for (std::size_t kk = 0; kk < target_eigs; ++kk) {
-                    if (!have_next_block) { ok = target_eigs; break; }
                     // residual ≈ ||B_j * y_last||
                     cblas_zgemv(CblasColMajor, CblasNoTrans,
                                 b, b, &one,
@@ -388,7 +389,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                     if (rk <= conv_tol) ++ok;
                 }
                 // Convergence curve: worst residual across the target window.
-                if (have_next_block) resid_hist.push_back(max_resid);
+                resid_hist.push_back(max_resid);
                 if (ok >= target_eigs) {
                     converged = true;
                     break;

@@ -81,6 +81,60 @@ TEST_CASE("krylov::block_lanczos_kernel matches the legacy block_lanczos",
     REQUIRE(res.eigenvalues[0] <= res.eigenvalues[1] + 1e-10);
 }
 
+TEST_CASE("krylov::block_lanczos_kernel is reproducible and its converged flag is honest",
+          "[kernel-facade][block-lanczos][determinism]") {
+    // A dense Hermitian matrix whose dimension (35) is NOT a multiple of the block size:
+    // the shape on which two identical calls used to disagree at 1e-5 while both reported
+    // converged = true (unseeded start block; the last, rank-deficient block was accepted
+    // without evaluating a single residual).
+    constexpr std::size_t dim = 35;
+    Eigen::MatrixXcd M = Eigen::MatrixXcd::Zero(dim, dim);
+    std::mt19937_64 gen(12345);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    for (std::size_t i = 0; i < dim; ++i) {
+        M(i, i) = u(gen);
+        for (std::size_t j = i + 1; j < dim; ++j) {
+            M(i, j) = Complex(u(gen), u(gen));
+            M(j, i) = std::conj(M(i, j));
+        }
+    }
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+    auto apply = [&](const Complex* in, Complex* out, std::size_t n) {
+        Eigen::Map<const Eigen::VectorXcd> x(in, static_cast<Eigen::Index>(n));
+        Eigen::Map<Eigen::VectorXcd> y(out, static_cast<Eigen::Index>(n));
+        y = M * x;
+    };
+    ed::matvec::CpuBackend backend;
+    ed::krylov::BlockLanczosOptions opts;
+    opts.num_eigs = 4; opts.block_size = 4; opts.max_iter = 0; opts.tolerance = 1e-10;
+
+    auto a = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, opts);
+    auto b = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, opts);
+    REQUIRE(a.eigenvalues.size() == b.eigenvalues.size());
+    for (std::size_t i = 0; i < a.eigenvalues.size(); ++i)
+        REQUIRE(a.eigenvalues[i] == b.eigenvalues[i]);           // bit-for-bit
+    REQUIRE(a.blocks_built * opts.block_size <= dim);             // never more columns than dimensions
+
+    // the flag is derived from the residuals: whatever it says must be true
+    REQUIRE(a.residuals.size() == a.eigenvalues.size());
+    bool all_small = true;
+    for (double r : a.residuals) all_small = all_small && (r <= opts.tolerance);
+    REQUIRE(a.converged == all_small);
+    for (std::size_t i = 0; i < a.eigenvalues.size(); ++i)
+        if (a.residuals[i] <= opts.tolerance)
+            REQUIRE(std::abs(a.eigenvalues[i] - es.eigenvalues()(static_cast<Eigen::Index>(i))) < 1e-8);
+
+    // a different seed is a different (but equally valid) run
+    ed::krylov::BlockLanczosOptions other = opts;
+    other.seed = 7;
+    auto c = ed::krylov::block_lanczos_kernel(backend, apply, dim, dim, other);
+    REQUIRE(c.eigenvalues[0] != a.eigenvalues[0]);              // genuinely another start block
+    if (c.residuals[0] <= opts.tolerance)                       // accurate whenever it says so
+        REQUIRE(std::abs(c.eigenvalues[0] - es.eigenvalues()(0)) < 1e-8);
+    else
+        REQUIRE_FALSE(c.converged);
+}
+
 TEST_CASE("krylov::block_lanczos_kernel lean reorth (keep_basis=false) matches full",
           "[kernel-facade][block-lanczos][lean]") {
     constexpr std::uint64_t N   = 6;
