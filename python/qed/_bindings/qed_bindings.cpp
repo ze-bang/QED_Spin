@@ -1330,6 +1330,94 @@ PYBIND11_MODULE(_core, m) {
           "decomposition, vectors expanded to the computational basis "
           "(persisted to <output_dir>/ed_results.h5 when given).");
 
+    // -------------------------------------------------------------------------
+    // I4: ground state in the SYMMETRY-REDUCED representative basis.
+    //
+    // Why this exists. `little_group_lowest_vectors` expands through
+    // expand_rep_vector_to_computational, i.e. to 2^n_sites amplitudes. At the
+    // N=36 production point that is 2^36 * 16 B = 1.1 TB PER VECTOR, so the
+    // only vector lane the engine had was unusable exactly where the campaign
+    // needs vectors. The rep basis is 3.78e8 amplitudes (6.05 GB) for the same
+    // state -- a factor 182 -- and it is what every diagonal observable already
+    // consumes (see little_group_gs_correlators, which reads gs.rd.reps and
+    // gs.vec and never expands).
+    //
+    // Returns everything needed to reconstruct or measure WITHOUT this process:
+    // reps + inv_norms + characters + perms_flat + flip_masks fully determine
+    // the orbit expansion, so a saved vector is self-contained.
+    //
+    // Pin one block per job with ED_SYM_LG_ONLY_K0; with no filter the engine
+    // scans the stars and returns the GLOBAL ground state. One state per call:
+    // a manifold spread over several blocks is one pinned call per block.
+    // -------------------------------------------------------------------------
+    m.def("little_group_gs_rep_vector",
+          [lg_opts](const Operator& op,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int n_up, int sz_parity, int spin_flip,
+             int time_reversal, int dense_max_dim,
+             const std::vector<int>& only_irrep) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupGroundState gs;
+              {
+                  py::gil_scoped_release release;
+                  // only_irrep names ONE little-co-group irrep, which is what
+                  // makes 36d tractable: the Gamma star carries 12 irreps, and
+                  // solving them in one process is why the first gate attempt
+                  // ran 19 h. One irrep per array task parallelises that 12x.
+                  auto o = lg_opts(n_up, sz_parity, dense_max_dim,
+                                   /*use_gpu=*/false, spin_flip,
+                                   time_reversal);
+                  o.only_irrep = only_irrep;
+                  gs = ed::solvers::little_group_ground_state(
+                      op, abelian_group, residue_perms, n_sites, o);
+              }
+              const auto& rd = gs.rd;
+              const std::size_t nr = rd.reps.size();
+              // A length mismatch means the vec contract broke; refuse rather
+              // than hand back a silently misaligned 6 GB array.
+              if (gs.vec.size() != nr)
+                  throw std::runtime_error(
+                      "little_group_gs_rep_vector: vec/reps length mismatch ("
+                      + std::to_string(gs.vec.size()) + " vs "
+                      + std::to_string(nr) + ").");
+              if (nr == 0)
+                  throw std::runtime_error(
+                      "little_group_gs_rep_vector: empty sector -- the star "
+                      "filter selected nothing solvable.");
+              auto to_np = [](const auto& v) {
+                  using T = typename std::decay_t<decltype(v)>::value_type;
+                  py::array_t<T> a(static_cast<py::ssize_t>(v.size()));
+                  std::copy(v.begin(), v.end(), a.mutable_data());
+                  return a;
+              };
+              py::dict d;
+              d["energy"]      = gs.energy;
+              d["k0"]          = gs.k0;
+              d["irrep"]       = gs.irrep;
+              d["flip_parity"] = gs.flip_parity;
+              d["group_size"]  = rd.group_size;
+              d["n_sites"]     = rd.n_sites;
+              d["n_up"]        = rd.n_up;
+              d["dim"]         = static_cast<std::uint64_t>(nr);
+              d["vec"]         = to_np(gs.vec);
+              d["reps"]        = to_np(rd.reps);
+              d["inv_norms"]   = to_np(rd.inv_norms);
+              d["characters"]  = to_np(rd.characters);
+              d["perms_flat"]  = to_np(rd.perms_flat);
+              d["flip_masks"]  = to_np(rd.flip_masks);
+              return d;
+          },
+          py::arg("operator"), py::arg("abelian_group"),
+          py::arg("residue_perms"), py::arg("n_up") = -1,
+          py::arg("sz_parity") = -1, py::arg("spin_flip") = -1,
+          py::arg("time_reversal") = -1, py::arg("dense_max_dim") = 256,
+          py::arg("only_irrep") = std::vector<int>{},
+          "Ground state in the representative basis of its own momentum "
+          "sector (NOT expanded to 2^N), with the orbit data needed to "
+          "expand or measure it elsewhere. Pin a block with "
+          "ED_SYM_LG_ONLY_K0; unfiltered returns the global ground state.");
+
     m.def("little_group_gs_dssf",
           [scan_gs_subspace](const Operator& op_h, const Operator& op_o,
              const std::vector<std::vector<int>>& abelian_group,
