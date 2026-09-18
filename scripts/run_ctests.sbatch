@@ -10,6 +10,7 @@ cd "${SLURM_SUBMIT_DIR}"
 export QED_VARIANT=cpu
 source scripts/golden/env.sh
 echo "host=$(hostname) branch=$(git rev-parse --abbrev-ref HEAD) commit=$(git rev-parse --short HEAD)"
+scripts/check_env_registry.sh || exit 1
 scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant cpu --name tests --tests --no-python || exit 1
 echo "=== BEGIN CTEST ==="
 ctest --test-dir build/cpu-tests --output-on-failure -j "${SLURM_CPUS_PER_TASK}" 2>&1 | tail -60

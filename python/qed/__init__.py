@@ -100,14 +100,44 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
 )
 
 
-def debug_env() -> str:
-    """Stage 10b: every symmetry-stack environment gate with its live
-    value, default, and one-line meaning (the X-list in
-    ``include/ed/symmetry/env_gates.h`` is the single inventory).
-    Print this into bug reports -- machine-to-machine behaviour
-    differences (a cluster with legacy drivers, a stray bisection gate)
-    become one diff instead of a grep of the tree."""
-    return _core.dump_env_gates()
+def debug_env(prefix: str = "") -> str:
+    """Every registered ``ED_*`` / ``QED_*`` environment variable whose name starts
+    with ``prefix``, with its live value, default and one-line meaning. The table is
+    ``include/ed/config/env_registry.h`` -- the only place a variable is declared.
+    Print this into bug reports: machine-to-machine behaviour differences become one
+    diff instead of a grep of the tree."""
+    return _core.env_dump(prefix)
+
+
+def env_snapshot() -> dict:
+    """``{name: value}`` of the registered environment variables that are set: the
+    environment-dependent inputs of this run. Store it next to results."""
+    return dict(_core.env_snapshot())
+
+
+def _check_environment() -> None:
+    """A misspelt ``ED_*`` variable is read by nothing and used to fail silently.
+    Unknown names warn once at import; ``ED_ENV_STRICT=1`` turns the warning into an
+    error (job scripts that must not run with a typo)."""
+    import difflib
+    import warnings
+
+    unknown = list(_core.env_unknown())
+    if not unknown:
+        return
+    names = list(_core.env_names())
+    parts = []
+    for n in sorted(unknown):
+        near = difflib.get_close_matches(n, names, n=1, cutoff=0.75)
+        parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
+    msg = ("qed: environment variable(s) not read by anything: " + ", ".join(parts)
+           + ". See qed.debug_env() for the variables that exist.")
+    if _os.environ.get("ED_ENV_STRICT", "") not in ("", "0"):
+        raise RuntimeError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+_check_environment()
 from . import thermal as _thermal_module  # one canonical finite-T entry point
 from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
 from . import spectral as _spectral_module  # one canonical spectral entry point

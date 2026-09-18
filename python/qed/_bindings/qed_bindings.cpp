@@ -914,9 +914,29 @@ PYBIND11_MODULE(_core, m) {
           "True when this build has CUDA support AND a device is present "
           "(the same gate the engine's GPU rep-gather consults).");
     m.def("dump_env_gates", [] { return ed::symmetry::dump_env_gates(); },
-          "Stage 10b: every symmetry-stack env gate with its live value, "
-          "default, and meaning -- paste into bug reports. The X-list in "
-          "env_gates.h is the single inventory.");
+          "The ED_SYM_* rows of the environment registry with their live values, "
+          "defaults and meanings (kept for callers of the old name; see env_dump).");
+    m.def("env_dump", [](const std::string& prefix) { return ed::env::dump(prefix.c_str()); },
+          py::arg("prefix") = "",
+          "Every registered ED_* / QED_* environment variable whose name starts with "
+          "`prefix`: live value | default | meaning. The table is "
+          "include/ed/config/env_registry.h. Paste into bug reports.");
+    m.def("env_snapshot", [] {
+              py::dict d;
+              for (const auto& kv : ed::env::snapshot()) d[py::str(kv.first)] = kv.second;
+              return d;
+          },
+          "{name: value} for the registered environment variables that are set -- the "
+          "environment-dependent inputs of this run, for result metadata.");
+    m.def("env_unknown", [] { return ed::env::unknown(); },
+          "ED_* / QED_* names present in the environment that the registry does not "
+          "declare. Nothing reads them: almost always a misspelt variable.");
+    m.def("env_names", [] {
+              std::vector<std::string> out;
+              for (const auto& r : ed::env::rows()) out.emplace_back(r.name);
+              return out;
+          },
+          "Names of all registered environment variables.");
 
     m.def("little_group_full_spectrum",
           [lg_opts, lg_stars_dict, lg_label_arrays](const Operator& op,

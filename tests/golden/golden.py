@@ -42,7 +42,14 @@ def git_sha():
 
 
 def env_snapshot():
-    return {k: v for k, v in sorted(os.environ.items()) if k.startswith(("ED_", "QED_", "OMP_NUM"))}
+    snap = {k: v for k, v in sorted(os.environ.items()) if k.startswith(("ED_", "QED_", "OMP_NUM"))}
+    try:                                   # the registry, when this build has one
+        import qed
+        snap["_registered"] = dict(qed._core.env_snapshot())
+        snap["_unknown"] = list(qed._core.env_unknown())
+    except Exception:  # noqa: BLE001
+        pass
+    return snap
 
 
 def run_case(case):

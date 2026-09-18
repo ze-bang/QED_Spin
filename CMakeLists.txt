@@ -766,6 +766,9 @@ if(BUILD_ED_TESTS)
     # parsing, threshold + counter contract, idempotent pinning, end-to-end
     # Lanczos eigenvalue invariance with knobs on vs off).
     ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
+    # The environment registry: one meaning of "set" per value type, unique rows,
+    # the unknown-name scan.
+    ed_add_test(test_env_registry               tests/unit/test_env_registry.cpp USE_CATCH2)
     # Phase 3a #5: SortedUint64Index — drop-in replacement for
     # `unordered_map<uint64_t, size_t>` in the streaming-symmetry hot path.
     # Coverage: empty / build / duplicate-key / clear / sort-invariant +
