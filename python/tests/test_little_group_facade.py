@@ -200,3 +200,12 @@ def test_momentum_labels_uses_the_callers_group_order():
     for l in res.levels:
         k1, k2 = labels[l.k_raw]
         assert (Fraction(k1, L1), Fraction(k2, L2)) in l.momenta
+
+
+def test_one_block_can_be_selected_by_its_indices(j1):
+    want = min(j1.select(point="K", flip=1), key=lambda l: l.energy)
+    one = _solve(TT.xxz_operator(J2=0.0), dense_max_dim=4096, only_k0=[want.k0],
+                 only_irrep=[want.irrep_index])
+    assert len(one.levels) == 1
+    got = one.levels[0]
+    assert got.label == want.label == "K.A1-" and abs(got.energy - want.energy) < 1e-12

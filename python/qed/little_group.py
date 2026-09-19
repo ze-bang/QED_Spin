@@ -50,7 +50,8 @@ class BlockLevel:
     diagonal_values: tuple = ()        # <n|D_j|n>, aligned with diagonal_observables
     point: Optional[str] = None
     irrep_name: Optional[str] = None
-    k_raw: int = -1                    # engine-internal; for only_k0-style filtering only
+    k_raw: int = -1                    # engine-internal abelian irrep of the star representative
+    k0: int = -1                       # engine-internal star index (with flip): pass to only_k0
     irrep_index: int = -1              # engine-internal
 
     @property
@@ -110,6 +111,7 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
                  spin_flip: int = -1, time_reversal: int = -1,
                  dense_max_dim: int = 256, use_gpu: bool = False,
                  block_size: int = 1, only_k0: Sequence[int] = (),
+                 only_irrep: Sequence[int] = (),
                  strict: bool = True) -> BlockResult:
     """Lowest ``k`` levels of every block of ``H``, labelled, with ``<n|O_i|n>``.
 
@@ -120,13 +122,16 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
     -> ``momenta`` is empty). ``namer``: callable ``BlockLevel -> (point, irrep)``.
     k = 1 without observables runs the engine's certified block-grounds lane; any
     other request runs the block-expectations lane (vectors in the rep basis).
+    ``only_k0`` / ``only_irrep`` restrict the solve to star representatives / irrep
+    indices (engine-internal: take them from ``BlockLevel.k0`` and ``irrep_index`` of
+    a previous, e.g. cheaper, result -- never from a guess).
     """
     A = [list(map(int, a)) for a in abelian_group]
     R = [list(map(int, r)) for r in residue_perms]
     obs = list(observables)
     common = dict(n_up=n_up, sz_parity=sz_parity, dense_max_dim=dense_max_dim,
                   use_gpu=use_gpu, spin_flip=spin_flip, time_reversal=time_reversal,
-                  only_k0=list(only_k0))
+                  only_k0=list(only_k0), only_irrep=list(only_irrep))
     diag = [[(float(w), [int(i) for i in sites]) for (w, sites) in d]
             for d in diagonal_observables]
     if k == 1 and not obs and not diag and block_size == 1:
@@ -181,7 +186,8 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
                         converged=bool(out["converged"][i]),
                         residual=None if residuals[i] is None else float(residuals[i]),
                         values=values[i], diagonal_values=dvalues[i],
-                        k_raw=k_raw, irrep_index=irr)
+                        k_raw=k_raw, irrep_index=irr,
+                        k0=int(st["k0"]) if st is not None else -1)
         if namer is not None:
             point, name = namer(lv)
             lv = dataclasses.replace(lv, point=point, irrep_name=name)
