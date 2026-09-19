@@ -59,6 +59,7 @@
 // class.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -304,8 +305,7 @@ struct MatVecTunables {
 // Read the ED_MATVEC_SCATTER bisection flag once (shared by every tunable
 // reader so the env var controls all lanes uniformly).
 inline bool read_matvec_scatter() noexcept {
-    const char* v = std::getenv("ED_MATVEC_SCATTER");
-    return v && v[0] == '1';
+    return ed::env::flag("ED_MATVEC_SCATTER", false);
 }
 
 inline MatVecTunables read_tunables(std::uint64_t default_cutoff) noexcept

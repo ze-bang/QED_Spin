@@ -39,6 +39,7 @@
 
 #ifdef WITH_CUDA
 
+#include <ed/config/env_registry.h>
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cstdint>
@@ -912,8 +913,7 @@ apply_terms_gpu_gather_warp(
 // hundreds of terms per row, where the lane split may pay off).
 inline bool gpu_gather_use_thread_kernel() {
     static const bool v = [] {
-        const char* e = std::getenv("ED_GPU_GATHER_WARP");
-        return !(e && e[0] == '1');
+        return !ed::env::flag("ED_GPU_GATHER_WARP", false);
     }();
     return v;
 }

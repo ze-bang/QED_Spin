@@ -1,6 +1,7 @@
 #ifndef HDF5_IO_H
 #define HDF5_IO_H
 
+#include <ed/config/env_registry.h>
 #include <H5Cpp.h>
 #include <vector>
 #include <complex>
@@ -129,8 +130,7 @@ public:
 
     static bool hdf5_shuffle_enabled() {
         static const bool on = []() {
-            const char* env = std::getenv("ED_HDF5_SHUFFLE");
-            return env ? (std::string(env) != "0") : true;
+            return ed::env::flag("ED_HDF5_SHUFFLE", true);
         }();
         return on;
     }

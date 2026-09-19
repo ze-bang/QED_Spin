@@ -1,4 +1,5 @@
 // ltlm.cpp - Low Temperature Lanczos Method implementation
+#include <ed/config/env_registry.h>
 #include <ed/core/system_utils.h>
 
 #include <ed/solvers/ltlm.h>
@@ -15,8 +16,7 @@
 namespace {
 
 inline bool ltlm_static_verbose() {
-    const char* env = std::getenv("ED_DSSF_VERBOSE");
-    return env != nullptr && std::string(env) != "0";
+    return ed::env::flag("ED_DSSF_VERBOSE", false);
 }
 
 std::vector<double> make_log_temperature_grid(

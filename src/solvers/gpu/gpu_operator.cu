@@ -3,6 +3,7 @@
 // Prevent inclusion of CPU Operator class that has CUDA-incompatible code
 #define CONSTRUCT_HAM_H  
 
+#include <ed/config/env_registry.h>
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_mixed_precision.h>
 #include <ed/matvec/term_storage.h>
@@ -519,8 +520,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
     // hot path is fully asynchronous by default. CPU profilers like nsys /
     // ncu still expose per-kernel timings without the host sync.
     static const bool ed_gpu_timing = []{
-        const char* e = std::getenv("ED_GPU_TIMING");
-        return e && e[0] == '1';
+        return ed::env::flag("ED_GPU_TIMING", false);
     }();
     if (ed_gpu_timing) {
         CUDA_CHECK(cudaEventRecord(timing_start_));

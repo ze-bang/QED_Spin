@@ -86,10 +86,8 @@ namespace {
 // ED_SYM_LG_TWO_PASS_MIN_DIM (validation suites set it to 1 to force the
 // two-pass lane at toy sizes).
 [[nodiscard]] inline std::size_t lg_two_pass_min_dim() {
-    if (const char* v = std::getenv("ED_SYM_LG_TWO_PASS_MIN_DIM")) {
-        const unsigned long long x = std::strtoull(v, nullptr, 10);
-        if (x > 0) return static_cast<std::size_t>(x);
-    }
+    if (const long long x = ed::env::integer("ED_SYM_LG_TWO_PASS_MIN_DIM", -1); x > 0)
+        return static_cast<std::size_t>(x);
     return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
 }
 
@@ -109,10 +107,8 @@ namespace {
 // vector lane passes its own tighter default (stored-basis memory).
 [[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k,
                                                       std::uint64_t dflt = 0) {
-    if (const char* v = std::getenv("ED_SYM_LG_LOWEST_MAX_ITER")) {
-        const unsigned long long x = std::strtoull(v, nullptr, 10);
-        if (x > 0) return static_cast<std::uint64_t>(x);
-    }
+    if (const long long x = ed::env::integer("ED_SYM_LG_LOWEST_MAX_ITER", -1); x > 0)
+        return static_cast<std::uint64_t>(x);
     if (dflt > 0) return dflt;
     return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
 }
@@ -127,10 +123,8 @@ namespace {
 // restarts, 11.8 h in). NOTE: the small-n lane STORES the Krylov basis
 // -- memory there is 16 B x dim x iterations.
 [[nodiscard]] inline std::size_t lg_gs_max_iter(std::size_t dflt) {
-    if (const char* v = std::getenv("ED_SYM_LG_GS_MAX_ITER")) {
-        const unsigned long long x = std::strtoull(v, nullptr, 10);
-        if (x > 0) return static_cast<std::size_t>(x);
-    }
+    if (const long long x = ed::env::integer("ED_SYM_LG_GS_MAX_ITER", -1); x > 0)
+        return static_cast<std::size_t>(x);
     return dflt;
 }
 
@@ -141,10 +135,8 @@ namespace {
 // 11.8 h in) -- and the shipped mitigation was loosening the acceptance
 // tolerance because this number needed a rebuild to change.
 [[nodiscard]] inline int lg_gs_restarts() {
-    if (const char* v = std::getenv("ED_SYM_LG_GS_RESTARTS")) {
-        const long x = std::strtol(v, nullptr, 10);
-        if (x >= 0) return static_cast<int>(x);
-    }
+    if (const long long x = ed::env::integer("ED_SYM_LG_GS_RESTARTS", -1); x >= 0)
+        return static_cast<int>(x);
     return 4;
 }
 
@@ -155,10 +147,8 @@ namespace {
 // inner loop hardcoded 1e-8, so relaxing the env still burned every
 // restart chasing a tolerance the caller had explicitly waived.
 [[nodiscard]] inline double lg_gs_resid_tol() {
-    if (const char* v = std::getenv("ED_SYM_LG_GS_RESID_TOL")) {
-        const double t = std::atof(v);
-        if (t > 0.0) return t;
-    }
+    if (const double t = ed::env::real("ED_SYM_LG_GS_RESID_TOL", -1.0); t > 0.0)
+        return t;
     return 1e-8;
 }
 
@@ -324,10 +314,9 @@ private:
     // (2^20 reps). ED_SYM_LG_GPU=0 vetoes; =1 removes the floor so 4x4
     // validation runs exercise the same lane.
     void maybe_build_gpu_() const {
-        const char* gate = std::getenv("ED_SYM_LG_GPU");
-        if (gate != nullptr && gate[0] == '0' && gate[1] == '\0') return;
-        const bool force = force_gpu_
-            || (gate != nullptr && gate[0] == '1' && gate[1] == '\0');
+        const std::optional<bool> gate = ed::env::tristate("ED_SYM_LG_GPU");
+        if (gate.has_value() && !*gate) return;                 // =0 vetoes
+        const bool force = force_gpu_ || gate.value_or(false);  // =1 removes the floor
         if (!force && rd_->reps.size() < (std::size_t{1} << 20)) return;
         if (!ed::have_cuda()) return;
         try {
@@ -642,13 +631,11 @@ characters_for(const EngineContext& cx, int k_ext) {
 // Stage 9a/9b env sub-gates (Auto mode only; Require overrides). Read per
 // call, like the other ED_SYM_* gates, so tests can toggle without restart.
 [[nodiscard]] bool little_group_flip_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_LG_FLIP");
-    return v == nullptr || v[0] != '0';
+    return ed::env::flag("ED_SYM_LG_FLIP", true);
 }
 
 [[nodiscard]] bool little_group_tr_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_LG_TR");
-    return v == nullptr || v[0] != '0';
+    return ed::env::flag("ED_SYM_LG_TR", true);
 }
 
 // One term-level SoA per engine call, shared by the flip and TR resolvers.
@@ -1221,8 +1208,8 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
     // multiplicities (the documented S1 mitigation, unchanged).
     std::uint64_t dense_floor = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(dense_max_dim), 4u * max_iter_cap);
-    if (const char* df = std::getenv("ED_SYM_LG_DENSE_FLOOR"))
-        dense_floor = static_cast<std::uint64_t>(std::strtoull(df, nullptr, 10));
+    if (const long long df = ed::env::integer("ED_SYM_LG_DENSE_FLOOR", -1); df >= 0)
+        dense_floor = static_cast<std::uint64_t>(df);
     return dense_floor;
 }
 
@@ -1232,8 +1219,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // path (the engine's graceful-degradation contract).
 [[nodiscard]] bool lg_gpu_eigensolve_enabled(const LittleGroupOptions& opt) {
     if (!opt.use_gpu) return false;
-    const char* gate = std::getenv("ED_SYM_LG_GPU");
-    if (gate != nullptr && gate[0] == '0' && gate[1] == '\0') return false;
+    if (!ed::env::flag("ED_SYM_LG_GPU", true)) return false;   // =0 vetoes
     return ed::have_cuda();
 }
 
@@ -1295,10 +1281,8 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // genuinely degenerate pair regardless of seed; multiplicity needs
     // block Lanczos (ledger #2).
     std::uint64_t seed = 0x51ED0B70ULL;
-    if (const char* sv = std::getenv("ED_SYM_LG_SEED")) {
-        seed ^= static_cast<std::uint64_t>(std::strtoull(sv, nullptr, 10))
-                * 0x9E3779B97F4A7C15ULL;
-    }
+    seed ^= static_cast<std::uint64_t>(ed::env::integer("ED_SYM_LG_SEED", 0))
+            * 0x9E3779B97F4A7C15ULL;
     std::mt19937_64 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& v : v0) v = Complex(nd(gen), nd(gen));
@@ -2217,11 +2201,8 @@ LittleGroupSpectrum little_group_lowest_spectrum(
     std::vector<CpuDeferred> defer;
     std::uint64_t defer_bytes  = 0;
     std::uint64_t defer_budget = std::uint64_t{8} << 30;
-    if (const char* v = std::getenv("ED_SYM_LG_DENSE_BATCH_GIB")) {
-        const double g = std::strtod(v, nullptr);
-        if (g >= 0.0)
-            defer_budget = static_cast<std::uint64_t>(g * (1ULL << 30));
-    }
+    if (const double g = ed::env::real("ED_SYM_LG_DENSE_BATCH_GIB", -1.0); g >= 0.0)
+        defer_budget = static_cast<std::uint64_t>(g * (1ULL << 30));
     auto out = run_little_group(
         op, abelian_group, residue_perms, n_sites, opt,
         [&](const ed::matvec::MatVecOperator& mv, int mult,

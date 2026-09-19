@@ -5,6 +5,7 @@
 // See include/ed/solvers/ftlm_kpm.h for the full mathematical specification.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <ed/solvers/ftlm_kpm.h>
 #include <ed/solvers/lanczos.h>   // build_lanczos_tridiagonal_with_basis,
                                    // diagonalize_tridiagonal_ritz,
@@ -34,8 +35,7 @@ namespace {
 // ---------------------------------------------------------------------------
 inline bool kpm_verbose() {
     static const bool v = []() {
-        const char* e = std::getenv("ED_KPM_VERBOSE");
-        return e && e[0] == '1';
+        return ed::env::flag("ED_KPM_VERBOSE", false);
     }();
     return v;
 }

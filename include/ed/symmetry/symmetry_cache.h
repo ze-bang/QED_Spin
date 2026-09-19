@@ -32,6 +32,7 @@
 // kernels.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -106,13 +107,11 @@ otab_path(const std::string& cache_dir, std::uint64_t key) {
 }
 
 [[nodiscard]] inline bool disk_cache_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_CACHE");
-    return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+    return ed::env::flag("ED_SYM_CACHE", true);
 }
 
 [[nodiscard]] inline std::string cache_dir_override() {
-    const char* v = std::getenv("ED_SYM_CACHE_DIR");
-    return (v != nullptr && v[0] != '\0') ? std::string(v) : std::string{};
+    return ed::env::text("ED_SYM_CACHE_DIR");
 }
 
 }  // namespace detail

@@ -28,6 +28,7 @@
 // not any produced number.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -42,8 +43,7 @@ namespace ed::symmetry {
 /// Env gate for the Stage-6 pairing (default ON; ED_SYM_TIME_REVERSAL=0
 /// disables). Read per call so tests can toggle from Python.
 [[nodiscard]] inline bool time_reversal_pairing_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_TIME_REVERSAL");
-    return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+    return ed::env::flag("ED_SYM_TIME_REVERSAL", true);
 }
 
 /// True iff every term coefficient is real (imag <= tol): the condition

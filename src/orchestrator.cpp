@@ -274,9 +274,7 @@ constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
 // that mean to gate a KERNEL set this to 0; nothing in production should.
 // Read per call so a test can toggle it without restarting the process.
 [[nodiscard]] inline bool exact_small_thermal_enabled() noexcept {
-    if (const char* v = std::getenv("ED_THERMAL_EXACT_SMALL"))
-        return !(v[0] == '0' && v[1] == '\0');
-    return true;
+    return ed::env::flag("ED_THERMAL_EXACT_SMALL", true);
 }
 
 // Audit 2026-07-31: forwards to the single canonical implementation in
@@ -352,8 +350,7 @@ GroundStateResult solve_on(Backend& be,
     // restores the kept-basis FullCGS2 lane.
     const bool eigvec_two_pass = [&] {
         if (!(opts.compute_vectors && method == SolveMethod::Lanczos)) return false;
-        const char* e = std::getenv("ED_LANCZOS_EIGVEC_TWOPASS");
-        return !(e && e[0] == '0' && e[1] == '\0');
+        return ed::env::flag("ED_LANCZOS_EIGVEC_TWOPASS", true);
     }();
     const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
 
@@ -447,8 +444,7 @@ GroundStateResult solve_on(Backend& be,
         // -------------------------------------------------------------
         if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
             const bool force_complex = []() {
-                const char* env = std::getenv("ED_FORCE_COMPLEX_LANCZOS");
-                return env && env[0] == '1';
+                return ed::env::flag("ED_FORCE_COMPLEX_LANCZOS", false);
             }();
             // Audit F3/F5 (2026-09): the real-storage lane now also serves
             // eigenvalue WINDOWS (num_eigs > 1, with the Ritz residual

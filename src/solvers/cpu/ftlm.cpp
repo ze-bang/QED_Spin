@@ -1,4 +1,5 @@
 // ftlm.cpp - Finite Temperature Lanczos Method implementation
+#include <ed/config/env_registry.h>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
@@ -28,8 +29,7 @@ namespace {
 // print. Mirrors the ED_LANCZOS_VERBOSE pattern in lanczos.cpp.
 inline bool ed_dssf_verbose() {
     static const bool v = []() {
-        const char* env = std::getenv("ED_DSSF_VERBOSE");
-        return env && env[0] == '1';
+        return ed::env::flag("ED_DSSF_VERBOSE", false);
     }();
     return v;
 }
@@ -488,8 +488,7 @@ FTLMResults finite_temperature_lanczos(
     // who own thread-safe operators opt in, we gate parallelism on
     // ED_FTLM_PARALLEL=1.
     static const bool ftlm_omp_enabled = []() {
-        const char* s = std::getenv("ED_FTLM_PARALLEL");
-        return (s && s[0] == '1');
+        return ed::env::flag("ED_FTLM_PARALLEL", false);
     }();
     const bool run_parallel = ftlm_omp_enabled && (params.num_samples > 1);
 

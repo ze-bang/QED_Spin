@@ -17,6 +17,7 @@
 // `tests/unit/test_symmetry_dsl.cpp`.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <ed/symmetry/group.h>
 
 #include <algorithm>
@@ -165,8 +166,7 @@ maximal_abelian_subgroup_generators(
 
 namespace {
 [[nodiscard]] bool require_abelian_env() {
-    const char* v = std::getenv("ED_SYM_REQUIRE_ABELIAN");
-    return v != nullptr && v[0] == '1' && v[1] == '\0';
+    return ed::env::flag("ED_SYM_REQUIRE_ABELIAN", false);
 }
 } // namespace
 

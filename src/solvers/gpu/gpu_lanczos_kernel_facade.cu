@@ -36,6 +36,7 @@
 
 #ifdef WITH_CUDA
 
+#include <ed/config/env_registry.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/gpu/gpu_operator.cuh>
@@ -209,8 +210,7 @@ KernelOutput run_facade_kernel(GPUOperator& gpu_op,
     //                       restores the pre-Wave defaults for
     //                       near-degenerate spectra.
     const bool force_cgs2 = []() {
-        const char* env = std::getenv("ED_GPU_LANCZOS_FULL_CGS2");
-        return env && env[0] == '1';
+        return ed::env::flag("ED_GPU_LANCZOS_FULL_CGS2", false);
     }();
     if (force_cgs2 || keep_basis) {
         opts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;

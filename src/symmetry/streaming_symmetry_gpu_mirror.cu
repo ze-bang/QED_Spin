@@ -364,8 +364,7 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
     // pre-zero memset; the diagonal is fused inline). Bisection fallback to the
     // validated atomic scatter via ED_MATVEC_SCATTER=1.
     static const bool use_scatter = []() {
-        const char* v = std::getenv("ED_MATVEC_SCATTER");
-        return v != nullptr && v[0] == '1' && v[1] == '\0';
+        return ed::env::flag("ED_MATVEC_SCATTER", false);
     }();
 
     cudaError_t err;

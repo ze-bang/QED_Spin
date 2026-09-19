@@ -42,6 +42,7 @@
 // halving the biggest sector -- is the Stage-5b follow-up.)
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -133,8 +134,7 @@ flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
 /// ED_SYM_SPIN_FLIP=0 to disable for bisection). Read per call so tests
 /// can toggle it from Python without process restarts.
 [[nodiscard]] inline bool spin_flip_transport_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_SPIN_FLIP");
-    return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+    return ed::env::flag("ED_SYM_SPIN_FLIP", true);
 }
 
 /// [H, X] == 0 at the term level (see header comment for the mapping).

@@ -50,6 +50,7 @@
 // remains a single compilation unit shared by everyone.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <algorithm>
 #include <chrono>     // Wave 5.1: ED_LANCZOS_KERNEL_PROFILE wallclock timers
 #include <complex>
@@ -376,8 +377,7 @@ LanczosKernelResult lanczos_kernel(
     // is just `if (profile_on) accumulate`).
     // ------------------------------------------------------------------
     const bool profile_on = []() {
-        const char* env = std::getenv("ED_LANCZOS_KERNEL_PROFILE");
-        return env && env[0] == '1';
+        return ed::env::flag("ED_LANCZOS_KERNEL_PROFILE", false);
     }();
     auto now_us = [] {
         return std::chrono::duration<double, std::micro>(

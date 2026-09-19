@@ -36,6 +36,7 @@
 // which the unit tests assert as an internal consistency tripwire.
 // =============================================================================
 
+#include <ed/config/env_registry.h>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -50,8 +51,7 @@ namespace ed::symmetry {
 /// detection-driven labeling/exploitation for bisection). Read per call so
 /// tests can toggle from Python without process restarts.
 [[nodiscard]] inline bool su2_enabled() noexcept {
-    const char* v = std::getenv("ED_SYM_SU2");
-    return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+    return ed::env::flag("ED_SYM_SU2", true);
 }
 
 /// [H, S_tot] == 0 at the term level (see header comment for the mapping).

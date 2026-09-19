@@ -73,8 +73,7 @@ private:
 // env var ED_LANCZOS_COMPLEX_SEED=1 reverts to a fully complex seed
 // (legacy behaviour, useful for testing complex spectra).
 inline bool ed_use_complex_lanczos_seed() {
-    const char* s = std::getenv("ED_LANCZOS_COMPLEX_SEED");
-    return (s && s[0] == '1');
+    return ed::env::flag("ED_LANCZOS_COMPLEX_SEED", false);
 }
 
 // Per-iteration progress prints inside the Lanczos inner loops are useful for
@@ -84,8 +83,7 @@ inline bool ed_use_complex_lanczos_seed() {
 // debugging convergence or breakdown issues.
 inline bool ed_lanczos_verbose() {
     static const bool v = []() {
-        const char* s = std::getenv("ED_LANCZOS_VERBOSE");
-        return (s && s[0] == '1');
+        return ed::env::flag("ED_LANCZOS_VERBOSE", false);
     }();
     return v;
 }
@@ -1185,8 +1183,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     // Optional per-iter timing breakdown (set ED_LANCZOS_PROFILE=1 to enable).
     // Sums of microseconds spent in each kernel across the whole run.
     const bool profile = []() {
-        const char* p = std::getenv("ED_LANCZOS_PROFILE");
-        return p && p[0] && p[0] != '0';
+        return ed::env::flag("ED_LANCZOS_PROFILE", false);
     }();
     double t_apply = 0, t_recur = 0, t_reorth = 0, t_normsc = 0, t_tridiag = 0;
     auto now_us = []() {
