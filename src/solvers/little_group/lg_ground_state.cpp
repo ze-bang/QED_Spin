@@ -14,7 +14,7 @@ using namespace lg_detail;
 // bindings with CrossSectorOrbitObservable + cf_spectral_from_vector).
 // =============================================================================
 
-namespace {
+namespace lg_detail {   // solve_gs_vector is also used by lg_observables.cpp
 
 // TWO-PASS no-reorth ground-state Ritz vector (2026-07-19).
 //
@@ -272,7 +272,7 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
     return {E0, std::move(u)};
 }
 
-}  // namespace
+}  // namespace lg_detail
 
 LittleGroupGroundState little_group_ground_state(
     const ::Operator&                    op,
@@ -307,12 +307,17 @@ LittleGroupGroundState little_group_ground_state(
         parse_only_k0_env(gs_only_k0, ignore_plan);
     }
     std::size_t   n_unconverged  = 0;
+    // The winning star is KEPT from the scan instead of rebuilt: at N = 36 a star
+    // build is minutes to an hour of sector construction, and the rebuild repeated
+    // it (with its reduced CSR or device mirror) for nothing.
+    StarBuild best_sb;
     std::uint64_t worst_scan_dim = 0;
     for (const auto& [k0, members] : stars) {
         if (!gs_only_k0.empty() && gs_only_k0.count(k0) == 0) continue;
         StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
                                          false, nullptr, nullptr, nullptr);
         if (!sb.hk) continue;
+        bool star_holds_best = false;
         for (std::size_t bi = 0; bi < sb.blocks.size(); ++bi) {
             const auto& impl = *sb.blocks[bi];
             const ed::matvec::MatVecOperator& mv =
@@ -338,8 +343,10 @@ LittleGroupGroundState little_group_ground_state(
                 best_e   = ev[0];
                 best_k0  = k0;
                 best_blk = bi;
+                star_holds_best = true;
             }
         }
+        if (star_holds_best) best_sb = std::move(sb);
     }
     if (n_unconverged > 0)
         throw std::runtime_error(
@@ -354,14 +361,12 @@ LittleGroupGroundState little_group_ground_state(
         throw std::runtime_error("little_group_ground_state: no non-empty "
                                  "momentum sector in this subspace.");
 
-    // Rebuild the winning star and solve the winning block WITH its
-    // eigenvector; lift u = W_sigma v back to the rep basis.
-    StarBuild win = build_star_blocks(
-        op, cx, tr_on, best_k0, stars.at(best_k0), opt,
-        false, nullptr, nullptr, nullptr);
+    // Solve the winning block WITH its eigenvector (the star kept from the scan);
+    // lift u = W_sigma v back to the rep basis.
+    StarBuild& win = best_sb;
     if (!win.hk || best_blk >= win.blocks.size())
         throw std::runtime_error("little_group_ground_state: winning star "
-                                 "rebuild mismatch (internal)");
+                                 "kept from the scan is inconsistent (internal)");
     LittleGroupBlock block(win.blocks[best_blk]);
 
     LittleGroupGroundState gs;
@@ -384,7 +389,14 @@ LittleGroupGroundState little_group_ground_state(
             num += std::norm(hu[i] - e0 * u[i]);
             den += std::norm(u[i]);
         }
-        if (std::sqrt(num / den) <= 1e-8) {
+        // The lift is an isometry onto an H-invariant subspace, so the rep-basis
+        // residual equals the block residual solve_gs_vector just certified against
+        // lg_gs_resid_tol(), up to roundoff. Guard at 2x that tolerance: a fixed
+        // 1e-8 here sent every projected ground state to the unprojected re-solve
+        // whenever ED_SYM_LG_GS_RESID_TOL was relaxed (and borderline ones by
+        // roundoff even at the default) -- the measured ~36x GS-path slowdown.
+        const double lift_tol = 2.0 * lg_gs_resid_tol();
+        if (std::sqrt(num / den) <= lift_tol) {
             const double inv = 1.0 / std::sqrt(den);
             for (auto& c : u) c *= inv;
             gs.energy      = e0;
@@ -394,9 +406,9 @@ LittleGroupGroundState little_group_ground_state(
             lifted = true;
         } else {
             std::fprintf(stderr,
-                "[little_group] GS lift residual %.3e > 1e-8 at k0=%d "
+                "[little_group] GS lift residual %.3e > %.1e at k0=%d "
                 "irrep=%d -- falling back to the plain sector re-solve\n",
-                std::sqrt(num / den), best_k0, block.tag().irrep);
+                std::sqrt(num / den), lift_tol, best_k0, block.tag().irrep);
         }
     }
     if (!lifted) {

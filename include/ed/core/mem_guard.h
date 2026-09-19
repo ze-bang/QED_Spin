@@ -13,6 +13,7 @@
 #pragma once
 
 #include <ed/config/env_registry.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -25,9 +26,9 @@
 
 namespace ed::core {
 
-/// Best-effort available RAM in bytes (0 = unknown). Prefers /proc/meminfo
-/// MemAvailable (counts reclaimable cache); falls back to sysconf.
-[[nodiscard]] inline std::uint64_t available_ram_bytes() noexcept {
+/// Node-wide available RAM in bytes (0 = unknown): /proc/meminfo MemAvailable
+/// (counts reclaimable cache), else sysconf.
+[[nodiscard]] inline std::uint64_t node_available_ram_bytes() noexcept {
     std::ifstream mi("/proc/meminfo");
     if (mi) {
         std::string key;
@@ -47,6 +48,53 @@ namespace ed::core {
         return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(psize);
 #endif
     return 0;
+}
+
+/// Headroom left under the tightest cgroup-v2 memory limit that contains this
+/// process (memory.max - memory.current, walking from our cgroup up to the root);
+/// 0 = no limit found (not in a limited cgroup, or cgroup v1 / unreadable).
+///
+/// Under a batch scheduler this is the number that matters: a SLURM job gets a
+/// cgroup of --mem bytes on a node whose MemAvailable may be ten times larger, and
+/// sizing a Krylov basis from MemAvailable is how a job gets OOM-killed.
+[[nodiscard]] inline std::uint64_t cgroup_available_ram_bytes() noexcept {
+    std::ifstream cg("/proc/self/cgroup");
+    std::string line, path;
+    while (cg && std::getline(cg, line))
+        if (line.rfind("0::", 0) == 0) { path = line.substr(3); break; }
+    if (path.empty()) return 0;
+    auto read_u64 = [](const std::string& file, std::uint64_t& out) -> bool {
+        std::ifstream f(file);
+        std::string s;
+        if (!(f >> s) || s == "max") return false;
+        try { out = std::stoull(s); } catch (...) { return false; }
+        return true;
+    };
+    std::uint64_t best = 0;
+    bool found = false;
+    for (std::string p = path;; ) {
+        const std::string dir = "/sys/fs/cgroup" + (p == "/" ? std::string() : p);
+        std::uint64_t lim = 0, cur = 0;
+        if (read_u64(dir + "/memory.max", lim) && read_u64(dir + "/memory.current", cur)) {
+            const std::uint64_t room = lim > cur ? lim - cur : 0;
+            if (!found || room < best) best = room;
+            found = true;
+        }
+        if (p.empty() || p == "/") break;
+        const auto slash = p.find_last_of('/');
+        p = (slash == 0 || slash == std::string::npos) ? std::string("/") : p.substr(0, slash);
+    }
+    return found ? std::max<std::uint64_t>(best, 1) : 0;
+}
+
+/// Best-effort RAM this process may still allocate, in bytes (0 = unknown): the
+/// smaller of the node's MemAvailable and the headroom under our cgroup limit.
+[[nodiscard]] inline std::uint64_t available_ram_bytes() noexcept {
+    const std::uint64_t node = node_available_ram_bytes();
+    const std::uint64_t job  = cgroup_available_ram_bytes();
+    if (job == 0) return node;
+    if (node == 0) return job;
+    return node < job ? node : job;
 }
 
 /// Throw a clean error if `est_bytes` would not fit in ~90% of available RAM.

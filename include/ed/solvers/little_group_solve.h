@@ -121,6 +121,12 @@ struct LittleGroupOptions {
     /// internal irrep index and NOT the momentum). Plan, decode, then solve
     /// the one star.
     bool plan_only = false;
+    /// Lowest-k solves above the dense crossover: 1 (default) = single-vector
+    /// Krylov-Schur with locking when k > 1 (the basis-free scan when k = 1);
+    /// p >= 2 = block Krylov-Schur with block width p, which also resolves an
+    /// accidental degeneracy of up to p levels INSIDE one (k, irrep, flip) block --
+    /// something no single-vector method can see.
+    int block_size = 1;
 };
 
 /// One star's diagnostics.
@@ -221,6 +227,10 @@ struct LittleGroupSpectrum {
     std::uint64_t       total_dim = 0;
     bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
     bool                tr_engaged   = false;  ///< 9b: TR folding was active
+    /// Blocks whose lowest-k solve did not converge. Such a block contributes only
+    /// its converged prefix (possibly nothing) to ``eigenvalues``, so this count is
+    /// the only trace of it -- consumers must check it before trusting a window.
+    std::size_t         unconverged_blocks = 0;
     /// True iff ANY star's matvec ran on the GPU rep-gather. This is the
     /// engine's truthful lane report; the Python project lane surfaces it as
     /// ``EDResults.backend.lane`` (which it previously did not set at all).

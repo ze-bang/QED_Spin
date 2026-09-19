@@ -34,6 +34,10 @@
 #include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
 #include <ed/matvec/backends/cpu_backend.h>      // 9d: CpuBackend for the GS Lanczos
 #include <ed/krylov/lanczos_kernel.h>            // 9d: keep_basis Ritz-vector GS
+#include <ed/krylov/krylov_schur_kernel.h>       // multi-level blocks: locked KS
+#include <ed/krylov/block_krylov_schur_kernel.h> // ... and its block form (multiplicities)
+#include <ed/krylov/subspace_policy.h>          // memory-capped Krylov basis
+#include <ed/core/mem_guard.h>                  // job-aware available RAM
 #include <ed/core/blas_lapack_wrapper.h>         // 9d: LAPACKE_dstevd
 #include <ed/planner/sym_matvec_policy_hook.h>   // 9e: RepReducedCsr default
 #include <ed/parallel/thread_budget.h>           // 2026-07-30: serial-BLAS scope
@@ -601,10 +605,23 @@ star_partition(const EngineContext& cx, bool tr_on);
 [[nodiscard]] bool lg_gpu_eigensolve_enabled(const LittleGroupOptions& opt);
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
-                   int dense_max_dim, bool* converged_out = nullptr);
+                   int dense_max_dim, bool* converged_out = nullptr,
+                   int block_size = 1);
 [[nodiscard]] std::uint64_t
 subspace_dim_of(int n_sites, const LittleGroupOptions& opt);
 void parse_only_k0_env(std::set<int>& only_k0, bool& plan_only);
+
+// lg_ground_state.cpp: certified lowest eigenpair of one block (dense / FullCGS2 /
+// two-pass by dimension); throws when the residual guard fails.
+[[nodiscard]] std::pair<double, std::vector<Complex>>
+solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim);
+
+// lg_block_solve.cpp: k levels of one block by (block) Krylov-Schur; with vecs_out
+// the Ritz vectors (block coordinates) too.
+[[nodiscard]] std::vector<double>
+solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
+                                int block_size, bool* converged_out,
+                                std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
 // lg_stars.cpp
 [[nodiscard]] StarBuild
@@ -722,6 +739,7 @@ LittleGroupSpectrum run_little_group(
                               *bi->hk);
                 const int mult = static_cast<int>(bi->tag.multiplicity);
                 const auto ev = solve_block(mv, mult, lab);
+                if (!lab.converged) ++out.unconverged_blocks;
                 for (double e : ev) {
                     out.eigenvalues.push_back(e);
                     out.multiplicities.push_back(mult);

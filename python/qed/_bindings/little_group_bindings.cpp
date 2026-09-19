@@ -129,6 +129,12 @@ void bind_little_group(py::module_& m) {
     // Stage 9f: per-BLOCK quantum-number labels, parallel to
     // block_values / multiplicities. k_raw is the star REPRESENTATIVE's
     // abelian irrep (fold partners share it; membership is in "stars").
+    // block_size >= 2 routes above-crossover blocks through block Krylov-Schur,
+    // which resolves within-block degeneracies up to the block width.
+    auto with_block_size = [](ed::solvers::LittleGroupOptions o, int block_size) {
+        o.block_size = block_size;
+        return o;
+    };
     auto lg_label_arrays = [](const ed::solvers::LittleGroupSpectrum& s,
                               py::dict& d) {
         std::vector<int> kraw, fpar, irr, irrd;
@@ -193,6 +199,7 @@ void bind_little_group(py::module_& m) {
               d["stars"]          = lg_stars_dict(s);
               d["flip_engaged"]   = s.flip_engaged;
               d["tr_engaged"]     = s.tr_engaged;
+              d["unconverged_blocks"] = s.unconverged_blocks;
               d["gpu_engaged"]    = s.gpu_engaged;
               return d;
           },
@@ -216,19 +223,19 @@ void bind_little_group(py::module_& m) {
           "the momentum).");
 
     m.def("little_group_lowest_eigenvalues",
-          [lg_opts](const Operator& op,
+          [lg_opts, with_block_size](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int k, int n_up, int sz_parity, int dense_max_dim,
              int spin_flip, int time_reversal, bool use_gpu,
              const std::vector<int>& only_k0,
-             const std::vector<int>& only_irrep) {
+             const std::vector<int>& only_irrep, int block_size) {
               const int n_sites = static_cast<int>(op.getNumBits());
               return ed::solvers::little_group_lowest_eigenvalues(
                   op, abelian_group, residue_perms, n_sites, k,
-                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                  with_block_size(lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
                           spin_flip, time_reversal, only_k0,
-                          /*plan_only=*/false, only_irrep));
+                          /*plan_only=*/false, only_irrep), block_size));
           },
           py::arg("operator"), py::arg("abelian_group"),
           py::arg("residue_perms"), py::arg("k") = 1,
@@ -238,18 +245,19 @@ void bind_little_group(py::module_& m) {
           py::arg("use_gpu") = false,
           py::arg("only_k0") = std::vector<int>{},
           py::arg("only_irrep") = std::vector<int>{},
+          py::arg("block_size") = 1,
           "Lowest-k eigenvalues via the factorized little-co-group "
           "reduction (dense on small blocks, Lanczos on the projected "
           "matrix-free matvec otherwise); multiplicities expanded.");
 
     m.def("little_group_lowest_eigenvalues_labeled",
-          [lg_opts, lg_stars_dict](const Operator& op,
+          [lg_opts, lg_stars_dict, with_block_size](const Operator& op,
              const std::vector<std::vector<int>>& abelian_group,
              const std::vector<std::vector<int>>& residue_perms,
              int k, int n_up, int sz_parity, int dense_max_dim,
              bool use_gpu, int spin_flip, int time_reversal,
              const std::vector<int>& only_k0,
-             const std::vector<int>& only_irrep) {
+             const std::vector<int>& only_irrep, int block_size) {
               // Stage 9f: the labeled twin of little_group_lowest_eigenvalues.
               // Aligned per-eigenvalue arrays (expanded by multiplicity,
               // sorted ascending, truncated to k): momentum k_raw is the star
@@ -260,9 +268,9 @@ void bind_little_group(py::module_& m) {
               const int n_sites = static_cast<int>(op.getNumBits());
               const auto s = ed::solvers::little_group_lowest_spectrum(
                   op, abelian_group, residue_perms, n_sites, k,
-                  lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                  with_block_size(lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
                           spin_flip, time_reversal, only_k0, false,
-                          only_irrep));
+                          only_irrep), block_size));
               std::vector<std::size_t> order(s.eigenvalues.size());
               std::iota(order.begin(), order.end(), std::size_t{0});
               std::sort(order.begin(), order.end(),
@@ -300,6 +308,7 @@ void bind_little_group(py::module_& m) {
               d["stars"]        = lg_stars_dict(s);
               d["flip_engaged"] = s.flip_engaged;
               d["tr_engaged"]   = s.tr_engaged;
+              d["unconverged_blocks"] = s.unconverged_blocks;
               d["gpu_engaged"]  = s.gpu_engaged;
               return d;
           },
@@ -310,6 +319,7 @@ void bind_little_group(py::module_& m) {
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           py::arg("only_k0") = std::vector<int>{},
           py::arg("only_irrep") = std::vector<int>{},
+          py::arg("block_size") = 1,
           "Stage 9f: lowest-k eigenvalues WITH aligned per-eigenvalue "
           "quantum-number labels (k_raw = star representative's momentum "
           "irrep, little-group irrep index + dimension, flip parity, "
@@ -370,6 +380,7 @@ void bind_little_group(py::module_& m) {
               d["stars"]        = lg_stars_dict(s);
               d["flip_engaged"] = s.flip_engaged;
               d["tr_engaged"]   = s.tr_engaged;
+              d["unconverged_blocks"] = s.unconverged_blocks;
               d["gpu_engaged"]  = s.gpu_engaged;
               return d;
           },

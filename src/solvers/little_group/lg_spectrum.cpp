@@ -236,7 +236,7 @@ LittleGroupSpectrum little_group_lowest_spectrum(
                     }
                     bool conv = true;
                     auto ev = solve_block_lowest(mv, k, opt.dense_max_dim,
-                                                 &conv);
+                                                 &conv, opt.block_size);
                     lab.converged = conv;
                     return ev;
                 });
@@ -317,7 +317,8 @@ LittleGroupSpectrum little_group_lowest_spectrum(
                 // Budget exhausted: solve inline (exact, just serial).
             }
             bool conv = true;
-            auto ev = solve_block_lowest(mv, k, opt.dense_max_dim, &conv);
+            auto ev = solve_block_lowest(mv, k, opt.dense_max_dim, &conv,
+                                         opt.block_size);
             lab.converged = conv;
             return ev;
         });
@@ -376,6 +377,19 @@ std::vector<double> little_group_lowest_eigenvalues(
 {
     auto spec = little_group_lowest_spectrum(
         op, abelian_group, residue_perms, n_sites, k, opt);
+    // A flat list has nowhere to carry a per-block convergence flag, and an
+    // unconverged block returns only the converged PREFIX of its levels -- so its
+    // missing levels could belong in the global lowest k. Returning the list anyway
+    // (or an empty one) is how this verb used to fail silently; refuse instead.
+    const std::size_t unconverged = spec.unconverged_blocks;
+    if (unconverged > 0) {
+        throw std::runtime_error(
+            "little_group_lowest_eigenvalues: " + std::to_string(unconverged)
+            + " block(s) did not converge their lowest levels within the iteration "
+            "budget, so the global lowest-" + std::to_string(k) + " list cannot be "
+            "certified. little_group_lowest_eigenvalues_labeled reports which blocks; "
+            "raise ED_SYM_LG_LOWEST_MAX_ITER to give them more iterations.");
+    }
     std::vector<double> flat = spec.expanded();
     if (static_cast<int>(flat.size()) > k)
         flat.resize(static_cast<std::size_t>(k));

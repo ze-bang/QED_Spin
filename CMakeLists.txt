@@ -769,6 +769,8 @@ if(BUILD_ED_TESTS)
     # The environment registry: one meaning of "set" per value type, unique rows,
     # the unknown-name scan.
     ed_add_test(test_env_registry               tests/unit/test_env_registry.cpp USE_CATCH2)
+    # The available-memory probe honours the job's cgroup limit (Krylov basis caps).
+    ed_add_test(test_mem_guard                  tests/unit/test_mem_guard.cpp USE_CATCH2)
     # Phase 3a #5: SortedUint64Index — drop-in replacement for
     # `unordered_map<uint64_t, size_t>` in the streaming-symmetry hot path.
     # Coverage: empty / build / duplicate-key / clear / sort-invariant +

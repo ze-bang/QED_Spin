@@ -119,6 +119,112 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
     return ed::have_cuda();
 }
 
+// Several lowest levels of one block above the dense crossover: thick-restart
+// Krylov-Schur with locking (single vector, block_size <= 1) or its block form
+// (block_size = p resolves within-block multiplicities up to p). Both reorthogonalise
+// fully inside each cycle, so there are no ghost copies to dedup, and both lock
+// Ritz pairs strictly from the bottom: a level whose residual has not converged
+// stops the locked prefix, it is never replaced by a higher one.
+//
+// Budgets. The per-cycle basis (m length-nb vectors) is capped by the RAM this job
+// may still allocate (cgroup-aware); a cap too small to hold k + 8 vectors is a
+// clean refusal, never a silent fall-back to the ghost-prone scan. The total
+// iteration budget is max(200k, 2000) or ED_SYM_LG_LOWEST_MAX_ITER, spent
+// as restart cycles -- so the environment lever keeps its meaning.
+[[nodiscard]] std::vector<double>
+solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
+                                int block_size, bool* converged_out,
+                                std::vector<std::vector<Complex>>* vecs_out) {
+    const std::size_t nb = mv.dim();
+    const std::uint64_t cap = ed::krylov::krylov_vector_budget(
+        ed::core::available_ram_bytes(), nb, /*safety=*/0.5, /*reserve_vecs=*/8);
+    if (cap > 0 && cap < k + 8) {
+        throw std::runtime_error(
+            "little_group: " + std::to_string(k) + " levels of a block of dimension "
+            + std::to_string(nb) + " need at least " + std::to_string(k + 8)
+            + " resident Krylov vectors (" + std::to_string((k + 8) * nb * 16 >> 20)
+            + " MiB); only " + std::to_string(cap) + " fit in the memory this job may "
+            "still allocate. Ask for fewer levels (k = 1 uses a basis-free scan) or more "
+            "memory.");
+    }
+    // Default max(200k, 2000): each cycle restarts from ONE Ritz vector, so many
+    // levels need many cycles (k = 10 left a block unconverged at the scan's 400).
+    // ED_SYM_LG_LOWEST_MAX_ITER still overrides absolutely.
+    const std::uint64_t budget = lg_lowest_max_iter(
+        k, std::max<std::uint64_t>(200u * static_cast<std::uint64_t>(k), 2000u));
+    // A cycle never exceeds the whole iteration budget (a starved budget must yield
+    // an unconverged result, not one full-length cycle), nor the memory cap.
+    const std::size_t per_cycle = std::min<std::size_t>(
+        ed::krylov::krylov_subspace_dim(k, 2 * k + 60, nb, cap),
+        static_cast<std::size_t>(std::max<std::uint64_t>(budget, k + 1)));
+    const std::size_t restarts = static_cast<std::size_t>(std::max<std::uint64_t>(
+        1u, budget / std::max<std::size_t>(per_cycle, 1)));
+    // The kernels floor a cycle at 2k + 20 vectors unless the SUBSPACE cap says
+    // otherwise, so the cycle length is imposed through that cap.
+    const std::uint64_t cycle_cap = (cap > 0) ? std::min<std::uint64_t>(cap, per_cycle)
+                                              : static_cast<std::uint64_t>(per_cycle);
+    constexpr double tol = 1e-9;     // absolute residual ||H x - theta x||
+
+    auto apply_H = [&mv](const Complex* in, Complex* out, std::size_t nn) {
+        mv.apply(in, out, nn);
+    };
+    ed::matvec::CpuBackend be;
+    std::vector<double> ev;
+    std::vector<std::vector<Complex>> vv;    // Ritz vectors (block coordinates)
+    bool conv = false;
+    if (block_size <= 1) {
+        std::uint64_t seed = 0x51ED0B70ULL;       // same stream as the k = 1 scan
+        seed ^= static_cast<std::uint64_t>(ed::env::integer("ED_SYM_LG_SEED", 0))
+                * 0x9E3779B97F4A7C15ULL;
+        std::mt19937_64 gen(seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        std::vector<Complex> v0(nb);
+        for (auto& v : v0) v = Complex(nd(gen), nd(gen));
+        ed::krylov::KrylovSchurOptions o;
+        o.num_eigs             = k;
+        o.max_iter             = per_cycle;
+        o.max_restarts         = restarts;
+        o.tolerance            = tol;
+        o.max_subspace_vectors = cycle_cap;
+        o.compute_vectors      = vecs_out != nullptr;
+        auto r = ed::krylov::krylov_schur_kernel(be, apply_H, nb, v0.data(), o);
+        ev   = std::move(r.eigenvalues);
+        conv = r.converged;
+        if (vecs_out)
+            for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
+    } else {
+        ed::krylov::BlockKrylovSchurOptions o;
+        o.num_eigs             = k;
+        o.block_size           = static_cast<std::size_t>(block_size);
+        o.max_iter             = per_cycle;
+        o.max_restarts         = restarts;
+        o.tolerance            = tol;
+        o.max_subspace_vectors = cycle_cap;
+        o.compute_vectors      = vecs_out != nullptr;
+        auto r = ed::krylov::block_krylov_schur_kernel(be, apply_H, nb, nb, o);
+        ev   = std::move(r.eigenvalues);
+        conv = r.converged;
+        if (vecs_out)
+            for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
+    }
+    // Ascending, vectors kept aligned with their values; then the k lowest.
+    std::vector<std::size_t> order(ev.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(),
+              [&ev](std::size_t a, std::size_t b) { return ev[a] < ev[b]; });
+    const bool have_vecs = vecs_out != nullptr && vv.size() == ev.size();
+    std::vector<double> ev_sorted;
+    std::vector<std::vector<Complex>> vv_sorted;
+    for (std::size_t i = 0; i < order.size() && ev_sorted.size() < k; ++i) {
+        ev_sorted.push_back(ev[order[i]]);
+        if (have_vecs) vv_sorted.push_back(std::move(vv[order[i]]));
+    }
+    if (vecs_out) *vecs_out = std::move(vv_sorted);
+    if (converged_out)
+        *converged_out = conv && ev_sorted.size() >= k && (!vecs_out || have_vecs);
+    return ev_sorted;
+}
+
 // Lowest-k: dense on small blocks, Lanczos otherwise.
 // Stage-9f verification fix (2026-07-12). The previous body delegated to the
 // legacy ``::lanczos`` wrapper with an iteration budget of ``max_it = 2k+40``
@@ -133,7 +239,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // and a k-lowest Ritz stationarity gate.
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
-                   int dense_max_dim, bool* converged_out) {
+                   int dense_max_dim, bool* converged_out, int block_size) {
     if (converged_out) *converged_out = true;
     const std::uint64_t nb = mv.dim();
     if (nb == 0) return {};
@@ -160,6 +266,12 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
         return std::vector<double>(w.begin(), w.begin() + m);
     }
 
+    // Several levels, or an explicit block size: Krylov-Schur (see above). The
+    // basis-free scan below stays the k = 1 lane -- the one production uses at
+    // N = 36, where a Krylov basis of 1e8-dimensional vectors does not fit.
+    if (k > 1 || block_size > 1)
+        return solve_block_lowest_krylov_schur(mv, k, block_size, converged_out);
+
     // S1 (WITHIN-BLOCK genuine degeneracy): a single-vector Lanczos returns
     // exactly ONE Ritz value per eigenvalue no matter its true multiplicity
     // (a random start has one component in a degenerate eigenspace), so an
@@ -168,14 +280,11 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // crossover covers every block up to 4x the iteration cap (1600 at
     // k <= 10) -- verified at 4x4 J2=1.0 (which DOES carry a within-block
     // degeneracy at block ~800): normal operation matches the dense
-    // spectrum. The residual gap is a block that both exceeds the
-    // crossover AND carries an accidental degeneracy (a
-    // special-point corner absent from generic frustrated spectra). To resolve
-    // that too, RAISE ED_SYM_LG_DENSE_FLOOR so the degenerate block also goes
-    // dense (memory permitting) -- the reliable, exact mitigation. (A
-    // block-Lanczos path was prototyped and dropped: lean reorth sheds the
-    // excited window and full reorth does not fit the 1e8-dim blocks, so it
-    // could not be verified to resolve the corner it targets.)
+    // spectrum. The residual gap is a block that both exceeds the crossover AND
+    // carries an accidental degeneracy; two remedies: raise ED_SYM_LG_DENSE_FLOOR
+    // so the block goes dense (exact, memory permitting), or ask for block_size >= 2,
+    // which routes the block through block Krylov-Schur (above) and resolves
+    // multiplicities up to the block size. This scan is the k = 1 lane only.
     ed::matvec::CpuBackend be;
     std::vector<Complex> v0(nb);
     // ED_SYM_LG_SEED offsets the start vector (default 0): the multi-seed
