@@ -50,7 +50,8 @@
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/ftlm.h>
-#include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz
+#include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz, generateGaussianRandomVector
+#include <ed/thermal/sample_seed.h>
 
 #ifdef WITH_CUDA
 // Forward declaration so the ``if constexpr`` branch below can refer to
@@ -152,10 +153,15 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
 ///     is skipped (with a warning) instead of aborting the run; the
 ///     call throws only if every sample failed;
 ///   * ``ground_state_estimate`` is the minimum lowest Ritz value over
-///     the valid samples.
+///     the valid samples;
+///   * sample ``s`` starts from the CPU driver's vector: engine
+///     ``sample_engine(resolve_base_seed(seed), s)`` and
+///     ``generateGaussianRandomVector`` (dznrm2 normalisation), so for
+///     the same options ``CpuBackend`` reproduces
+///     ``::finite_temperature_lanczos`` exactly.
 ///
 /// Algorithm per sample:
-///   1. Host-side Gaussian seed ``v_0`` (normalised), copy to backend
+///   1. Host-side Gaussian seed ``v_0`` (see above), copy to backend
 ///      device-side scratch via ``backend.copy_from_host``.
 ///   2. ``lanczos_kernel<Backend>`` (krylov_dim, keep_basis=false) ->
 ///      tridiagonal ``(alpha, beta)``.
@@ -212,50 +218,45 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         temperatures.push_back(1.0 / b);
     }
 
-    // Audit 2026-07-31 (seed-contract alignment): seed == 0 means
-    // NONDETERMINISTIC, matching the legacy CPU driver's documented
-    // public contract ("0 = use random_device") -- the old fixed
-    // 0xFEEDFACE fallback made two "independent" default-seeded runs
-    // draw identical samples, silently defeating averaging. Explicit
-    // seeds keep bit-reproducibility.
-    const std::uint64_t base_seed = (opts.random_seed != 0)
-        ? opts.random_seed
-        : (static_cast<std::uint64_t>(std::random_device{}()) << 32
-           | std::random_device{}());
+    // Seed contract shared with the CPU driver (WP10 C3): seed == 0 means
+    // NONDETERMINISTIC ("use random_device"); explicit seeds are taken
+    // verbatim, and every sample draws from its own ``sample_engine``.
+    const std::uint64_t base_seed = resolve_base_seed(opts.random_seed);
+
+    // generateGaussianRandomVector and the BLAS normalisation take int.
+    if (local_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            "ftlm_kernel: local_n exceeds the int range of the host "
+            "random-vector draw");
+    }
+    const int n_int = static_cast<int>(local_n);
 
     std::vector<::ThermodynamicData> per_sample;
     per_sample.reserve(opts.num_samples);
     double ground_state_estimate = std::numeric_limits<double>::infinity();
 
     for (std::size_t s = 0; s < opts.num_samples; ++s) {
-        // Per-sample RNG: salt the user seed with the sample index so
-        // the CPU and GPU lanes draw the same sequence given the same
-        // ``opts.random_seed``.
-        std::mt19937_64 rng(base_seed + 0x9E3779B97F4A7C15ULL * s);
-        std::normal_distribution<double> gauss(0.0, 1.0);
-
-        // ---- 1. Seed v_0 on the host, normalise, copy to backend ----
-        std::vector<Complex> v0_host(local_n);
-        for (auto& c : v0_host) c = Complex(gauss(rng), gauss(rng));
+        // ---- 1. Seed v_0 on the host, copy to backend ----
+        // The CPU driver's draw verbatim (same engine, same Gaussian
+        // stream, same dznrm2 + zscal normalisation), so both lanes start
+        // every sample from bit-identical vectors.
+        std::mt19937 rng = sample_engine(base_seed, static_cast<std::uint64_t>(s));
+        ComplexVector v0_host = generateGaussianRandomVector(n_int, rng);
         // Stage 12f: subspace projection of the stochastic seed (e.g.
-        // Lowdin total-spin), BEFORE normalisation.
+        // Lowdin total-spin), then renormalise the same way.
         if (opts.seed_transform) {
             opts.seed_transform(v0_host.data(), local_n);
+            const double v0_nrm = cblas_dznrm2(n_int, v0_host.data(), 1);
+            if (!(v0_nrm > 0.0)) {
+                throw std::runtime_error(
+                    "ftlm_kernel: zero-norm random start vector for sample "
+                    + std::to_string(s)
+                    + " (the seed transform annihilated it -- the "
+                      "targeted subspace has no weight in this block)");
+            }
+            const Complex scale(1.0 / v0_nrm, 0.0);
+            cblas_zscal(n_int, &scale, v0_host.data(), 1);
         }
-        double sum_sq = 0.0;
-        for (auto c : v0_host) sum_sq += std::norm(c);
-        const double v0_nrm = std::sqrt(sum_sq);
-        if (!(v0_nrm > 0.0)) {
-            throw std::runtime_error(
-                "ftlm_kernel: zero-norm random start vector for sample "
-                + std::to_string(s)
-                + (opts.seed_transform
-                       ? " (the seed transform annihilated it -- the "
-                         "targeted subspace has no weight in this block)"
-                       : ""));
-        }
-        const double inv = 1.0 / v0_nrm;
-        for (auto& c : v0_host) c *= inv;
 
         auto d_v0 = backend.make_zero_vector(local_n);
         backend.copy_from_host(v0_host.data(), d_v0.get(), local_n);

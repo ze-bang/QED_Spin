@@ -746,6 +746,9 @@ if(BUILD_ED_TESTS)
     # WP10: the Backend-templated FTLM body (the CUDA lane) honours full
     # reorthogonalisation and fills ground_state_estimate like the CPU driver.
     ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp USE_CATCH2)
+    # WP10 C3: on CpuBackend the Backend-templated FTLM body reproduces the
+    # CPU driver (same per-sample RNG recipe and normalisation).
+    ed_add_test(test_ftlm_rng_parity            tests/unit/test_ftlm_rng_parity.cpp USE_CATCH2)
     # Smoke-test the unified spectral entry point
     # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.
