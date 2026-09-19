@@ -107,6 +107,34 @@ def _outcome(r):
     return f"raised {r['raised']}: {r.get('message', '')}" if "raised" in r else "values"
 
 
+def dense_inconsistencies(records, tol=1e-8):
+    """Full spectra that disagree with their model's dense reference.
+
+    A reference only records what the code returned, so a lane that was wrong when the
+    reference was taken stays "green" forever (the chiral 3x3 symmetric lanes were
+    0.43 off their dense spectrum from the tag until 785ca0e). Every record of a model
+    that carries the complete spectrum (same count as <model>/dense_reference) must
+    equal it as a multiset, whatever the reference says."""
+    out = []
+    for name, rec in records.items():
+        if not name.endswith("/dense_reference") or "values" not in rec:
+            continue
+        model = name[: -len("/dense_reference")]
+        dense = np.sort(np.asarray(rec["values"]["eigenvalues"], float))
+        scale = max(1.0, float(np.max(np.abs(dense))))
+        for other, r in records.items():
+            if not other.startswith(model + "/") or other == name or "values" not in r:
+                continue
+            v = r["values"]
+            ev = v.get("eigenvalues") if isinstance(v, dict) else None
+            if not isinstance(ev, list) or len(ev) != len(dense) or v.get("count") != len(dense):
+                continue
+            d = float(np.max(np.abs(np.sort(np.asarray(ev, float)) - dense))) / scale
+            if d > tol:
+                out.append((other, d))
+    return out
+
+
 def select(cases, only):
     return [c for c in cases if not only or any(o in c.name for o in only)]
 
@@ -129,6 +157,12 @@ def cmd_record(args):
             note = f"{r1['raised']}: {r1['message']}"
         print(f"{flag} {c.name:90s} {r1['seconds']:8.2f}s  {note}", flush=True)
         records[c.name] = r1
+    wrong = dense_inconsistencies(records)
+    if wrong:
+        for name, d in wrong:
+            print(f"  DENSE MISMATCH: {name}: full spectrum {d:.2e} from its dense reference")
+        print("refusing to record a reference that disagrees with exact diagonalization")
+        return 1
     doc = {"meta": {"sha": git_sha(), "device": args.device, "env": env_snapshot(),
                     "recorded": time.strftime("%Y-%m-%d %H:%M:%S"), "qed_file": _qed_file()},
            "records": records, "quarantine": quarantine}
@@ -184,6 +218,7 @@ def cmd_compare(args):
     print(f"reference {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}); "
           f"this run {git_sha()[:10]} ({args.device}); qed from {_qed_file()}")
     bad, new, qdiff = [], [], []
+    current = {}
     names = set()
     for c in cases:
         names.add(c.name)
@@ -191,6 +226,7 @@ def cmd_compare(args):
             new.append(c.name)
             continue
         got = run_case(c)
+        current[c.name] = got
         d = diff_records(ref[c.name], got)
         gated = c.name not in quarantine
         flag = " " if not d else ("!" if gated else "q")
@@ -208,7 +244,10 @@ def cmd_compare(args):
             print(f"      {line}")
     for name in missing:
         print(f"  MISSING: {name}")
-    return 1 if (bad or missing) else 0
+    wrong = dense_inconsistencies(current)
+    for name, d in wrong:
+        print(f"  DENSE MISMATCH: {name}: full spectrum {d:.2e} from its dense reference")
+    return 1 if (bad or missing or wrong) else 0
 
 
 def cmd_list(args):
