@@ -70,6 +70,16 @@ struct FtlmOptions {
     std::size_t num_samples  = 40;
     std::size_t krylov_dim   = 100;
     std::vector<double> betas;           ///< inverse-temperature grid (positive)
+
+    /// Optional exact temperature grid (WP10 C4). When non-empty it is
+    /// used verbatim as the evaluation grid and reported as
+    /// ``FtlmResult::temperatures``, bypassing the ``T = 1/beta``
+    /// round trip, which can move a grid point by 1 ulp relative to a
+    /// caller that built T directly (the legacy min/max/bins overload's
+    /// ``exp`` grid). ``betas`` may then be left empty (it is filled with
+    /// ``1/T``); if both are given they must have the same length.
+    std::vector<double> temperatures;
+
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
     std::string output_dir;
 
@@ -104,7 +114,7 @@ struct FtlmOptions {
 
 struct FtlmResult {
     std::vector<double> betas;
-    std::vector<double> temperatures;        ///< 1/betas (grid order)
+    std::vector<double> temperatures;        ///< 1/betas, or opts.temperatures verbatim (grid order)
     std::vector<double> partition_function;
     std::vector<double> energy;
     std::vector<double> heat_capacity;
@@ -128,6 +138,59 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
     out.free_energy        = legacy.thermo_data.free_energy;
     out.ground_state_estimate = legacy.ground_state_estimate;
     return out;
+}
+
+/// The (temperatures, betas) evaluation grid of ``opts``, index-aligned.
+/// ``opts.temperatures`` wins when set (taken verbatim, betas = 1/T unless
+/// the caller supplied them); otherwise T = 1/beta as before.
+struct FtlmGrid {
+    std::vector<double> temperatures;
+    std::vector<double> betas;
+};
+
+inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
+                                  const char* who) {
+    FtlmGrid g;
+    if (!opts.temperatures.empty()) {
+        if (!opts.betas.empty()
+            && opts.betas.size() != opts.temperatures.size()) {
+            throw std::invalid_argument(
+                std::string(who) + ": opts.temperatures and opts.betas "
+                "must have the same length when both are set.");
+        }
+        for (double t : opts.temperatures) {
+            if (!(t > 0.0)) {
+                throw std::invalid_argument(
+                    std::string(who) + ": opts.temperatures must be "
+                    "strictly positive.");
+            }
+        }
+        g.temperatures = opts.temperatures;
+        if (!opts.betas.empty()) {
+            g.betas = opts.betas;
+        } else {
+            g.betas.reserve(g.temperatures.size());
+            for (double t : g.temperatures) g.betas.push_back(1.0 / t);
+        }
+        return g;
+    }
+    if (opts.betas.empty()) {
+        throw std::invalid_argument(
+            std::string(who) + ": opts.betas (or opts.temperatures) must "
+            "be non-empty (the temperature grid is required to evaluate "
+            "Z, <E>, Cv, S).");
+    }
+    g.betas = opts.betas;
+    g.temperatures.reserve(opts.betas.size());
+    for (double b : opts.betas) {
+        if (!(b > 0.0)) {
+            throw std::invalid_argument(
+                std::string(who) + ": opts.betas must be strictly "
+                "positive.");
+        }
+        g.temperatures.push_back(1.0 / b);
+    }
+    return g;
 }
 
 /// Phase E of the "Close CPU/GPU Gaps" plan (May 2026): backend-
@@ -192,31 +255,18 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         throw std::invalid_argument(
             "ftlm_kernel: num_samples must be > 0");
     }
-    if (opts.betas.empty()) {
-        throw std::invalid_argument(
-            "ftlm_kernel: opts.betas must be non-empty (the temperature "
-            "grid is required to evaluate Z, <E>, Cv, S).");
-    }
+    // Beta -> temperature for the host post-processors (or the caller's
+    // exact ``opts.temperatures``). ``compute_ftlm_thermodynamics`` is
+    // temperature-driven; the caller's ordering is preserved so the
+    // returned curves are index-aligned with the grid.
+    const FtlmGrid grid = resolve_ftlm_grid(opts, "ftlm_kernel");
+    const std::vector<double>& temperatures = grid.temperatures;
 
     // Same dim-aware OMP+BLAS thread cap as the CPU driver. Harmless when
     // the orchestrator already applied it (see the doc comment above).
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(
             static_cast<std::uint64_t>(local_n)));
-
-    // Convert beta -> temperature for the host post-processors. The
-    // ``compute_ftlm_thermodynamics`` API is temperature-driven; we
-    // preserve the caller's beta ordering so the returned curves are
-    // index-aligned with ``opts.betas``.
-    std::vector<double> temperatures;
-    temperatures.reserve(opts.betas.size());
-    for (double b : opts.betas) {
-        if (!(b > 0.0)) {
-            throw std::invalid_argument(
-                "ftlm_kernel: opts.betas must be strictly positive.");
-        }
-        temperatures.push_back(1.0 / b);
-    }
 
     // Seed contract shared with the CPU driver (WP10 C3): seed == 0 means
     // NONDETERMINISTIC ("use random_device"); explicit seeds are taken
@@ -341,7 +391,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             1.0 / static_cast<double>(per_sample.size());
         for (auto& z : legacy.thermo_data.Z_sample) z *= inv_n;
     }
-    return to_ftlm_result(legacy, opts.betas);
+    return to_ftlm_result(legacy, grid.betas);
 }
 
 }  // namespace detail
@@ -401,17 +451,10 @@ FtlmResult ftlm_kernel(const Backend&  backend,
         // produced energies sampled at the wrong temperatures while the
         // reported ``temperatures`` (derived from ``opts.betas``) stayed
         // linear. That mismatch is now closed: the CPU lane matches the
-        // GPU lane, which already used 1/betas directly.
-        std::vector<double> temperatures;
-        temperatures.reserve(opts.betas.size());
-        for (double b : opts.betas) {
-            if (!(b > 0.0)) {
-                throw std::invalid_argument(
-                    "ftlm_kernel (CPU lane): opts.betas must be strictly "
-                    "positive.");
-            }
-            temperatures.push_back(1.0 / b);
-        }
+        // GPU lane, which already used 1/betas directly. An explicit
+        // ``opts.temperatures`` grid is forwarded verbatim (WP10 C4).
+        const detail::FtlmGrid grid =
+            detail::resolve_ftlm_grid(opts, "ftlm_kernel (CPU lane)");
 
         std::function<void(const Complex*, Complex*, int)> legacy_H =
             [&apply_H](const Complex* in, Complex* out, int n) {
@@ -421,9 +464,9 @@ FtlmResult ftlm_kernel(const Backend&  backend,
         const auto legacy = ::finite_temperature_lanczos(
             legacy_H,
             static_cast<std::uint64_t>(local_n),
-            params, temperatures, opts.output_dir);
+            params, grid.temperatures, opts.output_dir);
 
-        return detail::to_ftlm_result(legacy, opts.betas);
+        return detail::to_ftlm_result(legacy, grid.betas);
     }
 #ifdef WITH_CUDA
     else if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
