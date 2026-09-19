@@ -810,7 +810,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // users on near-degenerate spectra can opt in to higher K via
     // ``ED_LANCZOS_REORTH_K``.
     opts.reorth = ReorthPolicy::LocalDGKS3;
-    if (const char* k_env = std::getenv("ED_LANCZOS_REORTH_K")) {
+    if (const char* k_env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
         try {
             const long k_val = std::stol(k_env);
             if (k_val >= 1 && k_val <= 64) {
@@ -834,7 +834,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // checking via env ``ED_LANCZOS_CHECK_EVERY=1``.
     std::vector<double> prev_eigenvalues_outer;
     opts.convergence_check_interval = 5;
-    if (const char* ce = std::getenv("ED_LANCZOS_CHECK_EVERY")) {
+    if (const char* ce = ed::env::raw("ED_LANCZOS_CHECK_EVERY")) {
         try {
             const long ci = std::stol(ce);
             if (ci >= 1 && ci <= 1000) {
@@ -1110,7 +1110,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     // the user-facing tolerance of 1e-10. Override with
     // ED_LANCZOS_REORTH_K=N (0..max_recent-1) for ill-conditioned spectra.
     int reorth_K = 1;
-    if (const char* env = std::getenv("ED_LANCZOS_REORTH_K")) {
+    if (const char* env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
         const int k = std::atoi(env);
         if (k >= 0 && k < max_recent) reorth_K = k;
     }
@@ -1548,7 +1548,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     // retired 2026-07-20). ED_FULLDIAG_DENSE_MAX overrides in either
     // direction.
     uint64_t DENSE_THRESHOLD = 120000;
-    if (const char* env_max = std::getenv("ED_FULLDIAG_DENSE_MAX")) {
+    if (const char* env_max = ed::env::raw("ED_FULLDIAG_DENSE_MAX")) {
         const unsigned long long v = std::strtoull(env_max, nullptr, 10);
         if (v > 0) DENSE_THRESHOLD = static_cast<uint64_t>(v);
     }
@@ -1652,7 +1652,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // per ~1024 rows, all cores from ~32k rows on. ED_FULLDIAG_THREADS
         // overrides.
         int dense_threads = static_cast<int>(std::max<uint64_t>(1, N / 1024));
-        if (const char* e = std::getenv("ED_FULLDIAG_THREADS")) {
+        if (const char* e = ed::env::raw("ED_FULLDIAG_THREADS")) {
             const int v = std::atoi(e);
             if (v > 0) dense_threads = v;
         }

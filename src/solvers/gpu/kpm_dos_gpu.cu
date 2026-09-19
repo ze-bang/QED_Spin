@@ -29,6 +29,7 @@
 
 #ifdef WITH_CUDA
 
+#include <ed/config/env_registry.h>
 #include <ed/gpu/kpm_dos_gpu.cuh>
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/solvers/kpm_dos.h>
@@ -59,8 +60,8 @@ namespace {
 
 inline bool kpm_dos_gpu_verbose() {
     static const bool v = []() {
-        const char* e = std::getenv("ED_KPM_DOS_GPU_VERBOSE");
-        if (!e) e = std::getenv("ED_KPM_DOS_VERBOSE");
+        const char* e = ed::env::raw("ED_KPM_DOS_GPU_VERBOSE");
+        if (!e) e = ed::env::raw("ED_KPM_DOS_VERBOSE");
         return e && e[0] == '1';
     }();
     return v;

@@ -119,7 +119,7 @@ acquire_gpu_shared_rank(
     // strong cache; the weak registry still dedups concurrent co-owners.
     static const double kBudgetBytes = [] {
         double gib = 24.0;
-        if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB")) {
+        if (const char* v = ed::env::raw("ED_GPU_SYM_CACHE_GIB")) {
             const double parsed = std::atof(v);
             if (parsed > 0.0) gib = parsed;
         }
@@ -528,7 +528,7 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
         // sector arrays at N=36). Shares ED_GPU_SYM_CACHE_GIB semantics.
         static const double kKeepBudget = [] {
             double gib = 16.0;
-            if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB")) {
+            if (const char* v = ed::env::raw("ED_GPU_SYM_CACHE_GIB")) {
                 const double parsed = std::atof(v);
                 if (parsed > 0.0) gib = parsed;
             }

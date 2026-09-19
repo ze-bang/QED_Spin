@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <functional>
+#include <ed/config/env_registry.h>
 
 #ifdef WITH_MPI
 #include <mpi.h>
@@ -388,7 +389,7 @@ inline bool generate_automorphisms(const std::string& directory, bool translatio
     std::cout << "Generating automorphisms..." << std::endl;
     
     // Check for custom Python interpreter (environment variable ED_PYTHON)
-    const char* python_env = std::getenv("ED_PYTHON");
+    const char* python_env = ed::env::raw("ED_PYTHON");
     std::string python_cmd = (python_env && strlen(python_env) > 0) ? python_env : "python3";
     
     std::string cmd = python_cmd + " \"" + finder_path + "\" --data_dir=\"" + directory + "\"";

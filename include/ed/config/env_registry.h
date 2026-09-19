@@ -82,12 +82,12 @@ struct Row {
       "=0 vetoes the SU(2) total-spin axis (labels, Lowdin targeting, S-resolution)")\
     X("ED_SYM_SU2_REPROJECT_FREQ", Integer, "symmetry", "1",                   \
       "Lowdin drift-scrub cadence: project every k-th wrapped apply; 0 = seed projection only")\
-    X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "Auto -> RepReducedCsr",     \
-      "=1 forces the reduced-CSR symmetry matvec, =0 forces the CSR-free rep walk")\
+    X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> planner slot, then RepReducedCsr",\
+      "Exactly \"1\" forces the reduced-CSR symmetry matvec, exactly \"0\" the CSR-free rep walk (read once per process)")\
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", Real, "symmetry", "8.0",                 \
       "AGGREGATE reduced-CSR byte budget; over-budget sectors fall back to the CSR-free walk")\
-    X("ED_SYM_SECTOR_PARALLEL", Flag, "symmetry", "auto (many-tiny-sectors heuristic)",\
-      "=1/=0 force the sector-parallel outer OMP loops on/off")                \
+    X("ED_SYM_SECTOR_PARALLEL", Tristate, "symmetry", "unset -> many-tiny-sectors heuristic (off on the GPU lane)",\
+      "Set: a value starting with '1' forces the sector-parallel outer OMP loops on, any other value (even \"\") off; one sector is always off")\
     X("ED_SYM_CSR_DIM_MAX", Integer, "symmetry", "0 -> falls back to ED_CSR_DIM_MAX, then the caller default 1<<13",\
       "Symmetry-lane CSR-vs-matrix-free dimension cutoff")                     \
     X("ED_SYM_LG_FLIP", Flag, "little-group", "true",                          \
@@ -151,7 +151,7 @@ struct Row {
     X("ED_FORCE_COMPLEX_LANCZOS", Flag, "krylov", "false",                     \
       "=1 returns the pre-Wave-1.1 unified complex Lanczos kernel (A/B + bisection)")\
     X("ED_LANCZOS_REAL_DISPATCH", Flag, "krylov", "true (real dispatch on)",   \
-      "=0 opts out of dispatching eigenvalue-only Lanczos to the real-arithmetic fast path")\
+      "=0/false/FALSE opts out of dispatching eigenvalue-only Lanczos to the real-arithmetic fast path")\
     X("ED_BLOCK_LANCZOS_LEAN", Flag, "krylov", "false (honour the caller)",    \
       "=1 forces keep_basis = false in the block-Lanczos eigenvalue-only lane")\
     X("ED_GPU_LANCZOS_FULL_CGS2", Flag, "krylov", "false",                     \
@@ -165,7 +165,7 @@ struct Row {
     X("ED_LANCZOS_REORTH_TILE", Integer, "krylov", "16",                       \
       "Tile width for the disk-backed full-reorthogonalisation pass")          \
     X("ED_LANCZOS_DISK", Flag, "krylov", "false",                              \
-      "=1 forces the Lanczos basis onto disk instead of in-memory buffers")    \
+      "Any value but \"\"/0/false/FALSE/no/NO forces the Lanczos basis onto disk instead of in-memory buffers (read once per process)")\
     X("ED_LANCZOS_CHECKPOINT_DIR", Path, "io-hdf5", "\"\" (checkpointing disabled)",\
       "Directory for the HDF5 Lanczos checkpoint; non-empty enables checkpointing")\
     X("ED_LANCZOS_CHECKPOINT_INTERVAL", Integer, "io-hdf5", "100",             \
@@ -197,7 +197,7 @@ struct Row {
     X("ED_KPM_BOUND_BUFFER", Real, "thermal-kpm", "KPMDOSParameters::spectral_bound_buffer default",\
       "Safety buffer on the estimated spectral bounds before Chebyshev rescaling")\
     X("ED_KPM_KERNEL", Text, "thermal-kpm", "Jackson kernel (use_jackson_kernel = true)",\
-      "Selects the Chebyshev damping kernel")                                  \
+      "Selects the Chebyshev damping kernel: lorentz/Lorentz/LORENTZ -> Lorentz, anything else keeps Jackson")\
     X("ED_KPM_LORENTZ_LAMBDA", Real, "thermal-kpm", "KPMDOSParameters::lorentz_lambda default",\
       "lambda parameter of the Lorentz kernel")                                \
     X("ED_DSSF_PAIR_THREADS", Integer, "thermal-kpm", "min(n_my_pairs, max(1, omp_max_threads / 2))",\
@@ -217,15 +217,15 @@ struct Row {
     X("ED_GPU_TIMING", Flag, "gpu", "false",                                   \
       "=1 enables per-call CUDA event timing (forces a host sync, 30-50% of wall time at small N)")\
     X("ED_GPU_MIXED_PRECISION_SPMV", Flag, "gpu", "false",                     \
-      "=1 enables the FP32 CSR SpMV cache on the GPU lane")                    \
+      "A value starting with 1/t/T/y/Y enables the FP32 CSR SpMV cache on the GPU lane")\
     X("ED_GPU_CUSPARSE_MIN_DIM", Integer, "gpu", "32768",                      \
       "Dimension below which cuSPARSE CSR is skipped in favour of the matrix-free fused kernel")\
     X("ED_GPU_DISABLE_CUSPARSE", Flag, "gpu", "false",                         \
       "=1 disables the cuSPARSE assembled-CSR pathway entirely")               \
     X("ED_GPU_ALLOW_DROPPED_THREEBODY", Flag, "gpu", "false (hard error)",     \
       "=1 acknowledges that three-body terms are silently dropped by the GPU kernel; without it the load THROWS")\
-    X("ED_AUTO_THREADS", Flag, "threads-numa", "false (auto-threading enabled)",\
-      "=0/false/no disables the dim-aware automatic thread-budget scaling")    \
+    X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\
+      "=0/false/FALSE/no/NO disables the dim-aware automatic thread-budget scaling; any other value leaves it on")\
     X("ED_AUTO_THREADS_PER_K", Integer, "threads-numa", "8",                   \
       "Aim for one OMP/BLAS worker per K * 1024 basis states")                 \
     X("ED_AUTO_THREADS_CEIL", Integer, "threads-numa", "8",                    \

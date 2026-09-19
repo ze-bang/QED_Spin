@@ -10,6 +10,7 @@
 // =============================================================================
 
 #include "ed/gpu/gpu_mixed_precision.h"
+#include <ed/config/env_registry.h>
 
 #include <cstdlib>
 
@@ -21,7 +22,7 @@ bool gpu_mixed_precision_spmv_enabled() {
     // build of the FP32 CSR cache (see GPUOperator::buildCsrFp32OnDevice),
     // not via a one-shot static init, so tests can flip the knob between
     // operators in the same process without re-loading the library.
-    const char* v = std::getenv("ED_GPU_MIXED_PRECISION_SPMV");
+    const char* v = ed::env::raw("ED_GPU_MIXED_PRECISION_SPMV");
     if (!v || !*v) return false;
     return v[0] == '1' || v[0] == 't' || v[0] == 'T' ||
            v[0] == 'y' || v[0] == 'Y';

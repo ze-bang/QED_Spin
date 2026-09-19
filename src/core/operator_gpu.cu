@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/operator.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/planner/basis_policy_hook.h>
@@ -51,7 +52,7 @@ bool Operator::cuda_mirror_available_() noexcept {
     // gate is the env override used for CPU/GPU bisection. Mirrors the
     // ed::symmetry::SectorOperator gate (ED_GPU_OPERATOR_MIRROR=0 -> off).
     static const bool kEnabled = [] {
-        const char* e = std::getenv("ED_GPU_OPERATOR_MIRROR");
+        const char* e = ed::env::raw("ED_GPU_OPERATOR_MIRROR");
         if (e == nullptr || e[0] == '\0') return true;   // default ON
         if (e[0] == '0' && e[1] == '\0')  return false;  // "0" -> OFF
         return true;                                     // else -> ON

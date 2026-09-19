@@ -51,6 +51,7 @@
 #include <string>
 #include <vector>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/linear_operator.h>
 #include <ed/matvec/matvec.h>
 #include <ed/symmetry/spin_flip.h>
@@ -68,7 +69,7 @@ namespace ed::symmetry {
 /// spectrum is known to be drift-benign. Read per call so tests can
 /// toggle from Python.
 [[nodiscard]] inline int su2_reproject_freq() noexcept {
-    const char* v = std::getenv("ED_SYM_SU2_REPROJECT_FREQ");
+    const char* v = ed::env::raw("ED_SYM_SU2_REPROJECT_FREQ");
     if (v == nullptr || *v == '\0') return 1;
     return std::atoi(v);
 }

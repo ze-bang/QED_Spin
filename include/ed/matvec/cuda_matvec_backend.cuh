@@ -59,6 +59,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 
+#include <ed/config/env_registry.h>
 #include <ed/matvec/matvec_backend.h>        // MatVecBackendBase, TermViewT
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_storage.h>          // canonical SoA bin types
@@ -71,7 +72,7 @@ namespace cuda_matvec_detail {
 // ED_GPU_SYNC_LAUNCH=1 restores a host synchronisation after every matvec launch
 // (diagnostic switch for the 2026-09-11 async-launch change).
 inline bool sync_every_launch() {
-    static const bool v = [] { const char* e = std::getenv("ED_GPU_SYNC_LAUNCH"); return e && e[0] == '1'; }();
+    static const bool v = [] { const char* e = ed::env::raw("ED_GPU_SYNC_LAUNCH"); return e && e[0] == '1'; }();
     return v;
 }
 
@@ -155,7 +156,7 @@ public:
                       std::shared_ptr<void> backing = nullptr)
         : basis_(basis), spin_l_(spin_l), label_(std::move(label)),
           backing_(std::move(backing)) {
-        const char* s = std::getenv("ED_MATVEC_SCATTER");
+        const char* s = ed::env::raw("ED_MATVEC_SCATTER");
         use_scatter_ = (s && s[0] == '1');
     }
 

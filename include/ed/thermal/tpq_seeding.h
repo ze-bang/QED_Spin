@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <string>
+#include <ed/config/env_registry.h>
 
 namespace ed {
 
@@ -35,7 +36,7 @@ inline std::uint64_t tpq_per_sample_seed(std::uint64_t sample) {
         z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
         return z ^ (z >> 31);
     };
-    const char* s = std::getenv("ED_TPQ_BASE_SEED");
+    const char* s = ed::env::raw("ED_TPQ_BASE_SEED");
     std::uint64_t base = 0;
     if (s && s[0] != '\0') {
         try { base = std::stoull(s); } catch (...) { base = 0; }

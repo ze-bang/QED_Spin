@@ -106,7 +106,7 @@ public:
     // count below ~10 for typical run sizes.
     static int hdf5_compression_level() {
         static const int level = []() {
-            const char* env = std::getenv("ED_HDF5_COMPRESSION_LEVEL");
+            const char* env = ed::env::raw("ED_HDF5_COMPRESSION_LEVEL");
             if (!env) return 4;
             try { return std::clamp(std::stoi(env), 0, 9); }
             catch (...) { return 4; }
@@ -116,7 +116,7 @@ public:
 
     static size_t hdf5_chunk_target_bytes() {
         static const size_t bytes = []() -> size_t {
-            const char* env = std::getenv("ED_HDF5_CHUNK_TARGET_BYTES");
+            const char* env = ed::env::raw("ED_HDF5_CHUNK_TARGET_BYTES");
             if (!env) return 256 * 1024;
             try {
                 long long v = std::stoll(env);

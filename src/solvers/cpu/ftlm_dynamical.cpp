@@ -912,7 +912,7 @@ compute_dynamical_correlation_multi_operator_multi_temperature_impl(
     double E_gs = energy_shift;
     if (std::abs(E_gs) < 1e-14) {
         ComplexVector test_state(N);
-        const char* env_complex_seed = std::getenv("ED_LANCZOS_COMPLEX_SEED");
+        const char* env_complex_seed = ed::env::raw("ED_LANCZOS_COMPLEX_SEED");
         const bool complex_seed = (env_complex_seed && env_complex_seed[0] == '1');
         for (uint64_t i = 0; i < N; i++) {
             test_state[i] = complex_seed ? Complex(dist(gen), dist(gen))

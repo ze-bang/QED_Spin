@@ -609,7 +609,7 @@ GroundStateResult solve_on(Backend& be,
         } else {
             kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
             kopts.local_ring_size = 1;
-            if (const char* k_env = std::getenv("ED_LANCZOS_REORTH_K")) {
+            if (const char* k_env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
                 try {
                     const long k_val = std::stol(k_env);
                     if (k_val >= 1 && k_val <= 64) {
@@ -637,7 +637,7 @@ GroundStateResult solve_on(Backend& be,
         // and the post-Wave-2.6 `lanczos()` default. Override via
         // env ``ED_LANCZOS_CHECK_EVERY``.
         kopts.convergence_check_interval = 5;
-        if (const char* ce = std::getenv("ED_LANCZOS_CHECK_EVERY")) {
+        if (const char* ce = ed::env::raw("ED_LANCZOS_CHECK_EVERY")) {
             try {
                 const long ci = std::stol(ce);
                 if (ci >= 1 && ci <= 1000) {

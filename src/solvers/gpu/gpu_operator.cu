@@ -202,7 +202,7 @@ void GPUOperator::loadThreeBodyFile(const std::string& filename) {
     // which case we still emit the loud warning so the situation is
     // recorded in run logs.
     if (!three_body_data_.empty()) {
-        const char* opt_in = std::getenv("ED_GPU_ALLOW_DROPPED_THREEBODY");
+        const char* opt_in = ed::env::raw("ED_GPU_ALLOW_DROPPED_THREEBODY");
         const bool user_acknowledged = (opt_in && opt_in[0] == '1');
         if (!user_acknowledged) {
             throw std::runtime_error(
@@ -696,8 +696,8 @@ void GPUOperator::selectKernelPathway(int N) {
     // call cuSPARSE launch + descriptor binding overhead dominates over the
     // raw SpMV work. The crossover is operator-dependent so we expose it via
     // ED_GPU_CUSPARSE_MIN_DIM (default 32768).
-    const char* disable_env = std::getenv("ED_GPU_DISABLE_CUSPARSE");
-    const char* min_dim_env = std::getenv("ED_GPU_CUSPARSE_MIN_DIM");
+    const char* disable_env = ed::env::raw("ED_GPU_DISABLE_CUSPARSE");
+    const char* min_dim_env = ed::env::raw("ED_GPU_CUSPARSE_MIN_DIM");
     const int   cusparse_min_dim =
         (min_dim_env && min_dim_env[0] != '\0') ? std::atoi(min_dim_env) : 32768;
     const bool cusparse_disabled =

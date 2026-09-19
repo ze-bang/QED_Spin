@@ -3,7 +3,8 @@
 #   1. every ED_* / QED_* name the sources mention next to an environment read is a row of
 #      include/ed/config/env_registry.h;
 #   2. every row is mentioned somewhere outside the registry (no dead rows);
-#   3. no row is declared twice.
+#   3. no row is declared twice;
+#   4. no C++ source reads an ED_* / QED_* variable with a raw getenv (go through ed::env).
 # Exit 1 on any discrepancy.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -24,5 +25,8 @@ dead=$(comm -23 <(echo "${reg}") <(echo "${all}") || true)
 if [ -n "${missing}" ]; then echo "READ BUT NOT REGISTERED:"; echo "${missing}" | sed 's/^/  /'; status=1; fi
 if [ -n "${dead}" ];    then echo "REGISTERED BUT NEVER MENTIONED IN THE SOURCES:"; echo "${dead}" | sed 's/^/  /'; status=1; fi
 if [ -n "${dup}" ];     then echo "DUPLICATE ROWS:"; echo "${dup}" | sed 's/^/  /'; status=1; fi
+raw=$(grep -rnE 'getenv\("(ED|QED)_' include src python/qed/_bindings --include=*.h --include=*.cpp --include=*.cu --include=*.cuh \
+       | grep -v "^${REG}:" || true)
+if [ -n "${raw}" ];     then echo "RAW getenv OF A REGISTERED-NAMESPACE VARIABLE (use ed::env):"; echo "${raw}" | sed 's/^/  /'; status=1; fi
 echo "registry rows: $(echo "${reg}" | wc -l); names read in sources: $(echo "${used}" | wc -l); status=${status}"
 exit ${status}

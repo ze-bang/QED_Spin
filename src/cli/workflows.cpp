@@ -54,6 +54,7 @@
 #include <set>
 #include <fstream>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
 #include <ed/core/ed_wrapper.h>            // residue: EDResults envelope (legacy types only)
@@ -2913,7 +2914,7 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         const int max_threads = 1;
 #endif
         pair_threads = std::min(n_my_pairs, std::max(1, max_threads / 2));
-        if (const char* env = std::getenv("ED_DSSF_PAIR_THREADS")) {
+        if (const char* env = ed::env::raw("ED_DSSF_PAIR_THREADS")) {
             try {
                 const long t = std::stol(env);
                 if (t >= 1 && t <= max_threads) {
@@ -3265,25 +3266,25 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
     // Tunables not yet exposed through ed_config.cpp — pick them up from env
     // so production scripts can sweep without rebuilding.  Defaults are
     // documented next to KPMDOSParameters in include/ed/solvers/kpm_dos.h.
-    if (const char* env_M = std::getenv("ED_KPM_NUM_MOMENTS")) {
+    if (const char* env_M = ed::env::raw("ED_KPM_NUM_MOMENTS")) {
         const int v = std::atoi(env_M);
         if (v >= 4) kpm_params.num_moments = v;
     }
-    if (const char* env_Nq = std::getenv("ED_KPM_NUM_QUAD")) {
+    if (const char* env_Nq = ed::env::raw("ED_KPM_NUM_QUAD")) {
         const int v = std::atoi(env_Nq);
         if (v > 0) kpm_params.num_quadrature_nodes = v;
     }
-    if (const char* env_buf = std::getenv("ED_KPM_BOUND_BUFFER")) {
+    if (const char* env_buf = ed::env::raw("ED_KPM_BOUND_BUFFER")) {
         const double v = std::atof(env_buf);
         if (v > 0.0) kpm_params.spectral_bound_buffer = v;
     }
-    if (const char* env_kern = std::getenv("ED_KPM_KERNEL")) {
+    if (const char* env_kern = ed::env::raw("ED_KPM_KERNEL")) {
         const std::string s(env_kern);
         if (s == "lorentz" || s == "Lorentz" || s == "LORENTZ") {
             kpm_params.use_jackson_kernel = false;
         }
     }
-    if (const char* env_lambda = std::getenv("ED_KPM_LORENTZ_LAMBDA")) {
+    if (const char* env_lambda = ed::env::raw("ED_KPM_LORENTZ_LAMBDA")) {
         const double v = std::atof(env_lambda);
         if (v > 0.0) kpm_params.lorentz_lambda = v;
     }

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <ed/config/env_registry.h>
 
 #ifdef _OPENMP
 #  include <omp.h>
@@ -82,7 +83,7 @@ inline void clear_sym_matvec_repr() noexcept {
 /// walk. Consumed by CpuMatVecBackend (the reduced-CSR sub-choice).
 [[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
     static const int env_override = [] {
-        if (const char* e = std::getenv("ED_SYM_REDUCED_CSR")) {
+        if (const char* e = ed::env::raw("ED_SYM_REDUCED_CSR")) {
             if (e[0] == '1' && e[1] == '\0')
                 return static_cast<int>(SymMatvecRepr::RepReducedCsr);
             if (e[0] == '0' && e[1] == '\0')
@@ -143,7 +144,7 @@ inline void clear_sym_matvec_repr() noexcept {
         dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
         + (dim + 1) * 8u /* row ptr */;
     double budget_gib = 8.0;
-    if (const char* v = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
+    if (const char* v = ed::env::raw("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
         const double b = std::atof(v);
         if (b > 0.0) budget_gib = b;
     }

@@ -42,6 +42,7 @@
 #include <utility>
 #include <vector>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/symmetry_metadata.h>
 #include <ed/matvec/term_storage.h>
 #include <ed/symmetry/sector_operator.h>
@@ -125,7 +126,7 @@ resolve_symmetry_composition(const ed::matvec::TermStorage& soa,
     }
     (void)allow_gpu;  // Stage 8b: projection is backend-independent now
     if (c.flip_transport) {
-        const char* v = std::getenv("ED_SYM_SPIN_FLIP_PROJECT");
+        const char* v = ed::env::raw("ED_SYM_SPIN_FLIP_PROJECT");
         c.flip_project = !(v != nullptr && v[0] == '0' && v[1] == '\0');
     }
 

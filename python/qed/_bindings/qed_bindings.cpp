@@ -36,6 +36,7 @@
 #include <pybind11/complex.h>
 #include <pybind11/functional.h>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/construct_ham.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr / prefer_tableless_fixed_sz (leaf)
@@ -431,7 +432,7 @@ py_full_diag_fixed_sz(const FixedSzOperator& op,
 // Opt-out via ED_LANCZOS_REAL_DISPATCH=0 (default on).
 namespace {
 inline bool real_lanczos_dispatch_enabled() {
-    const char* env = std::getenv("ED_LANCZOS_REAL_DISPATCH");
+    const char* env = ed::env::raw("ED_LANCZOS_REAL_DISPATCH");
     if (!env || env[0] == '\0') return true;
     if (std::strcmp(env, "0")     == 0) return false;
     if (std::strcmp(env, "false") == 0) return false;

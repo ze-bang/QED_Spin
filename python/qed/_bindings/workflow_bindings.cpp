@@ -21,6 +21,7 @@
 #include <pybind11/complex.h>
 
 #include <Eigen/Dense>                   // degenerate-multiplet S^2 rotation (2026-09-11)
+#include <ed/config/env_registry.h>
 #include <ed/core/hdf5_io.h>             // isDisabledOutputPath
 #include <ed/core/fixed_sz_operator.h>   // FixedSzOperator (bound pybind type)
 #include <ed/core/linear_operator.h>
@@ -112,7 +113,7 @@ inline bool resolve_sector_parallel(std::size_t   num_sectors,
     // semantics-preserving (there is no parallelism to enable), so it
     // outranks even the explicit env.
     if (num_sectors <= 1) return false;
-    if (const char* env = std::getenv("ED_SYM_SECTOR_PARALLEL"))
+    if (const char* env = ed::env::raw("ED_SYM_SECTOR_PARALLEL"))
         return env[0] == '1';   // explicit override always wins (user's risk)
     // NEVER auto-enable on the GPU lane: the per-sector solves launch CUDA
     // kernels / build device mirrors, which are not safe to call concurrently

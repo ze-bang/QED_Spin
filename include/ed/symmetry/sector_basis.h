@@ -48,6 +48,7 @@
 #include <utility>
 #include <vector>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/sorted_uint64_index.h>
 #include <ed/symmetry/symmetry_sector_data.h>      // SymmetrySector, SymBasisState,
                                              // SectorLookupHandle
@@ -77,11 +78,11 @@ namespace ed::symmetry {
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
     if (table_entries == 0) return false;
-    const char* force = std::getenv("ED_SYM_REP_RANKTABLE");
+    const char* force = ed::env::raw("ED_SYM_REP_RANKTABLE");
     if (force != nullptr && force[0] == '0' && force[1] == '\0') return false;
     if (force != nullptr && force[0] == '1' && force[1] == '\0') return true;
     double budget_gib = 8.0;
-    if (const char* b = std::getenv("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
+    if (const char* b = ed::env::raw("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
         const double parsed = std::atof(b);
         if (parsed > 0.0) budget_gib = parsed;
     }

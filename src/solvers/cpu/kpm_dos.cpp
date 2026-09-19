@@ -494,7 +494,7 @@ KPMDOSResult compute_kpm_dos(
     // outer team is capped at ``max_threads / 2`` and nested
     // parallelism is enabled.
     int outer_threads = 1;
-    if (const char* env = std::getenv("ED_KPM_SAMPLE_THREADS")) {
+    if (const char* env = ed::env::raw("ED_KPM_SAMPLE_THREADS")) {
 #ifdef _OPENMP
         const int max_threads = omp_get_max_threads();
 #else

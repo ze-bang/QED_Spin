@@ -27,6 +27,7 @@
 
 #include <ed/dssf/cross_sector_orbit_observable.h>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/basis_utils.h>          // popcount (defensive, mirrors CrossSectorObservable)
 #include <ed/core/sorted_uint64_index.h>  // SortedUint64Index::kNotFound
 #include <ed/matvec/symmetry_matvec_backend.h>  // rep_policy_from (Stage 8d)
@@ -321,7 +322,7 @@ void CrossSectorOrbitObservable::build_csr_() const {
                      * static_cast<double>(std::max<std::size_t>(transforms_.size(), 1))
                      * 24.0;
     double budget_gib = 4.0;
-    if (const char* v = std::getenv("ED_XSEC_CSR_BUDGET_GIB")) {
+    if (const char* v = ed::env::raw("ED_XSEC_CSR_BUDGET_GIB")) {
         const double b = std::atof(v);
         if (b > 0.0) budget_gib = b;
     }

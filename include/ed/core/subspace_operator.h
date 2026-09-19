@@ -58,6 +58,7 @@
 
 #include <Eigen/Sparse>
 
+#include <ed/config/env_registry.h>
 #include <ed/core/operator.h>
 #include <ed/planner/basis_policy_hook.h>   // prefer_tableless_fixed_sz()
 #include <ed/matvec/basis_policy.h>
@@ -329,7 +330,7 @@ public:
         if constexpr (!is_fixed_sz_) {
 #ifdef WITH_CUDA
             static const bool kGpuMirrorEnabled = [] {
-                const char* e = std::getenv("ED_GPU_SYMMETRY_MIRROR");
+                const char* e = ed::env::raw("ED_GPU_SYMMETRY_MIRROR");
                 if (e == nullptr) return true;                  // default ON
                 if (e[0] == '\0') return true;                  // empty -> ON
                 if (e[0] == '0' && e[1] == '\0') return false;  // "0" -> OFF

@@ -38,6 +38,7 @@
 #include <omp.h>
 #endif
 
+#include <ed/config/env_registry.h>
 #include <ed/core/combinadic.h>  // BinomialTable + rank_state (O(1) reverse lookup)
 #include <ed/matvec/rep_symmetry_basis_policy.h>  // RepSymmetryBasisPolicy (make_policy)
 
@@ -215,7 +216,7 @@ struct RepSectorData {
         // pathway matrix can pin LUT == scalar at any size (the LUT is
         // otherwise unconditional and the fallback would only ever run at
         // N > 64, i.e. never in tests).
-        if (const char* v = std::getenv("ED_SYM_PERM_LUT")) {
+        if (const char* v = ed::env::raw("ED_SYM_PERM_LUT")) {
             if (v[0] == '0' && v[1] == '\0') return;
         }
         const int G   = group_size;

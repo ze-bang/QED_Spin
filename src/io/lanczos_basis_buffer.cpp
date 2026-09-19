@@ -1,4 +1,5 @@
 #include <ed/io/lanczos_basis_buffer.h>
+#include <ed/config/env_registry.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -43,7 +44,7 @@ Registry& registry() {
 
 bool force_disk_storage() {
     static const bool cached = []() {
-        const char* env = std::getenv("ED_LANCZOS_DISK");
+        const char* env = ed::env::raw("ED_LANCZOS_DISK");
         if (!env) return false;
         // Accept "1", "true", "TRUE", "yes", "YES" as truthy.
         if (env[0] == '\0') return false;

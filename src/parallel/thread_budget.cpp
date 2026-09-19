@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "ed/parallel/thread_budget.h"
+#include <ed/config/env_registry.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -35,7 +36,7 @@ void openblas_set_num_threads(int)  __attribute__((weak));
 }
 
 bool auto_threads_disabled() {
-    const char* env = std::getenv("ED_AUTO_THREADS");
+    const char* env = ed::env::raw("ED_AUTO_THREADS");
     if (!env || env[0] == '\0') return false;
     if (std::strcmp(env, "0")     == 0) return true;
     if (std::strcmp(env, "false") == 0) return true;
@@ -88,13 +89,13 @@ int auto_threads_for_dim(std::uint64_t dim) {
     // tuning. HPC users on systems with significantly more memory
     // bandwidth (multi-socket, MI300A, GH200) can raise the ceiling.
     std::uint64_t per_k = 8;
-    if (const char* env = std::getenv("ED_AUTO_THREADS_PER_K")) {
+    if (const char* env = ed::env::raw("ED_AUTO_THREADS_PER_K")) {
         const long long parsed = std::strtoll(env, nullptr, 10);
         if (parsed > 0) per_k = static_cast<std::uint64_t>(parsed);
     }
 
     int ceil = 8;
-    if (const char* env = std::getenv("ED_AUTO_THREADS_CEIL")) {
+    if (const char* env = ed::env::raw("ED_AUTO_THREADS_CEIL")) {
         const long long parsed = std::strtoll(env, nullptr, 10);
         if (parsed >= 0) ceil = static_cast<int>(parsed);
     }

@@ -10,6 +10,7 @@
 #include "ed/io/lanczos_basis_buffer.h"
 #include "ed/core/blas_lapack_wrapper.h"
 #include "ed/parallel/numa.h"
+#include <ed/config/env_registry.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -23,7 +24,7 @@ namespace lanczos_io {
 namespace {
 
 uint64_t parse_tile_size_env() {
-    const char* v = std::getenv("ED_LANCZOS_REORTH_TILE");
+    const char* v = ed::env::raw("ED_LANCZOS_REORTH_TILE");
     if (!v || !*v) return 16;
     try {
         long long parsed = std::stoll(v);

@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <ed/config/env_registry.h>
 
 namespace ed::planner {
 
@@ -63,7 +64,7 @@ private:
 /// Resolve whether a fixed-Sz operator should use the tableless combinadic
 /// basis. Env overrides the planner override, which overrides the default.
 [[nodiscard]] inline bool prefer_tableless_fixed_sz() noexcept {
-    if (const char* v = std::getenv("ED_FIXED_SZ_TABLELESS")) {
+    if (const char* v = ed::env::raw("ED_FIXED_SZ_TABLELESS")) {
         if (v[0] == '1' && v[1] == '\0') return true;
         if (v[0] == '0' && v[1] == '\0') return false;
     }
@@ -78,7 +79,7 @@ private:
 /// silently allocating 72.6 GB the consumer may never read.
 [[nodiscard]] inline double fixed_sz_table_budget_bytes() noexcept {
     double gib = 16.0;
-    if (const char* v = std::getenv("ED_FIXED_SZ_TABLE_BUDGET_GIB")) {
+    if (const char* v = ed::env::raw("ED_FIXED_SZ_TABLE_BUDGET_GIB")) {
         const double parsed = std::atof(v);
         if (parsed > 0.0) gib = parsed;
     }
@@ -92,7 +93,7 @@ private:
 /// half filling even for consumers that only read the term list.
 [[nodiscard]] inline bool
 prefer_tableless_fixed_sz(std::uint64_t n_bits, std::int64_t n_up) noexcept {
-    if (const char* v = std::getenv("ED_FIXED_SZ_TABLELESS")) {
+    if (const char* v = ed::env::raw("ED_FIXED_SZ_TABLELESS")) {
         if (v[0] == '1' && v[1] == '\0') return true;
         if (v[0] == '0' && v[1] == '\0') return false;
     }
