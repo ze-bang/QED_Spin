@@ -125,3 +125,78 @@ def test_nematic_group_and_an_unconverged_request_raises(monkeypatch):
         lg.solve_blocks(H, A_n, R_n, k=4, n_up=N // 2, dense_max_dim=1)
     assert lg.solve_blocks(H, A_n, R_n, k=4, n_up=N // 2, dense_max_dim=1,
                            strict=False).unconverged_blocks > 0
+
+
+def _dense_diag(psi, terms):
+    """<psi| sum_t w prod S^z |psi> for a 2^N vector (bit set = up)."""
+    idx = np.arange(len(psi), dtype=np.int64)
+    val = np.zeros(len(psi))
+    for w, sites in terms:
+        v = np.full(len(psi), float(w))
+        for i in sites:
+            v *= ((idx >> i) & 1) - 0.5
+        val += v
+    return float(np.sum(np.abs(psi) ** 2 * val))
+
+
+def test_diagonal_observables_including_four_point_dimer_correlators():
+    H = TT.xxz_operator(J2=0.1)
+    nn = TT.bonds(NN_OFFSETS)
+    bonds = [[(i, j) for (i, j, d) in nn if d == t] for t in range(3)]
+    assert all(b[c][0] == c for b in bonds for c in range(N))          # cell = its first site
+    shifts = [[TT.site(TT.sites[c][0] + s1, TT.sites[c][1] + s2) for c in range(N)]
+              for (s1, s2) in TT.sites]
+    dimer, keys = lg.dimer_zz_observables(bonds, shifts)
+    zz_all = [(1.0, [i, j]) for (i, j, _) in nn]
+    O_ZZ = _core.Operator(N, 0.5)
+    for (i, j, _) in nn:
+        O_ZZ.add_two_body(_core.OP_SZ, i, _core.OP_SZ, j, 1.0)
+    res = lg.solve_blocks(H, A, R, n_up=N // 2, observables=[O_ZZ],
+                          diagonal_observables=[zz_all] + dimer, momentum_generators=GENS,
+                          namer=TT.namer(LABELS), dense_max_dim=4096)
+    # the diagonal lane equals the operator lane on every block, projected ones included
+    for l in res.levels:
+        assert abs(l.diagonal_values[0] - l.values[0]) < 1e-10, l.label
+    g = res.ground()
+    assert g.label == "G.A1+"
+    # one bond direction is not C6 invariant, but in a C6v-symmetric state it is 1/3
+    for t in range(3):
+        assert abs(g.diagonal_values[1 + keys.index(("B", t))] - g.values[0] / 3) < 1e-10
+    vec = dict(_core.little_group_lowest_vectors(H, A, R, k=1, n_up=N // 2))
+    psi = np.asarray(vec["vectors"][0])
+    assert len(psi) == 2 ** N
+    psi = psi / np.linalg.norm(psi)
+    for j, terms in enumerate(dimer):
+        assert abs(g.diagonal_values[1 + j] - _dense_diag(psi, terms)) < 1e-10, keys[j]
+
+
+def test_diagonal_observables_that_break_the_sector_are_refused():
+    H = TT.xxz_operator(J2=0.1)
+    with pytest.raises(ValueError, match="not invariant under abelian element"):
+        lg.solve_blocks(H, A, R, n_up=N // 2, diagonal_observables=[[(1.0, [0, 1])]])
+    odd = [[(1.0, [c]) for c in range(N)]]                             # total S^z: flip odd
+    with pytest.raises(ValueError, match="odd number of S"):
+        lg.solve_blocks(H, A, R, n_up=N // 2, diagonal_observables=odd)
+    res = lg.solve_blocks(H, A, R, n_up=N // 2, spin_flip=0, diagonal_observables=odd)
+    assert all(abs(l.diagonal_values[0]) < 1e-12 for l in res.levels)  # Sz_total = 0
+
+
+def test_momentum_labels_uses_the_callers_group_order():
+    from qed.symmetry import momentum_labels
+    H = TT.xxz_operator(J2=0.1)
+    shuffled = list(A)
+    random.Random(5).shuffle(shuffled)
+    out = dict(_core.little_group_block_grounds(H, shuffled, R, n_up=N // 2))
+    res = lg.solve_blocks(H, shuffled, R, n_up=N // 2, momentum_generators=GENS)
+
+    def order(p):
+        q, n = list(p), 1
+        while q != list(range(N)):
+            q, n = [p[i] for i in q], n + 1
+        return n
+    L1, L2 = order(GENS[0]), order(GENS[1])
+    labels = momentum_labels(out["irrep_characters"], GENS[0], GENS[1], L1, L2,
+                             abelian_group=shuffled)
+    for l in res.levels:
+        k1, k2 = labels[l.k_raw]
+        assert (Fraction(k1, L1), Fraction(k2, L2)) in l.momenta

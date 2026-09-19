@@ -32,7 +32,7 @@ from typing import Callable, Optional, Sequence
 
 from . import _core
 
-__all__ = ["BlockLevel", "BlockResult", "solve_blocks", "dE_dlambda"]
+__all__ = ["BlockLevel", "BlockResult", "solve_blocks", "dE_dlambda", "dimer_zz_observables"]
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,7 @@ class BlockLevel:
     converged: bool
     residual: Optional[float] = None
     values: tuple = ()                 # <n|O_i|n>, aligned with the observables
+    diagonal_values: tuple = ()        # <n|D_j|n>, aligned with diagonal_observables
     point: Optional[str] = None
     irrep_name: Optional[str] = None
     k_raw: int = -1                    # engine-internal; for only_k0-style filtering only
@@ -103,7 +104,8 @@ def _kappa(row, A_index, gens):
 
 
 def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
-                 observables: Sequence = (), momentum_generators: Sequence = None,
+                 observables: Sequence = (), diagonal_observables: Sequence = (),
+                 momentum_generators: Sequence = None,
                  namer: Callable = None, n_up: int = -1, sz_parity: int = -1,
                  spin_flip: int = -1, time_reversal: int = -1,
                  dense_max_dim: int = 256, use_gpu: bool = False,
@@ -125,19 +127,24 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
     common = dict(n_up=n_up, sz_parity=sz_parity, dense_max_dim=dense_max_dim,
                   use_gpu=use_gpu, spin_flip=spin_flip, time_reversal=time_reversal,
                   only_k0=list(only_k0))
-    if k == 1 and not obs and block_size == 1:
+    diag = [[(float(w), [int(i) for i in sites]) for (w, sites) in d]
+            for d in diagonal_observables]
+    if k == 1 and not obs and not diag and block_size == 1:
         out = dict(_core.little_group_block_grounds(H, A, R, **common))
         energies = list(out["eigenvalues"])
         level_of = [0] * len(energies)
         residuals = [None] * len(energies)
         values = [()] * len(energies)
+        dvalues = [()] * len(energies)
     else:
         out = dict(_core.little_group_block_expectations(H, obs, A, R, k=k,
-                                                          block_size=block_size, **common))
+                                                          block_size=block_size,
+                                                          diagonal_observables=diag, **common))
         energies = list(out["energies"])
         level_of = list(out["level"])
         residuals = list(out["residuals"])
         values = [tuple(float(x) for x in row) for row in out["values"]]
+        dvalues = [tuple(float(x) for x in row) for row in out["diagonal_values"]]
     if strict and int(out["unconverged_blocks"]) > 0:
         raise RuntimeError(f"{out['unconverged_blocks']} block(s) did not converge; "
                            "pass strict=False to inspect the certified part")
@@ -173,7 +180,8 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
                         flip=flip, multiplicity=int(out["multiplicity"][i]),
                         converged=bool(out["converged"][i]),
                         residual=None if residuals[i] is None else float(residuals[i]),
-                        values=values[i], k_raw=k_raw, irrep_index=irr)
+                        values=values[i], diagonal_values=dvalues[i],
+                        k_raw=k_raw, irrep_index=irr)
         if namer is not None:
             point, name = namer(lv)
             lv = dataclasses.replace(lv, point=point, irrep_name=name)
@@ -190,3 +198,26 @@ def dE_dlambda(H, dH: Sequence, abelian_group, residue_perms, **kw) -> BlockResu
     is non-degenerate inside its block; for a degenerate one it is the value in the
     solver's vector, and degenerate first-order theory needs the full multiplet."""
     return solve_blocks(H, abelian_group, residue_perms, observables=dH, **kw)
+
+
+def dimer_zz_observables(bonds, cell_shift):
+    """Diagonal observables for zz-dimer correlations, as ``diagonal_observables``.
+
+    ``bonds[t][c] = (i, j)``: the bond of type ``t`` in cell ``c``, with
+    ``B_{t,c} = S^z_i S^z_j``. ``cell_shift[d][c]`` is the cell ``c`` moves to under the
+    ``d``-th displacement. Returns ``(observables, keys)``: ``("B", t)`` is
+    ``sum_c B_{t,c}`` and ``("D", t, u, d)`` is ``sum_c B_{t,c} B_{u,shift[d][c]}``, both
+    translation invariant when the bond table is translation covariant. Divide B by
+    the number of cells for the mean bond value."""
+    n_type, n_cell = len(bonds), len(bonds[0])
+    obs, keys = [], []
+    for t in range(n_type):
+        obs.append([(1.0, list(bonds[t][c])) for c in range(n_cell)])
+        keys.append(("B", t))
+    for t in range(n_type):
+        for u in range(n_type):
+            for d, shift in enumerate(cell_shift):
+                obs.append([(1.0, list(bonds[t][c]) + list(bonds[u][shift[c]]))
+                            for c in range(n_cell)])
+                keys.append(("D", t, u, d))
+    return obs, keys

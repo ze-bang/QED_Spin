@@ -84,7 +84,7 @@ __all__ = [
 ]
 
 
-def momentum_labels(irrep_characters, t1, t2, Lx, Ly):
+def momentum_labels(irrep_characters, t1, t2, Lx, Ly, abelian_group=None):
     """(k1, k2) crystal momentum for each RAW abelian irrep index.
 
     The little-group project lane's ``k_raw`` / ``block_k_raw`` indices
@@ -92,13 +92,15 @@ def momentum_labels(irrep_characters, t1, t2, Lx, Ly):
     momentum-ordered (index 0 is generally not the Gamma point -- a
     36-site campaign was nearly mislabeled by assuming it was). The
     physically unambiguous decode reads the momentum off the translation
-    generators' character phases: the engine closes the abelian group as
-    SORTED permutation tuples, column ``j`` of ``irrep_characters`` is the
-    j-th sorted element, and ``chi_k(T_i) = exp(-2 pi i k_i / L_i)``.
+    generators' character phases. Column ``j`` of ``irrep_characters`` is the
+    j-th element of the ``abelian_group`` THE CALLER PASSED to the engine, in the
+    caller's order, and ``chi_k(T_i) = exp(-2 pi i k_i / L_i)``.
 
     Parameters: ``irrep_characters`` from the solve result (row per raw
     irrep), the two translation site-permutations ``t1`` / ``t2``, and the
-    lattice extents. Returns ``[(k1, k2), ...]`` indexed by ``k_raw``.
+    lattice extents, and the ``abelian_group`` handed to the engine. Without it
+    the group is rebuilt from t1/t2 and SORTED, which is right only if the caller
+    passed the sorted closure. Returns ``[(k1, k2), ...]`` indexed by ``k_raw``.
     Works for any abelian group CONTAINING the translations (e.g. the
     flip-extended A x Z2: the flip planes carry the same spatial columns).
     """
@@ -117,7 +119,7 @@ def momentum_labels(irrep_characters, t1, t2, Lx, Ly):
                     elems.add(c)
                     nxt.append(c)
         frontier = nxt
-    A = sorted(elems)
+    A = sorted(elems) if abelian_group is None else [tuple(int(x) for x in a) for a in abelian_group]
     i1, i2 = A.index(tuple(t1)), A.index(tuple(t2))
     chars = np.asarray(irrep_characters)
     out = []

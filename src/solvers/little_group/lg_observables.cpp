@@ -8,6 +8,8 @@
 
 #include <ed/symmetry/commute_check.h>
 
+#include <map>
+
 namespace ed::solvers {
 
 using namespace lg_detail;
@@ -90,6 +92,108 @@ void require_compatible(const ::Operator& O, std::size_t index, const EngineCont
             who + " is complex, but the blocks fold time reversal (pass time_reversal=0).");
 }
 
+
+// A diagonal observable folded to sum_t coef_t (-1)^{popcount(mask_t & ~s)}: each site
+// contributes S^z = +-1/2 (bit set = up), a repeated site squares to 1/4 and drops out
+// of the mask. Terms with equal masks are merged.
+struct FoldedDiagonal {
+    std::vector<double>        coef;
+    std::vector<std::uint64_t> mask;
+};
+
+FoldedDiagonal fold_diagonal(const DiagonalObservable& d, std::size_t index, int n_sites) {
+    const std::string who = "little_group_block_expectations: diagonal observable "
+                            + std::to_string(index);
+    if (d.weights.size() != d.sites.size())
+        throw std::invalid_argument(who + ": weights and sites differ in length");
+    if (n_sites > 64)
+        throw std::invalid_argument(who + ": more than 64 sites");
+    std::map<std::uint64_t, double> merged;
+    for (std::size_t t = 0; t < d.sites.size(); ++t) {
+        std::uint64_t m = 0;
+        double c = d.weights[t];
+        for (int i : d.sites[t]) {
+            if (i < 0 || i >= n_sites)
+                throw std::invalid_argument(who + ": site " + std::to_string(i)
+                                            + " out of range");
+            m ^= (std::uint64_t{1} << i);
+            c *= 0.5;
+        }
+        merged[m] += c;
+    }
+    FoldedDiagonal f;
+    for (const auto& [m, c] : merged) {
+        f.mask.push_back(m);
+        f.coef.push_back(c);
+    }
+    return f;
+}
+
+// Exactness of sum_r |u_r|^2 O(rep_r) needs O invariant under every element of the
+// sector's group: the translations, and the spin flip when it is folded.
+void require_diagonal_compatible(const FoldedDiagonal& f, std::size_t index,
+                                 const EngineContext& cx) {
+    const std::string who = "little_group_block_expectations: diagonal observable "
+                            + std::to_string(index);
+    std::map<std::uint64_t, double> table;
+    double scale = 0.0;
+    for (std::size_t t = 0; t < f.mask.size(); ++t) {
+        table[f.mask[t]] = f.coef[t];
+        scale = std::max(scale, std::abs(f.coef[t]));
+    }
+    const double tol = 1e-12 * std::max(scale, 1.0);
+    for (std::size_t a = 0; a < cx.A.size(); ++a) {
+        const auto& p = cx.A[a];
+        for (std::size_t t = 0; t < f.mask.size(); ++t) {
+            std::uint64_t img = 0;
+            for (int i = 0; i < cx.n_sites; ++i)
+                if ((f.mask[t] >> i) & 1u) img |= (std::uint64_t{1} << p[static_cast<std::size_t>(i)]);
+            const auto it = table.find(img);
+            const double c = it == table.end() ? 0.0 : it->second;
+            if (std::abs(c - f.coef[t]) > tol)
+                throw std::invalid_argument(
+                    who + " is not invariant under abelian element " + std::to_string(a)
+                    + " (a translation); sum it over the translation images of each term.");
+        }
+    }
+    if (cx.flip_half)
+        for (std::size_t t = 0; t < f.mask.size(); ++t)
+            if (__builtin_popcountll(f.mask[t]) % 2 != 0 && std::abs(f.coef[t]) > tol)
+                throw std::invalid_argument(
+                    who + " has a term with an odd number of S^z, which the folded spin "
+                    "flip reverses (pass spin_flip=0 to drop the flip).");
+}
+
+// sum_r |u_r|^2 O_j(rep_r) for every folded observable; u normalised.
+std::vector<double> diagonal_expectations(const std::vector<std::uint64_t>& reps,
+                                          const std::vector<Complex>& u,
+                                          const std::vector<FoldedDiagonal>& D) {
+    const std::size_t nd = D.size();
+    std::vector<double> acc(nd, 0.0);
+    if (nd == 0) return acc;
+    const long long nr = static_cast<long long>(reps.size());
+#pragma omp parallel
+    {
+        std::vector<double> loc(nd, 0.0);
+#pragma omp for schedule(static)
+        for (long long r = 0; r < nr; ++r) {
+            const double w = std::norm(u[static_cast<std::size_t>(r)]);
+            if (w == 0.0) continue;
+            const std::uint64_t down = ~reps[static_cast<std::size_t>(r)];
+            for (std::size_t j = 0; j < nd; ++j) {
+                double v = 0.0;
+                const auto& f = D[j];
+                for (std::size_t t = 0; t < f.mask.size(); ++t)
+                    v += (__builtin_popcountll(f.mask[t] & down) & 1) ? -f.coef[t] : f.coef[t];
+                loc[j] += w * v;
+            }
+        }
+#pragma omp critical
+        for (std::size_t j = 0; j < nd; ++j) acc[j] += loc[j];
+    }
+    return acc;
+}
+
 }  // namespace
 
 LittleGroupExpectations little_group_block_expectations(
@@ -99,7 +203,8 @@ LittleGroupExpectations little_group_block_expectations(
     const std::vector<std::vector<int>>&  residue_perms,
     int                                   n_sites,
     int                                   k,
-    const LittleGroupOptions&             opt)
+    const LittleGroupOptions&             opt,
+    const std::vector<DiagonalObservable>& diagonal)
 {
     EngineContext cx;
     bool tr_on = false;
@@ -112,6 +217,12 @@ LittleGroupExpectations little_group_block_expectations(
                 "little_group_block_expectations: observable " + std::to_string(i)
                 + " acts on a different number of sites");
         require_compatible(*observables[i], i, cx, tr_on, opt);
+    }
+    std::vector<FoldedDiagonal> folded;
+    folded.reserve(diagonal.size());
+    for (std::size_t j = 0; j < diagonal.size(); ++j) {
+        folded.push_back(fold_diagonal(diagonal[j], j, n_sites));
+        require_diagonal_compatible(folded.back(), j, cx);
     }
     const auto stars = star_partition(cx, tr_on);
     bool ignore_plan = false;
@@ -174,6 +285,8 @@ LittleGroupExpectations little_group_block_expectations(
                 out.level.push_back(static_cast<int>(j));
                 out.multiplicity.push_back(static_cast<int>(tag.multiplicity));
                 out.values.push_back(std::move(vals));
+                out.diagonal_values.push_back(
+                    diagonal_expectations(sb.hk->rep_data_ptr()->reps, u, folded));
                 out.residuals.push_back(std::sqrt(res));
             }
         }

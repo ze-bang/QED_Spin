@@ -250,6 +250,19 @@ little_group_lowest_vectors(const ::Operator&                    op,
                             int                                  k,
                             const LittleGroupOptions&            opt);
 
+// A DIAGONAL observable: sum_t weights[t] * prod_{i in sites[t]} S^z_i (a site may
+// repeat; S^z_i^2 = 1/4). Any number of sites per term -- four-point dimer
+// correlators D(t,t',delta) = sum_c <B_{t,c} B_{t',c+delta}> are one term per cell.
+// Evaluated as sum_r |u_r|^2 O(rep_r) in the momentum sector's rep basis, which is
+// exact for an operator that is diagonal AND invariant under the abelian group (it
+// then acts as the number O(r) on each orbit state). So it must be translation
+// invariant, and flip even when the flip is folded; it need NOT be invariant under
+// the point-group residues (the block vector is lifted to the rep basis first).
+struct DiagonalObservable {
+    std::vector<double>           weights;
+    std::vector<std::vector<int>> sites;
+};
+
 // =============================================================================
 // Expectation values <n|O_i|n> of the lowest `k` levels of every (star, irrep, flip)
 // block -- computed in the momentum sector's representative basis, never expanded
@@ -275,6 +288,7 @@ struct LittleGroupExpectations {
     std::vector<int>                     level;      ///< 0 = block ground, 1, ...
     std::vector<int>                     multiplicity;  ///< |star| x d_sigma (x2 TR fold)
     std::vector<std::vector<double>>     values;     ///< values[row][i] = <n|O_i|n>
+    std::vector<std::vector<double>>     diagonal_values;  ///< [row][j] = <n|D_j|n>
     std::vector<double>                  residuals;  ///< rep-basis residual per row
     std::vector<LittleGroupStarInfo>     stars;
     std::vector<std::vector<std::complex<double>>> irrep_characters;
@@ -290,7 +304,8 @@ little_group_block_expectations(const ::Operator&                    op,
                                 const std::vector<std::vector<int>>& residue_perms,
                                 int                                  n_sites,
                                 int                                  k,
-                                const LittleGroupOptions&            opt);
+                                const LittleGroupOptions&            opt,
+                                const std::vector<DiagonalObservable>& diagonal = {});
 
 // =============================================================================
 // U3: FOLD TRANSPORT for vectors -- the partners a fold skipped. A star

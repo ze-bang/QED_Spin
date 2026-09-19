@@ -1139,8 +1139,18 @@ void bind_little_group(py::module_& m) {
              int k, int n_up, int sz_parity, int dense_max_dim, bool use_gpu,
              int spin_flip, int time_reversal,
              const std::vector<int>& only_k0,
-             const std::vector<int>& only_irrep, int block_size) {
+             const std::vector<int>& only_irrep, int block_size,
+             const std::vector<std::vector<std::pair<double, std::vector<int>>>>& diagonal_observables) {
               const int n_sites = static_cast<int>(op.getNumBits());
+              std::vector<ed::solvers::DiagonalObservable> diag;
+              for (const auto& terms : diagonal_observables) {
+                  ed::solvers::DiagonalObservable d;
+                  for (const auto& [w, sites] : terms) {
+                      d.weights.push_back(w);
+                      d.sites.push_back(sites);
+                  }
+                  diag.push_back(std::move(d));
+              }
               ed::solvers::LittleGroupExpectations r;
               {
                   py::gil_scoped_release release;
@@ -1149,7 +1159,8 @@ void bind_little_group(py::module_& m) {
                       with_block_size(lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
                                               spin_flip, time_reversal, only_k0,
                                               /*plan_only=*/false, only_irrep),
-                                      block_size));
+                                      block_size),
+                      diag);
               }
               std::vector<int> kraw, fpar, irr, idim;
               std::vector<bool> conv;
@@ -1173,6 +1184,14 @@ void bind_little_group(py::module_& m) {
               py::dict d;
               d["energies"]           = r.energies;
               d["values"]             = vals;
+              py::array_t<double> dvals({static_cast<py::ssize_t>(r.diagonal_values.size()),
+                                         static_cast<py::ssize_t>(diag.size())});
+              auto dm = dvals.mutable_unchecked<2>();
+              for (std::size_t i = 0; i < r.diagonal_values.size(); ++i)
+                  for (std::size_t j = 0; j < diag.size(); ++j)
+                      dm(static_cast<py::ssize_t>(i), static_cast<py::ssize_t>(j)) =
+                          r.diagonal_values[i][j];
+              d["diagonal_values"]    = dvals;
               d["k_raw"]              = kraw;
               d["flip_parity"]        = fpar;
               d["irrep"]              = irr;
@@ -1196,6 +1215,8 @@ void bind_little_group(py::module_& m) {
           py::arg("only_k0") = std::vector<int>{},
           py::arg("only_irrep") = std::vector<int>{},
           py::arg("block_size") = 1,
+          py::arg("diagonal_observables") =
+              std::vector<std::vector<std::pair<double, std::vector<int>>>>{},
           "<n|O_i|n> for the lowest k levels of every (star, irrep, flip) block, "
           "computed in the momentum sector's representative basis (never expanded "
           "to 2^N). One row per (block, level): energies, values[row, i], labels "
@@ -1203,5 +1224,9 @@ void bind_little_group(py::module_& m) {
           "residual, and unconverged_blocks. Observables must commute with every "
           "abelian element and residue (and the spin flip / be real when those are "
           "folded), else ValueError. With O_i = dH/dlambda_i the values are "
-          "Hellmann-Feynman derivatives.");
+          "Hellmann-Feynman derivatives. diagonal_observables: each a list of "
+          "(weight, [sites]) terms of weight * prod S^z_i (any number of sites, "
+          "e.g. four-point dimer correlators); must be translation invariant (and "
+          "flip even when the flip is folded), need not be point-group invariant; "
+          "diagonal_values[row, j].");
 }
