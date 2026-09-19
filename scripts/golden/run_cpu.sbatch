@@ -12,7 +12,11 @@ cd "${SLURM_SUBMIT_DIR}"
 source scripts/golden/env.sh
 MODE="${MODE:-compare}"; REF="${REF:?set REF=<reference file>}"
 echo "host=$(hostname) commit=$(git rev-parse --short HEAD) mode=${MODE} ref=${REF} pythonpath=${PYTHONPATH%%:*} core=${QED_CORE_DIR:-<in package>}"
-if [ "${MODE}" = bless ]; then
+if [ "${MODE}" = bless_new ]; then
+    NEW=$(python -c "import gzip, json, sys; sys.path.insert(0, 'tests/golden'); from cases import build_cases; ref = json.load(gzip.open('${REF}', 'rt'))['records']; print(' '.join(c.name for c in build_cases('cpu') if c.name not in ref))")
+    echo "new cases: ${NEW}"
+    python -u tests/golden/golden.py bless --device cpu --ref "${REF}" --only ${NEW} --reason "${REASON:?set REASON=...}"
+elif [ "${MODE}" = bless ]; then
     python -u tests/golden/golden.py bless --device cpu --ref "${REF}" --only ${ONLY:?set ONLY=<case names>} --reason "${REASON:?set REASON=...}"
 elif [ "${MODE}" = record ]; then
     python -u tests/golden/golden.py record --device cpu --out "${REF}" ${ONLY:+--only ${ONLY}}

@@ -282,6 +282,70 @@ def thermal_cases(m: Model):
     return cs
 
 
+def thermal_kernel_cases(m: Model):
+    """FTLM / LTLM with the exact small-block fallback switched off. Blocks of
+    dimension <= 512 (every symmetry=auto sector here, and the outer Sz sectors of a
+    12-site symmetry=None run) are otherwise diagonalised exactly and never reach the
+    sampling kernel. ED_THERMAL_EXACT_SMALL is read per call."""
+    H = m.operator()
+    kw = dict(T_min=0.25, T_max=3.0, num_T=8, random_seed=11, verbose=False, device=DEVICE,
+              num_samples=8, krylov_dim=40)
+    cs = []
+    for method in ("FTLM", "LTLM"):
+        for sym in (None, "auto"):
+            def run(method=method, sym=sym):
+                with env(ED_THERMAL_EXACT_SMALL=0):
+                    r = quiet(lambda: qed.thermal(H, method=method, symmetry=sym, **kw))
+                return {"T": fl(r.temperatures), "E": fl(r.energy), "C": fl(r.specific_heat)}
+            cs.append(GCase(f"{m.name}/thermal/{method}/symmetry={sym}/ED_THERMAL_EXACT_SMALL=0",
+                            "stochastic", run))
+    return cs
+
+
+def lanczos_binding_cases(m: Model):
+    """The direct bindings qed.finite_temperature_lanczos / qed.low_temperature_lanczos
+    on the full 2^N space, DEFAULT parameter structs (full reorthogonalisation, the
+    struct's krylov_dim / num_samples) with only the seed fixed. Both run on the CPU
+    whatever the lane."""
+    H = m.operator()
+    grid = dict(temp_min=0.25, temp_max=3.0, num_temp_bins=8)
+
+    def rec(d, gs_key):
+        out = {k: fl(d[k]) for k in ("temperatures", "energy", "specific_heat", "entropy", "free_energy")}
+        out["ground_state"] = [float(d[gs_key])]
+        return out
+
+    def ftlm():
+        p = _core.FTLMParameters()
+        p.random_seed = 11
+        return rec(quiet(lambda: qed.finite_temperature_lanczos(H, p, **grid)), "ground_state_estimate")
+
+    def ltlm():
+        p = _core.LTLMParameters()
+        p.random_seed = 11
+        return rec(quiet(lambda: qed.low_temperature_lanczos(H, p, **grid)), "ground_state_energy")
+    return [GCase(f"{m.name}/finite_temperature_lanczos/default_params/seed=11", "stochastic", ftlm),
+            GCase(f"{m.name}/low_temperature_lanczos/default_params/seed=11", "stochastic", ltlm)]
+
+
+def thermal_large_dim_case():
+    """FTLM on one block of dimension 2^14 = 16384 > 8192, where the CPU backend's
+    dot / nrm2 reductions go multi-threaded. A thread-count-dependent reduction order
+    shows up here and nowhere else in the matrix; the golden jobs run with
+    OMP_NUM_THREADS = --cpus-per-task = 8 (scripts/golden/env.sh), which golden.py
+    stores in the reference's environment snapshot. OMP_NUM_THREADS cannot be pinned
+    per case: the OpenMP runtime reads it once, at initialisation."""
+    m = gm.heis_chain(14)
+    H = m.operator()
+
+    def run():
+        r = quiet(lambda: qed.thermal(H, method="FTLM", symmetry=None, sz="off", T_min=0.25, T_max=3.0,
+                                      num_T=8, random_seed=11, num_samples=3, krylov_dim=30,
+                                      verbose=False, device=DEVICE))
+        return {"T": fl(r.temperatures), "E": fl(r.energy), "C": fl(r.specific_heat)}
+    return GCase(f"{m.name}/thermal/FTLM/symmetry=None/sz=off/dim=16384", "stochastic", run)
+
+
 def spectral_cases(m: Model):
     H = m.operator()
     N, half = m.N, m.N // 2
@@ -408,6 +472,11 @@ def build_cases(device="cpu"):
     for nm in ("j1j2_chain12", "square4x3", "tri_chiral4x3", "tfim10"):
         if nm in by_name:
             cases += thermal_cases(by_name[nm])
+            cases += thermal_kernel_cases(by_name[nm])
+    for nm in ("j1j2_chain12", "tfim10"):
+        if nm in by_name:
+            cases += lanczos_binding_cases(by_name[nm])
+    cases.append(thermal_large_dim_case())
     for nm in ("j1j2_chain12", "square4x3"):
         if nm in by_name:
             cases += spectral_cases(by_name[nm])
