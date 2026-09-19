@@ -6,11 +6,9 @@
 // ``template<Backend, MatvecFn>``. Same dual-backend pattern as
 // ``ltlm_kernel<Backend>``:
 //
-//   * ``CpuBackend``: delegates to the legacy ``::finite_temperature_lanczos``
-//     in ``src/solvers/cpu/ftlm.cpp`` so existing HDF5 output, console
-//     logging, and OpenMP-over-samples behaviour are preserved.
-//   * ``CudaBackend`` (Phase E of the "Close CPU/GPU Gaps" plan,
-//     May 2026): delegates to ``detail::ftlm_kernel_via_backend``, a
+//   * ``CpuBackend`` (WP10 C5) and ``CudaBackend`` (Phase E of the
+//     "Close CPU/GPU Gaps" plan, May 2026): delegate to
+//     ``detail::ftlm_kernel_via_backend``, a
 //     fully Backend-templated body that reuses ``lanczos_kernel<Backend>``
 //     (Phase 2 BLAS-1 facade) once per random sample. All BLAS-1 ops
 //     run device-resident; cross-PCI traffic is limited to a host-seeded
@@ -81,16 +79,20 @@ struct FtlmOptions {
     std::vector<double> temperatures;
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
-    std::string output_dir;
+    std::string output_dir;              ///< unused since WP10 C5 (no per-sample dumps)
 
     /// Knob parity with the legacy FTLMParameters (audit 2026-07-31):
     /// the CPU lane used to forward only krylov/samples/seed and let
     /// everything else silently take legacy defaults, which blocked the
     /// direct Python bindings from routing through this front door.
-    /// The CPU lane maps all of these; the Backend-templated body
-    /// honours ``full_reorthogonalization`` (FullCGS2 with a kept basis,
-    /// as the CPU lane) and ignores ``reorth_frequency`` (the CPU lane
-    /// does too since audit H5).
+    /// Since WP10 C5 both lanes run the Backend-templated body, which
+    /// honours ``full_reorthogonalization`` (FullCGS2 with a kept basis)
+    /// and ignores the rest, exactly as the legacy CPU driver did for
+    /// its results: ``max_iterations`` / ``tolerance`` /
+    /// ``reorth_frequency`` were unused there since audit H5, and
+    /// ``compute_error_bars`` only gated per-sample data and error bars
+    /// that ``FtlmResult`` never carried. ``store_intermediate`` (the
+    /// driver's per-sample HDF5 dump) is no longer honoured.
     std::uint64_t max_iterations           = 1000;
     double        tolerance                = 1e-10;
     /// Audit H5 (2026-09): stochastic-trace samples do not need a mutually
@@ -194,9 +196,10 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 }
 
 /// Phase E of the "Close CPU/GPU Gaps" plan (May 2026): backend-
-/// templated FTLM body. Used by every non-Cpu Backend specialisation
-/// of ``ftlm_kernel`` (today: ``CudaBackend``; future MPI lanes will
-/// land alongside cross-rank Lanczos post-processing).
+/// templated FTLM body. Used by every single-rank specialisation of
+/// ``ftlm_kernel`` (``CpuBackend`` since WP10 C5, ``CudaBackend``;
+/// future MPI lanes will land alongside cross-rank Lanczos
+/// post-processing).
 ///
 /// Mirrors the LTLM dual-backend pattern but is simpler:
 /// FTLM only needs the first-component weights ``|<v0 | q_k>|^2``
@@ -398,21 +401,19 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
 
 /// FTLM kernel facade.
 ///
-/// Phase E of the "Close CPU/GPU Gaps" plan (May 2026): closes the
-/// previous CPU-only ``static_assert`` gap. The body now dispatches
-/// on the backend type:
-///   * ``CpuBackend``: delegates to ``::finite_temperature_lanczos``
-///     (the legacy CPU driver in ``src/solvers/cpu/ftlm.cpp``) so
-///     existing HDF5 output, console logging, and OpenMP-over-samples
-///     behaviour is preserved.
-///   * ``CudaBackend``: delegates to ``detail::ftlm_kernel_via_backend``
-///     -- a fully Backend-templated body that reuses
-///     ``lanczos_kernel<CudaBackend>`` (Phase 2 BLAS-1 facade) once per
-///     random sample. All BLAS-1 ops run device-resident; the only
-///     cross-PCI traffic is the host-seeded random starting vector per
-///     sample (a single ``~N*16`` byte transfer at the top of each
-///     sample) and the small ``(M x M)`` tridiagonal diagonalisation
-///     handled on the host with LAPACK.
+/// ``CpuBackend`` and ``CudaBackend`` both delegate to
+/// ``detail::ftlm_kernel_via_backend`` (WP10 C5; CUDA since Phase E of
+/// the "Close CPU/GPU Gaps" plan, May 2026) -- a fully Backend-templated
+/// body that reuses ``lanczos_kernel<Backend>`` once per random sample.
+/// On CUDA all BLAS-1 ops run device-resident; the only cross-PCI
+/// traffic is the host-seeded random starting vector per sample (a
+/// single ``~N*16`` byte transfer at the top of each sample) and the
+/// small ``(M x M)`` tridiagonal diagonalisation handled on the host
+/// with LAPACK. On CPU the result equals the legacy driver
+/// ``::finite_temperature_lanczos`` for the same options; the driver's
+/// opt-in sample-parallel loop (``ED_FTLM_PARALLEL``), per-sample HDF5
+/// dumps (``store_intermediate``) and verbose sample logging are not
+/// carried over.
 template <typename Backend, typename MatvecFn>
 FtlmResult ftlm_kernel(const Backend&  backend,
                        MatvecFn&&      apply_H,
@@ -420,63 +421,21 @@ FtlmResult ftlm_kernel(const Backend&  backend,
                        std::uint64_t   global_n,
                        const FtlmOptions& opts)
 {
-    if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
-        // Stage 12f: the legacy CPU driver draws its own seeds and
-        // cannot honour a subspace-restricting ``seed_transform`` --
-        // route through the Backend-templated body (which applies the
-        // transform per sample) instead of silently sampling the
-        // whole block.
-        if (opts.seed_transform) {
-            return detail::ftlm_kernel_via_backend(
-                backend, std::forward<MatvecFn>(apply_H),
-                local_n, global_n, opts);
-        }
-        // CPU lane: legacy driver with full I/O behaviour.
-        FTLMParameters params;
-        params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);
-        params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);
-        params.random_seed  = opts.random_seed;
-        params.max_iterations           = opts.max_iterations;
-        params.tolerance                = opts.tolerance;
-        params.full_reorthogonalization = opts.full_reorthogonalization;
-        params.reorth_frequency         = opts.reorth_frequency;
-        params.store_intermediate       = opts.store_intermediate;
-        params.compute_error_bars       = opts.compute_error_bars;
-
-        // Evaluate the thermodynamics on the EXACT temperature grid the
-        // caller supplied via ``opts.betas`` (T_k = 1/beta_k), preserving
-        // its spacing. The previous code forwarded only (temp_min,
-        // temp_max, num_bins) to the legacy driver, which rebuilt a
-        // *log-spaced* grid internally -- so a linear ``opts.betas`` axis
-        // produced energies sampled at the wrong temperatures while the
-        // reported ``temperatures`` (derived from ``opts.betas``) stayed
-        // linear. That mismatch is now closed: the CPU lane matches the
-        // GPU lane, which already used 1/betas directly. An explicit
-        // ``opts.temperatures`` grid is forwarded verbatim (WP10 C4).
-        const detail::FtlmGrid grid =
-            detail::resolve_ftlm_grid(opts, "ftlm_kernel (CPU lane)");
-
-        std::function<void(const Complex*, Complex*, int)> legacy_H =
-            [&apply_H](const Complex* in, Complex* out, int n) {
-                apply_H(in, out, static_cast<std::size_t>(n));
-            };
-
-        const auto legacy = ::finite_temperature_lanczos(
-            legacy_H,
-            static_cast<std::uint64_t>(local_n),
-            params, grid.temperatures, opts.output_dir);
-
-        return detail::to_ftlm_result(legacy, grid.betas);
-    }
+    // WP10 C5: one body for both single-rank lanes. The CPU lane used to
+    // convert to FTLMParameters and call ``::finite_temperature_lanczos``;
+    // the Backend-templated body now reproduces that driver sample for
+    // sample (tests/unit/test_ftlm_rng_parity.cpp), so it is used here too.
+    constexpr bool single_rank =
 #ifdef WITH_CUDA
-    else if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
+        std::is_same_v<Backend, ed::matvec::CudaBackend> ||
+#endif
+        std::is_same_v<Backend, ed::matvec::CpuBackend>;
+    if constexpr (single_rank) {
         return detail::ftlm_kernel_via_backend(
             backend,
             std::forward<MatvecFn>(apply_H),
             local_n, global_n, opts);
-    }
-#endif
-    else {
+    } else {
         // MpiBackend / MpiCudaBackend: needs cross-rank reductions in
         // the Lanczos basis and in the per-temperature thermo averages
         // that the current Backend-templated body does not yet handle.

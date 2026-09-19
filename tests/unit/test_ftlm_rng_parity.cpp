@@ -13,6 +13,9 @@
 //     and on.
 // Energy, specific heat, entropy and free energy must agree to 1e-12
 // (relative); the test also reports whether the curves are bit-identical.
+// WP10 C5: the CpuBackend front door ``ftlm_kernel`` now runs this body
+// instead of the driver, so it is held to the same tolerance against the
+// driver (plus exact temperature-grid equality) while the driver exists.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -104,6 +107,22 @@ void check_parity(std::uint64_t n_sites, std::size_t samples,
     WARN("n_sites " << n_sites << ", full_reorth " << full_reorth
          << ": via_backend vs finite_temperature_lanczos "
          << (identical ? "bit-identical" : "equal to 1e-12, not bit-identical"));
+
+    // WP10 C5: the CpuBackend front door (orchestrator FTLM/LTLM and the
+    // qed.finite/low_temperature_lanczos bindings) no longer calls the
+    // driver; it must still return the driver's curves on the driver's
+    // temperature grid.
+    const auto front = ed::thermal::ftlm_kernel(
+        ed::matvec::default_cpu_backend(), apply, dim,
+        static_cast<std::uint64_t>(dim), opts);
+    CHECK(front.temperatures == gen1.thermo_data.temperatures);
+    CHECK(front.betas == betas);
+    compare_curve("front energy",        front.energy,        gen1.thermo_data.energy);
+    compare_curve("front specific_heat", front.heat_capacity, gen1.thermo_data.specific_heat);
+    compare_curve("front entropy",       front.entropy,       gen1.thermo_data.entropy);
+    compare_curve("front free_energy",   front.free_energy,   gen1.thermo_data.free_energy);
+    CHECK(std::abs(front.ground_state_estimate - gen1.ground_state_estimate)
+          <= 1e-12 * std::max(1.0, std::abs(gen1.ground_state_estimate)));
 }
 
 }  // namespace

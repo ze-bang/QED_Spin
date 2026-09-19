@@ -511,9 +511,10 @@ py::dict py_compute_thermo_from_spectrum(const py::array_t<double>& eigs,
 // ed::thermal::ftlm_kernel front door entirely -- the seam this repo's
 // consolidation essay warns about (the Stage-12f seed_transform feature
 // exists only behind the front door). All four bindings now route through
-// ftlm_kernel<CpuBackend>, which delegates to the SAME legacy driver
-// with the SAME log-spaced grid and (newly knob-complete) parameters,
-// so the public output is unchanged byte-for-byte.
+// ftlm_kernel<CpuBackend> with the SAME log-spaced grid and (newly
+// knob-complete) parameters. Since WP10 C5 the front door runs the
+// Backend-templated body, which reproduces the legacy driver sample for
+// sample (tests/unit/test_ftlm_rng_parity.cpp).
 
 // The exact log-spaced grid the legacy (temp_min, temp_max, num_temp_bins)
 // driver overload builds internally (src/solvers/cpu/ftlm.cpp), same
@@ -539,7 +540,7 @@ std::vector<double> legacy_log_temperature_grid(double temp_min,
 // How the front door receives the log grid. kBetas passes beta = 1/T and
 // lets the kernel report T = 1/beta (qed.finite_temperature_lanczos, whose
 // goldens were blessed that way); kExactTemperatures passes the grid
-// verbatim through FtlmOptions::temperatures, so the driver evaluates and
+// verbatim through FtlmOptions::temperatures, so the kernel evaluates and
 // reports exactly the exp grid the direct driver call used
 // (qed.low_temperature_lanczos, WP10 C4: 1/(1/T) can differ from T by an
 // ulp).
