@@ -148,3 +148,26 @@ def test_sector_names_one_momentum_on_every_lane():
     assert abs(E["off", (0, 1)] - E["off", (0, 2)]) > 0.1      # k and -k differ here
     for q in [(a, b) for a in range(3) for b in range(3)]:
         assert abs(E["off", q] - E["full", q]) < 1e-9, (q, E["off", q], E["full", q])
+
+
+def test_directory_automorphism_finder_respects_three_body_terms(tmp_path, monkeypatch):
+    """The ED CLI regenerates automorphisms from a directory with
+    edlib/automorphism_finder.py; its graph sees Trans.dat and InterAll.dat only, so
+    ThreeBodyG.dat must filter the result (else 1296 elements instead of 54)."""
+    import json as _json
+    from edlib import automorphism_finder as af
+    sys.path.insert(0, os.path.join(ROOT, "benchmarks"))
+    try:
+        from audit_workflows import Model, chiral_terms, heisenberg_terms, triangular_torus
+    finally:
+        sys.path.pop(0)
+    nn, _, tri = triangular_torus(3, 3)
+    m = Model("up", 9, heisenberg_terms(nn, 1.0) + chiral_terms(tri[0::2], 0.7), u1=True, real=False)
+    m.builder().write_directory(str(tmp_path))
+    assert (tmp_path / "ThreeBodyG.dat").stat().st_size > 0
+    monkeypatch.setattr(sys, "argv", ["automorphism_finder.py", "--data_dir", str(tmp_path)])
+    af.main()
+    with open(tmp_path / "automorphism_results" / "automorphisms.json") as f:
+        autos = [list(p) for p in _json.load(f)]
+    assert len(autos) == 54
+    assert all(_core.check_generators_commute(m.operator(), autos))

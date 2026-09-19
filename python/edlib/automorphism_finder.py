@@ -32,6 +32,50 @@ def read_trans_file(filename):
         raise RuntimeError(f"Error reading Trans.dat file: {e}")
     return vertex_weights
 
+def read_three_body_file(filename):
+    """Three-body terms of ThreeBodyG.dat as ((op, site), (op, site), (op, site), coeff);
+    [] when the file is absent."""
+    terms = []
+    if not os.path.exists(filename):
+        return terms
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('=') or line.startswith('num'):
+                continue
+            p = line.split()
+            if len(p) >= 8:
+                terms.append(((int(p[0]), int(p[1])), (int(p[2]), int(p[3])),
+                              (int(p[4]), int(p[5])), complex(float(p[6]), float(p[7]))))
+    return terms
+
+
+def _three_body_table(terms, perm=None, digits=9):
+    """{canonical term: summed coefficient}. Factors on distinct sites commute, so such
+    a term is keyed by its factors sorted by site; a term with a repeated site keeps
+    its order."""
+    table = {}
+    for *factors, c in terms:
+        f = [(op, perm[s] if perm is not None else s) for op, s in factors]
+        sites = [s for _, s in f]
+        key = tuple(sorted(f, key=lambda x: x[1])) if len(set(sites)) == len(sites) else tuple(f)
+        table[key] = table.get(key, 0) + c
+    return {k: complex(round(v.real, digits), round(v.imag, digits))
+            for k, v in table.items() if abs(v) > 10.0 ** -digits}
+
+
+def filter_three_body_automorphisms(automorphisms, terms):
+    """Keep the permutations that map the three-body term table onto itself.
+
+    The colored graph is built from Trans.dat and InterAll.dat only, so its
+    automorphisms ignore three-body terms; a permutation reversing a scalar-chirality
+    triangle turns S_i.(S_j x S_k) into minus itself and would otherwise pass."""
+    if not terms:
+        return automorphisms
+    base = _three_body_table(terms)
+    return [p for p in automorphisms if _three_body_table(terms, p) == base]
+
+
 def read_interall_file(filename):
     """Read edge information from InterAll.dat file."""
     edges = []
@@ -992,6 +1036,11 @@ def main():
         n_removed = all_automorphisms_pre_filter - len(all_automorphisms)
         print(f"WARNING: Removed {n_removed} automorphisms that don't commute with Hamiltonian")
         print(f"  This may indicate edge-type encoding issues in the graph construction")
+    three_body = read_three_body_file(os.path.join(args.data_dir, "ThreeBodyG.dat"))
+    if three_body:
+        n_before = len(all_automorphisms)
+        all_automorphisms = filter_three_body_automorphisms(all_automorphisms, three_body)
+        print(f"Three-body terms: kept {len(all_automorphisms)} of {n_before} automorphisms")
     print(f"Valid Hamiltonian automorphisms: {len(all_automorphisms)}")
     
     # Save all automorphisms to JSON (now with correct vertex IDs)
