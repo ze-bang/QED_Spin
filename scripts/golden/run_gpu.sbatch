@@ -21,7 +21,9 @@ fi
 MODE="${MODE:-compare}"; REF="${REF:?set REF=<reference file>}"
 echo "host=$(hostname) commit=$(git rev-parse --short HEAD) mode=${MODE} ref=${REF} pythonpath=${PYTHONPATH%%:*} core=${QED_CORE_DIR:-<in package>}"
 python -c "import qed, sys; ok = bool(qed._core.have_cuda()); print('have_cuda =', ok); sys.exit(0 if ok else 3)" || { echo "=== NODE FAILURE: the library sees no CUDA device ==="; exit 3; }
-if [ "${MODE}" = record ]; then
+if [ "${MODE}" = bless ]; then
+    python -u tests/golden/golden.py bless --device gpu --ref "${REF}" --only ${ONLY:?set ONLY=<case names>} --reason "${REASON:?set REASON=...}"
+elif [ "${MODE}" = record ]; then
     python -u tests/golden/golden.py record --device gpu --out "${REF}" ${ONLY:+--only ${ONLY}}
 else
     python -u tests/golden/golden.py compare --device gpu --ref "${REF}" ${ONLY:+--only ${ONLY}}

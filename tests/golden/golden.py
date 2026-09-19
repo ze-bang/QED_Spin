@@ -3,6 +3,7 @@
 
     python tests/golden/golden.py record  --out tests/golden/refs/<tag>/cpu.json.gz
     python tests/golden/golden.py compare --ref tests/golden/refs/<tag>/cpu.json.gz
+    python tests/golden/golden.py bless   --ref tests/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
     python tests/golden/golden.py list
 
 ``record`` runs every case twice unless --once is given and refuses to write a
@@ -140,6 +141,40 @@ def cmd_record(args):
     return 0
 
 
+def cmd_bless(args):
+    """Re-record EXACTLY the named cases into an existing reference (determinism checked
+    by a second run) and keep every other record; the file's meta keeps a log of what
+    was re-blessed, at which commit and why."""
+    from cases import build_cases
+    if not args.only:
+        print("bless needs --only: re-blessing everything is `record`")
+        return 2
+    with gzip.open(args.ref, "rt") as f:
+        doc = json.load(f)
+    chosen = [c for c in build_cases(args.device) if c.name in set(args.only)]
+    unknown = sorted(set(args.only) - {c.name for c in chosen})
+    if unknown:
+        print(f"no such case(s): {unknown} (bless takes exact case names)")
+        return 2
+    for c in chosen:
+        r1, r2 = run_case(c), run_case(c)
+        d = diff_records(r1, r2)
+        if d or "raised" in r1:
+            print(f"refusing to bless {c.name}: " + (d[0] if d else r1.get("message", "raised")))
+            return 1
+        old = doc["records"].get(c.name)
+        for line in (diff_records(old, r1) if old else ["  (new case)"])[:6]:
+            print(f"  {c.name}{line}")
+        doc["records"][c.name] = r1
+    doc["meta"].setdefault("blessed", []).append(
+        {"sha": git_sha(), "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "cases": [c.name for c in chosen], "reason": args.reason})
+    with gzip.open(args.ref, "wt") as f:
+        json.dump(doc, f)
+    print(f"\nblessed {len(chosen)} case(s) into {args.ref}")
+    return 0
+
+
 def cmd_compare(args):
     from cases import build_cases
     with gzip.open(args.ref, "rt") as f:
@@ -194,13 +229,17 @@ def _qed_file():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("record", cmd_record), ("compare", cmd_compare), ("list", cmd_list)):
+    for name, fn in (("record", cmd_record), ("compare", cmd_compare), ("bless", cmd_bless),
+                     ("list", cmd_list)):
         p = sub.add_parser(name)
         p.add_argument("--device", default="cpu", choices=("cpu", "gpu"))
         p.add_argument("--only", nargs="*", default=[], help="substring filter on case names")
         if name == "record":
             p.add_argument("--out", required=True)
             p.add_argument("--once", action="store_true", help="single pass, no determinism check")
+        if name == "bless":
+            p.add_argument("--ref", required=True)
+            p.add_argument("--reason", required=True, help="why the reference moves (kept in meta)")
         if name == "compare":
             p.add_argument("--ref", required=True)
         p.set_defaults(fn=fn)
