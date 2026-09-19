@@ -150,7 +150,8 @@ def test_full_spectrum_ring6_matches_dense_and_directory_lane(no_tempdir):
     info = _normalize_symmetry_info(H, gens)
     ref, ref_tags = _directory_full_spectrum(H, info, N, range(N + 1))
     np.testing.assert_allclose(out.eigenvalues, ref, rtol=0, atol=1e-12)
-    assert [(n, _tag(t)) for n, t in out.sector_tags] == ref_tags
+    # sectors come out in energy order; degenerate ones (k and -k) in no fixed order
+    assert sorted((n, _tag(t)) for n, t in out.sector_tags) == sorted(ref_tags)
     assert sorted({tuple(q) for _, (_, q, _, _) in ref_tags}) == [(k,) for k in range(N)]
 
 
@@ -166,7 +167,8 @@ def test_full_spectrum_j1j2_4x4_two_generators(no_tempdir, n_up):
     info = _normalize_symmetry_info(H, gens)
     ref, ref_tags = _directory_full_spectrum(H, info, N, [n_up])
     np.testing.assert_allclose(out.eigenvalues, ref, rtol=0, atol=1e-12)
-    assert [(n, _tag(t)) for n, t in out.sector_tags] == ref_tags
+    # sectors come out in energy order; degenerate ones (k and -k) in no fixed order
+    assert sorted((n, _tag(t)) for n, t in out.sector_tags) == sorted(ref_tags)
     assert len({tuple(q) for _, (_, q, _, _) in ref_tags}) == 16
 
 
@@ -220,8 +222,8 @@ def test_raw_generators_only_dict_is_closed_like_the_writer(no_tempdir):
     a = qed.full_spectrum(H, symmetry=raw, total_spin="off", **kw)
     b = qed.full_spectrum(H, symmetry=gens, total_spin="off", **kw)
     np.testing.assert_allclose(a.eigenvalues, b.eigenvalues, rtol=0, atol=1e-12)
-    assert [(n, _tag(t)) for n, t in a.sector_tags] == \
-        [(n, _tag(t)) for n, t in b.sector_tags]
+    assert sorted((n, _tag(t)) for n, t in a.sector_tags) == \
+        sorted((n, _tag(t)) for n, t in b.sector_tags)
     for qn in [(0, 0), (1, 0), (1, 2), (3, 3)]:
         ra = qed.solve(H, sector=qn, symmetry=raw, num_eigenvalues=1, verbose=False, **kw)
         rb = qed.solve(H, sector=qn, symmetry=gens, num_eigenvalues=1, verbose=False, **kw)
