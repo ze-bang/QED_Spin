@@ -18,7 +18,7 @@ echo "host=$(hostname) branch=$(git rev-parse --abbrev-ref HEAD) commit=$(git re
 scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant "${QED_VARIANT}" --target _core || exit 1
 echo "=== BEGIN PYTEST ==="
 # the same two directories CI runs; -rf summarises failures at the end
-python -u -m pytest python/tests tests/integration -q -rf -p no:cacheprovider
+python -u -m pytest ${PYTEST_ARGS:-python/tests tests/integration} -q -rf -p no:cacheprovider
 status=$?
 echo "=== END PYTEST (exit ${status}) ==="
 exit ${status}
