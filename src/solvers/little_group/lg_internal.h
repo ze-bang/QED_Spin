@@ -196,11 +196,20 @@ public:
 
     RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd,
                     bool force_gpu = false)
-        : rd_(std::make_unique<ed::symmetry::RepSectorData>(std::move(rd))),
+        : RepSectorMatVec(op, own_with_lut(std::move(rd)), force_gpu) {}
+
+    /// Share an existing sector basis: H and any other G-invariant operator on the
+    /// same (k, n_up) sector can use ONE copy of the reps / norms / perm tables,
+    /// which is 1-2 GB at N = 36. The data must already carry its permutation LUT
+    /// (every RepSectorMatVec builds it on construction, so rep_data_ptr() of an
+    /// existing operator qualifies).
+    RepSectorMatVec(const ::Operator& op,
+                    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
+                    bool force_gpu = false)
+        : rd_(std::move(rd)),
           terms_(op.getTerms()),
           force_gpu_(force_gpu)
     {
-        rd_->build_perm_lut();
         tv_.diag_one    = &terms_.diag_one_body;
         tv_.offdiag_one = &terms_.offdiag_one_body;
         tv_.diag_two    = &terms_.diag_two_body;
@@ -263,6 +272,9 @@ public:
     [[nodiscard]] bool is_hermitian() const override { return true; }
     [[nodiscard]] std::string description() const override {
         return "LittleGroupRepSector(H_k)";
+    }
+    [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const {
+        return rd_;
     }
     [[nodiscard]] const ed::symmetry::RepSectorData& rep_data() const {
         return *rd_;
@@ -342,7 +354,16 @@ private:
         }
     }
 
-    std::unique_ptr<ed::symmetry::RepSectorData>  rd_;   // stable address for the backend
+    // Shared (possibly with other operators on the same sector); stable address
+    // for the backend, which holds a non-owning view.
+    std::shared_ptr<const ed::symmetry::RepSectorData> rd_;
+
+    static std::shared_ptr<const ed::symmetry::RepSectorData>
+    own_with_lut(ed::symmetry::RepSectorData rd) {
+        auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
+        p->build_perm_lut();
+        return p;
+    }
     ed::matvec::TermStorage                        terms_;
     TV                                             tv_{};
     std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
