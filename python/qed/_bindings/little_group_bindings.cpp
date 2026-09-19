@@ -1125,4 +1125,83 @@ void bind_little_group(py::module_& m) {
           "flip Z2 is exploited -- the cheap replacement for the multi-Q "
           "spectral lane when only the STATIC structure factor is wanted.");
 
+
+    // -------------------------------------------------------------------------
+    // Expectation values <n|O_i|n> of the lowest k levels of every block, in the
+    // representative basis (no 2^N expansion): the excited-state observable lane.
+    // With O_i = dH/dlambda_i these are Hellmann-Feynman derivatives.
+    // -------------------------------------------------------------------------
+    m.def("little_group_block_expectations",
+          [lg_opts, lg_stars_dict, with_block_size](const Operator& op,
+             const std::vector<const Operator*>& observables,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int k, int n_up, int sz_parity, int dense_max_dim, bool use_gpu,
+             int spin_flip, int time_reversal,
+             const std::vector<int>& only_k0,
+             const std::vector<int>& only_irrep, int block_size) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupExpectations r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::little_group_block_expectations(
+                      op, observables, abelian_group, residue_perms, n_sites, k,
+                      with_block_size(lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                                              spin_flip, time_reversal, only_k0,
+                                              /*plan_only=*/false, only_irrep),
+                                      block_size));
+              }
+              std::vector<int> kraw, fpar, irr, idim;
+              std::vector<bool> conv;
+              for (const auto& L : r.labels) {
+                  kraw.push_back(L.k_raw);
+                  fpar.push_back(L.flip_parity);
+                  irr.push_back(L.irrep);
+                  idim.push_back(L.irrep_dim);
+                  conv.push_back(L.converged);
+              }
+              const std::size_t n_obs = observables.size();
+              py::array_t<double> vals({static_cast<py::ssize_t>(r.values.size()),
+                                        static_cast<py::ssize_t>(n_obs)});
+              auto vm = vals.mutable_unchecked<2>();
+              for (std::size_t i = 0; i < r.values.size(); ++i)
+                  for (std::size_t j = 0; j < n_obs; ++j)
+                      vm(static_cast<py::ssize_t>(i), static_cast<py::ssize_t>(j)) =
+                          r.values[i][j];
+              ed::solvers::LittleGroupSpectrum star_view;   // lg_stars_dict's input shape
+              star_view.stars = r.stars;
+              py::dict d;
+              d["energies"]           = r.energies;
+              d["values"]             = vals;
+              d["k_raw"]              = kraw;
+              d["flip_parity"]        = fpar;
+              d["irrep"]              = irr;
+              d["irrep_dim"]          = idim;
+              d["level"]              = r.level;
+              d["multiplicity"]       = r.multiplicity;
+              d["converged"]          = conv;
+              d["residuals"]          = r.residuals;
+              d["irrep_characters"]   = r.irrep_characters;
+              d["stars"]              = lg_stars_dict(star_view);
+              d["flip_engaged"]       = r.flip_engaged;
+              d["tr_engaged"]         = r.tr_engaged;
+              d["unconverged_blocks"] = r.unconverged_blocks;
+              return d;
+          },
+          py::arg("operator"), py::arg("observables"),
+          py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("k") = 1, py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 256, py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("only_k0") = std::vector<int>{},
+          py::arg("only_irrep") = std::vector<int>{},
+          py::arg("block_size") = 1,
+          "<n|O_i|n> for the lowest k levels of every (star, irrep, flip) block, "
+          "computed in the momentum sector's representative basis (never expanded "
+          "to 2^N). One row per (block, level): energies, values[row, i], labels "
+          "aligned like little_group_lowest_eigenvalues_labeled, the rep-basis "
+          "residual, and unconverged_blocks. Observables must commute with every "
+          "abelian element and residue (and the spin flip / be real when those are "
+          "folded), else ValueError. With O_i = dH/dlambda_i the values are "
+          "Hellmann-Feynman derivatives.");
 }

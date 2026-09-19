@@ -237,6 +237,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
     ${SRC_DIR}/solvers/little_group/lg_thermal.cpp
     ${SRC_DIR}/solvers/little_group/lg_vectors.cpp
+    ${SRC_DIR}/solvers/little_group/lg_observables.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
     # Phase A of the "mirror examples" plan (May 2026): Python-named

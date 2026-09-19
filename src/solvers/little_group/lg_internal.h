@@ -23,6 +23,7 @@
 //   lg_ground_state.cpp  certified ground-state vector, k-sector factories
 //   lg_thermal.cpp       exact and sampled thermodynamics over the blocks
 //   lg_vectors.cpp       lowest eigenpairs with vectors, fold transport, expansion
+//   lg_observables.cpp   expectation values <n|O|n> of block eigenstates (rep basis)
 // =============================================================================
 
 #include <ed/solvers/little_group_solve.h>

@@ -251,6 +251,48 @@ little_group_lowest_vectors(const ::Operator&                    op,
                             const LittleGroupOptions&            opt);
 
 // =============================================================================
+// Expectation values <n|O_i|n> of the lowest `k` levels of every (star, irrep, flip)
+// block -- computed in the momentum sector's representative basis, never expanded
+// to 2^N, so they are available wherever the block solve is (N = 36 included).
+//
+// Each observable is applied through the SAME sector basis as H (one copy of the
+// reps / norms / permutation tables per star). Observables must share H's
+// symmetries -- commute with every abelian element and residue at the term level,
+// with the global spin flip when that engages, be real when time reversal folds,
+// and conserve Sz when n_up is fixed -- or the call throws naming the offender: a
+// sector basis cannot represent an operator that mixes its sectors.
+//
+// With O_i = dH/dlambda_i these are the Hellmann-Feynman derivatives dE_n/dlambda_i.
+//
+// Rows: one per (block, level), levels ascending within a block, blocks in the
+// engine's canonical star / irrep order. `residuals` is ||H u - E u|| / ||u|| of
+// each lifted state in the rep basis; a block that could not certify its levels
+// is counted in `unconverged_blocks` and contributes its certified prefix only.
+// =============================================================================
+struct LittleGroupExpectations {
+    std::vector<double>                  energies;
+    std::vector<LittleGroupLabel>        labels;     ///< parallel to energies
+    std::vector<int>                     level;      ///< 0 = block ground, 1, ...
+    std::vector<int>                     multiplicity;  ///< |star| x d_sigma (x2 TR fold)
+    std::vector<std::vector<double>>     values;     ///< values[row][i] = <n|O_i|n>
+    std::vector<double>                  residuals;  ///< rep-basis residual per row
+    std::vector<LittleGroupStarInfo>     stars;
+    std::vector<std::vector<std::complex<double>>> irrep_characters;
+    bool        flip_engaged       = false;
+    bool        tr_engaged         = false;
+    std::size_t unconverged_blocks = 0;
+};
+
+[[nodiscard]] LittleGroupExpectations
+little_group_block_expectations(const ::Operator&                    op,
+                                const std::vector<const ::Operator*>& observables,
+                                const std::vector<std::vector<int>>& abelian_group,
+                                const std::vector<std::vector<int>>& residue_perms,
+                                int                                  n_sites,
+                                int                                  k,
+                                const LittleGroupOptions&            opt);
+
+// =============================================================================
 // U3: FOLD TRANSPORT for vectors -- the partners a fold skipped. A star
 // fold proves spec(k') == spec(k0) by U_p; this applies that U_p (or the
 // antiunitary K for a TR pair) to an actual eigenvector:
