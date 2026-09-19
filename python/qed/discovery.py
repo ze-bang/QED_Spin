@@ -85,6 +85,23 @@ def _run_full_automorphism_pipeline(
     return filter_hamiltonian_automorphisms(autos, edges)
 
 
+def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> list[Permutation]:
+    """Only the automorphisms that commute with the whole operator.
+
+    The colored graph is built from the one- and two-body terms, so its automorphisms
+    ignore three-body terms: a permutation that reverses the orientation of a scalar-
+    chirality triangle maps S_i.(S_j x S_k) to minus itself and still passes. On the 3x3
+    triangular torus with chirality on up-triangles, 1242 of the 1296 graph
+    automorphisms are not symmetries, and the projection lane folded k with -k from
+    them. The term-level check is exact and sees every term; the survivors are the
+    intersection of two groups, hence a group."""
+    if not autos or not any(True for _ in operator.iter_three_body_terms()):
+        return autos
+    from . import _core
+    keep = list(_core.check_generators_commute(operator, [list(map(int, p)) for p in autos]))
+    return [p for p, ok in zip(autos, keep) if ok]
+
+
 def _translation_autos_from_lattice(
     all_automorphisms: list[Permutation],
     lattice: Any,
@@ -696,6 +713,7 @@ def _find_symmetries_impl(
                 AutomorphismFinder, filter_hamiltonian_automorphisms,
             )
 
+    all_automorphisms = _keep_hamiltonian_symmetries(operator, all_automorphisms)
     # 3a. Translation-only generator set (when a lattice is provided).
     if lattice is not None:
         translation_autos = _translation_autos_from_lattice(

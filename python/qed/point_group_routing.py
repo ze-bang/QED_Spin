@@ -202,8 +202,11 @@ def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
     """Which star(s) does the caller's momentum live in?
 
     ``sector`` names one quantum number per GENERATOR: generator ``a_i`` (of
-    order ``o_i``) acts with phase ``exp(-2*pi*i*q_i/o_i)``, the directory's
-    ``phase_factors`` convention. Returns ``(k0, k_raw)`` -- the star
+    order ``o_i``) has character ``exp(+2*pi*i*q_i/o_i)``, the convention of the
+    abelian lanes (the directory writer's ``phase_factors`` and
+    SymmetryGroupInfo::from_memory), so one ``sector=`` names one momentum on every
+    lane. (It was ``exp(-...)`` here, and the projection lane answered ``sector=q``
+    with the spectrum of ``-q``.) Returns ``(k0, k_raw)`` -- the star
     REPRESENTATIVE to hand to ``only_k0``, and the caller's own raw irrep
     index -- or a ``str`` decline reason.
 
@@ -236,7 +239,7 @@ def decode_star_for_sector(stars, irrep_characters, A, generators, orders,
         except ValueError:
             return ("a generator is not present in the closed abelian group "
                     "(cannot decode its character)")
-        want.append((a_idx, cmath.exp(-2j * cmath.pi * (q % o) / o)))
+        want.append((a_idx, cmath.exp(2j * cmath.pi * (q % o) / o)))
 
     k_raw = None
     for kk, row in enumerate(irrep_characters):
