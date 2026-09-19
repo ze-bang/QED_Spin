@@ -107,13 +107,28 @@ struct InMemoryOperator {
     std::unique_ptr<Operator> op;
 };
 
+/// In-memory symmetric route (WP9): the term list and the symmetry group
+/// the directory route would read from ``InterAll.dat`` & co. and
+/// ``automorphism_results/``, supplied without the directory. ``op`` is
+/// only read (its terms are copied into the factory's own carrier), so
+/// one pair can feed several specs. ``group`` is expected to come from
+/// ``SymmetryGroupInfo::from_memory`` (writer phase convention). The
+/// symmetry lanes run with no lattice directory: the OrbitTable disk
+/// cache is registry-only unless ``basis_cache_dir`` / ``ED_SYM_CACHE_DIR``
+/// names one (see ed::symmetry::resolve_sym_cache_dir).
+struct InMemorySymmetric {
+    std::shared_ptr<const Operator>          op;
+    std::shared_ptr<const SymmetryGroupInfo> group;
+};
+
 // ---------------------------------------------------------------------------
 // OperatorSpec
 // ---------------------------------------------------------------------------
 
 struct OperatorSpec {
     /// Hamiltonian source. Exactly one variant alternative is consulted.
-    std::variant<FilePaths, DirectoryPath, InMemoryOperator> source;
+    std::variant<FilePaths, DirectoryPath, InMemoryOperator,
+                 InMemorySymmetric> source;
 
     /// Total number of sites (= number of qubits in the spin-1/2 mapping).
     std::uint64_t         num_sites = 0;
@@ -262,14 +277,21 @@ inline void load_terms_into(Operator& op, const OperatorSpec& spec) {
             // around this case explicitly.
             (void)op;
             (void)src;
+        } else if constexpr (std::is_same_v<T, InMemorySymmetric>) {
+            if (!src.op) {
+                throw std::invalid_argument(
+                    "ed::make_operator: InMemorySymmetric source has a "
+                    "null operator.");
+            }
+            op.copyTermsFrom(*src.op);
         }
     }, spec.source);
 }
 
 /// Resolve the directory string from a `DirectoryPath`-typed source,
-/// or throw if the spec is using a different source variant. Used by
-/// the streaming-symmetry lane which mandatorily needs a directory
-/// (it loads `automorphism_results/` from disk).
+/// or throw if the spec is using a different source variant. The
+/// symmetry lanes resolve their source through `symmetric_source_dir` /
+/// `load_symmetric_base` below (which also accept `InMemorySymmetric`).
 inline const std::string& require_directory(const OperatorSpec& spec) {
     return std::visit([&](auto&& src) -> const std::string& {
         using T = std::decay_t<decltype(src)>;
@@ -283,6 +305,48 @@ inline const std::string& require_directory(const OperatorSpec& spec) {
                 "metadata from <directory>/automorphism_results/).");
         }
     }, spec.source);
+}
+
+/// Lattice directory of a symmetric source: the ``DirectoryPath`` directory,
+/// or "" for ``InMemorySymmetric`` (no fixture directory -- the OrbitTable
+/// disk cache then resolves registry-only unless an override names one).
+/// Throws for the sources that carry no symmetry group.
+inline std::string symmetric_source_dir(const OperatorSpec& spec) {
+    if (std::holds_alternative<InMemorySymmetric>(spec.source)) return {};
+    if (const auto* d = std::get_if<DirectoryPath>(&spec.source))
+        return d->directory;
+    throw std::runtime_error(
+        "ed::make_operator: streaming_symmetry = true requires "
+        "OperatorSpec::source to be a DirectoryPath (with "
+        "<directory>/automorphism_results/) or an InMemorySymmetric "
+        "(terms + SymmetryGroupInfo).");
+}
+
+/// The symmetric base operator every symmetry lane builds its sectors from:
+/// a ``build_base_op`` carrier holding the Hamiltonian terms plus the loaded
+/// ``symmetry_info``.
+///   * ``DirectoryPath``    : terms parsed from the directory's files, then
+///                            ``symmetry_info.loadFromDirectory(directory)``.
+///   * ``InMemorySymmetric``: terms copied verbatim from ``*op``
+///                            (``copyTermsFrom``), ``symmetry_info`` copied
+///                            from ``*group``.
+inline std::shared_ptr<Operator> load_symmetric_base(const OperatorSpec& spec) {
+    if (const auto* mem = std::get_if<InMemorySymmetric>(&spec.source)) {
+        if (!mem->op || !mem->group) {
+            throw std::invalid_argument(
+                "ed::make_operator: InMemorySymmetric source needs both an "
+                "operator and a symmetry group.");
+        }
+        auto base = build_base_op(spec);
+        load_terms_into(*base, spec);
+        base->symmetry_info = *mem->group;
+        return base;
+    }
+    const std::string dir = symmetric_source_dir(spec);
+    auto base = build_base_op(spec);
+    load_terms_into(*base, spec);
+    base->symmetry_info.loadFromDirectory(dir);
+    return base;
 }
 
 // NOTE (Stage 11c-1, Jul 2026): the eager-vs-lazy regime decision
@@ -321,7 +385,8 @@ inline const std::string& require_directory(const OperatorSpec& spec) {
 /// entirely.
 ///
 /// Requirements: ``spec.streaming_symmetry == true`` and a ``DirectoryPath``
-/// source carrying ``<directory>/automorphism_results/``. ``spec.fixed_sz``
+/// source carrying ``<directory>/automorphism_results/`` (or an
+/// ``InMemorySymmetric`` source). ``spec.fixed_sz``
 /// selects the fixed-Sz lane (orbits restricted to the ``n_up`` subspace);
 /// absent, the full-Hilbert lane is used.
 // ---------------------------------------------------------------------------
@@ -466,7 +531,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             "symmetry sector set; use ed::make_operator for the plain / "
             "fixed-Sz / distributed lanes).");
     }
-    const std::string& dir = detail::require_directory(spec);
+    const std::string dir = detail::symmetric_source_dir(spec);
     const std::string cache_dir =
         ed::symmetry::resolve_sym_cache_dir(spec.basis_cache_dir, dir);
 
@@ -477,11 +542,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
     // cleanup (Jul 2026): callers that already parsed the directory for
     // symmetry DETECTION (the binding probes) pass their loaded carrier in
     // -- one parse per binding call instead of two.
-    if (!base) {
-        base = detail::build_base_op(spec);
-        detail::load_terms_into(*base, spec);
-        base->symmetry_info.loadFromDirectory(dir);
-    }
+    if (!base) base = detail::load_symmetric_base(spec);
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;
@@ -717,18 +778,14 @@ make_all_sz_sector_operators_tagged(const OperatorSpec& spec,
             "ed::make_all_sz_sector_operators_tagged: requires "
             "streaming_symmetry = true.");
     }
-    const std::string& dir = detail::require_directory(spec);
+    const std::string dir = detail::symmetric_source_dir(spec);
     const std::uint64_t n_bits = static_cast<std::uint64_t>(spec.num_sites);
     if (n_up_max < 0)
         n_up_max = static_cast<int>(n_bits);
 
     // Load operator terms + symmetry group info ONCE (or reuse the caller's
     // detection probe -- structural cleanup, Jul 2026).
-    if (!base) {
-        base = detail::build_base_op(spec);
-        detail::load_terms_into(*base, spec);
-        base->symmetry_info.loadFromDirectory(dir);
-    }
+    if (!base) base = detail::load_symmetric_base(spec);
 
     auto term_builder = [&base](ed::symmetry::SectorOperator& op) {
         op.transform_data_  = base->transform_data_;
@@ -936,6 +993,22 @@ inline std::unique_ptr<LinearOperator> make_operator(OperatorSpec spec) {
         return make_streaming_symmetry_operator(spec);
     }
 
+    // InMemorySymmetric without the symmetry axis: the plain / fixed-Sz
+    // carrier with the supplied terms (the group is not consulted).
+    if (std::holds_alternative<InMemorySymmetric>(spec.source)) {
+        if (spec.fixed_sz.has_value()) {
+            auto fop = std::make_unique<FixedSzOperator>(
+                static_cast<uint64_t>(spec.num_sites), spec.spin_l,
+                static_cast<int64_t>(*spec.fixed_sz));
+            detail::load_terms_into(*fop, spec);
+            return fop;
+        }
+        auto op = std::make_unique<Operator>(
+            static_cast<uint64_t>(spec.num_sites), spec.spin_l);
+        detail::load_terms_into(*op, spec);
+        return op;
+    }
+
     // Default lane: plain Operator or FixedSzOperator, file-loaded.
     // Resolve the source into a concrete FilePaths first; the InMemory
     // branch is handled at the top of the function.
@@ -944,7 +1017,7 @@ inline std::unique_ptr<LinearOperator> make_operator(OperatorSpec spec) {
         if constexpr (std::is_same_v<T, FilePaths>) return src;
         else if constexpr (std::is_same_v<T, DirectoryPath>)
             return detail::file_paths_from_directory(src);
-        else return {};  // unreachable; InMemoryOperator handled above.
+        else return {};  // unreachable; in-memory sources handled above.
     }, spec.source);
 
     if (spec.fixed_sz.has_value()) {

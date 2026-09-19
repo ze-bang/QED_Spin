@@ -186,14 +186,15 @@ make_cross_sector_ref(ed::symmetry::SectorOperator* sec,
 }
 
 // ---------------------------------------------------------------------------
-// Structural cleanup (Jul 2026): ONE directory probe per binding call.
+// Structural cleanup (Jul 2026): ONE source probe per binding call.
 //
 // Every symmetry binding needs (a) the term-level TermStorage for detection
 // and (b) the loaded symmetry_info for composition -- and then hands the
-// SAME parsed content to ``make_sector_operators_tagged``. This helper loads
-// the carrier once; the caller passes ``probe.base`` into the factory so the
-// directory is parsed exactly once per call (previously: probe + factory
-// each parsed it).
+// SAME loaded content to ``make_sector_operators_tagged``. This helper loads
+// the carrier once (``ed::detail::load_symmetric_base``: directory parse or
+// in-memory copy, per the spec's source); the caller passes ``probe.base``
+// into the factory so the source is loaded exactly once per call
+// (previously: probe + factory each parsed it).
 // ---------------------------------------------------------------------------
 struct DirectoryProbe {
     std::shared_ptr<Operator>  base;   // terms + symmetry_info loaded
@@ -201,15 +202,12 @@ struct DirectoryProbe {
 };
 
 inline DirectoryProbe
-load_directory_probe(const ed::OperatorSpec& spec,
-                     const std::string&      directory) {
+load_probe(const ed::OperatorSpec& spec) {
     DirectoryProbe p;
-    p.base = ed::detail::build_base_op(spec);
-    ed::detail::load_terms_into(*p.base, spec);
+    p.base = ed::detail::load_symmetric_base(spec);
     ed::matvec::TermStorage::classify_route(
         p.soa, p.base->transform_data_, p.base->three_body_data_,
         [](const std::complex<double>& c) { return c; });
-    p.base->symmetry_info.loadFromDirectory(directory);
     return p;
 }
 
@@ -1511,7 +1509,7 @@ void bind_workflows(py::module_& m) {
                   // the env escapes for the Auto defaults.
                   // -----------------------------------------------------
                   DirectoryProbe probe =
-                      load_directory_probe(spec, directory);
+                      load_probe(spec);
                   ed::symmetry::SymmetryComposition comp =
                       resolve_comp_with_stars(probe, opts);
                   // Stage 12 (SU(2) rollout): engagement + ONE carrier for
@@ -2221,7 +2219,7 @@ void bind_workflows(py::module_& m) {
                   spec.sz_parity = opts.sz_parity;
               }
               const DirectoryProbe probe =
-                  load_directory_probe(spec, directory);
+                  load_probe(spec);
               {
                   const auto comp = ed::symmetry::resolve_symmetry_composition(
                       probe.soa, probe.base->symmetry_info,
@@ -3605,7 +3603,7 @@ void bind_workflows(py::module_& m) {
                   // S(Q, omega)^* with a real spectral function) -- detected
                   // once here, applied per-Q below.
                   const DirectoryProbe mq_probe =
-                      load_directory_probe(src_spec, directory);
+                      load_probe(src_spec);
                   const bool h_real =
                       ed::symmetry::hamiltonian_is_real(mq_probe.soa);
 
@@ -3703,8 +3701,12 @@ void bind_workflows(py::module_& m) {
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
                       dst_spec.fixed_sz           = *src_spec.fixed_sz + delta_n_up;
+                      // Same source as the probe: reuse its carrier (the
+                      // factory reads only its terms + symmetry_info, which
+                      // do not depend on n_up) instead of re-parsing.
                       dst_handle = ed::core::SectorSetView(
-                          ed::make_sector_operators_tagged(dst_spec));
+                          ed::make_sector_operators_tagged(dst_spec, 0, 1,
+                                                           mq_probe.base));
                   }
 
                   // (5) Shared omega grid (built once).
@@ -4472,7 +4474,7 @@ void bind_workflows(py::module_& m) {
                   const int req_hi  = (n_up_max < 0) ? N_sites
                                                      : std::min(n_up_max, N_sites);
                   DirectoryProbe probe =
-                      load_directory_probe(spec, directory);
+                      load_probe(spec);
                   ed::symmetry::SymmetryComposition comp =
                       resolve_comp_with_stars(probe, opts);
                   const ed::symmetry::BuildWindow win =
