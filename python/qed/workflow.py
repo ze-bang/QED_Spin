@@ -14,8 +14,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
-import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Union
@@ -60,7 +58,7 @@ SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
 # `_core.exact_diagonalization_*` have been deleted in lockstep with
 # the Wave 2 / Wave 3 collapse. Every in-tree call site now routes
 # through `_core.workflows_*` (ground-state + thermal) or
-# `_core.workflows_solve_streaming_symmetry_directory` (streaming-
+# `_core.workflows_solve_streaming_symmetry` (streaming-
 # symmetry). This shim is preserved as a no-op for any third-party
 # code that imported it transitively; it will be deleted in the next
 # cycle.
@@ -904,7 +902,7 @@ def solve(
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:
     #     * symmetry path → orchestrator's streaming-symmetry kernel
-    #       via ``_core.workflows_solve_streaming_symmetry_directory``
+    #       via ``_core.workflows_solve_streaming_symmetry``
     #       (handles GPU per-sector).
     #     * GPU + no-symmetry → orchestrator with
     #       ``BackendConstraints::allow_gpu = true`` (the orchestrator
@@ -2028,10 +2026,15 @@ def _diag_with_symmetry(
         )
 
     params.use_symmetry = True
+    # Close a raw generators-only dict here, before anything reads the sector
+    # table: the in-memory binding below receives exactly this dict, so the
+    # sector= lookup and the C++ group share one table.
+    info = _closed_symmetry_info(info)
 
     # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw INDICES.
-    # info['sectors'] is the table that maps between them (Python writes it to
-    # sector_metadata.json), so resolve here -- the first point where it exists.
+    # info['sectors'] is the table that maps between them (the same table the
+    # C++ group is built from), so resolve here -- the first point where it
+    # exists.
     if sector is not None:
         _sid = _resolve_sector_quantum_numbers(info, sector)
         # GAP 9 fix (extended 2026-07): the sector set may carry EXTENDED
@@ -2055,142 +2058,137 @@ def _diag_with_symmetry(
                   f"{[_sid + _s * _n_raw for _s in range(1, 4)]} when engaged)")
 
     # ------------------------------------------------------------------
-    # 2. Materialise operator + symmetry into a temp directory the
-    #    streaming kernel will read.
+    # 2. Hand operator + group to the streaming kernel in memory (the
+    #    bindings copy the operator's terms and build the group from
+    #    ``info`` with the directory writer's phase convention).
     # ------------------------------------------------------------------
-    tmpdir = tempfile.mkdtemp(prefix="qed_diag_symm_")
-    try:
-        _write_operator_directory(operator, tmpdir)
-        _write_symmetry_directory(tmpdir, info)
+    if verbose:
+        print(f"[qed.solve] symmetry projection: |G|="
+              f"{len(info.get('max_clique', []))}, "
+              f"sectors={len(info.get('sectors', []))}")
 
-        if verbose:
-            print(f"[qed.solve] symmetry projection: |G|="
-                  f"{len(info.get('max_clique', []))}, "
-                  f"sectors={len(info.get('sectors', []))}, "
-                  f"tmpdir={tmpdir}")
-
-        # Route through the unified orchestrator's streaming-symmetry
-        # helper. It composes `ed::make_operator(streaming_symmetry=true)`
-        # with a per-sector `ed::workflows::solve` loop -- the same
-        # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
-        #
-        # Phase B of the "Backend x Symmetries x Workflows" plan
-        # (May 2026): thermal methods (FTLM / LTLM / mTPQ /
-        # KPM_DOS) now route through the matching
-        # ``workflows_thermal_streaming_symmetry_directory`` binding,
-        # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
-        fixed_sz_n_up = None
-        # Sz-parity mode: explicit via sz="even"/"odd", or AUTO when the
-        # Hamiltonian breaks U(1) but keeps the Z2 remnant (-1)^{n_up}
-        # (all terms change n_up by even amounts): both halves in one
-        # sector set.
-        _parity_mode = sz_parity
-        if (_parity_mode is None and sz is None and auto_sz_axis
-                and not isinstance(operator, FixedSzOperator)
-                and not operator.conserves_sz()):
-            try:
-                _det = _core.detect_hamiltonian_symmetries(operator)
-                if bool(_det["sz_parity"]):
-                    _parity_mode = 2          # both halves
-                    if verbose:
-                        print("[qed] Sz axis: U(1) broken but parity "
-                              "(-1)^{n_up} conserved -> parity-half "
-                              "sectors engage.")
-            except Exception:
-                _parity_mode = None
-        if isinstance(operator, FixedSzOperator):
-            if sz is None:
-                if params.n_up < 0:
-                    raise RuntimeError(
-                        "internal: FixedSzOperator passed without n_up. "
-                        "Use sz= in qed.solve(...) so the streaming kernel "
-                        "knows the sector."
-                    )
-                sz = int(params.n_up)
-            fixed_sz_n_up = int(sz)
-
-        if _is_thermal_method(method):
-            topts = _ed_params_to_thermal_options(params, method)
-            # ``ThermalOptions`` carries no use_symmetry / use_fixed_sz
-            # flags -- those live on the OperatorSpec the binding
-            # builds internally (streaming_symmetry=true,
-            # fixed_sz=fixed_sz_n_up). So we just hand it the temp
-            # directory + sites + spin_l and the binding takes care of
-            # composing the per-sector thermal lane.
-            if _parity_mode is not None:
-                topts.sz_parity = int(_parity_mode)
-            topts.spin_flip = resolve_discrete_toggle(
-                operator, spin_flip, "spin_flip", verbose=verbose)
-            topts.time_reversal = resolve_discrete_toggle(
-                operator, time_reversal, "time_reversal", verbose=verbose)
-            tr = _core.workflows_thermal_streaming_symmetry_directory(
-                tmpdir,
-                int(operator.num_sites),
-                float(params.spin_length),
-                topts,
-                fixed_sz_n_up,
-            )
-            return _ed_result_from_thermal_result(tr)
-
-        # Ground-state lane (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
-        # FULL) -- the original behaviour.
-        # 2026-09-11: honour "no solver named" as SolveMethod::Auto so per-sector
-        # windows get Krylov-Schur (single-vector Lanczos drops degenerate
-        # copies: measured 2e-2 on a staggered-field chain window).
-        opts = _ed_params_to_solve_options(params, method, auto_method=auto_method)
-        _apply_total_spin_opts(opts)
-        opts.use_symmetry = True
-        # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
-        # with 'on' = auto + detection report (warn-and-continue when
-        # the Hamiltonian lacks the symmetry).
-        opts.spin_flip = resolve_discrete_toggle(
-            operator, spin_flip, "spin_flip", verbose=verbose)
-        # Correctness (2026-09-11): the in-sector flip projection of the abelian
-        # lane is eigenvalues-only (it has no orbit form to reconstruct vectors
-        # from), so a vector request silently came back WITHOUT vectors. Keep
-        # flip transport but disable the projection when vectors are wanted;
-        # 'require' + vectors is a contradiction and raises.
-        if bool(getattr(params, "compute_eigenvectors", False)) and opts.spin_flip != 0:
-            if opts.spin_flip == 1:
-                raise ValueError(
-                    "qed.solve: spin_flip='require' with compute_eigenvectors=True is not "
-                    "supported on the abelian symmetry lane (the flip projection is "
-                    "eigenvalues-only); use spin_flip='off' or point_group='full'.")
-            if verbose:
-                print("[qed.solve] compute_eigenvectors: in-sector spin-flip projection "
-                      "disabled (eigenvalues-only lane); flip transport is kept.")
-            opts.spin_flip = 0
-        opts.time_reversal = resolve_discrete_toggle(
-            operator, time_reversal, "time_reversal", verbose=verbose)
-        if _parity_mode is not None:
-            opts.sz_parity = int(_parity_mode)
-        # Stage 7a: star reduction. The non-abelian residue of the
-        # spatial group permutes the abelian irreps; related sectors
-        # are isospectral, so the C++ plan solves one representative
-        # per orbit and copies the spectrum to its partners.
-        _star = getattr(symmetry, "star_perms", None) or []
-        if _star and point_group not in (False, 0, "off", "none"):
-            from .star_reduction import star_maps_from_info
-            _maps = star_maps_from_info(info, _star)
-            if _maps:
-                opts.star_maps = _maps
+    # Route through the unified orchestrator's streaming-symmetry
+    # helper. It composes `ed::make_operator(streaming_symmetry=true)`
+    # with a per-sector `ed::workflows::solve` loop -- the same
+    # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
+    #
+    # Phase B of the "Backend x Symmetries x Workflows" plan
+    # (May 2026): thermal methods (FTLM / LTLM / mTPQ /
+    # KPM_DOS) now route through the matching
+    # ``workflows_thermal_streaming_symmetry`` binding,
+    # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.
+    fixed_sz_n_up = None
+    # Sz-parity mode: explicit via sz="even"/"odd", or AUTO when the
+    # Hamiltonian breaks U(1) but keeps the Z2 remnant (-1)^{n_up}
+    # (all terms change n_up by even amounts): both halves in one
+    # sector set.
+    _parity_mode = sz_parity
+    if (_parity_mode is None and sz is None and auto_sz_axis
+            and not isinstance(operator, FixedSzOperator)
+            and not operator.conserves_sz()):
+        try:
+            _det = _core.detect_hamiltonian_symmetries(operator)
+            if bool(_det["sz_parity"]):
+                _parity_mode = 2          # both halves
                 if verbose:
-                    print(f"[qed] point group: {len(_maps)} residue "
-                          "automorphisms fold the irrep sectors into "
-                          "isospectral stars (solve one per star).")
-        if fixed_sz_n_up is not None:
-            opts.use_fixed_sz = True
-            opts.n_up         = fixed_sz_n_up
-        gs = _core.workflows_solve_streaming_symmetry_directory(
-            tmpdir,
+                    print("[qed] Sz axis: U(1) broken but parity "
+                          "(-1)^{n_up} conserved -> parity-half "
+                          "sectors engage.")
+        except Exception:
+            _parity_mode = None
+    if isinstance(operator, FixedSzOperator):
+        if sz is None:
+            if params.n_up < 0:
+                raise RuntimeError(
+                    "internal: FixedSzOperator passed without n_up. "
+                    "Use sz= in qed.solve(...) so the streaming kernel "
+                    "knows the sector."
+                )
+            sz = int(params.n_up)
+        fixed_sz_n_up = int(sz)
+
+    if _is_thermal_method(method):
+        topts = _ed_params_to_thermal_options(params, method)
+        # ``ThermalOptions`` carries no use_symmetry / use_fixed_sz
+        # flags -- those live on the OperatorSpec the binding
+        # builds internally (streaming_symmetry=true,
+        # fixed_sz=fixed_sz_n_up). So we just hand it the operator +
+        # group + sites + spin_l and the binding takes care of
+        # composing the per-sector thermal lane.
+        if _parity_mode is not None:
+            topts.sz_parity = int(_parity_mode)
+        topts.spin_flip = resolve_discrete_toggle(
+            operator, spin_flip, "spin_flip", verbose=verbose)
+        topts.time_reversal = resolve_discrete_toggle(
+            operator, time_reversal, "time_reversal", verbose=verbose)
+        tr = _core.workflows_thermal_streaming_symmetry(
+            operator,
+            info,
             int(operator.num_sites),
             float(params.spin_length),
-            opts,
+            topts,
             fixed_sz_n_up,
         )
-        return _ed_result_from_gs_result(gs, params)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        return _ed_result_from_thermal_result(tr)
+
+    # Ground-state lane (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
+    # FULL) -- the original behaviour.
+    # 2026-09-11: honour "no solver named" as SolveMethod::Auto so per-sector
+    # windows get Krylov-Schur (single-vector Lanczos drops degenerate
+    # copies: measured 2e-2 on a staggered-field chain window).
+    opts = _ed_params_to_solve_options(params, method, auto_method=auto_method)
+    _apply_total_spin_opts(opts)
+    opts.use_symmetry = True
+    # Stage 8 composition toggles: -1 auto / 0 off / 1 require,
+    # with 'on' = auto + detection report (warn-and-continue when
+    # the Hamiltonian lacks the symmetry).
+    opts.spin_flip = resolve_discrete_toggle(
+        operator, spin_flip, "spin_flip", verbose=verbose)
+    # Correctness (2026-09-11): the in-sector flip projection of the abelian
+    # lane is eigenvalues-only (it has no orbit form to reconstruct vectors
+    # from), so a vector request silently came back WITHOUT vectors. Keep
+    # flip transport but disable the projection when vectors are wanted;
+    # 'require' + vectors is a contradiction and raises.
+    if bool(getattr(params, "compute_eigenvectors", False)) and opts.spin_flip != 0:
+        if opts.spin_flip == 1:
+            raise ValueError(
+                "qed.solve: spin_flip='require' with compute_eigenvectors=True is not "
+                "supported on the abelian symmetry lane (the flip projection is "
+                "eigenvalues-only); use spin_flip='off' or point_group='full'.")
+        if verbose:
+            print("[qed.solve] compute_eigenvectors: in-sector spin-flip projection "
+                  "disabled (eigenvalues-only lane); flip transport is kept.")
+        opts.spin_flip = 0
+    opts.time_reversal = resolve_discrete_toggle(
+        operator, time_reversal, "time_reversal", verbose=verbose)
+    if _parity_mode is not None:
+        opts.sz_parity = int(_parity_mode)
+    # Stage 7a: star reduction. The non-abelian residue of the
+    # spatial group permutes the abelian irreps; related sectors
+    # are isospectral, so the C++ plan solves one representative
+    # per orbit and copies the spectrum to its partners.
+    _star = getattr(symmetry, "star_perms", None) or []
+    if _star and point_group not in (False, 0, "off", "none"):
+        from .star_reduction import star_maps_from_info
+        _maps = star_maps_from_info(info, _star)
+        if _maps:
+            opts.star_maps = _maps
+            if verbose:
+                print(f"[qed] point group: {len(_maps)} residue "
+                      "automorphisms fold the irrep sectors into "
+                      "isospectral stars (solve one per star).")
+    if fixed_sz_n_up is not None:
+        opts.use_fixed_sz = True
+        opts.n_up         = fixed_sz_n_up
+    gs = _core.workflows_solve_streaming_symmetry(
+        operator,
+        info,
+        int(operator.num_sites),
+        float(params.spin_length),
+        opts,
+        fixed_sz_n_up,
+    )
+    return _ed_result_from_gs_result(gs, params)
 
 
 def _operator_conserves_sz(operator: Operator) -> bool:
@@ -2701,7 +2699,9 @@ def full_spectrum(
         res.eigenvalues = sorted(res.eigenvalues)
         return res
 
-    tmpdir = tempfile.mkdtemp(prefix="qed_fullspec_")
+    # The in-memory binding receives this dict verbatim; close a raw
+    # generators-only group first (same group the directory writer builds).
+    info = _closed_symmetry_info(info)
     # full_spectrum is the many-small-sectors regime: turn on the C++ sector-
     # parallel FULL loop so independent (Sz, irrep) blocks are dense-diagonalised
     # across cores. Each sector's eigensolve runs single-threaded (see
@@ -2711,9 +2711,6 @@ def full_spectrum(
     if _prev_sector_parallel is None:
         os.environ["ED_SYM_SECTOR_PARALLEL"] = "1"
     try:
-        _write_operator_directory(operator, tmpdir)
-        _write_symmetry_directory(tmpdir, info)
-
         if sz is not None and sz_conserved:
             # ONE named magnetisation block. Flip transport mirrors a HALF
             # sweep onto its partner; with a single named sector there is no
@@ -2762,8 +2759,8 @@ def full_spectrum(
             if n_up is not None:
                 opts.use_fixed_sz = True
                 opts.n_up = int(n_up)
-            gs = _core.workflows_solve_streaming_symmetry_directory(
-                tmpdir, N, float(spin_length), opts, n_up)
+            gs = _core.workflows_solve_streaming_symmetry(
+                operator, info, N, float(spin_length), opts, n_up)
             eigs.extend(gs.eigenvalues)
             _su2_blocks.append(
                 (int(n_up) if n_up is not None else None,
@@ -2814,7 +2811,6 @@ def full_spectrum(
             require=(_fs_label == 1))
         return out
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
         if _prev_sector_parallel is None:
             os.environ.pop("ED_SYM_SECTOR_PARALLEL", None)
         else:
@@ -2910,6 +2906,45 @@ def _format_three_body_row(row) -> str:
     )
 
 
+def _closed_symmetry_info(info: dict[str, Any]) -> dict[str, Any]:
+    """The group ``info`` dict with its element list closed.
+
+    The streaming kernel needs ``max_clique`` (the enumerated group). A dict
+    produced by ``group_from_generators`` already carries it and is returned
+    unchanged; a raw dict holding only ``generators`` (e.g. from a
+    third-party source) is closed here through the symmetry DSL, which also
+    supplies ``generator_orders`` and the (relation-filtered, contiguously
+    numbered) ``sectors`` table. The caller's generators are kept verbatim
+    unless the DSL restricted them (non-abelian input -> maximal abelian
+    subgroup), in which case its own generator list is the one the orders
+    and quantum numbers refer to.
+
+    Both the directory writer and the in-memory symmetric bindings take
+    their group from this dict, and ``sector=`` is resolved against the same
+    table. (C++ re-filters phantom irreps and renumbers the survivors; a
+    closed table is already filtered and contiguous, so that is a no-op
+    here. Only a caller-supplied ``max_clique`` + UNFILTERED ``sectors``
+    table can still be renumbered under the ``sector=`` lookup.)
+    """
+    if info.get("max_clique"):
+        return info
+    from .symmetry import group_from_generators  # noqa: WPS433
+    generators = info.get("generators", []) or []
+    info2 = group_from_generators(
+        len(generators[0]) if generators else 0,
+        [list(map(int, g)) for g in generators],
+    )
+    closed = dict(info)
+    closed["max_clique"] = info2["max_clique"]
+    closed["generator_orders"] = info2["generator_orders"]
+    closed["sectors"] = info2["sectors"]
+    if len(generators) != len(info2["generator_orders"]):
+        closed["generators"] = info2.get("generators", generators)
+    else:
+        closed["generators"] = [list(map(int, g)) for g in generators]
+    return closed
+
+
 def _write_symmetry_directory(directory: str, info: dict[str, Any]) -> None:
     """Write the four JSON files the C++ streaming-symmetry kernel needs.
 
@@ -2934,22 +2969,11 @@ def _write_symmetry_directory(directory: str, info: dict[str, Any]) -> None:
     out_dir = os.path.join(directory, "automorphism_results")
     os.makedirs(out_dir, exist_ok=True)
 
+    info = _closed_symmetry_info(info)
     max_clique = info.get("max_clique", [])
     generators = info.get("generators", [])
     generator_orders = info.get("generator_orders", [])
     sectors = info.get("sectors", [])
-
-    if not max_clique:
-        # Fallback: reconstruct via the symmetry DSL when only generators
-        # were provided (e.g. a raw dict from a third-party source).
-        from .symmetry import group_from_generators  # noqa: WPS433
-        info2 = group_from_generators(
-            len(generators[0]) if generators else 0,
-            [list(map(int, g)) for g in generators],
-        )
-        max_clique = info2["max_clique"]
-        generator_orders = info2["generator_orders"]
-        sectors = info2["sectors"]
 
     max_clique_int = [list(map(int, p)) for p in max_clique]
 
