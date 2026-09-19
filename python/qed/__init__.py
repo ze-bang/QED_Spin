@@ -88,6 +88,8 @@ from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
 from . import input  # standalone C++ ed_input library bindings
 from . import symmetry  # programmatic site-permutation symmetry DSL
 from . import helpers  # re-export edlib utilities under qed.helpers
+from . import lattice  # lattice geometries: space group + physical labels
+from . import little_group  # labelled block spectra and <n|O|n>
 from . import workflow  # internal implementation module for qed.solve
 from .workflow import (  # noqa: E402  (top-level re-exports)
     GeneratorSet,
@@ -188,6 +190,8 @@ __all__ = [
     "input",
     "symmetry",
     "helpers",
+    "lattice",
+    "little_group",
     "workflow",
     # Helpers
     "list_diag_parameters",
