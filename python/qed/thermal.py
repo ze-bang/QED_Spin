@@ -67,9 +67,8 @@ from ._core import (
 from .workflow import solve as _solve  # per-sector dispatcher
 from .workflow import normalize_sz     # ONE Sz spelling (Jul 2026)
 from .workflow import _resolve_device   # (use_gpu, use_mpi) device picker
-from .workflow import (                 # in-memory symmetry -> temp directory
-    _write_operator_directory as _write_operator_directory,
-    _write_symmetry_directory as _write_symmetry_directory,
+from .workflow import (                 # in-memory symmetry -> (H, info)
+    _closed_symmetry_info as _closed_symmetry_info,
     _normalize_symmetry_info as _normalize_symmetry_info,
     resolve_auto_symmetry as _resolve_auto_symmetry,
     SymmetryArg as SymmetryArg,
@@ -99,8 +98,20 @@ def _sym_toggle_int(value, name: str, operator=None, verbose=True) -> int:
     return resolve_discrete_toggle(operator, value, name, verbose=verbose)
 
 
+# Where the symmetric sector lanes read the Hamiltonian and the group from:
+# a directory path (``Trans.dat`` / ``InterAll.dat`` / ... plus
+# ``automorphism_results/``), or an in-memory ``(Operator, info)`` pair whose
+# ``info`` is the CLOSED group dict (``_closed_symmetry_info``). The two feed
+# the ``*_directory`` bindings and their in-memory twins respectively.
+SymmetricSource = Union[str, tuple]
+
+
+def _is_in_memory_source(source: SymmetricSource) -> bool:
+    return isinstance(source, tuple)
+
+
 def _thermal_via_workflows_all_sz_streaming_symmetry(
-    directory: str,
+    source: SymmetricSource,
     num_sites: int,
     spin_l: float,
     method: DiagonalizationMethod,
@@ -117,7 +128,9 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
 ) -> "_core.ThermalResult":
     """Single C++ call covering ALL (n_up, irrep) sectors simultaneously.
 
-    Calls ``workflows_thermal_all_sz_streaming_symmetry_directory``, which:
+    Calls ``workflows_thermal_all_sz_streaming_symmetry_directory`` (or its
+    in-memory twin ``workflows_thermal_all_sz_streaming_symmetry`` for an
+    ``(Operator, info)`` source), which:
       1. Loads Hamiltonian + symmetry group info once.
       2. Runs ``enumerate_full_orbit_reps`` once (O(2^N × |G|)).
       3. Partitions reps by n_up and builds all (n_up, irrep) sectors.
@@ -142,8 +155,13 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     opts.time_reversal = int(time_reversal)
     if star_maps:
         opts.star_maps = [[int(x) for x in m] for m in star_maps]
+    if _is_in_memory_source(source):
+        H_src, info = source
+        return _core.workflows_thermal_all_sz_streaming_symmetry(
+            H_src, info, int(num_sites), float(spin_l), opts,
+            int(n_up_min), int(n_up_max))
     return _core.workflows_thermal_all_sz_streaming_symmetry_directory(
-        directory, int(num_sites), float(spin_l), opts,
+        source, int(num_sites), float(spin_l), opts,
         int(n_up_min), int(n_up_max))
 
 
@@ -213,8 +231,23 @@ def _sector_table_from_directory(directory: str) -> Optional[dict]:
     except Exception:
         return None
 
+
+def _sector_table_from_source(source: SymmetricSource) -> Optional[dict]:
+    """The (sector_id, quantum_numbers) table the C++ group is built from.
+
+    Directory source: ``sector_metadata.json`` (see
+    :func:`_sector_table_from_directory`). In-memory source: the closed
+    ``info`` dict's own ``sectors`` -- the same dict the in-memory binding
+    builds its group from, so the lookup and the C++ side share one table.
+    """
+    if _is_in_memory_source(source):
+        _, info = source
+        return {"sectors": list(info.get("sectors", []) or [])}
+    return _sector_table_from_directory(source)
+
+
 def _thermal_via_workflows_streaming_symmetry(
-    directory: str,
+    source: SymmetricSource,
     num_sites: int,
     spin_l: float,
     method: DiagonalizationMethod,
@@ -224,9 +257,10 @@ def _thermal_via_workflows_streaming_symmetry(
     use_mpi: bool = False,
     gpu_dim_floor: int = 0,
 ) -> EDResults:
-    """Route a directory + ``automorphism_results/`` through the
-    SOTA C++ streaming-symmetry thermal binding
-    (``_core.workflows_thermal_streaming_symmetry_directory``).
+    """Route a directory + ``automorphism_results/`` (or an in-memory
+    ``(Operator, info)`` source) through the SOTA C++ streaming-symmetry
+    thermal binding (``_core.workflows_thermal_streaming_symmetry_directory``
+    / its in-memory twin ``_core.workflows_thermal_streaming_symmetry``).
 
     Mirrors :func:`_thermal_via_workflows_thermal` but lets the C++
     side own the per-irrep sector loop and the Z-recombination via
@@ -249,13 +283,24 @@ def _thermal_via_workflows_streaming_symmetry(
         # at N = 16. device='gpu' (explicit) passes floor 0 and forces every sector.
         opts.backend.gpu_dim_floor = int(gpu_dim_floor)
     fixed_sz = int(params.n_up) if params.use_fixed_sz else None
-    tr = _core.workflows_thermal_streaming_symmetry_directory(
-        directory,
-        int(num_sites),
-        float(spin_l),
-        opts,
-        fixed_sz,
-    )
+    if _is_in_memory_source(source):
+        H_src, info = source
+        tr = _core.workflows_thermal_streaming_symmetry(
+            H_src,
+            info,
+            int(num_sites),
+            float(spin_l),
+            opts,
+            fixed_sz,
+        )
+    else:
+        tr = _core.workflows_thermal_streaming_symmetry_directory(
+            source,
+            int(num_sites),
+            float(spin_l),
+            opts,
+            fixed_sz,
+        )
     return _ed_result_from_thermal_result(tr)
 
 
@@ -830,12 +875,10 @@ def thermal(
         res = qed.thermal(H, T_min=0.05, T_max=2.0, num_T=64,
                           sz_min=N//2 - 1, sz_max=N//2 + 1)
     """
-    _all_params = dict(locals())   # capture every parameter for the symmetry recursion
     # ONE Sz spelling (diction consolidation, Jul 2026): sz= accepts
     # int | (lo, hi) | "auto" | "off"; the legacy sz_min/sz_max and
     # use_sz_if_conserved=False keep working with a FutureWarning when
-    # load-bearing. Canonicalized BEFORE the recursion capture so the
-    # tempdir-forwarded call speaks the new spelling (no double warning).
+    # load-bearing.
     _szmode = normalize_sz(sz, verb="thermal",
                            use_sz_if_conserved=use_sz_if_conserved,
                            sz_min=sz_min, sz_max=sz_max)
@@ -853,9 +896,6 @@ def thermal(
         use_sz_if_conserved = False
     else:
         sz = None
-    # keep the recursion speaking the canonical spelling
-    _all_params.update(sz=sz, sz_min=sz_min, sz_max=sz_max,
-                       use_sz_if_conserved=use_sz_if_conserved)
 
     is_directory = isinstance(H, (str, os.PathLike))
 
@@ -1033,14 +1073,13 @@ def thermal(
             "(e.g. qed.find_symmetries(H).full_set), or use sz_min/sz_max for "
             "magnetisation sectors.")
 
-    # In-memory operator + explicit spatial `symmetry=`: materialise a temp
-    # directory (operator + automorphism_results/) and re-dispatch as the
-    # directory form, which runs the per-(Sz, irrep) stochastic lanes and
-    # Z-recombines. This makes the spatial-symmetry sectors available to the
-    # in-memory API. (A non-abelian generator set is reduced by its maximal
-    # abelian subgroup here -- a complete, correct, coarser reduction; for the
-    # FULL non-abelian reduction route through the little-group engine
-    # (point_group="full").)
+    # In-memory operator + explicit spatial `symmetry=`: the operator and its
+    # closed group info dict ride the same per-(Sz, irrep) stochastic sector
+    # lane as the directory form (section 3a below, fed by the in-memory
+    # bindings), which Z-recombines. (A non-abelian generator set is reduced
+    # by its maximal abelian subgroup there -- a complete, correct, coarser
+    # reduction; for the FULL non-abelian reduction route through the
+    # little-group engine (point_group="full").)
     if not is_directory:
         # symmetry='auto' -> maximal spatial generator set (or None);
         # 'on' toggles -> detection-checked ints (report + degrade).
@@ -1087,7 +1126,7 @@ def thermal(
         # _core.little_group_thermal (F-shift Z-recombination). The lane
         # resolver declines KPM_DOS (full-spectrum DOS) and honours
         # ED_SYM_LG_THERMAL=0; any decline falls through to the abelian
-        # tempdir lane below unchanged. sector= keeps the abelian
+        # sector lane below unchanged. sector= keeps the abelian
         # filtering lane (the block engine has only_k0/only_irrep but the
         # QN decode for thermal is future work -- refusing to guess).
         from .point_group_routing import resolve_projection_lane
@@ -1116,24 +1155,23 @@ def thermal(
         elif verbose:
             print(f"[qed.thermal] projection declined ({lane.reason}); "
                   f"abelian sector lane.")
-    if symmetry is not None and not is_directory:
-        _N = int(H.num_sites)
-        _tmp = tempfile.mkdtemp(prefix="qed_thermal_sym_")
-        try:
-            _write_operator_directory(H, _tmp)
-            _info = _normalize_symmetry_info(H, symmetry)
-            if _info is not None:
-                _write_symmetry_directory(_tmp, _info)
-            _fwd = {k: v for k, v in _all_params.items() if k != "H"}
-            _fwd["num_sites"] = _N
-            _fwd["use_symmetry_if_available"] = True
-            _fwd["symmetry"] = None
-            _fwd["spin_flip"] = spin_flip          # already resolved ints
-            _fwd["time_reversal"] = time_reversal
-            _fwd["star_maps"] = star_maps
-            return thermal(_tmp, **_fwd)
-        finally:
-            shutil.rmtree(_tmp, ignore_errors=True)
+    # In-memory operator + spatial symmetry that the block lane did not take:
+    # the abelian (Sz, irrep) sector lane (3a) with an in-memory SOURCE --
+    # the operator itself plus its CLOSED group info dict, handed to the
+    # in-memory twins of the directory bindings. Everything the directory
+    # form would have read from disk comes from here instead: the terms
+    # (incl. three-body) are copied from ``H`` and the sector table for
+    # sector= is ``info['sectors']``, the same table the C++ group is built
+    # from. spin_flip / time_reversal / star_maps were resolved above.
+    _in_memory_sector_lane = symmetry is not None and not is_directory
+    _sym_info: Optional[dict] = None
+    if _in_memory_sector_lane:
+        _sym_info = _normalize_symmetry_info(H, symmetry)
+        if _sym_info is not None:
+            _sym_info = _closed_symmetry_info(_sym_info)
+        # The bindings build their base operator with this spin length;
+        # it must be the operator's own.
+        spin = float(getattr(H, "spin", spin))
 
     if is_directory and num_sites is None:
         raise ValueError(
@@ -1298,13 +1336,20 @@ def thermal(
                 )
             )
         )
+        _source: Optional[SymmetricSource] = directory
+    elif _in_memory_sector_lane:
+        # In-memory symmetric input: the sector lane (3a) reads the terms
+        # and the group from (H, info) -- no directory, no reload.
+        H_op = H
+        directory = None
+        has_sym = _sym_info is not None
+        _source = (H, _sym_info) if has_sym else None
     else:
         H_op = H
         directory = None
         has_sym = False
-        # In-memory symmetry support would require an
-        # explicit `symmetry=` arg; for now we route the
-        # in-memory path through plain Sz iteration only.
+        _source = None
+        # No spatial symmetry: plain Sz iteration via qed.solve (3b).
 
     N = int(H_op.num_sites)
     # Input validation (2026-09-11).
@@ -1374,6 +1419,8 @@ def thermal(
     #         snapshots are flat-pool deliverables -- decline.
     #       * sector= or a partial Sz window: the filtering loop serves
     #         those -- decline.
+    #     Directory input only: an in-memory operator with symmetry= already
+    #     had its block-lane decision (U1b) above.
     # ------------------------------------------------------------------
     if (is_directory and has_sym and sector is None
             and isinstance(point_group, str)
@@ -1423,11 +1470,17 @@ def thermal(
                       f"({lane.reason}); flat-pool sector lane.")
 
     # ------------------------------------------------------------------
-    # 3a. Directory form -- per-Sz dispatch through the C++ dispatcher
+    # 3a. Sector lane -- directory form, or an in-memory operator with
+    #     spatial symmetry: per-Sz dispatch through the C++ dispatcher
     #     which handles spatial symmetry internally when
     #     `params.use_symmetry=True`.
     # ------------------------------------------------------------------
-    if is_directory:
+    def _sector_lane(source: Optional[SymmetricSource]) -> ThermalResult:
+        """Run section 3a on ``source``: a directory path (the
+        ``*_directory`` bindings) or ``(H, closed info)`` (their in-memory
+        twins); ``None`` when there is no spatial group (``has_sym`` False,
+        the per-Sz loop then runs on ``H_op``). Only the symmetric calls
+        and the sector= table read the source; everything else is shared."""
         per_sector_blocks: list[tuple[np.ndarray, ...]] = []
         per_sector_records: list[ThermalSectorEntry] = []
         sector_hdf5_paths: dict[Optional[int], str] = {}
@@ -1446,7 +1499,7 @@ def thermal(
                     "this run has no spatial symmetry (no automorphism_results/ "
                     "in the directory, or use_symmetry_if_available=False). "
                     "Use sz_min/sz_max for magnetisation sectors.")
-            _tbl = _sector_table_from_directory(directory)
+            _tbl = _sector_table_from_source(source)
             if _tbl is None:
                 raise RuntimeError(
                     "qed.thermal: sector= was given but the directory carries "
@@ -1528,10 +1581,10 @@ def thermal(
             # the Z-weighted recombiner handling sector mixing.
             p.use_symmetry = bool(has_sym)
             # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw
-            # sector INDICES. Resolve against the directory's own
-            # sector_metadata.json (the same table the C++ side reads) rather
-            # than assuming the two axes coincide -- they only do for a
-            # single-generator group.
+            # sector INDICES. Resolve against the source's own table
+            # (sector_metadata.json, or the in-memory info dict -- the same
+            # table the C++ side reads) rather than assuming the two axes
+            # coincide -- they only do for a single-generator group.
             if _sector_sid is not None:
                 # GAP 9 (extended 2026-07): the sector set may be EXTENDED
                 # in SLOTS of n_raw -- 2 slots for flip halves or Sz-parity
@@ -1564,7 +1617,7 @@ def thermal(
                     )
                 if has_sym:
                     res = _thermal_via_workflows_streaming_symmetry(
-                        directory, N, float(spin),
+                        source, N, float(spin),
                         method_enum, p,
                         use_gpu=_use_gpu, use_mpi=_use_mpi, gpu_dim_floor=_gpu_floor,
                     )
@@ -1653,7 +1706,7 @@ def thermal(
                         "eigenvalues.")
                 p = _make_dir_params(None)
                 tr = _thermal_via_workflows_all_sz_streaming_symmetry(
-                    directory, N, float(spin), method_enum, p,
+                    source, N, float(spin), method_enum, p,
                     lo, hi, use_gpu=_use_gpu, use_mpi=_use_mpi, gpu_dim_floor=_gpu_floor,
                     spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
                     time_reversal=_sym_toggle_int(time_reversal,
@@ -1795,6 +1848,9 @@ def thermal(
             used_symmetry_decomposition=bool(has_sym),
             per_sector=per_sector_records,
         )
+
+    if is_directory or _in_memory_sector_lane:
+        return _sector_lane(_source)
 
     # ------------------------------------------------------------------
     # 3b. In-memory form -- iterate via qed.solve(H, sz=n_up).
