@@ -285,10 +285,12 @@ def _spectral_in_memory_with_symmetry(
     spin_flip=-1,
 ):
     """Route an IN-MEMORY spectral call through the streaming-symmetry
-    machinery: resolve ``symmetry`` (including ``"auto"``), export the
-    operator + automorphism metadata to a temp directory, extract each
-    observable's transform tuples, and dispatch to the cross-irrep
-    GS-CF (T is None) or FTLM (finite T) C++ binding.
+    machinery: resolve ``symmetry`` (including ``"auto"``) to the closed
+    group info dict, extract each observable's transform tuples, and
+    dispatch ``(H, info)`` to the in-memory twin of the cross-irrep
+    GS-CF (T is None) or FTLM (finite T) C++ binding -- the same sector
+    lanes the directory form runs, without writing the operator or the
+    group anywhere.
 
     Stage 8d (SymmetryEngine v2): when ``sz`` is None the diagonal /
     flip axes compose automatically -- Sz-parity halves when H carries
@@ -303,13 +305,9 @@ def _spectral_in_memory_with_symmetry(
     an unsupported method) -- the caller then falls back to the plain
     in-memory lane.
     """
-    import shutil as _shutil
-    import tempfile as _tempfile
-
     from .workflow import (
         resolve_auto_symmetry as _resolve_auto,
-        _write_operator_directory as _write_op_dir,
-        _write_symmetry_directory as _write_sym_dir,
+        _closed_symmetry_info as _closed_sym_info,
         _normalize_symmetry_info as _norm_sym_info,
     )
 
@@ -351,100 +349,118 @@ def _spectral_in_memory_with_symmetry(
             return NotImplemented
         transforms_per_obs.append(tuples)
 
-    tmpdir = _tempfile.mkdtemp(prefix="qed_spectral_sym_")
-    try:
-        _write_op_dir(H, tmpdir)
-        info = _norm_sym_info(H, gen)
-        if info is None:
-            return NotImplemented
-        _write_sym_dir(tmpdir, info)
+    info = _norm_sym_info(H, gen)
+    if info is None:
+        return NotImplemented
+    # The in-memory twins receive this dict verbatim; close a raw
+    # generators-only group first (the same group, sector ids and
+    # quantum numbers the directory writer would have produced).
+    source = (H, _closed_sym_info(info))
 
-        # Stage 8d: diagonal / flip axis composition for the sz=None
-        # lanes. Detection is term-level (same walk solve/thermal use);
-        # engagement is PER PROBE, since routability depends on the
-        # probe's selection rules.
-        det = None
-        if sz is None:
-            try:
-                det = dict(_core.detect_hamiltonian_symmetries(H))
-            except Exception:
-                det = None
+    # Stage 8d: diagonal / flip axis composition for the sz=None
+    # lanes. Detection is term-level (same walk solve/thermal use);
+    # engagement is PER PROBE, since routability depends on the
+    # probe's selection rules.
+    det = None
+    if sz is None:
+        try:
+            det = dict(_core.detect_hamiltonian_symmetries(H))
+        except Exception:
+            det = None
 
-        def _probe_lanes(tuples):
-            """(sz_parity, flip_sectors) for one probe's transforms."""
-            szp, flip = -1, False
-            if sz is not None or det is None:
-                return szp, flip
-            n = int(H.num_sites)
-            if det.get("sz_parity") and not det.get("u1"):
-                if _core.probe_delta_n_up_parity(tuples) >= 0:
-                    szp = 2                     # pool both parity halves
-            if spin_flip != 0 and det.get("spin_flip"):
-                if (_core.probe_spin_flip_character(tuples) != 0
-                        and (szp < 0 or n % 2 == 0)):
-                    flip = True
-            if spin_flip == 1 and not flip:
-                raise RuntimeError(
-                    "qed.spectral: spin_flip='require' but the flip lane "
-                    "cannot route this call (H lacks the symmetry, the "
-                    "probe has no definite flip character, or the parity "
-                    "closure rule excludes it).")
+    def _probe_lanes(tuples):
+        """(sz_parity, flip_sectors) for one probe's transforms."""
+        szp, flip = -1, False
+        if sz is not None or det is None:
             return szp, flip
+        n = int(H.num_sites)
+        if det.get("sz_parity") and not det.get("u1"):
+            if _core.probe_delta_n_up_parity(tuples) >= 0:
+                szp = 2                     # pool both parity halves
+        if spin_flip != 0 and det.get("spin_flip"):
+            if (_core.probe_spin_flip_character(tuples) != 0
+                    and (szp < 0 or n % 2 == 0)):
+                flip = True
+        if spin_flip == 1 and not flip:
+            raise RuntimeError(
+                "qed.spectral: spin_flip='require' but the flip lane "
+                "cannot route this call (H lacks the symmetry, the "
+                "probe has no definite flip character, or the parity "
+                "closure rule excludes it).")
+        return szp, flip
 
-        results = []
-        for tuples in transforms_per_obs:
-            delta = _infer_delta_n_up(tuples) if sz is not None else 0
-            szp, flip = _probe_lanes(tuples)
-            if T is None:
-                results.append(
-                    _spectral_streaming_symmetry_cross_irrep_directory(
-                        tmpdir,
-                        num_sites=int(H.num_sites),
-                        spin_l=float(spin_l),
-                        fixed_sz_n_up=(int(sz) if sz is not None else None),
-                        omega=omega, eta=eta, krylov_dim=krylov_dim,
-                        energy_shift=energy_shift,
-                        momentum_transfer=momentum_transfer,
-                        momentum_tolerance=momentum_tolerance,
-                        selected_sectors=selected_sectors,
-                        observable_transforms=tuples,
-                        delta_n_up=delta,
-                        sz_parity=szp,
-                        flip_sectors=flip,
-                        output_dir=output_dir,
-                        observable_type=observable_type,
-                        verbose=verbose,
-                    ))
-            else:
-                Ts_list = T if isinstance(T, (list, tuple)) else [T]
-                results.append(
-                    _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
-                        tmpdir,
-                        num_sites=int(H.num_sites),
-                        spin_l=float(spin_l),
-                        fixed_sz_n_up=(int(sz) if sz is not None else None),
-                        omega=omega, eta=eta, krylov_dim=krylov_dim,
-                        momentum_transfer=momentum_transfer,
-                        momentum_tolerance=momentum_tolerance,
-                        selected_sectors=selected_sectors,
-                        observable_transforms=tuples,
-                        delta_n_up=delta,
-                        sz_parity=szp,
-                        flip_sectors=flip,
-                        temperatures=list(Ts_list),
-                        num_samples=int(num_random_vectors or 30),
-                        random_seed=0,
-                        output_dir=output_dir,
-                        observable_type=observable_type,
-                        verbose=verbose,
-                    ))
-        return results[0] if len(results) == 1 else results
-    finally:
-        _shutil.rmtree(tmpdir, ignore_errors=True)
+    results = []
+    for tuples in transforms_per_obs:
+        delta = _infer_delta_n_up(tuples) if sz is not None else 0
+        szp, flip = _probe_lanes(tuples)
+        if T is None:
+            results.append(
+                _spectral_streaming_symmetry_cross_irrep(
+                    source,
+                    num_sites=int(H.num_sites),
+                    spin_l=float(spin_l),
+                    fixed_sz_n_up=(int(sz) if sz is not None else None),
+                    omega=omega, eta=eta, krylov_dim=krylov_dim,
+                    energy_shift=energy_shift,
+                    momentum_transfer=momentum_transfer,
+                    momentum_tolerance=momentum_tolerance,
+                    selected_sectors=selected_sectors,
+                    observable_transforms=tuples,
+                    delta_n_up=delta,
+                    sz_parity=szp,
+                    flip_sectors=flip,
+                    output_dir=output_dir,
+                    observable_type=observable_type,
+                    verbose=verbose,
+                ))
+        else:
+            Ts_list = T if isinstance(T, (list, tuple)) else [T]
+            results.append(
+                _spectral_streaming_symmetry_ftlm_cross_irrep(
+                    source,
+                    num_sites=int(H.num_sites),
+                    spin_l=float(spin_l),
+                    fixed_sz_n_up=(int(sz) if sz is not None else None),
+                    omega=omega, eta=eta, krylov_dim=krylov_dim,
+                    momentum_transfer=momentum_transfer,
+                    momentum_tolerance=momentum_tolerance,
+                    selected_sectors=selected_sectors,
+                    observable_transforms=tuples,
+                    delta_n_up=delta,
+                    sz_parity=szp,
+                    flip_sectors=flip,
+                    temperatures=list(Ts_list),
+                    num_samples=int(num_random_vectors or 30),
+                    random_seed=0,
+                    output_dir=output_dir,
+                    observable_type=observable_type,
+                    verbose=verbose,
+                ))
+    return results[0] if len(results) == 1 else results
 
 
-def _spectral_streaming_symmetry_cross_irrep_directory(
-    directory: str,
+# Where the cross-irrep sector lanes read the Hamiltonian and the group
+# from: a directory path (``Trans.dat`` / ``InterAll.dat`` / ... plus
+# ``automorphism_results/``), or an in-memory ``(Operator, info)`` pair
+# whose ``info`` is the CLOSED group dict (``_closed_symmetry_info``). The
+# two feed the ``*_directory`` bindings and their in-memory twins
+# respectively; everything else about the call is shared.
+SymmetricSource = Union[str, tuple]
+
+
+def _is_in_memory_source(source: SymmetricSource) -> bool:
+    return isinstance(source, tuple)
+
+
+def _source_label(source: SymmetricSource) -> str:
+    """How the verbose lines name ``source``."""
+    if _is_in_memory_source(source):
+        return "source=in-memory"
+    return f"directory={source!r}"
+
+
+def _spectral_streaming_symmetry_cross_irrep(
+    source: SymmetricSource,
     *,
     num_sites: int,
     spin_l: float,
@@ -465,7 +481,10 @@ def _spectral_streaming_symmetry_cross_irrep_directory(
     flip_sectors: bool = False,
 ) -> Any:
     """SOTA cross-irrep streaming-symmetry spectral routing the call to
-    ``_core.workflows_spectral_streaming_symmetry_cross_irrep_directory``.
+    ``_core.workflows_spectral_streaming_symmetry_cross_irrep_directory``
+    (directory ``source``) or its in-memory twin
+    ``_core.workflows_spectral_streaming_symmetry_cross_irrep``
+    (``(Operator, info)`` source).
 
     Stage 8d: ``sz_parity`` / ``flip_sectors`` engage the Sz-parity /
     prod-sigma^x synthetic sector lanes (sz=None only).
@@ -497,13 +516,27 @@ def _spectral_streaming_symmetry_cross_irrep_directory(
     if verbose:
         print(
             f"[qed.spectral] cross-irrep streaming-symmetry: "
-            f"directory={directory!r}  N={num_sites}  "
+            f"{_source_label(source)}  N={num_sites}  "
             f"fixed_sz_n_up={fixed_sz_n_up}  delta_n_up={delta_n_up}  "
             f"Q={list(opts.momentum_transfer)}  "
             f"terms={len(observable_transforms)}"
         )
+    if _is_in_memory_source(source):
+        H_src, info = source
+        return _core.workflows_spectral_streaming_symmetry_cross_irrep(
+            H_src,
+            info,
+            int(num_sites),
+            float(spin_l),
+            observable_transforms,
+            opts,
+            fixed_sz_n_up,
+            int(delta_n_up),
+            int(sz_parity),
+            bool(flip_sectors),
+        )
     return _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
-        directory,
+        source,
         int(num_sites),
         float(spin_l),
         observable_transforms,
@@ -605,8 +638,8 @@ def _spectral_streaming_symmetry_cross_irrep_multiq_directory(
     )
 
 
-def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
-    directory: str,
+def _spectral_streaming_symmetry_ftlm_cross_irrep(
+    source: SymmetricSource,
     *,
     num_sites: int,
     spin_l: float,
@@ -629,7 +662,10 @@ def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
     flip_sectors: bool = False,
 ) -> Any:
     """SOTA finite-T cross-irrep streaming-symmetry spectral routing to
-    ``_core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory``.
+    ``_core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory``
+    (directory ``source``) or its in-memory twin
+    ``_core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep``
+    (``(Operator, info)`` source).
 
     The C++ binding performs the per-source-sector FTLM walk:
     draw random samples in each source orbit basis, outer-Lanczos on
@@ -670,25 +706,43 @@ def _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
     if verbose:
         print(
             f"[qed.spectral] FTLM cross-irrep streaming-symmetry: "
-            f"directory={directory!r}  N={num_sites}  "
+            f"{_source_label(source)}  N={num_sites}  "
             f"fixed_sz_n_up={fixed_sz_n_up}  delta_n_up={delta_n_up}  "
             f"Q={list(opts.momentum_transfer)}  T={Ts}  "
             f"num_samples={num_samples}  terms={len(observable_transforms)}"
         )
-    agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
-        directory,
-        int(num_sites),
-        float(spin_l),
-        observable_transforms,
-        opts,
-        fixed_sz_n_up,
-        int(delta_n_up),
-        Ts,
-        int(num_samples),
-        int(random_seed),
-        int(sz_parity),
-        bool(flip_sectors),
-    )
+    if _is_in_memory_source(source):
+        H_src, info = source
+        agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep(
+            H_src,
+            info,
+            int(num_sites),
+            float(spin_l),
+            observable_transforms,
+            opts,
+            fixed_sz_n_up,
+            int(delta_n_up),
+            Ts,
+            int(num_samples),
+            int(random_seed),
+            int(sz_parity),
+            bool(flip_sectors),
+        )
+    else:
+        agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
+            source,
+            int(num_sites),
+            float(spin_l),
+            observable_transforms,
+            opts,
+            fixed_sz_n_up,
+            int(delta_n_up),
+            Ts,
+            int(num_samples),
+            int(random_seed),
+            int(sz_parity),
+            bool(flip_sectors),
+        )
 
     # The binding stuffs the multi-T payload into per_sector_pair as
     # extra synthetic entries (one per T) with
@@ -1258,7 +1312,7 @@ def spectral(
                     "has at least one one-body / two-body term."
                 )
             Ts_list = T if isinstance(T, (list, tuple)) else [T]
-            return _spectral_streaming_symmetry_ftlm_cross_irrep_directory(
+            return _spectral_streaming_symmetry_ftlm_cross_irrep(
                 H_or_directory,
                 num_sites=int(num_sites),
                 spin_l=float(spin_l),
@@ -1350,7 +1404,7 @@ def spectral(
                     "expanded to zero transforms; check the Operator "
                     "has at least one one-body / two-body term."
                 )
-            return _spectral_streaming_symmetry_cross_irrep_directory(
+            return _spectral_streaming_symmetry_cross_irrep(
                 H_or_directory,
                 num_sites=int(num_sites),
                 spin_l=float(spin_l),
