@@ -171,4 +171,22 @@ struct DSSFResult {
  */
 DSSFResult run(const DSSFRequest& request);
 
+/**
+ * The `ED dssf <method> <directory> [options]` subcommand as a library call.
+ *
+ * `argv` is exactly what `ED` receives: argv[0] is the program name,
+ * argv[1] == "dssf", argv[2] the method token, and the remainder is parsed
+ * by `EDConfig::fromCommandLine` as a normal ED invocation. Validates the
+ * config, creates the output directory, calls `run(...)` and prints the
+ * one-line `[ED dssf]` summary to stdout.
+ *
+ * Shared by `src/apps/ed_main.cpp` and the `_core.dssf_run` Python binding,
+ * so both parse the same arguments and write the same files. MPI setup and
+ * teardown stay with the caller.
+ *
+ * @return 0 on success, 1 on a usage / validation / engine error (the
+ *         message is written to stderr), matching the `ED` exit code.
+ */
+int run_cli(int argc, char** argv);
+
 } // namespace ed::dssf

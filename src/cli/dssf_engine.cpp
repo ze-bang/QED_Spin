@@ -6,7 +6,9 @@
 //
 // This translation unit deliberately stays small and *only* contains the
 // `run(...)` dispatcher (it has to live in `ed_cli` so it can call into
-// the `compute_*_workflow` bodies that live in `src/cli/workflows.cpp`).
+// the `compute_*_workflow` bodies that live in `src/cli/workflows.cpp`)
+// and `run_cli(...)`, the `ED dssf` subcommand body shared by the `ED`
+// executable and the `_core.dssf_run` Python binding (WP9.8).
 // The pure helpers `to_string` / `method_from_string` were split out
 // into `src/dssf/dssf_method.cpp` (P2.3) so they can be linked from
 // `ed_dssf` consumers (e.g. `dssf_io.cpp`) without dragging in `ed_cli`.
@@ -15,9 +17,13 @@
 #include <ed/dssf/dssf_engine.h>
 
 #include <ed/cli/workflows.h>
+#include <ed/core/system_utils.h>      // create_directory_mpi_safe
 
+#include <exception>
+#include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ed::dssf {
 
@@ -83,6 +89,61 @@ DSSFResult run(const DSSFRequest& request) {
     throw std::invalid_argument(
         "ed::dssf::run: unrecognised DSSFMethod value " +
         std::to_string(static_cast<std::uint32_t>(request.method)));
+}
+
+int run_cli(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Error: `ED dssf` requires a method argument.\n"
+                  << "Usage: ED dssf <dynamical_thermal|static_thermal|"
+                     "ground_state_dssf|single_expectation|"
+                     "kpm_thermodynamics> "
+                     "<directory> [options]\n";
+        return 1;
+    }
+
+    DSSFMethod method;
+    try {
+        method = method_from_string(argv[2]);
+    } catch (const std::invalid_argument& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Strip the "dssf <method>" prefix so EDConfig parses the rest of
+    // argv as a normal ED invocation.
+    std::vector<char*> cfg_argv;
+    cfg_argv.reserve(argc - 1);
+    cfg_argv.push_back(argv[0]);
+    for (int i = 3; i < argc; ++i) cfg_argv.push_back(argv[i]);
+    EDConfig sub_config = EDConfig::fromCommandLine(
+        static_cast<int>(cfg_argv.size()), cfg_argv.data());
+
+    if (!sub_config.validate()) {
+        std::cerr << "\nConfiguration validation failed. Use --help.\n";
+        return 1;
+    }
+
+    create_directory_mpi_safe(sub_config.workflow.output_dir);
+
+    DSSFRequest request;
+    request.method     = method;
+    request.output_dir = sub_config.workflow.output_dir;
+    request.config     = &sub_config;
+    // operators left default-constructed: P2.2 transitional cut still
+    // routes operator construction through the workflow body (which
+    // reads sub_config.dynamical / .static_resp). P2.3 will populate
+    // request.operators here from the same EDConfig fields.
+
+    try {
+        const auto result = run(request);
+        std::cout << "\n[ED dssf] method=" << to_string(result.method)
+                  << " tasks=" << result.num_tasks_attempted
+                  << " output=" << result.output_dir << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
 }
 
 } // namespace ed::dssf

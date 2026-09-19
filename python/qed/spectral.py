@@ -11,10 +11,11 @@ Two call shapes are supported:
   the supplied operator and observable list. Used for programmatic
   workflows and notebook prototyping.
 
-* **Directory form:** ``qed.spectral(directory, ...)`` -- shells out to
-  the canonical ``./ED dssf <method> <directory>`` CLI workflow, which
-  handles the full DSSF / SSSF / static-response pipeline with HDF5
-  outputs. Used for production runs.
+* **Directory form:** ``qed.spectral(directory, ...)`` -- runs the
+  canonical ``ED dssf <method> <directory>`` CLI workflow in-process
+  (``_core.dssf_run``, the same parser and engine as the ``ED``
+  executable), which handles the full DSSF / SSSF / static-response
+  pipeline with HDF5 outputs. Used for production runs.
 
 The CLI form is the same code path the old ``qed.dssf.compute`` /
 ``qed.dssf.run_from_directory`` helpers exercised; those names were
@@ -28,6 +29,9 @@ import numpy as np
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
+import warnings
 from typing import Iterable, Optional, Sequence, Union, Any
 
 from . import _core
@@ -109,7 +113,12 @@ def _spectral_directory(
     capture_output: bool,
     verbose: bool,
 ) -> subprocess.CompletedProcess:
-    """Shell out to ``./ED dssf <method> <directory>``."""
+    """Run ``ED dssf <method> <directory>`` (in-process by default).
+
+    The ``ED dssf`` subcommand runs in this process through
+    ``_core.dssf_run`` with exactly the arguments the CLI would receive.
+    Passing ``ed_binary=`` selects the deprecated subprocess path instead.
+    """
     if method is None:
         chosen = _pick_cli_method(T=T, omega=omega)
     else:
@@ -165,16 +174,94 @@ def _spectral_directory(
             f"directory={directory!r} does not exist or is not a directory"
         )
 
-    binary = _resolve_ed_binary(ed_binary)
-    cmd = [binary, "dssf", chosen, directory,
-           *tuple(auto_args), *tuple(extra_args)]
-    return subprocess.run(
-        cmd,
-        check=check,
-        env=env,
-        capture_output=capture_output,
-        text=True,
+    cli_args = [*tuple(auto_args), *tuple(extra_args)]
+
+    if ed_binary is not None:
+        warnings.warn(
+            "qed.spectral(directory, ed_binary=...) runs the `ED dssf` CLI "
+            "as a subprocess; this is deprecated. Omit ed_binary= to run the "
+            "same `ED dssf` code path in-process (same arguments, same "
+            "output files).",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        binary = _resolve_ed_binary(ed_binary)
+        cmd = [binary, "dssf", chosen, directory, *cli_args]
+        return subprocess.run(
+            cmd,
+            check=check,
+            env=env,
+            capture_output=capture_output,
+            text=True,
+        )
+
+    if env:
+        warnings.warn(
+            "qed.spectral(directory, env=...) only applied to the `ED dssf` "
+            "subprocess, which is no longer used; env= is ignored. Set the "
+            "variables in os.environ before the call instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    return _run_dssf_in_process(
+        chosen, directory, cli_args,
+        check=check, capture_output=capture_output,
     )
+
+
+def _run_dssf_in_process(
+    method: str,
+    directory: str,
+    cli_args: list[str],
+    *,
+    check: bool,
+    capture_output: bool,
+) -> subprocess.CompletedProcess:
+    """Run ``ED dssf <method> <directory> <cli_args>`` via ``_core.dssf_run``.
+
+    Mirrors :func:`subprocess.run` for the fields callers use: ``args`` is
+    the notional command line (``["ED", "dssf", method, directory, ...]``),
+    ``returncode`` the exit code ``ED`` would have returned, and ``stdout`` /
+    ``stderr`` are ``None`` unless ``capture_output=True``, in which case the
+    process-level file descriptors 1 and 2 are redirected for the duration
+    of the run (the C++ engine writes there, not to ``sys.stdout``) and the
+    captured text is returned. ``check=True`` raises
+    :class:`subprocess.CalledProcessError` on a non-zero exit code.
+    """
+    args = ["ED", "dssf", method, directory, *cli_args]
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+
+    if capture_output:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        with tempfile.TemporaryFile() as out_f, \
+                tempfile.TemporaryFile() as err_f:
+            saved_out = os.dup(1)
+            saved_err = os.dup(2)
+            try:
+                os.dup2(out_f.fileno(), 1)
+                os.dup2(err_f.fileno(), 2)
+                rc = int(_core.dssf_run(method, directory, cli_args))
+            finally:
+                os.dup2(saved_out, 1)
+                os.dup2(saved_err, 2)
+                os.close(saved_out)
+                os.close(saved_err)
+            out_f.seek(0)
+            err_f.seek(0)
+            stdout = out_f.read().decode(errors="replace")
+            stderr = err_f.read().decode(errors="replace")
+    else:
+        # Keep Python-side progress lines ahead of the C++ output.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        rc = int(_core.dssf_run(method, directory, cli_args))
+
+    if check and rc != 0:
+        raise subprocess.CalledProcessError(rc, args, stdout, stderr)
+    return subprocess.CompletedProcess(args, rc, stdout, stderr)
 
 
 def _extract_transforms(observable: Any) -> list:
@@ -1107,10 +1194,10 @@ def spectral(
 
     * If ``H_or_directory`` is a string, it is interpreted as a
       directory containing ``parameters.def`` plus the Hamiltonian
-      deck, and the call shells out to ``./ED dssf <method>
-      <directory>``. Observables are assembled by the CLI from
-      ``parameters.def`` in this form; the ``observables=`` kwarg is
-      ignored.
+      deck, and the call runs ``ED dssf <method> <directory>``
+      in-process (``_core.dssf_run``). Observables are assembled by
+      the CLI from ``parameters.def`` in this form; the
+      ``observables=`` kwarg is ignored.
 
     Parameters common to both forms
     -------------------------------
@@ -1158,8 +1245,21 @@ def spectral(
         Inputs for the auto-tuner.
     auto_tune : bool, optional
         If True, auto-tune the omega grid / Krylov dim / etc.
-    ed_binary, extra_args, env, check, capture_output : see
-        :func:`subprocess.run`.
+    extra_args : sequence of str, optional
+        Extra ``ED dssf`` options appended after the auto-tuned ones.
+    check : bool, optional
+        Raise :class:`subprocess.CalledProcessError` on a non-zero exit
+        code (as :func:`subprocess.run` does).
+    capture_output : bool, optional
+        Capture the C++ stdout / stderr (file descriptors 1 and 2) into
+        the returned object's ``stdout`` / ``stderr`` as text.
+    ed_binary : str, optional
+        Deprecated. Run the given ``ED`` executable as a subprocess
+        instead of in-process (emits a :class:`DeprecationWarning`).
+    env : dict, optional
+        Deprecated no-op on the in-process path (emits a
+        :class:`DeprecationWarning` when non-empty); still passed to
+        the subprocess when ``ed_binary=`` is given.
 
     Returns
     -------
@@ -1167,7 +1267,10 @@ def spectral(
     * Directory form with ``symmetry=``: a :class:`_core.SpectralResult`
       (the streaming-symmetry C++ binding returns the same result type).
     * Directory form without ``symmetry=``: a
-      :class:`subprocess.CompletedProcess` from the ``./ED dssf`` CLI.
+      :class:`subprocess.CompletedProcess` with ``args`` =
+      ``["ED", "dssf", method, directory, ...]`` and ``returncode`` = the
+      ``ED`` exit code (``stdout`` / ``stderr`` are ``None`` unless
+      ``capture_output=True``).
 
     SOTA streaming-symmetry kwargs (directory form, May 2026)
     ---------------------------------------------------------

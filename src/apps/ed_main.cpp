@@ -370,74 +370,14 @@ int main(int argc, char* argv[]) {
     // work); the subcommand only chooses which engine method is invoked.
     // -------------------------------------------------------------------
     if (argc >= 2 && std::string(argv[1]) == "dssf") {
-        if (argc < 3) {
-            std::cerr << "Error: `ED dssf` requires a method argument.\n"
-                      << "Usage: ED dssf <dynamical_thermal|static_thermal|"
-                         "ground_state_dssf|single_expectation|"
-                         "kpm_thermodynamics> "
-                         "<directory> [options]\n";
-            #ifdef WITH_MPI
-            MPI_Finalize();
-            #endif
-            return 1;
-        }
-
-        ed::dssf::DSSFMethod method;
-        try {
-            method = ed::dssf::method_from_string(argv[2]);
-        } catch (const std::invalid_argument& e) {
-            std::cerr << "Error: " << e.what() << "\n";
-            #ifdef WITH_MPI
-            MPI_Finalize();
-            #endif
-            return 1;
-        }
-
-        // Strip the "dssf <method>" prefix so EDConfig parses the rest of
-        // argv as a normal ED invocation.
-        std::vector<char*> cfg_argv;
-        cfg_argv.reserve(argc - 1);
-        cfg_argv.push_back(argv[0]);
-        for (int i = 3; i < argc; ++i) cfg_argv.push_back(argv[i]);
-        EDConfig sub_config = EDConfig::fromCommandLine(
-            static_cast<int>(cfg_argv.size()), cfg_argv.data());
-
-        if (!sub_config.validate()) {
-            std::cerr << "\nConfiguration validation failed. Use --help.\n";
-            #ifdef WITH_MPI
-            MPI_Finalize();
-            #endif
-            return 1;
-        }
-
-        create_directory_mpi_safe(sub_config.workflow.output_dir);
-
-        ed::dssf::DSSFRequest request;
-        request.method     = method;
-        request.output_dir = sub_config.workflow.output_dir;
-        request.config     = &sub_config;
-        // operators left default-constructed: P2.2 transitional cut still
-        // routes operator construction through the workflow body (which
-        // reads sub_config.dynamical / .static_resp). P2.3 will populate
-        // request.operators here from the same EDConfig fields.
-
-        try {
-            const auto result = ed::dssf::run(request);
-            std::cout << "\n[ED dssf] method=" << ed::dssf::to_string(result.method)
-                      << " tasks=" << result.num_tasks_attempted
-                      << " output=" << result.output_dir << "\n";
-        } catch (const std::exception& e) {
-            std::cerr << "\nError: " << e.what() << "\n";
-            #ifdef WITH_MPI
-            MPI_Finalize();
-            #endif
-            return 1;
-        }
-
+        // The subcommand body lives in ed_cli (`ed::dssf::run_cli`) so the
+        // `_core.dssf_run` Python binding runs the identical parse ->
+        // validate -> run sequence in-process.
+        const int rc = ed::dssf::run_cli(argc, argv);
         #ifdef WITH_MPI
         MPI_Finalize();
         #endif
-        return 0;
+        return rc;
     }
 
     // Reject the historical `--dssf` flag with a friendly migration hint.

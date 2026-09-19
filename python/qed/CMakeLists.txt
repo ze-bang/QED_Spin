@@ -57,6 +57,14 @@ target_link_libraries(_core PRIVATE
     ed_input
 )
 
+# WP9.8: `_core.dssf_run` runs the `ED dssf` subcommand in-process through
+# `ed::dssf::run_cli` (src/cli/dssf_engine.cpp), so the extension carries the
+# CLI workflow bodies and the EDConfig command-line parser. ed_cli is a
+# static, PIC library with no `main` (that stays in src/apps/ed_main.cpp).
+# In CUDA builds ed_cli PUBLIC-links ed_solvers_gpu, which is linked just
+# below anyway, so no new GPU dependency enters the module.
+target_link_libraries(_core PRIVATE ed_cli)
+
 # When the project was configured with WITH_CUDA=ON, the dispatcher header
 # `ed_wrapper.h` references GPUEDWrapper::* symbols (gated by
 # `#ifdef WITH_CUDA`, which is set via `add_definitions(-DWITH_CUDA)` in

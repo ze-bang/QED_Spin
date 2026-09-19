@@ -39,6 +39,7 @@
 #include <ed/config/env_registry.h>
 #include <ed/core/construct_ham.h>
 #include <ed/dssf/operator_spec.h>
+#include <ed/dssf/dssf_engine.h>           // WP9.8: run_cli (`ED dssf` in-process)
 #include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr / prefer_tableless_fixed_sz (leaf)
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
@@ -68,6 +69,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -1036,6 +1038,52 @@ PYBIND11_MODULE(_core, m) {
         -------
         (e1, e2) : tuple[list[float], list[float]]
             Two unit 3-vectors.
+        )pbdoc");
+
+    // WP9.8: the `ED dssf <method> <directory> [args]` subcommand in-process.
+    // Same parser, validation and engine call as the executable
+    // (`ed::dssf::run_cli`), so the files written are identical.
+    m.def("dssf_run",
+        [](const std::string& method, const std::string& directory,
+           const std::vector<std::string>& argv) {
+            std::vector<std::string> args;
+            args.reserve(argv.size() + 4);
+            args.emplace_back("ED");
+            args.emplace_back("dssf");
+            args.push_back(method);
+            args.push_back(directory);
+            args.insert(args.end(), argv.begin(), argv.end());
+            std::vector<char*> c_argv;
+            c_argv.reserve(args.size() + 1);
+            for (auto& a : args) c_argv.push_back(a.data());
+            c_argv.push_back(nullptr);
+            int rc = 1;
+            {
+                py::gil_scoped_release release;
+                rc = ed::dssf::run_cli(static_cast<int>(args.size()),
+                                       c_argv.data());
+                std::cout.flush();
+                std::cerr.flush();
+            }
+            return rc;
+        },
+        py::arg("method"), py::arg("directory"),
+        py::arg("argv") = std::vector<std::string>{},
+        R"pbdoc(
+        Run ``ED dssf <method> <directory> [argv...]`` in this process.
+
+        ``argv`` is the option list that follows the directory on the
+        command line (the ``--dyn-*`` / ``--static-*`` / ``--gs-dssf-*`` /
+        ``--kpm-*`` knobs). Parsing, validation and the engine call are the
+        ones the ``ED`` executable uses, so the output files are the same.
+        Progress is printed by the C++ code on the process stdout / stderr.
+        The GIL is released for the duration of the run.
+
+        Returns
+        -------
+        int
+            The exit code ``ED`` would have returned: 0 on success, 1 on a
+            usage, validation or engine error.
         )pbdoc");
 
     // ed::sym -- programmatic site-permutation symmetry DSL (P2.11).
