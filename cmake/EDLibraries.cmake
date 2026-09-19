@@ -229,7 +229,14 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
-    ${SOLVERS_CPU_DIR}/little_group_solve.cpp
+    ${SRC_DIR}/solvers/little_group/lg_engine.cpp
+    ${SRC_DIR}/solvers/little_group/lg_block_solve.cpp
+    ${SRC_DIR}/solvers/little_group/lg_stars.cpp
+    ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
+    ${SRC_DIR}/solvers/little_group/lg_spectrum.cpp
+    ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
+    ${SRC_DIR}/solvers/little_group/lg_thermal.cpp
+    ${SRC_DIR}/solvers/little_group/lg_vectors.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
     ${SRC_DIR}/orchestrator.cpp
     # Phase A of the "mirror examples" plan (May 2026): Python-named

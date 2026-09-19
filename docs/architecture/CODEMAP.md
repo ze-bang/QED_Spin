@@ -321,7 +321,8 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 ### `src/solvers/cpu/`
 
-- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`, `lanczos.cpp`, `little_group_solve.cpp`, `ltlm.cpp`, `observables.cpp`, `oftlm.cpp`
+- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`, `lanczos.cpp`, `ltlm.cpp`, `observables.cpp`, `oftlm.cpp`
+- `src/solvers/little_group/` -- the little-group (factorized non-abelian) engine: `lg_internal.h` (private types, star-walk template, file map), `lg_engine.cpp`, `lg_block_solve.cpp`, `lg_stars.cpp`, `lg_blocks.cpp`, `lg_spectrum.cpp`, `lg_ground_state.cpp`, `lg_thermal.cpp`, `lg_vectors.cpp`. Python surface: `python/qed/_bindings/little_group_bindings.cpp`.
 
 ### `src/solvers/gpu/` *(the Gen-1 hand-rolled bodies and `gpu_ftlm.cu` (GPUFTLMSolver, consolidation Family 3) are gone; GPU Lanczos/FTLM/mTPQ ride `lanczos_kernel<CudaBackend>` + the backend-templated thermal kernels)*
 

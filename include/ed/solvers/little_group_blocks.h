@@ -28,7 +28,7 @@
 // this set surface is sized for the verb loops and tests at small-to-mid N.
 //
 // The concrete types behind the handle (RepSectorMatVec, SparseColumns,
-// ProjectedBlockOp, Monomial) stay PRIVATE to little_group_solve.cpp -- this
+// ProjectedBlockOp, Monomial) stay PRIVATE to the engine (src/solvers/little_group/lg_internal.h) -- this
 // header is deliberately pimpl so the basis layer keeps zero new surface.
 // =============================================================================
 
@@ -82,7 +82,7 @@ struct LittleGroupBlockTag {
 // -----------------------------------------------------------------------------
 class LittleGroupBlock {
 public:
-    struct Impl;  // defined in little_group_solve.cpp
+    struct Impl;  // defined in src/solvers/little_group/lg_internal.h
     explicit LittleGroupBlock(std::shared_ptr<Impl> impl);
     ~LittleGroupBlock();
     LittleGroupBlock(const LittleGroupBlock&);
