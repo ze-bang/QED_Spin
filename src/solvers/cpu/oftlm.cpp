@@ -5,6 +5,7 @@
 // See include/ed/thermal/oftlm_kernel.h for the estimator + references.
 // =============================================================================
 
+#include <ed/thermal/sample_seed.h>
 #include <ed/thermal/oftlm_kernel.h>
 
 #include <ed/solvers/lanczos.h>   // generateGaussianRandomVector,
@@ -62,11 +63,7 @@ FtlmResult oftlm_cpu(
     // matching the legacy FTLM driver's public contract; explicit seeds
     // keep bit-reproducibility. (Was a fixed 0xFEEDFACE, which made
     // "independent" default runs draw identical samples.)
-    const std::uint64_t base_seed =
-        opts.random_seed != 0
-            ? opts.random_seed
-            : (static_cast<std::uint64_t>(std::random_device{}()) << 32
-               | std::random_device{}());
+    const std::uint64_t base_seed = ed::thermal::resolve_base_seed(opts.random_seed);
 
     // -------------------------------------------------------------------------
     // 1. N_V lowest exact eigenpairs via one long full-reorthogonalized Lanczos
@@ -124,11 +121,7 @@ FtlmResult oftlm_cpu(
     std::vector<SampleSpectrum> samples;
     samples.reserve(R);
     for (std::size_t s = 0; s < R; ++s) {
-        std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (s + 1);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z =  z ^ (z >> 31);
-        std::mt19937 gen(static_cast<std::mt19937::result_type>(z));
+        std::mt19937 gen = ed::thermal::sample_engine(base_seed, s);
 
         ComplexVector v = generateGaussianRandomVector(static_cast<int>(N), gen);
         // Gram-Schmidt against the exact eigenvectors: v -= sum_i |i><i|v>.

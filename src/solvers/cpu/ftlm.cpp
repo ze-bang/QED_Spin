@@ -1,4 +1,5 @@
 // ftlm.cpp - Finite Temperature Lanczos Method implementation
+#include <ed/thermal/sample_seed.h>
 #include <ed/config/env_registry.h>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>       // For HDF5 output
@@ -454,11 +455,7 @@ FTLMResults finite_temperature_lanczos(
     // Reproducible base seed: 0 means "draw from random_device"; non-zero
     // is taken verbatim. Each sample derives its own per-thread RNG below
     // so the loop is safe to parallelize without giving up reproducibility.
-    std::uint64_t base_seed = params.random_seed;
-    if (base_seed == 0) {
-        std::random_device rd;
-        base_seed = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
-    }
+    const std::uint64_t base_seed = ed::thermal::resolve_base_seed(params.random_seed);
 
     // Storage for results — pre-sized so OpenMP threads can write to
     // disjoint slots without locks. Empty slots (Lanczos failure) are
@@ -509,12 +506,7 @@ FTLMResults finite_temperature_lanczos(
                       << params.num_samples << " ---\n";
         }
 
-        // Per-sample, per-thread RNG: splitmix-mixed (base_seed, sample)
-        std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (std::uint64_t)(sample + 1);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z =  z ^ (z >> 31);
-        std::mt19937 local_gen(static_cast<std::mt19937::result_type>(z));
+        std::mt19937 local_gen = ed::thermal::sample_engine(base_seed, static_cast<std::uint64_t>(sample));
 
         ComplexVector v0 = generateGaussianRandomVector(N, local_gen);
 
