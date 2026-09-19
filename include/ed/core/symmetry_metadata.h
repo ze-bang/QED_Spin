@@ -23,6 +23,8 @@
 #include <fstream>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 using Complex = std::complex<double>;
@@ -96,7 +98,54 @@ struct SymmetryGroupInfo {
         std::cout << "  Number of symmetry sectors: " << sectors.size() << std::endl;
         std::cout << "  Group size: " << max_clique.size() << std::endl;
     }
-    
+
+    /**
+     * The same object loadFromDirectory builds, from memory: what the Python writer
+     * (qed.workflow._write_symmetry_directory) would put on disk, without the disk.
+     * Phases follow the WRITER: one per generator, exp(+2 pi i q_k / o_k), computed as
+     * cos / sin of 2 pi q / o in the writer's operation order (bit-identical after the
+     * JSON round trip; o = 0 gives angle 0, a missing order counts as 1). Never build
+     * this from ed::symmetry::group_from_generators' per-element characters: they carry
+     * the opposite sign and would relabel every momentum k -> -k.
+     * @param sectors (sector_id, quantum numbers) per sector
+     */
+    static SymmetryGroupInfo from_memory(
+        std::vector<std::vector<int>> max_clique_in,
+        std::vector<std::vector<int>> generators_in,
+        std::vector<int> orders_in,
+        const std::vector<std::pair<uint64_t, std::vector<int>>>& sectors_in,
+        bool verbose = false) {
+        if (max_clique_in.empty())
+            throw std::invalid_argument(
+                "SymmetryGroupInfo::from_memory: empty max_clique (close the group first)");
+        if (generators_in.size() != orders_in.size())
+            throw std::invalid_argument(
+                "SymmetryGroupInfo::from_memory: one order per generator required");
+        SymmetryGroupInfo g;
+        g.max_clique       = std::move(max_clique_in);
+        g.generators       = std::move(generators_in);
+        g.generator_orders = std::move(orders_in);
+        g.num_generators   = g.generators.size();
+        g.sectors.reserve(sectors_in.size());
+        for (const auto& [sid, qn] : sectors_in) {
+            SectorMetadata s;
+            s.sector_id       = sid;
+            s.dimension       = 0;
+            s.quantum_numbers = qn;
+            s.phase_factors.reserve(qn.size());
+            for (std::size_t k = 0; k < qn.size(); ++k) {
+                const int o = k < g.generator_orders.size() ? g.generator_orders[k] : 1;
+                const double angle =
+                    o ? 2.0 * M_PI * static_cast<double>(qn[k]) / static_cast<double>(o) : 0.0;
+                s.phase_factors.emplace_back(std::cos(angle), std::sin(angle));
+            }
+            g.sectors.push_back(std::move(s));
+        }
+        g.computePowerRepresentation(verbose);
+        g.filterInvalidSectors(verbose);
+        return g;
+    }
+
 private:
     void loadMaxClique(const std::string& auto_dir) {
         // P0.15: was a hand-rolled .find('[') / .substr() parser. Now uses
@@ -225,7 +274,7 @@ private:
         std::cout << "Loaded metadata for " << sectors.size() << " symmetry sectors" << std::endl;
     }
     
-    void computePowerRepresentation() {
+    void computePowerRepresentation(bool verbose = true) {
         power_representation.clear();
         
         // Use BFS to represent each automorphism as powers of generators
@@ -234,7 +283,7 @@ private:
             power_representation.push_back(powers);
         }
         
-        std::cout << "Computed power representation for all automorphisms" << std::endl;
+        if (verbose) std::cout << "Computed power representation for all automorphisms" << std::endl;
     }
     
     /**
@@ -250,7 +299,7 @@ private:
      * g_0^{r_0} * ... * g_{k-1}^{r_{k-1}} = identity), we have
      * sum_k q_k * r_k / o_k is an integer.
      */
-    void filterInvalidSectors() {
+    void filterInvalidSectors(bool verbose = true) {
         // Quick check: if #sectors <= |G|, likely already correct
         if (sectors.size() <= max_clique.size()) return;
         
@@ -321,7 +370,7 @@ private:
         
         if (relations.empty()) return;
         
-        std::cout << "Found " << relations.size() << " generator relation(s) "
+        if (verbose) std::cout << "Found " << relations.size() << " generator relation(s) "
                   << "(|K| = " << (relations.size() + 1) << ")" << std::endl;
         
         // Filter sectors: keep those where sum_k q_k*r_k/o_k is integer for all relations
@@ -342,10 +391,12 @@ private:
         }
         
         if (valid_sectors.size() < sectors.size()) {
-            std::cout << "Filtered " << (sectors.size() - valid_sectors.size())
-                      << " invalid sectors (phantom irreps from generator relations)" << std::endl;
-            std::cout << "Valid sectors: " << valid_sectors.size() 
-                      << " (group size: " << max_clique.size() << ")" << std::endl;
+            if (verbose) {
+                std::cout << "Filtered " << (sectors.size() - valid_sectors.size())
+                          << " invalid sectors (phantom irreps from generator relations)" << std::endl;
+                std::cout << "Valid sectors: " << valid_sectors.size()
+                          << " (group size: " << max_clique.size() << ")" << std::endl;
+            }
             
             // Re-number sector IDs
             for (uint64_t i = 0; i < valid_sectors.size(); ++i) {

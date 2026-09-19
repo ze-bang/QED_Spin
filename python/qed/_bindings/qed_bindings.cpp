@@ -1159,4 +1159,44 @@ PYBIND11_MODULE(_core, m) {
     // -------------------------------------------------------------------------
     bind_workflows(m);
     bind_sectors(m);
+
+    // -------------------------------------------------------------------------
+    // SymmetryGroupInfo as the C++ side sees it, built from a directory (the
+    // current symmetric lanes) or from memory (their replacement). Test hooks:
+    // the two must agree bit for bit, labels included.
+    // -------------------------------------------------------------------------
+    auto group_info_dict = [](const SymmetryGroupInfo& g) {
+        py::list secs;
+        for (const auto& s : g.sectors) {
+            py::dict d;
+            d["sector_id"]       = s.sector_id;
+            d["quantum_numbers"] = s.quantum_numbers;
+            d["phase_factors"]   = s.phase_factors;
+            secs.append(d);
+        }
+        py::dict out;
+        out["generators"]           = g.generators;
+        out["generator_orders"]     = g.generator_orders;
+        out["max_clique"]           = g.max_clique;
+        out["power_representation"] = g.power_representation;
+        out["sectors"]              = secs;
+        return out;
+    };
+    m.def("_symmetry_info_from_directory",
+          [group_info_dict](const std::string& directory) {
+              SymmetryGroupInfo g;
+              g.loadFromDirectory(directory);
+              return group_info_dict(g);
+          },
+          py::arg("directory"));
+    m.def("_symmetry_info_from_memory",
+          [group_info_dict](const std::vector<std::vector<int>>& max_clique,
+                            const std::vector<std::vector<int>>& generators,
+                            const std::vector<int>& generator_orders,
+                            const std::vector<std::pair<uint64_t, std::vector<int>>>& sectors) {
+              return group_info_dict(SymmetryGroupInfo::from_memory(
+                  max_clique, generators, generator_orders, sectors));
+          },
+          py::arg("max_clique"), py::arg("generators"), py::arg("generator_orders"),
+          py::arg("sectors"));
 }
