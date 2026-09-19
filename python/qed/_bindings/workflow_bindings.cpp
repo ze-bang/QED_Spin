@@ -64,6 +64,8 @@
 #include <exception>
 #include <thread>
 #include <optional>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef WITH_MPI
@@ -603,12 +605,65 @@ inline void warn_silent_cpu_fallback(const char* what,
     return o.cast<int>();
 }
 
+// ---------------------------------------------------------------------------
+// WP9: the symmetric source a streaming-symmetry binding body runs on -- the
+// writer's directory (``*_directory`` bindings) or the same content held in
+// memory (their in-memory twins). Both alternatives are cheap to copy, so a
+// body can seed several specs (source + shifted-Sz target) from one source.
+// ---------------------------------------------------------------------------
+using SymmetricSource = std::variant<ed::DirectoryPath, ed::InMemorySymmetric>;
+
+inline void set_symmetric_source(ed::OperatorSpec& spec,
+                                 const SymmetricSource& source) {
+    std::visit([&spec](const auto& s) { spec.source = s; }, source);
+}
+
+// In-memory twin input: a private copy of ``H``'s terms (the result never
+// aliases the Python-owned operator) plus the group the directory writer
+// would have serialised, rebuilt with the writer's phase convention
+// (``SymmetryGroupInfo::from_memory``). ``group`` is the Python info dict
+// ``_write_symmetry_directory`` consumes; only ``max_clique``,
+// ``generators``, ``generator_orders`` and each sector's ``sector_id`` /
+// ``quantum_numbers`` are read (the writer recomputes the phases from the
+// quantum numbers too). Must run under the GIL.
+[[nodiscard]] inline ed::InMemorySymmetric
+in_memory_symmetric_source(const Operator& H, const py::dict& group,
+                           const char* who) {
+    auto entry = [&](const char* key) -> py::object {
+        if (!group.contains(key)) {
+            throw std::invalid_argument(
+                std::string(who) + ": group dict has no '" + key
+                + "' entry.");
+        }
+        return group[key];
+    };
+    auto max_clique = entry("max_clique").cast<std::vector<std::vector<int>>>();
+    auto generators = entry("generators").cast<std::vector<std::vector<int>>>();
+    auto orders     = entry("generator_orders").cast<std::vector<int>>();
+    std::vector<std::pair<std::uint64_t, std::vector<int>>> sectors;
+    for (py::handle h : entry("sectors")) {
+        py::object s = py::reinterpret_borrow<py::object>(h);
+        sectors.emplace_back(
+            s.attr("get")("sector_id", 0).cast<std::uint64_t>(),
+            s.attr("get")("quantum_numbers", py::list())
+                .cast<std::vector<int>>());
+    }
+    auto op = std::make_shared<Operator>(H.getNumBits(), H.getSpin());
+    op->copyTermsFrom(H);
+    return ed::InMemorySymmetric{
+        std::move(op),
+        std::make_shared<const SymmetryGroupInfo>(
+            SymmetryGroupInfo::from_memory(std::move(max_clique),
+                                           std::move(generators),
+                                           std::move(orders), sectors))};
+}
+
 [[nodiscard]] inline ed::OperatorSpec make_cross_irrep_src_spec(
-    const std::string& directory, std::uint64_t num_sites, double spin_l,
+    const SymmetricSource& source, std::uint64_t num_sites, double spin_l,
     std::optional<int> fixed_sz_n_up, int sz_parity, bool flip_sectors)
 {
     ed::OperatorSpec spec;
-    spec.source             = ed::DirectoryPath{directory};
+    set_symmetric_source(spec, source);
     spec.num_sites          = num_sites;
     spec.spin_l             = static_cast<float>(spin_l);
     spec.streaming_symmetry = true;
@@ -1460,14 +1515,19 @@ void bind_workflows(py::module_& m) {
     // shape callers received from the legacy entry: ascending eigenvalues
     // truncated to `opts.num_eigs`.
     // -----------------------------------------------------------------
-    m.def("workflows_solve_streaming_symmetry_directory",
-          [](const std::string& directory,
+    //
+    // WP9: ONE body shared by the directory binding and its in-memory twin
+    // ``workflows_solve_streaming_symmetry`` (H + group dict); the two
+    // m.def's below differ only in how they build the source.
+    // -----------------------------------------------------------------
+    const auto solve_streaming_symmetry_body =
+          [](const SymmetricSource& source,
              std::uint64_t num_sites,
              double spin_l,
              ed::workflows::SolveOptions opts,
              py::object fixed_sz_n_up) {
               ed::OperatorSpec spec;
-              spec.source             = ed::DirectoryPath{directory};
+              set_symmetric_source(spec, source);
               spec.num_sites          = num_sites;
               spec.spin_l             = static_cast<float>(spin_l);
               spec.streaming_symmetry = true;
@@ -2132,6 +2192,17 @@ void bind_workflows(py::module_& m) {
                   }
               }
               return agg;
+          };
+    m.def("workflows_solve_streaming_symmetry_directory",
+          [solve_streaming_symmetry_body](
+              const std::string& directory,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::SolveOptions opts,
+              py::object fixed_sz_n_up) {
+              return solve_streaming_symmetry_body(
+                  ed::DirectoryPath{directory}, num_sites, spin_l,
+                  std::move(opts), std::move(fixed_sz_n_up));
           },
           py::arg("directory"),
           py::arg("num_sites"),
@@ -2179,6 +2250,35 @@ void bind_workflows(py::module_& m) {
             (irrep, sector_dim, n_up) attribution for every eigenvalue
             in the merged list.
     )pbdoc");
+    m.def("workflows_solve_streaming_symmetry",
+          [solve_streaming_symmetry_body](
+              const Operator& H,
+              const py::dict& group,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::SolveOptions opts,
+              py::object fixed_sz_n_up) {
+              return solve_streaming_symmetry_body(
+                  in_memory_symmetric_source(
+                      H, group, "workflows_solve_streaming_symmetry"),
+                  num_sites, spin_l, std::move(opts),
+                  std::move(fixed_sz_n_up));
+          },
+          py::arg("H"),
+          py::arg("group"),
+          py::arg("num_sites"),
+          py::arg("spin_l")      = 0.5,
+          py::arg("opts")        = ed::workflows::SolveOptions{},
+          py::arg("fixed_sz_n_up") = py::none(),
+          R"pbdoc(
+        In-memory twin of ``workflows_solve_streaming_symmetry_directory``.
+
+        Takes the Hamiltonian ``H`` (its terms are copied) and the group
+        info dict the directory writer consumes (``max_clique``,
+        ``generators``, ``generator_orders``, ``sectors`` with
+        ``sector_id`` / ``quantum_numbers``) in place of the directory;
+        every other argument and the result are identical.
+    )pbdoc");
 
     // -----------------------------------------------------------------
     // SOTA streaming-symmetry thermal workflow over a directory
@@ -2197,14 +2297,18 @@ void bind_workflows(py::module_& m) {
     // grid AND per-sector entries (with irrep tags) for callers that
     // want a breakdown.
     // -----------------------------------------------------------------
-    m.def("workflows_thermal_streaming_symmetry_directory",
-          [](const std::string& directory,
+    //
+    // WP9: one body for the directory binding and its in-memory twin
+    // ``workflows_thermal_streaming_symmetry``.
+    // -----------------------------------------------------------------
+    const auto thermal_streaming_symmetry_body =
+          [](const SymmetricSource& source,
              std::uint64_t num_sites,
              double spin_l,
              ed::workflows::ThermalOptions opts,
              py::object fixed_sz_n_up) {
               ed::OperatorSpec spec;
-              spec.source             = ed::DirectoryPath{directory};
+              set_symmetric_source(spec, source);
               spec.num_sites          = num_sites;
               spec.spin_l             = static_cast<float>(spin_l);
               spec.streaming_symmetry = true;
@@ -2735,6 +2839,17 @@ void bind_workflows(py::module_& m) {
                   }
               }
               return agg;
+          };
+    m.def("workflows_thermal_streaming_symmetry_directory",
+          [thermal_streaming_symmetry_body](
+              const std::string& directory,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::ThermalOptions opts,
+              py::object fixed_sz_n_up) {
+              return thermal_streaming_symmetry_body(
+                  ed::DirectoryPath{directory}, num_sites, spin_l,
+                  std::move(opts), std::move(fixed_sz_n_up));
           },
           py::arg("directory"),
           py::arg("num_sites"),
@@ -2774,6 +2889,33 @@ void bind_workflows(py::module_& m) {
             ``per_sector`` lists every sector that contributed, with
             the irrep ``tag`` (``sector_index`` / ``quantum_numbers`` /
             ``sector_dim``) attached.
+    )pbdoc");
+    m.def("workflows_thermal_streaming_symmetry",
+          [thermal_streaming_symmetry_body](
+              const Operator& H,
+              const py::dict& group,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::ThermalOptions opts,
+              py::object fixed_sz_n_up) {
+              return thermal_streaming_symmetry_body(
+                  in_memory_symmetric_source(
+                      H, group, "workflows_thermal_streaming_symmetry"),
+                  num_sites, spin_l, std::move(opts),
+                  std::move(fixed_sz_n_up));
+          },
+          py::arg("H"),
+          py::arg("group"),
+          py::arg("num_sites"),
+          py::arg("spin_l")      = 0.5,
+          py::arg("opts")        = ed::workflows::ThermalOptions{},
+          py::arg("fixed_sz_n_up") = py::none(),
+          R"pbdoc(
+        In-memory twin of ``workflows_thermal_streaming_symmetry_directory``.
+
+        Takes the Hamiltonian ``H`` (its terms are copied) and the group
+        info dict the directory writer consumes in place of the
+        directory; every other argument and the result are identical.
     )pbdoc");
 
     // -----------------------------------------------------------------
@@ -3051,8 +3193,13 @@ void bind_workflows(py::module_& m) {
     // ``selection_rule_label`` documenting how the target sector was
     // chosen.
     // -----------------------------------------------------------------
-    m.def("workflows_spectral_streaming_symmetry_cross_irrep_directory",
-          [](const std::string&                    directory,
+    //
+    // WP9: one body for the directory binding and its in-memory twin
+    // ``workflows_spectral_streaming_symmetry_cross_irrep``; the shifted-Sz
+    // target set (delta_n_up != 0) is seeded from the SAME source.
+    // -----------------------------------------------------------------
+    const auto spectral_cross_irrep_body =
+          [](const SymmetricSource&                source,
              std::uint64_t                          num_sites,
              double                                 spin_l,
              const std::vector<py::tuple>&          observable_transforms,
@@ -3091,7 +3238,7 @@ void bind_workflows(py::module_& m) {
                   //     same-irrep binding's OperatorSpec layout.
                   // -----------------------------------------------------
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_opt,
+                      source, num_sites, spin_l, fixed_sz_opt,
                       sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
@@ -3217,7 +3364,7 @@ void bind_workflows(py::module_& m) {
                               "fixed_sz_n_up to be set.");
                       }
                       ed::OperatorSpec dst_spec;
-                      dst_spec.source             = ed::DirectoryPath{directory};
+                      set_symmetric_source(dst_spec, source);
                       dst_spec.num_sites          = num_sites;
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
@@ -3435,6 +3582,23 @@ void bind_workflows(py::module_& m) {
                   agg.per_sector_pair.push_back(std::move(entry));
               }
               return agg;
+          };
+    m.def("workflows_spectral_streaming_symmetry_cross_irrep_directory",
+          [spectral_cross_irrep_body](
+              const std::string&                    directory,
+              std::uint64_t                          num_sites,
+              double                                 spin_l,
+              const std::vector<py::tuple>&          observable_transforms,
+              ed::workflows::SpectralOptions         opts,
+              py::object                             fixed_sz_n_up,
+              int                                    delta_n_up,
+              int                                    sz_parity,
+              bool                                   flip_sectors) {
+              return spectral_cross_irrep_body(
+                  ed::DirectoryPath{directory}, num_sites, spin_l,
+                  observable_transforms, std::move(opts),
+                  std::move(fixed_sz_n_up), delta_n_up, sz_parity,
+                  flip_sectors);
           },
           py::arg("directory"),
           py::arg("num_sites"),
@@ -3497,6 +3661,44 @@ void bind_workflows(py::module_& m) {
             ``per_sector_pair`` records the (initial, final)
             SectorTag pair; ``selection_rule_label`` documents the
             resolved transition.
+    )pbdoc");
+    m.def("workflows_spectral_streaming_symmetry_cross_irrep",
+          [spectral_cross_irrep_body](
+              const Operator&                        H,
+              const py::dict&                        group,
+              std::uint64_t                          num_sites,
+              double                                 spin_l,
+              const std::vector<py::tuple>&          observable_transforms,
+              ed::workflows::SpectralOptions         opts,
+              py::object                             fixed_sz_n_up,
+              int                                    delta_n_up,
+              int                                    sz_parity,
+              bool                                   flip_sectors) {
+              return spectral_cross_irrep_body(
+                  in_memory_symmetric_source(
+                      H, group,
+                      "workflows_spectral_streaming_symmetry_cross_irrep"),
+                  num_sites, spin_l, observable_transforms, std::move(opts),
+                  std::move(fixed_sz_n_up), delta_n_up, sz_parity,
+                  flip_sectors);
+          },
+          py::arg("H"),
+          py::arg("group"),
+          py::arg("num_sites"),
+          py::arg("spin_l")                = 0.5,
+          py::arg("observable_transforms") = std::vector<py::tuple>{},
+          py::arg("opts")                  = ed::workflows::SpectralOptions{},
+          py::arg("fixed_sz_n_up")         = py::none(),
+          py::arg("delta_n_up")            = 0,
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
+          R"pbdoc(
+        In-memory twin of
+        ``workflows_spectral_streaming_symmetry_cross_irrep_directory``.
+
+        Takes the Hamiltonian ``H`` (its terms are copied) and the group
+        info dict the directory writer consumes in place of the
+        directory; every other argument and the result are identical.
     )pbdoc");
 
     // -----------------------------------------------------------------
@@ -3596,8 +3798,8 @@ void bind_workflows(py::module_& m) {
 
                   // (1) Source streaming operator + OperatorRef.
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_opt,
-                      sz_parity, flip_sectors);
+                      ed::DirectoryPath{directory}, num_sites, spin_l,
+                      fixed_sz_opt, sz_parity, flip_sectors);
                   // Stage 8d TR panel gate: for a REAL H, the -Q panel of an
                   // adjoint probe pair equals the +Q panel (S(-Q, omega) =
                   // S(Q, omega)^* with a real spectral function) -- detected
@@ -4022,8 +4224,11 @@ void bind_workflows(py::module_& m) {
           "Finite-temperature S(omega, T) of one observable on the operator's own block "
           "via the FTLM cross-irrep estimator with source = target = this block.");
 
-    m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory",
-          [](const std::string&                    directory,
+    // WP9: one body for the directory binding and its in-memory twin
+    // ``workflows_spectral_streaming_symmetry_ftlm_cross_irrep``; the
+    // shifted-Sz target set is seeded from the SAME source.
+    const auto spectral_ftlm_cross_irrep_body =
+          [](const SymmetricSource&                source,
              std::uint64_t                          num_sites,
              double                                 spin_l,
              const std::vector<py::tuple>&          observable_transforms,
@@ -4064,7 +4269,7 @@ void bind_workflows(py::module_& m) {
                   // (1) Build source streaming operator.
                   // -----------------------------------------------
                   ed::OperatorSpec src_spec = make_cross_irrep_src_spec(
-                      directory, num_sites, spin_l, fixed_sz_opt,
+                      source, num_sites, spin_l, fixed_sz_opt,
                       sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
@@ -4098,7 +4303,7 @@ void bind_workflows(py::module_& m) {
                               "requires fixed_sz_n_up to be set.");
                       }
                       ed::OperatorSpec dst_spec;
-                      dst_spec.source             = ed::DirectoryPath{directory};
+                      set_symmetric_source(dst_spec, source);
                       dst_spec.num_sites          = num_sites;
                       dst_spec.spin_l             = static_cast<float>(spin_l);
                       dst_spec.streaming_symmetry = true;
@@ -4344,6 +4549,27 @@ void bind_workflows(py::module_& m) {
                   }
               }
               return agg;
+          };
+    m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory",
+          [spectral_ftlm_cross_irrep_body](
+              const std::string&                    directory,
+              std::uint64_t                          num_sites,
+              double                                 spin_l,
+              const std::vector<py::tuple>&          observable_transforms,
+              ed::workflows::SpectralOptions         opts,
+              py::object                             fixed_sz_n_up,
+              int                                    delta_n_up,
+              std::vector<double>                    temperatures,
+              std::uint64_t                          num_samples,
+              std::uint64_t                          random_seed,
+              int                                    sz_parity,
+              bool                                   flip_sectors) {
+              return spectral_ftlm_cross_irrep_body(
+                  ed::DirectoryPath{directory}, num_sites, spin_l,
+                  observable_transforms, std::move(opts),
+                  std::move(fixed_sz_n_up), delta_n_up,
+                  std::move(temperatures), num_samples, random_seed,
+                  sz_parity, flip_sectors);
           },
           py::arg("directory"),
           py::arg("num_sites"),
@@ -4424,6 +4650,52 @@ void bind_workflows(py::module_& m) {
             ``qed.spectral`` unpacks this and surfaces a clean
             ``{T -> S(omega)}`` dict to the user.
     )pbdoc");
+    m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep",
+          [spectral_ftlm_cross_irrep_body](
+              const Operator&                        H,
+              const py::dict&                        group,
+              std::uint64_t                          num_sites,
+              double                                 spin_l,
+              const std::vector<py::tuple>&          observable_transforms,
+              ed::workflows::SpectralOptions         opts,
+              py::object                             fixed_sz_n_up,
+              int                                    delta_n_up,
+              std::vector<double>                    temperatures,
+              std::uint64_t                          num_samples,
+              std::uint64_t                          random_seed,
+              int                                    sz_parity,
+              bool                                   flip_sectors) {
+              return spectral_ftlm_cross_irrep_body(
+                  in_memory_symmetric_source(
+                      H, group,
+                      "workflows_spectral_streaming_symmetry_ftlm_cross_"
+                      "irrep"),
+                  num_sites, spin_l, observable_transforms, std::move(opts),
+                  std::move(fixed_sz_n_up), delta_n_up,
+                  std::move(temperatures), num_samples, random_seed,
+                  sz_parity, flip_sectors);
+          },
+          py::arg("H"),
+          py::arg("group"),
+          py::arg("num_sites"),
+          py::arg("spin_l")                = 0.5,
+          py::arg("observable_transforms") = std::vector<py::tuple>{},
+          py::arg("opts")                  = ed::workflows::SpectralOptions{},
+          py::arg("fixed_sz_n_up")         = py::none(),
+          py::arg("delta_n_up")            = 0,
+          py::arg("temperatures")          = std::vector<double>{},
+          py::arg("num_samples")           = std::uint64_t{30},
+          py::arg("random_seed")           = std::uint64_t{0},
+          py::arg("sz_parity")             = -1,
+          py::arg("flip_sectors")          = false,
+          R"pbdoc(
+        In-memory twin of
+        ``workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory``.
+
+        Takes the Hamiltonian ``H`` (its terms are copied) and the group
+        info dict the directory writer consumes in place of the
+        directory; every other argument and the result are identical.
+    )pbdoc");
 
     // -----------------------------------------------------------------
     // All-Sz flat-pool thermal binding (Jun 2026).
@@ -4442,8 +4714,12 @@ void bind_workflows(py::module_& m) {
     // present when calling workflows_thermal_streaming_symmetry_directory
     // once per n_up from a Python ThreadPoolExecutor.
     // -----------------------------------------------------------------
-    m.def("workflows_thermal_all_sz_streaming_symmetry_directory",
-          [](const std::string& directory,
+    //
+    // WP9: one body for the directory binding and its in-memory twin
+    // ``workflows_thermal_all_sz_streaming_symmetry``.
+    // -----------------------------------------------------------------
+    const auto thermal_all_sz_streaming_symmetry_body =
+          [](const SymmetricSource& source,
              std::uint64_t num_sites,
              double spin_l,
              ed::workflows::ThermalOptions opts,
@@ -4454,7 +4730,7 @@ void bind_workflows(py::module_& m) {
                   py::gil_scoped_release release;
 
                   ed::OperatorSpec spec;
-                  spec.source             = ed::DirectoryPath{directory};
+                  set_symmetric_source(spec, source);
                   spec.num_sites          = num_sites;
                   spec.spin_l             = static_cast<float>(spin_l);
                   spec.streaming_symmetry = true;
@@ -4725,6 +5001,18 @@ void bind_workflows(py::module_& m) {
                   }
               }
               return agg;
+          };
+    m.def("workflows_thermal_all_sz_streaming_symmetry_directory",
+          [thermal_all_sz_streaming_symmetry_body](
+              const std::string& directory,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::ThermalOptions opts,
+              int n_up_min,
+              int n_up_max) {
+              return thermal_all_sz_streaming_symmetry_body(
+                  ed::DirectoryPath{directory}, num_sites, spin_l,
+                  std::move(opts), n_up_min, n_up_max);
           },
           py::arg("directory"),
           py::arg("num_sites"),
@@ -4774,5 +5062,35 @@ void bind_workflows(py::module_& m) {
             ``thermo`` carries Z-weighted combined thermodynamics over ALL
             (n_up, irrep) sectors; ``per_sector`` lists every sector with
             ``tag.n_up`` and ``tag.sector_index`` set.
+    )pbdoc");
+    m.def("workflows_thermal_all_sz_streaming_symmetry",
+          [thermal_all_sz_streaming_symmetry_body](
+              const Operator& H,
+              const py::dict& group,
+              std::uint64_t num_sites,
+              double spin_l,
+              ed::workflows::ThermalOptions opts,
+              int n_up_min,
+              int n_up_max) {
+              return thermal_all_sz_streaming_symmetry_body(
+                  in_memory_symmetric_source(
+                      H, group,
+                      "workflows_thermal_all_sz_streaming_symmetry"),
+                  num_sites, spin_l, std::move(opts), n_up_min, n_up_max);
+          },
+          py::arg("H"),
+          py::arg("group"),
+          py::arg("num_sites"),
+          py::arg("spin_l")    = 0.5,
+          py::arg("opts")      = ed::workflows::ThermalOptions{},
+          py::arg("n_up_min")  = 0,
+          py::arg("n_up_max")  = -1,
+          R"pbdoc(
+        In-memory twin of
+        ``workflows_thermal_all_sz_streaming_symmetry_directory``.
+
+        Takes the Hamiltonian ``H`` (its terms are copied) and the group
+        info dict the directory writer consumes in place of the
+        directory; every other argument and the result are identical.
     )pbdoc");
 }
