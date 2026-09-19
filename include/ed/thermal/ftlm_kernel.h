@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -47,6 +48,7 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/backends/cpu_backend.h>
+#include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz
 
@@ -75,9 +77,9 @@ struct FtlmOptions {
     /// everything else silently take legacy defaults, which blocked the
     /// direct Python bindings from routing through this front door.
     /// The CPU lane maps all of these; the Backend-templated body
-    /// honours tolerance (Lanczos breakdown) and treats the reorth
-    /// fields as documentation of the CPU contract (its kernel is
-    /// FullCGS2).
+    /// honours ``full_reorthogonalization`` (FullCGS2 with a kept basis,
+    /// as the CPU lane) and ignores ``reorth_frequency`` (the CPU lane
+    /// does too since audit H5).
     std::uint64_t max_iterations           = 1000;
     double        tolerance                = 1e-10;
     /// Audit H5 (2026-09): stochastic-trace samples do not need a mutually
@@ -134,10 +136,23 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
 ///
 /// Mirrors the LTLM dual-backend pattern but is simpler:
 /// FTLM only needs the first-component weights ``|<v0 | q_k>|^2``
-/// (which the tridiagonal eigenvector solve already returns) so we do
-/// NOT keep the Lanczos basis around (``keep_basis=false``). This
-/// eliminates the per-sample device basis allocation that LTLM needs
-/// for Ritz reconstruction.
+/// (which the tridiagonal eigenvector solve already returns) so by
+/// default we do NOT keep the Lanczos basis around (``keep_basis=false``,
+/// LocalDGKS3). ``opts.full_reorthogonalization`` switches to FullCGS2
+/// with a kept basis, the same kernel call the CPU driver's
+/// ``build_lanczos_tridiagonal`` makes when full reorth is requested.
+///
+/// Parity with the CPU driver ``::finite_temperature_lanczos`` (WP10):
+///   * the whole call runs under ``ThreadBudgetScope(auto_threads_for_dim
+///     (local_n))``. Nested inside the orchestrator's identical scope it
+///     is a no-op: ``auto_threads_for_dim`` never exceeds the current
+///     ``omp_get_max_threads()`` and the scope only touches the runtimes
+///     when the requested count differs from the current one;
+///   * a sample whose Lanczos / tridiagonal solve yields no Ritz values
+///     is skipped (with a warning) instead of aborting the run; the
+///     call throws only if every sample failed;
+///   * ``ground_state_estimate`` is the minimum lowest Ritz value over
+///     the valid samples.
 ///
 /// Algorithm per sample:
 ///   1. Host-side Gaussian seed ``v_0`` (normalised), copy to backend
@@ -177,6 +192,12 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             "grid is required to evaluate Z, <E>, Cv, S).");
     }
 
+    // Same dim-aware OMP+BLAS thread cap as the CPU driver. Harmless when
+    // the orchestrator already applied it (see the doc comment above).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(
+            static_cast<std::uint64_t>(local_n)));
+
     // Convert beta -> temperature for the host post-processors. The
     // ``compute_ftlm_thermodynamics`` API is temperature-driven; we
     // preserve the caller's beta ordering so the returned curves are
@@ -204,6 +225,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
 
     std::vector<::ThermodynamicData> per_sample;
     per_sample.reserve(opts.num_samples);
+    double ground_state_estimate = std::numeric_limits<double>::infinity();
 
     for (std::size_t s = 0; s < opts.num_samples; ++s) {
         // Per-sample RNG: salt the user seed with the sample index so
@@ -238,37 +260,48 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         auto d_v0 = backend.make_zero_vector(local_n);
         backend.copy_from_host(v0_host.data(), d_v0.get(), local_n);
 
-        // ---- 2. Lanczos: tridiagonal only (no basis) ----
+        // ---- 2. Lanczos: tridiagonal (basis kept only for full reorth) ----
         ed::krylov::LanczosKernelOptions kopts;
-        kopts.max_iter   = opts.krylov_dim;
-        kopts.keep_basis = false;
-        // FTLM's first-component weights come from the tridiagonal
-        // eigenvectors directly, so we only need a faithful (alpha,
-        // beta) -- LocalDGKS3 is the cheap canonical reorth policy
-        // matching the legacy CPU driver's
-        // ``build_lanczos_tridiagonal`` body when full reorth is off.
-        kopts.reorth = ed::krylov::ReorthPolicy::LocalDGKS3;
-
-        auto k = ed::krylov::lanczos_kernel(
-            backend,
-            std::forward<MatvecFn>(apply_H),
-            local_n, d_v0.get(), kopts);
-
-        if (k.alpha.empty()) {
-            throw std::runtime_error(
-                "ftlm_kernel: Lanczos produced no Ritz values for "
-                "sample " + std::to_string(s));
+        kopts.max_iter = opts.krylov_dim;
+        if (opts.full_reorthogonalization) {
+            // Same kernel call as the CPU driver's
+            // ``build_lanczos_tridiagonal`` with full_reorth = true.
+            kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+            kopts.keep_basis = true;
+        } else {
+            // FTLM's first-component weights come from the tridiagonal
+            // eigenvectors directly, so we only need a faithful (alpha,
+            // beta) -- LocalDGKS3 is the cheap canonical reorth policy
+            // matching the legacy CPU driver's
+            // ``build_lanczos_tridiagonal`` body when full reorth is off.
+            kopts.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
+            kopts.keep_basis = false;
         }
 
-        // ---- 3. Diagonalise tridiagonal on host -> ritz + weights ----
         std::vector<double> ritz_values;
         std::vector<double> weights;
-        diagonalize_tridiagonal_ritz(k.alpha, k.beta, ritz_values, weights);
-        if (ritz_values.empty()) {
-            throw std::runtime_error(
-                "ftlm_kernel: tridiagonal diagonalisation failed for "
-                "sample " + std::to_string(s));
+        {
+            auto k = ed::krylov::lanczos_kernel(
+                backend,
+                std::forward<MatvecFn>(apply_H),
+                local_n, d_v0.get(), kopts);
+
+            // ---- 3. Diagonalise tridiagonal on host -> ritz + weights ----
+            // (the kept basis, if any, is released at the end of this
+            // block, before the host-side post-processing).
+            if (!k.alpha.empty()) {
+                diagonalize_tridiagonal_ritz(
+                    k.alpha, k.beta, ritz_values, weights);
+            }
         }
+        if (ritz_values.empty()) {
+            // CPU-driver parity: a failed sample is dropped, not fatal.
+            std::cerr << "  Warning: Tridiagonal diagonalization failed "
+                         "(sample " << s << ")" << std::endl;
+            continue;
+        }
+        ground_state_estimate =
+            std::min(ground_state_estimate, ritz_values.front());
 
         // ---- 4. Host-side thermodynamics for this sample ----
         ::ThermodynamicData td = ::compute_ftlm_thermodynamics(
@@ -277,8 +310,15 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         per_sample.push_back(std::move(td));
     }
 
+    if (per_sample.empty()) {
+        throw std::runtime_error(
+            "ftlm_kernel: every sample failed (no Ritz values from any "
+            "of the " + std::to_string(opts.num_samples) + " samples)");
+    }
+
     // ---- 5. Jensen-correct sample averaging ----
     ::FTLMResults legacy;
+    legacy.ground_state_estimate = ground_state_estimate;
     ::average_ftlm_samples(per_sample, legacy);
     legacy.thermo_data.temperatures = temperatures;
     // Surface the raw Z_sample average too so ``to_ftlm_result`` can
