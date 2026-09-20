@@ -45,6 +45,7 @@
 #include <thrust/device_vector.h>
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <cmath>
@@ -605,6 +606,35 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
 // Lanczos (host vectors); the staging traffic is O(dim) against the kernel's
 // O(dim * terms * |G|) walk.
 // ---------------------------------------------------------------------------
+// WP7 step 1: per-apply staging accounting for the host-pointer twin, under
+// ED_SYM_PROFILE only. Both the clock reads AND the extra device sync (without
+// it the blocking D2H absorbs the kernel and the split is a lie) sit behind
+// the gate, so an unprofiled run is untouched. ONE summary when the last copy
+// of the returned lambda dies -- a frontier star runs thousands of applies and
+// a per-apply line would bury every other signal in the log.
+namespace {
+
+struct HostPtrStagingProfile {
+    bool          on    = false;
+    std::uint64_t calls = 0;
+    std::size_t   dim   = 0;
+    double t_h2d = 0, t_kernel = 0, t_d2h = 0;
+
+    ~HostPtrStagingProfile() {
+        if (!on || calls == 0) return;
+        const double pcie = t_h2d + t_d2h;
+        const double tot  = pcie + t_kernel;
+        std::fprintf(stderr,
+            "[sym_profile] hostptr rep matvec dim=%zu applies=%llu: "
+            "H2D=%.3fs kernel=%.3fs D2H=%.3fs (staging %.1f%% of %.3fs)\n",
+            dim, static_cast<unsigned long long>(calls),
+            t_h2d, t_kernel, t_d2h,
+            tot > 0.0 ? 100.0 * pcie / tot : 0.0, tot);
+    }
+};
+
+}  // namespace
+
 ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
     const ed::symmetry::RepSectorData& rep,
@@ -616,27 +646,49 @@ ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
     auto dev_fn = ed::symmetry::make_sector_matvec_gpu_rep(rep, spin_l, terms);
     auto d_in   = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
     auto d_out  = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
+    auto prof   = std::make_shared<HostPtrStagingProfile>();
+    prof->on = ed::env::flag("ED_SYM_PROFILE", false);
 
-    return [dev_fn, d_in, d_out](const ed::matvec::Complex* in,
-                                 ed::matvec::Complex*       out,
-                                 std::size_t                n) {
+    return [dev_fn, d_in, d_out, prof](const ed::matvec::Complex* in,
+                                       ed::matvec::Complex*       out,
+                                       std::size_t                n) {
+        using Clock = std::chrono::steady_clock;
+        const bool p = prof->on;
+        auto stamp = [p] { return p ? Clock::now() : Clock::time_point{}; };
+        auto secs  = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double>(b - a).count();
+        };
         if (d_in->size() != n) {
             d_in->resize(n);
             d_out->resize(n);
         }
+        const auto t0 = stamp();
         cuda_check(cudaMemcpy(thrust::raw_pointer_cast(d_in->data()), in,
                               n * sizeof(cuDoubleComplex),
                               cudaMemcpyHostToDevice),
                    "hostptr rep matvec H2D");
+        const auto t1 = stamp();
         dev_fn(reinterpret_cast<const ed::matvec::Complex*>(
                    thrust::raw_pointer_cast(d_in->data())),
                reinterpret_cast<ed::matvec::Complex*>(
                    thrust::raw_pointer_cast(d_out->data())),
                n);
+        if (p)
+            cuda_check(cudaDeviceSynchronize(),
+                       "hostptr rep matvec profile sync");
+        const auto t2 = stamp();
         cuda_check(cudaMemcpy(out, thrust::raw_pointer_cast(d_out->data()),
                               n * sizeof(cuDoubleComplex),
                               cudaMemcpyDeviceToHost),
                    "hostptr rep matvec D2H");
+        const auto t3 = stamp();
+        if (p) {
+            ++prof->calls;
+            prof->dim       = n;
+            prof->t_h2d    += secs(t0, t1);
+            prof->t_kernel += secs(t1, t2);
+            prof->t_d2h    += secs(t2, t3);
+        }
     };
 }
 

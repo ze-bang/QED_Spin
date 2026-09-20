@@ -405,6 +405,43 @@ struct SparseColumns {
     [[nodiscard]] std::size_t size() const { return cols.size(); }
 };
 
+// Fork/join is ~5-10 us, so the tiny blocks of a small-N walk must stay
+// serial; the same ``if (work > par)`` guard ReducedSymmetryCsr::spmv uses.
+[[nodiscard]] inline std::size_t lg_omp_min_work() {
+#ifdef _OPENMP
+    return static_cast<std::size_t>(omp_get_max_threads()) * 1024u;
+#else
+    return std::numeric_limits<std::size_t>::max();
+#endif
+}
+
+// WP7: per-phase accounting for ProjectedBlockOp::apply, under ED_SYM_PROFILE
+// only -- the clock reads themselves are gated, so a production run pays
+// nothing at all. ONE summary per block, emitted when the block dies: a
+// frontier star runs thousands of applies and a per-apply line would bury
+// every other signal in the log. ``non-W`` is the fraction the WP7 device
+// block operator could actually remove (zero + scatter + gather, i.e.
+// everything that is not H_k0 itself).
+struct BlockApplyProfile {
+    bool          on    = false;
+    std::uint64_t calls = 0;
+    std::size_t   dim   = 0;
+    double t_zero = 0, t_scatter = 0, t_hk = 0, t_gather = 0;
+
+    ~BlockApplyProfile() {
+        if (!on || calls == 0) return;
+        const double host = t_zero + t_scatter + t_gather;
+        const double tot  = host + t_hk;
+        std::fprintf(stderr,
+            "[sym_profile] projected block dim_k0=%zu applies=%llu: "
+            "zero=%.3fs scatter=%.3fs H=%.3fs gather=%.3fs "
+            "(non-H %.1f%% of %.3fs)\n",
+            dim, static_cast<unsigned long long>(calls),
+            t_zero, t_scatter, t_hk, t_gather,
+            tot > 0.0 ? 100.0 * host / tot : 0.0, tot);
+    }
+};
+
 // Projected block operator y = W^dagger (H (W x)) -- the factorized
 // little-group matvec (still matrix-free through H_k0).
 //
@@ -419,20 +456,75 @@ class ProjectedBlockOp final : public ed::LinearOperator {
 public:
     ProjectedBlockOp(std::shared_ptr<const RepSectorMatVec> hk,
                      std::shared_ptr<const SparseColumns>   W)
-        : hk_(*hk), W_(*W), keep_hk_(std::move(hk)), keep_W_(std::move(W)) {}
+        : hk_(*hk), W_(*W), keep_hk_(std::move(hk)), keep_W_(std::move(W)) {
+        prof_.on  = ed::env::flag("ED_SYM_PROFILE", false);
+        prof_.dim = hk_.dim();
+    }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        scratch_in_.assign(hk_.dim(), Complex(0, 0));
-        scratch_out_.resize(hk_.dim());
+        using Clock = std::chrono::steady_clock;
+        const bool prof = prof_.on;
+        // Gated clock reads: not profiling => no steady_clock::now() at all.
+        auto stamp = [prof] {
+            return prof ? Clock::now() : Clock::time_point{};
+        };
+        auto charge = [prof](double& acc, Clock::time_point a,
+                             Clock::time_point b) {
+            if (prof) acc += std::chrono::duration<double>(b - a).count();
+        };
+        [[maybe_unused]] const std::size_t par = lg_omp_min_work();
+
+        const std::size_t dk = hk_.dim();
+        const auto t0 = stamp();
+        // The re-zero STAYS: the scatter below writes only the rep rows that
+        // carry a W entry (build_isotypic_columns drops |u| <= 1e-12, and a
+        // whole index-orbit is absent when this irrep's projector has rank 0
+        // there), while hk_.apply reads all dk of them. It is threadable
+        // though -- a pure store stream, numerically a no-op.
+        if (scratch_in_.size() != dk) {
+            scratch_in_.assign(dk, Complex(0, 0));
+            scratch_out_.resize(dk);
+        } else {
+#ifdef _OPENMP
+#           pragma omp parallel for schedule(static) if (dk > par)
+#endif
+            for (long long i = 0; i < static_cast<long long>(dk); ++i)
+                scratch_in_[static_cast<std::size_t>(i)] = Complex(0, 0);
+        }
+        const auto t1 = stamp();
+        // Scatter u += W x. SERIAL by construction: SparseColumns is
+        // column-major, so the only collision-free partition (over rep ROWS
+        // -- several columns of one index-orbit hit the same row) would need
+        // a transpose of W that does not exist. Splitting over columns
+        // instead would need atomics AND would reorder each row's sum.
+        // WP7 step 4's device CSR over rep rows is where this gets fixed.
         for (std::size_t c = 0; c < W_.cols.size(); ++c)
             for (const auto& [i, w] : W_.cols[c])
                 scratch_in_[static_cast<std::size_t>(i)] += w * in[c];
+        const auto t2 = stamp();
         hk_.apply(scratch_in_.data(), scratch_out_.data(), scratch_in_.size());
-        for (std::size_t c = 0; c < n; ++c) {
+        const auto t3 = stamp();
+        // Gather y = W^dagger u -- embarrassingly parallel over block
+        // columns, and each output keeps its own accumulation order (the
+        // entries of W_.cols[c], in order), so this is bitwise identical to
+        // the serial loop for any d_sigma.
+#ifdef _OPENMP
+#       pragma omp parallel for schedule(static) if (n > par)
+#endif
+        for (long long ic = 0; ic < static_cast<long long>(n); ++ic) {
+            const std::size_t c = static_cast<std::size_t>(ic);
             Complex acc(0, 0);
             for (const auto& [i, w] : W_.cols[c])
                 acc += std::conj(w) * scratch_out_[static_cast<std::size_t>(i)];
             out[c] = acc;
+        }
+        const auto t4 = stamp();
+        if (prof) {
+            ++prof_.calls;
+            charge(prof_.t_zero,    t0, t1);
+            charge(prof_.t_scatter, t1, t2);
+            charge(prof_.t_hk,      t2, t3);
+            charge(prof_.t_gather,  t3, t4);
         }
     }
     [[nodiscard]] std::size_t dim() const override { return W_.cols.size(); }
@@ -452,6 +544,12 @@ private:
     std::shared_ptr<const RepSectorMatVec>  keep_hk_;   // U1a keepalives
     std::shared_ptr<const SparseColumns>    keep_W_;
     mutable std::vector<Complex>  scratch_in_, scratch_out_;
+    // WP7: cudaHostRegister-pinning scratch_in_/scratch_out_ would halve the
+    // pageable H2D/D2H cost of the GPU rep lane, but it needs <cuda_runtime.h>
+    // and this header is compiled by the HOST compiler in every engine TU.
+    // Deferred to WP7 step 3, where ProjectedBlockOp::bind_cuda owns the
+    // staging buffers from a real .cu translation unit.
+    mutable BlockApplyProfile     prof_;
 };
 
 // B4: dense H_k (plain block) or W^dagger H_k W (projected block) assembled
