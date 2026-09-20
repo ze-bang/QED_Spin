@@ -227,7 +227,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/ftlm_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
-    ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
     ${SRC_DIR}/solvers/little_group/lg_engine.cpp
     ${SRC_DIR}/solvers/little_group/lg_block_solve.cpp

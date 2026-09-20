@@ -1,5 +1,11 @@
-// ltlm.h - Low Temperature Lanczos Method implementation
-// Specialized for low temperature thermodynamics using ground state projection
+// ltlm.h - Low Temperature Lanczos Method parameters + connected static response
+//
+// WP10 C7: ltlm.cpp is retired. ``compute_connected_qh_response_ltlm`` now
+// lives in src/solvers/cpu/ftlm_dynamical.cpp next to its FTLM sibling
+// ``compute_connected_qh_response``; ``find_ground_state_lanczos`` moved to
+// src/solvers/cpu/lanczos.cpp and is declared in <ed/solvers/lanczos.h>.
+// This header keeps the LTLM parameter block (bound in Python) and the
+// declaration of the LTLM-only connected static response.
 
 #pragma once
 
@@ -15,7 +21,6 @@
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
 #include <ed/solvers/ftlm.h>
-
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 
@@ -40,31 +45,6 @@ struct LTLMParameters {
     bool compute_error_bars = false;   // Compute standard error (only useful if num_samples > 1)
     bool use_exact_ground_state = false; // If true and ground state eigenvector provided, use it
 };
-
-/**
- * @brief Find ground state using Lanczos iteration
- * 
- * This is the first step of LTLM - find the ground state accurately.
- * Returns the ground state energy and eigenvector.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param N Hilbert space dimension
- * @param krylov_dim Krylov subspace dimension
- * @param tolerance Convergence tolerance
- * @param full_reorth Use full reorthogonalization
- * @param reorth_freq Reorthogonalization frequency
- * @param ground_state Output: ground state eigenvector
- * @return Ground state energy
- */
-double find_ground_state_lanczos(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t N,
-    uint64_t krylov_dim,
-    double tolerance,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    ComplexVector& ground_state
-);
 
 // NOTE (Consolidation Family 1): the LTLM *thermodynamics* driver
 // ``low_temperature_lanczos`` was removed. Its estimator seeded a second

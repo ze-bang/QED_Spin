@@ -1962,3 +1962,72 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
 // vestigial. To re-introduce, copy the implementations from git history.
 
 // Adaptive Spectrum Slicing Full Diagonalization with Degeneracy Preservation
+
+// ---------------------------------------------------------------------------
+// find_ground_state_lanczos: in-memory ground-state solve (energy + vector)
+// built on build_lanczos_tridiagonal_with_basis. Moved here from ltlm.cpp
+// when that file was retired (WP10 C7); body unchanged. Unlike `lanczos()`
+// it returns the Ritz vector directly to the caller instead of persisting
+// eigenvectors to disk, which is what the CLI DSSF / static-response
+// workflows need.
+// ---------------------------------------------------------------------------
+double find_ground_state_lanczos(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    uint64_t krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    uint64_t reorth_freq,
+    ComplexVector& ground_state
+) {
+    std::cout << "  Finding ground state via Lanczos...\n";
+
+    // Generate random initial vector using helper function
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v0 = generateRandomVector(N, gen, dist);
+
+    // Build Lanczos tridiagonal with basis storage
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> lanczos_vectors;
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, v0, N, krylov_dim, tolerance,
+        full_reorth, reorth_freq,
+        alpha, beta, &lanczos_vectors
+    );
+
+    std::cout << "  Lanczos iterations for ground state: " << iterations << std::endl;
+
+    uint64_t m = alpha.size();
+
+    // Diagonalize tridiagonal matrix using helper function
+    std::vector<double> ritz_values, weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
+
+    if (ritz_values.empty()) {
+        std::cerr << "  Error: Ground state tridiagonal diagonalization failed" << std::endl;
+        ground_state = v0;  // Return initial state as fallback
+        return 0.0;
+    }
+
+    double ground_energy = ritz_values[0];
+    std::cout << "  Ground state energy: " << ground_energy << std::endl;
+
+    // Reconstruct ground state in full Hilbert space
+    // |ψ_0⟩ = Σ_j c_j |v_j⟩ where c_j = evecs[j] (first eigenvector)
+    ground_state.resize(N, Complex(0.0, 0.0));
+
+    for (uint64_t j = 0; j < m; j++) {
+        double coeff = evecs[j];  // First eigenvector (ground state)
+        Complex alpha_c(coeff, 0.0);
+        cblas_zaxpy(N, &alpha_c, lanczos_vectors[j].data(), 1, ground_state.data(), 1);
+    }
+
+    // Normalize
+    double norm = cblas_dznrm2(N, ground_state.data(), 1);
+    Complex scale(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, ground_state.data(), 1);
+
+    return ground_energy;
+}

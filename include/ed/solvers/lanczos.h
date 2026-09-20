@@ -146,6 +146,32 @@ int build_lanczos_tridiagonal_with_basis(
     std::vector<ComplexVector>* basis_vectors = nullptr
 );
 
+/**
+ * @brief Find the ground state (energy + vector) using Lanczos iteration.
+ *
+ * Returns the lowest Ritz value and reconstructs the corresponding Ritz
+ * vector in memory, so the caller gets |psi_0> without any basis I/O.
+ * Moved here from ltlm.h when ltlm.cpp was retired (WP10 C7).
+ *
+ * @param H Hamiltonian matrix-vector product function
+ * @param N Hilbert space dimension
+ * @param krylov_dim Krylov subspace dimension
+ * @param tolerance Convergence tolerance
+ * @param full_reorth Use full reorthogonalization
+ * @param reorth_freq Reorthogonalization frequency
+ * @param ground_state Output: ground state eigenvector
+ * @return Ground state energy
+ */
+double find_ground_state_lanczos(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    uint64_t krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    uint64_t reorth_freq,
+    ComplexVector& ground_state
+);
+
 // Default Lanczos with three-vector LOCAL reorthogonalization (DGKS-style),
 // basis vectors kept in RAM by default (use ED_LANCZOS_DISK=1 for disk).
 //

@@ -77,6 +77,7 @@
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ftlm_dist.h>
 #include <ed/solvers/kpm_dos.h>
+#include <ed/solvers/lanczos.h>            // find_ground_state_lanczos
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
 #include <ed/observables/cf_dynamical.h>   // ftlm_dynamical_kernel_via_backend_multitemp
