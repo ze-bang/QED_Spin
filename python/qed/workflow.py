@@ -117,6 +117,11 @@ from ._solve.symmetry_input import (  # noqa: F401  (re-exports)
     _raw_generators,
     _resolve_sector_quantum_numbers,
 )
+from ._solve.request import (  # noqa: F401  (re-exports)
+    DECLINED,
+    Lane,
+    SolveRequest,
+)
 from ._solve.results import (  # noqa: F401  (re-exports)
     _ProjectLaneBackend,
     _attach_su2_full_spectrum_labels,

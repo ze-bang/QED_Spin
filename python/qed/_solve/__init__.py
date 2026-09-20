@@ -14,6 +14,8 @@ directory writers). It is split here by concern:
 * :mod:`~qed._solve.symmetry_input` -- ``symmetry=`` normalisation into the
   group ``info`` dict the kernels read
 * :mod:`~qed._solve.symmetry_lane`  -- the in-memory streaming-symmetry lane
+* :mod:`~qed._solve.request`        -- the frozen ``SolveRequest`` the solve
+  lanes read, and the ``Lane`` row of their ordered table
 * :mod:`~qed._solve.results`        -- result shaping (project-lane backend
   envelope, SU(2) spectral-differencing labels)
 * :mod:`~qed._solve.spectrum`       -- :func:`qed.full_spectrum`
