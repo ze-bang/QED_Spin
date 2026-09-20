@@ -4,7 +4,7 @@
 # Defines the project's first-class static libraries:
 #
 #   ed_io           Pure I/O helpers (basis vector storage, lanczos basis
-#                   buffer). No solver dependencies.
+#                   buffer, HDF5IO result files). No solver dependencies.
 #   ed_core         Core types/config (ed_config.cpp). Depends on ed_io.
 #   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
 #                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
@@ -108,10 +108,14 @@ target_compile_options(ed_parallel PRIVATE
 set_target_properties(ed_parallel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_io: I/O helpers (basis vector / lanczos basis buffer)
+# ed_io: I/O helpers (basis vector / lanczos basis buffer / HDF5IO)
 # -----------------------------------------------------------------------------
 add_library(ed_io STATIC
     ${IO_DIR}/basis_vector_storage.cpp
+    ${IO_DIR}/hdf5_io_file.cpp
+    ${IO_DIR}/hdf5_io_eigen.cpp
+    ${IO_DIR}/hdf5_io_tpq.cpp
+    ${IO_DIR}/hdf5_io_thermal.cpp
     ${IO_DIR}/lanczos_basis_buffer.cpp
     ${IO_DIR}/lanczos_checkpoint.cpp
     ${IO_DIR}/lanczos_reorth.cpp
