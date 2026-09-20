@@ -423,7 +423,15 @@ set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # guards.
 # -----------------------------------------------------------------------------
 add_library(ed_cli STATIC
-    ${CLI_DIR}/workflows.cpp
+    # WP14: the ~3400-line src/cli/workflows.cpp was split by workflow into
+    # src/cli/workflows/ (pure move; see workflows_internal.h for the file
+    # map). wf_common.cpp holds the plumbing the other TUs share.
+    ${CLI_DIR}/workflows/wf_common.cpp
+    ${CLI_DIR}/workflows/wf_diagonalize.cpp
+    ${CLI_DIR}/workflows/wf_dynamical.cpp
+    ${CLI_DIR}/workflows/wf_static.cpp
+    ${CLI_DIR}/workflows/wf_dssf.cpp
+    ${CLI_DIR}/workflows/wf_kpm.cpp
     ${CLI_DIR}/dssf_engine.cpp
 )
 target_include_directories(ed_cli PUBLIC ${_ED_PUBLIC_INCLUDES})
