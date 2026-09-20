@@ -180,8 +180,6 @@ struct Row {
       "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
     X("ED_DSSF_VERBOSE", Flag, "thermal-kpm", "false",                         \
       "Gates per-sample / per-iteration progress prints in the DSSF/SSSF/FTLM/LTLM kernels")\
-    X("ED_FTLM_PARALLEL", Flag, "thermal-kpm", "false (serial samples)",       \
-      "=1 opts in to OMP-parallel FTLM samples (only safe with a thread-safe Hv callback)")\
     X("ED_KPM_VERBOSE", Flag, "thermal-kpm", "false",                          \
       "Verbose logging in the FTLM-KPM kernel")                                \
     X("ED_KPM_DOS_VERBOSE", Flag, "thermal-kpm", "false",                      \

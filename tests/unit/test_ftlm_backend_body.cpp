@@ -2,9 +2,8 @@
 // tests/unit/test_ftlm_backend_body.cpp
 //
 // WP10: feature parity of the Backend-templated FTLM body
-// (``ed::thermal::detail::ftlm_kernel_via_backend``) with the CPU driver
-// ``::finite_temperature_lanczos``. The body is exercised directly on
-// ``CpuBackend`` (the CPU facade only reaches it with a seed_transform):
+// (``ed::thermal::detail::ftlm_kernel_via_backend``) with the retired Gen-1
+// CPU driver. The body is exercised directly on ``CpuBackend``:
 //   * full reorthogonalisation on and off both give finite curves that
 //     agree with each other at low temperature;
 //   * ``ground_state_estimate`` is filled with the lowest Ritz value and

@@ -145,11 +145,9 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
   * Selective re-orth (the default after Batch 1) — full re-orth at m=200
     against 250 M-state vectors costs 8 TFLOPs per sweep just for the
     re-orth pass.
-  * For dense thermodynamics (FTLM/TPQ): `ED_FTLM_PARALLEL=1` is **not**
-    safe to enable here unless you've verified your `Operator` is
-    thread-safe (the default `Operator::apply` may share scratch buffers).
-    Run samples serially or distribute them over MPI ranks via
-    `mpirun -n R ./ED ftlm.cfg`.
+  * For dense thermodynamics (FTLM/TPQ): samples run serially within a
+    process (threads go to the matvec / BLAS inside each sample);
+    distribute them over MPI ranks via `mpirun -n R ./ED ftlm.cfg`.
   * Multi-day wallclock. **Krylov-state checkpoint/restart is now
     available** for the default `lanczos()` solver (Phase 3a #1, see §3
     "Memory / disk strategy" knobs and §6).
@@ -204,7 +202,6 @@ them in your run script, not mid-run.
 
 | Env var | Default | What it does |
 |---|---|---|
-| `ED_FTLM_PARALLEL` | `0` (serial) | Enables OpenMP over FTLM samples (Batch 2, P1-4). **Opt-in** because the default `Operator` is not guaranteed thread-safe — concurrent `apply()` calls can corrupt shared scratch. Safe with the per-sector-CSR Operator. Validate against the serial run before trusting averaged thermodynamics. (The chunked-symmetry Operator was retired in matvec-unification Phase 7.2 and is no longer available as a thread-safe alternative.) |
 | `ED_GPU_TIMING` | `0` | If `1`, GPU fixed-Sz matvec calls insert `cudaDeviceSynchronize()` and record per-call timings. Off by default for performance (Batch 2, P1-6). |
 | `ED_NUMA_FIRST_TOUCH` | unset (off) | If `1`/`true`/`yes`, basis-sized work vectors (Lanczos `v_curr` / `v_prev` / `v_next` / `w`, the blocked-reorth tile) are parallel-zero-touched after allocation so each OpenMP thread owns the chunk of pages it will later read in `cblas_zaxpy` / `zdotc` / `zgemv` (Phase 3a #4, see `include/ed/parallel/numa.h`). On a multi-socket box this is the difference between every SpMV pulling its operand vector across the inter-socket link vs. straight from local DRAM (typically 2-4× SpMV bandwidth). No-op below a 256 KB threshold; never changes numerical results. Pair with `ED_NUMA_PIN_THREADS=1` so the thread-to-page assignment is stable across iterations. |
 | `ED_NUMA_PIN_THREADS` | unset (off) | If `1`/`true`/`yes`, OpenMP worker threads are pinned compactly via `pthread_setaffinity_np` (thread `t` → CPU `t mod ncpus`) on first call into `lanczos` (Phase 3a #4). Idempotent within a process. Pairs with `ED_NUMA_FIRST_TOUCH=1` so each thread keeps owning the same page range across iterations; without pinning the kernel is free to migrate threads between cores and socket-local DRAM access is no longer guaranteed. Honour `OMP_PROC_BIND` / `OMP_PLACES` for non-compact layouts. |
@@ -275,12 +272,8 @@ FTLM / TPQ are *cheaper than DSSF* because each sample is a single short
 Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 
 * **N=32 FTLM, m=80, R=50**: 50 short Lanczos runs of dim 1.9 × 10⁷, each
-  needing ~80 vectors × 300 MB = 24 GB working set. On a 64 GB node, run
-  serially (`ED_FTLM_PARALLEL=0`) so only one sample is live at a time.
-  Wallclock: hours.
-* **N=32 FTLM with thread-safe Operator**: set `ED_FTLM_PARALLEL=1`. With 8
-  OMP threads you'll get ~6× speedup if memory bandwidth permits.
-  *Validate* against the serial run on a small problem first.
+  needing ~80 vectors × 300 MB = 24 GB working set. Samples run serially
+  (one live at a time), so this fits a 64 GB node. Wallclock: hours.
 * **N=36 FTLM**: each sample wants 80 × 4 GB = 320 GB working set with full
   re-orth. Selective re-orth + `ED_LANCZOS_DISK=1` brings this down to
   ~12 GB resident + 320 GB on disk per sample. Run 1 sample per node with

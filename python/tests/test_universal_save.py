@@ -667,10 +667,9 @@ def test_thermal_ftlm_gpu_runs_on_gpu(tmp_path):
     e_cpu = np.asarray(tr_cpu.thermo.energy, dtype=float)
     assert e_gpu.shape == e_cpu.shape and e_gpu.size > 0, (
         "FTLM energy arrays must be populated on both lanes.")
-    # The CPU and GPU lanes use different host RNG seed strategies
-    # (the legacy ``::finite_temperature_lanczos`` driver has its own
-    # sample-RNG, ``ftlm_kernel_via_backend`` salts ``opts.random_seed``
-    # with the sample index). We therefore pin only the qualitative
+    # The CPU and GPU lanes run the same body with the same per-sample
+    # seeds, but their BLAS reductions differ, so the curves are not
+    # bit-identical across lanes. We therefore pin only the qualitative
     # contract: both curves are finite, and the energy bracket
     # ``[e_min_GPU, e_max_GPU]`` overlaps the CPU bracket. Tighter
     # numerical agreement is captured by the LTLM dual-backend

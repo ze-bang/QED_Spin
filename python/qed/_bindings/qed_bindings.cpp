@@ -513,12 +513,13 @@ py::dict py_compute_thermo_from_spectrum(const py::array_t<double>& eigs,
 // exists only behind the front door). All four bindings now route through
 // ftlm_kernel<CpuBackend> with the SAME log-spaced grid and (newly
 // knob-complete) parameters. Since WP10 C5 the front door runs the
-// Backend-templated body, which reproduces the legacy driver sample for
-// sample (tests/unit/test_ftlm_rng_parity.cpp).
+// Backend-templated body, which draws the legacy driver's per-sample
+// vectors (tests/unit/test_ftlm_sample_seed.cpp); the driver itself was
+// deleted in WP10 C6.
 
 // The exact log-spaced grid the legacy (temp_min, temp_max, num_temp_bins)
-// driver overload builds internally (src/solvers/cpu/ftlm.cpp), same
-// operations in the same order.
+// driver overload built internally (deleted in WP10 C6), same operations
+// in the same order.
 std::vector<double> legacy_log_temperature_grid(double temp_min,
                                                 double temp_max,
                                                 uint64_t num_temp_bins) {

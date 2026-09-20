@@ -215,7 +215,7 @@ For larger systems (e.g., up to 32–36 sites), solving the ground state in each
 ### CPU FTLM Temperature Axis Alignment Fix
 
 Previously, when the unified `qed.thermal()` dispatcher was invoked with `use_symmetry_if_available=True` or `device='cpu'`, it passed `T_min`, `T_max`, and `num_bins` to the legacy backend. The legacy CPU driver internally reconstructed a logarithmically-spaced temperature axis, but the returned results were mapped to a linear temperature grid constructed from `opts.betas` — introducing a temperature/energy indexing mismatch. 
-* This is now fully resolved: the CPU FTLM driver supports an explicit temperature grid overload `finite_temperature_lanczos(..., const std::vector<double>& temperatures, ...)`.
+* This is now fully resolved: both lanes run one body (`detail::ftlm_kernel_via_backend`, WP10 C5; the Gen-1 CPU driver was deleted in C6), which evaluates on `opts.temperatures` verbatim or on $T_k = 1/\beta_k$.
 * The `ftlm_kernel.h` CPU lane constructs the actual $T_k = 1/\beta_k$ grid in C++ and forwards it verbatim, perfectly aligning CPU calculations with the exact linear/geometric temperatures computed in the GPU lane.
 
 `Q` incommensurate with the lattice (residual greater than

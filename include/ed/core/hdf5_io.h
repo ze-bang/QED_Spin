@@ -818,9 +818,10 @@ public:
     // were retired in the minimalist-architecture rev (May 2026): all
     // current correlator / dynamical-response / FTLM-sample writes go
     // through saveCorrelationMatrix, saveDynamicalResponseFull, and
-    // saveFTLMThermodynamicSample / saveFTLMDynamicalSample /
-    // saveFTLMStaticSample respectively. None of the three deleted
-    // helpers had any callers.
+    // saveFTLMDynamicalSample / saveFTLMStaticSample respectively. None
+    // of the three deleted helpers had any callers. (The per-sample
+    // thermodynamic writer saveFTLMThermodynamicSample went with the
+    // Gen-1 FTLM driver, its only caller, in WP10 C6.)
 
     
     /**
@@ -2266,17 +2267,6 @@ public:
     // ============================================================================
     
     /**
-     * @brief Structure to hold FTLM thermodynamic sample data
-     */
-    struct FTLMThermodynamicSample {
-        std::vector<double> temperatures;
-        std::vector<double> energy;
-        std::vector<double> specific_heat;
-        std::vector<double> entropy;
-        std::vector<double> free_energy;
-    };
-    
-    /**
      * @brief Structure to hold FTLM dynamical sample data (spectral function)
      */
     struct FTLMDynamicalSample {
@@ -2324,60 +2314,6 @@ public:
             file.close();
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to create FTLM sample groups: " + std::string(e.getCDetailMsg()));
-        }
-    }
-    
-    /**
-     * @brief Save FTLM thermodynamic sample to HDF5 (replaces ftlm_samples/sample_*.dat)
-     * 
-     * @param filepath Path to HDF5 file
-     * @param sample_index Sample index
-     * @param sample Sample data
-     */
-    static void saveFTLMThermodynamicSample(const std::string& filepath,
-                                            size_t sample_index,
-                                            const FTLMThermodynamicSample& sample) {
-        if (isDisabledOutputPath(filepath)) return;
-        try {
-            H5::H5File file(filepath, H5F_ACC_RDWR);
-            
-            std::string sample_group = "/ftlm/samples/thermodynamic/sample_" + std::to_string(sample_index);
-            
-            // Create group if needed
-            if (!file.nameExists("/ftlm/samples/thermodynamic")) {
-                if (!file.nameExists("/ftlm/samples")) {
-                    if (!file.nameExists("/ftlm")) {
-                        file.createGroup("/ftlm");
-                    }
-                    file.createGroup("/ftlm/samples");
-                }
-                file.createGroup("/ftlm/samples/thermodynamic");
-            }
-            if (file.nameExists(sample_group)) {
-                // Delete existing group contents
-                file.unlink(sample_group);
-            }
-            file.createGroup(sample_group);
-            
-            // Helper to save dataset
-            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
-                std::string path = sample_group + "/" + name;
-                hsize_t dims[1] = {data.size()};
-                H5::DataSpace dataspace(1, dims);
-                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
-                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-                dataset.close();
-            };
-            
-            saveDataset("temperatures", sample.temperatures);
-            saveDataset("energy", sample.energy);
-            saveDataset("specific_heat", sample.specific_heat);
-            saveDataset("entropy", sample.entropy);
-            saveDataset("free_energy", sample.free_energy);
-            
-            file.close();
-        } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save FTLM thermodynamic sample: " + std::string(e.getCDetailMsg()));
         }
     }
     

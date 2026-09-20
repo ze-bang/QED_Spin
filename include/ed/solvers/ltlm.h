@@ -71,8 +71,7 @@ double find_ground_state_lanczos(
 // Lanczos from |0> and summed the GS-local density of states, not the
 // thermal trace, so it stayed pinned near E0 at every T. Since LTLM
 // thermodynamics reduces exactly to the FTLM trace for any function of H,
-// all thermodynamics now routes through ``finite_temperature_lanczos`` /
-// ``ftlm_kernel``. The connected static response below (⟨OH⟩-⟨O⟩⟨H⟩), which
+// all thermodynamics now routes through ``ftlm_kernel``. The connected static response below (⟨OH⟩-⟨O⟩⟨H⟩), which
 // probes an operator that does NOT commute with H, is genuinely LTLM-only
 // and is retained. See CONSOLIDATION_PLAN.md Family 1.
 

@@ -209,7 +209,7 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 /// with a kept basis, the same kernel call the CPU driver's
 /// ``build_lanczos_tridiagonal`` makes when full reorth is requested.
 ///
-/// Parity with the CPU driver ``::finite_temperature_lanczos`` (WP10):
+/// Parity with the retired Gen-1 CPU driver (WP10; deleted in C6):
 ///   * the whole call runs under ``ThreadBudgetScope(auto_threads_for_dim
 ///     (local_n))``. Nested inside the orchestrator's identical scope it
 ///     is a no-op: ``auto_threads_for_dim`` never exceeds the current
@@ -220,11 +220,10 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 ///     call throws only if every sample failed;
 ///   * ``ground_state_estimate`` is the minimum lowest Ritz value over
 ///     the valid samples;
-///   * sample ``s`` starts from the CPU driver's vector: engine
+///   * sample ``s`` starts from the driver's vector: engine
 ///     ``sample_engine(resolve_base_seed(seed), s)`` and
-///     ``generateGaussianRandomVector`` (dznrm2 normalisation), so for
-///     the same options ``CpuBackend`` reproduces
-///     ``::finite_temperature_lanczos`` exactly.
+///     ``generateGaussianRandomVector`` (dznrm2 normalisation), pinned by
+///     tests/unit/test_ftlm_sample_seed.cpp.
 ///
 /// Algorithm per sample:
 ///   1. Host-side Gaussian seed ``v_0`` (see above), copy to backend
@@ -409,11 +408,10 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
 /// traffic is the host-seeded random starting vector per sample (a
 /// single ``~N*16`` byte transfer at the top of each sample) and the
 /// small ``(M x M)`` tridiagonal diagonalisation handled on the host
-/// with LAPACK. On CPU the result equals the legacy driver
-/// ``::finite_temperature_lanczos`` for the same options; the driver's
-/// opt-in sample-parallel loop (``ED_FTLM_PARALLEL``), per-sample HDF5
-/// dumps (``store_intermediate``) and verbose sample logging are not
-/// carried over.
+/// with LAPACK. On CPU the result equals what the deleted Gen-1 driver
+/// returned for the same options; its opt-in sample-parallel loop,
+/// per-sample HDF5 dumps (``store_intermediate``) and verbose sample
+/// logging were not carried over.
 template <typename Backend, typename MatvecFn>
 FtlmResult ftlm_kernel(const Backend&  backend,
                        MatvecFn&&      apply_H,
@@ -422,9 +420,9 @@ FtlmResult ftlm_kernel(const Backend&  backend,
                        const FtlmOptions& opts)
 {
     // WP10 C5: one body for both single-rank lanes. The CPU lane used to
-    // convert to FTLMParameters and call ``::finite_temperature_lanczos``;
-    // the Backend-templated body now reproduces that driver sample for
-    // sample (tests/unit/test_ftlm_rng_parity.cpp), so it is used here too.
+    // convert to FTLMParameters and call the Gen-1 driver (deleted in C6);
+    // the Backend-templated body reproduced it sample for sample, so it is
+    // used here too.
     constexpr bool single_rank =
 #ifdef WITH_CUDA
         std::is_same_v<Backend, ed::matvec::CudaBackend> ||

@@ -743,12 +743,13 @@ if(BUILD_ED_TESTS)
     # (every sampling method) and the ED_THERMAL_EXACT_SMALL=0 escape that
     # test_thermal_dense_ref relies on to keep gating the real kernels.
     ed_add_test(test_thermal_exact_small_fallback tests/unit/test_thermal_exact_small_fallback.cpp USE_CATCH2)
-    # WP10: the Backend-templated FTLM body (the CUDA lane) honours full
-    # reorthogonalisation and fills ground_state_estimate like the CPU driver.
+    # WP10: the Backend-templated FTLM body (both lanes) honours full
+    # reorthogonalisation and fills ground_state_estimate.
     ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp USE_CATCH2)
-    # WP10 C3: on CpuBackend the Backend-templated FTLM body reproduces the
-    # CPU driver (same per-sample RNG recipe and normalisation).
-    ed_add_test(test_ftlm_rng_parity            tests/unit/test_ftlm_rng_parity.cpp USE_CATCH2)
+    # WP10 C3/C6: the FTLM body draws the shared per-sample seed recipe
+    # (sample_seed.h), is run-to-run bit-identical, and is what the CPU
+    # front door returns.
+    ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp USE_CATCH2)
     # Smoke-test the unified spectral entry point
     # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.
