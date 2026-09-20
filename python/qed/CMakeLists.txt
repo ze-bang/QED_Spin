@@ -37,7 +37,16 @@ if(WITH_CUDA AND TARGET ed_solvers_gpu)
         _bindings/dispatcher_bindings.cpp
         _bindings/sector_bindings.cpp
         _bindings/little_group_bindings.cpp
-        _bindings/workflow_bindings.cpp
+        _bindings/workflow/workflow_bindings.cpp
+        _bindings/workflow/workflow_types.cpp
+        _bindings/workflow/workflow_symmetry.cpp
+        _bindings/workflow/workflow_solve.cpp
+        _bindings/workflow/workflow_thermal.cpp
+        _bindings/workflow/workflow_thermal_all_sz.cpp
+        _bindings/workflow/workflow_spectral.cpp
+        _bindings/workflow/workflow_spectral_cross_irrep.cpp
+        _bindings/workflow/workflow_spectral_multiq.cpp
+        _bindings/workflow/workflow_spectral_ftlm.cpp
     )
 else()
     pybind11_add_module(_core MODULE
@@ -46,7 +55,16 @@ else()
         _bindings/dispatcher_bindings.cpp
         _bindings/sector_bindings.cpp
         _bindings/little_group_bindings.cpp
-        _bindings/workflow_bindings.cpp
+        _bindings/workflow/workflow_bindings.cpp
+        _bindings/workflow/workflow_types.cpp
+        _bindings/workflow/workflow_symmetry.cpp
+        _bindings/workflow/workflow_solve.cpp
+        _bindings/workflow/workflow_thermal.cpp
+        _bindings/workflow/workflow_thermal_all_sz.cpp
+        _bindings/workflow/workflow_spectral.cpp
+        _bindings/workflow/workflow_spectral_cross_irrep.cpp
+        _bindings/workflow/workflow_spectral_multiq.cpp
+        _bindings/workflow/workflow_spectral_ftlm.cpp
     )
 endif()
 

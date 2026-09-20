@@ -10,8 +10,9 @@
 // + BackendConstraints + the SolveMethod / ThermalMethod / SpectralMethod
 //   enums).
 //
-// The implementation lives in `workflow_bindings.cpp` and is invoked from
-// inside `PYBIND11_MODULE(_core, ...)` in `qed_bindings.cpp`.
+// The implementation lives in `workflow/` -- `workflow/workflow_bindings.cpp`
+// holds the entry point, the per-area registrars sit beside it -- and it is
+// invoked from inside `PYBIND11_MODULE(_core, ...)` in `qed_bindings.cpp`.
 //
 // ED Cleanup Sweep Phase 1 (May 2026).
 // =============================================================================
