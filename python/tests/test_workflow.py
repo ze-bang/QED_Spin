@@ -771,6 +771,9 @@ class TestDeviceMatrix:
 
         monkeypatch.setattr(wf, "has_cuda_build", lambda: True)
         from qed import _core as _qcore
+        # A build flag is no longer enough: device="gpu" also demands a usable device,
+        # so fake the runtime probe too (this test is about routing, not the device).
+        monkeypatch.setattr(_qcore, "have_cuda", lambda: True)
         monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
         # Dispatch-routing test (the workflows_solve call is monkeypatched,

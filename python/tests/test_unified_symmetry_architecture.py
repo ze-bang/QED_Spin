@@ -195,7 +195,8 @@ def _cuda_available() -> bool:
         from qed import _core  # type: ignore[attr-defined]
     except ImportError:
         return False
-    if not hasattr(_core, "has_cuda_build") or not _core.has_cuda_build():
+    if (not hasattr(_core, "has_cuda_build") or not _core.has_cuda_build()
+            or not _core.have_cuda()):        # a CUDA build is not a usable device
         return False
     try:
         import subprocess

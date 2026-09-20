@@ -62,7 +62,7 @@ def test_multi_operator_one_sector_gpu_matches_cpu():
     GPU S^{+-}(q) must equal the CPU S^{+-}(q) at every q. Before the
     term-content fingerprint fix, colliding probes reused one anothers'
     device mirror (GPU-only), so this diverged."""
-    if not qed.has_cuda_build():
+    if not qed.has_cuda_build() or not qed._core.have_cuda():   # a build is not a device
         pytest.skip("no CUDA build")
     H, obs, trans, n_up, N = _build()
     e_cpu, cpu = _static_sf(H, obs, trans, n_up, N, use_gpu=False)

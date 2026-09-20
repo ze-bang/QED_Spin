@@ -1721,7 +1721,10 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
         # CPU lane at dim ~ 7e5 (N = 22 half filling) for the Krylov verbs and
         # is 1.5-3x SLOWER below ~2e5 (launch + sync latency per iteration), so
         # "auto" keeps dim < 2^18 on the CPU. Pass device="gpu" to force it.
-        use_gpu = bool(has_cuda_build()) and dim >= (1 << 18)
+        # ... and only when a device is actually THERE: a CUDA build with no usable
+        # GPU (empty allocation, broken card, driver older than the toolkit) would
+        # otherwise pick the GPU lane and be served by the host without a word.
+        use_gpu = bool(has_cuda_build()) and bool(_core.have_cuda()) and dim >= (1 << 18)
         return use_gpu, False
     device_lc = device.lower()
     if device_lc == "cpu":
@@ -1732,6 +1735,19 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
                 "device='gpu' requested but this build of qed._core "
                 "does not have WITH_CUDA=ON. Rebuild with -DWITH_CUDA=ON or "
                 "use device='cpu'."
+            )
+        # A CUDA BUILD is not a usable DEVICE. Without this check the GPU lanes
+        # quietly run on the host when the allocation has no GPU, the device is
+        # broken or the driver is older than the build's toolkit -- a node with a
+        # failed GPU once produced 19 "GPU" golden results computed on the CPU.
+        if not _core.have_cuda():
+            raise RuntimeError(
+                "device='gpu' requested but no usable CUDA device is visible to "
+                f"this process on {os.uname().nodename} (cudaGetDeviceCount found "
+                "none: no GPU in the allocation, a broken or busy device, or a "
+                "driver older than the toolkit this build used). The GPU lanes "
+                "would silently run on the CPU; fix the allocation or pass "
+                "device='cpu'."
             )
         return True, False
     if device_lc in ("mpi", "mpi_gpu"):
