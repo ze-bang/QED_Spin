@@ -69,7 +69,13 @@ from ._core.symmetry import (  # type: ignore[attr-defined]
     translation_group_1d,
 )
 
+# Group plumbing the consumers need: QED_NLCE_Spin was importing the private
+# qed.point_group_routing._close, so both are public here (WP13).
+from .point_group_routing import close_group, split_nonabelian  # noqa: E402
+
 __all__ = [
+    "close_group",
+    "split_nonabelian",
     "identity",
     "compose",
     "power",

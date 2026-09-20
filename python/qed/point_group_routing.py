@@ -36,7 +36,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-__all__ = ["ProjectionLane", "split_nonabelian", "resolve_projection_lane",
+__all__ = ["ProjectionLane", "split_nonabelian", "close_group", "resolve_projection_lane",
            "greedy_maximal_abelian",
            "decode_star_for_sector", "decode_irrep_for_character"]
 
@@ -56,8 +56,11 @@ def _compose(g, e):
     return tuple(e[g[i]] for i in range(len(g)))
 
 
-def _close(gens, cap=_GROUP_CLOSURE_CAP):
-    """BFS closure of a permutation set. None when the group exceeds cap."""
+def close_group(gens, cap=_GROUP_CLOSURE_CAP):
+    """BFS closure of a permutation set. None when the group exceeds cap.
+
+    Public since WP13: consumers (QED_NLCE_Spin) were importing the private name.
+    """
     gens = [tuple(g) for g in gens]
     if not gens:
         return None
@@ -118,7 +121,7 @@ def greedy_maximal_abelian(elements, cap=_GROUP_CLOSURE_CAP):
         if e in Aset:
             continue
         if all(_commute(e, a) for a in A):
-            closed = _close(A + [e])
+            closed = close_group(A + [e])
             if closed is not None and len(closed) <= cap:
                 A = [tuple(a) for a in closed]
                 Aset = set(A)
@@ -142,7 +145,7 @@ def split_nonabelian(symmetry_or_gens):
         star = list(getattr(symmetry_or_gens, "star_perms", None) or [])
         if not gens:
             return "the symmetry has no spatial generators"
-        A = _close([list(g) for g in gens])
+        A = close_group([list(g) for g in gens])
         if A is None:
             return (f"the abelian group exceeds the {_GROUP_CLOSURE_CAP}-"
                     "element closure cap")
@@ -174,7 +177,7 @@ def split_nonabelian(symmetry_or_gens):
     perms = [tuple(p) for p in (symmetry_or_gens or [])]
     if not perms:
         return "no generators given"
-    G = _close(perms)
+    G = close_group(perms)
     if G is None:
         return (f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element "
                 "cap -- pass a GeneratorSet from find_symmetries instead")
@@ -433,3 +436,7 @@ def resolve_projection_lane(
         return _decline(split)
     A, residues = split
     return ProjectionLane(mode="project", A=A, residues=residues)
+
+
+# The pre-WP13 private spelling, kept so existing callers keep working.
+_close = close_group
