@@ -75,7 +75,7 @@ The traits gate the kernel's `if constexpr` branches:
 | `may_leave_basis` | Off-diagonal terms can produce a state outside this basis (fixed-Sz, symmetry). Kernel uses `index_of()` and skips on `-1`. |
 | `needs_orbit_walk` | Outer loop walks `iter_orbit(i, cb)` instead of using `state_of(i)` directly. |
 | `has_coeff_modifier` | Per-emit `coeff_modifier` multiplier applies. |
-| `is_distributed` | Reserved for the MPI lanes (see `ADD_NEW_MPI_CELL.md`). |
+| `is_distributed` | Vestigial: it gated the retired distributed (within-sector) matvec lanes. Every shipped policy sets it `false`; leave it `false`. |
 
 ### 2. Wire your policy into the owning host operator
 
@@ -119,9 +119,9 @@ honors `iter_orbit` and `coeff_modifier` exactly like
 
 See [`ADD_NEW_GPU_CELL.md`](ADD_NEW_GPU_CELL.md).
 
-### 5. (Optional) MPI twin
-
-See [`ADD_NEW_MPI_CELL.md`](ADD_NEW_MPI_CELL.md).
+There is no MPI twin to write: MPI parallelism lives above the matvec,
+in the CLI's across-sector distribution, and a new policy inherits it
+for free.
 
 ### See also
 

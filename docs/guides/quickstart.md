@@ -136,7 +136,7 @@ exposes more knobs and gives up some auto-decisions:
 | 0 | `ed::workflows::solve(H, SolveOptions{})` | common path, smart defaults |
 | 1 | same + `SolveOptions::{solver, num_eigenvalues, compute_eigenvectors, ...}` | override individual axes |
 | 2 | same + `SolveOptions::extra_params` (EDParameters tweaks) | tweak any of the ~50 niche `EDParameters` fields |
-| 3 | direct kernel call (`ed::ftlm_kernel`, `ed::mtpq_kernel`, `ed::lanczos_solve`, …) | full control; populate the kernel-specific options struct yourself |
+| 3 | direct kernel call (`ed::thermal::ftlm_kernel`, `ed::thermal::mtpq_kernel`, `ed::krylov::lanczos_kernel`, …) | full control; populate the kernel-specific options struct yourself |
 | 4 | `ed::make_operator(OperatorSpec{...})` + own driver | bring your own driver around the unified factory |
 
 Layers 2 and 3 reach the same `EDParameters` fields documented in

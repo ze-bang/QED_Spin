@@ -26,11 +26,14 @@ sudo apt-get install -y \
 
 Optional:
 
-- **MPI** (`libopenmpi-dev openmpi-bin`) — enables the distributed
-  lane (SectorDistributor across sectors + in-process MpiBackend).
+- **MPI** (`libopenmpi-dev openmpi-bin`) — lets `ED` distribute the
+  symmetry sectors across ranks when launched under `mpirun`. Nothing
+  else in the library uses MPI.
 - **CUDA Toolkit ≥ 12.x** — enables the GPU solvers (`ed_solvers_gpu`).
-- **NCCL** — enables the multi-GPU distributed lane
-  (NCCL collectives for the MPI+GPU backend, library `ed_multi_gpu`).
+- **NCCL** — builds `ed_multi_gpu` (the `MultiGpuCommunicator`
+  collectives behind `MpiCudaBackend`). Unit-tested, but no production
+  lane selects that backend, so a build without NCCL loses nothing you
+  can reach from `qed` or `./ED`.
 
 Then:
 
@@ -129,5 +132,5 @@ the default `native`) produces a binary that runs on every node type of a mixed 
 (docker-and-dev-containers)=
 ## Docker and dev containers
 
-A reproducible `Dockerfile.dev` plus a Nix flake are tracked under audit
-items P2.12 / P2.7. They will land alongside the next minor release.
+A reproducible `Dockerfile.dev` and a Nix flake (`flake.nix`) are
+tracked at the repository root.

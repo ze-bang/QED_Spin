@@ -112,8 +112,9 @@ auto res = ed::workflows::solve(*H, opts);
 
 Same auto-selection logic; same fall-back warnings. The C++
 orchestrator **does not** spawn MPI ranks — for MPI runs, launch the
-CLI under `mpirun` (SectorDistributor + in-process MpiBackend; the
-Python `device="mpi"` subprocess launcher was retired in Stage 11d).
+CLI under `mpirun`, which spreads the symmetry sectors over the ranks
+(the Python `device="mpi"` subprocess launcher was removed in
+Jul 2026).
 
 ## 2. Finite-temperature — `qed.thermal`
 
@@ -289,9 +290,11 @@ What `qed.spectral` decides for you:
 * **KPM moments** (`kpm_moments=None`): default `2048`. Only consulted
   for `method="kpm_thermodynamics"`.
 
-* **Device** (`device=None`): `pick_device(sector_dim, has_cuda_build,
-  has_mpi_build)` — adds `--use-gpu` to `./ED dssf` when a GPU is in
-  scope.
+* **Device** (`device=None`): `pick_device(sector_dim,
+  has_cuda_build=...)` — adds `--use-gpu` to `./ED dssf` when a GPU is
+  in scope. (`has_mpi_build` / `mpi_dim_threshold` are still accepted
+  for call-site compatibility and ignored; there is no device-string
+  MPI lane.)
 
 All knobs flow through to the standard `./ED dssf <method>` CLI as
 `--dyn-* / --static-* / --ftlm-*` flags, so the on-disk HDF5 layout is
@@ -302,7 +305,6 @@ identical to a hand-tuned run. The auto-tuner output is exposed as
 knobs = qed.auto_tune.tune_dssf(
     sector_dim=4096,
     has_cuda_build=qed.has_cuda_build(),
-    has_mpi_build=qed.has_mpi_build(),
     level="aggressive",
 )
 print(knobs)            # frozen dataclass — easy to log / serialise
@@ -362,8 +364,7 @@ explicitly:
 ```python
 knobs = qed.auto_tune.tune_diag(
     operator=H, num_eigenvalues=4, level="aggressive",
-    has_cuda_build=qed.has_cuda_build(),
-    has_mpi_build=qed.has_mpi_build())
+    has_cuda_build=qed.has_cuda_build())
 print(knobs.solver, knobs.device, knobs.to_extra_params())
 ```
 

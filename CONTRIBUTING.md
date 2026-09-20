@@ -27,7 +27,7 @@ See `CMakePresets.json` for the full list. The most common ones:
 | `default`          | First-time setup, no CUDA, no MPI                        |
 | `debug`            | Stepping through with `gdb`                              |
 | `debug-asan`       | Hunting memory bugs / undefined behavior (slow)          |
-| `release-mpi`      | Distributed Lanczos / FTLM / TPQ runs                    |
+| `release-mpi`      | CLI runs under mpirun (symmetry sectors split across ranks)|
 | `release-cuda`     | GPU Lanczos / FTLM / TPQ                                 |
 | `release-cuda-mpi` | Full HPC build (NCCL + CUDA + MPI)                       |
 | `ci-linux`         | What CI uses; pinned to system `gcc`/`g++`               |
@@ -90,7 +90,9 @@ When extending the codebase, the relevant entry points are:
   family) or `include/ed/thermal/` (finite-T family), plus
   implementation under `src/solvers/`. Register the new
   `DiagonalizationMethod` enum in `include/ed/core/ed_types.h` and
-  wire it into `src/orchestrator.cpp`.
+  wire it into the matching lane under `src/orchestrator/` (`orch_solve.cpp`,
+  `orch_thermal.cpp` or `orch_spectral.cpp`; the file map is in
+  `src/orchestrator/orchestrator_internal.h`).
 - **A new symmetry axis** (spin-flip Z2, time reversal, SU(2)
   total-S, etc.) — see
   [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6
@@ -102,8 +104,11 @@ When extending the codebase, the relevant entry points are:
   [`docs/architecture/ADD_NEW_BASIS_POLICY.md`](docs/architecture/ADD_NEW_BASIS_POLICY.md).
 - **A new GPU lane** — see
   [`docs/architecture/ADD_NEW_GPU_CELL.md`](docs/architecture/ADD_NEW_GPU_CELL.md).
-- **A new MPI lane** — see
-  [`docs/architecture/ADD_NEW_MPI_CELL.md`](docs/architecture/ADD_NEW_MPI_CELL.md).
+- **A new MPI lane** — there is none to extend. MPI parallelism sits
+  above the matvec, in the CLI's across-sector distribution
+  (`ed::make_sector_operators_tagged(spec, rank, size)` in
+  `src/cli/workflows.cpp`); the within-sector distributed family was
+  removed in Jul 2026.
 - **A new example** — the per-cell example tree was retired; the
   canonical usage documentation is now the tour
   (`examples/tour/0N_<topic>.py`, one verb per file, heavily

@@ -40,8 +40,8 @@ escape. What changed:
 **Distribution by stars (U5)**: stars are disjoint solve units;
 job-level splitting via `ED_SYM_LG_ONLY_K0` (or
 `LittleGroupOptions::only_k0`) is the production mechanism (proven at
-36 sites). Lane-B's across-sector `SectorDistributor` continues to serve
-the CLI under `mpirun`. Automatic in-process rank-striding of the star
+36 sites). Lane-B's across-sector distribution continues to serve the CLI under
+`mpirun`. Automatic in-process rank-striding of the star
 walk remains optional future convenience — the capability itself exists.
  Companion to
 [SYMMETRY.md](SYMMETRY.md) (mechanism reference),
@@ -190,7 +190,7 @@ the Lanczos.* Each step has exactly one implementation:
 | Matvec | the CSR-free rep kernel, host ([rep_symmetry_basis_policy.h](../../include/ed/matvec/rep_symmetry_basis_policy.h)) and device (rep mirror in [streaming_symmetry_gpu_mirror.cu](../../src/symmetry/streaming_symmetry_gpu_mirror.cu)), with the budget-gated reduced-CSR sub-mode | the CPU orbit-CSR backend, the GPU orbit mirror, the device orbit lane, `ED_SYM_REP` / `ED_GPU_SYMMETRY_REP` (11c-2b) |
 | Lanczos | `ed::krylov::lanczos_kernel<Backend>` ([lanczos_kernel.h](../../include/ed/krylov/lanczos_kernel.h)) | the deletable Gen-1 solver files (`TPQ.cpp`, `dynamics.cpp`, `tpq_dynamical`, `block_lanczos_dssf`; 11b) |
 | Operator | `LinearOperator ← Operator ← SubspaceOperator<Policy>`; `FixedSzOperator` / `SectorOperator` are aliases | (verified already true; a dozen headers still *described* the deleted streaming classes — fixed in 11d-prep) |
-| MPI | `ED` under `mpirun`: SectorDistributor (across sectors) × `MpiBackend` (in-process); NCCL `MultiGpuCommunicator` in [ed/parallel/multi_gpu.h](../../include/ed/parallel/multi_gpu.h) | the `ed::distributed` operator family (~6.6 kLOC), `ed_distributed_main`, `qed.mpi`, `device='mpi'` (11d, user-approved) |
+| MPI | `ED` under `mpirun`: across-sector distribution only (`make_sector_operators_tagged(spec, rank, size)` + spectrum `Allgatherv`). `MpiBackend` / `MpiCudaBackend` and the NCCL `MultiGpuCommunicator` ([ed/parallel/multi_gpu.h](../../include/ed/parallel/multi_gpu.h)) still compile and are unit-tested, but nothing selects them: `select_backend` requires a distributed operator geometry and no operator produces one | the `ed::distributed` operator family (~6.6 kLOC), `ed_distributed_main`, `qed.mpi`, `device='mpi'` (11d, user-approved) |
 
 Everything deleted is one `git log` away; every stage landed as one
 CI-green commit with the full gate (`scripts/check_local.sh`).

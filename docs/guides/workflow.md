@@ -7,7 +7,7 @@ two function calls (`find_symmetries` and `diag`) with smart defaults
 that match what an experienced ED user would tune by hand.
 
 If you want the lower-level dispatcher with explicit method/parameter
-control (FTLM, LTLM, ScaLAPACK, GPU streaming symmetry, etc.), see
+control (FTLM, LTLM, GPU streaming symmetry, etc.), see
 [`python_advanced.md`](python_advanced.md). The new workflow is built
 on top of the same C++ kernels — picking it up is purely a matter of
 how much knob-twiddling you want to do yourself.
@@ -247,14 +247,14 @@ qed.solve(H,
   fixed-Sz kernel. When `H` is already a `FixedSzOperator`,
   `sz=` is only used as a sanity check.
 * **Symmetry projection.** When `symmetry=` is passed,
-  `qed.solve` writes the operator + symmetry metadata to a temp
-  directory and invokes the unified
-  `_core.workflows_solve_streaming_symmetry_directory` binding, which
-  composes `ed::make_streaming_symmetry_operator(spec)` with a
+  `qed.solve` hands the operator + symmetry metadata to the unified
+  `_core.workflows_solve_streaming_symmetry` binding **in memory** (no
+  temp directory), which builds the tagged sector operators and runs a
   per-sector `ed::workflows::solve` loop. All accepted forms —
   `GeneratorSet`, raw `list[list[int]]` of permutations, or the dict
   produced by `qed.symmetry.group_from_generators` — are normalised to
-  the same on-disk schema.
+  the same schema; the `*_directory` binding is the twin for decks
+  already on disk.
 * **Combined Sz + symmetry.** Pass both `sz=` and `symmetry=`. The
   streaming-symmetry-fixed-Sz kernel handles the joint projection.
 
@@ -360,7 +360,7 @@ use FTLM/LTLM.
 ² FTLM/LTLM/KPM_DOS *do* combine across symmetry blocks correctly
 because each block contributes an additive term to the partition
 function; the dispatcher loops the sectors itself (and under
-`mpirun`, SectorDistributor spreads the sectors across ranks).
+`mpirun`, whole sectors are spread across ranks).
 
 ```python
 # Eigenvalue solver, all four paths:
@@ -409,8 +409,7 @@ Orthogonal to the basis (full / sz / symm / symm+sz) is the **device
 axis**: where the matrix-vector products execute. Two in-process cells
 remain — single-process CPU and single-GPU. (The distributed-operator
 family and its `device='mpi'`/`'mpi_gpu'` subprocess launcher were
-retired in Stage 11d, Jul 2026; see "MPI jobs" below for how MPI works
-now.)
+removed in Jul 2026; see "MPI jobs" below for how MPI works now.)
 
 | solver family            |  cpu  |  gpu  | how to invoke                                        |
 | ------------------------ | :---: | :---: | ---------------------------------------------------- |
@@ -496,13 +495,17 @@ CSR-free rep lane keeps the basis memory at O(#reps).
   solves inside DSSF/thermal never auto-ride the GPU. An explicit
   `device='gpu'` zeroes the floor.
 * `device='cpu'` / `device='gpu'` force the choice. The GPU path
-  routes through `_core.workflows_solve` with `OperatorSpec.distributed
-  = false` and the GPU lane enabled in `BackendConstraints`; the
-  orchestrator builds a `GPUOperator` via the same factory the
-  CLI uses.
+  routes through `_core.workflows_solve` with the GPU lane enabled in
+  `BackendConstraints`; the orchestrator's backend selector picks the
+  CUDA lane from the operator's geometry. `device='gpu'` is a hard
+  request, not a preference: it raises when the build has
+  `WITH_CUDA=OFF`, and it raises when `cudaGetDeviceCount` finds no
+  usable device (no GPU in the allocation, a broken device, a driver
+  older than the build's toolkit) instead of quietly running on the
+  host.
 * `device='mpi'` / `device='mpi_gpu'` raise: the subprocess launcher
-  was retired in Stage 11d. MPI runs go through the CLI under
-  `mpirun` (see "MPI jobs" below).
+  was removed (Jul 2026). MPI runs go through the CLI under `mpirun`
+  (see "MPI jobs" below).
 
 ---
 
@@ -562,19 +565,27 @@ res = qed.solve(H,
 
 The `device='mpi'` subprocess launcher (`ed_distributed_main` +
 `qed.mpi.run_distributed`) and the distributed-operator family behind
-it were retired in Stage 11d (Jul 2026). MPI is now ONE story, driven
-from the CLI:
+it were removed in Jul 2026. MPI is now ONE story, driven from the
+CLI, and it distributes SECTORS, never vectors:
 
 ```bash
 # Across-sector MPI: each rank owns a dim-balanced subset of the
-# symmetry sectors (SectorDistributor; Burnside-weighted greedy
-# packing) and solves them rank-locally. Engages automatically for
-# symmetry workloads under mpirun:
+# symmetry sectors (Burnside-weighted greedy packing) and builds and
+# solves them rank-locally; the merged spectrum is Allgatherv'd, so
+# the result is bit-identical to the single-rank run. Engages
+# automatically for symmetry workloads under mpirun:
 mpiexec -n 8 ./ED <input_dir> --use-symmetry --fixed-sz ...
-
-# In-process MPI reductions (MpiBackend) engage automatically when
-# the process runs under mpirun and the backend constraints allow it.
 ```
+
+Consequences worth knowing before you size a job: a run with no
+symmetry sectors to hand out gains nothing from extra ranks (every
+rank would solve the same replicated problem), and more ranks than
+surviving irreps leaves the surplus ranks idle. The in-process MPI
+backends (`MpiBackend`, `MpiCudaBackend`) still compile and are
+unit-tested, but `select_backend` only reaches for them when the
+operator's geometry is distributed — which no operator is since the
+distributed family was removed — so they do not engage in a
+production run.
 
 Single-node frontier runs (N = 32-36) do not need MPI at all: the
 CSR-free rep lane keeps basis memory at O(#reps) and the fp32 GPU
@@ -595,8 +606,8 @@ mTPQ lane halves the vector footprint (`tpq_fp32=True`).
 | Manually slice `info["max_clique"]` to subgroup            | `report.full_set[1]` or `report.full_set.subgroup([0])` |
 | `microcanonical_tpq(...)` driver + manual file plumbing    | `qed.solve(op, solver="mTPQ", target_beta=..., output_dir=...)` |
 | Memorize that the enum is `mTPQ` (mixed case)              | `qed.solve(op, solver="mtpq")` works (case-insensitive) |
-| Pass `--gpu` to `ED <dir> --method=LANCZOS_GPU`            | `qed.solve(op, device="gpu")` (auto temp-dir + from_directory) |
-| `mpiexec ed_distributed_main ...` (the retired launcher)   | `mpiexec -n N ./ED <dir> --use-symmetry ...` (SectorDistributor + MpiBackend) |
+| Pass `--gpu` to `ED <dir> --method=LANCZOS_GPU`            | `qed.solve(op, device="gpu")` (in-process; raises if no GPU is visible) |
+| `mpiexec ed_distributed_main ...` (the removed launcher)    | `mpiexec -n N ./ED <dir> --use-symmetry ...` (across-sector distribution) |
 | Look in `ed_method_traits.h` for solver/device wiring      | `qed.solver_device_support()` (build-aware (solver, device) matrix) |
 | Compute "will this fit?" before running                    | size it by hand (`dim · 16 B` per vector); the workflow itself raises a clean error if the dominant allocation won't fit (no planner) |
 
@@ -637,16 +648,17 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    ├─────────────────────────────────────────────────────┤
    │ 3. Device axis (orthogonal to solver)               │
    │    device='auto' (default):                         │
-   │      has_cuda_build()  AND  dim ≥ 2¹⁷  → use_gpu    │
-   │    device='gpu' / 'cpu' / 'mpi' / 'mpi_gpu'         │
-   │       → params.use_gpu, params.use_mpi flags        │
-   │    'mpi' / 'mpi_gpu' shells out to                  │
-   │       mpiexec ed_distributed_main, then reads HDF5. │
+   │      CUDA build AND a visible device                │
+   │        AND dim ≥ 2¹⁸            → use_gpu           │
+   │    device='cpu' → CPU; device='gpu' → GPU or raise  │
+   │      (no CUDA build / no visible device = error)    │
+   │    'mpi' / 'mpi_gpu' → raise (removed Jul 2026)     │
    ├─────────────────────────────────────────────────────┤
    │ 4. Symmetry axis (orthogonal)                       │
    │    symmetry=… given?                                │
    │      → params.use_symmetry = True                   │
-   │      → routes through streaming-symmetry kernel     │
+   │      → routes through the streaming-symmetry kernel │
+   │        in memory (no temp directory)                │
    ├─────────────────────────────────────────────────────┤
    │ 5. Memory guard (no planner)                        │
    │    guard_working_set(...) checks the dominant        │
@@ -667,8 +679,9 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    │    list_diag_parameters() prints every field        │
    ├─────────────────────────────────────────────────────┤
    │ 8. Dispatch: _core.workflows_{solve,thermal} ...    │
-   │    (or workflows_solve_streaming_symmetry_directory │
-   │     when symmetry= is set)                          │
+   │    (or workflows_solve_streaming_symmetry when      │
+   │     symmetry= is set; the *_directory twins are     │
+   │     for decks already on disk)                      │
    └─────────────────────────────────────────────────────┘
 ```
 
@@ -680,7 +693,7 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
 | 1 | `qed.solve(H, solver=…, device=…, sz=…, …)` | override individual axes |
 | 2 | `qed.solve(H, …, extra_params={...})` | tweak any niche `EDParameters` field |
 | 3 | `qed._core.workflows_{solve,thermal,spectral}(spec, opts)` | drop down to the Pybind-bound orchestrator with raw `OperatorSpec` / `SolveOptions` / `ThermalOptions` / `SpectralOptions` |
-| 4 | `qed.mpi.run_distributed(...)` / `qed.dssf.run_from_directory(...)` | shell out to the standalone `mpiexec` / `./ED dssf` binaries with custom flags |
+| 4 | `qed.spectral(dir, ed_binary=..., extra_args=...)` | shell out to the standalone `./ED dssf` binary with custom flags |
 
 Everything from layer 1 down maps **1-to-1** onto the C++
 `EDParameters` fields documented in
@@ -858,10 +871,9 @@ res = qed.solve(
 ```
 
 For the distributed variant, run the CLI under `mpirun`
-(`mpiexec -n R ./ED <dir> --use-symmetry ...`) — across-sector
-distribution (SectorDistributor + in-process MpiBackend) engages
-automatically; the `device="mpi"` subprocess lane and cTPQ were both
-retired.
+(`mpiexec -n R ./ED <dir> --use-symmetry ...`) — the sectors are
+spread across the ranks automatically; the `device="mpi"` subprocess
+lane and cTPQ were both retired.
 
 ---
 
@@ -919,7 +931,7 @@ qed.spectral(
 ```
 
 Output lands in `runs/<dir>/dssf/<momentum>/<observable>/<T>/` as the
-unified `(omega, S, error)` HDF5 schema (Phase 8 — see
+unified `(omega, S, error)` HDF5 schema (see
 [`docs/architecture/CODEMAP.md`](../architecture/CODEMAP.md#dssf-output-schema)).
 
 If your local build fails in `./ED dssf` on toy decks, validate first on
@@ -962,15 +974,15 @@ qed.spectral(
 )
 ```
 
-### When to bypass `compute(...)`
+### When to bypass the one-call form
 
-For total control (custom env vars, custom binary path, distributed
-DSSF), drop down to the lower layer:
+For total control (custom env vars, custom binary path), drop down to
+the lower layer:
 
 | Use this | When |
 |----------|------|
-| `qed.dssf.run_from_directory(dir, method, ...)` | you already know the method token and want named-kwarg control |
-| direct `subprocess.run(["/path/to/ED", "dssf", method, dir, ...])` | scripting around bespoke MPI launchers / SLURM |
+| `qed.spectral(dir, method=..., ed_binary=..., extra_args=..., env=...)` | you already know the method token and want named-kwarg control over the shell-out |
+| direct `subprocess.run(["/path/to/ED", "dssf", method, dir, ...])` | scripting around bespoke `mpirun` / SLURM wrappers |
 | `ed::workflows::spectral(DSSFRequest{...}, SpectralOptions{...})` ([`include/ed/orchestrator.h`](../../include/ed/orchestrator.h)) | embedding DSSF in a C++ pipeline |
 | `ed::dssf::run(DSSFRequest{...})` | full library-level control from C++ (no shell-out) |
 
@@ -1006,8 +1018,8 @@ engine — no separate driver needed.
 | Python | C++ |
 |--------|-----|
 | `qed.spectral(dir, T=..., omega=...)` | `ed::workflows::spectral(req, opts)` |
-| `qed.dssf.pick_method(T=..., omega=...)` | `ed::workflows::spectral_pick_method(has_T, has_w)` |
-| `qed.dssf.run_from_directory(dir, method, ...)` | `ed::dssf::run(EDConfig*, req, method)` |
+| the `T=` / `omega=` lane rule | `SpectralOptions::method` (`GroundStateCF` / `FtlmDynamical` / `KpmDynamical`), set explicitly |
+| `qed.dssf.build_observable_pairs(spec)` | `ed::dssf::build_observable_pairs(spec)` |
 
 The same auto-rules apply on both sides — see
 [`include/ed/orchestrator.h`](../../include/ed/orchestrator.h) and the
@@ -1025,19 +1037,23 @@ through the auto-pilot façade and the core dispatcher.
 
 ```cpp
 #include <ed/orchestrator.h>
-#include <ed/orchestrator.h>
-#include <ed/operators/spin_ops.h>
+#include <ed/input/hamiltonian_builder.h>
 
 // Optional low-level entry points:
-#include <ed/core/ed_wrapper.h>
+#include <ed/core/results.h>
 #include <ed/core/ed_parameters.h>
 ```
 
 ### 1) TL;DR / Step 1 equivalent — build H and run a one-liner ground state
 
 ```cpp
-ed::Operator H(/*N=*/12, /*S=*/0.5f);
-ed::spin_ops::heisenberg_chain(H, /*N=*/12, /*J=*/1.0, /*pbc=*/true);
+std::vector<std::pair<std::size_t, std::size_t>> bonds;
+for (std::size_t i = 0; i < 12; ++i) bonds.emplace_back(i, (i + 1) % 12);
+
+auto H_ptr = ed::input::HamiltonianBuilder(/*num_sites=*/12, /*spin=*/0.5)
+                 .heisenberg(bonds, /*J=*/1.0)
+                 .to_operator();
+auto& H = *H_ptr;
 
 ed::SolveOptions opts;
 opts.num_eigenvalues = 1;
@@ -1166,16 +1182,11 @@ auto out = ed::krylov::lanczos_kernel<ed::matvec::CpuBackend>(
 
 ### 8) DSSF / SSSF routine equivalents
 
-Method selection is the same 2x2 rule as Python and can be queried by
-`ed::workflows::spectral_pick_method(...)`.
-
-```cpp
-using ed::workflows::spectral_pick_method;
-auto m0 = spectral_pick_method(/*has_temperature=*/false, /*has_frequency=*/false);
-auto m1 = spectral_pick_method(/*has_temperature=*/false, /*has_frequency=*/true);
-auto m2 = spectral_pick_method(/*has_temperature=*/true,  /*has_frequency=*/false);
-auto m3 = spectral_pick_method(/*has_temperature=*/true,  /*has_frequency=*/true);
-```
+In C++ the lane is named, not inferred: `SpectralOptions::method` is
+one of `GroundStateCF` (T = 0 continued fraction), `FtlmDynamical`
+(finite-T) or `KpmDynamical` (Chebyshev expansion of
+`delta(omega - H)`). The Python `T=` / `omega=` rule picks the same
+lanes for you.
 
 ```cpp
 ed::dssf::DSSFRequest req;
@@ -1184,8 +1195,7 @@ req.config = &cfg;                  // required for non-single-expectation
 // Fill req.operators (OperatorSpec) as needed.
 
 ed::SpectralOptions o;
-o.has_temperature = true;
-o.has_frequency = true;
+o.method = ed::SpectralOptions::Method::FtlmDynamical;
 auto dssf = ed::workflows::spectral(req, o);
 ```
 
@@ -1213,7 +1223,7 @@ checks, then scale to `N=32`, `opts.sz=16` for production:
    `tune_params`.
 3. DSSF: build `DSSFRequest` for your directory and call
   `ed::workflows::spectral(req, dssf_opts)` with
-  `dssf_opts.has_temperature = true; dssf_opts.has_frequency = true;`.
+  `dssf_opts.method = ed::SpectralOptions::Method::FtlmDynamical;`.
 4. mTPQ: `opts.solver = DiagonalizationMethod::mTPQ`, set
    `target_beta` + TPQ knobs in `tune_params` (the cTPQ enum value was
    removed in the final consolidation).

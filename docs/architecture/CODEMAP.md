@@ -186,10 +186,13 @@ flowchart LR
 
 ## 4. MPI
 
-One product (Stage 11d, Jul 2026): `ED` under `mpirun`. Across-sector
-distribution (SectorDistributor: Burnside dim-balanced sector ownership,
-rank-local solves) engages automatically for symmetry workloads; the
-in-process `MpiBackend` covers reduction parallelism. The separate
+One product (Jul 2026): `ED` under `mpirun`. Across-sector
+distribution (`make_sector_operators_tagged`: Burnside dim-balanced
+sector ownership, rank-local build + solve, spectrum `Allgatherv`'d)
+engages automatically for symmetry workloads. That is the whole of it —
+`MpiBackend` is compiled and tested but never selected, because
+`select_backend` wants a distributed operator geometry that nothing
+produces. The separate
 `ed_distributed_main` launcher and the `ed::distributed::*` operator family
 (1D slab SpMV + distributed lanczos/ftlm/tpq/krylov-schur + GPU twins,
 ~6.6 kLOC) were retired — recoverable from git history if within-sector
@@ -332,13 +335,13 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 - `group.cpp`, `irreps.cpp`, `sector_operator_gpu.cpp`, `sector_operator_gpu.cu`, `streaming_symmetry_gpu_mirror.cpp`, `streaming_symmetry_gpu_mirror.cu`
 
-- `src/orchestrator.cpp` *(the three verbs' implementation)*
+- `src/orchestrator/` *(the three verbs' implementation: `orch_solve.cpp`, `orch_thermal.cpp`, `orch_spectral.cpp`, `orch_su2.cpp`, `orch_common.cpp`)*
 
 Retired wholesale (recoverable from git history): `include/ed/bfg` +
 `src/bfg` + both BFG apps (consolidation Family 11),
 `include/ed/distributed` + `src/distributed` + `ed_distributed_main`
-(Stage 11d -- across-sector SectorDistributor x MpiBackend is the MPI
-story), the chunked/disk-streaming triplet (Phase 7.2), and the
+(Jul 2026 -- across-sector distribution under `mpirun` is the whole
+MPI story), the chunked/disk-streaming triplet (Phase 7.2), and the
 monolithic SAB engine `symmetry_adapted*` (Family 6 -- the factorized
 little-group engine is the sole non-abelian engine).
 

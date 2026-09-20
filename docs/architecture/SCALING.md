@@ -232,8 +232,8 @@ precision.
   construction lane since Stage 11c-1) keep the per-sector footprint at
   O(#reps); the OrbitTable disk cache (`<lattice_dir>/basis_cache`)
   makes warm restarts load reps instead of rescanning. Under `mpirun`,
-  SectorDistributor spreads whole sectors across ranks (dim-balanced,
-  rank-local solves). When launching MPI ranks with OpenMP inside, use
+  whole sectors are spread across ranks (dim-balanced, rank-local build
+  and solve). When launching MPI ranks with OpenMP inside, use
   `--bind-to none` (or `--map-by …:PE=$OMP_NUM_THREADS`) so construction
   keeps its OpenMP parallelism.
 * **Wallclock**: hours, not days. GPU path (`LANCZOS_GPU` with
@@ -319,7 +319,7 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 > section narrates — `DistributedOperator`, distributed Lanczos / FTLM /
 > TPQ / Krylov-Schur, the GPU/NCCL twins, and the `ed_distributed_main`
 > launcher — was deleted: it had no production consumer (production MPI
-> is SectorDistributor × MpiBackend) and the "honest 40" regime was
+> is across-sector distribution under `mpirun`) and the "honest 40" regime was
 > never reached. The section is kept as the design record for whenever
 > distributed-memory state vectors are attempted again (the code is one
 > `git log -S DistributedOperator` away). Only the NCCL

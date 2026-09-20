@@ -57,7 +57,6 @@ architecture/CODEMAP
 architecture/SCALING
 architecture/ADD_NEW_BASIS_POLICY
 architecture/ADD_NEW_GPU_CELL
-architecture/ADD_NEW_MPI_CELL
 ```
 
 ```{toctree}

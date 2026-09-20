@@ -110,9 +110,12 @@ def solver_device_support(
 
     Notes
     -----
-    The MPI subprocess cells were retired in Stage 11d (Jul 2026);
-    MPI runs go through the CLI under mpirun (SectorDistributor +
-    MpiBackend).
+    The MPI subprocess cells were retired (the ed_distributed_main launcher
+    and qed.mpi are gone). What remains is in the CLI: run `ED` under mpirun
+    and each rank solves a disjoint subset of the symmetry sectors, with the
+    spectrum Allgatherv-d at the end. No in-process lane builds MpiBackend --
+    select_backend picks it only for a distributed geometry, and every basis
+    policy reports is_distributed() == false.
     """
     cuda_ok = bool(has_cuda_build())
     mpi_ok = bool(has_mpi_build())
@@ -144,8 +147,8 @@ def solver_device_support(
                 cells[device] = {
                     "kernel": False,
                     "available": False,
-                    "note": ("retired (Stage 11d): run the CLI under "
-                             "mpirun -- SectorDistributor + MpiBackend"),
+                    "note": ("retired: run the CLI under mpirun -- each rank "
+                             "takes a disjoint set of symmetry sectors"),
                 }
         matrix[solver_name] = cells
 
@@ -224,14 +227,14 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
         return True, False
     if device_lc in ("mpi", "mpi_gpu"):
         raise RuntimeError(
-            "device='mpi' / 'mpi_gpu' was retired (Stage 11d, Jul 2026): "
-            "the subprocess launcher (ed_distributed_main + qed.mpi) and "
-            "the distributed-operator family behind it were removed. "
-            "For MPI runs, launch the CLI under mpirun -- across-sector "
-            "distribution (SectorDistributor) engages automatically for "
-            "symmetry workloads, and the in-process MpiBackend covers "
-            "reduction parallelism. Single-node frontier runs use "
-            "device='gpu' (fp32 mTPQ / rep-lane memory scaling)."
+            "device='mpi' / 'mpi_gpu' was retired: the subprocess launcher "
+            "(ed_distributed_main + qed.mpi) and the distributed-operator "
+            "family behind it were removed. For MPI, run the CLI under "
+            "mpirun: each rank solves a disjoint subset of the symmetry "
+            "sectors and the spectrum is Allgatherv-d. No in-process lane "
+            "builds MpiBackend (select_backend needs a distributed geometry "
+            "and no basis policy produces one). Single-node frontier runs "
+            "use device='gpu' (fp32 mTPQ / rep-lane memory scaling)."
         )
     raise ValueError(
         f"device={device!r} not in "

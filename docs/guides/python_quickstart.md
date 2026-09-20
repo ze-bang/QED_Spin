@@ -206,9 +206,9 @@ full SOTA cross-irrep and finite-T cross-irrep recipes.
 ## MPI runs
 
 MPI is driven from the CLI: launch `ED` under `mpirun` and the
-across-sector distribution (SectorDistributor) plus the in-process
-`MpiBackend` engage automatically for symmetry workloads. (The
-`qed.mpi` subprocess launcher was retired in Stage 11d, Jul 2026.)
+across-sector distribution engages automatically for symmetry
+workloads — each rank owns a subset of the irrep sectors. (The
+`qed.mpi` subprocess launcher was removed in Jul 2026.)
 
 ```bash
 mpiexec -n 8 ./ED <input_dir> --use-symmetry --fixed-sz ...

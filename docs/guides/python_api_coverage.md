@@ -16,7 +16,7 @@ For how to *invoke* each mode (files, `ED`, `import`, MPI), see
 
 | Question | Short answer |
 |----------|--------------|
-| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI runs launch the CLI under `mpirun` (SectorDistributor + MpiBackend; the `qed.mpi` subprocess launcher was retired in Stage 11d); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
+| Does `qed` expose **all** `ED` capabilities? | **Functionally yes.** Every retained CPU iterative + dense + finite-temperature solver (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`) is reachable through `qed.solve(...)` / `qed.thermal(...)`. GPU per-sector solves and symmetry-projected runs go through the same entry points by passing `device='gpu'` / `symmetry=...`. MPI runs launch the CLI under `mpirun`, which distributes the symmetry sectors across ranks (the `qed.mpi` subprocess launcher was removed in Jul 2026); the full DSSF spectral driver runs through `qed.spectral(...)` (which shells out to `./ED dssf`). |
 | Is the **legacy** path (edlib → files → `./ED`) complete? | **Yes** (unchanged). The orchestrator reads the same on-disk deck the CLI consumes. |
 | Is the **C++ library** complete? | **Yes — every retained solver, every backend (CPU / GPU / MPI), symmetry projection, and fixed-Sz are header-callable.** All paths route through `ed::make_operator(OperatorSpec)` and `ed::workflows::{solve,thermal,spectral}` (declared in `include/ed/orchestrator.h`). See [§0 below](#0-capability-matrix-c-vs-python-vs-cli) for the matrix. |
 | What is Python strongest at today? | **Hamiltonian + lattice construction** (`qed.input` — full C++ `ed::input` library), the **three-verb orchestrator** (`solve` / `thermal` / `spectral`) that routes to every retained backend, **programmatic symmetries** (`ed::sym`) including in-process round-trip via `Operator.set_symmetry_info_from_dict(...)`. |
@@ -54,13 +54,13 @@ callable from where". Cells are interpreted as:
 | GPU FTLM / mTPQ | yes | **`qed.thermal(H, method="FTLM"/"mTPQ", device="gpu", ...)`** | `--method=… --use-gpu` |
 | GPU DSSF kernels (dynamical / static / correlations) | yes | **`qed.spectral(dir, method, ...)`** (shells out to `./ED dssf <method>`) | `./ED dssf <method>` |
 | Per-Sz GPU variants (`use_fixed_sz=true` + `use_gpu=true`) | yes | **`qed.solve(H, sz=n_up, device="gpu", ...)`** | `--method=… --fixed-sz --use-gpu` |
-| Multi-GPU NCCL (`<ed/parallel/multi_gpu.h>`) | yes | (used by the MPI+GPU backend `MpiCudaBackend`) | (in-process) |
+| Multi-GPU NCCL (`<ed/parallel/multi_gpu.h>`) | builds + unit-tested | only `MpiCudaBackend` consumes it, and nothing constructs that | n/a |
 | **MPI** (`-DWITH_MPI=ON`; gate with `qed.has_mpi_build()`) | | | |
-| Across-sector distribution (SectorDistributor) + in-process `MpiBackend` | yes | (run the CLI under mpirun) | `mpiexec -n N ./ED <dir> --use-symmetry ...` |
+| Across-sector distribution of the irrep sectors (`make_sector_operators_tagged`) | yes | (run the CLI under mpirun) | `mpiexec -n N ./ED <dir> --use-symmetry ...` |
 | **Symmetry projection** | | | |
 | `ed::sym` DSL: `translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `group_from_generators`, `translation_group_1d`, `translation_group_with_reflection_1d` | yes | **`qed.symmetry.*`** (returns dict) | (writes `automorphism_results/*.json`) |
 | Attach `SymmetryGroupInfo` to an `Operator` | yes (`op.symmetry_info = ...;` then dispatch via orchestrator) | **`op.set_symmetry_info_from_dict(info)`** / **`op.get_symmetry_info_as_dict()`** | `./ED <dir> --symm` (reads `automorphism_results/`) |
-| Streaming-symmetry (orbit basis on the fly, per-sector solve) | yes (`ed::make_streaming_symmetry_operator(OperatorSpec{...generators=...})`) | **`qed.solve(H, symmetry=info, ...)`** — routes through `_core.workflows_solve_streaming_symmetry_directory` | `./ED <dir> --symm` |
+| Streaming-symmetry (orbit basis on the fly, per-sector solve) | yes (`ed::make_streaming_symmetry_operator(OperatorSpec{...generators=...})`) | **`qed.solve(H, symmetry=info, ...)`** — routes through `_core.workflows_solve_streaming_symmetry` (in memory) | `./ED <dir> --symm` |
 | **Fixed-Sz** | | | |
 | `FixedSzOperator` (combinatorial sector basis) | yes | **`qed.FixedSzOperator(num_sites=…, n_up=…)`** | `--fixed-sz --n-up=…` |
 | Sz projection on a Sz-conserving `Operator` | yes (`OperatorSpec::sz = n_up`) | **`qed.solve(H, sz=n_up, ...)`** (auto-projects via `auto_sz=True` default) | `--fixed-sz --n-up=…` |
@@ -69,10 +69,10 @@ callable from where". Cells are interpreted as:
 | `ed::dssf::build_observable_pairs` (operator assembly) | yes | **`qed.dssf.build_observable_pairs`** | (used internally by `./ED dssf`) |
 | Full S(Q,ω) / S(Q) driver (continued-fraction, FTLM averaging) | yes (`ed::workflows::spectral` in `ed/orchestrator.h`; the `ed_cli` workflow uses it) | **`qed.spectral(dir, method, ...)`** | `./ED dssf {dynamical_thermal,static_thermal,ground_state_dssf}` |
 | **High-level orchestrator** | | | |
-| `ed::make_operator(OperatorSpec)` (unified factory: in-memory / FixedSz / streaming-symmetry / distributed) | yes (`<ed/core/make_operator.h>`) | (built internally by `qed.solve` / `qed.thermal` / `qed.spectral`) | (CLI internals) |
+| `ed::make_operator(OperatorSpec)` (unified factory: in-memory / FixedSz / streaming-symmetry) | yes (`<ed/core/make_operator.h>`) | (built internally by `qed.solve` / `qed.thermal` / `qed.spectral`) | (CLI internals) |
 | `ed::workflows::solve` / `thermal` / `spectral` (3 verbs over a `LinearOperator`) | yes (`<ed/orchestrator.h>`) | **`qed.solve(H, ...)`** / **`qed.thermal(H, ...)`** / **`qed.spectral(dir, ...)`** | (CLI internals) |
 | **Build introspection** | | | |
-| `ED_WITH_CUDA` / `ED_WITH_MPI` / `ED_WITH_SCALAPACK` (CMake-config flags) | yes (`@PACKAGE_INIT@`) | **`qed.has_cuda_build()`**, **`qed.has_mpi_build()`**, **`qed.has_scalapack_build()`** | (compile-time only) |
+| `QED_WITH_CUDA` / `QED_WITH_MPI` (CMake-config flags) | yes (`QEDConfig.cmake`) | **`qed.has_cuda_build()`**, **`qed.has_mpi_build()`** | (compile-time only) |
 | **Hamiltonian + lattice construction** | | | |
 | `ed::input::HamiltonianBuilder` + lattice generators + `.dat` writers | yes (`<ed/input/input.h>`, link `ed_input`) | **`qed.input.*`** (full parity, see §1.2.5) | (writes the directory `./ED` reads) |
 
@@ -83,14 +83,14 @@ callable from where". Cells are interpreted as:
   (`mTPQ` / `FTLM` / `LTLM` / `OFTLM`).
 * `qed.spectral(dir, T=..., omega=..., method=..., ...)` — structure
   factors and KPM-DOS thermodynamics.
-* `qed.has_cuda_build()` / `has_mpi_build()` / `has_scalapack_build()`
-  — runtime build introspection.
+* `qed.has_cuda_build()` / `has_mpi_build()` — build introspection.
 
-Anything still routed through a subprocess (the MPI launcher and the
-DSSF driver) is wrapped by the helpers listed above so callers never
-have to touch `subprocess` themselves; the helpers accept `binary=` /
-`launcher=` overrides for non-default install paths and forward
-arbitrary `extra_args` so the full CLI surface remains accessible.
+The one thing still routed through a subprocess — the DSSF driver —
+is wrapped by `qed.spectral(directory, ...)` so callers never have to
+touch `subprocess` themselves; it accepts an `ed_binary=` override for
+non-default install paths and forwards arbitrary `extra_args` so the
+full CLI surface remains accessible. MPI is not wrapped at all: it is
+a property of how you launch `./ED`.
 
 The C++ mirror of every cell marked "yes" above is exercised by the
 unit/integration suites under `tests/`; the Python-first usage
@@ -119,17 +119,17 @@ from `qed/__init__.py`:
 | `spectral(directory, *, T=None, omega=None, method=None, ...)` | The canonical structure-factor entry point. The `(T, omega)` truth table selects `single_expectation` / `ground_state_dssf` / `static_thermal` / `dynamical_thermal` automatically. |
 | `compute_thermodynamics_from_spectrum` | Post-process a **given** energy list into thermodynamic curves. |
 | **Orchestrator internals** | |
-| `DiagonalizationMethod` (enum) | Retained backends only: `LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`. The May 2026 cleanup removed `ARPACK_*`, `LOBPCG`, `DAVIDSON`, `CHEBYSHEV_FILTERED`, `SHIFT_INVERT*`, `IRL`, `TRL`, `BICG`, `OSS`, `SCALAPACK*`, `HYBRID`, and every `_GPU` / `_MPI` enum suffix (those axes are now flags on `EDParameters`). |
+| `DiagonalizationMethod` (enum) | Retained backends only: `LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `BLOCK_KRYLOV_SCHUR`, `FULL`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`. The May 2026 cleanup removed `ARPACK_*`, `LOBPCG`, `DAVIDSON`, `CHEBYSHEV_FILTERED`, `SHIFT_INVERT*`, `IRL`, `TRL`, `BICG`, `OSS`, `SCALAPACK*`, `HYBRID`, and every `_GPU` / `_MPI` enum suffix (those axes are now flags on `EDParameters`). |
 | `EDParameters` | Read/write parameter bag mirroring `<ed/core/ed_parameters.h>`. Carried internally between Python kwargs and the C++ orchestrator. |
 | `EDResults`, `ThermodynamicData` | Result envelope: `eigenvalues`, `eigenvectors_computed`, `eigenvectors_path`, `thermo_data`, `ftlm_results`. `to_dict()` for ergonomic serialisation. |
-| `has_cuda_build()` / `has_mpi_build()` / `has_scalapack_build()` | Runtime build introspection. |
+| `has_cuda_build()` / `has_mpi_build()` | Build introspection (compile-time flags). `qed._core.have_cuda()` answers the separate question of whether a device is actually visible. |
 
 **Auto Sz behaviour:** `qed.solve` defaults to `auto_sz=True`, which
 projects to the half-filled Sz=N/2 sector automatically when H
 conserves Sz. Pass `auto_sz=False` to keep the full Hilbert space, or
 `sz=k` to explicitly choose a sector.
 
-### 1.2 `qed.input` (Phase 4 — standalone C++ `ed_input` library bindings)
+### 1.2 `qed.input` (bindings for the standalone C++ `ed_input` library)
 
 Pybind11 mirror of the standalone `ed::input` C++ library. Reaches **full
 parity with the legacy `python/edlib/helper_*.py` family** through one
@@ -163,8 +163,8 @@ Bound under `qed.input` (facade in `python/qed/input.py`, C++ in
 | `OperatorSpec`, `ObservablePairs` | Yes | 1:1 with C++ `ed::dssf` |
 | `build_observable_pairs` | Yes | **Same** function `ED dssf` uses to build `(O1, O2, name)` lists |
 | `compute_transverse_bases` | Yes | Transverse basis helper |
-| `run_from_directory(directory, method, ed_binary=None, extra_args=(), capture_output=False)` | **Yes** | Locates `./ED` on `$PATH` (or honours `ed_binary=`), builds `[ed_binary, "dssf", method, directory, *extra_args]`, and runs it. The full continued-fraction S(Q,ω) / S(Q) / static-thermal pipeline reaches its CUDA kernels through this helper when the build is GPU-enabled. |
-| **Full `ED dssf` driver** (continued fractions, ω-grid, FTLM sampling for S(Q,ω), HDF5 `dssf` trees) | **Yes via subprocess** (`run_from_directory`) | Direct in-process binding requires migrating the hierarchical `EDConfig` to `pybind11` first (tracked separately). The subprocess wrapper is the canonical Python entry today. |
+| `run_from_directory` / `compute` | **No** | Removed in the May-2026 surface unification. Use `qed.spectral(directory, method=..., ed_binary=..., extra_args=...)`, which locates `./ED` on `$PATH` (or honours `ed_binary=`) and runs `[ed_binary, "dssf", method, directory, *extra_args]`. |
+| **Full `ED dssf` driver** (continued fractions, ω-grid, FTLM sampling for S(Q,ω), HDF5 `dssf` trees) | **Yes via subprocess** (`qed.spectral(directory, ...)`) | Direct in-process binding requires migrating the hierarchical `EDConfig` to `pybind11` first (tracked separately). The subprocess wrapper is the canonical Python entry today. |
 
 ### 1.4 `qed.symmetry`
 
@@ -204,13 +204,22 @@ as a top-level entry point; if you still have legacy notebooks that
 (`InterAll.dat` / `Trans.dat` / `positions.dat`) is unchanged and the
 `./ED` CLI consumes it byte-identically.
 
+### 1.6 `qed.little_group` and `qed.lattice`
+
+| Symbol | Notes |
+|--------|-------|
+| `little_group.solve_blocks(H, abelian_group, residue_perms, ...)` | Lowest `k` levels of **every** symmetry block, labelled, with `<n|O_i|n>` for observables that commute with the group. Returns a `BlockResult` of `BlockLevel`s (`energy`, `momenta`, `characters`, `irrep_dim`, `flip`, `multiplicity`, `converged`). `only_k0=` / `only_irrep=` restrict the solve to star representatives / irrep indices taken from an earlier result. |
+| `little_group.dE_dlambda`, `little_group.dimer_zz_observables` | Derivative and dimer-observable helpers built on the same block results. |
+| `lattice.TriangularSupercell` | Triangular-lattice torus, by name (`TriangularSupercell("36")`) or by supercell vectors (`TriangularSupercell(((6, 0), (0, 6)))`). |
+
 ### 1.7 MPI
 
-The `qed.mpi` launcher module was retired in Stage 11d (Jul 2026)
-together with `ed_distributed_main` and the distributed-operator
-family. MPI runs launch the CLI under `mpirun`; a single-process
-Python interpreter cannot host `MPI_Init` cleanly, so there are
-deliberately no in-process MPI bindings.
+The `qed.mpi` launcher module was removed in Jul 2026 together with
+`ed_distributed_main` and the distributed-operator family. MPI runs
+launch the CLI under `mpirun`, where each rank takes a subset of the
+symmetry sectors; a single-process Python interpreter cannot host
+`MPI_Init` cleanly, so there are deliberately no in-process MPI
+bindings.
 
 ---
 
@@ -258,7 +267,7 @@ The remaining items are quality-of-life rather than capability gaps:
 | [python_advanced.md](python_advanced.md) | Advanced patterns: orchestrator internals, GPU, MPI, in-process symmetry, build introspection |
 | `python/qed/*.py` | Module docstrings (input DSL, dssf, symmetry, thermal, discovery) |
 | `python/qed/_bindings/qed_bindings.cpp` | **Authoritative** list of C symbols exposed to Python |
-| `python/qed/_bindings/workflow_bindings.cpp` | Orchestrator bindings — `_core.workflows_{solve,thermal,spectral}` |
+| `python/qed/_bindings/workflow/` | Orchestrator bindings — `_core.workflows_{solve,thermal,spectral}` |
 | `README.md` | Install line for `pip install -v ./python` |
 
 ---

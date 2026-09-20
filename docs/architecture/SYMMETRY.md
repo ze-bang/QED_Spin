@@ -100,13 +100,13 @@
 > (C++ dense-vs-sym wall+RSS; ~6.6x faster / ~9.5x less RSS at N=12 and
 > widening) and `QED_NLCE/scripts/benchmark_pipelines.py --symmetry_ab`.
 >
-> *Note on the orbit-CSR HDF5 cache:* `saveOrbitBasisHDF5` /
-> `loadOrbitBasisHDF5` persist the **legacy** orbit CSR (materialised
-> on demand for orbit-data consumers). The rep path deliberately does
-> not materialise that structure; cross-cluster reuse in NLCE is provided
-> at the coarser, more effective granularity of the eigenvalue cache
-> (whole spectrum keyed by topology+options) plus the in-process spatial-
-> generator cache, so no separate per-sector rep HDF5 cache is wired.
+> *Note on the orbit-CSR HDF5 cache:* there is none. The helpers that
+> persisted the legacy orbit CSR went with the eager orbit-CSR
+> builders; the rep path deliberately does not materialise that
+> structure. Cross-cluster reuse in NLCE is provided at the coarser,
+> more effective granularity of the eigenvalue cache (whole spectrum
+> keyed by topology+options) plus the in-process spatial-generator
+> cache; no per-sector rep HDF5 cache is wired.
 
 > **Update (2026-06): non-abelian symmetry + reduced-CSR default matvec regime.**
 >
@@ -349,7 +349,7 @@ codes (HPhi, EDLib, QuSpin, Pomerol). It complements
 | Path | Sz | Spatial sym | Combined (Sz, k) | QN tags |
 |---|---|---|---|---|
 | `workflows::solve(H, opts)` — in-memory operator | ✓ (auto-detect via Marshall's theorem when no Zeeman) | ✗ in-memory | n/a | n/a |
-| `qed.solve(H, symmetry=...)` — Python, in-process | ✓ | ✓ via temp-dir round-trip + streaming kernel | ✓ | ✓ on result |
+| `qed.solve(H, symmetry=...)` — Python, in-process | ✓ | ✓ in memory (no temp dir) + streaming kernel | ✓ | ✓ on result |
 | `workflows_solve_streaming_symmetry_directory(dir, opts)` | ✓ via `use_fixed_sz + n_up` | ✓ via `use_symmetry` + streaming kernel | ✓ (streaming kernel filters orbits by both labels) | ✓ |
 
 Implementation: per-sector loop driven by
@@ -492,7 +492,7 @@ The May-2026 audit identified two thermal symmetry gaps:
 
 Both were addressed in this rollout. The new C++ binding
 `workflows_thermal_streaming_symmetry_directory`
-(`python/qed/_bindings/workflow_bindings.cpp`) mirrors the solve
+(`python/qed/_bindings/workflow/`) mirrors the solve
 sector loop:
 `ed::make_operator(streaming_symmetry=true) → handle.sector(k) →
 ed::workflows::thermal(*sec, opts)` for every non-empty sector
@@ -682,11 +682,12 @@ irrep decomposition, not in any of the math kernels.
   resident rep mirror, `DeviceRepSymmetryBasisPolicy` +
   `make_sector_matvec_gpu_rep`) dispatch transparently. Sz is exact in
   both backends; spatial irrep ditto.
-- MPI: across-sector distribution (SectorDistributor — each rank owns
-  a dim-balanced subset of the irrep sectors and solves rank-locally)
-  plus the in-process `MpiBackend` for reduction parallelism. Engages
-  automatically when the CLI runs under `mpirun`. (The within-sector
-  distributed-operator family was retired in Stage 11d, Jul 2026.)
+- MPI: across-sector distribution only — `make_sector_operators_tagged`
+  gives each rank a dim-balanced subset of the irrep sectors, which it
+  builds and solves rank-locally, and the merged spectrum is
+  `Allgatherv`'d. Engages automatically when the CLI runs under
+  `mpirun`. (The within-sector distributed-operator family was removed
+  in Jul 2026; `MpiBackend` survives but nothing selects it.)
 
 ---
 
@@ -712,7 +713,7 @@ irrep decomposition, not in any of the math kernels.
   sector loop + per-sector matvec dispatch (via the orchestrator) +
   per-sector eigenvalue collection with SOTA quantum-number
   attribution + per-sector HDF5 output.
-- `python/qed/_bindings/workflow_bindings.cpp` — the three SOTA
+- `python/qed/_bindings/workflow/` — the three SOTA
   streaming-symmetry bindings:
   `workflows_solve_streaming_symmetry_directory`,
   `workflows_thermal_streaming_symmetry_directory` (new, May 2026,

@@ -20,7 +20,6 @@ at a few thermodynamic curves), use the quickstart. If you need:
 * **Symmetry projection** in-process (without writing
   `automorphism_results/*.json` to disk first)
 * **Streaming-symmetry** ED for the largest tractable clusters
-* **MPI distributed** Lanczos / FTLM / TPQ runs from a Python script
 * The **full `./ED dssf`** continued-fraction spectral driver
 * To **introspect the build** (CUDA / MPI present?) at runtime so the
   same Python script works on a laptop and a cluster
@@ -153,8 +152,11 @@ through the fixed-Sz code paths automatically.
 ## 2. Symmetry projection in-process
 
 The `qed.symmetry` DSL builds the same symmetry-group dict the C++
-engine consumes, and Phase 5 lets you attach it directly to an
-`Operator` without going through `automorphism_results/*.json`.
+engine consumes, and you can attach it directly to an `Operator`
+without going through `automorphism_results/*.json`. `qed.symmetry`
+also exposes `close_group(...)` (close a generator list into the full
+group) and `split_nonabelian(...)` (carve an explicit non-abelian
+generator list into a maximal-abelian core plus coset residues).
 
 ```python
 import qed as qed
@@ -179,10 +181,12 @@ assert info_back["num_generators"] == info["num_generators"]
 
 For an actual symmetry-projected solve, pass the `info` dict (or a
 `GeneratorSet`) as the `symmetry=` kwarg on `qed.solve`. The Python
-wrapper writes the operator and metadata to a temp directory and
-invokes `_core.workflows_solve_streaming_symmetry_directory`, which
-composes `ed::make_streaming_symmetry_operator(spec)` with a
-per-sector `ed::workflows::solve` loop in C++.
+wrapper hands the operator and its symmetry metadata straight to
+`_core.workflows_solve_streaming_symmetry` **in memory** — no temp
+directory, no round-trip through `automorphism_results/` — and the
+C++ side runs a per-sector `ed::workflows::solve` loop over the
+tagged sector operators. (The `*_directory` twin of each binding is
+still there for decks that already live on disk.)
 
 ```python
 result = qed.solve(
@@ -282,14 +286,18 @@ and dispatches to the right CUDA kernel — exactly the same code path
 ## 4. MPI runs
 
 The `qed.mpi` subprocess launcher (and the `ed_distributed_main`
-binary + distributed-operator family it drove) was retired in
-Stage 11d (Jul 2026). MPI is driven from the CLI:
+binary + distributed-operator family it drove) was removed in
+Jul 2026. MPI is driven from the CLI, and it distributes SECTORS, not
+vectors:
 
 ```bash
-# Across-sector distribution (SectorDistributor) + in-process
-# MpiBackend engage automatically for symmetry workloads:
+# Each rank builds and solves a dim-balanced subset of the symmetry
+# sectors; engages automatically for symmetry workloads:
 mpiexec -n 8 ./ED /scratch/runs/heisenberg-32-chain --use-symmetry ...
 ```
+
+A run with no symmetry sectors to spread gains nothing from extra
+ranks.
 
 Single-node frontier runs generally don't need MPI: the CSR-free rep
 lane keeps basis memory at O(#reps) and the fp32 GPU mTPQ lane halves
@@ -304,22 +312,21 @@ the **continued-fraction S(Q,ω)** engine, the static-thermal driver,
 and (when the build is GPU-enabled) the CUDA spectral kernels.
 
 ```python
-from qed import dssf
+import qed
 
-result = dssf.run_from_directory(
-    directory="/scratch/runs/heisenberg-16-chain",
+result = qed.spectral(
+    "/scratch/runs/heisenberg-16-chain",
     method="dynamical_thermal",   # or "static_thermal", "ground_state_dssf"
     extra_args=("--num-temps", "21"),
     capture_output=True,
 )
-print(result.stdout)
 ```
 
 The DSSF observables themselves (the $(O_1, O_2, \text{name})$ pairs
 the engine averages over) can still be assembled from Python via
-`qed.dssf.build_observable_pairs(...)` — the
-`run_from_directory` helper is for the *full pipeline* (operator
-assembly + continued fractions + HDF5 output trees).
+`qed.dssf.build_observable_pairs(...)`; the directory form of
+`qed.spectral` is for the *full pipeline* (operator assembly +
+continued fractions + HDF5 output trees).
 
 ---
 
@@ -330,19 +337,20 @@ import qed
 
 print("CUDA build:    ", qed.has_cuda_build())
 print("MPI build:     ", qed.has_mpi_build())
-print("ScaLAPACK build:", qed.has_scalapack_build())
+print("GPU visible:   ", qed._core.have_cuda())
 
 # Same script, two builds — pick the device kwarg at runtime.
-device = "gpu" if qed.has_cuda_build() else "cpu"
+device = "gpu" if (qed.has_cuda_build() and qed._core.have_cuda()) else "cpu"
 result = qed.solve(op, num_eigenvalues=4, device=device)
 ```
 
-These three helpers report the compile-time state of the
-`WITH_CUDA` / `WITH_MPI` / `WITH_SCALAPACK` macros, so the same
-Python script can run on a laptop CPU build *and* a CUDA + MPI cluster
-build without if-else gymnastics around `import` failures.
-`has_scalapack_build() == True` implies `has_mpi_build() == True`
-(ScaLAPACK requires MPI).
+`has_cuda_build()` / `has_mpi_build()` report the compile-time state
+of the `WITH_CUDA` / `WITH_MPI` macros, so the same Python script can
+run on a laptop CPU build *and* a CUDA cluster build without if-else
+gymnastics around `import` failures. A CUDA build is not the same as
+a usable device, which is why the guard above also asks
+`qed._core.have_cuda()`; `device='gpu'` itself raises rather than
+falling back to the host when the answer is `False`.
 
 ---
 
@@ -400,7 +408,7 @@ the CLI directly.
 ## 8. Where to look for more
 
 * **Authoritative bindings:**
-  `python/qed/_bindings/workflow_bindings.cpp` (orchestrator —
+  `python/qed/_bindings/workflow/` (orchestrator —
   `_core.workflows_{solve,thermal,spectral}`),
   `python/qed/_bindings/qed_bindings.cpp` (`Operator` /
   `FixedSzOperator` / `EDParameters` / `EDResults` / utility types).

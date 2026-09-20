@@ -13,15 +13,15 @@ shape. This document is the single source of truth for that wiring.
 > O(dim·num_terms) linear), the same build the in-process GS / finite-T paths
 > use; Sz-parity and ∏σˣ flip sectors ride a CSR-free `RepSectorData` ref
 > (Stage 8d). DSSF has **no dedicated MPI mode** — MPI means the across-sector
-> SectorDistributor of the GS/finite-T verbs (the within-sector distributed
-> family was retired in Stage 11d).
+> sector distribution of the GS/finite-T verbs (the within-sector distributed
+> family was removed in Jul 2026).
 
 The four lanes solve different but overlapping problems:
 
 | Lane                  | Question it answers                                       | Random vectors? | Symmetry sectors? | Implementation |
 |-----------------------|-----------------------------------------------------------|-----------------|-------------------|----------------|
 | **In-memory orchestrator** (`ed::workflows::spectral`)            | `S(omega)` from one (H, O) pair, single sector            | T=0: no; T>0: yes (FTLM seed) | one sector (the operator you hand in)         | `src/orchestrator.cpp::spectral` |
-| **Streaming-symmetry same-irrep** (`workflows_spectral_streaming_symmetry_directory`) | `S(omega)` per sector, no momentum transfer               | T=0: no   | every sector under `automorphism_results/`    | `python/qed/_bindings/workflow_bindings.cpp` |
+| **Streaming-symmetry same-irrep** (`workflows_spectral_streaming_symmetry_directory`) | `S(omega)` per sector, no momentum transfer               | T=0: no   | every sector under `automorphism_results/`    | `python/qed/_bindings/workflow/` |
 | **Streaming-symmetry cross-irrep** (`*_cross_irrep_directory`)    | `S(Q, omega)` respecting `k_f = k_i + Q` selection rules  | T=0: no  ; T>0: yes (FTLM)   | source + destination sectors                   | same file, `cross_irrep_directory` |
 | **Amortized Multi-Q cross-irrep** (`*_cross_irrep_multiq_directory`) | `S(Q, omega)` and static `S(Q)` for multiple Q-points in one pass | T=0: no | source + multiple target sectors | same file, `cross_irrep_multiq_directory` |
 | **DSSF engine / CLI** (`ed::dssf::run(DSSFRequest)`)              | Full production `(method × T-grid × Q-grid × operator-pair)` matrix | varies by method | every sector via `OperatorSpec`               | `src/cli/dssf_engine.cpp`, `src/dssf/dssf_method.cpp` |
@@ -71,7 +71,7 @@ exposes.
 
 ## 1. In-memory orchestrator (`ed::workflows::spectral`)
 
-The **fast lane**. Lives in `src/orchestrator.cpp::spectral`, takes a
+The **fast lane**. Lives in `src/orchestrator/orch_spectral.cpp`, takes a
 single `LinearOperator H` plus a `std::vector<const LinearOperator*>
 observables`, returns a `SpectralResult { omega, S_real, S_imag,
 errors_*, backend }`.

@@ -9,14 +9,33 @@ canonical entry point for new contributors. Companion documents:
 * [`SYMMETRY.md`](SYMMETRY.md) — symmetry math + `Subspace × ProjectorChain`.
 * [`SCALING.md`](SCALING.md) — memory and N envelope.
 * [`ADD_NEW_BASIS_POLICY.md`](ADD_NEW_BASIS_POLICY.md) /
-  [`ADD_NEW_GPU_CELL.md`](ADD_NEW_GPU_CELL.md) /
-  [`ADD_NEW_MPI_CELL.md`](ADD_NEW_MPI_CELL.md) — extension recipes.
+  [`ADD_NEW_GPU_CELL.md`](ADD_NEW_GPU_CELL.md) — extension recipes.
 
 The full release / refactor history (including the Minimalist ED
 Collapse, the unified-interface waves, the 48-cell backend × symmetry
 × workflow closure, and the May-2026 orthogonal symmetry composition)
 lives in [`CHANGELOG.md`](../../CHANGELOG.md). The three-entry-point
 public surface is captured immediately below.
+
+### Reading the refactor labels
+
+These documents, the CHANGELOG and a good many code comments tag work
+with a campaign label. The labels are bookkeeping for the refactor
+that produced the code, never a user-facing concept — if a label is
+the only thing explaining a behaviour to you, the explanation is
+missing and worth filing. The schemes you will meet:
+
+| Label | What it names |
+|---|---|
+| **Phase N** | A wave of the 2026 unified-interface / unified CPU-GPU matvec plans. Numbered per plan, so "Phase 3" means different things in different documents; the enclosing section says which plan. |
+| **Stage N / Nx** | A step of the symmetry-engine campaign, ledgered in [`SYMMETRY_V2_DESIGN.md`](SYMMETRY_V2_DESIGN.md) (e.g. Stage 9c = routing unification, Stage 11d = the distributed-operator retirement, Stage 12 = SU(2) total-S). |
+| **Family N** | A group of the Jul-2026 consolidation: one duplicated subsystem collapsed onto one implementation (e.g. Family 1 = LTLM onto the FTLM kernel, Family 6 = the single non-abelian engine). |
+| **Wave N** | A tranche of the original "unify all 16 matvec cells" plan. |
+| **P2.N** | An item of the 2026 modernization audit, archived under [`docs/history/`](../history/). |
+| **WP N** | A work package of the 2026 hardening pass. |
+
+Dates are the durable part; where a label matters, these documents now
+carry the date next to it.
 
 ## Minimalist ED Collapse entry surface (canonical, May 2026)
 
@@ -34,8 +53,10 @@ public surface is captured immediately below.
                                    |
                 +------------------+------------------+
                 v                  v                  v
-            CpuBackend         CudaBackend         MpiBackend
-            (MpiCudaBackend opt-in, no auto-select;
+            CpuBackend         CudaBackend        (MpiBackend)
+            (the MPI backends need a distributed operator geometry
+             that no operator produces today -- in practice this
+             dispatch returns CpuBackend or CudaBackend;
              GPU auto-promotion gated by gpu_dim_floor, default 2^14)
                                    |
                                    v
@@ -200,7 +221,7 @@ production engine, so reduction and method are orthogonal.
 
 There is **no** execution-planner / cost-model / feasibility layer — it was
 removed in favour of **sensible defaults plus leaf policy hooks**. The
-orchestrator ([`src/orchestrator.cpp`](../../src/orchestrator.cpp)) chooses the
+orchestrator ([`src/orchestrator/`](../../src/orchestrator/)) chooses the
 method from the problem size alone (`default_method_for`: full diagonalization
 for `dim ≤ 1024`, Lanczos otherwise) and guards the dominant allocation with
 [`ed::core::guard_working_set`](../../include/ed/core/mem_guard.h) — a clean
@@ -227,7 +248,15 @@ gone.
 | `CpuBackend`      | `ed/matvec/backends/cpu_backend.h`        | `Host`                  |
 | `MpiBackend`      | `ed/matvec/backends/mpi_backend.h`        | `DistributedHost`       |
 | `CudaBackend`     | `ed/matvec/backends/cuda_backend.cuh`     | `CudaDevice`            |
-| `MpiCudaBackend`  | _future_ (NCCL + cuBLAS sibling)          | `DistributedCudaDevice` |
+| `MpiCudaBackend`  | `ed/matvec/backends/mpi_cuda_backend.cuh` | `DistributedCudaDevice` |
+
+`MpiBackend` and `MpiCudaBackend` compile and are unit-tested
+(`test_mpi_matvec_impl`, `test_mpi_cuda_backend`, `test_multi_gpu_nccl`)
+but **no production lane constructs them**: `select_backend` only
+reaches for them when the operator's geometry is distributed, and since
+the distributed-operator family was removed (Jul 2026) every basis
+policy sets `is_distributed = false`. The MPI that actually runs is the
+CLI's across-sector distribution (see "MPI today" below).
 
 The `CudaBackend` (May 2026, day 5) is the cuBLAS-driven realisation of
 the `Backend` interface. It owns a `cublasHandle_t` in `HOST` pointer
@@ -283,21 +312,45 @@ is `kpm_dos_gpu.cu`, the rep-walk symmetry kernels in
 engine's batched cuSOLVER block eigensolve — recovered from the
 SAB-owned kernel Family 6 removed, re-homed SAB-free; drives
 `point_group="full"` GS / full-spectrum / exact-thermal on the GPU).
-`MpiCudaBackend` (NCCL + cuBLAS) exists for the MPI+GPU lane.
+`MpiCudaBackend` (NCCL + cuBLAS) is the compiled-but-unselected
+MPI+GPU sibling described in the backend table above.
 
-## Retired algorithms (Phase 1)
+## MPI today
+
+MPI parallelism lives **above** the matvec, not inside it. The `ED`
+CLI calls `ed::make_sector_operators_tagged(spec, rank, size)`
+(`src/cli/workflows.cpp`), which dim-balances the |G| irrep sectors
+across ranks (Burnside dims + greedy packing); each rank builds and
+solves only its own sectors and the merged spectrum is `Allgatherv`'d,
+so the distributed result is bit-identical to the single-rank run.
+Construction time and per-rank memory both distribute; nothing else in
+the library uses MPI. `WITH_MPI=OFF` costs you exactly this.
+
+What is gone (Jul 2026): `src/distributed/` + `include/ed/distributed/`
+(`DistributedOperator` and the distributed Lanczos / FTLM / TPQ /
+Krylov-Schur bodies), the `ed_distributed_main` launcher, the
+`OperatorSpec.distributed` axis, and the Python `qed.mpi` /
+`device='mpi'` subprocess lane. `device='mpi'` / `'mpi_gpu'` raise.
+The NCCL `MultiGpuCommunicator` (`ed/parallel/multi_gpu.h`, library
+`ed_multi_gpu`) survived and is tested, but only `MpiCudaBackend`
+consumes it, and nothing constructs that.
+
+## Retired algorithms
 
 The following ground-state and thermal methods were removed in the
 minimalist refactor (May 2026):
 
 * Ground-state: `LANCZOS_SELECTIVE`, `LANCZOS_NO_ORTHO`,
   `CHEBYSHEV_FILTERED`, `SHIFT_INVERT`, `SHIFT_INVERT_ROBUST`,
-  `DAVIDSON`, `BICG`, `LOBPCG`, `BLOCK_KRYLOV_SCHUR`,
+  `DAVIDSON`, `BICG`, `LOBPCG`,
   `IMPLICIT_RESTART_LANCZOS`, `THICK_RESTART_LANCZOS`, `OSS`,
   `SCALAPACK`, `SCALAPACK_MIXED`, `ARPACK_SM`, `ARPACK_LM`,
   `ARPACK_SHIFT_INVERT`, `ARPACK_ADVANCED`.
 * Thermal: `HYBRID`, `mTPQ_MPI`, `mTPQ_CUDA`, and every legacy
   `*_GPU` / `*_MPI` / `*_FIXED_SZ` enum alias.
+
+(`BLOCK_KRYLOV_SCHUR` went out in that rev and came back: it is in the
+`DiagonalizationMethod` enum today and dispatches on CPU and GPU.)
 
 All four ARPACK variants and the SCALAPACK / SCALAPACK_MIXED solvers
 are gone with no replacement -- the in-tree Krylov family
@@ -389,6 +442,11 @@ declarations only and never gained production consumers.
 | CPU + MPI    | **kernel**    | **kernel**    | **kernel**    | n/a           |
 | GPU          | **kernel**    | CPU-only†     | **kernel**    | CPU-only†     |
 | GPU + MPI    | **kernel**    | **kernel**    | **kernel**    | n/a           |
+
+The two MPI rows record that the kernels are backend-templated and
+compile against `MpiBackend` / `MpiCudaBackend`; they are **not** a
+claim that a run reaches them. Nothing constructs those backends today
+(see "MPI today" above).
 
 \* `src/solvers/cpu/lanczos.cpp::lanczos()` is a thin orchestrator over
 `lanczos_kernel<CpuBackend>` (Phase 2.1: LocalDGKS3 ring reorth, resume

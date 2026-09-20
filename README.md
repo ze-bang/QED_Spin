@@ -32,8 +32,10 @@ The same shape is exposed in Python as
 | Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, factorized little-group engine for d≥2 |
 | Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF via the factorized little-group engine (one momentum per star + little-co-group isotypic projection, matrix-free); CPU and GPU (batched cuSOLVER block eigensolve) for GS/finite-T, CPU for the GS-DSSF continued fraction |
 | Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
-| Symmetry projection: SU(2) total-S | production (Stage 12, Jul 2026): `total_spin=` on `qed.solve` (Lowdin/Casimir targeting + certified labels), `qed.full_spectrum` (highest-weight spectral differencing), `qed.thermal` (per-tower Z = Σ_S (2S+1) Z_S); operator-level S² route, host-side targeting (device-resident Lowdin is the named follow-up) |
-| CPU (OpenMP), single-GPU (cuBLAS / cuSPARSE), multi-rank MPI, multi-GPU NCCL | production |
+| Symmetry projection: SU(2) total-S | production (Jul 2026): `total_spin=` on `qed.solve` (Lowdin/Casimir targeting + certified labels), `qed.full_spectrum` (highest-weight spectral differencing), `qed.thermal` (per-tower Z = Σ_S (2S+1) Z_S); operator-level S² route, host-side targeting (device-resident Lowdin is the named follow-up) |
+| CPU (OpenMP) and single-GPU (cuBLAS / cuSPARSE) lanes | production |
+| Multi-rank MPI | production for **one** thing: across-sector distribution of the `ED` CLI under `mpirun` (each rank builds and solves a dim-balanced subset of the symmetry sectors, spectrum `Allgatherv`'d). There is no within-sector (distributed-vector) lane — that family was removed in Jul 2026 |
+| Multi-GPU NCCL (`MultiGpuCommunicator`, `MpiCudaBackend`) | compiles (library `ed_multi_gpu`) and is unit-tested, but **no production lane selects it**: `select_backend` only picks the MPI backends for a distributed operator geometry, and no operator produces one any more |
 | First-class Python bindings (`import qed`) | production |
 | HDF5 I/O for eigenvectors, thermodynamic curves, DSSF traces | production |
 
@@ -106,11 +108,17 @@ CLI:
 ./build/ED /path/to/heisenberg_dir --method=LANCZOS --eigenvalues=3 --thermo
 ```
 
-The backend (CPU / single-GPU / MPI under `mpirun`) is auto-selected
-from the operator geometry and the build flags; pin manually with
-`device='cpu' | 'gpu'` in Python or `opts.backend_constraints` in C++.
-For MPI, launch `ED` under `mpirun` — across-sector distribution
-(SectorDistributor) engages automatically for symmetry workloads.
+The backend (CPU or single-GPU) is auto-selected from the operator
+geometry and the build flags; pin manually with `device='cpu' | 'gpu'`
+in Python or `opts.backend_constraints` in C++. `device='gpu'` is a
+hard request: it raises when the build has `WITH_CUDA=OFF` or when no
+CUDA device is visible to the process, rather than serving the run
+from the host.
+
+MPI is a property of the CLI run, not of `device=`: launch `ED` under
+`mpirun` and the across-sector distribution engages automatically for
+symmetry workloads (each rank owns a dim-balanced subset of the irrep
+sectors). `device='mpi'` / `'mpi_gpu'` raise in Python.
 
 ---
 
@@ -198,19 +206,18 @@ docs/
 │   ├── python_quickstart.md              # Python in 30 lines
 │   ├── one_call_api.md                   # solve / thermal / spectral reference
 │   ├── workflow.md                       # end-to-end recipes
-│   ├── python_advanced.md                # device pinning, MPI, GPU, symmetries
+│   ├── python_advanced.md                # device pinning, GPU, symmetries
 │   └── python_api_coverage.md            # C++/Python/CLI capability matrix
 ├── architecture/
 │   ├── ARCHITECTURE.md                   # post-collapse architecture (read first)
-│   ├── UNIFIED_STACK.md                  # Stage-9 layer-by-layer stack + pipelines
+│   ├── UNIFIED_STACK.md                  # layer-by-layer stack + pipelines
 │   ├── SYMMETRY.md                       # Subspace × ProjectorChain math + workflows
 │   ├── SYMMETRY_V2_DESIGN.md             # symmetry-engine design + residual ledger
 │   ├── DSSF.md                           # structure-factor lanes
 │   ├── CODEMAP.md                        # directory-level tour
 │   ├── SCALING.md                        # memory + N envelope, env knobs
 │   ├── ADD_NEW_BASIS_POLICY.md           # extending the matvec
-│   ├── ADD_NEW_GPU_CELL.md               # extending the GPU lane
-│   └── ADD_NEW_MPI_CELL.md               # extending the MPI lane
+│   └── ADD_NEW_GPU_CELL.md               # extending the GPU lane
 ├── benchmarks/
 │   ├── BENCHMARKS.md                     # head-to-head vs QuSpin / SciPy
 │   ├── bench_vs_xdiag.md                 # head-to-head vs XDiag
@@ -230,7 +237,7 @@ docs/
 | Understand the architecture | [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) |
 | Understand the symmetry math | [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) |
 | Know how big a problem fits | [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md) |
-| Extend the matvec / GPU / MPI lanes | [`docs/architecture/ADD_NEW_*.md`](docs/architecture/) |
+| Extend the matvec / GPU lanes | [`docs/architecture/ADD_NEW_*.md`](docs/architecture/) |
 | See performance numbers | [`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md) |
 | Run an example | [`examples/README.md`](examples/README.md) |
 | Contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
