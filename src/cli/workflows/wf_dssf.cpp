@@ -515,7 +515,15 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     }
 
     #ifdef WITH_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    // size > 1, like the two barriers above: rank/size come from
+    // get_mpi_rank_size_safe(), which reports (0, 1) when MPI was never
+    // initialised. Unguarded, this collective aborts the process the moment
+    // this workflow body is called from somewhere that is not the ED binary
+    // -- MPI_Init lives in main(), so an in-process caller (the WP9.8
+    // dssf_run binding) reaches here with MPI inactive and Open MPI kills
+    // the process with "MPI_Barrier before MPI_INIT" AFTER the results have
+    // been written.
+    if (size > 1) MPI_Barrier(MPI_COMM_WORLD);
     #endif
 
     if (rank == 0) {
