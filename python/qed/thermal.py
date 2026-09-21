@@ -81,6 +81,7 @@ __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
 
 # Stage 11a: converters single-sourced in qed._params (this module's
 # copy had silently diverged from workflow.py's -- see _params.py).
+from . import _thermal as _lanes  # the early-return lanes of thermal()
 from ._params import (  # noqa: E402,F401
     THERMAL_METHOD_MAP as _THERMAL_METHOD_MAP,
     ed_params_to_thermal_options as _ed_params_to_thermal_options,
@@ -899,164 +900,30 @@ def thermal(
 
     is_directory = isinstance(H, (str, os.PathLike))
 
-    # ------------------------------------------------------------------
-    # Stage 12f (SU(2) rollout): per-spin-tower thermodynamics.
-    # Z = sum_S (2S+1) Z_S with each tower sampled once in its
-    # highest-weight sector (small blocks: exact highest-weight
-    # spectral differencing). Opt-in; see the total_spin kwarg doc.
-    # ------------------------------------------------------------------
-    if not (total_spin is None or total_spin is False
-            or (isinstance(total_spin, str)
-                and total_spin.lower() == "off")):
-        # Audit fix (2026-07-30): the tower lane used to silently drop
-        # every kwarg its helper does not thread -- including symmetry
-        # composition and Sz windows the caller may believe are active.
-        # Refuse the named ones loudly; warn on device='gpu' (the Lowdin
-        # targeting is host-only for now -- the documented Stage-12h
-        # follow-up -- and the fallback is graceful but should not be
-        # silent).
-        _unsupported = [name for name, val in (
-            ("symmetry", symmetry), ("sector", sector),
-            ("sz", sz), ("sz_min", sz_min), ("sz_max", sz_max),
-            ("star_maps", star_maps),
-            ("output_dir", output_dir or None),
-            ("probe_betas", probe_betas),
-        ) if val is not None]
-        for name, val in (("spin_flip", spin_flip),
-                          ("time_reversal", time_reversal)):
-            if isinstance(val, str) and val.lower() == "require":
-                _unsupported.append(name + "='require'")
-        if isinstance(point_group, str) and point_group.lower() == "full":
-            _unsupported.append("point_group='full'")
-        if _unsupported:
-            raise NotImplementedError(
-                f"qed.thermal(total_spin=...): {_unsupported} are not "
-                f"threaded through the SU(2) tower lane (each spin-S "
-                f"tower runs in its highest-weight sector with its own "
-                f"Lowdin projection). Drop them, or drop total_spin= to "
-                f"use the composed symmetry lanes.")
-        if isinstance(device, str) and device.lower() == "gpu":
-            warnings.warn(
-                "qed.thermal(total_spin=...): the Lowdin tower targeting "
-                "is host-only (Stage-12h follow-up); device='gpu' runs "
-                "this lane on the CPU.", RuntimeWarning, stacklevel=2)
-        return _thermal_su2_towers(
-            H, total_spin=total_spin, method=method,
-            T_min=T_min, T_max=T_max, num_T=num_T,
-            num_samples=num_samples,
-            krylov_dim=(krylov_dim or ftlm_krylov_dim or 100),
-            krylov_dim_explicit=bool(krylov_dim or ftlm_krylov_dim),
-            random_seed=random_seed,
-            tpq_delta_beta=tpq_delta_beta,
-            tpq_taylor_order=tpq_taylor_order,
-            is_directory=is_directory, verbose=verbose)
+    # The early-return lanes, in order (bodies in qed._thermal.lanes). Each
+    # either produces the ThermalResult or declines; what sits BETWEEN them
+    # here is the preparation the later ones read.
+    _res = _lanes.su2_tower_lane(
+        H, total_spin=total_spin, method=method,
+        T_min=T_min, T_max=T_max, num_T=num_T, num_samples=num_samples,
+        krylov_dim=krylov_dim, ftlm_krylov_dim=ftlm_krylov_dim,
+        random_seed=random_seed, tpq_delta_beta=tpq_delta_beta,
+        tpq_taylor_order=tpq_taylor_order, is_directory=is_directory,
+        verbose=verbose, symmetry=symmetry, sector=sector, sz=sz,
+        sz_min=sz_min, sz_max=sz_max, star_maps=star_maps,
+        output_dir=output_dir, probe_betas=probe_betas,
+        spin_flip=spin_flip, time_reversal=time_reversal,
+        point_group=point_group, device=device)
+    if _res is not _lanes.DECLINED:
+        return _res
 
-    # ------------------------------------------------------------------
-    # method="exact": exact canonical thermodynamics from the block
-    # engine's full per-block spectra. This is a METHOD, sitting beside
-    # FTLM/LTLM/mTPQ -- point_group stays a pure symmetry-routing knob
-    # ('auto' project-when-possible / 'full' require / 'off' abelian).
-    # Historically this computation was reachable only through the
-    # point_group='full' spelling, which conflated routing with solver
-    # strategy; that spelling now warns (see below) and requires
-    # projection without changing the method.
-    # ------------------------------------------------------------------
-    if isinstance(method, str) and method.upper() == "EXACT":
-        if is_directory:
-            # U4a pattern: the directory's own deck + automorphisms feed
-            # the exact block engine. Same guards as the sampling route:
-            # the Python loader reads only Trans/InterAll (refuse
-            # ThreeBodyG.dat), and the group comes from
-            # automorphisms.json (validated permutations).
-            directory = str(H)
-            if num_sites is None:
-                raise ValueError(
-                    "qed.thermal: pass num_sites= with the directory "
-                    "form.")
-            if os.path.exists(os.path.join(directory, "ThreeBodyG.dat")):
-                raise NotImplementedError(
-                    "qed.thermal(method='exact'): this directory carries "
-                    "ThreeBodyG.dat, which the Python-side loader does "
-                    "not read -- the exact lane would silently miss "
-                    "terms. Use the sampling methods (exact below the "
-                    "small-dim cutoff) or the in-memory form.")
-            _autos_path = os.path.join(directory, "automorphism_results",
-                                       "automorphisms.json")
-            if not os.path.exists(_autos_path):
-                raise ValueError(
-                    "qed.thermal(method='exact'): the directory carries "
-                    "no automorphism_results/automorphisms.json to build "
-                    "the block engine from; pass the in-memory form with "
-                    "symmetry= instead.")
-            import json as _json
-            with open(_autos_path) as f:
-                _cand = _json.load(f)
-            _N = int(num_sites)
-            if not (isinstance(_cand, list) and _cand
-                    and all(isinstance(p, list) and len(p) == _N
-                            and sorted(p) == list(range(_N))
-                            for p in _cand)):
-                raise ValueError(
-                    "qed.thermal(method='exact'): automorphisms.json is "
-                    "not a list of site permutations.")
-            H_ex = Operator(num_sites=_N, spin=float(spin))
-            _trans = os.path.join(directory, "Trans.dat")
-            _inter = os.path.join(directory, "InterAll.dat")
-            if os.path.exists(_trans):
-                H_ex.load_trans(_trans)
-            if os.path.exists(_inter):
-                H_ex.load_inter_all(_inter)
-            H, symmetry, is_directory = H_ex, _cand, False
-        if symmetry is None:
-            raise NotImplementedError(
-                "qed.thermal: method='exact' rides the little-group block "
-                "engine and needs symmetry=. (Without symmetry, the "
-                "sampling methods are already exact below dim 512 via the "
-                "small-dim fallback.)")
-        if sector is not None:
-            raise NotImplementedError(
-                "qed.thermal: sector= is not honoured on the exact lane "
-                "yet -- refusing to silently ignore it.")
-        from .point_group_routing import split_nonabelian, _close
-        _split = split_nonabelian(symmetry)
-        if isinstance(_split, str):
-            # No non-abelian residue (or unsplittable): exact per plain
-            # (n_up, k) block -- close the abelian generators, no
-            # residues. Correct, merely less reduced.
-            _gens = [list(g) for g in symmetry.generators] \
-                if hasattr(symmetry, "generators") else \
-                [list(g) for g in symmetry]
-            _A = _close(_gens)
-            if _A is None:
-                raise ValueError(
-                    f"qed.thermal(method='exact'): could not close the "
-                    f"symmetry group ({_split})")
-            _A, _res = [list(g) for g in _A], []
-        else:
-            _A, _res = _split
-        temps = list(np.linspace(T_min, T_max, num_T))
-        td = dict(_core.little_group_thermodynamics(
-            H, _A, _res, temps, n_up=-1,
-            use_gpu=(isinstance(device, str)
-                     and device.lower() in ("gpu", "cuda")),
-            spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
-            time_reversal=_sym_toggle_int(time_reversal,
-                                          "time_reversal")))
-        if verbose:
-            print(f"[qed.thermal] EXACT little-group lane: |A| = "
-                  f"{len(_A)}, residues = {len(_res)}.")
-        _E = np.asarray(td["energy"], dtype=float)
-        return ThermalResult(
-            temperatures=np.asarray(td["temperatures"], dtype=float),
-            energy=_E,
-            specific_heat=np.asarray(td["specific_heat"], dtype=float),
-            entropy=np.asarray(td["entropy"], dtype=float),
-            free_energy=np.asarray(td["free_energy"], dtype=float),
-            method="exact",
-            ground_state_energy=float(_E[0]) if len(_E) else 0.0,
-            used_sz_decomposition=False,
-            used_symmetry_decomposition=True,
-        )
+    _res = _lanes.exact_lane(
+        H, method=method, is_directory=is_directory, num_sites=num_sites,
+        spin=spin, symmetry=symmetry, sector=sector,
+        T_min=T_min, T_max=T_max, num_T=num_T, device=device,
+        spin_flip=spin_flip, time_reversal=time_reversal, verbose=verbose)
+    if _res is not _lanes.DECLINED:
+        return _res
 
     method_enum = _coerce_method(method)
 
@@ -1116,45 +983,14 @@ def thermal(
             "little-group projection for whatever method= is set. For "
             "the old exact behaviour pass method='exact'.",
             FutureWarning, stacklevel=2)
-    if (symmetry is not None and not is_directory
-            and sector is None
-            and isinstance(point_group, str)
-            and point_group.lower() in ("auto", "full")):
-        # U1b (lane unification): thermal 'auto' + a sampling method now
-        # PROJECTS -- the run stays a sampling run, executed inside the
-        # (n_up, k, +/-, sigma) little-group blocks via
-        # _core.little_group_thermal (F-shift Z-recombination). The lane
-        # resolver declines KPM_DOS (full-spectrum DOS) and honours
-        # ED_SYM_LG_THERMAL=0; any decline falls through to the abelian
-        # sector lane below unchanged. sector= keeps the abelian
-        # filtering lane (the block engine has only_k0/only_irrep but the
-        # QN decode for thermal is future work -- refusing to guess).
-        from .point_group_routing import resolve_projection_lane
-        lane = resolve_projection_lane(
-            symmetry, point_group=point_group.lower(), consumer="thermal",
-            eigenvalues_only=True, method=str(method),
-            verbose=verbose)
-        if lane.mode == "project":
-            out = dict(_core.little_group_thermal(
-                H, lane.A, lane.residues, method=str(method),
-                t_min=float(T_min), t_max=float(T_max), num_t=int(num_T),
-                num_samples=int(num_samples),
-                krylov_dim=int(krylov_dim) if krylov_dim else 100,
-                random_seed=int(random_seed) if random_seed else 0,
-                use_gpu=(isinstance(device, str)
-                         and device.lower() in ("gpu", "cuda")),
-                spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
-                time_reversal=_sym_toggle_int(time_reversal,
-                                              "time_reversal")))
-            if verbose:
-                print(f"[qed.thermal] little-group SAMPLING lane "
-                      f"(U1b): {len(out['block_dim'])} blocks, "
-                      f"projected_any={out['projected_any']}, "
-                      f"max block dim={max(out['block_dim'])}.")
-            return _thermal_result_from_block_lane(out, method)
-        elif verbose:
-            print(f"[qed.thermal] projection declined ({lane.reason}); "
-                  f"abelian sector lane.")
+    _res = _lanes.inmemory_projection_lane(
+        H, symmetry=symmetry, is_directory=is_directory, sector=sector,
+        point_group=point_group, method=method,
+        T_min=T_min, T_max=T_max, num_T=num_T, num_samples=num_samples,
+        krylov_dim=krylov_dim, random_seed=random_seed, device=device,
+        spin_flip=spin_flip, time_reversal=time_reversal, verbose=verbose)
+    if _res is not _lanes.DECLINED:
+        return _res
     # In-memory operator + spatial symmetry that the block lane did not take:
     # the abelian (Sz, irrep) sector lane (3a) with an in-memory SOURCE --
     # the operator itself plus its CLOSED group info dict, handed to the
@@ -1393,6 +1229,12 @@ def thermal(
     # ------------------------------------------------------------------
     # 2. Resolve the Sz window early (used by both branches).
     # ------------------------------------------------------------------
+    # Bound unconditionally: the window is only MEANINGFUL under Sz
+    # conservation (and only read on paths that have it), but the directory
+    # projection lane below takes lo/hi as arguments and `not sz_conserved`
+    # no longer short-circuits their evaluation once they cross a call
+    # boundary.
+    lo = hi = None
     if sz_conserved:
         lo = int(sz_min) if sz_min is not None else 0
         hi = int(sz_max) if sz_max is not None else N
@@ -1422,52 +1264,17 @@ def thermal(
     #     Directory input only: an in-memory operator with symmetry= already
     #     had its block-lane decision (U1b) above.
     # ------------------------------------------------------------------
-    if (is_directory and has_sym and sector is None
-            and isinstance(point_group, str)
-            and point_group.lower() in ("auto", "full")
-            and not output_dir and not probe_betas
-            and str(method).upper() in ("FTLM", "LTLM", "MTPQ", "OFTLM")
-            and not os.path.exists(os.path.join(directory, "ThreeBodyG.dat"))
-            and (not sz_conserved or (lo == 0 and hi == N))):
-        _autos_path = os.path.join(sym_dir, "automorphisms.json")
-        _autos = None
-        if os.path.exists(_autos_path):
-            import json as _json
-            try:
-                with open(_autos_path) as f:
-                    _cand = _json.load(f)
-                if (isinstance(_cand, list) and _cand
-                        and all(isinstance(p, list) and len(p) == N
-                                and sorted(p) == list(range(N))
-                                for p in _cand)):
-                    _autos = _cand
-            except Exception:
-                _autos = None
-        if _autos is not None:
-            from .point_group_routing import resolve_projection_lane
-            lane = resolve_projection_lane(
-                _autos, point_group=point_group.lower(), consumer="thermal",
-                eigenvalues_only=True, method=str(method), verbose=verbose)
-            if lane.mode == "project":
-                out = dict(_core.little_group_thermal(
-                    H_op, lane.A, lane.residues, method=str(method),
-                    t_min=float(T_min), t_max=float(T_max),
-                    num_t=int(num_T), num_samples=int(num_samples),
-                    krylov_dim=int(krylov_dim) if krylov_dim else 100,
-                    random_seed=int(random_seed) if random_seed else 0,
-                    use_gpu=_use_gpu,
-                    spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
-                    time_reversal=_sym_toggle_int(time_reversal,
-                                                  "time_reversal")))
-                if verbose:
-                    print(f"[qed.thermal] directory -> little-group "
-                          f"SAMPLING lane (U4a): "
-                          f"{len(out['block_dim'])} blocks, "
-                          f"projected_any={out['projected_any']}.")
-                return _thermal_result_from_block_lane(out, method)
-            elif verbose:
-                print(f"[qed.thermal] directory projection declined "
-                      f"({lane.reason}); flat-pool sector lane.")
+    _res = _lanes.directory_projection_lane(
+        H_op, is_directory=is_directory, has_sym=has_sym, sector=sector,
+        point_group=point_group, output_dir=output_dir,
+        probe_betas=probe_betas, method=method,
+        directory=directory, sym_dir=sym_dir if is_directory else None,
+        sz_conserved=sz_conserved, lo=lo, hi=hi, N=N,
+        T_min=T_min, T_max=T_max, num_T=num_T, num_samples=num_samples,
+        krylov_dim=krylov_dim, random_seed=random_seed, use_gpu=_use_gpu,
+        spin_flip=spin_flip, time_reversal=time_reversal, verbose=verbose)
+    if _res is not _lanes.DECLINED:
+        return _res
 
     # ------------------------------------------------------------------
     # 3a. Sector lane -- directory form, or an in-memory operator with
