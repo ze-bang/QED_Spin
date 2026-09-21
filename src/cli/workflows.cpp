@@ -3166,7 +3166,7 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     }
 
     #ifdef WITH_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    if (size > 1) MPI_Barrier(MPI_COMM_WORLD);  // guarded: see wf_dssf.cpp on hardening
     #endif
 
     if (rank == 0) {
