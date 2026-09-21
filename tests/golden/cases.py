@@ -388,6 +388,40 @@ def little_group_cases(name, m: Model, A, residues, gens, correlator_translation
             return lg_rows(dict(_core.little_group_block_grounds(H, A, residues, n_up=half)), A, gens)
     add("block_grounds/forced_lanczos", "exact", forced)
 
+    # GPU-lane coverage (2026-09-20). Until now NEITHER golden job entered a
+    # device lane here. The little-group verbs take their GPU decision from
+    # LittleGroupOptions::use_gpu, and only full_spectrum reads it (the batched
+    # cuSOLVER stream-pool eigensolve, lg_spectrum.cpp); block_grounds and the
+    # rest ignore it, so a "block_grounds with use_gpu" case would freeze the
+    # same CPU numbers twice and prove nothing. The OTHER device lane -- the
+    # resident rep-gather (RepSectorMatVec::force_gpu_) -- is reachable from
+    # exactly one public verb, gs_dssf: its use_gpu demotes the reduced CSR to
+    # a fallback so the device gather runs even at these dimensions, where the
+    # CSR always fits and would otherwise short-circuit it. On a host without a
+    # device both fall back to the same CPU lanes, so ONE case definition
+    # serves both references and the GPU job is the one exercising the device.
+    add("full_spectrum/n_up=half/use_gpu=True", "exact",
+        lambda: _lg_full(H, A, residues, half, gens, use_gpu=True))
+
+    def gs_dssf(use_gpu):
+        # Staggered S^z probe (the spectral cases' observable). gpu_engaged is
+        # RECORDED, not just used: it is the binding's truthful report of which
+        # lane ran, so a GPU reference carrying True fails the day the device
+        # gather silently degrades to the host -- the failure mode that once
+        # produced 19 "GPU" golden results computed on the CPU.
+        O = probe_operator(m.N, [(("z",), (i,), cmath.exp(1j * math.pi * i) / math.sqrt(m.N))
+                                 for i in range(m.N)])
+        out = dict(_core.little_group_gs_dssf(
+            H, O, A, residues, omega_min=-1.0, omega_max=4.0, n_omega=41,
+            broadening=0.15, krylov_dim=80, use_gpu=use_gpu))
+        return {"omega": fl(out["omega"]), "s_omega": fl(out["s_omega"]),
+                "gs_energy": float(out["gs_energy"]),
+                "total_weight": float(out["total_weight"]),
+                "gpu_engaged": bool(out["gpu_engaged"])}
+
+    add("gs_dssf/SzQ/use_gpu=False", "transport", lambda: gs_dssf(False))
+    add("gs_dssf/SzQ/use_gpu=True", "transport", lambda: gs_dssf(True))
+
     def no_flip():
         return lg_rows(dict(_core.little_group_block_grounds(H, A, residues, n_up=half, spin_flip=0)), A, gens)
     add("block_grounds/spin_flip=off", "exact", no_flip)
@@ -432,8 +466,9 @@ def little_group_cases(name, m: Model, A, residues, gens, correlator_translation
     return cs
 
 
-def _lg_full(H, A, residues, n_up, gens):
-    out = dict(_core.little_group_full_spectrum(H, A, residues, n_up=n_up))
+def _lg_full(H, A, residues, n_up, gens, use_gpu=False):
+    out = dict(_core.little_group_full_spectrum(H, A, residues, n_up=n_up,
+                                                use_gpu=use_gpu))
     rec = {"eigenvalues": fl(np.sort(np.asarray(out["eigenvalues"], float)))}
     return rec
 

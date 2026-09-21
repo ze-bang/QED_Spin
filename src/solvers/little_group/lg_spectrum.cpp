@@ -148,6 +148,16 @@ LittleGroupSpectrum little_group_full_spectrum(
                 });
             const std::vector<double> eigs =
                 ed::solvers::lg_blocks_batched_eigenvalues_gpu(P);
+            // Same ED_SYM_PROFILE marker the rep-gather lane carries: this
+            // lane was previously silent unless it FAILED, so "the GPU
+            // eigensolve ran" could only be assumed, never observed -- and an
+            // assumed device lane is how CPU numbers get recorded as GPU ones.
+            if (ed::env::flag("ED_SYM_PROFILE", false)) {
+                std::fprintf(stderr,
+                             "[sym_profile] little-group batched GPU "
+                             "eigensolve engaged (%zu blocks)\n",
+                             P.block_dim.size());
+            }
             std::size_t off = 0;
             for (std::size_t b = 0; b < P.block_dim.size(); ++b) {
                 for (int i = 0; i < P.block_dim[b]; ++i) {
@@ -242,6 +252,16 @@ LittleGroupSpectrum little_group_lowest_spectrum(
                 });
             const std::vector<double> eigs =
                 ed::solvers::lg_blocks_batched_eigenvalues_gpu(P);
+            // Same ED_SYM_PROFILE marker the rep-gather lane carries: this
+            // lane was previously silent unless it FAILED, so "the GPU
+            // eigensolve ran" could only be assumed, never observed -- and an
+            // assumed device lane is how CPU numbers get recorded as GPU ones.
+            if (ed::env::flag("ED_SYM_PROFILE", false)) {
+                std::fprintf(stderr,
+                             "[sym_profile] little-group batched GPU "
+                             "eigensolve engaged (%zu blocks)\n",
+                             P.block_dim.size());
+            }
             std::size_t off = 0;
             for (std::size_t b = 0; b < P.block_dim.size(); ++b) {
                 const int keep = std::min(pack_keep[b], P.block_dim[b]);
