@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 source scripts/golden/env.sh
-scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant "${QED_VARIANT:-cuda}" --mpi --target _core
+scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant "${QED_VARIANT:-cuda}" --target _core
 status=$?
 echo "=== BUILD DONE (exit ${status}) ==="
 exit ${status}
