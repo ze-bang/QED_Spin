@@ -35,16 +35,8 @@ Three layers:
    Lanczos, GPU mixed-precision, MPI scaling, etc.). This is the
    per-microbench API reference; `BENCHMARKS.md` is the *story*.
 
-To re-run the full benchmark suite end-to-end:
-
-```bash
-cmake -B build -DED_BUILD_BENCHMARKS=ON ...
-cmake --build build --target ed_benchmarks
-python3 benchmarks/bench_all_backends.py \
-    --build-dir build --sizes 12 14 16 18 \
-    --threads $(nproc) --mpi-ranks 1 2 4 \
-    --output bench_all_backends.json
-```
-
-The snapshot of the JSON used to render the current `BENCHMARKS.md` is
-checked in at [`bench_all_backends.json`](./bench_all_backends.json).
+To build the Google-Benchmark targets: `-DED_BUILD_BENCHMARKS=ON`, then
+`cmake --build <dir> --target ed_benchmarks`. The multi-backend driver that produced the
+numbers in `BENCHMARKS.md` (`bench_all_backends.py`) ran the retired distributed binary and
+was removed; those numbers are a historical record, reproducible from the
+`pre-simplify-2026-09` tag.

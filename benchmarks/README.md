@@ -55,13 +55,11 @@ Audit ref: P2.13.
 
 ## Cross-library head-to-head benchmarks
 
-Two Python orchestrators wrap the C++ binaries above with peer
-libraries on the same workload (1D Heisenberg PBC chain):
+One Python orchestrator compares against a peer library on the same workload
+(1D Heisenberg PBC chain):
 
-| Script | Peers | Output |
+| Script | Peer | Output |
 |---|---|---|
-| `bench_vs_quspin.py` | QuSpin + scipy.sparse | `bench_vs_quspin_results.json` |
-| `bench_all_backends.py` | QuSpin + scipy + (this codebase's CPU/GPU/MPI backends) | `bench_all_backends.json` |
 | `bench_vs_xdiag.py` | [XDiag.jl](https://github.com/awietek/XDiag.jl) | `bench_vs_xdiag.json` (and `_fixed_sz.json`) |
 
 The XDiag run drives a Julia subprocess (`bench_vs_xdiag.jl`) so it

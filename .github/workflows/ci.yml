@@ -73,8 +73,8 @@ jobs:
         with:
           name: ctest-logs-linux-gcc-openblas
           path: |
-            build/Testing/Temporary/LastTest.log
-            build/Testing/Temporary/LastTestsFailed.log
+            build/ci-linux/Testing/Temporary/LastTest.log
+            build/ci-linux/Testing/Temporary/LastTestsFailed.log
           if-no-files-found: ignore
           retention-days: 7
 

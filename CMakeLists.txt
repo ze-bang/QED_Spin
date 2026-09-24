@@ -117,6 +117,12 @@ endif()
 option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
 option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
 
+# Whether the caller chose the CUDA architectures (-DCMAKE_CUDA_ARCHITECTURES or the
+# CUDAARCHS environment variable); must be read before project() sets its own default.
+if(DEFINED CMAKE_CUDA_ARCHITECTURES OR DEFINED ENV{CUDAARCHS})
+    set(ED_CUDA_ARCH_CHOSEN ON)
+endif()
+
 # Set languages based on options. The version is mirrored in CITATION.cff
 # and CHANGELOG.md; bump in lockstep when releasing.
 if(WITH_CUDA)
@@ -136,26 +142,12 @@ if(WITH_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     
-    # Set CUDA architectures - use native if GPU available, otherwise use common modern architectures
-    # Compute capability 6.0+ required for native double atomicAdd
-    include(CheckLanguage)
-    check_language(CUDA)
-    if(CMAKE_CUDA_COMPILER)
-        # Try native first, but provide fallback for headless compilation
-        execute_process(
-            COMMAND ${CMAKE_CUDA_COMPILER} --run --gpu-architecture=native -x cu -c /dev/null
-            RESULT_VARIABLE CUDA_NATIVE_CHECK_RESULT
-            OUTPUT_QUIET ERROR_QUIET
-        )
-        if(CUDA_NATIVE_CHECK_RESULT EQUAL 0)
-            set(CMAKE_CUDA_ARCHITECTURES "native")
-        else()
-            # Fallback: compile for common modern architectures (V100, A100, etc.)
-            set(CMAKE_CUDA_ARCHITECTURES "70;80;86;89;90")
-            message(STATUS "No GPU detected for native arch, using fallback: ${CMAKE_CUDA_ARCHITECTURES}")
-        endif()
-    else()
-        set(CMAKE_CUDA_ARCHITECTURES "70;80;86;89;90")
+    # CUDA architectures: H100 (sm_90) unless the caller chose them. (Compute capability
+    # 6.0+ is required for native double atomicAdd.) A former `nvcc --run -arch=native`
+    # probe always failed on the GPU-less build nodes, compiled five architectures, and
+    # wrote null.o into the source tree.
+    if(NOT ED_CUDA_ARCH_CHOSEN)
+        set(CMAKE_CUDA_ARCHITECTURES "90")
     endif()
     
     # Add CUDA compiler flags to handle C++ standard library compatibility
@@ -306,63 +298,6 @@ endif()
 # ED inherits BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP transitively
 # from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since those
 # libraries declare their dependencies as PUBLIC.
-
-# Link libraries for test_dynamical_correlation
-if(TARGET test_dynamical_correlation)
-    target_link_libraries(test_dynamical_correlation
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-    )
-    
-    # Add CPU optimization flags
-    target_compile_options(test_dynamical_correlation PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-    )
-    
-    # Add OpenMP if available
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(test_dynamical_correlation OpenMP::OpenMP_CXX)
-    endif()
-endif()
-
-
-# Link libraries for GPU Lanczos example
-if(TARGET GPU_LANCZOS_EXAMPLE)
-    target_link_libraries(GPU_LANCZOS_EXAMPLE
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-    )
-endif()
-
-
-# Link libraries for CUDA example if it exists
-if(TARGET CUDA_EXAMPLE)
-    target_link_libraries(CUDA_EXAMPLE
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-    )
-endif()
-
-# Link libraries for CUDA test if it exists
-if(TARGET CUDA_TEST)
-    target_link_libraries(CUDA_TEST
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-    )
-endif()
-
 
 # If using oneMKL via its modern CMake target, propagate it to the libraries.
 if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
@@ -654,11 +589,6 @@ if(BUILD_ED_TESTS)
     # (supports_device_matvec + bind_cuda -> CudaMatVecBackend). SKIPs at
     # runtime without a CUDA device; no-op TU when WITH_CUDA is OFF.
     ed_add_test(test_operator_gpu_parity        tests/unit/test_operator_gpu_parity.cpp USE_CATCH2)
-    # Phase A (PR-1 step 6) of the "mirror examples" plan (May 2026):
-    # pins byte-equality between the Python-named `ed::api::*` kwargs
-    # facade and the legacy `ed::workflows::*` orchestrator across a
-    # representative cell from each method.
-    ed_add_test(test_api_mirror                 tests/unit/test_api_mirror.cpp USE_CATCH2)
     # Eigenvector-save contract (May 2026): every CPU-single-rank solver
     # method (Lanczos / BlockLanczos / KrylovSchur / FullDiag) MUST honor
     # `compute_vectors=true` + `output_dir=...` by writing

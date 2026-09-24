@@ -8,7 +8,6 @@ intended workflow:
 | C++ developer, wants to hack on the source      | [From source (CMake)](#from-source-cmake) |
 | C++ user, wants to consume the library          | [Install + `find_package(ED)`](#consume-via-find_packageed-config) |
 | Python user, wants the `qed` package     | [Install the wheel (pip)](#install-the-python-wheel) |
-| Casual user, wants a sandboxed environment      | [Docker / dev container](#docker-and-dev-containers) (planned) |
 
 (from-source-cmake)=
 ## From source (CMake)
@@ -40,7 +39,7 @@ Then:
 ```bash
 git clone https://github.com/ze-bang/QED.git
 cd QED
-cmake --preset ci-linux            # or pick another preset (see CMakePresets.json)
+cmake --preset ci-linux            # the one preset (CI); cluster builds use scripts/build.sh
 cmake --build --preset ci-linux -- -j$(nproc)
 ctest --preset ci-linux
 ```
@@ -128,9 +127,3 @@ python -c "import qed; print(qed._core.__file__, qed.has_cuda_build())"
 warns if a stale `_core*.so` from an old in-tree build is still lying in `python/qed/`.
 Site toolchains live in `scripts/clusters/<name>.env`; `--arch x86-64-v3` (instead of
 the default `native`) produces a binary that runs on every node type of a mixed cluster.
-
-(docker-and-dev-containers)=
-## Docker and dev containers
-
-A reproducible `Dockerfile.dev` and a Nix flake (`flake.nix`) are
-tracked at the repository root.
