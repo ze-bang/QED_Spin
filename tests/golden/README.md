@@ -42,10 +42,18 @@ dimension 16384 (`heis_chain14`, `sz="off"`), where the CPU reductions go multi-
 ## Running (compute nodes only)
 
     sbatch scripts/golden/build.sbatch
-    sbatch --export=ALL,MODE=record,REF=tests/golden/refs/<tag>/cpu.json.gz  scripts/golden/run_cpu.sbatch
-    sbatch --export=ALL,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run_cpu.sbatch
-    sbatch --export=ALL,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run_gpu.sbatch
-    sbatch scripts/golden/run_consumers.sbatch      # QED_NLCE_Spin test suite against this tree
+    sbatch --export=ALL,DEVICE=cpu,MODE=record,REF=tests/golden/refs/<tag>/cpu.json.gz  scripts/golden/run.sbatch
+    sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
+    sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
+    sbatch scripts/golden/run_consumers.sbatch      # QED_NLCE_Spin suite + tri_dsl smoke against this tree
 
 A change lands only when the three compare jobs exit 0. Re-blessing a reference is its
 own commit and carries the `compare` output that justified it.
+
+Removing a feature on purpose: delete its cases from `cases.py`, then
+`MODE=retire ONLY="<exact names>" REASON="..."`. `retire` refuses while `cases.py` still
+produces a named case, and moves the dropped records into `meta.retired` with the commit
+and reason. New cases enter with `MODE=bless_new REASON="..."`.
+
+`reference.py` holds the model vocabulary (`Model`, term builders) and the independent
+dense numpy reference; `models.py` the case-specific clusters; `cases.py` the matrix.

@@ -27,12 +27,10 @@ from typing import Callable
 
 import numpy as np
 
-# Bind the qed package selected by PYTHONPATH / QED_CORE_DIR BEFORE importing the
-# benchmarks helpers: audit_workflows prepends the in-tree python/ to sys.path, which
-# would otherwise silently override the package under test.
-import qed  # noqa: E402,F401  (must stay first)
+import qed  # the package selected by PYTHONPATH / QED_CORE_DIR
 
 import models as gm
+import reference
 from models import Model
 
 from qed import _core
@@ -174,8 +172,7 @@ def probe_operator(N, terms):
 # case families
 # -----------------------------------------------------------------------------
 def audit_models():
-    import audit_correctness as ac
-    return quiet(ac.make_models)
+    return quiet(reference.make_audit_models)
 
 
 def spectrum_cases(m: Model):
@@ -184,8 +181,7 @@ def spectrum_cases(m: Model):
     cs = []
     if m.N <= DENSE_MAX_N:
         def dense():
-            from audit_workflows import Reference
-            ref = Reference(m)
+            ref = reference.Reference(m)
             got = np.sort(np.asarray(quiet(lambda: qed.full_spectrum(H, verbose=False)).eigenvalues, float))
             want = np.sort(ref.evals)
             if len(got) != len(want):
@@ -473,6 +469,149 @@ def _lg_full(H, A, residues, n_up, gens, use_gpu=False):
     return rec
 
 
+# -----------------------------------------------------------------------------
+# consumer pins: the exact call shapes downstream code depends on (tri_dsl,
+# QED_NLCE_Spin, twist_qsi_demo, qfi_chain), recorded so a refactor that keeps the
+# numbers but breaks a signature or a file layout still fails the gate
+# -----------------------------------------------------------------------------
+def _h5_layout(path):
+    """Datasets of an HDF5 file: {name: [shape, compound field names]}, plus the
+    eigenvalues and the norm of every eigenvector (phase-free)."""
+    import h5py
+    rec, evals, norms = {}, None, []
+    with h5py.File(path, "r") as h5:
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                rec[name] = [list(obj.shape), list(obj.dtype.names or [])]
+        h5.visititems(visit)
+        if "eigendata/eigenvalues" in h5:
+            evals = fl(np.sort(np.asarray(h5["eigendata/eigenvalues"], float)))
+            for i in range(len(evals)):
+                key = f"eigendata/eigenvector_{i}"
+                if key in h5:
+                    v = np.asarray(h5[key])
+                    if v.dtype.names:
+                        v = v["real"] + 1j * v["imag"]
+                    norms.append(float(np.linalg.norm(v)))
+    return {"datasets": rec, "eigenvalues": evals, "eigenvector_norms": norms}
+
+
+def _expectation_record(out, A, gens):
+    out = dict(out)
+    out["eigenvalues"] = out["energies"]
+    rec = lg_rows(out, A, gens)
+    rows = [[float(e)] + [float(x) for x in v] + [float(x) for x in d]
+            for e, v, d in zip(out["energies"], out["values"], out["diagonal_values"])]
+    rec["values"] = sorted(rows)
+    rec["levels"] = sorted(int(l) for l in out["level"])
+    return rec
+
+
+def consumer_pin_cases():
+    import tempfile
+    cs = []
+    m12, tt = gm.tri_j1j2((2, 2), (-2, 4), 0.125, "tri12_j1j2")
+    H = m12.operator()
+    A, R = tt.translation_group(), tt.point_group()
+    gens = [tt.translation(1, 0), tt.translation(0, 1)]
+    dH_dJ2 = Model("tri12_nnn", 12, gm.heisenberg_terms(tt.nnn(), 1.0), u1=True, real=True).operator()
+    zz_nn = [[(1.0, [i, j]) for (i, j) in tt.nn()]]
+
+    # tri_dsl run_blocks.py: plan read from a cheap sector with the flip off ...
+    def plan():
+        p = dict(_core.little_group_full_spectrum(H, A, R, n_up=2, plan_only=True, spin_flip=0))
+        return [{"k0": int(s["k0"]), "star_size": int(s["star_size"]),
+                 "little_order": int(s["little_order"]), "projected": bool(s["projected"]),
+                 "irrep_dims": [int(d) for d in s["little_irrep_dims"]],
+                 "members": sorted(int(m) for m in s["members"])} for s in p["stars"]]
+    cs.append(GCase("tri12_j1j2/consumer/tri_dsl/full_spectrum_plan_only", "exact",
+                    lambda: {"stars": plan()}))
+
+    # ... then k lowest levels of chosen blocks with <n|O|n> (Hellmann-Feynman slopes)
+    def expect(k, only):
+        kw = dict(k=k, block_size=1, n_up=6, dense_max_dim=1, use_gpu=DEVICE == "gpu",
+                  diagonal_observables=zz_nn)
+        if only:
+            st = [s for s in plan() if s["projected"]][0]
+            kw.update(only_k0=[st["k0"] + len(A)], only_irrep=[0])   # flip-odd copy (tri_dsl's k0 + |A|)
+        return _expectation_record(_core.little_group_block_expectations(H, [dH_dJ2], A, R, **kw), A, gens)
+    cs.append(GCase("tri12_j1j2/consumer/tri_dsl/block_expectations/k=2/all_blocks", "exact",
+                    lambda: expect(2, False)))
+
+    def ks_lane():
+        with env(ED_SYM_LG_DENSE_FLOOR=0):                     # force Krylov-Schur, as at N=36
+            return expect(4, True)
+    cs.append(GCase("tri12_j1j2/consumer/tri_dsl/block_expectations/k=4/only_k0/krylov_schur", "exact",
+                    ks_lane))
+
+    # QED_NLCE_Spin qed_nlce/ed/io.py: operator loaded from mVMC Trans.dat / InterAll.dat
+    def nlce_files():
+        nn = [(0, 1), (1, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 4), (3, 5), (4, 5)]
+        m = Model("nlce_tri6_field", 6, gm.heisenberg_terms(nn, 1.0) + [(("z",), (i,), 0.25) for i in range(6)],
+                  u1=True, real=True, flip=False)
+        with tempfile.TemporaryDirectory() as d:
+            m.builder().write_directory(d)
+            op = _core.Operator(6, 0.5)
+            op.load_trans(os.path.join(d, "Trans.dat"))
+            op.load_inter_all(os.path.join(d, "InterAll.dat"))
+            got = sorted_evals(quiet(lambda: qed.full_spectrum(op, verbose=False)))
+        want = sorted_evals(quiet(lambda: qed.full_spectrum(m.operator(), verbose=False)))
+        if max(abs(a - b) for a, b in zip(got, want)) > 1e-12:
+            raise AssertionError("file-loaded operator differs from the in-memory one")
+        return {"eigenvalues": got}
+    cs.append(GCase("nlce_tri6_field/consumer/nlce/load_trans_inter_all", "exact", nlce_files))
+
+    # qfi_chain: solve(FULL, compute_eigenvectors, output_dir) -> eigenvectors_path readable,
+    # on its model class: a transverse-field chain (no U(1), so one full-space solve)
+    chain8 = gm.heis_chain(8)
+    tfim = [(("z", "z"), (i, (i + 1) % 8), -1.0) for i in range(8)]
+    tfim += [t for i in range(8) for t in ((("+",), (i,), -0.35), (("-",), (i,), -0.35), (("z",), (i,), -0.1))]
+    tfim8 = Model("tfim_chain8", 8, tfim, u1=False, real=True, parity=False)
+
+    def qfi_full():
+        with tempfile.TemporaryDirectory() as d:
+            r = quiet(lambda: qed.solve(tfim8.operator(), solver="FULL", compute_eigenvectors=True,
+                                        output_dir=d, device=DEVICE, verbose=False))
+            path = getattr(r, "eigenvectors_path", "") or ""
+            rec = {"eigenvalues": sorted_evals(r),
+                   "eigenvectors_path": os.path.relpath(path, d) if path else ""}
+            if path and os.path.isfile(path):
+                rec["h5"] = _h5_layout(path)
+            else:
+                h5s = sorted(os.path.relpath(os.path.join(p, f), d) for p, _, fs in os.walk(d)
+                             for f in fs if f.endswith(".h5"))
+                rec["h5_files"] = h5s
+                if h5s:
+                    rec["h5"] = _h5_layout(os.path.join(d, h5s[0]))
+        return rec
+    cs.append(GCase("tfim_chain8/consumer/qfi_chain/solve_FULL_eigenvectors_h5", "exact", qfi_full))
+
+    # twist_qsi_demo: per-sector vectors under sector_k_*/ed_results.h5
+    def twist_sectors():
+        with tempfile.TemporaryDirectory() as d:
+            quiet(lambda: qed.solve(chain8.operator(), sz=4, num_eigenvalues=2, symmetry="auto",
+                                    point_group="off", compute_eigenvectors=True, output_dir=d,
+                                    device=DEVICE, verbose=False))
+            files = sorted(os.path.relpath(os.path.join(p, f), d) for p, _, fs in os.walk(d)
+                           for f in fs if f == "ed_results.h5")
+            return {"files": files, "layouts": {f: _h5_layout(os.path.join(d, f)) for f in files}}
+    cs.append(GCase("heis_chain8/consumer/twist/solve_symmetry_sector_vectors", "exact", twist_sectors))
+
+    # twist_qsi_demo qed_pregate_oftlm: thermal with an Sz window, generators, krylov_dim, seed
+    ring_gens = [[(i + 1) % 8 for i in range(8)]]
+    for method in ("FTLM", "OFTLM"):
+        def twist_thermal(method=method):
+            with env(ED_THERMAL_EXACT_SMALL=0):     # sample even the tiny sectors (no exact fallback)
+                r = quiet(lambda: qed.thermal(chain8.operator(), method=method, T_min=0.05, T_max=2.0,
+                                              num_T=8, sz=(0, 8), symmetry=ring_gens, num_samples=6,
+                                              krylov_dim=40, random_seed=7, device=DEVICE, verbose=False))
+            return {"T": fl(r.temperatures), "C": fl(r.specific_heat), "S": fl(r.entropy),
+                    "E": fl(r.energy)}
+        cs.append(GCase(f"heis_chain8/consumer/twist/thermal/{method}/sz_window/symmetry", "stochastic",
+                        twist_thermal))
+    return cs
+
+
 def symmetry_report_case(m: Model):
     H = m.operator()
 
@@ -524,6 +663,7 @@ def build_cases(device="cpu"):
     cases += little_group_cases("tri12_j1j2", m12, A, tt.point_group(), gens,
                                 correlator_translations=A)
     cases += little_group_cases("tri12_j1j2/translations_only", m12, A, [], gens)
+    cases += consumer_pin_cases()
 
     # square 4x4 J1-J2 at J2 = 1: exact within-block degeneracies
     sq = gm.square_j1j2(4, 1.0, "square4x4_j2=1")

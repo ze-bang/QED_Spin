@@ -4,6 +4,7 @@
     python tests/golden/golden.py record  --out tests/golden/refs/<tag>/cpu.json.gz
     python tests/golden/golden.py compare --ref tests/golden/refs/<tag>/cpu.json.gz
     python tests/golden/golden.py bless   --ref tests/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
+    python tests/golden/golden.py retire  --ref tests/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
     python tests/golden/golden.py list
 
 ``record`` runs every case twice unless --once is given and refuses to write a
@@ -180,16 +181,22 @@ def cmd_bless(args):
     by a second run) and keep every other record; the file's meta keeps a log of what
     was re-blessed, at which commit and why."""
     from cases import build_cases
-    if not args.only:
-        print("bless needs --only: re-blessing everything is `record`")
+    if not args.only and not args.new:
+        print("bless needs --only (exact case names) or --new: re-blessing everything is `record`")
         return 2
     with gzip.open(args.ref, "rt") as f:
         doc = json.load(f)
-    chosen = [c for c in build_cases(args.device) if c.name in set(args.only)]
-    unknown = sorted(set(args.only) - {c.name for c in chosen})
-    if unknown:
-        print(f"no such case(s): {unknown} (bless takes exact case names)")
-        return 2
+    if args.new:                                  # every case the reference does not know yet
+        chosen = [c for c in build_cases(args.device) if c.name not in doc["records"]]
+        if not chosen:
+            print("no new cases")
+            return 0
+    else:
+        chosen = [c for c in build_cases(args.device) if c.name in set(args.only)]
+        unknown = sorted(set(args.only) - {c.name for c in chosen})
+        if unknown:
+            print(f"no such case(s): {unknown} (bless takes exact case names)")
+            return 2
     for c in chosen:
         r1, r2 = run_case(c), run_case(c)
         d = diff_records(r1, r2)
@@ -206,6 +213,39 @@ def cmd_bless(args):
     with gzip.open(args.ref, "wt") as f:
         json.dump(doc, f)
     print(f"\nblessed {len(chosen)} case(s) into {args.ref}")
+    return 0
+
+
+def cmd_retire(args):
+    """Drop EXACTLY the named cases from an existing reference, for a feature that was
+    removed on purpose. Refuses while cases.py still produces any of them (retiring a
+    live case would hide a regression). The dropped records move into meta["retired"]
+    with the commit, date and reason, so every deletion stays auditable."""
+    from cases import build_cases
+    if not args.only:
+        print("retire needs --only with exact case names")
+        return 2
+    with gzip.open(args.ref, "rt") as f:
+        doc = json.load(f)
+    live = {c.name for c in build_cases(args.device)} & set(args.only)
+    if live:
+        print(f"refusing to retire case(s) that cases.py still produces: {sorted(live)}")
+        return 1
+    unknown = sorted(set(args.only) - set(doc["records"]))
+    if unknown:
+        print(f"no such case(s) in {args.ref}: {unknown}")
+        return 2
+    dropped = {name: doc["records"].pop(name) for name in args.only}
+    for name in args.only:
+        doc.get("quarantine", {}).pop(name, None)
+    doc["meta"].setdefault("retired", []).append(
+        {"sha": git_sha(), "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "reason": args.reason, "records": dropped})
+    with gzip.open(args.ref, "wt") as f:
+        json.dump(doc, f)
+    for name in args.only:
+        print(f"  retired {name}")
+    print(f"\nretired {len(dropped)} case(s) from {args.ref} ({len(doc['records'])} remain)")
     return 0
 
 
@@ -269,16 +309,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("record", cmd_record), ("compare", cmd_compare), ("bless", cmd_bless),
-                     ("list", cmd_list)):
+                     ("retire", cmd_retire), ("list", cmd_list)):
         p = sub.add_parser(name)
         p.add_argument("--device", default="cpu", choices=("cpu", "gpu"))
         p.add_argument("--only", nargs="*", default=[], help="substring filter on case names")
         if name == "record":
             p.add_argument("--out", required=True)
             p.add_argument("--once", action="store_true", help="single pass, no determinism check")
-        if name == "bless":
+        if name in ("bless", "retire"):
             p.add_argument("--ref", required=True)
             p.add_argument("--reason", required=True, help="why the reference moves (kept in meta)")
+        if name == "bless":
+            p.add_argument("--new", action="store_true", help="bless every case not yet in the reference")
         if name == "compare":
             p.add_argument("--ref", required=True)
         p.set_defaults(fn=fn)

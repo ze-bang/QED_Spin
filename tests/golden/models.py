@@ -1,6 +1,6 @@
 """Model zoo for the golden-master harness.
 
-Everything here is a term list in the ``benchmarks/audit_workflows.py`` vocabulary
+Everything here is a term list in the ``reference.py`` vocabulary
 (``(ops, sites, coeff)`` with ops in {"+", "-", "z"}), so one description feeds the
 library and the independent dense reference alike.
 
@@ -10,16 +10,10 @@ survives it exactly.
 """
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass, field
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "benchmarks"))
-
-from audit_workflows import (Model, chain_bonds, chiral_terms,  # noqa: E402
-                             heisenberg_terms, triangular_torus)
+from reference import (Model, chain_bonds, chiral_terms,
+                       heisenberg_terms, triangular_torus)
 
 
 # -----------------------------------------------------------------------------

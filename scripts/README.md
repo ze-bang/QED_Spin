@@ -23,8 +23,9 @@ repository QED_Spin_research, with its history.
 
 ```
 B=$(sbatch --parsable scripts/golden/build.sbatch)
-sbatch --dependency=afterok:$B --export=ALL,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/cpu.json.gz scripts/golden/run_cpu.sbatch
-sbatch --dependency=afterok:$B --export=ALL,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/gpu.json.gz scripts/golden/run_gpu.sbatch
+sbatch --dependency=afterok:$B --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/cpu.json.gz scripts/golden/run.sbatch
+sbatch --dependency=afterok:$B --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/gpu.json.gz scripts/golden/run.sbatch
+sbatch --gpus-per-node=h100:1 --export=ALL,QED_CTEST_VARIANT=cuda scripts/run_ctests.sbatch   # steps that touch GPU code
 sbatch --dependency=afterok:$B scripts/golden/run_consumers.sbatch
 sbatch --dependency=afterok:$B scripts/run_ctests.sbatch
 sbatch scripts/run_python_tests.sbatch        # after the others: it rebuilds _core in build/cpu
