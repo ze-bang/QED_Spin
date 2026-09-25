@@ -722,6 +722,13 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
                                 int block_size, bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
+// lg_observables.cpp: the lowest `want` eigenpairs of one block in block coordinates
+// (dense / certified GS vector / Krylov-Schur by size); *converged false when the
+// window could not be certified (the certified prefix is still returned).
+[[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
+solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
+                       int dense_max_dim, int block_size, bool* converged);
+
 // lg_stars.cpp
 [[nodiscard]] StarBuild
 build_star_blocks(const ::Operator&         op,

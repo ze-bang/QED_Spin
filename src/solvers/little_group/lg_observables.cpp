@@ -14,7 +14,7 @@ namespace ed::solvers {
 
 using namespace lg_detail;
 
-namespace {
+namespace lg_detail {
 
 // The lowest `want` eigenpairs of one block, in block coordinates. Dense below the
 // lowest-k crossover (exact); one level through the certified ground-state solver
@@ -57,6 +57,10 @@ solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
     ev = solve_block_lowest_krylov_schur(mv, k, block_size, converged, &vv);
     return {ev, vv};
 }
+
+}  // namespace lg_detail
+
+namespace {
 
 // The operator must be representable in the sector basis H's symmetries define.
 void require_compatible(const ::Operator& O, std::size_t index, const EngineContext& cx,
