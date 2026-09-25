@@ -318,21 +318,3 @@ def test_symmetry_info_round_trip_via_dict():
     fop.set_symmetry_info_from_dict(info)
     out2 = fop.get_symmetry_info_as_dict()
     assert out2["num_generators"] == info["num_generators"]
-
-
-# ----------------------------------------------------------------------------
-# DSSF runner: only smoke-check that the helper validates inputs gracefully
-# without requiring the ED binary on $PATH (CI runs without the C++ build).
-# ----------------------------------------------------------------------------
-
-
-def test_spectral_directory_form_validates_inputs(tmp_path):
-    """The replacement for the removed ``qed.dssf.run_from_directory``
-    helper: ``qed.spectral(directory, ...)`` shells out to ``./ED dssf``
-    and must validate its inputs before invoking the binary."""
-    with pytest.raises(FileNotFoundError):
-        qed.spectral(
-            str(tmp_path / "does-not-exist"),
-            method="dynamical_thermal",
-            ed_binary="/definitely/not/a/path/to/ED",
-        )

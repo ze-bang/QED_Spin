@@ -179,9 +179,8 @@ def _closed_symmetry_info(info: dict[str, Any]) -> dict[str, Any]:
     subgroup), in which case its own generator list is the one the orders
     and quantum numbers refer to.
 
-    Both the directory writer and the in-memory symmetric bindings take
-    their group from this dict, and ``sector=`` is resolved against the same
-    table. (C++ re-filters phantom irreps and renumbers the survivors; a
+    The symmetric bindings take their group from this dict, and ``sector=``
+    is resolved against the same table. (C++ re-filters phantom irreps and renumbers the survivors; a
     closed table is already filtered and contiguous, so that is a no-op
     here. Only a caller-supplied ``max_clique`` + UNFILTERED ``sectors``
     table can still be renumbered under the ``sector=`` lookup.)

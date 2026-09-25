@@ -2,9 +2,8 @@
 // python/qed/_bindings/workflow/workflow_spectral_ftlm.cpp
 //
 // The finite-T (FTLM) spectral bindings: `workflows_spectral_ftlm_plain`
-// and the cross-irrep FTLM pair
-// (`workflows_spectral_streaming_symmetry_ftlm_cross_irrep[_directory]`),
-// which share one body lambda.
+// and the cross-irrep FTLM binding
+// (`workflows_spectral_streaming_symmetry_ftlm_cross_irrep`).
 //
 // Split out of the former monolithic `workflow_bindings.cpp` (WP11, Sep
 // 2026). The binding bodies are unchanged; the shared helpers now live in
@@ -97,9 +96,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
           "Finite-temperature S(omega, T) of one observable on the operator's own block "
           "via the FTLM cross-irrep estimator with source = target = this block.");
 
-    // WP9: one body for the directory binding and its in-memory twin
-    // ``workflows_spectral_streaming_symmetry_ftlm_cross_irrep``; the
-    // shifted-Sz target set is seeded from the SAME source.
+    // The shifted-Sz target set is seeded from the SAME source.
     const auto spectral_ftlm_cross_irrep_body =
           [](const SymmetricSource&                source,
              std::uint64_t                          num_sites,
@@ -120,16 +117,16 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                   decode_probe_transforms(
                       observable_transforms,
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                      "irrep_directory");
+                      "irrep");
               if (tlist.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                      "irrep_directory: observable_transforms is empty.");
+                      "irrep: observable_transforms is empty.");
               }
               if (temperatures.empty()) {
                   throw std::invalid_argument(
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                      "irrep_directory: temperatures is empty.");
+                      "irrep: temperatures is empty.");
               }
 
               // Decode Python arguments BEFORE dropping the GIL.
@@ -147,7 +144,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
                       "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                      "irrep_directory");
+                      "irrep");
                   // Operator-collapse Phase 3 (Jun 2026): direct sector
                   // enumeration via ``make_sector_operators_tagged`` +
                   // ``SectorSetView``. ``src_ref`` / ``dst_ref`` are built
@@ -160,7 +157,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                   if (src_num_sectors == 0) {
                       throw std::runtime_error(
                           "workflows_spectral_streaming_symmetry_ftlm_cross_"
-                          "irrep_directory: source operator has no symmetry "
+                          "irrep: source operator has no symmetry "
                           "sectors; check automorphism_results/.");
                   }
 
@@ -172,7 +169,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                       if (!src_spec.fixed_sz.has_value()) {
                           throw std::invalid_argument(
                               "workflows_spectral_streaming_symmetry_ftlm_"
-                              "cross_irrep_directory: delta_n_up != 0 "
+                              "cross_irrep: delta_n_up != 0 "
                               "requires fixed_sz_n_up to be set.");
                       }
                       ed::OperatorSpec dst_spec;
@@ -242,7 +239,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                       if (q_residual > opts.momentum_tolerance) {
                           throw std::runtime_error(
                               "workflows_spectral_streaming_symmetry_ftlm_"
-                              "cross_irrep_directory: Q incommensurate with "
+                              "cross_irrep: Q incommensurate with "
                               "the lattice (residual = " +
                               std::to_string(q_residual) +
                               " > tolerance = " +
@@ -273,7 +270,7 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                       if (dim_dst != dst_view->dim()) {
                           throw std::runtime_error(
                               "workflows_spectral_streaming_symmetry_ftlm_"
-                              "cross_irrep_directory: dim_dst mismatch "
+                              "cross_irrep: dim_dst mismatch "
                               "(observable=" + std::to_string(dim_dst) +
                               ", view=" + std::to_string(dst_view->dim()) +
                               ").");
@@ -423,106 +420,6 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
               }
               return agg;
           };
-    m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory",
-          [spectral_ftlm_cross_irrep_body](
-              const std::string&                    directory,
-              std::uint64_t                          num_sites,
-              double                                 spin_l,
-              const std::vector<py::tuple>&          observable_transforms,
-              ed::workflows::SpectralOptions         opts,
-              py::object                             fixed_sz_n_up,
-              int                                    delta_n_up,
-              std::vector<double>                    temperatures,
-              std::uint64_t                          num_samples,
-              std::uint64_t                          random_seed,
-              int                                    sz_parity,
-              bool                                   flip_sectors) {
-              return spectral_ftlm_cross_irrep_body(
-                  ed::DirectoryPath{directory}, num_sites, spin_l,
-                  observable_transforms, std::move(opts),
-                  std::move(fixed_sz_n_up), delta_n_up,
-                  std::move(temperatures), num_samples, random_seed,
-                  sz_parity, flip_sectors);
-          },
-          py::arg("directory"),
-          py::arg("num_sites"),
-          py::arg("spin_l")                = 0.5,
-          py::arg("observable_transforms") = std::vector<py::tuple>{},
-          py::arg("opts")                  = ed::workflows::SpectralOptions{},
-          py::arg("fixed_sz_n_up")         = py::none(),
-          py::arg("delta_n_up")            = 0,
-          py::arg("temperatures")          = std::vector<double>{},
-          py::arg("num_samples")           = std::uint64_t{30},
-          py::arg("random_seed")           = std::uint64_t{0},
-          py::arg("sz_parity")             = -1,
-          py::arg("flip_sectors")          = false,
-          R"pbdoc(
-        Cross-irrep streaming-symmetry **finite-T** spectral workflow
-        (SOTA FTLM).
-
-        Computes S(Q, omega, T) for a user-supplied probe observable
-        ``O_Q`` whose lattice symmetry character implies a sector
-        transition
-
-            k_final = k_initial + Q
-
-        via the streaming-symmetry selection rule (and an optional
-        Sz shift ``delta_n_up``). The implementation is a per-source-
-        sector Finite-Temperature Lanczos Method (FTLM): for each
-        source sector ``k_src`` we draw ``num_samples`` Gaussian
-        random vectors in the source orbit basis, build an outer
-        Lanczos basis on ``H`` restricted to ``k_src``, reconstruct
-        each Ritz state, scatter it into ``k_dst`` via the
-        rectangular ``CrossSectorOrbitObservable``, run a second,
-        target-sector Lanczos starting from ``phi = O_Q |m>``, and
-        accumulate a Lorentzian-broadened Lehmann sum weighted by
-        ``exp(-beta * E_m) * |c_m|^2``. Sectors are recombined via
-        the F-shifted Z-weighted combiner so disparate per-sector
-        E_min values do not destabilise the floating-point exponent.
-
-        Parameters
-        ----------
-        directory : str
-            Hamiltonian directory (must contain
-            ``automorphism_results/``).
-        num_sites : int
-            Number of lattice sites.
-        spin_l : float, optional
-            Local spin (0.5 by default).
-        observable_transforms : list of (op_type:int, site:int,
-                                         coeff:complex,
-                                         is_two_body:bool,
-                                         op_type_2:int, site_2:int)
-            One row per term in ``O_Q``. ``qed.spectral`` extracts
-            these automatically from an ``ed.Operator`` argument.
-        opts : SpectralOptions, optional
-            ``krylov_dim``, ``broadening``, ``omega_*``,
-            ``momentum_transfer``, ``selected_sectors``, etc.
-        fixed_sz_n_up : int or None, optional
-            Source-sector n_up. Required when ``delta_n_up != 0``.
-        delta_n_up : int, optional
-            Change in n_up produced by ``O_Q``.
-        temperatures : list of float
-            Temperatures to evaluate (must be non-empty; values are
-            energy-axis units).
-        num_samples : int, optional
-            FTLM random samples per source sector.
-        random_seed : int, optional
-            Seed base; per-sample seed is
-            ``random_seed + sample_idx * 12345``.
-
-        Returns
-        -------
-        SpectralResult
-            ``omega`` / ``S_real`` carry the recombined S(Q,omega) at
-            ``temperatures[0]``. The per-T data set is stuffed into
-            ``per_sector_pair`` entries (one per source sector pair
-            for the **primary** T, followed by one synthetic entry
-            per temperature whose ``initial.sector_dim == 0`` flag
-            distinguishes the multi-T payload). The Python wrapper
-            ``qed.spectral`` unpacks this and surfaces a clean
-            ``{T -> S(omega)}`` dict to the user.
-    )pbdoc");
     m.def("workflows_spectral_streaming_symmetry_ftlm_cross_irrep",
           [spectral_ftlm_cross_irrep_body](
               const Operator&                        H,
@@ -562,12 +459,73 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
           py::arg("sz_parity")             = -1,
           py::arg("flip_sectors")          = false,
           R"pbdoc(
-        In-memory twin of
-        ``workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory``.
+        Cross-irrep streaming-symmetry **finite-T** spectral workflow
+        (SOTA FTLM).
 
-        Takes the Hamiltonian ``H`` (its terms are copied) and the group
-        info dict the directory writer consumes in place of the
-        directory; every other argument and the result are identical.
+        Computes S(Q, omega, T) for a user-supplied probe observable
+        ``O_Q`` whose lattice symmetry character implies a sector
+        transition
+
+            k_final = k_initial + Q
+
+        via the streaming-symmetry selection rule (and an optional
+        Sz shift ``delta_n_up``). The implementation is a per-source-
+        sector Finite-Temperature Lanczos Method (FTLM): for each
+        source sector ``k_src`` we draw ``num_samples`` Gaussian
+        random vectors in the source orbit basis, build an outer
+        Lanczos basis on ``H`` restricted to ``k_src``, reconstruct
+        each Ritz state, scatter it into ``k_dst`` via the
+        rectangular ``CrossSectorOrbitObservable``, run a second,
+        target-sector Lanczos starting from ``phi = O_Q |m>``, and
+        accumulate a Lorentzian-broadened Lehmann sum weighted by
+        ``exp(-beta * E_m) * |c_m|^2``. Sectors are recombined via
+        the F-shifted Z-weighted combiner so disparate per-sector
+        E_min values do not destabilise the floating-point exponent.
+
+        Parameters
+        ----------
+        H : Operator
+            The Hamiltonian (its terms are copied).
+        group : dict
+            Closed group info (``max_clique``, ``generators``,
+            ``generator_orders``, ``sectors``).
+        num_sites : int
+            Number of lattice sites.
+        spin_l : float, optional
+            Local spin (0.5 by default).
+        observable_transforms : list of (op_type:int, site:int,
+                                         coeff:complex,
+                                         is_two_body:bool,
+                                         op_type_2:int, site_2:int)
+            One row per term in ``O_Q``. ``qed.spectral`` extracts
+            these automatically from an ``ed.Operator`` argument.
+        opts : SpectralOptions, optional
+            ``krylov_dim``, ``broadening``, ``omega_*``,
+            ``momentum_transfer``, ``selected_sectors``, etc.
+        fixed_sz_n_up : int or None, optional
+            Source-sector n_up. Required when ``delta_n_up != 0``.
+        delta_n_up : int, optional
+            Change in n_up produced by ``O_Q``.
+        temperatures : list of float
+            Temperatures to evaluate (must be non-empty; values are
+            energy-axis units).
+        num_samples : int, optional
+            FTLM random samples per source sector.
+        random_seed : int, optional
+            Seed base; per-sample seed is
+            ``random_seed + sample_idx * 12345``.
+
+        Returns
+        -------
+        SpectralResult
+            ``omega`` / ``S_real`` carry the recombined S(Q,omega) at
+            ``temperatures[0]``. The per-T data set is stuffed into
+            ``per_sector_pair`` entries (one per source sector pair
+            for the **primary** T, followed by one synthetic entry
+            per temperature whose ``initial.sector_dim == 0`` flag
+            distinguishes the multi-T payload). The Python wrapper
+            ``qed.spectral`` unpacks this and surfaces a clean
+            ``{T -> S(omega)}`` dict to the user.
     )pbdoc");
 
 }

@@ -10,8 +10,8 @@ The legacy alias :func:`qed.solve` has been removed; use
 
 WP11 split the 3000-line body into :mod:`qed._solve` -- one module per
 concern (``methods`` / ``device`` / ``parameters`` / ``symmetry_input`` /
-``symmetry_lane`` / ``results`` / ``spectrum`` / ``entry`` /
-``directories``; see that package's docstring for the map). Nothing was
+``symmetry_lane`` / ``results`` / ``spectrum`` / ``entry``; see
+that package's docstring for the map). Nothing was
 renamed: this module re-exports every one of those names, public and
 private alike, so ``from qed.workflow import X`` and ``qed.workflow.X``
 keep resolving exactly as before. The in-tree consumers that lean on
@@ -134,14 +134,6 @@ from ._solve.spectrum import (  # noqa: F401  (re-exports)
     full_spectrum_compute,
 )
 from ._solve.entry import solve  # noqa: F401
-from ._solve.directories import (  # noqa: F401  (re-exports)
-    _format_one_body_row,
-    _format_three_body_row,
-    _format_two_body_row,
-    _write_dat_file,
-    _write_operator_directory,
-    _write_symmetry_directory,
-)
 
 __all__ = [
     "GeneratorSet",

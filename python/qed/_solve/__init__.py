@@ -20,8 +20,6 @@ directory writers). It is split here by concern:
   envelope, SU(2) spectral-differencing labels)
 * :mod:`~qed._solve.spectrum`       -- :func:`qed.full_spectrum`
 * :mod:`~qed._solve.entry`          -- :func:`qed.solve`
-* :mod:`~qed._solve.directories`    -- the ``.dat`` / ``automorphism_results``
-  writers the directory-form bindings consume
 
 ``qed.workflow`` re-exports every name these modules define, so
 ``from qed.workflow import X`` keeps working unchanged.

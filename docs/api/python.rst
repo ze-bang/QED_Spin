@@ -114,20 +114,6 @@ permutations) consumed via the ``symmetry=`` kwarg of
    :undoc-members:
    :show-inheritance:
 
-Auto-tuner (``qed.auto_tune``)
-------------------------------
-
-Pure-Python heuristics for spectral broadening (η), the ω-grid, random-vector
-count, and Krylov dimension. Consumed by :func:`qed.spectral` when
-``auto_tune=True`` (see :func:`qed.auto_tune.tune_dssf`); exposed standalone for
-inspection. (There is no pre-flight planner / feasibility module — it was
-removed in favour of sensible defaults plus a runtime memory guard.)
-
-.. automodule:: qed.auto_tune
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Hamiltonian builder (``qed.hamiltonian``)
 -----------------------------------------
 

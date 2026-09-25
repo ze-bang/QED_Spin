@@ -502,9 +502,6 @@ def cli_cases(m: Model, ref: Reference, run: Runner):
         run(Case(f"{m.name}/cli/ED --method=LANCZOS --fixed-sz --n-up={half}", lambda: run_cli(["--method=LANCZOS", "--eigenvalues=2", "--fixed-sz", f"--n-up={half}"]), chk_cli(half, 2)))
     run(Case(f"{m.name}/cli/ED --method=FULL --thermo", lambda: run_cli(["--method=FULL", "--thermo"]), chk_cli(None, 3)))
     # (--symm needs automorphism_results/ in the directory; covered by the Python symmetry lanes)
-    # directory form of the Python thermal verb
-    run(Case(f"{m.name}/thermal(directory)/FTLM", lambda: qed.thermal(d, num_sites=N, method="FTLM", T_min=0.5, T_max=3.0, num_T=4, num_samples=16, krylov_dim=50, verbose=False, device=DEVICE),
-             lambda r: (bool(np.all(np.isfinite(r.energy))), f"E={np.round(np.asarray(r.energy), 4)}")))
     shutil.rmtree(d, ignore_errors=True)
 
 

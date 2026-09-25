@@ -20,22 +20,15 @@ Workflows:
 Symmetry modes:
     * none    -- full Hilbert space
     * Sz      -- fixed-Sz block at half-filling (n_up = N/2)
-    * Symm    -- spatial symmetry (Z_N translation), all irreps
-    * Sz+Symm -- both
+    * Symm    -- spatial symmetry (Z_N translation), all irreps (GS only)
+    * Sz+Symm -- both (GS only)
 
 Known gaps flagged in the report (not benchmarked end-to-end):
     * mTPQ / cTPQ via `qed.thermal`: CLOSED (May 2026). The unified
       mTPQ/cTPQ kernels now emit per-sample (beta_k, E_k, var_k)
       trajectories which the orchestrator aggregates into
-      ThermodynamicData on the user's T grid. All four symmetry
-      modes (none / Sz / Symm / Sz+Symm) return populated arrays;
-      the streaming-symmetry SIGSEGV resolved as a side-effect
-      because sectors no longer return empty thermo to the
-      recombiner. Regression locked in ``test_tpq_thermo.py``.
-    * `qed.spectral(..., method="ftlm_dynamical", symmetry=...)`
-      with a SAME-irrep observable falls back to the CLI. The
-      cross-irrep streaming-binding path IS used here, which is
-      what the SOTA path covers.
+      ThermodynamicData on the user's T grid. Regression locked in
+      ``test_tpq_thermo.py``.
 
 Usage
 -----
@@ -58,9 +51,7 @@ import io
 import json
 import math
 import os
-import shutil
 import sys
-import tempfile
 import time
 import traceback
 from typing import Any, Optional
@@ -72,7 +63,7 @@ from qed import _core
 
 
 # ---------------------------------------------------------------------------
-# Fixtures: Heisenberg ring + Z_N translation symmetry
+# Fixtures: Heisenberg ring
 # ---------------------------------------------------------------------------
 
 
@@ -81,34 +72,6 @@ def heisenberg_ring(num_sites: int):
     bonds = [(i, (i + 1) % num_sites) for i in range(num_sites)]
     builder.heisenberg(bonds, J=1.0)
     return builder.to_operator()
-
-
-def zN_translation(num_sites: int) -> qed.GeneratorSet:
-    T = [(i + 1) % num_sites for i in range(num_sites)]
-    return qed.GeneratorSet(
-        name="ZN_translation",
-        description="Cyclic translation by one site (order N)",
-        generators=[T],
-        orders=[num_sites],
-        group_size=num_sites,
-    )
-
-
-def write_dir_with_automorphisms(num_sites: int):
-    """Write a Heisenberg-ring directory deck + ``automorphism_results/``
-    suitable for the streaming-symmetry bindings."""
-    from qed.symmetry import group_from_generators
-    from qed.workflow import (
-        _write_operator_directory,
-        _write_symmetry_directory,
-    )
-
-    H = heisenberg_ring(num_sites)
-    tmpdir = tempfile.mkdtemp(prefix=f"qed_bench_N{num_sites}_")
-    _write_operator_directory(H, tmpdir)
-    info = group_from_generators(num_sites, zN_translation(num_sites).generators)
-    _write_symmetry_directory(tmpdir, info)
-    return tmpdir, H
 
 
 def sz_q_observable(num_sites: int, q_int: int) -> Any:
@@ -152,148 +115,6 @@ def _time_call(fn, *args, **kwargs):
     except Exception as exc:  # noqa: BLE001
         dt = time.perf_counter() - t0
         return None, dt, exc
-
-
-# Subprocess-isolated single-cell runner. Used to enforce a per-cell
-# timeout AND survive native crashes (segfaults in the orchestrator).
-_CELL_RUNNER_SRC = r"""
-import json, sys, time, traceback
-import qed
-from qed import _core
-import numpy as np
-import math
-
-cell_kind = sys.argv[1]   # 'GS' | 'FT' | 'DSSF_GS' | 'DSSF_FT'
-payload   = json.loads(sys.argv[2])
-
-t0 = time.perf_counter()
-try:
-    if cell_kind == 'thermal_dir':
-        # qed.thermal directory form (Symm or Sz+Symm). Only forward
-        # kwargs that are not None -- some C++ bindings choke on None
-        # where int is expected.
-        kwargs = dict(
-            num_sites=payload['N'],
-            method=payload['method'],
-            T_min=payload['T_min'], T_max=payload['T_max'],
-            num_T=payload['num_T'],
-            use_symmetry_if_available=True,
-            use_sz_if_conserved=payload.get('use_sz', True),
-            verbose=False,
-        )
-        for k_pay, k_arg in [('num_samples', 'num_samples'),
-                             ('krylov_dim', 'krylov_dim'),
-                             ('kpm_num_moments', 'kpm_num_moments'),
-                             ('kpm_num_rvs', 'kpm_num_random_vectors')]:
-            v = payload.get(k_pay)
-            if v is not None:
-                kwargs[k_arg] = int(v)
-        r = qed.thermal(payload['tmpdir'], **kwargs)
-        obs = float(r.energy[0]) if len(r.energy) else None
-        out = {'ok': True, 'wall_s': time.perf_counter()-t0, 'obs': obs}
-    elif cell_kind == 'spectral_ftlm_dir':
-        # qed.spectral cross-irrep FTLM directory form (Symm / Sz+Symm).
-        omega = np.array(payload['omega'])
-        # Rebuild the observable in this subprocess.
-        N = payload['N']
-        q_int = payload['q_int']
-        obs_op = _core.Operator(N, 0.5)
-        Q = 2.0 * math.pi * q_int / N
-        coef = 1.0 / math.sqrt(N)
-        for j in range(N):
-            phase = complex(math.cos(-Q*j), math.sin(-Q*j))
-            obs_op.add_one_body(_core.OP_SZ, j, coef * phase)
-        kwargs = dict(
-            T=payload['T'], omega=omega,
-            eta=payload['eta'], krylov_dim=payload['krylov_dim'],
-            num_random_vectors=payload['num_random_vectors'],
-            symmetry={'observable': obs_op,
-                      'momentum_transfer': [q_int / N],
-                      'delta_n_up': 0},
-            num_sites=N, spin_l=0.5, verbose=False,
-        )
-        if payload.get('sz') is not None:
-            kwargs['sz'] = payload['sz']
-        r = qed.spectral(payload['tmpdir'], **kwargs)
-        S = np.asarray(r.S_real)
-        a = np.abs(S.flatten() if S.ndim > 1 else S)
-        peak = float(a.max()) if a.size else float('nan')
-        out = {'ok': True, 'wall_s': time.perf_counter()-t0, 'obs': peak}
-    elif cell_kind == 'spectral_gscf_dir':
-        omega = np.array(payload['omega'])
-        N = payload['N']
-        q_int = payload['q_int']
-        obs_op = _core.Operator(N, 0.5)
-        Q = 2.0 * math.pi * q_int / N
-        coef = 1.0 / math.sqrt(N)
-        for j in range(N):
-            phase = complex(math.cos(-Q*j), math.sin(-Q*j))
-            obs_op.add_one_body(_core.OP_SZ, j, coef * phase)
-        kwargs = dict(
-            omega=omega, eta=payload['eta'],
-            krylov_dim=payload['krylov_dim'],
-            symmetry={'observable': obs_op,
-                      'momentum_transfer': [q_int / N],
-                      'delta_n_up': 0},
-            num_sites=N, spin_l=0.5, verbose=False,
-        )
-        if payload.get('sz') is not None:
-            kwargs['sz'] = payload['sz']
-        r = qed.spectral(payload['tmpdir'], **kwargs)
-        S = np.asarray(r.S_real)
-        a = np.abs(S.flatten() if S.ndim > 1 else S)
-        peak = float(a.max()) if a.size else float('nan')
-        out = {'ok': True, 'wall_s': time.perf_counter()-t0, 'obs': peak}
-    else:
-        out = {'ok': False, 'wall_s': time.perf_counter()-t0,
-               'err': f'unknown cell_kind {cell_kind}'}
-except Exception as exc:
-    out = {'ok': False, 'wall_s': time.perf_counter()-t0,
-           'err': f'{type(exc).__name__}: {str(exc)[:160]}'}
-print('__PROBE_JSON__' + json.dumps(out))
-"""
-
-
-def _run_cell_subprocess(cell_kind: str, payload: dict, *,
-                         timeout_s: float = 300.0,
-                         verbose: bool = False) -> tuple[Optional[dict], Optional[str]]:
-    """Run a single matrix cell in an isolated subprocess with timeout.
-
-    Returns (payload_dict, error_note). The subprocess approach (a)
-    enforces a hard timeout, (b) survives native crashes, and (c)
-    silences inner-workflow stdout that escapes Python's redirect.
-    """
-    import subprocess
-
-    cmd = [sys.executable, "-c", _CELL_RUNNER_SRC,
-           cell_kind, json.dumps(payload)]
-    t0 = time.perf_counter()
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"subprocess timeout ({timeout_s:.0f}s)"
-    if proc.returncode != 0:
-        # Look for a __PROBE_JSON__ line in case the Python side caught.
-        for line in (proc.stdout or "").splitlines():
-            if line.startswith("__PROBE_JSON__"):
-                try:
-                    return json.loads(line[len("__PROBE_JSON__"):]), None
-                except json.JSONDecodeError:
-                    pass
-        note = f"native crash (rc={proc.returncode})"
-        stderr_tail = (proc.stderr or "")[-160:].strip()
-        if stderr_tail:
-            note += ": " + stderr_tail[:120]
-        return None, note
-    for line in (proc.stdout or "").splitlines():
-        if line.startswith("__PROBE_JSON__"):
-            try:
-                return json.loads(line[len("__PROBE_JSON__"):]), None
-            except json.JSONDecodeError:
-                pass
-    return None, "no payload"
 
 
 def _row(work: str, sym: str, N: int, *, dim: Optional[int] = None,
@@ -392,12 +213,9 @@ def bench_gs(num_sites: int, *, verbose: bool) -> list[dict]:
 
 
 def _thermal_common_kwargs(method: str, num_sites: int) -> dict[str, Any]:
-    """Per-method knobs tuned for "small but representative" benchmarks.
-
-    The streaming-symmetry directory path iterates over every irrep
-    sector (group_size=N for our Z_N translation symmetry) which
-    multiplies the cost by ~N. We scale sample counts down accordingly
-    so a single matrix cell stays in the seconds-not-minutes range.
+    """Per-method knobs tuned for "small but representative" benchmarks:
+    sample counts are scaled down so a single matrix cell stays in the
+    seconds-not-minutes range.
     """
     common = dict(
         method=method,
@@ -408,17 +226,15 @@ def _thermal_common_kwargs(method: str, num_sites: int) -> dict[str, Any]:
         common["num_samples"] = 4
         common["krylov_dim"] = min(80, max(20, (1 << num_sites) // 4))
     elif method == "KPM_DOS":
-        # KPM_DOS has K x R matvec cost, where the streaming path adds
-        # a per-sector factor + a per-sector spectral-bound Lanczos
-        # warm-up. Scale moments + random vectors down hard so the
-        # Symm cells finish in seconds at N>=12, not minutes.
+        # KPM_DOS has K x R matvec cost. Scale moments + random vectors
+        # down hard so the cells finish in seconds at N>=12, not minutes.
         common["kpm_num_moments"] = 80
         common["kpm_num_random_vectors"] = 2
     return common
 
 
 def bench_thermal(num_sites: int, method: str, *,
-                  verbose: bool, tmpdir: str) -> list[dict]:
+                  verbose: bool) -> list[dict]:
     rows: list[dict] = []
     H = heisenberg_ring(num_sites)
     common = _thermal_common_kwargs(method, num_sites)
@@ -448,55 +264,6 @@ def bench_thermal(num_sites: int, method: str, *,
     else:
         rows.append(_row(label, "Sz", num_sites, wall_s=t,
                          status="error", note=_err(e)))
-
-    # 3. Symm only -- directory binding, isolated subprocess so a
-    # native crash or runaway streaming-symmetry sector doesn't kill
-    # the matrix sweep.
-    sub_payload = {
-        "tmpdir": tmpdir, "N": num_sites, "method": method,
-        "T_min": common["T_min"], "T_max": common["T_max"],
-        "num_T": common["num_T"],
-        "use_sz": False,
-        "num_samples": common.get("num_samples"),
-        "krylov_dim": common.get("krylov_dim"),
-        "kpm_num_moments": common.get("kpm_num_moments"),
-        "kpm_num_rvs": common.get("kpm_num_random_vectors"),
-    }
-    payload, note = _run_cell_subprocess(
-        "thermal_dir", sub_payload,
-        timeout_s=(180.0 if method == "KPM_DOS" else 120.0),
-    )
-    if payload is None:
-        rows.append(_row(label, "Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row(label, "Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row(label, "Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
-
-    # 4. Sz + Symm -- directory binding, subprocess-isolated.
-    sub_payload["use_sz"] = True
-    payload, note = _run_cell_subprocess(
-        "thermal_dir", sub_payload,
-        timeout_s=(240.0 if method == "KPM_DOS" else 180.0),
-    )
-    if payload is None:
-        rows.append(_row(label, "Sz+Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row(label, "Sz+Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row(label, "Sz+Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
     return rows
 
 
@@ -515,13 +282,9 @@ def _dssf_peak(omega: np.ndarray, S: np.ndarray) -> float:
 
 
 def bench_dssf_gs(num_sites: int, *,
-                  verbose: bool, tmpdir: str) -> list[dict]:
-    """Ground-state DSSF via continued-fraction.
-
-    All four symmetry modes route through the spectral entry point;
-    'Symm' / 'Sz+Symm' use the streaming-symmetry cross-irrep binding;
-    'none' / 'Sz' use the in-memory CF path.
-    """
+                  verbose: bool) -> list[dict]:
+    """Ground-state DSSF via continued-fraction on the in-memory CF path
+    ('none' / 'Sz')."""
     rows: list[dict] = []
     half = num_sites // 2
     q_int = 1
@@ -562,58 +325,13 @@ def bench_dssf_gs(num_sites: int, *,
     else:
         rows.append(_row("DSSF-GS", "Sz", num_sites, wall_s=t,
                          status="error", note=_err(e)))
-
-    # 3. Symm only -- cross-irrep streaming binding (subprocess-isolated).
-    sub_payload = {
-        "tmpdir": tmpdir, "N": num_sites, "q_int": q_int,
-        "omega": omega.tolist(),
-        "eta": eta, "krylov_dim": 80,
-        "sz": None,
-    }
-    payload, note = _run_cell_subprocess(
-        "spectral_gscf_dir", sub_payload, timeout_s=180.0,
-    )
-    if payload is None:
-        rows.append(_row("DSSF-GS", "Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row("DSSF-GS", "Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row("DSSF-GS", "Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
-
-    # 4. Sz + Symm
-    sub_payload["sz"] = half
-    payload, note = _run_cell_subprocess(
-        "spectral_gscf_dir", sub_payload, timeout_s=180.0,
-    )
-    if payload is None:
-        rows.append(_row("DSSF-GS", "Sz+Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row("DSSF-GS", "Sz+Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row("DSSF-GS", "Sz+Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
     return rows
 
 
 def bench_dssf_ft(num_sites: int, *,
-                  verbose: bool, tmpdir: str) -> list[dict]:
-    """Finite-T DSSF via cross-irrep FTLM streaming binding.
-
-    For 'none' / 'Sz' modes (no streaming-symmetry directory) we fall
-    back to the in-memory `qed.spectral(..., T=..., method="ftlm_dynamical")`
-    path.
-    """
+                  verbose: bool) -> list[dict]:
+    """Finite-T DSSF via the in-memory
+    `qed.spectral(..., T=..., method="ftlm_dynamical")` path ('none' / 'Sz')."""
     rows: list[dict] = []
     half = num_sites // 2
     q_int = 1
@@ -621,9 +339,8 @@ def bench_dssf_ft(num_sites: int, *,
     omega = np.linspace(-2.0, 6.0, 25)
     eta = 0.2
     Ts = [1.0]
-    # FTLM-dynamical streaming binding iterates over every source
-    # irrep sector x num_samples. Use a small sample count so the
-    # per-cell wall stays in the seconds range at N=14.
+    # Use a small sample count so the per-cell wall stays in the
+    # seconds range at N=14.
     n_samples = 4
     H = heisenberg_ring(num_sites)
     obs = sz_q_observable(num_sites, q_int)
@@ -664,48 +381,6 @@ def bench_dssf_ft(num_sites: int, *,
     else:
         rows.append(_row("DSSF-FT", "Sz", num_sites, wall_s=t,
                          status="error", note=_err(e)))
-
-    # 3. Symm only -- FTLM cross-irrep directory binding (subprocess).
-    sub_payload = {
-        "tmpdir": tmpdir, "N": num_sites, "q_int": q_int,
-        "T": Ts, "omega": omega.tolist(),
-        "eta": eta, "krylov_dim": 60,
-        "num_random_vectors": n_samples,
-        "sz": None,
-    }
-    payload, note = _run_cell_subprocess(
-        "spectral_ftlm_dir", sub_payload, timeout_s=240.0,
-    )
-    if payload is None:
-        rows.append(_row("DSSF-FT", "Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row("DSSF-FT", "Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row("DSSF-FT", "Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
-
-    # 4. Sz + Symm
-    sub_payload["sz"] = half
-    payload, note = _run_cell_subprocess(
-        "spectral_ftlm_dir", sub_payload, timeout_s=240.0,
-    )
-    if payload is None:
-        rows.append(_row("DSSF-FT", "Sz+Symm", num_sites, status="error",
-                         note=note or "subprocess failure"))
-    elif payload.get("ok"):
-        rows.append(_row("DSSF-FT", "Sz+Symm", num_sites,
-                         wall_s=payload["wall_s"],
-                         observable=payload.get("obs")))
-    else:
-        rows.append(_row("DSSF-FT", "Sz+Symm", num_sites,
-                         wall_s=payload.get("wall_s"),
-                         status="error",
-                         note=payload.get("err", "")))
     return rows
 
 
@@ -717,15 +392,12 @@ def bench_dssf_ft(num_sites: int, *,
 # Subprocess-isolated TPQ probe payload. Run via -c so a segfault in
 # the orchestrator doesn't take down the whole matrix.
 _TPQ_PROBE_SRC = r"""
-import json, sys, tempfile, math, time, os
+import json, sys, math, time, os
 import qed
-from qed.symmetry import group_from_generators
-from qed.workflow import _write_operator_directory, _write_symmetry_directory
 
 method   = sys.argv[1]
 num_sites = int(sys.argv[2])
-mode     = sys.argv[3]   # 'none' | 'Sz' | 'Symm' | 'Sz+Symm'
-tmpdir   = sys.argv[4]   # streaming-symmetry directory (or '-')
+mode     = sys.argv[3]   # 'none' | 'Sz'
 
 half = num_sites // 2
 def H_op():
@@ -743,15 +415,8 @@ err = None
 try:
     if mode == 'none':
         r = qed.thermal(H_op(), use_sz_if_conserved=False, **common)
-    elif mode == 'Sz':
-        r = qed.thermal(H_op(), **common)
-    elif mode == 'Symm':
-        r = qed.thermal(tmpdir, num_sites=num_sites,
-                        use_symmetry_if_available=True,
-                        use_sz_if_conserved=False, **common)
     else:
-        r = qed.thermal(tmpdir, num_sites=num_sites,
-                        use_symmetry_if_available=True, **common)
+        r = qed.thermal(H_op(), **common)
     obs = (float(r.energy[0]) if len(r.energy) else None)
     out = {'ok': True, 'wall_s': time.perf_counter()-t0, 'obs': obs}
 except Exception as exc:
@@ -762,9 +427,9 @@ print('__PROBE_JSON__' + json.dumps(out))
 
 
 def bench_tpq(num_sites: int, method: str, *,
-              verbose: bool, tmpdir: str) -> list[dict]:
-    """Probe `qed.thermal(..., method="mTPQ"/"cTPQ")` on each symm mode
-    in an isolated subprocess.
+              verbose: bool) -> list[dict]:
+    """Probe `qed.thermal(..., method="mTPQ"/"cTPQ")` on the 'none' and 'Sz'
+    modes in an isolated subprocess.
 
     Historically documented the gap where the orchestrator only
     captured per-sample final-iterate energies and left the
@@ -780,10 +445,10 @@ def bench_tpq(num_sites: int, method: str, *,
     rows: list[dict] = []
     label = f"FT-{method}"
 
-    modes = ("none", "Sz", "Symm", "Sz+Symm")
+    modes = ("none", "Sz")
     for mode in modes:
         cmd = [sys.executable, "-c", _TPQ_PROBE_SRC,
-               method, str(num_sites), mode, tmpdir]
+               method, str(num_sites), mode]
         t0 = time.perf_counter()
         try:
             proc = subprocess.run(
@@ -841,36 +506,29 @@ def run_one_size(num_sites: int, *,
                  include_tpq: bool) -> list[dict]:
     print(f"\n=== N = {num_sites} ===", flush=True)
     rows: list[dict] = []
-    tmpdir, _H = write_dir_with_automorphisms(num_sites)
-    try:
+    t0 = time.perf_counter()
+    print(f"  [GS]", flush=True)
+    rows.extend(bench_gs(num_sites, verbose=verbose))
+    print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
+    for method in ("FTLM", "LTLM", "KPM_DOS"):
         t0 = time.perf_counter()
-        print(f"  [GS]", flush=True)
-        rows.extend(bench_gs(num_sites, verbose=verbose))
+        print(f"  [FT-{method}]", flush=True)
+        rows.extend(bench_thermal(num_sites, method, verbose=verbose))
         print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-        for method in ("FTLM", "LTLM", "KPM_DOS"):
+    t0 = time.perf_counter()
+    print(f"  [DSSF-GS]", flush=True)
+    rows.extend(bench_dssf_gs(num_sites, verbose=verbose))
+    print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
+    t0 = time.perf_counter()
+    print(f"  [DSSF-FT]", flush=True)
+    rows.extend(bench_dssf_ft(num_sites, verbose=verbose))
+    print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
+    if include_tpq:
+        for method in ("mTPQ", "cTPQ"):
             t0 = time.perf_counter()
-            print(f"  [FT-{method}]", flush=True)
-            rows.extend(bench_thermal(
-                num_sites, method, verbose=verbose, tmpdir=tmpdir))
+            print(f"  [FT-{method}]  (gap-probe)", flush=True)
+            rows.extend(bench_tpq(num_sites, method, verbose=verbose))
             print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-        t0 = time.perf_counter()
-        print(f"  [DSSF-GS]", flush=True)
-        rows.extend(bench_dssf_gs(num_sites, verbose=verbose, tmpdir=tmpdir))
-        print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-        t0 = time.perf_counter()
-        print(f"  [DSSF-FT]", flush=True)
-        rows.extend(bench_dssf_ft(num_sites, verbose=verbose, tmpdir=tmpdir))
-        print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-        if include_tpq:
-            for method in ("mTPQ", "cTPQ"):
-                t0 = time.perf_counter()
-                print(f"  [FT-{method}]  (gap-probe)", flush=True)
-                rows.extend(bench_tpq(
-                    num_sites, method, verbose=verbose, tmpdir=tmpdir))
-                print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-    finally:
-        with contextlib.suppress(OSError):
-            shutil.rmtree(tmpdir)
     return rows
 
 

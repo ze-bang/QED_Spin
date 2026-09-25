@@ -36,9 +36,7 @@ void bind_workflows(py::module_& m) {
     bind_workflows_spectral(m);
     bind_workflows_solve_streaming(m);
     bind_workflows_thermal_streaming(m);
-    bind_workflows_spectral_streaming(m);
     bind_workflows_spectral_cross_irrep(m);
-    bind_workflows_spectral_multiq(m);
     bind_workflows_spectral_ftlm(m);
     bind_workflows_thermal_all_sz(m);
 }

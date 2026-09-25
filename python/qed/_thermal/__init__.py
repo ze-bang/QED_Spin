@@ -6,7 +6,6 @@ dispatches to. See :mod:`qed._thermal.lanes`.
 
 from .lanes import (
     DECLINED,
-    directory_projection_lane,
     exact_lane,
     inmemory_projection_lane,
     su2_tower_lane,
@@ -17,5 +16,4 @@ __all__ = [
     "su2_tower_lane",
     "exact_lane",
     "inmemory_projection_lane",
-    "directory_projection_lane",
 ]

@@ -60,7 +60,6 @@
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
 #include "little_group_bindings.h"
-#include "sector_bindings.h"
 #include "workflow_bindings.h"
 
 #include <complex>
@@ -739,7 +738,7 @@ PYBIND11_MODULE(_core, m) {
                  // calls this to extract the one-/two-body terms in
                  // the canonical (op_type, site, coeff, is_two_body,
                  // op_type_2, site_2) layout that
-                 // ``workflows_spectral_streaming_symmetry_cross_irrep_directory``
+                 // ``workflows_spectral_streaming_symmetry_cross_irrep``
                  // ingests. We return a list of 6-tuples mirroring
                  // ``Operator::TransformData``; three-body terms are
                  // not yet plumbed through the cross-sector observable
@@ -1172,7 +1171,7 @@ PYBIND11_MODULE(_core, m) {
 
     // -------------------------------------------------------------------------
     // Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +
-    // streaming/directory dispatchers + build introspection. Must run AFTER
+    // streaming dispatchers + build introspection. Must run AFTER
     // Operator and FixedSzOperator are bound (it attaches symmetry methods
     // to them via m.attr("Operator")). See dispatcher_bindings.{h,cpp}.
     // -------------------------------------------------------------------------
@@ -1185,12 +1184,10 @@ PYBIND11_MODULE(_core, m) {
     // See workflow_bindings.cpp.
     // -------------------------------------------------------------------------
     bind_workflows(m);
-    bind_sectors(m);
 
     // -------------------------------------------------------------------------
-    // SymmetryGroupInfo as the C++ side sees it, built from a directory (the
-    // current symmetric lanes) or from memory (their replacement). Test hooks:
-    // the two must agree bit for bit, labels included.
+    // SymmetryGroupInfo as the C++ side sees it, built from memory. Test hook
+    // for the phase convention the symmetric lanes rely on.
     // -------------------------------------------------------------------------
     auto group_info_dict = [](const SymmetryGroupInfo& g) {
         py::list secs;
@@ -1209,13 +1206,6 @@ PYBIND11_MODULE(_core, m) {
         out["sectors"]              = secs;
         return out;
     };
-    m.def("_symmetry_info_from_directory",
-          [group_info_dict](const std::string& directory) {
-              SymmetryGroupInfo g;
-              g.loadFromDirectory(directory);
-              return group_info_dict(g);
-          },
-          py::arg("directory"));
     m.def("_symmetry_info_from_memory",
           [group_info_dict](const std::vector<std::vector<int>>& max_clique,
                             const std::vector<std::vector<int>>& generators,

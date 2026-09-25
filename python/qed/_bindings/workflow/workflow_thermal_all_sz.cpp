@@ -2,8 +2,7 @@
 // python/qed/_bindings/workflow/workflow_thermal_all_sz.cpp
 //
 // The all-Sz flat-pool thermal binding (Jun 2026):
-// `workflows_thermal_all_sz_streaming_symmetry[_directory]`, one body
-// lambda shared by the directory binding and its in-memory twin.
+// `workflows_thermal_all_sz_streaming_symmetry`.
 //
 // Split out of the former monolithic `workflow_bindings.cpp` (WP11, Sep
 // 2026). The binding bodies are unchanged; the shared helpers now live in
@@ -29,12 +28,8 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
     //   5. Does one combine_sector_thermodynamics call across all sectors.
     //
     // Eliminates N+1 cold-start overhead (JSON loads + orbit rep scans)
-    // present when calling workflows_thermal_streaming_symmetry_directory
+    // present when calling workflows_thermal_streaming_symmetry
     // once per n_up from a Python ThreadPoolExecutor.
-    // -----------------------------------------------------------------
-    //
-    // WP9: one body for the directory binding and its in-memory twin
-    // ``workflows_thermal_all_sz_streaming_symmetry``.
     // -----------------------------------------------------------------
     const auto thermal_all_sz_streaming_symmetry_body =
           [](const SymmetricSource& source,
@@ -97,8 +92,8 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                       static_cast<long>(set.operators.size());
                   if (n_ops == 0) {
                       throw std::runtime_error(
-                          "workflows_thermal_all_sz_streaming_symmetry_"
-                          "directory: no sectors found; check n_up range "
+                          "workflows_thermal_all_sz_streaming_symmetry"
+                          ": no sectors found; check n_up range "
                           "and automorphism_results/ directory.");
                   }
 
@@ -320,19 +315,23 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
               }
               return agg;
           };
-    m.def("workflows_thermal_all_sz_streaming_symmetry_directory",
+    m.def("workflows_thermal_all_sz_streaming_symmetry",
           [thermal_all_sz_streaming_symmetry_body](
-              const std::string& directory,
+              const Operator& H,
+              const py::dict& group,
               std::uint64_t num_sites,
               double spin_l,
               ed::workflows::ThermalOptions opts,
               int n_up_min,
               int n_up_max) {
               return thermal_all_sz_streaming_symmetry_body(
-                  ed::DirectoryPath{directory}, num_sites, spin_l,
-                  std::move(opts), n_up_min, n_up_max);
+                  in_memory_symmetric_source(
+                      H, group,
+                      "workflows_thermal_all_sz_streaming_symmetry"),
+                  num_sites, spin_l, std::move(opts), n_up_min, n_up_max);
           },
-          py::arg("directory"),
+          py::arg("H"),
+          py::arg("group"),
           py::arg("num_sites"),
           py::arg("spin_l")    = 0.5,
           py::arg("opts")      = ed::workflows::ThermalOptions{},
@@ -361,8 +360,11 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
 
         Parameters
         ----------
-        directory : str
-            Hamiltonian directory (must contain ``automorphism_results/``).
+        H : Operator
+            The Hamiltonian (its terms are copied).
+        group : dict
+            Closed group info (``max_clique``, ``generators``,
+            ``generator_orders``, ``sectors``).
         num_sites : int
             Number of lattice sites.
         spin_l : float, optional
@@ -380,35 +382,5 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
             ``thermo`` carries Z-weighted combined thermodynamics over ALL
             (n_up, irrep) sectors; ``per_sector`` lists every sector with
             ``tag.n_up`` and ``tag.sector_index`` set.
-    )pbdoc");
-    m.def("workflows_thermal_all_sz_streaming_symmetry",
-          [thermal_all_sz_streaming_symmetry_body](
-              const Operator& H,
-              const py::dict& group,
-              std::uint64_t num_sites,
-              double spin_l,
-              ed::workflows::ThermalOptions opts,
-              int n_up_min,
-              int n_up_max) {
-              return thermal_all_sz_streaming_symmetry_body(
-                  in_memory_symmetric_source(
-                      H, group,
-                      "workflows_thermal_all_sz_streaming_symmetry"),
-                  num_sites, spin_l, std::move(opts), n_up_min, n_up_max);
-          },
-          py::arg("H"),
-          py::arg("group"),
-          py::arg("num_sites"),
-          py::arg("spin_l")    = 0.5,
-          py::arg("opts")      = ed::workflows::ThermalOptions{},
-          py::arg("n_up_min")  = 0,
-          py::arg("n_up_max")  = -1,
-          R"pbdoc(
-        In-memory twin of
-        ``workflows_thermal_all_sz_streaming_symmetry_directory``.
-
-        Takes the Hamiltonian ``H`` (its terms are copied) and the group
-        info dict the directory writer consumes in place of the
-        directory; every other argument and the result are identical.
     )pbdoc");
 }

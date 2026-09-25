@@ -1,18 +1,14 @@
 """``qed.dssf``: DSSF observable-pair data helpers.
 
 This module re-exports the C++ ``ed::dssf`` observable-pair builder so
-Python notebooks and downstream scripts produce **byte-identical**
-observable names and ordering with the C++ ``./ED dssf`` workflow.
+Python notebooks and downstream scripts build DSSF observable names and
+ordering the same way the C++ side does.
 
 The actual workflow lives in :func:`qed.spectral`; the ``compute`` and
 ``run_from_directory`` helpers that used to live here were removed
 during the May-2026 surface unification. Use:
 
-* :func:`qed.spectral(H, observables, ...) <qed.spectral>` -- in-memory
-  spectral / structure-factor calculation.
-
-* :func:`qed.spectral(directory, ...) <qed.spectral>` -- directory-form
-  CLI workflow (shells out to ``./ED dssf``).
+* :func:`qed.spectral(H, observables, ...) <qed.spectral>` -- spectral / structure-factor calculation.
 
 Quick start (observable assembly):
 

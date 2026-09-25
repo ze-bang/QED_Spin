@@ -35,7 +35,6 @@ from __future__ import annotations
 import glob
 import math
 import os
-import tempfile
 import warnings
 
 import h5py
@@ -60,22 +59,16 @@ def _ring():
     return b.to_operator()
 
 
-def _ring_directory_with_symmetry():
-    """Materialise a fixture directory with ``InterAll.dat`` /
-    ``Trans.dat`` and an ``automorphism_results/`` subdir for the Z_N
-    translation group, so the streaming-symmetry C++ bindings have
-    something to chew on."""
-    from qed.symmetry import group_from_generators
-    from qed.workflow import _write_operator_directory, _write_symmetry_directory
+def _ring_with_group():
+    """The ring plus the CLOSED group dict of its Z_N translation group,
+    the ``(H, group)`` pair the in-memory streaming-symmetry C++ bindings
+    take."""
+    from qed.workflow import _closed_symmetry_info, _normalize_symmetry_info
 
     H = _ring()
-    tmp = tempfile.mkdtemp(prefix=f"qed_universal_save_N{N_SITES}_")
-    _write_operator_directory(H, tmp)
-    info = group_from_generators(
-        N_SITES, [[(i + 1) % N_SITES for i in range(N_SITES)]]
-    )
-    _write_symmetry_directory(tmp, info)
-    return tmp, H
+    group = _closed_symmetry_info(_normalize_symmetry_info(
+        H, [[(i + 1) % N_SITES for i in range(N_SITES)]]))
+    return H, group
 
 
 def _count_h5_datasets_matching(h5_path: str, suffix: str) -> int:
@@ -409,53 +402,37 @@ def test_solve_streaming_symmetry_fulldiag_gpu_small_sectors(tmp_path):
     backend's memory space.
     """
     from qed import _core  # type: ignore[attr-defined]
-    from qed.workflow import (
-        _write_operator_directory,
-        _write_symmetry_directory,
+
+    H, group = _ring_with_group()
+    outdir = str(tmp_path / "solve_sym_gpu_fulldiag")
+
+    opts = _core.SolveOptions()
+    opts.num_eigs = 1
+    opts.compute_vectors = True
+    opts.use_symmetry = True
+    opts.output_dir = outdir
+    opts.method = _core.SolveMethod.FullDiag
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+
+    agg = _core.workflows_solve_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts, None
     )
-    from qed.symmetry import group_from_generators
 
-    H = _ring()
-    fixture_dir = tempfile.mkdtemp(prefix="qed_universal_save_gpu_")
-    try:
-        _write_operator_directory(H, fixture_dir)
-        info = group_from_generators(
-            N_SITES, [[(i + 1) % N_SITES for i in range(N_SITES)]]
-        )
-        _write_symmetry_directory(fixture_dir, info)
-
-        outdir = str(tmp_path / "solve_sym_gpu_fulldiag")
-
-        opts = _core.SolveOptions()
-        opts.num_eigs = 1
-        opts.compute_vectors = True
-        opts.use_symmetry = True
-        opts.output_dir = outdir
-        opts.method = _core.SolveMethod.FullDiag
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-
-        agg = _core.workflows_solve_streaming_symmetry_directory(
-            fixture_dir, N_SITES, 0.5, opts, None
-        )
-
-        # Aggregate path points at the parent directory; each sector
-        # has its own ed_results.h5 under sector_k_<k>/.
-        assert getattr(agg, "hdf5_path", "") == outdir
-        per_sec = sorted(glob.glob(
-            os.path.join(outdir, "sector_k_*", "ed_results.h5")))
-        assert len(per_sec) >= 1, (
-            "GPU FullDiag streaming-symmetry solve produced no per-sector "
-            "HDF5 files; the GPU mirror previously crashed before reaching "
-            "the save block.")
-        for p in per_sec:
-            assert _count_h5_datasets_matching(
-                p, "/eigendata/eigenvalues") >= 1
-            assert _count_h5_datasets_matching(
-                p, "/eigendata/eigenvector_") >= 1
-    finally:
-        import shutil
-        shutil.rmtree(fixture_dir, ignore_errors=True)
+    # Aggregate path points at the parent directory; each sector
+    # has its own ed_results.h5 under sector_k_<k>/.
+    assert getattr(agg, "hdf5_path", "") == outdir
+    per_sec = sorted(glob.glob(
+        os.path.join(outdir, "sector_k_*", "ed_results.h5")))
+    assert len(per_sec) >= 1, (
+        "GPU FullDiag streaming-symmetry solve produced no per-sector "
+        "HDF5 files; the GPU mirror previously crashed before reaching "
+        "the save block.")
+    for p in per_sec:
+        assert _count_h5_datasets_matching(
+            p, "/eigendata/eigenvalues") >= 1
+        assert _count_h5_datasets_matching(
+            p, "/eigendata/eigenvector_") >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -763,26 +740,22 @@ def test_solve_streaming_symmetry_gpu_lane(tmp_path):
     pre-fix this read back as empty string."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.SolveOptions()
-        opts.num_eigs        = 1
-        opts.tolerance       = 1e-10
-        opts.compute_vectors = False
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-        gs = _core.workflows_solve_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts, None,
-        )
-        assert gs.backend.lane == "gpu", (
-            f"GPU + spatial symmetry should report lane='gpu'; got "
-            f"{gs.backend.lane!r}. If this is empty, the per-sector "
-            f"aggregate did not propagate the inner lane; if 'cpu' "
-            f"either the SectorView mirror is off or "
-            f"ED_GPU_SYMMETRY_MIRROR=0.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    opts = _core.SolveOptions()
+    opts.num_eigs        = 1
+    opts.tolerance       = 1e-10
+    opts.compute_vectors = False
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+    gs = _core.workflows_solve_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts, None,
+    )
+    assert gs.backend.lane == "gpu", (
+        f"GPU + spatial symmetry should report lane='gpu'; got "
+        f"{gs.backend.lane!r}. If this is empty, the per-sector "
+        f"aggregate did not propagate the inner lane; if 'cpu' "
+        f"either the SectorView mirror is off or "
+        f"ED_GPU_SYMMETRY_MIRROR=0.")
 
 
 @_REQUIRES_GPU
@@ -793,24 +766,20 @@ def test_solve_streaming_symmetry_sz_gpu_lane(tmp_path):
     deliver the GPU mirror. The aggregate lane must read "gpu"."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.SolveOptions()
-        opts.num_eigs        = 1
-        opts.tolerance       = 1e-10
-        opts.compute_vectors = False
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-        gs = _core.workflows_solve_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts,
-            N_SITES // 2,  # fixed_sz_n_up
-        )
-        assert gs.backend.lane == "gpu", (
-            f"GPU + Sz + spatial symmetry should report lane='gpu'; "
-            f"got {gs.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    opts = _core.SolveOptions()
+    opts.num_eigs        = 1
+    opts.tolerance       = 1e-10
+    opts.compute_vectors = False
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+    gs = _core.workflows_solve_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts,
+        N_SITES // 2,  # fixed_sz_n_up
+    )
+    assert gs.backend.lane == "gpu", (
+        f"GPU + Sz + spatial symmetry should report lane='gpu'; "
+        f"got {gs.backend.lane!r}.")
 
 
 @_REQUIRES_GPU
@@ -822,28 +791,24 @@ def test_thermal_streaming_symmetry_gpu_lane(tmp_path):
     binding's per-sector dispatch.)"""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.ThermalOptions()
-        opts.method        = _core.ThermalMethod.mTPQ
-        opts.num_samples   = 1
-        opts.krylov_dim    = 20
-        opts.num_temp_bins = 2
-        opts.temp_min      = 0.5
-        opts.temp_max      = 4.0
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-        tr = _core.workflows_thermal_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts, None,
-        )
-        assert tr.backend.lane == "gpu", (
-            f"GPU + spatial symmetry (thermal/mTPQ) should report "
-            f"lane='gpu'; got {tr.backend.lane!r}. This is what made "
-            f"the 12-site ring x 8 sectors look CPU-paced in the user "
-            f"workload -- the GPU mirror fires but the label lied.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    opts = _core.ThermalOptions()
+    opts.method        = _core.ThermalMethod.mTPQ
+    opts.num_samples   = 1
+    opts.krylov_dim    = 20
+    opts.num_temp_bins = 2
+    opts.temp_min      = 0.5
+    opts.temp_max      = 4.0
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+    tr = _core.workflows_thermal_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts, None,
+    )
+    assert tr.backend.lane == "gpu", (
+        f"GPU + spatial symmetry (thermal/mTPQ) should report "
+        f"lane='gpu'; got {tr.backend.lane!r}. This is what made "
+        f"the 12-site ring x 8 sectors look CPU-paced in the user "
+        f"workload -- the GPU mirror fires but the label lied.")
 
 
 @_REQUIRES_GPU
@@ -853,56 +818,23 @@ def test_thermal_streaming_symmetry_sz_gpu_lane(tmp_path):
     FixedSzStreamingSymmetry SectorView GPU path."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.ThermalOptions()
-        opts.method        = _core.ThermalMethod.mTPQ
-        opts.num_samples   = 1
-        opts.krylov_dim    = 20
-        opts.num_temp_bins = 2
-        opts.temp_min      = 0.5
-        opts.temp_max      = 4.0
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-        tr = _core.workflows_thermal_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts,
-            N_SITES // 2,
-        )
-        assert tr.backend.lane == "gpu", (
-            f"GPU + Sz + spatial symmetry (thermal/mTPQ) should report "
-            f"lane='gpu'; got {tr.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@_REQUIRES_GPU
-def test_spectral_streaming_symmetry_gpu_lane(tmp_path):
-    """``qed.spectral(symmetry=..., device='gpu')`` (GroundStateCF) --
-    the same-irrep binding propagates ``sr.backend`` from the inner
-    ``ed::workflows::spectral`` call, so Phase D's lane fix on the
-    orchestrator finalizer lands here automatically."""
-    from qed import _core
-
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.SpectralOptions()
-        opts.method     = _core.SpectralMethod.GroundStateCF
-        opts.num_omega  = 32
-        opts.omega_min  = 0.0
-        opts.omega_max  = 4.0
-        opts.broadening = 0.1
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
-        sr = _core.workflows_spectral_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts, None,
-        )
-        assert sr.backend.lane == "gpu", (
-            f"GPU + spatial symmetry (spectral/GroundStateCF) should "
-            f"report lane='gpu'; got {sr.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    opts = _core.ThermalOptions()
+    opts.method        = _core.ThermalMethod.mTPQ
+    opts.num_samples   = 1
+    opts.krylov_dim    = 20
+    opts.num_temp_bins = 2
+    opts.temp_min      = 0.5
+    opts.temp_max      = 4.0
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+    tr = _core.workflows_thermal_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts,
+        N_SITES // 2,
+    )
+    assert tr.backend.lane == "gpu", (
+        f"GPU + Sz + spatial symmetry (thermal/mTPQ) should report "
+        f"lane='gpu'; got {tr.backend.lane!r}.")
 
 
 def test_thermal_streaming_symmetry_cpu_lane(tmp_path):
@@ -911,33 +843,29 @@ def test_thermal_streaming_symmetry_cpu_lane(tmp_path):
     empty string)."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.ThermalOptions()
-        opts.method        = _core.ThermalMethod.mTPQ
-        opts.num_samples   = 1
-        opts.krylov_dim    = 20
-        opts.num_temp_bins = 2
-        opts.temp_min      = 0.5
-        opts.temp_max      = 4.0
-        opts.backend.allow_gpu = False
-        tr = _core.workflows_thermal_streaming_symmetry_directory(
-            tmp, N_SITES, 0.5, opts, None,
-        )
-        assert tr.backend.lane == "cpu", (
-            f"allow_gpu=False must land on lane='cpu'; got "
-            f"{tr.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    opts = _core.ThermalOptions()
+    opts.method        = _core.ThermalMethod.mTPQ
+    opts.num_samples   = 1
+    opts.krylov_dim    = 20
+    opts.num_temp_bins = 2
+    opts.temp_min      = 0.5
+    opts.temp_max      = 4.0
+    opts.backend.allow_gpu = False
+    tr = _core.workflows_thermal_streaming_symmetry(
+        H, group, N_SITES, 0.5, opts, None,
+    )
+    assert tr.backend.lane == "cpu", (
+        f"allow_gpu=False must land on lane='cpu'; got "
+        f"{tr.backend.lane!r}.")
 
 
 # ---------------------------------------------------------------------------
 # Phase H.1 of the "Close CPU/GPU Gaps" plan (May 2026):
 # cross-irrep spectral bindings must surface a non-empty
 # ``agg.backend.lane`` so callers reading ``SpectralResult.backend.lane``
-# from ``qed.spectral(symmetry={'observable': ..., 'momentum_transfer':
-# [...]})`` see the truthful lane that produced the result.
+# from ``qed.spectral(H, [O_Q], symmetry=..., momentum_transfer=[...])``
+# see the truthful lane that produced the result.
 # ---------------------------------------------------------------------------
 
 def _sz_q_observable_transforms(q_int: int):
@@ -961,29 +889,25 @@ def test_spectral_cross_irrep_lane_propagation_cpu(tmp_path):
     ``lane='cpu'`` rather than the previously-empty default."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.SpectralOptions()
-        opts.method            = _core.SpectralMethod.GroundStateCF
-        opts.num_omega         = 16
-        opts.omega_min         = -1.0
-        opts.omega_max         = 5.0
-        opts.broadening        = 0.1
-        opts.momentum_transfer = [1.0 / N_SITES]
-        opts.backend.allow_gpu = False
+    H, group = _ring_with_group()
+    opts = _core.SpectralOptions()
+    opts.method            = _core.SpectralMethod.GroundStateCF
+    opts.num_omega         = 16
+    opts.omega_min         = -1.0
+    opts.omega_max         = 5.0
+    opts.broadening        = 0.1
+    opts.momentum_transfer = [1.0 / N_SITES]
+    opts.backend.allow_gpu = False
 
-        agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
-            tmp, N_SITES, 0.5,
-            _sz_q_observable_transforms(1),
-            opts, None, 0,
-        )
-        assert agg.backend.lane == "cpu", (
-            f"GS cross-irrep with allow_gpu=False should report "
-            f"lane='cpu'; got {agg.backend.lane!r}. Before Phase H.1 "
-            f"this was the empty string (no propagation).")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    agg = _core.workflows_spectral_streaming_symmetry_cross_irrep(
+        H, group, N_SITES, 0.5,
+        _sz_q_observable_transforms(1),
+        opts, None, 0,
+    )
+    assert agg.backend.lane == "cpu", (
+        f"GS cross-irrep with allow_gpu=False should report "
+        f"lane='cpu'; got {agg.backend.lane!r}. Before Phase H.1 "
+        f"this was the empty string (no propagation).")
 
 
 @_REQUIRES_GPU
@@ -994,29 +918,25 @@ def test_spectral_cross_irrep_lane_propagation_gpu(tmp_path):
     available it must report ``lane='gpu'``."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        opts = _core.SpectralOptions()
-        opts.method            = _core.SpectralMethod.GroundStateCF
-        opts.num_omega         = 16
-        opts.omega_min         = -1.0
-        opts.omega_max         = 5.0
-        opts.broadening        = 0.1
-        opts.momentum_transfer = [1.0 / N_SITES]
-        opts.backend.allow_gpu = True
-        opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
+    H, group = _ring_with_group()
+    opts = _core.SpectralOptions()
+    opts.method            = _core.SpectralMethod.GroundStateCF
+    opts.num_omega         = 16
+    opts.omega_min         = -1.0
+    opts.omega_max         = 5.0
+    opts.broadening        = 0.1
+    opts.momentum_transfer = [1.0 / N_SITES]
+    opts.backend.allow_gpu = True
+    opts.backend.gpu_dim_floor = 0  # raw-binding force-GPU: bypass the auto floor
 
-        agg = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
-            tmp, N_SITES, 0.5,
-            _sz_q_observable_transforms(1),
-            opts, None, 0,
-        )
-        assert agg.backend.lane == "gpu", (
-            f"GS cross-irrep with allow_gpu=True should report "
-            f"lane='gpu'; got {agg.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    agg = _core.workflows_spectral_streaming_symmetry_cross_irrep(
+        H, group, N_SITES, 0.5,
+        _sz_q_observable_transforms(1),
+        opts, None, 0,
+    )
+    assert agg.backend.lane == "gpu", (
+        f"GS cross-irrep with allow_gpu=True should report "
+        f"lane='gpu'; got {agg.backend.lane!r}.")
 
 
 @_REQUIRES_GPU
@@ -1157,71 +1077,68 @@ def test_spectral_cross_irrep_gs_gpu_runs_on_gpu(tmp_path):
     from qed import _core
     import numpy as np
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        def _opts(allow_gpu: bool):
-            opts = _core.SpectralOptions()
-            opts.method            = _core.SpectralMethod.GroundStateCF
-            opts.num_omega         = 24
-            opts.omega_min         = -1.0
-            opts.omega_max         = 5.0
-            opts.broadening        = 0.1
-            opts.krylov_dim        = 40
-            opts.momentum_transfer = [1.0 / N_SITES]
-            opts.backend.allow_gpu = allow_gpu
-            if allow_gpu:
-                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
-            return opts
+    H, group = _ring_with_group()
 
-        agg_gpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
-            tmp, N_SITES, 0.5,
-            _sz_q_observable_transforms(1),
-            _opts(True), None, 0,
-        )
-        agg_cpu = _core.workflows_spectral_streaming_symmetry_cross_irrep_directory(
-            tmp, N_SITES, 0.5,
-            _sz_q_observable_transforms(1),
-            _opts(False), None, 0,
-        )
+    def _opts(allow_gpu: bool):
+        opts = _core.SpectralOptions()
+        opts.method            = _core.SpectralMethod.GroundStateCF
+        opts.num_omega         = 24
+        opts.omega_min         = -1.0
+        opts.omega_max         = 5.0
+        opts.broadening        = 0.1
+        opts.krylov_dim        = 40
+        opts.momentum_transfer = [1.0 / N_SITES]
+        opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
+        return opts
 
-        assert agg_gpu.backend.lane == "gpu", (
-            f"GS cross-irrep with allow_gpu=True must report "
-            f"lane='gpu'; got {agg_gpu.backend.lane!r}. Before "
-            f"Phase H.2 the inner CF-Lanczos was hard-coded to "
-            f"``CpuBackend cpu_be`` even when the GS solve ran on "
-            f"GPU.")
-        assert agg_cpu.backend.lane == "cpu", (
-            f"GS cross-irrep with allow_gpu=False must report "
-            f"lane='cpu'; got {agg_cpu.backend.lane!r}.")
+    agg_gpu = _core.workflows_spectral_streaming_symmetry_cross_irrep(
+        H, group, N_SITES, 0.5,
+        _sz_q_observable_transforms(1),
+        _opts(True), None, 0,
+    )
+    agg_cpu = _core.workflows_spectral_streaming_symmetry_cross_irrep(
+        H, group, N_SITES, 0.5,
+        _sz_q_observable_transforms(1),
+        _opts(False), None, 0,
+    )
 
-        sgpu = np.asarray(agg_gpu.S_real, dtype=float)
-        scpu = np.asarray(agg_cpu.S_real, dtype=float)
-        assert sgpu.size == scpu.size and sgpu.size > 0, (
-            "GS cross-irrep S_real arrays must be populated on both "
-            "lanes.")
-        assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
-            "GS cross-irrep S_real curves must be finite on both "
-            "lanes.")
-        assert float(np.max(np.abs(sgpu))) > 0.0, (
-            "GS cross-irrep GPU lane produced an all-zero spectrum.")
-        assert float(np.max(np.abs(scpu))) > 0.0, (
-            "GS cross-irrep CPU lane produced an all-zero spectrum.")
-        # GS is deterministic and the two lanes run the same
-        # CF-Lanczos algorithm with identical inputs (same krylov_dim,
-        # same broadening, same omega grid). Pin tight numerical
-        # agreement so any future divergence between CPU and GPU
-        # backends in the CF kernel fails CI loudly.
-        denom = max(float(np.max(np.abs(scpu))), 1e-12)
-        max_rel_err = float(np.max(np.abs(sgpu - scpu))) / denom
-        assert max_rel_err < 1e-3, (
-            f"GS cross-irrep GPU vs CPU S_real disagree by more than "
-            f"Lanczos roundoff; max relative error = {max_rel_err:.3e}. "
-            f"Both lanes share the same CF-Lanczos algorithm and a "
-            f"deterministic ground state, so any drift > 1e-3 implies "
-            f"a real backend bug.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    assert agg_gpu.backend.lane == "gpu", (
+        f"GS cross-irrep with allow_gpu=True must report "
+        f"lane='gpu'; got {agg_gpu.backend.lane!r}. Before "
+        f"Phase H.2 the inner CF-Lanczos was hard-coded to "
+        f"``CpuBackend cpu_be`` even when the GS solve ran on "
+        f"GPU.")
+    assert agg_cpu.backend.lane == "cpu", (
+        f"GS cross-irrep with allow_gpu=False must report "
+        f"lane='cpu'; got {agg_cpu.backend.lane!r}.")
+
+    sgpu = np.asarray(agg_gpu.S_real, dtype=float)
+    scpu = np.asarray(agg_cpu.S_real, dtype=float)
+    assert sgpu.size == scpu.size and sgpu.size > 0, (
+        "GS cross-irrep S_real arrays must be populated on both "
+        "lanes.")
+    assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
+        "GS cross-irrep S_real curves must be finite on both "
+        "lanes.")
+    assert float(np.max(np.abs(sgpu))) > 0.0, (
+        "GS cross-irrep GPU lane produced an all-zero spectrum.")
+    assert float(np.max(np.abs(scpu))) > 0.0, (
+        "GS cross-irrep CPU lane produced an all-zero spectrum.")
+    # GS is deterministic and the two lanes run the same
+    # CF-Lanczos algorithm with identical inputs (same krylov_dim,
+    # same broadening, same omega grid). Pin tight numerical
+    # agreement so any future divergence between CPU and GPU
+    # backends in the CF kernel fails CI loudly.
+    denom = max(float(np.max(np.abs(scpu))), 1e-12)
+    max_rel_err = float(np.max(np.abs(sgpu - scpu))) / denom
+    assert max_rel_err < 1e-3, (
+        f"GS cross-irrep GPU vs CPU S_real disagree by more than "
+        f"Lanczos roundoff; max relative error = {max_rel_err:.3e}. "
+        f"Both lanes share the same CF-Lanczos algorithm and a "
+        f"deterministic ground state, so any drift > 1e-3 implies "
+        f"a real backend bug.")
 
 
 def test_spectral_ftlm_cross_irrep_lane_is_cpu(tmp_path):
@@ -1237,32 +1154,28 @@ def test_spectral_ftlm_cross_irrep_lane_is_cpu(tmp_path):
     test alongside the lane propagation."""
     from qed import _core
 
-    tmp, _H = _ring_directory_with_symmetry()
-    try:
-        for allow_gpu in (False, True):
-            opts = _core.SpectralOptions()
-            opts.method            = _core.SpectralMethod.FtlmDynamical
-            opts.num_omega         = 12
-            opts.omega_min         = -1.0
-            opts.omega_max         = 5.0
-            opts.broadening        = 0.2
-            opts.krylov_dim        = 20
-            opts.momentum_transfer = [1.0 / N_SITES]
-            opts.backend.allow_gpu = allow_gpu
-            if allow_gpu:
-                opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
-            agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep_directory(
-                tmp, N_SITES, 0.5,
-                _sz_q_observable_transforms(1),
-                opts, None, 0,
-                [2.0],   # temperatures
-                4,       # num_samples
-                0xFEED,  # random_seed
-            )
-            assert agg.backend.lane == "cpu", (
-                f"FTLM cross-irrep is host-only and must report "
-                f"lane='cpu' (allow_gpu={allow_gpu}); got "
-                f"{agg.backend.lane!r}.")
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    H, group = _ring_with_group()
+    for allow_gpu in (False, True):
+        opts = _core.SpectralOptions()
+        opts.method            = _core.SpectralMethod.FtlmDynamical
+        opts.num_omega         = 12
+        opts.omega_min         = -1.0
+        opts.omega_max         = 5.0
+        opts.broadening        = 0.2
+        opts.krylov_dim        = 20
+        opts.momentum_transfer = [1.0 / N_SITES]
+        opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
+        agg = _core.workflows_spectral_streaming_symmetry_ftlm_cross_irrep(
+            H, group, N_SITES, 0.5,
+            _sz_q_observable_transforms(1),
+            opts, None, 0,
+            [2.0],   # temperatures
+            4,       # num_samples
+            0xFEED,  # random_seed
+        )
+        assert agg.backend.lane == "cpu", (
+            f"FTLM cross-irrep is host-only and must report "
+            f"lane='cpu' (allow_gpu={allow_gpu}); got "
+            f"{agg.backend.lane!r}.")

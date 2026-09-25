@@ -6,7 +6,7 @@
 // TU needs plus the helpers that used to live in the anonymous namespace of
 // the former monolithic `workflow_bindings.cpp` (WP11 split, Sep 2026):
 // the probe loader / composition resolver, the GPU-lane probes and the
-// silent-fallback warning, the SU(2) hoists, the symmetric-source variant
+// silent-fallback warning, the SU(2) hoists, the symmetric source
 // and the cross-irrep ground-state scan.
 //
 // The helpers live in `workflow_bindings_detail` (external linkage, `inline`
@@ -609,23 +609,21 @@ inline void warn_silent_cpu_fallback(const char* what,
 }
 
 // ---------------------------------------------------------------------------
-// WP9: the symmetric source a streaming-symmetry binding body runs on -- the
-// writer's directory (``*_directory`` bindings) or the same content held in
-// memory (their in-memory twins). Both alternatives are cheap to copy, so a
-// body can seed several specs (source + shifted-Sz target) from one source.
+// The symmetric source a streaming-symmetry binding body runs on: the
+// Hamiltonian and its group, held in memory. Cheap to copy, so a body can
+// seed several specs (source + shifted-Sz target) from one source.
 // ---------------------------------------------------------------------------
-using SymmetricSource = std::variant<ed::DirectoryPath, ed::InMemorySymmetric>;
+using SymmetricSource = ed::InMemorySymmetric;
 
 inline void set_symmetric_source(ed::OperatorSpec& spec,
                                  const SymmetricSource& source) {
-    std::visit([&spec](const auto& s) { spec.source = s; }, source);
+    spec.source = source;
 }
 
-// In-memory twin input: a private copy of ``H``'s terms (the result never
-// aliases the Python-owned operator) plus the group the directory writer
-// would have serialised, rebuilt with the writer's phase convention
-// (``SymmetryGroupInfo::from_memory``). ``group`` is the Python info dict
-// ``_write_symmetry_directory`` consumes; only ``max_clique``,
+// The source: a private copy of ``H``'s terms (the result never aliases the
+// Python-owned operator) plus the group, rebuilt with the symmetry writer's
+// phase convention (``SymmetryGroupInfo::from_memory``). ``group`` is the
+// closed Python info dict; only ``max_clique``,
 // ``generators``, ``generator_orders`` and each sector's ``sector_id`` /
 // ``quantum_numbers`` are read (the writer recomputes the phases from the
 // quantum numbers too). Must run under the GIL.
@@ -880,8 +878,6 @@ void bind_workflows_thermal(py::module_& m);
 void bind_workflows_spectral(py::module_& m);
 void bind_workflows_solve_streaming(py::module_& m);
 void bind_workflows_thermal_streaming(py::module_& m);
-void bind_workflows_spectral_streaming(py::module_& m);
 void bind_workflows_spectral_cross_irrep(py::module_& m);
-void bind_workflows_spectral_multiq(py::module_& m);
 void bind_workflows_spectral_ftlm(py::module_& m);
 void bind_workflows_thermal_all_sz(py::module_& m);

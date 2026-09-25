@@ -7,7 +7,7 @@
 // with the C++ ``ed::exact_diagonalization_*`` family removal; the
 // canonical entry points now live in `workflow_bindings.cpp`
 // (``_core.workflows_solve / thermal / spectral`` and the streaming-
-// symmetry directory helper) and the Python module
+// symmetry lanes) and the Python module
 // `qed.{solve,thermal,spectral}` re-exports a kwargs-only surface
 // over them.
 //
@@ -36,7 +36,7 @@
 // ``_streaming_symmetry_fixed_sz``, ``_from_directory``, and the
 // ``Operator``/``FixedSzOperator`` overloads of ``_core``) are gone:
 // the equivalent behaviour is reachable through
-// ``_core.workflows_solve_streaming_symmetry_directory`` (streaming-
+// ``_core.workflows_solve_streaming_symmetry`` (streaming-
 // symmetry) and ``_core.workflows_solve`` / ``workflows_thermal``
 // (everything else).
 // =============================================================================
@@ -299,7 +299,7 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("use_gpu",          &EDParameters::use_gpu)
         .def_readwrite("use_mpi",          &EDParameters::use_mpi)
         // 5th orthogonal axis -- spatial-symmetry projection. Consumed
-        // by ``_core.workflows_solve_streaming_symmetry_directory``.
+        // by ``_core.workflows_solve_streaming_symmetry``.
         .def_readwrite("use_symmetry",     &EDParameters::use_symmetry)
         .def_readwrite("translation_only", &EDParameters::translation_only)
         .def("__repr__", [](const EDParameters& p) {

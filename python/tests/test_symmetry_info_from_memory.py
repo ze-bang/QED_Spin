@@ -1,14 +1,16 @@
-"""SymmetryGroupInfo::from_memory == what the C++ side loads from the directory the
-Python writer produces: generators, orders, group, power representation, sector ids,
-quantum numbers and phases, bit for bit. This is the contract that lets the symmetric
-lanes drop the directory round trip without relabelling a single sector.
+"""SymmetryGroupInfo::from_memory reproduces the Python group info the symmetric lanes
+hand it: generators, orders, group, sector ids and quantum numbers verbatim, and one
+phase per generator, exp(2 pi i q_k / o_k), bit for bit (the convention the retired
+directory writer used, so no sector is relabelled).
 """
 from __future__ import annotations
+
+import math
 
 import pytest
 
 from qed import _core
-from qed.workflow import _normalize_symmetry_info, _write_symmetry_directory
+from qed.workflow import _closed_symmetry_info, _normalize_symmetry_info
 
 
 def _translation(Lx, Ly, dx, dy):
@@ -30,22 +32,23 @@ GROUPS = {
 
 
 @pytest.mark.parametrize("name", sorted(GROUPS))
-def test_from_memory_equals_the_directory_round_trip(name, tmp_path):
+def test_from_memory_reproduces_the_python_group_info(name):
     n, gens = GROUPS[name]
-    info = _normalize_symmetry_info(_core.Operator(n, 0.5), gens)
-    _write_symmetry_directory(str(tmp_path), info)
-    disk = dict(_core._symmetry_info_from_directory(str(tmp_path)))
+    info = _closed_symmetry_info(_normalize_symmetry_info(_core.Operator(n, 0.5), gens))
     mem = dict(_core._symmetry_info_from_memory(
         info["max_clique"], info["generators"], info["generator_orders"],
         [(int(s["sector_id"]), list(s["quantum_numbers"])) for s in info["sectors"]]))
-    for key in ("generators", "generator_orders", "max_clique", "power_representation"):
-        assert [list(x) if hasattr(x, "__len__") else x for x in disk[key]] == \
+    for key in ("generators", "generator_orders", "max_clique"):
+        assert [list(x) if hasattr(x, "__len__") else x for x in info[key]] == \
                [list(x) if hasattr(x, "__len__") else x for x in mem[key]], key
-    assert len(disk["sectors"]) == len(mem["sectors"])
-    for a, b in zip(disk["sectors"], mem["sectors"]):
-        assert a["sector_id"] == b["sector_id"]
+    assert len(info["sectors"]) == len(mem["sectors"])
+    orders = [int(o) for o in info["generator_orders"]]
+    for a, b in zip(info["sectors"], mem["sectors"]):
+        assert int(a["sector_id"]) == b["sector_id"]
         assert list(a["quantum_numbers"]) == list(b["quantum_numbers"])
-        assert list(a["phase_factors"]) == list(b["phase_factors"])     # exact, not approx
+        want = [complex(math.cos(2.0 * math.pi * q / o), math.sin(2.0 * math.pi * q / o))
+                for q, o in zip(a["quantum_numbers"], orders)]
+        assert list(b["phase_factors"]) == want     # exact, not approx
     if name == "ring6_redundant":
         assert len(mem["sectors"]) == 6
 

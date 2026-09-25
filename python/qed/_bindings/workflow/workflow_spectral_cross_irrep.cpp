@@ -2,8 +2,7 @@
 // python/qed/_bindings/workflow/workflow_spectral_cross_irrep.cpp
 //
 // The single-Q cross-irrep streaming-symmetry spectral binding
-// (`workflows_spectral_streaming_symmetry_cross_irrep[_directory]`): one
-// body lambda shared by the directory binding and its in-memory twin.
+// (`workflows_spectral_streaming_symmetry_cross_irrep`).
 //
 // Split out of the former monolithic `workflow_bindings.cpp` (WP11, Sep
 // 2026). The binding bodies are unchanged; the shared helpers now live in
@@ -47,9 +46,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
     // chosen.
     // -----------------------------------------------------------------
     //
-    // WP9: one body for the directory binding and its in-memory twin
-    // ``workflows_spectral_streaming_symmetry_cross_irrep``; the shifted-Sz
-    // target set (delta_n_up != 0) is seeded from the SAME source.
+    // The shifted-Sz target set (delta_n_up != 0) is seeded from the SAME
+    // source.
     // -----------------------------------------------------------------
     const auto spectral_cross_irrep_body =
           [](const SymmetricSource&                source,
@@ -71,12 +69,11 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
               std::vector<Operator::TransformData> tlist =
                   decode_probe_transforms(
                       observable_transforms,
-                      "workflows_spectral_streaming_symmetry_cross_irrep_"
-                      "directory");
+                      "workflows_spectral_streaming_symmetry_cross_irrep");
               if (tlist.empty()) {
                   throw std::invalid_argument(
-                      "workflows_spectral_streaming_symmetry_cross_irrep_"
-                      "directory: observable_transforms is empty -- the "
+                      "workflows_spectral_streaming_symmetry_cross_irrep"
+                      ": observable_transforms is empty -- the "
                       "cross-irrep walk needs at least one term.");
               }
 
@@ -95,8 +92,7 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                       sz_parity, flip_sectors);
                   const SlottedSelection slots = slotted_selection_for(
                       src_spec, tlist,
-                      "workflows_spectral_streaming_symmetry_cross_irrep_"
-                      "directory");
+                      "workflows_spectral_streaming_symmetry_cross_irrep");
 
                   // Operator-collapse Phase 3 (Jun 2026): enumerate the source
                   // symmetry sectors directly via
@@ -111,8 +107,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   const std::size_t src_num_sectors = src_handle.num_sectors();
                   if (src_num_sectors == 0) {
                       throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: source operator has no symmetry sectors; "
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": source operator has no symmetry sectors; "
                           "check automorphism_results/.");
                   }
 
@@ -140,8 +136,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   const bool        any_solved = gs_scan.any_solved;
                   if (!any_solved) {
                       throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: every source sector returned an empty "
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": every source sector returned an empty "
                           "spectrum; check the operator / Hilbert space.");
                   }
 
@@ -169,8 +165,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   if (gs_sr.eigenvalues.empty() || !gs_sr.eigenvectors ||
                       gs_sr.eigenvectors->host.empty()) {
                       throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: ground-state eigenvector reconstruction "
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": ground-state eigenvector reconstruction "
                           "failed (eigenvectors->host empty).");
                   }
                   // Phase H.1 of the "Close CPU/GPU Gaps" plan
@@ -213,7 +209,7 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                       if (!src_spec.fixed_sz.has_value()) {
                           throw std::invalid_argument(
                               "workflows_spectral_streaming_symmetry_cross_"
-                              "irrep_directory: delta_n_up != 0 requires "
+                              "irrep: delta_n_up != 0 requires "
                               "fixed_sz_n_up to be set.");
                       }
                       ed::OperatorSpec dst_spec;
@@ -246,8 +242,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                       // case so users can tell *why* their Q didn't land
                       // anywhere.
                       std::string msg =
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: no surviving target sector for the "
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": no surviving target sector for the "
                           "requested selection rule. Source sector qn = [";
                       for (std::size_t g = 0; g < gs_src_tag.quantum_numbers.size(); ++g) {
                           if (g) msg += ", ";
@@ -265,8 +261,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   }
                   if (q_residual > opts.momentum_tolerance) {
                       throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: Q is incommensurate with the lattice "
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": Q is incommensurate with the lattice "
                           "(residual = " + std::to_string(q_residual) +
                           " > tolerance = " +
                           std::to_string(opts.momentum_tolerance) + ").");
@@ -326,8 +322,8 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   const std::size_t dim_dst = orb_obs.dim_dst();
                   if (dst_sec_view->dim() != dim_dst) {
                       throw std::runtime_error(
-                          "workflows_spectral_streaming_symmetry_cross_irrep_"
-                          "directory: target sector dim mismatch (view="
+                          "workflows_spectral_streaming_symmetry_cross_irrep"
+                          ": target sector dim mismatch (view="
                           + std::to_string(dst_sec_view->dim())
                           + ", observable=" + std::to_string(dim_dst) + ").");
                   }
@@ -436,9 +432,10 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
               }
               return agg;
           };
-    m.def("workflows_spectral_streaming_symmetry_cross_irrep_directory",
+    m.def("workflows_spectral_streaming_symmetry_cross_irrep",
           [spectral_cross_irrep_body](
-              const std::string&                    directory,
+              const Operator&                        H,
+              const py::dict&                        group,
               std::uint64_t                          num_sites,
               double                                 spin_l,
               const std::vector<py::tuple>&          observable_transforms,
@@ -448,12 +445,15 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
               int                                    sz_parity,
               bool                                   flip_sectors) {
               return spectral_cross_irrep_body(
-                  ed::DirectoryPath{directory}, num_sites, spin_l,
-                  observable_transforms, std::move(opts),
+                  in_memory_symmetric_source(
+                      H, group,
+                      "workflows_spectral_streaming_symmetry_cross_irrep"),
+                  num_sites, spin_l, observable_transforms, std::move(opts),
                   std::move(fixed_sz_n_up), delta_n_up, sz_parity,
                   flip_sectors);
           },
-          py::arg("directory"),
+          py::arg("H"),
+          py::arg("group"),
           py::arg("num_sites"),
           py::arg("spin_l")                = 0.5,
           py::arg("observable_transforms") = std::vector<py::tuple>{},
@@ -479,9 +479,11 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
 
         Parameters
         ----------
-        directory : str
-            Hamiltonian directory (must contain
-            ``automorphism_results/``).
+        H : Operator
+            The Hamiltonian (its terms are copied).
+        group : dict
+            Closed group info (``max_clique``, ``generators``,
+            ``generator_orders``, ``sectors``).
         num_sites : int
             Number of lattice sites.
         spin_l : float, optional
@@ -514,44 +516,6 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
             ``per_sector_pair`` records the (initial, final)
             SectorTag pair; ``selection_rule_label`` documents the
             resolved transition.
-    )pbdoc");
-    m.def("workflows_spectral_streaming_symmetry_cross_irrep",
-          [spectral_cross_irrep_body](
-              const Operator&                        H,
-              const py::dict&                        group,
-              std::uint64_t                          num_sites,
-              double                                 spin_l,
-              const std::vector<py::tuple>&          observable_transforms,
-              ed::workflows::SpectralOptions         opts,
-              py::object                             fixed_sz_n_up,
-              int                                    delta_n_up,
-              int                                    sz_parity,
-              bool                                   flip_sectors) {
-              return spectral_cross_irrep_body(
-                  in_memory_symmetric_source(
-                      H, group,
-                      "workflows_spectral_streaming_symmetry_cross_irrep"),
-                  num_sites, spin_l, observable_transforms, std::move(opts),
-                  std::move(fixed_sz_n_up), delta_n_up, sz_parity,
-                  flip_sectors);
-          },
-          py::arg("H"),
-          py::arg("group"),
-          py::arg("num_sites"),
-          py::arg("spin_l")                = 0.5,
-          py::arg("observable_transforms") = std::vector<py::tuple>{},
-          py::arg("opts")                  = ed::workflows::SpectralOptions{},
-          py::arg("fixed_sz_n_up")         = py::none(),
-          py::arg("delta_n_up")            = 0,
-          py::arg("sz_parity")             = -1,
-          py::arg("flip_sectors")          = false,
-          R"pbdoc(
-        In-memory twin of
-        ``workflows_spectral_streaming_symmetry_cross_irrep_directory``.
-
-        Takes the Hamiltonian ``H`` (its terms are copied) and the group
-        info dict the directory writer consumes in place of the
-        directory; every other argument and the result are identical.
     )pbdoc");
 
 }

@@ -31,8 +31,7 @@ Fixture
 -------
 
 Default Heisenberg ring at N=20, n_up=10 with the full Z_N
-translation group (``automorphism_results/`` written by
-``_write_symmetry_directory``). ``dim_full_sz = C(20, 10) = 184756``;
+translation group. ``dim_full_sz = C(20, 10) = 184756``;
 the largest sector mirror is bounded by that (under 1 MB per table).
 Symmetry decomposes the full-Sz space into 20 momentum sectors of
 dim ~9k each -- big enough to expose hash-vs-rank perf, small enough
@@ -47,11 +46,9 @@ Streaming-symmetry method coverage
 ----------------------------------
 
 The streaming-symmetry C++ bindings cover 7 of the 8 universal
-workflows; ``KpmDynamical`` has no
-``workflows_spectral_streaming_symmetry_kpm_dynamical_directory``
-sibling today (see ``spectral.py::_spectral_streaming_symmetry_directory``,
-which raises if the method is not ``GroundStateCF`` /
-``FtlmDynamical``). We test the 7 supported and explicitly skip
+workflows; ``KpmDynamical`` has no streaming-symmetry binding today
+(the spectral symmetry lanes are the cross-irrep GroundStateCF and
+FTLM kernels only). We test the supported ones and explicitly skip
 ``KpmDynamical`` with a ``pytest.skip`` that surfaces the missing
 binding -- a future plan can wire the symmetry+KpmDynamical path
 and lift the skip.
@@ -59,9 +56,8 @@ and lift the skip.
 
 from __future__ import annotations
 
+import math
 import os
-import shutil
-import tempfile
 import time
 import warnings
 from math import comb
@@ -141,9 +137,7 @@ _REQUIRES_GPU = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Heisenberg ring + Z_N translation directory. We write ONCE per module
-# (session scope is too coarse for parallel pytest workers) so all
-# workflow tests share the same on-disk deck.
+# Heisenberg ring + Z_N translation group.
 # ---------------------------------------------------------------------------
 def _build_heisenberg_ring(num_sites: int):
     b = qed.input.HamiltonianBuilder(num_sites)
@@ -163,27 +157,30 @@ def _zn_generator(num_sites: int):
 
 
 @pytest.fixture(scope="module")
-def sym_directory(tmp_path_factory):
-    """Heisenberg-ring directory + ``automorphism_results/`` (Z_N
-    translation). Materialised once for the whole module; each test
-    consumes the path read-only."""
-    from qed.workflow import (
-        _write_operator_directory,
-        _write_symmetry_directory,
-    )
-    from qed.symmetry import group_from_generators
+def sym_ring():
+    """The Heisenberg ring and its CLOSED Z_N translation group dict,
+    built once for the whole module; each test consumes them
+    read-only."""
+    from qed.workflow import _closed_symmetry_info, _normalize_symmetry_info
 
-    tmpdir = tempfile.mkdtemp(prefix="qed_killhash_symE2_")
-    try:
-        H = _build_heisenberg_ring(N_SITES_TEST)
-        info = group_from_generators(
-            N_SITES_TEST, _zn_generator(N_SITES_TEST).generators
-        )
-        _write_operator_directory(H, tmpdir)
-        _write_symmetry_directory(tmpdir, info)
-        yield tmpdir
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    H = _build_heisenberg_ring(N_SITES_TEST)
+    group = _closed_symmetry_info(
+        _normalize_symmetry_info(H, _zn_generator(N_SITES_TEST)))
+    return H, group
+
+
+def _sz_q_transforms(num_sites: int, q_int: int):
+    """Transform tuples of S^z_Q = N^{-1/2} sum_j e^{-iQj} S^z_j,
+    Q = 2 pi q_int / N, for the cross-irrep spectral binding."""
+    from qed import _core
+
+    obs = _core.Operator(num_sites, 0.5)
+    Q = 2.0 * math.pi * q_int / num_sites
+    for j in range(num_sites):
+        obs.add_one_body(_core.OP_SZ, j,
+                         complex(math.cos(-Q * j), math.sin(-Q * j))
+                         / math.sqrt(num_sites))
+    return [tuple(t) for t in obs.transform_tuples()]
 
 
 def _expected_dim() -> int:
@@ -215,7 +212,7 @@ def _time_and_check(fn, label: str, budget_s: float = WORKFLOW_WALL_BUDGET_S):
 
 # ---- GS (Lanczos) --------------------------------------------------------
 @_REQUIRES_GPU
-def test_phase_e2_gs_lanczos_gpu_sym(sym_directory):
+def test_phase_e2_gs_lanczos_gpu_sym():
     """qed.solve(H, symmetry=..., solver='lanczos', device='gpu') on the
     fixed-Sz translation-symmetric Heisenberg ring."""
     H = _build_heisenberg_ring(N_SITES_TEST)
@@ -283,18 +280,16 @@ def test_phase_e2_kpm_dos_gpu_sym():
 
 # ---- FTLM ---------------------------------------------------------------
 @_REQUIRES_GPU
-def test_phase_e2_ftlm_gpu_sym(sym_directory, tmp_path):
-    """FTLM / qed.thermal(directory, ..., use_symmetry_if_available=True),
-    device='gpu'."""
+def test_phase_e2_ftlm_gpu_sym(sym_ring, tmp_path):
+    """FTLM / qed.thermal(H, symmetry=..., device='gpu')."""
     def go():
         return qed.thermal(
-            sym_directory,
+            sym_ring[0],
             method="FTLM",
-            num_sites=N_SITES_TEST, spin=0.5,
+            symmetry=_zn_generator(N_SITES_TEST),
             T_min=0.5, T_max=4.0, num_T=2,
             sz_min=N_UP_TEST, sz_max=N_UP_TEST,
             num_samples=1, ftlm_krylov_dim=20,
-            use_symmetry_if_available=True,
             device="gpu",
             verbose=False,
             output_dir=str(tmp_path / "ftlm_sym"),
@@ -310,18 +305,16 @@ def test_phase_e2_ftlm_gpu_sym(sym_directory, tmp_path):
 
 # ---- LTLM ---------------------------------------------------------------
 @_REQUIRES_GPU
-def test_phase_e2_ltlm_gpu_sym(sym_directory, tmp_path):
-    """LTLM / qed.thermal(directory, ..., use_symmetry_if_available=True),
-    device='gpu'."""
+def test_phase_e2_ltlm_gpu_sym(sym_ring, tmp_path):
+    """LTLM / qed.thermal(H, symmetry=..., device='gpu')."""
     def go():
         return qed.thermal(
-            sym_directory,
+            sym_ring[0],
             method="LTLM",
-            num_sites=N_SITES_TEST, spin=0.5,
+            symmetry=_zn_generator(N_SITES_TEST),
             T_min=0.5, T_max=4.0, num_T=2,
             sz_min=N_UP_TEST, sz_max=N_UP_TEST,
             num_samples=1, ltlm_krylov_dim=20,
-            use_symmetry_if_available=True,
             device="gpu",
             verbose=False,
             output_dir=str(tmp_path / "ltlm_sym"),
@@ -334,19 +327,18 @@ def test_phase_e2_ltlm_gpu_sym(sym_directory, tmp_path):
 
 # ---- mTPQ ---------------------------------------------------------------
 @_REQUIRES_GPU
-def test_phase_e2_mtpq_gpu_sym(sym_directory, tmp_path):
-    """mTPQ / qed.thermal(directory, ..., use_symmetry_if_available=True),
-    device='gpu'. The original kill-hash motivator: each per-sector
-    mTPQ call paid the full hash-build cost pre-patch."""
+def test_phase_e2_mtpq_gpu_sym(sym_ring, tmp_path):
+    """mTPQ / qed.thermal(H, symmetry=..., device='gpu'). The original
+    kill-hash motivator: each per-sector mTPQ call paid the full
+    hash-build cost pre-patch."""
     def go():
         return qed.thermal(
-            sym_directory,
+            sym_ring[0],
             method="mtpq",
-            num_sites=N_SITES_TEST, spin=0.5,
+            symmetry=_zn_generator(N_SITES_TEST),
             T_min=0.5, T_max=4.0, num_T=2,
             sz_min=N_UP_TEST, sz_max=N_UP_TEST,
             num_samples=1, max_iterations=20,
-            use_symmetry_if_available=True,
             device="gpu",
             verbose=False,
             output_dir=str(tmp_path / "mtpq_sym"),
@@ -365,12 +357,12 @@ def test_phase_e2_mtpq_gpu_sym(sym_directory, tmp_path):
 # ---- KpmDynamical (DSSF) ------------------------------------------------
 @_REQUIRES_GPU
 def test_phase_e2_kpm_dynamical_gpu_sym():
-    """No symmetry-aware C++ binding for KpmDynamical yet -- see
-    ``spectral.py::_spectral_streaming_symmetry_directory`` which
-    rejects every method except GroundStateCF / FtlmDynamical. The
-    symmetry mirror of Phase D is incomplete on this method; Phase E.1
-    nonetheless covers the dense rank-table path, and the hash IS dead
-    on KpmDynamical+sym once that binding lands.
+    """No symmetry-aware C++ binding for KpmDynamical yet -- the
+    spectral symmetry lanes are the cross-irrep GroundStateCF (T=0) and
+    FTLM (finite T) kernels only. The symmetry mirror of Phase D is
+    incomplete on this method; Phase E.1 nonetheless covers the dense
+    rank-table path, and the hash IS dead on KpmDynamical+sym once that
+    binding lands.
 
     The skip is INTENTIONAL universality bookkeeping: it surfaces the
     missing binding in pytest output instead of silently dropping the
@@ -381,8 +373,7 @@ def test_phase_e2_kpm_dynamical_gpu_sym():
         "KpmDynamical has no streaming-symmetry C++ binding yet; "
         "Phase E.1's rank-table indirection is still installed for "
         "the workflow but cannot be exercised end-to-end from Python "
-        "until workflows_spectral_streaming_symmetry_kpm_dynamical_directory "
-        "is wired."
+        "until a streaming-symmetry KpmDynamical binding is wired."
     )
 
 
@@ -390,71 +381,64 @@ def test_phase_e2_kpm_dynamical_gpu_sym():
 @_REQUIRES_GPU
 def test_phase_e2_ftlm_dynamical_gpu_sym():
     """``qed.spectral`` exposes FtlmDynamical+symmetry only through the
-    finite-T cross-irrep code path -- the dispatcher requires a
-    ``cross_irrep_observable`` (transverse Fourier-mode observable)
-    plus ``T`` set, neither of which the same-irrep universality gate
-    here is shaped to provide.
-
-    The underlying C++ binding
-    (``workflows_spectral_streaming_symmetry_directory``) DOES support
-    ``FtlmDynamical`` method; the gap is purely in the Python
-    dispatch, which is out of scope for the kill-hash plan. Phase E.1's
-    rank-table indirection is installed unconditionally for both
-    GroundStateCF and FtlmDynamical on the symmetry path -- the
-    GroundStateCF gate (below) exercises the same code path that
-    FtlmDynamical+sym uses once the Python dispatch ships.
+    finite-T cross-irrep binding
+    (``workflows_spectral_streaming_symmetry_ftlm_cross_irrep``), whose
+    per-sector FTLM kernel is host-only (pinned by
+    ``test_universal_save.py::test_spectral_ftlm_cross_irrep_lane_is_cpu``).
+    There is no GPU symmetry path to gate on this method yet; the
+    GroundStateCF gate (below) exercises the Phase E.1 rank-table
+    indirection on the cross-irrep GPU lane.
     """
     pytest.skip(
-        "FtlmDynamical+sym is reachable from qed.spectral only via the "
-        "cross-irrep observable surface; the same-irrep dispatch only "
-        "accepts GroundStateCF. Re-enable when qed.spectral grows a "
-        "same-irrep FtlmDynamical entry point."
+        "FtlmDynamical+sym runs only on the host-only FTLM cross-irrep "
+        "kernel; re-enable when that kernel grows a GPU lane."
     )
 
 
 # ---- GroundStateCF (DSSF) -----------------------------------------------
 @_REQUIRES_GPU
-def test_phase_e2_groundstate_cf_gpu_sym(sym_directory, tmp_path):
-    """GroundStateCF / qed.spectral(directory, ..., symmetry=True),
-    device='gpu'. Deterministic, so we compare against the CPU lane on
-    the same symmetry-projected GS sector.
+def test_phase_e2_groundstate_cf_gpu_sym(sym_ring, tmp_path):
+    """GroundStateCF on the cross-irrep streaming-symmetry binding
+    (``workflows_spectral_streaming_symmetry_cross_irrep``) with an
+    S^z_{Q=2 pi/N} probe on the fixed-Sz sector, ``allow_gpu`` on.
+    Deterministic, so we compare against the CPU lane on the same
+    symmetry-projected sectors.
     """
-    omega = np.linspace(-2.0, 4.0, 16)
+    from qed import _core
+
+    H, group = sym_ring
+    probe = _sz_q_transforms(N_SITES_TEST, 1)
+
+    def _opts(allow_gpu: bool, out: str):
+        opts = _core.SpectralOptions()
+        opts.method            = _core.SpectralMethod.GroundStateCF
+        opts.num_omega         = 16
+        opts.omega_min         = -2.0
+        opts.omega_max         = 4.0
+        opts.broadening        = 0.05
+        opts.krylov_dim        = 40
+        opts.momentum_transfer = [1.0 / N_SITES_TEST]
+        opts.output_dir        = str(tmp_path / out)
+        opts.backend.allow_gpu = allow_gpu
+        if allow_gpu:
+            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
+        return opts
 
     def go_gpu():
-        return qed.spectral(
-            sym_directory,
-            omega=omega,
-            method="ground_state_cf",
-            eta=0.05,
-            krylov_dim=40,
-            symmetry=True,
-            num_sites=N_SITES_TEST,
-            spin_l=0.5,
-            sz=N_UP_TEST,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "gscf_sym_gpu"),
+        return _core.workflows_spectral_streaming_symmetry_cross_irrep(
+            H, group, N_SITES_TEST, 0.5, probe,
+            _opts(True, "gscf_sym_gpu"), N_UP_TEST, 0,
         )
 
     res_gpu, _ = _time_and_check(go_gpu, "GroundStateCF[sym]")
+    assert res_gpu.backend.lane == "gpu"
     s_gpu = np.asarray(res_gpu.S_real, dtype=float)
     assert s_gpu.size > 0 and np.all(np.isfinite(s_gpu))
 
     def go_cpu():
-        return qed.spectral(
-            sym_directory,
-            omega=omega,
-            method="ground_state_cf",
-            eta=0.05,
-            krylov_dim=40,
-            symmetry=True,
-            num_sites=N_SITES_TEST,
-            spin_l=0.5,
-            sz=N_UP_TEST,
-            device="cpu",
-            verbose=False,
-            output_dir=str(tmp_path / "gscf_sym_cpu"),
+        return _core.workflows_spectral_streaming_symmetry_cross_irrep(
+            H, group, N_SITES_TEST, 0.5, probe,
+            _opts(False, "gscf_sym_cpu"), N_UP_TEST, 0,
         )
 
     res_cpu, _ = _time_and_check(go_cpu, "GroundStateCF[sym,CPU]",

@@ -205,13 +205,3 @@ def test_obs_1_handles_are_apply_callable():
     # We don't assert numeric value -- correctness of the apply() math is
     # covered by the C++ ctest baseline. We only check the bridge works.
     assert out.dtype == np.complex128
-
-
-# ---------------------------------------------------------------------------
-# qed.spectral CLI-form (directory) argument validation
-# ---------------------------------------------------------------------------
-
-def test_spectral_rejects_unknown_method_override():
-    """qed.spectral validates the CLI ``method=`` token before shelling out."""
-    with pytest.raises(ValueError):
-        qed.spectral("/nonexistent", T=0.5, method="not_a_real_method")

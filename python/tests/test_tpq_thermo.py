@@ -24,7 +24,7 @@ The fix:
   legacy adapter hardcoded 100 iterations).
 
 The streaming-symmetry SIGSEGV that previously crashed mTPQ on
-directory operators was a downstream artifact of the same gap (sectors
+the spatial-symmetry lane was a downstream artifact of the same gap (sectors
 returned empty thermo, the recombiner walked nonexistent data) and
 resolves as a side-effect.
 """
@@ -32,7 +32,6 @@ resolves as a side-effect.
 from __future__ import annotations
 
 import os
-import tempfile
 
 import numpy as np
 import pytest
@@ -49,18 +48,9 @@ def _ring():
     return b.to_operator()
 
 
-def _directory_with_symmetry():
-    from qed.symmetry import group_from_generators
-    from qed.workflow import _write_operator_directory, _write_symmetry_directory
-
-    H = _ring()
-    tmp = tempfile.mkdtemp(prefix=f"qed_tpq_test_N{N_SITES}_")
-    _write_operator_directory(H, tmp)
-    info = group_from_generators(
-        N_SITES, [[(i + 1) % N_SITES for i in range(N_SITES)]]
-    )
-    _write_symmetry_directory(tmp, info)
-    return tmp, H
+def _translation():
+    """The Z_N translation generator of the ring."""
+    return [[(i + 1) % N_SITES for i in range(N_SITES)]]
 
 
 @pytest.fixture(scope="module")
@@ -115,12 +105,10 @@ def test_tpq_returns_populated_thermo_fixed_sz(method):
 def test_tpq_returns_populated_thermo_streaming_symmetry(method):
     """Streaming-symmetry path used to SIGSEGV here because every sector
     returned empty thermo and the recombiner walked nonexistent data."""
-    tmp, _ = _directory_with_symmetry()
     r = qed.thermal(
-        tmp, num_sites=N_SITES, method=method,
+        _ring(), symmetry=_translation(), method=method,
         T_min=0.1, T_max=5.0, num_T=10,
         num_samples=4, max_iterations=1000,
-        use_symmetry_if_available=True,
         use_sz_if_conserved=False, verbose=False,
     )
     assert len(r.energy) == 10
@@ -129,12 +117,11 @@ def test_tpq_returns_populated_thermo_streaming_symmetry(method):
 
 @pytest.mark.parametrize("method", ["mTPQ"])
 def test_tpq_returns_populated_thermo_sz_plus_symmetry(method):
-    tmp, _ = _directory_with_symmetry()
     r = qed.thermal(
-        tmp, num_sites=N_SITES, method=method,
+        _ring(), symmetry=_translation(), method=method,
         T_min=0.1, T_max=5.0, num_T=10,
         num_samples=4, max_iterations=1000,
-        use_symmetry_if_available=True, verbose=False,
+        verbose=False,
     )
     assert len(r.energy) == 10
     assert np.all(np.isfinite(r.energy))
@@ -204,7 +191,7 @@ def test_mtpq_converges_with_more_iterations():
 # with symmetry on):
 #
 #   Bug 1 -- C++ streaming-symmetry binding (workflow_bindings.cpp)
-#            ``workflows_thermal_streaming_symmetry_directory`` called
+#            ``workflows_thermal_streaming_symmetry`` called
 #            ``topts.output_dir.clear()`` for every per-sector run, so
 #            NO state vectors ever landed on disk when the user opted
 #            into spatial symmetry.
@@ -233,23 +220,21 @@ def _count_state_vectors(h5_path: str) -> int:
         return count
 
 
-def test_tpq_save_with_symmetry_directory_lands_on_disk(tmp_path):
-    """Bug 1 pin: TPQ + use_symmetry_if_available + probe_betas + output_dir
+def test_tpq_save_with_symmetry_lands_on_disk(tmp_path):
+    """Bug 1 pin: TPQ + symmetry= + probe_betas + output_dir
     must produce per-sector ed_results.h5 files with state vectors at
     ``/tpq/samples/sample_<s>/states/beta_<b>``. Pre-fix every state
     vector was silently dropped (the C++ binding cleared output_dir)."""
-    tmp_dir, _ = _directory_with_symmetry()
     outdir = str(tmp_path / "save_with_sym")
 
     R = qed.thermal(
-        tmp_dir, num_sites=N_SITES, method="mTPQ",
+        _ring(), symmetry=_translation(), method="mTPQ",
         T_min=0.1, T_max=5.0, num_T=6,
         # max_iterations=None (auto): size the trajectory to bracket
         # beta_max = 1/T_min so both probe betas are reached (see the
         # multi-Sz save test for the large-auto-L rationale).
         num_samples=1, max_iterations=None,
         probe_betas=[0.5, 2.0],
-        use_symmetry_if_available=True,
         use_sz_if_conserved=False,
         output_dir=outdir,
         random_seed=7, verbose=False, device="cpu",
@@ -335,15 +320,13 @@ def test_tpq_load_state_round_trip(tmp_path):
     TPQ-to-CF spectral pipeline relies on: ``GroundStateCF`` takes the
     snapshot in the orbit/sector basis directly."""
     import h5py
-    tmp_dir, _ = _directory_with_symmetry()
     outdir = str(tmp_path / "load_round_trip")
 
     R = qed.thermal(
-        tmp_dir, num_sites=N_SITES, method="mTPQ",
+        _ring(), symmetry=_translation(), method="mTPQ",
         T_min=0.1, T_max=5.0, num_T=4,
         num_samples=1, max_iterations=15,
         probe_betas=[1.0],
-        use_symmetry_if_available=True,
         use_sz_if_conserved=False,
         output_dir=outdir,
         random_seed=23, verbose=False, device="cpu",

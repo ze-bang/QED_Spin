@@ -45,8 +45,6 @@ Submodules
 * :mod:`qed.symmetry` -- programmatic permutation-group helpers.
 * :mod:`qed.dssf` -- DSSF observable-pair builders (data helpers only;
   the actual workflow lives in :func:`qed.spectral`).
-* :mod:`qed.auto_tune` -- internal heuristic tuner (used by
-  :func:`qed.spectral` when ``auto_tune=True``).
 """
 
 from __future__ import annotations
@@ -83,7 +81,6 @@ from ._core import (
 )
 
 from . import dssf  # DSSF observable-pair data helpers
-from . import auto_tune  # heuristic helpers consumed internally by qed.spectral
 from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
 from . import input  # standalone C++ ed_input library bindings
 from . import symmetry  # programmatic site-permutation symmetry DSL
@@ -185,7 +182,6 @@ __all__ = [
     "find_symmetries",
     # Submodules
     "dssf",
-    "auto_tune",
     "hamiltonian",
     "input",
     "symmetry",

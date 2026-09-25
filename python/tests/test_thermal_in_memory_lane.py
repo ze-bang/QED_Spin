@@ -1,21 +1,15 @@
 """qed.thermal's abelian symmetric lane runs on the in-memory symmetric bindings
-(WP9.6): an Operator with symmetry= no longer goes through a temp directory and a
-recursive qed.thermal call, and gives the same thermodynamics as the directory lane
-it replaced.
+(WP9.6): an Operator with symmetry= goes through no temp directory.
 
 References:
-* the directory lane -- qed.thermal on a directory written by the same writers from
-  the same H and group dict (what the in-memory call used to do internally), with
-  the same seeds: equal to 1e-12, including the stochastic FTLM sectors (> 512
-  states) of the 4x4 torus;
-* the plain (no symmetry) lane for a three-body model, where every block is below
-  the orchestrator's exact small-dim cutoff so both answers are exact.
-The models use dyadic couplings, which survive the directory's text transport
-exactly.
+* the same call with the group handed over as a raw generators-only dict, which
+  is closed before it reaches C++;
+* method='exact' against FTLM on the ring, where every block is below the
+  orchestrator's exact small-dim cutoff so both answers are exact;
+* the plain (no symmetry) lane for a three-body model, likewise exact.
 """
 from __future__ import annotations
 
-import shutil
 import tempfile
 
 import numpy as np
@@ -24,11 +18,6 @@ import pytest
 qed = pytest.importorskip("qed")
 
 from qed import _core  # noqa: E402
-from qed.workflow import (  # noqa: E402
-    _normalize_symmetry_info,
-    _write_operator_directory,
-    _write_symmetry_directory,
-)
 
 SP, SM, SZ = _core.OP_SPLUS, _core.OP_SMINUS, _core.OP_SZ
 ATOL = 1e-12
@@ -101,8 +90,6 @@ def _tri_chiral_3x3():
     return N, H, [_translation(L, L, 1, 0), _translation(L, L, 0, 1)]
 
 
-MODELS = {"ring6": _ring6, "j1j2_4x4": _j1j2_4x4}
-
 # FTLM with a fixed seed; small sample / Krylov budgets keep the 4x4 torus cheap
 # while its middle-Sz irrep sectors (> 512 states) stay genuinely stochastic.
 FTLM_KW = dict(method="FTLM", T_min=0.2, T_max=4.0, num_T=12, num_samples=3,
@@ -119,18 +106,6 @@ def no_tempdir(monkeypatch):
     monkeypatch.setattr(tempfile, "mkdtemp", _refuse)
     monkeypatch.setattr(tempfile, "TemporaryDirectory", _refuse)
     return monkeypatch
-
-
-def _directory_thermal(H, gens, N, **kw):
-    """qed.thermal on a directory written from the same H and group dict -- the
-    lane the in-memory call used to recurse into."""
-    d = tempfile.mkdtemp(prefix="qed_test_thermal_dirlane_")
-    try:
-        _write_operator_directory(H, d)
-        _write_symmetry_directory(d, _normalize_symmetry_info(H, gens))
-        return qed.thermal(d, num_sites=N, use_symmetry_if_available=True, **kw)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def _assert_curves_close(a, b, atol, what, fields=CURVES):
@@ -153,54 +128,8 @@ def _assert_same_result(mem, disk, what):
         _assert_curves_close(m, d, ATOL, f"{what} sector n_up={d.n_up}")
 
 
-# -----------------------------------------------------------------------------
-# FTLM on the sector lane: all-Sz pool, one named Sz, and the Sz-off lane
-# -----------------------------------------------------------------------------
-@pytest.mark.parametrize("model_name", sorted(MODELS))
-@pytest.mark.parametrize("sz", [None, "half", "off"])
-def test_ftlm_matches_directory_lane(no_tempdir, model_name, sz):
-    """sz=None -> the all-Sz flat pool (workflows_thermal_all_sz_streaming_symmetry);
-    sz=N/2 -> the same pool on one magnetisation block; sz='off' -> the full-Hilbert
-    per-irrep lane (workflows_thermal_streaming_symmetry)."""
-    N, H, gens = MODELS[model_name]()
-    kw = dict(FTLM_KW, point_group="off")
-    if sz == "half":
-        kw["sz"] = N // 2
-    elif sz == "off":
-        kw["sz"] = "off"
-    mem = qed.thermal(H, symmetry=gens, **kw)
-    assert mem.used_symmetry_decomposition
-    no_tempdir.undo()
-    disk = _directory_thermal(H, gens, N, **kw)
-    _assert_same_result(mem, disk, f"{model_name} sz={sz}")
-
-
-@pytest.mark.parametrize("model_name", sorted(MODELS))
-def test_ftlm_default_toggles_match_directory_lane(no_tempdir, model_name):
-    """Default point_group / spin_flip / time_reversal: the block lane declines for
-    a pure translation group, and the resolved toggles reach C++ unchanged."""
-    N, H, gens = MODELS[model_name]()
-    mem = qed.thermal(H, symmetry=gens, **FTLM_KW)
-    no_tempdir.undo()
-    disk = _directory_thermal(H, gens, N, **FTLM_KW)
-    _assert_same_result(mem, disk, f"{model_name} defaults")
-
-
-@pytest.mark.parametrize("qn", [(0, 0), (1, 2), (3, 1)])
-def test_sector_selection_matches_directory_lane(no_tempdir, qn):
-    """sector= on the two-generator torus (QN != raw index) resolves against the
-    info dict's table exactly as the directory lane resolved sector_metadata.json."""
-    N, H, gens = _j1j2_4x4()
-    kw = dict(FTLM_KW, point_group="off", sz="off", sector=qn)
-    mem = qed.thermal(H, symmetry=gens, **kw)
-    no_tempdir.undo()
-    disk = _directory_thermal(H, gens, N, **kw)
-    _assert_same_result(mem, disk, f"sector={qn}")
-
-
 def test_raw_generators_only_dict(no_tempdir):
-    """A dict carrying only ``generators`` is closed before it reaches C++ (the
-    directory writer closed it the same way)."""
+    """A dict carrying only ``generators`` is closed before it reaches C++."""
     N, H, gens = _j1j2_4x4()
     kw = dict(FTLM_KW, point_group="off", sz=N // 2 - 1)
     raw = qed.thermal(H, symmetry={"generators": [list(g) for g in gens]}, **kw)
@@ -211,38 +140,27 @@ def test_raw_generators_only_dict(no_tempdir):
 # -----------------------------------------------------------------------------
 # method='exact' (little-group block engine, unchanged by the lane switch)
 # -----------------------------------------------------------------------------
-@pytest.mark.parametrize("model_name", sorted(MODELS))
-def test_exact_matches_directory_form_and_ftlm(no_tempdir, model_name):
-    N, H, gens = MODELS[model_name]()
+def test_exact_matches_ftlm(no_tempdir):
+    _, H, gens = _ring6()
     kw = dict(T_min=0.2, T_max=4.0, num_T=12, verbose=False)
     mem = qed.thermal(H, symmetry=gens, method="exact", **kw)
-    no_tempdir.undo()
-    disk = _directory_thermal(H, gens, N, method="exact", **kw)
-    # The two build the same abelian group from a generator list vs. the
-    # enumerated automorphisms.json, so element order (hence roundoff) may differ.
-    _assert_curves_close(mem, disk, 1e-10, f"{model_name} exact")
-    if model_name == "ring6":
-        # Every block is below the exact small-dim cutoff: FTLM is exact too.
-        ftlm = qed.thermal(H, symmetry=gens, point_group="off", **FTLM_KW)
-        _assert_curves_close(mem, ftlm, 1e-9, "ring6 exact vs FTLM",
-                             fields=("temperatures", "energy", "specific_heat"))
+    # Every block is below the exact small-dim cutoff: FTLM is exact too.
+    ftlm = qed.thermal(H, symmetry=gens, point_group="off", **FTLM_KW)
+    _assert_curves_close(mem, ftlm, 1e-9, "ring6 exact vs FTLM",
+                         fields=("temperatures", "energy", "specific_heat"))
 
 
 # -----------------------------------------------------------------------------
-# Three-body terms: copied from H by the in-memory binding (the directory lane
-# read them from ThreeBodyG.dat in C++; only its Python-side reload skipped them)
+# Three-body terms: copied from H by the in-memory binding
 # -----------------------------------------------------------------------------
 @pytest.mark.parametrize("sz", [None, "off", 4])
-def test_three_body_matches_directory_and_plain_lanes(no_tempdir, sz):
-    N, H, gens = _tri_chiral_3x3()
+def test_three_body_matches_plain_lane(no_tempdir, sz):
+    _, H, gens = _tri_chiral_3x3()
     kw = dict(FTLM_KW, point_group="off")
     if sz is not None:
         kw["sz"] = sz
     mem = qed.thermal(H, symmetry=gens, **kw)
     plain = qed.thermal(H, **kw)
-    no_tempdir.undo()
     # N = 9: every (Sz, k) block and every plain Sz block is <= 512 states, so
     # both lanes are exact and agree up to roundoff.
     _assert_curves_close(mem, plain, 1e-9, f"tri_chiral sz={sz} vs plain")
-    disk = _directory_thermal(H, gens, N, **kw)
-    _assert_same_result(mem, disk, f"tri_chiral sz={sz}")

@@ -1,40 +1,28 @@
-"""``qed._thermal.lanes``: the four early-return lanes of :func:`qed.thermal`.
+"""``qed._thermal.lanes``: the three early-return lanes of :func:`qed.thermal`.
 
 ``thermal()`` is a sequence of lanes, each of which either RETURNS a
-``ThermalResult`` or declines and lets the next one look. Four of them are
+``ThermalResult`` or declines and lets the next one look. Three of them are
 self-contained early returns -- the SU(2) tower lane, the exact block lane,
-and the two little-group projection lanes (in-memory and directory) -- and
-they are the bodies extracted here. What stays in ``thermal()`` is the
-preparation they read: Sz normalisation, symmetry resolution, the device
-pick, the method-knob merge and the operator load, each of which mutates
-state the LATER lanes depend on. That ordering is the contract; the lane
-functions take everything they read as explicit arguments so it cannot drift
-into implicit shared state again.
+and the little-group projection lane -- and they are the bodies extracted
+here. What stays in ``thermal()`` is the preparation they read: Sz
+normalisation, symmetry resolution, the device pick and the method-knob
+merge, each of which mutates state the LATER lanes depend on. That ordering
+is the contract; the lane functions take everything they read as explicit
+arguments so it cannot drift into implicit shared state again.
 
 A declining lane returns the shared ``DECLINED`` sentinel (the same object
 ``qed._solve`` uses), never ``None`` -- a lane may legitimately produce a
 falsy result, and a sentinel that is also the "no result" value is how a
 declined lane starts looking like a successful one.
-
-The bodies below are the pre-split text, unchanged except for the relative
-import depth (this module sits one package deeper). Two inconsistencies were
-found in them during the move and deliberately NOT fixed here, so the split
-stays reviewable as a pure move: the in-memory projection lane recomputes
-``use_gpu`` from ``device`` while the directory lane uses the resolved
-``_use_gpu``, and the two lanes word their decline messages differently.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import warnings
-from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 
 from .. import _core as _core
-from .._core import Operator
 from .._solve.request import DECLINED
 
 __all__ = [
@@ -42,14 +30,13 @@ __all__ = [
     "su2_tower_lane",
     "exact_lane",
     "inmemory_projection_lane",
-    "directory_projection_lane",
 ]
 
 
 def su2_tower_lane(
     H, *, total_spin, method, T_min, T_max, num_T, num_samples,
     krylov_dim, ftlm_krylov_dim, random_seed, tpq_delta_beta,
-    tpq_taylor_order, is_directory, verbose,
+    tpq_taylor_order, verbose,
     symmetry, sector, sz, sz_min, sz_max, star_maps, output_dir,
     probe_betas, spin_flip, time_reversal, point_group, device,
 ):
@@ -107,22 +94,18 @@ def su2_tower_lane(
             random_seed=random_seed,
             tpq_delta_beta=tpq_delta_beta,
             tpq_taylor_order=tpq_taylor_order,
-            is_directory=is_directory, verbose=verbose)
+            verbose=verbose)
 
 
     return DECLINED
 
 
 def exact_lane(
-    H, *, method, is_directory, num_sites, spin, symmetry, sector,
+    H, *, method, symmetry, sector,
     T_min, T_max, num_T, device, spin_flip, time_reversal, verbose,
 ):
     """``method="exact"``: exact canonical thermodynamics from the block
-    engine's full per-block spectra. Declines for every other method.
-
-    Note the local rebinding of ``H`` / ``symmetry`` / ``is_directory`` for
-    the directory form: it is confined to this lane because the lane always
-    returns, which is exactly why it can stay verbatim here."""
+    engine's full per-block spectra. Declines for every other method."""
     from ..thermal import ThermalResult, _sym_toggle_int
     # method="exact": exact canonical thermodynamics from the block
     # engine's full per-block spectra. This is a METHOD, sitting beside
@@ -134,51 +117,6 @@ def exact_lane(
     # projection without changing the method.
     # ------------------------------------------------------------------
     if isinstance(method, str) and method.upper() == "EXACT":
-        if is_directory:
-            # U4a pattern: the directory's own deck + automorphisms feed
-            # the exact block engine. Same guards as the sampling route:
-            # the Python loader reads only Trans/InterAll (refuse
-            # ThreeBodyG.dat), and the group comes from
-            # automorphisms.json (validated permutations).
-            directory = str(H)
-            if num_sites is None:
-                raise ValueError(
-                    "qed.thermal: pass num_sites= with the directory "
-                    "form.")
-            if os.path.exists(os.path.join(directory, "ThreeBodyG.dat")):
-                raise NotImplementedError(
-                    "qed.thermal(method='exact'): this directory carries "
-                    "ThreeBodyG.dat, which the Python-side loader does "
-                    "not read -- the exact lane would silently miss "
-                    "terms. Use the sampling methods (exact below the "
-                    "small-dim cutoff) or the in-memory form.")
-            _autos_path = os.path.join(directory, "automorphism_results",
-                                       "automorphisms.json")
-            if not os.path.exists(_autos_path):
-                raise ValueError(
-                    "qed.thermal(method='exact'): the directory carries "
-                    "no automorphism_results/automorphisms.json to build "
-                    "the block engine from; pass the in-memory form with "
-                    "symmetry= instead.")
-            import json as _json
-            with open(_autos_path) as f:
-                _cand = _json.load(f)
-            _N = int(num_sites)
-            if not (isinstance(_cand, list) and _cand
-                    and all(isinstance(p, list) and len(p) == _N
-                            and sorted(p) == list(range(_N))
-                            for p in _cand)):
-                raise ValueError(
-                    "qed.thermal(method='exact'): automorphisms.json is "
-                    "not a list of site permutations.")
-            H_ex = Operator(num_sites=_N, spin=float(spin))
-            _trans = os.path.join(directory, "Trans.dat")
-            _inter = os.path.join(directory, "InterAll.dat")
-            if os.path.exists(_trans):
-                H_ex.load_trans(_trans)
-            if os.path.exists(_inter):
-                H_ex.load_inter_all(_inter)
-            H, symmetry, is_directory = H_ex, _cand, False
         if symmetry is None:
             raise NotImplementedError(
                 "qed.thermal: method='exact' rides the little-group block "
@@ -234,7 +172,7 @@ def exact_lane(
 
 
 def inmemory_projection_lane(
-    H, *, symmetry, is_directory, sector, point_group, method,
+    H, *, symmetry, sector, point_group, method,
     T_min, T_max, num_T, num_samples, krylov_dim, random_seed,
     device, spin_flip, time_reversal, verbose,
 ):
@@ -242,7 +180,7 @@ def inmemory_projection_lane(
     method inside the little-group blocks. Declines when the preconditions
     do not hold or when the lane resolver declines the projection."""
     from ..thermal import _sym_toggle_int, _thermal_result_from_block_lane
-    if (symmetry is not None and not is_directory
+    if (symmetry is not None
             and sector is None
             and isinstance(point_group, str)
             and point_group.lower() in ("auto", "full")):
@@ -281,67 +219,5 @@ def inmemory_projection_lane(
         elif verbose:
             print(f"[qed.thermal] projection declined ({lane.reason}); "
                   f"abelian sector lane.")
-
-    return DECLINED
-
-
-def directory_projection_lane(
-    H_op, *, is_directory, has_sym, sector, point_group, output_dir,
-    probe_betas, method, directory, sym_dir, sz_conserved, lo, hi, N,
-    T_min, T_max, num_T, num_samples, krylov_dim, random_seed,
-    use_gpu, spin_flip, time_reversal, verbose,
-):
-    """U4a: the directory form rides the same block lane as the in-memory
-    one, guarded by every contract the block lane cannot honour (three-body
-    terms the Python loader does not read, per-sector files, TPQ snapshots,
-    ``sector=``, a partial Sz window). Declines otherwise."""
-    from ..thermal import _sym_toggle_int, _thermal_result_from_block_lane
-    _use_gpu = use_gpu
-    if (is_directory and has_sym and sector is None
-            and isinstance(point_group, str)
-            and point_group.lower() in ("auto", "full")
-            and not output_dir and not probe_betas
-            and str(method).upper() in ("FTLM", "LTLM", "MTPQ", "OFTLM")
-            and not os.path.exists(os.path.join(directory, "ThreeBodyG.dat"))
-            and (not sz_conserved or (lo == 0 and hi == N))):
-        _autos_path = os.path.join(sym_dir, "automorphisms.json")
-        _autos = None
-        if os.path.exists(_autos_path):
-            import json as _json
-            try:
-                with open(_autos_path) as f:
-                    _cand = _json.load(f)
-                if (isinstance(_cand, list) and _cand
-                        and all(isinstance(p, list) and len(p) == N
-                                and sorted(p) == list(range(N))
-                                for p in _cand)):
-                    _autos = _cand
-            except Exception:
-                _autos = None
-        if _autos is not None:
-            from ..point_group_routing import resolve_projection_lane
-            lane = resolve_projection_lane(
-                _autos, point_group=point_group.lower(), consumer="thermal",
-                eigenvalues_only=True, method=str(method), verbose=verbose)
-            if lane.mode == "project":
-                out = dict(_core.little_group_thermal(
-                    H_op, lane.A, lane.residues, method=str(method),
-                    t_min=float(T_min), t_max=float(T_max),
-                    num_t=int(num_T), num_samples=int(num_samples),
-                    krylov_dim=int(krylov_dim) if krylov_dim else 100,
-                    random_seed=int(random_seed) if random_seed else 0,
-                    use_gpu=_use_gpu,
-                    spin_flip=_sym_toggle_int(spin_flip, "spin_flip"),
-                    time_reversal=_sym_toggle_int(time_reversal,
-                                                  "time_reversal")))
-                if verbose:
-                    print(f"[qed.thermal] directory -> little-group "
-                          f"SAMPLING lane (U4a): "
-                          f"{len(out['block_dim'])} blocks, "
-                          f"projected_any={out['projected_any']}.")
-                return _thermal_result_from_block_lane(out, method)
-            elif verbose:
-                print(f"[qed.thermal] directory projection declined "
-                      f"({lane.reason}); flat-pool sector lane.")
 
     return DECLINED

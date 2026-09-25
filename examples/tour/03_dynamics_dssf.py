@@ -60,10 +60,8 @@ r_T = qed.spectral(H, [S_zQ], omega=omega, eta=0.1, T=[0.5, 1.0],
 #      krylov_dim     continued-fraction depth
 #      method         "ground_state_cf" (default) | "kpm_dynamical" | ...
 #      device         "cpu" | "gpu"
-#    Directory form: qed.spectral("runs/mydir", num_sites=N,
-#      symmetry={"observable": S_zQ, "momentum_transfer": [0.5]}, ...)
-#    covers the same lanes plus multi-Q sweeps
-#    (symmetry={"observables": [...], "momentum_points": [...]}).
+#    A Hamiltonian on disk (Trans.dat / InterAll.dat) is loaded into an
+#    Operator first (Operator.load_trans / load_inter_all).
 # ---------------------------------------------------------------------------
 r_plain = qed.spectral(H, [S_zQ], omega=omega, eta=0.05, verbose=False)
 d = np.max(np.abs(np.asarray(r.S_real) - np.asarray(r_plain.S_real)))

@@ -68,7 +68,7 @@ void bind_workflows_thermal(py::module_& m) {
 
 void bind_workflows_thermal_streaming(py::module_& m) {
     // -----------------------------------------------------------------
-    // SOTA streaming-symmetry thermal workflow over a directory
+    // Streaming-symmetry thermal workflow
     // (May 2026). Mirrors the solve binding above but, instead of
     // sorting eigenvalues, recombines per-sector ``ThermodynamicData``
     // via ``ed::core::combine_sector_thermodynamics`` (the canonical
@@ -83,10 +83,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
     // The aggregated ``ThermalResult`` carries the recombined thermo
     // grid AND per-sector entries (with irrep tags) for callers that
     // want a breakdown.
-    // -----------------------------------------------------------------
-    //
-    // WP9: one body for the directory binding and its in-memory twin
-    // ``workflows_thermal_streaming_symmetry``.
     // -----------------------------------------------------------------
     const auto thermal_streaming_symmetry_body =
           [](const SymmetricSource& source,
@@ -176,7 +172,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   const std::size_t num_sectors = handle.num_sectors();
                   if (mpi_size == 1 && num_sectors == 0) {
                       throw std::runtime_error(
-                          "workflows_thermal_streaming_symmetry_directory: "
+                          "workflows_thermal_streaming_symmetry: "
                           "make_operator returned an operator with no "
                           "symmetry sectors; check the "
                           "automorphism_results/ directory.");
@@ -511,8 +507,8 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       if (any_fail) {
                           if (sec_eptr) std::rethrow_exception(sec_eptr);
                           throw std::runtime_error(
-                              "workflows_thermal_streaming_symmetry_"
-                              "directory: a peer MPI rank failed inside "
+                              "workflows_thermal_streaming_symmetry"
+                              ": a peer MPI rank failed inside "
                               "its sector loop (see its stderr); raising "
                               "on every rank instead of deadlocking in "
                               "the thermo Allgather.");
@@ -627,56 +623,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
               }
               return agg;
           };
-    m.def("workflows_thermal_streaming_symmetry_directory",
-          [thermal_streaming_symmetry_body](
-              const std::string& directory,
-              std::uint64_t num_sites,
-              double spin_l,
-              ed::workflows::ThermalOptions opts,
-              py::object fixed_sz_n_up) {
-              return thermal_streaming_symmetry_body(
-                  ed::DirectoryPath{directory}, num_sites, spin_l,
-                  std::move(opts), std::move(fixed_sz_n_up));
-          },
-          py::arg("directory"),
-          py::arg("num_sites"),
-          py::arg("spin_l")      = 0.5,
-          py::arg("opts")        = ed::workflows::ThermalOptions{},
-          py::arg("fixed_sz_n_up") = py::none(),
-          R"pbdoc(
-        Streaming-symmetry-projected finite-T workflow over a directory.
-
-        Composes ``ed::make_operator(streaming_symmetry=true, fixed_sz=...)``
-        with a per-sector ``ed::workflows::thermal`` loop and then
-        recombines the per-sector ``ThermodynamicData`` blocks via the
-        canonical free-energy Z-weighted mixture rule
-        (``ed::core::combine_sector_thermodynamics``).
-
-        Parameters
-        ----------
-        directory : str
-            Path containing the Hamiltonian dat files and
-            ``automorphism_results/``.
-        num_sites : int
-            Number of sites in the lattice.
-        spin_l : float, optional
-            Spin magnitude (0.5 for spin-1/2, the default).
-        opts : ThermalOptions, optional
-            Per-sector finite-T options (FTLM / LTLM / mTPQ /
-            KPM-DOS). ``selected_sectors`` filters the loop.
-        fixed_sz_n_up : int or None, optional
-            If set, project to a fixed-Sz sector with this ``n_up``
-            and run the symmetry sector loop *inside* that Sz block.
-
-        Returns
-        -------
-        ThermalResult
-            ``thermo`` carries the recombined (Z-weighted) full-Hilbert
-            thermodynamics on the requested temperature grid;
-            ``per_sector`` lists every sector that contributed, with
-            the irrep ``tag`` (``sector_index`` / ``quantum_numbers`` /
-            ``sector_dim``) attached.
-    )pbdoc");
     m.def("workflows_thermal_streaming_symmetry",
           [thermal_streaming_symmetry_body](
               const Operator& H,
@@ -698,11 +644,40 @@ void bind_workflows_thermal_streaming(py::module_& m) {
           py::arg("opts")        = ed::workflows::ThermalOptions{},
           py::arg("fixed_sz_n_up") = py::none(),
           R"pbdoc(
-        In-memory twin of ``workflows_thermal_streaming_symmetry_directory``.
+        Streaming-symmetry-projected finite-T workflow.
 
-        Takes the Hamiltonian ``H`` (its terms are copied) and the group
-        info dict the directory writer consumes in place of the
-        directory; every other argument and the result are identical.
+        Composes ``ed::make_operator(streaming_symmetry=true, fixed_sz=...)``
+        with a per-sector ``ed::workflows::thermal`` loop and then
+        recombines the per-sector ``ThermodynamicData`` blocks via the
+        canonical free-energy Z-weighted mixture rule
+        (``ed::core::combine_sector_thermodynamics``).
+
+        Parameters
+        ----------
+        H : Operator
+            The Hamiltonian (its terms are copied).
+        group : dict
+            Closed group info (``max_clique``, ``generators``,
+            ``generator_orders``, ``sectors``).
+        num_sites : int
+            Number of sites in the lattice.
+        spin_l : float, optional
+            Spin magnitude (0.5 for spin-1/2, the default).
+        opts : ThermalOptions, optional
+            Per-sector finite-T options (FTLM / LTLM / mTPQ /
+            KPM-DOS). ``selected_sectors`` filters the loop.
+        fixed_sz_n_up : int or None, optional
+            If set, project to a fixed-Sz sector with this ``n_up``
+            and run the symmetry sector loop *inside* that Sz block.
+
+        Returns
+        -------
+        ThermalResult
+            ``thermo`` carries the recombined (Z-weighted) full-Hilbert
+            thermodynamics on the requested temperature grid;
+            ``per_sector`` lists every sector that contributed, with
+            the irrep ``tag`` (``sector_index`` / ``quantum_numbers`` /
+            ``sector_dim``) attached.
     )pbdoc");
 
 }

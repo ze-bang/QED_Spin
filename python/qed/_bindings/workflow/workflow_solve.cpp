@@ -2,8 +2,8 @@
 // python/qed/_bindings/workflow/workflow_solve.cpp
 //
 // The solve lane: the plain `workflows_solve` entry point and the
-// streaming-symmetry solve pair (`workflows_solve_streaming_symmetry`
-// + its `_directory` twin), which share one body lambda.
+// streaming-symmetry solve `workflows_solve_streaming_symmetry`, which
+// runs on an in-memory (H, group) source.
 //
 // Split out of the former monolithic `workflow_bindings.cpp` (WP11, Sep
 // 2026). The binding bodies are unchanged; the shared helpers now live in
@@ -100,8 +100,7 @@ void bind_workflows_solve(py::module_& m) {
 
 void bind_workflows_solve_streaming(py::module_& m) {
     // -----------------------------------------------------------------
-    // Streaming-symmetry workflow over a directory (mirrors the CLI's
-    // `run_streaming_symmetry_workflow` in `src/cli/workflows.cpp`).
+    // Streaming-symmetry workflow.
     //
     // This single C++ entry point replaces the deleted Python forwarders
     // ``exact_diagonalization_streaming_symmetry[_fixed_sz]`` by composing
@@ -111,11 +110,6 @@ void bind_workflows_solve_streaming(py::module_& m) {
     // aggregating the eigenvalues. The aggregated payload is the same
     // shape callers received from the legacy entry: ascending eigenvalues
     // truncated to `opts.num_eigs`.
-    // -----------------------------------------------------------------
-    //
-    // WP9: ONE body shared by the directory binding and its in-memory twin
-    // ``workflows_solve_streaming_symmetry`` (H + group dict); the two
-    // m.def's below differ only in how they build the source.
     // -----------------------------------------------------------------
     const auto solve_streaming_symmetry_body =
           [](const SymmetricSource& source,
@@ -220,7 +214,7 @@ void bind_workflows_solve_streaming(py::module_& m) {
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
                       throw std::runtime_error(
-                          "workflows_solve_streaming_symmetry_directory: "
+                          "workflows_solve_streaming_symmetry: "
                           "make_operator returned an operator with no "
                           "symmetry sectors; check the "
                           "automorphism_results/ directory.");
@@ -790,63 +784,6 @@ void bind_workflows_solve_streaming(py::module_& m) {
               }
               return agg;
           };
-    m.def("workflows_solve_streaming_symmetry_directory",
-          [solve_streaming_symmetry_body](
-              const std::string& directory,
-              std::uint64_t num_sites,
-              double spin_l,
-              ed::workflows::SolveOptions opts,
-              py::object fixed_sz_n_up) {
-              return solve_streaming_symmetry_body(
-                  ed::DirectoryPath{directory}, num_sites, spin_l,
-                  std::move(opts), std::move(fixed_sz_n_up));
-          },
-          py::arg("directory"),
-          py::arg("num_sites"),
-          py::arg("spin_l")      = 0.5,
-          py::arg("opts")        = ed::workflows::SolveOptions{},
-          py::arg("fixed_sz_n_up") = py::none(),
-          R"pbdoc(
-        Streaming-symmetry-projected ED over a directory.
-
-        Composes ``ed::make_operator(streaming_symmetry=true,
-        fixed_sz=...)`` with a per-sector ``ed::workflows::solve`` loop
-        and returns the aggregated (ascending) eigenvalues. Mirrors the
-        CLI's ``run_streaming_symmetry_workflow``; this is the canonical
-        Python entry for symmetry-projected ED.
-
-        The ``directory`` must contain the Hamiltonian dat files
-        (``InterAll.dat`` / ``Trans.dat``) and an ``automorphism_results/``
-        subdirectory with the precomputed symmetry metadata.
-
-        Parameters
-        ----------
-        directory : str
-            Path containing the Hamiltonian dat files and
-            ``automorphism_results/``.
-        num_sites : int
-            Number of sites in the lattice (sets the qubit count).
-        spin_l : float, optional
-            Spin magnitude (0.5 for spin-1/2, the default).
-        opts : SolveOptions, optional
-            Per-sector solver options. ``num_eigs`` is the global cap on
-            the returned eigenvalue list (sectors are union-merged then
-            sorted).
-        fixed_sz_n_up : int or None, optional
-            If set, project to the fixed-Sz sector with this n_up
-            (number of "up" spins). None (the default) keeps the full
-            magnetization span.
-
-        Returns
-        -------
-        GroundStateResult
-            Carries the merged eigenvalues across every symmetry
-            sector, truncated to ``opts.num_eigs`` and sorted
-            ascending. ``sector_tags``, ``eigenvalues_per_sector``,
-            and ``sector_index_of_eigenvalue`` carry the full
-            (irrep, sector_dim, n_up) attribution for every eigenvalue
-            in the merged list.
-    )pbdoc");
     m.def("workflows_solve_streaming_symmetry",
           [solve_streaming_symmetry_body](
               const Operator& H,
@@ -868,13 +805,40 @@ void bind_workflows_solve_streaming(py::module_& m) {
           py::arg("opts")        = ed::workflows::SolveOptions{},
           py::arg("fixed_sz_n_up") = py::none(),
           R"pbdoc(
-        In-memory twin of ``workflows_solve_streaming_symmetry_directory``.
+        Streaming-symmetry-projected ED.
 
-        Takes the Hamiltonian ``H`` (its terms are copied) and the group
-        info dict the directory writer consumes (``max_clique``,
-        ``generators``, ``generator_orders``, ``sectors`` with
-        ``sector_id`` / ``quantum_numbers``) in place of the directory;
-        every other argument and the result are identical.
+        Composes the streaming-symmetry sector factory (optionally at
+        fixed Sz) with a per-sector ``ed::workflows::solve`` loop and
+        returns the aggregated (ascending) eigenvalues.
+
+        Parameters
+        ----------
+        H : Operator
+            The Hamiltonian (its terms are copied).
+        group : dict
+            Closed group info (``max_clique``, ``generators``,
+            ``generator_orders``, ``sectors`` with ``sector_id`` /
+            ``quantum_numbers``).
+        num_sites : int
+            Number of sites in the lattice (sets the qubit count).
+        spin_l : float, optional
+            Spin magnitude (0.5 for spin-1/2, the default).
+        opts : SolveOptions, optional
+            Per-sector solver options. ``num_eigs`` is the global cap on
+            the returned eigenvalue list (sectors are union-merged then
+            sorted).
+        fixed_sz_n_up : int or None, optional
+            If set, project to the fixed-Sz sector with this n_up.
+            None (the default) keeps the full magnetization span.
+
+        Returns
+        -------
+        GroundStateResult
+            The merged eigenvalues across every symmetry sector,
+            truncated to ``opts.num_eigs`` and sorted ascending.
+            ``sector_tags``, ``eigenvalues_per_sector`` and
+            ``sector_index_of_eigenvalue`` carry the (irrep, sector_dim,
+            n_up) attribution for every eigenvalue in the merged list.
     )pbdoc");
 
 }
