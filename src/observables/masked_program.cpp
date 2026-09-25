@@ -247,6 +247,10 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
     MaskedProgram P;
     P.n_obs = static_cast<int>(ops.size());
     P.delta_set_bits = delta_req;
+    P.src_characters = src.characters;
+    P.tgt_characters = tgt.characters;
+    P.src_n_up = src.n_up;
+    P.tgt_n_up = tgt.n_up;
     P.terms_per_obs.assign(ops.size(), 0);
     for (std::size_t a = 0; a < ops.size(); ++a) {
         const MaskedOperator& O = ops[a];
@@ -264,8 +268,10 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
         } else {
             Ol = O;
         }
+        // relative to the UNPROJECTED operator, so a selection-rule zero (a projection
+        // that is pure roundoff) compiles to no terms
         double scale = 0.0;
-        for (const auto& t : Ol.terms()) scale = std::max(scale, std::abs(t.coeff));
+        for (const auto& t : O.terms()) scale = std::max(scale, std::abs(t.coeff));
         for (const auto& t : Ol.terms(opt.drop * scale)) {
             if (masked_delta_set_bits(t) != delta_req) continue;   // cannot connect the sectors
             tree[t.flip_mask][t.cond_val].push_back(T{t.sign_mask, t.coeff, static_cast<std::uint32_t>(a)});

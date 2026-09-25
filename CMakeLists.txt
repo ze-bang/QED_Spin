@@ -841,6 +841,7 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_little_group_blocks        tests/unit/test_little_group_blocks.cpp USE_CATCH2)
     # observable engine: MaskedTerm / MaskedOperator algebra against dense matrices
     ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp USE_CATCH2)
+    ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp USE_CATCH2)
     # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
     # Stage-12a SU(2) rollout: S^2 Casimir in the TermStorage schema + labeling

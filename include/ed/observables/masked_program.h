@@ -92,6 +92,9 @@ struct MaskedProgram {
     std::vector<std::complex<double>> term_coeff;  ///< coefficient per term
     std::vector<std::uint32_t> term_obs;           ///< observable index per term
     std::vector<std::size_t>   terms_per_obs;      ///< after projection (0: selection-rule zero)
+    /// Characters the program was compiled for (checked by rep_matrix_elements).
+    std::vector<std::complex<double>> src_characters, tgt_characters;
+    int src_n_up = -1, tgt_n_up = -1;
 
     [[nodiscard]] std::size_t n_groups() const noexcept { return group_flip.size(); }
     [[nodiscard]] std::size_t n_terms() const noexcept { return term_sign.size(); }
@@ -101,7 +104,8 @@ struct CompileOptions {
     /// Apply the lambda projection (default). Only turn off for operators the caller
     /// guarantees are already covariant (U_g O U_g^dagger = lambda(g) O).
     bool project = true;
-    /// Coefficients below drop * max|coeff| (per observable) are discarded after merging.
+    /// Projected coefficients below drop * max|coeff| of the UNPROJECTED observable are
+    /// discarded after merging (selection-rule zeros compile to no terms).
     double drop = 1e-14;
 };
 
