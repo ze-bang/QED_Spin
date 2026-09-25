@@ -93,9 +93,10 @@ void require_compatible(const ::Operator& O, std::size_t index, const EngineCont
 }
 
 
-// A diagonal observable folded to sum_t coef_t (-1)^{popcount(mask_t & ~s)}: each site
-// contributes S^z = +-1/2 (bit set = up), a repeated site squares to 1/4 and drops out
-// of the mask. Terms with equal masks are merged.
+// A diagonal observable folded to sum_t coef_t (-1)^{popcount(mask_t & s)}: each site
+// contributes S^z = +-1/2 with the engine's convention (bit set = DOWN, as in
+// term_gate_math.h), a repeated site squares to 1/4 and drops out of the mask. Terms
+// with equal masks are merged.
 struct FoldedDiagonal {
     std::vector<double>        coef;
     std::vector<std::uint64_t> mask;
@@ -179,7 +180,7 @@ std::vector<double> diagonal_expectations(const std::vector<std::uint64_t>& reps
         for (long long r = 0; r < nr; ++r) {
             const double w = std::norm(u[static_cast<std::size_t>(r)]);
             if (w == 0.0) continue;
-            const std::uint64_t down = ~reps[static_cast<std::size_t>(r)];
+            const std::uint64_t down = reps[static_cast<std::size_t>(r)];   // set bit = down
             for (std::size_t j = 0; j < nd; ++j) {
                 double v = 0.0;
                 const auto& f = D[j];

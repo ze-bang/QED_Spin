@@ -952,12 +952,12 @@ void bind_little_group(py::module_& m) {
               std::vector<double> static_sf;
               static_sf.reserve(observables.size());
               std::vector<Complex> ov(dim);
+              // ONE shared sector (reps, norms, perm LUT) for every probe; copying and
+              // re-tabulating it per probe dominated the cost of large probe batches.
+              const auto rdp = ed::solvers::share_rep_sector(gs.rd);
               for (const Operator& o : observables) {
-                  // rd is consumed by the matvec factory; copy so the GS sector
-                  // survives for the next probe (cheap vs. the GS solve).
-                  ed::symmetry::RepSectorData rd_copy = gs.rd;
                   auto mv = ed::solvers::make_rep_sector_matvec(
-                      o, std::move(rd_copy), /*force_gpu=*/use_gpu);
+                      o, rdp, /*force_gpu=*/use_gpu);
                   mv->apply(gs.vec.data(), ov.data(), dim);
                   Complex c(0.0, 0.0);
                   for (std::size_t i = 0; i < dim; ++i)

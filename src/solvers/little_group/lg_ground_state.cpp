@@ -480,6 +480,23 @@ std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
     return std::make_unique<RepSectorMatVec>(op, std::move(rd), force_gpu);
 }
 
+std::shared_ptr<const ed::symmetry::RepSectorData>
+share_rep_sector(ed::symmetry::RepSectorData rd)
+{
+    auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
+    p->build_perm_lut();
+    return p;
+}
+
+std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
+    const ::Operator&                                  op,
+    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
+    bool                                               force_gpu)
+{
+    if (!rd) throw std::invalid_argument("make_rep_sector_matvec: null sector");
+    return std::make_unique<RepSectorMatVec>(op, std::move(rd), force_gpu);
+}
+
 bool rep_sector_matvec_gpu_engaged(const ed::matvec::MatVecOperator& mv) {
     const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv);
     return hk != nullptr && hk->gpu_engaged();

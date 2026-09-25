@@ -128,15 +128,40 @@ def test_nematic_group_and_an_unconverged_request_raises(monkeypatch):
 
 
 def _dense_diag(psi, terms):
-    """<psi| sum_t w prod S^z |psi> for a 2^N vector (bit set = up)."""
+    """<psi| sum_t w prod S^z |psi> for a 2^N vector in the engine convention (bit set = down)."""
     idx = np.arange(len(psi), dtype=np.int64)
     val = np.zeros(len(psi))
     for w, sites in terms:
         v = np.full(len(psi), float(w))
         for i in sites:
-            v *= ((idx >> i) & 1) - 0.5
+            v *= 0.5 - ((idx >> i) & 1)
         val += v
     return float(np.sum(np.abs(psi) ** 2 * val))
+
+
+def test_odd_diagonal_strings_follow_the_engine_bit_convention():
+    # Away from S^z = 0 the flip is not folded, so odd S^z strings are allowed and their SIGN
+    # is observable: the diagonal lane must agree with the operator lane (Operator S^z, whose
+    # convention is fixed by term_gate_math.h) and with a dense check on the expanded vector.
+    H = TT.xxz_operator(J2=0.1)
+    shifts = [[TT.site(TT.sites[c][0] + s1, TT.sites[c][1] + s2) for c in range(N)]
+              for (s1, s2) in TT.sites]
+    one = [(1.0, [c]) for c in range(N)]                                   # total S^z
+    tri = [(1.0, [p[0], p[1], p[2]]) for p in shifts]                       # 3-site string
+    O_Sz = _core.Operator(N, 0.5)
+    for c in range(N):
+        O_Sz.add_one_body(_core.OP_SZ, c, 1.0)
+    n_set = N // 2 - 1                        # engine n_up counts set bits = down spins
+    res = lg.solve_blocks(H, A, R[:0], n_up=n_set, observables=[O_Sz],
+                          diagonal_observables=[one, tri], dense_max_dim=4096)
+    for l in res.levels:
+        assert abs(l.diagonal_values[0] - l.values[0]) < 1e-10, l.label
+        assert abs(l.diagonal_values[0] - (N / 2 - n_set)) < 1e-10, l.label   # S^z = +1
+    g = res.ground()
+    vec = dict(_core.little_group_lowest_vectors(H, A, R[:0], k=1, n_up=n_set))
+    psi = np.asarray(vec["vectors"][0])
+    psi = psi / np.linalg.norm(psi)
+    assert abs(g.diagonal_values[1] - _dense_diag(psi, tri)) < 1e-10
 
 
 def test_diagonal_observables_including_four_point_dimer_correlators():
