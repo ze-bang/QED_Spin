@@ -163,7 +163,9 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     // otherwise, so the cycle length is imposed through that cap.
     const std::uint64_t cycle_cap = (cap > 0) ? std::min<std::uint64_t>(cap, per_cycle)
                                               : static_cast<std::uint64_t>(per_cycle);
-    constexpr double tol = 1e-9;     // absolute residual ||H x - theta x||
+    // absolute residual ||H x - theta x||; ED_SYM_LG_KS_TOL tightens it when vectors feed
+    // observables (the error of <O> is first order in the vector error ~ residual / gap)
+    const double tol = ed::env::real("ED_SYM_LG_KS_TOL", 1e-9);
 
     auto apply_H = [&mv](const Complex* in, Complex* out, std::size_t nn) {
         mv.apply(in, out, nn);

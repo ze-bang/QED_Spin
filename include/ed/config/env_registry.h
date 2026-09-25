@@ -112,6 +112,8 @@ struct Row {
       "Restart count for the two-pass GS lane; total work <= (1+restarts) x GS_MAX_ITER")\
     X("ED_SYM_LG_GS_RESID_TOL", Real, "little-group", "1e-8",                  \
       "Residual acceptance tolerance for the certified little-group GS vector")\
+    X("ED_SYM_LG_KS_TOL", Real, "little-group", "1e-9",                        \
+      "Absolute residual tolerance of the per-block Krylov-Schur solves (levels >= 2)")\
     X("ED_SYM_LG_ONLY_K0", Text, "little-group", "unset (solve every star)",   \
       "=\"7,43\" solves only those star reps (job splitting); =\"plan\" lists (k0, |star|, dim) per star and solves nothing")\
     X("ED_SYM_LITTLE_GROUP", Flag, "little-group", "\"1\"",                    \
