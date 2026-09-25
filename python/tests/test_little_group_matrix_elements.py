@@ -235,3 +235,41 @@ def test_pair_observables_restricts_off_diagonal_pairs(case):
             assert np.abs(v[keep] - ref[keep]).max() < 1e-12
             rest = [o for o in range(len(ops)) if o not in keep]
             assert np.isnan(v[rest]).all()                   # never a silent zero
+
+
+def test_stored_vectors_reproduce_the_in_engine_sweep(case, tmp_path):
+    """solve -> return_vectors -> np.save -> mmap load -> rep_sector_matrix_elements."""
+    r, ops = case["r"], case["ops"]
+    H = TT.xxz_operator(J2=J2, delta=DELTA)
+    v = dict(_core.little_group_block_observables(H, ops[:3], A, R, levels=LEVELS, n_up=N // 2,
+                                                  dense_max_dim=4096, return_vectors=True))
+    assert len(v["vectors"]) == len(v["energies"]) == len(v["state_sector"])
+    secs = []
+    for n, s in enumerate(v["sectors"]):
+        d = {}
+        for k in ("reps", "inv_norms", "characters", "perms", "flip_masks"):
+            np.save(tmp_path / f"s{n}_{k}.npy", np.asarray(s[k]))
+            d[k] = np.load(tmp_path / f"s{n}_{k}.npy", mmap_mode="r")
+        d.update(group_size=s["group_size"], n_sites=s["n_sites"], n_up=s["n_up"])
+        secs.append(d)
+    vecs = []
+    for n, x in enumerate(v["vectors"]):
+        assert abs(np.linalg.norm(x) - 1.0) < 1e-12
+        np.save(tmp_path / f"v{n}.npy", x)
+        vecs.append(np.load(tmp_path / f"v{n}.npy", mmap_mode="r"))
+    ref = {(int(b), int(k)): row for (b, k), row in zip(np.asarray(v["pairs"]), np.asarray(v["values"]))}
+    ss = np.asarray(v["state_sector"])
+    checked = 0
+    for a in range(len(secs)):                       # ket sector
+        for b in range(len(secs)):                   # bra sector
+            kets = [s for s in range(len(ss)) if ss[s] == a]
+            bras = [s for s in range(len(ss)) if ss[s] == b]
+            if (bras[0], kets[0]) not in ref:
+                continue                             # different momentum: not paired
+            pairs = [(i, j) for i in range(len(bras)) for j in range(len(kets))]
+            M = _core.rep_sector_matrix_elements(secs[a], None if a == b else secs[b], ops[:3],
+                                                 [vecs[s] for s in kets], [vecs[s] for s in bras], pairs)
+            for p, (i, j) in enumerate(pairs):
+                assert np.abs(M[p] - ref[(bras[i], kets[j])]).max() < 1e-12
+                checked += 1
+    assert checked == len(ref)

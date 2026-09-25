@@ -185,6 +185,18 @@ LittleGroupMEResult little_group_block_observables(
                 run(off_ops, &off_index, a, b, off_pr);
             }
         }
+    if (me.return_vectors) {                     // after the sweeps: move, never copy
+        out.vectors.resize(out.states.size());
+        out.state_sector.assign(out.states.size(), -1);
+        for (std::size_t s = 0; s < sectors.size(); ++s) {
+            out.sectors.push_back(sectors[s].rd);
+            for (std::size_t i = 0; i < sectors[s].states.size(); ++i) {
+                const auto st = static_cast<std::size_t>(sectors[s].states[i]);
+                out.vectors[st] = std::move(sectors[s].vecs[i]);
+                out.state_sector[st] = static_cast<int>(s);
+            }
+        }
+    }
     return out;
 }
 

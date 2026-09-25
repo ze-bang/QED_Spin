@@ -367,6 +367,10 @@ struct LittleGroupMEOptions {
     /// evaluate only these observable indices; their other entries are NaN. Diagonal
     /// pairs always carry every observable.
     std::vector<int> pair_observables;
+    /// Hand the lifted state vectors and their sector data back (LittleGroupMEResult::
+    /// vectors / sectors / state_sector) so a caller can store them and evaluate
+    /// observables later (rep_matrix_elements) without re-solving.
+    bool return_vectors = false;
 };
 
 struct LittleGroupMEState {
@@ -389,6 +393,11 @@ struct LittleGroupMEResult {
     bool        flip_engaged       = false;
     bool        tr_engaged         = false;
     std::size_t unconverged_blocks = 0;
+    /// With return_vectors: the rep-basis vector of every state (normalised), the sector
+    /// data of every star that holds states, and the sector index of each state.
+    std::vector<std::vector<std::complex<double>>>                    vectors;
+    std::vector<std::shared_ptr<const ed::symmetry::RepSectorData>>   sectors;
+    std::vector<int>                                                  state_sector;
 };
 
 [[nodiscard]] LittleGroupMEResult
