@@ -242,6 +242,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_vectors.cpp
     ${SRC_DIR}/solvers/little_group/lg_observables.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
+    ${SRC_DIR}/observables/masked_program.cpp
     # WP14: the ~2700-line src/orchestrator.cpp was split by concern into
     # src/orchestrator/ (pure move; see orchestrator_internal.h for the
     # file map). orch_solve.cpp is the single TU that instantiates the
