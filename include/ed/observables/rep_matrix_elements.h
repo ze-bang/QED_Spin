@@ -46,6 +46,12 @@ struct RepMEOptions {
     /// Shared-memory budget per block for the GPU accumulators; observables are swept in
     /// chunks when n_pairs * n_obs does not fit.
     std::size_t gpu_shared_bytes = 96 * 1024;
+    /// Diagonal constraint projector P: keep only basis states in which EVERY mask holds
+    /// exactly half of its bits set (hexagon masks: Q_h = 0 on every hexagon). The sweep then
+    /// returns <bra| P O P |ket>; with the identity observable, <P>. P must commute with the
+    /// group -- checked: every element must map the mask set onto itself (a spin flip keeps
+    /// "half set" by construction). Empty: no constraint.
+    std::vector<std::uint64_t> balanced_masks;
 };
 
 /// out[p * prog.n_obs + o] = <bras[pairs[p].first] | O_o | kets[pairs[p].second]>,

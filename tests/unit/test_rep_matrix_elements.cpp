@@ -346,3 +346,75 @@ TEST_CASE("GPU sweep equals the CPU sweep", "[rep_me][gpu]") {
         CHECK(err < 1e-12);
     }
 }
+
+namespace {
+// masks = every translate of `window` (a group-closed set of site windows)
+std::vector<std::uint64_t> window_masks(const std::vector<Element>& G, std::uint64_t window, int n) {
+    std::vector<std::uint64_t> m;
+    for (const auto& e : G) {
+        const std::uint64_t w = ed::observables::permute_mask(window, e.perm.data(), n);
+        if (std::find(m.begin(), m.end(), w) == m.end()) m.push_back(w);
+    }
+    return m;
+}
+bool balanced_dense(std::uint64_t s, const std::vector<std::uint64_t>& masks) {
+    for (auto m : masks)
+        if (2 * __builtin_popcountll(s & m) != __builtin_popcountll(m)) return false;
+    return true;
+}
+}  // namespace
+
+TEST_CASE("constraint projector: <a|P O P|b> against dense", "[rep_me][balanced]") {
+    std::mt19937 rng(16);
+    for (const bool torus : {false, true}) {
+        const int L1 = torus ? 4 : 12, L2 = torus ? 4 : 1, n = L1 * L2;
+        const auto G = torus_group(L1, L2, /*flip=*/true);
+        const auto a = make_sector(G, L1, L2, 0, 0, +1, n / 2, true);
+        const auto c = make_sector(G, L1, L2, 1, 0, -1, n / 2, false);
+        const std::uint64_t window = torus ? 0x33ULL : 0xFULL;   // 2x2 plaquette / 4 consecutive sites
+        const auto masks = window_masks(G, window, n);
+        std::vector<MaskedOperator> ops{random_operator(n, rng), MaskedOperator::product(n, "zzz", {0, 1, 2}, 1.0),
+                                        MaskedOperator::product(n, "+-", {0, 1}, 1.0),
+                                        MaskedOperator::product(n, "I", {0}, 1.0)};
+        const std::vector<Cx> va = random_vec(a.dim(), rng), vc = random_vec(c.dim(), rng);
+        ed::observables::RepMEOptions opt;
+        opt.balanced_masks = masks;
+        for (const bool cross : {false, true}) {
+            const auto& tgt = cross ? c : a;
+            const auto& vb = cross ? vc : va;
+            const auto prog = compile_program(ops, a, tgt);
+            const auto M = rep_matrix_elements(a, tgt, prog, {{va.data(), va.size()}}, {{vb.data(), vb.size()}}, {{0, 0}}, opt);
+            const auto pa = ed::solvers::expand_rep_vector_to_computational(tgt, vb);
+            const auto pb = ed::solvers::expand_rep_vector_to_computational(a, va);
+            double err = 0.0;
+            for (std::size_t o = 0; o < ops.size(); ++o) {
+                Cx ref(0.0, 0.0);
+                for (std::uint64_t s = 0; s < pb.size(); ++s) {
+                    if (pb[s] == Cx(0.0, 0.0) || !balanced_dense(s, masks)) continue;
+                    for (const auto& t : ops[o].terms()) {
+                        std::uint64_t tt; double sg;
+                        if (!ed::observables::masked_apply(t, s, tt, sg) || !balanced_dense(tt, masks)) continue;
+                        ref += std::conj(pa[tt]) * t.coeff * sg * pb[s];
+                    }
+                }
+                err = std::max(err, std::abs(M[o] - ref));
+            }
+            INFO((torus ? "4x4 " : "ring ") << (cross ? "cross" : "same") << " masks " << masks.size());
+            CHECK(err < 1e-12);
+            if (!cross) CHECK(std::abs(M[3]) < 1.0 - 1e-6);   // <P> < 1: the projector is doing something
+        }
+        // a mask set the group does not preserve is refused
+        ed::observables::RepMEOptions bad;
+        bad.balanced_masks = {window};
+        const auto prog = compile_program(ops, a, a);
+        CHECK_THROWS(rep_matrix_elements(a, a, prog, {{va.data(), va.size()}}, {{va.data(), va.size()}}, {{0, 0}}, bad));
+        if (ed::observables::rep_matrix_elements_gpu_available()) {
+            ed::observables::RepMEOptions g = opt;
+            g.use_gpu = true;
+            const auto P = compile_program(ops, a, c);
+            const auto M0 = rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, opt);
+            const auto M1 = rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, g);
+            for (std::size_t i = 0; i < M0.size(); ++i) CHECK(std::abs(M0[i] - M1[i]) < 1e-12);
+        }
+    }
+}

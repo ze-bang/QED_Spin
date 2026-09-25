@@ -18,6 +18,32 @@ namespace ed::observables {
 
 using Complex = std::complex<double>;
 
+// true if every mask holds exactly half of its bits set (Q_h = 0 on every hexagon)
+inline bool is_balanced(std::uint64_t s, const std::vector<std::uint64_t>& masks) {
+    for (std::uint64_t m : masks)
+        if (2 * masked_popcount(s & m) != masked_popcount(m)) return false;
+    return true;
+}
+
+void check_balanced_masks(const ed::symmetry::RepSectorData& rd, const std::vector<std::uint64_t>& masks) {
+    if (masks.empty()) return;
+    for (std::uint64_t m : masks)
+        if (masked_popcount(m) % 2)
+            throw std::invalid_argument("rep_matrix_elements: balanced mask with an odd number of sites");
+    const auto pol = rd.make_policy();
+    std::vector<std::uint64_t> sorted = masks;
+    std::sort(sorted.begin(), sorted.end());
+    for (int g = 0; g < rd.group_size; ++g)
+        for (std::uint64_t m : masks) {
+            // image of the SITE SET: apply_perm also XORs the element's flip mask; undo it
+            const std::uint64_t flip = rd.flip_masks.empty() ? 0ULL : rd.flip_masks[static_cast<std::size_t>(g)];
+            const std::uint64_t site_img = pol.apply_perm(m, g) ^ flip;
+            if (!std::binary_search(sorted.begin(), sorted.end(), site_img))
+                throw std::invalid_argument("rep_matrix_elements: balanced masks are not permuted "
+                                            "among themselves by the group (constraint would break the symmetry)");
+        }
+}
+
 std::vector<Complex>
 rep_matrix_elements(const ed::symmetry::RepSectorData& src,
                     const ed::symmetry::RepSectorData& tgt,
@@ -46,6 +72,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
     const std::size_t n_pairs = pairs.size();
     std::vector<Complex> out(n_pairs * n_obs, Complex(0.0, 0.0));
     if (n_pairs == 0 || n_obs == 0 || prog.n_terms() == 0) return out;
+    check_balanced_masks(src, opt.balanced_masks);
     if (opt.use_gpu) return rep_matrix_elements_gpu(src, tgt, prog, kets, bras, pairs, opt);
 
     const auto tpol = tgt.make_policy();
@@ -87,6 +114,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
             }
             if (!any) continue;
             const std::uint64_t s = src.reps[r];
+            if (!is_balanced(s, opt.balanced_masks)) continue;       // P on the ket
             const double w = src.inv_norms[r];
             for (std::size_t gi = 0; gi < n_groups; ++gi) {
                 const std::uint64_t F = prog.group_flip[gi];
@@ -104,6 +132,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
                     j = static_cast<std::int64_t>(r);
                     proj = Complex(1.0 / w, 0.0);
                 } else {
+                    if (!is_balanced(s ^ F, opt.balanced_masks)) continue;   // P on the bra
                     j = tpol.index_and_projection(s ^ F, proj);
                     if (j < 0) continue;            // target orbit cancelled in this sector
                 }

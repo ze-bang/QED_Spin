@@ -1477,7 +1477,8 @@ void bind_little_group(py::module_& m) {
              const std::vector<MaskedOperator>& observables,
              const std::vector<py::array_t<Complex, py::array::c_style>>& kets,
              const std::vector<py::array_t<Complex, py::array::c_style>>& bras,
-             const std::vector<std::pair<int, int>>& pairs, bool use_gpu) {
+             const std::vector<std::pair<int, int>>& pairs, bool use_gpu,
+             const std::vector<std::uint64_t>& balanced_masks) {
               const ed::symmetry::RepSectorData rs = sector_from_dict(src);
               std::unique_ptr<ed::symmetry::RepSectorData> rt;
               if (!tgt.is_none()) rt = std::make_unique<ed::symmetry::RepSectorData>(
@@ -1488,6 +1489,7 @@ void bind_little_group(py::module_& m) {
               for (const auto& a : bras) bv.push_back({a.data(), static_cast<std::size_t>(a.size())});
               ed::observables::RepMEOptions ro;
               ro.use_gpu = use_gpu;
+              ro.balanced_masks = balanced_masks;
               std::vector<Complex> M;
               {
                   py::gil_scoped_release release;
@@ -1501,8 +1503,11 @@ void bind_little_group(py::module_& m) {
           },
           py::arg("src"), py::arg("tgt"), py::arg("observables"), py::arg("kets"),
           py::arg("bras"), py::arg("pairs"), py::arg("use_gpu") = false,
+          py::arg("balanced_masks") = std::vector<std::uint64_t>{},
           "out[p, o] = <bras[pairs[p][0]] | O_o | kets[pairs[p][1]]> for stored rep-basis "
           "vectors. src / tgt are sector dicts as returned by little_group_block_observables("
           "return_vectors=True)['sectors'] (tgt=None: the same sector as src). Vectors may be "
-          "read-only / memory-mapped complex128 arrays.");
+          "read-only / memory-mapped complex128 arrays. balanced_masks: evaluate <bra|P O P|ket> "
+          "with P the projector on states where every mask holds exactly half its bits set "
+          "(hexagon masks: Q_h = 0 everywhere); the mask set must be closed under the group.");
 }

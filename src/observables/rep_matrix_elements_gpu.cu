@@ -134,6 +134,18 @@ struct DevProgram {
     }
 };
 
+// Constraint projector masks (RepMEOptions::balanced_masks), passed by value.
+constexpr int kMaxBalanced = 64;
+struct Balanced {
+    std::uint64_t m[kMaxBalanced];
+    int n;
+};
+__device__ inline bool balanced(std::uint64_t s, const Balanced& b) {
+    for (int i = 0; i < b.n; ++i)
+        if (2 * __popcll(s & b.m[i]) != __popcll(b.m[i])) return false;
+    return true;
+}
+
 struct PairPtrs {
     const cuDoubleComplex* ket[kMaxPairs];
     const cuDoubleComplex* bra[kMaxPairs];
@@ -143,7 +155,7 @@ __device__ inline cuDoubleComplex cmul(cuDoubleComplex a, cuDoubleComplex b) { r
 
 // shared layout: acc[(p * n_loc + (o - obs_lo)) * 2 + {0: re, 1: im}]
 __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgView prog,
-                          PairPtrs pp, int n_pairs, int obs_lo, int obs_hi,
+                          PairPtrs pp, Balanced bal, int n_pairs, int obs_lo, int obs_hi,
                           double* __restrict__ block_out) {
     extern __shared__ double acc[];
     const int n_loc = obs_hi - obs_lo;
@@ -162,6 +174,7 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
         }
         if (!any) continue;
         const std::uint64_t s = src.reps[r];
+        if (!balanced(s, bal)) continue;                 // P on the ket
         const double w = src.inv_norms[r];
         for (int gi = 0; gi < prog.n_groups; ++gi) {
             const std::uint64_t F = prog.group_flip[gi];
@@ -181,6 +194,7 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
                 j = r;
                 proj = make_cuDoubleComplex(1.0 / w, 0.0);
             } else {
+                if (!balanced(s ^ F, bal)) continue;         // P on the bra
                 j = tgt.index_and_projection(s ^ F, proj);
                 if (j == ed::matvec::basis::kDeviceNotFound) continue;
             }
@@ -226,6 +240,11 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
     if (!same_sector) dtgt_own = std::make_unique<DevSector>(tgt);
     const DevPolicy tpol = same_sector ? dsrc.pol : dtgt_own->pol;
     const DevProgram dprog(prog);
+    if (opt.balanced_masks.size() > static_cast<std::size_t>(kMaxBalanced))
+        throw std::invalid_argument("rep_matrix_elements_gpu: more than 64 balanced masks");
+    Balanced bal{};
+    bal.n = static_cast<int>(opt.balanced_masks.size());
+    for (int i = 0; i < bal.n; ++i) bal.m[i] = opt.balanced_masks[static_cast<std::size_t>(i)];
 
     int dev = 0, n_sm = 0;
     ck(cudaGetDevice(&dev), "cudaGetDevice");
@@ -293,7 +312,7 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
             const int n_acc = 2 * n_pairs * (o1 - o0);
             thrust::device_vector<double> block_out(static_cast<std::size_t>(n_blocks) * n_acc);
             me_kernel<<<n_blocks, kThreads, static_cast<std::size_t>(n_acc) * sizeof(double)>>>(
-                dsrc.pol, tpol, same_sector, dprog.view(), pp, n_pairs, o0, o1,
+                dsrc.pol, tpol, same_sector, dprog.view(), pp, bal, n_pairs, o0, o1,
                 thrust::raw_pointer_cast(block_out.data()));
             ck(cudaGetLastError(), "kernel launch");
             ck(cudaDeviceSynchronize(), "kernel");
