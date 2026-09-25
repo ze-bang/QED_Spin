@@ -266,6 +266,7 @@ def block_observables(H, abelian_group, residue_perms, observables: Sequence, *,
                       time_reversal: int = -1, dense_max_dim: int = 256,
                       use_gpu: bool = False, sweep_gpu: int = -1, block_size: int = 1,
                       only_k0: Sequence[int] = (), only_irrep: Sequence[int] = (),
+                      pair_observables: Sequence[int] = (),
                       strict: bool = True) -> MatrixElements:
     """``<m|O_i|n>`` between the lowest ``levels`` states of every block.
 
@@ -273,7 +274,8 @@ def block_observables(H, abelian_group, residue_perms, observables: Sequence, *,
     (a single bond, plaquette or string is fine). ``pairs='same_momentum'`` gives
     every ordered pair of states whose stars share the representative momentum (all
     irreps and both flip parities); ``'diagonal'`` gives ``<n|O|n>`` only. Partners of
-    multi-dimensional irreps are included with ``partners=True``. Labels follow
+    multi-dimensional irreps are included with ``partners=True``. ``pair_observables`` restricts
+    OFF-diagonal pairs to those observable indices (the rest of those rows are NaN). Labels follow
     :func:`solve_blocks` (pass ``momentum_generators`` / ``namer`` the same way).
     """
     import numpy as np
@@ -284,7 +286,8 @@ def block_observables(H, abelian_group, residue_perms, observables: Sequence, *,
         H, list(observables), A, R, levels=levels, n_up=n_up, sz_parity=sz_parity,
         dense_max_dim=dense_max_dim, use_gpu=use_gpu, spin_flip=spin_flip,
         time_reversal=time_reversal, only_k0=list(only_k0), only_irrep=list(only_irrep),
-        block_size=block_size, partners=partners, pairs=pairs, sweep_gpu=sweep_gpu))
+        block_size=block_size, partners=partners, pairs=pairs, sweep_gpu=sweep_gpu,
+        pair_observables=[int(o) for o in pair_observables]))
     if strict and int(out["unconverged_blocks"]) > 0:
         raise RuntimeError(f"{out['unconverged_blocks']} block(s) did not converge; "
                            "pass strict=False to inspect the certified part")

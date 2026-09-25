@@ -9,6 +9,8 @@
 
 #include <ed/observables/rep_matrix_elements.h>
 
+#include <limits>
+
 namespace ed::solvers {
 
 using namespace lg_detail;
@@ -125,29 +127,62 @@ LittleGroupMEResult little_group_block_observables(
     ed::observables::RepMEOptions ro;
     ro.use_gpu = me.use_gpu;
     const bool diagonal = (me.pairs == LittleGroupMEOptions::Pairs::diagonal);
+    // Off-diagonal pairs carry only me.pair_observables when that list is given (a
+    // multi-thousand observable set on every pair would multiply the sweeps); the
+    // entries not evaluated are NaN, never a silent zero.
+    std::vector<ed::observables::MaskedOperator> off_ops;
+    std::vector<std::size_t> off_index;
+    if (!me.pair_observables.empty()) {
+        for (int o : me.pair_observables) {
+            if (o < 0 || o >= static_cast<int>(ops.size()))
+                throw std::invalid_argument("little_group_block_observables: pair_observables index "
+                                            + std::to_string(o) + " out of range");
+            off_ops.push_back(ops[static_cast<std::size_t>(o)]);
+            off_index.push_back(static_cast<std::size_t>(o));
+        }
+    }
+    const bool restrict_off = !me.pair_observables.empty();
+    const Complex nan_c(std::numeric_limits<double>::quiet_NaN(),
+                        std::numeric_limits<double>::quiet_NaN());
+    const auto run = [&](const std::vector<ed::observables::MaskedOperator>& set,
+                         const std::vector<std::size_t>* index, std::size_t a, std::size_t b,
+                         const std::vector<std::pair<int, int>>& pr) {
+        if (pr.empty()) return;
+        const auto& src = *sectors[a].rd;
+        const auto& tgt = *sectors[b].rd;   // same object when a == b
+        const auto prog = ed::observables::compile_program(set, src, tgt);
+        std::vector<ed::observables::RepVectorView> kv, bv;
+        for (const auto& v : sectors[a].vecs) kv.push_back({v.data(), v.size()});
+        for (const auto& v : sectors[b].vecs) bv.push_back({v.data(), v.size()});
+        const auto M = ed::observables::rep_matrix_elements(src, tgt, prog, kv, bv, pr, ro);
+        for (std::size_t p = 0; p < pr.size(); ++p) {
+            out.pairs.emplace_back(sectors[b].states[static_cast<std::size_t>(pr[p].first)],
+                                   sectors[a].states[static_cast<std::size_t>(pr[p].second)]);
+            std::vector<Complex> row(ops.size(), index ? nan_c : Complex(0.0, 0.0));
+            for (std::size_t o = 0; o < set.size(); ++o)
+                row[index ? (*index)[o] : o] = M[p * set.size() + o];
+            out.values.push_back(std::move(row));
+        }
+    };
     for (std::size_t a = 0; a < sectors.size(); ++a)
         for (std::size_t b = 0; b < sectors.size(); ++b) {
             if (diagonal && a != b) continue;
             if (sectors[a].k_raw != sectors[b].k_raw) continue;
-            const auto& src = *sectors[a].rd;
-            const auto& tgt = *sectors[b].rd;   // same object when a == b
-            const auto prog = ed::observables::compile_program(ops, src, tgt);
-            std::vector<ed::observables::RepVectorView> kv, bv;
-            for (const auto& v : sectors[a].vecs) kv.push_back({v.data(), v.size()});
-            for (const auto& v : sectors[b].vecs) bv.push_back({v.data(), v.size()});
-            std::vector<std::pair<int, int>> pr;
-            if (diagonal) {
-                for (int i = 0; i < static_cast<int>(kv.size()); ++i) pr.emplace_back(i, i);
+            const int nk = static_cast<int>(sectors[a].vecs.size());
+            const int nb = static_cast<int>(sectors[b].vecs.size());
+            std::vector<std::pair<int, int>> diag_pr, off_pr;
+            for (int bi = 0; bi < nb; ++bi)
+                for (int ki = 0; ki < nk; ++ki) {
+                    if (a == b && bi == ki) diag_pr.emplace_back(bi, ki);
+                    else if (!diagonal) off_pr.emplace_back(bi, ki);
+                }
+            if (!restrict_off) {
+                std::vector<std::pair<int, int>> all = diag_pr;
+                all.insert(all.end(), off_pr.begin(), off_pr.end());
+                run(ops, nullptr, a, b, all);
             } else {
-                for (int bi = 0; bi < static_cast<int>(bv.size()); ++bi)
-                    for (int ki = 0; ki < static_cast<int>(kv.size()); ++ki) pr.emplace_back(bi, ki);
-            }
-            const auto M = ed::observables::rep_matrix_elements(src, tgt, prog, kv, bv, pr, ro);
-            for (std::size_t p = 0; p < pr.size(); ++p) {
-                out.pairs.emplace_back(sectors[b].states[static_cast<std::size_t>(pr[p].first)],
-                                       sectors[a].states[static_cast<std::size_t>(pr[p].second)]);
-                out.values.emplace_back(M.begin() + static_cast<std::ptrdiff_t>(p * ops.size()),
-                                        M.begin() + static_cast<std::ptrdiff_t>((p + 1) * ops.size()));
+                run(ops, nullptr, a, b, diag_pr);
+                run(off_ops, &off_index, a, b, off_pr);
             }
         }
     return out;

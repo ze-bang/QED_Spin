@@ -1294,7 +1294,8 @@ void bind_little_group(py::module_& m) {
              int spin_flip, int time_reversal,
              const std::vector<int>& only_k0,
              const std::vector<int>& only_irrep, int block_size,
-             bool partners, const std::string& pairs, int sweep_gpu) {
+             bool partners, const std::string& pairs, int sweep_gpu,
+             const std::vector<int>& pair_observables) {
               const int n_sites = static_cast<int>(op.getNumBits());
               ed::solvers::LittleGroupMEOptions me;
               me.levels = levels;
@@ -1303,6 +1304,7 @@ void bind_little_group(py::module_& m) {
               else if (pairs == "diagonal") me.pairs = ed::solvers::LittleGroupMEOptions::Pairs::diagonal;
               else throw std::invalid_argument("pairs must be 'same_momentum' or 'diagonal'");
               me.use_gpu = (sweep_gpu < 0) ? use_gpu : (sweep_gpu != 0);
+              me.pair_observables = pair_observables;
               ed::solvers::LittleGroupMEResult r;
               {
                   py::gil_scoped_release release;
@@ -1375,6 +1377,7 @@ void bind_little_group(py::module_& m) {
           py::arg("only_irrep") = std::vector<int>{},
           py::arg("block_size") = 1, py::arg("partners") = true,
           py::arg("pairs") = std::string("same_momentum"), py::arg("sweep_gpu") = -1,
+          py::arg("pair_observables") = std::vector<int>{},
           "<m|O_i|n> between the lowest `levels` eigenstates of every block (plus the "
           "partners of multi-dimensional irreps), in the representative basis. "
           "Observables are MaskedOperators and need NO symmetry: each is projected "
@@ -1383,5 +1386,7 @@ void bind_little_group(py::module_& m) {
           "representative momentum (any irrep / flip parity); 'diagonal' gives "
           "<n|O|n> only. Result: per-state arrays (energies, labels, k0, level, "
           "partner, residuals), pairs[p] = (bra, ket), values[p, i] complex. "
-          "sweep_gpu: -1 follows use_gpu, 0/1 forces the matrix-element sweep lane.");
+          "sweep_gpu: -1 follows use_gpu, 0/1 forces the matrix-element sweep lane. "
+          "pair_observables: observable indices evaluated on OFF-diagonal pairs (default all); "
+          "the other off-diagonal entries are NaN.");
 }

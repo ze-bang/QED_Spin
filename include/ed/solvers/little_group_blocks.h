@@ -363,6 +363,10 @@ struct LittleGroupMEOptions {
     bool  partners = true;                  ///< add multi-dim irrep partners
     Pairs pairs    = Pairs::same_momentum;
     bool  use_gpu  = false;                 ///< GPU sweep of the matrix elements
+    /// Empty: every observable on every pair. Otherwise OFF-diagonal pairs (bra != ket)
+    /// evaluate only these observable indices; their other entries are NaN. Diagonal
+    /// pairs always carry every observable.
+    std::vector<int> pair_observables;
 };
 
 struct LittleGroupMEState {

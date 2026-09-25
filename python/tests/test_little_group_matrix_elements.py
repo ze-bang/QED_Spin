@@ -217,3 +217,21 @@ def test_facade_labels_and_multiplet_strengths():
         assert abs(me.strength(0, mult, mult) - d) < 1e-10
     # the current is flip-odd and translation-projected: <G.A1+| J |G.A1+> = 0 exactly
     assert abs(me.element(gs, gs)[1]) < 1e-14
+
+
+def test_pair_observables_restricts_off_diagonal_pairs(case):
+    r, ops = case["r"], case["ops"]
+    H = TT.xxz_operator(J2=J2, delta=DELTA)
+    keep = [1, 6]                                  # a random operator and the current
+    s = dict(_core.little_group_block_observables(H, ops, A, R, levels=LEVELS, n_up=N // 2,
+                                                  dense_max_dim=4096, pair_observables=keep))
+    full = {(int(b), int(k)): v for (b, k), v in zip(np.asarray(r["pairs"]), np.asarray(r["values"]))}
+    assert len(s["pairs"]) == len(full)
+    for (b, k), v in zip(np.asarray(s["pairs"]), np.asarray(s["values"])):
+        ref = full[(int(b), int(k))]
+        if b == k:
+            assert np.abs(v - ref).max() < 1e-12              # diagonal: every observable
+        else:
+            assert np.abs(v[keep] - ref[keep]).max() < 1e-12
+            rest = [o for o in range(len(ops)) if o not in keep]
+            assert np.isnan(v[rest]).all()                   # never a silent zero
