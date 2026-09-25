@@ -117,10 +117,12 @@ endif()
 option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
 option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
 
-# Whether the caller chose the CUDA architectures (-DCMAKE_CUDA_ARCHITECTURES or the
-# CUDAARCHS environment variable); must be read before project() sets its own default.
-if(DEFINED CMAKE_CUDA_ARCHITECTURES OR DEFINED ENV{CUDAARCHS})
-    set(ED_CUDA_ARCH_CHOSEN ON)
+# CUDA architectures: H100 (sm_90) unless the caller chose them (-DCMAKE_CUDA_ARCHITECTURES
+# or the CUDAARCHS environment variable). Compute capability 6.0+ is required for native
+# double atomicAdd. Seeded into the cache before project(), which would otherwise cache the
+# compiler default (sm_52) and have every later re-configure pick that up.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+    set(CMAKE_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA architectures to build for")
 endif()
 
 # Set languages based on options. The version is mirrored in CITATION.cff
@@ -141,15 +143,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WITH_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    
-    # CUDA architectures: H100 (sm_90) unless the caller chose them. (Compute capability
-    # 6.0+ is required for native double atomicAdd.) A former `nvcc --run -arch=native`
-    # probe always failed on the GPU-less build nodes, compiled five architectures, and
-    # wrote null.o into the source tree.
-    if(NOT ED_CUDA_ARCH_CHOSEN)
-        set(CMAKE_CUDA_ARCHITECTURES "90")
-    endif()
-    
     # Add CUDA compiler flags to handle C++ standard library compatibility
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
