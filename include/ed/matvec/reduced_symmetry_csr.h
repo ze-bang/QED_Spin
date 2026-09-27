@@ -23,19 +23,55 @@
 // =============================================================================
 
 #include <cstdint>
+#include <memory>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <ed/matvec/term_kernels.h>   // conj_scalar, coerce_coeff, kOpSz, kOpPlus
 
 namespace ed::matvec {
 
+// Allocator whose value-less construct() default-initialises: resize() then leaves trivial elements untouched instead
+// of zero-filling them on the calling thread. Linux places a page on the NUMA node of the thread that first writes it,
+// so a serial zero fill would put a whole reduced CSR (tens to hundreds of GB) on ONE node and every spmv would stream
+// it across the interconnect (measured on Fir: ~80 GB/s from one domain vs ~8x that interleaved). The builders below
+// instead first-touch every row's slots from the thread that owns the row in spmv's static partition.
+template <class T, class A = std::allocator<T>>
+struct DefaultInitAllocator : A {
+    using A::A;
+    template <class U>
+    struct rebind { using other = DefaultInitAllocator<U, typename std::allocator_traits<A>::template rebind_alloc<U>>; };
+    template <class U>
+    void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) { ::new (static_cast<void*>(p)) U; }
+    template <class U, class... Args>
+    void construct(U* p, Args&&... args) {
+        std::allocator_traits<A>::construct(static_cast<A&>(*this), p, std::forward<Args>(args)...);
+    }
+};
+
+template <class T>
+using NumaVector = std::vector<T, DefaultInitAllocator<T>>;
+
 template <class Scalar>
 struct ReducedSymmetryCsr {
-    std::vector<std::uint64_t> row_ptr;   // size dim+1
-    std::vector<std::uint32_t> col_idx;   // size nnz
-    std::vector<Scalar>        val;       // size nnz
-    std::uint64_t              dim = 0;
+    NumaVector<std::uint64_t> row_ptr;    // size dim+1
+    NumaVector<std::uint32_t> col_idx;    // size nnz
+    NumaVector<Scalar>        val;        // size nnz
+    std::uint64_t             dim = 0;
+
+    // Size the arrays for the prefix-summed row_ptr and first-touch them row by row in spmv's static partition.
+    void allocate_first_touch() {
+        const std::uint64_t total = row_ptr[dim];
+        col_idx.resize(total);
+        val.resize(total);
+        #pragma omp parallel for schedule(static) if(dim > (1ULL << 16))
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            const std::uint64_t r = static_cast<std::uint64_t>(ir);
+            for (std::uint64_t e = row_ptr[r]; e < row_ptr[r + 1]; ++e) { col_idx[e] = 0; val[e] = Scalar(0); }
+        }
+    }
 
     [[nodiscard]] std::uint64_t nnz() const noexcept { return val.size(); }
     [[nodiscard]] bool          built() const noexcept { return dim > 0 && !row_ptr.empty(); }
@@ -211,7 +247,10 @@ template <class BasisPolicy, class Scalar,
     const std::uint64_t total = csr.row_ptr[dim];
     csr.col_idx.resize(total);
     csr.val.resize(total);
-    for (std::uint64_t r = 0; r < dim; ++r) {
+    // flatten in spmv's static row partition: the first touch places each row's slots on its reader's NUMA node
+    #pragma omp parallel for schedule(static) if(dim > par)
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+        const std::uint64_t r = static_cast<std::uint64_t>(ir);
         std::uint64_t e = csr.row_ptr[r];
         for (const auto& cv : rows[r]) { csr.col_idx[e] = cv.first; csr.val[e] = cv.second; ++e; }
     }
@@ -300,9 +339,9 @@ template <class RepPolicy, class Scalar,
         }
     }
     for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
-    const std::uint64_t total = csr.row_ptr[dim];
-    csr.col_idx.resize(total);
-    csr.val.resize(total);
+    // Pages first-touched in spmv's static partition (one cheap bandwidth-bound sweep), so pass 2 keeps its dynamic
+    // load balance without deciding where the memory lives.
+    csr.allocate_first_touch();
     // pass 2: fill in place
     #pragma omp parallel if(dim > par)
     {
