@@ -28,6 +28,7 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
+#include <ed/solvers/group_sector.h>         // group-sector lane (full little group, 1-dim chi)
 #include <ed/observables/rep_matrix_elements.h>  // rep_sector_matrix_elements
 #include <ed/symmetry/rep_sector_data.h>
 #include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
@@ -1510,4 +1511,80 @@ void bind_little_group(py::module_& m) {
           "read-only / memory-mapped complex128 arrays. balanced_masks: evaluate <bra|P O P|ket> "
           "with P the projector on states where every mask holds exactly half its bits set "
           "(hexagon masks: Q_h = 0 everywhere); the mask set must be closed under the group.");
+
+    // -------------------------------------------------------------------------
+    // Group-sector lane (include/ed/solvers/group_sector.h): the rep basis under the FULL little group of a block
+    // with a 1-dim character -- block dim C(N, n_up)/|G| instead of the abelian k-sector's C(N, n_up)/|T x flip|.
+    // Sector dicts are the same objects rep_sector_matrix_elements consumes.
+    // -------------------------------------------------------------------------
+    m.def("group_sector",
+          [](const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip,
+             const py::array_t<Complex, py::array::c_style | py::array::forcecast>& characters) {
+              std::vector<Complex> chi(characters.data(), characters.data() + characters.size());
+              std::shared_ptr<const ed::symmetry::RepSectorData> sp;
+              {
+                  py::gil_scoped_release release;
+                  sp = std::make_shared<const ed::symmetry::RepSectorData>(
+                      ed::solvers::build_group_sector(perms, n_sites, n_up, flip, chi));
+              }
+              return sector_dict(sp);
+          },
+          py::arg("perms"), py::arg("n_sites"), py::arg("n_up"), py::arg("flip"), py::arg("characters"),
+          "Rep basis of the n_up sector under the group `perms` (x the spin flip when flip=True; elements "
+          "[g..., g*F...]) in the 1-dim representation `characters` (length |G|, or 2|G| with flip). Returns a "
+          "sector dict (reps, inv_norms, characters, perms, flip_masks, group_size, n_sites, n_up).");
+
+    m.def("group_block",
+          [](const Operator& op, const py::dict& sector, int levels, int block_size, int dense_max_dim,
+             bool return_vectors) {
+              auto sp = std::make_shared<const ed::symmetry::RepSectorData>(sector_from_dict(sector));
+              ed::solvers::GroupSectorSolveOptions o;
+              o.levels = levels; o.block_size = block_size; o.dense_max_dim = dense_max_dim;
+              o.return_vectors = return_vectors;
+              ed::solvers::GroupSectorSolveResult r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::solve_group_sector(op, sp, o);
+              }
+              py::dict d;
+              d["energies"]  = r.energies;
+              d["residuals"] = r.residuals;
+              d["converged"] = r.converged;
+              d["dim"]       = r.dim;
+              d["t_setup"]   = r.t_setup;
+              d["t_solve"]   = r.t_solve;
+              py::list vecs;
+              for (auto& v : r.vectors) {
+                  py::array_t<Complex> a(static_cast<py::ssize_t>(v.size()));
+                  std::copy(v.begin(), v.end(), a.mutable_data());
+                  vecs.append(a);
+              }
+              d["vectors"] = vecs;
+              return d;
+          },
+          py::arg("op"), py::arg("sector"), py::arg("levels") = 3, py::arg("block_size") = 1,
+          py::arg("dense_max_dim") = 256, py::arg("return_vectors") = true,
+          "Lowest `levels` eigenpairs of `op` in the group sector (a group_sector dict): energies, residuals "
+          "||Hv - Ev||, converged, dim, t_setup, t_solve (incl. the reduced-CSR build) and the vectors in the "
+          "group-sector basis. Use levels >= 2 (Krylov-Schur lane).");
+
+    m.def("group_convert",
+          [](const py::array_t<Complex, py::array::c_style | py::array::forcecast>& vec, const py::dict& src,
+             const py::dict& dst, bool conjugate) {
+              const std::vector<Complex> v(vec.data(), vec.data() + vec.size());
+              const ed::symmetry::RepSectorData rs = sector_from_dict(src);
+              const ed::symmetry::RepSectorData rt = sector_from_dict(dst);
+              std::vector<Complex> out;
+              {
+                  py::gil_scoped_release release;
+                  out = ed::solvers::convert_group_vector(v, rs, rt, conjugate);
+              }
+              py::array_t<Complex> a(static_cast<py::ssize_t>(out.size()));
+              std::copy(out.begin(), out.end(), a.mutable_data());
+              return a;
+          },
+          py::arg("vec"), py::arg("src"), py::arg("dst"), py::arg("conjugate") = true,
+          "Re-express a group-sector vector (sector `src`, group G) in the sector `dst` of a subgroup H of G "
+          "(characters restricted from G). conjugate=True is the engine convention (pinned by group_convert_test.py: "
+          "it reproduces <H> with complex characters; False does not). The result is normalised.");
 }

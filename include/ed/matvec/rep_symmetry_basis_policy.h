@@ -184,7 +184,7 @@ struct RepSymmetryBasisPolicy {
     // flip-extension doubles |G|, and NLCE point groups can exceed it -- so
     // |G| > kMaxG must NOT overrun the stack buffer. Matches the device policy's
     // identically named guard (device_basis_policy.cuh).
-    static constexpr int kMaxG = 256;
+    static constexpr int kMaxG = 512;   // 36d full little group with flip: |G| = 288 (a 4 KB stack buffer)
 
     [[nodiscard]] inline std::int64_t
     index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
