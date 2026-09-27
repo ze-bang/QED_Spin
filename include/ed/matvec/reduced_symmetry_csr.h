@@ -253,15 +253,18 @@ template <class RepPolicy, class Scalar,
     csr.dim = dim;
     csr.row_ptr.assign(dim + 1, 0);
 
-    std::vector<std::vector<std::pair<std::uint32_t, Scalar>>> rows(dim);
+    // Two passes over the rows, both parallel: (1) count the nonzeros of every row, (2) after one allocation of the
+    // final arrays, recompute each row and write it straight into its slot. A row's accumulation, zero filter and
+    // column sort are exactly those of the old single-pass build, so the matrix is bit-identical. The old build kept
+    // one heap vector per row until a SERIAL flatten had copied them all: at N=36 (3.8e8 rows, 1.5e10 nonzeros) that
+    // peaked above 700 GB with the flatten running single-threaded for more than an hour; now the peak is the final
+    // CSR itself (~290 GB) and nothing runs serially except the prefix sum.
 #ifdef _OPENMP
     const std::uint64_t par = static_cast<std::uint64_t>(omp_get_max_threads()) * 256ULL;
 #else
     const std::uint64_t par = std::numeric_limits<std::uint64_t>::max();
 #endif
-    #pragma omp parallel for schedule(dynamic, 256) if(dim > par)
-    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
-        const std::uint64_t r     = static_cast<std::uint64_t>(ir);
+    auto build_row = [&](std::uint64_t r, std::vector<std::pair<std::uint32_t, Scalar>>& dstrow) {
         const std::uint64_t rep_r = basis.state_of(r);
         const Scalar inv_norm_r = kernel::coerce_coeff<Scalar>(
             std::complex<double>(basis.inv_norm_of(r), 0.0));
@@ -278,22 +281,39 @@ template <class RepPolicy, class Scalar,
                     inv_norm_r * kernel::conj_scalar<Scalar>(
                         h * kernel::coerce_coeff<Scalar>(proj));
             });
-        auto& dstrow = rows[r];
+        dstrow.clear();
         dstrow.reserve(acc.size());
         for (const auto& kv : acc)
             if (std::abs(kv.second) > 0.0) dstrow.emplace_back(kv.first, kv.second);
         std::sort(dstrow.begin(), dstrow.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
-    }
+    };
 
-    for (std::uint64_t r = 0; r < dim; ++r)
-        csr.row_ptr[r + 1] = csr.row_ptr[r] + rows[r].size();
+    // pass 1: row lengths (row_ptr[r + 1] holds the length of row r until the prefix sum)
+    #pragma omp parallel if(dim > par)
+    {
+        std::vector<std::pair<std::uint32_t, Scalar>> row;
+        #pragma omp for schedule(dynamic, 256)
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            build_row(static_cast<std::uint64_t>(ir), row);
+            csr.row_ptr[static_cast<std::uint64_t>(ir) + 1] = row.size();
+        }
+    }
+    for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
     const std::uint64_t total = csr.row_ptr[dim];
     csr.col_idx.resize(total);
     csr.val.resize(total);
-    for (std::uint64_t r = 0; r < dim; ++r) {
-        std::uint64_t e = csr.row_ptr[r];
-        for (const auto& cv : rows[r]) { csr.col_idx[e] = cv.first; csr.val[e] = cv.second; ++e; }
+    // pass 2: fill in place
+    #pragma omp parallel if(dim > par)
+    {
+        std::vector<std::pair<std::uint32_t, Scalar>> row;
+        #pragma omp for schedule(dynamic, 256)
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            const std::uint64_t r = static_cast<std::uint64_t>(ir);
+            build_row(r, row);
+            std::uint64_t e = csr.row_ptr[r];
+            for (const auto& cv : row) { csr.col_idx[e] = cv.first; csr.val[e] = cv.second; ++e; }
+        }
     }
     return csr;
 }
