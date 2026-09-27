@@ -94,6 +94,8 @@ struct Row {
       "=0 disables A' = A x Z2 inside the little-group engine")                \
     X("ED_SYM_LG_TR", Flag, "little-group", "true",                            \
       "=0 disables TR star/sigma folding inside the engine")                   \
+    X("ED_SYM_LG_GROUP_SECTOR", Flag, "little-group", "true",                  \
+      "=0 vetoes the full-little-group basis for 1-dim irreps (group_sector.h)")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
     X("ED_SYM_LG_SEED", Integer, "little-group", "0 (base seed 0x51ED0B70)",   \

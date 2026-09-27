@@ -839,6 +839,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_flip_projection            tests/unit/test_flip_projection.cpp USE_CATCH2)
     # U1a lane unification: owned little-group block handles (tiling/covering/spectra)
     ed_add_test(test_little_group_blocks        tests/unit/test_little_group_blocks.cpp USE_CATCH2)
+    # group-sector lane: full-little-group rep basis for 1-dim irreps + its dispatch in the block factory
+    ed_add_test(test_group_sector               tests/unit/test_group_sector.cpp USE_CATCH2)
     # observable engine: MaskedTerm / MaskedOperator algebra against dense matrices
     ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp USE_CATCH2)
     ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp USE_CATCH2)

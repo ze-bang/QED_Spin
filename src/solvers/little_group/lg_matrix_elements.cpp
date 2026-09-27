@@ -67,20 +67,15 @@ LittleGroupMEResult little_group_block_observables(
         const int star_k0 = k0;   // structured bindings cannot be captured in C++17
         SolvedSector S;
         S.rd = sb.hk->rep_data_ptr();
-        const std::size_t nrep = sb.hk->dim();
-        std::vector<Complex> hu(nrep);
-
-        const auto add_state = [&](std::vector<Complex> u, double e, const LittleGroupBlockTag& tag,
-                                   int level, int partner, bool conv) {
+        const auto add_state = [&](const LittleGroupBlock::Impl& blk, const Complex* v, std::vector<Complex> u, double e,
+                                   const LittleGroupBlockTag& tag, int level, int partner, bool conv) {
             double nrm = 0.0;
             for (const auto& c : u) nrm += std::norm(c);
             nrm = std::sqrt(nrm);
             if (!(nrm > 0.0))
                 throw std::runtime_error("little_group_block_observables: zero lifted vector");
             for (auto& c : u) c /= nrm;
-            sb.hk->apply(u.data(), hu.data(), nrep);
-            double res = 0.0;
-            for (std::size_t i = 0; i < nrep; ++i) res += std::norm(hu[i] - e * u[i]);
+            const double res = lifted_residual(blk, v, u, e);
             LittleGroupMEState st;
             st.energy = e;
             st.label.k_raw = tag.k_raw;
@@ -92,7 +87,7 @@ LittleGroupMEResult little_group_block_observables(
             st.level = level;
             st.partner = partner;
             st.multiplicity = tag.multiplicity;
-            st.residual = std::sqrt(res);
+            st.residual = res;
             S.states.push_back(static_cast<int>(out.states.size()));
             out.states.push_back(st);
             S.vecs.push_back(std::move(u));
@@ -110,14 +105,13 @@ LittleGroupMEResult little_group_block_observables(
                 std::vector<Complex> u = block.lift_to_rep(vv[j].data());
                 std::vector<std::vector<Complex>> partners;
                 if (me.partners && tag.irrep_dim > 1) partners = block.degenerate_partners(u);
-                add_state(std::move(u), ev[j], tag, static_cast<int>(j), 0, conv);
+                add_state(*impl, vv[j].data(), std::move(u), ev[j], tag, static_cast<int>(j), 0, conv);
                 for (std::size_t q = 0; q < partners.size(); ++q)
-                    add_state(std::move(partners[q]), ev[j], tag, static_cast<int>(j),
+                    add_state(*impl, nullptr, std::move(partners[q]), ev[j], tag, static_cast<int>(j),
                               static_cast<int>(q + 1), conv);
             }
         }
-        sb.info.gpu_engaged = sb.hk->gpu_engaged();
-        sb.info.csr_engaged = sb.hk->csr_engaged();
+        report_engagement(sb);
         out.stars.push_back(sb.info);
         if (!S.states.empty()) sectors.push_back(std::move(S));
         // sb (H_k0 and its device mirror) is released here

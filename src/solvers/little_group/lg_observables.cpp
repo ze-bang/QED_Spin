@@ -251,7 +251,7 @@ LittleGroupExpectations little_group_block_expectations(
         for (const auto* O : observables)
             Ok.push_back(std::make_unique<RepSectorMatVec>(*O, sb.hk->rep_data_ptr()));
         const std::size_t nrep = sb.hk->dim();
-        std::vector<Complex> hu(nrep), ou(nrep);
+        std::vector<Complex> ou(nrep);
 
         for (const auto& impl : sb.blocks) {
             LittleGroupBlock block(impl);
@@ -268,9 +268,7 @@ LittleGroupExpectations little_group_block_expectations(
                 if (!(nrm > 0.0))
                     throw std::runtime_error("little_group_block_expectations: zero lifted vector");
                 for (auto& c : u) c /= nrm;
-                sb.hk->apply(u.data(), hu.data(), nrep);
-                double res = 0.0;
-                for (std::size_t i = 0; i < nrep; ++i) res += std::norm(hu[i] - ev[j] * u[i]);
+                const double res = lifted_residual(*impl, vv[j].data(), u, ev[j]);
                 std::vector<double> vals;
                 vals.reserve(Ok.size());
                 for (const auto& O : Ok) {
@@ -292,11 +290,10 @@ LittleGroupExpectations little_group_block_expectations(
                 out.values.push_back(std::move(vals));
                 out.diagonal_values.push_back(
                     diagonal_expectations(sb.hk->rep_data_ptr()->reps, u, folded));
-                out.residuals.push_back(std::sqrt(res));
+                out.residuals.push_back(res);
             }
         }
-        sb.info.gpu_engaged = sb.hk->gpu_engaged();
-        sb.info.csr_engaged = sb.hk->csr_engaged();
+        report_engagement(sb);
         out.stars.push_back(sb.info);
     }
     return out;

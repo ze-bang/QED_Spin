@@ -320,11 +320,7 @@ LittleGroupGroundState little_group_ground_state(
         bool star_holds_best = false;
         for (std::size_t bi = 0; bi < sb.blocks.size(); ++bi) {
             const auto& impl = *sb.blocks[bi];
-            const ed::matvec::MatVecOperator& mv =
-                impl.pop ? static_cast<const ed::matvec::MatVecOperator&>(
-                               *impl.pop)
-                         : static_cast<const ed::matvec::MatVecOperator&>(
-                               *impl.hk);
+            const ed::matvec::MatVecOperator& mv = block_mv(impl);
             bool conv = true;
             const auto ev = solve_block_lowest(mv, 1, opt.dense_max_dim,
                                                &conv);
@@ -381,14 +377,10 @@ LittleGroupGroundState little_group_ground_state(
         // the sandwich. A failed guard falls back to the plain re-solve
         // below (correct, merely less reduced) -- never ship an
         // unguarded vector.
-        const std::size_t n = u.size();
-        std::vector<Complex> hu(n);
-        win.hk->apply(u.data(), hu.data(), n);
-        double num = 0.0, den = 1e-300;
-        for (std::size_t i = 0; i < n; ++i) {
-            num += std::norm(hu[i] - e0 * u[i]);
-            den += std::norm(u[i]);
-        }
+        // (lifted_residual: on H_k0, or in the block for a group sector, whose lift intertwines exactly)
+        double den = 1e-300;
+        for (const auto& c : u) den += std::norm(c);
+        const double lift_res = lifted_residual(*win.blocks[best_blk], v.data(), u, e0);
         // The lift is an isometry onto an H-invariant subspace, so the rep-basis
         // residual equals the block residual solve_gs_vector just certified against
         // lg_gs_resid_tol(), up to roundoff. Guard at 2x that tolerance: a fixed
@@ -396,7 +388,7 @@ LittleGroupGroundState little_group_ground_state(
         // whenever ED_SYM_LG_GS_RESID_TOL was relaxed (and borderline ones by
         // roundoff even at the default) -- the measured ~36x GS-path slowdown.
         const double lift_tol = 2.0 * lg_gs_resid_tol();
-        if (std::sqrt(num / den) <= lift_tol) {
+        if (lift_res <= lift_tol) {
             const double inv = 1.0 / std::sqrt(den);
             for (auto& c : u) c *= inv;
             gs.energy      = e0;
@@ -408,7 +400,7 @@ LittleGroupGroundState little_group_ground_state(
             std::fprintf(stderr,
                 "[little_group] GS lift residual %.3e > %.1e at k0=%d "
                 "irrep=%d -- falling back to the plain sector re-solve\n",
-                std::sqrt(num / den), lift_tol, best_k0, block.tag().irrep);
+                lift_res, lift_tol, best_k0, block.tag().irrep);
         }
     }
     if (!lifted) {
