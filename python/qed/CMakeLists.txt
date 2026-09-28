@@ -32,6 +32,7 @@ if(WITH_CUDA AND TARGET ed_solvers_gpu)
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
         _bindings/little_group_bindings.cpp
+        _bindings/sectors_bindings.cpp
         _bindings/workflow/workflow_bindings.cpp
         _bindings/workflow/workflow_types.cpp
         _bindings/workflow/workflow_symmetry.cpp
@@ -48,6 +49,7 @@ else()
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
         _bindings/little_group_bindings.cpp
+        _bindings/sectors_bindings.cpp
         _bindings/workflow/workflow_bindings.cpp
         _bindings/workflow/workflow_types.cpp
         _bindings/workflow/workflow_symmetry.cpp

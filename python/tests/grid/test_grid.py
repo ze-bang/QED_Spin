@@ -21,7 +21,10 @@ import pytest
 qed = pytest.importorskip("qed")
 pytest.importorskip("pynauty")
 
-from . import adapter_v1 as api  # noqa: E402
+import importlib  # noqa: E402
+
+# QED_GRID_API selects the API under test (v1: qed.solve/thermal/spectral; v2: qed.api).
+api = importlib.import_module(f".adapter_{os.environ.get('QED_GRID_API', 'v1')}", __package__)
 from .models import MODELS, Model, fourier, oracle  # noqa: E402
 
 pytestmark = pytest.mark.grid

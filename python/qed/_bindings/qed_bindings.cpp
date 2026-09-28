@@ -59,6 +59,7 @@
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
 #include "little_group_bindings.h"
+#include "sectors_bindings.h"
 #include "workflow_bindings.h"
 
 #include <complex>
@@ -484,6 +485,7 @@ PYBIND11_MODULE(_core, m) {
 
     // The little-group verbs (little_group_bindings.cpp).
     bind_little_group(m);
+    bind_sectors(m);
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.
 
