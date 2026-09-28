@@ -73,9 +73,6 @@ struct Geometry {
     /// mirror).
     bool                  supports_device_matvec = false;
 
-    [[nodiscard]] bool is_distributed() const noexcept {
-        return ed::matvec::is_distributed(memory_space);
-    }
     [[nodiscard]] bool is_device() const noexcept {
         return ed::matvec::is_device(memory_space);
     }

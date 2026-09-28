@@ -53,7 +53,6 @@ void bind_workflows_types(py::module_& m) {
         .def_readwrite("compute_vectors", &ed::workflows::SolveOptions::compute_vectors)
         .def_readwrite("output_dir",      &ed::workflows::SolveOptions::output_dir)
         .def_readwrite("method",          &ed::workflows::SolveOptions::method)
-        .def_readwrite("allow_infeasible",&ed::workflows::SolveOptions::allow_infeasible)
         .def_readwrite("backend",         &ed::workflows::SolveOptions::backend)
         // Wave A5 (Full unified-interface collapse, May 2026): CLI parity knobs.
         .def_readwrite("use_fixed_sz",
@@ -84,7 +83,6 @@ void bind_workflows_types(py::module_& m) {
     py::class_<ed::BackendMetadata>(m, "BackendMetadata")
         .def(py::init<>())
         .def_readonly("lane",         &ed::BackendMetadata::lane)
-        .def_readonly("mpi_size",     &ed::BackendMetadata::mpi_size)
         .def_readonly("cuda_devices", &ed::BackendMetadata::cuda_devices)
         .def_readonly("wall_seconds", &ed::BackendMetadata::wall_seconds);
 
@@ -163,13 +161,10 @@ void bind_workflows_types(py::module_& m) {
     py::class_<ed::workflows::ThermalOptions>(m, "ThermalOptions")
         .def(py::init<>())
         .def_readwrite("method",       &ed::workflows::ThermalOptions::method)
-        .def_readwrite("allow_infeasible", &ed::workflows::ThermalOptions::allow_infeasible)
         .def_readwrite("num_samples",  &ed::workflows::ThermalOptions::num_samples)
         .def_readwrite("krylov_dim",   &ed::workflows::ThermalOptions::krylov_dim)
         .def_readwrite("num_exact",    &ed::workflows::ThermalOptions::num_exact)
-        .def_readwrite("taylor_order", &ed::workflows::ThermalOptions::taylor_order)
         .def_readwrite("betas",        &ed::workflows::ThermalOptions::betas)
-        .def_readwrite("delta_beta",   &ed::workflows::ThermalOptions::delta_beta)
         .def_readwrite("random_seed",  &ed::workflows::ThermalOptions::random_seed)
         .def_readwrite("spin_flip",
                        &ed::workflows::ThermalOptions::spin_flip)
@@ -284,7 +279,6 @@ void bind_workflows_types(py::module_& m) {
     py::class_<ed::workflows::SpectralOptions>(m, "SpectralOptions")
         .def(py::init<>())
         .def_readwrite("method",       &ed::workflows::SpectralOptions::method)
-        .def_readwrite("allow_infeasible", &ed::workflows::SpectralOptions::allow_infeasible)
         .def_readwrite("krylov_dim",   &ed::workflows::SpectralOptions::krylov_dim)
         .def_readwrite("broadening",   &ed::workflows::SpectralOptions::broadening)
         .def_readwrite("omega_min",    &ed::workflows::SpectralOptions::omega_min)
@@ -300,12 +294,10 @@ void bind_workflows_types(py::module_& m) {
                        &ed::workflows::SpectralOptions::momentum_tolerance)
         .def_readwrite("selected_sectors",
                        &ed::workflows::SpectralOptions::selected_sectors)
-        // Wave A5: CLI parity knobs (finite-T sample/temperature
-        // controls and the observable-type discriminator).
+        // CLI parity knobs (finite-T sample count and the
+        // observable-type discriminator).
         .def_readwrite("num_samples",
                        &ed::workflows::SpectralOptions::num_samples)
-        .def_readwrite("temperatures",
-                       &ed::workflows::SpectralOptions::temperatures)
         .def_readwrite("observable_type",
                        &ed::workflows::SpectralOptions::observable_type)
         // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):

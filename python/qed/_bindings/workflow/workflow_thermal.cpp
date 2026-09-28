@@ -142,7 +142,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                           "does this per tower).");
                   }
                   su2t_carrier = ed::ops::make_S2_carrier(num_sites);
-                  spec.two_total_spin = opts.two_total_spin;
                   // Exact per-raw-sector tower dims (Burnside differencing):
                   // the sampled estimator averages over the TOWER, but the
                   // kernel's free energy bakes in ln(D_sector) -- correct
@@ -160,9 +159,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // through ``SectorSetView`` (preserves the CSR-free
                   // lazy-rep memory path for large N).
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec, /*mpi_rank=*/0,
-                                                       /*mpi_size=*/1,
-                                                       probe.base));
+                      ed::make_sector_operators_tagged(spec, probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -252,7 +249,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // back as if it ran on CPU even when the GPU mirror
                   // fired (the timing-vs-CPU diff was masked).
                   std::string sector_lane;
-                  std::size_t sector_mpi_size = 1;
 
                   // Sector-level OMP parallelism: every irrep sector's
                   // thermal call is independent (distinct Krylov workspace,
@@ -380,7 +376,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       if (sector_lane.empty()
                           && !tr.backend.lane.empty()) {
                           sector_lane     = tr.backend.lane;
-                          sector_mpi_size = tr.backend.mpi_size;
                       }
                       if (tr.thermo.temperatures.empty()) {
                           if (std::isfinite(tr.ground_state_energy)) {
@@ -450,7 +445,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // lane ("gpu" / "cpu").
                   if (!sector_lane.empty()) {
                       agg.backend.lane = sector_lane;
-                      agg.backend.mpi_size = sector_mpi_size;
                   }
               }
               return agg;

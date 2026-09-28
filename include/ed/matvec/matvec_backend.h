@@ -100,21 +100,18 @@ using Complex = std::complex<double>;
 // ---------------------------------------------------------------------------
 // Compile-time detection of the on-the-fly representative symmetry policy
 // (``RepSymmetryBasisPolicy``). Detected via the optional ``is_rep_symmetry``
-// trait so the trivial / orbit-CSR policies need not declare it. When true,
+// trait so the trivial policies need not declare it. When true,
 // CpuMatVecBackend (i) always takes the complex matrix-free path -- the
-// assembled-CSR + real-input fast paths are invalid for a momentum sector,
-// exactly as for ``needs_orbit_walk`` -- and (ii) dispatches the dedicated
-// ``apply_terms_rep_symmetry`` kernel instead of the orbit-walk
+// assembled-CSR + real-input fast paths are invalid for a momentum sector --
+// and (ii) dispatches the dedicated representative kernels instead of
 // ``apply_terms``.
 // ---------------------------------------------------------------------------
 namespace detail {
 // Gate for the reduced-CSR symmetry matvec: assemble the reduced sector matrix
 // ONCE then do an O(1)-per-nnz SpMV every matvec, instead of the per-matvec
-// orbit/rep walk. This is the DEFAULT (RepReducedCsr). Stage 2b (SymmetryEngine
-// v2, Jul 2026): BOTH policy branches of matrix_free_* honor it -- the rep
-// branch assembles via ``build_reduced_symmetry_csr_rep`` (index_and_projection,
-// no orbit CSR ever materialized -- the lane the hook always documented), the
-// orbit branch via the iter_orbit/coeff_modifier builder. The reduced sector
+// rep walk. This is the DEFAULT (RepReducedCsr): the rep branch of
+// matrix_free_* assembles via ``build_reduced_symmetry_csr_rep``
+// (index_and_projection, no orbit CSR ever materialized). The reduced sector
 // matrix materialises (~dim x nnz/row), so for very large sectors that would
 // not fit, opt out with ED_SYM_REDUCED_CSR=0 -> RepStream (CSR-free rep walk,
 // cannot OOM).
@@ -134,7 +131,7 @@ inline bool reduced_csr_enabled() noexcept {
 // the little-group engine's up-front UPPER-BOUND estimate (each off-diagonal
 // term contributes at most one entry per source row) against the SAME budget
 // knob, ED_SYM_SECTOR_CSR_BUDGET_GIB (default 8): an oversized sector falls
-// back to the CSR-free rep/orbit walk on its own, no env var required.
+// back to the CSR-free rep walk on its own, no env var required.
 inline bool reduced_csr_within_budget(std::uint64_t dim,
                                       std::uint64_t terms_per_row) noexcept {
     return ed::planner::sector_csr_within_budget(dim, terms_per_row);
@@ -416,9 +413,9 @@ inline MatVecTunables read_symmetry_tunables(
 // ---------------------------------------------------------------------------
 // Structural Hermiticity check (audit 2026-09, correctness R1).
 //
-// The symmetry gather kernels (`apply_terms_rep_symmetry_gather`,
-// `apply_terms_gather_symmetry`) evaluate <r| H |s'> through the adjoint of
-// the emitted element and therefore compute H^dagger v. That is only H v
+// The symmetry gather kernel (`apply_terms_rep_symmetry_gather`) evaluates
+// <r| H |s'> through the adjoint of the emitted element and therefore
+// computes H^dagger v. That is only H v
 // when the term list is Hermitian. Every off-diagonal term must have an
 // adjoint partner with the conjugate coefficient: (S+_i S-_j, c) needs
 // (S-_i S+_j, conj c), (Sz_i S+_j, c) needs (Sz_i S-_j, conj c), etc.
@@ -514,16 +511,14 @@ public:
         const auto& terms = *static_cast<const term_view_t*>(tv);
         check_size(n);
 
-        // Symmetry policies (needs_orbit_walk) must always take the complex
+        // The representative symmetry policy must always take the complex
         // matrix-free kernel. The assembled-CSR path is invalid (the
-        // assemble kernel does not perform the orbit walk / symmetry
-        // weighting), and the real-input fast path is invalid too: a real
-        // Hamiltonian projected onto a complex momentum sector has complex
-        // off-diagonals (coeff_modifier<double> would silently drop the
-        // imaginary part of the phase). This branch is compiled out for the
-        // Full / FixedSz policies (needs_orbit_walk == false).
-        if constexpr (BasisPolicy::needs_orbit_walk
-                      || detail::policy_is_rep_v<BasisPolicy>) {
+        // assemble kernel does not perform the symmetry weighting), and the
+        // real-input fast path is invalid too: a real Hamiltonian projected
+        // onto a complex momentum sector has complex off-diagonals (a real
+        // projection would silently drop the imaginary part of the phase).
+        // This branch is compiled out for the Full / FixedSz policies.
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
             // Audit 2026-09 (correctness R1): the symmetry gather kernels
             // compute H^dagger v and rely on H being Hermitian; check the
             // term list structurally once per backend instance.
@@ -533,10 +528,9 @@ public:
                                                 *terms.diag_one, *terms.diag_two);
                 hermiticity_checked_ = true;
             }
-            // GATHER (default) overwrites every row; the SCATTER fallback and the
-            // multi-target (non-abelian) path accumulate, so they pre-zero.
-            if (tunables_.matvec_scatter
-                || kernel::policy_multi_target_v<BasisPolicy>)
+            // GATHER (default) overwrites every row; the SCATTER fallback
+            // accumulates, so it pre-zeroes.
+            if (tunables_.matvec_scatter)
                 std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
             return;
@@ -586,50 +580,36 @@ public:
                     std::size_t   n) override
     {
         const auto& terms = *static_cast<const term_view_t*>(tv);
-        if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
-            // The non-abelian SAB projection is complex (D^Γ), so the effective
-            // matrix is complex even for real terms; the real fast path would
-            // drop the imaginary part. Force callers onto apply_complex. The
-            // `else` wraps the whole real body so `matrix_free_real` (and its
-            // real symmetry gather, which needs has_coeff_modifier) is NOT
-            // instantiated for this policy.
-            (void)terms; (void)in; (void)out; (void)n;
+        if (!terms.is_real) {
             throw std::runtime_error(
-                "MatVecBackend::apply_real: multi-target (non-abelian) symmetry "
-                "policy is complex-only; use apply_complex");
+                "MatVecBackend::apply_real: operator has complex couplings");
+        }
+        check_size(n);
+
+        // The representative symmetry policy must skip the assembled-CSR
+        // path (the assemble kernel performs no symmetry weighting). The real
+        // matrix-free kernel is valid here only because apply_real is reached
+        // solely when the owning operator reports a real effective matrix
+        // (real terms AND real momentum phases); the real projection is then
+        // exact. Compiled out for Full / FixedSz.
+        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
+            // GATHER (default) overwrites every row; only the SCATTER fallback
+            // needs a pre-zeroed accumulator.
+            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+            matrix_free_real(terms, in, out);
+            return;
         } else {
-            if (!terms.is_real) {
-                throw std::runtime_error(
-                    "MatVecBackend::apply_real: operator has complex couplings");
-            }
-            check_size(n);
+            const bool use_csr = detail::csr_eligible(
+                tunables_, basis_.dim(), csr_real_built_);
 
-            // Symmetry policies must skip the assembled-CSR path (the assemble
-            // kernel performs no orbit walk). The real matrix-free kernel is
-            // valid here only because apply_real is reached solely when the
-            // owning operator reports a real effective matrix (real terms AND
-            // real momentum phases); coeff_modifier<double> is then exact.
-            // Compiled out for Full / FixedSz (needs_orbit_walk == false).
-            if constexpr (BasisPolicy::needs_orbit_walk
-                          || detail::policy_is_rep_v<BasisPolicy>) {
-                // GATHER (default) overwrites every row; only the SCATTER fallback
-                // needs a pre-zeroed accumulator.
-                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-                matrix_free_real(terms, in, out);
+            if (use_csr) {
+                ensure_csr_real(terms);
+                csr_spmv_real(in, out, n);
                 return;
-            } else {
-                const bool use_csr = detail::csr_eligible(
-                    tunables_, basis_.dim(), csr_real_built_);
-
-                if (use_csr) {
-                    ensure_csr_real(terms);
-                    csr_spmv_real(in, out, n);
-                    return;
-                }
-
-                if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-                matrix_free_real(terms, in, out);
             }
+
+            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
+            matrix_free_real(terms, in, out);
         }
     }
 
@@ -686,50 +666,6 @@ private:
                     *t.three_body,
                     in, out, diag_cplx_.data());
             }
-        } else if constexpr (BasisPolicy::needs_orbit_walk) {
-            // Orbit-walk symmetry lane.
-            if constexpr (kernel::policy_multi_target_v<BasisPolicy>) {
-                // Non-abelian (multiplicity): only the SCATTER kernel emits to the
-                // multiple SAB targets per state. The GATHER kernel assumes a
-                // single dst (and static_asserts has_coeff_modifier). Caller
-                // pre-zeroed ``out``.
-                ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
-                    basis_, t.spin_l,
-                    *t.diag_one, *t.offdiag_one,
-                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                    *t.three_body,
-                    in, out);
-            } else if (tunables_.matvec_scatter) {
-                // Bisection fallback: orbit-walk SCATTER (caller pre-zeroed).
-                ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
-                    basis_, t.spin_l,
-                    *t.diag_one, *t.offdiag_one,
-                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                    *t.three_body,
-                    in, out);
-            } else if (detail::reduced_csr_enabled()
-                       && detail::reduced_csr_within_budget(
-                              basis_.dim(),
-                              1 + t.offdiag_one->size() + t.mixed_two->size()
-                                + t.offdiag_two->size() + t.three_body->size())) {
-                // Skeleton lane: materialize the reduced sector matrix ONCE
-                // (same coeff_modifier as the gather) then O(1)-per-nnz SpMV.
-                if (!rep_csr_cplx_.built())
-                    rep_csr_cplx_ = build_reduced_symmetry_csr<BasisPolicy, Complex>(
-                        basis_, t.spin_l,
-                        *t.diag_one, *t.offdiag_one, *t.diag_two,
-                        *t.mixed_two, *t.offdiag_two, *t.three_body);
-                rep_csr_cplx_.spmv(in, out);
-            } else {
-                // DEFAULT: lock-free row GATHER (Hermitian transpose of the
-                // orbit walk). Overwrites ``out`` (no pre-zero needed).
-                ed::matvec::kernel::apply_terms_gather_symmetry<BasisPolicy, Complex>(
-                    basis_, t.spin_l,
-                    *t.diag_one, *t.offdiag_one,
-                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                    *t.three_body,
-                    in, out);
-            }
         } else if (tunables_.matvec_scatter) {
             // Trivial policy, bisection fallback: legacy SCATTER kernel
             // (caller pre-zeroed ``out``).
@@ -784,33 +720,6 @@ private:
                     *t.three_body,
                     in, out, diag_real_.data());
             }
-        } else if constexpr (BasisPolicy::needs_orbit_walk) {
-            if (tunables_.matvec_scatter) {
-                ed::matvec::kernel::apply_terms<BasisPolicy, double>(
-                    basis_, t.spin_l,
-                    *t.diag_one, *t.offdiag_one,
-                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                    *t.three_body,
-                    in, out);
-            } else if (detail::reduced_csr_enabled()
-                       && detail::reduced_csr_within_budget(
-                              basis_.dim(),
-                              1 + t.offdiag_one->size() + t.mixed_two->size()
-                                + t.offdiag_two->size() + t.three_body->size())) {
-                if (!rep_csr_real_.built())
-                    rep_csr_real_ = build_reduced_symmetry_csr<BasisPolicy, double>(
-                        basis_, t.spin_l,
-                        *t.diag_one, *t.offdiag_one, *t.diag_two,
-                        *t.mixed_two, *t.offdiag_two, *t.three_body);
-                rep_csr_real_.spmv(in, out);
-            } else {
-                ed::matvec::kernel::apply_terms_gather_symmetry<BasisPolicy, double>(
-                    basis_, t.spin_l,
-                    *t.diag_one, *t.offdiag_one,
-                    *t.diag_two, *t.mixed_two, *t.offdiag_two,
-                    *t.three_body,
-                    in, out);
-            }
         } else if (tunables_.matvec_scatter) {
             ed::matvec::kernel::apply_terms<BasisPolicy, double>(
                 basis_, t.spin_l,
@@ -839,7 +748,7 @@ private:
     // diagonal gather)`` and skips the diagonal bins. Lazy-built; dropped by
     // ``invalidate_caches`` whenever the term list mutates.
     //
-    // Only the trivial policies ever call these (the orbit-walk / rep
+    // Only the trivial policies ever call these (the rep
     // branches are selected via ``if constexpr`` in matrix_free_*), but the
     // bodies compile for every policy because ``state_of`` / ``dim`` are
     // part of the common BasisPolicy surface.
@@ -1077,7 +986,7 @@ private:
     mutable bool diag_real_built_ = false;
 
     // Reduced-CSR "skeleton" lane (rep symmetry only; ED_SYM_REDUCED_CSR=1). Built
-    // once on first apply from the same coeff_modifier as the gather, then reused
+    // once on first apply from the same row walk as the rep gather, then reused
     // as an O(1)-per-nnz SpMV across all solver iterations.
     mutable ReducedSymmetryCsr<Complex> rep_csr_cplx_{};
     mutable ReducedSymmetryCsr<double>  rep_csr_real_{};

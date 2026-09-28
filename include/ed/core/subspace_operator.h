@@ -66,7 +66,7 @@
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
-#include <ed/matvec/reduced_symmetry_csr.h>    // build_reduced_symmetry_csr (orbit-walk dense assembly)
+#include <ed/matvec/reduced_symmetry_csr.h>    // build_reduced_symmetry_csr_rep (dense assembly)
 #include <ed/symmetry/subspace.h>               // FixedSzSubspace (FixedSz producer)
 #include <ed/symmetry/symmetry_sector_data.h>   // SymmetrySector (symmetry forwarders)
 #include <ed/symmetry/rep_sector_data.h>        // RepSectorData (symmetry forwarders)
@@ -183,17 +183,15 @@ public:
             return true;
         } else if constexpr (Producer::needs_orbit_walk
                              && Producer::has_coeff_modifier) {
-            // Orbit-walk symmetry lane (abelian spatial group, possibly without
-            // fixed Sz). The reduced matrix element is NOT the bare <s'|H|s> but
-            // the projection-weighted conj(base_contrib * coeff_modifier); we
-            // enumerate each reduced row ONCE via ``rep_symmetry_row_for_each``
-            // (the same per-row walk ``build_reduced_symmetry_csr`` and the
-            // gather matvec share) and write the element straight into the
-            // column-major dense buffer. This replaces the O(dim)-matvec column
-            // build -- where each matvec re-walks every orbit and recomputes the
-            // projection -- with a single O(|G|*nnz) assembly pass. The emitted
-            // value is byte-for-byte what the gather kernel accumulates (pinned
-            // by the "lazy rep-walk dense-assembly lane == full reference" case in
+            // Symmetry lane (abelian spatial group, possibly without fixed
+            // Sz). The reduced matrix element is NOT the bare <s'|H|s> but
+            // the projection-weighted one; the reduced sector matrix is
+            // assembled once from the rep policy (build_reduced_symmetry_csr_rep,
+            // the same row walk as the rep gather matvec) and written straight
+            // into the column-major dense buffer. This replaces the
+            // O(dim)-matvec column build with a single O(|G|*nnz) assembly
+            // pass (pinned by the "lazy rep-walk dense-assembly lane == full
+            // reference" case in
             // tests/integration/test_make_sector_operators_e2e.cpp: the FullDiag
             // sector union equals the full-Hilbert dense spectrum).
             if (static_cast<std::size_t>(producer_.dim()) != N) return false;

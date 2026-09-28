@@ -130,13 +130,9 @@ SpectralResult spectral(const LinearOperator&                      H,
 
     auto variant = select_backend(H.geometry(), opts.backend);
 
-    // COMPLETION GUARANTEE (spectral lane). Working set: GroundStateCF runs an
-    // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window.
-    // Plan it + refuse cleanly if it would not fit, before allocating.
-    // allow_infeasible (force) opts out.
-    // Leaf memory guard (planner feasibility pre-flight removed): GS-CF stores
-    // the GS eigenvector + a continued-fraction Krylov window (~2x krylov,
-    // per-sector dim for symmetry).
+    // Memory guard (spectral lane): GS-CF stores the GS eigenvector + a
+    // continued-fraction Krylov window (~2x krylov, per-sector dim for
+    // symmetry); throw cleanly before allocating if it would not fit.
     {
         const std::uint64_t D = H.global_dim();
         const std::uint64_t vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4);

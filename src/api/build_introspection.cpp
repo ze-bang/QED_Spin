@@ -8,7 +8,7 @@
 // pathways at runtime without `#ifdef`-cluttering the example body.
 //
 //   * has_cuda_build -- true when compiled with WITH_CUDA (CUDA runtime +
-//                       cuBLAS / cuSPARSE).
+//                       cuBLAS).
 //   * has_mpi_build, has_nccl_build -- always false; the library has no
 //                       MPI or NCCL support.
 // =============================================================================

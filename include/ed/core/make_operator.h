@@ -180,16 +180,6 @@ struct OperatorSpec {
     /// for in-memory sources). ``ED_SYM_CACHE=0`` disables the disk layer
     /// entirely. See ed::symmetry::resolve_sym_cache_dir.
     std::string           basis_cache_dir;
-
-    /// Stage 12c (SU(2) rollout): PLANNING HINT that the workflow will
-    /// target the spin-S tower (two_S = 2S) inside the fixed-Sz sectors
-    /// it builds. Does not change which basis is built -- the Casimir
-    /// route is operator-level -- but the across-sector MPI balance then
-    /// weighs each sector by its S-resolved dimension
-    /// (highest-weight differencing of the Burnside dims at adjacent
-    /// n_up) instead of the full fixed-Sz dimension. -1 = off.
-    int                   two_total_spin = -1;
-
 };
 
 // ---------------------------------------------------------------------------
@@ -447,7 +437,7 @@ inline std::uint64_t num_fixed_states(const std::vector<int>& perm, int n_up) {
 //   dim(chi_s) = (1/|G|) * Re sum_g chi_s(g) |Fix(g)|
 // (the multiplicity of the 1-D irrep chi_s in the fixed-Sz permutation
 // representation). Cheap -- O(|G|^2) total -- and needs NO orbit walk, so it can
-// drive the across-sector load balance BEFORE the expensive build.
+// size the sectors BEFORE the expensive build.
 inline std::vector<std::uint64_t>
 sector_dims_burnside(const ::SymmetryGroupInfo& info, int n_up) {
     const std::size_t G = info.max_clique.size();
@@ -473,8 +463,8 @@ sector_dims_burnside(const ::SymmetryGroupInfo& info, int n_up) {
 // commutes with the global raising operator S+, so per irrep:
 //   dim(sector, spin S) = dim(sector, n_up = (N+2S)/2)
 //                       - dim(sector, n_up = (N+2S)/2 + 1).
-// Two Burnside evaluations, no orbit walk. Feeds the MPI balance when the
-// workflow targets a spin tower, and doubles as the exact-integer oracle
+// Two Burnside evaluations, no orbit walk. Gives the per-sector tower
+// dimensions of the SU(2) thermal lane and doubles as the exact-integer oracle
 // the dense S-resolution validates against (Stage 12e).
 inline std::vector<std::uint64_t>
 sector_dims_s_resolved(const ::SymmetryGroupInfo& info, int n_sites,
@@ -493,33 +483,10 @@ sector_dims_s_resolved(const ::SymmetryGroupInfo& info, int n_sites,
     return dims;
 }
 
-// Greedy longest-processing-time bin-packing: hand each raw sector (largest dim
-// first) to the currently least-loaded rank. Deterministic, so every rank
-// computes the IDENTICAL ``owner[raw_s] = rank`` map. Solve + construction cost
-// both scale ~linearly with sector dim, so dim is the load proxy.
-inline std::vector<int>
-greedy_sector_owner(const std::vector<std::uint64_t>& dims, int nranks) {
-    std::vector<std::size_t> order(dims.size());
-    std::iota(order.begin(), order.end(), std::size_t{0});
-    std::sort(order.begin(), order.end(),
-              [&](std::size_t a, std::size_t b) { return dims[a] > dims[b]; });
-    std::vector<std::uint64_t> load(static_cast<std::size_t>(nranks), 0);
-    std::vector<int>           owner(dims.size(), 0);
-    for (std::size_t s : order) {
-        int best = 0;
-        for (int r = 1; r < nranks; ++r)
-            if (load[static_cast<std::size_t>(r)] < load[static_cast<std::size_t>(best)]) best = r;
-        owner[s] = best;
-        load[static_cast<std::size_t>(best)] += (dims[s] > 0 ? dims[s] : 1);
-    }
-    return owner;
-}
-
 }  // namespace detail
 
 inline SectorOperatorSet
 make_sector_operators_tagged(const OperatorSpec& spec,
-                             int mpi_rank = 0, int mpi_size = 1,
                              std::shared_ptr<Operator> base = nullptr) {
     if (!spec.streaming_symmetry) {
         throw std::runtime_error(
@@ -548,36 +515,6 @@ make_sector_operators_tagged(const OperatorSpec& spec,
 
     SectorOperatorSet set;
     std::vector<std::size_t> sector_ids;
-
-    // Across-sector MPI load balance: pre-compute exact per-sector dims via the
-    // Burnside/character formula (cheap, no orbit walk) and greedy-pack them onto
-    // ranks. owner[raw_s] = owning rank; nullptr (single-rank) => build all.
-    std::vector<int> sector_owner;
-    const std::vector<int>* owner_ptr = nullptr;
-    if (mpi_size > 1) {
-        const int n_up_for_dims = spec.fixed_sz.has_value()
-            ? static_cast<int>(*spec.fixed_sz) : -1;
-        // Stage 12c: when the workflow targets a spin-S tower, the work per
-        // sector scales with the S-resolved dimension (highest-weight
-        // differencing), not the full fixed-Sz dimension -- balance on that.
-        const auto dims = (spec.two_total_spin >= 0)
-            ? detail::sector_dims_s_resolved(
-                  base->symmetry_info,
-                  static_cast<int>(spec.num_sites), spec.two_total_spin)
-            : detail::sector_dims_burnside(base->symmetry_info,
-                                           n_up_for_dims);
-        sector_owner = detail::greedy_sector_owner(dims, mpi_size);
-        owner_ptr = &sector_owner;
-        if (ed::env::flag("ED_DEBUG_BALANCE", false) && mpi_rank == 0) {
-            std::vector<std::uint64_t> load(static_cast<std::size_t>(mpi_size), 0);
-            for (std::size_t s = 0; s < dims.size(); ++s) load[static_cast<std::size_t>(sector_owner[s])] += dims[s];
-            fprintf(stderr, "[BALANCE] burnside dims:");
-            for (auto d : dims) fprintf(stderr, " %llu", (unsigned long long)d);
-            fprintf(stderr, "\n[BALANCE] per-rank load:");
-            for (auto l : load) fprintf(stderr, " %llu", (unsigned long long)l);
-            fprintf(stderr, "\n"); fflush(stderr);
-        }
-    }
 
     // Structural consolidation (Jul 2026): ONE decode of the sector-mode
     // flags with the illegal combinations rejected up front (they were
@@ -618,40 +555,6 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             (*spec.sz_parity >= 2) ? -1 : *spec.sz_parity,
             base->symmetry_info, term_builder, &sector_ids, cache_dir,
             spec.flip_sectors_full);
-        // Audit 2026-07-30 (H1): the parity builder has no per-sector
-        // owner hook, and its SYNTHETIC (parity, irrep[, flip]) slot ids
-        // cannot index the raw-irrep Burnside owner table computed
-        // above. Without ownership every rank built AND solved every
-        // parity sector, and the across-rank thermo combine then summed
-        // each sector P times -- Z -> P*Z, i.e. F and S silently wrong
-        // by ln P under mpirun (E and Cv survived only because the
-        // duplication scales all weights uniformly). Enforce the same
-        // rank-local-solve invariant as the fixed-Sz / full lanes by
-        // greedy-packing the EMITTED sectors on their exact dims (known
-        // up-front from the fused scan) and keeping only this rank's
-        // share. The per-parity orbit tables are still built on every
-        // rank (cheap relative to the solves, and deterministic input
-        // to the pack, so all ranks agree on the assignment with zero
-        // communication).
-        if (owner_ptr != nullptr) {
-            std::vector<std::uint64_t> pdims;
-            pdims.reserve(set.operators.size());
-            for (const auto& op : set.operators)
-                pdims.push_back(static_cast<std::uint64_t>(op->dim()));
-            const std::vector<int> powner =
-                detail::greedy_sector_owner(pdims, mpi_size);
-            std::vector<std::unique_ptr<ed::symmetry::SectorOperator>> kept;
-            std::vector<std::size_t> kept_ids;
-            kept.reserve(set.operators.size());
-            kept_ids.reserve(sector_ids.size());
-            for (std::size_t i = 0; i < set.operators.size(); ++i) {
-                if (powner[i] != mpi_rank) continue;
-                kept.push_back(std::move(set.operators[i]));
-                kept_ids.push_back(sector_ids[i]);
-            }
-            set.operators = std::move(kept);
-            sector_ids    = std::move(kept_ids);
-        }
     } else if (spec.fixed_sz.has_value()) {
         // CSR-free lazy-rep regime -- THE fixed-Sz construction lane
         // (Stage 11c-1): operators know their dim up-front (Pass 1.5) and
@@ -661,14 +564,14 @@ make_sector_operators_tagged(const OperatorSpec& spec,
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
             static_cast<std::int64_t>(*spec.fixed_sz),
             base->symmetry_info, term_builder, &sector_ids,
-            mpi_rank, mpi_size, owner_ptr, cache_dir, spec.flip_project_half);
+            cache_dir, spec.flip_project_half);
     } else {
         // Pure-spatial symmetry (no Sz): CSR-free rep-walk lazy lane
         // (memory-bounded, stabilizer-fused construction).
         set.operators = ed::symmetry::build_full_sector_operators_lazy(
             static_cast<std::uint64_t>(spec.num_sites), spec.spin_l,
             base->symmetry_info, term_builder, &sector_ids,
-            mpi_rank, mpi_size, owner_ptr, cache_dir,
+            cache_dir,
             spec.flip_sectors_full);
     }
     if (time_ctor) {

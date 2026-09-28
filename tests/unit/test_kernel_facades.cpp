@@ -1,12 +1,9 @@
 // =============================================================================
 // tests/unit/test_kernel_facades.cpp
 //
-// Phase-6 lockdown for the unified algorithm-kernel facades. Each
-// kernel header is a thin Backend-templated wrapper over an existing
-// CPU body (Lanczos / FTLM / mTPQ /
-// block-Lanczos / Krylov-Schur). The tests prove the new headers
-// actually compile, link, and produce the same numbers as the legacy
-// entry points on small Heisenberg chains.
+// Lockdown for the Backend-templated algorithm kernels (Lanczos / FTLM /
+// mTPQ / block-Lanczos / Krylov-Schur). The tests prove the headers
+// compile, link, and produce correct numbers on small Heisenberg chains.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -50,7 +47,7 @@ struct MatvecCallable {
 
 }  // namespace
 
-TEST_CASE("krylov::block_lanczos_kernel matches the legacy block_lanczos",
+TEST_CASE("krylov::block_lanczos_kernel returns sane Heisenberg eigenvalues",
           "[kernel-facade][block-lanczos][phase6]") {
     constexpr std::uint64_t N   = 6;
     constexpr std::size_t   dim = std::size_t{1} << N;

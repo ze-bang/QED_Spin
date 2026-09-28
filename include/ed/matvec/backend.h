@@ -6,7 +6,7 @@
 // MatVecOperator says "how to apply H to a vector", Backend says "how to do
 // every *other* linear-algebra primitive that the surrounding Krylov /
 // thermal solver needs on that vector": axpy, dot, norm, scale, copy,
-// memory allocation, reductions.
+// memory allocation.
 //
 // Backends are paired 1:1 with MemorySpace:
 //
@@ -53,8 +53,7 @@ using Complex = std::complex<double>;
 // agnostic --- the *meaning* of those pointers (host RAM vs device memory)
 // is determined by memory_space().
 //
-// All vector arguments are dimension `n` (rank-local for distributed
-// backends; the implementation handles global reductions internally).
+// All vector arguments are dimension `n`.
 // ----------------------------------------------------------------------------
 class Backend {
 public:
@@ -88,8 +87,8 @@ public:
     // Level-1 BLAS primitives, complex-double. Naming mirrors BLAS.
     //   axpy:  y <- alpha * x + y
     //   scale: x <- alpha * x
-    //   dot:   returns x^H * y   (conj on left, MPI-reduced if distributed)
-    //   nrm2:  returns ||x||_2   (MPI-reduced if distributed)
+    //   dot:   returns x^H * y   (conj on left)
+    //   nrm2:  returns ||x||_2
     //   set_value: x[i] <- v for i < n  (used for unit vector seeding)
     // ------------------------------------------------------------------
     virtual void   axpy(Complex alpha, const Complex* x, Complex* y, std::size_t n) const = 0;
@@ -124,31 +123,10 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Reductions. For the concrete (single-process) backends these are
-    // no-ops returning their argument.
-    // ------------------------------------------------------------------
-    [[nodiscard]] virtual Complex all_reduce_sum(Complex v) const { return v; }
-    [[nodiscard]] virtual double  all_reduce_sum(double  v) const { return v; }
-
-    /// Vector all-reduce (sum). Used by block-Lanczos to reduce the
-    /// rank-local (b x b) Gram blocks. Default is a no-op for
-    /// non-distributed backends.
-    virtual void all_reduce_sum_vec(Complex* /*buf*/, std::size_t /*count*/) const {}
-    virtual void all_reduce_sum_vec(double*  /*buf*/, std::size_t /*count*/) const {}
-
-    // ------------------------------------------------------------------
     // Batched BLAS-1 primitives used by classical Gram-Schmidt-2 (CGS2)
-    // reorthogonalisation. The "many" forms exist to amortise both
-    //   (1) the cache-residency of `v` (one streaming pass over `v`
-    //       feeds k inner dots, instead of k streaming passes for k
-    //       single-pair calls), and
-    //   (2) the MPI / NCCL reduction count: one Allreduce over a
-    //       k-element buffer instead of k Allreduces over scalars
-    //       (huge difference for the FTLM tridiagonal builder at
-    //       M=100, where it turns ~100 round-trips into 1).
-    //
-    // Returned coefficients in `dot_many` are already-reduced for
-    // distributed backends, matching the single-pair `dot()` contract.
+    // reorthogonalisation. The "many" forms amortise the cache-residency
+    // of `v` (one streaming pass over `v` feeds k inner dots, instead of
+    // k streaming passes for k single-pair calls).
     //
     // Default implementations are provided so that pre-existing
     // concrete Backends compile unchanged; they trade reduction
@@ -159,9 +137,8 @@ public:
     // ------------------------------------------------------------------
 
     /// Compute `coeffs_out[k] = <basis[k], v>` for k in [0, num_basis).
-    /// `basis[k]` and `v` are dimension-`n` rank-local vectors. The
-    /// returned coefficients are MPI/NCCL-reduced for distributed
-    /// backends. The default impl loops over `dot()`.
+    /// `basis[k]` and `v` are dimension-`n` vectors. The default impl
+    /// loops over `dot()`.
     virtual void dot_many(const Complex* const* basis,
                           std::size_t           num_basis,
                           const Complex*        v,
@@ -186,14 +163,7 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Level-3 BLAS primitives. Added Phase 1 of the Minimalist ED
-    // Collapse (May 2026). All matrix arguments are column-major. For
-    // distributed backends, `gemm`/`gemv`/`trsm` operate purely on the
-    // rank-local slabs --- the caller chains `all_reduce_sum_vec` on
-    // the result block when a cross-rank reduction is required (this
-    // matches the BLAS-1 contract where `dot()` reduces internally
-    // but `axpy()` doesn't, and avoids hardcoding reduction semantics
-    // into the wrong primitive).
+    // Level-3 BLAS primitives. All matrix arguments are column-major.
     //
     // Defaults throw; backends that need to expose BLAS-3 (currently
     // every concrete backend: CpuBackend, CudaBackend) override.
@@ -202,8 +172,7 @@ public:
     /// Standard ZGEMM: C = alpha * op(A) * op(B) + beta * C, where
     /// op = 'N' (none), 'T' (transpose), 'C' (conjugate-transpose).
     /// All matrices column-major. `m`, `n`, `k` follow BLAS convention:
-    /// op(A) is m x k, op(B) is k x n, C is m x n. Strictly local; no
-    /// cross-rank reduction.
+    /// op(A) is m x k, op(B) is k x n, C is m x n.
     virtual void gemm(char /*opA*/, char /*opB*/,
                       std::size_t /*m*/, std::size_t /*n*/, std::size_t /*k*/,
                       Complex /*alpha*/,
@@ -215,7 +184,6 @@ public:
     }
 
     /// Standard ZGEMV: y = alpha * op(A) * x + beta * y. op(A) is m x n.
-    /// Strictly local for distributed backends.
     virtual void gemv(char /*opA*/,
                       std::size_t /*m*/, std::size_t /*n*/,
                       Complex /*alpha*/,
@@ -230,8 +198,6 @@ public:
     /// in-place, writing X to B. A is `ka x ka` upper- or lower-triangular,
     /// B is `m x n`. `side` = 'L' (left) or 'R' (right); `uplo` = 'U' or
     /// 'L'; `transA` = 'N'/'T'/'C'; `diag` = 'N' (non-unit) or 'U' (unit).
-    /// Strictly local for distributed backends. Used by the
-    /// CholeskyQR-based `qr_thin` to recover Q from B * R^{-1}.
     virtual void trsm(char /*side*/, char /*uplo*/, char /*transA*/, char /*diag*/,
                       std::size_t /*m*/, std::size_t /*n*/,
                       Complex /*alpha*/,
@@ -241,13 +207,9 @@ public:
     }
 
     /// In-place tall-skinny QR. On entry, `A` is `m_local x b`
-    /// column-major (row-slab partition for distributed backends).
-    /// On exit, `A` holds Q (orthonormal columns, same partition),
-    /// and `R_host` (size `b*b`, column-major) holds the upper-
-    /// triangular R block --- identical on every rank for
-    /// distributed backends. Internally chains gemm/trsm + Cholesky
-    /// + `all_reduce_sum_vec` for distributed paths (CholeskyQR2);
-    /// uses LAPACK / cuSolver `geqrf` + `ungqr` for single-rank paths.
+    /// column-major. On exit, `A` holds Q (orthonormal columns) and
+    /// `R_host` (size `b*b`, column-major) holds the upper-triangular
+    /// R block. Uses LAPACK / cuSolver `geqrf` + `ungqr`.
     virtual void qr_thin(Complex* /*A*/, std::size_t /*m_local*/, std::size_t /*b*/,
                          Complex* /*R_host*/) const {
         throw std::runtime_error("Backend::qr_thin not implemented for this backend");

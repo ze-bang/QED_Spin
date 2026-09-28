@@ -181,7 +181,6 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   // contract).
                   if (!gs_sr.backend.lane.empty()) {
                       agg.backend.lane     = gs_sr.backend.lane;
-                      agg.backend.mpi_size = gs_sr.backend.mpi_size;
                   }
                   std::vector<Complex> psi0 = gs_sr.eigenvectors->host[0];
                   double E0 = gs_sr.eigenvalues.front();

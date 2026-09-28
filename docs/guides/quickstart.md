@@ -141,7 +141,7 @@ exposes more knobs and gives up some auto-decisions:
 
 Layers 2 and 3 reach the same `EDParameters` fields documented in
 [`include/ed/core/ed_parameters.h`](../../include/ed/core/ed_parameters.h)
-— things like `tpq_taylor_order`, `tpq_delta_beta`, `ftlm_krylov_dim`,
+— things like `tpq_max_steps`, `tpq_energy_shift`, `ftlm_krylov_dim`,
 `ltlm_full_reorth`, etc.
 
 The Python side mirrors this exactly: `qed.solve(H, extra_params={...})`

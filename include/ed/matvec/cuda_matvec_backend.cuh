@@ -136,7 +136,7 @@ private:
 // CudaMatVecBackend
 //
 // DevicePolicy : one of ed::matvec::basis::DeviceFullBasisPolicy /
-//                DeviceFixedSzBasisPolicy / DeviceSymmetryBasisPolicy.
+//                DeviceFixedSzBasisPolicy.
 //                Held by value (non-owning POD view). Its backing arrays
 //                (if any) must outlive this backend.
 // The six term-bin template params mirror CpuMatVecBackend so the SAME

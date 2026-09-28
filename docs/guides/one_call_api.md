@@ -134,10 +134,8 @@ What `qed.thermal` decides for you:
 
 * **β grid**: built from `T_min` / `T_max` / `num_T` if
   not given explicitly.
-* **mTPQ Taylor order / Δβ / energy shift**: sensible static defaults
-  (`tpq_taylor_order`, `tpq_delta_beta`, spectral-bound `L_auto` energy
-  shift); the June-2026 planner removal retired the per-run
-  `tune_thermal` heuristic.
+* **mTPQ energy shift**: the spectral-bound `L_auto` shift by default
+  (`tpq_energy_shift` overrides it).
 * **Sector orchestration**: when H conserves Sz, the orchestrator
   sweeps Sz sectors, runs the kernel per-sector, then aggregates
   `<O>(T) = Σ_sector Z_sector <O>_sector / Z_total`.

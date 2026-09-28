@@ -51,7 +51,6 @@ THERMAL_METHOD_MAP = {
 def ed_params_to_thermal_options(
     params: EDParameters,
     method: DiagonalizationMethod,
-    allow_infeasible: bool = False,
 ) -> "_core.ThermalOptions":
     """Translate the ``EDParameters`` bag + a thermal method into a
     fresh ``_core.ThermalOptions`` for ``workflows_thermal``."""
@@ -93,8 +92,6 @@ def ed_params_to_thermal_options(
         opts.krylov_dim = steps
     else:
         opts.krylov_dim = 100
-    opts.taylor_order  = int(params.tpq_taylor_order)
-    opts.delta_beta    = float(params.tpq_delta_beta)
     opts.random_seed   = int(params.ftlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")
     opts.temp_min      = float(params.temp_min)
@@ -107,10 +104,6 @@ def ed_params_to_thermal_options(
     # fp32 single-GPU mTPQ (memory-halving lane).
     if hasattr(opts, "mtpq_fp32"):
         opts.mtpq_fp32 = bool(getattr(params, "tpq_fp32", False))
-    # Completion guarantee: the orchestrator refuses an infeasible plan
-    # (clean throw before allocating) unless this is set.
-    if hasattr(opts, "allow_infeasible"):
-        opts.allow_infeasible = bool(allow_infeasible)
     # Probe-beta list for mTPQ state-vector snapshots.
     pb = list(getattr(params, "tpq_probe_betas", []) or [])
     if pb:
@@ -147,7 +140,6 @@ def ed_params_to_solve_options(
     params: EDParameters,
     method: DiagonalizationMethod,
     auto_method: bool = False,
-    allow_infeasible: bool = False,
 ) -> "_core.SolveOptions":
     """Translate ``EDParameters`` + ``DiagonalizationMethod`` into a
     ``_core.SolveOptions`` for the orchestrator.
@@ -159,7 +151,6 @@ def ed_params_to_solve_options(
         method=method,
         auto_method=bool(auto_method),
         wire_backend=True,
-        allow_infeasible=bool(allow_infeasible),
     )
 
 

@@ -176,8 +176,6 @@ void bind_workflows_solve_streaming(py::module_& m) {
                   std::shared_ptr<::Operator> s2_carrier =
                       su2_on ? ed::ops::make_S2_carrier(num_sites)
                              : nullptr;
-                  spec.two_total_spin =
-                      su2_target ? opts.two_total_spin : -1;
                   // Requested n_up before any transport re-target; -1 when
                   // the fixed-Sz axis is off. Used to restore the caller's
                   // n_up on the emitted sector tags.
@@ -208,8 +206,7 @@ void bind_workflows_solve_streaming(py::module_& m) {
                       spec.flip_sectors_full = true;
                   }
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec, 0, 1,
-                                                       probe.base));
+                      ed::make_sector_operators_tagged(spec, probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
                   if (num_sectors == 0) {
@@ -449,7 +446,6 @@ void bind_workflows_solve_streaming(py::module_& m) {
                   // and the same SectorView geometry contract, so the
                   // first lane is authoritative.
                   std::string sector_lane;
-                  std::size_t sector_mpi_size = 1;
 
                   // Phase 2: sector-parallel solve. Same ED_SYM_SECTOR_PARALLEL
                   // gate as the Phase-1 Lanczos scan above (the gate variable
@@ -552,7 +548,6 @@ void bind_workflows_solve_streaming(py::module_& m) {
                       if (sector_lane.empty()
                           && !sr.backend.lane.empty()) {
                           sector_lane     = sr.backend.lane;
-                          sector_mpi_size = sr.backend.mpi_size;
                       }
                       touched_idx.push_back(touched_tags.size());
                       touched_tags.push_back(handle.sector_tag(k));
@@ -775,11 +770,9 @@ void bind_workflows_solve_streaming(py::module_& m) {
                   // fired, "cpu" otherwise). All per-sector calls
                   // share the same ``opts.backend``, so the first
                   // non-empty sector lane is authoritative for the
-                  // aggregate; we keep ``mpi_size`` from the same
-                  // sector for symmetry.
+                  // aggregate.
                   if (!sector_lane.empty()) {
                       agg.backend.lane = sector_lane;
-                      agg.backend.mpi_size = sector_mpi_size;
                   }
               }
               return agg;

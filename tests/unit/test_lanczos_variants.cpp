@@ -1,12 +1,12 @@
 // =============================================================================
-// test_lanczos_variants (Catch2 v3, P1.8 / audit Q12)
+// test_lanczos_variants (Catch2 v3)
 //
-// Drives every Lanczos-family solver exported from `ed/solvers/lanczos.h` on
+// Drives the Lanczos solver exported from `ed/solvers/lanczos.h` on
 // a small Heisenberg chain (N=8, dim=256) and checks that the lowest few
 // eigenvalues match a dense Eigen reference.
 //
-// Each solver runs in its own SECTION (and its own scratch directory) so that
-// a single failing solver does not short-circuit the others.
+// The solver runs in its own scratch directory (the ED_LANCZOS_DISK=1 variant
+// of this binary exercises the on-disk basis path).
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -100,64 +100,6 @@ TEST_CASE("Lanczos-family solvers reproduce dense spectrum (N=8)",
         run_solver("lanczos", f, 1e-8, 1e-6,
                    [&](const std::string& dir, std::vector<double>& e) {
                        lanczos(f.Hv, f.dim, max_iter, 3, 1e-12, e, dir, false);
-                   });
-    }
-
-    SECTION("block_lanczos") {
-        run_solver("block_lanczos", f, 1e-6, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       block_lanczos(f.Hv, f.dim, max_iter, 3, /*block=*/2,
-                                     1e-12, e, dir, false);
-                   });
-    }
-
-    SECTION("krylov_schur") {
-        run_solver("krylov_schur", f, 1e-6, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       krylov_schur(f.Hv, f.dim, /*max_iter=*/60, 3, 1e-10,
-                                    e, dir, false);
-                   });
-    }
-
-    // Retired in the minimalist-architecture rev (May 2026):
-    //   lanczos_selective_reorth, lanczos_no_ortho,
-    //   implicitly_restarted_lanczos, thick_restart_lanczos,
-    //   chebyshev_filtered_lanczos, shift_invert_lanczos.
-    // These variants are absorbed into the single lanczos kernel +
-    // LanczosKernelOptions.reorth/restart enum values (Phase 3).
-
-    // -------------------------------------------------------------------
-    // Phase 4 (matvec-unification): exercise the MatVecOperator-taking
-    // overloads. The Operator (built via build_heisenberg_chain) inherits
-    // from MatVecOperator after Phase 2, so we can pass `*f.op` directly
-    // and the new inline overload forwards through as_apply_function.
-    // The numerics had better agree with the std::function path; that
-    // path is exercised above.
-    // -------------------------------------------------------------------
-    SECTION("matvec-unification: lanczos(MatVecOperator&) "
-            "matches lanczos(std::function&)") {
-        run_solver("lanczos[MatVecOperator]", f, 1e-5, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       lanczos(*f.op, f.dim, max_iter, /*exct=*/1, 1e-10,
-                               e, dir, false);
-                   });
-    }
-
-    SECTION("matvec-unification: block_lanczos(MatVecOperator&) "
-            "matches block_lanczos(std::function&)") {
-        run_solver("block_lanczos[MatVecOperator]", f, 1e-5, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       block_lanczos(*f.op, f.dim, max_iter, /*num_eigs=*/1,
-                                     /*block_size=*/2, 1e-10, e, dir, false);
-                   });
-    }
-
-    SECTION("matvec-unification: krylov_schur(MatVecOperator&) "
-            "matches krylov_schur(std::function&)") {
-        run_solver("krylov_schur[MatVecOperator]", f, 1e-5, 5e-1,
-                   [&](const std::string& dir, std::vector<double>& e) {
-                       krylov_schur(*f.op, f.dim, max_iter, /*num_eigs=*/1,
-                                    1e-10, e, dir, false);
                    });
     }
 }

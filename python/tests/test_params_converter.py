@@ -58,7 +58,7 @@ def test_cli_semantics_leave_backend_open():
     p = _bag(use_gpu=False, use_mpi=False)
     opts = _core.ed_params_to_solve_options(
         params=p, method=_core.DiagonalizationMethod.LANCZOS,
-        auto_method=False, wire_backend=False, allow_infeasible=False)
+        auto_method=False, wire_backend=False)
     assert opts.backend.allow_gpu is True
     assert opts.backend.allow_mpi is True
 
@@ -70,15 +70,6 @@ def test_method_map_and_auto_override():
     auto = ed_params_to_solve_options(
         p, _core.DiagonalizationMethod.FULL, auto_method=True)
     assert auto.method == _core.SolveMethod.Auto
-
-
-def test_allow_infeasible_passthrough():
-    p = _bag()
-    assert ed_params_to_solve_options(
-        p, _core.DiagonalizationMethod.LANCZOS).allow_infeasible is False
-    assert ed_params_to_solve_options(
-        p, _core.DiagonalizationMethod.LANCZOS,
-        allow_infeasible=True).allow_infeasible is True
 
 
 def test_selected_sectors_now_mapped_on_python_path():

@@ -37,8 +37,6 @@ using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 using ComplexMatrix = std::vector<ComplexVector>;
 
-ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
-
 /**
  * @brief Generate a random complex vector with i.i.d. complex Gaussian components.
  *
@@ -48,18 +46,8 @@ ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_d
  * isotropic on the unit sphere, unlike normalised uniform-cube samples.
  *
  * Use this for FTLM / TPQ-style finite-temperature random sampling.
- * For Lanczos starting vectors (where the distribution does not matter after
- * normalisation), generateRandomVector is equally valid.
  */
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
-
-// generateOrthogonalVector was deleted in the debt-cleanup sweep
-// (Jul 2026): zero callers.
-
-// refine_eigenvector_with_cg / refine_degenerate_eigenvectors were
-// retired together with orthogonalize_degenerate_subspace in the
-// minimalist-architecture rev (May 2026): no callers and no remaining
-// internal use. See lanczos.cpp for the retirement note.
 
 ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N);
 
@@ -93,104 +81,23 @@ void diagonalize_tridiagonal_ritz(
 );
 
 /**
- * @brief Build Lanczos tridiagonal with optional in-memory basis vector storage
- *
- * @deprecated Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+).
- * For new code, prefer `ed::krylov::lanczos_tridiag(...)` in
- * `<ed/krylov/lanczos_tridiag.h>`, which calls
- * `ed::krylov::lanczos_kernel<CpuBackend>` directly without the
- * `std::function` adapter or the `UniqueVec` -> `ComplexVector` copy.
- * The legacy wrapper is retained because the no-reorth / periodic-reorth
- * branches and the in-memory-basis ABI shape of FTLM downstream
- * consumers have not been individually ported yet; once those are
- * migrated this function will be removed in a follow-up version bump.
- *
- * Similar to build_lanczos_tridiagonal in ftlm.cpp, but with option to store
- * basis vectors in memory for later use (e.g., computing expectation values).
- *
- * @param H Hamiltonian matrix-vector product
- * @param v0 Initial vector (should be normalized)
- * @param N Hilbert space dimension
- * @param max_iter Maximum Lanczos iterations
- * @param tol Convergence tolerance
- * @param full_reorth Use full reorthogonalization
- * @param reorth_freq Reorthogonalization frequency
- * @param alpha Output: diagonal elements
- * @param beta Output: off-diagonal elements
- * @param basis_vectors Optional: store basis vectors in memory
- * @return Number of iterations performed
- */
-// Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+):
-// the `[[deprecated]]` attribute is gated by `ED_BUILDING_INTERNAL` so
-// the library's own legacy callsites (FTLM / spectral bounds / TPQ_DYNAMICAL,
-// each waiting on its own per-call migration to `ed::krylov::lanczos_tridiag`)
-// do not produce a wall of internal warnings during a clean build. The
-// attribute is visible to ALL EXTERNAL CALLERS (Python pybind11 layer,
-// downstream C++ apps): for them every use of this function will emit a
-// diagnostic pointing at the kernel-direct replacement.
-#ifndef ED_BUILDING_INTERNAL
-[[deprecated("Use ed::krylov::lanczos_tridiag(...) in "
-             "<ed/krylov/lanczos_tridiag.h> -- see Phase 5.3 of the "
-             "Krylov-unification gap-fill rollout (May 2026)")]]
-#endif
-int build_lanczos_tridiagonal_with_basis(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& v0,
-    uint64_t N,
-    uint64_t max_iter,
-    double tol,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    std::vector<double>& alpha,
-    std::vector<double>& beta,
-    std::vector<ComplexVector>* basis_vectors = nullptr
-);
-
-/**
  * @brief Estimate the extreme eigenvalues [e_min, e_max] of a Hermitian H.
  *
  * Blocks with dim <= 512 are assembled densely and the exact extremes are
- * returned; larger blocks run a Lanczos sweep (krylov_dim clamped to dim)
- * from a Gaussian random start and return the extreme Ritz values. `gen` is
- * in/out: a deterministically seeded `gen` gives a reproducible estimate.
+ * returned; larger blocks run a Lanczos sweep without reorthogonalization
+ * (krylov_dim clamped to dim, stopping when ||w|| < tol) from a Gaussian
+ * random start and return the extreme Ritz values. `gen` is in/out: a
+ * deterministically seeded `gen` gives a reproducible estimate.
  * Used by the mTPQ auto-tune to place the shift L above the spectrum.
  */
 void estimate_spectral_bounds(
     std::function<void(const Complex*, Complex*, int)> H,
     uint64_t dim,
     int krylov_dim,
-    bool full_reorth,
-    int reorth_freq,
     double tol,
     std::mt19937& gen,
     double& e_min,
     double& e_max);
-
-/**
- * @brief Find the ground state (energy + vector) using Lanczos iteration.
- *
- * Returns the lowest Ritz value and reconstructs the corresponding Ritz
- * vector in memory, so the caller gets |psi_0> without any basis I/O.
- * Moved here from ltlm.h when ltlm.cpp was retired (WP10 C7).
- *
- * @param H Hamiltonian matrix-vector product function
- * @param N Hilbert space dimension
- * @param krylov_dim Krylov subspace dimension
- * @param tolerance Convergence tolerance
- * @param full_reorth Use full reorthogonalization
- * @param reorth_freq Reorthogonalization frequency
- * @param ground_state Output: ground state eigenvector
- * @return Ground state energy
- */
-double find_ground_state_lanczos(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t N,
-    uint64_t krylov_dim,
-    double tolerance,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    ComplexVector& ground_state
-);
 
 // Default Lanczos with three-vector LOCAL reorthogonalization (DGKS-style),
 // basis vectors kept in RAM by default (use ED_LANCZOS_DISK=1 for disk).
@@ -254,11 +161,6 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t* iters_out = nullptr, bool* converged_out = nullptr,
                   LanczosRealExtras* extras = nullptr);
 
-// Block Lanczos algorithm for finding eigenvalues with degeneracies
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
-                   uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
-                   std::string dir = "", bool compute_eigenvectors = false);
-
 // Full diagonalization algorithm optimized for sparse matrices.
 //
 // `op_for_dense` (optional): when non-null AND it supports it
@@ -266,62 +168,19 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 // operator's sparse term structure in O(nnz) -- vs the O(dim) full matvecs (=
 // O(dim*nnz)) of the `H` column build, which dominates for large sparse H. Pass
 // the LinearOperator being solved; nullptr keeps the matvec column build (used
-// by distributed / GPU / wrapped-matvec callers that have no operator handle).
-// ``eigenvectors_out`` (optional, audit 2026-09): receives the requested
-// eigenvectors in memory (one std::vector<Complex> per eigenvalue, in the
-// operator's basis) when ``compute_eigenvectors`` is set -- independent of
-// whether ``dir`` persists them to HDF5.
+// by GPU / wrapped-matvec callers that have no operator handle).
+// ``eigenvectors_out`` (optional): receives the requested eigenvectors in
+// memory (one std::vector<Complex> per eigenvalue, in the operator's basis)
+// when ``compute_eigenvectors`` is set -- independent of whether ``dir``
+// persists them to HDF5.
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir = "",
                        bool compute_eigenvectors = true,
                        const ed::matvec::MatVecOperator* op_for_dense = nullptr,
                        std::vector<std::vector<Complex>>* eigenvectors_out = nullptr);
 
-// Krylov-Schur algorithm implementation
-void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
-                  uint64_t num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir = "",
-                  bool compute_eigenvectors = false);
-
-// orthogonalize_degenerate_subspace was retired in the
-// minimalist-architecture rev (May 2026): no callers. The Krylov-Schur
-// / Block-Lanczos paths get orthonormal degenerate subspaces directly
-// from LAPACK on the projected matrix.
-
-// =============================================================================
-// Phase 4 (matvec-unification): MatVecOperator-taking convenience overloads.
-//
-// Every solver above keeps its legacy std::function signature for back-compat,
-// and gets a thin inline overload that takes `const ed::matvec::MatVecOperator&`
-// directly. The overload uses ed::matvec::as_apply_function(op) -- a one-line
-// std::function adapter that captures `&op` and calls op.apply(...) -- so the
-// per-matvec cost is one virtual call (already implicit in MatVecOperator).
-// No solver internals had to change; the bridge collapses to identity when
-// the optimiser inlines through it.
-//
-// Call sites that already build a std::function continue to compile unchanged;
-// new call sites can pass any Operator / FixedSzOperator /
-// StreamingSymmetrySectorView / Distributed{,Symmetry}Operator directly.
-// =============================================================================
-inline void lanczos(const ed::matvec::MatVecOperator& H_op,
-                    uint64_t N, uint64_t max_iter, uint64_t exct, double tol,
-                    std::vector<double>& eigenvalues, std::string dir = "",
-                    bool eigenvectors = false)
-{
-    lanczos(ed::matvec::as_apply_function(H_op),
-            N, max_iter, exct, tol, eigenvalues, std::move(dir), eigenvectors);
-}
-
-inline void block_lanczos(const ed::matvec::MatVecOperator& H_op,
-                          uint64_t N, uint64_t max_iter, uint64_t num_eigs,
-                          uint64_t block_size, double tol,
-                          std::vector<double>& eigenvalues, std::string dir = "",
-                          bool compute_eigenvectors = false)
-{
-    block_lanczos(ed::matvec::as_apply_function(H_op),
-                  N, max_iter, num_eigs, block_size, tol, eigenvalues,
-                  std::move(dir), compute_eigenvectors);
-}
-
+// MatVecOperator-taking convenience overload: adapts `op.apply(...)` through
+// ed::matvec::as_apply_function (one virtual call per matvec).
 inline void full_diagonalization(const ed::matvec::MatVecOperator& H_op,
                                  uint64_t N, uint64_t num_eigs,
                                  std::vector<double>& eigenvalues,
@@ -331,15 +190,4 @@ inline void full_diagonalization(const ed::matvec::MatVecOperator& H_op,
     full_diagonalization(ed::matvec::as_apply_function(H_op),
                          N, num_eigs, eigenvalues, std::move(dir),
                          compute_eigenvectors);
-}
-
-inline void krylov_schur(const ed::matvec::MatVecOperator& H_op,
-                         uint64_t N, uint64_t max_iter, uint64_t num_eigs,
-                         double tol, std::vector<double>& eigenvalues,
-                         std::string dir = "",
-                         bool compute_eigenvectors = false)
-{
-    krylov_schur(ed::matvec::as_apply_function(H_op),
-                 N, max_iter, num_eigs, tol, eigenvalues, std::move(dir),
-                 compute_eigenvectors);
 }

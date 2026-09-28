@@ -59,10 +59,9 @@
 //
 // Implementation
 // --------------
-// The kernel is a thin specialisation of the legacy multi-sample
-// FTLM (we reuse ``build_lanczos_tridiagonal_with_basis`` and
-// ``diagonalize_tridiagonal_ritz`` from the same compilation unit
-// as the legacy kernel). The two differences are:
+// The kernel is a thin specialisation of the multi-sample FTLM
+// (fully reorthogonalised ``ed::krylov::lanczos_kernel`` runs plus
+// ``diagonalize_tridiagonal_ritz``). The two differences are:
 //
 //   1. The outer matvec is ``H_src`` on dim_src; the inner matvec
 //      is ``H_dst`` on dim_dst. Both are passed as

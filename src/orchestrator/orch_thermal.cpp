@@ -78,13 +78,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         variant = select_backend(H.geometry(), opts.backend);
     }
 
-    // COMPLETION GUARANTEE (thermal lane). The operator's basis is already built,
-    // so the binding constraint is the kernel WORKING SET: FTLM keep a
-    // krylov_dim window of length-N vectors; TPQ a handful. Plan it and
-    // refuse cleanly if it would not fit, before allocating those vectors. The
-    // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
-    // passes. allow_infeasible (force) opts out.
-    // Leaf memory guard (planner feasibility pre-flight removed): throw cleanly
+    // Memory guard (thermal lane). The operator's basis is already built, so
+    // the binding constraint is the kernel WORKING SET: FTLM keeps a
+    // krylov_dim window of length-N vectors; TPQ a handful. Throw cleanly
     // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
     // is the per-call working dim (symmetry iterates sectors a level up, so this
     // is the sector dim there). FTLM and LTLM both keep one sample's Krylov
@@ -302,13 +298,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     const int kry = static_cast<int>(
                         std::min<std::uint64_t>(
                             60, std::max<std::uint64_t>(bdim, 1)));
-                    // Extreme Ritz values converge first and are robust
-                    // without reorthogonalization; skip it (the estimator
-                    // does not retain the Krylov basis anyway) to avoid a
-                    // spurious "reorth skipped" warning and wasted work.
                     ::estimate_spectral_bounds(
-                        legacy_H, bdim, kry, /*full_reorth=*/false,
-                        /*reorth_freq=*/0, /*tol=*/1e-10,
+                        legacy_H, bdim, kry, /*tol=*/1e-10,
                         gen, e_min_est, e_max_est);
                     have_bounds = std::isfinite(e_min_est)
                                 && std::isfinite(e_max_est)

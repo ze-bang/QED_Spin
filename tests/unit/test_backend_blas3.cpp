@@ -219,15 +219,6 @@ TEST_CASE("CpuBackend::qr_thin produces orthonormal Q and recovers A=Q*R",
     REQUIRE(qr_reconstruction_error(A.data(), R.data(), A_in.data(), m, b) < 1e-12);
 }
 
-TEST_CASE("CpuBackend::all_reduce_sum_vec is a no-op on the host",
-          "[backend-blas3][cpu]") {
-    ed::matvec::CpuBackend be;
-    std::vector<Complex> v{Complex(1, 2), Complex(3, -4), Complex(-5, 6)};
-    auto copy = v;
-    be.all_reduce_sum_vec(v.data(), v.size());
-    REQUIRE(max_abs_diff(v.data(), copy.data(), v.size()) == 0.0);
-}
-
 // =============================================================================
 // CudaBackend BLAS-3 (only when WITH_CUDA + a visible GPU)
 // =============================================================================

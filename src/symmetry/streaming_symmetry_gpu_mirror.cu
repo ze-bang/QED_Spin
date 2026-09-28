@@ -1,34 +1,20 @@
 // =============================================================================
 // src/symmetry/streaming_symmetry_gpu_mirror.cu
 //
-// Phase A of the "Backend x Symmetries x Workflows: close the full
-// 48-cell matrix" plan (May 2026).
-//
 // Lazy per-sector GPU mirror for the SectorView::bind_cuda() path.
 // Compiled into ed_solvers_gpu (so we have nvcc + thrust available);
 // the matching ed_core .cpp file ``streaming_symmetry_gpu_mirror.cpp``
 // only contributes the throwing stub when WITH_CUDA is OFF.
 //
-// On first bind, builds a fully device-resident snapshot of:
-//
-//   * Orbit CSR (orbit_elements, orbit_coefficients, orbit_offsets,
-//     orbit_norms)
-//   * State -> (basis_idx, pre-baked projection) hash table
-//     (DeviceSymmetryHashEntry layout from device_basis_policy.cuh)
-//   * Term SoA (DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-//     OffDiagTwoBody, ThreeBodyTerm) -- the same POD structs the host
-//     uses, copied byte-for-byte
+// On first bind, uploads a device-resident snapshot of the CSR-free
+// representative sector data (``RepSectorData``: representatives, inverse
+// norms, group permutations, characters, rank -> orbit reverse table) and
+// the term SoA (the same POD structs the host uses, copied byte-for-byte).
 //
 // The returned MatvecFn takes DEVICE pointers (per the bind_cuda()
 // contract from <ed/core/linear_operator.h>) and dispatches the
-// unified ``apply_terms_gpu_scatter<DeviceSymmetryBasisPolicy,
-// cuDoubleComplex>`` kernel for both the StreamingSymmetryOperator
-// (full Hilbert + symmetry, cell 3B) and the FixedSz variant (cell 4B).
-//
-// Validation: an end-to-end C++ test at
-// tests/unit/test_streaming_symmetry_gpu_mirror.cpp asserts the GPU
-// matvec result matches the CPU ``applySymmetrized`` to 1e-10 on a
-// Heisenberg ring with Z_N translation symmetry.
+// on-the-fly representative kernels
+// (``launch_apply_terms_rep_symmetry_gpu{,_gather}<DeviceRepSymmetryBasisPolicy>``).
 // =============================================================================
 
 #ifdef WITH_CUDA

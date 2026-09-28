@@ -89,9 +89,8 @@ std::uint64_t unrank_to_state(std::uint64_t rank, int n_bits, int k) {
 }
 
 namespace detail {
-// Backward-compat alias: ``DeviceSymmetryBasisPolicy::basis_view()``
-// (and earlier drafts of this plan) used ``detail::upload_pascal()``.
-// Forward to the canonical name now that the symbol is shared.
+// Short name used by the representative sector mirror; forwards to the
+// shared Pascal-table upload.
 inline void upload_pascal() { upload_pascal_shared(); }
 }  // namespace detail
 

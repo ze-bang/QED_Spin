@@ -98,7 +98,6 @@ public:
     static constexpr bool may_leave_basis    = false;
     static constexpr bool needs_orbit_walk   = false;
     static constexpr bool has_coeff_modifier = false;
-    static constexpr bool is_distributed     = false;
 
 private:
     std::uint64_t n_bits_ = 0;
@@ -309,7 +308,6 @@ public:
     static constexpr bool may_leave_basis    = true;
     static constexpr bool needs_orbit_walk   = false;
     static constexpr bool has_coeff_modifier = false;
-    static constexpr bool is_distributed     = false;
 
 private:
     // Re-home the non-owning pointers after a copy/move from ``o``: if the

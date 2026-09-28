@@ -98,16 +98,6 @@ struct SolveOptions {
     SolveMethod method         = SolveMethod::Auto;
     BackendConstraints backend;
 
-    /// Completion guarantee (planner-as-dictator). When false (default), a solve
-    /// whose ExecutionPlan is infeasible (working set / basis construction would
-    /// exceed the memory budget) is REFUSED cleanly -- the orchestrator throws
-    /// with the bottleneck + ranked suggestions BEFORE any large allocation, so
-    /// the run can never OOM/crash mid-flight. Set true to dispatch anyway (the
-    /// manual escape hatch; the Python lane maps `force=True` onto this). The
-    /// Python `qed.solve` pre-flight enforces the same verdict before this point;
-    /// this gate is the safety net for direct C++ / CLI / api_facade callers.
-    bool        allow_infeasible = false;
-
     // -----------------------------------------------------------------
     // CLI parity knobs (Wave A5 -- Full unified-interface collapse,
     // May 2026). These extend SolveOptions so the CLI migration
@@ -238,21 +228,14 @@ struct ThermalOptions {
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
-    // Defaults aligned to `python/qed/thermal.py` (May 2026,
-    // PR-1 step 2 of the "mirror examples" plan). Previous C++ defaults
-    // are noted inline for callers consulting the diff. Most existing
-    // tests / call sites override these fields explicitly; the legacy
-    // defaults were also rather arbitrary (num_samples=30, taylor_order=50,
-    // num_temp_bins=100). Pinning the C++ defaults to the Python
-    // canonical values makes the two surfaces line up byte-for-byte
-    // when `ed::api::ThermalOptions` is passed through `to_legacy()`.
+    // Defaults aligned to `python/qed/thermal.py`, so the two surfaces
+    // line up when `ed::api::ThermalOptions` is passed through
+    // `to_legacy()`.
     // ---------------------------------------------------------------
-    std::size_t num_samples    = 40;   ///< Python default (was 30).
+    std::size_t num_samples    = 40;
     std::size_t krylov_dim     = 100;
     std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
-    std::size_t taylor_order   = 8;    ///< Python default (was 50). mTPQ Taylor truncation.
     std::vector<double> betas;
-    double      delta_beta     = 0.05; ///< Python default (was 0.1). mTPQ imag-time step.
     std::uint64_t random_seed  = 0;
     std::string output_dir;
     BackendConstraints backend;
@@ -316,11 +299,6 @@ struct ThermalOptions {
     // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
     // -----------------------------------------------------------------
     std::vector<double> probe_betas;
-
-    /// Completion guarantee: when false (default), a thermal run whose plan would
-    /// not fit the memory budget (kernel working set) is REFUSED cleanly before
-    /// any allocation. Set true (Python force=True) to dispatch anyway.
-    bool        allow_infeasible = false;
 };
 
 struct SpectralOptions {
@@ -344,19 +322,14 @@ struct SpectralOptions {
     BackendConstraints backend;
 
     // -----------------------------------------------------------------
-    // CLI parity knobs (Wave A5). FTLM-dynamical needs sample-count +
-    // temperature scan controls; the static-response lane carries an
-    // observable-type discriminator used by the legacy CLI.
+    // CLI parity knobs: FTLM-dynamical sample count and the
+    // observable-type label used by the CLI.
     // -----------------------------------------------------------------
 
     /// Number of random samples for finite-T FTLM averaging (finite-T
     /// spectral path). Ignored by GroundStateCF (which uses the
     /// ground-state vector).
     std::size_t num_samples   = 30;
-
-    /// Temperature axis for the finite-T spectral path; empty means
-    /// "T = 0 only". GroundStateCF ignores it.
-    std::vector<double> temperatures;
 
     /// Observable-type label carried for HDF5 output / Python
     /// roundtripping (e.g., "Sz", "Sx_Sx", "Sz_Sz"). Optional --
@@ -401,11 +374,6 @@ struct SpectralOptions {
     // it as the seed.
     // -----------------------------------------------------------------
     std::vector<std::complex<double>> initial_state;
-
-    /// Completion guarantee: when false (default), a spectral run whose plan would
-    /// not fit the memory budget is REFUSED cleanly before any allocation. Set
-    /// true (Python force=True) to dispatch anyway.
-    bool        allow_infeasible = false;
 
     /// Stage 12g (SU(2) rollout): optional labeler for the CF source
     /// state. Called with the (host, unit-norm) seed after the inner GS

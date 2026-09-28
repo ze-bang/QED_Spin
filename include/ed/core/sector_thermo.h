@@ -20,9 +20,7 @@
 //
 // This header provides a single canonical combiner that operates on the
 // generic ``ThermodynamicData`` payload populated by every finite-T
-// solver. The math mirrors ``combine_ftlm_sector_results`` in
-// ``src/solvers/cpu/ftlm.cpp`` but is decoupled from the FTLMResults
-// envelope so it works uniformly for every finite-T method.
+// solver, so it works uniformly for every finite-T method.
 //
 // MATH
 // ----

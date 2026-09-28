@@ -1,20 +1,16 @@
 // =============================================================================
 // test_lanczos_kernel (Catch2 v3)
 //
-// Krylov-kernel unification, Phase A regression tests.
+// Regression tests for `ed::krylov::lanczos_kernel`, the single Lanczos
+// algorithm body shared by the CPU and GPU backends. These tests pin:
 //
-// The unified `ed::krylov::lanczos_kernel` is the single Lanczos
-// algorithm body shared by CPU / GPU / CPU+MPI / GPU+MPI (and Phase A
-// wires the CPU full-reorth path through it). These tests pin:
-//
-//   1. The kernel reproduces the legacy `build_lanczos_tridiagonal_with_basis`
-//      output (alpha / beta / first eigenvalues) on a Heisenberg chain
-//      to 1e-10 absolute tolerance.
-//   2. Batched-CGS2 reorth produces eigenvalues matching the dense
-//      reference to the same tolerance the legacy MGS path achieves.
-//   3. Orthogonality of the returned Krylov basis is preserved at
+//   1. Full-CGS2 reorth produces a ground-state Ritz value matching the
+//      dense reference on a Heisenberg chain.
+//   2. Orthogonality of the returned Krylov basis is preserved at
 //      ~ machine epsilon * M (CGS2 guarantee).
-//   4. The breakdown path (||w|| < tol) terminates cleanly.
+//   3. The breakdown path (||w|| < tol) terminates cleanly.
+//   4. aux_ortho_ptrs deflation, the convergence_check cadence, the
+//      PeriodicCGS2 cadence, and misuse rejection.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -42,7 +38,7 @@ using Complex = std::complex<double>;
 
 namespace {
 
-/// Run the *unified* kernel directly (bypassing the legacy facade).
+/// Run the kernel with full CGS2 reorth and a kept basis.
 struct KernelResult {
     std::vector<double>                         alpha;
     std::vector<double>                         beta;
@@ -52,8 +48,7 @@ struct KernelResult {
 KernelResult run_kernel(const Operator& op,
                         std::size_t dim,
                         const std::vector<Complex>& v0,
-                        std::size_t max_iter,
-                        double /*unused_legacy_tol*/ = 1e-12) {
+                        std::size_t max_iter) {
     LanczosKernelOptions opts;
     opts.max_iter = max_iter;
     opts.reorth   = ReorthPolicy::FullCGS2;
@@ -74,144 +69,37 @@ KernelResult run_kernel(const Operator& op,
 } // namespace
 
 // ----------------------------------------------------------------------------
-// Test 1: unified kernel + canonical MGS body agree on alpha/beta for a
-// real Heisenberg chain. Both build the same Krylov subspace from the
-// same initial vector, so alpha[j] / beta[j] must coincide to numerical
-// noise.
+// Test 1: the full-reorth kernel's lowest Ritz value matches the dense
+// ground-state energy of a real Heisenberg chain.
 // ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel agrees with legacy MGS body on alpha/beta",
-          "[krylov][kernel][regression]") {
-    constexpr int  N   = 6;
-    constexpr auto dim = std::size_t{1} << N;
-    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-
-    // Same seed -> same initial vector for both runs.
-    auto v0 = random_unit_vector(dim, /*seed=*/0xC0FFEEu);
-
-    const std::size_t M = 40;
-    auto kr = run_kernel(*op, dim, v0, M);
-
-    // Legacy MGS path via build_lanczos_tridiagonal_with_basis.
-    std::vector<double> a_mgs, b_mgs;
-    std::vector<ComplexVector> basis_mgs;
-    {
-        auto H = [&op](const Complex* in, Complex* out, int n) {
-            op->apply(in, out, static_cast<std::size_t>(n));
-        };
-        // Use the same v0 (the legacy entry point copies it internally).
-        build_lanczos_tridiagonal_with_basis(
-            H, ComplexVector(v0.begin(), v0.end()),
-            dim, M, /*tol=*/1e-12,
-            /*full_reorth=*/true, /*reorth_freq=*/0,
-            a_mgs, b_mgs, &basis_mgs);
-    }
-
-    REQUIRE(kr.alpha.size() == a_mgs.size());
-    REQUIRE(kr.beta.size()  == b_mgs.size());
-
-    for (std::size_t j = 0; j < kr.alpha.size(); ++j) {
-        INFO("alpha[" << j << "] kernel=" << kr.alpha[j]
-             << " mgs=" << a_mgs[j]);
-        REQUIRE(std::abs(kr.alpha[j] - a_mgs[j]) < 1e-10);
-    }
-    for (std::size_t j = 0; j < kr.beta.size(); ++j) {
-        INFO("beta[" << j << "] kernel=" << kr.beta[j]
-             << " mgs=" << b_mgs[j]);
-        REQUIRE(std::abs(kr.beta[j] - b_mgs[j]) < 1e-10);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Test 1b: full-Krylov regime (M == dim). At full Krylov dimension the
-// Lanczos residual collapses to numerical noise, and the noise patterns
-// of CGS2 vs sequential MGS diverge. With breakdown_tol = 1e-300 (the
-// kernel default), neither method breaks on noise -- both run to the
-// full max_iter. We pin agreement on the "good" part of the tridiagonal
-// (before either method enters the noise floor of its own
-// orthogonalisation procedure).
-// ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel agrees with legacy MGS on the good part at "
-          "full Krylov M=dim",
-          "[krylov][kernel][full_krylov]") {
-    constexpr int  N   = 6;
-    constexpr auto dim = std::size_t{1} << N;
-    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto v0 = random_unit_vector(dim, /*seed=*/20260513u);
-
-    auto kr = run_kernel(*op, dim, v0, /*max_iter=*/dim, /*tol=*/1e-12);
-
-    std::vector<double> a_mgs, b_mgs;
-    std::vector<ComplexVector> basis_mgs;
-    {
-        auto H = [&op](const Complex* in, Complex* out, int n) {
-            op->apply(in, out, static_cast<std::size_t>(n));
-        };
-        build_lanczos_tridiagonal_with_basis(
-            H, ComplexVector(v0.begin(), v0.end()),
-            dim, dim, /*tol=*/1e-12,
-            /*full_reorth=*/true, /*reorth_freq=*/0,
-            a_mgs, b_mgs, &basis_mgs);
-    }
-
-    // With breakdown_tol effectively disabled the kernel runs to M=N
-    // (matching legacy behaviour). Both arrive at the full dimension.
-    REQUIRE(kr.alpha.size() == a_mgs.size());
-    REQUIRE(kr.alpha.size() == dim);
-    INFO("M_kernel=" << kr.alpha.size() << " M_mgs=" << a_mgs.size());
-
-    // Beyond ~ dim/2 the residual is dominated by orthogonalisation
-    // noise that differs between CGS2 and MGS-once; we only require
-    // agreement on the first half of the tridiagonal (the part that
-    // carries the physically meaningful Ritz spectrum).
-    const std::size_t k_good = dim / 2;
-    for (std::size_t j = 0; j < k_good; ++j) {
-        INFO("alpha[" << j << "] kernel=" << kr.alpha[j]
-             << " mgs=" << a_mgs[j]);
-        REQUIRE(std::abs(kr.alpha[j] - a_mgs[j]) < 1e-9);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Test 2: end-to-end -- the legacy entry point `build_lanczos_tridiagonal_with_basis`
-// now routes its full-reorth branch through the unified kernel. Verify
-// that consumers (FTLM, Lanczos itself) see a Krylov subspace
-// whose eigenvalues match the dense reference -- the contract the
-// legacy MGS body has always honoured.
-// ----------------------------------------------------------------------------
-TEST_CASE("legacy build_lanczos_tridiagonal_with_basis through unified kernel "
-          "matches dense reference",
+TEST_CASE("unified Lanczos kernel ground state matches the dense reference",
           "[krylov][kernel][regression]") {
     constexpr int  N   = 6;
     constexpr auto dim = std::size_t{1} << N;
     auto op  = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
     auto ref = reference_from_operator(*op, dim);
 
-    auto v0 = random_unit_vector(dim, /*seed=*/0xDEADBEEFu);
-    auto Hv = [&op](const Complex* in, Complex* out, int n) {
-        op->apply(in, out, static_cast<std::size_t>(n));
-    };
+    auto v0 = random_unit_vector(dim, /*seed=*/0xC0FFEEu);
+    auto kr = run_kernel(*op, dim, v0, /*max_iter=*/40);
 
-    // This call now hits the unified kernel via the fast path (basis +
-    // full reorth). The output ABI is unchanged.
-    std::vector<double> a, b;
-    std::vector<ComplexVector> basis;
-    build_lanczos_tridiagonal_with_basis(
-        Hv, ComplexVector(v0.begin(), v0.end()),
-        dim, /*max_iter=*/dim, /*tol=*/1e-12,
-        /*full_reorth=*/true, /*reorth_freq=*/0,
-        a, b, &basis);
+    const std::size_t M = kr.alpha.size();
+    REQUIRE(M >= 5);
+    REQUIRE(kr.beta.size() == M + 1);
+    REQUIRE(kr.basis.size() == M);
 
-    REQUIRE(a.size() >= 5);
-    REQUIRE(basis.size() == a.size());
-
-    // The lowest Ritz value is bounded below by the dense ground-state
-    // energy and converges from above; check it lies within tol.
-    // (A full eigenvalue comparison via LAPACK would just retest dstev;
-    // here we rely on the alpha/beta agreement from Test 1 and only
-    // sanity-check the ground-state pinch.)
-    INFO("legacy alpha[0] (= <v0|H|v0>) = " << a[0]
-         << " ref.eigs[0] = " << ref.eigs.front());
-    REQUIRE(a[0] >= ref.eigs.front() - 1e-9);
+    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(M, M);
+    for (std::size_t i = 0; i < M; ++i) {
+        T(i, i) = kr.alpha[i];
+        if (i + 1 < M) {
+            T(i, i + 1) = kr.beta[i + 1];
+            T(i + 1, i) = kr.beta[i + 1];
+        }
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+    REQUIRE(es.info() == Eigen::Success);
+    INFO("E0 lanczos=" << es.eigenvalues()(0)
+         << " E0 dense=" << ref.eigs.front());
+    REQUIRE(std::abs(es.eigenvalues()(0) - ref.eigs.front()) < 1e-8);
 }
 
 // ----------------------------------------------------------------------------
@@ -545,11 +433,9 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
 // Test: `ReorthPolicy::PeriodicCGS2` actually fires at the documented
 // cadence.
 //
-// PeriodicCGS2 is implemented in the kernel (the legacy
-// `build_lanczos_tridiagonal_with_basis` body has its own MGS-once-
-// with-filter periodic path) but nothing in the production tree calls
-// `lanczos_kernel` with it yet. Without a test the policy can rot
-// silently across kernel refactors. This pins:
+// PeriodicCGS2 is implemented in the kernel but nothing in the
+// production tree calls `lanczos_kernel` with it. Without a test the
+// policy can rot silently across kernel refactors. This pins:
 //
 //   1. `reorth_freq = 1` (fire every step) is **numerically
 //      equivalent** to `FullCGS2`. Same matrix elements, same basis,

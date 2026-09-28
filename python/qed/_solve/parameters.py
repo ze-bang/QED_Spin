@@ -227,8 +227,8 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
     ]),
     ("tpq", "Thermal Pure Quantum / mTPQ imaginary-time evolution", [
         "tpq_max_steps", "tpq_measurement_interval",
-        "tpq_energy_shift", "tpq_beta_max", "tpq_delta_beta",
-        "tpq_taylor_order", "tpq_continue", "tpq_continue_sample",
+        "tpq_energy_shift", "tpq_beta_max", "tpq_continue",
+        "tpq_continue_sample",
         "tpq_continue_beta", "tpq_target_beta",
         "tpq_num_measure_points", "tpq_measure_beta_min",
         "tpq_measure_beta_max",

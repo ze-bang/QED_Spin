@@ -66,8 +66,6 @@ struct EDParameters {
     bool tpq_fp32 = false;
 
     double tpq_beta_max = 20.0;
-    double tpq_delta_beta = 1e-2;
-    uint64_t tpq_taylor_order = 100;
 
     bool tpq_continue = false;
     uint64_t tpq_continue_sample = 0;
@@ -87,23 +85,6 @@ struct EDParameters {
     // "trajectory only, no state vectors persisted".
     // ------------------------------------------------------------------
     std::vector<double> tpq_probe_betas;
-
-    // ------------------------------------------------------------------
-    // Removed in matvec-unification Phase 7.5:
-    //   - num_order()             -> tpq_taylor_order
-    //   - num_measure_freq()      -> tpq_measurement_interval
-    //   - delta_tau()             -> tpq_delta_beta
-    //   - large_value()           -> tpq_energy_shift
-    //   - continue_quenching()    -> tpq_continue
-    //   - continue_sample()       -> tpq_continue_sample
-    //   - continue_beta()         -> tpq_continue_beta
-    //   - target_beta()           -> tpq_target_beta
-    //
-    // These were [[deprecated]] accessor shims for the canonical
-    // tpq_<name> data members above. All in-tree callers have been
-    // migrated; out-of-tree callers should rename the call sites
-    // (search-and-replace).
-    // ------------------------------------------------------------------
 
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = ed::defaults::kFtlmKrylovDim;

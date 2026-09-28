@@ -35,8 +35,7 @@ __all__ = [
 
 def su2_tower_lane(
     H, *, total_spin, method, T_min, T_max, num_T, num_samples,
-    krylov_dim, ftlm_krylov_dim, random_seed, tpq_delta_beta,
-    tpq_taylor_order, verbose,
+    krylov_dim, ftlm_krylov_dim, random_seed, verbose,
     symmetry, sector, sz, sz_min, sz_max, star_maps, output_dir,
     probe_betas, spin_flip, time_reversal, point_group, device,
 ):
@@ -92,8 +91,6 @@ def su2_tower_lane(
             krylov_dim=(krylov_dim or ftlm_krylov_dim or 100),
             krylov_dim_explicit=bool(krylov_dim or ftlm_krylov_dim),
             random_seed=random_seed,
-            tpq_delta_beta=tpq_delta_beta,
-            tpq_taylor_order=tpq_taylor_order,
             verbose=verbose)
 
 

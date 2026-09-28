@@ -26,8 +26,7 @@
 // Templated on Backend + matvec functor exactly like the other kernels, so the
 // reduction axis (Full / Sz / abelian / non-abelian symmetry) and the device
 // axis (CPU / CUDA) are inherited through the same `MatVecOperator` seam --
-// nothing symmetry-specific lives here. MPI backends are a documented deferral
-// (same static_assert as block_lanczos_kernel).
+// nothing symmetry-specific lives here.
 // =============================================================================
 
 #include <ed/krylov/block_lanczos_kernel.h>   // detail helpers + Complex + LAPACKE
@@ -89,8 +88,7 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
             || std::is_base_of_v<ed::matvec::CudaBackend, std::decay_t<Backend>>
 #endif
         ,
-        "block_krylov_schur_kernel currently supports CpuBackend / CudaBackend. "
-        "Distributed backends use src/distributed/* directly (Phase 2.3).");
+        "block_krylov_schur_kernel supports CpuBackend / CudaBackend.");
 
     using ed::krylov::detail::hermitianize_inplace;
     using ed::krylov::detail::build_projected_matrix;
@@ -185,7 +183,6 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
             // A_j = V_curr^H W  (Hermitianized).
             be.gemm('C', 'N', b, b, N, one, V_curr.get(), N, W.get(), N, zero, AB.get(), b);
             be.copy_to_host(AB.get(), Aj.data(), b * b);
-            be.all_reduce_sum_vec(Aj.data(), b * b);
             hermitianize_inplace(Aj.data(), b);
             be.copy_from_host(Aj.data(), AB.get(), b * b);
 

@@ -203,24 +203,13 @@ gather_row(std::uint64_t r,
 }
 
 // ===========================================================================
-// gather_row<BasisPolicy, Scalar=Complex>:
+// gather_row<BasisPolicy, Scalar=Complex>: the GATHER kernel for one row of
+// the trivial policies:
 //
-// Wave 2 of the "Unify all 16 matvec cells under apply_terms<BasisPolicy,
-// Scalar, Backend>" plan (May 2026). Generalises the GATHER kernel so the
-// CPU+MPI lane covers cells 1C, 2C, 3C, 4C uniformly:
+//   * Full    -- BasisPolicy = FullBasisPolicy
+//   * FixedSz -- BasisPolicy = FixedSzBasisPolicy
 //
-//   * cell 1C (Full)         -- BasisPolicy = FullBasisPolicy
-//   * cell 2C (FixedSz)      -- BasisPolicy = FixedSzBasisPolicy
-//   * cell 3C (Symm)         -- BasisPolicy = SymmetryBasisPolicy
-//   * cell 4C (FixedSz+Symm) -- BasisPolicy = SymmetryBasisPolicy
-//                                (orbit walk via iter_orbit; symmetry
-//                                policies plug coeff_modifier into the
-//                                accumulator before emission)
-//
-// For symmetry policies, the caller must wrap the outer-row loop in
-// ``basis.iter_orbit(r_idx, ...)`` and the closure must apply the
-// symmetry weighting before / after this kernel runs -- the gather
-// version stays simple (a single row, single state).
+// (single row, single computational state).
 //
 // @tparam BasisPolicy   compile-time basis description (see basis_policy.h)
 // @tparam GetV          callable Complex(std::uint64_t c_global_idx)

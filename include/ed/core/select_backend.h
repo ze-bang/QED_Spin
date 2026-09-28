@@ -202,8 +202,8 @@ inline BackendVariant select_backend(const LinearOperator& op,
 // lane_label_for<Backend>() / lane_label_from_variant(v): truthful lane
 // reporting helpers.
 //
-// `R.backend.lane` used to be inferred from `H.geometry().is_device()` /
-// `is_distributed()`. That is correct for native Operator
+// `R.backend.lane` used to be inferred from `H.geometry().is_device()`.
+// That is correct for native Operator
 // instances, but it lies about every `SectorView` (streaming-symmetry /
 // fixed-Sz streaming-symmetry): the view advertises `Host` memory_space
 // yet lazily wires a GPU mirror via `bind_cuda_for_sector(...)`. With
@@ -216,8 +216,7 @@ inline BackendVariant select_backend(const LinearOperator& op,
 // inside any `solve_on<Backend>` / `thermal_on<Backend>` body).
 // `lane_label_from_variant(v)` visits the variant for callers that
 // already hold a `BackendVariant`. Both return one of
-// {"cpu","gpu"}. Callers should set `R.backend.mpi_size`
-// separately -- the label encodes the lane class, not the rank count.
+// {"cpu","gpu"}.
 //
 // Phase D of the "Backend x Symmetries x Workflows" plan (May 2026).
 // ---------------------------------------------------------------------------

@@ -182,8 +182,6 @@ to_legacy(const ThermalOptions& opts, std::uint64_t dim_hint) {
     }
     wf.num_samples         = opts.num_samples;
     if (opts.krylov_dim) wf.krylov_dim = *opts.krylov_dim;
-    wf.taylor_order        = opts.tpq_taylor_order;
-    wf.delta_beta          = opts.tpq_delta_beta;
     wf.random_seed         = opts.random_seed;
     wf.output_dir          = opts.output_dir;
     wf.temp_min            = opts.T_min;
@@ -225,10 +223,6 @@ to_legacy(const SpectralOptions& opts, std::uint64_t dim_hint) {
     wf.energy_shift     = opts.energy_shift;
     wf.output_dir       = opts.output_dir;
     if (opts.num_random_vectors) wf.num_samples = *opts.num_random_vectors;
-    wf.temperatures     = opts.temperatures;
-    if (opts.T.has_value() && wf.temperatures.empty()) {
-        wf.temperatures.push_back(*opts.T);
-    }
     wf.observable_type  = opts.observable_type;
     wf.momentum_transfer = opts.momentum_transfer;
     wf.momentum_tolerance = opts.momentum_tolerance;

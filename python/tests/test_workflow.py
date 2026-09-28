@@ -471,7 +471,7 @@ def test_list_diag_parameters_returns_dict_with_every_field():
     assert "num_eigenvalues" in seen
     assert "tolerance" in seen
     assert "ftlm_seed" in seen
-    assert "tpq_taylor_order" in seen
+    assert "tpq_max_steps" in seen
 
 
 def test_list_diag_parameters_filters_by_category_substring():

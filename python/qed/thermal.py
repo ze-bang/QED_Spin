@@ -537,8 +537,6 @@ def _thermal_su2_towers(
     krylov_dim: int,
     krylov_dim_explicit: bool,
     random_seed: int,
-    tpq_delta_beta: float,
-    tpq_taylor_order: int,
     verbose: bool,
 ) -> "ThermalResult":
     """Stage 12f: SU(2)-resolved thermodynamics, Z = sum_S (2S+1) Z_S.
@@ -605,8 +603,6 @@ def _thermal_su2_towers(
         o.temp_max = float(T_max)
         o.random_seed = int(random_seed)
         o.betas = betas
-        o.delta_beta = float(tpq_delta_beta)
-        o.taylor_order = int(tpq_taylor_order)
         o.two_total_spin = int(ts)
         tr = _core.workflows_thermal_su2_tower(op, o)
         if not tr.thermo.temperatures:
@@ -691,8 +687,6 @@ def thermal(
     # by default and let the user override.
     tpq_measure_beta_min: Optional[float] = None,
     tpq_measure_beta_max: Optional[float] = None,
-    tpq_delta_beta: float = 0.05,
-    tpq_taylor_order: int = 8,
     tpq_measurement_interval: int = 1,
     # ``0.0`` -> auto-pick via a quick Lanczos spectral-bound estimate
     # inside the orchestrator's TPQ kernel (single source of truth).
@@ -821,8 +815,7 @@ def thermal(
         H, total_spin=total_spin, method=method,
         T_min=T_min, T_max=T_max, num_T=num_T, num_samples=num_samples,
         krylov_dim=krylov_dim, ftlm_krylov_dim=ftlm_krylov_dim,
-        random_seed=random_seed, tpq_delta_beta=tpq_delta_beta,
-        tpq_taylor_order=tpq_taylor_order,
+        random_seed=random_seed,
         verbose=verbose, symmetry=symmetry, sector=sector, sz=sz,
         sz_min=sz_min, sz_max=sz_max, star_maps=star_maps,
         output_dir=output_dir, probe_betas=probe_betas,
@@ -965,8 +958,6 @@ def thermal(
             tpq_num_measure_points=int(tpq_num_measure_points),
             tpq_measure_beta_min=beta_min_eff,
             tpq_measure_beta_max=beta_max_eff,
-            tpq_delta_beta=float(tpq_delta_beta),
-            tpq_taylor_order=int(tpq_taylor_order),
             tpq_measurement_interval=int(tpq_measurement_interval),
             tpq_energy_shift=float(tpq_energy_shift),
             # Mirror the iteration budget into ``tpq_max_steps`` so the

@@ -578,20 +578,16 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
                                      const SymmetryGroupInfo& info,
                                      TermBuilder&&            terms,
                                      std::vector<std::size_t>* out_sector_ids = nullptr,
-                                     int                      mpi_rank = 0,
-                                     int                      mpi_size = 1,
-                                     const std::vector<int>*  sector_owner = nullptr,
                                      const std::string&       cache_dir = {},
                                      bool                     flip_project_half = false)
 {
     // Stage 8c (SymmetryEngine v2): flip-projected half-filling block for
     // the SINGLE-Sz lane (GS solve). Delegates to the all-Sz builder's
-    // proven (k, +/-) machinery restricted to this one n_up. Single-rank
-    // only (the all-Sz builder carries no MPI sector ownership); callers
+    // proven (k, +/-) machinery restricted to this one n_up. Callers
     // gate on eigenvalues-only workloads upstream (the flip-projected
     // eigenvectors live in the projected basis and the orbit-CSR
     // reconstruction lane is not flip-aware).
-    if (flip_project_half && mpi_size == 1
+    if (flip_project_half
         && n_up * 2 == static_cast<std::int64_t>(n_bits)) {
         std::vector<std::pair<int, std::size_t>> ids;
         auto ops = build_all_sz_sector_operators(
@@ -669,14 +665,6 @@ build_fixed_sz_sector_operators_lazy(std::uint64_t            n_bits,
     for (std::ptrdiff_t si = 0;
          si < static_cast<std::ptrdiff_t>(num_sectors); ++si) {
         const std::size_t s = static_cast<std::size_t>(si);
-        // Across-sector MPI: run the per-sector Pass 1.5 orbit walk only for
-        // this rank's raw sectors (distributes the walk + the per-sector
-        // RepSectorData memory). The shared rep enumeration above stays per-rank.
-        if (mpi_size > 1) {
-            const int owner_r = sector_owner ? (*sector_owner)[s]
-                : static_cast<int>(s % static_cast<std::size_t>(mpi_size));
-            if (owner_r != mpi_rank) continue;
-        }
         const std::vector<Complex>& phase = info_sp->sectors[s].phase_factors;
 
         // Pass 1.5: CSR-free per-sector dimension + RepSectorData. Walk each
@@ -790,9 +778,6 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
                                  const SymmetryGroupInfo& info,
                                  TermBuilder&&            terms,
                                  std::vector<std::size_t>* out_sector_ids = nullptr,
-                                 int                      mpi_rank = 0,
-                                 int                      mpi_size = 1,
-                                 const std::vector<int>*  sector_owner = nullptr,
                                  const std::string&       cache_dir = {},
                                  bool                     flip_sectors = false)
 {
@@ -809,9 +794,9 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
     // mask; the full space is trivially closed under it) and emit
     // (k, +/-) sectors with chi' = (chi, +/-chi). Halves every irrep
     // block on top of the spatial reduction. CPU/GPU rep lanes only
-    // (the orbit-CSR fallback throws, as at N/2); single-rank.
+    // (the orbit-CSR fallback throws, as at N/2).
     // -----------------------------------------------------------------
-    if (flip_sectors && mpi_size == 1) {
+    if (flip_sectors) {
         const CompiledGroup cg_flip =
             make_flip_extended_group(*info_sp, n_bits);
         auto flip_tab = acquire_orbit_table_full_compiled(
@@ -828,7 +813,6 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
             if (out_sector_ids) out_sector_ids->push_back(idx);
             ops.push_back(std::move(slots[idx]));
         }
-        (void)mpi_rank; (void)sector_owner;
         return ops;
     }
 
@@ -854,11 +838,6 @@ build_full_sector_operators_lazy(std::uint64_t            n_bits,
     for (std::ptrdiff_t si = 0;
          si < static_cast<std::ptrdiff_t>(num_sectors); ++si) {
         const std::size_t s = static_cast<std::size_t>(si);
-        if (mpi_size > 1) {
-            const int owner_r = sector_owner ? (*sector_owner)[s]
-                : static_cast<int>(s % static_cast<std::size_t>(mpi_size));
-            if (owner_r != mpi_rank) continue;
-        }
         const std::vector<Complex>& phase = info_sp->sectors[s].phase_factors;
         RepSectorData rd;
         rd.n_sites    = static_cast<int>(n_bits);

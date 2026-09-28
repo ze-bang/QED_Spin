@@ -8,8 +8,9 @@
 #include <ed/thermal/sample_seed.h>
 #include <ed/thermal/oftlm_kernel.h>
 
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/backends/cpu_backend.h>
 #include <ed/solvers/lanczos.h>   // generateGaussianRandomVector,
-                                  // build_lanczos_tridiagonal_with_basis,
                                   // diagonalize_tridiagonal_ritz
 
 #include <algorithm>
@@ -39,6 +40,22 @@ double norm2(const ComplexVector& v) {
     double s = 0.0;
     for (const auto& c : v) s += std::norm(c);
     return s;
+}
+
+// Lanczos tridiagonal (and optionally the Krylov basis) of apply_H from v0 on
+// the default CPU backend.
+ed::krylov::LanczosKernelResult run_lanczos(
+    const std::function<void(const Complex*, Complex*, int)>& apply_H,
+    const ComplexVector& v0,
+    std::uint64_t N,
+    const ed::krylov::LanczosKernelOptions& opts)
+{
+    auto matvec = [&apply_H](const Complex* in, Complex* out, std::size_t n) {
+        apply_H(in, out, static_cast<int>(n));
+    };
+    return ed::krylov::lanczos_kernel(
+        ed::matvec::default_cpu_backend(), matvec,
+        static_cast<std::size_t>(N), v0.data(), opts);
 }
 
 }  // namespace
@@ -84,15 +101,15 @@ FtlmResult oftlm_cpu(
         const double n0 = std::sqrt(norm2(v0));
         if (n0 > 0.0) for (auto& c : v0) c /= n0;
 
-        std::vector<double> alpha, beta;
-        std::vector<ComplexVector> basis;
-        build_lanczos_tridiagonal_with_basis(
-            apply_H, v0, N, Mex, /*tol=*/1e-12,
-            /*full_reorth=*/true, /*reorth_freq=*/1,
-            alpha, beta, &basis);
+        ed::krylov::LanczosKernelOptions lopts;
+        lopts.max_iter   = static_cast<std::size_t>(Mex);
+        lopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+        lopts.keep_basis = true;
+        auto lres = run_lanczos(apply_H, v0, N, lopts);
+        const auto& basis = lres.basis;
 
         std::vector<double> ritz, weights, tri_evecs;   // tri_evecs: m*m col-major
-        diagonalize_tridiagonal_ritz(alpha, beta, ritz, weights, &tri_evecs);
+        diagonalize_tridiagonal_ritz(lres.alpha, lres.beta, ritz, weights, &tri_evecs);
 
         const std::size_t m = ritz.size();
         Nv = std::min<std::size_t>(Nv, m);
@@ -105,7 +122,7 @@ FtlmResult oftlm_cpu(
             const std::size_t kmax = std::min<std::size_t>(m, basis.size());
             for (std::size_t k = 0; k < kmax; ++k) {
                 const double ck = tri_evecs[k + i * m];
-                const ComplexVector& bk = basis[k];
+                const Complex* bk = basis[k].get();
                 for (std::uint64_t n = 0; n < N; ++n) vi[n] += ck * bk[n];
             }
             const double vn = std::sqrt(norm2(vi));
@@ -140,17 +157,17 @@ FtlmResult oftlm_cpu(
         // practice (Jaklic-Prelovsek; Schnack-Richter-Steinigeweg PRR 2,
         // 013186) runs the stochastic samples bare -- ghost Ritz duplicates
         // redistribute the sample weight but leave the trace estimator
-        // consistent. (Previously this passed full_reorth=true with a null
-        // basis, which the legacy shim silently downgraded to None while
-        // printing a spurious per-sample warning.)
-        std::vector<double> alpha, beta;
-        build_lanczos_tridiagonal_with_basis(
-            apply_H, v, N, M, /*tol=*/1e-10,
-            /*full_reorth=*/false, /*reorth_freq=*/0,
-            alpha, beta, /*basis=*/nullptr);
+        // consistent. The run stops early when ||w|| < 1e-10.
+        ed::krylov::LanczosKernelOptions lopts;
+        lopts.max_iter      = static_cast<std::size_t>(
+            std::min<std::uint64_t>(N, M));
+        lopts.reorth        = ed::krylov::ReorthPolicy::None;
+        lopts.keep_basis    = false;
+        lopts.breakdown_tol = 1e-10;
+        auto lres = run_lanczos(apply_H, v, N, lopts);
 
         SampleSpectrum sp;
-        diagonalize_tridiagonal_ritz(alpha, beta, sp.ritz, sp.weights);
+        diagonalize_tridiagonal_ritz(lres.alpha, lres.beta, sp.ritz, sp.weights);
         if (!sp.ritz.empty()) samples.push_back(std::move(sp));
     }
 

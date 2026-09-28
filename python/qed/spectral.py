@@ -545,13 +545,13 @@ def _spectral_in_memory(
             opts.num_omega = int(len(ws))
     if T is not None:
         if hasattr(T, "__iter__"):
-            opts.temperatures = [float(t) for t in T]
+            temps = [float(t) for t in T]
         else:
-            opts.temperatures = [float(T)]
+            temps = [float(T)]
         # ``_core.workflows_spectral`` has no finite-T estimator:
         # GroundStateCF is a T = 0 method and FtlmDynamical is rejected
         # there. Finite T goes to the FTLM cross-irrep estimator below.
-        if any(t > 0.0 for t in opts.temperatures):
+        if any(t > 0.0 for t in temps):
             # 2026-09-11: route finite T through the same FTLM estimator the
             # symmetry lane uses (ftlm_cross_irrep_kernel with source = target
             # = this block). Without symmetry this was refused outright.
@@ -562,7 +562,7 @@ def _spectral_in_memory(
             _ns = int(num_random_vectors) if num_random_vectors is not None else 30
             _kd = int(krylov_dim) if krylov_dim is not None else 100
             d = _core.workflows_spectral_ftlm_plain(
-                H, observables[0], [float(t) for t in opts.temperatures], _ws,
+                H, observables[0], temps, _ws,
                 float(opts.broadening), _ns, _kd, 0)
             return FiniteTSpectralResult(
                 omega=np.asarray(d["omega"], dtype=float),

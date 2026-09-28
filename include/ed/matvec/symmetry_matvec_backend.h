@@ -2,38 +2,20 @@
 // =============================================================================
 // include/ed/matvec/symmetry_matvec_backend.h
 //
-// CPU symmetry backend factories (rep + non-abelian oracle).
+// CPU symmetry backend factory (on-the-fly representative SpMV).
 //
 // ``matvec_backend.h`` ships ``make_cpu_full_basis_backend`` (FullBasisPolicy)
 // and ``make_cpu_fixed_sz_backend`` (FixedSzBasisPolicy) but deliberately
 // stays free of any symmetry dependency so it remains a light, host-only
-// leaf header. The symmetry policy lives in ``symmetry_basis_policy.h``,
-// which transitively pulls in the heavyweight ``streaming_symmetry.h`` /
-// ``operator.h`` chain -- including that from ``matvec_backend.h`` would
-// create an include cycle (operator.h already includes matvec_backend.h).
+// leaf header. This header ties the representative symmetry policy to the
+// backend: ``CpuMatVecBackend`` compiles out the assembled-CSR and real-input
+// fast paths for the rep policy (see the ``if constexpr`` guards in
+// apply_complex / apply_real), so a symmetry sector always runs a matrix-free
+// or reduced-CSR rep kernel that preserves complex momentum phases.
 //
-// This header is the leaf that ties the two together: it constructs a
-// ``CpuMatVecBackend<SymmetryBasisPolicy, ...>`` over a non-owning
-// ``SymmetryBasisPolicy`` view (typically obtained from a live
-// ``ed::symmetry::SectorBasis::policy()``). The backend then drives the
-// unified matrix-free kernel (``apply_terms<SymmetryBasisPolicy, Scalar>``),
-// whose ``if constexpr (needs_orbit_walk)`` branch performs the orbit walk
-// and applies the per-emit symmetry weighting.
-//
-// CSR / real-fast-path safety: ``CpuMatVecBackend`` compiles out the
-// assembled-CSR and real-input fast paths for any policy with
-// ``needs_orbit_walk == true`` (see the ``if constexpr`` guards in
-// apply_complex / apply_real). A symmetry sector therefore always runs the
-// complex matrix-free kernel from apply_complex, which is the only path
-// that preserves the imaginary part of complex momentum phases. The
-// tunables passed here are consequently inert for the symmetry lane; they
-// are forwarded only so the backend's ABI matches the other two factories.
-//
-// Lifetime: the returned backend stores the ``SymmetryBasisPolicy`` BY
-// VALUE, but that POD view holds non-owning pointers into the
-// ``SymmetrySector`` and lookup index owned by the originating
-// ``SectorBasis``. The SectorBasis (or whatever owns the sector) MUST
-// outlive the backend.
+// Lifetime: the returned backend stores the policy BY VALUE, but that POD
+// view holds non-owning pointers into the ``RepSectorData`` it was built
+// from, which MUST outlive the backend.
 // =============================================================================
 
 #include <cstdint>
@@ -47,10 +29,6 @@
 #include <ed/symmetry/rep_sector_data.h>
 
 namespace ed::matvec {
-
-// (Stage 11c-2b: ``make_cpu_symmetry_backend`` -- the orbit-CSR walk over a
-// ``SymmetryBasisPolicy`` view -- was deleted with the legacy orbit matvec
-// lane; the rep factory below is THE CPU symmetry backend.)
 
 // ---------------------------------------------------------------------------
 // make_cpu_rep_symmetry_backend: the CPU on-the-fly representative SpMV

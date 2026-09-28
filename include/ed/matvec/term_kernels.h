@@ -85,22 +85,6 @@ inline constexpr uint8_t kOpSMinus = 1;
 inline constexpr uint8_t kOpSz     = 2;
 
 // ---------------------------------------------------------------------------
-// Multi-target detector. A connected state s' maps to ONE basis index for the
-// abelian/Sz policies (orbits partition the space). A non-abelian policy with
-// `static constexpr bool multi_target = true` instead provides
-// `for_each_target(s', cb)` enumerating the d_Γ multiplicity copies. The
-// detector defaults to false, so every existing policy is byte-identical
-// (the `if constexpr (multi_target)` branch in `emit` is discarded).
-// ---------------------------------------------------------------------------
-template <class P, class = void>
-struct policy_multi_target : std::false_type {};
-template <class P>
-struct policy_multi_target<P, std::void_t<decltype(P::multi_target)>>
-    : std::bool_constant<P::multi_target> {};
-template <class P>
-inline constexpr bool policy_multi_target_v = policy_multi_target<P>::value;
-
-// ---------------------------------------------------------------------------
 // Internal: convert a (complex) coefficient to the chosen Scalar kernel
 // type. For Scalar==Complex we just return it; for Scalar==double we drop
 // the imaginary part (the surrounding code is required to verify that all
@@ -259,6 +243,8 @@ inline void apply_terms(
     const Scalar* __restrict__ in,
     Scalar*       __restrict__ out)
 {
+    static_assert(!BasisPolicy::needs_orbit_walk && !BasisPolicy::has_coeff_modifier,
+                  "apply_terms applies H to one state per row (Full / FixedSz policies)");
     using Contrib = LocalContribution<Scalar>;
     const uint64_t dim      = basis.dim();
     const double   spin_sq  = spin_l * spin_l;
@@ -317,19 +303,8 @@ inline void apply_terms(
 
                 // --------------------------------------------------------------
                 // process_source(s, pre_phase): apply every term to the
-                // computational state ``s``, accumulating into local_buffer.
-                //
-                // - Trivial policies (Full/FixedSz) call this once with
-                //   s = state_of(i) and pre_phase = 1.
-                // - Symmetry policies call this for each (orbit_state, alpha_s)
-                //   in the orbit of orbit index i, with pre_phase = alpha_s /
-                //   norm_i. The per-emit normalization (conj(beta_{s'}) *
-                //   group_norm / norm_{dst}) is supplied via coeff_modifier.
-                //
-                // This shape keeps the inner term loops byte-identical for
-                // Full/FixedSz (the constexpr branches on has_coeff_modifier
-                // elide the extra multiply), while letting Wave 1's
-                // SymmetryBasisPolicy reuse the same kernel.
+                // computational state ``s`` = state_of(i) (pre_phase = 1),
+                // accumulating into local_buffer.
                 // --------------------------------------------------------------
                 auto process_source = [&](uint64_t basis_state,
                                           std::complex<double> pre_phase) {
@@ -339,26 +314,8 @@ inline void apply_terms(
 
                     auto emit = [&](uint64_t j_idx, uint64_t s_prime,
                                     const Scalar& base_contrib) {
-                        if constexpr (policy_multi_target_v<BasisPolicy>) {
-                            // Non-abelian: s' belongs to several SAB vectors
-                            // (multiplicity). The single index `j_idx` (used as
-                            // the in-sector gate by the caller) is ignored; emit
-                            // to every target weighted by conj(c_k(s')).
-                            (void)j_idx;
-                            basis.for_each_target(
-                                s_prime, [&](uint64_t k, std::complex<double> w) {
-                                    local_buffer.push_back(
-                                        {k, base_contrib * coerce_coeff<Scalar>(w)});
-                                });
-                        } else if constexpr (BasisPolicy::has_coeff_modifier) {
-                            const Scalar mod =
-                                basis.template coeff_modifier<Scalar>(
-                                    basis_state, s_prime, i, j_idx);
-                            local_buffer.push_back({j_idx, base_contrib * mod});
-                        } else {
-                            (void)s_prime;
-                            local_buffer.push_back({j_idx, base_contrib});
-                        }
+                        (void)s_prime;
+                        local_buffer.push_back({j_idx, base_contrib});
                     };
 
                     // Per-term gate/geometric math is shared with the CPU
@@ -441,16 +398,9 @@ inline void apply_terms(
                     }
                 }; // end process_source
 
-                if constexpr (BasisPolicy::needs_orbit_walk) {
-                    // Symmetry path: walk |orbit(i)| computational states.
-                    basis.iter_orbit(i, process_source);
-                } else {
-                    // Trivial path: a single computational state with phase 1.
-                    // Bypasses iter_orbit for byte-identical performance to
-                    // the pre-Wave-0 kernel.
-                    process_source(basis.state_of(i),
-                                   std::complex<double>(1.0, 0.0));
-                }
+                // A single computational state with phase 1.
+                process_source(basis.state_of(i),
+                               std::complex<double>(1.0, 0.0));
 
                 if (local_buffer.size() >= kFlushThreshold) flush();
             }
@@ -471,8 +421,7 @@ inline void apply_terms(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Phase 4 of the "Unified CPU/GPU symmetry architecture" plan
-// (May 2026). Factored single-state emitter:
+// Factored single-state emitter:
 //
 //   apply_term_to_state<Scalar>(s, spin_l, terms, callback)
 //
@@ -483,20 +432,8 @@ inline void apply_terms(
 // offdiag_one_body, diag_two_body, mixed_two_body, offdiag_two_body,
 // three_body) with the same numerical tolerance (1e-15 zero-skip).
 //
-// Used by:
-//   * The orbit-walk triplet emit path in
-//     ``DistributedSymmetryOperator`` -- replaces the O(n_orbits *
-//     2^N) probe loop with an O(n_orbits * |orbit| * num_terms)
-//     walk. Each orbit walks its members; for each member, this
-//     helper yields the reachable (s', h) pairs; the caller
-//     projects s' back to its orbit index.
-//   * The future ``make_cpu_symmetry_backend`` CSR cache. Builds a
-//     sparse representation by emitting all ``<s'|H|s>`` for every
-//     orbit representative s.
-//   * The future ``apply_term_to_state_gpu`` device-side twin in
-//     ``term_kernels_gpu.cuh`` (which the unified ``apply_terms_gpu``
-//     kernel already inlines, but the device twin exists for any
-//     device-side single-state emit work, e.g. NCCL halo packers).
+// Used by the representative-symmetry kernels below, the reduced-CSR
+// builder (reduced_symmetry_csr.h) and Operator's single-state queries.
 //
 // Pure function on its inputs; thread-safe by construction (callback
 // owns side effects). The callback is invoked sequentially -- callers
@@ -856,162 +793,6 @@ inline void apply_terms_rep_symmetry_gather(
             * acc;
         if (use_cache) row += diag_cache[r] * in[r];
         out[r] = row;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// apply_terms_gather_symmetry -- the lock-free GATHER twin of the orbit-walk
-// scatter ``apply_terms`` for the ``SymmetryBasisPolicy`` lane (sym without
-// fixed-Sz, or the eager orbit-CSR path).
-//
-// "Optimized symmetry ED" plan, Phase D. The scatter computes, for a SOURCE
-// orbit ``r`` walked over its members ``t`` (coefficient alpha_{t,r}):
-//   out[dst] += in[r] * emitted,   emitted = (alpha_{t,r}/norm_r) * h(t->t')
-//                                          * conj(beta_{t',dst})*group_norm/norm_dst
-// where ``dst = index_of(t')`` and the projection factor is exactly
-// ``coeff_modifier(t, t', r, dst)``. By Hermiticity (H[r,dst] = conj(H[dst,r])):
-//   out[r] = sum over orbit_r members t, terms:  conj(emitted) * in[dst].
-//
-// So the gather row kernel runs the IDENTICAL orbit walk + term emit as the
-// scatter (treating ``r`` as the source, ``coeff_in`` dropped), and instead of
-// an atomic scatter to ``out[dst]`` accumulates ``conj(emitted) * in[dst]`` in
-// a register, then writes ``out[r]`` exactly once. NO atomics, NO radix sort,
-// NO thread-local buffer, NO pre-zero. Provably equal to ``apply_terms`` and
-// pinned by the symmetry-backend parity tests.
-// ---------------------------------------------------------------------------
-template <
-    class BasisPolicy,
-    class Scalar,
-    class DiagOneBodyVec,
-    class OffDiagOneBodyVec,
-    class DiagTwoBodyVec,
-    class MixedTwoBodyVec,
-    class OffDiagTwoBodyVec,
-    class ThreeBodyVec>
-inline void apply_terms_gather_symmetry(
-    BasisPolicy              basis,
-    double                   spin_l,
-    const DiagOneBodyVec&    diag_one_body,
-    const OffDiagOneBodyVec& offdiag_one_body,
-    const DiagTwoBodyVec&    diag_two_body,
-    const MixedTwoBodyVec&   mixed_two_body,
-    const OffDiagTwoBodyVec& offdiag_two_body,
-    const ThreeBodyVec&      three_body,
-    const Scalar* __restrict__ in,
-    Scalar*       __restrict__ out)
-{
-    static_assert(BasisPolicy::needs_orbit_walk && BasisPolicy::has_coeff_modifier,
-                  "apply_terms_gather_symmetry is for orbit-walk symmetry policies");
-    const uint64_t dim     = basis.dim();
-    const double   spin_sq = spin_l * spin_l;
-
-#ifdef _OPENMP
-    const uint64_t par_threshold =
-        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
-#else
-    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
-#endif
-
-    #pragma omp parallel for schedule(static) if(dim > par_threshold)
-    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
-        const uint64_t r = static_cast<uint64_t>(ir);
-        Scalar acc = Scalar(0);
-
-        // Accumulate conj(emitted) * in[dst] for one connected (dst, s') pair.
-        auto gather_emit = [&](uint64_t dst_idx, uint64_t s_prime,
-                               uint64_t basis_state, const Scalar& base_contrib) {
-            const Scalar mod = basis.template coeff_modifier<Scalar>(
-                basis_state, s_prime, r, dst_idx);
-            acc += conj_scalar<Scalar>(base_contrib * mod) * in[dst_idx];
-        };
-
-        // process_source mirrors apply_terms exactly, with coeff = pre_phase
-        // (NO in[r] factor) and the scatter replaced by the gather accumulate.
-        auto process_source = [&](uint64_t basis_state,
-                                  std::complex<double> pre_phase) {
-            const Scalar coeff = coerce_coeff<Scalar>(pre_phase);
-            if (std::abs(coeff) < 1e-15) return;
-
-            // 1. One-body diagonal (Sz_k): s -> s, dst == r.
-            for (const auto& t : diag_one_body) {
-                const double sign =
-                    ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
-                const Scalar contrib =
-                    coerce_coeff<Scalar>(t.coefficient) * spin_l * sign * coeff;
-                gather_emit(r, basis_state, basis_state, contrib);
-            }
-            // 2. One-body off-diagonal (S+/S-): flip one bit.
-            for (const auto& t : offdiag_one_body) {
-                const uint64_t bit = (basis_state >> t.site_index) & 1;
-                if (bit == t.op_type) continue;
-                const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
-                const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
-                const int64_t j = basis.index_of(new_state);
-                if (j < 0) continue;
-                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
-            }
-            // 3. Two-body purely diagonal (Sz_i Sz_j): s -> s, dst == r.
-            for (const auto& t : diag_two_body) {
-                const double sa = ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                const double sb = ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
-                const Scalar contrib =
-                    coerce_coeff<Scalar>(t.coefficient) * spin_sq * sa * sb * coeff;
-                gather_emit(r, basis_state, basis_state, contrib);
-            }
-            // 4. Two-body mixed (Sz S+/-): flip one bit.
-            for (const auto& t : mixed_two_body) {
-                const uint64_t flip_bit = (basis_state >> t.flip_site) & 1;
-                if (flip_bit == t.flip_op_type) continue;
-                const double sz_sign = ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
-                const uint64_t new_state = basis_state ^ (1ULL << t.flip_site);
-                const Scalar contrib =
-                    coerce_coeff<Scalar>(t.coefficient) * spin_l * sz_sign * coeff;
-                const int64_t j = basis.index_of(new_state);
-                if (j < 0) continue;
-                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
-            }
-            // 5. Two-body off-diagonal (S+- S+-): flip two bits, both gated.
-            for (const auto& t : offdiag_two_body) {
-                const uint64_t b1 = (basis_state >> t.site_index_1) & 1;
-                const uint64_t b2 = (basis_state >> t.site_index_2) & 1;
-                if (b1 == t.op_type_1 || b2 == t.op_type_2) continue;
-                const uint64_t new_state =
-                    basis_state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-                const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
-                const int64_t j = basis.index_of(new_state);
-                if (j < 0) continue;
-                gather_emit(static_cast<uint64_t>(j), new_state, basis_state, contrib);
-            }
-            // 6. Three-body (general).
-            for (const auto& t : three_body) {
-                uint64_t cur_state = basis_state;
-                Scalar   scalar    = coerce_coeff<Scalar>(t.coefficient);
-                bool     valid     = true;
-                auto gate = [&](std::uint8_t op_type, std::uint64_t site) {
-                    if (!valid) return;
-                    if (op_type == kOpSz) {
-                        const double sg = ((cur_state >> site) & 1) ? -1.0 : 1.0;
-                        scalar *= spin_l * sg;
-                    } else {
-                        const uint64_t b = (cur_state >> site) & 1;
-                        if (b != op_type) cur_state ^= (1ULL << site);
-                        else              valid = false;
-                    }
-                };
-                gate(t.op_type_1, t.site_index_1);
-                gate(t.op_type_2, t.site_index_2);
-                gate(t.op_type_3, t.site_index_3);
-                if (!valid) continue;
-                if (std::abs(scalar) < 1e-15) continue;
-                const Scalar contrib = scalar * coeff;
-                const int64_t j = basis.index_of(cur_state);
-                if (j < 0) continue;
-                gather_emit(static_cast<uint64_t>(j), cur_state, basis_state, contrib);
-            }
-        };
-
-        basis.iter_orbit(r, process_source);
-        out[r] = acc;
     }
 }
 

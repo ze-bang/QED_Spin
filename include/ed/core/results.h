@@ -58,7 +58,6 @@ struct BackendMetadata {
     /// One of: "cpu", "gpu". Set by the orchestrator
     /// when constructing the result.
     std::string  lane         = "cpu";
-    std::size_t  mpi_size     = 1;
     std::size_t  cuda_devices = 0;
     double       wall_seconds = 0.0;
     /// Free-form key=value diagnostics (e.g. memory hwm, reorth count).

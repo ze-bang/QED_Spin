@@ -22,11 +22,10 @@
 // coherent and instantiable as a standalone library object.
 //
 // The three host cells:
-//   * cell 1H (Full)              -- FullBasisPolicy
-//   * cell 2H (FixedSz)           -- FixedSzBasisPolicy
-//   * cell 3H/4H (Symmetry / +Sz) -- SymmetryBasisPolicy (orbit-walk lane;
-//                                    needs_orbit_walk==true compiles out the
-//                                    CSR + real-fast-path branches)
+//   * cell 1H (Full)        -- FullBasisPolicy
+//   * cell 2H (FixedSz)     -- FixedSzBasisPolicy
+//   * cell 5H (RepSymmetry) -- RepSymmetryBasisPolicy (symmetry sectors, with
+//                              or without fixed Sz)
 //
 // The CUDA host cells live in cuda_matvec_backend.cuh (compiled only under
 // WITH_CUDA) -- not a CpuMatVecBackend specialization, so out of scope for

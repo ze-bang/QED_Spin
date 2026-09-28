@@ -4,30 +4,24 @@
 //
 // THE single Lanczos algorithm.
 //
-// One template-function body drives all four deployment targets in this
-// codebase (CPU, single GPU, CPU+MPI, GPU+MPI). It is parameterised on:
+// One template-function body drives both deployment targets in this
+// codebase (CPU and single GPU). It is parameterised on:
 //
 //   1. A `Backend` (from `ed/matvec/backend.h`) that provides the
-//      linear-algebra plane: alloc, dot/axpy/scale/nrm2, batched
-//      dot_many/axpy_many for CGS2 reorth, and the no-op-or-Allreduce
-//      reductions that turn a single-process kernel into a distributed
-//      kernel without touching the algorithm body.
+//      linear-algebra plane: alloc, dot/axpy/scale/nrm2 and batched
+//      dot_many/axpy_many for CGS2 reorth.
 //   2. A `MatvecFn` callable (`void(const Complex*, Complex*, size_t)`)
-//      that knows how to apply H to a rank-local slab. The callable
-//      hides any halo exchange / cuBLAS handle / NCCL stream wiring
-//      from the kernel.
+//      that knows how to apply H to a vector. The callable hides any
+//      cuBLAS handle / stream wiring from the kernel.
 //
-// Algorithmic features (matching the previous serial canonical body
-// `build_lanczos_tridiagonal_with_basis` in src/solvers/cpu/lanczos.cpp,
-// modulo the upgrade from sequential MGS to batched CGS2):
+// Algorithmic features:
 //
 //   * Three-term Lanczos recurrence with swap-rotated working vectors
 //     (no per-iter memcpy).
 //   * Optional full reorthogonalisation via classical Gram-Schmidt 2
 //     (CGS2). CGS2 has the same numerical quality as modified
-//     Gram-Schmidt but uses ONE batched Allreduce per pass instead of
-//     M sequential Allreduces --- the headline performance win for
-//     CPU-MPI and (in Phase B) GPU-MPI Lanczos.
+//     Gram-Schmidt but batches the M projections of each pass into one
+//     dot_many / axpy_many call.
 //   * Optional periodic reorthogonalisation (every `reorth_freq`
 //     iterations) on the same CGS2 path.
 //   * Breakdown detection via beta < tol.
@@ -79,8 +73,7 @@ enum class ReorthPolicy : std::uint8_t {
     None,
     /// Full reorth against every stored basis vector via classical
     /// Gram-Schmidt 2 (CGS2). Requires `keep_basis = true` and
-    /// O(M^2 * local_n) work + one Allreduce per pass per step in
-    /// the distributed case (2 Allreduces per step for CGS2).
+    /// O(M^2 * local_n) work (two batched passes per step).
     FullCGS2,
     /// Periodic reorth (every `reorth_freq` steps) using the CGS2
     /// machinery. Same arithmetic as Full but skipped on most steps.
@@ -134,21 +127,11 @@ struct LanczosKernelOptions {
     /// Genuine-invariant-subspace breakdown threshold on beta_{j+1}.
     /// Default is the smallest value for which `1/bnext` is still
     /// representable (so we only break when w is mathematically zero,
-    /// not just numerically small).
-    ///
-    /// Rationale: the *user-facing* `tol` in legacy entry points
-    /// (`build_lanczos_tridiagonal_with_basis(..., tol, ...)`) is a
-    /// Ritz-convergence parameter, NOT a breakdown threshold. The
-    /// legacy MGS-once code conflated the two: it broke when
-    /// `||w|| < tol`, but at full Krylov dimension the MGS noise
-    /// floor (~1e-10) sat above the typical tol=1e-12, so it never
-    /// triggered. CGS2 has a much lower noise floor (~1e-14), so the
-    /// same threshold would break early -- and the resulting Ritz
-    /// truncation would corrupt downstream observables (LTLM static-
-    /// connected-Q-H test). The kernel decouples the two: Ritz
-    /// convergence is handled by the `convergence_check` callback
-    /// below; `breakdown_tol` (this field) is *only* the
-    /// invariant-subspace detection threshold.
+    /// not just numerically small). Ritz convergence is a separate
+    /// test, handled by the `convergence_check` callback below;
+    /// `breakdown_tol` (this field) is *only* the invariant-subspace
+    /// detection threshold. Callers that want the bare recurrence to
+    /// stop on a small residual (||w|| < tol) set it explicitly.
     double      breakdown_tol = 1e-300;
 
     ReorthPolicy reorth  = ReorthPolicy::FullCGS2;
@@ -258,7 +241,7 @@ struct LanczosKernelOptions {
     /// non-empty AND `reorth != ReorthPolicy::None` causes the kernel
     /// to project against `aux_ortho_ptrs` ∪ basis_ptrs on every CGS2
     /// pass via the same batched `dot_many` / `axpy_many` primitives;
-    /// the per-step Allreduce count is unchanged (still 2 per step in
+    /// the per-step batched call count is unchanged (still 2 per step in
     /// the CGS2 case — one per pass over the combined set).
     ///
     /// Contract on `v0_local`: the kernel takes v0 AS-IS as the first
@@ -319,8 +302,7 @@ struct LanczosKernelResult {
     /// Diagonal of the tridiagonal matrix, size = `iters_done`.
     std::vector<double>              alpha;
     /// Sub-diagonal of the tridiagonal matrix, size = `iters_done + 1`.
-    /// `beta[0]` is unused (kept for legacy index alignment with the
-    /// classic `build_lanczos_tridiagonal_with_basis` ABI).
+    /// `beta[0]` is unused, so `beta[j]` couples `alpha[j-1]` and `alpha[j]`.
     std::vector<double>              beta;
     /// Orthonormal Krylov basis in backend memory. Each vector is
     /// dimension `local_n`. Empty iff `opts.keep_basis == false`.
@@ -506,7 +488,7 @@ LanczosKernelResult lanczos_kernel(
     // against `aux_ortho_ptrs` ∪ basis_ptrs in a single batched
     // dot_many / axpy_many. We materialise that union once
     // (`ortho_ptrs`) and append the new basis pointer to it on each
-    // iteration; that way the batched primitives stay one Allreduce
+    // iteration; that way the batched primitives stay one call
     // per pass regardless of how the caller splits the work between
     // aux and basis.
     const std::size_t n_aux = opts.aux_ortho_ptrs.size();
@@ -570,7 +552,7 @@ LanczosKernelResult lanczos_kernel(
         //
         //   FullCGS2 / PeriodicCGS2: CGS2 against `aux_ortho_ptrs ∪
         //     basis_ptrs` (two passes; two batched dot_many +
-        //     axpy_many = two Allreduces per step).
+        //     axpy_many per step).
         //
         //   LocalDGKS3: pointwise `dot`/`axpy` against the ring
         //     buffer of up to local_ring_size most-recent basis

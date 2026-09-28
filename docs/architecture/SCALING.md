@@ -207,7 +207,6 @@ them in your run script, not mid-run.
 
 | Env var | Default | What it does |
 |---|---|---|
-| `ED_LANCZOS_VERBOSE` | `0` | Per-iteration progress prints inside Lanczos. Useful when debugging convergence; floods stdout in production (FTLM/TPQ call Lanczos hundreds of times). |
 
 ---
 

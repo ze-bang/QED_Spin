@@ -174,10 +174,9 @@ py::dict ed_results_to_dict(const EDResults& r) {
 //   auto_method       SolveMethod::Auto regardless of `method` (Python `method=None`).
 //   wire_backend      map use_gpu / use_mpi onto the backend constraints (device='cpu' must pin the CPU; a GPU the
 //                     Python side already chose is not second-guessed by the C++ dimension floor).
-//   allow_infeasible  skip the orchestrator's up-front feasibility refusal.
 ed::workflows::SolveOptions
 ed_params_to_solve_options(const EDParameters& params, ::DiagonalizationMethod method, bool auto_method,
-                           bool wire_backend, bool allow_infeasible) {
+                           bool wire_backend) {
     ed::workflows::SolveOptions opts;
     opts.num_eigs        = static_cast<std::size_t>(params.num_eigenvalues);
     // The EDParameters default max_iterations means "not set": let the orchestrator choose (passing it through makes
@@ -205,7 +204,6 @@ ed_params_to_solve_options(const EDParameters& params, ::DiagonalizationMethod m
         opts.backend.allow_mpi = params.use_mpi;
         if (params.use_gpu) opts.backend.gpu_dim_floor = 0;
     }
-    opts.allow_infeasible = allow_infeasible;
 
     opts.use_fixed_sz          = params.use_fixed_sz;
     opts.use_symmetry          = params.use_symmetry;
@@ -288,8 +286,6 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("tpq_energy_shift",         &EDParameters::tpq_energy_shift)
         .def_readwrite("tpq_fp32",                 &EDParameters::tpq_fp32)
         .def_readwrite("tpq_beta_max",             &EDParameters::tpq_beta_max)
-        .def_readwrite("tpq_delta_beta",           &EDParameters::tpq_delta_beta)
-        .def_readwrite("tpq_taylor_order",         &EDParameters::tpq_taylor_order)
         .def_readwrite("tpq_continue",             &EDParameters::tpq_continue)
         .def_readwrite("tpq_continue_sample",      &EDParameters::tpq_continue_sample)
         .def_readwrite("tpq_continue_beta",        &EDParameters::tpq_continue_beta)
@@ -348,7 +344,6 @@ void bind_dispatcher(py::module_& m) {
           py::arg("method"),
           py::arg("auto_method"),
           py::arg("wire_backend"),
-          py::arg("allow_infeasible"),
           "Translate an EDParameters bag + DiagonalizationMethod into "
           "ed::workflows::SolveOptions.");
 

@@ -323,7 +323,6 @@ public:
     static constexpr bool may_leave_basis    = true;
     static constexpr bool needs_orbit_walk   = true;
     static constexpr bool has_coeff_modifier = true;
-    static constexpr bool is_distributed     = false;
 
     // =================================================================
     // CSR-FREE lazy rep mode (operator-collapse Phase 4: folded down from

@@ -26,17 +26,16 @@ class _ProjectLaneBackend:
     ``select_backend`` fills). The project lane has no such struct -- the
     little-group engine is its own CPU engine with an optional GPU rep-gather
     -- so it reports the engine's OWN answer here. Same duck-type
-    (``.lane`` / ``.mpi_size``) as the abelian one, so callers need not branch.
+    (``.lane``) as the abelian one, so callers need not branch.
     """
 
-    __slots__ = ("lane", "mpi_size")
+    __slots__ = ("lane",)
 
-    def __init__(self, lane: str, mpi_size: int = 1):
+    def __init__(self, lane: str):
         self.lane = lane
-        self.mpi_size = mpi_size
 
     def __repr__(self) -> str:      # pragma: no cover - diagnostics only
-        return f"Backend(lane={self.lane!r}, mpi_size={self.mpi_size})"
+        return f"Backend(lane={self.lane!r})"
 
 
 # ---------------------------------------------------------------------------

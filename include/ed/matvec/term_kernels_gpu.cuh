@@ -2,16 +2,13 @@
 // =============================================================================
 // include/ed/matvec/term_kernels_gpu.cuh
 //
-// Phase 1 of the "Unified CPU/GPU symmetry architecture" plan
-// (May 2026). CUDA twin of ``ed::matvec::kernel::apply_terms``.
+// CUDA twin of ``ed::matvec::kernel::apply_terms``.
 //
-// One device kernel template -- ``apply_terms_gpu_scatter`` -- handles
-// every (BasisPolicy, Scalar) pair: full Hilbert, fixed Sz, symmetry,
-// fixed-Sz+symmetry, and (with no kernel changes) the future
-// distributed-policy compositions. The orbit-walk and coeff-modifier
-// branches are gated on the same compile-time traits as the CPU twin
-// (``BasisPolicy::needs_orbit_walk`` / ``has_coeff_modifier`` /
-// ``may_leave_basis`` / ``is_distributed``), so trivial policies emit
+// ``apply_terms_gpu_scatter`` handles the full-Hilbert and fixed-Sz
+// (BasisPolicy, Scalar) pairs; the representative kernels below handle
+// the symmetry sectors. The coeff-modifier and leave-basis branches are
+// gated on the same compile-time traits as the CPU twin
+// (``has_coeff_modifier`` / ``may_leave_basis``), so trivial policies emit
 // the same instruction sequence the bespoke per-bin kernels did.
 //
 // Term storage is uploaded once at construct time and consumed as a
@@ -196,7 +193,7 @@ struct ScalarTraits<double> {
 //
 // This is the shared term-walk body extracted (verbatim) from the former
 // ``process_source`` lambda inside ``apply_terms_gpu_scatter`` so that the
-// orbit-CSR kernel and the on-the-fly representative kernel
+// trivial-policy kernel and the on-the-fly representative kernel
 // (``apply_terms_rep_symmetry_scatter``) drive IDENTICAL term logic -- the
 // only thing that differs between them is how the source state(s) and the
 // ``pre_phase`` are produced, and how the destination index + projection
@@ -395,11 +392,9 @@ __device__ __forceinline__ void process_source_terms(
 // THE KERNEL.
 //
 // One thread per input state ``i``. For each term, accumulate
-// contributions and atomicAdd into the output. Compile-time branches:
+// contributions and atomicAdd into the output (one computational state per
+// row: the Full / FixedSz policies). Compile-time branches:
 //
-//   * ``BasisPolicy::needs_orbit_walk`` -- gates ``iter_orbit`` (the
-//     symmetry policies sweep |G| computational states per orbit
-//     representative).
 //   * ``BasisPolicy::has_coeff_modifier`` -- gates the per-emit
 //     phase-from-projection multiplier (symmetry policies pre-bake it
 //     into the hash; trivial policies elide the multiply entirely).
@@ -418,6 +413,8 @@ __global__ void apply_terms_gpu_scatter(
     const Scalar* __restrict__ in,
     Scalar*       __restrict__ out)
 {
+    static_assert(!BasisPolicy::needs_orbit_walk,
+                  "apply_terms_gpu_scatter applies H to one state per row");
     using ST = ScalarTraits<Scalar>;
     const std::uint64_t dim = basis.dim();
     const std::uint64_t i =
@@ -427,32 +424,9 @@ __global__ void apply_terms_gpu_scatter(
     const Scalar coeff_in = in[i];
     if (ST::abs2(coeff_in) < 1e-30) return;  // skip negligible amplitudes
 
-    if constexpr (BasisPolicy::needs_orbit_walk) {
-        // Symmetry policies sweep |orbit(i)| computational states.
-        // The device-side iter_orbit is provided by the symmetry policy
-        // and is a CSR walk over the pre-uploaded orbit table.
-        const std::uint32_t off_begin = basis.orbit_offsets[i];
-        const std::uint32_t off_end   = basis.orbit_offsets[i + 1];
-        // Phase I: orbit_inv_norms[i] == 1/norm_i (pre-baked at
-        // ``GpuSectorMirror`` construction). Saves one fdiv per
-        // launched orbit walk vs. the legacy ``1.0 / norm_i``.
-        const double inv_norm_i = basis.orbit_inv_norms[i];
-
-        for (std::uint32_t off = off_begin; off < off_end; ++off) {
-            const std::uint64_t s = basis.orbit_elements[off];
-            const cuDoubleComplex alpha_s = basis.orbit_coefficients[off];
-            // pre_phase = alpha_s / norm_i
-            const cuDoubleComplex pre_phase = make_cuDoubleComplex(
-                cuCreal(alpha_s) * inv_norm_i,
-                cuCimag(alpha_s) * inv_norm_i);
-            process_source_terms<BasisPolicy, Scalar>(
-                basis, spin_l, terms, s, pre_phase, coeff_in, i, out);
-        }
-    } else {
-        process_source_terms<BasisPolicy, Scalar>(
-            basis, spin_l, terms, basis.state_of(i),
-            make_cuDoubleComplex(1.0, 0.0), coeff_in, i, out);
-    }
+    process_source_terms<BasisPolicy, Scalar>(
+        basis, spin_l, terms, basis.state_of(i),
+        make_cuDoubleComplex(1.0, 0.0), coeff_in, i, out);
 }
 
 // ---------------------------------------------------------------------------

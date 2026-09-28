@@ -183,7 +183,6 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                   std::vector<ed::ThermalSectorEntry> per_sector;
                   double gs_E = std::numeric_limits<double>::infinity();
                   std::string sector_lane;
-                  std::size_t sector_mpi_size = 1;
 
                   for (long ii = 0; ii < n_ops; ++ii) {
                       const std::size_t i = static_cast<std::size_t>(ii);
@@ -197,7 +196,6 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                       if (sector_lane.empty()
                           && !tr.backend.lane.empty()) {
                           sector_lane     = tr.backend.lane;
-                          sector_mpi_size = tr.backend.mpi_size;
                       }
                       if (tr.thermo.temperatures.empty()) {
                           if (std::isfinite(tr.ground_state_energy))
@@ -258,7 +256,6 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                   agg.ground_state_energy = std::isfinite(gs_E) ? gs_E : 0.0;
                   if (!sector_lane.empty()) {
                       agg.backend.lane     = sector_lane;
-                      agg.backend.mpi_size = sector_mpi_size;
                   }
               }
               return agg;

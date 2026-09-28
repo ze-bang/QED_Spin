@@ -148,8 +148,6 @@ struct ThermalOptions {
     std::size_t tpq_num_measure_points = 100;
     std::optional<double> tpq_measure_beta_min = std::nullopt;
     std::optional<double> tpq_measure_beta_max = std::nullopt;
-    double      tpq_delta_beta        = 0.05;
-    std::size_t tpq_taylor_order      = 8;
     std::size_t tpq_measurement_interval = 1;
     double      tpq_energy_shift      = 0.0;
     /// Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):

@@ -244,12 +244,6 @@ struct RepSymmetryBasisPolicy {
     static constexpr bool may_leave_basis    = true;
     static constexpr bool needs_orbit_walk   = false;
     static constexpr bool has_coeff_modifier = true;
-    static constexpr bool is_distributed     = false;
-
-    [[nodiscard]] inline bool is_local(std::uint64_t /*g*/) const noexcept {
-        return true;
-    }
-    [[nodiscard]] inline std::uint64_t local_offset() const noexcept { return 0; }
 };
 
 }  // namespace ed::matvec::basis

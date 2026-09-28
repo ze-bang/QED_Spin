@@ -4,8 +4,6 @@
 #include <ed/io/lanczos_basis_buffer.h>
 #include <ed/io/lanczos_checkpoint.h>
 #include <ed/io/lanczos_reorth.h>
-#include <ed/krylov/block_lanczos_kernel.h>
-#include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/fused_blas1.h>
@@ -76,38 +74,6 @@ inline bool ed_use_complex_lanczos_seed() {
     return ed::env::flag("ED_LANCZOS_COMPLEX_SEED", false);
 }
 
-// Per-iteration progress prints inside the Lanczos inner loops are useful for
-// development but flood stdout in production runs where Lanczos is called
-// hundreds of times (FTLM, TPQ, NLCE pipelines). Gate them behind a single
-// env var so the default is quiet but the chatter can be re-enabled when
-// debugging convergence or breakdown issues.
-inline bool ed_lanczos_verbose() {
-    static const bool v = []() {
-        return ed::env::flag("ED_LANCZOS_VERBOSE", false);
-    }();
-    return v;
-}
-
-ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
-    ComplexVector v(N);
-
-    if (ed_use_complex_lanczos_seed()) {
-        for (int i = 0; i < N; i++) {
-            v[i] = Complex(dist(gen), dist(gen));
-        }
-    } else {
-        for (int i = 0; i < N; i++) {
-            v[i] = Complex(dist(gen), 0.0);
-        }
-    }
-
-    double norm = cblas_dznrm2(N, v.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v.data(), 1);
-
-    return v;
-}
-
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     // i.i.d. standard complex Gaussian: real and imag parts ~ N(0, 1), then
     // L2-normalise. This produces an isotropic random vector on the complex
@@ -124,21 +90,6 @@ ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     cblas_zscal(N, &scale_factor, v.data(), 1);
     return v;
 }
-
-// generateOrthogonalVector (random vector Gram-Schmidt-orthogonalized
-// against a provided set) was deleted in the debt-cleanup sweep
-// (Jul 2026): zero callers.
-
-// Helper function to refine a single eigenvector with CG
-// refine_eigenvector_with_cg and refine_degenerate_eigenvectors were
-// retired in the minimalist-architecture rev (May 2026): no external
-// caller and the only internal user, orthogonalize_degenerate_subspace,
-// was deleted alongside them. The refinement step is unnecessary because
-// the Lanczos / Block-Lanczos kernels already produce orthonormal Ritz
-// vectors and the workflows that need degenerate-cluster handling go
-// through Krylov-Schur. To re-introduce, copy the CG / projected-power
-// implementations from git history.
-
 
 ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N) {
     // Fast path: in-memory buffer. This is the normal case once a solver has
@@ -246,172 +197,10 @@ void diagonalize_tridiagonal_ritz(
     }
 }
 
-// Build Lanczos tridiagonal with optional basis storage
-//
-// Krylov-kernel unification (Phase A, May 2026): when ``full_reorth ==
-// true`` we delegate to the single unified ``ed::krylov::lanczos_kernel``
-// so the canonical CPU FTLM / Lanczos all benefit from the
-// batched CGS2 reorth (M Allreduces -> 1 in the future MPI path, and a
-// single OMP pass per CGS2 step instead of M serial dot/axpy round-trips
-// on CPU). The legacy three-vector / periodic-reorth branches below
-// stay in place for callers who do not want full reorth.
-int build_lanczos_tridiagonal_with_basis(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& v0,
-    uint64_t N,
-    uint64_t max_iter,
-    double tol,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    std::vector<double>& alpha,
-    std::vector<double>& beta,
-    std::vector<ComplexVector>* basis_vectors
-) {
-    // ------------------------------------------------------------------
-    // Fast path: full reorth + basis requested goes through the new
-    // unified kernel. Conditions for the fast path:
-    //   * full_reorth is on (we want CGS2 anyway), and
-    //   * caller asked for the basis to be retained (otherwise reorth
-    //     is impossible regardless of which kernel we use).
-    // ------------------------------------------------------------------
-    if (full_reorth && basis_vectors != nullptr) {
-        ed::krylov::LanczosKernelOptions opts;
-        opts.max_iter     = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
-        opts.reorth       = ed::krylov::ReorthPolicy::FullCGS2;
-        opts.keep_basis   = true;
-        // `tol` from the legacy ABI is the Ritz convergence threshold,
-        // which the kernel routes through `opts.convergence_check`.
-        // The legacy MGS body never actually checked Ritz convergence
-        // (it only broke on ||w|| < tol — which CGS2 handles via
-        // `breakdown_tol`); preserve that "run to max_iter" behaviour
-        // by NOT setting convergence_check here.
-        (void)tol;
-
-        const auto& be = ed::matvec::default_cpu_backend();
-
-        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
-            H(in, out, static_cast<int>(n));
-        };
-
-        auto result = ed::krylov::lanczos_kernel(
-            be, matvec,
-            static_cast<std::size_t>(N),
-            v0.data(),
-            opts);
-
-        // Translate the result back to the legacy ABI:
-        //   alpha / beta returned by reference,
-        //   basis_vectors as std::vector<ComplexVector>.
-        //
-        // Wave C4 / B5 (May 2026): pool-aware. Resize the destination
-        // to ``result.basis.size()`` instead of clear+reserve+
-        // emplace_back -- this preserves existing inner ComplexVector
-        // heap allocations when the caller re-uses ``basis_vectors``
-        // across calls (e.g. across FTLM samples or cross-irrep
-        // pairs). When the destination is shorter than needed we
-        // append fresh entries; when it's longer we drop the tail.
-        alpha = std::move(result.alpha);
-        beta  = std::move(result.beta);
-        const std::size_t need = result.basis.size();
-        if (basis_vectors->size() > need) {
-            basis_vectors->resize(need);
-        }
-        basis_vectors->reserve(need);
-        const std::size_t reuse = std::min(basis_vectors->size(), need);
-        for (std::size_t i = 0; i < reuse; ++i) {
-            (*basis_vectors)[i].resize(static_cast<std::size_t>(N));
-            std::memcpy((*basis_vectors)[i].data(), result.basis[i].get(),
-                        static_cast<std::size_t>(N) * sizeof(Complex));
-        }
-        for (std::size_t i = reuse; i < need; ++i) {
-            ComplexVector v(static_cast<std::size_t>(N));
-            std::memcpy(v.data(), result.basis[i].get(),
-                        static_cast<std::size_t>(N) * sizeof(Complex));
-            basis_vectors->emplace_back(std::move(v));
-        }
-        return static_cast<int>(alpha.size());
-    }
-
-    // ------------------------------------------------------------------
-    // Non-full-reorth / no-basis path. Krylov-unification (Jun 2026): this
-    // used to be a hand-rolled three-term recurrence. It now routes through
-    // the SAME `ed::krylov::lanczos_kernel<CpuBackend>` as the fast path
-    // above, mapping the legacy ABI flags onto a `ReorthPolicy`:
-    //
-    //   * full_reorth && basis==nullptr  -> None  (reorth impossible without
-    //         a stored basis; legacy warned once and ran the bare recurrence)
-    //   * !full_reorth && reorth_freq>0 && basis!=nullptr -> PeriodicCGS2
-    //         (the legacy threshold-MGS periodic reorth, upgraded to CGS2 to
-    //          match the fast path's numerics)
-    //   * otherwise                       -> None  (pure three-term)
-    //
-    // The legacy `tol` is a Ritz-convergence parameter that the old body
-    // (incorrectly) reused as a ||w||<tol breakdown threshold; we preserve
-    // that exact termination by routing `tol` to `breakdown_tol` here. (The
-    // fast path above leaves breakdown at its ~exact-zero default, matching
-    // its own historical "run to max_iter" behaviour.)
-    // ------------------------------------------------------------------
-    {
-        using ed::krylov::ReorthPolicy;
-        ed::krylov::LanczosKernelOptions opts;
-        opts.max_iter   = static_cast<std::size_t>(std::min<uint64_t>(N, max_iter));
-        opts.keep_basis = (basis_vectors != nullptr);
-        opts.breakdown_tol = tol;
-
-        if (full_reorth) {
-            // basis_vectors == nullptr here (the full_reorth+basis case took
-            // the fast path above and returned).
-            std::cerr << "Warning: full_reorthogonalization requested but "
-                      << "basis_vectors == nullptr. Reorthogonalization "
-                      << "will be silently skipped — eigenvalues may have "
-                      << "spurious duplicates." << std::endl;
-            opts.reorth = ReorthPolicy::None;
-        } else if (reorth_freq > 0 && basis_vectors != nullptr) {
-            opts.reorth      = ReorthPolicy::PeriodicCGS2;
-            opts.reorth_freq = static_cast<std::size_t>(reorth_freq);
-        } else {
-            opts.reorth = ReorthPolicy::None;
-        }
-
-        const auto& be = ed::matvec::default_cpu_backend();
-        auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
-            H(in, out, static_cast<int>(n));
-        };
-        auto result = ed::krylov::lanczos_kernel(
-            be, matvec, static_cast<std::size_t>(N), v0.data(), opts);
-
-        alpha = std::move(result.alpha);
-        beta  = std::move(result.beta);
-
-        if (basis_vectors != nullptr) {
-            // Pool-aware translate-back (mirrors the fast path): reuse the
-            // overlapping prefix's heap allocations, append the remainder.
-            const std::size_t need = result.basis.size();
-            if (basis_vectors->size() > need) basis_vectors->resize(need);
-            basis_vectors->reserve(need);
-            const std::size_t reuse = std::min(basis_vectors->size(), need);
-            for (std::size_t i = 0; i < reuse; ++i) {
-                (*basis_vectors)[i].resize(static_cast<std::size_t>(N));
-                std::memcpy((*basis_vectors)[i].data(), result.basis[i].get(),
-                            static_cast<std::size_t>(N) * sizeof(Complex));
-            }
-            for (std::size_t i = reuse; i < need; ++i) {
-                ComplexVector v(static_cast<std::size_t>(N));
-                std::memcpy(v.data(), result.basis[i].get(),
-                            static_cast<std::size_t>(N) * sizeof(Complex));
-                basis_vectors->emplace_back(std::move(v));
-            }
-        }
-        return static_cast<int>(alpha.size());
-    }
-}
-
 void estimate_spectral_bounds(
     std::function<void(const Complex*, Complex*, int)> H,
     uint64_t dim,
     int krylov_dim,
-    bool full_reorth,
-    int reorth_freq,
     double tol,
     std::mt19937& gen,
     double& e_min,
@@ -445,15 +234,23 @@ void estimate_spectral_bounds(
 
     ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
 
-    std::vector<double> alpha, beta;
-    const int M_lanc = build_lanczos_tridiagonal_with_basis(
-        H, v0, dim,
-        static_cast<uint64_t>(krylov_dim),
-        tol, full_reorth,
-        static_cast<uint64_t>(reorth_freq),
-        alpha, beta, /*basis_vectors=*/nullptr);
+    // Bare three-term recurrence (extreme Ritz values converge first and are
+    // robust without reorthogonalization), stopping when ||w|| < tol.
+    ed::krylov::LanczosKernelOptions opts;
+    opts.max_iter      = static_cast<std::size_t>(krylov_dim);
+    opts.reorth        = ed::krylov::ReorthPolicy::None;
+    opts.keep_basis    = false;
+    opts.breakdown_tol = tol;
+    auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+        H(in, out, static_cast<int>(n));
+    };
+    auto result = ed::krylov::lanczos_kernel(
+        ed::matvec::default_cpu_backend(), matvec,
+        static_cast<std::size_t>(dim), v0.data(), opts);
+    std::vector<double> alpha = std::move(result.alpha);
+    std::vector<double> beta  = std::move(result.beta);
 
-    if (M_lanc == 0)
+    if (alpha.empty())
         throw std::runtime_error("estimate_spectral_bounds: Lanczos produced 0 iterations");
 
     std::vector<double> ritz, weights;
@@ -1499,67 +1296,8 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
               << (converged ? " [converged]" : "") << std::endl;
 }
 
-// Block Lanczos algorithm for finding eigenvalues with degeneracies
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
-                   uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues,
-                   std::string dir, bool compute_eigenvectors) {
-    // Phase 2.3 orchestrator over `ed::krylov::block_lanczos_kernel<CpuBackend>`.
-    // Same contract as before (function pointer matvec, HDF5 result file,
-    // out-by-reference eigenvalues). The kernel keeps the basis in
-    // RAM via `Backend::UniqueVec`s rather than the legacy on-disk
-    // `BasisBufferScope` --- block_size is small in practice (b=4..8)
-    // so the m*b*N footprint is comparable to the single-vector
-    // Lanczos basis the disk path was originally introduced for.
-    std::cout << "Starting Block Lanczos algorithm" << std::endl;
-    eigenvalues.clear();
-
-    if (N == 0) {
-        std::cerr << "Block Lanczos: invalid Hilbert space dimension" << std::endl;
-        return;
-    }
-
-    const ed::parallel::ThreadBudgetScope budget(
-        ed::parallel::auto_threads_for_dim(N));
-
-    ed::matvec::CpuBackend backend;
-    auto matvec = [&H, N](const Complex* x, Complex* y, std::size_t /*n*/) {
-        H(x, y, static_cast<int>(N));
-    };
-
-    ed::krylov::BlockLanczosOptions opts;
-    opts.num_eigs        = static_cast<std::size_t>(std::max<uint64_t>(1, num_eigs));
-    opts.max_iter        = static_cast<std::size_t>(max_iter);
-    opts.block_size      = static_cast<std::size_t>(std::max<uint64_t>(1, block_size));
-    opts.tolerance       = tol;
-    opts.compute_vectors = compute_eigenvectors;
-    opts.output_dir      = dir;
-    opts.global_n        = N;
-
-    auto kres = ed::krylov::block_lanczos_kernel(
-        backend, matvec, static_cast<std::size_t>(N), N, opts);
-
-    eigenvalues.assign(kres.eigenvalues.begin(), kres.eigenvalues.end());
-
-    if (compute_eigenvectors) {
-        std::vector<ComplexVector> full_vectors;
-        full_vectors.reserve(kres.eigenvectors.size());
-        for (auto& dv : kres.eigenvectors) {
-            ComplexVector vec(static_cast<std::size_t>(N));
-            backend.copy_to_host(dv.get(), vec.data(),
-                                 static_cast<std::size_t>(N));
-            full_vectors.emplace_back(std::move(vec));
-        }
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_vectors, "Block Lanczos");
-    } else {
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block Lanczos");
-    }
-
-    std::cout << "Block Lanczos: completed successfully with "
-              << eigenvalues.size() << " eigenvalues" << std::endl;
-}
-
-
-// Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
+// Full diagonalization: dense LAPACK inside the dense window, matrix-free
+// Lanczos for partial requests above it.
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues, std::string dir,
                        bool compute_eigenvectors,
@@ -1935,158 +1673,4 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     }
     
     std::cout << "Full diagonalization completed successfully" << std::endl;
-}
-
-
-
-// Krylov-Schur algorithm implementation
-//
-// Phase 2.2 of the Minimalist ED Collapse (May 2026): this is now a
-// thin orchestrator over `ed::krylov::krylov_schur_kernel<CpuBackend>`.
-// All algorithmic content (per-cycle Lanczos, projected eigensolve,
-// Ritz lock + thick restart) lives in the templated kernel. The body
-// here is responsible for: seed generation, the CpuBackend matvec
-// adapter, ferrying converged eigenvectors back out of backend memory,
-// and the legacy HDF5 result file (`HDF5IO::saveDiagonalizationResults`).
-void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
-                  uint64_t num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir,
-                  bool compute_eigenvectors) {
-
-    std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
-
-    const ed::parallel::ThreadBudgetScope budget(
-        ed::parallel::auto_threads_for_dim(N));
-
-    ed::matvec::CpuBackend backend;
-    auto matvec = [&H, N](const Complex* x, Complex* y, std::size_t /*n*/) {
-        H(x, y, static_cast<int>(N));
-    };
-
-    // Random initial seed (mirrors historical behaviour).
-    std::vector<Complex> seed(static_cast<std::size_t>(N));
-    {
-        std::mt19937 gen(std::random_device{}());
-        std::uniform_real_distribution<double> dist(-1.0, 1.0);
-        for (auto& z : seed) z = Complex(dist(gen), dist(gen));
-        const double n0 = cblas_dznrm2(static_cast<int>(N), seed.data(), 1);
-        if (n0 > 0.0) {
-            const Complex inv(1.0 / n0, 0.0);
-            cblas_zscal(static_cast<int>(N), &inv, seed.data(), 1);
-        }
-    }
-
-    ed::krylov::KrylovSchurOptions kopts;
-    kopts.num_eigs        = std::max<std::size_t>(1, static_cast<std::size_t>(num_eigs));
-    kopts.max_iter        = static_cast<std::size_t>(max_iter);
-    kopts.tolerance       = tol;
-    kopts.compute_vectors = compute_eigenvectors;
-    kopts.global_n        = N;
-    kopts.output_dir      = dir;
-
-    auto kres = ed::krylov::krylov_schur_kernel(
-        backend, matvec, static_cast<std::size_t>(N),
-        seed.data(), kopts);
-
-    eigenvalues.assign(kres.eigenvalues.begin(), kres.eigenvalues.end());
-
-    if (compute_eigenvectors) {
-        std::cout << "  Computing eigenvectors..." << std::endl;
-        std::vector<ComplexVector> full_eigenvectors;
-        full_eigenvectors.reserve(kres.eigenvectors.size());
-        for (auto& dv : kres.eigenvectors) {
-            ComplexVector evec(static_cast<std::size_t>(N));
-            backend.copy_to_host(dv.get(), evec.data(),
-                                 static_cast<std::size_t>(N));
-            full_eigenvectors.emplace_back(std::move(evec));
-        }
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_eigenvectors, "Krylov-Schur");
-    } else {
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Krylov-Schur");
-    }
-
-    if (!kres.converged) {
-        std::cout << "Krylov-Schur: Maximum iterations reached without full convergence" << std::endl;
-    } else {
-        std::cout << "Krylov-Schur: Successfully computed " << eigenvalues.size() << " eigenvalues" << std::endl;
-    }
-}
-
-
-// estimate_eigenvalue_count (Chebyshev spectral-projector + stochastic
-// trace estimator) and orthogonalize_degenerate_subspace were retired
-// in the minimalist-architecture rev (May 2026): no external callers
-// and no remaining internal use. Spectrum-count / degeneracy handling
-// for the live Krylov-Schur / Block-Lanczos paths comes for free from
-// LAPACK on the projected matrix, so the standalone helpers had become
-// vestigial. To re-introduce, copy the implementations from git history.
-
-// Adaptive Spectrum Slicing Full Diagonalization with Degeneracy Preservation
-
-// ---------------------------------------------------------------------------
-// find_ground_state_lanczos: in-memory ground-state solve (energy + vector)
-// built on build_lanczos_tridiagonal_with_basis. Moved here from ltlm.cpp
-// when that file was retired (WP10 C7); body unchanged. Unlike `lanczos()`
-// it returns the Ritz vector directly to the caller instead of persisting
-// eigenvectors to disk, which is what the CLI DSSF / static-response
-// workflows need.
-// ---------------------------------------------------------------------------
-double find_ground_state_lanczos(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t N,
-    uint64_t krylov_dim,
-    double tolerance,
-    bool full_reorth,
-    uint64_t reorth_freq,
-    ComplexVector& ground_state
-) {
-    std::cout << "  Finding ground state via Lanczos...\n";
-
-    // Generate random initial vector using helper function
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    ComplexVector v0 = generateRandomVector(N, gen, dist);
-
-    // Build Lanczos tridiagonal with basis storage
-    std::vector<double> alpha, beta;
-    std::vector<ComplexVector> lanczos_vectors;
-    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
-        H, v0, N, krylov_dim, tolerance,
-        full_reorth, reorth_freq,
-        alpha, beta, &lanczos_vectors
-    );
-
-    std::cout << "  Lanczos iterations for ground state: " << iterations << std::endl;
-
-    uint64_t m = alpha.size();
-
-    // Diagonalize tridiagonal matrix using helper function
-    std::vector<double> ritz_values, weights;
-    std::vector<double> evecs;
-    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
-
-    if (ritz_values.empty()) {
-        std::cerr << "  Error: Ground state tridiagonal diagonalization failed" << std::endl;
-        ground_state = v0;  // Return initial state as fallback
-        return 0.0;
-    }
-
-    double ground_energy = ritz_values[0];
-    std::cout << "  Ground state energy: " << ground_energy << std::endl;
-
-    // Reconstruct ground state in full Hilbert space
-    // |ψ_0⟩ = Σ_j c_j |v_j⟩ where c_j = evecs[j] (first eigenvector)
-    ground_state.resize(N, Complex(0.0, 0.0));
-
-    for (uint64_t j = 0; j < m; j++) {
-        double coeff = evecs[j];  // First eigenvector (ground state)
-        Complex alpha_c(coeff, 0.0);
-        cblas_zaxpy(N, &alpha_c, lanczos_vectors[j].data(), 1, ground_state.data(), 1);
-    }
-
-    // Normalize
-    double norm = cblas_dznrm2(N, ground_state.data(), 1);
-    Complex scale(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, ground_state.data(), 1);
-
-    return ground_energy;
 }

@@ -138,8 +138,6 @@ struct Row {
       "=1 forces the tableless combinadic fixed-Sz basis, =0 forces the materialized list")\
     X("ED_FIXED_SZ_TABLE_BUDGET_GIB", Real, "memory-guard", "16.0",            \
       "Byte budget for the materialized fixed-Sz basis list; above it the basis flips to tableless")\
-    X("ED_LANCZOS_VERBOSE", Flag, "krylov", "false",                           \
-      "=1 re-enables per-iteration progress prints inside the Lanczos inner loops")\
     X("ED_LANCZOS_PROFILE", Flag, "krylov", "false",                           \
       "=1 enables the per-iteration us timing breakdown in lanczos_real")      \
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
@@ -178,8 +176,6 @@ struct Row {
       "Prints the mTPQ fp32-vs-double lane-selection decision to stderr")      \
     X("ED_TPQ_BASE_SEED", Integer, "thermal", "0 -> non-deterministic, time-seeded",\
       "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
-    X("ED_DSSF_VERBOSE", Flag, "thermal", "false",                             \
-      "Gates per-sample / per-iteration progress prints in the DSSF/SSSF/FTLM kernels")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_OPERATOR_MIRROR", Flag, "gpu", "true (mirror on)",               \
@@ -212,8 +208,6 @@ struct Row {
       "Enables the HDF5 shuffle filter before deflate")                        \
     X("ED_TIME_CONSTRUCTION", Flag, "debug", "false",                          \
       "Times and reports the sector/operator construction phase")              \
-    X("ED_DEBUG_BALANCE", Flag, "debug", "false",                              \
-      "Dumps Burnside sector dims and the per-MPI-rank load after greedy owner assignment")\
     X("QED_CORE_DIR", Path, "python", "unset (extension inside the package)",  \
       "Prepends a build directory containing _core*.so to qed.__path__")       \
     X("QED_SZ_WORKERS", Integer, "python", "len(_n_up_values) (one worker per Sz sector)",\

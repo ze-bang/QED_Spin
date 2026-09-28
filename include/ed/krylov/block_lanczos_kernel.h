@@ -255,14 +255,11 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
             apply_H(V_curr.get() + c * N, W.get() + c * N, N);
         }
 
-        // A_j = V_curr^H * W   (local; for distributed backends this is
-        // the rank-local Gram block and `all_reduce_sum_vec` consolidates
-        // it. The static_assert above currently keeps us out of that path.)
+        // A_j = V_curr^H * W.
         backend.gemm('C', 'N', b, b, N,
                      one, V_curr.get(), N, W.get(), N,
                      zero, AB.get(), b);
         backend.copy_to_host(AB.get(), Aj_host.data(), b * b);
-        backend.all_reduce_sum_vec(Aj_host.data(), b * b);
         detail::hermitianize_inplace(Aj_host.data(), b);
         backend.copy_from_host(Aj_host.data(), AB.get(), b * b);
 
@@ -292,12 +289,6 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                     backend.gemm('C', 'N', b, b, N,
                                  one, Vptr, N, W.get(), N,
                                  zero, AB.get(), b);
-                    {
-                        std::vector<Complex> tmp(b * b);
-                        backend.copy_to_host(AB.get(), tmp.data(), b * b);
-                        backend.all_reduce_sum_vec(tmp.data(), b * b);
-                        backend.copy_from_host(tmp.data(), AB.get(), b * b);
-                    }
                     backend.gemm('N', 'N', N, b, b,
                                  neg_one, Vptr, N, AB.get(), b,
                                  one, W.get(), N);
@@ -308,12 +299,6 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
             backend.gemm('C', 'N', b, b, N,
                          one, V_curr.get(), N, W.get(), N,
                          zero, AB.get(), b);
-            {
-                std::vector<Complex> tmp(b * b);
-                backend.copy_to_host(AB.get(), tmp.data(), b * b);
-                backend.all_reduce_sum_vec(tmp.data(), b * b);
-                backend.copy_from_host(tmp.data(), AB.get(), b * b);
-            }
             backend.gemm('N', 'N', N, b, b,
                          neg_one, V_curr.get(), N, AB.get(), b,
                          one, W.get(), N);
@@ -321,12 +306,6 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
                 backend.gemm('C', 'N', b, b, N,
                              one, V_prev.get(), N, W.get(), N,
                              zero, AB.get(), b);
-                {
-                    std::vector<Complex> tmp(b * b);
-                    backend.copy_to_host(AB.get(), tmp.data(), b * b);
-                    backend.all_reduce_sum_vec(tmp.data(), b * b);
-                    backend.copy_from_host(tmp.data(), AB.get(), b * b);
-                }
                 backend.gemm('N', 'N', N, b, b,
                              neg_one, V_prev.get(), N, AB.get(), b,
                              one, W.get(), N);

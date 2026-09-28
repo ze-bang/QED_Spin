@@ -134,7 +134,6 @@ def _diag_via_workflows_solve(
     method: DiagonalizationMethod,
     params: EDParameters,
     auto_method: bool = False,
-    allow_infeasible: bool = False,
 ) -> EDResults:
     """Route an in-memory `Operator` through the unified orchestrator.
 
@@ -145,7 +144,7 @@ def _diag_via_workflows_solve(
     family was deleted in the surface-unification collapse and every
     Python-side call site now lands on ``_core.workflows_*``."""
     if _is_ground_state_method(method):
-        opts = _ed_params_to_solve_options(params, method, auto_method, allow_infeasible)
+        opts = _ed_params_to_solve_options(params, method, auto_method)
         _apply_total_spin_opts(opts)
         # The orchestrator's `workflows_solve` accepts an `Operator&`;
         # if the caller already projected to a fixed-Sz sector we hand
@@ -153,7 +152,7 @@ def _diag_via_workflows_solve(
         gs   = _core.workflows_solve(operator, opts)
         return _ed_result_from_gs_result(gs, params)
     if method in _THERMAL_METHOD_MAP:
-        opts = _ed_params_to_thermal_options(params, method, allow_infeasible)
+        opts = _ed_params_to_thermal_options(params, method)
         tr = _core.workflows_thermal(operator, opts)
         return _ed_result_from_thermal_result(tr)
     raise ValueError(

@@ -715,11 +715,6 @@ if(BUILD_ED_TESTS)
     # (skips cleanly with exit 0 when no device is present).
     if(WITH_CUDA)
         ed_add_test(test_cuda_matvec_backend    tests/unit/test_cuda_matvec_backend.cu)
-        # P3c: CudaMatVecBackend<DeviceSymmetryBasisPolicy> (GPU symmetry lane)
-        # -- DeviceSymmetryBasisPolicyHolder uploads the orbit CSR + pre-baked
-        # projection hash; the GPU symmetry matvec matches the host
-        # CpuMatVecBackend<Symmetry> to <1e-9 across every momentum sector of
-        # the Heisenberg Z_N ring (N=6). CUDA-only; plain main() harness.
         # Phase A operator-collapse GPU parity (Jun 2026): a standalone
         # ed::symmetry::SectorOperator (from make_sector_operators -> the P5
         # sector-set enumerator, no StreamingSymmetryOperator) is backend-

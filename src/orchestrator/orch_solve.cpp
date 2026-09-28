@@ -324,7 +324,6 @@ GroundStateResult solve_on(Backend& be,
                 // consistent with the variant-driven helper used at
                 // the bottom of solve() / thermal() / spectral().
                 R.backend.lane = ed::lane_label_for<Backend>();
-                R.backend.mpi_size = 1;
                 // "Universal save contract" follow-up (May 2026): the
                 // lanczos_real fast path used to ``return R`` here and
                 // silently bypass every persistence finalizer below.
@@ -811,7 +810,6 @@ GroundStateResult solve_on(Backend& be,
     // the template parameter directly so the label always matches
     // the lane ``std::visit`` dispatched to.
     R.backend.lane = ed::lane_label_for<Backend>();
-    R.backend.mpi_size = 1;
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();
@@ -826,9 +824,7 @@ GroundStateResult solve_on(Backend& be,
 
 GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
     require_hermitian_input(H, "ed::solve");
-    // Apply the same thread-budget hygiene the legacy `lanczos()` /
-    // `block_lanczos()` / `krylov_schur()` entries do (Phase 6.1 of the
-    // matvec-unification arc).
+    // Dimension-aware thread budget (the same one `lanczos()` applies).
     // Without this the orchestrator runs OpenBLAS + OpenMP at
     // `omp_get_max_threads()` for every BLAS-1 / SpMV call -- which at
     // N=14 dim=16k turns a ~1 ms/iter SpMV into a ~5 ms/iter SpMV due to

@@ -352,7 +352,6 @@ void bind_workflows_spectral_ftlm(py::module_& m) {
                   // a deferred follow-up. Until that lands, this
                   // binding always reports ``lane='cpu'``.
                   agg.backend.lane     = "cpu";
-                  agg.backend.mpi_size = 1;
 
                   std::string label =
                       "k_final = k_initial + Q (cross-irrep, FTLM, "

@@ -32,11 +32,11 @@
 // comparable to ``cf_spectral_from_vector``.
 // =============================================================================
 
-#define ED_BUILDING_INTERNAL 1  // silence deprecation on build_lanczos_*
-
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
 
-#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector, build_lanczos_*, diagonalize_tridiagonal_ritz
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/backends/cpu_backend.h>
+#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector, diagonalize_tridiagonal_ritz
 #include <ed/core/blas_lapack_wrapper.h>
 
 #include <algorithm>
@@ -53,6 +53,25 @@ namespace {
 
 constexpr double  kInvPi          = 0.3183098861837907;  // 1 / pi
 constexpr double  kPhiNormCutoff  = 1e-14;
+
+// Fully reorthogonalised Lanczos from v0 (at most min(dim, krylov_dim) steps)
+// with the Krylov basis kept, on the default CPU backend.
+ed::krylov::LanczosKernelResult full_reorth_lanczos(
+    const std::function<void(const Complex*, Complex*, int)>& H,
+    const ComplexVector& v0,
+    std::size_t dim,
+    std::size_t krylov_dim)
+{
+    ed::krylov::LanczosKernelOptions lopts;
+    lopts.max_iter   = std::min(dim, krylov_dim);
+    lopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    lopts.keep_basis = true;
+    auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
+        H(in, out, static_cast<int>(n));
+    };
+    return ed::krylov::lanczos_kernel(
+        ed::matvec::default_cpu_backend(), matvec, dim, v0.data(), lopts);
+}
 
 }  // namespace
 
@@ -95,15 +114,6 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
         R.Z[T]      = 0.0;
     }
 
-    // Wave C4 (May 2026): share outer Lanczos basis storage across
-    // (k_src, k_dst) sample iterations within this one_sector call.
-    // ``basis_H`` is rebuilt every sample; reusing the std::vector<
-    // ComplexVector> shell across samples lets the underlying
-    // per-vector heap blocks survive on the pool side -- net saves
-    // ~30 malloc()s per (k_src, k_dst) call on the default
-    // ``num_samples=30`` setting.
-    std::vector<ComplexVector> basis_H_scratch;
-
     // Per-sector global energy reference for thermal-weight numerical
     // stability. We initialise to +infinity and update on the fly as
     // each sample's Ritz spectrum becomes available; this matches the
@@ -136,7 +146,6 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
     // Ritz vectors enter the overlap matrix explicitly, so ghost copies from
     // a local-reorth run would double-count weight.
     // ---------------------------------------------------------------------
-    std::vector<ComplexVector> basis_S_scratch;
     const double eta    = opts.broadening;
     const double eta_sq = eta * eta;
 
@@ -152,15 +161,11 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
             static_cast<int>(dim_src), sample_gen);   // unit norm
 
         // ---- outer Lanczos on H_src from |r> ----
-        std::vector<double> alpha_H, beta_H;
-        basis_H_scratch.clear();
-        const int H_iters = build_lanczos_tridiagonal_with_basis(
-            H_src, r_state, static_cast<std::uint64_t>(dim_src),
-            opts.krylov_dim, opts.tolerance,
-            /*full_reorth=*/true, opts.reorth_frequency,
-            alpha_H, beta_H, &basis_H_scratch);
-        auto& basis_H = basis_H_scratch;
-        if (H_iters == 0 || alpha_H.empty()) {
+        auto res_H = full_reorth_lanczos(H_src, r_state, dim_src, opts.krylov_dim);
+        std::vector<double> alpha_H = std::move(res_H.alpha);
+        std::vector<double> beta_H  = std::move(res_H.beta);
+        const auto& basis_H = res_H.basis;
+        if (alpha_H.empty()) {
             if (opts.verbose) std::cout << "  outer Lanczos failed; skipping sample\n";
             continue;
         }
@@ -216,14 +221,10 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
         }
 
         // ---- inner Lanczos on H_dst from O|r>/||O r|| ----
-        std::vector<double> alpha_S, beta_S;
-        basis_S_scratch.clear();
-        build_lanczos_tridiagonal_with_basis(
-            H_dst, phi0, static_cast<std::uint64_t>(dim_dst),
-            opts.krylov_dim, opts.tolerance,
-            /*full_reorth=*/true, opts.reorth_frequency,
-            alpha_S, beta_S, &basis_S_scratch);
-        auto& basis_S = basis_S_scratch;
+        auto res_S = full_reorth_lanczos(H_dst, phi0, dim_dst, opts.krylov_dim);
+        std::vector<double> alpha_S = std::move(res_S.alpha);
+        std::vector<double> beta_S  = std::move(res_S.beta);
+        const auto& basis_S = res_S.basis;
         if (alpha_S.empty() || basis_S.size() < alpha_S.size()) {
             R.samples_done++;
             continue;
@@ -241,9 +242,9 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
         std::vector<Complex> A(static_cast<std::size_t>(dim_dst) * m_H);
         std::vector<Complex> B(static_cast<std::size_t>(dim_dst) * m_S);
         for (std::size_t a = 0; a < m_H; ++a)
-            O_apply(basis_H[a].data(), A.data() + a * dim_dst, static_cast<int>(dim_dst));
+            O_apply(basis_H[a].get(), A.data() + a * dim_dst, static_cast<int>(dim_dst));
         for (std::size_t b = 0; b < m_S; ++b)
-            std::copy(basis_S[b].begin(), basis_S[b].begin() + static_cast<std::ptrdiff_t>(dim_dst),
+            std::copy(basis_S[b].get(), basis_S[b].get() + dim_dst,
                       B.begin() + static_cast<std::ptrdiff_t>(b * dim_dst));
         std::vector<Complex> W(m_H * m_S);                      // column-major: W[a + b*m_H]
         {

@@ -202,8 +202,7 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 /// (which the tridiagonal eigenvector solve already returns) so by
 /// default we do NOT keep the Lanczos basis around (``keep_basis=false``,
 /// LocalDGKS3). ``opts.full_reorthogonalization`` switches to FullCGS2
-/// with a kept basis, the same kernel call the CPU driver's
-/// ``build_lanczos_tridiagonal`` makes when full reorth is requested.
+/// with a kept basis.
 ///
 /// Parity with the retired Gen-1 CPU driver (WP10; deleted in C6):
 ///   * the whole call runs under ``ThreadBudgetScope(auto_threads_for_dim
@@ -313,16 +312,12 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter = opts.krylov_dim;
         if (opts.full_reorthogonalization) {
-            // Same kernel call as the CPU driver's
-            // ``build_lanczos_tridiagonal`` with full_reorth = true.
             kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
             kopts.keep_basis = true;
         } else {
             // FTLM's first-component weights come from the tridiagonal
             // eigenvectors directly, so we only need a faithful (alpha,
-            // beta) -- LocalDGKS3 is the cheap canonical reorth policy
-            // matching the legacy CPU driver's
-            // ``build_lanczos_tridiagonal`` body when full reorth is off.
+            // beta) -- LocalDGKS3 is the cheap canonical reorth policy.
             kopts.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
             kopts.keep_basis = false;
         }

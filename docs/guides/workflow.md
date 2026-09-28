@@ -671,7 +671,7 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    ├─────────────────────────────────────────────────────┤
    │ 7. Low-level escape hatch                           │
    │    extra_params={'ftlm_krylov_dim': 120,            │
-   │                  'tpq_taylor_order': 200, ...}      │
+   │                  'tpq_max_steps': 200, ...}         │
    │      → setattr(params, key, value) for each pair    │
    │    list_diag_parameters() prints every field        │
    ├─────────────────────────────────────────────────────┤
@@ -858,8 +858,6 @@ res = qed.solve(
     num_temp_points=6,
     output_dir="ed_runs/heisenberg_N12_mtpq",
     extra_params={
-        "tpq_taylor_order": 40,
-        "tpq_delta_beta": 0.05,
         "tpq_num_measure_points": 6,
         "tpq_measure_beta_min": 0.1,
         "tpq_measure_beta_max": 2.0,
@@ -878,7 +876,7 @@ lane and cTPQ were both retired.
 
 | You want to … | Use |
 |--------------|-----|
-| change `arpack_ncv`, `tpq_taylor_order`, `ftlm_seed`, …  | `qed.solve(…, extra_params={…})` |
+| change `arpack_ncv`, `tpq_max_steps`, `ftlm_seed`, …     | `qed.solve(…, extra_params={…})` |
 | swap the **whole** parameter struct (e.g. copy from CLI) | `qed.solve(H, method, params)` |
 | list every knob and which family it belongs to           | `qed.list_diag_parameters()` (or `('arpack')`, `('tpq')`, …) |
 | inspect what the auto-pilot decided                      | `qed.solve(H, …, verbose=True)` (default) |
@@ -1152,7 +1150,7 @@ opts.num_eigenvalues = 4;
 opts.extra_params = [](EDParameters& p) {
   p.ftlm_krylov_dim   = 180;
   p.ltlm_krylov_dim   = 220;
-  p.tpq_taylor_order  = 150;
+  p.tpq_max_steps     = 150;
 };
 auto out = ed::workflows::solve(H, opts);
 ```

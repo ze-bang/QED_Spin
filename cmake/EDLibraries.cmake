@@ -271,11 +271,6 @@ target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel 
 # consumers (tests, examples, new SDK callers) do not have to remember
 # the dep.
 target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry)
-# Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+): suppress
-# the `[[deprecated]]` warning on `build_lanczos_tridiagonal_with_basis`
-# for our own legacy CPU callsites. The attribute remains active for every
-# external consumer of `<ed/solvers/lanczos.h>`.
-target_compile_definitions(ed_solvers_cpu PRIVATE ED_BUILDING_INTERNAL=1)
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -428,7 +423,6 @@ if(WITH_CUDA)
         ed_solvers_cpu
         CUDA::cudart
         CUDA::cublas
-        CUDA::cusparse
         CUDA::curand
         CUDA::cusolver
         ${ED_COMMON_LINK_LIBS}
@@ -446,8 +440,4 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
-    # Phase 5.3 (Krylov-unification gap-fill): library TUs see the internal
-    # view of the headers (no `build_lanczos_tridiagonal_with_basis`
-    # deprecation diagnostics).
-    target_compile_definitions(ed_solvers_gpu PRIVATE ED_BUILDING_INTERNAL=1)
 endif()
