@@ -448,9 +448,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // Phase E of the "Close CPU/GPU Gaps" plan (May 2026): the
         // FTLM kernel facade now dispatches on Backend type internally
         // (see ftlm_kernel.h, mirroring LTLM at the block below).
-        // Both CpuBackend and CudaBackend are supported; MpiBackend /
-        // MpiCudaBackend are explicitly rejected by the kernel until
-        // cross-rank Lanczos post-processing is wired.
+        // Both CpuBackend and CudaBackend are supported.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
@@ -515,9 +513,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // Phase E1 of the "Backend x Symmetries x Workflows" plan
         // (May 2026): the KPM-DOS kernel now dispatches on Backend
         // type internally (see kpm_dos_kernel.h). Both CpuBackend and
-        // CudaBackend are supported; MpiBackend / MpiCudaBackend are
-        // explicitly rejected by the kernel until the cross-rank
-        // Hutchinson reduction is wired.
+        // CudaBackend are supported.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
@@ -597,10 +593,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): uniform
     // thermal persistence finalizer. Mirrors the contract that lives in
     // ``ed::workflows::solve`` (l. 458-510): when ``opts.output_dir``
-    // is set and the run is single-rank (the shared-file save is not
-    // safe under MPI; per-rank files are written elsewhere), persist
-    // the result to ``<output_dir>/ed_results.h5`` and surface the
-    // resulting path via ``R.hdf5_path``.
+    // is set, persist the result to ``<output_dir>/ed_results.h5`` and
+    // surface the resulting path via ``R.hdf5_path``.
     //
     // Method-conditional payload (user-confirmed policy):
     //   - mTPQ: the full per-sample (beta, E, var, step)
@@ -611,23 +605,12 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     //   - FTLM / KPM_DOS: aggregated thermodynamic curves
     //     (``T, E, Cv, S, F``) only -- no state vectors.
     // -----------------------------------------------------------------
-    // MPI-aware single-file emission (May 2026 follow-up): rank 0 owns
-    // the aggregate thermo / TPQ-trajectory data (the kernels recombine
-    // per-sample columns onto rank 0 before the orchestrator wraps the
-    // result), so we run the finalizer there too. Slab-distributed TPQ
-    // state vectors are *not* re-gathered here -- the per-rank
-    // ``rank_<r>.h5`` files written by ``ed_distributed_main`` remain
-    // the canonical location for those. The unified file therefore
-    // ships:
-    //   * mTPQ: per-sample trajectory rows (always on rank 0).
-    //     The probe-beta state snapshots are written only when they are
-    //     populated -- which is the serial case; in the distributed
-    //     lane ``R.tpq_state_snapshots`` is empty on rank 0 and the
-    //     loop is a no-op.
+    // The unified file ships:
+    //   * mTPQ: per-sample trajectory rows, plus the probe-beta state
+    //     snapshots when they are populated.
     //   * FTLM / KPM_DOS: aggregated thermodynamic curves.
     if (!opts.output_dir.empty()
-            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
-            && is_unified_writer(H.geometry())) {
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
         try {
             std::error_code ec;
             std::filesystem::create_directories(opts.output_dir, ec);

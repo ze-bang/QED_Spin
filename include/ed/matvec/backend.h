@@ -14,19 +14,16 @@
 //     ---------------------     -----------------------
 //     Host                      CpuBackend
 //     CudaDevice                CudaBackend
-//     DistributedHost           MpiBackend
-//     DistributedCudaDevice     MpiCudaBackend     (NCCL + cuBLAS)
 //
 // Why a separate object instead of methods on MatVecOperator? Because
 // vector primitives are independent of which Hamiltonian you're applying.
 // One backend can drive many different MatVecOperators (e.g. the
 // Hamiltonian and an observable, used together in FTLM-style spectral
-// kernels). The split also lets us swap reduction strategies (NCCL vs
-// host-staged MPI) without touching operator code.
+// kernels).
 //
 // All operations are synchronous from the caller's point of view: when
 // they return, the result is visible. Internally Backends may chain CUDA
-// streams or pipeline MPI requests, but the API is sync. This matches
+// streams, but the API is sync. This matches
 // what every existing solver in the codebase already assumes.
 //
 // Phase 1 of the matvec-unification revamp.
@@ -111,7 +108,7 @@ public:
     //   axpy_dot : y <- y + alpha*x ; returns z^H * y      (reduced)
     //   axpy_nrm2: y <- y + alpha*x ; returns ||y||_2      (reduced)
     // The defaults compose the primitives above so every backend stays
-    // correct; CpuBackend / MpiBackend override them with single-pass
+    // correct; CpuBackend overrides them with single-pass
     // kernels (the unified `lanczos_kernel` issues three fused calls per
     // iteration instead of seven separate BLAS-1 calls).
     // ------------------------------------------------------------------
@@ -127,9 +124,8 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Reductions. For non-distributed backends these are no-ops returning
-    // their argument; for MPI / NCCL backends they MPI_Allreduce /
-    // ncclAllReduce across the communicator.
+    // Reductions. For the concrete (single-process) backends these are
+    // no-ops returning their argument.
     // ------------------------------------------------------------------
     [[nodiscard]] virtual Complex all_reduce_sum(Complex v) const { return v; }
     [[nodiscard]] virtual double  all_reduce_sum(double  v) const { return v; }
@@ -158,8 +154,8 @@ public:
     // concrete Backends compile unchanged; they trade reduction
     // amortisation for code simplicity. Concrete backends override
     // them when they want the batched fast path (CpuBackend uses a
-    // single OpenMP region; MpiBackend collapses k Allreduces into
-    // 1; future GpuBackend will route through cuBLAS gemv).
+    // single OpenMP region; future GpuBackend will route through cuBLAS
+    // gemv).
     // ------------------------------------------------------------------
 
     /// Compute `coeffs_out[k] = <basis[k], v>` for k in [0, num_basis).
@@ -200,8 +196,7 @@ public:
     // into the wrong primitive).
     //
     // Defaults throw; backends that need to expose BLAS-3 (currently
-    // every concrete backend: CpuBackend, CudaBackend, MpiBackend,
-    // MpiCudaBackend) override.
+    // every concrete backend: CpuBackend, CudaBackend) override.
     // ------------------------------------------------------------------
 
     /// Standard ZGEMM: C = alpha * op(A) * op(B) + beta * C, where

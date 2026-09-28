@@ -443,8 +443,8 @@ void bind_workflows_solve_streaming(py::module_& m) {
                   std::vector<std::string> sector_hdf5_paths;
                   // Phase D (May 2026): capture the truthful per-sector
                   // backend lane on the first non-empty sector so the
-                  // aggregate result can surface "gpu" vs "cpu" vs
-                  // "mpi" instead of leaving ``agg.backend.lane``
+                  // aggregate result can surface "gpu" vs "cpu"
+                  // instead of leaving ``agg.backend.lane``
                   // empty. All sectors share the same ``opts.backend``
                   // and the same SectorView geometry contract, so the
                   // first lane is authoritative.

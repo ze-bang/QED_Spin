@@ -14,16 +14,6 @@
 //                       still happen on host (the projected matrix is
 //                       small: m_blocks * b square).
 //
-// MpiBackend / MpiCudaBackend are NOT yet supported here. The block
-// Gram update needs an all-reduce across ranks for the (b x b) block;
-// a TSQR-based replacement for the local `qr_thin` is similarly
-// pending. The static_assert below is the documented fallback. The
-// (the distributed block-Lanczos family was retired in Stage 11d)
-// (a separate path that doesn't go through this kernel). When the
-// distributed `qr_thin` (CholeskyQR2-based, already in Backend::qr_thin
-// for MpiBackend) is wired through, the static_assert can be relaxed
-// to also accept MpiBackend / MpiCudaBackend.
-//
 // Algorithm (textbook block tridiagonal Lanczos, all on Backend):
 //   1. Random N x b block on host -> backend -> `qr_thin` -> V0.
 //   2. for j = 0..m-1:
@@ -187,12 +177,7 @@ BlockLanczosResult block_lanczos_kernel(Backend&                  backend,
             || std::is_base_of_v<ed::matvec::CudaBackend, std::decay_t<Backend>>
 #endif
         ,
-        "block_lanczos_kernel currently supports CpuBackend / CudaBackend "
-        "(and MpiBackend via CpuBackend inheritance, in the single-rank "
-        "build). MpiBackend / MpiCudaBackend with a true distributed "
-        "TSQR pathway is a documented Phase 2.3 deferral --- the "
-        "distributed block-Lanczos still uses `src/distributed/"
-        "distributed_block_lanczos*` directly.");
+        "block_lanczos_kernel supports CpuBackend / CudaBackend.");
 
     const std::size_t N = local_n;
     if (N == 0) {

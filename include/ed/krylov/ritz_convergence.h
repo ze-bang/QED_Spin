@@ -18,9 +18,6 @@
 // `include/ed/distributed/distributed_lanczos_kernel.h`,
 // `src/solvers/gpu/gpu_lanczos.cu`), and the well-trodden ARPACK / SLEPc
 // / Anasazi default for one-eigenvalue convergence.
-//
-// May 2026 -- shipped alongside the `distributed_lanczos` migration onto
-// `lanczos_kernel<MpiBackend>`.
 // =============================================================================
 
 #include <algorithm>

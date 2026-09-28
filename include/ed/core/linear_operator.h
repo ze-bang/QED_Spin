@@ -35,10 +35,6 @@
 #include <ed/matvec/matvec.h>
 #include <ed/matvec/memory_space.h>
 
-#ifdef WITH_MPI
-#include <mpi.h>
-#endif
-
 namespace ed {
 
 using Complex = std::complex<double>;
@@ -77,12 +73,6 @@ struct Geometry {
     /// mirror).
     bool                  supports_device_matvec = false;
 
-#ifdef WITH_MPI
-    /// MPI communicator the operator runs on. `MPI_COMM_NULL` means the
-    /// operator is single-rank (no MPI).
-    MPI_Comm              comm         = MPI_COMM_NULL;
-#endif
-
     [[nodiscard]] bool is_distributed() const noexcept {
         return ed::matvec::is_distributed(memory_space);
     }
@@ -100,17 +90,14 @@ public:
     /// Default implementation derives geometry from the existing
     /// `MatVecOperator` getters (dim / global_dim / memory_space), so
     /// every existing operator becomes a single-rank `LinearOperator`
-    /// for free. Override when the rank-local offset / MPI comm
-    /// differ from the trivial single-rank values.
+    /// for free. Override when the rank-local offset differs from the
+    /// trivial single-rank value.
     [[nodiscard]] virtual Geometry geometry() const {
         Geometry g;
         g.local_dim    = this->dim();
         g.global_dim   = this->global_dim();
         g.local_offset = 0;
         g.memory_space = this->memory_space();
-#ifdef WITH_MPI
-        g.comm         = MPI_COMM_NULL;
-#endif
         return g;
     }
 
@@ -122,9 +109,9 @@ public:
     // The default just calls apply(). Concrete operators with a faster
     // backend-specialised path override the appropriate overload below.
     // The template is non-virtual; specialisation happens via the
-    // backend-tagged virtual hooks `bind_cpu`, `bind_cuda`, `bind_mpi`,
-    // `bind_mpi_cuda`. Each defaults to the legacy `apply()` so an
-    // operator that doesn't yet specialise still works.
+    // backend-tagged virtual hooks `bind_cpu`, `bind_cuda`. Each defaults
+    // to the legacy `apply()` so an operator that doesn't yet specialise
+    // still works.
     // -------------------------------------------------------------------
 
     using MatvecFn = std::function<void(const Complex*, Complex*, std::size_t)>;
@@ -141,8 +128,6 @@ public:
         };
     }
     [[nodiscard]] virtual MatvecFn bind_cuda() const { return bind_cpu(); }
-    [[nodiscard]] virtual MatvecFn bind_mpi() const { return bind_cpu(); }
-    [[nodiscard]] virtual MatvecFn bind_mpi_cuda() const { return bind_cpu(); }
 
     // -------------------------------------------------------------------
     // Single-precision (fp32) CUDA device matvec binding --- the memory-
@@ -217,17 +202,6 @@ public:
     [[nodiscard]] virtual RealMatvecFn bind_real_cuda() const {
         return bind_real_cpu();
     }
-    /// MPI real-only matvec binding. Defaults to bind_real_cpu (the
-    /// halo-aware operators override this with a slab-aware Real
-    /// matvec).  Wave 4 of the unification plan (May 2026).
-    [[nodiscard]] virtual RealMatvecFn bind_real_mpi() const {
-        return bind_real_cpu();
-    }
-    /// MPI+CUDA real-only matvec binding. Default routes through
-    /// bind_real_cuda; real GPU+MPI lanes land in Wave 5.
-    [[nodiscard]] virtual RealMatvecFn bind_real_mpi_cuda() const {
-        return bind_real_cuda();
-    }
 
     // -------------------------------------------------------------------
     // Wave C2 (May 2026): batched multi-column matvec.
@@ -282,17 +256,11 @@ public:
 }  // namespace ed
 
 // Specialisations of `bind` live at the bottom so concrete Backend types
-// (CpuBackend, CudaBackend, MpiBackend, MpiCudaBackend) declared in
-// `ed/matvec/backends/*.h` don't pull this header into a dependency cycle.
+// (CpuBackend, CudaBackend) declared in `ed/matvec/backends/*.h` don't
+// pull this header into a dependency cycle.
 #include <ed/matvec/backends/cpu_backend.h>
 #ifdef WITH_CUDA
 #include <ed/matvec/backends/cuda_backend.cuh>
-#endif
-#ifdef WITH_MPI
-#include <ed/matvec/backends/mpi_backend.h>
-#  ifdef ED_HAVE_NCCL
-#  include <ed/matvec/backends/mpi_cuda_backend.cuh>
-#  endif
 #endif
 
 namespace ed {
@@ -307,19 +275,6 @@ template <>
 inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CudaBackend>() const {
     return bind_cuda();
 }
-#endif
-
-#ifdef WITH_MPI
-template <>
-inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::MpiBackend>() const {
-    return bind_mpi();
-}
-#  ifdef ED_HAVE_NCCL
-template <>
-inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::MpiCudaBackend>() const {
-    return bind_mpi_cuda();
-}
-#  endif
 #endif
 
 }  // namespace ed

@@ -469,10 +469,8 @@ SpectralResult spectral(const LinearOperator&                      H,
     // -----------------------------------------------------------------
     // "Universal save contract" follow-up (May 2026): uniform spectral
     // persistence finalizer. Mirrors the thermal finalizer above --
-    // when the caller supplies a real ``output_dir`` and the current
-    // process is the unified-file writer (every rank for the serial
-    // lane, rank 0 only for MPI lanes), lay down the standard group
-    // skeleton and persist (omega, S_real, S_imag, errors_real,
+    // when the caller supplies a real ``output_dir``, lay down the
+    // standard group skeleton and persist (omega, S_real, S_imag, errors_real,
     // errors_imag) under ``/dynamical/<method>/...`` of
     // ``<output_dir>/ed_results.h5``.
     //
@@ -487,17 +485,9 @@ SpectralResult spectral(const LinearOperator&                      H,
     // ``store_intermediate=true``. The uniform finalizer is
     // complementary: it ships the aggregated S(omega) at a stable,
     // method-tagged path regardless of which kernel produced it.
-    //
-    // MPI: ``R.omega`` / ``R.S_*`` are reduced onto every rank by the
-    // kernels (CF / KPM use rank-local matvecs + ``MPI_Allreduce``;
-    // FTLM averages locally and reduces at the orchestrator level),
-    // so rank 0 holds the final aggregate. Per-rank ``rank_<r>.h5``
-    // files (when produced by the legacy CLI) remain the canonical
-    // location for any rank-local intermediates.
     // -----------------------------------------------------------------
     if (!opts.output_dir.empty()
-            && !HDF5IO::isDisabledOutputPath(opts.output_dir)
-            && is_unified_writer(H.geometry())) {
+            && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
         try {
             std::error_code ec;
             std::filesystem::create_directories(opts.output_dir, ec);

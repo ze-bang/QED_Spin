@@ -71,32 +71,11 @@
 #include <variant>
 #include <vector>
 
-#ifdef WITH_MPI
-#include <mpi.h>
-#endif
-
 namespace py = pybind11;
 
 namespace workflow_bindings_detail {
 
 using Complex = std::complex<double>;
-
-// (rank, size) on MPI_COMM_WORLD, or (0,1) when MPI is unavailable / not
-// initialized. Lets the in-process symmetry sector loops distribute their
-// independent per-sector work across ranks when launched under
-// ``mpirun -n N python ...`` (mpi4py / a launcher initializes MPI).
-inline std::pair<int, int> binding_mpi_rank_size() {
-    int rank = 0, size = 1;
-#ifdef WITH_MPI
-    int inited = 0;
-    MPI_Initialized(&inited);
-    if (inited) {
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        MPI_Comm_size(MPI_COMM_WORLD, &size);
-    }
-#endif
-    return {rank, size};
-}
 
 // B6: resolve the sector-level OMP gate. An explicit ED_SYM_SECTOR_PARALLEL
 // (0/1) always wins. When UNSET, auto-enable only in the many-tiny-sectors
@@ -270,92 +249,6 @@ slotted_selection_for(const ed::OperatorSpec&                     spec,
     }
     return s;
 }
-
-#ifdef WITH_MPI
-// Across-sector finite-T recombination: every rank holds the per-sector
-// ThermodynamicData for ITS sectors only; Allgather the combine-relevant
-// arrays (temperatures, energy, specific_heat, entropy, free_energy -- the
-// fields ed::core::combine_sector_thermodynamics reads) so every rank ends with
-// the FULL per-sector list and computes an identical combined result. gs_E is
-// min-reduced. No-op when single-rank. Returns the gathered full list in-place.
-inline void mpi_allgather_sector_thermo(
-    std::vector<ThermodynamicData>&  per_sector_thermo,
-    std::vector<std::uint64_t>&      per_sector_dims,
-    const std::vector<std::uint64_t>& raw_indices,  // parallel to per_sector_thermo
-    double&                          gs_E,
-    int                              mpi_size) {
-    if (mpi_size <= 1) return;
-
-    // Agree on the temperature-grid length (a rank that owns no sector has 0).
-    int nT = per_sector_thermo.empty()
-                 ? 0 : static_cast<int>(per_sector_thermo.front().temperatures.size());
-    int nT_global = nT;
-    MPI_Allreduce(&nT, &nT_global, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-    if (nT_global <= 0) {  // no rank produced any thermo
-        double gmin = gs_E;
-        MPI_Allreduce(&gs_E, &gmin, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-        gs_E = gmin;
-        return;
-    }
-
-    // Flatten local sectors: [raw_index, temps, energy, Cv, S, F] = 1 + 5*nT
-    // doubles each. The raw index travels with the block so the gathered list
-    // can be re-sorted into the canonical (single-node) order -- otherwise the
-    // F-based combine sums sectors in rank order and the result differs by FP
-    // rounding from the single-rank run.
-    const int per_block = 1 + 5 * nT_global;
-    std::vector<double> send;
-    send.reserve(per_sector_thermo.size() * static_cast<std::size_t>(per_block));
-    auto put = [&](const std::vector<double>& v) {
-        for (int t = 0; t < nT_global; ++t)
-            send.push_back(t < static_cast<int>(v.size()) ? v[static_cast<std::size_t>(t)] : 0.0);
-    };
-    for (std::size_t s = 0; s < per_sector_thermo.size(); ++s) {
-        send.push_back(static_cast<double>(s < raw_indices.size() ? raw_indices[s] : s));
-        const auto& th = per_sector_thermo[s];
-        put(th.temperatures); put(th.energy); put(th.specific_heat);
-        put(th.entropy);      put(th.free_energy);
-    }
-
-    const int sendcount = static_cast<int>(send.size());
-    std::vector<int> counts(static_cast<std::size_t>(mpi_size));
-    MPI_Allgather(&sendcount, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-    std::vector<int> displs(static_cast<std::size_t>(mpi_size));
-    int total = 0;
-    for (int i = 0; i < mpi_size; ++i) { displs[i] = total; total += counts[i]; }
-    std::vector<double> recv(static_cast<std::size_t>(total));
-    MPI_Allgatherv(send.data(), sendcount, MPI_DOUBLE,
-                   recv.data(), counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-
-    // Sort the gathered blocks by raw sector index (canonical order == the
-    // single-node sector loop order) so the combine is bit-identical.
-    std::vector<int> block_off;
-    for (int off = 0; off + per_block <= total; off += per_block) block_off.push_back(off);
-    std::sort(block_off.begin(), block_off.end(),
-              [&](int a, int b) { return recv[a] < recv[b]; });
-
-    per_sector_thermo.clear();
-    per_sector_dims.clear();
-    for (int off : block_off) {
-        ThermodynamicData th;
-        auto take = [&](int slot) {  // slot 0 is raw_index; arrays start at 1
-            const int base = off + 1 + slot * nT_global;
-            return std::vector<double>(recv.begin() + base, recv.begin() + base + nT_global);
-        };
-        th.temperatures  = take(0);
-        th.energy        = take(1);
-        th.specific_heat = take(2);
-        th.entropy       = take(3);
-        th.free_energy   = take(4);
-        per_sector_thermo.push_back(std::move(th));
-        per_sector_dims.push_back(1);   // dims are unused by the F-based combine
-    }
-
-    double gmin = gs_E;
-    MPI_Allreduce(&gs_E, &gmin, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    gs_E = gmin;
-}
-#endif  // WITH_MPI
 
 // Pybind11 cannot move a captured `std::unique_ptr<LinearOperator>` out of
 // a Python-owned Operator easily; we instead accept the raw `Operator&` /

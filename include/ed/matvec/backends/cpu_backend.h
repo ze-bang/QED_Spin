@@ -37,13 +37,6 @@
 
 namespace ed::matvec {
 
-// NOT `final`: `MpiBackend` derives from this class to reuse the host
-// allocators / BLAS-1 locals and override only the reduction-bearing
-// primitives. The original `final` keyword was a copy-paste from
-// `CudaBackend`; removed (May 2026, day 8) when the
-// `distributed_lanczos` migration onto `lanczos_kernel<MpiBackend>`
-// actually instantiated `MpiBackend` for the first time and tripped
-// the contradiction.
 class CpuBackend : public Backend {
 public:
     [[nodiscard]] MemorySpace memory_space() const override {
@@ -151,8 +144,7 @@ public:
 
     // ----------------------------------------------------------------
     // Fused Lanczos primitives (audit F5): single streaming pass.
-    // `axpy_dot_local` / `axpy_nrm2sq_local` are the rank-local pieces
-    // so MpiBackend can reuse them and reduce the scalar once.
+    // `axpy_dot_local` / `axpy_nrm2sq_local` are the local pieces.
     // ----------------------------------------------------------------
     [[nodiscard]] Complex axpy_dot_local(Complex alpha, const Complex* x, Complex* y,
                                          const Complex* z, std::size_t n) const {

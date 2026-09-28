@@ -42,9 +42,6 @@
 //                                             one sector from the tagged
 //                                             factory -- the legacy monolithic
 //                                             streaming operators are gone)
-//   (The distributed-operator family was retired in Stage 11d, Jul 2026;
-//    production MPI = MpiBackend within the operator x SectorDistributor
-//    across sectors.)
 //
 // Every case derives from `ed::LinearOperator`, so a single owning
 // pointer covers the matrix without losing dispatchability.
@@ -625,7 +622,7 @@ make_sector_operators_tagged(const OperatorSpec& spec,
         // owner hook, and its SYNTHETIC (parity, irrep[, flip]) slot ids
         // cannot index the raw-irrep Burnside owner table computed
         // above. Without ownership every rank built AND solved every
-        // parity sector, and mpi_allgather_sector_thermo then summed
+        // parity sector, and the across-rank thermo combine then summed
         // each sector P times -- Z -> P*Z, i.e. F and S silently wrong
         // by ln P under mpirun (E and Cv survived only because the
         // duplication scales all weights uniformly). Enforce the same
@@ -947,10 +944,6 @@ private:
 
 namespace ed {
 
-#ifdef WITH_MPI
-
-#endif  // WITH_MPI
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -961,22 +954,15 @@ namespace ed {
 ///
 /// Dispatch order (axis values):
 ///
-///   distributed | streaming_symmetry | fixed_sz | returned type
-///   ------------|--------------------|----------|--------------------------
-///   false       | false              | nullopt  | Operator
-///   false       | false              | set      | FixedSzOperator
-///   false       | true               | nullopt  | StreamingSymmetryOperator
-///   false       | true               | set      | FixedSzStreamingSymmetryOperator
-///   true        | false              | any      | DistributedOperator
-///   true        | true               | any      | DistributedSymmetryOperator
-///
-/// Compile guards:
-///   * `distributed = true` requires `WITH_MPI`. Without WITH_MPI, the
-///     factory throws `std::runtime_error` to keep the surface
-///     uniformly defined regardless of build flags.
+///   streaming_symmetry | fixed_sz | returned type
+///   -------------------|----------|--------------------------
+///   false              | nullopt  | Operator
+///   false              | set      | FixedSzOperator
+///   true               | nullopt  | StreamingSymmetryOperator
+///   true               | set      | FixedSzStreamingSymmetryOperator
 inline std::unique_ptr<LinearOperator> make_operator(OperatorSpec spec) {
     // The InMemoryOperator route is incompatible with the
-    // streaming_symmetry / distributed axes (those require directory
+    // streaming_symmetry axis (it requires directory
     // loading or term-storage manipulation that the caller has not
     // performed). Forward the bare unique_ptr in the simple case.
     if (auto* mem = std::get_if<InMemoryOperator>(&spec.source)) {

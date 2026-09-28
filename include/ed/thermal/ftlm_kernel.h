@@ -14,10 +14,6 @@
 //     run device-resident; cross-PCI traffic is limited to a host-seeded
 //     random starting vector per sample and the small (M x M)
 //     tridiagonal diagonalisation handled on the host with LAPACK.
-//   * Distributed backends (MpiBackend / MpiCudaBackend): unsupported
-//     today -- the body throws ``std::runtime_error`` so the caller can
-//     pin ``BackendConstraints::allow_mpi = false`` and route through a
-//     single-rank lane. Tracked under the MPI-parity follow-up.
 //
 // Algorithm:
 //   * Draw ``R`` Gaussian random unit vectors ``|r>``.
@@ -434,14 +430,9 @@ FtlmResult ftlm_kernel(const Backend&  backend,
             std::forward<MatvecFn>(apply_H),
             local_n, global_n, opts);
     } else {
-        // MpiBackend / MpiCudaBackend: needs cross-rank reductions in
-        // the Lanczos basis and in the per-temperature thermo averages
-        // that the current Backend-templated body does not yet handle.
-        // Tracked separately under the MPI-parity follow-up.
         throw std::runtime_error(
-            "ftlm_kernel: distributed backends are not yet supported. "
-            "Pin BackendConstraints::allow_mpi = false to route through "
-            "the CPU/CUDA lanes.");
+            "ftlm_kernel: unsupported backend (CpuBackend / CudaBackend "
+            "only).");
     }
 }
 

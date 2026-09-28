@@ -29,9 +29,8 @@
 //                                    CSR + real-fast-path branches)
 //
 // The CUDA host cells live in cuda_matvec_backend.cuh (compiled only under
-// WITH_CUDA), and the DistributedHost lane is MpiMatVecImpl (header-only,
-// WITH_MPI) -- neither is a CpuMatVecBackend specialization, so both are
-// out of scope for this TU.
+// WITH_CUDA) -- not a CpuMatVecBackend specialization, so out of scope for
+// this TU.
 // =============================================================================
 
 #include <ed/matvec/basis_policy.h>

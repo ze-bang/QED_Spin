@@ -5,16 +5,15 @@
 //
 // `ed::select_backend(LinearOperator, BackendConstraints)`: the runtime
 // dispatch helper consumed by the Phase-4 orchestrators (`ed::solve`,
-// `ed::thermal`, `ed::spectral`). Resolves the (mpi_size, have_cuda,
-// gpu_mem_fits, user constraints) tuple into a single `BackendVariant`
-// the caller can `std::visit` over.
+// `ed::thermal`, `ed::spectral`). Resolves the (have_cuda, gpu_mem_fits,
+// user constraints) tuple into a single `BackendVariant` the caller can
+// `std::visit` over.
 //
-// Decision order (matches the legacy `auto/solve.cpp` heuristic):
-//   1. if mpi_size > 1 AND have_cuda() AND gpu_mem_fits AND allow_mpi_gpu
-//          --> MpiCudaBackend
-//   2. else if mpi_size > 1 AND allow_mpi          --> MpiBackend
-//   3. else if have_cuda() AND gpu_mem_fits AND allow_gpu --> CudaBackend
-//   4. else                                          --> CpuBackend
+// Decision order:
+//   1. if have_cuda() AND gpu_mem_fits AND allow_gpu --> CudaBackend
+//   2. else                                          --> CpuBackend
+//
+// `allow_mpi` / `allow_mpi_gpu` are accepted and ignored.
 //
 // Phase 4.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
@@ -34,15 +33,6 @@
 #ifdef WITH_CUDA
 #  include <cuda_runtime.h>
 #  include <ed/matvec/backends/cuda_backend.cuh>
-#endif
-
-#ifdef WITH_MPI
-#  include <mpi.h>
-#  include <ed/matvec/backends/mpi_backend.h>
-#  ifdef ED_HAVE_NCCL
-#    include <ed/parallel/multi_gpu.h>
-#    include <ed/matvec/backends/mpi_cuda_backend.cuh>
-#  endif
 #endif
 
 namespace ed {
@@ -82,12 +72,6 @@ using BackendVariant = std::variant<
 #ifdef WITH_CUDA
     , std::unique_ptr<ed::matvec::CudaBackend>
 #endif
-#ifdef WITH_MPI
-    , std::unique_ptr<ed::matvec::MpiBackend>
-#  ifdef ED_HAVE_NCCL
-    , std::unique_ptr<ed::matvec::MpiCudaBackend>
-#  endif
-#endif
 >;
 
 // ---------------------------------------------------------------------------
@@ -126,19 +110,6 @@ inline bool have_cuda() noexcept {
     return ok;
 #else
     return false;
-#endif
-}
-
-inline std::size_t mpi_size_or_one() noexcept {
-#ifdef WITH_MPI
-    int inited = 0;
-    MPI_Initialized(&inited);
-    if (!inited) return 1;
-    int sz = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &sz);
-    return static_cast<std::size_t>(sz);
-#else
-    return 1;
 #endif
 }
 
@@ -185,10 +156,9 @@ inline bool gpu_mem_fits(const Geometry& geom,
 inline BackendVariant select_backend(const Geometry& geom,
                                      const BackendConstraints& c = {})
 {
-    const std::size_t nmpi = mpi_size_or_one();
     const bool have_gpu = have_cuda();
     const bool gpu_fits = have_gpu && gpu_mem_fits(geom, c);
-    (void)nmpi; (void)have_gpu;
+    (void)have_gpu;
 
     // CRITICAL: select_backend can only pick a Backend that matches
     // the operator's declared memory space. A Host operator forced
@@ -199,35 +169,6 @@ inline BackendVariant select_backend(const Geometry& geom,
         ed::matvec::is_host(geom.memory_space);
     const bool op_is_device =
         ed::matvec::is_device(geom.memory_space);
-
-#ifdef WITH_MPI
-    // NOTE: MpiCudaBackend (the GPU+MPI lane) requires a
-    // `MultiGpuCommunicator` that the caller owns separately --- the
-    // NCCL handle cannot be auto-constructed here without coordinating
-    // initialisation. When the caller wants the MPI+GPU lane it
-    // constructs the BackendVariant in place via the MpiCudaBackend
-    // alternative; this auto-dispatch returns MpiBackend (host-staged
-    // collectives over CUDA-aware MPI) when only mpi_size > 1 is true,
-    // and CudaBackend when only the GPU is available.
-    // Audit 2026-07-30 (H4): require a genuinely DISTRIBUTED operator
-    // geometry before auto-picking MpiBackend. Since DistributedOperator
-    // was retired (Stage 11d) no operator produces a distributed
-    // geometry, and the old `mpi_size > 1` test alone put every rank of
-    // `mpirun -n P ed` through an MpiBackend wrapped around a fully
-    // REPLICATED operator: P identical full-dim solves whose every
-    // dot/nrm2 was Allreduce-inflated by P (eigenvalues survive --
-    // Lanczos is invariant under a uniform inner-product scale and the
-    // fixed seed makes the ranks bit-identical replicas -- but Ritz
-    // vectors carried true norm 1/sqrt(P) and every rank wrote results
-    // concurrently). Replicated ranks now solve on their local
-    // CPU/CUDA lane; across-sector MPI distribution is handled ABOVE
-    // this dispatch by make_sector_operators_tagged ownership.
-    if (nmpi > 1 && c.allow_mpi && !op_is_device
-            && geom.is_distributed()) {
-        return BackendVariant{std::make_unique<ed::matvec::MpiBackend>(
-            MPI_COMM_WORLD)};
-    }
-#endif
 
 #ifdef WITH_CUDA
     // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
@@ -275,7 +216,7 @@ inline BackendVariant select_backend(const LinearOperator& op,
 // inside any `solve_on<Backend>` / `thermal_on<Backend>` body).
 // `lane_label_from_variant(v)` visits the variant for callers that
 // already hold a `BackendVariant`. Both return one of
-// {"cpu","gpu","mpi","mpi_gpu"}. Callers should set `R.backend.mpi_size`
+// {"cpu","gpu"}. Callers should set `R.backend.mpi_size`
 // separately -- the label encodes the lane class, not the rank count.
 //
 // Phase D of the "Backend x Symmetries x Workflows" plan (May 2026).
@@ -290,16 +231,6 @@ inline std::string lane_label_for() {
         return std::string{"gpu"};
     }
 #endif
-#ifdef WITH_MPI
-    else if constexpr (std::is_same_v<Backend, ed::matvec::MpiBackend>) {
-        return std::string{"mpi"};
-    }
-#  ifdef ED_HAVE_NCCL
-    else if constexpr (std::is_same_v<Backend, ed::matvec::MpiCudaBackend>) {
-        return std::string{"mpi_gpu"};
-    }
-#  endif
-#endif
     else {
         return std::string{"cpu"};
     }
@@ -312,85 +243,5 @@ inline std::string lane_label_from_variant(const BackendVariant& v) {
         return lane_label_for<B>();
     }, v);
 }
-
-#if defined(WITH_MPI) && defined(WITH_CUDA) && defined(ED_HAVE_NCCL)
-/// `WithMpiCudaBackend` --- explicit opt-in for the MPI+GPU lane.
-///
-/// `select_backend` cannot auto-construct an `MpiCudaBackend` because
-/// the constructor needs a `MultiGpuCommunicator` that the caller owns.
-/// CLIs that pass `--gpu` on the distributed binary can use this helper
-/// to wrap an externally-constructed `MpiCudaBackend` in the
-/// `BackendVariant` that the orchestrators consume.
-///
-/// ED Cleanup Sweep Phase 4 (May 2026): added so the distributed-CLI
-/// `--gpu` flag has a uniform path through the `ed::workflows::*`
-/// orchestrators (matching the CPU lane's auto-selection).
-inline BackendVariant WithMpiCudaBackend(
-    std::unique_ptr<ed::matvec::MpiCudaBackend> be) {
-    return BackendVariant{std::move(be)};
-}
-
-/// `MpiCudaBackendContext` --- RAII bundle bundling a NCCL
-/// `MultiGpuCommunicator` and the `MpiCudaBackend` that references it.
-///
-/// The `MpiCudaBackend` keeps a reference to the
-/// `MultiGpuCommunicator`; both must outlive the kernel call. This
-/// context bundle owns the comm by `unique_ptr` and hands the backend
-/// out via the `BackendVariant` member. Construct once at CLI startup,
-/// keep alive until after the orchestrator call returns.
-///
-/// The context is non-movable / non-copyable on purpose: the backend
-/// holds a raw reference into the comm. Stash it on the caller's stack
-/// (e.g. inside `main()`) for the duration of the workflow.
-struct MpiCudaBackendContext {
-    std::unique_ptr<ed::distributed::multi_gpu::MultiGpuCommunicator> comm;
-    BackendVariant                                                   backend;
-
-    MpiCudaBackendContext(MpiCudaBackendContext&&) = delete;
-    MpiCudaBackendContext& operator=(MpiCudaBackendContext&&) = delete;
-};
-
-/// Build a `MpiCudaBackendContext` from an MPI communicator and an
-/// optional explicit CUDA device index. Defaults: `MPI_COMM_WORLD` and
-/// auto-detected node-local device binding (one GPU per rank,
-/// node-local rank modulo visible device count).
-///
-/// Construction is COLLECTIVE on `mpi_comm`. Throws
-/// `std::logic_error` if `ED_HAVE_NCCL` was not set at compile time,
-/// `std::runtime_error` on cuda / nccl / MPI failure.
-///
-/// Typical use:
-///
-///     auto ctx = ed::make_mpi_cuda_backend();      // collective
-///     auto op  = ed::make_operator({...,
-///                                   .distributed = true});
-///     auto gs  = ed::workflows::solve(*op, opts);  // uses ctx.backend
-///                                                   // via the caller
-///                                                   // plumbing.
-///
-/// The orchestrator does not yet accept an externally-supplied
-/// `BackendVariant`; callers needing the MPI+CUDA lane today drive the
-/// kernel manually via `std::visit(ctx.backend, ...)`. The factory
-/// exists so that machinery has a single, RAII-correct entry point.
-inline std::unique_ptr<MpiCudaBackendContext> make_mpi_cuda_backend(
-    MPI_Comm mpi_comm = MPI_COMM_WORLD,
-    int      device_index =
-        ed::distributed::multi_gpu::kAutoDeviceIndex)
-{
-    if (!ed::distributed::multi_gpu::nccl_compiled_in()) {
-        throw std::logic_error(
-            "ed::make_mpi_cuda_backend: NCCL not compiled in. Rebuild "
-            "with -DED_USE_NCCL=ON and a NCCL-enabled toolchain.");
-    }
-    auto comm =
-        std::make_unique<ed::distributed::multi_gpu::MultiGpuCommunicator>(
-            mpi_comm, device_index);
-    auto be = std::make_unique<ed::matvec::MpiCudaBackend>(*comm);
-    auto ctx = std::unique_ptr<MpiCudaBackendContext>(
-        new MpiCudaBackendContext{
-            std::move(comm), WithMpiCudaBackend(std::move(be))});
-    return ctx;
-}
-#endif
 
 }  // namespace ed

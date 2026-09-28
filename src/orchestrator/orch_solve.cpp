@@ -133,7 +133,7 @@ GroundStateResult solve_on(Backend& be,
 
     // Deterministic-ish seed for reproducibility within a single process.
     // The kernel expects the seed in the backend's memory space (host for
-    // CPU/MPI, device for CUDA/MPI+CUDA). Build the seed on host first then
+    // CPU, device for CUDA). Build the seed on host first then
     // stage through `copy_from_host` into a backend-allocated vector so the
     // kernel's internal `be.copy(seed -> v_curr)` (which is a D2D for CUDA)
     // is given a properly-resident pointer.
@@ -183,7 +183,7 @@ GroundStateResult solve_on(Backend& be,
         // recurrence (`src/solvers/cpu/lanczos.cpp:1110-1258`).
         //
         // Eligibility (all must hold):
-        //   * CpuBackend (no GPU / MPI lane affected),
+        //   * CpuBackend (no GPU lane affected),
         //   * single eigenvalue (the smallest --- num_eigs == 1),
         //   * eigenvalues only (caller did NOT request eigenvectors;
         //     CF spectral / per-state observables go through the
@@ -709,161 +709,59 @@ GroundStateResult solve_on(Backend& be,
         // path for small dimensions (<= 2^12 by default) so the O(N^3)
         // dense step is affordable.
         //
-        // Distributed path (Wave A4 -- Full unified-interface collapse,
-        // May 2026): gather the per-rank slab matvecs onto rank 0,
-        // assemble the dense matrix there, run zheevd on rank 0, then
-        // MPI_Bcast the eigenvalues. This trades the simplicity of a
-        // ScaLAPACK redistribution for not introducing a new dependency,
-        // and is correct precisely in the regime where FullDiag is the
-        // orchestrator's chosen method (global_dim <= 2^12 -- ~12-13 MB
-        // of dense complex<double> on rank 0). A ScaLAPACK path can
-        // replace this when callers exercise FullDiag at larger
-        // distributed dims.
-#ifdef WITH_MPI
-        if (geom.is_distributed()) {
-            int mpi_rank = 0, mpi_size = 1;
-            MPI_Comm_rank(geom.comm, &mpi_rank);
-            MPI_Comm_size(geom.comm, &mpi_size);
-
-            const auto Nlocal  = static_cast<int>(geom.local_dim);
-            const auto Nglobal = static_cast<int>(geom.global_dim);
-
-            std::vector<int> recv_counts(mpi_size, 0);
-            std::vector<int> recv_displs(mpi_size, 0);
-            MPI_Allgather(&Nlocal, 1, MPI_INT,
-                          recv_counts.data(), 1, MPI_INT, geom.comm);
-            for (int r = 1; r < mpi_size; ++r) {
-                recv_displs[r] = recv_displs[r-1] + recv_counts[r-1];
-            }
-
-            // Dense matrix on rank 0; null elsewhere.
-            std::vector<Complex> H_dense;
-            if (mpi_rank == 0) {
-                H_dense.assign(static_cast<std::size_t>(Nglobal)
-                               * static_cast<std::size_t>(Nglobal),
-                               Complex{0.0, 0.0});
-            }
-
-            // For each column k: build e_k as a slab-distributed
-            // vector, apply H to get H * e_k (per-rank y_local),
-            // gather y_local onto rank 0 into column k of H_dense.
-            std::vector<Complex> ek_local(Nlocal, Complex{0.0, 0.0});
-            std::vector<Complex> y_local(Nlocal, Complex{0.0, 0.0});
-            for (int k = 0; k < Nglobal; ++k) {
-                // Set e_k on the rank that owns global index k.
-                std::fill(ek_local.begin(), ek_local.end(),
-                          Complex{0.0, 0.0});
-                const std::uint64_t lo = geom.local_offset;
-                const std::uint64_t hi = lo + Nlocal;
-                if (static_cast<std::uint64_t>(k) >= lo
-                    && static_cast<std::uint64_t>(k) < hi) {
-                    ek_local[static_cast<std::size_t>(
-                        static_cast<std::uint64_t>(k) - lo)] =
-                        Complex{1.0, 0.0};
-                }
-
-                matvec(ek_local.data(), y_local.data(),
-                       static_cast<std::size_t>(Nlocal));
-
-                // Gather column k onto rank 0.
-                Complex* col_ptr = (mpi_rank == 0)
-                    ? &H_dense[static_cast<std::size_t>(k)
-                               * static_cast<std::size_t>(Nglobal)]
-                    : nullptr;
-                MPI_Gatherv(
-                    y_local.data(), Nlocal, MPI_DOUBLE_COMPLEX,
-                    col_ptr, recv_counts.data(), recv_displs.data(),
-                    MPI_DOUBLE_COMPLEX, /*root=*/0, geom.comm);
-            }
-
-            std::vector<double> eigs(Nglobal, 0.0);
-            if (mpi_rank == 0) {
-                std::function<void(const Complex*, Complex*, int)> Hv =
-                    [&](const Complex* in, Complex* out, int n) {
-                        // Apply H_dense (column-major) once per call.
-                        for (int i = 0; i < n; ++i) {
-                            Complex acc{0.0, 0.0};
-                            for (int j = 0; j < n; ++j) {
-                                acc += H_dense[static_cast<std::size_t>(j)
-                                                * static_cast<std::size_t>(n)
-                                                + static_cast<std::size_t>(i)]
-                                    * in[j];
-                            }
-                            out[i] = acc;
-                        }
-                    };
-                full_diagonalization(Hv, static_cast<std::size_t>(Nglobal),
-                                     opts.num_eigs, eigs,
-                                     opts.output_dir,
-                                     opts.compute_vectors);
-                if (!opts.output_dir.empty()
-                        && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
-                    R.hdf5_path = opts.output_dir + "/ed_results.h5";
-                }
-            }
-            MPI_Bcast(eigs.data(), Nglobal, MPI_DOUBLE, 0, geom.comm);
-            const std::size_t n_keep = std::min<std::size_t>(
-                opts.num_eigs, static_cast<std::size_t>(Nglobal));
-            R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
-            R.krylov.iters_done = 0;
-            R.krylov.converged  = true;
-        } else
-#endif
-        {
-            // "Universal save contract" follow-up (May 2026): the
-            // FullDiag column-extraction loop in
-            // ``::full_diagonalization`` (lanczos.cpp:1483-1488) calls
-            // ``H(unit_vec.data(), col_j.data(), N)`` with host
-            // ``std::vector<Complex>`` storage. If we hand it a matvec
-            // bound to a non-CPU backend (e.g. the streaming-symmetry
-            // GPU mirror, advertised via
-            // ``Geometry::supports_device_matvec=true``), the lambda
-            // dereferences the host pointers as device pointers and
-            // ``cudaMemsetAsync`` returns "invalid argument".
-            //
-            // The dense build is O(N) matvecs and the LAPACK O(N^3)
-            // call dominates, so there is no perf gain in keeping the
-            // FullDiag column build on the GPU. Pin it to the CPU
-            // binding (``LinearOperator::bind_cpu()`` is supported by
-            // every Operator subclass and is the fallback path
-            // ``LinearOperator::bind<CpuBackend>()`` selects). Krylov /
-            // BlockLanczos / KrylovSchur lanes above keep the original
-            // device-bound matvec since they operate entirely in the
-            // backend's memory space.
-            ed::LinearOperator::MatvecFn cpu_matvec = H.bind_cpu();
-            std::function<void(const Complex*, Complex*, int)> Hv =
-                [&](const Complex* in, Complex* out, int n) {
-                    cpu_matvec(in, out, static_cast<std::size_t>(n));
-                };
-            std::vector<double> eigs;
-            // Pass &H so the dense matrix is assembled DIRECTLY from the sparse
-            // term structure in O(nnz) (full-space / fixed-Sz lanes) instead of N
-            // full matvecs. Symmetry lanes (and any operator without direct
-            // support) return false and fall back to the Hv column build, which
-            // stays SEQUENTIAL because the CPU matvec is not reentrant.
-            std::vector<std::vector<Complex>> fd_vecs;
-            full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
-                                 opts.output_dir,
-                                 opts.compute_vectors,
-                                 /*op_for_dense=*/&H,
-                                 opts.compute_vectors ? &fd_vecs : nullptr);
-            if (opts.compute_vectors && !fd_vecs.empty()) {
-                // Audit 2026-09: the dense lane used to persist vectors to
-                // HDF5 only; with output_dir empty the caller got nothing.
-                EigenvectorRef evref;
-                evref.host = std::move(fd_vecs);
-                R.eigenvectors = std::move(evref);
-            }
-            if (!opts.output_dir.empty()
-                    && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
-                R.hdf5_path = opts.output_dir + "/ed_results.h5";
-            }
-            const std::size_t n_keep = std::min<std::size_t>(
-                opts.num_eigs, eigs.size());
-            R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
-            R.krylov.iters_done = 0;
-            R.krylov.converged  = true;
+        // "Universal save contract" follow-up (May 2026): the
+        // FullDiag column-extraction loop in
+        // ``::full_diagonalization`` (lanczos.cpp:1483-1488) calls
+        // ``H(unit_vec.data(), col_j.data(), N)`` with host
+        // ``std::vector<Complex>`` storage. If we hand it a matvec
+        // bound to a non-CPU backend (e.g. the streaming-symmetry
+        // GPU mirror, advertised via
+        // ``Geometry::supports_device_matvec=true``), the lambda
+        // dereferences the host pointers as device pointers and
+        // ``cudaMemsetAsync`` returns "invalid argument".
+        //
+        // The dense build is O(N) matvecs and the LAPACK O(N^3)
+        // call dominates, so there is no perf gain in keeping the
+        // FullDiag column build on the GPU. Pin it to the CPU
+        // binding (``LinearOperator::bind_cpu()`` is supported by
+        // every Operator subclass and is the fallback path
+        // ``LinearOperator::bind<CpuBackend>()`` selects). Krylov /
+        // BlockLanczos / KrylovSchur lanes above keep the original
+        // device-bound matvec since they operate entirely in the
+        // backend's memory space.
+        ed::LinearOperator::MatvecFn cpu_matvec = H.bind_cpu();
+        std::function<void(const Complex*, Complex*, int)> Hv =
+            [&](const Complex* in, Complex* out, int n) {
+                cpu_matvec(in, out, static_cast<std::size_t>(n));
+            };
+        std::vector<double> eigs;
+        // Pass &H so the dense matrix is assembled DIRECTLY from the sparse
+        // term structure in O(nnz) (full-space / fixed-Sz lanes) instead of N
+        // full matvecs. Symmetry lanes (and any operator without direct
+        // support) return false and fall back to the Hv column build, which
+        // stays SEQUENTIAL because the CPU matvec is not reentrant.
+        std::vector<std::vector<Complex>> fd_vecs;
+        full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
+                             opts.output_dir,
+                             opts.compute_vectors,
+                             /*op_for_dense=*/&H,
+                             opts.compute_vectors ? &fd_vecs : nullptr);
+        if (opts.compute_vectors && !fd_vecs.empty()) {
+            // Audit 2026-09: the dense lane used to persist vectors to
+            // HDF5 only; with output_dir empty the caller got nothing.
+            EigenvectorRef evref;
+            evref.host = std::move(fd_vecs);
+            R.eigenvectors = std::move(evref);
         }
+        if (!opts.output_dir.empty()
+                && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
+            R.hdf5_path = opts.output_dir + "/ed_results.h5";
+        }
+        const std::size_t n_keep = std::min<std::size_t>(
+            opts.num_eigs, eigs.size());
+        R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
+        R.krylov.iters_done = 0;
+        R.krylov.converged  = true;
     }
 
     // ---------------------------------------------------------------------
@@ -884,24 +782,15 @@ GroundStateResult solve_on(Backend& be,
     //   * `opts.compute_vectors` was actually requested,
     //   * the caller supplied a non-empty, non-/dev/null `output_dir`,
     //   * the kernel populated host-side eigenvectors,
-    //   * no upstream path already wrote (and recorded) the file,
-    //   * single-rank lane only (the MPI lane uses per-rank rank_*.h5
-    //     files written by `ed_distributed_main` / the streaming-symmetry
-    //     directory walker -- writing a single shared `ed_results.h5`
-    //     from N ranks would clobber across processes).
+    //   * no upstream path already wrote (and recorded) the file.
     // ---------------------------------------------------------------------
     // ---------------------------------------------------------------------
     // Universal persistence finalizer (May 2026 follow-up). Pinned by
     // the long block-comment on ``apply_solve_save_finalizer`` above.
     //
-    // Writes:
-    //   * serial lane: ``<out>/ed_results.h5`` with
-    //     ``/eigendata/eigenvalues`` (always) and
-    //     ``/eigendata/eigenvector_*`` (when ``compute_vectors`` is set
-    //     and the kernel populated host-side eigenvectors).
-    //   * MPI lane: same file from rank 0 carrying only the aggregate
-    //     eigenvalue array. Per-rank ``rank_<r>.h5`` files remain the
-    //     canonical location for slab-distributed eigenvectors.
+    // Writes ``<out>/ed_results.h5`` with ``/eigendata/eigenvalues``
+    // (always) and ``/eigendata/eigenvector_*`` (when ``compute_vectors``
+    // is set and the kernel populated host-side eigenvectors).
     //
     // No-op when ``R.hdf5_path`` was already filled by the FullDiag
     // upstream lane.
@@ -939,7 +828,7 @@ GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
     require_hermitian_input(H, "ed::solve");
     // Apply the same thread-budget hygiene the legacy `lanczos()` /
     // `block_lanczos()` / `krylov_schur()` entries do (Phase 6.1 of the
-    // matvec-unification arc; see docs/history/PHASE_8_GPU_MPI_OPT.md).
+    // matvec-unification arc).
     // Without this the orchestrator runs OpenBLAS + OpenMP at
     // `omp_get_max_threads()` for every BLAS-1 / SpMV call -- which at
     // N=14 dim=16k turns a ~1 ms/iter SpMV into a ~5 ms/iter SpMV due to

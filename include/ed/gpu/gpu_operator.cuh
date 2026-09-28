@@ -196,18 +196,6 @@ public:
             "or pair the operator with a CudaBackend via "
             "ed::select_backend().");
     }
-    [[nodiscard]] MatvecFn bind_mpi() const override {
-        throw std::runtime_error(
-            "GPUOperator: bind_mpi() is not supported -- this is a "
-            "single-rank GPU operator. Use ed::distributed::"
-            "DistributedGPUOperator for the MPI+CUDA lane.");
-    }
-    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
-        throw std::runtime_error(
-            "GPUOperator: bind_mpi_cuda() is not supported -- this is a "
-            "single-rank GPU operator. Use ed::distributed::"
-            "DistributedGPUOperator for the MPI+CUDA lane.");
-    }
     
     // OPTIMIZED: Direct data population (no std::function overhead)
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);

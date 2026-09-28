@@ -65,7 +65,6 @@ jobs:
             -DED_BUILD_DOCS=ON \
             -DBUILD_ED_TESTS=OFF \
             -DWITH_CUDA=OFF \
-            -DWITH_MPI=OFF \
             -DBLAS_PROFILE=OPENBLAS
 
       - name: Build (sphinx target -- pulls in doxygen)

@@ -159,18 +159,13 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // enumeration via ``make_sector_operators_tagged`` viewed
                   // through ``SectorSetView`` (preserves the CSR-free
                   // lazy-rep memory path for large N).
-                  // Across-sector MPI (Level 1): when launched under mpirun the
-                  // factory dim-balances + hands each rank only its sectors
-                  // (construction + memory distribute); the inner thermal solve
-                  // is forced rank-local below, and the per-sector thermo is
-                  // Allgather-combined after the loop. Single-rank => unchanged.
-                  const auto [mpi_rank, mpi_size] = binding_mpi_rank_size();
                   ed::core::SectorSetView handle(
-                      ed::make_sector_operators_tagged(spec, mpi_rank, mpi_size,
+                      ed::make_sector_operators_tagged(spec, /*mpi_rank=*/0,
+                                                       /*mpi_size=*/1,
                                                        probe.base));
 
                   const std::size_t num_sectors = handle.num_sectors();
-                  if (mpi_size == 1 && num_sectors == 0) {
+                  if (num_sectors == 0) {
                       throw std::runtime_error(
                           "workflows_thermal_streaming_symmetry: "
                           "make_operator returned an operator with no "
@@ -227,18 +222,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   if (opts.random_seed == 0) {
                       opts.random_seed = std::random_device{}();
                   }
-#ifdef WITH_MPI
-                  // Across-sector MPI: every rank must use the SAME base seed so
-                  // a sector's FTLM draws the identical random vectors no matter
-                  // which rank owns it -- otherwise the distributed combine would
-                  // not match the single-node result. Broadcast rank 0's seed.
-                  if (mpi_size > 1) {
-                      unsigned long long s =
-                          static_cast<unsigned long long>(opts.random_seed);
-                      MPI_Bcast(&s, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-                      opts.random_seed = static_cast<decltype(opts.random_seed)>(s);
-                  }
-#endif
 
                   // -----------------------------------------------------
                   // Wave B3 (May 2026): for the KPM-DOS lane, estimate
@@ -253,21 +236,11 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       std::numeric_limits<double>::quiet_NaN();
                   double shared_e_max =
                       std::numeric_limits<double>::quiet_NaN();
-                  // Audit 2026-07-31 (M2): under across-sector MPI the
-                  // gate must be RANK-UNIFORM (sector_indices is this
-                  // rank's owned subset -- a rank owning one sector
-                  // still has to join the Allreduce below), and the
-                  // locally estimated bounds must be MIN/MAX-combined
-                  // across ranks: each rank used to run KPM with bounds
-                  // from its LOCAL largest sector, breaking the
-                  // bit-identical-to-single-node combine and clipping a
-                  // rank's other sectors when its local largest bounded
-                  // them poorly.
                   if (opts.method ==
                           ed::workflows::ThermalOptions::Method::KpmDos
                       && !(std::isfinite(opts.e_min_override)
                            && std::isfinite(opts.e_max_override))
-                      && (sector_indices.size() > 1 || mpi_size > 1)) {
+                      && sector_indices.size() > 1) {
                       std::size_t best_k   = sector_indices.front();
                       std::size_t best_dim = 0;
                       for (std::size_t k : sector_indices) {
@@ -305,34 +278,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                               // Silent fallback: kernel estimates.
                           }
                       }
-#ifdef WITH_MPI
-                      if (mpi_size > 1) {
-                          // Global bounds: MIN/MAX over every rank's
-                          // local estimate (non-finite locals contribute
-                          // inert sentinels; every rank participates).
-                          const double inf =
-                              std::numeric_limits<double>::infinity();
-                          double lo_s = std::isfinite(shared_e_min)
-                                            ? shared_e_min : inf;
-                          double hi_s = std::isfinite(shared_e_max)
-                                            ? shared_e_max : -inf;
-                          double lo_g = 0.0, hi_g = 0.0;
-                          MPI_Allreduce(&lo_s, &lo_g, 1, MPI_DOUBLE,
-                                        MPI_MIN, MPI_COMM_WORLD);
-                          MPI_Allreduce(&hi_s, &hi_g, 1, MPI_DOUBLE,
-                                        MPI_MAX, MPI_COMM_WORLD);
-                          if (std::isfinite(lo_g) && std::isfinite(hi_g)
-                              && hi_g > lo_g) {
-                              shared_e_min = lo_g;
-                              shared_e_max = hi_g;
-                          } else {
-                              shared_e_min = std::numeric_limits<
-                                  double>::quiet_NaN();
-                              shared_e_max = std::numeric_limits<
-                                  double>::quiet_NaN();
-                          }
-                      }
-#endif
                   }
 
                   // Save & DSSF Upgrades follow-up (May 2026): when the
@@ -396,12 +341,9 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       static_cast<std::size_t>(n_sec_th));
 
                   // Audit 2026-07-31 (M1): a throw escaping an OpenMP
-                  // parallel region is UB (std::terminate in practice),
-                  // and under across-sector MPI a rank dying here skips
-                  // the Allgather below and hangs every peer in the
-                  // collective. Capture per-sector exceptions, then
-                  // coordinate a consistent failure across ranks BEFORE
-                  // rethrowing, so either every rank raises or none does.
+                  // parallel region is UB (std::terminate in practice).
+                  // Capture per-sector exceptions and rethrow the first
+                  // one after the loop.
                   std::exception_ptr sec_eptr;
                   #pragma omp parallel for schedule(dynamic, 1) \
                       if(thermal_sector_parallel)
@@ -413,17 +355,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       if (!sec || sec->dim() == 0) continue;
                       ed::workflows::ThermalOptions topts = opts;
                       topts.selected_sectors.clear();
-                      if (mpi_size > 1) {
-                          // Across-sector MPI: the inner thermal solve must be
-                          // rank-local. select_backend would otherwise pick
-                          // MpiBackend (MPI_Comm_dup ctor + Allreduce dot) on
-                          // MPI_COMM_WORLD; with ranks on different sectors those
-                          // collectives mismatch and deadlock. Collective on-disk
-                          // I/O (create_directory_mpi_safe) is suppressed too.
-                          topts.backend.allow_mpi     = false;
-                          topts.backend.allow_mpi_gpu = false;
-                          topts.output_dir.clear();
-                      } else if (need_per_sector_outdir) {
+                      if (need_per_sector_outdir) {
                           topts.output_dir = opts.output_dir
                               + "/sector_k_" + std::to_string(k);
                       } else {
@@ -494,31 +426,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                           { if (!sec_eptr) sec_eptr = std::current_exception(); }
                       }
                   }
-#ifdef WITH_MPI
-                  if (mpi_size > 1) {
-                      // Every rank reaches this collective whether its own
-                      // loop failed or not; a failure anywhere then raises
-                      // everywhere (peers get a descriptive error instead
-                      // of hanging in the Allgather below).
-                      int local_fail = sec_eptr ? 1 : 0;
-                      int any_fail   = 0;
-                      MPI_Allreduce(&local_fail, &any_fail, 1, MPI_INT,
-                                    MPI_MAX, MPI_COMM_WORLD);
-                      if (any_fail) {
-                          if (sec_eptr) std::rethrow_exception(sec_eptr);
-                          throw std::runtime_error(
-                              "workflows_thermal_streaming_symmetry"
-                              ": a peer MPI rank failed inside "
-                              "its sector loop (see its stderr); raising "
-                              "on every rank instead of deadlocking in "
-                              "the thermo Allgather.");
-                      }
-                  } else if (sec_eptr) {
-                      std::rethrow_exception(sec_eptr);
-                  }
-#else
                   if (sec_eptr) std::rethrow_exception(sec_eptr);
-#endif
 
                   // Serial post-processing: collect results in
                   // sector_indices order. The same dim==0 guard filters
@@ -583,20 +491,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       }
                   }
 
-#ifdef WITH_MPI
-                  // Across-sector MPI: recombine every rank's per-sector thermo
-                  // into the full list (collective; all ranks participate, even
-                  // those owning zero sectors) so the combined result below is
-                  // identical on every rank -- bit-identical to single-node.
-                  if (mpi_size > 1) {
-                      std::vector<std::uint64_t> raw_idx;
-                      raw_idx.reserve(per_sector.size());
-                      for (const auto& e : per_sector)
-                          raw_idx.push_back(e.tag.sector_index);
-                      mpi_allgather_sector_thermo(per_sector_thermo, per_sector_dims,
-                                                  raw_idx, gs_E, mpi_size);
-                  }
-#endif
                   if (!per_sector_thermo.empty()) {
                       agg.thermo = ed::core::combine_sector_thermodynamics(
                           per_sector_thermo, per_sector_dims);
@@ -615,7 +509,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // Phase D (May 2026): propagate the per-sector
                   // backend lane on the aggregate so callers reading
                   // ``ThermalResult.backend.lane`` see the truthful
-                  // lane ("gpu" / "cpu" / "mpi" / "mpi_gpu").
+                  // lane ("gpu" / "cpu").
                   if (!sector_lane.empty()) {
                       agg.backend.lane = sector_lane;
                       agg.backend.mpi_size = sector_mpi_size;

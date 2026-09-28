@@ -74,13 +74,10 @@ target_link_libraries(_core PRIVATE
 # When the project was configured with WITH_CUDA=ON, the dispatcher header
 # `ed_wrapper.h` references GPUEDWrapper::* symbols (gated by
 # `#ifdef WITH_CUDA`, which is set via `add_definitions(-DWITH_CUDA)` in
-# `cmake/EDDependencies.cmake`). We must PRIVATE-link ed_solvers_gpu (and
-# ed_distributed_gpu when NCCL is present) so the linker can resolve them.
+# `cmake/EDDependencies.cmake`). We must PRIVATE-link ed_solvers_gpu so the
+# linker can resolve them.
 if(WITH_CUDA AND TARGET ed_solvers_gpu)
     target_link_libraries(_core PRIVATE ed_solvers_gpu)
-    if(TARGET ed_distributed_gpu)
-        target_link_libraries(_core PRIVATE ed_distributed_gpu)
-    endif()
     # ed_solvers_gpu is built with CUDA_SEPARABLE_COMPILATION=ON (device
     # functions across .cu translation units link via cudadevrt). Python
     # loads `_core.so` standalone, so we must perform device linking here

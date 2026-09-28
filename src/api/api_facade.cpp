@@ -267,11 +267,9 @@ to_legacy(const SpectralOptions& opts, std::uint64_t dim_hint) {
 // the spec).
 // ---------------------------------------------------------------------------
 
-// Note: the OperatorSpec-form overloads live `inline` in `include/ed/api.h`
-// to keep the `WITH_MPI` distributed-constructor back-edge at the
-// consumer link site (where it already lives via the test / example
-// helpers). Only the LinearOperator-form lives here, since it does NOT
-// instantiate `ed::make_operator` and so does not need `ed_distributed`.
+// Note: the OperatorSpec-form overloads live `inline` in `include/ed/api.h`.
+// Only the LinearOperator-form lives here, since it does NOT instantiate
+// `ed::make_operator`.
 
 ed::GroundStateResult solve(const ed::LinearOperator& H, SolveOptions opts) {
     auto wf_opts = to_legacy(opts, H.geometry().global_dim);

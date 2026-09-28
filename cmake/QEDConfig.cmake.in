@@ -17,14 +17,13 @@
 #   target_link_libraries(my_app PRIVATE QED::ed_solvers_cpu)
 #
 # Re-finds the transitive dependencies that the imported targets reference
-# (BLAS / LAPACK / HDF5 / OpenMP / optionally MPI / CUDAToolkit).
+# (BLAS / LAPACK / HDF5 / OpenMP / optionally CUDAToolkit).
 # -----------------------------------------------------------------------------
 
 include(CMakeFindDependencyMacro)
 
 set(QED_VERSION             "@PROJECT_VERSION@")
 set(QED_WITH_CUDA           "@WITH_CUDA@")
-set(QED_WITH_MPI            "@WITH_MPI@")
 set(QED_WITH_SCALAPACK      "@WITH_SCALAPACK@")
 set(QED_BLAS_PROFILE        "@BLAS_PROFILE@")
 
@@ -48,10 +47,6 @@ endif()
 # nlohmann_json (used by construct_ham loaders).
 if(NOT TARGET nlohmann_json::nlohmann_json)
     find_dependency(nlohmann_json)
-endif()
-
-if(QED_WITH_MPI)
-    find_dependency(MPI COMPONENTS CXX)
 endif()
 
 if(QED_WITH_CUDA)

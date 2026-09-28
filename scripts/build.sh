@@ -14,7 +14,6 @@
 # Options
 #   --cluster NAME   scripts/clusters/NAME.env is sourced first   (default: local)
 #   --variant V      cpu | cuda                                   (default: cpu)
-#   --mpi            WITH_MPI=ON
 #   --tests          BUILD_ED_TESTS=ON
 #   --no-python      skip the qed._core extension
 #   --target T       build only target T (repeatable)
@@ -30,14 +29,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER=local VARIANT=cpu MPI=OFF TESTS=OFF PYTHON=ON CLEAN=0 ARCH="" NAME=""
+CLUSTER=local VARIANT=cpu TESTS=OFF PYTHON=ON CLEAN=0 ARCH="" NAME=""
 JOBS="${SLURM_CPUS_PER_TASK:-4}"
 TARGETS=() EXTRA=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cluster)   CLUSTER="$2"; shift 2 ;;
         --variant)   VARIANT="$2"; shift 2 ;;
-        --mpi)       MPI=ON; shift ;;
         --tests)     TESTS=ON; shift ;;
         --no-python) PYTHON=OFF; shift ;;
         --target)    TARGETS+=("$2"); shift 2 ;;
@@ -46,7 +44,7 @@ while [[ $# -gt 0 ]]; do
         --arch)      ARCH="$2"; shift 2 ;;
         --name)      NAME="$2"; shift 2 ;;
         --)          shift; EXTRA=("$@"); break ;;
-        -h|--help)   sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help)   sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -65,13 +63,13 @@ BUILD="${ROOT}/build/${VARIANT}${NAME:+-${NAME}}"
 ARGS=(-S "${ROOT}" -B "${BUILD}"
       -DCMAKE_BUILD_TYPE=Release
       -DBLAS_PROFILE="${QED_BLAS_PROFILE:-AUTO}"
-      -DWITH_CUDA="${CUDA}" -DWITH_MPI="${MPI}"
+      -DWITH_CUDA="${CUDA}"
       -DED_BUILD_PYTHON="${PYTHON}" -DBUILD_ED_TESTS="${TESTS}"
       -DED_BUILD_BENCHMARKS=OFF)
 [[ -n "${QED_PYBIND11_DIR:-}" ]] && ARGS+=(-Dpybind11_DIR="${QED_PYBIND11_DIR}")
 [[ -n "${ARCH}" ]] && ARGS+=(-DED_MARCH="${ARCH}")
 
-echo "=== qed build: cluster=${CLUSTER} variant=${VARIANT} mpi=${MPI} tests=${TESTS} python=${PYTHON} jobs=${JOBS}"
+echo "=== qed build: cluster=${CLUSTER} variant=${VARIANT} tests=${TESTS} python=${PYTHON} jobs=${JOBS}"
 echo "=== commit $(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo '?') on $(hostname) -> ${BUILD}"
 cmake "${ARGS[@]}" "${EXTRA[@]}"
 if [[ ${#TARGETS[@]} -gt 0 ]]; then

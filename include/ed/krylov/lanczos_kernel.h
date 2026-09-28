@@ -37,11 +37,11 @@
 // Pointer-convention notes:
 //
 //   * Every `Complex*` in this file is in the backend's memory space
-//     (host RAM for `CpuBackend` / `MpiBackend`, device memory for the
-//     future `CudaBackend` / `MpiCudaBackend`). Callers must NOT mix
-//     host pointers into a GPU backend, nor vice versa --- there is no
-//     defensive copy_to/from_host in here. The `Backend::make_zero_vector`
-//     helper produces a properly-spaced pointer.
+//     (host RAM for `CpuBackend`, device memory for `CudaBackend`).
+//     Callers must NOT mix host pointers into a GPU backend, nor vice
+//     versa --- there is no defensive copy_to/from_host in here. The
+//     `Backend::make_zero_vector` helper produces a properly-spaced
+//     pointer.
 //   * `local_n` is the rank-local slab dimension. Global dimension N
 //     only enters as a convergence/breakdown sanity check (not used here).
 //
@@ -401,14 +401,9 @@ LanczosKernelResult lanczos_kernel(
     if (opts.max_iter == 0) {
         return LanczosKernelResult{};
     }
-    // NB: `local_n == 0` MUST NOT short-circuit here. In distributed runs
-    // it's legitimate for a rank to receive an empty slab (e.g. LPT-balanced
-    // orbit partition on a small symmetry sector with global_dim < n_ranks).
-    // Such ranks still have to participate in every collective inside the
-    // kernel (Allreduce for dot/nrm2, batched Allreduces in CGS2), so the
-    // loop body has to run on them. All host BLAS-1 locals below short
-    // operate trivially on a length-0 buffer; the backend's `make_zero_vector`
-    // is expected to handle `n == 0` (CpuBackend / MpiBackend do).
+    // NB: `local_n == 0` does not short-circuit here. All host BLAS-1
+    // locals below operate trivially on a length-0 buffer; the backend's
+    // `make_zero_vector` is expected to handle `n == 0` (CpuBackend does).
 
     LanczosKernelResult R;
     R.alpha.reserve(opts.max_iter);

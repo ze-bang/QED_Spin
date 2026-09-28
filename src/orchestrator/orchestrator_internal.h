@@ -32,9 +32,8 @@
 // select_backend), same env reads, same dispatch order.
 //
 // File map
-//   orch_common.cpp    shared plumbing: unified-writer rank test, the solve()
-//                      HDF5 persistence finalizer, the exact-small thermal
-//                      env probe
+//   orch_common.cpp    shared plumbing: the solve() HDF5 persistence
+//                      finalizer, the exact-small thermal env probe
 //   orch_solve.cpp     solve() + the backend-templated solve_on<Backend>
 //                      lanes (Lanczos / BlockLanczos / BlockKrylovSchur /
 //                      KrylovSchur / FullDiag). The ONLY translation unit
@@ -117,12 +116,6 @@ namespace ed::workflows {
 // carry external linkage with their one definition in orch_common.cpp.
 // ---------------------------------------------------------------------------
 namespace orch_detail {
-
-/// Which rank should own the unified ``ed_results.h5`` writer? True on the
-/// single process of a serial lane, on rank 0 of a distributed lane, and
-/// whenever MPI is not initialised inside the orchestrator. Full contract:
-/// see the definition in orch_common.cpp.
-bool is_unified_writer(const Geometry& geom);
 
 /// solve() persistence finalizer: centralises the post-kernel HDF5 emission
 /// so every dispatch lane hits the same on-disk contract. Full contract: see

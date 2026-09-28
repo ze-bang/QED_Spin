@@ -256,15 +256,9 @@ to_legacy(const SpectralOptions& opts, std::uint64_t dim_hint = 0);
 // call site (which is the common Python-mirror idiom). Specs whose
 // active source is `FilePaths` / `DirectoryPath` are cheap to construct.
 //
-// LinearOperator-form overloads live in the .cpp (one translation unit
-// is enough: no `make_operator` instantiation, so they don't drag in
-// the `WITH_MPI` distributed constructors). The OperatorSpec-form
-// overloads are `inline` in the header to keep the back-edge link
-// dependency at the consumer (every call site that wants
-// `ed::api::solve(spec, ...)` already needs to link `ed_distributed`
-// when MPI is on, so this just moves the demand from the api library
-// to the consumer, which `ed_add_test` and the examples register
-// already wire up).
+// LinearOperator-form overloads live in the .cpp (no `make_operator`
+// instantiation); the OperatorSpec-form overloads are `inline` in the
+// header.
 
 [[nodiscard]] ed::GroundStateResult
 solve(const ed::LinearOperator& H, SolveOptions opts = {});

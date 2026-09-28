@@ -55,7 +55,7 @@ using Complex = std::complex<double>;
 // return the SAME struct regardless of which backend ran the kernel.
 // ---------------------------------------------------------------------------
 struct BackendMetadata {
-    /// One of: "cpu", "mpi", "gpu", "mpi_gpu". Set by the orchestrator
+    /// One of: "cpu", "gpu". Set by the orchestrator
     /// when constructing the result.
     std::string  lane         = "cpu";
     std::size_t  mpi_size     = 1;

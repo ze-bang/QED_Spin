@@ -172,7 +172,7 @@ void bind_workflows_spectral_cross_irrep(py::module_& m) {
                   // Phase H.1 of the "Close CPU/GPU Gaps" plan
                   // (May 2026): capture the truthful backend lane
                   // from the inner GS solve so the cross-irrep
-                  // aggregate reports "gpu" (or "cpu" / "mpi") on
+                  // aggregate reports "gpu" (or "cpu") on
                   // ``agg.backend.lane`` instead of leaving it
                   // empty. The GS sector full solve is the anchor:
                   // it's the only solve guaranteed to run in this

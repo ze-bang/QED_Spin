@@ -471,14 +471,9 @@ void bind_dispatcher(py::module_& m) {
         "``qed.solve(...)`` falls back to CPU with a runtime warning.");
 
     m.def("has_mpi_build", []() {
-#ifdef WITH_MPI
-        return true;
-#else
         return false;
-#endif
     },
-        "True iff this build was compiled with ``WITH_MPI=ON``. The "
-        "single-process ``qed._core`` does not call MPI; distribute "
+        "Always False: ``qed._core`` has no MPI support; distribute "
         "independent solves across processes with mpi4py.");
 
     // (capability-aware execution planner removed: sensible defaults +

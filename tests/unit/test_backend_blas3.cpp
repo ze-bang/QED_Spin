@@ -3,22 +3,19 @@
 //
 // Phase 1 of the Minimalist ED Collapse (May 2026): lock down the new
 // Level-3 BLAS surface on `Backend` (`gemm`, `gemv`, `trsm`, `qr_thin`)
-// across the four concrete backends:
+// across the concrete backends:
 //
 //     CpuBackend    -- LAPACK / cBLAS path
 //     CudaBackend   -- cuBLAS + cuSolver path
-//     MpiBackend    -- inherited local + CholeskyQR2-based qr_thin
-//     MpiCudaBackend - inherited local + NCCL CholeskyQR2 qr_thin
 //
 // The new BLAS-3 surface is the foundation block-Lanczos needs once it
 // migrates to `block_lanczos_kernel<Backend>` (Phase 2.3 of the same
 // rollout). This test covers correctness on small random inputs, not
 // performance.
 //
-// Runtime SKIPs follow the same pattern as `test_cuda_backend.cpp` and
-// `test_mpi_cuda_backend.cpp`: build-without-CUDA hosts get the
-// CpuBackend lane; the CudaBackend / MpiCudaBackend lanes SKIP
-// gracefully when no GPU / NCCL is visible.
+// Runtime SKIPs follow the same pattern as `test_cuda_backend.cpp`:
+// build-without-CUDA hosts get the CpuBackend lane; the CudaBackend lane
+// SKIPs gracefully when no GPU is visible.
 // =============================================================================
 
 #include "common/catch2_harness.h"

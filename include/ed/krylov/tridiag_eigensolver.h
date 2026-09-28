@@ -11,18 +11,9 @@
 // (the alpha / beta tridiagonal entries) and return / fill another set of
 // `std::vector<double>` (eigenvalues, optional first-component weights,
 // optional column-major eigenvectors). They depend only on Eigen and on
-// the C++ standard library; in particular, they have **no** MPI or CUDA
+// the C++ standard library; in particular, they have **no** CUDA
 // dependency, so they are safe to include from any Krylov kernel
-// regardless of `WITH_MPI` / `WITH_CUDA`.
-//
-// Provenance: extracted unchanged from
-// the retired `distributed_lanczos_kernel.h` (where they lived
-// inside an `#ifdef WITH_MPI` block and were therefore unavailable to the
-// CPU-only Krylov-Schur kernel in `include/ed/krylov/krylov_schur_kernel.h`).
-// The distributed kernel header now `#include`s this header and re-exports
-// the three functions via a `using` alias, so callers that previously
-// reached for `ed::distributed::kernel::solve_tridiag_with_eigenvectors`
-// continue to work unchanged.
+// regardless of `WITH_CUDA`.
 // =============================================================================
 
 #include <algorithm>

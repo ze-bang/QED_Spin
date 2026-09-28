@@ -5,8 +5,8 @@
 // KPM-DOS kernel — `template<Backend, MatvecFn>`. CPU body delegates
 // to `ed::kpm_dos::compute_kpm_dos` in `src/solvers/cpu/kpm_dos.cpp`.
 // Backend interface (axpy/dot/norm) is already abstracted by the CPU
-// implementation; GPU and MPI specialisations land alongside
-// `CudaBackend` and `MpiBackend`.
+// implementation; the GPU specialisation lands alongside
+// `CudaBackend`.
 //
 // Algorithm:
 //   * Estimate spectral bounds via outer Lanczos.
@@ -187,15 +187,9 @@ KpmDosResult kpm_dos_kernel(const Backend& /*backend*/,
     }
 #endif
     else {
-        // MpiBackend / MpiCudaBackend are not yet wired through the
-        // KPM-DOS lane: the per-rank Lanczos for the spectral bound
-        // and the Hutchinson loop both need a cross-rank reduction
-        // that the CPU/CUDA drivers do not currently implement.
-        // Mirrors the analogous FTLM guard above.
         throw std::runtime_error(
-            "kpm_dos_kernel: distributed backends are not yet "
-            "supported. Pin BackendConstraints::allow_mpi = false "
-            "to route through the CPU/CUDA lanes.");
+            "kpm_dos_kernel: unsupported backend (CpuBackend / "
+            "CudaBackend only).");
     }
 }
 

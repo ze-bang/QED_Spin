@@ -12,9 +12,7 @@
 #   OPENBLAS   - OpenBLAS (preferred fallback)
 #   GENERIC    - system reference BLAS / LAPACK
 #
-# This module only handles the SERIAL linear algebra stack. ScaLAPACK is
-# selected separately in cmake/EDMpiScalapack.cmake (so MPI / WITH_SCALAPACK
-# decisions stay together with MPI detection).
+# This module only handles the SERIAL linear algebra stack.
 #
 # Variables produced (parent / directory scope):
 #   BLAS_LIBRARIES, LAPACK_LIBRARIES, LAPACKE_LIBRARIES,

@@ -65,7 +65,6 @@ if(DEFINED USE_FLEXIBLAS AND USE_FLEXIBLAS AND BLAS_PROFILE STREQUAL "AUTO")
 endif()
 
 set(DEFAULT_WITH_CUDA ON)
-set(DEFAULT_WITH_MPI ON)
 
 # Set defaults based on CPU vendor (only if AUTO)
 if(BLAS_PROFILE STREQUAL "AUTO")
@@ -115,7 +114,6 @@ endif()
 
 # Options (define before project)
 option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
-option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
 
 # CUDA architectures: H100 (sm_90) unless the caller chose them (-DCMAKE_CUDA_ARCHITECTURES
 # or the CUDAARCHS environment variable). Compute capability 6.0+ is required for native
@@ -196,13 +194,6 @@ include(EDBlasProfile)
 # WITH_CUDA), and ARPACK. Each is independent of the BLAS profile above.
 include(EDDependencies)
 
-# =============================================================================
-# MPI / ScaLAPACK
-# =============================================================================
-# MPI is gated by WITH_MPI; if found, also tries to enable distributed
-# diagonalization via ScaLAPACK (compatibility constrained by BLAS_PROFILE).
-include(EDMpiScalapack)
-
 # CPU optimization flags must be defined before EDLibraries so the static
 # libraries pick them up via target_compile_options(... PRIVATE CPU_OPT_FLAGS).
 include(EDOptimizationFlags)
@@ -214,47 +205,6 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "  OpenMP Support: YES")
 else()
     message(STATUS "  OpenMP Support: NO")
-endif()
-
-# -----------------------------------------------------------------------------
-# Phase 3c: NCCL detection (used by ed_multi_gpu).
-#
-# Multi-GPU dot/norm reductions for ed::distributed::distributed_lanczos
-# ride NCCL (Phase 3c stage 1). This block is run BEFORE EDLibraries so
-# that `ed_multi_gpu` can be added conditionally inside that file.
-#
-# Sets:
-#   * NCCL_FOUND          (TRUE / FALSE)
-#   * NCCL_INCLUDE_DIRS
-#   * NCCL_LIBRARIES
-#
-# Disabling: set `-DWITH_NCCL=OFF` to forcibly turn the discovery off
-# even on hosts where it would otherwise be found (useful for CPU-only
-# regression rebuilds on GPU nodes).
-# -----------------------------------------------------------------------------
-option(WITH_NCCL "Discover NCCL for ed_multi_gpu (NCCL collectives)" ON)
-if(WITH_CUDA AND WITH_MPI AND WITH_NCCL)
-    find_path(NCCL_INCLUDE_DIRS NAMES nccl.h
-              HINTS $ENV{NCCL_ROOT}/include $ENV{NCCL_HOME}/include
-                    /usr/include /usr/local/include /opt/nccl/include)
-    find_library(NCCL_LIBRARIES NAMES nccl
-                 HINTS $ENV{NCCL_ROOT}/lib $ENV{NCCL_HOME}/lib
-                       /usr/lib/x86_64-linux-gnu /usr/local/lib /opt/nccl/lib)
-    if(NCCL_INCLUDE_DIRS AND NCCL_LIBRARIES)
-        set(NCCL_FOUND TRUE)
-        message(STATUS "  NCCL Support: DETECTED (Phase 3c multi-GPU enabled)")
-        message(STATUS "    NCCL_INCLUDE_DIRS: ${NCCL_INCLUDE_DIRS}")
-        message(STATUS "    NCCL_LIBRARIES:    ${NCCL_LIBRARIES}")
-    else()
-        set(NCCL_FOUND FALSE)
-        message(STATUS "  NCCL Support: NOT FOUND "
-                       "(Phase 3c multi-GPU disabled; pass NCCL_ROOT to override)")
-    endif()
-else()
-    set(NCCL_FOUND FALSE)
-    if(NOT WITH_NCCL)
-        message(STATUS "  NCCL Support: DISABLED via WITH_NCCL=OFF")
-    endif()
 endif()
 
 # =============================================================================
@@ -294,9 +244,6 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu)
-if(WITH_MPI AND TARGET ed_multi_gpu)
-    list(APPEND _ED_INSTALL_TARGETS ed_multi_gpu)
-endif()
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -352,7 +299,6 @@ if(WITH_CUDA)
 else()
     message(STATUS "  CUDA Support: NO")
 endif()
-message(STATUS "  MPI Support: ${WITH_MPI}")
 
 # Build configuration summary and performance options
 message(STATUS "")
@@ -369,14 +315,11 @@ endif()
 if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
     message(STATUS "  ScaLAPACK Libraries: ${SCALAPACK_LIBRARIES}")
     message(STATUS "  ScaLAPACK Compatible: ${SCALAPACK_COMPATIBLE}")
-elseif(WITH_MPI)
-    message(STATUS "  ScaLAPACK: DISABLED")
 endif()
 message(STATUS "  Aggressive Optimizations: ${ENABLE_AGGRESSIVE_OPTS}")
 message(STATUS "  Profile-Guided Optimization: ${ENABLE_PROFILE_GUIDED_OPTS}")
 message(STATUS "  Native Architecture: ${ENABLE_NATIVE_ARCH}")
 message(STATUS "  CUDA Support: ${WITH_CUDA}")
-message(STATUS "  MPI Support: ${WITH_MPI}")
 message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
 
 # CPU information (informational; uses CPU_VENDOR set by EDPlatform).
@@ -466,7 +409,7 @@ if(BUILD_ED_TESTS)
     # Helper to declare a test executable. Each test gets its own binary so
     # CTest can run them in parallel and report failures independently.
     # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
-    # ed_io, BLAS/LAPACK/HDF5/ARPACK/MPI/OpenMP), and against ed_solvers_gpu
+    # ed_io, BLAS/LAPACK/HDF5/ARPACK/OpenMP), and against ed_solvers_gpu
     # when CUDA is enabled. This guarantees tests are compiled against the
     # exact same TUs as the production binaries.
     #
@@ -484,13 +427,6 @@ if(BUILD_ED_TESTS)
         else()
             target_link_libraries(${test_name} PRIVATE ed_solvers_cpu)
         endif()
-        # Wave A (Full unified-interface collapse, May 2026): `make_operator.h`
-        # references `DistributedOperator` / `DistributedSymmetryOperator`
-        # constructors in inline factory bodies under `WITH_MPI`. The compiler
-        # emits the inline bodies for every TU that includes the header even
-        # when the runtime branch is unreachable, so the linker needs the
-        # distributed library when MPI is on. Link transitively here so test
-        # authors do not have to remember per-target.
         target_compile_options(${test_name} PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
         )
@@ -525,7 +461,7 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
     ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp USE_CATCH2)
     # Krylov-kernel unification Phase A: one Lanczos algorithm shared by
-    # CPU / GPU / CPU+MPI / GPU+MPI via the abstract Backend interface.
+    # CPU / GPU via the abstract Backend interface.
     # This test pins agreement with the legacy sequential-MGS body and
     # orthogonality of the CGS2 basis.
     ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
@@ -672,99 +608,6 @@ if(BUILD_ED_TESTS)
     # Coverage: empty / build / duplicate-key / clear / sort-invariant +
     # 1M-entry stress vs unordered_map oracle (memory + correctness).
     ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
-
-    # -------------------------------------------------------------------------
-    # Phase 3b: distributed-memory tests. Always built when WITH_MPI is ON
-    # (regardless of MPIEXEC discovery); each test is registered N times --
-    # once per `np` count in {1, 2, 4} -- and launched via `mpiexec -np N`.
-    # The test binary uses Catch2 with a manual MPI_Init/Finalize main, and
-    # rank 0 owns stdout while non-zero ranks pipe to /dev/null. A failed
-    # REQUIRE() on any rank propagates via MPI_Allreduce(MPI_MAX) to the
-    # CTest exit code.
-    # -------------------------------------------------------------------------
-    if(WITH_MPI AND MPIEXEC_EXECUTABLE)
-        function(ed_add_mpi_test test_name test_source)
-            add_executable(${test_name} ${test_source})
-            target_include_directories(${test_name} PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests
-            )
-            target_link_libraries(${test_name} PRIVATE
-                ed_core Catch2::Catch2)
-            target_compile_options(${test_name} PRIVATE
-                $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-            )
-            foreach(np IN ITEMS 1 2 4)
-                set(_tname "${test_name}_np${np}")
-                add_test(NAME ${_tname}
-                         COMMAND ${MPIEXEC_EXECUTABLE}
-                                 ${MPIEXEC_NUMPROC_FLAG} ${np}
-                                 ${MPIEXEC_PREFLAGS}
-                                 $<TARGET_FILE:${test_name}>
-                                 ${MPIEXEC_POSTFLAGS})
-                set_tests_properties(${_tname} PROPERTIES
-                    ENVIRONMENT
-                        "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch_${_tname}"
-                    TIMEOUT 240
-                    LABELS "mpi;phase3b"
-                )
-            endforeach()
-        endfunction()
-
-        # P4: policy-agnostic CommPlan halo-exchange schedule (the reusable
-        # MemSpace=DistributedHost matvec machinery). Self-contained; no
-        # Operator dependency. Validates geometry, send/recv conservation,
-        # and end-to-end halo correctness (complex + real lanes) at np 1/2/4.
-        ed_add_mpi_test(test_comm_plan
-                        tests/unit/test_comm_plan.cpp)
-
-        # P4: MpiMatVecImpl -- the MemSpace=DistributedHost matrix-free SpMV
-        # built on CommPlan + the GATHER kernel. Validates the slab SpMV
-        # (complex + real lanes) against the INDEPENDENT serial SCATTER
-        # kernel over the full Hilbert space at np 1/2/4.
-        ed_add_mpi_test(test_mpi_matvec_impl
-                        tests/unit/test_mpi_matvec_impl.cpp)
-
-        # NCCL multi-GPU collectives (production MultiGpuCommunicator +
-        # MpiCudaBackend). Registered at np {1,2,4}; the tests SKIP when no
-        # CUDA device is visible at runtime (e.g. CI on a CPU box) so the
-        # CTest invocation stays green even without GPUs.
-        if(TARGET ed_multi_gpu)
-            function(ed_add_nccl_test test_name test_source)
-                add_executable(${test_name} ${test_source})
-                target_include_directories(${test_name} PRIVATE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/tests
-                )
-                target_link_libraries(${test_name} PRIVATE
-                    ed_multi_gpu ed_core Catch2::Catch2)
-                target_compile_options(${test_name} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-                )
-                foreach(np IN ITEMS 1 2 4)
-                    set(_tname "${test_name}_np${np}")
-                    add_test(NAME ${_tname}
-                             COMMAND ${MPIEXEC_EXECUTABLE}
-                                     ${MPIEXEC_NUMPROC_FLAG} ${np}
-                                     ${MPIEXEC_PREFLAGS}
-                                     $<TARGET_FILE:${test_name}>
-                                     ${MPIEXEC_POSTFLAGS})
-                    set_tests_properties(${_tname} PROPERTIES
-                        TIMEOUT 240
-                        LABELS "mpi;phase3c;gpu"
-                    )
-                endforeach()
-            endfunction()
-
-            # NCCL collective wrappers (lockdown vs MPI ref).
-            ed_add_nccl_test(test_multi_gpu_nccl
-                             tests/unit/test_multi_gpu_nccl.cpp)
-
-            # Direct lockdown for `ed::matvec::MpiCudaBackend` overrides
-            # (dot, nrm2, dot_many, axpy_many, all_reduce_sum). Mirrors
-            # `test_cuda_backend.cpp` for the MPI+GPU lane. NCCL-gated.
-            ed_add_nccl_test(test_mpi_cuda_backend
-                             tests/unit/test_mpi_cuda_backend.cpp)
-        endif()
-    endif()
 
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     # ed_input library lockdown (lattice generators + HamiltonianBuilder +
@@ -957,9 +800,7 @@ if(BUILD_ED_TESTS)
 
     # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3
     # surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
-    # (+ CudaBackend when WITH_CUDA). MpiBackend / MpiCudaBackend qr_thin
-    # CholeskyQR2 coverage lives in test_backend_blas3_mpi.cpp under the
-    # WITH_MPI guard below (when added).
+    # (+ CudaBackend when WITH_CUDA).
     ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp USE_CATCH2)
 
     # Regression test of the on-disk fallback path for the Lanczos basis

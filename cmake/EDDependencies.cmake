@@ -2,8 +2,7 @@
 # cmake/EDDependencies.cmake
 #
 # Third-party dependencies (other than the BLAS/LAPACK profile, which lives
-# in cmake/EDBlasProfile.cmake, and MPI/ScaLAPACK, which lives in
-# cmake/EDMpiScalapack.cmake):
+# in cmake/EDBlasProfile.cmake):
 #
 #   * Eigen3              REQUIRED   linear algebra (header-only)
 #   * nlohmann/json       REQUIRED   JSON parsing (find_package() with

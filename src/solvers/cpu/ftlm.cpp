@@ -15,9 +15,6 @@
 #include <chrono>
 #include <cstdint>
 #include <omp.h>
-#ifdef WITH_MPI
-#include <mpi.h>
-#endif
 
 namespace {
 // Gate per-sample / per-iteration progress prints in DSSF/SSSF/FTLM

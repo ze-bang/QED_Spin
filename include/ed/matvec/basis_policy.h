@@ -11,7 +11,6 @@
 //   * fixed total-Sz sector matvec    -- FixedSzBasisPolicy
 //   * symmetry-projected sector       -- SymmetryBasisPolicy   (Wave 1)
 //   * Sz + symmetry sector            -- FixedSzSymmetryBasisPolicy (Wave 1)
-//   * distributed slab of any above   -- CommPlan + mpi_matvec_impl (Wave 2)
 //
 // A basis policy is a small value-type that exposes:
 //

@@ -17,7 +17,7 @@
 # Each library exposes its include directories and link dependencies via
 # PUBLIC properties, so executables (ED, the
 # test binaries) only need to write `target_link_libraries(<exe> PRIVATE
-# ed_solvers_cpu)` -- the include path and BLAS/LAPACK/HDF5/OpenMP/MPI/CUDA
+# ed_solvers_cpu)` -- the include path and BLAS/LAPACK/HDF5/OpenMP/CUDA
 # link stack propagate automatically.
 #
 # This module is a pure structural refactor: every TU that the previous
@@ -42,9 +42,6 @@ list(APPEND ED_COMMON_LINK_LIBS
     ${EXTRA_LINALG_LIBRARIES}
     ${HDF5_LIBRARIES}
 )
-if(WITH_MPI)
-    list(APPEND ED_COMMON_LINK_LIBS ${MPI_CXX_LIBRARIES})
-endif()
 
 # OpenMP must already have been found by the parent CMakeLists.txt (we put
 # the find_package(OpenMP) call before include(EDLibraries) for exactly this
@@ -288,36 +285,6 @@ target_compile_options(ed_solvers_cpu PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# -----------------------------------------------------------------------------
-# ed_multi_gpu: NCCL collective wrappers (MultiGpuCommunicator, RAII over
-# ncclComm_t built from MPI_Comm) consumed by the production MpiCudaBackend
-# (ed/matvec/backends/mpi_cuda_backend.cuh) and select_backend.
-#
-# Stage 11d (Jul 2026): the distributed-operator family this used to belong
-# to (ed_distributed / ed_distributed_gpu: DistributedOperator + distributed
-# lanczos/ftlm/tpq/krylov-schur + GPU twins + ed_distributed_main) was
-# retired -- production MPI is MpiBackend (within-operator) x
-# SectorDistributor (across sectors). Only the multi-GPU communicator
-# survives, relocated to src/parallel/multi_gpu.cu.
-# -----------------------------------------------------------------------------
-if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
-    add_library(ed_multi_gpu STATIC
-        ${SRC_DIR}/parallel/multi_gpu.cu
-    )
-    target_include_directories(ed_multi_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-    target_include_directories(ed_multi_gpu PRIVATE ${NCCL_INCLUDE_DIRS})
-    target_link_libraries(ed_multi_gpu PUBLIC
-        CUDA::cudart
-        ${NCCL_LIBRARIES}
-        ${ED_COMMON_LINK_LIBS}
-    )
-    target_compile_definitions(ed_multi_gpu PUBLIC ED_HAVE_NCCL=1)
-    set_target_properties(ed_multi_gpu PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        POSITION_INDEPENDENT_CODE ON
-    )
-endif()
 
 # -----------------------------------------------------------------------------
 # ed_dssf: pure-data DSSF/SSSF observable assembly (operator_spec etc.).

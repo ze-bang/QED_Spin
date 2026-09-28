@@ -87,7 +87,6 @@ sdist.exclude = [
 ED_BUILD_PYTHON = "ON"
 BUILD_ED_TESTS = "OFF"
 WITH_CUDA = "OFF"
-WITH_MPI = "OFF"
 
 # -----------------------------------------------------------------------------
 # Tooling: ruff (linter) + pytest defaults.

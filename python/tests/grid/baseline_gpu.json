@@ -1482,9 +1482,9 @@
       "content": "abelian",
       "model": "chain12",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.003703261585595826,
-      "note": "err R=50: 4.88e-03, R=200: 3.70e-03",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 129.03
     },
     {
@@ -1493,9 +1493,9 @@
       "content": "abelian",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.011664664083544619,
-      "note": "err R=50: 3.14e-02, R=200: 1.17e-02",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 10.09
     },
     {
@@ -1691,9 +1691,9 @@
       "content": "tr",
       "model": "chain12",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.003703261585595826,
-      "note": "err R=50: 4.88e-03, R=200: 3.70e-03",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 129.07
     },
     {
@@ -1702,9 +1702,9 @@
       "content": "abelian",
       "model": "chain12",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.0177614562318917,
-      "note": "err R=16: 1.38e-02, R=64: 1.78e-02",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 184.62
     },
     {
@@ -1713,9 +1713,9 @@
       "content": "abelian",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.03419372823585739,
-      "note": "err R=16: 2.59e-02, R=64: 3.42e-02",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 23.67
     },
     {
@@ -1911,9 +1911,9 @@
       "content": "tr",
       "model": "chain12",
       "backend": "gpu",
-      "status": "pass",
+      "status": "flaky",
       "metric": 0.0177614562318917,
-      "note": "err R=16: 1.38e-02, R=64: 1.78e-02",
+      "note": "non-deterministic on cd08f64: GPU thermal on the abelian all-Sz lane (fails in some runs, e.g. jobs 61883449, 61897027)",
       "secs": 184.63
     },
     {

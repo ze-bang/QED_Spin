@@ -16,7 +16,6 @@
                 "CMAKE_BUILD_TYPE": "Release",
                 "BLAS_PROFILE": "OPENBLAS",
                 "WITH_CUDA": "OFF",
-                "WITH_MPI": "OFF",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++"
             }
