@@ -49,6 +49,11 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("only_k0", &sec::Spec::only_k0)
         .def_readwrite("only_irrep", &sec::Spec::only_irrep);
 
+    py::enum_<sec::Device>(s, "Device")
+        .value("Cpu", sec::Device::Cpu)
+        .value("Gpu", sec::Device::Gpu)
+        .value("Auto", sec::Device::Auto);
+
     py::enum_<sec::SzContent>(s, "SzContent")
         .value("U1", sec::SzContent::U1)
         .value("Parity", sec::SzContent::Parity)
@@ -89,6 +94,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("complete", &sec::EigsResult::complete)
         .def_readonly("flip_engaged", &sec::EigsResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
+        .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
         .def("sector_vector", [](const sec::EigsResult& r, int i) {
                  const auto& v = r.vectors.at(static_cast<std::size_t>(i));
@@ -138,7 +144,8 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("samples", &sec::ThermalSpec::samples)
         .def_readwrite("krylov", &sec::ThermalSpec::krylov)
         .def_readwrite("exact_states", &sec::ThermalSpec::exact_states)
-        .def_readwrite("seed", &sec::ThermalSpec::seed);
+        .def_readwrite("seed", &sec::ThermalSpec::seed)
+        .def_readwrite("device", &sec::ThermalSpec::device);
 
     py::class_<sec::ThermalCurves>(s, "ThermalCurves")
         .def_readonly("T", &sec::ThermalCurves::T)
@@ -151,7 +158,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("chi", &sec::ThermalCurves::chi)
         .def_readonly("e0", &sec::ThermalCurves::e0)
         .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
-        .def_readonly("blocks", &sec::ThermalCurves::blocks);
+        .def_readonly("blocks", &sec::ThermalCurves::blocks)
+        .def_readonly("device_blocks", &sec::ThermalCurves::device_blocks);
 
     s.def("thermal",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, const sec::ThermalSpec& t) {
@@ -190,15 +198,15 @@ void bind_sectors(py::module_& m) {
 
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,
-             int dense_max_dim, int block_size, bool allow_partial) {
+             int dense_max_dim, int block_size, bool allow_partial, sec::Device device) {
               sec::EigsOptions o;
               o.k = k; o.vectors = vectors; o.dense_max_dim = dense_max_dim;
-              o.block_size = block_size; o.allow_partial = allow_partial;
+              o.block_size = block_size; o.allow_partial = allow_partial; o.device = device;
               py::gil_scoped_release nogil;
               return sec::eigs(H, n_sites, spec, o);
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("k") = 1,
           py::arg("vectors") = false, py::arg("dense_max_dim") = 64, py::arg("block_size") = 1,
-          py::arg("allow_partial") = false,
+          py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
           "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
 }

@@ -40,6 +40,12 @@ namespace ed::sectors {
 using Complex = std::complex<double>;
 using Perm    = std::vector<int>;
 
+/// Where the blocks run. Gpu: every block that has a device kernel runs on it (group and
+/// momentum sectors); isotypic W blocks, spin-projected blocks and blocks small enough for a
+/// dense solve stay on the host. Auto: the device only above the backend's dimension floor.
+/// Results count the blocks that ran on the device.
+enum class Device { Cpu, Gpu, Auto };
+
 struct Spec {
     std::vector<Perm> abelian;      ///< closed abelian group; empty = identity only
     std::vector<Perm> residues;     ///< point-group coset representatives
@@ -85,6 +91,7 @@ struct EigsOptions {
     int  dense_max_dim = 64;    ///< per-block dense crossover
     int  block_size    = 1;     ///< >1: block Krylov-Schur inside each block
     bool allow_partial = false; ///< return an incomplete window instead of throwing
+    Device device      = Device::Cpu;
 };
 
 /// One eigenvalue of one block. The level occurs `multiplicity` times in the spectrum.
@@ -110,6 +117,7 @@ struct EigsResult {
     bool                     complete = true;     ///< no uncertified level can lie below the cut
     bool                     flip_engaged = false;
     bool                     tr_engaged   = false;
+    std::size_t              device_blocks = 0;   ///< blocks solved on a GPU
 
     /// Energies with multiplicities expanded, the lowest k.
     [[nodiscard]] std::vector<double> energies(int k) const;

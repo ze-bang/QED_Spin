@@ -50,6 +50,7 @@ struct BlockOp {
     std::shared_ptr<const ed::matvec::MatVecOperator> op;
     double        ghost        = std::numeric_limits<double>::infinity();
     std::uint64_t multiplicity = 1;
+    bool          on_device    = false;   ///< the operator may be bound to a CUDA backend
     [[nodiscard]] bool is_ghost(double e) const {
         return std::isfinite(ghost) && e > ghost - 1e-6 * std::max(1.0, std::abs(ghost));
     }
@@ -58,12 +59,18 @@ struct BlockOp {
 inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const ed::solvers::lg_detail::StarBuild& sb,
                               const std::shared_ptr<ed::solvers::LittleGroupBlock::Impl>& bi,
-                              const std::shared_ptr<::Operator>& s2_carrier) {
+                              const std::shared_ptr<::Operator>& s2_carrier,
+                              Device device = Device::Cpu) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
     b.op = std::shared_ptr<const ed::matvec::MatVecOperator>(bi, &block_mv(*bi));
     b.multiplicity = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
-    if (s.two_S < 0) return b;
+    if (s.two_S < 0) {
+        // Group and momentum sectors have a device kernel; the isotypic sandwich does not.
+        RepSectorMatVec* rep = bi->gop ? bi->gop.get() : (bi->W ? nullptr : sb.hk.get());
+        if (rep && device != Device::Cpu) { rep->enable_device(true); b.on_device = true; }
+        return b;
+    }
     std::shared_ptr<const ed::matvec::MatVecOperator> s2;
     if (bi->gop) {
         s2 = std::make_shared<RepSectorMatVec>(*s2_carrier, bi->gsec);

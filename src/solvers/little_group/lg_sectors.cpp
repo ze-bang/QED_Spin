@@ -42,6 +42,27 @@ std::vector<std::uint64_t> sz_states(int n_sites, int n_up) {
     return out;
 }
 
+// One block solved by the orchestrator, which binds it to a CUDA backend when the block has a
+// device kernel. Returns whether it actually ran on the device.
+bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, Device device,
+                           std::vector<double>& ev, std::vector<std::vector<Complex>>& vv,
+                           bool& converged) {
+    ed::workflows::SolveOptions so;
+    so.num_eigs        = static_cast<std::size_t>(want);
+    so.compute_vectors = vectors;
+    so.backend.allow_gpu = true;
+    if (device == Device::Gpu) so.backend.gpu_dim_floor = 0;
+    const auto r = ed::workflows::solve(static_cast<const ed::LinearOperator&>(*bop.op), so);
+    ev = r.eigenvalues;
+    if (vectors) {
+        if (!r.eigenvectors || r.eigenvectors->host.size() < ev.size())
+            throw std::runtime_error("eigs: the device solve returned no host eigenvectors");
+        vv.assign(r.eigenvectors->host.begin(), r.eigenvectors->host.begin() + static_cast<long>(ev.size()));
+    }
+    converged = static_cast<int>(ev.size()) >= want;
+    return r.backend.lane == "gpu";
+}
+
 std::uint64_t state_index(std::uint64_t st, int n_up) {
     if (n_up < 0) return st;
     std::uint64_t r = 0;
@@ -155,7 +176,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
             for (const auto& bi : sb.blocks) {
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 if (!bop.op) continue;
                 const std::uint64_t mult = bop.multiplicity;
                 if (s.two_S < 0) res.total_dim += dim * mult;
@@ -166,7 +187,10 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 bool converged = true;
                 std::vector<double> ev;
                 std::vector<std::vector<Complex>> vv;
-                if (o.vectors) {
+                if (bop.on_device && dim > lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim)) {
+                    if (solve_by_orchestrator(bop, want, o.vectors, o.device, ev, vv, converged))
+                        ++res.device_blocks;
+                } else if (o.vectors) {
                     std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim,
                                                               o.block_size, &converged);
                 } else {

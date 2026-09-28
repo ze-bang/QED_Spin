@@ -3,6 +3,9 @@ cover yet fall through to the current API (adapter_v1), so a grid run always
 measures every cell."""
 from __future__ import annotations
 
+import contextlib
+import os
+
 import numpy as np
 
 from qed.api import Symmetry
@@ -38,16 +41,36 @@ def _sym(m, content):
     raise Missing(f"content {content!r} is not in the sector-resolved API yet")
 
 
+@contextlib.contextmanager
+def _device_engaged(device):
+    """Grid blocks are below the dense crossover; drop it so GPU cells run the device path."""
+    if device != "gpu":
+        yield
+        return
+    old = os.environ.get("ED_SYM_LG_DENSE_FLOOR")
+    os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("ED_SYM_LG_DENSE_FLOOR")
+        else:
+            os.environ["ED_SYM_LG_DENSE_FLOOR"] = old
+
+
 def eigs(m, H, content, device, k):
-    if device != "cpu":
-        raise Missing("the sector-resolved eigensolve runs on the CPU only so far")
-    return np.sort(_eigs(H, k, sym=_sym(m, content)).energies)
+    with _device_engaged(device):
+        r = _eigs(H, k, sym=_sym(m, content), device=device)
+    if device == "gpu" and r.device_blocks == 0 and content != "su2":
+        raise Missing("no block ran on the device")
+    return np.sort(r.energies)
 
 
 def vectors(m, H, content, device, k):
-    if device != "cpu":
-        raise Missing("the sector-resolved eigensolve runs on the CPU only so far")
-    r = _eigs(H, k, sym=_sym(m, content), vectors=True)
+    with _device_engaged(device):
+        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device)
+    if device == "gpu" and r.device_blocks == 0 and content != "su2":
+        raise Missing("no block ran on the device")
     return r.energies, r.vectors(basis="full")
 
 
@@ -58,10 +81,10 @@ def spectrum(m, H, content, device):
 
 
 def thermal(m, H, content, device, method, T, samples, krylov, seed):
-    if device != "cpu":
-        raise Missing("the sector-resolved thermodynamics runs on the CPU only so far")
     r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
-                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed)
+                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device)
+    if device == "gpu" and method.lower() != "exact" and r.device_blocks == 0:
+        raise Missing("no block ran on the device")
     return {"T": r.T, "E": r.E, "C": r.C}
 
 

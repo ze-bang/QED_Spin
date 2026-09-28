@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from .. import _core
+from . import _device
 from .symmetry import Symmetry
 
 _METHODS = {"exact", "ftlm", "mtpq"}
@@ -28,12 +29,13 @@ class ThermalResult:
     method: str
     e0: float
     blocks: int
+    device_blocks: int
     symmetry: Symmetry = field(repr=False)
 
 
 def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
             samples: int = 40, krylov: Optional[int] = None, exact_states: int = 0,
-            seed: int = 0) -> ThermalResult:
+            seed: int = 0, device: str = "cpu") -> ThermalResult:
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
@@ -54,8 +56,10 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     t.krylov = int(krylov) if krylov is not None else (0 if key == "mtpq" else 100)
     t.exact_states = int(exact_states)
     t.seed = int(seed)
+    t.device = _device.resolve(device)
     r = _core.sectors.thermal(H, int(H.num_sites), sym.resolve(H), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
     return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), S=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
                          M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,
-                         method=key, e0=float(r.e0), blocks=int(r.blocks), symmetry=sym)
+                         method=key, e0=float(r.e0), blocks=int(r.blocks),
+                         device_blocks=int(r.device_blocks), symmetry=sym)

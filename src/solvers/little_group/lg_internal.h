@@ -278,6 +278,23 @@ public:
     [[nodiscard]] std::string description() const override {
         return "LittleGroupRepSector(H_k)";
     }
+
+    /// Let backend selection run this sector on a CUDA device (the device rep-gather
+    /// kernel over the same RepSectorData). Off unless a caller asks for it.
+    void enable_device(bool on) noexcept { device_ok_ = on; }
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g = ed::LinearOperator::geometry();
+#ifdef WITH_CUDA
+        g.supports_device_matvec = device_ok_;
+#endif
+        return g;
+    }
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+#ifdef WITH_CUDA
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, tv_.spin_l, terms_);
+#endif
+        return bind_cpu();
+    }
     [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const {
         return rd_;
     }
@@ -377,6 +394,7 @@ private:
     mutable std::once_flag                         gpu_once_;
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
     bool                                           force_gpu_ = false;
+    bool                                           device_ok_ = false;
 public:
     /// Did the GPU rep-gather actually engage for this sector? Lazy, so this
     /// is only meaningful after the first apply(). Reported rather than

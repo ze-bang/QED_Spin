@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 
 from .. import _core
+from . import _device
 from .symmetry import Symmetry
 
 
@@ -25,6 +26,7 @@ class EigResult:
     k: int
     symmetry: Symmetry
     complete: bool
+    device_blocks: int
     _raw: object
     _spec: object
     _n_sites: int
@@ -56,7 +58,8 @@ class EigResult:
 
 
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
-         block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False) -> EigResult:
+         block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
+         device: str = "cpu") -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises when a block cannot certify levels
@@ -67,7 +70,8 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     n = int(H.num_sites)
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
                              dense_max_dim=int(dense_max_dim), block_size=int(block_size),
-                             allow_partial=bool(allow_partial))
+                             allow_partial=bool(allow_partial), device=_device.resolve(device))
     return EigResult(energies=np.asarray(raw.energies(int(k)), float), levels=list(raw.levels),
-                     k=int(k), symmetry=sym, complete=bool(raw.complete), _raw=raw, _spec=spec,
+                     k=int(k), symmetry=sym, complete=bool(raw.complete),
+                     device_blocks=int(raw.device_blocks), _raw=raw, _spec=spec,
                      _n_sites=n)

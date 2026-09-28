@@ -40,7 +40,7 @@ BlockThermo exact_block(const std::vector<double>& ev, const std::vector<double>
 }
 
 BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
-                          const std::vector<double>& beta, std::uint64_t seed) {
+                          const std::vector<double>& beta, std::uint64_t seed, bool* on_gpu) {
     ed::workflows::ThermalOptions o;
     o.method        = t.method == ThermalSpec::Method::mTPQ ? ed::workflows::ThermalOptions::Method::mTPQ
                     : (t.exact_states > 0 ? ed::workflows::ThermalOptions::Method::OFTLM
@@ -52,8 +52,10 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     o.random_seed   = seed;
     o.spin_flip     = 0;       // one plain block: nothing to re-enter
     o.time_reversal = 0;
-    o.backend.allow_gpu = false;
+    o.backend.allow_gpu = t.device != Device::Cpu;
+    if (t.device == Device::Gpu) o.backend.gpu_dim_floor = 0;
     const auto r = ed::workflows::thermal(op, o);
+    *on_gpu = r.backend.lane == "gpu";
     const auto& d = r.thermo;
     if (d.energy.size() != beta.size())
         throw std::runtime_error("thermal: a block returned " + std::to_string(d.energy.size())
@@ -93,7 +95,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device);
                 if (!bop.op) continue;
                 const auto& mv = *bop.op;
                 BlockThermo b;
@@ -106,7 +108,9 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                 } else {
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-                    b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed);
+                    bool on_gpu = false;
+                    b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu);
+                    if (on_gpu) ++out.device_blocks;
                     for (double e : b.E) out.e0 = std::min(out.e0, e);
                 }
                 b.weight   = static_cast<double>(bop.multiplicity);

@@ -32,6 +32,7 @@ struct ThermalSpec {
     std::size_t   krylov       = 100;   ///< FTLM Lanczos depth; mTPQ step count (0 = automatic)
     std::size_t   exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
     std::uint64_t seed         = 0;     ///< 0 = draw one
+    Device        device       = Device::Cpu;
 };
 
 struct ThermalCurves {
@@ -40,6 +41,7 @@ struct ThermalCurves {
     double        e0        = 0.0;       ///< lowest energy seen (exact: the ground state)
     std::uint64_t total_dim = 0;
     std::size_t   blocks    = 0;
+    std::size_t   device_blocks = 0;   ///< blocks sampled on a GPU
 };
 
 [[nodiscard]] ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s,
