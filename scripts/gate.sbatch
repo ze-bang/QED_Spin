@@ -1,6 +1,6 @@
 #!/bin/bash
 # The full per-step gate on one GPU node, against this checkout:
-#   ctest (cuda build, tests) -> pytest -> coverage grid -> golden cpu + gpu -> consumers.
+#   ctest (cuda build, tests) -> pytest -> coverage grid (current API, qed.api) -> golden cpu + gpu -> consumers.
 #   sbatch --account=<acct> scripts/gate.sbatch
 # Every stage runs even if an earlier one fails; the summary at the end lists each exit code.
 # GOLDEN_REF (default pre-refactor-2026-09) selects the golden reference set.
@@ -33,6 +33,11 @@ echo "=== GRID ==="
 export QED_GRID_REPORT="${PWD}/logs/grid-gate-${SLURM_JOB_ID}.json"
 python -u -m pytest python/tests/grid -m grid -q -rf -p no:cacheprovider 2>&1 | tail -20
 rc[grid]=${PIPESTATUS[0]}
+
+echo "=== GRID (qed.api) ==="
+export QED_GRID_REPORT="${PWD}/logs/grid-gate-v2-${SLURM_JOB_ID}.json"
+QED_GRID_API=v2 python -u -m pytest python/tests/grid -m grid -q -rf -p no:cacheprovider 2>&1 | tail -20
+rc[grid_v2]=${PIPESTATUS[0]}
 unset QED_GRID_REPORT
 
 for dev in cpu gpu; do
@@ -52,7 +57,7 @@ rc[consumers]=${PIPESTATUS[0]}
 
 echo "=== GATE SUMMARY ($(git rev-parse --short HEAD)) ==="
 fail=0
-for k in env_registry build_tests build_core ctest pytest grid golden_cpu golden_gpu consumers; do
+for k in env_registry build_tests build_core ctest pytest grid grid_v2 golden_cpu golden_gpu consumers; do
     printf '  %-14s %s\n' "$k" "${rc[$k]}"
     [ "${rc[$k]}" = 0 ] || fail=1
 done
