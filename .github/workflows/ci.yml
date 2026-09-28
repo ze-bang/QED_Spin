@@ -276,17 +276,8 @@ jobs:
           python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy h5py networkx pynauty
           python -m pip install -v .
 
-      - name: Build the ED command-line binary (for the CLI cases)
-        run: |
-          cmake -S . -B build-cli -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF \
-            -DBLAS_PROFILE=OPENBLAS
-          cmake --build build-cli --target ED -- -j$(nproc)
-
       - name: Run the correctness harness
         env:
-          QED_ED_BIN: ${{ github.workspace }}/build-cli/ED
           OMP_NUM_THREADS: "4"
         run: |
           set -o pipefail
@@ -481,7 +472,7 @@ jobs:
           # libnvjitlink-12-6 is a transitive dependency of cusolver/cusparse
           # 12.6 (their .so files dlopen `libnvJitLink.so.12` at link time),
           # but the dev metapackages do *not* pull it in automatically, so
-          # the final `ld` step on the ED executable fails with a flood of
+          # the final CUDA link step fails with a flood of
           # "undefined reference to __nvJitLink*_12_6" without it.
           sudo apt-get install -y --no-install-recommends \
             cuda-nvcc-12-6 \
@@ -528,7 +519,7 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70
 
       - name: Build (compile only, no execution)
-        run: cmake --build build-cuda --target ed_solvers_gpu ED -- -j$(nproc)
+        run: cmake --build build-cuda --target ed_solvers_gpu -- -j$(nproc)
 
   # ---------------------------------------------------------------------------
   # MPI lane: build with OpenMPI + run the distributed ctest suite. Catches

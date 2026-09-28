@@ -161,12 +161,10 @@ endif()
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(CORE_DIR ${SRC_DIR}/core)
-set(APPS_DIR ${SRC_DIR}/apps)
 set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(IO_DIR ${SRC_DIR}/io)
 set(DSSF_DIR ${SRC_DIR}/dssf)
-set(CLI_DIR ${SRC_DIR}/cli)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
 set(MATVEC_DIR ${SRC_DIR}/matvec)  # Matvec-unification revamp (Phase 1)
@@ -268,30 +266,6 @@ endif()
 # `target_link_libraries(<exe> PRIVATE ed_solvers_cpu ...)`.
 include(EDLibraries)
 
-# =============================================================================
-# EXECUTABLES
-# =============================================================================
-
-# Main `ED` driver. The library targets carry every other source file.
-# When CUDA is on, ed_solvers_gpu PUBLIC-links ed_solvers_cpu so we only need
-# to mention the topmost library.
-add_executable(ED ${APPS_DIR}/ed_main.cpp)
-if(WITH_CUDA)
-    target_link_libraries(ED PRIVATE ed_cli ed_solvers_gpu ed_dssf)
-else()
-    target_link_libraries(ED PRIVATE ed_cli ed_solvers_cpu ed_dssf)
-endif()
-
-# NOTE: The historical `TPQ_DSSF` standalone binary (~4.2 kLOC of duplicated
-# kernels + a positional CLI + parallel HDF5 plumbing) was deleted in P2.14.
-# Every feature it offered is now reachable through `ED dssf <method>`, which
-# routes the same `compute_*_workflow` kernels through `ed::dssf::run(...)`.
-# See `docs/history/MODERNIZATION_AUDIT.md` for migration notes and the historical context.
-
-# ED inherits BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP transitively
-# from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since those
-# libraries declare their dependencies as PUBLIC.
-
 # If using oneMKL via its modern CMake target, propagate it to the libraries.
 if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
     target_link_libraries(ed_solvers_cpu PUBLIC MKL::MKL)
@@ -310,7 +284,6 @@ endif()
 #   target_link_libraries(myapp PRIVATE QED::ed_solvers_cpu)
 #
 # Layout under <prefix>:
-#   bin/                        ED
 #   include/ed/                 public headers (kept hierarchical)
 #   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
 #                               libed_solvers_gpu.a (when WITH_CUDA)
@@ -320,7 +293,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu ed_cli)
+set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu)
 if(WITH_MPI AND TARGET ed_multi_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_multi_gpu)
 endif()
@@ -328,9 +301,8 @@ if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
 
-install(TARGETS ${_ED_INSTALL_TARGETS} ED
+install(TARGETS ${_ED_INSTALL_TARGETS}
     EXPORT QEDTargets
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
@@ -409,12 +381,6 @@ message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
 
 # CPU information (informational; uses CPU_VENDOR set by EDPlatform).
 _ed_report_cpu_features()
-
-# Apply CPU optimization flags to driver TUs (the bulk of the codebase
-# already inherits them from the static libraries' PRIVATE compile options).
-target_compile_options(ED PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-)
 
 # =============================================================================
 # Optional Python bindings (P2.7 / audit "modern python interface").
@@ -677,7 +643,7 @@ if(BUILD_ED_TESTS)
     # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
     # method-selection rule + QEDConfig-null guard.
     ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
-    target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
+    target_link_libraries(test_auto_dssf PRIVATE ed_dssf ed_input)
     # ED Cleanup Sweep Phase 5 (May 2026): test_dssf_tune / test_diag_tune
     # locked down the cross-cutting DSSF / diag tune heuristics that
     # were deleted along with `include/ed/auto/{diag,dssf}_tune.h`.
@@ -814,7 +780,6 @@ if(BUILD_ED_TESTS)
     #   * test_ftlm_kpm          (KPM dynamical / FTLM-KPM kernel gone -- KPM_DOS
     #                              stays; covered by test_kpm_dos)
     # The dynamical-correlator coverage moves to Phase 6 primitives.
-    ed_add_test(test_ltlm_static_connected_qh   tests/unit/test_ltlm_static_connected_qh.cpp USE_CATCH2)
     # (execution-planner test removed with the planner)
     # Streaming/tableless basis construction (Gosper enum + membership subspace)
     ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
@@ -853,9 +818,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
-    # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
-    ed_add_test(test_cross_sector_dssf          tests/unit/test_cross_sector_dssf.cpp USE_CATCH2)
-    target_link_libraries(test_cross_sector_dssf PRIVATE ed_dssf)
     # Phase E (TPQ dynamical correlator) -- retired in the
     # minimalist-architecture rev (May 2026). TPQ dynamical correlators
     # become workflow-level compositions of mtpq_kernel +
@@ -955,23 +917,11 @@ if(BUILD_ED_TESTS)
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
     )
 
-    # P2.2 (DSSF PR-C): lockdown for the new ed::dssf::run dispatch + DSSFMethod
-    # round-trip tokens. Links against ed_cli because the implementation lives
-    # there (it needs to reach the workflow functions).
-    ed_add_test(test_dssf_engine                tests/unit/test_dssf_engine.cpp USE_CATCH2)
-    target_link_libraries(test_dssf_engine PRIVATE ed_cli ed_dssf)
-
     # P2.3 (DSSF PR-D): bit-for-bit lockdown of the legacy /dynamical/ and
     # /correlations/ HDF5 schemas, so the unified /dssf/ writer cannot
     # accidentally regress them. Reaches into ed_solvers_cpu for HDF5IO.
     ed_add_test(test_dssf_legacy_schema         tests/unit/test_dssf_legacy_schema.cpp USE_CATCH2)
     target_include_directories(test_dssf_legacy_schema PRIVATE ${HDF5_INCLUDE_DIRS})
-
-    # P2.3 (DSSF PR-D): round-trip lockdown for the new unified /dssf/ schema
-    # (ensure_metadata + write_record + read_record). Lives in ed_dssf.
-    ed_add_test(test_dssf_io                    tests/unit/test_dssf_io.cpp USE_CATCH2)
-    target_link_libraries(test_dssf_io PRIVATE ed_dssf)
-    target_include_directories(test_dssf_io PRIVATE ${HDF5_INCLUDE_DIRS})
 
     # P2.11: lock down the programmatic symmetry DSL (ed::sym::Permutation
     # algebra + group_from_generators + Bloch-momentum convention +
@@ -1021,75 +971,4 @@ if(BUILD_ED_TESTS)
         TIMEOUT 240
     )
 
-    # -------------------------------------------------------------------------
-    # End-to-end smoke test: run the actual `ED` binary on a 4-site Heisenberg
-    # ring fixture and verify the ground-state energy is -2 exactly.
-    # -------------------------------------------------------------------------
-    set(TEST_CHAIN4_DIR
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4)
-    set(TEST_CHAIN4_OUT_DIR
-        ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_out)
-    set(TEST_CHAIN4_CFG
-        ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4.cfg)
-    set(ED_BINARY_FALLBACK
-        ${CMAKE_CURRENT_BINARY_DIR}/ED)
-
-    configure_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4.cfg.in
-        ${TEST_CHAIN4_CFG}
-        @ONLY
-    )
-    configure_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ed_smoke.sh.in
-        ${CMAKE_CURRENT_BINARY_DIR}/run_ed_smoke.sh
-        @ONLY
-    )
-
-    add_test(NAME test_ed_smoke
-             COMMAND bash ${CMAKE_CURRENT_BINARY_DIR}/run_ed_smoke.sh)
-    set_tests_properties(test_ed_smoke PROPERTIES
-        ENVIRONMENT "ED_BINARY=$<TARGET_FILE:ED>"
-        DEPENDS "ED"
-        TIMEOUT 120
-    )
-
-    # -------------------------------------------------------------------------
-    # Audit 2026-07-31 (H2): MPI master-worker integration test. Runs the
-    # 9-task single-T dynamical-response config serially and under
-    # `mpirun -n 3` and pins the two ed_results.h5 outputs dataset-for-
-    # dataset (fixed per-task FTLM seed => rank-placement independent).
-    # Guards the single-writer protocol: pre-fix, concurrent worker writes
-    # raced the HDF5 file lock and a worker death hung the master.
-    # -------------------------------------------------------------------------
-    if(WITH_MPI AND MPIEXEC_EXECUTABLE)
-        set(TEST_CHAIN4_SRC_DIR
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4)
-        set(TEST_POSITIONS_4SITE
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat)
-        set(TEST_CHAIN4_DYN_SCRATCH
-            ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_dyn_mpi)
-        set(TEST_CHAIN4_DYN_DIR
-            ${TEST_CHAIN4_DYN_SCRATCH}/ham)
-        set(TEST_CHAIN4_DYN_CFG
-            ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_dyn.cfg)
-        configure_file(
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4_dyn.cfg.in
-            ${TEST_CHAIN4_DYN_CFG}
-            @ONLY
-        )
-        configure_file(
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ed_mpi_dynamical.sh.in
-            ${CMAKE_CURRENT_BINARY_DIR}/run_ed_mpi_dynamical.sh
-            @ONLY
-        )
-        add_test(NAME test_ed_mpi_dynamical_master_worker
-                 COMMAND bash ${CMAKE_CURRENT_BINARY_DIR}/run_ed_mpi_dynamical.sh)
-        set_tests_properties(test_ed_mpi_dynamical_master_worker PROPERTIES
-            ENVIRONMENT "ED_BINARY=$<TARGET_FILE:ED>"
-            DEPENDS "ED"
-            LABELS "mpi"
-            SKIP_RETURN_CODE 77
-            TIMEOUT 300
-        )
-    endif()
 endif()

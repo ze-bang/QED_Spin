@@ -299,13 +299,12 @@ def test_diag_with_trivial_generator_set_falls_back_to_full_hilbert():
 # ---------------------------------------------------------------------------
 
 
-def test_diag_rejects_retired_mpi_device():
-    """Stage 11d: the device='mpi' subprocess launcher (ed_distributed_main
-    + qed.mpi) was retired; the device string now raises with guidance."""
+def test_diag_rejects_mpi_device():
+    """device='mpi' / 'mpi_gpu' raise, pointing at mpi4py."""
     H = _heisenberg_ring(6)
-    with pytest.raises(RuntimeError, match="retired"):
+    with pytest.raises(RuntimeError, match="not supported"):
         qed.solve(H, device="mpi", num_eigenvalues=1, verbose=False)
-    with pytest.raises(RuntimeError, match="mpirun"):
+    with pytest.raises(RuntimeError, match="mpi4py"):
         qed.solve(H, device="mpi_gpu", num_eigenvalues=1, verbose=False)
 
 
@@ -561,10 +560,7 @@ def test_eigenvalue_solver_matches_reference_across_paths(solver, label, kwargs)
 def test_mtpq_runs_on_full_hilbert(tmp_path):
     """mTPQ should run end-to-end on the full Hilbert space and return
     an EDResults whose .eigenvalues field has at least one entry (the
-    per-sample summary). After the surface-unification collapse the
-    trajectory dump under output_dir is no longer auto-emitted by the
-    orchestrator's ``mtpq_kernel`` -- callers wanting the SS_rand*.dat
-    files reach for the CLI binary ``./ED workflow thermal`` instead.
+    per-sample summary).
     """
     H = _heisenberg_ring()
     out = str(tmp_path / "tpq_full")
@@ -710,9 +706,8 @@ class TestDeviceMatrix:
       raises a clean RuntimeError when CUDA is missing) and through
       monkeypatching ``has_cuda_build`` so the routing decision is
       verified without touching the dispatcher;
-    * the MPI cells through the structured retirement error in
-      ``_resolve_device`` (Stage 11d: the subprocess launcher is gone;
-      the error points at mpirun + SectorDistributor).
+    * the MPI cells through the error in ``_resolve_device`` (not supported
+      in-process; it points at mpi4py).
     """
 
     @pytest.fixture
@@ -827,10 +822,9 @@ class TestDeviceMatrix:
             f"sz= must solve exactly one block, got {called}")
 
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
-    def test_mpi_devices_retired(self, H, device):
-        """Stage 11d: the device='mpi' subprocess launcher was retired;
-        both device strings raise with mpirun guidance."""
-        with pytest.raises(RuntimeError, match="retired"):
+    def test_mpi_devices_rejected(self, H, device):
+        """Both device strings raise, pointing at mpi4py."""
+        with pytest.raises(RuntimeError, match="mpi4py"):
             qed.solve(H, device=device, num_eigenvalues=1, verbose=False)
 
     def test_unknown_device_rejects(self, H):

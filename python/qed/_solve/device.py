@@ -49,10 +49,8 @@ def has_mpi_build() -> bool:
 # "device" axis values:
 #   "cpu"     -> single-process CPU
 #   "gpu"     -> single GPU (cuSPARSE / per-sector dispatch)
-#   "mpi"     -> distributed via mpirun on the CLI `ED` binary (the
-#                ed_distributed_main binary was retired in Stage 11d;
-#                the in-process qed.solve surface raises for 'mpi')
-#   "mpi_gpu" -> distributed CPU + per-rank GPU (multi-GPU)
+#   "mpi" / "mpi_gpu" -> not available in-process (qed.solve raises); distribute
+#                independent solves across processes with mpi4py.
 #
 # Coverage refreshed 2026-07-30 against src/orchestrator.cpp dispatch.
 _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
@@ -110,12 +108,8 @@ def solver_device_support(
 
     Notes
     -----
-    The MPI subprocess cells were retired (the ed_distributed_main launcher
-    and qed.mpi are gone). What remains is in the CLI: run `ED` under mpirun
-    and each rank solves a disjoint subset of the symmetry sectors, with the
-    spectrum Allgatherv-d at the end. No in-process lane builds MpiBackend --
-    select_backend picks it only for a distributed geometry, and every basis
-    policy reports is_distributed() == false.
+    There are no MPI cells: the library runs in one process (OpenMP, optionally
+    one GPU); distribute independent solves across processes with mpi4py.
     """
     cuda_ok = bool(has_cuda_build())
     mpi_ok = bool(has_mpi_build())
@@ -147,8 +141,8 @@ def solver_device_support(
                 cells[device] = {
                     "kernel": False,
                     "available": False,
-                    "note": ("retired: run the CLI under mpirun -- each rank "
-                             "takes a disjoint set of symmetry sectors"),
+                    "note": ("not in-process: distribute independent solves "
+                             "across processes with mpi4py"),
                 }
         matrix[solver_name] = cells
 
@@ -227,14 +221,9 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
         return True, False
     if device_lc in ("mpi", "mpi_gpu"):
         raise RuntimeError(
-            "device='mpi' / 'mpi_gpu' was retired: the subprocess launcher "
-            "(ed_distributed_main + qed.mpi) and the distributed-operator "
-            "family behind it were removed. For MPI, run the CLI under "
-            "mpirun: each rank solves a disjoint subset of the symmetry "
-            "sectors and the spectrum is Allgatherv-d. No in-process lane "
-            "builds MpiBackend (select_backend needs a distributed geometry "
-            "and no basis policy produces one). Single-node frontier runs "
-            "use device='gpu' (fp32 mTPQ / rep-lane memory scaling)."
+            "device='mpi' / 'mpi_gpu' is not supported: the library runs in "
+            "one process (OpenMP, optionally one GPU). Distribute independent "
+            "solves (sectors, clusters) across processes with mpi4py."
         )
     raise ValueError(
         f"device={device!r} not in "

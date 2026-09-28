@@ -24,8 +24,8 @@ Two ways to use it
                 .to_operator())
       eigs = qed.full_diagonalization(H)
 
-2. **Disk output (for the production ``./ED <dir>`` CLI).** Same builder,
-   different finaliser:
+2. **Disk output** (the ``InterAll.dat`` / ``Trans.dat`` directory format read by
+   ``Operator.load_inter_all`` / ``load_trans``). Same builder, different finaliser:
 
    .. code-block:: python
 
@@ -34,7 +34,6 @@ Two ways to use it
       builder = (qed.input.HamiltonianBuilder(lat.num_sites)
                        .pyrochlore_non_kramers(lat, Jxx=1.0, Jyy=0.5, Jzz=0.7))
       builder.write_directory("/tmp/pyro_2x2x2", lattice=lat)
-      # subprocess.run(["./ED", "/tmp/pyro_2x2x2"])  # business as usual
 
 Available lattice generators (``qed.input.lattice``)
 -----------------------------------------------------------

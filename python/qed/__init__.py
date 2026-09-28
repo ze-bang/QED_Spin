@@ -12,9 +12,8 @@ The public surface is intentionally small: **three verbs**:
 
 * :func:`qed.spectral(H, observables, ...) <qed.spectral>` --
   spectral / dynamical structure factors (ground-state continued
-  fraction, FTLM dynamical). Accepts an in-memory ``H`` plus a list
-  of observable operators, or a directory path for the ``./ED dssf``
-  CLI workflow.
+  fraction, FTLM dynamical) of an in-memory ``H`` and a list of
+  observable operators.
 
 All three call into the unified C++ orchestrator
 (``ed::workflows::{solve, thermal, spectral}`` in C++) and accept

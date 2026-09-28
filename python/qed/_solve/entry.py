@@ -123,12 +123,8 @@ def solve(
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"``.
         ``None`` (default) means ``"auto"``. ``"mpi"`` / ``"mpi_gpu"``
-        RAISE on this in-process surface (the ed_distributed_main
-        launcher was retired in Stage 11d): distributed runs go through
-        ``mpirun`` on the CLI ``ED`` binary, whose sector factory
-        dim-balances (n_up, irrep) sectors across ranks and Allgathers
-        the results (rank-local solves; see
-        ``ed::make_sector_operators_tagged``).
+        raise: the library runs in one process; distribute independent
+        solves across processes with mpi4py.
     symmetry : GeneratorSet, list[Permutation], or dict, optional
         If provided, the diagonalization runs in the symmetry-projected
         basis via the streaming symmetry kernel (per-sector matrix-free

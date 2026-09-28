@@ -16,18 +16,8 @@ defaults kicked in). The merged converters below are the UNION of both
 copies' fixes: strict method mapping, backend wiring, feasibility gate,
 AND the KPM/OFTLM/mTPQ knob forwarding.
 
-The direction of travel (Stage 11 program): the orchestrator Options
-are the canonical parameter surface; ``EDParameters`` survives as the
-kwargs staging bag whose ONLY consumers are the converters in this
-file plus the CLI adapter (`ed_config_adapter.h`).
-
-Stage 11a-tail: the SolveOptions converter is no longer duplicated
-across the language boundary either -- ``ed_params_to_solve_options``
-below delegates to the bound ``ed_adapter::toSolveOptions`` (the same
-function the CLI calls), with the deliberate semantic differences
-expressed as explicit flags instead of divergent copies. The
-ThermalOptions converter has no C++ twin (the CLI drives thermal
-through the legacy dispatcher), so it stays implemented here.
+``EDParameters`` is the kwargs staging bag. The SolveOptions converter is the C++
+``_core.ed_params_to_solve_options``; the ThermalOptions converter is implemented here.
 """
 
 from __future__ import annotations
@@ -181,12 +171,8 @@ def ed_params_to_solve_options(
     """Translate ``EDParameters`` + ``DiagonalizationMethod`` into a
     ``_core.SolveOptions`` for the orchestrator.
 
-    Delegates to THE one converter, ``ed_adapter::toSolveOptions``
-    (ed_config_adapter.h) -- this module previously carried a Python
-    twin of it that silently drifted in three fields (backend wiring,
-    ``allow_infeasible``, ``selected_sectors``). ``wire_backend=True``
-    is the Python-surface semantic: ``device='cpu'`` must PIN the CPU
-    backend, where the CLI keeps its historical auto-promotion."""
+    Delegates to the C++ converter; ``wire_backend=True`` makes
+    ``device='cpu'`` pin the CPU backend."""
     return _core.ed_params_to_solve_options(
         params=params,
         method=method,

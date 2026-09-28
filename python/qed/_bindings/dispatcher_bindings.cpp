@@ -49,12 +49,12 @@
 #include <pybind11/numpy.h>
 
 #include <ed/core/results.h>  // ::EDResults envelope (formerly ed_legacy_types.h)
-#include <ed/core/ed_config_adapter.h>  // ed_adapter::toSolveOptions (THE converter)
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/operator.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/results.h>          // ThermodynamicData + FTLMResults (legacy envelope)
+#include <ed/orchestrator.h>           // ed::workflows::SolveOptions
 
 #include <complex>
 #include <cstdint>
@@ -167,6 +167,55 @@ py::dict ed_results_to_dict(const EDResults& r) {
     d["thermo_data"]           = thermo_data_to_dict(r.thermo_data);
     d["ftlm_results"]          = ftlm_results_to_dict(r.ftlm_results);
     return d;
+}
+
+// EDParameters + DiagonalizationMethod -> SolveOptions, the converter behind `_core.ed_params_to_solve_options`
+// (`qed/_params.py`).
+//   auto_method       SolveMethod::Auto regardless of `method` (Python `method=None`).
+//   wire_backend      map use_gpu / use_mpi onto the backend constraints (device='cpu' must pin the CPU; a GPU the
+//                     Python side already chose is not second-guessed by the C++ dimension floor).
+//   allow_infeasible  skip the orchestrator's up-front feasibility refusal.
+ed::workflows::SolveOptions
+ed_params_to_solve_options(const EDParameters& params, ::DiagonalizationMethod method, bool auto_method,
+                           bool wire_backend, bool allow_infeasible) {
+    ed::workflows::SolveOptions opts;
+    opts.num_eigs        = static_cast<std::size_t>(params.num_eigenvalues);
+    // The EDParameters default max_iterations means "not set": let the orchestrator choose (passing it through makes
+    // a Krylov-Schur cycle span the whole space).
+    opts.max_iter        = (params.max_iterations == EDParameters{}.max_iterations)
+                               ? 0 : static_cast<std::size_t>(params.max_iterations);
+    opts.block_size      = static_cast<std::size_t>(params.block_size);
+    opts.tolerance       = params.tolerance;
+    opts.compute_vectors = params.compute_eigenvectors;
+    opts.output_dir      = params.output_dir;
+
+    using SM = ed::workflows::SolveMethod;
+    switch (method) {
+        case ::DiagonalizationMethod::LANCZOS:            opts.method = SM::Lanczos; break;
+        case ::DiagonalizationMethod::BLOCK_LANCZOS:      opts.method = SM::BlockLanczos; break;
+        case ::DiagonalizationMethod::KRYLOV_SCHUR:       opts.method = SM::KrylovSchur; break;
+        case ::DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: opts.method = SM::BlockKrylovSchur; break;
+        case ::DiagonalizationMethod::FULL:               opts.method = SM::FullDiag; break;
+        default:                                          opts.method = SM::Auto; break;
+    }
+    if (auto_method) opts.method = SM::Auto;
+
+    if (wire_backend) {
+        opts.backend.allow_gpu = params.use_gpu;
+        opts.backend.allow_mpi = params.use_mpi;
+        if (params.use_gpu) opts.backend.gpu_dim_floor = 0;
+    }
+    opts.allow_infeasible = allow_infeasible;
+
+    opts.use_fixed_sz          = params.use_fixed_sz;
+    opts.use_symmetry          = params.use_symmetry;
+    opts.n_up                  = static_cast<int>(params.n_up);
+    opts.basis_cache_dir       = params.basis_cache_dir;
+    opts.precompute_basis_only = params.precompute_basis_only;
+    opts.selected_sectors.reserve(params.selected_sectors.size());
+    for (int s : params.selected_sectors)
+        if (s >= 0) opts.selected_sectors.push_back(static_cast<std::size_t>(s));
+    return opts;
 }
 
 }  // anonymous namespace
@@ -312,22 +361,16 @@ void bind_dispatcher(py::module_& m) {
                    ">";
         });
 
-    // THE EDParameters -> SolveOptions converter (Stage 11a-tail): one
-    // implementation (`ed_adapter::toSolveOptions`, ed_config_adapter.h)
-    // shared by the CLI and the Python surface. `qed/_params.py` delegates
-    // here with `wire_backend=true`; the CLI calls the C++ function
-    // directly with its historical auto-promote semantics. No defaulted
-    // kwargs on purpose -- each caller MUST state its semantics.
+    // No defaulted kwargs on purpose: each caller states its semantics.
     m.def("ed_params_to_solve_options",
-          &ed_adapter::toSolveOptions,
+          &ed_params_to_solve_options,
           py::arg("params"),
           py::arg("method"),
           py::arg("auto_method"),
           py::arg("wire_backend"),
           py::arg("allow_infeasible"),
           "Translate an EDParameters bag + DiagonalizationMethod into "
-          "ed::workflows::SolveOptions (the single shared converter; see "
-          "ed_config_adapter.h).");
+          "ed::workflows::SolveOptions.");
 
     // ------------------------------------------------------------------------
     // 4. EDResults -- read-only result envelope returned by the legacy
@@ -443,10 +486,8 @@ void bind_dispatcher(py::module_& m) {
 #endif
     },
         "True iff this build was compiled with ``WITH_MPI=ON``. The "
-        "single-process ``qed._core`` does not call MPI directly; "
-        "launch the CLI under mpirun (SectorDistributor + MpiBackend) "
-        "to drive the MPI "
-        "solvers.");
+        "single-process ``qed._core`` does not call MPI; distribute "
+        "independent solves across processes with mpi4py.");
 
     // (capability-aware execution planner removed: sensible defaults +
     //  env-override leaf hooks; no probe_system / plan_execution surface)

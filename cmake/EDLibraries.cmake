@@ -5,7 +5,7 @@
 #
 #   ed_io           Pure I/O helpers (basis vector storage, lanczos basis
 #                   buffer, HDF5IO result files). No solver dependencies.
-#   ed_core         Core types/config (ed_config.cpp). Depends on ed_io.
+#   ed_core         Core types. Depends on ed_io.
 #   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
 #                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
 #                   LTLM, KPM_DOS, observables, dynamics). Depends on
@@ -133,10 +133,9 @@ target_compile_options(ed_io PRIVATE
 set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_core: ed_config + (eventually) split-out construct_ham / hdf5_io / etc.
+# ed_core: core types and the CPU stub of the lazy GPU sector mirror.
 # -----------------------------------------------------------------------------
 add_library(ed_core STATIC
-    ${CORE_DIR}/ed_config.cpp
     # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026)
     # -- CPU-only stub for the lazy GPU sector mirror entry point.
     # When WITH_CUDA is OFF this TU provides the throwing stub that
@@ -228,7 +227,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/observables.cpp
     ${SOLVERS_CPU_DIR}/lanczos.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
@@ -326,17 +324,12 @@ endif()
 #
 # This library is the canonical home for the (operator_type x basis x momentum
 # x spin-combo x fixed-Sz) cross-product that every dynamical/static
-# structure-factor workflow needs. The ED CLI consumes it via
-# `compute_*_workflow` (in ed_cli) and the canonical `ed::dssf::run` engine
-# seam (P1.10 / DSSF PR-A; P2.5 / DSSF PR-F; P2.14 deletion of TPQ_DSSF).
+# structure-factor workflow needs, plus the cross-irrep orbit observable the bindings apply.
 #
 # Depends only on ed_core for the `Operator` definitions.
 # -----------------------------------------------------------------------------
 add_library(ed_dssf STATIC
     ${DSSF_DIR}/operator_spec.cpp
-    ${DSSF_DIR}/dssf_method.cpp
-    ${DSSF_DIR}/dssf_io.cpp
-    ${DSSF_DIR}/cross_sector_observable.cpp
     ${DSSF_DIR}/cross_sector_orbit_observable.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
@@ -411,50 +404,6 @@ target_compile_options(ed_input PRIVATE
 )
 set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# ed_cli: CLI workflow entry points (run_*_workflow / compute_*_workflow /
-# parse_* / construct_operators_from_config / print_eigenvalue_summary /
-# compute_thermodynamics).
-#
-# Extracted from src/apps/ed_main.cpp in P1.11 (DSSF PR-B / audit §3.10) so
-# the same workflow functions can be reused by future entry points
-# (`ED dssf` subcommand in P2.4) and by pybind11 bindings without also
-# pulling in the legacy `int main()` machinery.
-#
-# Depends on ed_solvers_cpu (Lanczos / FTLM / observables), ed_dssf
-# (build_observable_pairs), ed_io (HDF5IO via construct_ham), and
-# transitively on ed_core. When WITH_CUDA, also depends on ed_solvers_gpu
-# for the GPU dynamical/static-response code paths under the WITH_CUDA
-# guards.
-# -----------------------------------------------------------------------------
-add_library(ed_cli STATIC
-    # WP14: the ~3400-line src/cli/workflows.cpp was split by workflow into
-    # src/cli/workflows/ (pure move; see workflows_internal.h for the file
-    # map). wf_common.cpp holds the plumbing the other TUs share.
-    ${CLI_DIR}/workflows/wf_common.cpp
-    ${CLI_DIR}/workflows/wf_diagonalize.cpp
-    ${CLI_DIR}/workflows/wf_dynamical.cpp
-    ${CLI_DIR}/workflows/wf_static.cpp
-    ${CLI_DIR}/workflows/wf_dssf.cpp
-    ${CLI_DIR}/workflows/wf_kpm.cpp
-    ${CLI_DIR}/dssf_engine.cpp
-)
-target_include_directories(ed_cli PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
-if(WITH_CUDA)
-    target_link_libraries(ed_cli PUBLIC ed_solvers_gpu)
-endif()
-target_link_libraries(ed_cli PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
-target_compile_options(ed_cli PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-)
-set_target_properties(ed_cli PROPERTIES POSITION_INDEPENDENT_CODE ON)
-# Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
-# `build_lanczos_tridiagonal_with_basis` deprecation warning inside the
-# CLI workflows -- they still call the legacy function through
-# `<ed/core/ed_wrapper.h>`.
-target_compile_definitions(ed_cli PRIVATE ED_BUILDING_INTERNAL=1)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.

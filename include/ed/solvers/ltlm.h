@@ -1,11 +1,4 @@
-// ltlm.h - Low Temperature Lanczos Method parameters + connected static response
-//
-// WP10 C7: ltlm.cpp is retired. ``compute_connected_qh_response_ltlm`` now
-// lives in src/solvers/cpu/ftlm_dynamical.cpp next to its FTLM sibling
-// ``compute_connected_qh_response``; ``find_ground_state_lanczos`` moved to
-// src/solvers/cpu/lanczos.cpp and is declared in <ed/solvers/lanczos.h>.
-// This header keeps the LTLM parameter block (bound in Python) and the
-// declaration of the LTLM-only connected static response.
+// ltlm.h - the LTLM parameter block (bound in Python; LTLM thermodynamics runs through the FTLM trace).
 
 #pragma once
 
@@ -46,37 +39,3 @@ struct LTLMParameters {
     bool use_exact_ground_state = false; // If true and ground state eigenvector provided, use it
 };
 
-// NOTE (Consolidation Family 1): the LTLM *thermodynamics* driver
-// ``low_temperature_lanczos`` was removed. Its estimator seeded a second
-// Lanczos from |0> and summed the GS-local density of states, not the
-// thermal trace, so it stayed pinned near E0 at every T. Since LTLM
-// thermodynamics reduces exactly to the FTLM trace for any function of H,
-// all thermodynamics now routes through ``ftlm_kernel``. The connected static response below (⟨OH⟩-⟨O⟩⟨H⟩), which
-// probes an operator that does NOT commute with H, is genuinely LTLM-only
-// and is retained. See CONSOLIDATION_PLAN.md Family 1.
-
-/**
- * @brief Compute the connected thermal-expansion covariance with LTLM.
- *
- * Evaluates the low-temperature estimator
- *     (⟨OH⟩ - ⟨O⟩⟨H⟩) / T²
- * by retaining the lowest LTLM Ritz states from a single outer Lanczos run.
- *
- * The returned ``expectation`` dataset stores the thermal-expansion
- * coefficient itself, while ``variance`` stores the raw connected covariance
- * ⟨δO δH⟩ and ``susceptibility`` stores ⟨δO δH⟩ / T.
- *
- * Parameter mapping for the legacy LTLM knobs:
- * - ``ground_state_krylov`` sets the outer Lanczos dimension floor.
- * - ``krylov_dim`` sets how many lowest Ritz states are retained.
- */
-StaticResponseResults compute_connected_qh_response_ltlm(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    uint64_t N,
-    const LTLMParameters& params,
-    double temp_min,
-    double temp_max,
-    uint64_t num_temp_bins,
-    const std::string& output_dir = ""
-);

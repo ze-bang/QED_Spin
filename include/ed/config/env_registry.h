@@ -192,18 +192,6 @@ struct Row {
       "Verbose logging in the GPU KPM-DOS kernel")                             \
     X("ED_KPM_SAMPLE_THREADS", Integer, "thermal-kpm", "1 (serial)",           \
       "Outer OMP team size over KPM random samples")                           \
-    X("ED_KPM_NUM_MOMENTS", Integer, "thermal-kpm", "KPMDOSParameters::num_moments (from config.dynamical.krylov_dim, se...",\
-      "Chebyshev moment count for the KPM-DOS workflow")                       \
-    X("ED_KPM_NUM_QUAD", Integer, "thermal-kpm", "KPMDOSParameters::num_quadrature_nodes default",\
-      "Quadrature-node count for the KPM thermodynamic integrals")             \
-    X("ED_KPM_BOUND_BUFFER", Real, "thermal-kpm", "KPMDOSParameters::spectral_bound_buffer default",\
-      "Safety buffer on the estimated spectral bounds before Chebyshev rescaling")\
-    X("ED_KPM_KERNEL", Text, "thermal-kpm", "Jackson kernel (use_jackson_kernel = true)",\
-      "Selects the Chebyshev damping kernel: lorentz/Lorentz/LORENTZ -> Lorentz, anything else keeps Jackson")\
-    X("ED_KPM_LORENTZ_LAMBDA", Real, "thermal-kpm", "KPMDOSParameters::lorentz_lambda default",\
-      "lambda parameter of the Lorentz kernel")                                \
-    X("ED_DSSF_PAIR_THREADS", Integer, "thermal-kpm", "min(n_my_pairs, max(1, omp_max_threads / 2))",\
-      "Outer OMP team size over DSSF (q, omega) pair tasks")                   \
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal-kpm", "4.0",                    \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_OPERATOR_MIRROR", Flag, "gpu", "true (mirror on)",               \
@@ -248,8 +236,6 @@ struct Row {
       "Times and reports the sector/operator construction phase")              \
     X("ED_DEBUG_BALANCE", Flag, "debug", "false",                              \
       "Dumps Burnside sector dims and the per-MPI-rank load after greedy owner assignment")\
-    X("ED_PYTHON", Path, "debug", "\"python3\"",                               \
-      "Custom Python interpreter used to shell out to automorphism_finder.py") \
     X("QED_CORE_DIR", Path, "python", "unset (extension inside the package)",  \
       "Prepends a build directory containing _core*.so to qed.__path__")       \
     X("QED_SZ_WORKERS", Integer, "python", "len(_n_up_values) (one worker per Sz sector)",\

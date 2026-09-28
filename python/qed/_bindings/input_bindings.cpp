@@ -401,7 +401,7 @@ void bind_input(py::module_& parent) {
              py::arg("lattice") = static_cast<const Lattice*>(nullptr),
              py::arg("opts") = FileOptions{},
              "Write the legacy directory format (`InterAll.dat`, `Trans.dat`, "
-             "`ThreeBodyG.dat`, `positions.dat`) consumed by `./ED <dir>`.")
+             "`ThreeBodyG.dat`, `positions.dat`) read by `Operator.load_inter_all` / `load_trans`.")
 
         // Inspection -----------------------------------------------------
         .def_property_readonly("num_sites", &HamiltonianBuilder::num_sites)

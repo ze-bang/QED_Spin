@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Correctness and robustness campaign: every capability on small systems against the
 independent dense reference of ``audit_workflows.py``, plus edge cases, invalid input,
-mutation/idempotence, persistence and the CLI directory form.
+mutation/idempotence and persistence.
 
     python3 benchmarks/audit_correctness.py                 # everything, CPU
     python3 benchmarks/audit_correctness.py --device gpu
@@ -21,7 +21,6 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -41,7 +40,6 @@ from qed.input import HamiltonianBuilder, Op  # noqa: E402
 
 warnings.simplefilter("ignore")
 DEVICE = "cpu"
-ED_BIN = os.environ.get("QED_ED_BIN", os.path.join(HERE, "..", "build", "ED"))
 
 
 # =============================================================================
@@ -475,35 +473,6 @@ def persistence_cases(m: Model, ref: Reference, run: Runner):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def cli_cases(m: Model, ref: Reference, run: Runner):
-    """Directory form: write Trans.dat / InterAll.dat / ThreeBodyG.dat and run the ED binary."""
-    N = m.N; half = N // 2
-    d = tempfile.mkdtemp(prefix="qed_audit_cli_")
-    m.builder().write_directory(d)
-    def run_cli(args):
-        out = os.path.join(d, "out_" + "_".join(a.strip("-").replace("=", "") for a in args)[:40])
-        os.makedirs(out, exist_ok=True)
-        cp = subprocess.run([ED_BIN, d, f"--num_sites={N}", f"--output={out}"] + args, capture_output=True, text=True, timeout=600)
-        if cp.returncode != 0:
-            raise RuntimeError(f"ED exit {cp.returncode}: {(cp.stderr or cp.stdout).strip().splitlines()[-1][:150] if (cp.stderr or cp.stdout).strip() else ''}")
-        import re
-        vals = [float(x) for x in re.findall(r"E\[\d+\]\s*=\s*(-?[0-9.eE+-]+)", cp.stdout)]
-        return vals
-    def chk_cli(nset, k):
-        def f(vals):
-            if not vals:
-                return False, "no E[i] lines in stdout"
-            got = np.sort(np.asarray(vals))[:k]; want = ref.lowest(len(got), nset)
-            return rel(got, want) < 1e-6, f"maxrel={rel(got, want):.1e} E0={got[0]:.8f}"
-        return f
-    run(Case(f"{m.name}/cli/ED --method=LANCZOS --eigenvalues=1 (full space)", lambda: run_cli(["--method=LANCZOS", "--eigenvalues=1"]), chk_cli(None, 1)))
-    run(Case(f"{m.name}/cli/ED --method=KRYLOV_SCHUR --eigenvalues=3 (full space)", lambda: run_cli(["--method=KRYLOV_SCHUR", "--eigenvalues=3"]), chk_cli(None, 3)))
-    if m.u1:
-        run(Case(f"{m.name}/cli/ED --method=LANCZOS --fixed-sz --n-up={half}", lambda: run_cli(["--method=LANCZOS", "--eigenvalues=2", "--fixed-sz", f"--n-up={half}"]), chk_cli(half, 2)))
-    run(Case(f"{m.name}/cli/ED --method=FULL --thermo", lambda: run_cli(["--method=FULL", "--thermo"]), chk_cli(None, 3)))
-    # (--symm needs automorphism_results/ in the directory; covered by the Python symmetry lanes)
-    shutil.rmtree(d, ignore_errors=True)
-
 
 def robustness_cases(run: Runner):
     """Invalid input must raise; edge constructions must give the right numbers."""
@@ -630,7 +599,6 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"])
     ap.add_argument("--verbose", action="store_true")
-    ap.add_argument("--skip-cli", action="store_true")
     ap.add_argument("--max-sites", type=int, default=None,
                     help="skip models with more sites than this (CI uses 10: the 12-site "
                          "dense references take minutes each on a hosted runner)")
@@ -652,8 +620,6 @@ def main():
         spectral_battery(m, ref, run)
         if m.name in ("open_chain10", "tri_chiral4x3"):
             persistence_cases(m, ref, run)
-        if not a.skip_cli and m.name in ("chain4", "open_chain10", "tfim10", "tri_chiral4x3", "random_complex8") and os.path.exists(ED_BIN):
-            cli_cases(m, ref, run)
     n = len(run.rows)
     bad = [r for r in run.rows if r.status in ("MISMATCH", "ERROR")]
     uns = [r for r in run.rows if r.status == "unsupported"]

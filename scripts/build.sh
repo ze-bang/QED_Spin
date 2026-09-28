@@ -83,5 +83,4 @@ fi
 echo "=== done"
 [[ "${PYTHON}" == ON ]] && ls -l "${BUILD}"/python/qed/_core*.so && \
     echo "    export PYTHONPATH=${ROOT}/python QED_CORE_DIR=${BUILD}/python/qed"
-[[ -x "${BUILD}/ED" ]] && echo "    CLI: ${BUILD}/ED"
 exit 0

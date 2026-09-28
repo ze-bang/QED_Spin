@@ -1,9 +1,6 @@
-"""Python-side smoke tests for the ``ed::dssf`` pybind11 bindings (P2.8).
-
-These tests are the Python mirror of ``tests/unit/test_dssf_operator_spec.cpp``;
-they exercise the *same* C++ ``ed::dssf::build_observable_pairs`` /
-``ed::dssf::compute_transverse_bases`` entry points the C++ ``ED dssf``
-subcommand calls internally, and lock down:
+"""Python-side smoke tests for the ``ed::dssf`` pybind11 bindings, the mirror of
+``tests/unit/test_dssf_operator_spec.cpp``: ``ed::dssf::build_observable_pairs`` /
+``ed::dssf::compute_transverse_bases``, locking down:
 
   * the pair count for ``sum`` / ``transverse`` / ``sublattice`` operator types
   * the ``single_obs_only`` shortcut (empty ``obs_2``, single-op naming)
