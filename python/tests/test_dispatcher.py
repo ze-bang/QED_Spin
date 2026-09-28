@@ -96,7 +96,6 @@ def test_diagonalization_method_enum_has_canonical_values():
         "KRYLOV_SCHUR",
         "FULL",
         "FTLM",
-        "LTLM",
         "mTPQ",
         "KPM_DOS",
     }

@@ -7,7 +7,7 @@
 // Coverage matrix
 // ---------------
 //
-//   Methods   : FTLM, LTLM, mTPQ, KpmDos
+//   Methods   : FTLM, mTPQ, KpmDos
 //   Symmetry  : none (full Hilbert),
 //               U(1)/Sz (per-Sz-sector recombination),
 //               spatial (Z_N translation + combine_sector_thermodynamics),
@@ -16,8 +16,8 @@
 //               GPU (if WITH_CUDA and a device is present at runtime)
 //   Trials    : three independent random seeds per method
 //   Observables: E(T) and Cv(T) for all methods;
-//                S(T) additionally for FTLM, KpmDos and LTLM (which include
-//                the full ln(D) entropy baseline in their formulas).
+//                S(T) additionally for FTLM and KpmDos (which include the full
+//                ln(D) entropy baseline in their formulas).
 //
 // System under test
 // -----------------
@@ -29,30 +29,6 @@
 //   FTLM    : trace estimator, accurate at all T with enough samples.
 //             Compared on [T_BROAD_MIN, T_BROAD_MAX].
 //             E, Cv, S all tested.
-//
-//   LTLM    : Low Temperature Lanczos Method.  For any FUNCTION OF H --
-//             which is all of thermodynamics -- the symmetric LTLM
-//             estimator reduces exactly to the FTLM trace, so the
-//             thermal LTLM branch dispatches through ftlm_kernel
-//             (654ea06).  Accurate at all T, like FTLM.
-//             Compared on [T_BROAD_MIN, T_BROAD_MAX] with krylov_dim=64
-//             (complete Krylov space for this small dim=64 system).
-//             E, Cv, S all tested across the full window.
-//
-//             HISTORY -- do not "restore" the old contract: this block
-//             used to describe LTLM as a "GS-biased estimator" that
-//             converges to ⟨ψ_GS|H|ψ_GS⟩ = E₀ at high T, and pinned it
-//             only on T ∈ [0.01, 0.06].  That was not a method regime;
-//             it was a BUG.  Both LTLM lanes (CPU low_temperature_lanczos
-//             and GPU ltlm_kernel_via_backend) summed |⟨0|ψₙ⟩|²e^(−βEₙ)
-//             -- the ground-state local DOS -- instead of the thermal
-//             trace, so LTLM returned E₀ at every T.  The [0.01, 0.06]
-//             window is exactly where the broken and correct estimators
-//             agree (8.1e−06 vs 1.4e−06 max rel dev at N=6), so this
-//             test passed either way and the specification above
-//             documented the defect.  Keep LTLM on the BROAD grid with
-//             the entropy check enabled: that is what distinguishes the
-//             two.
 //
 //   mTPQ    : microcanonical TPQ.  The iteration β_k = 2k/(L−E_k)
 //             reaches β_target only asymptotically with max_iter.
@@ -67,7 +43,7 @@
 //
 // Temperature grids
 // -----------------
-//   T_BROAD : [1.0, 10.0], 15 log-spaced points — FTLM, LTLM, KpmDos.
+//   T_BROAD : [1.0, 10.0], 15 log-spaced points — FTLM, KpmDos.
 //   T_HIGH  : [3.0, 10.0], 10 log-spaced points — mTPQ (TPQ variance
 //             shrinks at higher T; trajectory reaches β=0.33 in 200 steps).
 //
@@ -149,7 +125,7 @@ constexpr double T_HIGH_MAX  = 10.0;
 constexpr uint64_t N_HIGH    = 10;
 
 // Force the sampling KERNELS. dim=64 < SMALL_THERMAL_DIM=512, so without this
-// the orchestrator answers every FTLM/LTLM/mTPQ cell from an exact eigensolve
+// the orchestrator answers every FTLM/mTPQ cell from an exact eigensolve
 // and this file silently stops testing the estimators at all. Set at static
 // init, before any thermal() call. See the "Which KERNEL runs" note above.
 const bool kForceSamplingKernels = [] {
@@ -272,21 +248,6 @@ ThermalOptions make_ftlm_opts(uint64_t seed, bool allow_gpu = false) {
     return o;
 }
 
-ThermalOptions make_ltlm_opts(uint64_t seed, bool allow_gpu = false) {
-    ThermalOptions o;
-    o.method       = ThermalOptions::Method::LTLM;
-    // LTLM thermodynamics IS the FTLM trace (654ea06) -- same knobs as
-    // make_ftlm_opts, same accuracy budget, same BROAD window.
-    o.num_samples  = 50;
-    // krylov_dim=64 covers the complete 64-dim Hilbert space for N=6.
-    // For smaller symmetry sectors Lanczos terminates early — safe universally.
-    o.krylov_dim   = 64;
-    o.betas        = BETAS_BROAD;
-    o.random_seed  = seed;
-    o.backend.allow_gpu = allow_gpu;
-    return o;
-}
-
 ThermalOptions make_mtpq_opts(uint64_t seed, bool allow_gpu = false) {
     ThermalOptions o;
     o.method       = ThermalOptions::Method::mTPQ;
@@ -317,7 +278,6 @@ ThermalOptions opts_for(ThermalOptions::Method m, uint64_t seed,
                         bool allow_gpu = false) {
     switch (m) {
         case ThermalOptions::Method::FTLM:   return make_ftlm_opts(seed, allow_gpu);
-        case ThermalOptions::Method::LTLM:   return make_ltlm_opts(seed, allow_gpu);
         case ThermalOptions::Method::mTPQ:   return make_mtpq_opts(seed, allow_gpu);
         case ThermalOptions::Method::KpmDos: return make_kpm_opts(seed,  allow_gpu);
         default: throw std::logic_error("unknown method");
@@ -327,7 +287,6 @@ ThermalOptions opts_for(ThermalOptions::Method m, uint64_t seed,
 std::string method_name(ThermalOptions::Method m) {
     switch (m) {
         case ThermalOptions::Method::FTLM:   return "FTLM";
-        case ThermalOptions::Method::LTLM:   return "LTLM";
         case ThermalOptions::Method::mTPQ:   return "mTPQ";
         case ThermalOptions::Method::KpmDos: return "KpmDos";
         default: return "??";
@@ -337,10 +296,6 @@ std::string method_name(ThermalOptions::Method m) {
 // Which observables are reliable for each method?
 bool method_compare_entropy(ThermalOptions::Method m) {
     // mTPQ integrates S from 0 at T_MIN (no ln(D) baseline).
-    // LTLM was excluded here on the premise that it "gives S=0 (Z≈1, E≈E_GS)"
-    // -- a symptom of the GS-local-DOS bug, not of the method. It runs the
-    // FTLM kernel now and carries the same ln(D) baseline FTLM does, so its
-    // entropy IS checked: that check is what would catch a regression.
     return m != ThermalOptions::Method::mTPQ;
 }
 
@@ -467,51 +422,6 @@ bool has_gpu() {
 } // anonymous namespace
 
 // ===========================================================================
-// 0. LTLM thermodynamics IS the FTLM trace
-//
-// The contract established by 654ea06, and the direct regression pin for the
-// GS-local-DOS bug: with IDENTICAL knobs and seed, method=LTLM must reproduce
-// method=FTLM element for element. The broken LTLM returned E0 at every T, so
-// this comparison fails immediately on any reintroduction -- including one
-// that only touches a single lane, which is how the bug survived (the CPU and
-// GPU LTLM paths reimplemented it independently, and their agreement was
-// misread as evidence of a method regime rather than a shared defect).
-// ===========================================================================
-
-TEST_CASE("LTLM thermodynamics IS the FTLM trace (identical knobs)",
-          "[thermal][dense-ref][ltlm][ftlm]") {
-    auto H = make_full_heisen();
-
-    auto make = [](ThermalOptions::Method m, uint64_t seed) {
-        ThermalOptions o;
-        o.method       = m;
-        o.num_samples  = 20;
-        o.krylov_dim   = 40;
-        o.betas        = BETAS_BROAD;
-        o.random_seed  = seed;
-        o.backend.allow_gpu = false;
-        return o;
-    };
-
-    for (uint64_t seed : SEEDS) {
-        auto R_ltlm = ed::workflows::thermal(*H, make(ThermalOptions::Method::LTLM, seed));
-        auto R_ftlm = ed::workflows::thermal(*H, make(ThermalOptions::Method::FTLM, seed));
-
-        REQUIRE(R_ltlm.thermo.energy.size() == R_ftlm.thermo.energy.size());
-        REQUIRE_FALSE(R_ltlm.thermo.energy.empty());
-        for (std::size_t i = 0; i < R_ftlm.thermo.energy.size(); ++i) {
-            INFO("seed=" << seed << " T=" << R_ftlm.thermo.temperatures[i]
-                 << " LTLM E=" << R_ltlm.thermo.energy[i]
-                 << " FTLM E=" << R_ftlm.thermo.energy[i]);
-            REQUIRE(std::abs(R_ltlm.thermo.energy[i]
-                             - R_ftlm.thermo.energy[i]) < 1e-12);
-            REQUIRE(std::abs(R_ltlm.thermo.entropy[i]
-                             - R_ftlm.thermo.entropy[i]) < 1e-12);
-        }
-    }
-}
-
-// ===========================================================================
 // 1. No symmetry — full Hilbert space
 //    Each method on the full `Operator`, compared to the exact dense reference.
 // ===========================================================================
@@ -525,17 +435,6 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
         for (uint64_t seed : SEEDS)
             run_trial(*H, ThermalOptions::Method::FTLM, seed, ref,
                       "FTLM/no-sym");
-    }
-
-    // LTLM: thermodynamics == the FTLM trace (654ea06), so it is checked on
-    // the same BROAD window as FTLM, entropy included. krylov_dim=64 spans the
-    // complete dim=64 space.
-    SECTION("LTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        auto H = make_full_heisen();
-        for (uint64_t seed : SEEDS)
-            run_trial(*H, ThermalOptions::Method::LTLM, seed, ref,
-                      "LTLM/no-sym");
     }
 
     // mTPQ: entropy S not compared (integration baseline issue).
@@ -615,12 +514,6 @@ TEST_CASE("thermal methods vs dense reference: U(1)/Sz symmetry",
             sz_trial(ThermalOptions::Method::FTLM, seed, ref);
     }
 
-    SECTION("LTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : SEEDS)
-            sz_trial(ThermalOptions::Method::LTLM, seed, ref);
-    }
-
     SECTION("mTPQ") {
         // Combined energy tolerance is wider because the free-energy
         // weighting of sectors uses the biased TPQ F (missing entropy
@@ -697,12 +590,6 @@ TEST_CASE("thermal methods vs dense reference: spatial Z_N translation symmetry"
         const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
         for (uint64_t seed : SEEDS)
             spatial_trial(ThermalOptions::Method::FTLM, seed, sym_root, ref);
-    }
-
-    SECTION("LTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : SEEDS)
-            spatial_trial(ThermalOptions::Method::LTLM, seed, sym_root, ref);
     }
 
     SECTION("mTPQ") {
@@ -795,12 +682,6 @@ TEST_CASE("thermal methods vs dense reference: Sz + spatial (U(1) × Z_N)",
             sz_spatial_trial(ThermalOptions::Method::FTLM, seed, sym_root, ref);
     }
 
-    SECTION("LTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : seeds2)
-            sz_spatial_trial(ThermalOptions::Method::LTLM, seed, sym_root, ref);
-    }
-
     SECTION("mTPQ") {
         const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
         for (uint64_t seed : seeds2)
@@ -835,7 +716,6 @@ TEST_CASE("thermal GPU lane vs dense reference",
 
     const auto ref_broad = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
     const auto ref_high  = dense_reference(T_HIGH_MIN,  T_HIGH_MAX,  N_HIGH);
-    // LTLM shares FTLM's window (LTLM thermo == FTLM trace).
     auto H = make_full_heisen();
     constexpr uint64_t GPU_SEED = 42ULL;
 
@@ -846,16 +726,6 @@ TEST_CASE("thermal GPU lane vs dense reference",
         check_thermo_close(R.thermo, ref_broad,
                            TOL_E, TOL_CV, TOL_S,
                            "FTLM/gpu",
-                           /*compare_entropy=*/true);
-    }
-
-    SECTION("LTLM GPU") {
-        auto opts = make_ltlm_opts(GPU_SEED, true);
-        auto R    = ed::workflows::thermal(*H, opts);
-        REQUIRE((R.backend.lane == "gpu" || R.backend.lane == "cpu"));
-        check_thermo_close(R.thermo, ref_broad,
-                           TOL_E, TOL_CV, TOL_S,
-                           "LTLM/gpu",
                            /*compare_entropy=*/true);
     }
 

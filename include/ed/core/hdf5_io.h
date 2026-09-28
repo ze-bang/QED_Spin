@@ -4,7 +4,7 @@
 // Declarations only. The definitions live in src/io/hdf5_io_file.cpp (helpers,
 // chunking, file management), src/io/hdf5_io_eigen.cpp (eigen/thermodynamic/
 // correlation datasets), src/io/hdf5_io_tpq.cpp (TPQ samples, per-rank merge)
-// and src/io/hdf5_io_thermal.cpp (FTLM/LTLM response, time correlations).
+// and src/io/hdf5_io_thermal.cpp (FTLM response, time correlations).
 
 #include <H5Cpp.h>
 #include <vector>
@@ -543,7 +543,7 @@ public:
 
     
     // ============================================================================
-    // FTLM/LTLM/Hybrid Thermal Results I/O
+    // FTLM / Hybrid Thermal Results I/O
     // ============================================================================
     
     /**
@@ -559,7 +559,7 @@ public:
      * @param free_energy Free energy values
      * @param free_energy_error Free energy error bars
      * @param total_samples Number of samples used
-     * @param method Method name (FTLM, LTLM, Hybrid)
+     * @param method Method name (FTLM, Hybrid)
      */
     static void saveFTLMThermodynamics(
         const std::string& filepath,

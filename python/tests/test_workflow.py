@@ -513,7 +513,6 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     ("mtpq", "mTPQ"),         # lower
     ("MTPQ", "mTPQ"),         # upper (would fail the old .upper() lookup)
     ("FTLM", "FTLM"),
-    ("ltlm", "LTLM"),
     ("FULL", "FULL"),
 ])
 def test_solver_name_lookup_is_case_insensitive(name, expected):

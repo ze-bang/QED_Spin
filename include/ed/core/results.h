@@ -265,7 +265,7 @@ struct ThermalResult {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
     // trajectory + state-snapshot surface. Populated only by the mTPQ
     // branch of ``ed::workflows::thermal``; empty for
-    // FTLM / LTLM / KPM-DOS.
+    // FTLM / KPM-DOS.
     //
     // The trajectory fields are mirror-images of
     // ``MtpqResult::sample_*`` --

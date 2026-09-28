@@ -3,14 +3,14 @@
 //
 // Pins the orchestrator's small-dimension exact-thermal fallback:
 // for D <= SMALL_THERMAL_DIM (512), every SAMPLING thermodynamics method
-// (mTPQ / FTLM / LTLM / OFTLM) is answered by an exact eigensolve instead of
+// (mTPQ / FTLM / OFTLM) is answered by an exact eigensolve instead of
 // its stochastic estimator.
 //
 // Why this file exists
 // --------------------
-// Until Jul 2026 the gate required mTPQ specifically, so FTLM/LTLM kept
+// Until Jul 2026 the gate required mTPQ specifically, so FTLM kept
 // sampling in a regime where the exact solve is free AND machine precise --
-// measured at dim=64: mTPQ 1.4e-15 vs FTLM/LTLM 2.3e-02, i.e. 13 orders for
+// measured at dim=64: mTPQ 1.4e-15 vs FTLM 2.3e-02, i.e. 13 orders for
 // microseconds of eigensolve. The deliverable of all four methods here is
 // identical (canonical E/C/S), so all four take the exact route.
 //
@@ -110,7 +110,6 @@ TEST_CASE("ed::thermal: D <= SMALL_THERMAL_DIM is exact for every sampling metho
     // at ANY temperature: machine precision here proves the exact path ran.
     for (auto m : {ThermalOptions::Method::mTPQ,
                    ThermalOptions::Method::FTLM,
-                   ThermalOptions::Method::LTLM,
                    ThermalOptions::Method::OFTLM}) {
         auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
         auto R = ed::workflows::thermal(*H, base_opts(m));

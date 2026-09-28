@@ -16,7 +16,7 @@
 //     engine's graceful-fallback floor).
 //
 // The handle exposes the block as an `ed::LinearOperator`, so anything the
-// orchestrator can drive (Lanczos, dense eigensolve, FTLM/LTLM/TPQ sampling
+// orchestrator can drive (Lanczos, dense eigensolve, FTLM / TPQ sampling
 // kernels via ed::workflows::thermal) runs inside the reduced dimension with
 // no kernel changes. Ownership is by shared_ptr: all irrep blocks of one star
 // co-own their star's matrix-free H_{k0} (RepSectorMatVec), so a caller may
@@ -151,7 +151,7 @@ build_little_group_blocks(const ::Operator&                    op,
 //
 // Where little_group_thermodynamics (little_group_solve.h) EXACT-diagonalizes
 // every block (the point_group='full' contract), this runs the caller's
-// sampling method (FTLM / LTLM / mTPQ / OFTLM) per block through
+// sampling method (FTLM / mTPQ / OFTLM) per block through
 // ed::workflows::thermal(block.op(), ...) -- same kernels, same mem_guard,
 // same small-dim exact fallback -- and Z-recombines with each block's
 // spectral multiplicity folded in as a free-energy shift

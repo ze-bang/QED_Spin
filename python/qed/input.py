@@ -11,9 +11,8 @@ Two ways to use it
 
 1. **In-process (recommended for notebooks and Python-side workflows).**
    ``HamiltonianBuilder.to_operator()`` returns a fully populated
-   ``qed.Operator`` you can drop straight into
-   :func:`qed.full_diagonalization`,
-   :func:`qed.lanczos`, etc.
+   ``qed.Operator`` you can pass straight to :func:`qed.solve`,
+   :func:`qed.full_spectrum`, :func:`qed.thermal`, ...
 
    .. code-block:: python
 
@@ -22,7 +21,7 @@ Two ways to use it
       H = (qed.input.HamiltonianBuilder(lat.num_sites)
                 .heisenberg(lat.nn_pairs(), 1.0)
                 .to_operator())
-      eigs = qed.full_diagonalization(H)
+      eigs = qed.full_spectrum(H).eigenvalues
 
 2. **Disk output** (the ``InterAll.dat`` / ``Trans.dat`` directory format read by
    ``Operator.load_inter_all`` / ``load_trans``). Same builder, different finaliser:

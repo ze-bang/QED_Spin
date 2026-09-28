@@ -182,12 +182,12 @@ def test_full_spectrum(refs, monkeypatch, model, regime, content):
 
 
 # ===========================================================================
-# 3. thermal (FTLM / LTLM / mTPQ sampled + exact) x content x regime
+# 3. thermal (FTLM / mTPQ sampled + exact) x content x regime
 # ===========================================================================
 
 @pytest.mark.parametrize("model", ["ring", "torus"])
 @pytest.mark.parametrize("regime", list(_REGIMES))
-@pytest.mark.parametrize("method", ["FTLM", "LTLM", "mTPQ", "exact"])
+@pytest.mark.parametrize("method", ["FTLM", "mTPQ", "exact"])
 def test_thermal(refs, monkeypatch, model, regime, method):
     _set_env(monkeypatch, _REGIMES[regime])
     H = _op(model)

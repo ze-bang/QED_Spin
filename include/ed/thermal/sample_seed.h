@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/thermal/sample_seed.h
 //
-// The random-vector stream of the sampled thermal methods (FTLM, LTLM, OFTLM):
+// The random-vector stream of the sampled thermal methods (FTLM, OFTLM):
 // one reproducible engine per sample, derived from the caller's base seed. One
 // definition, so every lane that samples draws the same vectors for the same
 // seed. Header-only and host-only (the engines feed host-side vector draws).

@@ -109,7 +109,7 @@ def exact_lane(
     from ..thermal import ThermalResult, _sym_toggle_int
     # method="exact": exact canonical thermodynamics from the block
     # engine's full per-block spectra. This is a METHOD, sitting beside
-    # FTLM/LTLM/mTPQ -- point_group stays a pure symmetry-routing knob
+    # FTLM / mTPQ -- point_group stays a pure symmetry-routing knob
     # ('auto' project-when-possible / 'full' require / 'off' abelian).
     # Historically this computation was reachable only through the
     # point_group='full' spelling, which conflated routing with solver

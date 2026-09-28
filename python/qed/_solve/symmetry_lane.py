@@ -151,7 +151,7 @@ def _diag_with_symmetry(
     # CLI path the C++ `run_streaming_symmetry_workflow` exercises.
     #
     # Phase B of the "Backend x Symmetries x Workflows" plan
-    # (May 2026): thermal methods (FTLM / LTLM / mTPQ /
+    # (May 2026): thermal methods (FTLM / mTPQ /
     # KPM_DOS) now route through the matching
     # ``workflows_thermal_streaming_symmetry`` binding,
     # closing the "qed.solve(symmetry=..., solver='FTLM')" gap.

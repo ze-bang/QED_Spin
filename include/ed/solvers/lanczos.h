@@ -47,7 +47,7 @@ ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_d
  * (Jaklic & Prelovsek, PRB 49, 5065 (1994); Skilling 1989) and is statistically
  * isotropic on the unit sphere, unlike normalised uniform-cube samples.
  *
- * Use this for FTLM/LTLM/TPQ-style finite-temperature random sampling.
+ * Use this for FTLM / TPQ-style finite-temperature random sampling.
  * For Lanczos starting vectors (where the distribution does not matter after
  * normalisation), generateRandomVector is equally valid.
  */
@@ -101,7 +101,7 @@ void diagonalize_tridiagonal_ritz(
  * `ed::krylov::lanczos_kernel<CpuBackend>` directly without the
  * `std::function` adapter or the `UniqueVec` -> `ComplexVector` copy.
  * The legacy wrapper is retained because the no-reorth / periodic-reorth
- * branches and the in-memory-basis ABI shape of FTLM / LTLM downstream
+ * branches and the in-memory-basis ABI shape of FTLM downstream
  * consumers have not been individually ported yet; once those are
  * migrated this function will be removed in a follow-up version bump.
  *
@@ -122,7 +122,7 @@ void diagonalize_tridiagonal_ritz(
  */
 // Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+):
 // the `[[deprecated]]` attribute is gated by `ED_BUILDING_INTERNAL` so
-// the library's own legacy callsites (FTLM / LTLM / KPM_DOS / TPQ_DYNAMICAL,
+// the library's own legacy callsites (FTLM / KPM_DOS / TPQ_DYNAMICAL,
 // each waiting on its own per-call migration to `ed::krylov::lanczos_tridiag`)
 // do not produce a wall of internal warnings during a clean build. The
 // attribute is visible to ALL EXTERNAL CALLERS (Python pybind11 layer,

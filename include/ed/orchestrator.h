@@ -7,7 +7,7 @@
 //     ed::solve     -- ground-state eigenproblem (Lanczos / Krylov-Schur /
 //                       Block-Lanczos / full diag), one of the four
 //                       Backend lanes auto-selected via select_backend.
-//     ed::thermal   -- finite-temperature workflows (FTLM / LTLM / mTPQ /
+//     ed::thermal   -- finite-temperature workflows (FTLM / mTPQ /
 //                       KPM-DOS).
 //     ed::spectral  -- dynamical correlators (DSSF ground state /
 //                       finite-T) via continued-fraction Lanczos.
@@ -234,7 +234,7 @@ struct ThermalOptions {
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, LTLM, mTPQ, KpmDos = 4, OFTLM,
+        FTLM = 0, mTPQ = 2, KpmDos = 4, OFTLM = 5,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -338,7 +338,7 @@ struct ThermalOptions {
     // user-supplied probe-betas for TPQ state-vector snapshots. The
     // orchestrator passes this through to ``MtpqOptions::probe_betas``
     // Empty (default) -> no snapshots
-    // are taken. Ignored by FTLM / LTLM / KPM-DOS (which never have
+    // are taken. Ignored by FTLM / KPM-DOS (which never have
     // a meaningful TPQ state to snapshot). Combine with
     // ``output_dir`` to land the saved states on disk under
     // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).

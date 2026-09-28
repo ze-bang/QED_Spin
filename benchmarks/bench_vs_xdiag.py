@@ -12,7 +12,7 @@ Heisenberg chain at spin 1/2, no symmetries -- and report:
 
 The XDiag side runs as a Julia subprocess (`bench_vs_xdiag.jl`) and
 writes its results to a JSON file we splice in here. The qed
-side uses `qed.lanczos` and a direct timing of `Operator.apply`.
+side uses `qed.solve(solver="LANCZOS")` and a direct timing of `Operator.apply`.
 
 Usage:
 
@@ -109,12 +109,12 @@ def time_qed_lanczos(N: int, fixed_sz: bool,
 
     op = _build_chain_op(N, fixed_sz=fixed_sz)
     # Warm up: triggers any first-touch allocation, JIT, etc.
-    _ = qed.lanczos(op, max_iter=200, exct=1, tolerance=1e-10)
+    _ = qed.solve(op, solver="LANCZOS", num_eigenvalues=1, tolerance=1e-10, verbose=False)
     samples_ms: list[float] = []
     e0: float | None = None
     for _ in range(n_calls):
         t0 = time.perf_counter()
-        eigs = qed.lanczos(op, max_iter=400, exct=1, tolerance=1e-10)
+        eigs = qed.solve(op, solver="LANCZOS", num_eigenvalues=1, tolerance=1e-10, verbose=False)
         samples_ms.append((time.perf_counter() - t0) * 1e3)
         if hasattr(eigs, "eigenvalues"):
             eigs = eigs.eigenvalues
@@ -300,7 +300,7 @@ def main() -> None:
 
     print()
     print("=" * 96)
-    print(f"Ground-state Lanczos. qed.lanczos vs XDiag.eigval0 (both at "
+    print(f"Ground-state Lanczos. qed.solve(LANCZOS) vs XDiag.eigval0 (both at "
           f"natural numerical convergence).")
     print("=" * 96)
     hdr = (f"{'N':>3} {'dim':>10} | {'qed':>12} | {'xdiag':>12} | "

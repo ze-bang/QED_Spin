@@ -11,7 +11,7 @@ projection lane instead:
   engine's star walk via ``only_k0`` instead of forcing the abelian lane.) Any decline falls back silently to the
   abelian rep lane with star/TR/flip *folds* -- the pre-9c behaviour.
   The thermal verb is the exception: its sampling methods (mTPQ/FTLM/
-  LTLM) are the large-N design point, and the projection lane computes
+  OFTLM) are the large-N design point, and the projection lane computes
   EXACT full-spectrum thermodynamics per block -- auto never hijacks a
   sampling run into an exponentially costlier exact one, so thermal
   projects only under the explicit ``point_group="full"`` contract.
@@ -414,10 +414,10 @@ def resolve_projection_lane(
             return _decline(
                 "KPM_DOS produces one full-spectrum DOS; per-block "
                 "sub-DOS cannot recombine -- the abelian lane serves it")
-        if _m not in ("FTLM", "LTLM", "MTPQ", "OFTLM"):
+        if _m not in ("FTLM", "MTPQ", "OFTLM"):
             return _decline(
                 f"thermal method {method!r} has no sample-inside-block "
-                f"lane; only FTLM/LTLM/mTPQ/OFTLM project under 'auto'")
+                f"lane; only FTLM/mTPQ/OFTLM project under 'auto'")
     if pg == "auto" and consumer == "spectral":
         # DELIBERATE dialect (kept after the 2026-07-16 diction audit):
         # the little-group GS-DSSF computes the TOTAL S(omega) and

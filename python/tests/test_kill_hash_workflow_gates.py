@@ -20,7 +20,7 @@ Each test asserts the same three guarantees:
 
 3. **Numerical correctness** -- where the workflow is deterministic
    (GS, GroundStateCF), we compare to the same call on CPU and
-   require tight agreement. Stochastic workflows (FTLM, LTLM, mTPQ,
+   require tight agreement. Stochastic workflows (FTLM, mTPQ,
    FtlmDynamical, KpmDynamical) cannot bit-match CPU because the RNG
    draws happen device-local, so we only assert "produces a finite,
    non-zero result".
@@ -243,27 +243,6 @@ def test_phase_d_ftlm_gpu(tmp_path):
             output_dir=str(tmp_path / "ftlm"),
         )
     res, _ = _time_and_check(go, "FTLM")
-    assert res is not None
-
-
-# ---- LTLM ----------------------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_d_ltlm_gpu(tmp_path):
-    """LTLM / qed.thermal, method=LTLM, device='gpu'."""
-    H = _ring_operator()
-    def go():
-        return qed.thermal(
-            H,
-            method="LTLM",
-            T_min=0.5, T_max=4.0, num_T=2,
-            sz_min=N_UP_TEST, sz_max=N_UP_TEST,
-            num_samples=1, ltlm_krylov_dim=20,
-            use_sz_if_conserved=True,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "ltlm"),
-        )
-    res, _ = _time_and_check(go, "LTLM")
     assert res is not None
 
 

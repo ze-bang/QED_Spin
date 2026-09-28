@@ -183,7 +183,7 @@ def test_build_pairs_rejects_malformed_input(mutate, desc):
 def test_obs_1_handles_are_apply_callable():
     """The Operator handles returned by build_observable_pairs must support
     the same apply(complex128 vector) protocol as user-built Operators -- this
-    is what makes them pluggable into Lanczos / FTLM / LTLM via Python."""
+    is what makes them pluggable into Lanczos / FTLM via Python."""
     import numpy as np
 
     spec = _base_spec()

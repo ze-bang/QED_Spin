@@ -1,6 +1,6 @@
 """Cross-check the C++ full-diagonalization solver against NumPy.
 
-We build a 2-site Heisenberg chain by hand, run qed.full_diagonalization,
+We build a 2-site Heisenberg chain by hand, run qed.full_spectrum,
 and verify the spectrum matches the analytic singlet/triplet pattern.
 """
 
@@ -27,9 +27,7 @@ def _build_heisenberg_2site() -> "qed.Operator":
 def test_2site_heisenberg_spectrum_matches_analytic():
     """Spectrum: singlet -3/4, triplet +1/4 (degeneracy 3)."""
     op = _build_heisenberg_2site()
-    eigvals = qed.full_diagonalization(op)
-
-    eigvals = np.sort(np.asarray(eigvals))
+    eigvals = np.sort(np.asarray(qed.full_spectrum(op, verbose=False).eigenvalues))
     assert eigvals.shape == (4,)
     assert np.isclose(eigvals[0], -0.75, atol=1e-10)
     assert np.allclose(eigvals[1:], 0.25, atol=1e-10)
@@ -37,6 +35,6 @@ def test_2site_heisenberg_spectrum_matches_analytic():
 
 def test_lanczos_ground_state_matches_full_diag():
     op = _build_heisenberg_2site()
-    full = np.sort(np.asarray(qed.full_diagonalization(op)))
-    e0_lanczos = qed.lanczos(op, max_iter=50, exct=1, tolerance=1e-12)
-    assert np.isclose(np.asarray(e0_lanczos)[0], full[0], atol=1e-8)
+    full = np.sort(np.asarray(qed.full_spectrum(op, verbose=False).eigenvalues))
+    e0 = qed.solve(op, solver="LANCZOS", num_eigenvalues=1, verbose=False).eigenvalues
+    assert np.isclose(np.asarray(e0)[0], full[0], atol=1e-8)

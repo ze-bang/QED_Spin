@@ -191,7 +191,7 @@ KpmDosResult kpm_dos_kernel(const Backend& /*backend*/,
         // KPM-DOS lane: the per-rank Lanczos for the spectral bound
         // and the Hutchinson loop both need a cross-rank reduction
         // that the CPU/CUDA drivers do not currently implement.
-        // Mirrors the analogous FTLM/LTLM guard above.
+        // Mirrors the analogous FTLM guard above.
         throw std::runtime_error(
             "kpm_dos_kernel: distributed backends are not yet "
             "supported. Pin BackendConstraints::allow_mpi = false "

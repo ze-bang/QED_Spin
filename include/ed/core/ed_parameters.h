@@ -113,13 +113,6 @@ struct EDParameters {
     bool ftlm_store_samples = false;
     bool ftlm_error_bars = true;
 
-    // ========== LTLM-Specific Parameters ==========
-    uint64_t ltlm_krylov_dim = ed::defaults::kLtlmKrylovDim;
-    uint64_t ltlm_ground_krylov = 100;
-    bool ltlm_full_reorth = ed::defaults::kThermalFullReorth;
-    uint64_t ltlm_reorth_freq = 10;
-    uint64_t ltlm_seed = 0;
-    bool ltlm_store_data = false;
     // ========== KPM-DOS-Specific Parameters ==========
     // Kernel Polynomial Method density-of-states + thermodynamics.
     // See include/ed/solvers/kpm_dos.h for full algorithmic specification.
@@ -269,5 +262,5 @@ struct EDParameters {
     // were retired with their solvers in the minimalist-architecture rev
     // (May 2026). EDParameters now carries only the knobs that are still
     // used by the kept solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
-    // FULL / FTLM / LTLM / mTPQ / KPM_DOS).
+    // FULL / FTLM / mTPQ / KPM_DOS).
 };

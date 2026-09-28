@@ -154,8 +154,6 @@ struct Row {
       "=0 restores the kept-basis FullCGS2 eigenvector lane instead of the two-pass no-reorth reconstruction")\
     X("ED_FORCE_COMPLEX_LANCZOS", Flag, "krylov", "false",                     \
       "=1 returns the pre-Wave-1.1 unified complex Lanczos kernel (A/B + bisection)")\
-    X("ED_LANCZOS_REAL_DISPATCH", Flag, "krylov", "true (real dispatch on)",   \
-      "=0/false/FALSE opts out of dispatching eigenvalue-only Lanczos to the real-arithmetic fast path")\
     X("ED_BLOCK_LANCZOS_LEAN", Flag, "krylov", "false (honour the caller)",    \
       "=1 forces keep_basis = false in the block-Lanczos eigenvalue-only lane")\
     X("ED_GPU_LANCZOS_FULL_CGS2", Flag, "krylov", "false",                     \
@@ -183,7 +181,7 @@ struct Row {
     X("ED_TPQ_BASE_SEED", Integer, "thermal-kpm", "0 -> non-deterministic, time-seeded",\
       "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
     X("ED_DSSF_VERBOSE", Flag, "thermal-kpm", "false",                         \
-      "Gates per-sample / per-iteration progress prints in the DSSF/SSSF/FTLM/LTLM kernels")\
+      "Gates per-sample / per-iteration progress prints in the DSSF/SSSF/FTLM kernels")\
     X("ED_KPM_VERBOSE", Flag, "thermal-kpm", "false",                          \
       "Verbose logging in the FTLM-KPM kernel")                                \
     X("ED_KPM_DOS_VERBOSE", Flag, "thermal-kpm", "false",                      \

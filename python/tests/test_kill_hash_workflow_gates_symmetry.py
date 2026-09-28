@@ -303,28 +303,6 @@ def test_phase_e2_ftlm_gpu_sym(sym_ring, tmp_path):
     assert getattr(res, "used_symmetry_decomposition", False) is True
 
 
-# ---- LTLM ---------------------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_e2_ltlm_gpu_sym(sym_ring, tmp_path):
-    """LTLM / qed.thermal(H, symmetry=..., device='gpu')."""
-    def go():
-        return qed.thermal(
-            sym_ring[0],
-            method="LTLM",
-            symmetry=_zn_generator(N_SITES_TEST),
-            T_min=0.5, T_max=4.0, num_T=2,
-            sz_min=N_UP_TEST, sz_max=N_UP_TEST,
-            num_samples=1, ltlm_krylov_dim=20,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "ltlm_sym"),
-        )
-
-    res, _ = _time_and_check(go, "LTLM[sym]")
-    assert res is not None
-    assert getattr(res, "used_symmetry_decomposition", False) is True
-
-
 # ---- mTPQ ---------------------------------------------------------------
 @_REQUIRES_GPU
 def test_phase_e2_mtpq_gpu_sym(sym_ring, tmp_path):

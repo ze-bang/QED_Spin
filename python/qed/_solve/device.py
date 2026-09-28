@@ -62,12 +62,7 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    # Audit 2026-07-30: LTLM and KPM_DOS dispatch on CudaBackend in the
-    # orchestrator (src/orchestrator.cpp LTLM/KpmDos lanes + kpm_dos_gpu.cu),
-    # and the capability matrix publishes passing gpu rows for both -- the
-    # old False entries contradicted the shipped kernels. OFTLM remains the
-    # sole CPU-only thermal lane (H.bind_cpu() in its orchestrator branch).
-    "LTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
+    # OFTLM is the only CPU-only thermal lane (H.bind_cpu() in its orchestrator branch).
     "KPM_DOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
 }
 

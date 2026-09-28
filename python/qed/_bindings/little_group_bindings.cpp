@@ -22,7 +22,6 @@
 #include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr / prefer_tableless_fixed_sz (leaf)
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
-#include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/irreps.h>
@@ -496,7 +495,7 @@ void bind_little_group(py::module_& m) {
           "little-co-group full spectrum.");
 
     // U1b (lane unification): SAMPLED thermodynamics inside the projected
-    // blocks -- FTLM/LTLM/mTPQ/OFTLM per (n_up, k, +/-, sigma) block via
+    // blocks -- FTLM / mTPQ/OFTLM per (n_up, k, +/-, sigma) block via
     // ed::workflows::thermal(block.op(), ...), Z-recombined with the block
     // multiplicity folded in as an F-shift. KPM_DOS raises (full-spectrum
     // DOS deliverable; use the abelian lane). Returns the combined thermo
@@ -514,13 +513,12 @@ void bind_little_group(py::module_& m) {
               using Method = ed::workflows::ThermalOptions::Method;
               ed::workflows::ThermalOptions topts;
               if      (method == "FTLM")  topts.method = Method::FTLM;
-              else if (method == "LTLM")  topts.method = Method::LTLM;
               else if (method == "mTPQ")  topts.method = Method::mTPQ;
               else if (method == "OFTLM") topts.method = Method::OFTLM;
               else
                   throw std::invalid_argument(
                       "little_group_thermal: method must be one of "
-                      "FTLM/LTLM/mTPQ/OFTLM (KPM_DOS recombines on the "
+                      "FTLM/mTPQ/OFTLM (KPM_DOS recombines on the "
                       "abelian lane only), got '" + method + "'");
               topts.temp_min      = t_min;
               topts.temp_max      = t_max;
@@ -582,7 +580,7 @@ void bind_little_group(py::module_& m) {
           py::arg("use_gpu") = false,
           py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
           py::arg("dense_max_dim") = 4096,
-          "Sampled (FTLM/LTLM/mTPQ/OFTLM) thermodynamics inside the "
+          "Sampled (FTLM / mTPQ/OFTLM) thermodynamics inside the "
           "factorized little-group blocks, Z-recombined with block "
           "multiplicities.");
 

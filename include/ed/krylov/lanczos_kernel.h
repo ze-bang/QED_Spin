@@ -31,7 +31,7 @@
 //   * Optional periodic reorthogonalisation (every `reorth_freq`
 //     iterations) on the same CGS2 path.
 //   * Breakdown detection via beta < tol.
-//   * Optional basis-vector retention for downstream FTLM / LTLM /
+//   * Optional basis-vector retention for downstream FTLM / 
 //     observable-projection consumers.
 //
 // Pointer-convention notes:

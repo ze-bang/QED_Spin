@@ -18,7 +18,7 @@ void bind_workflows_thermal(py::module_& m) {
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
               // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
-              // every thermal method (FTLM / LTLM / mTPQ /
+              // every thermal method (FTLM / mTPQ /
               // KpmDos) dispatches on Backend internally and accepts both
               // ``CpuBackend`` and ``CudaBackend``, so the host operator's
               // lazy CudaMatVecBackend mirror (operator-collapse Phase 2a)
@@ -36,7 +36,7 @@ void bind_workflows_thermal(py::module_& m) {
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
-          "Run the unified finite-temperature workflow (FTLM / LTLM / mTPQ / "
+          "Run the unified finite-temperature workflow (FTLM / mTPQ / "
           "KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
           "routes the matvec through the host operator's lazy "
           "CudaMatVecBackend device mirror without manual conversion.");
@@ -349,7 +349,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // aggregate ``ThermalResult``. Non-TPQ methods can
                   // also benefit (per-sector ftlm/averaged groups stay
                   // intact) but the bug was specific to TPQ because
-                  // FTLM/LTLM/KPM-DOS only ship the aggregated curves.
+                  // FTLM / KPM-DOS only ship the aggregated curves.
                   const bool need_per_sector_outdir =
                       !opts.output_dir.empty()
                       && !HDF5IO::isDisabledOutputPath(opts.output_dir);
@@ -664,7 +664,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
         spin_l : float, optional
             Spin magnitude (0.5 for spin-1/2, the default).
         opts : ThermalOptions, optional
-            Per-sector finite-T options (FTLM / LTLM / mTPQ /
+            Per-sector finite-T options (FTLM / mTPQ /
             KPM-DOS). ``selected_sectors`` filters the loop.
         fixed_sz_n_up : int or None, optional
             If set, project to a fixed-Sz sector with this ``n_up``

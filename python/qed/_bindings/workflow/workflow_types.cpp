@@ -156,7 +156,6 @@ void bind_workflows_types(py::module_& m) {
     // -----------------------------------------------------------------
     py::enum_<ed::workflows::ThermalOptions::Method>(m, "ThermalMethod")
         .value("FTLM",   ed::workflows::ThermalOptions::Method::FTLM)
-        .value("LTLM",   ed::workflows::ThermalOptions::Method::LTLM)
         .value("mTPQ",   ed::workflows::ThermalOptions::Method::mTPQ)
         .value("KpmDos", ed::workflows::ThermalOptions::Method::KpmDos)
         .value("OFTLM",  ed::workflows::ThermalOptions::Method::OFTLM)

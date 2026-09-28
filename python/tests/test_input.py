@@ -1,7 +1,6 @@
 """Tests for the standalone ``qed.input`` C++ library bindings.
 
-Cross-checks the new ``HamiltonianBuilder`` against the legacy Python
-``qed.hamiltonian.Hamiltonian`` DSL and against
+Cross-checks ``HamiltonianBuilder`` against exact values and against
 ``Operator.load_trans`` / ``Operator.load_inter_all`` round-trips for a
 handful of textbook lattices.
 """
@@ -67,22 +66,19 @@ def test_from_neighbor_lists_roundtrip():
 
 
 # ----------------------------------------------------------------------
-# HamiltonianBuilder vs legacy Python Hamiltonian DSL
+# HamiltonianBuilder against exact values
 # ----------------------------------------------------------------------
 
 def _ground_state(op):
-    return float(np.asarray(qed.full_diagonalization(op)).min())
+    return float(np.asarray(qed.full_spectrum(op, verbose=False).eigenvalues).min())
 
 
-def test_heisenberg_chain_4_matches_python_dsl():
+def test_heisenberg_open_chain_4_ground_state():
     bonds = [(0, 1), (1, 2), (2, 3)]
-    H_cpp = (qinput.HamiltonianBuilder(4)
-                  .heisenberg(bonds, 1.0)
-                  .to_operator())
-    H_py = (qed.hamiltonian.Hamiltonian(4)
-                      .heisenberg(bonds, 1.0)
-                      .build())
-    assert np.isclose(_ground_state(H_cpp), _ground_state(H_py), atol=1e-12)
+    H = (qinput.HamiltonianBuilder(4)
+              .heisenberg(bonds, 1.0)
+              .to_operator())
+    assert np.isclose(_ground_state(H), -0.75 - np.sqrt(3.0) / 2.0, atol=1e-12)   # exact, open S=1/2 chain
 
 
 def test_xxz_collapses_to_heisenberg_when_jxy_eq_jz():
@@ -155,6 +151,6 @@ def test_low_level_add_one_body():
                .add_one_body(qinput.Op.Sz, 0, 1.0)
                .add_one_body(qinput.Op.Sz, 1, 1.0)
                .to_operator())
-    eigs = sorted(np.real(qed.full_diagonalization(H)))
+    eigs = sorted(np.real(qed.full_spectrum(H, verbose=False).eigenvalues))
     # Sz_0 + Sz_1 has eigenvalues -1, 0, 0, 1.
     assert np.allclose(eigs, [-1.0, 0.0, 0.0, 1.0], atol=1e-12)

@@ -242,7 +242,6 @@ void bind_dispatcher(py::module_& m) {
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)
         .value("FTLM",                     DiagonalizationMethod::FTLM)
-        .value("LTLM",                     DiagonalizationMethod::LTLM)
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
         .value("OFTLM",                    DiagonalizationMethod::OFTLM)
         .export_values();
@@ -306,13 +305,6 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("ftlm_seed",            &EDParameters::ftlm_seed)
         .def_readwrite("ftlm_store_samples",   &EDParameters::ftlm_store_samples)
         .def_readwrite("ftlm_error_bars",      &EDParameters::ftlm_error_bars)
-        // LTLM
-        .def_readwrite("ltlm_krylov_dim",      &EDParameters::ltlm_krylov_dim)
-        .def_readwrite("ltlm_ground_krylov",   &EDParameters::ltlm_ground_krylov)
-        .def_readwrite("ltlm_full_reorth",     &EDParameters::ltlm_full_reorth)
-        .def_readwrite("ltlm_reorth_freq",     &EDParameters::ltlm_reorth_freq)
-        .def_readwrite("ltlm_seed",            &EDParameters::ltlm_seed)
-        .def_readwrite("ltlm_store_data",      &EDParameters::ltlm_store_data)
         // KPM-DOS (see include/ed/solvers/kpm_dos.h)
         .def_readwrite("kpm_num_moments",            &EDParameters::kpm_num_moments)
         .def_readwrite("kpm_num_random_vectors",     &EDParameters::kpm_num_random_vectors)
@@ -378,7 +370,7 @@ void bind_dispatcher(py::module_& m) {
     // ------------------------------------------------------------------------
     py::class_<ThermodynamicData>(m, "ThermodynamicData",
         "Thermodynamic observables on the temperature grid the orchestrator "
-        "computed. Populated by FTLM/LTLM/TPQ/KPM_DOS; otherwise empty.")
+        "computed. Populated by FTLM / TPQ/KPM_DOS; otherwise empty.")
         .def(py::init<>())
         .def_readwrite("temperatures",  &ThermodynamicData::temperatures)
         .def_readwrite("energy",        &ThermodynamicData::energy)

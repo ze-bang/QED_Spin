@@ -26,7 +26,7 @@
 //   * is_hermitian() : whether the surrounding solver may use Hermitian
 //                      shortcuts (real eigenvalues, two-term Lanczos, ...)
 //
-// All five existing matvec consumers in the codebase (Lanczos, FTLM, LTLM,
+// All five existing matvec consumers in the codebase (Lanczos, FTLM,
 // TPQ, CG/LOBPCG, KPM-DOS, time evolution) are expressible in terms of
 // this base class plus a matching Backend (axpy/dot/norm/scale/copy).
 //

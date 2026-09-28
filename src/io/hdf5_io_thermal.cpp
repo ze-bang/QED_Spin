@@ -1,7 +1,7 @@
 // =============================================================================
 // src/io/hdf5_io_thermal.cpp
 //
-// HDF5IO: FTLM/LTLM thermal output -- averaged thermodynamics, static and
+// HDF5IO: FTLM thermal output -- averaged thermodynamics, static and
 // dynamical response, per-sample FTLM datasets and time-correlation data.
 // Declarations live in include/ed/core/hdf5_io.h.
 // =============================================================================

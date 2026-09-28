@@ -7,7 +7,7 @@ The public surface is intentionally small: **three verbs**:
   automatically; opt-out via the matching kwargs.
 
 * :func:`qed.thermal(H, ...) <qed.thermal>` -- finite-temperature
-  thermodynamics (FTLM / LTLM / mTPQ / KPM-DOS). Iterates the
+  thermodynamics (FTLM / OFTLM / mTPQ / KPM-DOS). Iterates the
   Sz axis automatically when Sz is conserved.
 
 * :func:`qed.spectral(H, observables, ...) <qed.spectral>` --
@@ -64,13 +64,6 @@ from ._core import (
     OP_SPLUS,
     OP_SMINUS,
     OP_SZ,
-    full_diagonalization,
-    lanczos,
-    compute_thermodynamics_from_spectrum,
-    finite_temperature_lanczos,
-    low_temperature_lanczos,
-    FTLMParameters,
-    LTLMParameters,
     DiagonalizationMethod,
     EDParameters,
     EDResults,
@@ -80,7 +73,6 @@ from ._core import (
 )
 
 from . import dssf  # DSSF observable-pair data helpers
-from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL
 from . import input  # standalone C++ ed_input library bindings
 from . import symmetry  # programmatic site-permutation symmetry DSL
 from . import helpers  # re-export edlib utilities under qed.helpers
@@ -153,13 +145,6 @@ __all__ = [
     "OP_SMINUS",
     "OP_SZ",
     # Low-level solver primitives (rarely needed; consider qed.solve instead)
-    "full_diagonalization",
-    "lanczos",
-    "compute_thermodynamics_from_spectrum",
-    "finite_temperature_lanczos",
-    "low_temperature_lanczos",
-    "FTLMParameters",
-    "LTLMParameters",
     # Enums and parameter helpers
     "DiagonalizationMethod",
     "EDParameters",
@@ -181,7 +166,6 @@ __all__ = [
     "find_symmetries",
     # Submodules
     "dssf",
-    "hamiltonian",
     "input",
     "symmetry",
     "helpers",

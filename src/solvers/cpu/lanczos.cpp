@@ -250,7 +250,7 @@ void diagonalize_tridiagonal_ritz(
 //
 // Krylov-kernel unification (Phase A, May 2026): when ``full_reorth ==
 // true`` we delegate to the single unified ``ed::krylov::lanczos_kernel``
-// so the canonical CPU FTLM / LTLM / Lanczos all benefit from the
+// so the canonical CPU FTLM / Lanczos all benefit from the
 // batched CGS2 reorth (M Allreduces -> 1 in the future MPI path, and a
 // single OMP pass per CGS2 step instead of M serial dot/axpy round-trips
 // on CPU). The legacy three-vector / periodic-reorth branches below

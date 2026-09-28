@@ -375,7 +375,6 @@ class ThermalResult:
 _THERMAL_METHODS = {
     "FTLM": DiagonalizationMethod.FTLM,
     "OFTLM": DiagonalizationMethod.OFTLM,
-    "LTLM": DiagonalizationMethod.LTLM,
     "KPM_DOS": DiagonalizationMethod.KPM_DOS,
     "MTPQ": DiagonalizationMethod.mTPQ,
 }
@@ -566,11 +565,10 @@ def _thermal_su2_towers(
             "anisotropy); the term-level [H, S_tot] check failed.")
     mname = str(getattr(method, "name", method)).upper()
     method_map = {"FTLM": _core.ThermalMethod.FTLM,
-                  "LTLM": _core.ThermalMethod.LTLM,
                   "MTPQ": _core.ThermalMethod.mTPQ}
     if mname not in method_map:
         raise ValueError(
-            f"qed.thermal: total_spin= supports methods FTLM / LTLM / "
+            f"qed.thermal: total_spin= supports methods FTLM / "
             f"mTPQ (got {method!r}). method='exact' gets per-S labels "
             f"from the full-spectrum lane instead.")
 
@@ -672,7 +670,6 @@ def thermal(
     num_samples: int = 40,
     krylov_dim: Optional[int] = None,
     ftlm_krylov_dim: Optional[int] = None,
-    ltlm_krylov_dim: Optional[int] = None,
     tolerance: float = 1e-10,
     max_iterations: Optional[int] = None,
     random_seed: int = 0,
@@ -722,7 +719,7 @@ def thermal(
     # default (plain Sz recombination is already exact for the total).
     # ``"auto"``/True: resolve Z = sum_S (2S+1) Z_S over every tower;
     # numeric S: that tower only. Requires an SU(2)-invariant H and an
-    # in-memory Operator; methods FTLM / LTLM / mTPQ (small blocks take
+    # in-memory Operator; methods FTLM / mTPQ (small blocks take
     # an exact highest-weight-differencing route regardless of method).
     total_spin: Union[int, float, str, bool, None] = None,
     extra_params: Optional[dict[str, Any]] = None,
@@ -739,10 +736,10 @@ def thermal(
     H : Operator
         In-memory :class:`Operator` instance.
     method : str or DiagonalizationMethod, optional
-        Finite-T method: ``"FTLM"`` (default), ``"LTLM"``,
+        Finite-T method: ``"FTLM"`` (default), ``"OFTLM"``,
         ``"KPM_DOS"``, ``"mTPQ"``.
     T_min, T_max, num_T : float / int, optional
-        Temperature grid. Linear in T by convention; FTLM/LTLM use
+        Temperature grid. Linear in T by convention; FTLM/OFTLM use
         ``num_T`` evenly-spaced points in ``[T_min, T_max]``.
     sz_min, sz_max : int, optional
         Sz window in ``n_up`` convention (``Sz_total = n_up - N/2``).
@@ -750,7 +747,7 @@ def thermal(
         Use this to restrict to "adjacent Sz" bands that carry the
         partition-function weight at the temperatures of interest.
     num_samples, krylov_dim, tolerance, random_seed : optional
-        Per-sector FTLM / LTLM solver knobs.
+        Per-sector FTLM solver knobs.
     use_sz_if_conserved : bool, optional
         Force-off toggle for the Sz auto-iteration. Default True.
     output_dir : str, optional
@@ -770,7 +767,7 @@ def thermal(
         reload (e.g. by :func:`qed.spectral(method="GroundStateCF",
         initial_state=...)`). Empty / ``None`` (default) -> the
         kernel skips state-vector copies and only the trajectory is
-        persisted. Ignored by FTLM / LTLM / KPM_DOS.
+        persisted. Ignored by FTLM / OFTLM / KPM_DOS.
 
     Returns
     -------
@@ -1071,7 +1068,7 @@ def thermal(
     if int(num_samples) < 1:
         raise ValueError(f"qed.thermal: num_samples must be >= 1, got {num_samples!r}")
     for _name, _v in (("krylov_dim", krylov_dim), ("ftlm_krylov_dim", ftlm_krylov_dim),
-                      ("ltlm_krylov_dim", ltlm_krylov_dim), ("max_iterations", max_iterations)):
+                      ("max_iterations", max_iterations)):
         if _v is not None and int(_v) < 1:
             raise ValueError(f"qed.thermal: {_name} must be >= 1, got {_v!r}")
     if not (float(T_min) > 0.0) or not (float(T_max) >= float(T_min)) or int(num_T) < 1:
@@ -1176,7 +1173,7 @@ def thermal(
             # multiple Sz sectors for a TPQ method, each sector lands
             # in its own subdirectory ``<output_dir>/n_up_<n_up>/`` so
             # the per-sector ``ed_results.h5`` files do not overwrite
-            # one another. For non-TPQ methods (FTLM / LTLM / KPM-DOS)
+            # one another. For non-TPQ methods (FTLM / KPM-DOS)
             # the file holds only aggregated curves which the
             # ``averaged/`` group can dedupe in-place; we still route
             # per-sector to be safe and consistent.
@@ -1190,15 +1187,11 @@ def thermal(
                 p.output_dir = output_dir
             if krylov_dim is not None:
                 p.ftlm_krylov_dim = int(krylov_dim)
-                p.ltlm_krylov_dim = int(krylov_dim)
             if ftlm_krylov_dim is not None:
                 p.ftlm_krylov_dim = int(ftlm_krylov_dim)
-            if ltlm_krylov_dim is not None:
-                p.ltlm_krylov_dim = int(ltlm_krylov_dim)
-                p.ltlm_ground_krylov = int(ltlm_krylov_dim)
             # Pipe ``max_iterations`` into ``tpq_max_steps`` for the
             # mTPQ lane (closes a gap where this helper only
-            # set the FTLM/LTLM Krylov-dim and left the TPQ iteration
+            # set the FTLM Krylov-dim and left the TPQ iteration
             # budget at the EDParameters default). ``_ed_params_to_thermal_options``
             # reads ``tpq_max_steps`` to populate ``opts.krylov_dim``
             # for mTPQ.
@@ -1213,15 +1206,14 @@ def thermal(
                 p.tpq_max_steps  = 0
             if random_seed:
                 p.ftlm_seed = int(random_seed)
-                p.ltlm_seed = int(random_seed)
             if n_up_val is not None:
                 p.use_fixed_sz = True
                 p.n_up = int(n_up_val)
             # SOTA upgrade (May 2026): the per-irrep sector loop is
-            # now wired for every thermal method (FTLM / LTLM / KPM /
+            # now wired for every thermal method (FTLM / KPM /
             # mTPQ) via ``_core.workflows_thermal_streaming_symmetry``
             # + ``ed::core::combine_sector_thermodynamics``; TPQ feeds
-            # exactly the same streaming loop as FTLM/LTLM/KPM, with
+            # exactly the same streaming loop as FTLM / KPM, with
             # the Z-weighted recombiner handling sector mixing.
             p.use_symmetry = bool(has_sym)
             # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw
@@ -1511,7 +1503,7 @@ def thermal(
         # every Sz sector to ``<output_dir>/n_up_<n_up>/ed_results.h5``
         # regardless of method. TPQ + multi-Sz was the user-visible
         # symptom because state vectors live ONLY on disk; for
-        # FTLM / LTLM / KPM_DOS the recombined thermo in
+        # FTLM / KPM_DOS the recombined thermo in
         # ``ThermalResult.thermo`` would mask the corruption but the
         # HDF5 file (used for diagnostics, post-processing, audit
         # trails) would still be wrong.
@@ -1542,29 +1534,20 @@ def thermal(
         }
         # Pipe ``max_iterations`` into the per-sector solver call. For
         # mTPQ this controls the iteration budget; for FTLM /
-        # LTLM / KPM_DOS it's the Lanczos / KPM cap. Closes a gap where
+        # KPM_DOS it's the Lanczos / KPM cap. Closes a gap where
         # this helper silently used the EDParameters default (1000)
         # regardless of what the user asked for.
         if max_iterations is not None:
             kwargs["max_iterations"] = int(max_iterations)
         # Build the per-sector extra_params bag.
         sector_extra: dict[str, Any] = dict(merged_extra)
-        # The `krylov_dim` argument is a legacy alias: for FTLM it maps to
-        # `ftlm_krylov_dim`, for LTLM to `ltlm_krylov_dim` / ground_krylov.
-        if krylov_dim is not None:
-            if method_enum == DiagonalizationMethod.FTLM:
-                sector_extra.setdefault("ftlm_krylov_dim", int(krylov_dim))
-            elif method_enum == DiagonalizationMethod.LTLM:
-                sector_extra.setdefault("ltlm_krylov_dim", int(krylov_dim))
-                sector_extra.setdefault("ltlm_ground_krylov", int(krylov_dim))
+        # `krylov_dim` maps to `ftlm_krylov_dim` for FTLM.
+        if krylov_dim is not None and method_enum == DiagonalizationMethod.FTLM:
+            sector_extra.setdefault("ftlm_krylov_dim", int(krylov_dim))
         if ftlm_krylov_dim is not None:
             sector_extra["ftlm_krylov_dim"] = int(ftlm_krylov_dim)
-        if ltlm_krylov_dim is not None:
-            sector_extra["ltlm_krylov_dim"] = int(ltlm_krylov_dim)
-            sector_extra["ltlm_ground_krylov"] = int(ltlm_krylov_dim)
         if random_seed:
             sector_extra.setdefault("ftlm_seed", int(random_seed))
-            sector_extra.setdefault("ltlm_seed", int(random_seed))
         kwargs["extra_params"] = sector_extra
         return kwargs
 

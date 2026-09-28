@@ -74,7 +74,7 @@ def solve(
     max_iterations: Optional[int] = None,
     block_size: Optional[int] = None,
     # Thermal-method first-class shortcuts (only consulted for
-    # mTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
+    # mTPQ / FTLM; ignored for eigenvalue solvers, where
     # the relevant knob is num_eigenvalues + max_iterations).
     num_samples: Optional[int] = None,
     target_beta: Optional[float] = None,
@@ -119,7 +119,7 @@ def solve(
         * thermal (returns ``EDResults`` with the imaginary-time
           trajectory in ``eigenvalues`` and the post-processed
           thermodynamic curve on disk in ``output_dir``):
-          ``mTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
+          ``mTPQ``, ``FTLM``, ``OFTLM``, ``KPM_DOS``.
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"``.
         ``None`` (default) means ``"auto"``. ``"mpi"`` / ``"mpi_gpu"``
@@ -248,7 +248,7 @@ def solve(
         If True (default), prints what the auto-selector chose.
     extra_params : dict, optional
         Forwarded to :class:`EDParameters` as ``setattr`` calls.
-        Useful for niche flags (``tpq_*``, ``ltlm_*``, ``kpm_*``,
+        Useful for niche flags (``tpq_*``, ``kpm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
 
@@ -659,7 +659,7 @@ def _resolve_execution(req: SolveRequest) -> SolveRequest:
             "and per-symmetry-block diagonalisation does not factor "
             "through the streaming kernel. Options: drop the symmetry= "
             "argument (TPQ + sz= is supported), or use a different "
-            "thermal method (FTLM/LTLM combine across symmetry blocks "
+            "thermal method (FTLM/OFTLM combine across symmetry blocks "
             "correctly)."
         )
 

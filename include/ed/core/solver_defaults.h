@@ -15,9 +15,6 @@ namespace ed::defaults {
 /// FTLM / OFTLM Krylov subspace dimension.
 inline constexpr std::uint64_t kFtlmKrylovDim = 100;
 
-/// LTLM Krylov subspace dimension.
-inline constexpr std::uint64_t kLtlmKrylovDim = 200;
-
 /// Full reorthogonalization in the thermal Lanczos passes (CPU default).
 inline constexpr bool kThermalFullReorth = true;
 

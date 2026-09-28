@@ -156,9 +156,9 @@ def test_solve_streaming_symmetry_lands_per_sector(tmp_path):
 # FT / thermal workflow — extension of TPQ regression to all methods
 # ===========================================================================
 
-@pytest.mark.parametrize("method", ["FTLM", "LTLM"])
+@pytest.mark.parametrize("method", ["FTLM"])
 def test_thermal_multi_sz_lands_per_sector_non_tpq(tmp_path, method):
-    """Universal save contract: FTLM/LTLM multi-Sz iteration must
+    """Universal save contract: FTLM multi-Sz iteration must
     namespace per-Sz writes (previously TPQ-only; non-TPQ methods
     silently overwrote /ftlm/averaged/* across Sz sectors)."""
     H = _ring()
@@ -200,7 +200,7 @@ def test_thermal_multi_sz_lands_per_sector_non_tpq(tmp_path, method):
 def test_thermal_kpm_dos_ignores_the_sz_window_and_saves_one_file(tmp_path):
     """KPM_DOS does NOT share the per-sector contract, ON PURPOSE.
 
-    This test used to assert the FTLM/LTLM contract ("Same contract for
+    This test used to assert the FTLM contract ("Same contract for
     KPM_DOS") and had been failing on main: it demanded per-sector
     ``n_up_<n>/ed_results.h5`` files and ``hdf5_path == outdir`` from a
     method that deliberately ignores the Sz window entirely.

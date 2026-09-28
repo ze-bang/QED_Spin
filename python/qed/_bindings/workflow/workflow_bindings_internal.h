@@ -525,7 +525,7 @@ using ed::workflows::solve_su2_targeted;  // hoisted
 
 /// The thermal lane has uneven GPU coverage:
 ///   * FTLM         : CPU only (orchestrator throws on CUDA).
-///   * LTLM, KpmDos : CPU or CUDA.
+///   * KpmDos : CPU or CUDA.
 ///   * mTPQ         : any backend.
 ///
 /// As of Phase E of the "Close CPU/GPU Gaps" plan (May 2026), the
@@ -536,7 +536,6 @@ inline bool thermal_method_supports_gpu(
     ed::workflows::ThermalOptions::Method m) noexcept {
     using M = ed::workflows::ThermalOptions::Method;
     return m == M::FTLM
-        || m == M::LTLM
         || m == M::KpmDos
         || m == M::mTPQ;
 }
@@ -578,7 +577,7 @@ inline void warn_silent_cpu_fallback(const char* what,
                   "implementation in the orchestrator. Falling back to the "
                   "CPU lane. Pass device='cpu' to silence this warning, or "
                   "switch to a GPU-clean method (Lanczos/BlockLanczos/"
-                  "KrylovSchur for solve; LTLM/KPM_DOS/mTPQ for "
+                  "KrylovSchur for solve; KPM_DOS/mTPQ for "
                   "thermal; GroundStateCF for spectral).",
             py::module_::import("builtins").attr("RuntimeWarning"),
             py::arg("stacklevel") = 2);

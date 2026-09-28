@@ -447,9 +447,9 @@ def thermal_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool)
         return f
 
     common = dict(T_min=float(temps[0]), T_max=float(temps[-1]), num_T=len(temps), random_seed=7, verbose=False, device=DEVICE)
-    for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
         kw = dict(common)
-        if method in ("FTLM", "LTLM", "OFTLM"):
+        if method in ("FTLM", "OFTLM"):
             kw.update(num_samples=24, krylov_dim=100)
         if method == "mTPQ":
             kw.update(num_samples=16)   # mTPQ variance at the lowest T dominates dC (checked: 8 -> 64 samples halves it)
@@ -635,7 +635,7 @@ def timing_cases(run: Runner):
                  lambda r: (True, f"E0={r.eigenvalues[0]:.10f}")))
         run(Case(f"{m.name}/solve/symmetry=auto/sz=sweep/k=1", lambda H=H: qed.solve(H, symmetry="auto", verbose=False),
                  lambda r: (True, f"E0={r.eigenvalues[0]:.10f}")))
-        for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS"):
+        for method in ("FTLM", "mTPQ", "KPM_DOS"):
             for sym in (None, "auto"):
                 kw = dict(T_min=0.2, T_max=4.0, num_T=12, num_samples=8, random_seed=7, verbose=False, device=DEVICE)
                 if method != "mTPQ":

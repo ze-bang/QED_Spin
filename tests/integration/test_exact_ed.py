@@ -1,7 +1,7 @@
 """End-to-end integration: qed.solve / thermal against the EXACT spectrum.
 
 Small systems where full diagonalization is feasible, so we can check the
-ground state and the FTLM/LTLM thermodynamics against the exact answer --
+ground state and the FTLM thermodynamics against the exact answer --
 across Sz-only and Sz+translation symmetry (which must agree, since symmetry
 only block-diagonalizes). This is the net that catches end-to-end physics
 regressions that unit tests miss.
@@ -92,13 +92,12 @@ def test_ground_state_matches_exact(model, combo):
 # validated over the beta range where it is designed to be correct.
 THERMAL_CASES = {
     "FTLM": ([0.2, 0.5, 1.0, 2.0], THERMO_TOL),
-    "LTLM": ([4.0, 8.0],           THERMO_TOL),   # low-T regime
 }
 
 
 @pytest.mark.parametrize("solver", list(THERMAL_CASES))
 def test_thermal_matches_exact(model, solver):
-    """FTLM/LTLM energy(T) over the FULL space ~= exact, each in its valid
+    """FTLM energy(T) over the FULL space ~= exact, each in its valid
     temperature window (within sampling error)."""
     lat, H, eigs = model
     betas, tol = THERMAL_CASES[solver]

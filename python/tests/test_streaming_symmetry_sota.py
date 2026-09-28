@@ -16,7 +16,7 @@ What this file pins (May 2026 SOTA upgrade)
     single irrep without falsely missing the global minimum.
 
 3.  **Thermal + spatial symmetry no longer raises**: the FTLM /
-    LTLM / KPM_DOS / mTPQ lanes that used to bail with
+    KPM_DOS / mTPQ lanes that used to bail with
     ``NotImplementedError`` under a spatial group now route through
     ``_core.workflows_thermal_streaming_symmetry`` and
     Z-recombine sectors via
@@ -228,7 +228,7 @@ def test_qed_thermal_with_symmetry_runs():
     assert np.all(np.isfinite(res.energy))
     assert np.all(np.isfinite(res.specific_heat))
     # The spatial-symmetry-decomposition flag must now be True
-    # (previously it was silently False for FTLM/LTLM/KPM and
+    # (previously it was silently False for FTLM / KPM and
     # always False for TPQ).
     assert res.used_symmetry_decomposition is True
 

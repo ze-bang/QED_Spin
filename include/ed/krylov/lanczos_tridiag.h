@@ -3,11 +3,11 @@
 // include/ed/krylov/lanczos_tridiag.h
 //
 // Direct kernel-facade helper for the canonical CPU Lanczos build that
-// feeds FTLM / LTLM / Hybrid / KPM_DOS / TPQ_DYNAMICAL.
+// feeds FTLM / Hybrid / KPM_DOS / TPQ_DYNAMICAL.
 //
 // Phase 5 of the Krylov-unification gap-fill (May 2026 day 12+):
 //
-// Today the four CPU thermal kernels (FTLM, LTLM, Hybrid, KPM_DOS) build
+// Today the four CPU thermal kernels (FTLM, Hybrid, KPM_DOS) build
 // the per-sample Krylov subspace through
 // `build_lanczos_tridiagonal_with_basis(...)` in `src/solvers/cpu/lanczos.cpp`,
 // which since the Phase-A roll-up already delegates to

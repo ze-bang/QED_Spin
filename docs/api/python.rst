@@ -114,14 +114,3 @@ permutations) consumed via the ``symmetry=`` kwarg of
    :undoc-members:
    :show-inheritance:
 
-Hamiltonian builder (``qed.hamiltonian``)
------------------------------------------
-
-Lower-level ``Operator`` / ``FixedSzOperator`` construction helpers
-shared between :mod:`qed.input` and direct callers.
-
-.. automodule:: qed.hamiltonian
-   :members:
-   :undoc-members:
-   :show-inheritance:
-

@@ -174,7 +174,7 @@ TEST_CASE("unified Lanczos kernel agrees with legacy MGS on the good part at "
 // ----------------------------------------------------------------------------
 // Test 2: end-to-end -- the legacy entry point `build_lanczos_tridiagonal_with_basis`
 // now routes its full-reorth branch through the unified kernel. Verify
-// that consumers (FTLM, LTLM, Lanczos itself) see a Krylov subspace
+// that consumers (FTLM, Lanczos itself) see a Krylov subspace
 // whose eigenvalues match the dense reference -- the contract the
 // legacy MGS body has always honoured.
 // ----------------------------------------------------------------------------

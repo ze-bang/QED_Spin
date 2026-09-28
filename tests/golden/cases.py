@@ -250,9 +250,9 @@ def thermal_cases(m: Model):
     H = m.operator()
     common = dict(T_min=0.25, T_max=3.0, num_T=8, random_seed=11, verbose=False, device=DEVICE)
     cs = []
-    for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
         kw = dict(common)
-        if method in ("FTLM", "LTLM", "OFTLM"):
+        if method in ("FTLM", "OFTLM"):
             kw.update(num_samples=8, krylov_dim=40)
         if method == "mTPQ":
             kw.update(num_samples=4)
@@ -279,7 +279,7 @@ def thermal_cases(m: Model):
 
 
 def thermal_kernel_cases(m: Model):
-    """FTLM / LTLM with the exact small-block fallback switched off. Blocks of
+    """FTLM with the exact small-block fallback switched off. Blocks of
     dimension <= 512 (every symmetry=auto sector here, and the outer Sz sectors of a
     12-site symmetry=None run) are otherwise diagonalised exactly and never reach the
     sampling kernel. ED_THERMAL_EXACT_SMALL is read per call."""
@@ -287,7 +287,7 @@ def thermal_kernel_cases(m: Model):
     kw = dict(T_min=0.25, T_max=3.0, num_T=8, random_seed=11, verbose=False, device=DEVICE,
               num_samples=8, krylov_dim=40)
     cs = []
-    for method in ("FTLM", "LTLM"):
+    for method in ("FTLM",):
         for sym in (None, "auto"):
             def run(method=method, sym=sym):
                 with env(ED_THERMAL_EXACT_SMALL=0):
@@ -298,30 +298,6 @@ def thermal_kernel_cases(m: Model):
     return cs
 
 
-def lanczos_binding_cases(m: Model):
-    """The direct bindings qed.finite_temperature_lanczos / qed.low_temperature_lanczos
-    on the full 2^N space, DEFAULT parameter structs (full reorthogonalisation, the
-    struct's krylov_dim / num_samples) with only the seed fixed. Both run on the CPU
-    whatever the lane."""
-    H = m.operator()
-    grid = dict(temp_min=0.25, temp_max=3.0, num_temp_bins=8)
-
-    def rec(d, gs_key):
-        out = {k: fl(d[k]) for k in ("temperatures", "energy", "specific_heat", "entropy", "free_energy")}
-        out["ground_state"] = [float(d[gs_key])]
-        return out
-
-    def ftlm():
-        p = _core.FTLMParameters()
-        p.random_seed = 11
-        return rec(quiet(lambda: qed.finite_temperature_lanczos(H, p, **grid)), "ground_state_estimate")
-
-    def ltlm():
-        p = _core.LTLMParameters()
-        p.random_seed = 11
-        return rec(quiet(lambda: qed.low_temperature_lanczos(H, p, **grid)), "ground_state_energy")
-    return [GCase(f"{m.name}/finite_temperature_lanczos/default_params/seed=11", "stochastic", ftlm),
-            GCase(f"{m.name}/low_temperature_lanczos/default_params/seed=11", "stochastic", ltlm)]
 
 
 def thermal_large_dim_case():
@@ -647,9 +623,6 @@ def build_cases(device="cpu"):
         if nm in by_name:
             cases += thermal_cases(by_name[nm])
             cases += thermal_kernel_cases(by_name[nm])
-    for nm in ("j1j2_chain12", "tfim10"):
-        if nm in by_name:
-            cases += lanczos_binding_cases(by_name[nm])
     cases.append(thermal_large_dim_case())
     for nm in ("j1j2_chain12", "square4x3"):
         if nm in by_name:

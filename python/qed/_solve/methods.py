@@ -43,7 +43,7 @@ from .._core import (  # type: ignore[attr-defined]
 # ---------------------------------------------------------------------------
 
 # Ground-state methods the orchestrator's `workflows_solve` handles.
-# Thermal methods (FTLM / LTLM / mTPQ / KPM_DOS) route through
+# Thermal methods (FTLM / mTPQ / KPM_DOS) route through
 # `_core.workflows_thermal` instead -- the dispatch is decided by the
 # helper `_diag_via_workflows_solve` below.
 _GROUND_STATE_METHODS = frozenset({
@@ -139,7 +139,7 @@ def _diag_via_workflows_solve(
     """Route an in-memory `Operator` through the unified orchestrator.
 
     Ground-state methods (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL)
-    go through ``_core.workflows_solve``. Thermal methods (FTLM / LTLM
+    go through ``_core.workflows_solve``. Thermal methods (FTLM / OFTLM
     / mTPQ / KPM_DOS) route through ``_core.workflows_thermal``.
     No legacy fallback remains: the C++ ``exact_diagonalization_*``
     family was deleted in the surface-unification collapse and every
@@ -160,7 +160,7 @@ def _diag_via_workflows_solve(
         f"_diag_via_workflows_solve: unsupported DiagonalizationMethod "
         f"{method!r}. Supported: ground-state "
         f"(LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL) and thermal "
-        f"(FTLM / LTLM / mTPQ / KPM_DOS)."
+        f"(FTLM / OFTLM / mTPQ / KPM_DOS)."
     )
 
 
@@ -172,7 +172,7 @@ def _diag_via_workflows_solve(
 # ---------------------------------------------------------------------------
 
 def _thermal_method_names() -> set[str]:
-    """Names of every TPQ / FTLM / LTLM / KPM_DOS variant.
+    """Names of every TPQ / FTLM / OFTLM / KPM_DOS variant.
 
     ``KPM_DOS`` belongs here too -- it produces a full
     ``ThermodynamicData`` block keyed off the same ``temp_min`` /
@@ -182,7 +182,6 @@ def _thermal_method_names() -> set[str]:
     return {
         "mTPQ",
         "FTLM",
-        "LTLM",
         "OFTLM",
         "KPM_DOS",
     }

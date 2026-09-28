@@ -9,7 +9,7 @@
 //     orchestrator writes ``<output_dir>/ed_results.h5`` and surfaces the
 //     resulting path via ``ThermalResult::hdf5_path`` (the same field the
 //     Python facade mirrors into ``EDResults.eigenvectors_path``).
-//   * FTLM / LTLM / KPM_DOS persist the aggregated thermodynamic curves
+//   * FTLM / KPM_DOS persist the aggregated thermodynamic curves
 //     (``T, E, Cv, S, F``) under ``/ftlm/averaged/<...>``.
 //   * mTPQ persists the per-sample trajectory rows
 //     (``/tpq/samples/sample_<s>/thermodynamics``); when
@@ -20,7 +20,7 @@
 //     state vectors so callers can chain them into ``ed::workflows::spectral``
 //     (the TPQ-to-CF pipeline) without an HDF5 round-trip.
 //
-// Covered methods: FTLM, LTLM, KPM_DOS (thermo-only) + mTPQ
+// Covered methods: FTLM, KPM_DOS (thermo-only) + mTPQ
 // (trajectory + probe-beta state snapshots).
 // =============================================================================
 
@@ -90,32 +90,6 @@ TEST_CASE("ed::thermal persists FTLM thermo curves",
     CHECK(dataset_exists(h5, "/ftlm/averaged/temperatures"));
     // Thermo carrier on the in-memory result.
     CHECK(R.thermo.energy.size() == opts.num_temp_bins);
-
-    std::filesystem::remove_all(outdir);
-}
-
-TEST_CASE("ed::thermal persists LTLM thermo curves",
-          "[orchestrator][thermal-save]") {
-    auto H = heisen();
-    const std::string outdir = make_scratch_dir("thermal_save", "ltlm");
-
-    ed::workflows::ThermalOptions opts;
-    opts.method        = ed::workflows::ThermalOptions::Method::LTLM;
-    opts.num_samples   = 2;
-    opts.krylov_dim    = 30;
-    opts.temp_min      = 0.1;
-    opts.temp_max      = 5.0;
-    opts.num_temp_bins = 8;
-    opts.random_seed   = 42;
-    opts.output_dir    = outdir;
-
-    auto R = ed::workflows::thermal(*H, opts);
-
-    const std::string h5 = outdir + "/ed_results.h5";
-    CHECK(std::filesystem::exists(h5));
-    CHECK(R.hdf5_path == h5);
-    CHECK(dataset_exists(h5, "/ftlm/averaged/energy"));
-    CHECK(dataset_exists(h5, "/ftlm/averaged/temperatures"));
 
     std::filesystem::remove_all(outdir);
 }

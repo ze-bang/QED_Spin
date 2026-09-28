@@ -44,7 +44,6 @@ __all__ = [
 THERMAL_METHOD_MAP = {
     DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
     DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
-    DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
     DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
     DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
 }
@@ -76,7 +75,7 @@ def ed_params_to_thermal_options(
         # its own dim heuristic); disable the C++ auto-promotion floor.
         opts.backend.gpu_dim_floor = 0
     # ``krylov_dim`` is the orchestrator's per-method iteration budget:
-    # FTLM/LTLM use it as the Krylov subspace dimension; mTPQ uses it as
+    # FTLM/OFTLM use it as the Krylov subspace dimension; mTPQ uses it as
     # the number of (L - H) iterations (0 = auto-size from the spectral
     # bounds to bracket beta_max = 1/T_min).
     if method in (DiagonalizationMethod.FTLM, DiagonalizationMethod.OFTLM):
@@ -87,8 +86,6 @@ def ed_params_to_thermal_options(
             _nv = getattr(params, "oftlm_num_exact", None)
             if _nv is not None:
                 opts.num_exact = int(_nv)
-    elif method == DiagonalizationMethod.LTLM:
-        opts.krylov_dim = int(params.ltlm_krylov_dim or 200)
     elif method == DiagonalizationMethod.mTPQ:
         steps = int(getattr(params, "tpq_max_steps", 0) or 0)
         if steps <= 0:
@@ -109,7 +106,7 @@ def ed_params_to_thermal_options(
             opts.kpm_num_random_vectors = kn_r
     opts.taylor_order  = int(params.tpq_taylor_order)
     opts.delta_beta    = float(params.tpq_delta_beta)
-    opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
+    opts.random_seed   = int(params.ftlm_seed or 0)
     opts.output_dir    = str(params.output_dir or "")
     opts.temp_min      = float(params.temp_min)
     opts.temp_max      = float(params.temp_max)

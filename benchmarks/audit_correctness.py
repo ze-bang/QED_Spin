@@ -297,9 +297,9 @@ def thermal_battery(m: Model, ref: Reference, run: Runner):
             dE = float(np.max(np.abs(E - Ei)) / N); dC = float(np.max(np.abs(C - Ci)) / N)
             return dE < tolE and dC < tolC, f"dE/N={dE:.1e} dC/N={dC:.1e}"
         return f
-    for method in ("FTLM", "LTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
         kw = dict(common)
-        if method in ("FTLM", "LTLM", "OFTLM"): kw.update(num_samples=32, krylov_dim=60)
+        if method in ("FTLM", "OFTLM"): kw.update(num_samples=32, krylov_dim=60)
         if method == "mTPQ": kw.update(num_samples=8)
         if method == "KPM_DOS": kw.update(kpm_num_moments=300, kpm_num_random_vectors=16)
         for sym in (None, "auto"):

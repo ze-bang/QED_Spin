@@ -558,7 +558,7 @@ if(BUILD_ED_TESTS)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # mirror-image of `test_eigenvector_save` but for
     # `ed::workflows::thermal` -- pins the uniform `ed_results.h5`
-    # contract for FTLM / LTLM / KPM_DOS (thermo curves) and
+    # contract for FTLM / KPM_DOS (thermo curves) and
     # mTPQ / cTPQ (trajectory + probe-beta state vectors).
     ed_add_test(test_thermal_save               tests/unit/test_thermal_save.cpp USE_CATCH2)
     # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026): pins the

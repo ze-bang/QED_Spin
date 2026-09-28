@@ -12,7 +12,7 @@
 //                  or krylov_schur_kernel<Backend>       (many eigs / harder problems)
 //                  or full_diag fallback                  (small dim)
 //     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
-//                  or the existing FTLM / LTLM / KpmDos kernels (CPU-only
+//                  or the existing FTLM / KpmDos kernels (CPU-only
 //                     until they migrate to Backend; orchestrator routes
 //                     CPU-friendly cases here).
 //     ed::spectral  -> cf_spectral_kernel<Backend>
@@ -42,7 +42,7 @@
 //                      so the CudaBackend instantiation of the solve path
 //                      lives here and nowhere else.
 //   orch_thermal.cpp   thermal(): exact-small eigenspectrum fallback, mTPQ
-//                      sampling, FTLM / LTLM / KpmDos lanes, all-Sz sweep
+//                      sampling, FTLM / KpmDos lanes, all-Sz sweep
 //   orch_spectral.cpp  spectral(): GroundStateCF / KpmDynamical /
 //                      FtlmDynamical lanes plus the host GS seed refinement
 //   orch_su2.cpp       Stage 12 SU(2) helpers: full-diag predicate, SU(2)

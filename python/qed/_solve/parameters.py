@@ -116,10 +116,10 @@ def _make_params(
         p.n_up = int(sz)
 
     if _is_thermal_method(method):
-        # ---- Thermal solvers (TPQ / FTLM / LTLM / KPM_DOS) ----
+        # ---- Thermal solvers (TPQ / FTLM / KPM_DOS) ----
         # These don't extract eigenvalues from a Krylov subspace; they
         # build thermodynamic averages from random-state imaginary-time
-        # trajectories (TPQ) or from Lanczos micro-bases (FTLM/LTLM).
+        # trajectories (TPQ) or from Lanczos micro-bases (FTLM).
         # The relevant knobs are different.
         if num_samples is not None:
             p.num_samples = int(num_samples)
@@ -225,10 +225,6 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
         "ftlm_krylov_dim", "ftlm_full_reorth", "ftlm_reorth_freq",
         "ftlm_seed", "ftlm_store_samples", "ftlm_error_bars",
     ]),
-    ("ltlm", "Low-Temperature Lanczos Method", [
-        "ltlm_krylov_dim", "ltlm_ground_krylov", "ltlm_full_reorth",
-        "ltlm_reorth_freq", "ltlm_seed", "ltlm_store_data",
-    ]),
     ("tpq", "Thermal Pure Quantum / mTPQ imaginary-time evolution", [
         "tpq_max_steps", "tpq_measurement_interval",
         "tpq_energy_shift", "tpq_beta_max", "tpq_delta_beta",
@@ -237,7 +233,7 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
         "tpq_num_measure_points", "tpq_measure_beta_min",
         "tpq_measure_beta_max",
     ]),
-    ("thermal", "Thermal post-processing grid (FTLM/LTLM/TPQ)", [
+    ("thermal", "Thermal post-processing grid (FTLM/OFTLM/TPQ)", [
         "num_samples", "temp_min", "temp_max", "num_temp_bins",
         "save_thermal_states", "compute_spin_correlations",
     ]),
@@ -272,7 +268,7 @@ def list_diag_parameters(
     ----------
     category : str, optional
         Filter to a single category. One of ``"general"``,
-        ``"krylov"``, ``"device"``, ``"ftlm"``, ``"ltlm"``,
+        ``"krylov"``, ``"device"``, ``"ftlm"``,
         ``"tpq"``, ``"thermal"``, ``"observables"``, ``"lattice"``,
         ``"other"``. Substring matches are accepted.
     return_dict : bool, optional

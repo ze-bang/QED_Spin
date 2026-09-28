@@ -163,12 +163,12 @@ def test_fixed_sz_and_parity_subspaces():
 def test_verbs_route_and_match_dense(capsys):
     """Family 6: the monolithic SAB oracle was removed; the routed
     little-group verbs (lowest / thermodynamics / full spectrum) are pinned
-    against a dense brute-force reference (full_diagonalization)."""
+    against a dense brute-force reference (full_spectrum, no symmetry)."""
     N = 8
     H = _ring(N)
     gen = qed.find_symmetries(H, verbose=False).full_set
 
-    dense_ev = np.sort(np.asarray(qed._core.full_diagonalization(H), dtype=float))
+    dense_ev = np.sort(np.asarray(qed.full_spectrum(H, verbose=False).eigenvalues, dtype=float))
 
     r_lg = qed.solve(H, symmetry=gen, num_eigenvalues=3, auto_sz=False,
                      point_group="full", verbose=True)
