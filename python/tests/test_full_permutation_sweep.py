@@ -284,7 +284,7 @@ def test_gpu_rep_gather_engages_when_forced(monkeypatch):
     H = _op("ring")
     sym = _sym(H, "full", "ring")
     stars, out = _labeled_stars(
-        H, sym, {"ED_SYM_SECTOR_CSR_BUDGET_GIB": "1e-9",
+        H, sym, {"ED_SYM_LG_DENSE_FLOOR": "1", "ED_SYM_SECTOR_CSR_BUDGET_GIB": "1e-9",
                  "ED_SYM_LG_GPU": "1"}, monkeypatch)
     assert any(s["gpu_engaged"] for s in stars), (
         "forced GPU regime: no star engaged the rep gather")
