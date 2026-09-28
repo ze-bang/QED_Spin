@@ -13,8 +13,7 @@
 //
 // This is the operator-collapse GPU-parity lane for the plain full-Hilbert /
 // fixed-Sz operators: it routes their production GPU matvec through the SOTA
-// no-atomic-gather ``CudaMatVecBackend`` instead of the bespoke atomic-scatter
-// ``GPUFixedSzOperator::matVecGPU``. Mirrors the
+// no-atomic-gather ``CudaMatVecBackend``. Mirrors the
 // ``ed::symmetry::SectorOperator::bind_cuda()`` split (sector_operator_gpu.cu)
 // so a host-resident Operator is backend-complete (CPU + GPU) with zero caller
 // changes -- ``select_backend`` picks ``CudaBackend`` off the

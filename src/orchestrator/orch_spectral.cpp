@@ -1,7 +1,6 @@
 // =============================================================================
-// src/orchestrator/orch_spectral.cpp -- ed::workflows::spectral and its lanes
-// (GroundStateCF / KpmDynamical / FtlmDynamical) plus the host ground-state
-// seed refinement they share.
+// src/orchestrator/orch_spectral.cpp -- ed::workflows::spectral (the
+// GroundStateCF lane) plus the host ground-state seed refinement it uses.
 // Part of the workflow orchestrator; see orchestrator_internal.h for the
 // file map.
 // =============================================================================
@@ -15,7 +14,7 @@ using namespace orch_detail;
 namespace {
 
 // ---------------------------------------------------------------------------
-// GroundStateCF / KpmDynamical seed guard (Jul 2026).
+// GroundStateCF seed guard (Jul 2026).
 //
 // The in-memory spectral lanes seeded the continued-fraction kernel with the
 // best-effort GS vector from ``solve()``, which caps its Lanczos and does NOT
@@ -119,6 +118,10 @@ SpectralResult spectral(const LinearOperator&                      H,
         throw std::invalid_argument(
             "ed::spectral: at least one observable is required.");
     }
+    if (opts.method == SpectralOptions::Method::FtlmDynamical) {
+        throw std::invalid_argument(
+            "FTLM dynamics needs temperatures; use the finite-T spectral path");
+    }
     using Complex = std::complex<double>;
 
     const ed::parallel::ThreadBudgetScope budget(
@@ -128,12 +131,12 @@ SpectralResult spectral(const LinearOperator&                      H,
     auto variant = select_backend(H.geometry(), opts.backend);
 
     // COMPLETION GUARANTEE (spectral lane). Working set: GroundStateCF runs an
-    // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window;
-    // the dynamical lanes keep an FTLM / KPM window. Plan it + refuse cleanly if
-    // it would not fit, before allocating. allow_infeasible (force) opts out.
+    // inner GS Lanczos (with vectors) + a continued-fraction krylov_dim window.
+    // Plan it + refuse cleanly if it would not fit, before allocating.
+    // allow_infeasible (force) opts out.
     // Leaf memory guard (planner feasibility pre-flight removed): GS-CF stores
-    // the GS eigenvector + a continued-fraction Krylov window; the dynamical
-    // lanes keep an FTLM/KPM window (~2x krylov, per-sector dim for symmetry).
+    // the GS eigenvector + a continued-fraction Krylov window (~2x krylov,
+    // per-sector dim for symmetry).
     {
         const std::uint64_t D = H.global_dim();
         const std::uint64_t vecs = 2 * std::max<std::size_t>(opts.krylov_dim, 4);
@@ -250,209 +253,6 @@ SpectralResult spectral(const LinearOperator&                      H,
             R.krylov.converged     = kres.convergence_change < 0.05;
         }, variant);
         R.S_imag.assign(opts.num_omega, 0.0);
-    } else if (opts.method == SpectralOptions::Method::KpmDynamical) {
-        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-        // KPM Chebyshev expansion of `delta(omega - H)` against a
-        // single seed. Promotes
-        // `ed::observables::kpm_dynamical_correlator` to a first-class
-        // SpectralOptions::Method on equal footing with GroundStateCF
-        // / FtlmDynamical.
-        //
-        // Seed resolution mirrors the GroundStateCF branch:
-        //   - ``opts.initial_state`` (renormalised) when non-empty
-        //     (TPQ-to-KPM warm seeding);
-        //   - else: inner Lanczos GS solve with compute_vectors=true.
-        if (observables.size() < 1) {
-            throw std::invalid_argument(
-                "ed::spectral: KpmDynamical requires at least one "
-                "observable.");
-        }
-        std::vector<Complex> seed_host(H.geometry().local_dim);
-        if (!opts.initial_state.empty()) {
-            if (opts.initial_state.size() != H.geometry().local_dim) {
-                throw std::invalid_argument(
-                    "ed::spectral: opts.initial_state size ("
-                    + std::to_string(opts.initial_state.size())
-                    + ") does not match H.geometry().local_dim ("
-                    + std::to_string(H.geometry().local_dim) + ").");
-            }
-            seed_host = opts.initial_state;
-        } else {
-            SolveOptions sopts;
-            sopts.num_eigs        = 1;
-            sopts.compute_vectors = true;
-            sopts.tolerance       = 1e-12;
-            sopts.backend         = opts.backend;
-            sopts.method          = SolveMethod::Lanczos;
-            auto gs = solve(H, sopts);
-            if (!gs.eigenvectors.has_value() || gs.eigenvectors->host.empty()
-                    || gs.eigenvectors->host[0].size()
-                       != H.geometry().local_dim) {
-                throw std::runtime_error(
-                    "ed::spectral: KpmDynamical could not extract a "
-                    "host-side ground-state vector from the inner "
-                    "solve. Distributed lanes are not yet wired -- "
-                    "pin BackendConstraints to a CPU/GPU single-rank "
-                    "lane.");
-            }
-            seed_host = gs.eigenvectors->host[0];
-        }
-        // Renormalise to absorb any sloppiness in the user seed.
-        {
-            double sumsq = 0.0;
-            for (const auto& z : seed_host) sumsq += std::norm(z);
-            const double inv = (sumsq > 0.0)
-                ? (1.0 / std::sqrt(sumsq)) : 1.0;
-            for (auto& z : seed_host) z *= inv;
-        }
-        // Guard the GS seed for the KPM correlator (same rationale as
-        // GroundStateCF). Only when NOT user-seeded: a caller-staged warm
-        // state (TPQ-to-KPM) is deliberately not a GS eigenvector.
-        if (opts.initial_state.empty()) {
-            double e0_dummy = 0.0;
-            refine_gs_seed_host(H, seed_host, e0_dummy);
-        }
-
-        const LinearOperator& O1 = *observables.front();
-        const LinearOperator& O2 = (observables.size() >= 2)
-            ? *observables[1] : O1;
-
-        ed::observables::KpmDynamicalOptions kopts;
-        kopts.num_moments         = opts.kpm_moments;
-        kopts.kernel              = (opts.kpm_kernel
-                                       == SpectralOptions::KpmKernel::Jackson)
-            ? ed::observables::KpmKernel::Jackson
-            : ed::observables::KpmKernel::Lorentz;
-        kopts.lorentz_lambda      = opts.kpm_lorentz_lambda;
-        kopts.spectral_bound_buffer = 0.05;
-        kopts.spectral_bounds_krylov = static_cast<int>(
-            std::max<std::size_t>(opts.krylov_dim, 32));
-
-        // Phase G of the "Close CPU/GPU Gaps" plan (May 2026):
-        // dispatch on Backend type. CpuBackend keeps the legacy host
-        // body (delegates to ``compute_kpm_ltlm_from_states`` -- the
-        // single source of truth for the CPU lane's intermediate
-        // diagnostics + future HDF5 hooks). CudaBackend routes
-        // through ``detail::kpm_dynamical_kernel_via_backend``, a
-        // fully device-resident Chebyshev recursion (M matvecs + M
-        // dot products on the GPU, host-side kernel-coefficient +
-        // spectral-function evaluation).
-        std::visit([&](auto& backend_uptr) {
-            using BPtr = std::decay_t<decltype(backend_uptr)>;
-            using B = typename BPtr::element_type;
-            constexpr bool is_cpu =
-                std::is_same_v<B, ed::matvec::CpuBackend>;
-#ifdef WITH_CUDA
-            constexpr bool is_cuda =
-                std::is_same_v<B, ed::matvec::CudaBackend>;
-#else
-            constexpr bool is_cuda = false;
-#endif
-            if constexpr (!(is_cpu || is_cuda)) {
-                throw std::runtime_error(
-                    "ed::spectral: KpmDynamical requires a CpuBackend "
-                    "or CudaBackend; distributed backends are not yet "
-                    "wired. Pin BackendConstraints to route through "
-                    "the CPU/CUDA lanes.");
-            } else if constexpr (is_cpu) {
-                auto kres = ed::observables::kpm_dynamical_correlator(
-                    *backend_uptr,
-                    static_cast<const ed::matvec::MatVecOperator&>(H),
-                    static_cast<const ed::matvec::MatVecOperator&>(O1),
-                    static_cast<const ed::matvec::MatVecOperator&>(O2),
-                    seed_host.data(),
-                    H.geometry().local_dim,
-                    R.omega,
-                    kopts);
-                R.omega  = std::move(kres.omega);
-                R.S_real = std::move(kres.spectral_real);
-                R.S_imag = std::move(kres.spectral_imag);
-            } else {
-                // CudaBackend: device-resident Chebyshev recursion.
-                auto matvec_h = H.template bind<B>();
-                auto matvec_a = O1.template bind<B>();
-                auto matvec_b = O2.template bind<B>();
-                auto kres = ed::observables::detail::
-                    kpm_dynamical_kernel_via_backend(
-                        *backend_uptr, matvec_h, matvec_a, matvec_b,
-                        seed_host.data(),
-                        H.geometry().local_dim,
-                        R.omega, kopts);
-                R.omega  = std::move(kres.omega);
-                R.S_real = std::move(kres.spectral_real);
-                R.S_imag = std::move(kres.spectral_imag);
-            }
-        }, variant);
-        if (R.S_imag.size() != R.S_real.size()) {
-            R.S_imag.assign(R.S_real.size(), 0.0);
-        }
-    } else {
-        // Phase F of the "Close CPU/GPU Gaps" plan (May 2026):
-        // finite-temperature dynamical correlator via FTLM CF-Lanczos.
-        // Family-3 consolidation (audit 2026-07-31): ONE backend-generic
-        // arm. The old split kept the legacy ``::compute_dynamical_
-        // correlation`` on CPU "for HDF5 sample dumps" that were never
-        // enabled (store_intermediate defaulted false and was never
-        // set), silently used the legacy default of 40 samples on CPU
-        // while the CUDA arm hardcoded 1 sample regardless of the
-        // caller's request, and duplicated tolerance/seed constants per
-        // arm (they had already drifted once). Both lanes now run
-        // ``ftlm_dynamical_kernel_via_backend`` -- gated equivalent to
-        // the legacy body at matching T (~5 decimals, Family-3 step 3)
-        // -- and honour ``opts.num_samples``.
-        if (observables.size() < 1) {
-            throw std::invalid_argument(
-                "ed::spectral: FtlmDynamical requires at least one "
-                "observable.");
-        }
-        const LinearOperator& O1 = *observables.front();
-        const LinearOperator& O2 = (observables.size() >= 2)
-            ? *observables[1] : O1;
-
-        std::visit([&](auto& backend_uptr) {
-            using BPtr = std::decay_t<decltype(backend_uptr)>;
-            using B = typename BPtr::element_type;
-            constexpr bool is_cpu =
-                std::is_same_v<B, ed::matvec::CpuBackend>;
-#ifdef WITH_CUDA
-            constexpr bool is_cuda =
-                std::is_same_v<B, ed::matvec::CudaBackend>;
-#else
-            constexpr bool is_cuda = false;
-#endif
-            if constexpr (!(is_cpu || is_cuda)) {
-                throw std::runtime_error(
-                    "ed::spectral: FtlmDynamical requires a CpuBackend "
-                    "or CudaBackend; distributed backends are not yet "
-                    "wired. Pin BackendConstraints to route through "
-                    "the CPU/CUDA lanes.");
-            } else {
-                ed::observables::FtlmDynamicalOptions kopts;
-                kopts.krylov_dim   = opts.krylov_dim;
-                kopts.num_samples  = std::max<std::size_t>(
-                    1, opts.num_samples);
-                kopts.broadening   = opts.broadening;
-                kopts.temperature  = 0.0;
-                kopts.energy_shift = opts.energy_shift;
-                kopts.tolerance    = 1e-10;
-                kopts.random_seed  = 0;
-                kopts.global_n     = H.geometry().global_dim;
-                auto matvec_h  = H.template bind<B>();
-                auto matvec_o1 = O1.template bind<B>();
-                auto matvec_o2 = O2.template bind<B>();
-                auto kres = ed::observables::detail::
-                    ftlm_dynamical_kernel_via_backend(
-                        *backend_uptr,
-                        matvec_h, matvec_o1, matvec_o2,
-                        H.geometry().local_dim, R.omega, kopts);
-                R.S_real = std::move(kres.spectral_real);
-                R.S_imag = std::move(kres.spectral_imag);
-            }
-        }, variant);
-
-        if (R.S_imag.size() != R.S_real.size()) {
-            R.S_imag.assign(R.S_real.size(), 0.0);
-        }
     }
 
     R.errors_real.assign(R.S_real.size(), 0.0);
@@ -474,17 +274,7 @@ SpectralResult spectral(const LinearOperator&                      H,
     // errors_imag) under ``/dynamical/<method>/...`` of
     // ``<output_dir>/ed_results.h5``.
     //
-    // Method labels:
-    //   GroundStateCF -> "ground_state_cf"
-    //   FtlmDynamical -> "ftlm_dynamical"
-    //   KpmDynamical  -> "kpm_dynamical"
-    //
-    // The legacy ``FtlmDynamical`` branch already passes
-    // ``opts.output_dir`` to ``compute_dynamical_correlation`` which
-    // writes ``/ftlm/samples/dynamical/...`` when
-    // ``store_intermediate=true``. The uniform finalizer is
-    // complementary: it ships the aggregated S(omega) at a stable,
-    // method-tagged path regardless of which kernel produced it.
+    // Method label: GroundStateCF -> "ground_state_cf".
     // -----------------------------------------------------------------
     if (!opts.output_dir.empty()
             && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
@@ -495,14 +285,7 @@ SpectralResult spectral(const LinearOperator&                      H,
                 opts.output_dir + "/ed_results.h5";
             HDF5IO::createOrOpenFile(opts.output_dir);
 
-            const char* label =
-                (opts.method == SpectralOptions::Method::GroundStateCF)
-                    ? "ground_state_cf"
-              : (opts.method == SpectralOptions::Method::KpmDynamical)
-                    ? "kpm_dynamical"
-              : (opts.method == SpectralOptions::Method::FtlmDynamical)
-                    ? "ftlm_dynamical"
-              : "spectral";
+            const char* label = "ground_state_cf";
 
             HDF5IO::saveDynamicalResponseFull(
                 h5_path,

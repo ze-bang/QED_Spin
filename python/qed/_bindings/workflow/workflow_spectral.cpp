@@ -22,8 +22,8 @@ void bind_workflows_spectral(py::module_& m) {
               // observables through ``bind<Backend>()``. The host operators
               // advertise ``supports_device_matvec`` and their ``bind_cuda()``
               // device mirror serves the CudaBackend lane directly, so both
-              // the Hamiltonian and the observables run device-resident with
-              // no GPUOperator promotion. ``spectral_method_supports_gpu``
+              // the Hamiltonian and the observables run device-resident.
+              // ``spectral_method_supports_gpu``
               // stays as a defensive hook for any future host-only method.
               if (!spectral_method_supports_gpu(opts.method)) {
                   warn_silent_cpu_fallback(

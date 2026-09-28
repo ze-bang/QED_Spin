@@ -1,20 +1,17 @@
 // =============================================================================
 // ed/gpu/combinadic.cuh -- combinadic rank/unrank for fixed-Sz GPU lookups.
 //
-// Phase E.1 of the "Kill the GPU State-Lookup Hash" plan (May 2026).
+// The device basis policies (``ed/matvec/device_basis_policy.cuh``, driven
+// by ``streaming_symmetry_gpu_mirror.cu``) rank fixed-Sz states through a
+// constant-cache Pascal table. To stay within the 64 KiB per-TU
+// constant-memory budget (a single 65x65 Pascal table is already ~33 KiB),
+// ONE ``d_pascal_shared`` ``__constant__`` table is shared across all TUs
+// that need combinadic lookups:
 //
-// The symmetry path (``streaming_symmetry_gpu_mirror.cu``) needs the
-// same constant-cache combinadic rank that the Sz-only matvec kernels
-// (``gpu_kernels.cu``, Phase A.1) use. To stay within the 64 KiB
-// per-TU constant-memory budget (a single 65x65 Pascal table is
-// already ~33 KiB), we share ONE ``d_pascal_shared`` ``__constant__``
-// table across all TUs that need combinadic lookups:
-//
-//   * Defined in ``gpu_kernels.cu`` (the same Pascal upload that the
-//     Sz-only path already populates via ``ensure_pascal_uploaded``).
+//   * Defined in ``src/solvers/gpu/combinadic.cu`` together with its
+//     uploader ``upload_pascal_shared``.
 //   * Declared ``extern __device__ __constant__`` in this header so
-//     downstream TUs (the symmetry GPU mirror, future helpers) read
-//     from the same constant memory.
+//     downstream TUs read from the same constant memory.
 //
 // Device-linking (``CUDA_SEPARABLE_COMPILATION ON``) resolves the
 // extern reference across libraries -- all our CUDA TUs end up in
@@ -34,15 +31,12 @@
 
 namespace ed::gpu::combinadic {
 
-// Shared Pascal table. Definition lives in ``gpu_kernels.cu`` next to
-// ``ensure_pascal_uploaded`` (single source of truth for the upload).
+// Shared Pascal table. Definition lives in ``src/solvers/gpu/combinadic.cu``.
 // Downstream TUs reference this symbol via device linking.
 extern __device__ __constant__
 unsigned long long d_pascal_shared[65][65];
 
-// Host-callable uploader. Idempotent. Implemented in gpu_kernels.cu
-// alongside ``ensure_pascal_uploaded`` (which uploads the same data
-// into the legacy ``d_pascal`` symbol used by the older kernels).
+// Host-callable uploader. Idempotent. Implemented in combinadic.cu.
 void upload_pascal_shared();
 
 __device__ __forceinline__

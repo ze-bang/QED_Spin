@@ -75,10 +75,6 @@ set_target_properties(bench_symmetry_full_spectrum PROPERTIES
 # omega-grid size so the speed-up is visible at a glance.
 ed_add_benchmark(bench_dssf_omega_parallel  bench_dssf_omega_parallel.cpp)
 
-# GPU benchmarks: only built when WITH_CUDA=ON. The C++ files compile
-# unconditionally (they short-circuit to a SkipWithError when CUDA is not
-# available at runtime), but they need ed_solvers_gpu and the cuSPARSE /
-# cuBLAS link line, which only exist in the CUDA build.
 set(_ed_bench_targets
     bench_operator_apply
     bench_lanczos_ground_state
@@ -86,34 +82,6 @@ set(_ed_bench_targets
     bench_dssf_omega_parallel
     bench_symmetry_full_spectrum
 )
-if(WITH_CUDA)
-    function(ed_add_gpu_benchmark bench_name bench_source)
-        add_executable(${bench_name} ${bench_source})
-        target_link_libraries(${bench_name} PRIVATE
-            ed_solvers_gpu
-            ed_solvers_cpu
-            benchmark::benchmark
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-        )
-        target_include_directories(${bench_name} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}
-        )
-        set_target_properties(${bench_name} PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-        )
-    endfunction()
-
-    ed_add_gpu_benchmark(bench_gpu_operator_apply       bench_gpu_operator_apply.cpp)
-    ed_add_gpu_benchmark(bench_gpu_lanczos_ground_state bench_gpu_lanczos_ground_state.cpp)
-
-    list(APPEND _ed_bench_targets
-        bench_gpu_operator_apply
-        bench_gpu_lanczos_ground_state
-    )
-endif()
 
 # Convenience meta-target that pulls in everything so a single
 # `cmake --build build --target ed_benchmarks` builds the lot.

@@ -82,51 +82,44 @@ to_device(const MyBasisPolicy& host) noexcept {
 
 ### 2. RAII upload in the host operator
 
-The owning host operator (e.g. `GPUMyOperator`) holds the device
-allocations:
+The host operator owns the device allocations in a lazily built,
+shared mirror (the pattern of `CudaMatVecBackend` in
+`include/ed/matvec/cuda_matvec_backend.cuh`):
 
 ```cpp
-class GPUMyOperator : public GPUOperator {
-    // ... existing GPU operator state ...
-    uint64_t* d_my_backing_array_ = nullptr;
-    // ... etc ...
-public:
-    void setSectorData(...) {
-        // cudaMalloc + cudaMemcpy the host SoA -> device.
-        // Build any auxiliary tables (e.g. open-addressing hash for
-        // index_of).
-    }
-    ~GPUMyOperator() {
-        cudaFree(d_my_backing_array_);
-        // ... etc ...
-    }
+struct MyDeviceMirror {
+    uint64_t* d_my_backing_array = nullptr;
+    // ... device term SoA, auxiliary tables (e.g. open-addressing
+    //     hash for index_of) ...
+    ~MyDeviceMirror() { cudaFree(d_my_backing_array); /* ... */ }
 };
 ```
 
+Build it on first `bind_cuda()` (cudaMalloc + cudaMemcpy the host SoA
+-> device) and keep it in a `mutable std::shared_ptr` member.
+
 ### 3. Dispatch the unified kernel
 
-Inside `matVecGPU`:
+`bind_cuda()` returns a `MatvecFn` over DEVICE pointers that launches
+the template:
 
 ```cpp
-void GPUMyOperator::matVecGPU(const cuDoubleComplex* d_x,
-                              cuDoubleComplex* d_y, int N) {
-    cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex));
-
-    ed::matvec::basis::DeviceMyBasisPolicy basis_device{
-        /* device pointers */, /* dim */
+ed::LinearOperator::MatvecFn MyOperator::bind_cuda_impl_() const {
+    if (!mirror_) mirror_ = build_my_mirror(*this);
+    auto m = mirror_;  // shared_ptr copy keeps the mirror alive
+    return [m](const Complex* in, Complex* out, std::size_t n) {
+        auto* d_x = reinterpret_cast<const cuDoubleComplex*>(in);
+        auto* d_y = reinterpret_cast<cuDoubleComplex*>(out);
+        cudaMemset(d_y, 0, n * sizeof(cuDoubleComplex));
+        ed::matvec::kernel::gpu::launch_apply_terms_gpu<
+            ed::matvec::basis::DeviceMyBasisPolicy, cuDoubleComplex>(
+                m->basis_view(), m->spin_l, m->terms_view(), d_x, d_y);
     };
-    ed::matvec::kernel::gpu::DeviceTermStorage terms{
-        d_diag_one_body_,  num_diag_one_body_,
-        d_offdiag_one_body_, num_offdiag_one_body_,
-        // ... 5 + three-body bins ...
-    };
-
-    ed::matvec::kernel::gpu::launch_apply_terms_gpu<
-        ed::matvec::basis::DeviceMyBasisPolicy, cuDoubleComplex>(
-            basis_device, static_cast<double>(spin_l_),
-            terms, d_x, d_y);
 }
 ```
+
+See `Operator::bind_cuda_full_impl_` (`src/core/operator_gpu.cu`) for
+the canonical upload-once, apply-on-device pattern.
 
 ### 4. Register the cell with `select_backend`
 
@@ -150,10 +143,6 @@ wiring needed.
 * Run the existing
   `python/tests/test_unified_symmetry_architecture.py` to confirm
   the architectural seam still holds.
-* The cuSPARSE-assembled-CSR alternative path (Phase-2 of the
-  legacy GPU operator) stays as the auto-selected fast path for
-  large dim where it wins; the unified kernel is the matrix-free
-  branch in `selectKernelPathway`.
 
 ## Existing cells (May 2026)
 

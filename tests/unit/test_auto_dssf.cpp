@@ -3,8 +3,9 @@
 //
 // Smoke-tests the unified `ed::workflows::spectral(H, observables, opts)`
 // orchestrator (continued-fraction Lanczos for ground-state DSSF). The
-// FtlmDynamical lane is not yet wired and is gated by a documented
-// `runtime_error`; we lock in that contract here.
+// FtlmDynamical method is rejected with `std::invalid_argument` (it needs
+// temperatures, which the finite-T spectral path provides); we lock in
+// that contract here.
 //
 // Migrated from the legacy `ed::auto_pilot::dssf::compute(...)` API
 // during the ED Cleanup Sweep Phase 2 (May 2026). The legacy DSSF
@@ -98,31 +99,15 @@ TEST_CASE("workflows::spectral throws when no observable is supplied",
                        std::invalid_argument);
 }
 
-TEST_CASE("workflows::spectral FtlmDynamical lane runs the FTLM "
-          "continued-fraction body and returns a populated spectrum",
+TEST_CASE("workflows::spectral rejects FtlmDynamical (needs temperatures)",
           "[workflows][spectral][ftlm_dynamical]") {
-    // Wave A4 (Full unified-interface collapse, May 2026): the
-    // FtlmDynamical lane is now wired through to the legacy
-    // `compute_dynamical_correlation` body inside the orchestrator.
-    // This test verifies the lane returns a sensibly-sized result on
-    // a small Heisenberg chain.
     auto H   = build_heisen(4);
     auto Sz0 = build_single_site_sz(4);
 
     SpectralOptions opts;
-    opts.backend.gpu_dim_floor = 0;  // tiny fixture: keep the GPU CF lane covered
-    opts.method      = SpectralOptions::Method::FtlmDynamical;
-    opts.krylov_dim  = 32;
-    opts.num_omega   = 16;
-    opts.num_samples = 4;
-    opts.omega_min   = -3.0;
-    opts.omega_max   = +3.0;
-    opts.broadening  = 0.1;
+    opts.method = SpectralOptions::Method::FtlmDynamical;
 
     std::vector<const ed::LinearOperator*> obs{ Sz0.get() };
-    ed::SpectralResult R;
-    REQUIRE_NOTHROW(R = ed::workflows::spectral(*H, obs, opts));
-    REQUIRE(R.omega.size() == opts.num_omega);
-    REQUIRE(R.S_real.size() == R.omega.size());
-    REQUIRE(R.S_imag.size() == R.omega.size());
+    REQUIRE_THROWS_AS(ed::workflows::spectral(*H, obs, opts),
+                      std::invalid_argument);
 }

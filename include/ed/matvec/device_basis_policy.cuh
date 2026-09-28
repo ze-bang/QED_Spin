@@ -97,7 +97,7 @@ to_device(const FullBasisPolicy& host) noexcept {
 //   * basis_states (sorted, length dim)
 //   * Lin index table (open-addressing hash) for O(1) state -> idx
 //
-// The owning host class (``GPUFixedSzOperator``, or a Phase 2 mirror
+// The owning host mirror (the fixed-Sz ``CudaMatVecBackend``, or a Phase 2 mirror
 // inside ``StreamingSymmetryOperator``) builds the device tables once
 // at construction; this struct is a non-owning view.
 // ===========================================================================

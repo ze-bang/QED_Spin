@@ -7,8 +7,8 @@
 //     ed::solve     -- ground-state eigenproblem (Lanczos / Krylov-Schur /
 //                       Block-Lanczos / full diag), one of the four
 //                       Backend lanes auto-selected via select_backend.
-//     ed::thermal   -- finite-temperature workflows (FTLM / mTPQ /
-//                       KPM-DOS).
+//     ed::thermal   -- finite-temperature workflows (FTLM / OFTLM /
+//                       mTPQ).
 //     ed::spectral  -- dynamical correlators (DSSF ground state /
 //                       finite-T) via continued-fraction Lanczos.
 //
@@ -234,7 +234,7 @@ struct ThermalOptions {
 
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
-        FTLM = 0, mTPQ = 2, KpmDos = 4, OFTLM = 5,
+        FTLM = 0, mTPQ = 2, OFTLM = 5,
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
@@ -262,16 +262,12 @@ struct ThermalOptions {
     // controls the legacy `EDParameters` / CLI thermo section carry.
     // -----------------------------------------------------------------
 
-    /// Temperature scan range (used by both the thermodynamics
-    /// post-processing and the KPM-DOS lane). Linear in T by
-    /// default; the CLI may convert to inverse-temperature betas if
-    /// needed.
+    /// Temperature scan range (used by the thermodynamics
+    /// post-processing). Linear in T by default; the CLI may convert
+    /// to inverse-temperature betas if needed.
     double      temp_min       = 0.1;  ///< Python `T_min` default (was 0.01).
     double      temp_max       = 10.0;
     std::size_t num_temp_bins  = 24;   ///< Python `num_T` default (was 100).
-
-    /// Lorentzian broadening eta for the KPM-DOS density lane.
-    double      broadening     = 0.05;
 
     /// Filter for the streaming-symmetry sector loop. See
     /// ``SolveOptions::selected_sectors``. Empty => walk every
@@ -279,13 +275,11 @@ struct ThermalOptions {
     std::vector<std::size_t> selected_sectors;
 
     // -----------------------------------------------------------------
-    // Wave B3 (May 2026): caller-supplied spectral bounds for the
-    // KPM-DOS lane. When BOTH ``e_min_override`` and ``e_max_override``
-    // are finite, the kernel skips its own Lanczos-based spectral
-    // estimation and uses the supplied window directly. Used by the
-    // streaming-symmetry binding to estimate the band edges once and
-    // reuse them across N sector calls. NaN means "estimate per
-    // sector" (the legacy behaviour).
+    // Caller-supplied spectral bounds for the mTPQ auto-tune. When BOTH
+    // ``e_min_override`` and ``e_max_override`` are finite (and ordered),
+    // the mTPQ lane skips its own Lanczos-based spectral estimation and
+    // uses the supplied window to place the shift L. NaN means
+    // "estimate per call".
     // -----------------------------------------------------------------
     double      e_min_override = std::numeric_limits<double>::quiet_NaN();
     double      e_max_override = std::numeric_limits<double>::quiet_NaN();
@@ -312,33 +306,11 @@ struct ThermalOptions {
     bool        mtpq_fp32      = false;
 
     // -----------------------------------------------------------------
-    // KPM-DOS knobs (closing-the-symmetry-gap follow-up, May 2026).
-    //
-    // Prior to this revision ``ThermalOptions`` carried no
-    // moment-count or Hutchinson-sample knobs for the KpmDos lane,
-    // so the orchestrator silently fell back to ``KpmDosOptions``'
-    // defaults (M=2048, R=20). The Python facade
-    // (qed.thermal(..., kpm_num_moments=..., kpm_num_random_vectors=...))
-    // had no way to reach the streaming-symmetry binding -- a ~250x
-    // amplifier on FT-KPM_DOS Symm at production sizes.
-    //
-    // ``0`` means "use the kernel default" so existing call sites
-    // (CLI, single-operator orchestrator entry) keep their behaviour.
-    // -----------------------------------------------------------------
-    // Aligned to `python/qed/thermal.py` defaults (May 2026): 200
-    // Chebyshev moments and 16 Hutchinson random vectors. Previous
-    // value of 0 meant "use kernel default" (which was 2048/20 for
-    // production use); the new defaults are tighter and match what the
-    // Python facade has been shipping for the streaming-symmetry binding.
-    int kpm_num_moments        = 200; ///< Python default (was 0 -> kernel 2048).
-    int kpm_num_random_vectors = 16;  ///< Python default (was 0 -> kernel 20).
-
-    // -----------------------------------------------------------------
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     // user-supplied probe-betas for TPQ state-vector snapshots. The
     // orchestrator passes this through to ``MtpqOptions::probe_betas``
     // Empty (default) -> no snapshots
-    // are taken. Ignored by FTLM / KPM-DOS (which never have
+    // are taken. Ignored by FTLM / OFTLM (which never have
     // a meaningful TPQ state to snapshot). Combine with
     // ``output_dir`` to land the saved states on disk under
     // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
@@ -354,42 +326,12 @@ struct ThermalOptions {
 struct SpectralOptions {
     enum class Method : std::uint8_t {
         GroundStateCF = 0,   ///< compute_ground_state_dssf via cf_spectral_kernel
+        /// Finite-T FTLM dynamics. ``ed::workflows::spectral`` rejects it
+        /// (std::invalid_argument): it needs temperatures, which the
+        /// finite-T spectral path (FTLM cross-irrep kernel) provides.
         FtlmDynamical = 1,
-        /// Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-        /// Chebyshev expansion of `delta(omega - H)` against a single
-        /// seed (GS by default, ``initial_state`` when provided).
-        /// Backed by `ed::observables::kpm_dynamical_correlator` ->
-        /// `ed::kpm::compute_kpm_ltlm_from_states` at beta = 0.
-        KpmDynamical  = 2,
     } method = Method::GroundStateCF;
 
-    /// KPM Chebyshev moments for ``Method::KpmDynamical``. Ignored by
-    /// the other lanes. Bigger M = sharper features but more matvecs.
-    std::size_t kpm_moments = 200;
-
-    /// Window function applied to the Chebyshev moments when
-    /// reconstructing S(omega). ``Jackson`` is the standard optimal
-    /// Gibbs-suppressing window; ``Lorentz`` is the alternative used by
-    /// the legacy `ed::kpm` driver and parametrised by
-    /// ``kpm_lorentz_lambda``.
-    enum class KpmKernel : std::uint8_t {
-        Jackson = 0,
-        Lorentz = 1,
-    } kpm_kernel = KpmKernel::Jackson;
-
-    /// Lorentz kernel decay parameter (only used when
-    /// ``kpm_kernel == Lorentz``).
-    double kpm_lorentz_lambda = 4.0;
-
-    /// Override the auto-detected ``[E_min, E_max]`` spectral bounds
-    /// used to rescale H into ``[-1, 1]`` before the Chebyshev
-    /// recursion. When unset (default), the orchestrator runs a small
-    /// Lanczos in `ed::kpm_dos::estimate_spectral_bounds` to discover
-    /// them. NB: the kernel currently uses the legacy driver's own
-    /// bound-estimation path; this field is reserved for the next
-    /// landing wave once we plumb caller-supplied bounds through
-    /// ``compute_kpm_ltlm_from_states``.
-    std::optional<std::pair<double, double>> kpm_spectral_bounds;
     std::size_t krylov_dim    = 200;
     double      broadening    = 0.05;
     double      omega_min     = -10.0;
@@ -407,11 +349,13 @@ struct SpectralOptions {
     // observable-type discriminator used by the legacy CLI.
     // -----------------------------------------------------------------
 
-    /// Number of random samples for FtlmDynamical averaging. Ignored
-    /// by GroundStateCF (which uses the ground-state vector).
+    /// Number of random samples for finite-T FTLM averaging (finite-T
+    /// spectral path). Ignored by GroundStateCF (which uses the
+    /// ground-state vector).
     std::size_t num_samples   = 30;
 
-    /// Temperature scan for FtlmDynamical; empty means "T = 0 only".
+    /// Temperature axis for the finite-T spectral path; empty means
+    /// "T = 0 only". GroundStateCF ignores it.
     std::vector<double> temperatures;
 
     /// Observable-type label carried for HDF5 output / Python

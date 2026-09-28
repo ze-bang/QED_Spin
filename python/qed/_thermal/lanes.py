@@ -188,7 +188,7 @@ def inmemory_projection_lane(
         # PROJECTS -- the run stays a sampling run, executed inside the
         # (n_up, k, +/-, sigma) little-group blocks via
         # _core.little_group_thermal (F-shift Z-recombination). The lane
-        # resolver declines KPM_DOS (full-spectrum DOS) and honours
+        # resolver honours
         # ED_SYM_LG_THERMAL=0; any decline falls through to the abelian
         # sector lane below unchanged. sector= keeps the abelian
         # filtering lane (the block engine has only_k0/only_irrep but the

@@ -256,8 +256,6 @@ benchmarks/
   bench_all_backends.py     -- the orchestrator that produced this report
   bench_operator_apply.cpp  -- per-call SpMV microbench (CPU)
   bench_lanczos_ground_state.cpp  -- ground-state Lanczos (CPU)
-  bench_gpu_operator_apply.cu     -- per-call SpMV (GPU)
-  bench_gpu_lanczos_ground_state.cu  -- ground-state Lanczos (GPU)
   bench_vs_quspin.py        -- legacy QuSpin-only sweep (kept for reproducibility)
   bench_vs_xdiag.py         -- head-to-head against XDiag.jl
                                (orchestrator; see docs/benchmarks/bench_vs_xdiag.md)

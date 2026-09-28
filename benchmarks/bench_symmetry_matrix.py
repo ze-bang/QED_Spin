@@ -10,7 +10,6 @@ observable (E0 for GS / FT, low-omega peak for DSSF).
 Workflows:
     * GS         -- `qed.solve(..., solver="LANCZOS")` (ground state)
     * FT-FTLM    -- `qed.thermal(..., method="FTLM")`
-    * FT-KPM_DOS -- `qed.thermal(..., method="KPM_DOS")`
     * DSSF-GS    -- `qed.spectral(..., method="ground_state_cf")`
                     (cross-irrep observable S^z_Q at Q = 2 pi / N)
     * DSSF-FT    -- `qed.spectral(..., method="dynamical_thermal", T=[T0])`
@@ -207,7 +206,7 @@ def bench_gs(num_sites: int, *, verbose: bool) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Finite-T thermodynamics (FTLM, KPM_DOS)
+# Finite-T thermodynamics (FTLM)
 # ---------------------------------------------------------------------------
 
 
@@ -224,11 +223,6 @@ def _thermal_common_kwargs(method: str, num_sites: int) -> dict[str, Any]:
     if method in ("FTLM",):
         common["num_samples"] = 4
         common["krylov_dim"] = min(80, max(20, (1 << num_sites) // 4))
-    elif method == "KPM_DOS":
-        # KPM_DOS has K x R matvec cost. Scale moments + random vectors
-        # down hard so the cells finish in seconds at N>=12, not minutes.
-        common["kpm_num_moments"] = 80
-        common["kpm_num_random_vectors"] = 2
     return common
 
 
@@ -509,7 +503,7 @@ def run_one_size(num_sites: int, *,
     print(f"  [GS]", flush=True)
     rows.extend(bench_gs(num_sites, verbose=verbose))
     print(f"    -> {time.perf_counter()-t0:5.1f}s", flush=True)
-    for method in ("FTLM", "KPM_DOS"):
+    for method in ("FTLM",):
         t0 = time.perf_counter()
         print(f"  [FT-{method}]", flush=True)
         rows.extend(bench_thermal(num_sites, method, verbose=verbose))

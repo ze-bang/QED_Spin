@@ -402,18 +402,12 @@ def resolve_projection_lane(
         # methods -- the run stays a sampling run, inside the smaller
         # (n_up, k, +/-, sigma) blocks (little_group_thermal); only
         # point_group='full' opts into EXACT per-block spectra
-        # (little_group_thermodynamics), unchanged. KPM_DOS keeps the
-        # abelian lane: its deliverable is one full-spectrum DOS, which
-        # per-block Chebyshev grids cannot recombine into.
+        # (little_group_thermodynamics), unchanged.
         _m = (method or "").upper()
         if os.environ.get("ED_SYM_LG_THERMAL", "1") == "0":
             return _decline(
                 "ED_SYM_LG_THERMAL=0 restores the pre-U1b behaviour "
                 "(thermal auto never projects)")
-        if _m in ("KPM_DOS", "KPMDOS"):
-            return _decline(
-                "KPM_DOS produces one full-spectrum DOS; per-block "
-                "sub-DOS cannot recombine -- the abelian lane serves it")
         if _m not in ("FTLM", "MTPQ", "OFTLM"):
             return _decline(
                 f"thermal method {method!r} has no sample-inside-block "

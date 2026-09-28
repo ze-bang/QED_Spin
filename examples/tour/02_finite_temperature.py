@@ -2,7 +2,7 @@
 """Tour 02 -- finite temperature with `qed.thermal`: every real knob.
 
 Methods: mTPQ (microcanonical TPQ, default choice for large N),
-FTLM / LTLM (stochastic Lanczos), KPM_DOS, and exact
+FTLM / LTLM (stochastic Lanczos), and exact
 ED for small blocks. All of them run per (Sz, irrep) sector when
 symmetry is on, and the flat pool recombines Z_s(beta) exactly --
 including the spin-flip mirror (solve n_up <= N/2, copy to N - n_up)
@@ -41,7 +41,6 @@ print(f"n_up coverage: {ups[0]}..{ups[-1]} "
 # 2. Method zoo. Same call shape; the method-specific knobs are:
 #      mTPQ      : num_samples, tpq_measure_beta_min/max
 #      FTLM/LTLM : num_samples, ftlm_krylov_dim / ltlm_krylov_dim
-#      KPM_DOS   : kpm_num_moments, kpm_num_random_vectors
 # ---------------------------------------------------------------------------
 r_ftlm = qed.thermal(H, method="FTLM", T_min=0.1, T_max=10.0, num_T=24,
                      symmetry="auto", num_samples=20, ftlm_krylov_dim=80,

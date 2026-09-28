@@ -497,8 +497,7 @@ void bind_little_group(py::module_& m) {
     // U1b (lane unification): SAMPLED thermodynamics inside the projected
     // blocks -- FTLM / mTPQ/OFTLM per (n_up, k, +/-, sigma) block via
     // ed::workflows::thermal(block.op(), ...), Z-recombined with the block
-    // multiplicity folded in as an F-shift. KPM_DOS raises (full-spectrum
-    // DOS deliverable; use the abelian lane). Returns the combined thermo
+    // multiplicity folded in as an F-shift. Returns the combined thermo
     // plus parallel per-block tag arrays -- the engagement signal the
     // dimension-reduction matrix asserts block structure against.
     m.def("little_group_thermal",
@@ -518,8 +517,7 @@ void bind_little_group(py::module_& m) {
               else
                   throw std::invalid_argument(
                       "little_group_thermal: method must be one of "
-                      "FTLM/mTPQ/OFTLM (KPM_DOS recombines on the "
-                      "abelian lane only), got '" + method + "'");
+                      "FTLM/mTPQ/OFTLM, got '" + method + "'");
               topts.temp_min      = t_min;
               topts.temp_max      = t_max;
               topts.num_temp_bins = num_t;

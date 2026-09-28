@@ -26,15 +26,8 @@
 // gives the same scatter semantics as the CPU radix-sort + flush;
 // modulo atomic ordering the result is bit-identical.
 //
-// Legacy-kernel status (debt-cleanup sweep, Jul 2026):
-//   * The fixed-Sz matvec generations (linear / hash / rank), the
-//     fixed-Sz branch-free kernels, and ``matVecSymmetrized`` were
-//     DELETED from ``gpu_kernels.cu`` -- this template family plus the
-//     rep-walk kernels below are the only symmetry/fixed-Sz device path.
-//   * ``matVecKernelOptimized``, the 5 full-Hilbert per-bin scatter
-//     kernels, cuSPARSE-assembled CSR, and ``matVecWarpReductionFused``
-//     remain as auto-gated fast paths in
-//     ``GPUOperator::selectKernelPathway`` for the full-Hilbert lane.
+// This template family plus the rep-walk kernels below are the only
+// full-Hilbert / fixed-Sz / symmetry device matvec path.
 // =============================================================================
 
 #ifdef WITH_CUDA

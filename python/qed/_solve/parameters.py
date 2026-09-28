@@ -116,7 +116,7 @@ def _make_params(
         p.n_up = int(sz)
 
     if _is_thermal_method(method):
-        # ---- Thermal solvers (TPQ / FTLM / KPM_DOS) ----
+        # ---- Thermal solvers (TPQ / FTLM / OFTLM) ----
         # These don't extract eigenvalues from a Krylov subspace; they
         # build thermodynamic averages from random-state imaginary-time
         # trajectories (TPQ) or from Lanczos micro-bases (FTLM).

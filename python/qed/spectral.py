@@ -510,11 +510,6 @@ def _spectral_in_memory(
     # caller-supplied seed state for the GroundStateCF lane. Accepts a
     # numpy array, list, or anything h5py reads as a 1D complex vector.
     initial_state: Optional[Any] = None,
-    # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-    # KpmDynamical knobs.
-    kpm_moments: Optional[int] = None,
-    kpm_kernel: Optional[str] = None,
-    kpm_lorentz_lambda: Optional[float] = None,
 ) -> Any:
     """Build a `_core.SpectralOptions` and call `_core.workflows_spectral`."""
     opts = _core.SpectralOptions()
@@ -524,13 +519,11 @@ def _spectral_in_memory(
             opts.method = _core.SpectralMethod.GroundStateCF
         elif key in ("FTLM_DYNAMICAL", "DYNAMICAL_THERMAL", "FTLMDYNAMICAL"):
             opts.method = _core.SpectralMethod.FtlmDynamical
-        elif key in ("KPM_DYNAMICAL", "KPM_DYN", "KPMDYNAMICAL"):
-            opts.method = _core.SpectralMethod.KpmDynamical
         else:
             raise ValueError(
                 f"method={method!r} not supported by the in-memory "
-                f"spectral path. Use 'ground_state_cf', "
-                f"'ftlm_dynamical', or 'kpm_dynamical'."
+                f"spectral path. Use 'ground_state_cf' or "
+                f"'ftlm_dynamical' (the latter with T > 0)."
             )
     if krylov_dim is not None:
         opts.krylov_dim = int(krylov_dim)
@@ -555,16 +548,9 @@ def _spectral_in_memory(
             opts.temperatures = [float(t) for t in T]
         else:
             opts.temperatures = [float(T)]
-        # Audit fix (2026-07-30): the plain in-memory lane has NO working
-        # finite-T estimator. GroundStateCF ignores `temperatures` outright
-        # (measured: T=1.0 and T=0.5 both returned the T=0 spectrum,
-        # machine-identical), and the in-memory FtlmDynamical/KpmDynamical
-        # kernels hardcode temperature=0.0 in the orchestrator (measured:
-        # the returned spectrum equals the T=infinity correlator for any
-        # requested T). Refuse loudly instead of silently answering a
-        # different physical question. The finite-T machinery that IS
-        # verified correct lives on the symmetry lane (ftlm cross-irrep
-        # kernel).
+        # ``_core.workflows_spectral`` has no finite-T estimator:
+        # GroundStateCF is a T = 0 method and FtlmDynamical is rejected
+        # there. Finite T goes to the FTLM cross-irrep estimator below.
         if any(t > 0.0 for t in opts.temperatures):
             # 2026-09-11: route finite T through the same FTLM estimator the
             # symmetry lane uses (ftlm_cross_irrep_kernel with source = target
@@ -627,27 +613,6 @@ def _spectral_in_memory(
         arr = arr.astype(_np.complex128, copy=False).ravel()
         opts.initial_state = [complex(z) for z in arr.tolist()]
 
-    # Pillar 4 (May 2026): KPM-dynamical knobs. Only the moments knob
-    # is forwarded unconditionally (it is meaningful for any future
-    # KPM expansion lane). The kernel + lambda knobs are forwarded
-    # opaquely; the C++ binding stays the source of truth for
-    # validation.
-    if kpm_moments is not None:
-        opts.kpm_moments = int(kpm_moments)
-    if kpm_kernel is not None:
-        k_lc = str(kpm_kernel).lower()
-        if k_lc in ("jackson", "j"):
-            opts.kpm_kernel = _core.SpectralKpmKernel.Jackson
-        elif k_lc in ("lorentz", "l"):
-            opts.kpm_kernel = _core.SpectralKpmKernel.Lorentz
-        else:
-            raise ValueError(
-                f"qed.spectral: kpm_kernel={kpm_kernel!r} not in "
-                "{'Jackson', 'Lorentz'}."
-            )
-    if kpm_lorentz_lambda is not None:
-        opts.kpm_lorentz_lambda = float(kpm_lorentz_lambda)
-
     obs_list = list(observables)
     if verbose:
         print(
@@ -681,10 +646,6 @@ def spectral(
     energy_shift: Optional[float] = None,
     output_dir: str = "",
     observable_type: str = "",
-    # KpmDynamical knobs, forwarded to ``_core.SpectralOptions.kpm_*``.
-    kpm_moments: Optional[int] = None,
-    kpm_kernel: Optional[str] = None,
-    kpm_lorentz_lambda: Optional[float] = None,
     device: Optional[str] = None,
     verbose: bool = True,
     # Streaming-symmetry (cross-irrep) knobs ------------------------------
@@ -722,7 +683,7 @@ def spectral(
     omega : sequence of floats or None
         Frequency grid.
     method : str, optional
-        ``"ground_state_cf"``, ``"ftlm_dynamical"`` or ``"kpm_dynamical"``;
+        ``"ground_state_cf"`` (T = 0) or ``"ftlm_dynamical"`` (needs T > 0);
         auto-picked from ``T`` when omitted.
     eta : float, optional
         Lorentzian broadening.
@@ -736,8 +697,6 @@ def spectral(
         Where the C++ engine writes HDF5 artifacts.
     observable_type : str, optional
         Label used in the HDF5 group naming (e.g. "Sz").
-    kpm_moments, kpm_kernel, kpm_lorentz_lambda : optional
-        KpmDynamical knobs.
     device : str, optional
         ``"cpu"`` or ``"gpu"`` (``None``/``"auto"`` lets the backend choose).
     verbose : bool, optional
@@ -783,6 +742,16 @@ def spectral(
         raise ValueError(f"qed.spectral: krylov_dim must be >= 2, got {krylov_dim!r}")
     if num_random_vectors is not None and int(num_random_vectors) < 1:
         raise ValueError(f"qed.spectral: num_random_vectors must be >= 1, got {num_random_vectors!r}")
+    if method is not None and str(method).upper().replace("-", "_") in (
+            "FTLM_DYNAMICAL", "DYNAMICAL_THERMAL", "FTLMDYNAMICAL"):
+        _Ts = ([] if T is None else
+               [float(t) for t in T] if hasattr(T, "__iter__") else [float(T)])
+        if not any(t > 0.0 for t in _Ts):
+            raise ValueError(
+                f"qed.spectral: method={method!r} is a finite-temperature "
+                "method and needs T > 0 (got T=None / T <= 0). Pass T=... "
+                "for the finite-T FTLM spectrum, or use "
+                "method='ground_state_cf' for T = 0.")
     if not isinstance(H, Operator):
         raise TypeError(
             f"qed.spectral first argument must be an Operator / "
@@ -944,8 +913,4 @@ def spectral(
         device=device,
         # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026).
         initial_state=initial_state,
-        # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026).
-        kpm_moments=kpm_moments,
-        kpm_kernel=kpm_kernel,
-        kpm_lorentz_lambda=kpm_lorentz_lambda,
     )

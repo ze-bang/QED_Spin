@@ -132,10 +132,7 @@ struct ObservablePairs {
     /// `size != (1ULL << n_bits_)` and throws on the smaller fixed-Sz
     /// dimension. CPU dispatch in workflows that consume these vectors
     /// must call `obs_1_fs[i]->apply(...)` instead of `obs_1[i].apply(...)`
-    /// when `use_fixed_sz` is true. The GPU path is unaffected because
-    /// `convertOperatorToGPU` only reads the basis-independent
-    /// `transform_data_` member, which lives on the base and is preserved
-    /// through the slice.
+    /// when `use_fixed_sz` is true.
     std::vector<std::shared_ptr<FixedSzOperator>> obs_1_fs;
     std::vector<std::shared_ptr<FixedSzOperator>> obs_2_fs;
 };

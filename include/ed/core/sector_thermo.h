@@ -12,7 +12,7 @@
 // sectors, calling ``ed::workflows::thermal(...)`` once per sector.
 // For ground-state methods (LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, ...)
 // it is enough to collect the per-sector eigenvalues into a global
-// pool and sort. For finite-temperature methods (FTLM, KPM_DOS,
+// pool and sort. For finite-temperature methods (FTLM, OFTLM,
 // mTPQ) we *also* need to recombine thermodynamic observables
 // across sectors --- otherwise the result for ``ed::workflows::thermal``
 // with ``method=FTLM`` and ``use_symmetry=true`` would be just the
@@ -22,7 +22,7 @@
 // generic ``ThermodynamicData`` payload populated by every finite-T
 // solver. The math mirrors ``combine_ftlm_sector_results`` in
 // ``src/solvers/cpu/ftlm.cpp`` but is decoupled from the FTLMResults
-// envelope so it works uniformly for KPM_DOS.
+// envelope so it works uniformly for every finite-T method.
 //
 // MATH
 // ----
@@ -71,7 +71,7 @@ namespace core {
  *                       entirely from F_s (which already absorbs the
  *                       sector dimension via the ln(D_s) entropy term
  *                       inside each solver). Provided for symmetry with
- *                       the audit's `combine_sector_kpm` signature and
+ *                       the per-sector solver outputs and
  *                       so that callers do not have to discard the data.
  * @return Combined ``ThermodynamicData`` for the full Hilbert space.
  *
@@ -116,7 +116,7 @@ combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_therm
     combined.free_energy.assign(n_temps, 0.0);
 
     // Suppress unused-parameter warning while keeping the signature
-    // symmetric with `combine_sector_kpm` (which does use the dims
+    // symmetric with the per-sector solver outputs (which carry the dims
     // explicitly). Sector dimensions enter the math indirectly through
     // the per-sector ln(D_s) inside each solver's free_energy.
     (void) sector_dims;
@@ -226,7 +226,7 @@ combine_sector_thermodynamics(const std::vector<ThermodynamicData>& sector_therm
  *        recombination in the streaming-symmetry kernel.
  *
  * Returns true exactly for the finite-temperature methods that populate
- * ``EDResults::thermo_data`` --- FTLM, KPM_DOS, mTPQ.
+ * ``EDResults::thermo_data`` --- FTLM, OFTLM, mTPQ.
  * The streaming-symmetry kernel uses this to decide whether to invoke
  * ``combine_sector_thermodynamics`` after the per-sector loop.
  */
@@ -234,7 +234,6 @@ inline bool method_produces_sector_thermo(DiagonalizationMethod method) {
     switch (method) {
         case DiagonalizationMethod::FTLM:
         case DiagonalizationMethod::OFTLM:
-        case DiagonalizationMethod::KPM_DOS:
         case DiagonalizationMethod::mTPQ:
             return true;
         default:

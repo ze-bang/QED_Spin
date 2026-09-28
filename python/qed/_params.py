@@ -10,11 +10,11 @@ Why this exists: the thermal converter had silently FORKED --
 ``_ed_params_to_thermal_options`` which diverged by 75 lines. One copy
 raised on a non-thermal method while the other silently defaulted it to
 FTLM; one wired ``device=`` into the backend constraints while the
-other dropped it; one forwarded the KPM moment/Hutchinson knobs while
+other dropped it; one forwarded the method-specific knobs while
 the other silently dropped them (a ~250x cost amplifier when the
 defaults kicked in). The merged converters below are the UNION of both
 copies' fixes: strict method mapping, backend wiring, feasibility gate,
-AND the KPM/OFTLM/mTPQ knob forwarding.
+AND the OFTLM/mTPQ knob forwarding.
 
 ``EDParameters`` is the kwargs staging bag. The SolveOptions converter is the C++
 ``_core.ed_params_to_solve_options``; the ThermalOptions converter is implemented here.
@@ -45,7 +45,6 @@ THERMAL_METHOD_MAP = {
     DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
     DiagonalizationMethod.OFTLM:   _core.ThermalMethod.OFTLM,
     DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
-    DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
 }
 
 
@@ -94,16 +93,6 @@ def ed_params_to_thermal_options(
         opts.krylov_dim = steps
     else:
         opts.krylov_dim = 100
-    # KPM moment / Hutchinson knobs: forwarded so the streaming-symmetry
-    # binding does not fall back to the KpmDosOptions defaults
-    # (M=2048, R=20 -- a ~250x amplifier when unintended).
-    if method == DiagonalizationMethod.KPM_DOS:
-        kn_m = int(getattr(params, "kpm_num_moments", 0) or 0)
-        kn_r = int(getattr(params, "kpm_num_random_vectors", 0) or 0)
-        if kn_m > 0:
-            opts.kpm_num_moments = kn_m
-        if kn_r > 0:
-            opts.kpm_num_random_vectors = kn_r
     opts.taylor_order  = int(params.tpq_taylor_order)
     opts.delta_beta    = float(params.tpq_delta_beta)
     opts.random_seed   = int(params.ftlm_seed or 0)
@@ -151,11 +140,6 @@ def ed_result_from_thermal_result(
     h5_path = str(getattr(tr, "hdf5_path", "") or "")
     out.eigenvectors_computed = bool(h5_path)
     out.eigenvectors_path     = h5_path
-    # KPM-DOS raw density of states (Jul 2026): surface the density(E) the
-    # method produces so callers can consume/integrate it (EDResults carries
-    # py::dynamic_attr; empty lists for the non-DOS methods).
-    out.dos_energies = list(getattr(tr, "dos_energies", []) or [])
-    out.dos_values   = list(getattr(tr, "dos_values", []) or [])
     return out
 
 

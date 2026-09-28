@@ -406,6 +406,65 @@ int build_lanczos_tridiagonal_with_basis(
     }
 }
 
+void estimate_spectral_bounds(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t dim,
+    int krylov_dim,
+    bool full_reorth,
+    int reorth_freq,
+    double tol,
+    std::mt19937& gen,
+    double& e_min,
+    double& e_max)
+{
+    // On small blocks a Lanczos sweep with krylov_dim > dim returns garbage
+    // bounds. Below 512 states assemble the block densely (dim matvecs) and
+    // take the exact extremes; above, clamp the sweep to dim.
+    if (dim <= 512) {
+        const int n = static_cast<int>(dim);
+        std::vector<Complex> dense(static_cast<std::size_t>(n) * n), unit(n), col(n);
+        for (int j = 0; j < n; ++j) {
+            std::fill(unit.begin(), unit.end(), Complex(0.0, 0.0));
+            unit[j] = Complex(1.0, 0.0);
+            H(unit.data(), col.data(), n);
+            for (int i = 0; i < n; ++i) dense[static_cast<std::size_t>(j) * n + i] = col[i];
+        }
+        std::vector<double> w(n);
+        const int info = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'N', 'U', n,
+                                        reinterpret_cast<lapack_complex_double*>(dense.data()),
+                                        n, w.data());
+        if (info == 0) {
+            e_min = w.front();
+            e_max = w.back();
+            return;
+        }
+        // fall through to the Krylov estimate on a LAPACK failure
+    }
+    krylov_dim = static_cast<int>(std::min<uint64_t>(
+        static_cast<uint64_t>(std::max(krylov_dim, 2)), dim));
+
+    ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
+
+    std::vector<double> alpha, beta;
+    const int M_lanc = build_lanczos_tridiagonal_with_basis(
+        H, v0, dim,
+        static_cast<uint64_t>(krylov_dim),
+        tol, full_reorth,
+        static_cast<uint64_t>(reorth_freq),
+        alpha, beta, /*basis_vectors=*/nullptr);
+
+    if (M_lanc == 0)
+        throw std::runtime_error("estimate_spectral_bounds: Lanczos produced 0 iterations");
+
+    std::vector<double> ritz, weights;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz, weights, /*evecs=*/nullptr);
+    if (ritz.empty())
+        throw std::runtime_error("estimate_spectral_bounds: Ritz step returned 0 eigenpairs");
+
+    e_min = ritz.front();
+    e_max = ritz.back();
+}
+
 // Helper function to solve tridiagonal eigenvalue problem
 int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
                             uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 

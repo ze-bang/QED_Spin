@@ -4,7 +4,7 @@
 //
 // CpuBackend: host-memory, OpenMP-parallel realisation of the Backend
 // interface. Drives every CPU solver in the codebase (Lanczos, FTLM,
-// LTLM, TPQ, CG, KPM, time evolution) once the matvec-unification revamp
+// LTLM, TPQ, CG, time evolution) once the matvec-unification revamp
 // is complete.
 //
 // Vector primitives delegate to BLAS via the existing

@@ -197,54 +197,6 @@ def test_thermal_multi_sz_lands_per_sector_non_tpq(tmp_path, method):
         )
 
 
-def test_thermal_kpm_dos_ignores_the_sz_window_and_saves_one_file(tmp_path):
-    """KPM_DOS does NOT share the per-sector contract, ON PURPOSE.
-
-    This test used to assert the FTLM contract ("Same contract for
-    KPM_DOS") and had been failing on main: it demanded per-sector
-    ``n_up_<n>/ed_results.h5`` files and ``hdf5_path == outdir`` from a
-    method that deliberately ignores the Sz window entirely.
-
-    ``qed.thermal`` forces ``sz_conserved = False`` for KPM_DOS
-    (thermal.py, "KPM_DOS produces a density of states -- a full-SPECTRUM
-    quantity"): per-sector sub-DOS land on different Chebyshev grids that
-    the thermodynamic recombination cannot merge, so an Sz-decomposed run
-    would silently return an EMPTY ``dos_*`` -- the whole deliverable of
-    the method. The full-Hilbert lane is therefore correct, and it makes
-    exactly one aggregated ``ed_results.h5`` whose path IS the file.
-
-    So this pins what KPM_DOS actually promises. Do not "restore" the
-    per-sector assertions: the per-sector return path carries no ``dos_*``
-    fields at all, and routing KPM through it trades a 128-point density
-    of states for a tidier directory layout.
-    """
-    H = _ring()
-    outdir = str(tmp_path / "thermal_kpm_dos_multi_sz")
-
-    sz_lo = N_SITES // 2 - 1
-    sz_hi = N_SITES // 2 + 1
-    R = qed.thermal(
-        H, method="KPM_DOS",
-        T_min=0.1, T_max=5.0, num_T=4,
-        num_samples=8, kpm_num_moments=64,
-        sz_min=sz_lo, sz_max=sz_hi,
-        output_dir=outdir,
-        random_seed=22, verbose=False, device="cpu",
-    )
-
-    # One aggregated file, and hdf5_path names the FILE (no per-sector
-    # namespacing is needed -- there is only one writer).
-    assert R.hdf5_path == os.path.join(outdir, "ed_results.h5")
-    assert os.path.exists(R.hdf5_path)
-    assert R.sector_hdf5_paths == {}
-
-    # The Sz window was ignored: the run is full-Hilbert, so the DOS is
-    # the COMPLETE one. This is the assertion the old test traded away.
-    assert not R.used_sz_decomposition
-    assert len(R.dos_energies) > 0
-    assert len(R.dos_values) == len(R.dos_energies)
-
-
 # ===========================================================================
 # DSSF / spectral workflow — uniform persistence finalizer
 # ===========================================================================
@@ -295,59 +247,6 @@ def test_spectral_ground_state_cf_writes_hdf5(tmp_path):
         # Sanity: returned omega matches in-memory grid.
         np.testing.assert_allclose(np.asarray(r.omega), omega,
                                    rtol=1e-12, atol=1e-12)
-
-
-def test_spectral_kpm_dynamical_writes_hdf5(tmp_path):
-    """Same contract for KpmDynamical -- writes to
-    /dynamical/kpm_dynamical/* instead."""
-    H = _ring()
-    Op, Od = _make_s_plus_s_minus(N_SITES)
-    outdir = str(tmp_path / "spectral_kpm")
-
-    omega_grid = np.linspace(-3.0, 3.0, 24)
-    r = qed.spectral(
-        H, [Op, Od],
-        method="kpm_dynamical",
-        omega=omega_grid,
-        eta=0.05,
-        kpm_moments=64,
-        output_dir=outdir,
-        device="cpu",
-        verbose=False,
-    )
-
-    h5 = os.path.join(outdir, "ed_results.h5")
-    assert os.path.exists(h5)
-    assert getattr(r, "hdf5_path", "") == h5
-    with h5py.File(h5, "r") as f:
-        assert "/dynamical/kpm_dynamical/frequencies" in f
-        assert "/dynamical/kpm_dynamical/spectral_real" in f
-
-
-def test_spectral_method_groups_dont_collide(tmp_path):
-    """Running both GroundStateCF and KpmDynamical against the same
-    output_dir must give two independent groups under /dynamical/,
-    not overwrite each other."""
-    H = _ring()
-    Op, Od = _make_s_plus_s_minus(N_SITES)
-    outdir = str(tmp_path / "spectral_two_methods")
-
-    omega_grid = np.linspace(-3.0, 3.0, 16)
-    qed.spectral(
-        H, [Op, Od], method="ground_state_cf",
-        omega=omega_grid, eta=0.05, krylov_dim=20,
-        output_dir=outdir, device="cpu", verbose=False,
-    )
-    qed.spectral(
-        H, [Op, Od], method="kpm_dynamical",
-        omega=omega_grid, eta=0.05, kpm_moments=64,
-        output_dir=outdir, device="cpu", verbose=False,
-    )
-
-    h5 = os.path.join(outdir, "ed_results.h5")
-    with h5py.File(h5, "r") as f:
-        assert "/dynamical/ground_state_cf/frequencies" in f
-        assert "/dynamical/kpm_dynamical/frequencies" in f
 
 
 # ===========================================================================
@@ -442,9 +341,9 @@ def test_solve_streaming_symmetry_fulldiag_gpu_small_sectors(tmp_path):
 #
 # Both gaps closed in the May 2026 "make sure all workflows are properly
 # routed" follow-up:
-#   * The binding-side GPU promoter (``maybe_promote_to_gpu``) now lifts
-#     a host ``Operator`` / ``FixedSzOperator`` to ``GPUOperator`` /
-#     ``GPUFixedSzOperator`` when ``opts.backend.allow_gpu == true``.
+#   * A host ``Operator`` / ``FixedSzOperator`` serves the CUDA lane
+#     through its ``bind_cuda()`` device mirror when
+#     ``opts.backend.allow_gpu == true``.
 #   * ``_ed_params_to_thermal_options`` in ``workflow.py`` now forwards
 #     ``params.use_gpu`` / ``params.use_mpi`` into the ThermalOptions
 #     ``BackendConstraints`` (it previously stayed at the C++ default
@@ -544,7 +443,7 @@ def _ring_n(n_sites: int):
 
 # ---------------------------------------------------------------------------
 # "Loud fallback" contract -- when ``device='gpu'`` is silently demoted to
-# CPU (FullDiag / FTLM / FtlmDynamical / KpmDynamical), the binding must
+# CPU (FullDiag), the binding must
 # emit a Python ``RuntimeWarning`` so the caller can audit the demotion
 # rather than discover it through profiling.
 # ---------------------------------------------------------------------------
@@ -937,128 +836,6 @@ def test_spectral_cross_irrep_lane_propagation_gpu(tmp_path):
     assert agg.backend.lane == "gpu", (
         f"GS cross-irrep with allow_gpu=True should report "
         f"lane='gpu'; got {agg.backend.lane!r}.")
-
-
-@_REQUIRES_GPU
-def test_spectral_ftlm_dynamical_gpu_runs_on_gpu(tmp_path):
-    """Phase F regression of the "Close CPU/GPU Gaps" plan (May 2026):
-    drive ``_core.workflows_spectral`` directly with FtlmDynamical +
-    a host operator promoted to GPU, then verify the truthful lane
-    label is ``'gpu'`` AND that the GPU lane produces a finite,
-    non-trivial spectral function.
-
-    The FtlmDynamical CPU lane goes through the legacy
-    ``::compute_dynamical_correlation`` host driver (multi-sample
-    averaging, intermediate HDF5 dumps); the GPU lane routes through
-    ``detail::ftlm_dynamical_kernel_via_backend`` which is the
-    backend-templated body added by Phase F. Both lanes consume the
-    same ``SpectralOptions`` payload, the difference is purely in
-    where the Lanczos basis + matvecs run."""
-    from qed import _core
-    import numpy as np
-
-    H = _ring()
-    op = H._operator if hasattr(H, "_operator") else H
-
-    # Build a simple S^z(q=0) probe observable as the single matvec
-    # the FtlmDynamical kernel needs.
-    obs_op = _core.Operator(N_SITES, 0.5)
-    for j in range(N_SITES):
-        obs_op.add_one_body(_core.OP_SZ, j, complex(1.0, 0.0))
-
-    def _opts(allow_gpu: bool):
-        opts = _core.SpectralOptions()
-        opts.method        = _core.SpectralMethod.FtlmDynamical
-        opts.num_omega     = 16
-        opts.omega_min     = -1.0
-        opts.omega_max     = 5.0
-        opts.broadening    = 0.2
-        opts.krylov_dim    = 40
-        opts.backend.allow_gpu = allow_gpu
-        if allow_gpu:
-            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
-        return opts
-
-    sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
-    sr_cpu = _core.workflows_spectral(op, [obs_op], _opts(False))
-
-    assert sr_gpu.backend.lane == "gpu", (
-        f"FtlmDynamical with allow_gpu=True should report lane='gpu'; "
-        f"got {sr_gpu.backend.lane!r}.")
-    assert sr_cpu.backend.lane == "cpu", (
-        f"FtlmDynamical with allow_gpu=False should report lane='cpu'; "
-        f"got {sr_cpu.backend.lane!r}.")
-    sgpu = np.asarray(sr_gpu.S_real, dtype=float)
-    scpu = np.asarray(sr_cpu.S_real, dtype=float)
-    assert sgpu.size == scpu.size and sgpu.size > 0, (
-        "FtlmDynamical S_real arrays must be populated on both lanes.")
-    assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
-        "FtlmDynamical S_real curves must be finite on both lanes.")
-    # The two lanes use different random seeds; pin only the
-    # qualitative contract that both curves carry non-zero weight
-    # somewhere in the omega window (no all-zero output).
-    assert float(np.max(np.abs(sgpu))) > 0.0, (
-        "FtlmDynamical GPU lane produced an all-zero spectrum.")
-    assert float(np.max(np.abs(scpu))) > 0.0, (
-        "FtlmDynamical CPU lane produced an all-zero spectrum.")
-
-
-@_REQUIRES_GPU
-def test_spectral_kpm_dynamical_gpu_runs_on_gpu(tmp_path):
-    """Phase G regression of the "Close CPU/GPU Gaps" plan (May 2026):
-    drive ``_core.workflows_spectral`` directly with KpmDynamical +
-    a host operator promoted to GPU, verify the truthful lane label
-    is ``'gpu'`` AND that the GPU Chebyshev recursion produces a
-    finite, non-trivial S(omega).
-
-    The KpmDynamical CPU lane still goes through
-    ``compute_kpm_ltlm_from_states`` (legacy host body, single source
-    of truth for HDF5/CLI diagnostics); the GPU lane routes through
-    ``detail::kpm_dynamical_kernel_via_backend`` -- a M-matvec
-    device-resident Chebyshev recursion with M ``backend.dot`` moment
-    accumulators."""
-    from qed import _core
-    import numpy as np
-
-    H = _ring()
-    op = H._operator if hasattr(H, "_operator") else H
-
-    obs_op = _core.Operator(N_SITES, 0.5)
-    for j in range(N_SITES):
-        obs_op.add_one_body(_core.OP_SZ, j, complex(1.0, 0.0))
-
-    def _opts(allow_gpu: bool):
-        opts = _core.SpectralOptions()
-        opts.method        = _core.SpectralMethod.KpmDynamical
-        opts.num_omega     = 64
-        opts.omega_min     = -1.0
-        opts.omega_max     = 5.0
-        opts.broadening    = 0.1
-        opts.kpm_moments   = 128
-        opts.backend.allow_gpu = allow_gpu
-        if allow_gpu:
-            opts.backend.gpu_dim_floor = 0  # force-GPU twin: bypass the auto floor
-        return opts
-
-    sr_gpu = _core.workflows_spectral(op, [obs_op], _opts(True))
-    sr_cpu = _core.workflows_spectral(op, [obs_op], _opts(False))
-
-    assert sr_gpu.backend.lane == "gpu", (
-        f"KpmDynamical with allow_gpu=True should report lane='gpu'; "
-        f"got {sr_gpu.backend.lane!r}.")
-    assert sr_cpu.backend.lane == "cpu", (
-        f"KpmDynamical with allow_gpu=False should report lane='cpu'; "
-        f"got {sr_cpu.backend.lane!r}.")
-    sgpu = np.asarray(sr_gpu.S_real, dtype=float)
-    scpu = np.asarray(sr_cpu.S_real, dtype=float)
-    assert sgpu.size == scpu.size and sgpu.size > 0, (
-        "KpmDynamical S_real arrays must be populated on both lanes.")
-    assert np.all(np.isfinite(sgpu)) and np.all(np.isfinite(scpu)), (
-        "KpmDynamical S_real curves must be finite on both lanes.")
-    assert float(np.max(np.abs(sgpu))) > 0.0, (
-        "KpmDynamical GPU lane produced an all-zero spectrum.")
-    assert float(np.max(np.abs(scpu))) > 0.0, (
-        "KpmDynamical CPU lane produced an all-zero spectrum.")
 
 
 @_REQUIRES_GPU

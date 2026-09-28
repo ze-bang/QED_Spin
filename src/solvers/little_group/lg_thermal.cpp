@@ -76,15 +76,6 @@ LittleGroupThermalResult little_group_thermal(
     ed::workflows::ThermalOptions        topts,
     const LittleGroupOptions&            opt)
 {
-    using Method = ed::workflows::ThermalOptions::Method;
-    if (topts.method == Method::KpmDos) {
-        throw std::invalid_argument(
-            "little_group_thermal: KPM_DOS is a full-spectrum DOS "
-            "deliverable; per-block sub-DOS on different Chebyshev grids "
-            "cannot recombine into one density. Use the abelian sector "
-            "lane for KPM_DOS.");
-    }
-
     // Lock the temperature grid and seed ONCE so every block samples the
     // same betas (same rule as the all-Sz streaming binding).
     if (topts.betas.empty() && topts.num_temp_bins > 0

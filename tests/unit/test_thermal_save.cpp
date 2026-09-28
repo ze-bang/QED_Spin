@@ -9,7 +9,7 @@
 //     orchestrator writes ``<output_dir>/ed_results.h5`` and surfaces the
 //     resulting path via ``ThermalResult::hdf5_path`` (the same field the
 //     Python facade mirrors into ``EDResults.eigenvectors_path``).
-//   * FTLM / KPM_DOS persist the aggregated thermodynamic curves
+//   * FTLM persists the aggregated thermodynamic curves
 //     (``T, E, Cv, S, F``) under ``/ftlm/averaged/<...>``.
 //   * mTPQ persists the per-sample trajectory rows
 //     (``/tpq/samples/sample_<s>/thermodynamics``); when
@@ -20,7 +20,7 @@
 //     state vectors so callers can chain them into ``ed::workflows::spectral``
 //     (the TPQ-to-CF pipeline) without an HDF5 round-trip.
 //
-// Covered methods: FTLM, KPM_DOS (thermo-only) + mTPQ
+// Covered methods: FTLM (thermo-only) + mTPQ
 // (trajectory + probe-beta state snapshots).
 // =============================================================================
 
@@ -90,33 +90,6 @@ TEST_CASE("ed::thermal persists FTLM thermo curves",
     CHECK(dataset_exists(h5, "/ftlm/averaged/temperatures"));
     // Thermo carrier on the in-memory result.
     CHECK(R.thermo.energy.size() == opts.num_temp_bins);
-
-    std::filesystem::remove_all(outdir);
-}
-
-TEST_CASE("ed::thermal persists KpmDos thermo curves",
-          "[orchestrator][thermal-save]") {
-    auto H = heisen();
-    const std::string outdir = make_scratch_dir("thermal_save", "kpm");
-
-    ed::workflows::ThermalOptions opts;
-    opts.method        = ed::workflows::ThermalOptions::Method::KpmDos;
-    opts.num_samples   = 2;
-    opts.temp_min      = 0.1;
-    opts.temp_max      = 5.0;
-    opts.num_temp_bins = 8;
-    opts.kpm_num_moments        = 64;
-    opts.kpm_num_random_vectors = 4;
-    opts.random_seed   = 42;
-    opts.output_dir    = outdir;
-
-    auto R = ed::workflows::thermal(*H, opts);
-
-    const std::string h5 = outdir + "/ed_results.h5";
-    CHECK(std::filesystem::exists(h5));
-    CHECK(R.hdf5_path == h5);
-    CHECK(dataset_exists(h5, "/ftlm/averaged/energy"));
-    CHECK(dataset_exists(h5, "/ftlm/averaged/temperatures"));
 
     std::filesystem::remove_all(outdir);
 }
@@ -193,8 +166,8 @@ TEST_CASE("ed::thermal leaves hdf5_path empty when output_dir is unset",
 //   2. StreamingSymmetryOperator::SectorView + mTPQ + probe_betas:
 //      Same contract for symmetry sectors. The state vectors are
 //      stored in the ORBIT basis (length = sector dim, NOT full Hilbert
-//      dim). This is the matvec basis the ``CF`` / ``KpmDynamical`` lanes
-//      consume, so the saved data is directly chainable into the
+//      dim). This is the matvec basis the ``CF`` lane
+//      consumes, so the saved data is directly chainable into the
 //      TPQ-to-CF spectral pipeline without an embedToFull round trip.
 //
 //   3. FixedSzStreamingSymmetryOperator::SectorView + mTPQ + probe_betas:

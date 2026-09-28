@@ -113,20 +113,6 @@ struct EDParameters {
     bool ftlm_store_samples = false;
     bool ftlm_error_bars = true;
 
-    // ========== KPM-DOS-Specific Parameters ==========
-    // Kernel Polynomial Method density-of-states + thermodynamics.
-    // See include/ed/solvers/kpm_dos.h for full algorithmic specification.
-    uint64_t kpm_num_moments = 2048;          // M, Chebyshev moments
-    uint64_t kpm_num_random_vectors = 20;     // R, Hutchinson samples
-    uint64_t kpm_num_quadrature_nodes = 0;    // 0 = auto = 2*M
-    uint64_t kpm_spectral_bounds_krylov = 150;
-    double kpm_spectral_bound_buffer = 0.05;
-    bool kpm_use_jackson_kernel = true;       // false = Lorentz kernel
-    double kpm_lorentz_lambda = 4.0;
-    bool kpm_full_reorth = true;
-    uint64_t kpm_reorth_freq = 10;
-    uint64_t kpm_seed = 0;
-
     // ========== GPU Lanczos / Krylov-Schur Determinism ==========
     // Starting-vector RNG seed for the GPU Lanczos / GPU Krylov-Schur
     // family. 0 keeps the legacy deterministic seed (42); a nonzero
@@ -262,5 +248,5 @@ struct EDParameters {
     // were retired with their solvers in the minimalist-architecture rev
     // (May 2026). EDParameters now carries only the knobs that are still
     // used by the kept solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
-    // FULL / FTLM / mTPQ / KPM_DOS).
+    // FULL / FTLM / mTPQ / OFTLM).
 };

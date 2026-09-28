@@ -19,7 +19,7 @@
 //   * Field names match Python's `qed.solve` / `qed.thermal` / `qed.spectral`
 //     kwargs.
 //   * Defaults match Python's (T_min=0.1, num_T=24, num_samples=40,
-//     taylor_order=8, kpm_num_moments=200, ...).
+//     taylor_order=8, ...).
 //   * Method enums are accepted as case-insensitive strings
 //     ("LANCZOS" / "lanczos" / "Lanczos" / "FTLM" / "ftlm" / ...).
 //   * `device=` accepts "auto" / "cpu" / "gpu" / "mpi" / "mpi_gpu" and
@@ -52,9 +52,9 @@ namespace ed::api {
 // ---------------------------------------------------------------------------
 // String parsers for the three method enums.
 //
-// Accepts both Python tokens (`"LANCZOS"`, `"FTLM"`, `"KPM_DOS"`,
+// Accepts both Python tokens (`"LANCZOS"`, `"FTLM"`, `"mTPQ"`,
 // `"ground_state_cf"`, `"ftlm_dynamical"`) and C++ enum spellings
-// (`"Lanczos"`, `"KpmDos"`, `"GroundStateCF"`). Returns `std::nullopt`
+// (`"Lanczos"`, `"BlockLanczos"`, `"GroundStateCF"`). Returns `std::nullopt`
 // when the token is unrecognised.
 // ---------------------------------------------------------------------------
 
@@ -144,9 +144,6 @@ struct ThermalOptions {
     bool        use_sz_if_conserved   = true;
     std::string output_dir            = "";
     std::string device                = "";
-    /// KPM_DOS knobs (Python defaults).
-    int         kpm_num_moments       = 200;
-    int         kpm_num_random_vectors = 16;
     /// mTPQ knobs (Python defaults).
     std::size_t tpq_num_measure_points = 100;
     std::optional<double> tpq_measure_beta_min = std::nullopt;
@@ -170,8 +167,9 @@ struct ThermalOptions {
 // explicit defaults; otherwise picks the legacy C++ defaults.
 // ===========================================================================
 struct SpectralOptions {
-    /// "" / "auto" => pick from (T, omega): if T is set => FtlmDynamical,
-    /// else GroundStateCF.
+    /// "" / "auto" => pick from (T, omega): if T is set => FtlmDynamical
+    /// (which ``ed::workflows::spectral`` rejects: finite T runs on the
+    /// finite-T spectral path), else GroundStateCF.
     std::string method                = "";
     /// Optional single temperature (mirrors Python's float-or-iterable).
     std::optional<double> T           = std::nullopt;
@@ -205,20 +203,6 @@ struct SpectralOptions {
     /// Lanczos solve. Length MUST match ``H.geometry().local_dim``.
     /// Mirror of ``ed::workflows::SpectralOptions::initial_state``.
     std::vector<std::complex<double>> initial_state;
-
-    /// Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-    /// KPM-dynamical knobs (used only by ``method == "kpm_dynamical"``;
-    /// ignored by the GroundStateCF / FtlmDynamical lanes).
-    std::size_t kpm_moments           = 200;
-    /// Chebyshev kernel for KPM-dynamical: "Jackson" (default) or
-    /// "Lorentz".
-    std::string kpm_kernel            = "Jackson";
-    /// Lorentz kernel decay parameter (only used when
-    /// ``kpm_kernel == "Lorentz"``).
-    double      kpm_lorentz_lambda    = 4.0;
-    /// Optional override for the (E_min, E_max) Chebyshev rescaling.
-    /// Unset (default) -> let the kernel discover them via Lanczos.
-    std::optional<std::pair<double, double>> kpm_spectral_bounds;
 };
 
 // ---------------------------------------------------------------------------

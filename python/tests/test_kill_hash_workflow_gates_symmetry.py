@@ -1,7 +1,7 @@
 """Phase E.2 of the "Kill the GPU State-Lookup Hash" plan (May 2026).
 
 Symmetry-path mirror of Phase D's per-workflow regression gates. Pins
-that the SAME 8 workflows (or all that the streaming-symmetry binding
+that the same workflows (or all that the streaming-symmetry binding
 actually supports) clear without setup-time blowup when the user runs
 on ``device='gpu'`` AND with a non-trivial spatial symmetry attached.
 
@@ -45,13 +45,8 @@ the new rank table still beats the hash at C(24, 12) = 2.7M.
 Streaming-symmetry method coverage
 ----------------------------------
 
-The streaming-symmetry C++ bindings cover 7 of the 8 universal
-workflows; ``KpmDynamical`` has no streaming-symmetry binding today
-(the spectral symmetry lanes are the cross-irrep GroundStateCF and
-FTLM kernels only). We test the supported ones and explicitly skip
-``KpmDynamical`` with a ``pytest.skip`` that surfaces the missing
-binding -- a future plan can wire the symmetry+KpmDynamical path
-and lift the skip.
+The spectral symmetry lanes are the cross-irrep GroundStateCF and FTLM
+kernels; every workflow with a GPU symmetry path is gated below.
 """
 
 from __future__ import annotations
@@ -255,29 +250,6 @@ def test_phase_e2_gs_lanczos_gpu_sym():
     )
 
 
-# ---- KpmDos -------------------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_e2_kpm_dos_gpu_sym():
-    """KPM_DOS+sym+GPU currently raises ``cuRAND error code 105``
-    inside the per-sector kernel launch -- reproducible BOTH with the
-    Phase E.1 rank-table path AND with ``ED_GPU_USE_HASH=1`` re-enabled,
-    so this is a pre-existing limitation of the KPM_DOS GPU+symmetry
-    combination, NOT a kill-hash regression.
-
-    The skip is INTENTIONAL universality bookkeeping (mirroring the
-    ``test_phase_e2_kpm_dynamical_gpu_sym`` skip): it surfaces the
-    incomplete cell in pytest output instead of silently dropping it.
-    A future plan that addresses the cuRAND launch failure inside
-    ``kpm_dos_gpu``'s per-sector recombination path can lift the skip.
-    """
-    pytest.skip(
-        "KPM_DOS+sym+GPU raises cuRAND status 105 in the C++ orchestrator "
-        "before the per-sector matvec even fires; same failure with "
-        "ED_GPU_USE_HASH=1, so this is unrelated to Phase E.1's rank-table "
-        "rewrite. Re-enable the gate when KPM_DOS+sym+GPU lands."
-    )
-
-
 # ---- FTLM ---------------------------------------------------------------
 @_REQUIRES_GPU
 def test_phase_e2_ftlm_gpu_sym(sym_ring, tmp_path):
@@ -298,8 +270,8 @@ def test_phase_e2_ftlm_gpu_sym(sym_ring, tmp_path):
     res, _ = _time_and_check(go, "FTLM[sym]")
     assert res is not None
     # ``used_symmetry_decomposition`` is the cleanest signal that the
-    # streaming-symmetry binding engaged; FTLM does set it (KPM_DOS /
-    # mTPQ paths set it less consistently, see those tests).
+    # streaming-symmetry binding engaged; FTLM does set it (the
+    # mTPQ path sets it less consistently, see that test).
     assert getattr(res, "used_symmetry_decomposition", False) is True
 
 
@@ -330,29 +302,6 @@ def test_phase_e2_mtpq_gpu_sym(sym_ring, tmp_path):
     # test_lane_exploitation_matrix).
     assert getattr(res, "used_symmetry_decomposition", False) is True
     assert hasattr(res, "energy") and np.all(np.isfinite(res.energy))
-
-
-# ---- KpmDynamical (DSSF) ------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_e2_kpm_dynamical_gpu_sym():
-    """No symmetry-aware C++ binding for KpmDynamical yet -- the
-    spectral symmetry lanes are the cross-irrep GroundStateCF (T=0) and
-    FTLM (finite T) kernels only. The symmetry mirror of Phase D is
-    incomplete on this method; Phase E.1 nonetheless covers the dense
-    rank-table path, and the hash IS dead on KpmDynamical+sym once that
-    binding lands.
-
-    The skip is INTENTIONAL universality bookkeeping: it surfaces the
-    missing binding in pytest output instead of silently dropping the
-    coverage cell. Lift this skip when the symmetry+KpmDynamical
-    binding ships.
-    """
-    pytest.skip(
-        "KpmDynamical has no streaming-symmetry C++ binding yet; "
-        "Phase E.1's rank-table indirection is still installed for "
-        "the workflow but cannot be exercised end-to-end from Python "
-        "until a streaming-symmetry KpmDynamical binding is wired."
-    )
 
 
 # ---- FtlmDynamical (DSSF) -----------------------------------------------

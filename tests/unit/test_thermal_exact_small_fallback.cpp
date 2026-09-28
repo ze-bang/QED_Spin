@@ -20,10 +20,6 @@
 // ED_THERMAL_EXACT_SMALL=0 so it keeps gating the real kernels; that escape
 // is pinned here too, since the two files' contracts are complementary and a
 // regression in either direction should fail exactly one of them.
-//
-// KpmDos is deliberately NOT in the fallback: its deliverable includes the
-// Chebyshev density of states, which the exact path does not produce (the
-// same rationale as the probe_betas carve-out).
 // =============================================================================
 
 #include "common/catch2_harness.h"

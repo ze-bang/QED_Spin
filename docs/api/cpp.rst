@@ -117,10 +117,10 @@ documentation.
 - ``include/ed/krylov/block_lanczos_kernel.h`` -- block Lanczos.
 - ``include/ed/krylov/krylov_schur_kernel.h`` -- thick-restart
   Krylov-Schur.
-- ``include/ed/thermal/{ftlm,ltlm,mtpq,ctpq,kpm_dos}_kernel.h`` --
+- ``include/ed/thermal/{ftlm,ltlm,mtpq,ctpq}_kernel.h`` --
   finite-temperature kernel facades.
-- ``include/ed/observables/{expectation,static_correlator,cf_dynamical,kpm_dynamical,time_evolution}.h``
-  -- correlator primitives (cf-spectral, KPM, time evolution).
+- ``include/ed/observables/{expectation,cf_spectral_kernel,ftlm_cross_irrep_kernel}.h``
+  -- correlator primitives (expectation, cf-spectral, finite-T FTLM).
 
 ed::dssf -- Dynamical / static structure factor
 -----------------------------------------------
@@ -162,8 +162,10 @@ Jul 2026.)
 ed::gpu -- CUDA lane (built only with WITH_CUDA=ON)
 ----------------------------------------------------
 
-GPU operators and solvers live under ``include/ed/gpu/`` and are only
-compiled when ``WITH_CUDA=ON``: ``gpu_operator.cuh``, ``gpu_ftlm.cuh``,
-``gpu_solvers.h``, ``gpu_ed_wrapper.h``, ``gpu_mixed_precision.h``,
-``kpm_dos_gpu.cuh``, ``kernel_config.h``, ``bit_operations.cuh``,
-``combinadic.cuh``.
+The CUDA lane is only compiled when ``WITH_CUDA=ON``. Host operators
+hand ``CudaBackend`` a device matvec through ``bind_cuda()``
+(``include/ed/matvec/cuda_matvec_backend.cuh``,
+``include/ed/matvec/backends/cuda_backend.cuh``, and the rep-sector
+mirror in ``src/symmetry/streaming_symmetry_gpu_mirror.cu``);
+``include/ed/gpu/combinadic.cuh`` holds the shared constant-memory
+Pascal table for fixed-Sz lookups.

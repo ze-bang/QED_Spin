@@ -18,10 +18,6 @@ Grid axes:
   solver : dense-per-block (full_spectrum) | Lanczos (solve lowest-k) |
            FTLM | LTLM | mTPQ (sampled thermal) | exact thermal |
            continued-fraction (little-group GS-DSSF)
-
-KPM-DOS is deliberately absent from the regime/content grid: it declines
-symmetry by physics (one full-spectrum DOS); its contract has its own pin
-in the existing suites.
 """
 from __future__ import annotations
 

@@ -8,7 +8,7 @@
 #   ed_core         Core types. Depends on ed_io.
 #   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
 #                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
-#                   LTLM, KPM_DOS, observables, dynamics). Depends on
+#                   LTLM, observables, dynamics). Depends on
 #                   ed_core and ed_io.
 #   ed_solvers_gpu  All GPU/CUDA solvers (only built when WITH_CUDA). Depends
 #                   on ed_core, ed_io, and the CUDA runtime/cuBLAS/cuSPARSE/
@@ -224,8 +224,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/observables.cpp
     ${SOLVERS_CPU_DIR}/lanczos.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
-    ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
     ${SRC_DIR}/solvers/little_group/lg_engine.cpp
     ${SRC_DIR}/solvers/little_group/lg_block_solve.cpp
@@ -379,26 +377,12 @@ set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 if(WITH_CUDA)
     set(ED_SOLVERS_GPU_SOURCES
-        ${SOLVERS_GPU_DIR}/gpu_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
-        ${SOLVERS_GPU_DIR}/gpu_kernels.cu
-        # Operator-collapse Phase 2b (Jun 2026): gpu_fixed_sz_operator.cu,
-        # gpu_full_diag.cu, gpu_block_lanczos.cu, gpu_krylov_schur.cu, and
-        # gpu_tpq.cu were deleted along with the dead GPUEDWrapper forwarders
-        # that were their only callers. The production GPU paths now run off
-        # the unified host operators' bind_cuda() device matvec (CudaBackend /
-        # CudaMatVecBackend); GPUFTLMSolver was retired in consolidation
-        # Family 3 (FTLM rides the backend-generic via_backend kernels).
-        # gpu_lanczos.cu (the Gen-1 hand-rolled GPULanczos class) was retired:
-        # runGPULanczos routes entirely through gpu_lanczos_kernel_facade.cu
-        # (lanczos_kernel<CudaBackend>). The one capability it uniquely held --
-        # on-disk basis spill for oversized-basis eigenvector runs -- is now a
-        # clear facade error rather than a separate hand-rolled solver.
-        ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
-        ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
-        ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
+        # The GPU paths run off the unified host operators' bind_cuda()
+        # device matvec (CudaBackend / CudaMatVecBackend) and the rep-sector
+        # mirror below. combinadic.cu defines the shared constant-memory
+        # Pascal table the device basis policies rank fixed-Sz states with.
+        ${SOLVERS_GPU_DIR}/combinadic.cu
         ${SOLVERS_GPU_DIR}/little_group_gpu.cu
-        ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for
         # StreamingSymmetryOperator + FixedSz variant. Lives here (and
@@ -462,9 +446,8 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
-    # Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
-    # `build_lanczos_tridiagonal_with_basis` deprecation warning -- the GPU
-    # ed_wrapper still calls the CPU legacy function for the eigenvector
-    # reconstruction path.
+    # Phase 5.3 (Krylov-unification gap-fill): library TUs see the internal
+    # view of the headers (no `build_lanczos_tridiagonal_with_basis`
+    # deprecation diagnostics).
     target_compile_definitions(ed_solvers_gpu PRIVATE ED_BUILDING_INTERNAL=1)
 endif()

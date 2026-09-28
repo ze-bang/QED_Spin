@@ -1,6 +1,6 @@
 // =============================================================================
 // src/orchestrator/orch_thermal.cpp -- ed::workflows::thermal and its lanes
-// (exact-small eigenspectrum fallback, mTPQ sampling, FTLM / KpmDos,
+// (exact-small eigenspectrum fallback, mTPQ sampling, FTLM / OFTLM,
 // the all-Sz sweep).
 // Part of the workflow orchestrator; see orchestrator_internal.h for the
 // file map.
@@ -51,7 +51,7 @@ static ThermodynamicData compute_canonical_thermo_from_eigs(
 ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     require_hermitian_input(H, "ed::thermal");
     // All lanes are wired: mTPQ dispatches through the unified
-    // `tpq_kernel` via the Phase 2.4 facades; FTLM / KpmDos
+    // `tpq_kernel` via the Phase 2.4 facades; FTLM / OFTLM
     // dispatch through their own `*_kernel<Backend>` templates (CPU
     // implementations today, GPU when the kernels migrate). The variant
     // visit at each lane keeps the dispatch backend-agnostic.
@@ -80,7 +80,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
     // COMPLETION GUARANTEE (thermal lane). The operator's basis is already built,
     // so the binding constraint is the kernel WORKING SET: FTLM keep a
-    // krylov_dim window of length-N vectors; TPQ / KPM a handful. Plan it and
+    // krylov_dim window of length-N vectors; TPQ a handful. Plan it and
     // refuse cleanly if it would not fit, before allocating those vectors. The
     // small-sector exact fallback (D <= SMALL_THERMAL_DIM) is tiny and always
     // passes. allow_infeasible (force) opts out.
@@ -88,7 +88,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
     // is the per-call working dim (symmetry iterates sectors a level up, so this
     // is the sector dim there). FTLM and LTLM both keep one sample's Krylov
-    // basis at a time (LTLM routes through the FTLM kernel); TPQ/KPM are O(1)
+    // basis at a time (LTLM routes through the FTLM kernel); TPQ is O(1)
     // state vectors.
     {
         const std::uint64_t D = H.global_dim();
@@ -116,7 +116,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     // per-sample Krylov basis + the exact-eigenpair Lanczos basis
                     vecs = std::max<std::size_t>(opts.krylov_dim, 4)
                          + 2 * opts.num_exact + 34; break;
-                default:  // mTPQ / KpmDos: a handful of state vectors
+                default:  // mTPQ: a handful of state vectors
                     vecs = 8; break;
             }
         }
@@ -175,9 +175,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // vs FTLM 2.3e-02 (sampling), i.e. 13 orders for microseconds of
     // eigensolve. The deliverable of FTLM / OFTLM / mTPQ is identical
     // here -- canonical E(T)/C(T)/S(T) -- so all four take the exact route.
-    // KpmDos is deliberately EXCLUDED: its deliverable includes the Chebyshev
-    // density of states, which this path does not produce (same rationale as
-    // the probe_betas carve-out below).
     //
     // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
@@ -264,7 +261,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             //
             // SOTA recipe:
             //   1. Measure the true spectral bounds (E_min, E_max) with a
-            //      short Lanczos (reuse the KPM estimator).
+            //      short Lanczos (estimate_spectral_bounds).
             //   2. Pick L from ONE resolution knob: Delta_beta_target.
             //        L_res  = <H>_inf + 2 / Delta_beta_target
             //        L_stab = E_max + buffer   (strictly above the ceiling)
@@ -292,7 +289,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             } else if constexpr (std::is_same_v<B, ed::matvec::CpuBackend>) {
                 // CPU lane: run the shared Lanczos spectral-bound
                 // estimator on a host-pointer wrapper of the matvec.
-                ed::kpm_dos::MatVec legacy_H =
+                std::function<void(const Complex*, Complex*, int)> legacy_H =
                     [&matvec](const std::complex<double>* in,
                               std::complex<double>* out, int n) {
                         matvec(in, out, static_cast<std::size_t>(n));
@@ -309,7 +306,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     // without reorthogonalization; skip it (the estimator
                     // does not retain the Krylov basis anyway) to avoid a
                     // spurious "reorth skipped" warning and wasted work.
-                    ed::kpm_dos::estimate_spectral_bounds(
+                    ::estimate_spectral_bounds(
                         legacy_H, bdim, kry, /*full_reorth=*/false,
                         /*reorth_freq=*/0, /*tol=*/1e-10,
                         gen, e_min_est, e_max_est);
@@ -509,61 +506,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         R.ground_state_energy = R.thermo.energy.empty()
             ? 0.0
             : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
-    } else if (opts.method == ThermalOptions::Method::KpmDos) {
-        // Phase E1 of the "Backend x Symmetries x Workflows" plan
-        // (May 2026): the KPM-DOS kernel now dispatches on Backend
-        // type internally (see kpm_dos_kernel.h). Both CpuBackend and
-        // CudaBackend are supported.
-        std::visit([&](auto& backend_uptr) {
-            using BPtr = std::decay_t<decltype(backend_uptr)>;
-            using B = typename BPtr::element_type;
-            constexpr bool is_cpu =
-                std::is_same_v<B, ed::matvec::CpuBackend>;
-#ifdef WITH_CUDA
-            constexpr bool is_cuda =
-                std::is_same_v<B, ed::matvec::CudaBackend>;
-#else
-            constexpr bool is_cuda = false;
-#endif
-            if constexpr (!(is_cpu || is_cuda)) {
-                throw std::runtime_error(
-                    "ed::thermal: KpmDos requires a CpuBackend or "
-                    "CudaBackend; distributed backends are not yet "
-                    "wired. Pin BackendConstraints to route through "
-                    "the CPU/CUDA lanes.");
-            } else {
-                ed::thermal::KpmDosOptions kopts;
-                kopts.betas = opts.betas;
-                kopts.random_seed = opts.random_seed;
-                // Wave B3 (May 2026): pass-through caller-supplied
-                // spectral bounds. NaN means "estimate via Lanczos".
-                kopts.e_min_override = opts.e_min_override;
-                kopts.e_max_override = opts.e_max_override;
-                // Closing-the-gap follow-up (May 2026): forward the
-                // user's KPM knobs. ``0`` keeps the kernel default
-                // so legacy CLI call sites with no knob set are
-                // unaffected.
-                if (opts.kpm_num_moments > 0) {
-                    kopts.num_moments = opts.kpm_num_moments;
-                }
-                if (opts.kpm_num_random_vectors > 0) {
-                    kopts.num_random_vectors = opts.kpm_num_random_vectors;
-                }
-                auto matvec = H.template bind<B>();
-                auto kres = ed::thermal::kpm_dos_kernel<B>(
-                    *backend_uptr, matvec, H.geometry().local_dim,
-                    H.geometry().global_dim, kopts);
-                R.thermo.energy = std::move(kres.energy);
-                R.thermo.specific_heat = std::move(kres.specific_heat);
-                R.thermo.entropy = std::move(kres.entropy);
-                R.thermo.free_energy = std::move(kres.free_energy);
-                R.ground_state_energy = kres.e_min_estimate;
-                // Surface the raw DOS the method exists to produce (was
-                // computed and discarded; only its thermodynamics escaped).
-                R.dos_energies = std::move(kres.dos_grid_energies);
-                R.dos_values   = std::move(kres.dos_grid_values);
-            }
-        }, variant);
     } else {
         throw std::runtime_error(
             "ed::thermal: unknown ThermalOptions::Method enumerator.");
@@ -572,7 +514,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // Surface unification follow-up (May 2026): populate
     // ``R.thermo.free_energy = E - T * S`` post-hoc so downstream
     // consumers see the full thermodynamic quintet (T, E, Cv, S, F).
-    // The FTLM / KpmDos kernel facades return E/Cv/S only; the
+    // The FTLM / OFTLM kernel facades return E/Cv/S only; the
     // legacy ``finite_temperature_lanczos`` populated F from the
     // partition function (F = -T ln Z), which is mathematically
     // equivalent to E - T S once normalised. We use the latter form
@@ -602,13 +544,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     //     ``HDF5IO::appendTPQThermodynamics``), plus state vectors at
     //     the betas closest to ``opts.probe_betas`` written via
     //     ``HDF5IO::saveTPQState``.
-    //   - FTLM / KPM_DOS: aggregated thermodynamic curves
+    //   - FTLM / OFTLM: aggregated thermodynamic curves
     //     (``T, E, Cv, S, F``) only -- no state vectors.
     // -----------------------------------------------------------------
     // The unified file ships:
     //   * mTPQ: per-sample trajectory rows, plus the probe-beta state
     //     snapshots when they are populated.
-    //   * FTLM / KPM_DOS: aggregated thermodynamic curves.
+    //   * FTLM / OFTLM: aggregated thermodynamic curves.
     if (!opts.output_dir.empty()
             && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
         try {
@@ -658,7 +600,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                                          /*overwrite=*/true);
                 }
             } else {
-                // FTLM / KPM-DOS: aggregated thermodynamic
+                // FTLM / OFTLM: aggregated thermodynamic
                 // curves. The kernel facades do not surface per-T
                 // standard errors (those live on ``FTLMResults`` for
                 // the legacy CLI path); the shared-file saver below
@@ -668,7 +610,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 const std::vector<double> zeros(N, 0.0);
                 const char* label =
                     (opts.method == ThermalOptions::Method::FTLM)   ? "FTLM"
-                  : (opts.method == ThermalOptions::Method::KpmDos) ? "KPM_DOS"
                   : "thermal";
                 HDF5IO::saveFTLMThermodynamics(
                     h5_path,

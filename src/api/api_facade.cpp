@@ -65,8 +65,6 @@ parse_thermal_method(std::string_view name) {
     const auto t = trim(name);
     if (ieq(t, "FTLM"))                                 return M::FTLM;
     if (ieq(t, "mTPQ") || ieq(t, "MTPQ") || ieq(t, "mtpq")) return M::mTPQ;
-    if (ieq(t, "KPM_DOS") || ieq(t, "KpmDos") || ieq(t, "kpm_dos") || ieq(t, "KPMDOS"))
-        return M::KpmDos;
     return std::nullopt;
 }
 
@@ -81,11 +79,6 @@ parse_spectral_method(std::string_view name) {
     if (ieq(t, "ftlm_dynamical")    || ieq(t, "FtlmDynamical")
         || ieq(t, "dynamical_thermal") || ieq(t, "dynamical"))
         return M::FtlmDynamical;
-    // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-    // KpmDynamical -- Chebyshev expansion of `delta(omega - H)`.
-    if (ieq(t, "kpm_dynamical")     || ieq(t, "KpmDynamical")
-        || ieq(t, "kpm_dyn")        || ieq(t, "KPM_DYNAMICAL"))
-        return M::KpmDynamical;
     return std::nullopt;
 }
 
@@ -184,7 +177,7 @@ to_legacy(const ThermalOptions& opts, std::uint64_t dim_hint) {
         } else {
             throw std::invalid_argument(
                 "ed::api::thermal: unknown method token '" + opts.method +
-                "'. Accepts 'FTLM', 'mTPQ', 'KPM_DOS'.");
+                "'. Accepts 'FTLM', 'mTPQ'.");
         }
     }
     wf.num_samples         = opts.num_samples;
@@ -197,8 +190,6 @@ to_legacy(const ThermalOptions& opts, std::uint64_t dim_hint) {
     wf.temp_max            = opts.T_max;
     wf.num_temp_bins       = opts.num_T;
     wf.selected_sectors    = opts.selected_sectors;
-    wf.kpm_num_moments     = opts.kpm_num_moments;
-    wf.kpm_num_random_vectors = opts.kpm_num_random_vectors;
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026).
     wf.probe_betas         = opts.probe_betas;
     wf.backend = device_constraints(opts.device, dim_hint);
@@ -244,15 +235,6 @@ to_legacy(const SpectralOptions& opts, std::uint64_t dim_hint) {
     wf.selected_sectors = opts.selected_sectors;
     // Pillar 3 (May 2026): caller-supplied seed for GroundStateCF.
     wf.initial_state    = opts.initial_state;
-    // Pillar 4 (May 2026): KPM-dynamical knobs.
-    wf.kpm_moments      = opts.kpm_moments;
-    if (ieq(opts.kpm_kernel, "lorentz")) {
-        wf.kpm_kernel = ed::workflows::SpectralOptions::KpmKernel::Lorentz;
-    } else {
-        wf.kpm_kernel = ed::workflows::SpectralOptions::KpmKernel::Jackson;
-    }
-    wf.kpm_lorentz_lambda = opts.kpm_lorentz_lambda;
-    wf.kpm_spectral_bounds = opts.kpm_spectral_bounds;
     wf.backend = device_constraints(opts.device, dim_hint);
     return wf;
 }

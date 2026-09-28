@@ -7,7 +7,7 @@
 // Coverage matrix
 // ---------------
 //
-//   Methods   : FTLM, mTPQ, KpmDos
+//   Methods   : FTLM, mTPQ
 //   Symmetry  : none (full Hilbert),
 //               U(1)/Sz (per-Sz-sector recombination),
 //               spatial (Z_N translation + combine_sector_thermodynamics),
@@ -16,8 +16,8 @@
 //               GPU (if WITH_CUDA and a device is present at runtime)
 //   Trials    : three independent random seeds per method
 //   Observables: E(T) and Cv(T) for all methods;
-//                S(T) additionally for FTLM and KpmDos (which include the full
-//                ln(D) entropy baseline in their formulas).
+//                S(T) additionally for FTLM (which includes the full
+//                ln(D) entropy baseline in its formula).
 //
 // System under test
 // -----------------
@@ -38,12 +38,9 @@
 //             For sector-combination tests the free-energy weighting
 //             also uses this biased F, so only E is checked after combine.
 //
-//   KpmDos  : Chebyshev trace estimator.  Accurate at all T with enough
-//             moments.  E, Cv, S all tested.
-//
 // Temperature grids
 // -----------------
-//   T_BROAD : [1.0, 10.0], 15 log-spaced points — FTLM, KpmDos.
+//   T_BROAD : [1.0, 10.0], 15 log-spaced points — FTLM.
 //   T_HIGH  : [3.0, 10.0], 10 log-spaced points — mTPQ (TPQ variance
 //             shrinks at higher T; trajectory reaches β=0.33 in 200 steps).
 //
@@ -112,7 +109,7 @@ namespace {
 constexpr uint64_t N_SITES = 6;
 constexpr double   J       = 1.0;
 
-// "Broad" T range: valid for FTLM, KpmDos.
+// "Broad" T range: valid for FTLM.
 //   mTPQ uses T_HIGH_MIN (see below).
 constexpr double T_BROAD_MIN = 1.0;
 constexpr double T_BROAD_MAX = 10.0;
@@ -263,23 +260,11 @@ ThermalOptions make_mtpq_opts(uint64_t seed, bool allow_gpu = false) {
     return o;
 }
 
-ThermalOptions make_kpm_opts(uint64_t seed, bool allow_gpu = false) {
-    ThermalOptions o;
-    o.method                 = ThermalOptions::Method::KpmDos;
-    o.kpm_num_moments        = 512;
-    o.kpm_num_random_vectors = 24;
-    o.betas                  = BETAS_BROAD;
-    o.random_seed            = seed;
-    o.backend.allow_gpu      = allow_gpu;
-    return o;
-}
-
 ThermalOptions opts_for(ThermalOptions::Method m, uint64_t seed,
                         bool allow_gpu = false) {
     switch (m) {
         case ThermalOptions::Method::FTLM:   return make_ftlm_opts(seed, allow_gpu);
         case ThermalOptions::Method::mTPQ:   return make_mtpq_opts(seed, allow_gpu);
-        case ThermalOptions::Method::KpmDos: return make_kpm_opts(seed,  allow_gpu);
         default: throw std::logic_error("unknown method");
     }
 }
@@ -288,7 +273,6 @@ std::string method_name(ThermalOptions::Method m) {
     switch (m) {
         case ThermalOptions::Method::FTLM:   return "FTLM";
         case ThermalOptions::Method::mTPQ:   return "mTPQ";
-        case ThermalOptions::Method::KpmDos: return "KpmDos";
         default: return "??";
     }
 }
@@ -446,14 +430,6 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
             run_trial(*H, ThermalOptions::Method::mTPQ, seed, ref,
                       "mTPQ/no-sym");
     }
-
-    SECTION("KpmDos") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        auto H = make_full_heisen();
-        for (uint64_t seed : SEEDS)
-            run_trial(*H, ThermalOptions::Method::KpmDos, seed, ref,
-                      "KpmDos/no-sym");
-    }
 }
 
 // ===========================================================================
@@ -522,12 +498,6 @@ TEST_CASE("thermal methods vs dense reference: U(1)/Sz symmetry",
         for (uint64_t seed : SEEDS)
             sz_trial(ThermalOptions::Method::mTPQ, seed, ref,
                      /*tol_E_combo=*/0.5);
-    }
-
-    SECTION("KpmDos") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : SEEDS)
-            sz_trial(ThermalOptions::Method::KpmDos, seed, ref);
     }
 }
 
@@ -599,12 +569,6 @@ TEST_CASE("thermal methods vs dense reference: spatial Z_N translation symmetry"
                           /*tol_E_combo=*/0.5);
     }
 
-    SECTION("KpmDos") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : SEEDS)
-            spatial_trial(ThermalOptions::Method::KpmDos, seed, sym_root, ref);
-    }
-
     std::filesystem::remove_all(sym_root);
 }
 
@@ -615,7 +579,7 @@ TEST_CASE("thermal methods vs dense reference: spatial Z_N translation symmetry"
 //    then flat-combine all sector thermo blocks.
 //
 //    Two representative seeds; E+Cv checked for all methods;
-//    S additionally checked for FTLM and KpmDos.
+//    S additionally checked for FTLM.
 // ===========================================================================
 
 namespace {
@@ -689,19 +653,13 @@ TEST_CASE("thermal methods vs dense reference: Sz + spatial (U(1) × Z_N)",
                              /*tol_E_combo=*/0.5);
     }
 
-    SECTION("KpmDos") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : seeds2)
-            sz_spatial_trial(ThermalOptions::Method::KpmDos, seed, sym_root, ref);
-    }
-
     std::filesystem::remove_all(sym_root);
 }
 
 // ===========================================================================
 // 5. GPU backend — if WITH_CUDA and a device is present at runtime
 //
-//    Run all five methods with allow_gpu=true and verify they still agree with
+//    Run each method with allow_gpu=true and verify it still agrees with
 //    the dense reference.  Skipped (SUCCEED) on GPU-less hosts.
 // ===========================================================================
 
@@ -737,16 +695,6 @@ TEST_CASE("thermal GPU lane vs dense reference",
                            TOL_E, TOL_CV, TOL_S,
                            "mTPQ/gpu",
                            /*compare_entropy=*/false);
-    }
-
-    SECTION("KpmDos GPU") {
-        auto opts = make_kpm_opts(GPU_SEED, true);
-        auto R    = ed::workflows::thermal(*H, opts);
-        REQUIRE((R.backend.lane == "gpu" || R.backend.lane == "cpu"));
-        check_thermo_close(R.thermo, ref_broad,
-                           TOL_E, TOL_CV, TOL_S,
-                           "KpmDos/gpu",
-                           /*compare_entropy=*/true);
     }
 }
 #endif  // WITH_CUDA

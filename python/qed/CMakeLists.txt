@@ -6,13 +6,9 @@
 # Linked against the project's CPU static-library stack (ed_solvers_cpu) so
 # the binding inherits BLAS/LAPACK/HDF5/OpenMP transitively. When the
 # top-level build sets ``WITH_CUDA=ON`` we additionally PRIVATE-link
-# ``ed_solvers_gpu`` so the dispatcher header (`ed_wrapper.h`) -- which
-# `dispatcher_bindings.cpp` ``#include``s and which references
-# ``GPUEDWrapper::*`` symbols inside ``#ifdef WITH_CUDA`` blocks at
-# compile time -- can resolve them at link time. The Python module
-# itself never instantiates GPU code from Python; it just routes
-# ``params.use_gpu = True`` calls into the directory / streaming-symmetry
-# dispatchers, which then call into the CUDA kernels.
+# ``ed_solvers_gpu``, which holds the device lanes (the operators'
+# ``bind_cuda()`` CudaMatVecBackend mirrors, the rep-sector mirror, the
+# little-group GPU eigensolver) that the workflow bindings dispatch into.
 #
 # When built via scikit-build-core (pip install [-e] .), the binary lands in
 # `python/qed/_core*.so` next to `__init__.py`. When built via the
@@ -71,9 +67,9 @@ target_link_libraries(_core PRIVATE
     ed_input
 )
 
-# When the project was configured with WITH_CUDA=ON, the dispatcher header
-# `ed_wrapper.h` references GPUEDWrapper::* symbols (gated by
-# `#ifdef WITH_CUDA`, which is set via `add_definitions(-DWITH_CUDA)` in
+# When the project was configured with WITH_CUDA=ON, the bindings reference
+# the device-lane symbols in ed_solvers_gpu (gated by `#ifdef WITH_CUDA`,
+# which is set via `add_definitions(-DWITH_CUDA)` in
 # `cmake/EDDependencies.cmake`). We must PRIVATE-link ed_solvers_gpu so the
 # linker can resolve them.
 if(WITH_CUDA AND TARGET ed_solvers_gpu)

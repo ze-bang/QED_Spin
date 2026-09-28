@@ -18,8 +18,8 @@ void bind_workflows_thermal(py::module_& m) {
     m.def("workflows_thermal",
           [](Operator& op, ed::workflows::ThermalOptions opts) {
               // Phase E of the "Close CPU/GPU Gaps" plan (May 2026):
-              // every thermal method (FTLM / mTPQ /
-              // KpmDos) dispatches on Backend internally and accepts both
+              // every thermal method (FTLM / OFTLM /
+              // mTPQ) dispatches on Backend internally and accepts both
               // ``CpuBackend`` and ``CudaBackend``, so the host operator's
               // lazy CudaMatVecBackend mirror (operator-collapse Phase 2a)
               // serves the GPU lane directly. The ``supports_gpu`` gate
@@ -36,8 +36,8 @@ void bind_workflows_thermal(py::module_& m) {
           },
           py::arg("op"),
           py::arg("opts") = ed::workflows::ThermalOptions{},
-          "Run the unified finite-temperature workflow (FTLM / mTPQ / "
-          "KPM-DOS) over the auto-selected Backend. ``allow_gpu`` "
+          "Run the unified finite-temperature workflow (FTLM / OFTLM / "
+          "mTPQ) over the auto-selected Backend. ``allow_gpu`` "
           "routes the matvec through the host operator's lazy "
           "CudaMatVecBackend device mirror without manual conversion.");
 
@@ -223,63 +223,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                       opts.random_seed = std::random_device{}();
                   }
 
-                  // -----------------------------------------------------
-                  // Wave B3 (May 2026): for the KPM-DOS lane, estimate
-                  // the spectral bounds ONCE on the largest sector and
-                  // reuse for every sector call. The bounds are global
-                  // properties of H, so per-sector re-estimation is a
-                  // 1.5-3x overhead amplifier for KPM-DOS-Symm. Only
-                  // applies when the caller has not provided their own
-                  // overrides.
-                  // -----------------------------------------------------
-                  double shared_e_min =
-                      std::numeric_limits<double>::quiet_NaN();
-                  double shared_e_max =
-                      std::numeric_limits<double>::quiet_NaN();
-                  if (opts.method ==
-                          ed::workflows::ThermalOptions::Method::KpmDos
-                      && !(std::isfinite(opts.e_min_override)
-                           && std::isfinite(opts.e_max_override))
-                      && sector_indices.size() > 1) {
-                      std::size_t best_k   = sector_indices.front();
-                      std::size_t best_dim = 0;
-                      for (std::size_t k : sector_indices) {
-                          auto sec = handle.sector(k);
-                          if (!sec) continue;
-                          if (sec->dim() > best_dim) {
-                              best_dim = sec->dim();
-                              best_k   = k;
-                          }
-                      }
-                      auto sec = handle.sector(best_k);
-                      if (sec && sec->dim() > 0) {
-                          try {
-                              std::mt19937 gen(
-                                  opts.random_seed
-                                      ? opts.random_seed
-                                      : 0xdeadbeefULL);
-                              double lo = 0.0, hi = 0.0;
-                              ed::kpm_dos::MatVec H_mv =
-                                  [&sec](const Complex* in, Complex* out,
-                                         int n) {
-                                      sec->apply(in, out,
-                                          static_cast<std::size_t>(n));
-                                  };
-                              ed::kpm_dos::estimate_spectral_bounds(
-                                  H_mv, sec->dim(),
-                                  /*krylov_dim=*/80,
-                                  /*full_reorth=*/true,
-                                  /*reorth_freq=*/10,
-                                  /*tol=*/1e-10,
-                                  gen, lo, hi);
-                              shared_e_min = lo;
-                              shared_e_max = hi;
-                          } catch (...) {
-                              // Silent fallback: kernel estimates.
-                          }
-                      }
-                  }
-
                   // Save & DSSF Upgrades follow-up (May 2026): when the
                   // user supplied an ``output_dir`` AND a TPQ method,
                   // each per-sector run wrote to the SAME
@@ -294,7 +237,7 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                   // aggregate ``ThermalResult``. Non-TPQ methods can
                   // also benefit (per-sector ftlm/averaged groups stay
                   // intact) but the bug was specific to TPQ because
-                  // FTLM / KPM-DOS only ship the aggregated curves.
+                  // FTLM / OFTLM only ship the aggregated curves.
                   const bool need_per_sector_outdir =
                       !opts.output_dir.empty()
                       && !HDF5IO::isDisabledOutputPath(opts.output_dir);
@@ -360,11 +303,6 @@ void bind_workflows_thermal_streaming(py::module_& m) {
                               + "/sector_k_" + std::to_string(k);
                       } else {
                           topts.output_dir.clear();
-                      }
-                      if (std::isfinite(shared_e_min)
-                          && std::isfinite(shared_e_max)) {
-                          topts.e_min_override = shared_e_min;
-                          topts.e_max_override = shared_e_max;
                       }
                       // Stage 12f: restrict this sector's stochastic trace
                       // to the spin-S tower -- Lowdin-projected seeds +
@@ -558,8 +496,8 @@ void bind_workflows_thermal_streaming(py::module_& m) {
         spin_l : float, optional
             Spin magnitude (0.5 for spin-1/2, the default).
         opts : ThermalOptions, optional
-            Per-sector finite-T options (FTLM / mTPQ /
-            KPM-DOS). ``selected_sectors`` filters the loop.
+            Per-sector finite-T options (FTLM / OFTLM /
+            mTPQ). ``selected_sectors`` filters the loop.
         fixed_sz_n_up : int or None, optional
             If set, project to a fixed-Sz sector with this ``n_up``
             and run the symmetry sector loop *inside* that Sz block.

@@ -60,7 +60,7 @@ void bind_workflows_solve(py::module_& m) {
               // FixedSzOperator advertise ``supports_device_matvec`` and
               // ``bind_cuda()`` builds a CudaMatVecBackend device mirror, so
               // ``ed::select_backend`` picks the CudaBackend lane straight
-              // off the capability flag -- no GPUOperator promotion needed.
+              // off the capability flag.
               //
               // Exception: FullDiag (small-dim O(N^3) dense LAPACK solve) has
               // no GPU implementation and its column-build runs on host

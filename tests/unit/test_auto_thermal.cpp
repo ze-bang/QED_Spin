@@ -4,10 +4,7 @@
 // Smoke-tests the unified `ed::workflows::thermal(H, opts)` orchestrator.
 // Covers the mTPQ path that the orchestrator currently routes
 // through `tpq_kernel<Backend>` (Phase 4.2 / 4.3 of the Minimalist ED
-// Collapse). The FTLM / KPM_DOS lanes are intentionally NOT
-// covered here --- they remain on the legacy CPU-only path until Phase 6
-// of the cleanup sweep lands the `<Backend>` versions and we can route
-// them uniformly.
+// Collapse), plus a smoke test that the FTLM lane is wired.
 //
 // Migrated from the legacy `ed::auto_pilot::thermal(...)` API during the
 // ED Cleanup Sweep Phase 2 (May 2026). The legacy auto-pilot's per-Sz
@@ -74,33 +71,25 @@ TEST_CASE("workflows::thermal mTPQ produces a finite ground-state estimate "
     REQUIRE(res.ground_state_energy >= gs.eigenvalues[0] - 1e-6);
 }
 
-TEST_CASE("workflows::thermal FTLM / KpmDos lanes are wired",
-          "[workflows][thermal][ftlm][ltlm][kpm_dos]") {
-    // Phase 6 wired the FTLM / KPM-DOS lanes through the unified
-    // orchestrator by routing them at the kernel-shim level
-    // (`ed::thermal::{ftlm_kernel,ltlm_kernel,kpm_dos_kernel}`). This
-    // test verifies the orchestrator actually executes those kernels
+TEST_CASE("workflows::thermal FTLM lane is wired",
+          "[workflows][thermal][ftlm][ltlm]") {
+    // Phase 6 wired the FTLM lane through the unified
+    // orchestrator by routing it at the kernel-shim level
+    // (`ed::thermal::{ftlm_kernel,ltlm_kernel}`). This
+    // test verifies the orchestrator actually executes the kernel
     // and returns a populated ThermalResult.
     auto H = build_heisen();
 
     const std::vector<double> betas = { 0.1, 1.0, 5.0 };
 
     // CPU-lane smoke tests (see the mTPQ case above): these tiny,
-    // high-iteration FTLM / KPM runs are dominated by GPU launch overhead;
+    // high-iteration FTLM runs are dominated by GPU launch overhead;
     // GPU correctness is covered by the thermal::*_kernel<CudaBackend> tests.
     SECTION("FTLM") {
         ThermalOptions opts;
         opts.method      = ThermalOptions::Method::FTLM;
         opts.num_samples = 4;
         opts.krylov_dim  = 30;
-        opts.betas       = betas;
-        opts.random_seed = 7;
-        opts.backend.allow_gpu = false;
-        REQUIRE_NOTHROW(ed::workflows::thermal(*H, opts));
-    }
-    SECTION("KpmDos") {
-        ThermalOptions opts;
-        opts.method      = ThermalOptions::Method::KpmDos;
         opts.betas       = betas;
         opts.random_seed = 7;
         opts.backend.allow_gpu = false;

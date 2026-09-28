@@ -12,9 +12,7 @@
 //                  or krylov_schur_kernel<Backend>       (many eigs / harder problems)
 //                  or full_diag fallback                  (small dim)
 //     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
-//                  or the existing FTLM / KpmDos kernels (CPU-only
-//                     until they migrate to Backend; orchestrator routes
-//                     CPU-friendly cases here).
+//                  or the FTLM / OFTLM kernels
 //     ed::spectral  -> cf_spectral_kernel<Backend>
 //
 // The orchestrator carries the legacy CLI behaviour ONLY for the
@@ -41,9 +39,9 @@
 //                      so the CudaBackend instantiation of the solve path
 //                      lives here and nowhere else.
 //   orch_thermal.cpp   thermal(): exact-small eigenspectrum fallback, mTPQ
-//                      sampling, FTLM / KpmDos lanes, all-Sz sweep
-//   orch_spectral.cpp  spectral(): GroundStateCF / KpmDynamical /
-//                      FtlmDynamical lanes plus the host GS seed refinement
+//                      sampling, FTLM / OFTLM lanes, all-Sz sweep
+//   orch_spectral.cpp  spectral(): the GroundStateCF lane plus the host GS
+//                      seed refinement
 //   orch_su2.cpp       Stage 12 SU(2) helpers: full-diag predicate, SU(2)
 //                      invariance probe, Lowdin targeting, highest-weight
 //                      tower thermodynamics
@@ -82,16 +80,13 @@
 #include <string>
 #include <unistd.h>  // sysconf
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/observables/cf_dynamical.h>
 #include <ed/observables/cf_spectral_kernel.h>
-#include <ed/observables/kpm_dynamical.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/thermal/tpq_thermo.h>  // compute_tpq_thermo_from_trajectories aggregator
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
-#include <ed/thermal/kpm_dos_kernel.h>
 #include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
 #include <ed/thermal/mtpq_f32.h>

@@ -10,7 +10,7 @@
 // Design:
 //   * `LinearOperator` derives from `ed::matvec::MatVecOperator`, so every
 //     existing concrete operator (`MatVecOperator`, `DistributedOperator`,
-//     `GPUOperator`, `DistributedGPUOperator`, ...) remains usable via the
+//     ...) remains usable via the
 //     legacy `MatVecOperator*` API; the new entry points just need them
 //     to also expose `geometry()` and the matching `bind<Backend>` lane.
 //   * `Geometry` captures every piece of metadata `ed::select_backend`
@@ -167,8 +167,8 @@ public:
     // The two virtuals below let the orchestrator detect such cases
     // and dispatch. The defaults are conservative: ``is_real_hermitian``
     // returns false, ``bind_real_cpu`` throws. Concrete subclasses
-    // (notably ``Operator``, ``SectorView``, ``DistributedOperator``,
-    // ``GPUOperator``) override only when their internal storage
+    // (notably ``Operator``, ``SectorView``, ``DistributedOperator``)
+    // override only when their internal storage
     // genuinely supports a `double*`-typed apply.
     // -------------------------------------------------------------------
 
@@ -206,7 +206,7 @@ public:
     // -------------------------------------------------------------------
     // Wave C2 (May 2026): batched multi-column matvec.
     //
-    // Block solvers (KPM Chebyshev moments over R random vectors,
+    // Block solvers (stochastic traces over R random vectors,
     // FTLM block-Lanczos, GMRES variants) benefit from amortising
     // any per-matvec overhead (orbit walk, term-table prefetch, OMP
     // team spin-up) across a "batch" of input columns processed

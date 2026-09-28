@@ -133,53 +133,6 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                       opts.random_seed = std::random_device{}();
                   }
 
-                  // Wave B3: for KPM-DOS, estimate spectral bounds on the
-                  // globally largest sector and share across all sectors.
-                  double shared_e_min =
-                      std::numeric_limits<double>::quiet_NaN();
-                  double shared_e_max =
-                      std::numeric_limits<double>::quiet_NaN();
-                  if (opts.method ==
-                          ed::workflows::ThermalOptions::Method::KpmDos
-                      && !(std::isfinite(opts.e_min_override)
-                           && std::isfinite(opts.e_max_override))
-                      && n_ops > 1) {
-                      std::size_t best_i   = 0;
-                      std::uint64_t best_dim = 0;
-                      for (std::size_t i = 0;
-                           i < static_cast<std::size_t>(n_ops); ++i) {
-                          if (set.operators[i] &&
-                              set.operators[i]->dim() > best_dim) {
-                              best_dim = set.operators[i]->dim();
-                              best_i   = i;
-                          }
-                      }
-                      auto* best_sec = set.operators[best_i].get();
-                      if (best_sec && best_sec->dim() > 0) {
-                          try {
-                              std::mt19937 gen(opts.random_seed
-                                                   ? opts.random_seed
-                                                   : 0xdeadbeefULL);
-                              double lo = 0.0, hi = 0.0;
-                              ed::kpm_dos::MatVec H_mv =
-                                  [best_sec](const Complex* in, Complex* out,
-                                              int n) {
-                                      best_sec->apply(in, out,
-                                          static_cast<std::size_t>(n));
-                                  };
-                              ed::kpm_dos::estimate_spectral_bounds(
-                                  H_mv, best_sec->dim(),
-                                  /*krylov_dim=*/80,
-                                  /*full_reorth=*/true,
-                                  /*reorth_freq=*/10,
-                                  /*tol=*/1e-10,
-                                  gen, lo, hi);
-                              shared_e_min = lo;
-                              shared_e_max = hi;
-                          } catch (...) {}
-                      }
-                  }
-
                   const bool need_per_sector_outdir =
                       !opts.output_dir.empty()
                       && !HDF5IO::isDisabledOutputPath(opts.output_dir);
@@ -220,11 +173,6 @@ void bind_workflows_thermal_all_sz(py::module_& m) {
                               + std::to_string(tag.sector_index);
                       } else {
                           topts.output_dir.clear();
-                      }
-                      if (std::isfinite(shared_e_min)
-                          && std::isfinite(shared_e_max)) {
-                          topts.e_min_override = shared_e_min;
-                          topts.e_max_override = shared_e_max;
                       }
                       all_results[i] = ed::workflows::thermal(*op, topts);
                   }

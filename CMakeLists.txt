@@ -473,7 +473,7 @@ if(BUILD_ED_TESTS)
     # consumers -- the only call sites were this test and the headers
     # mutually including each other. Solvers consume the unified
     # `ed::matvec::MatVecOperator` (which `Operator` /
-    # `FixedSzOperator` / `GPUOperator` / `DistributedOperator` /
+    # `FixedSzOperator` / `DistributedOperator` /
     # `StreamingSymmetryOperator` all derive from) directly. If a
     # future workstream needs a runtime BasisPolicy + wrapper, build
     # it fresh against an actual consumer.
@@ -494,17 +494,13 @@ if(BUILD_ED_TESTS)
     # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     # mirror-image of `test_eigenvector_save` but for
     # `ed::workflows::thermal` -- pins the uniform `ed_results.h5`
-    # contract for FTLM / KPM_DOS (thermo curves) and
+    # contract for FTLM (thermo curves) and
     # mTPQ / cTPQ (trajectory + probe-beta state vectors).
     ed_add_test(test_thermal_save               tests/unit/test_thermal_save.cpp USE_CATCH2)
     # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026): pins the
     # ``SpectralOptions::initial_state`` contract on the GroundStateCF
     # lane (auto-GS, user-supplied GS, and TPQ-style warm seeds).
     ed_add_test(test_spectral_initial_state     tests/unit/test_spectral_initial_state.cpp USE_CATCH2)
-    # Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026): pins the
-    # ``SpectralOptions::Method::KpmDynamical`` lane against the dense
-    # Lehmann reference (smoothed L2 < 5%) on the 4-site Heisenberg ring.
-    ed_add_test(test_kpm_dynamical_spectral     tests/unit/test_kpm_dynamical_spectral.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     # Full Unified-Interface Collapse, end-to-end acceptance (May 2026):
     # walks every (source x axis x workflow x method) cell of the
@@ -620,8 +616,6 @@ if(BUILD_ED_TESTS)
     #   * test_ftlm_jp           (FTLM double-Lanczos dynamical kernel gone)
     #   * test_ftlm_ltlm_dyn     (LTLM dynamical kernel gone)
     #   * test_ftlm_sssf         (FTLM SSSF static-structure-factor kernel gone)
-    #   * test_ftlm_kpm          (KPM dynamical / FTLM-KPM kernel gone -- KPM_DOS
-    #                              stays; covered by test_kpm_dos)
     # The dynamical-correlator coverage moves to Phase 6 primitives.
     # (execution-planner test removed with the planner)
     # Streaming/tableless basis construction (Gosper enum + membership subspace)
@@ -659,8 +653,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_sector_plan                tests/unit/test_sector_plan.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
-    # Phase D2 (KPM density-of-states + thermodynamics kernel)
-    ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Phase E (TPQ dynamical correlator) -- retired in the
     # minimalist-architecture rev (May 2026). TPQ dynamical correlators
     # become workflow-level compositions of mtpq_kernel +
@@ -773,29 +765,18 @@ if(BUILD_ED_TESTS)
     target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
 
     # -------------------------------------------------------------------------
-    # CPU/GPU equivalence (P1.9). Only added when WITH_CUDA is ON so non-GPU
+    # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU
     # builds skip compilation entirely. The TEST_CASEs themselves SKIP at
     # runtime when no CUDA device is detected (cudaGetDeviceCount), which
     # keeps the build-only `linux-cuda-build` CI lane green even though it
     # has no NVIDIA hardware attached.
     # -------------------------------------------------------------------------
     if(WITH_CUDA)
-        ed_add_test(test_cpu_gpu_equivalence    tests/unit/test_cpu_gpu_equivalence.cpp USE_CATCH2)
-        # Phase 3a #3: FP32 cuSPARSE SpMV + FP64 dot/norm/axpy mixed-precision path.
-        ed_add_test(test_gpu_mixed_precision_spmv tests/unit/test_gpu_mixed_precision_spmv.cpp USE_CATCH2)
         # Phase 2 of the matvec-unification (May 2026): CudaBackend BLAS-1
         # round-trips + agreement of `lanczos_kernel<Backend&>` between
         # CpuBackend and CudaBackend on a 6-site Heisenberg chain. First
         # production consumer of `ed/matvec/backends/cuda_backend.cuh`.
         ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
-        # Phase A.1 of the "Kill the GPU State-Lookup Hash" plan
-        # (May 2026): pin the colex convention between
-        # ``unrank_combination_dev`` (already in the codebase) and the
-        # new ``rank_combination_dev`` that replaces the 8-32 GiB
-        # ``d_state_hash_`` device table. Failure here means the
-        # fixed-Sz matvec kernels would silently miss states once we
-        # flip the dispatch in Phase A.2.
-        ed_add_test(test_gpu_fixed_sz_rank      tests/unit/test_gpu_fixed_sz_rank.cpp USE_CATCH2)
     endif()
 
     # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3

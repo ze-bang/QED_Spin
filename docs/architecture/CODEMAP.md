@@ -38,7 +38,7 @@ flowchart TB
     ep["ed_parallel<br/>numa.cpp"]
     eio["ed_io<br/>basis + reorth + checkpoint"]
     ec["ed_core<br/>ed_config.cpp"]
-    esc["ed_solvers_cpu<br/>lanczos KPM … TPQ FTLM …"]
+    esc["ed_solvers_cpu<br/>lanczos … TPQ FTLM …"]
     esg["ed_solvers_gpu<br/>.cu GPU solvers"]
     edssf["ed_dssf<br/>operator_spec dssf_method dssf_io"]
     esym["ed_symmetry<br/>group irreps sector_operator_gpu"]
@@ -230,9 +230,9 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 - `cross_sector_observable.h`, `cross_sector_orbit_observable.h`, `dssf_engine.h`, `dssf_io.h`, `operator_spec.h`
 
-### `include/ed/gpu/` *(CUDA lane: device operator, kernels config, KPM-DOS GPU; `gpu_ed_wrapper.h` is the test-only legacy GPU Lanczos entry)*
+### `include/ed/gpu/` *(combinadic rank/unrank + the shared constant-memory Pascal table for fixed-Sz GPU lookups)*
 
-- `bit_operations.cuh`, `combinadic.cuh`, `gpu_ed_wrapper.h`, `gpu_mixed_precision.h`, `gpu_operator.cuh`, `gpu_solvers.h`, `kernel_config.h`, `kpm_dos_gpu.cuh`
+- `combinadic.cuh`
 
 ### `include/ed/input/` *(lattice + fluent HamiltonianBuilder + `.dat` writers; backs `qed.input`)*
 
@@ -254,9 +254,9 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 - `cpu_backend.h`, `cuda_backend.cuh`, `mpi_backend.h`, `mpi_cuda_backend.cuh`
 
-### `include/ed/observables/` *(expectation, static + dynamical correlator kernels, cross-irrep FTLM)*
+### `include/ed/observables/` *(expectation, continued-fraction spectral kernel, cross-irrep FTLM)*
 
-- `cf_dynamical.h`, `cf_spectral_kernel.h`, `expectation.h`, `ftlm_cross_irrep_kernel.h`, `kpm_dynamical.h`, `static_correlator.h`
+- `cf_spectral_kernel.h`, `expectation.h`, `ftlm_cross_irrep_kernel.h`
 
 ### `include/ed/operators/`
 
@@ -272,15 +272,15 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 ### `include/ed/solvers/` *(CPU drivers incl. the factorized little-group engine `little_group_solve.h`)*
 
-- `ftlm.h`, `ftlm_dist.h`, `ftlm_kpm.h`, `kpm_dos.h`, `lanczos.h`, `little_group_blocks.h`, `little_group_solve.h`, `ltlm.h`, `observables.h`
+- `ftlm.h`, `ftlm_dist.h`, `lanczos.h`, `little_group_blocks.h`, `little_group_solve.h`, `ltlm.h`, `observables.h`
 
 ### `include/ed/symmetry/` *(Subspace x ProjectorChain composition, CompiledGroup, irreps, sector plan/set/basis, GPU mirrors)*
 
 - `canonical_thermo.h`, `commute_check.h`, `compiled_group.h`, `env_gates.h`, `fixed_sz_membership.h`, `gosper.h`, `group.h`, `irreps.h`, `observable_character.h`, `orbit_table.h`, `projector.h`, `projector_chain.h`, `rep_projection.h`, `rep_sector_data.h`, `sector_basis.h`, `sector_gpu_mirror.h`, `sector_operator.h`, `sector_plan.h`, `sector_set.h`, `spin_flip.h`, `subspace.h`, `sym_profile.h`, `symmetry_cache.h`, `symmetry_sector_data.h`, `time_reversal.h`
 
-### `include/ed/thermal/` *(FTLM / LTLM-via-FTLM / OFTLM / mTPQ / KPM-DOS kernels; `tpq_kernel.h` also carries the CanonicalTaylor mechanism, but the user-facing cTPQ method was removed in the final consolidation)*
+### `include/ed/thermal/` *(FTLM / LTLM-via-FTLM / OFTLM / mTPQ kernels; `tpq_kernel.h` also carries the CanonicalTaylor mechanism, but the user-facing cTPQ method was removed in the final consolidation)*
 
-- `ftlm_kernel.h`, `kpm_dos_kernel.h`, `mtpq_f32.h`, `mtpq_kernel.h`, `oftlm_kernel.h`, `tpq_kernel.h`, `tpq_seeding.h`, `tpq_thermo.h`
+- `ftlm_kernel.h`, `mtpq_f32.h`, `mtpq_kernel.h`, `oftlm_kernel.h`, `tpq_kernel.h`, `tpq_seeding.h`, `tpq_thermo.h`
 
 ### `src/api/`
 
@@ -324,12 +324,12 @@ per folder; the per-subsystem design docs are `ARCHITECTURE.md`,
 
 ### `src/solvers/cpu/`
 
-- `ftlm.cpp`, `ftlm_dynamical.cpp`, `ftlm_kpm.cpp`, `kpm_dos.cpp`, `lanczos.cpp`, `observables.cpp`, `oftlm.cpp`
+- `ftlm.cpp`, `lanczos.cpp`, `observables.cpp`, `oftlm.cpp`
 - `src/solvers/little_group/` -- the little-group (factorized non-abelian) engine: `lg_internal.h` (private types, star-walk template, file map), `lg_engine.cpp`, `lg_block_solve.cpp`, `lg_stars.cpp`, `lg_blocks.cpp`, `lg_spectrum.cpp`, `lg_ground_state.cpp`, `lg_thermal.cpp`, `lg_vectors.cpp`. Python surface: `python/qed/_bindings/little_group_bindings.cpp`.
 
 ### `src/solvers/gpu/` *(the Gen-1 hand-rolled bodies and `gpu_ftlm.cu` (GPUFTLMSolver, consolidation Family 3) are gone; GPU Lanczos/FTLM/mTPQ ride `lanczos_kernel<CudaBackend>` + the backend-templated thermal kernels)*
 
-- `gpu_ed_wrapper.cu`, `gpu_kernels.cu`, `gpu_lanczos_kernel_facade.cu`, `gpu_mixed_precision.cu`, `gpu_operator.cu`, `gpu_operator_conversion.cpp`, `kpm_dos_gpu.cu`, `mtpq_f32_impl.cuh`
+- `combinadic.cu`, `little_group_gpu.cu`, `mtpq_f32_impl.cuh`
 
 ### `src/symmetry/`
 
@@ -371,7 +371,6 @@ exactly the same dispatch axes as the ground-state solvers
 |-------------|------------------------------------------|----------------------------------------------------------------------------|--------------------------------|
 | `FTLM`      | `include/ed/solvers/ftlm.h`             | `Z ≈ (D/R) Σ_r Σ_k |<r|ψ_k>|^2 e^{-β E_k}`, R random Lanczos starts        | `num_samples × krylov_dim`     |
 | `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
-| `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
 | `mTPQ`      | `include/ed/thermal/mtpq_kernel.h`      | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
 
 Each of these solvers populates the same `ThermodynamicData` payload
@@ -382,15 +381,13 @@ with proper Jensen-inequality handling.
 
 **Coverage of the unified `thermal()` entry point** (2026-07-20, verified
 by `benchmarks/bench_capability_matrix.py` against the exact partition
-sum): every method (FTLM / LTLM / OFTLM / mTPQ / KPM-DOS) rides the same
+sum): every method (FTLM / LTLM / OFTLM / mTPQ) rides the same
 flat sector pool — U(1) Sz (or the Sz-parity half), spatial irreps, the
 ∏σˣ flip split, time-reversal pairing, and point-group star copies all
 compose, on CPU and GPU. Sectors with dim ≤ 512 take the exact
 small-block route (machine precision) for every sampling method whose
 deliverable is thermodynamics; larger sectors sample per-sector and
-Z-recombine. KPM-DOS is excluded from the exact fallback on purpose (its
-Chebyshev density of states is a deliverable the exact path does not
-produce). The historical "TPQ can't factor through spatial irreps"
+Z-recombine. The historical "TPQ can't factor through spatial irreps"
 restriction is gone; `used_symmetry_decomposition` reports truthfully.
 
 ### How the auto-Sz / auto-symmetry layers integrate
@@ -463,14 +460,12 @@ generic version is what the streaming kernel now calls.
   build covers the very-large-Hilbert case the chunked path was
   built for.
 - **CPU + GPU solvers**: the Krylov plane is unified
-  (`lanczos_kernel<CpuBackend|CudaBackend>`); the one remaining split
-  surface (KPM-DOS CPU vs `kpm_dos_gpu.cu`) is bound by regression
-  tests (`test_cpu_gpu_equivalence.cpp`); `GPUFTLMSolver` was retired
+  (`lanczos_kernel<CpuBackend|CudaBackend>`); `GPUFTLMSolver` was retired
   in consolidation Family 3 (dynamical + static FTLM unified onto the
   backend-generic `via_backend` kernels). Both paths plug into the unified
-  `ed::matvec::MatVecOperator` interface -- the Hamiltonian wrappers
-  (`Operator`, `GPUOperator`, etc.) advertise their memory space tag
-  so solvers can dispatch on it.
+  `ed::matvec::MatVecOperator` interface -- the host operators
+  (`Operator`, `SubspaceOperator<Policy>`) advertise their memory space tag
+  and hand `CudaBackend` a device matvec through `bind_cuda()`.
 - **DSSF** kernel overlap between `workflows.cpp` response helpers and
   `dssf_engine.cpp` was **unified** under `ed::dssf::run` (P2.x); remaining
   overlap should be only thin wrappers.

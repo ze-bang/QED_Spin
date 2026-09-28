@@ -20,8 +20,8 @@ Each test asserts the same three guarantees:
 
 3. **Numerical correctness** -- where the workflow is deterministic
    (GS, GroundStateCF), we compare to the same call on CPU and
-   require tight agreement. Stochastic workflows (FTLM, mTPQ,
-   FtlmDynamical, KpmDynamical) cannot bit-match CPU because the RNG
+   require tight agreement. Stochastic workflows (FTLM, mTPQ)
+   cannot bit-match CPU because the RNG
    draws happen device-local, so we only assert "produces a finite,
    non-zero result".
 
@@ -202,29 +202,6 @@ def test_phase_d_gs_lanczos_gpu():
     )
 
 
-# ---- KpmDos --------------------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_d_kpm_dos_gpu(tmp_path):
-    """KPM density-of-states / qed.thermal, method=KPM_DOS, device='gpu'."""
-    H = _ring_operator()
-    def go():
-        return qed.thermal(
-            H,
-            method="KPM_DOS",
-            T_min=0.5, T_max=4.0, num_T=2,
-            sz_min=N_UP_TEST, sz_max=N_UP_TEST,
-            num_samples=2, kpm_num_moments=40,
-            kpm_num_random_vectors=2,
-            use_sz_if_conserved=True,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "kpm_dos"),
-        )
-    res, _ = _time_and_check(go, "KPM_DOS")
-    # Surface a representative numeric to ensure work happened.
-    assert res is not None
-
-
 # ---- FTLM ----------------------------------------------------------------
 @_REQUIRES_GPU
 def test_phase_d_ftlm_gpu(tmp_path):
@@ -270,67 +247,6 @@ def test_phase_d_mtpq_gpu(tmp_path):
         )
     res, _ = _time_and_check(go, "mTPQ")
     assert res is not None
-
-
-# ---- KpmDynamical (DSSF) -------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_d_kpm_dynamical_gpu(tmp_path):
-    """KpmDynamical / qed.spectral, method='kpm_dynamical', device='gpu'."""
-    H = _ring_operator()
-    Op, Od = _make_sz_pair(N_SITES_TEST, N_UP_TEST)
-    omega = np.linspace(-2.0, 4.0, 16)
-    def go():
-        return qed.spectral(
-            H, [Op, Od],
-            method="kpm_dynamical",
-            omega=omega,
-            eta=0.05,
-            kpm_moments=40,
-            num_random_vectors=2,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "kpm_dyn"),
-        )
-    res, _ = _time_and_check(go, "KpmDynamical")
-    s = np.asarray(res.S_real, dtype=float)
-    assert s.size > 0 and np.all(np.isfinite(s))
-
-
-# ---- FtlmDynamical (DSSF) -------------------------------------------------
-@_REQUIRES_GPU
-def test_phase_d_ftlm_dynamical_gpu(tmp_path):
-    """FtlmDynamical / qed.spectral, method='ftlm_dynamical', device='gpu'.
-
-    Audit 2026-07-30: a finite ``T=`` on the plain in-memory lane now
-    raises loudly -- the lane's kernels hardcode temperature 0 in the
-    orchestrator, so the old ``T=1.0`` spelling of this gate was timing a
-    computation that silently answered a different physical question
-    (the finite-T machinery lives on the symmetry / directory lanes).
-    The perf gate keeps its kill-hash purpose on the T-less spelling and
-    additionally pins the loud-refusal contract.
-    """
-    H = _ring_operator()
-    Op, Od = _make_sz_pair(N_SITES_TEST, N_UP_TEST)
-    omega = np.linspace(-2.0, 4.0, 16)
-    with pytest.raises(NotImplementedError):
-        qed.spectral(H, [Op, Od], T=1.0, method="ftlm_dynamical",
-                     omega=omega, eta=0.05, krylov_dim=20,
-                     num_random_vectors=1, device="gpu", verbose=False)
-    def go():
-        return qed.spectral(
-            H, [Op, Od],
-            method="ftlm_dynamical",
-            omega=omega,
-            eta=0.05,
-            krylov_dim=20,
-            num_random_vectors=1,
-            device="gpu",
-            verbose=False,
-            output_dir=str(tmp_path / "ftlm_dyn"),
-        )
-    res, _ = _time_and_check(go, "FtlmDynamical")
-    s = np.asarray(res.S_real, dtype=float)
-    assert s.size > 0 and np.all(np.isfinite(s))
 
 
 # ---- GroundStateCF (DSSF) -------------------------------------------------
@@ -387,10 +303,9 @@ def test_phase_d_groundstate_cf_gpu(tmp_path):
     # (non-deterministic across runs) produces O(eps) per-matvec noise
     # that compounds to ~1e-5 - 1e-4 by the end of the Krylov build.
     # Anything tighter chases atomic-order noise; anything looser would
-    # miss real backend regressions. The existing universal_save
-    # FtlmDynamical / KpmDynamical tests use the same "finite +
-    # non-zero" contract; here we add the ~1e-3 envelope as a stronger
-    # gate where determinism allows.
+    # miss real backend regressions. The stochastic gates use a
+    # "finite + non-zero" contract; here we add the ~1e-3 envelope as a
+    # stronger gate where determinism allows.
     assert max_rel_err < 1e-3, (
         f"GroundStateCF GPU vs CPU disagree at max rel err = {max_rel_err:.3e} "
         f"-- both lanes run the same deterministic CF-Lanczos (modulo "

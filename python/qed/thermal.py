@@ -43,7 +43,6 @@ import os
 import shutil
 import tempfile
 import time
-import warnings
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Sequence, Union
 
@@ -135,7 +134,7 @@ def _thermal_via_workflows_all_sz_streaming_symmetry(
     if use_gpu:
         # GPU audit (2026-09-11): per-sector dispatch. Sectors below the floor
         # run on the CPU -- a 150-iteration bound estimate plus ~200 cuBLAS syncs
-        # per sector made the GPU KPM-DOS symmetry lane 17x slower than the CPU
+        # per sector made the GPU symmetry lane 17x slower than the CPU
         # at N = 16. device='gpu' (explicit) passes floor 0 and forces every sector.
         opts.backend.gpu_dim_floor = int(gpu_dim_floor)
     opts.spin_flip     = int(spin_flip)      # Stage 8 composition toggles
@@ -237,7 +236,7 @@ def _thermal_via_workflows_streaming_symmetry(
     if use_gpu:
         # GPU audit (2026-09-11): per-sector dispatch. Sectors below the floor
         # run on the CPU -- a 150-iteration bound estimate plus ~200 cuBLAS syncs
-        # per sector made the GPU KPM-DOS symmetry lane 17x slower than the CPU
+        # per sector made the GPU symmetry lane 17x slower than the CPU
         # at N = 16. device='gpu' (explicit) passes floor 0 and forces every sector.
         opts.backend.gpu_dim_floor = int(gpu_dim_floor)
     fixed_sz = int(params.n_up) if params.use_fixed_sz else None
@@ -363,10 +362,6 @@ class ThermalResult:
     # mapping so callers can reload state vectors per sector.
     hdf5_path: str = ""
     sector_hdf5_paths: dict[Optional[int], str] = field(default_factory=dict)
-    # KPM_DOS raw density of states (Jul 2026): populated only by the
-    # KPM_DOS method (full-Hilbert lane); empty for every other method.
-    dos_energies: np.ndarray = field(default_factory=lambda: np.array([]))
-    dos_values: np.ndarray = field(default_factory=lambda: np.array([]))
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +370,6 @@ class ThermalResult:
 _THERMAL_METHODS = {
     "FTLM": DiagonalizationMethod.FTLM,
     "OFTLM": DiagonalizationMethod.OFTLM,
-    "KPM_DOS": DiagonalizationMethod.KPM_DOS,
     "MTPQ": DiagonalizationMethod.mTPQ,
 }
 
@@ -450,7 +444,7 @@ def _sector_thermo_arrays(res: EDResults) -> Optional[tuple[np.ndarray, ...]]:
     """Extract (temperatures, energy, C_v, entropy, F) from an EDResults.
 
     Returns ``None`` if the result carries no usable thermo block
-    (e.g. KPM_DOS without the temperature post-processing, or a method
+    (e.g. a method without the temperature post-processing, or one
     that errored out).
     """
     t = res.thermo_data
@@ -689,9 +683,6 @@ def thermal(
     # ``ThermalOptions.backend`` carried by the streaming-symmetry C++
     # binding.
     device: Optional[str] = None,
-    # ---- KPM_DOS specific ------------------------------------------
-    kpm_num_moments: int = 200,
-    kpm_num_random_vectors: int = 16,
     # ---- TPQ specific (mTPQ) ---------------------------------------
     tpq_num_measure_points: int = 100,
     # ``None`` -> auto-derive from (T_min, T_max). For mTPQ we
@@ -737,7 +728,7 @@ def thermal(
         In-memory :class:`Operator` instance.
     method : str or DiagonalizationMethod, optional
         Finite-T method: ``"FTLM"`` (default), ``"OFTLM"``,
-        ``"KPM_DOS"``, ``"mTPQ"``.
+        ``"mTPQ"``.
     T_min, T_max, num_T : float / int, optional
         Temperature grid. Linear in T by convention; FTLM/OFTLM use
         ``num_T`` evenly-spaced points in ``[T_min, T_max]``.
@@ -767,7 +758,7 @@ def thermal(
         reload (e.g. by :func:`qed.spectral(method="GroundStateCF",
         initial_state=...)`). Empty / ``None`` (default) -> the
         kernel skips state-vector copies and only the trajectory is
-        persisted. Ignored by FTLM / OFTLM / KPM_DOS.
+        persisted. Ignored by FTLM / OFTLM.
 
     Returns
     -------
@@ -959,13 +950,7 @@ def thermal(
     method_extra: dict[str, Any] = {
         "max_iterations": int(max_iterations) if max_iterations is not None else 0,
     }
-    if method_enum == DiagonalizationMethod.KPM_DOS:
-        method_extra.update(
-            kpm_num_moments=int(kpm_num_moments),
-            kpm_num_random_vectors=int(kpm_num_random_vectors),
-            kpm_seed=int(random_seed) if random_seed else 0,
-        )
-    elif method_enum in _TPQ_METHODS:
+    if method_enum in _TPQ_METHODS:
         # Auto-derive the TPQ measurement β grid from (T_min, T_max)
         # unless the user pinned them explicitly. We add a small
         # buffer on each end so the interpolation inside
@@ -1074,25 +1059,6 @@ def thermal(
     if not (float(T_min) > 0.0) or not (float(T_max) >= float(T_min)) or int(num_T) < 1:
         raise ValueError(f"qed.thermal: need 0 < T_min <= T_max and num_T >= 1 (got T_min={T_min}, T_max={T_max}, num_T={num_T})")
     sz_conserved = use_sz_if_conserved and bool(H_op.conserves_sz())
-    # KPM_DOS produces a density of states -- a full-SPECTRUM quantity. Sz
-    # decomposition would yield per-sector sub-DOS on different Chebyshev
-    # grids that the thermodynamic recombination cannot merge into one DOS
-    # (the raw density(E) then never reaches the caller). Run it on the full
-    # space so ThermalResult.dos_* is the complete DOS; the derived
-    # thermodynamics are identical (the DOS is Sz-summed either way).
-    if method_enum == DiagonalizationMethod.KPM_DOS:
-        # Audit fix (2026-07-30): say so when this overrides an EXPLICIT
-        # Sz request -- the derived thermodynamics are identical, but a
-        # caller who named a window deserves to know it was widened.
-        if (isinstance(sz, int) or sz_min is not None
-                or sz_max is not None):
-            warnings.warn(
-                "qed.thermal(method='KPM_DOS'): the KPM density of "
-                "states runs on the FULL Hilbert space so dos_* is "
-                "complete; the requested Sz window is ignored (the "
-                "Sz-summed thermodynamics are identical).",
-                RuntimeWarning, stacklevel=2)
-        sz_conserved = False
 
     if verbose:
         print(
@@ -1173,7 +1139,7 @@ def thermal(
             # multiple Sz sectors for a TPQ method, each sector lands
             # in its own subdirectory ``<output_dir>/n_up_<n_up>/`` so
             # the per-sector ``ed_results.h5`` files do not overwrite
-            # one another. For non-TPQ methods (FTLM / KPM-DOS)
+            # one another. For non-TPQ methods (FTLM / OFTLM)
             # the file holds only aggregated curves which the
             # ``averaged/`` group can dedupe in-place; we still route
             # per-sector to be safe and consistent.
@@ -1210,10 +1176,10 @@ def thermal(
                 p.use_fixed_sz = True
                 p.n_up = int(n_up_val)
             # SOTA upgrade (May 2026): the per-irrep sector loop is
-            # now wired for every thermal method (FTLM / KPM /
+            # now wired for every thermal method (FTLM / OFTLM /
             # mTPQ) via ``_core.workflows_thermal_streaming_symmetry``
             # + ``ed::core::combine_sector_thermodynamics``; TPQ feeds
-            # exactly the same streaming loop as FTLM / KPM, with
+            # exactly the same streaming loop as FTLM / OFTLM, with
             # the Z-weighted recombiner handling sector mixing.
             p.use_symmetry = bool(has_sym)
             # `sector=` names QUANTUM NUMBERS; selected_sectors takes raw
@@ -1285,10 +1251,6 @@ def thermal(
                 # unconditionally.
                 used_symmetry_decomposition=bool(has_sym),
                 hdf5_path=h5_path,
-                dos_energies=np.asarray(
-                    getattr(res, "dos_energies", []) or [], dtype=float),
-                dos_values=np.asarray(
-                    getattr(res, "dos_values", []) or [], dtype=float),
             )
 
         if verbose:
@@ -1495,15 +1457,14 @@ def thermal(
         # Multi-Sz overwrite fix (May 2026): EVERY method's HDF5 schema
         # ( ``/tpq/samples/sample_<s>/...`` for TPQ,
         #   ``/ftlm/averaged/<curve>`` for FTLM,
-        #   ``/ltlm/averaged/<curve>`` for LTLM,
-        #   ``/kpm_dos/...`` for KPM_DOS )
+        #   ``/ltlm/averaged/<curve>`` for LTLM )
         # is keyed by sample / beta / curve with **no sector tag**, so
         # if two Sz sectors share an ``output_dir`` the second sector's
         # ``ed_results.h5`` write silently overwrites the first. Route
         # every Sz sector to ``<output_dir>/n_up_<n_up>/ed_results.h5``
         # regardless of method. TPQ + multi-Sz was the user-visible
         # symptom because state vectors live ONLY on disk; for
-        # FTLM / KPM_DOS the recombined thermo in
+        # FTLM the recombined thermo in
         # ``ThermalResult.thermo`` would mask the corruption but the
         # HDF5 file (used for diagnostics, post-processing, audit
         # trails) would still be wrong.
@@ -1533,8 +1494,8 @@ def thermal(
             "device": device,
         }
         # Pipe ``max_iterations`` into the per-sector solver call. For
-        # mTPQ this controls the iteration budget; for FTLM /
-        # KPM_DOS it's the Lanczos / KPM cap. Closes a gap where
+        # mTPQ this controls the iteration budget; for FTLM it is
+        # the Lanczos cap. Closes a gap where
         # this helper silently used the EDParameters default (1000)
         # regardless of what the user asked for.
         if max_iterations is not None:
@@ -1577,10 +1538,6 @@ def thermal(
             used_sz_decomposition=False,
             used_symmetry_decomposition=False,
             hdf5_path=h5_path_solo,
-            dos_energies=np.asarray(
-                getattr(res, "dos_energies", []) or [], dtype=float),
-            dos_values=np.asarray(
-                getattr(res, "dos_values", []) or [], dtype=float),
         )
 
     if verbose:

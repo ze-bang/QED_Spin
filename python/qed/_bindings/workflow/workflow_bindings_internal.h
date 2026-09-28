@@ -53,7 +53,6 @@
 #include <ed/symmetry/casimir_projector.h>           // Stage 12: Lowdin targeting
 #include <ed/symmetry/su2.h>                         // Stage 12: SU(2) detection
 #include <ed/solvers/little_group_solve.h>           // make_rep_sector_matvec
-#include <ed/solvers/kpm_dos.h>                      // Wave B3: estimate_spectral_bounds
 
 #include <algorithm>
 #include <cmath>
@@ -265,9 +264,7 @@ slotted_selection_for(const ed::OperatorSpec&                     spec,
 // ``geometry().supports_device_matvec=true`` (WITH_CUDA), and their
 // ``bind_cuda()`` lazily builds a ``CudaMatVecBackend`` device mirror (the
 // SOTA no-atomic gather kernel). So ``ed::select_backend`` picks the
-// ``CudaBackend`` lane straight off the host operator's capability flag --
-// no bespoke ``GPUOperator`` / ``GPUFixedSzOperator`` promotion needed
-// (that path is retired here; the legacy classes go away in Phase 2b).
+// ``CudaBackend`` lane straight off the host operator's capability flag.
 //
 // The streaming-symmetry directory binding is likewise capability-driven:
 // the per-sector operators advertise the flag and wire their own lazy GPU
@@ -416,32 +413,24 @@ using ed::workflows::make_su2_targeting;  // hoisted
 /// tower in this block) to an empty result.
 using ed::workflows::solve_su2_targeted;  // hoisted
 
-/// The thermal lane has uneven GPU coverage:
-///   * FTLM         : CPU only (orchestrator throws on CUDA).
-///   * KpmDos : CPU or CUDA.
+/// GPU-eligible thermal methods:
+///   * FTLM         : the facade dispatches on Backend internally (see
+///                    ``include/ed/thermal/ftlm_kernel.h``) and accepts
+///                    both ``CpuBackend`` and ``CudaBackend``.
 ///   * mTPQ         : any backend.
-///
-/// As of Phase E of the "Close CPU/GPU Gaps" plan (May 2026), the
-/// FTLM facade dispatches on Backend internally (see
-/// ``include/ed/thermal/ftlm_kernel.h``) and accepts both ``CpuBackend``
-/// and ``CudaBackend``, so it joins the GPU-eligible set.
 inline bool thermal_method_supports_gpu(
     ed::workflows::ThermalOptions::Method m) noexcept {
     using M = ed::workflows::ThermalOptions::Method;
     return m == M::FTLM
-        || m == M::KpmDos
         || m == M::mTPQ;
 }
 
-/// Spectral lanes after Phases F + G of the "Close CPU/GPU Gaps"
-/// plan (May 2026): every method now dispatches on Backend
-/// internally, so the entire spectral lane is GPU-eligible.
+/// Every spectral method dispatches on Backend internally, so the entire
+/// spectral lane is GPU-eligible.
 ///   * GroundStateCF : runs the inner solve + CF kernel through
 ///                     ``H.template bind<B>()``.
-///   * FtlmDynamical : routes through
-///                     ``detail::ftlm_dynamical_kernel_via_backend``.
-///   * KpmDynamical  : routes through
-///                     ``detail::kpm_dynamical_kernel_via_backend``.
+///   * FtlmDynamical : rejected by ``ed::workflows::spectral`` before any
+///                     backend work (it needs the finite-T spectral path).
 inline bool spectral_method_supports_gpu(
     ed::workflows::SpectralOptions::Method /*m*/) noexcept {
     return true;
@@ -470,7 +459,7 @@ inline void warn_silent_cpu_fallback(const char* what,
                   "implementation in the orchestrator. Falling back to the "
                   "CPU lane. Pass device='cpu' to silence this warning, or "
                   "switch to a GPU-clean method (Lanczos/BlockLanczos/"
-                  "KrylovSchur for solve; KPM_DOS/mTPQ for "
+                  "KrylovSchur for solve; FTLM/mTPQ for "
                   "thermal; GroundStateCF for spectral).",
             py::module_::import("builtins").attr("RuntimeWarning"),
             py::arg("stacklevel") = 2);

@@ -129,7 +129,7 @@ polynomial vs coupled basis).
 
 ## Inventory
 
-### Algorithm kernels (9)
+### Algorithm kernels (8)
 
 | Algorithm        | Header                                  |
 |------------------|-----------------------------------------|
@@ -141,16 +141,12 @@ polynomial vs coupled basis).
 | LTLM             | `ed/thermal/ftlm_kernel.h` (consolidation Family 1: for thermodynamics the symmetric LTLM estimator reduces exactly to the FTLM trace, so LTLM dispatches through the FTLM kernel; the buggy GS-local-DOS `ltlm_kernel.h` was deleted) |
 | mTPQ             | `ed/thermal/mtpq_kernel.h`              |
 | cTPQ             | *(removed as a user-facing method in the final consolidation; the CanonicalTaylor mechanism survives inside `ed/thermal/tpq_kernel.h`)* |
-| KPM-DOS          | `ed/thermal/kpm_dos_kernel.h`           |
 
-### Correlator primitives (5)
+### Correlator primitives
 
 | Primitive                                   | Header                                   |
 |---------------------------------------------|------------------------------------------|
 | `expectation_value`                          | `ed/observables/expectation.h`           |
-| `static_correlator`                          | `ed/observables/static_correlator.h`     |
-| `cf_dynamical_correlator`                    | `ed/observables/cf_dynamical.h`          |
-| `kpm_dynamical_correlator`                   | `ed/observables/kpm_dynamical.h`         |
 
 ### Operator types
 
@@ -271,43 +267,25 @@ pins per-iteration `(alpha, beta)` agreement of
 `lanczos_kernel<Backend>` between `CpuBackend` and `CudaBackend` to
 ~1e-10 on a 6-site periodic Heisenberg ring.
 
-**Production migration (May 2026, days 6-7).** With `CudaBackend`
-proven, *both* paths of `GPUEDWrapper::runGPULanczos(...)` and
-`GPUEDWrapper::runGPULanczosFixedSz(...)` now dispatch into a thin
-facade onto `ed::krylov::lanczos_kernel<CudaBackend>` instead of the
-1099-LOC hand-rolled `GPULanczos::run`. The facade
-(`src/solvers/gpu/gpu_lanczos_kernel_facade.cu`) allocates `v0` on the
-GPU via `CudaBackend::make_zero_vector`, initialises it with the same
-curand-based Gaussian as the legacy class (preserving seed
-reproducibility across both paths), drives the unified kernel with a
-matvec callable that forwards into `GPUOperator::matVecGPU` (the
-`GPUFixedSzOperator` override this originally also served was retired
-in operator-collapse Phase 2b; fixed-Sz GPU matvecs now come from
-`FixedSzOperator::bind_cuda()`), then
-diagonalises the small tridiagonal on the host via Eigen. For the
-eigenpair branch (day 7), an additional Ritz-reconstruction phase does
-`num_eigs * M` backend axpys on the retained Krylov basis followed
-by a host-bound copy per Ritz vector. The legacy `GPULanczos::run` is
-retained only as a defensive fallback (invoked from a try/catch when
-the facade throws — currently the only realistic trigger is the
-`keep_basis = true` assertion under heavy device-memory pressure).
-Every call site in the orchestrator's GPU lane (`ed::workflows::solve`
-via `runGPULanczos`) and the streaming-symmetry GPU kernels picks up
-the new path without a source change; `test_cuda_backend`
-pins eigenvalue accuracy to 1e-8 and eigenpair residuals
-`|| H y - λy ||` to 1e-6, with `test_cpu_gpu_equivalence` adding a
-second seal at the wrapper level.
+**Production path.** GPU Lanczos drives
+`ed::krylov::lanczos_kernel<CudaBackend>` directly: `select_backend`
+picks `CudaBackend` off `geometry().supports_device_matvec`, and the
+host operator's `bind_cuda()` hands it a device-pointer matvec
+(`CudaMatVecBackend` for the full-space and fixed-Sz operators, the
+rep-sector mirror for symmetry sectors). `test_cuda_backend` pins
+eigenvalue accuracy to 1e-8 and eigenpair residuals `|| H y - λy ||`
+to 1e-6.
 
 The Gen-1 hand-rolled GPU bodies (`gpu_lanczos.cu`,
 `gpu_block_lanczos.cu`, `gpu_krylov_schur.cu`, `gpu_tpq.cu`,
 `gpu_full_diag.cu`, `gpu_dynamics.cu`) have all been retired: GPU
-Lanczos runs exclusively on `lanczos_kernel<CudaBackend>` via the
-facade, GPU mTPQ rides the backend-templated thermal kernels
+Lanczos runs exclusively on `lanczos_kernel<CudaBackend>`,
+GPU mTPQ rides the backend-templated thermal kernels
 (plus the fp32 mTPQ lane in `mtpq_f32_impl.cuh`), GPU FTLM (thermo,
 dynamical, and static correlation) rides the backend-generic
 `via_backend` kernels (consolidation Family 3 retired
 `gpu_ftlm.cu` / `GPUFTLMSolver`), and the remaining bespoke GPU code
-is `kpm_dos_gpu.cu`, the rep-walk symmetry kernels in
+is the rep-walk symmetry kernels in
 `term_kernels_gpu.cuh`, and `little_group_gpu.cu` (the little-group
 engine's batched cuSOLVER block eigensolve — recovered from the
 SAB-owned kernel Family 6 removed, re-homed SAB-free; drives
@@ -413,8 +391,8 @@ The dynamical-correlator coverage moves to Phase 6 primitives.
 | 2     | SquareOperator / RectangularOperator + factories  | **Retired (May 2026)** — the `ed::core::SquareOperator<MS>`, `ed::core::RectangularOperator<MS>`, `BasisPolicy<MS>` runtime hierarchy, and `square_operator_factories.h` were deleted along with their lockdown test `test_square_operator.cpp`. Zero production consumers had migrated. The unification work happened on the simpler axis: `Operator` / `FixedSzOperator` / `*Symmetry*` / `Distributed*` / `GPU*` all derive from the single `ed::matvec::MatVecOperator` base, which is what every solver consumes. |
 | 3     | CudaBackend / MpiCudaBackend headers + facades    | **Done (days 7-12)** — CudaBackend + GPU Lanczos (day 7), BOTH CPU+MPI Lanczos paths consolidated onto `lanczos_kernel<MpiBackend>` (day 8), distributed Krylov-Schur per-cycle Lanczos also delegating via new `aux_ortho_ptrs` (day 9), `MpiCudaBackend` + Phase C migration (days 11-12, GPU+MPI Lanczos / Krylov-Schur / FTLM all kernel-driven). `ed/matvec/backends/cuda_backend.cuh` is the real cuBLAS-driven `Backend` implementation. `runGPULanczos(...)` / `runGPULanczosFixedSz(...)` route *both* branches into `src/solvers/gpu/gpu_lanczos_kernel_facade.cu`. **Day 8:** templated CPU+MPI kernel in `include/ed/distributed/distributed_lanczos_kernel.h` is a ~30-line facade over `lanczos_kernel<MpiBackend>`; the row-slab entry point in `src/distributed/distributed_lanczos.cpp` was collapsed too (665 → 310 LOC). **Day 9:** the thick-restart `src/distributed/distributed_krylov_schur.cpp` had its own inline per-cycle Lanczos body that orthogonalised against the union of the locked Ritz set and the in-cycle basis. The kernel didn't speak that idiom yet, so day 9 added `LanczosKernelOptions::aux_ortho_ptrs` (a fixed user-supplied ortho set the CGS2 pass projects out alongside the basis) and migrated the KS body to use it. Per-step Allreduce count drops from `2*(k+m)` sequential to `2` batched, same headline speedup the day-1 batched-CGS2 work brought to plain Lanczos now extends to thick-restart KS. Same convergence semantics across all paths preserved via `LanczosKernelOptions::convergence_check` + the `ed::krylov::make_smallest_ritz_convergence(exct, tol)` factory in `include/ed/krylov/ritz_convergence.h`. Day 8 also fixed two correctness bugs surfaced by the migration: (i) `cap = min(max_iter, local_n)` was wrong for distributed runs where `local_n < global_dim` — added `LanczosKernelOptions::dim_cap`; (ii) the kernel's `if (local_n == 0) return` was deadlocking np=4 runs on small symmetry sectors where some ranks receive an empty slab — removed. Cumulative Lanczos-body LOC eliminated across days 8-9: ~410. `MpiCudaBackend` (NCCL + cuBLAS sibling) is the next deliverable. (The distributed solver family this wave migrated was retired wholesale in Stage 11d, Jul 2026 — `MpiBackend`/`MpiCudaBackend` and the kernel survive; the row is kept as the design record of the kernel-unification work.) |
 | 4     | block_lanczos / krylov_schur kernel headers       | **CPU-only facade, statically enforced.** `block_lanczos_kernel<Backend>` and `krylov_schur_kernel<Backend>` are inline templates that delegate to the existing CPU bodies in `src/solvers/cpu/lanczos.cpp` and round-trip through `test_kernel_facades.cpp`. As of day-10 the Backend template parameter has a `static_assert(std::is_base_of_v<CpuBackend, Backend>)` to surface mis-use at compile time — the body does not consult the backend object and uses BLAS-3 / Schur-reordering primitives that the `Backend` interface does not expose. CPU+MPI Krylov-Schur **is** unified — `src/distributed/distributed_krylov_schur.cpp` delegates its per-cycle Lanczos build to `lanczos_kernel<MpiBackend>` with `aux_ortho_ptrs` (day 9). There is no single-GPU Krylov-Schur / Block-Lanczos implementation (the Gen-1 `gpu_krylov_schur.cu` / `gpu_block_lanczos.cu` bodies were retired in Jun 2026); adding one waits on either a BLAS-3 expansion of the Backend interface or a contiguous-buffer Backend variant. |
-| 5     | FTLM / LTLM / mTPQ / cTPQ / KPM-DOS kernel headers| **Working kernels** — all five `template<Backend, MatvecFn>` kernels have real inline bodies. FTLM/LTLM run the Backend-templated `detail::ftlm_kernel_via_backend` on both lanes (WP10 C5); KPM delegates to `ed::kpm_dos::compute_kpm_dos`; the mTPQ/cTPQ kernels own their iteration loops outright (the legacy `microcanonical_tpq` / `canonical_tpq` monoliths were deleted in the Jul-2026 debt cleanup; the trajectory→ThermodynamicData aggregator lives in `include/ed/thermal/tpq_thermo.h`). Round-tripped in `test_kernel_facades.cpp`. |
-| 6     | 5 correlator-primitive headers                    | **Working CPU facade** — `expectation_value`, `static_correlator`, `cf_dynamical_correlator`, `kpm_dynamical_correlator` are real inline templates that delegate to the CPU legacy entry points (the `time_evolution_correlator` facade and its `ed/solvers/dynamics.h` Krylov time-step primitive were retired in Stage 11b — production-dead since the legacy TPQ spectral family was deleted). |
+| 5     | FTLM / LTLM / mTPQ / cTPQ kernel headers          | **Working kernels** — all four `template<Backend, MatvecFn>` kernels have real inline bodies. FTLM/LTLM run the Backend-templated `detail::ftlm_kernel_via_backend` on both lanes (WP10 C5); the mTPQ/cTPQ kernels own their iteration loops outright (the legacy `microcanonical_tpq` / `canonical_tpq` monoliths were deleted in the Jul-2026 debt cleanup; the trajectory→ThermodynamicData aggregator lives in `include/ed/thermal/tpq_thermo.h`). Round-tripped in `test_kernel_facades.cpp`. |
+| 6     | Correlator-primitive headers                      | **Working CPU facade** — `expectation_value` is a real inline template that delegates to the CPU legacy entry points (the `time_evolution_correlator` facade and its `ed/solvers/dynamics.h` Krylov time-step primitive were retired in Stage 11b — production-dead since the legacy TPQ spectral family was deleted). |
 | 7     | Workflow facade `ed/workflows/workflows.h`        | **Retired (May 2026)** — header and namespace deleted. `WorkflowResult` had no consumers and the CLI workflow body in `src/cli/workflows.cpp` already composes the kernels above directly. |
 | 8     | Auto-pilot dispatch `ed/auto/dispatch.h`          | **Retired (May 2026)** — header deleted. `Device`, `DispatchKey`, `memory_space_for`, `has_implementation`, and `to_string` had no implementation and no consumers. The live dispatch surface is now the orchestrator in `ed/orchestrator.h` (`ed::workflows::{solve, thermal, spectral}` + `SolveOptions` / `ThermalOptions` / `SpectralOptions`) together with `ed::make_operator(OperatorSpec)` in `ed/core/make_operator.h`. The entire `ed/auto/{solve,thermal,dssf,diag_tune,dssf_tune}.h` family was deleted in the surface-unification collapse alongside `ed/core/dispatch.h`. |
 | 9     | Test retirement + this document                   | **Done** — retired 8 obsolete tests (`test_ftlm_jp.cpp`, `test_ftlm_ltlm_dyn.cpp`, `test_ftlm_sssf.cpp`, `test_ftlm_kpm.cpp`, `test_thermal_methods.cpp`, `test_tpq_dynamical.cpp`, `test_method_canonicalize.cpp`, `test_square_operator.cpp`); added `test_kernel_facades.cpp`; updated audit / codemap / symmetry docs to point at this file. **268/268** tests pass after the refactor. |
@@ -495,7 +473,6 @@ The remaining forward path:
   `ed::dssf::CrossSectorObservable` directly; the orbit-basis
   cross-sector path described in `SYMMETRY.md` is the next
   workstream there.
-* KPM kernel-selection auto-tune -- ship Jackson by default.
 * Multi-comm / MPI_Comm splitting -- still `MPI_COMM_WORLD`.
 
 ## Reading order for new contributors

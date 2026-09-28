@@ -31,8 +31,8 @@ Three layers:
 
 5. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
    reference for every Google-Benchmark target in
-   [`benchmarks/`](../../benchmarks/) (CPU SpMV, GPU SpMV, CPU/GPU
-   Lanczos, GPU mixed-precision, MPI scaling, etc.). This is the
+   [`benchmarks/`](../../benchmarks/) (CPU SpMV, GPU SpMV, CPU
+   Lanczos, MPI scaling, etc.). This is the
    per-microbench API reference; `BENCHMARKS.md` is the *story*.
 
 To build the Google-Benchmark targets: `-DED_BUILD_BENCHMARKS=ON`, then

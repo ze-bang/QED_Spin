@@ -250,14 +250,12 @@ def thermal_cases(m: Model):
     H = m.operator()
     common = dict(T_min=0.25, T_max=3.0, num_T=8, random_seed=11, verbose=False, device=DEVICE)
     cs = []
-    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "OFTLM"):
         kw = dict(common)
         if method in ("FTLM", "OFTLM"):
             kw.update(num_samples=8, krylov_dim=40)
         if method == "mTPQ":
             kw.update(num_samples=4)
-        if method == "KPM_DOS":
-            kw.update(kpm_num_moments=120, kpm_num_random_vectors=8)
         for sym in (None, "auto"):
             def run(kw=kw, method=method, sym=sym):
                 r = quiet(lambda: qed.thermal(H, method=method, symmetry=sym, **kw))

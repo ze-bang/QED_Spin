@@ -236,7 +236,7 @@ qed.solve(H,
   string name to override.
 * **Device.** `device=None` uses GPU iff
   `qed.has_cuda_build()` is true and the matrix is large
-  enough for cuSPARSE matvec to amortize H2D / D2H (rule of thumb:
+  enough for the GPU matvec to amortize H2D / D2H (rule of thumb:
   dim ≥ 2¹⁴). Pass `"cpu"` / `"gpu"` to force a backend.
   (`"mpi"` / `"mpi_gpu"` -- the retired subprocess launcher -- raise
   with guidance; MPI runs go through the CLI under `mpirun`, see
@@ -276,7 +276,7 @@ arguments (listed in the signature above): `num_eigenvalues`,
 `tolerance`, `compute_eigenvectors`, `solver`, `device`, `symmetry`,
 `sector`, `sz`, `output_dir`, `max_iterations`, `block_size`, and
 `verbose`. Anything else on `EDParameters` — FTLM / LTLM / TPQ /
-KPM-DOS / observable settings — is reachable via `extra_params={...}`:
+observable settings — is reachable via `extra_params={...}`:
 
 ```python
 res = qed.solve(
@@ -310,7 +310,6 @@ The catalogue is bucketed into:
 | `ftlm`        | Finite-Temperature Lanczos                           |
 | `ltlm`        | Low-Temperature Lanczos                              |
 | `tpq`         | Thermal Pure Quantum / mTPQ                          |
-| `kpm`         | Kernel Polynomial Method DOS / thermodynamics        |
 | `thermal`     | Temperature-grid post-processing                     |
 | `observables` | Spectral / dynamical observables (`omega_*`, `dt`)   |
 | `lattice`     | Lattice metadata                                     |
@@ -341,7 +340,6 @@ refers to the four basis choices the workflow can compose:
 | `mTPQ`                    | ✅ | ✅ | ❌¹ / ✅³ | ❌¹ / ✅³ | trajectory in `eigenvalues`; thermo curve in `output_dir`/`thermo_data` |
 | `FTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` (sectors are summed) |
 | `LTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
-| `KPM_DOS`                 | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
 
 (The May-2026 minimalist-solver-matrix cleanup retired the
 `ARPACK_*` / `DAVIDSON` / `LOBPCG` / `CHEBYSHEV_FILTERED` /
@@ -357,7 +355,7 @@ normalisation, so `solver='mTPQ' + symmetry=` raises a clear
 `ValueError`. Pre-project to a fixed-Sz block instead (`sz=`), or
 use FTLM/LTLM.
 
-² FTLM/LTLM/KPM_DOS *do* combine across symmetry blocks correctly
+² FTLM/LTLM *do* combine across symmetry blocks correctly
 because each block contributes an additive term to the partition
 function; the dispatcher loops the sectors itself (and under
 `mpirun`, whole sectors are spread across ranks).
@@ -420,7 +418,6 @@ removed in Jul 2026; see "MPI jobs" below for how MPI works now.)
 | `mTPQ`                   |  ✅   |  ✅   | `qed.thermal(H, method="mTPQ"[, device='gpu'])` (fp32 GPU lane via `tpq_fp32=True`) |
 | `FTLM`                   |  ✅   |  ✅   | `qed.thermal(H, method="FTLM")`                       |
 | `LTLM`                   |  ✅   |  ❌   | `qed.thermal(H, method="LTLM")`                       |
-| `KPM_DOS`                |  ✅   |  ✅   | `qed.thermal(H, method="KPM_DOS"[, device='gpu'])`    |
 
 ### Path × device — cross-product caveats
 
@@ -667,7 +664,7 @@ the `./ED` CLI uses; the Python wrapper just makes the choices for you:
    │      → ED_MEM_GUARD_OFF=1 bypasses                   │
    ├─────────────────────────────────────────────────────┤
    │ 6. Thermal-method bookkeeping                       │
-   │    if solver ∈ {mTPQ, FTLM, LTLM, KPM_DOS}:         │
+   │    if solver ∈ {mTPQ, FTLM, LTLM}:                  │
    │      auto-create output_dir if empty                │
    │      forward num_samples / target_beta / temp_*     │
    │        / num_temp_points to params.tpq_*/ftlm_*/…   │
@@ -699,7 +696,7 @@ Everything from layer 1 down maps **1-to-1** onto the C++
 `EDParameters` fields documented in
 [`include/ed/core/ed_parameters.h`](../../include/ed/core/ed_parameters.h).
 Run `qed.list_diag_parameters()` to print them grouped by family
-(general / thermal / TPQ / FTLM / LTLM / KPM / fixed-Sz / device /
+(general / thermal / TPQ / FTLM / LTLM / fixed-Sz / device /
 symmetry / observables).
 
 ### C++ parity table
@@ -1018,7 +1015,7 @@ engine — no separate driver needed.
 | Python | C++ |
 |--------|-----|
 | `qed.spectral(dir, T=..., omega=...)` | `ed::workflows::spectral(req, opts)` |
-| the `T=` / `omega=` lane rule | `SpectralOptions::method` (`GroundStateCF` / `FtlmDynamical` / `KpmDynamical`), set explicitly |
+| the `T=` / `omega=` lane rule | `SpectralOptions::method` = `GroundStateCF` (T = 0), set explicitly; finite T runs the FTLM cross-irrep kernel |
 | `qed.dssf.build_observable_pairs(spec)` | `ed::dssf::build_observable_pairs(spec)` |
 
 The same auto-rules apply on both sides — see
@@ -1182,11 +1179,11 @@ auto out = ed::krylov::lanczos_kernel<ed::matvec::CpuBackend>(
 
 ### 8) DSSF / SSSF routine equivalents
 
-In C++ the lane is named, not inferred: `SpectralOptions::method` is
-one of `GroundStateCF` (T = 0 continued fraction), `FtlmDynamical`
-(finite-T) or `KpmDynamical` (Chebyshev expansion of
-`delta(omega - H)`). The Python `T=` / `omega=` rule picks the same
-lanes for you.
+In C++ the lane is named, not inferred: `ed::workflows::spectral` runs
+`GroundStateCF` (T = 0 continued fraction) and rejects `FtlmDynamical`
+with `std::invalid_argument` (FTLM dynamics needs temperatures). Finite-T
+spectra run the FTLM cross-irrep kernel, which the Python `T > 0` rule
+picks for you.
 
 ```cpp
 ed::dssf::DSSFRequest req;
@@ -1195,7 +1192,7 @@ req.config = &cfg;                  // required for non-single-expectation
 // Fill req.operators (OperatorSpec) as needed.
 
 ed::SpectralOptions o;
-o.method = ed::SpectralOptions::Method::FtlmDynamical;
+o.method = ed::SpectralOptions::Method::GroundStateCF;
 auto dssf = ed::workflows::spectral(req, o);
 ```
 
@@ -1223,7 +1220,7 @@ checks, then scale to `N=32`, `opts.sz=16` for production:
    `tune_params`.
 3. DSSF: build `DSSFRequest` for your directory and call
   `ed::workflows::spectral(req, dssf_opts)` with
-  `dssf_opts.method = ed::SpectralOptions::Method::FtlmDynamical;`.
+  `dssf_opts.method = ed::SpectralOptions::Method::GroundStateCF;`.
 4. mTPQ: `opts.solver = DiagonalizationMethod::mTPQ`, set
    `target_beta` + TPQ knobs in `tune_params` (the cTPQ enum value was
    removed in the final consolidation).

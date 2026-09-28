@@ -54,7 +54,6 @@ enum class DiagonalizationMethod {
     // ===== Thermal =====
     mTPQ,                     // Microcanonical TPQ
     FTLM,                     // Finite Temperature Lanczos Method
-    KPM_DOS = 8,              // Kernel Polynomial Method DOS + thermo
     OFTLM = 9,                // Orthogonalized Finite-Temperature Lanczos Method
 };
 

@@ -88,8 +88,8 @@ public:
     // API
     // ---
     // The preferred public mutation surface is the typed setters
-    // ``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``
-    // (matching the ``GPUOperator`` API). Direct pushes into
+    // ``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``.
+    // Direct pushes into
     // ``transform_data_`` / ``three_body_data_`` remain supported for
     // backward compatibility -- they update the canonical AoS, and the
     // SoA cache is rebuilt automatically on the next apply.
@@ -153,8 +153,6 @@ public:
 
     // ------------------------------------------------------------------
     // Typed setters: the canonical public mutation surface.
-    // Mirror the API used by ``GPUOperator`` so the same builder code
-    // can target either backend.
     // ------------------------------------------------------------------
 
     /// Append a one-body term (op_type, site, coeff) to the canonical AoS
@@ -368,8 +366,7 @@ public:
     // device-matvec capability so ``ed::select_backend`` picks the
     // ``CudaBackend`` lane (the operator stays host-resident; ``bind_cuda``
     // lazily builds a ``CudaMatVecBackend`` device mirror -- the SOTA
-    // no-atomic gather kernel). This replaces the bespoke
-    // ``GPUFixedSzOperator`` promotion the Python bindings used to do.
+    // no-atomic gather kernel).
     // Mirrors ``ed::symmetry::SectorOperator``'s gate;
     // ``ED_GPU_OPERATOR_MIRROR=0`` forces the CPU route for bisection.
     // -------------------------------------------------------------------

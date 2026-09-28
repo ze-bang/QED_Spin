@@ -297,11 +297,10 @@ def thermal_battery(m: Model, ref: Reference, run: Runner):
             dE = float(np.max(np.abs(E - Ei)) / N); dC = float(np.max(np.abs(C - Ci)) / N)
             return dE < tolE and dC < tolC, f"dE/N={dE:.1e} dC/N={dC:.1e}"
         return f
-    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "OFTLM"):
         kw = dict(common)
         if method in ("FTLM", "OFTLM"): kw.update(num_samples=32, krylov_dim=60)
         if method == "mTPQ": kw.update(num_samples=8)
-        if method == "KPM_DOS": kw.update(kpm_num_moments=300, kpm_num_random_vectors=16)
         for sym in (None, "auto"):
             run(Case(f"{m.name}/thermal/{method}/symmetry={sym}", lambda kw=kw, method=method, sym=sym: qed.thermal(H, method=method, symmetry=sym, **kw), chk()))
     if m.u1:
@@ -364,28 +363,6 @@ def spectral_battery(m: Model, ref: Reference, run: Runner):
             # Sz-changing probe: cross-sector lane (delta n_up inferred from the transforms)
             run(Case(f"{m.name}/spectral/gs_cf/symmetry=auto/cross_sector/{name}",
                      lambda O=O: qed.spectral(H, [O], method="ground_state_cf", symmetry="auto", **common), chk(S_ex_gs, 1e-2)))
-        # KPM: sum rule + centroid
-        def chk_kpm(S_ex):
-            def f(r):
-                S = np.asarray(r.S_real, dtype=float); w = np.asarray(r.omega, dtype=float)
-                W = np.trapezoid(S, w); Wex = np.trapezoid(S_ex, omega)
-                c = np.trapezoid(S * w, w) / max(W, 1e-12); cex = np.trapezoid(S_ex * omega, omega) / max(Wex, 1e-12)
-                ok = abs(W - Wex) < 0.08 * max(Wex, 1e-9) + 1e-3 and abs(c - cex) < 0.1
-                return ok, f"weight={W:.4f} (exact {Wex:.4f}) centroid={c:.3f} (exact {cex:.3f})"
-            return f
-        if gap_global > 1e-6:
-          # KPM peaks are far narrower than eta; integrate the sum rule on a fine grid
-          omega_fine = np.linspace(omega[0], omega[-1], 4001)
-          def chk_kpm_fine(S_ex):
-              def f(r):
-                  S = np.asarray(r.S_real, dtype=float); w = np.asarray(r.omega, dtype=float)
-                  W = np.trapezoid(S, w); Wex = np.trapezoid(S_ex, omega)
-                  c = np.trapezoid(S * w, w) / max(W, 1e-12); cex = np.trapezoid(S_ex * omega, omega) / max(Wex, 1e-12)
-                  ok = abs(W - Wex) < 0.08 * max(Wex, 1e-9) + 1e-3 and abs(c - cex) < 0.1
-                  return ok, f"weight={W:.4f} (exact {Wex:.4f}) centroid={c:.3f} (exact {cex:.3f})"
-              return f
-          run(Case(f"{m.name}/spectral/kpm_dynamical/plain/{name}",
-                 lambda O=O: qed.spectral(H, [O], method="kpm_dynamical", kpm_moments=300, omega=omega_fine, eta=eta, verbose=False, device=DEVICE), chk_kpm_fine(S_ex_gs)))
     # multi-observable call (both Sz-conserving so a fixed block is legal)
     if m.u1:
         pbs = []

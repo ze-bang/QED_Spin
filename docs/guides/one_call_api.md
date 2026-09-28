@@ -18,8 +18,8 @@ prefer the Python entry points below.
 |----------------------------------------------------------------|-----------------------------------------|---------------------------------------------|
 | Diagonalize H (eigenvalues / GS / a few states)                | `qed.solve(H, ...)`                     | `ed::workflows::solve(H, SolveOptions{...})`     |
 | Finite-temperature thermodynamics (mTPQ / FTLM / LTLM / OFTLM) | `qed.thermal(H, ...)`                   | `ed::workflows::thermal(H, ThermalOptions{...})` |
-| Structure factor (zero or finite T, static or dynamical, KPM)  | `qed.spectral(directory, T=, omega=)`   | `ed::workflows::spectral(req, SpectralOptions{...})` |
-| Pure heuristic helpers (η, ω, Krylov, R, KPM moments)          | `qed.auto_tune.*`                       | (Python-only)                               |
+| Structure factor (zero or finite T, static or dynamical)       | `qed.spectral(directory, T=, omega=)`   | `ed::workflows::spectral(req, SpectralOptions{...})` |
+| Pure heuristic helpers (η, ω, Krylov, R)                       | `qed.auto_tune.*`                       | (Python-only)                               |
 
 Each call accepts (a) **what you want** (`num_eigenvalues`, `T`,
 `omega`, …) and (b) **optional overrides** for any auto-selected
@@ -255,9 +255,6 @@ result_multi = qed.spectral(
 # Each momentum point's contribution is stored in res.per_sector_pair:
 # for idx, sector_pair in enumerate(result_multi.per_sector_pair):
 #     print(f"Q = {q_pts[idx]}   SSSF = {sector_pair.static_sf:.4f}")
-
-# KPM-DOS thermodynamics (uses every CPU core; no Lanczos at all):
-qed.spectral("runs/heisenberg6", method="kpm_thermodynamics")
 ```
 
 What `qed.spectral` decides for you:
@@ -270,8 +267,6 @@ What `qed.spectral` decides for you:
   | no      | yes     | `ground_state_dssf`   |
   | yes     | no      | `static_thermal`      |
   | yes     | yes     | `dynamical_thermal`   |
-
-  Or pass `method="kpm_thermodynamics"` explicitly.
 
 * **η broadening** (`eta=None`): set to `c · Δω` with `c ∈ {2, 3, 5}`
   for aggressive / balanced / conservative `level=`. Avoids both
@@ -286,9 +281,6 @@ What `qed.spectral` decides for you:
 
 * **# random vectors** (`num_random_vectors=None`):
   `64/√D` clamped to `[4, 32]` (balanced). Trace-estimator R.
-
-* **KPM moments** (`kpm_moments=None`): default `2048`. Only consulted
-  for `method="kpm_thermodynamics"`.
 
 * **Device** (`device=None`): `pick_device(sector_dim,
   has_cuda_build=...)` — adds `--use-gpu` to `./ED dssf` when a GPU is

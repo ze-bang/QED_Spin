@@ -63,7 +63,6 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "OFTLM":           {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     # OFTLM is the only CPU-only thermal lane (H.bind_cpu() in its orchestrator branch).
-    "KPM_DOS":         {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
 }
 
 

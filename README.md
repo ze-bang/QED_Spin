@@ -27,13 +27,13 @@ The same shape is exposed in Python as
 | Feature | Status |
 |---------|--------|
 | Ground state / low-lying spectrum (Lanczos, Block-Lanczos, Krylov-Schur, dense LAPACK) | production |
-| Finite-temperature thermodynamics (FTLM, LTLM, OFTLM, mTPQ, KPM-DOS) | production |
+| Finite-temperature thermodynamics (FTLM, LTLM, OFTLM, mTPQ) | production |
 | Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
 | Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, factorized little-group engine for d≥2 |
 | Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF via the factorized little-group engine (one momentum per star + little-co-group isotypic projection, matrix-free); CPU and GPU (batched cuSOLVER block eigensolve) for GS/finite-T, CPU for the GS-DSSF continued fraction |
 | Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
 | Symmetry projection: SU(2) total-S | production (Jul 2026): `total_spin=` on `qed.solve` (Lowdin/Casimir targeting + certified labels), `qed.full_spectrum` (highest-weight spectral differencing), `qed.thermal` (per-tower Z = Σ_S (2S+1) Z_S); operator-level S² route, host-side targeting (device-resident Lowdin is the named follow-up) |
-| CPU (OpenMP) and single-GPU (cuBLAS / cuSPARSE) lanes | production |
+| CPU (OpenMP) and single-GPU (CUDA / cuBLAS) lanes | production |
 | Multi-rank MPI | production for **one** thing: across-sector distribution of the `ED` CLI under `mpirun` (each rank builds and solves a dim-balanced subset of the symmetry sectors, spectrum `Allgatherv`'d). There is no within-sector (distributed-vector) lane — that family was removed in Jul 2026 |
 | Multi-GPU NCCL (`MultiGpuCommunicator`, `MpiCudaBackend`) | compiles (library `ed_multi_gpu`) and is unit-tested, but **no production lane selects it**: `select_backend` only picks the MPI backends for a distributed operator geometry, and no operator produces one any more |
 | First-class Python bindings (`import qed`) | production |
@@ -254,7 +254,7 @@ real knob, one verb per file --
 | script | covers |
 |---|---|
 | [`01_ground_state.py`](examples/tour/01_ground_state.py) | `qed.solve`: `symmetry="auto"`, per-symmetry toggles, solvers, devices, per-sector attribution |
-| [`02_finite_temperature.py`](examples/tour/02_finite_temperature.py) | `qed.thermal`: mTPQ/FTLM/LTLM/KPM, the sector pool + flip/TR/star copies, Sz windows |
+| [`02_finite_temperature.py`](examples/tour/02_finite_temperature.py) | `qed.thermal`: mTPQ/FTLM/LTLM, the sector pool + flip/TR/star copies, Sz windows |
 | [`03_dynamics_dssf.py`](examples/tour/03_dynamics_dssf.py) | `qed.spectral`: S^z_Q / S^±_Q probes, GS + finite-T DSSF through the sector machinery |
 | [`04_symmetry_toolkit.py`](examples/tour/04_symmetry_toolkit.py) | `find_symmetries`, `GeneratorSet.describe()`, sector selection, env escapes |
 | [`05_tpq_dssf.py`](examples/tour/05_tpq_dssf.py) | finite-temperature DSSF from persisted mTPQ states (`initial_state=` seeding) |
@@ -306,7 +306,7 @@ QED/
 │   ├── symmetry/              # Subspace × ProjectorChain composition
 │   ├── krylov/                # Lanczos / Block-Lanczos / Krylov-Schur kernels
 │   ├── solvers/               # cpu drivers for the kernels
-│   ├── thermal/               # FTLM / OFTLM / mTPQ / KPM-DOS kernels (LTLM = FTLM trace)
+│   ├── thermal/               # FTLM / OFTLM / mTPQ kernels (LTLM = FTLM trace)
 │   ├── observables/           # expectation, static + dynamical correlator primitives
 │   ├── dssf/                  # cross-sector observables (Sz-resolved + orbit-basis)
 │   ├── parallel/              # NUMA + thread budget + NCCL multi-GPU comm

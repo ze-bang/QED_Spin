@@ -157,7 +157,6 @@ void bind_workflows_types(py::module_& m) {
     py::enum_<ed::workflows::ThermalOptions::Method>(m, "ThermalMethod")
         .value("FTLM",   ed::workflows::ThermalOptions::Method::FTLM)
         .value("mTPQ",   ed::workflows::ThermalOptions::Method::mTPQ)
-        .value("KpmDos", ed::workflows::ThermalOptions::Method::KpmDos)
         .value("OFTLM",  ed::workflows::ThermalOptions::Method::OFTLM)
         .export_values();
 
@@ -183,23 +182,18 @@ void bind_workflows_types(py::module_& m) {
                        &ed::workflows::ThermalOptions::two_total_spin)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
         .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
-        // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
+        // Wave A5: CLI parity knobs (temperature scan).
         .def_readwrite("temp_min",
                        &ed::workflows::ThermalOptions::temp_min)
         .def_readwrite("temp_max",
                        &ed::workflows::ThermalOptions::temp_max)
         .def_readwrite("num_temp_bins",
                        &ed::workflows::ThermalOptions::num_temp_bins)
-        .def_readwrite("broadening",
-                       &ed::workflows::ThermalOptions::broadening)
         // SOTA streaming-symmetry sector filter (May 2026).
         .def_readwrite("selected_sectors",
                        &ed::workflows::ThermalOptions::selected_sectors)
-        // Wave B3 follow-up (May 2026): KPM-DOS spectral-bound
-        // overrides (NaN sentinel) plus the Hutchinson/moment knobs
-        // that the orchestrator forwards into ``KpmDosOptions``.
-        // ``0`` for the int knobs means "kernel default" which keeps
-        // legacy call sites unchanged.
+        // mTPQ spectral-bound overrides (NaN sentinel = estimate per
+        // call); used to place the (L*I - H) shift.
         .def_readwrite("e_min_override",
                        &ed::workflows::ThermalOptions::e_min_override)
         .def_readwrite("e_max_override",
@@ -212,10 +206,6 @@ void bind_workflows_types(py::module_& m) {
         // vectors so the full 2^32 Hilbert space runs mTPQ on one 80 GB H100.
         .def_readwrite("mtpq_fp32",
                        &ed::workflows::ThermalOptions::mtpq_fp32)
-        .def_readwrite("kpm_num_moments",
-                       &ed::workflows::ThermalOptions::kpm_num_moments)
-        .def_readwrite("kpm_num_random_vectors",
-                       &ed::workflows::ThermalOptions::kpm_num_random_vectors)
         // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
         // user-supplied probe-betas for mTPQ state-vector
         // snapshots. Empty list (default) means "no state vectors are
@@ -265,9 +255,7 @@ void bind_workflows_types(py::module_& m) {
         .def_readonly("tpq_sample_variances",
                       &ed::ThermalResult::tpq_sample_variances)
         .def_readonly("tpq_state_snapshots",
-                      &ed::ThermalResult::tpq_state_snapshots)
-        .def_readonly("dos_energies", &ed::ThermalResult::dos_energies)
-        .def_readonly("dos_values",   &ed::ThermalResult::dos_values);
+                      &ed::ThermalResult::tpq_state_snapshots);
 
     py::class_<ed::TpqStateSnapshot>(m, "TpqStateSnapshot")
         .def(py::init<>())
@@ -291,14 +279,6 @@ void bind_workflows_types(py::module_& m) {
     py::enum_<ed::workflows::SpectralOptions::Method>(m, "SpectralMethod")
         .value("GroundStateCF",  ed::workflows::SpectralOptions::Method::GroundStateCF)
         .value("FtlmDynamical",  ed::workflows::SpectralOptions::Method::FtlmDynamical)
-        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-        // KpmDynamical -- Chebyshev expansion of `delta(omega - H)`.
-        .value("KpmDynamical",   ed::workflows::SpectralOptions::Method::KpmDynamical)
-        .export_values();
-
-    py::enum_<ed::workflows::SpectralOptions::KpmKernel>(m, "SpectralKpmKernel")
-        .value("Jackson", ed::workflows::SpectralOptions::KpmKernel::Jackson)
-        .value("Lorentz", ed::workflows::SpectralOptions::KpmKernel::Lorentz)
         .export_values();
 
     py::class_<ed::workflows::SpectralOptions>(m, "SpectralOptions")
@@ -320,7 +300,7 @@ void bind_workflows_types(py::module_& m) {
                        &ed::workflows::SpectralOptions::momentum_tolerance)
         .def_readwrite("selected_sectors",
                        &ed::workflows::SpectralOptions::selected_sectors)
-        // Wave A5: CLI parity knobs (FtlmDynamical sample/temperature
+        // Wave A5: CLI parity knobs (finite-T sample/temperature
         // controls and the observable-type discriminator).
         .def_readwrite("num_samples",
                        &ed::workflows::SpectralOptions::num_samples)
@@ -331,17 +311,7 @@ void bind_workflows_types(py::module_& m) {
         // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
         // user-supplied seed state for the GroundStateCF lane.
         .def_readwrite("initial_state",
-                       &ed::workflows::SpectralOptions::initial_state)
-        // Pillar 4 of the "Save and DSSF Upgrades" plan (May 2026):
-        // KpmDynamical knobs.
-        .def_readwrite("kpm_moments",
-                       &ed::workflows::SpectralOptions::kpm_moments)
-        .def_readwrite("kpm_kernel",
-                       &ed::workflows::SpectralOptions::kpm_kernel)
-        .def_readwrite("kpm_lorentz_lambda",
-                       &ed::workflows::SpectralOptions::kpm_lorentz_lambda)
-        .def_readwrite("kpm_spectral_bounds",
-                       &ed::workflows::SpectralOptions::kpm_spectral_bounds);
+                       &ed::workflows::SpectralOptions::initial_state);
 
     // SOTA cross-sector spectral contribution (May 2026).
     py::class_<ed::SpectralSectorEntry>(m, "SpectralSectorEntry")

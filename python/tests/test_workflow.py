@@ -314,6 +314,17 @@ def test_diag_rejects_unknown_solver_name():
         qed.solve(H, solver="MAGIC_NEW_SOLVER", verbose=False)
 
 
+def test_spectral_rejects_ftlm_dynamical_without_temperature_and_unknown_methods():
+    H = _heisenberg_ring()
+    Sz = qed.Operator(N_SITES, 0.5)
+    Sz.add_one_body(op_type=2, site=0, coeff=1.0 + 0.0j)  # Sz at site 0
+    omega = [-1.0, 0.0, 1.0]
+    with pytest.raises(ValueError, match="needs T > 0"):
+        qed.spectral(H, [Sz], method="ftlm_dynamical", omega=omega, verbose=False)
+    with pytest.raises(ValueError, match="not supported"):
+        qed.spectral(H, [Sz], method="kpm_dynamical", omega=omega, verbose=False)
+
+
 def test_diag_results_match_explicit_workflows_solve_call():
     """Top-level ``qed.solve(auto_sz=False)`` must agree with the canonical
     ``_core.workflows_solve`` it routes to (no off-by-one in parameter
@@ -862,14 +873,6 @@ class TestSolverDeviceSupport:
                         f"unbuilt {solver_name}/{device} has unhelpful "
                         f"note: {note!r}"
                     )
-
-    def test_no_kernel_cells_say_so(self):
-        m = qed.solver_device_support(return_dict=True)
-        # KPM-DOS has no MPI kernel (the GPU lane is honoured but
-        # there's no distributed-Chebyshev implementation).
-        if "KPM_DOS" in m:
-            assert m["KPM_DOS"]["mpi"]["kernel"] is False
-            assert m["KPM_DOS"]["mpi"]["available"] is False
 
     def test_filter_by_solver(self):
         m = qed.solver_device_support(solver="lanczos", return_dict=True)

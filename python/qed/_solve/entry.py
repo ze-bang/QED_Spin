@@ -119,7 +119,7 @@ def solve(
         * thermal (returns ``EDResults`` with the imaginary-time
           trajectory in ``eigenvalues`` and the post-processed
           thermodynamic curve on disk in ``output_dir``):
-          ``mTPQ``, ``FTLM``, ``OFTLM``, ``KPM_DOS``.
+          ``mTPQ``, ``FTLM``, ``OFTLM``.
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"``.
         ``None`` (default) means ``"auto"``. ``"mpi"`` / ``"mpi_gpu"``
@@ -248,7 +248,7 @@ def solve(
         If True (default), prints what the auto-selector chose.
     extra_params : dict, optional
         Forwarded to :class:`EDParameters` as ``setattr`` calls.
-        Useful for niche flags (``tpq_*``, ``kpm_*``,
+        Useful for niche flags (``tpq_*``, ``ftlm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
 
@@ -1235,8 +1235,8 @@ def _always(req: SolveRequest) -> bool:
 #     per-sector), with the little-group projection engine taking the
 #     eigenvalue-only and certified-vector calls off the front of it;
 #   * GPU + no-symmetry -> orchestrator with
-#     ``BackendConstraints::allow_gpu = true`` (the orchestrator builds
-#     the right GPUOperator under the hood);
+#     ``BackendConstraints::allow_gpu = true`` (the host operator's
+#     ``bind_cuda()`` device mirror serves the CUDA lane);
 #   * CPU + no-symmetry -> orchestrator with the CPU lane (the fastest
 #     path, no I/O).
 #

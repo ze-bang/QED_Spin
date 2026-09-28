@@ -122,7 +122,7 @@ void diagonalize_tridiagonal_ritz(
  */
 // Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+):
 // the `[[deprecated]]` attribute is gated by `ED_BUILDING_INTERNAL` so
-// the library's own legacy callsites (FTLM / KPM_DOS / TPQ_DYNAMICAL,
+// the library's own legacy callsites (FTLM / spectral bounds / TPQ_DYNAMICAL,
 // each waiting on its own per-call migration to `ed::krylov::lanczos_tridiag`)
 // do not produce a wall of internal warnings during a clean build. The
 // attribute is visible to ALL EXTERNAL CALLERS (Python pybind11 layer,
@@ -145,6 +145,26 @@ int build_lanczos_tridiagonal_with_basis(
     std::vector<double>& beta,
     std::vector<ComplexVector>* basis_vectors = nullptr
 );
+
+/**
+ * @brief Estimate the extreme eigenvalues [e_min, e_max] of a Hermitian H.
+ *
+ * Blocks with dim <= 512 are assembled densely and the exact extremes are
+ * returned; larger blocks run a Lanczos sweep (krylov_dim clamped to dim)
+ * from a Gaussian random start and return the extreme Ritz values. `gen` is
+ * in/out: a deterministically seeded `gen` gives a reproducible estimate.
+ * Used by the mTPQ auto-tune to place the shift L above the spectrum.
+ */
+void estimate_spectral_bounds(
+    std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t dim,
+    int krylov_dim,
+    bool full_reorth,
+    int reorth_freq,
+    double tol,
+    std::mt19937& gen,
+    double& e_min,
+    double& e_max);
 
 /**
  * @brief Find the ground state (energy + vector) using Lanczos iteration.
@@ -279,7 +299,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
 // the optimiser inlines through it.
 //
 // Call sites that already build a std::function continue to compile unchanged;
-// new call sites can pass any Operator / FixedSzOperator / GPUOperator /
+// new call sites can pass any Operator / FixedSzOperator /
 // StreamingSymmetrySectorView / Distributed{,Symmetry}Operator directly.
 // =============================================================================
 inline void lanczos(const ed::matvec::MatVecOperator& H_op,

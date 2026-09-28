@@ -14,7 +14,7 @@ If your task is straightforward (build a Hamiltonian, run Lanczos, look
 at a few thermodynamic curves), use the quickstart. If you need:
 
 * A **specific solver** other than Lanczos (`BLOCK_LANCZOS`,
-  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS`, `FULL`)
+  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `FULL`)
 * The **GPU** path (`device='gpu'` — auto-selects the right GPU
   kernel for the requested solver)
 * **Symmetry projection** in-process (without writing
@@ -39,7 +39,7 @@ verbs.
 |-----------|------------|----------|
 | eigenvalues / ground state / a few low-lying states | `qed.solve(H, ...)` | `qed.workflow` |
 | finite-temperature trajectories (mTPQ / FTLM / LTLM / OFTLM) | `qed.thermal(H, method=..., ...)` | `qed.thermal` |
-| structure factors S(Q, ω) / S(Q, T) / KPM-DOS | `qed.spectral(dir, T=..., omega=..., ...)` | `qed.dssf` |
+| structure factors S(Q, ω) / S(Q, T) | `qed.spectral(dir, T=..., omega=..., ...)` | `qed.dssf` |
 
 The legacy `qed.exact_diagonalization_*` family was deleted in the
 May 2026 surface-unification collapse along with the C++
@@ -79,7 +79,7 @@ string name (case-insensitive). Retained backends only:
 | Lanczos | `LANCZOS`, `BLOCK_LANCZOS` |
 | Krylov-Schur | `KRYLOV_SCHUR` |
 | Dense | `FULL` |
-| Finite-temperature | `FTLM`, `LTLM`, `OFTLM`, `mTPQ`, `KPM_DOS` (use via `qed.thermal` / `qed.spectral`; cTPQ was removed in the final consolidation) |
+| Finite-temperature | `FTLM`, `LTLM`, `OFTLM`, `mTPQ` (use via `qed.thermal` / `qed.spectral`; cTPQ was removed in the final consolidation) |
 
 The May 2026 minimalist-solver-matrix cleanup retired `ARPACK_*`,
 `LOBPCG`, `DAVIDSON`, `CHEBYSHEV_FILTERED`, `SHIFT_INVERT*`, `IRL`,
@@ -441,7 +441,7 @@ The escape hatches:
   down to the Pybind11 binding for `ed::workflows::*` and supply
   `OperatorSpec` / `SolveOptions` / `ThermalOptions` /
   `SpectralOptions` directly.
-* `qed.list_diag_parameters("tpq" / "ftlm" / "ltlm" / "kpm" /
+* `qed.list_diag_parameters("tpq" / "ftlm" / "ltlm" /
   "thermal" / "general")` — print the catalogue grouped by family.
 
 End-to-end **32-site** worked examples for ground state, FTLM, DSSF,

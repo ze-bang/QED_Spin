@@ -8,7 +8,7 @@ Jul 2026).
 The two-lane picture below is now HISTORICAL ROUTING DETAIL: one block
 engine ([little_group_blocks.h](../../include/ed/solvers/little_group_blocks.h))
 serves every verb, and lane B survives as (a) the engine's per-star
-fallback floor and (b) the deliberate server for KPM_DOS, `sector=`
+fallback floor and (b) the deliberate server for `sector=`
 filtering, per-sector `output_dir` files, and the `ED_SYM_LG_THERMAL=0`
 escape. What changed:
 

@@ -205,7 +205,7 @@
 >    solve sector loop, recombines per-sector
 >    `ThermodynamicData` via the canonical
 >    `ed::core::combine_sector_thermodynamics`, and now powers
->    every method (FTLM / LTLM / KPM_DOS / mTPQ) in
+>    every method (FTLM / LTLM / mTPQ) in
 >    `qed.thermal(directory, ..., use_symmetry_if_available=True)`
 >    (which used to raise `NotImplementedError` for the non-TPQ
 >    methods and silently disable symmetry for TPQ).
@@ -399,7 +399,7 @@ Krylov-Schur / Davidson with eigenvalue pool combination.
 ### What's implemented
 
 The canonical entry point is `workflows::thermal(...)`. It supports
-FTLM, LTLM, OFTLM, KPM_DOS, mTPQ on three backends
+FTLM, LTLM, OFTLM, mTPQ on three backends
 (in-memory operator, directory + no spatial symmetry, directory +
 spatial symmetry).
 
@@ -446,10 +446,6 @@ the per-irrep streaming sector loop and recombines via
   - Spatial: ✓ (per-sector via streaming kernel)
   - Combined: ✓
 - **LTLM** (low-T Lanczos with K lowest Ritz states):
-  - Sz: ✓
-  - Spatial: ✓
-  - Combined: ✓
-- **KPM_DOS** (Chebyshev density of states):
   - Sz: ✓
   - Spatial: ✓
   - Combined: ✓
@@ -502,7 +498,7 @@ ed::workflows::thermal(*sec, opts)` for every non-empty sector
 contributions land in `ThermalResult::per_sector` with the SOTA
 `SectorTag` attached. `qed.thermal(directory, ...,
 use_symmetry_if_available=True)` is now end-to-end for FTLM /
-LTLM / KPM_DOS / mTPQ, and the
+LTLM / mTPQ, and the
 `used_symmetry_decomposition` flag on `ThermalResult` is now
 unconditionally `True` whenever `automorphism_results/` is loaded.
 

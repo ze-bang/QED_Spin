@@ -203,7 +203,7 @@ inline BackendVariant select_backend(const LinearOperator& op,
 // reporting helpers.
 //
 // `R.backend.lane` used to be inferred from `H.geometry().is_device()` /
-// `is_distributed()`. That is correct for native Operator / GPUOperator
+// `is_distributed()`. That is correct for native Operator
 // instances, but it lies about every `SectorView` (streaming-symmetry /
 // fixed-Sz streaming-symmetry): the view advertises `Host` memory_space
 // yet lazily wires a GPU mirror via `bind_cuda_for_sector(...)`. With

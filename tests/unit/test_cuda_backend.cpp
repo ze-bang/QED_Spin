@@ -13,8 +13,10 @@
 //      runs unchanged against the CUDA implementation of `Backend`.
 //
 // Runtime SKIPs (Catch2 SUCCEED + return) keep the build-only CUDA lane
-// happy on CI hosts without an attached GPU, exactly like
-// `test_cpu_gpu_equivalence.cpp` does.
+// happy on CI hosts without an attached GPU.
+//
+// The device matvec in both Lanczos cases is the host Operator's
+// `bind_cuda()` (CudaMatVecBackend over the full Hilbert space).
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -25,11 +27,6 @@
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/krylov/lanczos_kernel.h>
-#include <ed/thermal/kpm_dos_kernel.h>
-
-#include <ed/gpu/gpu_operator.cuh>
-#include <ed/gpu/gpu_solvers.h>  // run_lanczos_eigenvalues_kernel_facade
-#include <ed/solvers/lanczos.h>  // CPU `lanczos(...)` reference
 
 #include <cuda_runtime.h>
 
@@ -56,24 +53,6 @@ bool gpu_available() {
         return false;
     }
     return count > 0;
-}
-
-// Mirror of `build_heisenberg_chain` (CPU, test_harness.h) for the GPU
-// term-storage path, so the cuBLAS lane sees the same Hamiltonian.
-std::unique_ptr<GPUOperator>
-build_gpu_heisenberg_chain(int N, bool periodic) {
-    auto op = std::make_unique<GPUOperator>(N, /*spin=*/0.5f);
-    const Complex J_real(1.0, 0.0);
-    const Complex J_half(0.5, 0.0);
-    const int last = periodic ? N : (N - 1);
-    for (int i = 0; i < last; ++i) {
-        const int j = (i + 1) % N;
-        op->addTwoBodyTerm(/*op1=*/2, i, /*op2=*/2, j, J_real);
-        op->addTwoBodyTerm(/*op1=*/0, i, /*op2=*/1, j, J_half);
-        op->addTwoBodyTerm(/*op1=*/1, i, /*op2=*/0, j, J_half);
-    }
-    op->copyTransformDataToDevice();
-    return op;
 }
 
 }  // namespace
@@ -159,7 +138,7 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
     REQUIRE(cpu_res.alpha.size() > 0);
 
     // ---- CUDA lane: same kernel, CUDA backend ----
-    auto gpu_H = build_gpu_heisenberg_chain(N, /*periodic=*/true);
+    auto gpu_H = cpu_H->bind_cuda();
     ed::matvec::CudaBackend cuda;
 
     auto d_v0 = cuda.make_zero_vector(dim);
@@ -168,10 +147,7 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
     auto cuda_res = ed::krylov::lanczos_kernel(
         cuda,
         [&](const Complex* in, Complex* out, std::size_t n) {
-            gpu_H->matVecGPU(
-                reinterpret_cast<const cuDoubleComplex*>(in),
-                reinterpret_cast<cuDoubleComplex*>(out),
-                static_cast<int>(n));
+            gpu_H(in, out, n);
         },
         dim, d_v0.get(), opts);
     REQUIRE(cuda_res.alpha.size() == cpu_res.alpha.size());
@@ -188,202 +164,6 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
     }
     for (std::size_t k = 0; k < cpu_res.beta.size(); ++k) {
         REQUIRE(std::abs(cpu_res.beta[k] - cuda_res.beta[k]) < 1e-10);
-    }
-}
-
-TEST_CASE("gpu::run_lanczos_eigenvalues_kernel_facade matches CPU lanczos on N=8 Heisenberg",
-          "[cuda-backend][lanczos-kernel][phase2][facade]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    constexpr int    N   = 8;
-    constexpr std::size_t dim = std::size_t{1} << N;
-
-    // CPU reference: legacy `lanczos(Hv, ...)` entry point in
-    // ed/solvers/lanczos.h, eigenvalues-only. This is the same reference
-    // path test_cpu_gpu_equivalence uses to pin GPULanczos::run.
-    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        cpu_op->apply(in, out, static_cast<std::size_t>(n));
-    };
-    std::vector<double> cpu_eigs;
-    ::lanczos(Hv, dim, /*max_iter=*/100, /*exct=*/1, /*tol=*/1e-12,
-              cpu_eigs, /*dir=*/"", /*eigenvectors=*/false);
-    REQUIRE(!cpu_eigs.empty());
-
-    // GPU lane: the new kernel-facade entry point used in production by
-    // `runGPULanczos(...)` when `eigenvectors=false`.
-    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-    std::vector<double> facade_eigs;
-    ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-        *gpu_op,
-        /*N=*/static_cast<int>(dim),
-        /*max_iter=*/100,
-        /*num_eigs=*/1,
-        /*tol=*/1e-12,
-        /*seed=*/42ULL,
-        facade_eigs);
-    REQUIRE(!facade_eigs.empty());
-
-    INFO("E_cpu=" << cpu_eigs[0]
-         << "  E_facade=" << facade_eigs[0]
-         << "  |Δ|=" << std::abs(cpu_eigs[0] - facade_eigs[0]));
-    // The CPU & GPU lanczos seed their starting vectors differently
-    // (std::mt19937 vs curand), so the recurrence runs through different
-    // Ritz iterates -- but both converge to the same ground-state energy.
-    // 1e-8 matches the threshold the legacy test_cpu_gpu_equivalence uses
-    // for the same comparison.
-    REQUIRE(std::abs(cpu_eigs[0] - facade_eigs[0]) < 1e-8);
-}
-
-TEST_CASE("gpu::run_lanczos_eigenvalues_kernel_facade input validation",
-          "[cuda-backend][facade]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    auto gpu_op = build_gpu_heisenberg_chain(/*N=*/4, /*periodic=*/true);
-    std::vector<double> out;
-
-    REQUIRE_THROWS_AS(
-        ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-            *gpu_op, /*N=*/-1, 10, 1, 1e-10, 42ULL, out),
-        std::invalid_argument);
-    REQUIRE_THROWS_AS(
-        ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-            *gpu_op, /*N=*/16, /*max_iter=*/0, 1, 1e-10, 42ULL, out),
-        std::invalid_argument);
-    REQUIRE_THROWS_AS(
-        ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-            *gpu_op, /*N=*/16, 10, /*num_eigs=*/0, 1e-10, 42ULL, out),
-        std::invalid_argument);
-}
-
-TEST_CASE("gpu::run_lanczos_eigenpairs_kernel_facade returns a valid "
-          "eigenpair on N=8 Heisenberg",
-          "[cuda-backend][facade][ritz-recon]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    constexpr int    N   = 8;
-    constexpr std::size_t dim = std::size_t{1} << N;
-
-    // CPU reference for the ground-state energy.
-    auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        cpu_op->apply(in, out, static_cast<std::size_t>(n));
-    };
-    std::vector<double> cpu_eigs;
-    ::lanczos(Hv, dim, /*max_iter=*/100, /*exct=*/1, /*tol=*/1e-12,
-              cpu_eigs, /*dir=*/"", /*eigenvectors=*/false);
-    REQUIRE(!cpu_eigs.empty());
-
-    // GPU facade with eigvec recovery.
-    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-    std::vector<double> facade_eigs;
-    std::vector<std::vector<Complex>> facade_vecs;
-    ed::matvec::gpu::run_lanczos_eigenpairs_kernel_facade(
-        *gpu_op,
-        /*N=*/static_cast<int>(dim),
-        /*max_iter=*/100,
-        /*num_eigs=*/1,
-        /*tol=*/1e-12,
-        /*seed=*/42ULL,
-        facade_eigs,
-        facade_vecs);
-
-    REQUIRE(facade_eigs.size() == 1);
-    REQUIRE(facade_vecs.size() == 1);
-    REQUIRE(facade_vecs[0].size() == dim);
-
-    INFO("E_cpu=" << cpu_eigs[0]
-         << "  E_facade=" << facade_eigs[0]
-         << "  |Δ|=" << std::abs(cpu_eigs[0] - facade_eigs[0]));
-    REQUIRE(std::abs(cpu_eigs[0] - facade_eigs[0]) < 1e-8);
-
-    // Norm check: each reconstructed Ritz vector should be unit-norm
-    // (up to roundoff). T's eigenvectors are orthonormal, so the sum
-    //   y = sum_k S(k,0) * V_k
-    // of orthonormal V_k weighted by an orthonormal column of S has
-    // norm exactly 1 (modulo the breakdown_tol-controlled truncation).
-    double sq = 0.0;
-    for (const auto& z : facade_vecs[0]) sq += std::norm(z);
-    INFO("||y_0|| = " << std::sqrt(sq));
-    REQUIRE(std::abs(std::sqrt(sq) - 1.0) < 1e-8);
-
-    // Residual check: ||H y - lambda y|| / ||y|| should be small for
-    // a true Ritz pair on a fully-converged Krylov subspace.
-    std::vector<Complex> Hy(dim);
-    cpu_op->apply(facade_vecs[0].data(), Hy.data(), dim);
-    double res2 = 0.0;
-    for (std::size_t i = 0; i < dim; ++i) {
-        const Complex r = Hy[i] - facade_eigs[0] * facade_vecs[0][i];
-        res2 += std::norm(r);
-    }
-    INFO("||H y_0 - lambda y_0|| = " << std::sqrt(res2));
-    REQUIRE(std::sqrt(res2) < 1e-6);
-}
-
-TEST_CASE("gpu::run_lanczos_eigenpairs_kernel_facade recovers multiple "
-          "orthonormal Ritz pairs on N=6 Heisenberg",
-          "[cuda-backend][facade][ritz-recon]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    constexpr int    N    = 6;
-    constexpr std::size_t dim = std::size_t{1} << N;
-    constexpr int    K    = 3;  // request the lowest 3 Ritz pairs
-
-    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-    std::vector<double> evals;
-    std::vector<std::vector<Complex>> evecs;
-    ed::matvec::gpu::run_lanczos_eigenpairs_kernel_facade(
-        *gpu_op,
-        /*N=*/static_cast<int>(dim),
-        /*max_iter=*/50,
-        /*num_eigs=*/K,
-        /*tol=*/1e-12,
-        /*seed=*/123ULL,
-        evals,
-        evecs);
-
-    REQUIRE(evals.size() == K);
-    REQUIRE(evecs.size() == K);
-    for (const auto& v : evecs) REQUIRE(v.size() == dim);
-
-    // Ascending eigenvalues.
-    for (int i = 1; i < K; ++i) {
-        REQUIRE(evals[i - 1] <= evals[i] + 1e-10);
-    }
-
-    // Each reconstructed Ritz vector is unit-norm and they are
-    // pairwise orthogonal (since T's eigenvectors are orthonormal
-    // and the Krylov basis is orthonormal, so column-i and column-j
-    // are <S_i, S_j> = delta_{ij}). Slack 1e-8 captures cuBLAS
-    // round-off in the axpy chain.
-    auto cpu_op = ed_tests::build_heisenberg_chain(N, 1.0, true);
-    for (int i = 0; i < K; ++i) {
-        double sq = 0.0;
-        for (const auto& z : evecs[i]) sq += std::norm(z);
-        INFO("||y_" << i << "|| = " << std::sqrt(sq));
-        REQUIRE(std::abs(std::sqrt(sq) - 1.0) < 1e-8);
-
-        // Residual for THIS Ritz pair.
-        std::vector<Complex> Hy(dim);
-        cpu_op->apply(evecs[i].data(), Hy.data(), dim);
-        double res2 = 0.0;
-        for (std::size_t k = 0; k < dim; ++k) {
-            const Complex r = Hy[k] - evals[i] * evecs[i][k];
-            res2 += std::norm(r);
-        }
-        INFO("||H y_" << i << " - lambda_" << i << " y_" << i
-             << "|| = " << std::sqrt(res2));
-        REQUIRE(std::sqrt(res2) < 1e-6);
-    }
-    for (int i = 0; i < K; ++i) {
-        for (int j = i + 1; j < K; ++j) {
-            Complex ip(0.0, 0.0);
-            for (std::size_t k = 0; k < dim; ++k) {
-                ip += std::conj(evecs[i][k]) * evecs[j][k];
-            }
-            INFO("<y_" << i << ", y_" << j << "> = " << ip);
-            REQUIRE(std::abs(ip) < 1e-8);
-        }
     }
 }
 
@@ -603,7 +383,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     REQUIRE(ref.eigs.size() >= 2);
 
     // ---- Pass 1: build the Krylov basis with CudaBackend, reconstruct y_0 --
-    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
+    auto gpu_op = cpu_op->bind_cuda();
     ed::matvec::CudaBackend cuda;
 
     // v0_a: a random unit vector. The canonical basis vector |000…0⟩ lives
@@ -616,10 +396,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     cuda.copy_from_host(v0_a_host.data(), d_v0_a.get(), dim);
 
     auto gpu_matvec = [&](const Complex* in, Complex* out, std::size_t n) {
-        gpu_op->matVecGPU(
-            reinterpret_cast<const cuDoubleComplex*>(in),
-            reinterpret_cast<cuDoubleComplex*>(out),
-            static_cast<int>(n));
+        gpu_op(in, out, n);
     };
 
     ed::krylov::LanczosKernelOptions opts_a;
@@ -724,94 +501,6 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
             std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
 }
 
-TEST_CASE("thermal::kpm_dos_kernel<CudaBackend> matches CpuBackend on N=6 chain",
-          "[cuda-backend][kpm-dos][phase-e1]") {
-    // Phase E1 of the "Backend x Symmetries x Workflows" plan
-    // (May 2026): pin that the new ``kpm_dos_kernel<CudaBackend>``
-    // specialisation (which wraps the GPU Chebyshev/Hutchinson
-    // driver in ``compute_kpm_dos_gpu_with_matvec``) produces the
-    // same Z/E/Cv/S grid as the CpuBackend specialisation when both
-    // see the same Hamiltonian and the same random seed.
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    constexpr int          N   = 6;
-    constexpr std::size_t  dim = std::size_t{1} << N;
-
-    // ---- Build Hamiltonians on both lanes ----
-    auto cpu_H = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto gpu_H = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-
-    ed::matvec::CpuBackend  cpu;
-    ed::matvec::CudaBackend cuda;
-
-    ed::thermal::KpmDosOptions opts;
-    opts.num_moments        = 256;
-    opts.num_random_vectors = 8;
-    opts.betas              = {0.25, 0.5, 1.0, 2.0};
-    opts.random_seed        = 7777;
-    // Lock the spectral window by hand so both lanes use the same
-    // rescaling. Exact bounds for the 6-site periodic Heisenberg
-    // ring at J=1 are E_min ≈ -2.802 and E_max ≈ +1.5; we pad to
-    // be safe. With the window pinned the only remaining variance
-    // is the Hutchinson sampling -- enough to put the two lanes in
-    // numerical agreement at R=8.
-    opts.e_min_override = -3.5;
-    opts.e_max_override =  2.0;
-
-    auto cpu_res = ed::thermal::kpm_dos_kernel(
-        cpu,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            cpu_H->apply(in, out, n);
-        },
-        dim, static_cast<std::uint64_t>(dim), opts);
-
-    auto cuda_res = ed::thermal::kpm_dos_kernel(
-        cuda,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            gpu_H->matVecGPU(
-                reinterpret_cast<const cuDoubleComplex*>(in),
-                reinterpret_cast<cuDoubleComplex*>(out),
-                static_cast<int>(n));
-        },
-        dim, static_cast<std::uint64_t>(dim), opts);
-
-    REQUIRE(cpu_res.energy.size()  == opts.betas.size());
-    REQUIRE(cuda_res.energy.size() == opts.betas.size());
-    REQUIRE(cpu_res.specific_heat.size()  == opts.betas.size());
-    REQUIRE(cuda_res.specific_heat.size() == opts.betas.size());
-
-    // Both lanes use the *same* spectral window (we passed an
-    // explicit override above) -- so any remaining discrepancy is
-    // purely Hutchinson sampling noise from the two independent
-    // RNGs (host mt19937 vs cuRAND).
-    REQUIRE(std::abs(cpu_res.e_min_estimate  - (-3.5)) < 1e-12);
-    REQUIRE(std::abs(cpu_res.e_max_estimate  -  2.0 ) < 1e-12);
-    REQUIRE(std::abs(cuda_res.e_min_estimate - (-3.5)) < 1e-12);
-    REQUIRE(std::abs(cuda_res.e_max_estimate -  2.0 ) < 1e-12);
-
-    // At R=8 on D=64 the Monte-Carlo error on the energy is
-    // O(1/sqrt(R*D)) ≈ 0.04, which dominates the kernel-smoothing
-    // bias. The energy must lie inside the spectrum (else the
-    // moment computation is broken) and be within ~0.5 of the CPU
-    // reference (~10% of the bandwidth).
-    for (std::size_t t = 0; t < opts.betas.size(); ++t) {
-        INFO("beta=" << opts.betas[t]
-             << "  E_cpu=" << cpu_res.energy[t]
-             << "  E_gpu=" << cuda_res.energy[t]
-             << "  Cv_cpu=" << cpu_res.specific_heat[t]
-             << "  Cv_gpu=" << cuda_res.specific_heat[t]);
-
-        // Energies inside the spectrum.
-        REQUIRE(cpu_res.energy[t]  >= -3.5);
-        REQUIRE(cpu_res.energy[t]  <=  2.0);
-        REQUIRE(cuda_res.energy[t] >= -3.5);
-        REQUIRE(cuda_res.energy[t] <=  2.0);
-
-        // CPU vs CUDA agreement within Hutchinson noise at R=8.
-        REQUIRE(std::abs(cpu_res.energy[t] - cuda_res.energy[t]) < 0.6);
-    }
-}
-
 // REMOVED: "thermal::ltlm_kernel<CudaBackend> matches CpuBackend".
 // ltlm_kernel (and ed/thermal/ltlm_kernel.h) were deleted in consolidation
 // Family 1 (Jul 2026). This case pinned CPU/GPU AGREEMENT between the two LTLM
@@ -822,34 +511,6 @@ TEST_CASE("thermal::kpm_dos_kernel<CudaBackend> matches CpuBackend on N=6 chain"
 // replacement pin compares LTLM against an INDEPENDENT reference rather than
 // its own twin: test_thermal_dense_ref's "LTLM thermodynamics IS the FTLM
 // trace" (identical knobs, 1e-12) plus its dense-reference cells.
-
-
-TEST_CASE("gpu::lanczos_kernel facade is seed-reproducible",
-          "[cuda-backend][facade]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
-
-    constexpr int N = 6;
-    constexpr std::size_t dim = std::size_t{1} << N;
-
-    auto gpu_op = build_gpu_heisenberg_chain(N, /*periodic=*/true);
-
-    auto run_with_seed = [&](unsigned long long s) {
-        std::vector<double> e;
-        ed::matvec::gpu::run_lanczos_eigenvalues_kernel_facade(
-            *gpu_op, static_cast<int>(dim), 40, 3, 1e-12, s, e);
-        return e;
-    };
-
-    auto a = run_with_seed(42ULL);
-    auto b = run_with_seed(42ULL);
-    REQUIRE(a.size() == b.size());
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        // Identical seed → identical v0 → identical Krylov sequence →
-        // bit-equal eigenvalues (modulo non-deterministic FP reductions
-        // in cuBLAS, which are below 1e-12 here).
-        REQUIRE(std::abs(a[i] - b[i]) < 1e-12);
-    }
-}
 
 #else   // !WITH_CUDA
 

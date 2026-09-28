@@ -156,8 +156,6 @@ struct Row {
       "=1 returns the pre-Wave-1.1 unified complex Lanczos kernel (A/B + bisection)")\
     X("ED_BLOCK_LANCZOS_LEAN", Flag, "krylov", "false (honour the caller)",    \
       "=1 forces keep_basis = false in the block-Lanczos eigenvalue-only lane")\
-    X("ED_GPU_LANCZOS_FULL_CGS2", Flag, "krylov", "false",                     \
-      "=1 restores FullCGS2 + keep_basis in the GPU Lanczos facade (pre-Wave-4.1/4.2 defaults)")\
     X("ED_FULLDIAG_DENSE_MAX", Integer, "krylov", "120000",                    \
       "Dimension threshold below which full diagonalization uses the dense LAPACK path")\
     X("ED_FULLDIAG_THREADS", Integer, "krylov", "max(1, N / 1024)",            \
@@ -174,23 +172,15 @@ struct Row {
       "Iterations between checkpoint writes")                                  \
     X("ED_LANCZOS_RESUME", Flag, "io-hdf5", "false",                           \
       "Resume a Lanczos run from the checkpoint file if one exists")           \
-    X("ED_THERMAL_EXACT_SMALL", Flag, "thermal-kpm", "true",                   \
+    X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
       "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
-    X("ED_MTPQ_VERBOSE", Flag, "thermal-kpm", "false",                         \
+    X("ED_MTPQ_VERBOSE", Flag, "thermal", "false",                             \
       "Prints the mTPQ fp32-vs-double lane-selection decision to stderr")      \
-    X("ED_TPQ_BASE_SEED", Integer, "thermal-kpm", "0 -> non-deterministic, time-seeded",\
+    X("ED_TPQ_BASE_SEED", Integer, "thermal", "0 -> non-deterministic, time-seeded",\
       "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
-    X("ED_DSSF_VERBOSE", Flag, "thermal-kpm", "false",                         \
+    X("ED_DSSF_VERBOSE", Flag, "thermal", "false",                             \
       "Gates per-sample / per-iteration progress prints in the DSSF/SSSF/FTLM kernels")\
-    X("ED_KPM_VERBOSE", Flag, "thermal-kpm", "false",                          \
-      "Verbose logging in the FTLM-KPM kernel")                                \
-    X("ED_KPM_DOS_VERBOSE", Flag, "thermal-kpm", "false",                      \
-      "Verbose logging in the CPU KPM-DOS kernel; also the fallback name for the GPU kernel")\
-    X("ED_KPM_DOS_GPU_VERBOSE", Flag, "thermal-kpm", "false -> falls back to ED_KPM_DOS_VERBOSE",\
-      "Verbose logging in the GPU KPM-DOS kernel")                             \
-    X("ED_KPM_SAMPLE_THREADS", Integer, "thermal-kpm", "1 (serial)",           \
-      "Outer OMP team size over KPM random samples")                           \
-    X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal-kpm", "4.0",                    \
+    X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_OPERATOR_MIRROR", Flag, "gpu", "true (mirror on)",               \
       "=0 disables the full-Hilbert / fixed-Sz device mirror (CPU-vs-GPU bisection)")\
@@ -202,16 +192,6 @@ struct Row {
       "=1 restores a host sync after every matvec launch (diagnostic for the 2026-09-11 async change)")\
     X("ED_GPU_GATHER_WARP", Flag, "gpu", "false (thread-per-row kernel)",      \
       "=1 selects the warp-per-row GPU gather kernel instead of thread-per-row")\
-    X("ED_GPU_TIMING", Flag, "gpu", "false",                                   \
-      "=1 enables per-call CUDA event timing (forces a host sync, 30-50% of wall time at small N)")\
-    X("ED_GPU_MIXED_PRECISION_SPMV", Flag, "gpu", "false",                     \
-      "A value starting with 1/t/T/y/Y enables the FP32 CSR SpMV cache on the GPU lane")\
-    X("ED_GPU_CUSPARSE_MIN_DIM", Integer, "gpu", "32768",                      \
-      "Dimension below which cuSPARSE CSR is skipped in favour of the matrix-free fused kernel")\
-    X("ED_GPU_DISABLE_CUSPARSE", Flag, "gpu", "false",                         \
-      "=1 disables the cuSPARSE assembled-CSR pathway entirely")               \
-    X("ED_GPU_ALLOW_DROPPED_THREEBODY", Flag, "gpu", "false (hard error)",     \
-      "=1 acknowledges that three-body terms are silently dropped by the GPU kernel; without it the load THROWS")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\
       "=0/false/FALSE/no/NO disables the dim-aware automatic thread-budget scaling; any other value leaves it on")\
     X("ED_AUTO_THREADS_PER_K", Integer, "threads-numa", "8",                   \

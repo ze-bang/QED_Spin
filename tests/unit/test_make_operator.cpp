@@ -18,8 +18,7 @@
 //   * make_operator with streaming_symmetry + distributed combinations
 //     that require axes the simple lane does not provide throws the
 //     documented error.
-//   * The default-lane bind_* overrides return live callables, while
-//     the wrong-backend overrides throw with the documented message.
+//   * The default-lane bind_cpu override returns a live callable.
 //
 // The streaming-symmetry + distributed lanes are covered by their
 // existing per-feature tests (test_streaming_symmetry, the
@@ -199,19 +198,3 @@ TEST_CASE("LinearOperator: plain Operator's bind_cpu returns a "
     x[0] = std::complex<double>{1.0, 0.0};
     REQUIRE_NOTHROW(mv(x.data(), y.data(), dim));
 }
-
-#ifdef WITH_CUDA
-// The GPUOperator throw-on-wrong-backend overrides are exercised here.
-// We rely on the fact that calling `bind_cpu()` on a GPUOperator
-// should throw at construction time of the callable, not on the
-// first apply -- because GPUOperator decides which lane is legal
-// at bind time.
-#include <ed/gpu/gpu_operator.cuh>
-TEST_CASE("LinearOperator: GPUOperator's bind_cpu throws the documented "
-          "device-only message",
-          "[bind_overrides][gpu][error]") {
-    GPUOperator gpu(4, 0.5f);
-    REQUIRE_THROWS_AS(gpu.bind<ed::matvec::CpuBackend>(),
-                       std::runtime_error);
-}
-#endif

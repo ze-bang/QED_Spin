@@ -20,7 +20,7 @@
 //     ``SolveOptions::method`` enum.
 //   * ``EDParameters`` mutable parameter bag -- still used internally
 //     by ``qed.workflow._diag_via_workflows_solve`` to carry the
-//     legacy knobs (FTLM krylov_dim, TPQ taylor_order, KPM moments,
+//     legacy knobs (FTLM krylov_dim, TPQ taylor_order,
 //     etc.) across the Python <-> C++ boundary before they get
 //     translated into ``SolveOptions`` / ``ThermalOptions``.
 //   * ``EDResults`` + ``ThermodynamicData`` -- the result envelope
@@ -242,7 +242,6 @@ void bind_dispatcher(py::module_& m) {
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)
         .value("FTLM",                     DiagonalizationMethod::FTLM)
-        .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
         .value("OFTLM",                    DiagonalizationMethod::OFTLM)
         .export_values();
 
@@ -254,7 +253,7 @@ void bind_dispatcher(py::module_& m) {
     // 3. EDParameters -- the legacy parameter bag still used internally by
     //    ``qed.workflow._diag_via_workflows_solve`` to carry knobs the
     //    orchestrator's ``SolveOptions`` / ``ThermalOptions`` don't carry
-    //    natively (FTLM krylov_dim, TPQ taylor_order, KPM moments, etc.).
+    //    natively (FTLM krylov_dim, TPQ taylor_order, etc.).
     // ------------------------------------------------------------------------
     py::class_<EDParameters>(m, "EDParameters", R"pbdoc(
         Parameter bag used internally by ``qed.workflow`` to carry the
@@ -305,17 +304,6 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("ftlm_seed",            &EDParameters::ftlm_seed)
         .def_readwrite("ftlm_store_samples",   &EDParameters::ftlm_store_samples)
         .def_readwrite("ftlm_error_bars",      &EDParameters::ftlm_error_bars)
-        // KPM-DOS (see include/ed/solvers/kpm_dos.h)
-        .def_readwrite("kpm_num_moments",            &EDParameters::kpm_num_moments)
-        .def_readwrite("kpm_num_random_vectors",     &EDParameters::kpm_num_random_vectors)
-        .def_readwrite("kpm_num_quadrature_nodes",   &EDParameters::kpm_num_quadrature_nodes)
-        .def_readwrite("kpm_spectral_bounds_krylov", &EDParameters::kpm_spectral_bounds_krylov)
-        .def_readwrite("kpm_spectral_bound_buffer",  &EDParameters::kpm_spectral_bound_buffer)
-        .def_readwrite("kpm_use_jackson_kernel",     &EDParameters::kpm_use_jackson_kernel)
-        .def_readwrite("kpm_lorentz_lambda",         &EDParameters::kpm_lorentz_lambda)
-        .def_readwrite("kpm_full_reorth",            &EDParameters::kpm_full_reorth)
-        .def_readwrite("kpm_reorth_freq",            &EDParameters::kpm_reorth_freq)
-        .def_readwrite("kpm_seed",                   &EDParameters::kpm_seed)
         // Observables (DSSF window etc.)
         .def_readwrite("omega_min",   &EDParameters::omega_min)
         .def_readwrite("omega_max",   &EDParameters::omega_max)
@@ -370,7 +358,7 @@ void bind_dispatcher(py::module_& m) {
     // ------------------------------------------------------------------------
     py::class_<ThermodynamicData>(m, "ThermodynamicData",
         "Thermodynamic observables on the temperature grid the orchestrator "
-        "computed. Populated by FTLM / TPQ/KPM_DOS; otherwise empty.")
+        "computed. Populated by FTLM / OFTLM / TPQ; otherwise empty.")
         .def(py::init<>())
         .def_readwrite("temperatures",  &ThermodynamicData::temperatures)
         .def_readwrite("energy",        &ThermodynamicData::energy)

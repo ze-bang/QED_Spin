@@ -156,10 +156,6 @@ build_little_group_blocks(const ::Operator&                    op,
 // same small-dim exact fallback -- and Z-recombines with each block's
 // spectral multiplicity folded in as a free-energy shift
 // F_b[t] -= T[t] * ln(m_b)  (exactly Z_b -> m_b * Z_b).
-//
-// KPM_DOS is REFUSED (std::invalid_argument): its deliverable is one
-// full-spectrum DOS; per-block sub-DOS on different Chebyshev grids cannot
-// recombine into it. Route KPM to the abelian lane.
 // =============================================================================
 struct LittleGroupThermalResult {
     ThermodynamicData                 thermo;      ///< combined across blocks

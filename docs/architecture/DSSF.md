@@ -47,7 +47,7 @@ graph TD
     subspace1["Symmetry / Subspaces:<br>• FullSpaceSubspace<br>• FixedSzSubspace"]
     projectors["Symmetry / ProjectorChain:<br>• SpatialProjector (point groups / translations)<br>• Orthogonal U(1) Sz × Point Group composition"]
 
-    Lane1 --> |"Supports any Backend:<br>• CPU (OpenMP)<br>• Single-GPU<br>• MPI Custom Ranks"| Lane1_Workflows["Workflows:<br>• GroundStateCF (T=0)<br>• FtlmDynamical (T>0)<br>• KpmDynamical (Chebyshev DOS)"]
+    Lane1 --> |"Supports any Backend:<br>• CPU (OpenMP)<br>• Single-GPU<br>• MPI Custom Ranks"| Lane1_Workflows["Workflows:<br>• GroundStateCF (T=0)<br>• FTLM cross-irrep kernel (T>0)"]
 
     Lane2 --> Lane2_Logic["Walks automorphism_results/ sectors<br>Perform GS CF within same irrep (Q=0)"]
     
@@ -57,12 +57,12 @@ graph TD
 
     Lane3MultiQ --> Lane3MultiQ_Logic["S(Q, ω) for multiple Q-points:<br>• Performs a SINGLE amortized GS solve<br>• Loops over Q-points internally to scatter/continued-fraction<br>• Outputs per-Q dynamical spectra and equal-time SSSF (static_sf)"]
 
-    Lane4 --> Lane4_Logic["DSSF Engine Workflow Handler:<br>• DYNAMICAL_THERMAL<br>• STATIC_THERMAL<br>• GROUND_STATE_DSSF<br>• SINGLE_EXPECTATION<br>• KPM_THERMODYNAMICS"]
+    Lane4 --> Lane4_Logic["DSSF Engine Workflow Handler:<br>• DYNAMICAL_THERMAL<br>• STATIC_THERMAL<br>• GROUND_STATE_DSSF<br>• SINGLE_EXPECTATION"]
 
     %% Backend Layer
     Lane1_Workflows & Lane2_Logic & Lane3GS_Logic & Lane3FTLM_Logic & Lane3MultiQ_Logic & Lane4_Logic --> Backends["Target Execution Backend"]
     Backends --> CPU["CPU Backend (OpenMP)<br>• Multi-threaded loops<br>• Explicit temperature grid support (FTLM fix)"]
-    Backends --> GPU["GPU Backend (CUDA)<br>• Single-GPU cuBLAS/cuSPARSE matvecs"]
+    Backends --> GPU["GPU Backend (CUDA)<br>• Single-GPU CUDA matvecs + cuBLAS vector ops"]
     Backends --> MPI["MPI (ed_distributed_main)<br>• Subprocess orchestration for 32-36 sites<br>• Memory-distributed operations"]
 ```
 
@@ -76,8 +76,10 @@ single `LinearOperator H` plus a `std::vector<const LinearOperator*>
 observables`, returns a `SpectralResult { omega, S_real, S_imag,
 errors_*, backend }`.
 
-`SpectralOptions::Method` ∈ {`GroundStateCF`, `FtlmDynamical`,
-`KpmDynamical`}.
+`SpectralOptions::Method` ∈ {`GroundStateCF`, `FtlmDynamical`};
+`ed::workflows::spectral` runs `GroundStateCF` only and rejects
+`FtlmDynamical` with `std::invalid_argument` (FTLM dynamics needs
+temperatures; see *Finite T* below).
 
 ### GroundStateCF (T = 0)
 
@@ -101,57 +103,22 @@ Pipeline:
    backend; CPU / single-GPU / MPI / MPI+GPU all dispatched via
    `select_backend(H.geometry(), opts.backend)`).
 
-### FtlmDynamical (T > 0)
+### Finite T (T > 0)
 
-Delegates verbatim to the legacy
-`compute_dynamical_correlation(H_apply, O1_apply, O2_apply, ..., T,
-output_dir, energy_shift)` in `src/solvers/cpu/ftlm_dynamical.cpp`. FTLM
-seeds `num_random_vectors` random vectors, builds a Krylov subspace per
-seed, evaluates `<psi_R| O dagger * (omega + i*eta - H)^-1 * O |psi_R>`
-on the Boltzmann-weighted shell, and averages. CPU-only today.
-
-### KpmDynamical (Chebyshev expansion of `delta(omega - H)`)
-
-```
-S(omega) = <psi| O dagger * delta(omega - H) * O |psi>
-         ≈ sum_k g_k * mu_k * T_k((omega - b)/a)
-```
-
-where `T_k` are the Chebyshev polynomials of the first kind, `mu_k =
-<O psi| T_k((H - b)/a) |O psi>` the rescaled-H moments, and `g_k` the
-kernel window (Jackson by default; Lorentz when
-`opts.kpm_kernel = Lorentz`). The kernel-window damping suppresses
-the Gibbs oscillations a sharp delta function would inflict on a
-finite-moment expansion; Jackson is the optimal positive-definite
-window.
-
-Pipeline:
-
-1. Resolve the seed (`opts.initial_state` if non-empty, else inner
-   Lanczos GS solve -- same contract as GroundStateCF).
-2. Estimate the spectral bounds `[E_min_H, E_max_H]` of `H` via
-   `ed::kpm_dos::estimate_spectral_bounds` (a small Lanczos sweep) and
-   compute the rescaling `a = max(<psi|H|psi> - E_min_H, E_max_H -
-   <psi|H|psi>) * (1 + buffer)`, `b = <psi|H|psi>` so that the
-   rescaled operator `(H - b) / a` has all eigenvalues in `[-1, 1]`.
-3. Drive `ed::observables::kpm_dynamical_correlator` (->
-   `ed::kpm::compute_kpm_ltlm_from_states` at beta = 0) with
-   `opts.kpm_moments` Chebyshev moments and the selected kernel.
-
-This is the SOTA-beyond-CF lane the user asked for: KPM gives
-delta-like resolution at fixed cost-per-moment, and it does not
-need the second observable `O2` so it dovetails cleanly with the
-GroundStateCF call shape. *Pillar 4 of the May 2026 "Save and DSSF
-Upgrades" plan promoted this lane from library-only to a first-class
-SpectralOptions::Method.*
+`ed::workflows::spectral` has no finite-T estimator. `qed.spectral(H,
+observables, T=..., omega=...)` with any `T > 0` routes to
+`_core.workflows_spectral_ftlm_plain`, which runs the FTLM cross-irrep
+kernel (`ed::observables::ftlm_cross_irrep_kernel_one_sector`, source =
+target = the operator you hand in; one observable per call) -- the same
+estimator the symmetry lane runs per sector (§3).
+`method="ftlm_dynamical"` without a `T > 0` raises `ValueError`.
 
 Exposed in Python through `qed.spectral(H, observables, ...)` →
-`_spectral_in_memory` → `_core.workflows_spectral`. The Python kwarg
+`_spectral_in_memory` → `_core.workflows_spectral` (T = 0) or
+`_core.workflows_spectral_ftlm_plain` (T > 0). The Python kwarg
 that picks the lane is `method ∈ {"ground_state_cf",
-"ftlm_dynamical", "kpm_dynamical"}` (case-insensitive, see
-`ed::api::parse_spectral_method`). KPM knobs:
-`kpm_moments`, `kpm_kernel` ∈ {`"Jackson"`, `"Lorentz"`},
-`kpm_lorentz_lambda`.
+"ftlm_dynamical"}` (case-insensitive, see
+`ed::api::parse_spectral_method`).
 
 **Cells exercised in `examples/spectral/`:** the entire
 `examples/spectral/{single_expectation,ground_state_dssf,
@@ -235,7 +202,6 @@ enum class DSSFMethod : std::uint32_t {
     STATIC_THERMAL      = 1,  // <O>(T) -- no omega axis
     GROUND_STATE_DSSF   = 2,  // T = 0 S(Q, omega) via Lanczos GS + CF
     SINGLE_EXPECTATION  = 3,  // <psi|O|psi> diagnostic (one operator)
-    KPM_THERMODYNAMICS  = 4,  // Z/E/C/S/F(beta) via KPM Chebyshev DOS
 };
 ```
 
@@ -248,7 +214,6 @@ Each enum value dispatches to a `compute_*_workflow` body in
 | `STATIC_THERMAL`      | `compute_static_response_workflow`      | Thermal expectation values; HDF5 `/dssf/static/`.        |
 | `GROUND_STATE_DSSF`   | `compute_ground_state_dssf_workflow`    | T = 0 Lanczos GS + CF resolvent; HDF5 `/dssf/ground/`.   |
 | `SINGLE_EXPECTATION`  | `compute_static_response_workflow` with `OperatorSpec::single_obs_only` | Diagnostic `<psi|O|psi>`; one operator per group. |
-| `KPM_THERMODYNAMICS`  | `ed::kpm_dos::compute_kpm_dos`           | Chebyshev-DOS thermodynamics; *no* `S(Q, omega)`.        |
 
 Driven by the CLI subcommand `./ED dssf <method> <directory>` and the
 legacy `--dynamical-response` / `--static-response` /
@@ -266,7 +231,6 @@ _VALID_CLI_METHODS = (
     "static_thermal",
     "ground_state_dssf",
     "single_expectation",
-    "kpm_thermodynamics",
 )
 ```
 
@@ -319,7 +283,6 @@ Lanes 2-4 by the presence of `Q`, `level`, and/or `method`.
 | `S(Q, omega)` for a Heisenberg / Hubbard model with translation   | 3 (T=0) or 4 (`ground_state_dssf`) | Both reconstruct the GS + CF; Lane 3 walks sectors in-process, Lane 4 writes HDF5 and is the production path. |
 | Finite-T `S(Q, omega)` with FTLM                                  | 3 (FTLM) or 4 (`dynamical_thermal`) | Lane 4 also tunes random-vector count + omega grid via `qed.auto_tune`. |
 | `<O>(T)` thermal expectation values                               | 4 (`static_thermal`) | The DSSF engine is the only lane that writes the per-T HDF5 trail. |
-| KPM thermodynamics (Z, E, C, S, F at many beta)                   | 4 (`kpm_thermodynamics`) | Operator-free; uses the Chebyshev DOS. |
 | Diagnostic `<psi|O|psi>`                                          | 4 (`single_expectation`) | Skips the omega + T machinery. |
 
 ## 7. Where the example tree fits

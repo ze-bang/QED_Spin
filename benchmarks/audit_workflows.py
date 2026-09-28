@@ -447,14 +447,12 @@ def thermal_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool)
         return f
 
     common = dict(T_min=float(temps[0]), T_max=float(temps[-1]), num_T=len(temps), random_seed=7, verbose=False, device=DEVICE)
-    for method in ("FTLM", "mTPQ", "KPM_DOS", "OFTLM"):
+    for method in ("FTLM", "mTPQ", "OFTLM"):
         kw = dict(common)
         if method in ("FTLM", "OFTLM"):
             kw.update(num_samples=24, krylov_dim=100)
         if method == "mTPQ":
             kw.update(num_samples=16)   # mTPQ variance at the lowest T dominates dC (checked: 8 -> 64 samples halves it)
-        if method == "KPM_DOS":
-            kw.update(kpm_num_moments=400, kpm_num_random_vectors=16)
         tol = (5e-2, 1.5e-1) if method == "mTPQ" else (5e-2, 1e-1)
         for sym in (None, "auto"):
             if sym == "auto" and method in ("mTPQ",) and not m.u1:
@@ -544,23 +542,6 @@ def spectral_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool
             return d < tol, f"maxrel={d:.1e} peak={S.max():.4f}"
         return f
 
-    if ref is not None:
-        # exact (broadening-free) moments of the T=0 spectral function of the GLOBAL ground state:
-        # sum rule <0|O+O|0> and first moment <0|O+(H-E0)O|0>/<0|O+O|0>
-        psi0 = ref.evecs[:, 0]; phi = Om @ psi0
-        M0_ex = float(np.vdot(phi, phi).real)
-        M1_ex = float(np.vdot(phi, ref.H @ phi).real - ref.evals[0] * M0_ex) / max(M0_ex, 1e-12)
-
-    def chk_kpm(r):
-        """KPM (Jackson kernel) has a different line shape from the Lorentzian reference, so
-        compare the integrated weight (sum rule) and the first moment against the exact moments."""
-        S = np.asarray(r.S_real, dtype=float); w = np.asarray(r.omega, dtype=float)
-        if ref is None:
-            return True, f"peak={S.max():.4f}"
-        I = np.trapezoid(S, w); c = np.trapezoid(S * w, w) / max(I, 1e-12)
-        ok = abs(I - M0_ex) < 0.1 * max(M0_ex, 1e-12) and abs(c - M1_ex) < 0.1
-        return ok, f"weight={I:.4f} (sum rule {M0_ex:.4f}) centroid={c:.3f} (exact {M1_ex:.3f})"
-
     common = dict(omega=omega, eta=eta, verbose=False, device=DEVICE, krylov_dim=150)
     run(Case(f"{m.name}/spectral/ground_state_cf/plain", lambda: qed.spectral(H, [O], method="ground_state_cf", **common),
              chk_gs(use_global=True), tags=("spectral",)))
@@ -573,10 +554,6 @@ def spectral_cases(m: Model, ref: Optional[Reference], run: Runner, timing: bool
         run(Case(f"{m.name}/spectral/ground_state_cf/symmetry=auto/point_group=off/sz={half}/Q",
                  lambda: qed.spectral(H, [O], method="ground_state_cf", sz=half, symmetry="auto", point_group="off",
                                       momentum_transfer=Qfrac, **common), chk_gs(), tags=("spectral", "symmetry")))
-    # KPM dynamical (Chebyshev), Jackson kernel: compare loosely (kernel broadening differs)
-    run(Case(f"{m.name}/spectral/kpm_dynamical/plain",
-             lambda: qed.spectral(H, [O], method="kpm_dynamical", kpm_moments=400, **{k: v for k, v in common.items() if k != 'krylov_dim'}),
-             chk_kpm, tags=("spectral",)))
     # finite-T FTLM dynamical
     Ts = [1.0]
     if ref is not None:
@@ -635,7 +612,7 @@ def timing_cases(run: Runner):
                  lambda r: (True, f"E0={r.eigenvalues[0]:.10f}")))
         run(Case(f"{m.name}/solve/symmetry=auto/sz=sweep/k=1", lambda H=H: qed.solve(H, symmetry="auto", verbose=False),
                  lambda r: (True, f"E0={r.eigenvalues[0]:.10f}")))
-        for method in ("FTLM", "mTPQ", "KPM_DOS"):
+        for method in ("FTLM", "mTPQ"):
             for sym in (None, "auto"):
                 kw = dict(T_min=0.2, T_max=4.0, num_T=12, num_samples=8, random_seed=7, verbose=False, device=DEVICE)
                 if method != "mTPQ":

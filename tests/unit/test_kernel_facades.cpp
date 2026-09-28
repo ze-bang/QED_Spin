@@ -3,7 +3,7 @@
 //
 // Phase-6 lockdown for the unified algorithm-kernel facades. Each
 // kernel header is a thin Backend-templated wrapper over an existing
-// CPU body (Lanczos / FTLM / mTPQ / KPM-DOS /
+// CPU body (Lanczos / FTLM / mTPQ /
 // block-Lanczos / Krylov-Schur). The tests prove the new headers
 // actually compile, link, and produce the same numbers as the legacy
 // entry points on small Heisenberg chains.
@@ -21,12 +21,8 @@
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
-#include <ed/thermal/kpm_dos_kernel.h>
 
 #include <ed/observables/expectation.h>
-#include <ed/observables/static_correlator.h>
-#include <ed/observables/cf_dynamical.h>
-#include <ed/observables/kpm_dynamical.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -340,30 +336,6 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
         backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
 
     REQUIRE_FALSE(res.energies.empty());
-}
-
-TEST_CASE("thermal::kpm_dos_kernel returns Z/E/Cv/S over a beta grid",
-          "[kernel-facade][kpm-dos][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    MatvecCallable apply{H.get()};
-
-    ed::thermal::KpmDosOptions opts;
-    opts.num_moments        = 128;
-    opts.num_random_vectors = 4;
-    opts.betas              = {0.5, 1.0, 2.0};
-    opts.random_seed        = 123;
-
-    auto res = ed::thermal::kpm_dos_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
-
-    REQUIRE(res.energy.size() == opts.betas.size());
-    REQUIRE(res.specific_heat.size() == opts.betas.size());
-    REQUIRE(res.e_min_estimate < 0.0);
 }
 
 TEST_CASE("observables::expectation_value reproduces <psi|H|psi>",

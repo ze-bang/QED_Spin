@@ -136,9 +136,6 @@ def test_projected_sampling_lane_tracks_dense(dense, monkeypatch):
 def test_negative_controls():
     with pytest.raises(RuntimeError, match="SU\\(2\\)"):
         qed.thermal(_ring(delta=1.5), total_spin="auto", verbose=False)
-    with pytest.raises(ValueError, match="method"):
-        qed.thermal(_ring(), total_spin="auto", method="KPM_DOS",
-                    verbose=False)
     with pytest.raises(ValueError):
         qed.thermal(_ring(), total_spin=0.5, verbose=False)  # parity
     # OFF: the axis must not engage.

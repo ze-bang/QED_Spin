@@ -226,7 +226,7 @@ struct ThermalSectorEntry {
 
 // ---------------------------------------------------------------------------
 // ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
-// LTLM / mTPQ / KPM-DOS family.
+// LTLM / mTPQ family.
 // ---------------------------------------------------------------------------
 /// One snapshotted TPQ state. Pillar 1 of the "Save and DSSF Upgrades"
 /// plan (May 2026). The orchestrator's thermal finalizer iterates these
@@ -255,7 +255,7 @@ struct ThermalResult {
     /// Ground-state energy for diagnostic / shift purposes.
     double                           ground_state_energy = 0.0;
     /// Optional FTLM raw results (Ritz triples per sample). Empty
-    /// for TPQ / KPM-DOS lanes.
+    /// for TPQ lanes.
     std::optional<FTLMResults>       ftlm;
     KrylovDiagnostics                krylov;
     BackendMetadata                  backend;
@@ -265,7 +265,7 @@ struct ThermalResult {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
     // trajectory + state-snapshot surface. Populated only by the mTPQ
     // branch of ``ed::workflows::thermal``; empty for
-    // FTLM / KPM-DOS.
+    // FTLM / OFTLM.
     //
     // The trajectory fields are mirror-images of
     // ``MtpqResult::sample_*`` --
@@ -278,15 +278,6 @@ struct ThermalResult {
     std::vector<std::vector<double>>    tpq_sample_variances;
     /// One entry per snapshot the kernel actually recorded.
     std::vector<TpqStateSnapshot>       tpq_state_snapshots;
-
-    // KPM-DOS raw density of states (Jul 2026): the KpmDos lane computed
-    // the DOS grid and then discarded it, surfacing only its derived
-    // thermodynamics -- so the actual density(E) the method exists to
-    // produce was unreachable (a caller integrating it to check the sum
-    // rule int rho dE == D got nothing). Populated only by the KpmDos
-    // branch; empty for every other method.
-    std::vector<double>                 dos_energies;
-    std::vector<double>                 dos_values;
 };
 
 // ---------------------------------------------------------------------------

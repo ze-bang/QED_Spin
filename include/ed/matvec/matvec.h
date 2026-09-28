@@ -6,7 +6,6 @@
 // library consumes. Replaces the previous parallel hierarchies:
 //
 //   - std::function<void(const Complex*, Complex*, int)> (CPU solvers)
-//   - GPUOperator* with device pointers (GPU solvers)
 //   - DistributedOperator::apply(v_local, y_local) (MPI solvers)
 //
 // Each is now a concrete subclass of MatVecOperator advertising its
@@ -27,7 +26,7 @@
 //                      shortcuts (real eigenvalues, two-term Lanczos, ...)
 //
 // All five existing matvec consumers in the codebase (Lanczos, FTLM,
-// TPQ, CG/LOBPCG, KPM-DOS, time evolution) are expressible in terms of
+// TPQ, CG/LOBPCG, time evolution) are expressible in terms of
 // this base class plus a matching Backend (axpy/dot/norm/scale/copy).
 //
 // Phase 1 of the matvec-unification revamp.
@@ -99,12 +98,10 @@ public:
 
     // nnz_per_row_estimate() was retired in the minimalist-architecture
     // rev (May 2026): no concrete subclass overrode it and no solver
-    // path called it. The assembled-CSR decision lives inside
-    // ``GPUOperator::selectPathway`` (which queries its own counters);
-    // the matrix-free decision is implicit in ``MemorySpace``. For CPU
-    // estimates use ``Operator::getTransformData().size()`` /
-    // ``getThreeBodyData().size()``; for GPU use
-    // ``GPUOperator::getNumTransforms()``.
+    // path called it. The matrix-free decision is implicit in
+    // ``MemorySpace``. For estimates use
+    // ``Operator::getTransformData().size()`` /
+    // ``getThreeBodyData().size()``.
 
     // -------------------------------------------------------------------
     // Sanity helpers shared by all subclasses. Inlined into the hot

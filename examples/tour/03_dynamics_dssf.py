@@ -58,7 +58,7 @@ r_T = qed.spectral(H, [S_zQ], omega=omega, eta=0.1, T=[0.5, 1.0],
 # 4. Knobs that matter:
 #      eta            Lorentzian broadening
 #      krylov_dim     continued-fraction depth
-#      method         "ground_state_cf" (default) | "kpm_dynamical" | ...
+#      method         "ground_state_cf" (default) | "ftlm_dynamical" (T > 0)
 #      device         "cpu" | "gpu"
 #    A Hamiltonian on disk (Trans.dat / InterAll.dat) is loaded into an
 #    Operator first (Operator.load_trans / load_inter_all).
