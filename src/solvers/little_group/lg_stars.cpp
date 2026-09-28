@@ -5,11 +5,233 @@
 
 #include "lg_internal.h"
 
+#include <ed/symmetry/commute_check.h>   // term-level [H, U_p] = 0 (group-sector fast path)
+
+#include <map>
+#include <numeric>
+#include <set>
+#include <string>
+
 namespace ed::solvers {
 
 using namespace lg_detail;
 
 namespace lg_detail {
+
+namespace {
+
+// ED_SYM_LG_GROUP_SECTOR (default on): one-dimensional irreps of a star are solved in the rep basis of the FULL little
+// group G_k0 = A . P_k0 (x flip) -- C(N, n_up)/|G_k0| states -- instead of W-projecting the whole k-sector.
+[[nodiscard]] bool group_sector_enabled(const LittleGroupOptions& opt) {
+    return opt.n_up >= 0 && ed::env::flag("ED_SYM_LG_GROUP_SECTOR", true);
+}
+
+// The group-sector fast path. Returns true when every wanted irrep of the star is one-dimensional and the star was
+// built here; false (with the reason under ED_SYM_PROFILE / verbose) sends the star down the isotypic W path,
+// unchanged. Everything the W path derives from monomials is derived here from permutations:
+//   little co-group  identity + one residue per coset of A (first in residue order, as same_coset keeps), fixing k0,
+//                    commuting with H at the TERM level (hamiltonian_commutes_with_permutation; the W path's
+//                    monomial_commutes needs an H_k0 apply, i.e. the full k-sector CSR);
+//   table            p_e . p_f = a . p_g with a in A; trivial factor system chi_k0(a) = 1 (as build_little_tables);
+//   irreps           decompose_irreps_tables on that table -> the same published little_characters;
+//   G_k0             { a . p_e } (U_a U_p = U_{a.p}), chi(a . p_e) = chi_k0(a) chi_sigma(e), flip half x (+-1).
+// Guards: the group-sector dims tile the k-sector (exactly when every irrep is 1-dim); and LABEL PARITY with the W
+// path -- a k0-fixing residue that fails the term-level test, or a co-group element that may act as a scalar on this
+// k-sector (which the W path merges into the identity coset), declines, so whenever this path engages both lanes
+// publish the same co-group, characters and irrep labels.
+[[nodiscard]] bool
+try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
+               const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag,
+               StarBuild& sb, double* t_isotypic)
+{
+    auto decline = [&](const std::string& why) {
+        if (lg_diag)
+            std::fprintf(stderr, "[little_group] star k0=%d: group-sector path declined -- %s; isotypic (W) path.\n",
+                         k0, why.c_str());
+        return false;
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    const RepSectorMatVec& hk = *sb.hk;
+    const auto& rdr = hk.rep_data();
+    const int N = cx.n_sites;
+    std::map<std::vector<int>, int> aidx;
+    for (std::size_t a = 0; a < cx.A.size(); ++a) aidx[cx.A[a]] = static_cast<int>(a);
+
+    std::vector<std::vector<int>> P, Pinv;
+    std::vector<int> P_res;
+    {
+        std::vector<int> id(static_cast<std::size_t>(N));
+        std::iota(id.begin(), id.end(), 0);
+        P.push_back(id); Pinv.push_back(id); P_res.push_back(-1);
+    }
+    for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
+        if (cx.irrep_map[rp][static_cast<std::size_t>(k0)] != k0) continue;
+        const auto& p = cx.residues[rp];
+        bool dup = false;
+        for (const auto& qi : Pinv)
+            if (aidx.count(compose(p, qi))) { dup = true; break; }     // p = a . q: same coset
+        if (dup) continue;
+        // The W path tests commutation on the sector (monomial_commutes) and could keep a residue this term-level
+        // test rejects: leave such a star to it, so both lanes always publish the same co-group.
+        if (!ed::symmetry::hamiltonian_commutes_with_permutation(op.transform_data_, op.three_body_data_, p))
+            return decline("residue " + std::to_string(rp) + " fixes k0 but fails the term-level commutation test");
+        P.push_back(p); Pinv.push_back(inverse_perm(p)); P_res.push_back(static_cast<int>(rp));
+    }
+    const int nP = static_cast<int>(P.size());
+    if (nP == 1) return decline("trivial little co-group (nothing to gain)");
+
+    const auto& chiA = cx.giA.irreps[static_cast<std::size_t>(k0 % cx.n_irr_raw)].character;
+    std::vector<std::vector<int>> mult(static_cast<std::size_t>(nP), std::vector<int>(static_cast<std::size_t>(nP), -1));
+    for (int e = 0; e < nP; ++e)
+        for (int f = 0; f < nP; ++f) {
+            const auto c = compose(P[static_cast<std::size_t>(e)], P[static_cast<std::size_t>(f)]);
+            for (int g = 0; g < nP; ++g) {
+                const auto it = aidx.find(compose(c, Pinv[static_cast<std::size_t>(g)]));
+                if (it == aidx.end()) continue;
+                if (std::abs(chiA[static_cast<std::size_t>(it->second)] - Complex(1, 0)) > 1e-8)
+                    return decline("projective factor system (chi_k0(a) != 1 in p_e p_f = a p_g)");
+                mult[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] = g;
+                break;
+            }
+            if (mult[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] < 0)
+                return decline("the coset representatives do not close");
+        }
+    ed::symmetry::GroupIrreps giP;
+    try { giP = ed::symmetry::decompose_irreps_tables(mult); }
+    catch (const std::exception& ex) { return decline(std::string("decompose_irreps_tables threw: ") + ex.what()); }
+    const int nIr = static_cast<int>(giP.irreps.size());
+    std::vector<int> want;
+    for (int ii = 0; ii < nIr; ++ii)
+        if (opt.only_irrep.empty()
+            || std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) != opt.only_irrep.end())
+            want.push_back(ii);
+    for (int ii : want)
+        if (giP.irreps[static_cast<std::size_t>(ii)].dim != 1)
+            return decline("a two-dimensional irrep is wanted (partners need the isotypic basis)");
+
+    std::vector<std::vector<int>> Gp;
+    Gp.reserve(cx.A.size() * static_cast<std::size_t>(nP));
+    for (const auto& a : cx.A)
+        for (const auto& p : P) Gp.push_back(compose(a, p));
+    {
+        std::set<std::vector<int>> distinct(Gp.begin(), Gp.end());
+        if (distinct.size() != Gp.size()) return decline("A . P_k0 elements are not distinct");
+    }
+    const bool flip = cx.flip_half;
+    const std::size_t Gx = (flip ? 2 : 1) * Gp.size();
+    if (ed::have_cuda() && Gx > 256)
+        return decline("|G| > 256 on a CUDA host (the device rep gather caps the group at 256)");
+    const double fs = flip ? ((k0 / cx.n_irr_raw == 0) ? 1.0 : -1.0) : 1.0;
+    auto chars_of = [&](int ii) {
+        const auto& cs = giP.irreps[static_cast<std::size_t>(ii)].character;
+        std::vector<Complex> c;
+        c.reserve(Gx);
+        for (std::size_t a = 0; a < cx.A.size(); ++a)
+            for (int e = 0; e < nP; ++e) c.push_back(chiA[a] * cs[static_cast<std::size_t>(e)]);
+        if (flip)
+            for (std::size_t g = 0, n0 = c.size(); g < n0; ++g) c.push_back(fs * c[g]);
+        return c;
+    };
+
+    const ed::symmetry::OrbitTable tab = group_orbit_table(Gp, N, opt.n_up, flip);
+    std::vector<std::shared_ptr<ed::symmetry::RepSectorData>> secs(static_cast<std::size_t>(nIr));
+    std::uint64_t one_dim_total = 0;
+    bool all_one_dim = true;
+    for (int ii = 0; ii < nIr; ++ii) {
+        if (giP.irreps[static_cast<std::size_t>(ii)].dim != 1) { all_one_dim = false; continue; }
+        secs[static_cast<std::size_t>(ii)] = std::make_shared<ed::symmetry::RepSectorData>(
+            group_sector_from_table(tab, Gp, N, opt.n_up, flip, chars_of(ii)));
+        one_dim_total += secs[static_cast<std::size_t>(ii)]->reps.size();
+    }
+    if (all_one_dim ? one_dim_total != rdr.reps.size() : one_dim_total >= rdr.reps.size())
+        return decline("group-sector dims (" + std::to_string(one_dim_total) + ") do not tile the k-sector ("
+                       + std::to_string(rdr.reps.size()) + ")");
+    // Label parity with the W path. There, a co-group element that acts as a SCALAR on this k-sector (a small sector
+    // lying entirely in irreps that agree on it, e.g. every state odd under a reflection) has a monomial proportional
+    // to the identity's, is merged into the identity coset (same_coset), and the published co-group shrinks. Decline
+    // whenever some element could be scalar here -- exact for all-1-dim co-groups, conservative otherwise (the d > 1
+    // content is not resolved, so any d > 1 irrep on which the element is scalar counts) -- so a caller never sees the
+    // two lanes label the same sector differently. Sectors at scale populate every irrep and never trip this.
+    {
+        const std::uint64_t rest = rdr.reps.size() - one_dim_total;
+        for (int e = 1; e < nP; ++e) {
+            bool have = false, scalar = true;
+            Complex c(0, 0);
+            for (int ii = 0; ii < nIr && scalar; ++ii) {
+                const auto& sp = secs[static_cast<std::size_t>(ii)];
+                if (!sp || sp->reps.empty()) continue;
+                const Complex x = giP.irreps[static_cast<std::size_t>(ii)].character[static_cast<std::size_t>(e)];
+                if (have && std::abs(x - c) > 1e-8) scalar = false;
+                c = x; have = true;
+            }
+            if (scalar && rest > 0) {
+                bool some = false;
+                for (const auto& ir : giP.irreps) {
+                    if (ir.dim == 1) continue;
+                    const Complex x = ir.character[static_cast<std::size_t>(e)] / static_cast<double>(ir.dim);
+                    if (std::abs(std::abs(x) - 1.0) < 1e-8 && (!have || std::abs(x - c) < 1e-8)) { some = true; break; }
+                }
+                scalar = some;
+            }
+            if (scalar)
+                return decline("co-group element " + std::to_string(e) + " may act as a scalar on this k-sector "
+                               "(the W path merges it into the identity coset)");
+        }
+    }
+
+    // TR pairing sigma <-> sigma* (real k0 sector, H real): isospectral, solve the earlier one (as the W path)
+    std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
+    if (tr_on && opt.only_irrep.empty()) {
+        bool sector_real = true;
+        for (const Complex& c : rdr.characters) if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
+        for (int ii = 0; ii < nIr && sector_real; ++ii) {
+            if (pair_of[static_cast<std::size_t>(ii)] >= 0 || !secs[static_cast<std::size_t>(ii)]) continue;
+            const auto& ci = giP.irreps[static_cast<std::size_t>(ii)].character;
+            for (int jj = ii + 1; jj < nIr; ++jj) {
+                if (!secs[static_cast<std::size_t>(jj)]) continue;
+                const auto& cj = giP.irreps[static_cast<std::size_t>(jj)].character;
+                bool m = ci.size() == cj.size();
+                for (std::size_t g = 0; m && g < ci.size(); ++g) m = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
+                if (m && secs[static_cast<std::size_t>(ii)]->reps.size() == secs[static_cast<std::size_t>(jj)]->reps.size()) {
+                    pair_of[static_cast<std::size_t>(ii)] = jj; pair_of[static_cast<std::size_t>(jj)] = ii; break;
+                }
+            }
+        }
+    }
+    LittleGroupStarInfo& info = sb.info;
+    for (int ii : want) {
+        auto& sp = secs[static_cast<std::size_t>(ii)];
+        if (!sp || sp->reps.empty()) continue;
+        const int jj = pair_of[static_cast<std::size_t>(ii)];
+        if (jj >= 0 && jj < ii) continue;                   // partner solved
+        if (jj > ii) ++info.tr_pairs;
+        sp->build_perm_lut();
+        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+        impl->tag              = base_tag;
+        impl->tag.irrep        = ii;
+        impl->tag.irrep_dim    = 1;
+        impl->tag.tr_folded    = (jj > ii);
+        impl->tag.dim          = sp->reps.size();
+        impl->tag.multiplicity = static_cast<std::uint64_t>((jj > ii ? 2 : 1) * m_star);
+        impl->hk   = sb.hk;
+        impl->gsec = sp;
+        impl->gop  = std::make_shared<RepSectorMatVec>(op, std::shared_ptr<const ed::symmetry::RepSectorData>(sp));
+        sb.blocks.push_back(std::move(impl));
+    }
+    info.little_order = nP;
+    info.little_elems = P_res;
+    info.little_characters.clear();
+    info.little_irrep_dims.clear();
+    for (const auto& ir : giP.irreps) { info.little_characters.push_back(ir.character); info.little_irrep_dims.push_back(ir.dim); }
+    info.projected = true;
+    if (t_isotypic) *t_isotypic += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (lg_diag)
+        std::fprintf(stderr, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu\n",
+                     k0, Gx, sb.blocks.size(), rdr.reps.size());
+    return true;
+}
+
+}  // namespace
 
 [[nodiscard]] StarBuild
 build_star_blocks(const ::Operator&         op,
@@ -64,6 +286,12 @@ build_star_blocks(const ::Operator&         op,
     base_tag.k_raw       = k0 % cx.n_irr_raw;
     base_tag.flip_parity = info.flip_parity;
     base_tag.star_size   = m_star;
+
+    if (group_sector_enabled(opt)) {
+        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
+        if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, sb, profile ? t_isotypic : nullptr))
+            return sb;
+    }
 
     // Little co-group: identity + residues fixing k0, validated, ONE
     // representative per coset of A. Residues in the same coset act as

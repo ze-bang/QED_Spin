@@ -237,11 +237,15 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_stars.cpp
     ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
     ${SRC_DIR}/solvers/little_group/lg_spectrum.cpp
+    ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp
     ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
     ${SRC_DIR}/solvers/little_group/lg_thermal.cpp
     ${SRC_DIR}/solvers/little_group/lg_vectors.cpp
     ${SRC_DIR}/solvers/little_group/lg_observables.cpp
+    ${SRC_DIR}/solvers/little_group/lg_matrix_elements.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
+    ${SRC_DIR}/observables/masked_program.cpp
+    ${SRC_DIR}/observables/rep_matrix_elements.cpp
     # WP14: the ~2700-line src/orchestrator.cpp was split by concern into
     # src/orchestrator/ (pure move; see orchestrator_internal.h for the
     # file map). orch_solve.cpp is the single TU that instantiates the
@@ -499,6 +503,9 @@ if(WITH_CUDA)
         # CudaMatVecBackend. Override the weak ed_core fallbacks
         # (operator_gpu.cpp) wherever this archive is linked.
         ${CORE_DIR}/operator_gpu.cu
+        # observable engine: device sweep of rep_matrix_elements (CPU stub in
+        # rep_matrix_elements.cpp under !WITH_CUDA)
+        ${SRC_DIR}/observables/rep_matrix_elements_gpu.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

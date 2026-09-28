@@ -722,6 +722,13 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
                                 int block_size, bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
+// lg_observables.cpp: the lowest `want` eigenpairs of one block in block coordinates
+// (dense / certified GS vector / Krylov-Schur by size); *converged false when the
+// window could not be certified (the certified prefix is still returned).
+[[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
+solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
+                       int dense_max_dim, int block_size, bool* converged);
+
 // lg_stars.cpp
 [[nodiscard]] StarBuild
 build_star_blocks(const ::Operator&         op,
@@ -752,7 +759,66 @@ struct LittleGroupBlock::Impl {
     // empty on plain blocks and d == 1 irreps.
     std::shared_ptr<const std::vector<lg_detail::Monomial>>   M;
     std::vector<std::vector<std::complex<double>>> Dmats;  // per p, d*d row-major
+    // Group-sector block (Sep 2026, group_sector.h): a 1-dim irrep solved in the rep basis of the FULL little group
+    // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on `gsec`; `hk`
+    // stays the star's k-sector (rep_data(), the lift target). Null on isotypic (W) and plain blocks.
+    std::shared_ptr<const ed::symmetry::RepSectorData> gsec;
+    std::shared_ptr<lg_detail::RepSectorMatVec>        gop;
 };
+
+namespace lg_detail {
+// The operator a block is solved with: group sector, isotypic sandwich, or the plain k-sector.
+[[nodiscard]] inline const ed::matvec::MatVecOperator& block_mv(const LittleGroupBlock::Impl& b) {
+    if (b.gop) return *b.gop;
+    if (b.pop) return *b.pop;
+    return *b.hk;
+}
+
+// ||H u - E u|| / ||u|| for a block eigenpair: v in block coordinates, u = lift(v). A group-sector block's lift is an
+// isometry intertwining its operator with H_k0 (every element of G commutes with H, checked term by term at dispatch),
+// so the residual is taken in the block itself: no H_k0 apply, which at N = 36 would build the k-sector CSR (~290 GB)
+// the group sector exists to avoid. Any other block (v == nullptr included: shift-projector partners) certifies the
+// lift on H_k0 as before -- the sandwich residual does not cover W.
+// A star's engagement report: the k-sector operator or any group-sector block operator (which a group-sector star
+// applies INSTEAD of H_k0) built the reduced CSR / ran on the device.
+inline void report_engagement(StarBuild& sb) {
+    bool csr = sb.hk && sb.hk->csr_engaged(), gpu = sb.hk && sb.hk->gpu_engaged();
+    for (const auto& b : sb.blocks)
+        if (b && b->gop) { csr = csr || b->gop->csr_engaged(); gpu = gpu || b->gop->gpu_engaged(); }
+    sb.info.csr_engaged = csr;
+    sb.info.gpu_engaged = gpu;
+}
+
+[[nodiscard]] inline double lifted_residual(const LittleGroupBlock::Impl& b, const Complex* v,
+                                            const std::vector<Complex>& u, double E) {
+    const bool in_block = b.gop != nullptr && v != nullptr;
+    const ed::matvec::MatVecOperator& H = in_block ? static_cast<const ed::matvec::MatVecOperator&>(*b.gop)
+                                                   : static_cast<const ed::matvec::MatVecOperator&>(*b.hk);
+    const std::size_t n = H.dim();
+    const Complex* x = in_block ? v : u.data();
+    std::vector<Complex> hx(n);
+    H.apply(x, hx.data(), n);
+    double num = 0.0, den = 0.0;
+    #pragma omp parallel for reduction(+ : num, den) schedule(static) if(n > 65536)
+    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+        const std::size_t i = static_cast<std::size_t>(ii);
+        num += std::norm(hx[i] - E * x[i]);
+        den += std::norm(x[i]);
+    }
+    return den > 0.0 ? std::sqrt(num / den) : std::numeric_limits<double>::infinity();
+}
+
+// lg_group_sector.cpp: the pieces build_group_sector is made of, shared with the build_star_blocks fast path.
+[[nodiscard]] ed::symmetry::OrbitTable
+group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip);
+[[nodiscard]] ed::symmetry::RepSectorData
+group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
+                        int n_sites, int n_up, bool flip, const std::vector<Complex>& characters);
+/// Re-express v (sector g, group G) in sector k of a subgroup (conj convention, norm kept); both sectors must
+/// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
+[[nodiscard]] std::vector<Complex>
+lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
+}  // namespace lg_detail
 
 namespace lg_detail {
 
@@ -830,12 +896,7 @@ LittleGroupSpectrum run_little_group(
                 lab.flip_parity = bi->tag.flip_parity;
                 lab.irrep       = bi->tag.irrep;
                 lab.irrep_dim   = bi->tag.irrep_dim;
-                const ed::matvec::MatVecOperator& mv =
-                    bi->pop
-                        ? static_cast<const ed::matvec::MatVecOperator&>(
-                              *bi->pop)
-                        : static_cast<const ed::matvec::MatVecOperator&>(
-                              *bi->hk);
+                const ed::matvec::MatVecOperator& mv = block_mv(*bi);
                 const int mult = static_cast<int>(bi->tag.multiplicity);
                 const auto ev = solve_block(mv, mult, lab);
                 if (!lab.converged) ++out.unconverged_blocks;
@@ -851,8 +912,7 @@ LittleGroupSpectrum run_little_group(
         // the CPU however loudly the caller asked for a GPU -- that is the
         // engine's own 2^20-rep gate, and echoing the request instead would
         // make every GPU assertion toothless.
-        sb.info.gpu_engaged = sb.hk->gpu_engaged();
-        sb.info.csr_engaged = sb.hk->csr_engaged();
+        report_engagement(sb);
         if (sb.info.gpu_engaged) out.gpu_engaged = true;
         out.stars.push_back(sb.info);
         if (profile) {

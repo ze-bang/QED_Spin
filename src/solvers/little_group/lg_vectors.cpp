@@ -152,11 +152,7 @@ LittleGroupVectors little_group_lowest_vectors(
         if (!sb.hk) continue;
         std::size_t slot = static_cast<std::size_t>(-1);
         for (const auto& bi : sb.blocks) {
-            const ed::matvec::MatVecOperator& mv =
-                bi->pop ? static_cast<const ed::matvec::MatVecOperator&>(
-                              *bi->pop)
-                        : static_cast<const ed::matvec::MatVecOperator&>(
-                              *bi->hk);
+            const ed::matvec::MatVecOperator& mv = block_mv(*bi);
             bool refused = false;
             auto [ev, vv] = solve_block_pairs(mv, k, opt.dense_max_dim,
                                               &refused);
@@ -164,17 +160,10 @@ LittleGroupVectors little_group_lowest_vectors(
             LittleGroupBlock blk(bi);
             for (std::size_t i = 0; i < ev.size(); ++i) {
                 auto u = blk.lift_to_rep(vv[i].data());
-                // Certify the LIFT against the full momentum-sector H
-                // (the sandwich residual above does not cover W_sigma).
-                const std::size_t nrep = u.size();
-                std::vector<Complex> hu(nrep);
-                sb.hk->apply(u.data(), hu.data(), nrep);
-                double num = 0.0, den = 1e-300;
-                for (std::size_t r = 0; r < nrep; ++r) {
-                    num += std::norm(hu[r] - ev[i] * u[r]);
-                    den += std::norm(u[r]);
-                }
-                if (std::sqrt(num / den) > 1e-8) {
+                // Certify the LIFT (lifted_residual: on H_k0, or in the block for a group sector).
+                double den = 1e-300;
+                for (const auto& c : u) den += std::norm(c);
+                if (lifted_residual(*bi, vv[i].data(), u, ev[i]) > 1e-8) {
                     // The sandwich residual certified this row but the
                     // LIFT did not -- refused, not absent (audit
                     // 2026-08-01: used to vanish without a trace).

@@ -28,6 +28,9 @@
 #include <ed/symmetry/irreps.h>
 #include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
 #include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
+#include <ed/solvers/group_sector.h>         // group-sector lane (full little group, 1-dim chi)
+#include <ed/observables/rep_matrix_elements.h>  // rep_sector_matrix_elements
+#include <ed/symmetry/rep_sector_data.h>
 #include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
 #include <ed/core/hdf5_io.h>                // r2b: canonical eigenvector save
 #include <ed/symmetry/spin_flip.h>
@@ -43,6 +46,72 @@ namespace py = pybind11;
 
 namespace {
 using Complex = std::complex<double>;
+
+// numpy array that OWNS a moved std::vector (no copy of a multi-GB state vector).
+template <class T>
+py::array_t<T> owning_array(std::vector<T>&& v) {
+    auto* p = new std::vector<T>(std::move(v));
+    py::capsule cap(p, [](void* q) { delete reinterpret_cast<std::vector<T>*>(q); });
+    return py::array_t<T>({static_cast<py::ssize_t>(p->size())}, p->data(), cap);
+}
+
+// Read-only numpy view into a shared RepSectorData (the capsule keeps it alive).
+template <class T>
+py::array_t<T> sector_view(const std::shared_ptr<const ed::symmetry::RepSectorData>& sp,
+                           const std::vector<T>& v, std::vector<py::ssize_t> shape) {
+    auto* keep = new std::shared_ptr<const ed::symmetry::RepSectorData>(sp);
+    py::capsule cap(keep, [](void* q) {
+        delete reinterpret_cast<std::shared_ptr<const ed::symmetry::RepSectorData>*>(q);
+    });
+    py::array_t<T> a(shape, v.data(), cap);
+    py::detail::array_proxy(a.ptr())->flags &= ~py::detail::npy_api::NPY_ARRAY_WRITEABLE_;
+    return a;
+}
+
+// Everything rep_sector_matrix_elements needs to rebuild the sector (perm LUT and rank
+// tables are rebuilt, not stored).
+py::dict sector_dict(const std::shared_ptr<const ed::symmetry::RepSectorData>& sp) {
+    const auto& rd = *sp;
+    py::dict d;
+    d["reps"]       = sector_view(sp, rd.reps, {static_cast<py::ssize_t>(rd.reps.size())});
+    d["inv_norms"]  = sector_view(sp, rd.inv_norms, {static_cast<py::ssize_t>(rd.inv_norms.size())});
+    d["characters"] = sector_view(sp, rd.characters, {static_cast<py::ssize_t>(rd.characters.size())});
+    d["perms"]      = sector_view(sp, rd.perms_flat, {static_cast<py::ssize_t>(rd.group_size),
+                                                     static_cast<py::ssize_t>(rd.n_sites)});
+    d["flip_masks"] = sector_view(sp, rd.flip_masks, {static_cast<py::ssize_t>(rd.flip_masks.size())});
+    d["group_size"] = rd.group_size;
+    d["n_sites"]    = rd.n_sites;
+    d["n_up"]       = rd.n_up;
+    return d;
+}
+
+// Inverse of sector_dict (arrays may be read-only / memory-mapped; they are copied).
+ed::symmetry::RepSectorData sector_from_dict(const py::dict& d) {
+    ed::symmetry::RepSectorData rd;
+    rd.group_size = d["group_size"].cast<int>();
+    rd.n_sites    = d["n_sites"].cast<int>();
+    rd.n_up       = d["n_up"].cast<int>();
+    const auto reps  = d["reps"].cast<py::array_t<std::uint64_t, py::array::c_style | py::array::forcecast>>();
+    const auto norms = d["inv_norms"].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+    const auto chars = d["characters"].cast<py::array_t<Complex, py::array::c_style | py::array::forcecast>>();
+    const auto perms = d["perms"].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+    const auto flips = d["flip_masks"].cast<py::array_t<std::uint64_t, py::array::c_style | py::array::forcecast>>();
+    rd.reps.assign(reps.data(), reps.data() + reps.size());
+    rd.inv_norms.assign(norms.data(), norms.data() + norms.size());
+    rd.characters.assign(chars.data(), chars.data() + chars.size());
+    rd.perms_flat.assign(perms.data(), perms.data() + perms.size());
+    rd.flip_masks.assign(flips.data(), flips.data() + flips.size());
+    if (rd.reps.size() != rd.inv_norms.size()
+        || static_cast<int>(rd.characters.size()) != rd.group_size
+        || static_cast<int>(rd.perms_flat.size()) != rd.group_size * rd.n_sites
+        || (!rd.flip_masks.empty() && static_cast<int>(rd.flip_masks.size()) != rd.group_size))
+        throw std::invalid_argument("sector dict: inconsistent array sizes");
+    for (std::size_t i = 1; i < rd.reps.size(); ++i)
+        if (rd.reps[i] <= rd.reps[i - 1])
+            throw std::invalid_argument("sector dict: reps must be strictly ascending");
+    rd.build_perm_lut();
+    return rd;
+}
 }  // namespace
 
 void bind_little_group(py::module_& m) {
@@ -952,12 +1021,12 @@ void bind_little_group(py::module_& m) {
               std::vector<double> static_sf;
               static_sf.reserve(observables.size());
               std::vector<Complex> ov(dim);
+              // ONE shared sector (reps, norms, perm LUT) for every probe; copying and
+              // re-tabulating it per probe dominated the cost of large probe batches.
+              const auto rdp = ed::solvers::share_rep_sector(gs.rd);
               for (const Operator& o : observables) {
-                  // rd is consumed by the matvec factory; copy so the GS sector
-                  // survives for the next probe (cheap vs. the GS solve).
-                  ed::symmetry::RepSectorData rd_copy = gs.rd;
                   auto mv = ed::solvers::make_rep_sector_matvec(
-                      o, std::move(rd_copy), /*force_gpu=*/use_gpu);
+                      o, rdp, /*force_gpu=*/use_gpu);
                   mv->apply(gs.vec.data(), ov.data(), dim);
                   Complex c(0.0, 0.0);
                   for (std::size_t i = 0; i < dim; ++i)
@@ -1229,4 +1298,293 @@ void bind_little_group(py::module_& m) {
           "e.g. four-point dimer correlators); must be translation invariant (and "
           "flip even when the flip is folded), need not be point-group invariant; "
           "diagonal_values[row, j].");
+
+    // -------------------------------------------------------------------------
+    // Observable engine: general spin-1/2 operators (any number of sites, any
+    // symmetry) and their matrix elements between block eigenstates.
+    // -------------------------------------------------------------------------
+    using ed::observables::MaskedOperator;
+    py::class_<MaskedOperator>(m, "MaskedOperator",
+        "Sum of products of S+, S-, S^z, S^x, S^y, |up><up|, |dn><dn| on any sites "
+        "(engine convention: bit set = spin down). Exact algebra: +, * (a * b applies "
+        "b first), dagger(), image(perm, flip_xor).")
+        .def(py::init<int>(), py::arg("n_sites"))
+        .def_static("product", &MaskedOperator::product, py::arg("n_sites"), py::arg("ops"),
+                    py::arg("sites"), py::arg("coeff") = Complex(1.0, 0.0),
+                    "coeff * prod_k O_k(site_k), the LAST factor acting first; ops is a "
+                    "string over '+-zxyudI'.")
+        .def_property_readonly("n_sites", &MaskedOperator::n_sites)
+        .def("__len__", &MaskedOperator::size)
+        .def("add", [](MaskedOperator& a, const MaskedOperator& b, Complex s) -> MaskedOperator& {
+                 return a.add(b, s);
+             }, py::arg("other"), py::arg("scale") = Complex(1.0, 0.0),
+             py::return_value_policy::reference_internal)
+        .def("__add__", [](const MaskedOperator& a, const MaskedOperator& b) { return a + b; })
+        .def("__sub__", [](const MaskedOperator& a, const MaskedOperator& b) {
+                 return a + b.scaled(-1.0);
+             })
+        .def("__mul__", [](const MaskedOperator& a, const MaskedOperator& b) { return a * b; })
+        .def("__mul__", [](const MaskedOperator& a, Complex s) { return a.scaled(s); })
+        .def("__rmul__", [](const MaskedOperator& a, Complex s) { return a.scaled(s); })
+        .def("scaled", &MaskedOperator::scaled, py::arg("s"))
+        .def("dagger", &MaskedOperator::dagger)
+        .def("image", [](const MaskedOperator& a, const std::vector<int>& perm, std::uint64_t flip_xor) {
+                 if (static_cast<int>(perm.size()) != a.n_sites())
+                     throw std::invalid_argument("MaskedOperator.image: perm length != n_sites");
+                 return a.image(perm.data(), flip_xor);
+             }, py::arg("perm"), py::arg("flip_xor") = 0,
+             "U O U^dagger for U|s> = |P(s) ^ flip_xor>, new bit i = old bit perm[i].")
+        .def("is_hermitian", &MaskedOperator::is_hermitian, py::arg("tol") = 1e-12)
+        .def("delta_set_bits", &MaskedOperator::delta_set_bits)
+        .def("terms", [](const MaskedOperator& a, double drop) {
+                 py::list out;
+                 for (const auto& t : a.terms(drop))
+                     out.append(py::make_tuple(t.cond_mask, t.cond_val, t.flip_mask,
+                                               t.sign_mask, t.coeff));
+                 return out;
+             }, py::arg("drop") = 0.0,
+             "Canonical terms (cond_mask, cond_val, flip_mask, sign_mask, coeff).")
+        .def("to_dense", [](const MaskedOperator& a) {
+                 if (a.n_sites() > 12)
+                     throw std::invalid_argument("MaskedOperator.to_dense: n_sites > 12");
+                 const auto D = a.to_dense();
+                 const py::ssize_t dim = static_cast<py::ssize_t>(1) << a.n_sites();
+                 py::array_t<Complex> M({dim, dim});
+                 std::copy(D.begin(), D.end(), M.mutable_data());
+                 return M;
+             });
+
+    m.def("little_group_block_observables",
+          [lg_opts, lg_stars_dict, with_block_size](const Operator& op,
+             const std::vector<MaskedOperator>& observables,
+             const std::vector<std::vector<int>>& abelian_group,
+             const std::vector<std::vector<int>>& residue_perms,
+             int levels, int n_up, int sz_parity, int dense_max_dim, bool use_gpu,
+             int spin_flip, int time_reversal,
+             const std::vector<int>& only_k0,
+             const std::vector<int>& only_irrep, int block_size,
+             bool partners, const std::string& pairs, int sweep_gpu,
+             const std::vector<int>& pair_observables, bool return_vectors) {
+              const int n_sites = static_cast<int>(op.getNumBits());
+              ed::solvers::LittleGroupMEOptions me;
+              me.levels = levels;
+              me.partners = partners;
+              if (pairs == "same_momentum") me.pairs = ed::solvers::LittleGroupMEOptions::Pairs::same_momentum;
+              else if (pairs == "diagonal") me.pairs = ed::solvers::LittleGroupMEOptions::Pairs::diagonal;
+              else throw std::invalid_argument("pairs must be 'same_momentum' or 'diagonal'");
+              me.use_gpu = (sweep_gpu < 0) ? use_gpu : (sweep_gpu != 0);
+              me.pair_observables = pair_observables;
+              me.return_vectors = return_vectors;
+              ed::solvers::LittleGroupMEResult r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::little_group_block_observables(
+                      op, observables, abelian_group, residue_perms, n_sites,
+                      with_block_size(lg_opts(n_up, sz_parity, dense_max_dim, use_gpu,
+                                              spin_flip, time_reversal, only_k0,
+                                              /*plan_only=*/false, only_irrep),
+                                      block_size),
+                      me);
+              }
+              std::vector<double> en, res;
+              std::vector<int> kraw, fpar, irr, idim, sk0, lev, par;
+              std::vector<std::uint64_t> mult;
+              std::vector<bool> conv;
+              for (const auto& s : r.states) {
+                  en.push_back(s.energy);
+                  res.push_back(s.residual);
+                  kraw.push_back(s.label.k_raw);
+                  fpar.push_back(s.label.flip_parity);
+                  irr.push_back(s.label.irrep);
+                  idim.push_back(s.label.irrep_dim);
+                  conv.push_back(s.label.converged);
+                  sk0.push_back(s.star_k0);
+                  lev.push_back(s.level);
+                  par.push_back(s.partner);
+                  mult.push_back(s.multiplicity);
+              }
+              const std::size_t n_obs = observables.size();
+              py::array_t<int> pa({static_cast<py::ssize_t>(r.pairs.size()), static_cast<py::ssize_t>(2)});
+              py::array_t<Complex> vals({static_cast<py::ssize_t>(r.pairs.size()),
+                                         static_cast<py::ssize_t>(n_obs)});
+              auto pm = pa.mutable_unchecked<2>();
+              auto vm = vals.mutable_unchecked<2>();
+              for (std::size_t p = 0; p < r.pairs.size(); ++p) {
+                  pm(static_cast<py::ssize_t>(p), 0) = r.pairs[p].first;
+                  pm(static_cast<py::ssize_t>(p), 1) = r.pairs[p].second;
+                  for (std::size_t o = 0; o < n_obs; ++o)
+                      vm(static_cast<py::ssize_t>(p), static_cast<py::ssize_t>(o)) = r.values[p][o];
+              }
+              ed::solvers::LittleGroupSpectrum star_view;
+              star_view.stars = r.stars;
+              py::dict d;
+              d["energies"]           = en;
+              d["residuals"]          = res;
+              d["k_raw"]              = kraw;
+              d["flip_parity"]        = fpar;
+              d["irrep"]              = irr;
+              d["irrep_dim"]          = idim;
+              d["converged"]          = conv;
+              d["k0"]                 = sk0;
+              d["level"]              = lev;
+              d["partner"]            = par;
+              d["multiplicity"]       = mult;
+              d["pairs"]              = pa;
+              d["values"]             = vals;
+              d["irrep_characters"]   = r.irrep_characters;
+              d["stars"]              = lg_stars_dict(star_view);
+              d["flip_engaged"]       = r.flip_engaged;
+              d["tr_engaged"]         = r.tr_engaged;
+              d["unconverged_blocks"] = r.unconverged_blocks;
+              if (return_vectors) {
+                  py::list vecs, secs;
+                  for (auto& v : r.vectors) vecs.append(owning_array(std::move(v)));
+                  for (const auto& sp : r.sectors) secs.append(sector_dict(sp));
+                  d["vectors"]      = vecs;
+                  d["sectors"]      = secs;
+                  d["state_sector"] = r.state_sector;
+              }
+              return d;
+          },
+          py::arg("operator"), py::arg("observables"),
+          py::arg("abelian_group"), py::arg("residue_perms"),
+          py::arg("levels") = 1, py::arg("n_up") = -1, py::arg("sz_parity") = -1,
+          py::arg("dense_max_dim") = 256, py::arg("use_gpu") = false,
+          py::arg("spin_flip") = -1, py::arg("time_reversal") = -1,
+          py::arg("only_k0") = std::vector<int>{},
+          py::arg("only_irrep") = std::vector<int>{},
+          py::arg("block_size") = 1, py::arg("partners") = true,
+          py::arg("pairs") = std::string("same_momentum"), py::arg("sweep_gpu") = -1,
+          py::arg("pair_observables") = std::vector<int>{}, py::arg("return_vectors") = false,
+          "<m|O_i|n> between the lowest `levels` eigenstates of every block (plus the "
+          "partners of multi-dimensional irreps), in the representative basis. "
+          "Observables are MaskedOperators and need NO symmetry: each is projected "
+          "onto the component connecting the two sectors, so selection-rule zeros are "
+          "exact. pairs='same_momentum' pairs every two states whose stars share the "
+          "representative momentum (any irrep / flip parity); 'diagonal' gives "
+          "<n|O|n> only. Result: per-state arrays (energies, labels, k0, level, "
+          "partner, residuals), pairs[p] = (bra, ket), values[p, i] complex. "
+          "sweep_gpu: -1 follows use_gpu, 0/1 forces the matrix-element sweep lane. "
+          "pair_observables: observable indices evaluated on OFF-diagonal pairs (default all); "
+          "the other off-diagonal entries are NaN.");
+
+    // -------------------------------------------------------------------------
+    // Observables on STORED vectors: the sector dicts and rep-basis vectors that
+    // little_group_block_observables(..., return_vectors=True) hands back, reloaded from
+    // disk. Same compile_program + rep_matrix_elements as the in-engine sweep.
+    // -------------------------------------------------------------------------
+    m.def("rep_sector_matrix_elements",
+          [](const py::dict& src, const py::object& tgt,
+             const std::vector<MaskedOperator>& observables,
+             const std::vector<py::array_t<Complex, py::array::c_style>>& kets,
+             const std::vector<py::array_t<Complex, py::array::c_style>>& bras,
+             const std::vector<std::pair<int, int>>& pairs, bool use_gpu,
+             const std::vector<std::uint64_t>& balanced_masks) {
+              const ed::symmetry::RepSectorData rs = sector_from_dict(src);
+              std::unique_ptr<ed::symmetry::RepSectorData> rt;
+              if (!tgt.is_none()) rt = std::make_unique<ed::symmetry::RepSectorData>(
+                  sector_from_dict(tgt.cast<py::dict>()));
+              const ed::symmetry::RepSectorData& rtgt = rt ? *rt : rs;   // same object: fast path
+              std::vector<ed::observables::RepVectorView> kv, bv;
+              for (const auto& a : kets) kv.push_back({a.data(), static_cast<std::size_t>(a.size())});
+              for (const auto& a : bras) bv.push_back({a.data(), static_cast<std::size_t>(a.size())});
+              ed::observables::RepMEOptions ro;
+              ro.use_gpu = use_gpu;
+              ro.balanced_masks = balanced_masks;
+              std::vector<Complex> M;
+              {
+                  py::gil_scoped_release release;
+                  const auto prog = ed::observables::compile_program(observables, rs, rtgt);
+                  M = ed::observables::rep_matrix_elements(rs, rtgt, prog, kv, bv, pairs, ro);
+              }
+              py::array_t<Complex> out({static_cast<py::ssize_t>(pairs.size()),
+                                        static_cast<py::ssize_t>(observables.size())});
+              std::copy(M.begin(), M.end(), out.mutable_data());
+              return out;
+          },
+          py::arg("src"), py::arg("tgt"), py::arg("observables"), py::arg("kets"),
+          py::arg("bras"), py::arg("pairs"), py::arg("use_gpu") = false,
+          py::arg("balanced_masks") = std::vector<std::uint64_t>{},
+          "out[p, o] = <bras[pairs[p][0]] | O_o | kets[pairs[p][1]]> for stored rep-basis "
+          "vectors. src / tgt are sector dicts as returned by little_group_block_observables("
+          "return_vectors=True)['sectors'] (tgt=None: the same sector as src). Vectors may be "
+          "read-only / memory-mapped complex128 arrays. balanced_masks: evaluate <bra|P O P|ket> "
+          "with P the projector on states where every mask holds exactly half its bits set "
+          "(hexagon masks: Q_h = 0 everywhere); the mask set must be closed under the group.");
+
+    // -------------------------------------------------------------------------
+    // Group-sector lane (include/ed/solvers/group_sector.h): the rep basis under the FULL little group of a block
+    // with a 1-dim character -- block dim C(N, n_up)/|G| instead of the abelian k-sector's C(N, n_up)/|T x flip|.
+    // Sector dicts are the same objects rep_sector_matrix_elements consumes.
+    // -------------------------------------------------------------------------
+    m.def("group_sector",
+          [](const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip,
+             const py::array_t<Complex, py::array::c_style | py::array::forcecast>& characters) {
+              std::vector<Complex> chi(characters.data(), characters.data() + characters.size());
+              std::shared_ptr<const ed::symmetry::RepSectorData> sp;
+              {
+                  py::gil_scoped_release release;
+                  sp = std::make_shared<const ed::symmetry::RepSectorData>(
+                      ed::solvers::build_group_sector(perms, n_sites, n_up, flip, chi));
+              }
+              return sector_dict(sp);
+          },
+          py::arg("perms"), py::arg("n_sites"), py::arg("n_up"), py::arg("flip"), py::arg("characters"),
+          "Rep basis of the n_up sector under the group `perms` (x the spin flip when flip=True; elements "
+          "[g..., g*F...]) in the 1-dim representation `characters` (length |G|, or 2|G| with flip). Returns a "
+          "sector dict (reps, inv_norms, characters, perms, flip_masks, group_size, n_sites, n_up).");
+
+    m.def("group_block",
+          [](const Operator& op, const py::dict& sector, int levels, int block_size, int dense_max_dim,
+             bool return_vectors) {
+              auto sp = std::make_shared<const ed::symmetry::RepSectorData>(sector_from_dict(sector));
+              ed::solvers::GroupSectorSolveOptions o;
+              o.levels = levels; o.block_size = block_size; o.dense_max_dim = dense_max_dim;
+              o.return_vectors = return_vectors;
+              ed::solvers::GroupSectorSolveResult r;
+              {
+                  py::gil_scoped_release release;
+                  r = ed::solvers::solve_group_sector(op, sp, o);
+              }
+              py::dict d;
+              d["energies"]  = r.energies;
+              d["residuals"] = r.residuals;
+              d["converged"] = r.converged;
+              d["dim"]       = r.dim;
+              d["t_setup"]   = r.t_setup;
+              d["t_solve"]   = r.t_solve;
+              py::list vecs;
+              for (auto& v : r.vectors) {
+                  py::array_t<Complex> a(static_cast<py::ssize_t>(v.size()));
+                  std::copy(v.begin(), v.end(), a.mutable_data());
+                  vecs.append(a);
+              }
+              d["vectors"] = vecs;
+              return d;
+          },
+          py::arg("op"), py::arg("sector"), py::arg("levels") = 3, py::arg("block_size") = 1,
+          py::arg("dense_max_dim") = 256, py::arg("return_vectors") = true,
+          "Lowest `levels` eigenpairs of `op` in the group sector (a group_sector dict): energies, residuals "
+          "||Hv - Ev||, converged, dim, t_setup, t_solve (incl. the reduced-CSR build) and the vectors in the "
+          "group-sector basis. Use levels >= 2 (Krylov-Schur lane).");
+
+    m.def("group_convert",
+          [](const py::array_t<Complex, py::array::c_style | py::array::forcecast>& vec, const py::dict& src,
+             const py::dict& dst, bool conjugate) {
+              const std::vector<Complex> v(vec.data(), vec.data() + vec.size());
+              const ed::symmetry::RepSectorData rs = sector_from_dict(src);
+              const ed::symmetry::RepSectorData rt = sector_from_dict(dst);
+              std::vector<Complex> out;
+              {
+                  py::gil_scoped_release release;
+                  out = ed::solvers::convert_group_vector(v, rs, rt, conjugate);
+              }
+              py::array_t<Complex> a(static_cast<py::ssize_t>(out.size()));
+              std::copy(out.begin(), out.end(), a.mutable_data());
+              return a;
+          },
+          py::arg("vec"), py::arg("src"), py::arg("dst"), py::arg("conjugate") = true,
+          "Re-express a group-sector vector (sector `src`, group G) in the sector `dst` of a subgroup H of G "
+          "(characters restricted from G). conjugate=True is the engine convention (pinned by group_convert_test.py: "
+          "it reproduces <H> with complex characters; False does not). The result is normalised.");
 }

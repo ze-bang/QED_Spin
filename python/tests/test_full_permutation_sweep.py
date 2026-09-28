@@ -253,8 +253,9 @@ def _labeled_stars(H, sym, env, monkeypatch):
                                    eigenvalues_only=True, verbose=False)
     out = dict(_core.little_group_lowest_eigenvalues_labeled(
         H, lane.A, lane.residues, k=6, n_up=N // 2, dense_max_dim=2))
-    # dense_max_dim=2 forces Lanczos (applies) on essentially every block,
-    # so the lazy engagement signals are meaningful.
+    # ED_SYM_LG_DENSE_FLOOR=1 (set by the callers) forces Lanczos applies on every block, so the lazy engagement
+    # signals are meaningful: dense_max_dim alone does not, the dense crossover is at least 4x the Lanczos cap
+    # (1600), and a dense block is assembled from the reduced matrix without keeping a CSR.
     for k in env:
         monkeypatch.delenv(k)
     return [dict(s) for s in out["stars"]], out
@@ -263,9 +264,9 @@ def _labeled_stars(H, sym, env, monkeypatch):
 def test_regime_engagement_signals(monkeypatch):
     H = _op("ring")
     sym = _sym(H, "full", "ring")
-    stars_csr, _ = _labeled_stars(H, sym, {}, monkeypatch)
+    stars_csr, _ = _labeled_stars(H, sym, {"ED_SYM_LG_DENSE_FLOOR": "1"}, monkeypatch)
     stars_gw, _ = _labeled_stars(
-        H, sym, {"ED_SYM_SECTOR_CSR_BUDGET_GIB": "1e-9"}, monkeypatch)
+        H, sym, {"ED_SYM_LG_DENSE_FLOOR": "1", "ED_SYM_SECTOR_CSR_BUDGET_GIB": "1e-9"}, monkeypatch)
     assert any(s["csr_engaged"] for s in stars_csr), (
         "default regime: no star reports the reduced CSR -- either the "
         "signal or the default regime is broken")

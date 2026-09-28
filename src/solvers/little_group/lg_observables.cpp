@@ -14,7 +14,7 @@ namespace ed::solvers {
 
 using namespace lg_detail;
 
-namespace {
+namespace lg_detail {
 
 // The lowest `want` eigenpairs of one block, in block coordinates. Dense below the
 // lowest-k crossover (exact); one level through the certified ground-state solver
@@ -58,6 +58,10 @@ solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
     return {ev, vv};
 }
 
+}  // namespace lg_detail
+
+namespace {
+
 // The operator must be representable in the sector basis H's symmetries define.
 void require_compatible(const ::Operator& O, std::size_t index, const EngineContext& cx,
                         bool tr_on, const LittleGroupOptions& opt) {
@@ -93,9 +97,10 @@ void require_compatible(const ::Operator& O, std::size_t index, const EngineCont
 }
 
 
-// A diagonal observable folded to sum_t coef_t (-1)^{popcount(mask_t & ~s)}: each site
-// contributes S^z = +-1/2 (bit set = up), a repeated site squares to 1/4 and drops out
-// of the mask. Terms with equal masks are merged.
+// A diagonal observable folded to sum_t coef_t (-1)^{popcount(mask_t & s)}: each site
+// contributes S^z = +-1/2 with the engine's convention (bit set = DOWN, as in
+// term_gate_math.h), a repeated site squares to 1/4 and drops out of the mask. Terms
+// with equal masks are merged.
 struct FoldedDiagonal {
     std::vector<double>        coef;
     std::vector<std::uint64_t> mask;
@@ -179,7 +184,7 @@ std::vector<double> diagonal_expectations(const std::vector<std::uint64_t>& reps
         for (long long r = 0; r < nr; ++r) {
             const double w = std::norm(u[static_cast<std::size_t>(r)]);
             if (w == 0.0) continue;
-            const std::uint64_t down = ~reps[static_cast<std::size_t>(r)];
+            const std::uint64_t down = reps[static_cast<std::size_t>(r)];   // set bit = down
             for (std::size_t j = 0; j < nd; ++j) {
                 double v = 0.0;
                 const auto& f = D[j];
@@ -246,7 +251,7 @@ LittleGroupExpectations little_group_block_expectations(
         for (const auto* O : observables)
             Ok.push_back(std::make_unique<RepSectorMatVec>(*O, sb.hk->rep_data_ptr()));
         const std::size_t nrep = sb.hk->dim();
-        std::vector<Complex> hu(nrep), ou(nrep);
+        std::vector<Complex> ou(nrep);
 
         for (const auto& impl : sb.blocks) {
             LittleGroupBlock block(impl);
@@ -263,9 +268,7 @@ LittleGroupExpectations little_group_block_expectations(
                 if (!(nrm > 0.0))
                     throw std::runtime_error("little_group_block_expectations: zero lifted vector");
                 for (auto& c : u) c /= nrm;
-                sb.hk->apply(u.data(), hu.data(), nrep);
-                double res = 0.0;
-                for (std::size_t i = 0; i < nrep; ++i) res += std::norm(hu[i] - ev[j] * u[i]);
+                const double res = lifted_residual(*impl, vv[j].data(), u, ev[j]);
                 std::vector<double> vals;
                 vals.reserve(Ok.size());
                 for (const auto& O : Ok) {
@@ -287,11 +290,10 @@ LittleGroupExpectations little_group_block_expectations(
                 out.values.push_back(std::move(vals));
                 out.diagonal_values.push_back(
                     diagonal_expectations(sb.hk->rep_data_ptr()->reps, u, folded));
-                out.residuals.push_back(std::sqrt(res));
+                out.residuals.push_back(res);
             }
         }
-        sb.info.gpu_engaged = sb.hk->gpu_engaged();
-        sb.info.csr_engaged = sb.hk->csr_engaged();
+        report_engagement(sb);
         out.stars.push_back(sb.info);
     }
     return out;

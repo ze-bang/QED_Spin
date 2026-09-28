@@ -32,7 +32,8 @@ from typing import Callable, Optional, Sequence
 
 from . import _core
 
-__all__ = ["BlockLevel", "BlockResult", "solve_blocks", "dE_dlambda", "dimer_zz_observables"]
+__all__ = ["BlockLevel", "BlockResult", "MatrixElements", "solve_blocks", "block_observables",
+           "dE_dlambda", "dimer_zz_observables"]
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,49 @@ def _kappa(row, A_index, gens):
     return tuple(out)
 
 
+def _levels(out, A, momentum_generators, namer, energies, level_of, residuals, values,
+            dvalues) -> list:
+    """One BlockLevel per engine row: momenta, characters and names from raw labels."""
+    gens = [list(map(int, g)) for g in (momentum_generators or [])]
+    # irrep_characters columns follow the caller's order of abelian_group (pinned by
+    # test_labels_do_not_depend_on_the_order_of_the_group).
+    A_index = {tuple(a): i for i, a in enumerate(A)}
+    for g in gens:
+        if tuple(g) not in A_index:
+            raise ValueError("a momentum generator is not an element of abelian_group")
+    chars = out["irrep_characters"]
+    n_a = len(A)
+    by_member = {}
+    for st in out["stars"]:
+        for m in list(st["members"]) + [st["k0"]]:
+            by_member.setdefault(int(m), st)
+
+    levels = []
+    for i, e in enumerate(energies):
+        k_raw, flip = int(out["k_raw"][i]), int(out["flip_parity"][i])
+        irr = int(out["irrep"][i])
+        st = by_member.get(k_raw + (flip if flip > 0 else 0) * n_a)
+        members = [int(m) % n_a for m in st["members"]] if st is not None else [k_raw]
+        momenta = tuple(sorted({_kappa(chars[m], A_index, gens) for m in members})) if gens else ()
+        characters = {}
+        if st is not None and irr >= 0 and st["little_characters"]:
+            characters = {int(el): complex(c) for el, c in
+                          zip(st["little_elems"], st["little_characters"][irr])}
+        lv = BlockLevel(energy=float(e), level=int(level_of[i]), momenta=momenta,
+                        characters=characters, irrep_dim=int(out["irrep_dim"][i]),
+                        flip=flip, multiplicity=int(out["multiplicity"][i]),
+                        converged=bool(out["converged"][i]),
+                        residual=None if residuals[i] is None else float(residuals[i]),
+                        values=values[i], diagonal_values=dvalues[i],
+                        k_raw=k_raw, irrep_index=irr,
+                        k0=int(st["k0"]) if st is not None else -1)
+        if namer is not None:
+            point, name = namer(lv)
+            lv = dataclasses.replace(lv, point=point, irrep_name=name)
+        levels.append(lv)
+    return levels
+
+
 def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
                  observables: Sequence = (), diagonal_observables: Sequence = (),
                  momentum_generators: Sequence = None,
@@ -154,44 +198,9 @@ def solve_blocks(H, abelian_group, residue_perms, *, k: int = 1,
         raise RuntimeError(f"{out['unconverged_blocks']} block(s) did not converge; "
                            "pass strict=False to inspect the certified part")
 
-    gens = [list(map(int, g)) for g in (momentum_generators or [])]
-    # irrep_characters columns follow the caller's order of abelian_group (pinned by
-    # test_labels_do_not_depend_on_the_order_of_the_group).
-    A_index = {tuple(a): i for i, a in enumerate(A)}
-    for g in gens:
-        if tuple(g) not in A_index:
-            raise ValueError("a momentum generator is not an element of abelian_group")
-    chars = out["irrep_characters"]
-    n_a = len(A)
     stars = list(out["stars"])
-    by_member = {}
-    for st in stars:
-        for m in list(st["members"]) + [st["k0"]]:
-            by_member.setdefault(int(m), st)
-
-    levels = []
-    for i, e in enumerate(energies):
-        k_raw, flip = int(out["k_raw"][i]), int(out["flip_parity"][i])
-        irr = int(out["irrep"][i])
-        st = by_member.get(k_raw + (flip if flip > 0 else 0) * n_a)
-        members = [int(m) % n_a for m in st["members"]] if st is not None else [k_raw]
-        momenta = tuple(sorted({_kappa(chars[m], A_index, gens) for m in members})) if gens else ()
-        characters = {}
-        if st is not None and irr >= 0 and st["little_characters"]:
-            characters = {int(el): complex(c) for el, c in
-                          zip(st["little_elems"], st["little_characters"][irr])}
-        lv = BlockLevel(energy=float(e), level=int(level_of[i]), momenta=momenta,
-                        characters=characters, irrep_dim=int(out["irrep_dim"][i]),
-                        flip=flip, multiplicity=int(out["multiplicity"][i]),
-                        converged=bool(out["converged"][i]),
-                        residual=None if residuals[i] is None else float(residuals[i]),
-                        values=values[i], diagonal_values=dvalues[i],
-                        k_raw=k_raw, irrep_index=irr,
-                        k0=int(st["k0"]) if st is not None else -1)
-        if namer is not None:
-            point, name = namer(lv)
-            lv = dataclasses.replace(lv, point=point, irrep_name=name)
-        levels.append(lv)
+    levels = _levels(out, A, momentum_generators, namer, energies, level_of, residuals,
+                     values, dvalues)
     return BlockResult(levels=levels, observables=len(obs),
                        unconverged_blocks=int(out["unconverged_blocks"]),
                        flip_engaged=bool(out["flip_engaged"]),
@@ -204,6 +213,92 @@ def dE_dlambda(H, dH: Sequence, abelian_group, residue_perms, **kw) -> BlockResu
     is non-degenerate inside its block; for a degenerate one it is the value in the
     solver's vector, and degenerate first-order theory needs the full multiplet."""
     return solve_blocks(H, abelian_group, residue_perms, observables=dH, **kw)
+
+
+@dataclass
+class MatrixElements:
+    """<m|O_i|n> between block eigenstates (see :func:`block_observables`).
+
+    ``states[s]`` is a :class:`BlockLevel` (``values`` empty); ``partner[s]`` is 0 for
+    the solved row of its irrep and 1..d-1 for the generated partners. ``pairs[p] =
+    (bra, ket)`` indexes ``states``; ``values[p, i]`` is the complex matrix element of
+    observable ``i``. Individual elements of a degenerate multiplet depend on the basis
+    chosen inside it; :meth:`strength` sums over whole multiplets and does not.
+    """
+    states: list
+    partner: list
+    pairs: "object"
+    values: "object"
+    unconverged_blocks: int = 0
+    flip_engaged: bool = False
+    tr_engaged: bool = False
+    stars: list = field(default_factory=list)
+
+    def element(self, bra: int, ket: int):
+        """values row of the pair (bra, ket); KeyError if it was not computed."""
+        idx = self._index().get((bra, ket))
+        if idx is None:
+            raise KeyError((bra, ket))
+        return self.values[idx]
+
+    def _index(self):
+        if not hasattr(self, "_idx"):
+            object.__setattr__(self, "_idx", {(int(b), int(k)): p
+                                              for p, (b, k) in enumerate(self.pairs)})
+        return self._idx
+
+    def multiplets(self, tol: float = 1e-8) -> list:
+        """State indices grouped by (block, level): a solved row with its partners."""
+        groups = {}
+        for s, lv in enumerate(self.states):
+            groups.setdefault((lv.k0, lv.irrep_index, lv.level), []).append(s)
+        return sorted(groups.values(), key=lambda g: self.states[g[0]].energy)
+
+    def strength(self, obs: int, bra: Sequence[int], ket: Sequence[int]) -> float:
+        """sum_{i in bra, j in ket} |<i|O_obs|j>|^2 (basis independent over multiplets)."""
+        return float(sum(abs(self.element(i, j)[obs]) ** 2 for i in bra for j in ket))
+
+
+def block_observables(H, abelian_group, residue_perms, observables: Sequence, *,
+                      levels: int = 1, pairs: str = "same_momentum", partners: bool = True,
+                      momentum_generators: Sequence = None, namer: Callable = None,
+                      n_up: int = -1, sz_parity: int = -1, spin_flip: int = -1,
+                      time_reversal: int = -1, dense_max_dim: int = 256,
+                      use_gpu: bool = False, sweep_gpu: int = -1, block_size: int = 1,
+                      only_k0: Sequence[int] = (), only_irrep: Sequence[int] = (),
+                      pair_observables: Sequence[int] = (),
+                      strict: bool = True) -> MatrixElements:
+    """``<m|O_i|n>`` between the lowest ``levels`` states of every block.
+
+    ``observables`` are :class:`qed.masked_ops.MaskedOperator` and need no symmetry
+    (a single bond, plaquette or string is fine). ``pairs='same_momentum'`` gives
+    every ordered pair of states whose stars share the representative momentum (all
+    irreps and both flip parities); ``'diagonal'`` gives ``<n|O|n>`` only. Partners of
+    multi-dimensional irreps are included with ``partners=True``. ``pair_observables`` restricts
+    OFF-diagonal pairs to those observable indices (the rest of those rows are NaN). Labels follow
+    :func:`solve_blocks` (pass ``momentum_generators`` / ``namer`` the same way).
+    """
+    import numpy as np
+
+    A = [list(map(int, a)) for a in abelian_group]
+    R = [list(map(int, r)) for r in residue_perms]
+    out = dict(_core.little_group_block_observables(
+        H, list(observables), A, R, levels=levels, n_up=n_up, sz_parity=sz_parity,
+        dense_max_dim=dense_max_dim, use_gpu=use_gpu, spin_flip=spin_flip,
+        time_reversal=time_reversal, only_k0=list(only_k0), only_irrep=list(only_irrep),
+        block_size=block_size, partners=partners, pairs=pairs, sweep_gpu=sweep_gpu,
+        pair_observables=[int(o) for o in pair_observables]))
+    if strict and int(out["unconverged_blocks"]) > 0:
+        raise RuntimeError(f"{out['unconverged_blocks']} block(s) did not converge; "
+                           "pass strict=False to inspect the certified part")
+    n = len(out["energies"])
+    states = _levels(out, A, momentum_generators, namer, list(out["energies"]),
+                     list(out["level"]), list(out["residuals"]), [()] * n, [()] * n)
+    return MatrixElements(states=states, partner=[int(x) for x in out["partner"]],
+                          pairs=np.asarray(out["pairs"]), values=np.asarray(out["values"]),
+                          unconverged_blocks=int(out["unconverged_blocks"]),
+                          flip_engaged=bool(out["flip_engaged"]),
+                          tr_engaged=bool(out["tr_engaged"]), stars=list(out["stars"]))
 
 
 def dimer_zz_observables(bonds, cell_shift):

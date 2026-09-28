@@ -38,6 +38,7 @@
 
 #include <ed/orchestrator.h>                // ed::workflows::ThermalOptions (U1b)
 #include <ed/solvers/little_group_solve.h>  // LittleGroupOptions, LittleGroupSpectrum
+#include <ed/observables/masked_program.h>  // MaskedOperator (block observables)
 
 namespace ed {
 class LinearOperator;  // include/ed/core/linear_operator.h
@@ -337,5 +338,75 @@ little_group_transport(const ::Operator&                    op,
                        const std::vector<std::complex<double>>& vec,
                        const LittleGroupOptions&            opt,
                        int                                  n_up_dst = -1);
+
+// -----------------------------------------------------------------------------
+// Matrix elements of general observables between block eigenstates, evaluated in
+// the representative basis (observable engine: masked_program.h,
+// rep_matrix_elements.h). Stars are solved one at a time; only each star's rep
+// data and the lifted vectors are kept, so sectors of different flip parity can
+// be paired afterwards.
+//
+// States: the lowest `levels` eigenpairs of every block (option filters such as
+// only_k0 apply), plus, with `partners`, the d_sigma - 1 degenerate partners of
+// every row of a multi-dimensional irrep (partner > 0). TR-folded sigma* partners
+// are NOT generated. Observables need no symmetry: each is projected onto the
+// component that can connect the two sectors, so a single bond, plaquette or
+// string is a valid input, and selection-rule zeros come out exactly 0.
+//
+// Pairs: `diagonal` = <n|O|n>; `same_momentum` = every ordered (bra, ket) whose
+// stars share the representative momentum k_raw (any irrep, level, partner or
+// flip parity). Cross-momentum pairs are not supported yet.
+// -----------------------------------------------------------------------------
+struct LittleGroupMEOptions {
+    enum class Pairs { diagonal, same_momentum };
+    int   levels   = 1;                     ///< eigenpairs per block
+    bool  partners = true;                  ///< add multi-dim irrep partners
+    Pairs pairs    = Pairs::same_momentum;
+    bool  use_gpu  = false;                 ///< GPU sweep of the matrix elements
+    /// Empty: every observable on every pair. Otherwise OFF-diagonal pairs (bra != ket)
+    /// evaluate only these observable indices; their other entries are NaN. Diagonal
+    /// pairs always carry every observable.
+    std::vector<int> pair_observables;
+    /// Hand the lifted state vectors and their sector data back (LittleGroupMEResult::
+    /// vectors / sectors / state_sector) so a caller can store them and evaluate
+    /// observables later (rep_matrix_elements) without re-solving.
+    bool return_vectors = false;
+};
+
+struct LittleGroupMEState {
+    double           energy = 0.0;
+    LittleGroupLabel label;
+    int              star_k0  = -1;   ///< star (sector) the vector lives in
+    int              level    = 0;    ///< 0 = block ground state, 1, ...
+    int              partner  = 0;    ///< 0 = the solved row, 1..d-1 = partners
+    std::uint64_t    multiplicity = 1;
+    double           residual = 0.0;  ///< ||H u - E u|| in the rep basis
+};
+
+struct LittleGroupMEResult {
+    std::vector<LittleGroupMEState>  states;
+    std::vector<std::pair<int, int>> pairs;    ///< (bra, ket) indices into states
+    /// values[p][o] = <states[pairs[p].first] | O_o | states[pairs[p].second]>
+    std::vector<std::vector<std::complex<double>>> values;
+    std::vector<LittleGroupStarInfo> stars;
+    std::vector<std::vector<std::complex<double>>> irrep_characters;
+    bool        flip_engaged       = false;
+    bool        tr_engaged         = false;
+    std::size_t unconverged_blocks = 0;
+    /// With return_vectors: the rep-basis vector of every state (normalised), the sector
+    /// data of every star that holds states, and the sector index of each state.
+    std::vector<std::vector<std::complex<double>>>                    vectors;
+    std::vector<std::shared_ptr<const ed::symmetry::RepSectorData>>   sectors;
+    std::vector<int>                                                  state_sector;
+};
+
+[[nodiscard]] LittleGroupMEResult
+little_group_block_observables(const ::Operator&                                  op,
+                               const std::vector<ed::observables::MaskedOperator>& ops,
+                               const std::vector<std::vector<int>>&               abelian_group,
+                               const std::vector<std::vector<int>>&               residue_perms,
+                               int                                                n_sites,
+                               const LittleGroupOptions&                          opt,
+                               const LittleGroupMEOptions&                        me = {});
 
 }  // namespace ed::solvers

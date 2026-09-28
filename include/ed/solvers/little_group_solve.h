@@ -339,6 +339,21 @@ make_rep_sector_matvec(
     ed::symmetry::RepSectorData  rd,
     bool                         force_gpu = false);
 
+/// One shared, read-only copy of a sector basis with its permutation LUT built, so
+/// several operators on the SAME (k, n_up) sector (H and a batch of probes) do not
+/// each copy the reps / norms / perm tables (1-2 GB at N = 36).
+[[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData>
+share_rep_sector(ed::symmetry::RepSectorData rd);
+
+/// As above, over a sector shared with share_rep_sector() (or rep_data_ptr() of an
+/// existing sector operator). The operator must be G-invariant and Hermitian, like
+/// every operator on this lane (the gather kernels apply O^dagger).
+[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
+make_rep_sector_matvec(
+    const ::Operator&                                  op,
+    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
+    bool                                               force_gpu = false);
+
 /// Truthful device report for a matvec built by make_rep_sector_matvec:
 /// did its GPU rep-gather actually engage? (Lazy -- meaningful only after
 /// the first apply(); false for foreign operator types.)

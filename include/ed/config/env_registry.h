@@ -94,6 +94,8 @@ struct Row {
       "=0 disables A' = A x Z2 inside the little-group engine")                \
     X("ED_SYM_LG_TR", Flag, "little-group", "true",                            \
       "=0 disables TR star/sigma folding inside the engine")                   \
+    X("ED_SYM_LG_GROUP_SECTOR", Flag, "little-group", "true",                  \
+      "=0 vetoes the full-little-group basis for 1-dim irreps (group_sector.h)")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
     X("ED_SYM_LG_SEED", Integer, "little-group", "0 (base seed 0x51ED0B70)",   \
@@ -112,6 +114,8 @@ struct Row {
       "Restart count for the two-pass GS lane; total work <= (1+restarts) x GS_MAX_ITER")\
     X("ED_SYM_LG_GS_RESID_TOL", Real, "little-group", "1e-8",                  \
       "Residual acceptance tolerance for the certified little-group GS vector")\
+    X("ED_SYM_LG_KS_TOL", Real, "little-group", "1e-9",                        \
+      "Absolute residual tolerance of the per-block Krylov-Schur solves (levels >= 2)")\
     X("ED_SYM_LG_ONLY_K0", Text, "little-group", "unset (solve every star)",   \
       "=\"7,43\" solves only those star reps (job splitting); =\"plan\" lists (k0, |star|, dim) per star and solves nothing")\
     X("ED_SYM_LITTLE_GROUP", Flag, "little-group", "\"1\"",                    \
