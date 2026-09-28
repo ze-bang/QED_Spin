@@ -4,7 +4,7 @@
 // Part of the little-group engine; see lg_internal.h for the file map.
 // =============================================================================
 
-#include "lg_internal.h"
+#include "lg_walk.h"
 
 #include <ed/sectors/sectors.h>
 #include <ed/core/basis_utils.h>
@@ -17,47 +17,6 @@ using namespace ed::solvers::lg_detail;
 namespace {
 
 int sz_shift(int op_type) { return op_type == 0 ? 1 : (op_type == 1 ? -1 : 0); }
-
-std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
-    if (!s.abelian.empty()) return s.abelian;
-    Perm id(static_cast<std::size_t>(n_sites));
-    std::iota(id.begin(), id.end(), 0);
-    return {id};
-}
-
-LittleGroupOptions engine_options(const Spec& s, const Subspace& sub, int dense_max_dim,
-                                  int block_size) {
-    LittleGroupOptions o;
-    o.n_up          = sub.n_up;
-    o.sz_parity     = sub.sz_parity;
-    // subspaces() already enforced 'require' against H. A subspace the flip maps onto a
-    // different one gets the symmetry through the mirror fold, so inside it the engine
-    // may only engage the flip where the subspace is its own image.
-    o.spin_flip     = (s.spin_flip == 1 && sub.mirror == 2) ? -1 : s.spin_flip;
-    o.time_reversal = s.time_reversal;
-    o.only_k0       = s.only_k0;
-    o.only_irrep    = s.only_irrep;
-    o.dense_max_dim = dense_max_dim;
-    o.block_size    = block_size;
-    return o;
-}
-
-// The blocks of one subspace, star by star, as the engine builds them.
-template <class Fn>
-void walk(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub,
-          const LittleGroupOptions& opt, Fn&& fn) {
-    EngineContext cx;
-    bool tr_on = false;
-    make_engine_context(H, abelian_or_identity(s, n_sites), s.residues, n_sites, opt, cx, tr_on);
-    const auto stars = star_partition(cx, tr_on);
-    const std::set<int> only(s.only_k0.begin(), s.only_k0.end());
-    for (const auto& [k0, members] : stars) {
-        if (!only.empty() && only.count(k0) == 0) continue;
-        StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt, false,
-                                         nullptr, nullptr, nullptr);
-        fn(cx, tr_on, sb);
-    }
-}
 
 std::uint64_t binomial(int n, int k) {
     if (k < 0 || k > n) return 0;
@@ -150,8 +109,8 @@ std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s)
 
 void for_each_star(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub,
                    const StarFn& fn) {
-    const LittleGroupOptions opt = engine_options(s, sub, 64, 1);
-    walk(H, n_sites, s, sub, opt, [&](const EngineContext&, bool, StarBuild& sb) {
+    const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
+    detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
         std::vector<LittleGroupBlock> blocks;
         blocks.reserve(sb.blocks.size());
         for (auto& b : sb.blocks) blocks.emplace_back(b);
@@ -176,8 +135,8 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     std::vector<BlockEnd> ends;
 
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
-        const LittleGroupOptions opt = engine_options(s, sub, o.dense_max_dim, o.block_size);
-        walk(H, n_sites, s, sub, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
+        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
@@ -271,8 +230,8 @@ std::vector<double> SpectrumResult::expanded() const {
 SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s) {
     SpectrumResult res;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
-        const LittleGroupOptions opt = engine_options(s, sub, 64, 1);
-        walk(H, n_sites, s, sub, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
+        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {

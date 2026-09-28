@@ -6,6 +6,7 @@
 #include "sectors_bindings.h"
 
 #include <ed/sectors/sectors.h>
+#include <ed/sectors/thermal.h>
 
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
@@ -122,6 +123,41 @@ void bind_sectors(py::module_& m) {
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"),
           "The complete spectrum of H, every symmetry block diagonalised densely.");
+
+    py::enum_<sec::ThermalSpec::Method>(s, "ThermalMethod")
+        .value("Exact", sec::ThermalSpec::Method::Exact)
+        .value("FTLM", sec::ThermalSpec::Method::FTLM)
+        .value("mTPQ", sec::ThermalSpec::Method::mTPQ);
+
+    py::class_<sec::ThermalSpec>(s, "ThermalSpec")
+        .def(py::init<>())
+        .def_readwrite("method", &sec::ThermalSpec::method)
+        .def_readwrite("temperatures", &sec::ThermalSpec::temperatures)
+        .def_readwrite("samples", &sec::ThermalSpec::samples)
+        .def_readwrite("krylov", &sec::ThermalSpec::krylov)
+        .def_readwrite("exact_states", &sec::ThermalSpec::exact_states)
+        .def_readwrite("seed", &sec::ThermalSpec::seed);
+
+    py::class_<sec::ThermalCurves>(s, "ThermalCurves")
+        .def_readonly("T", &sec::ThermalCurves::T)
+        .def_readonly("lnZ", &sec::ThermalCurves::lnZ)
+        .def_readonly("E", &sec::ThermalCurves::E)
+        .def_readonly("C", &sec::ThermalCurves::C)
+        .def_readonly("S", &sec::ThermalCurves::S)
+        .def_readonly("F", &sec::ThermalCurves::F)
+        .def_readonly("M", &sec::ThermalCurves::M)
+        .def_readonly("chi", &sec::ThermalCurves::chi)
+        .def_readonly("e0", &sec::ThermalCurves::e0)
+        .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
+        .def_readonly("blocks", &sec::ThermalCurves::blocks);
+
+    s.def("thermal",
+          [](const ::Operator& H, int n_sites, const sec::Spec& spec, const sec::ThermalSpec& t) {
+              py::gil_scoped_release nogil;
+              return sec::thermal(H, n_sites, spec, t);
+          },
+          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("thermal"),
+          "Thermodynamics of H over every symmetry block, combined in log space.");
 
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,

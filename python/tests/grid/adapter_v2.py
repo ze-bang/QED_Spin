@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from qed.api import Symmetry, eigs as _eigs, spectrum as _spectrum
+from qed.api import Symmetry, eigs as _eigs, spectrum as _spectrum, thermal as _thermal
 
 from . import adapter_v1 as _v1
 from .adapter_v1 import Missing, selection  # noqa: F401  (re-exported for the grid)
@@ -51,5 +51,12 @@ def spectrum(m, H, content, device):
     return _spectrum(H, sym=_sym(m, content)).energies
 
 
-thermal = _v1.thermal
+def thermal(m, H, content, device, method, T, samples, krylov, seed):
+    if device != "cpu":
+        raise Missing("the sector-resolved thermodynamics runs on the CPU only so far")
+    r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
+                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed)
+    return {"T": r.T, "E": r.E, "C": r.C}
+
+
 dynamics = _v1.dynamics
