@@ -67,7 +67,8 @@ def _cells():
 
 
 def _baseline(backend):
-    p = HERE / f"baseline_{backend}.json"
+    api_tag = os.environ.get("QED_GRID_API", "v1")
+    p = HERE / (f"baseline_{backend}.json" if api_tag == "v1" else f"baseline_{api_tag}_{backend}.json")
     if not p.exists():
         return {}
     return {r["cell"]: r["status"] for r in json.loads(p.read_text())["cells"]}

@@ -7,6 +7,7 @@
 
 #include <ed/sectors/sectors.h>
 #include <ed/sectors/thermal.h>
+#include <ed/sectors/dynamics.h>
 
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
@@ -158,6 +159,33 @@ void bind_sectors(py::module_& m) {
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("thermal"),
           "Thermodynamics of H over every symmetry block, combined in log space.");
+
+    py::class_<sec::DynamicsSpec>(s, "DynamicsSpec")
+        .def(py::init<>())
+        .def_readwrite("omega", &sec::DynamicsSpec::omega)
+        .def_readwrite("eta", &sec::DynamicsSpec::eta)
+        .def_readwrite("temperatures", &sec::DynamicsSpec::temperatures)
+        .def_readwrite("krylov", &sec::DynamicsSpec::krylov)
+        .def_readwrite("samples", &sec::DynamicsSpec::samples)
+        .def_readwrite("seed", &sec::DynamicsSpec::seed)
+        .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol);
+
+    py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")
+        .def_readonly("omega", &sec::DynamicsCurves::omega)
+        .def_readonly("T", &sec::DynamicsCurves::T)
+        .def_readonly("S", &sec::DynamicsCurves::S)
+        .def_readonly("e0", &sec::DynamicsCurves::e0)
+        .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
+        .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors);
+
+    s.def("dynamics",
+          [](const ::Operator& H, int n_sites, const sec::Spec& spec, const ::Operator& O,
+             const sec::DynamicsSpec& d) {
+              py::gil_scoped_release nogil;
+              return sec::dynamics(H, n_sites, spec, O, d);
+          },
+          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("O"), py::arg("dynamics"),
+          "S(omega) = <O^dag delta(omega - H + E) O> over the momentum sectors of H.");
 
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,

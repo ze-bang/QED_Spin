@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from qed.api import Symmetry, eigs as _eigs, spectrum as _spectrum, thermal as _thermal
+from qed.api import Symmetry
+from qed.api import dynamics as _dynamics
+from qed.api import eigs as _eigs
+from qed.api import spectrum as _spectrum
+from qed.api import thermal as _thermal
 
 from . import adapter_v1 as _v1
 from .adapter_v1 import Missing, selection  # noqa: F401  (re-exported for the grid)
@@ -59,4 +63,9 @@ def thermal(m, H, content, device, method, T, samples, krylov, seed):
     return {"T": r.T, "E": r.E, "C": r.C}
 
 
-dynamics = _v1.dynamics
+def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
+    if device != "cpu":
+        raise Missing("the sector-resolved dynamics runs on the CPU only so far")
+    r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
+                  krylov=krylov, samples=samples, seed=7)
+    return r.S[0]

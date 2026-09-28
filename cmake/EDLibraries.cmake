@@ -230,6 +230,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_stars.cpp
     ${SRC_DIR}/solvers/little_group/lg_sectors.cpp
     ${SRC_DIR}/solvers/little_group/lg_sectors_thermal.cpp
+    ${SRC_DIR}/solvers/little_group/lg_sectors_dynamics.cpp
     ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
     ${SRC_DIR}/solvers/little_group/lg_spectrum.cpp
     ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp
@@ -272,7 +273,7 @@ target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel 
 # library into ed_solvers_cpu's PUBLIC link surface so downstream
 # consumers (tests, examples, new SDK callers) do not have to remember
 # the dep.
-target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry)
+target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry ed_dssf)
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
