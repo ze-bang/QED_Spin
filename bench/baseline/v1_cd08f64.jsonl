@@ -1,0 +1,8 @@
+{"case": "chain28_ftlm_gpu", "api": "v1", "commit": "cd08f64", "wall_s": 726.96, "peak_rss_gib": 5.55, "threads": 16, "host": "fc10503", "job": "61883458", "result": {"E(Tmin)": -10.654481094270556, "C_max": 7.572074919356981}}
+{"case": "chain28_ftlm_cpu", "api": "v1", "commit": "cd08f64", "wall_s": 776.32, "peak_rss_gib": 51.04, "threads": 32, "host": "fc30565", "job": "61883457", "result": {"E(Tmin)": -10.65448109427055, "C_max": 7.572074919358622}}
+{"case": "chain32_abelian_eigs_gpu", "api": "v1", "commit": "cd08f64", "wall_s": 1508.58, "peak_rss_gib": 30.27, "threads": 16, "host": "fc10510", "job": "61883456", "result": {"E0": -12.373187923847185}}
+{"case": "tri20_lg_exact_thermal_cpu", "api": "v1", "commit": "cd08f64", "wall_s": 3043.6, "peak_rss_gib": 1.28, "threads": 32, "host": "fc30605", "job": "61883462", "result": {"E(Tmin)": -11.130991636486444, "C_max": 5.358614530138065}}
+{"case": "chain30_mtpq_gpu", "api": "v1", "commit": "cd08f64", "wall_s": 4102.86, "peak_rss_gib": 20.79, "threads": 16, "host": "fc10612", "job": "61887440", "result": {"E(Tmin)": -10.81316146748502}}
+{"case": "tri30_lg_eigs_cpu", "api": "v1", "commit": "cd08f64", "wall_s": 5370.8, "peak_rss_gib": 4.01, "threads": 32, "host": "fc30604", "job": "61887439", "result": {"E0": -16.649827306259812}}
+{"case": "chain30_dyn0_cpu", "api": "v1", "commit": "cd08f64", "wall_s": 10234.17, "peak_rss_gib": 11.7, "threads": 32, "host": "fc30606", "job": "61887442", "result": {"weight": 0.3002423136167407}}
+{"case": "chain24_dynT_cpu", "api": "v1", "commit": "cd08f64", "wall_s": null, "timeout_s": 10800, "note": "no result within 3 h (jobs 61883461, 61887443)"}
