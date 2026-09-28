@@ -82,6 +82,18 @@ std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s)
     const bool fold = flip_sym && s.spin_flip != 0;
 
     std::vector<Subspace> out;
+    if (s.two_S >= 0) {
+        if (c != SzContent::U1 || !ed::symmetry::hamiltonian_is_su2_symmetric(term_soa(H)))
+            throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H");
+        if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
+            throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "
+                                        + std::to_string(n_sites));
+        const int n = (n_sites - s.two_S) / 2;              // the Sz = S member of each multiplet
+        if (s.n_up >= 0 && s.n_up != n)
+            throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
+        out.push_back({n, -1, 1});
+        return out;
+    }
     if (!s.use_sz || c == SzContent::None) {
         out.push_back({});
     } else if (c == SzContent::U1) {
@@ -134,20 +146,23 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     std::vector<Row> rows;
     std::vector<BlockEnd> ends;
 
+    const auto s2c = detail::s2_carrier_for(s, n_sites);
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
         detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
-                const std::uint64_t mult = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
-                res.total_dim += bi->tag.dim * mult;
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                if (!bop.op) continue;
+                const std::uint64_t mult = bop.multiplicity;
+                if (s.two_S < 0) res.total_dim += dim * mult;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
                 const std::uint64_t need = (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
                 const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));
-                const ed::matvec::MatVecOperator& mv = block_mv(*bi);
+                const ed::matvec::MatVecOperator& mv = *bop.op;
                 bool converged = true;
                 std::vector<double> ev;
                 std::vector<std::vector<Complex>> vv;
@@ -157,7 +172,11 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 } else {
                     ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged, o.block_size);
                 }
-                const bool short_ = !converged || static_cast<int>(ev.size()) < want;
+                // Off-tower ghosts sit above the spectrum: once one appears the tower is exhausted.
+                bool ghost_seen = false;
+                for (std::size_t i = 0; i < ev.size(); ++i)
+                    if (bop.is_ghost(ev[i])) { ev.resize(i); if (o.vectors) vv.resize(i); ghost_seen = true; break; }
+                const bool short_ = !converged || (static_cast<int>(ev.size()) < want && !ghost_seen);
                 if (short_) ++res.partial_blocks;
                 ends.push_back({ev.empty() ? -std::numeric_limits<double>::infinity() : ev.back(), short_});
                 for (std::size_t i = 0; i < ev.size(); ++i) {
@@ -229,6 +248,7 @@ std::vector<double> SpectrumResult::expanded() const {
 
 SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s) {
     SpectrumResult res;
+    const auto s2c = detail::s2_carrier_for(s, n_sites);
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
         detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
@@ -236,13 +256,15 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s) {
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                const std::uint64_t mult = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
-                for (double e : solve_block_full(block_mv(*bi))) {
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                if (!bop.op) continue;
+                for (double e : solve_block_full(*bop.op)) {
+                    if (bop.is_ghost(e)) continue;
                     Level L;
-                    L.energy = e; L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = mult;
+                    L.energy = e; L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
                     res.levels.push_back(L);
+                    res.total_dim += bop.multiplicity;
                 }
-                res.total_dim += bi->tag.dim * mult;
             }
         });
     }
@@ -323,6 +345,16 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
         ops.push_back([](const std::vector<Complex>& x) {
             std::vector<Complex> y(x.size());
             for (std::size_t i = 0; i < x.size(); ++i) y[i] = std::conj(x[i]);
+            return y;
+        });
+    if (s.two_S > 0 && n_up < 0)   // the other members of an SU(2) multiplet: total S-
+        ops.push_back([&](const std::vector<Complex>& x) {
+            std::vector<Complex> y(dim, Complex(0, 0));
+            for (std::uint64_t st = 0; st < dim; ++st) {
+                if (x[st] == Complex(0, 0)) continue;
+                for (int i = 0; i < n_sites; ++i)
+                    if (!((st >> i) & 1u)) y[st | (std::uint64_t{1} << i)] += x[st];
+            }
             return y;
         });
     const bool flip_inside = n_up < 0 || 2 * n_up == n_sites;

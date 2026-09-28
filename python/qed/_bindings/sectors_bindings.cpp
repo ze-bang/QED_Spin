@@ -45,6 +45,7 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("use_sz", &sec::Spec::use_sz)
         .def_readwrite("spin_flip", &sec::Spec::spin_flip)
         .def_readwrite("time_reversal", &sec::Spec::time_reversal)
+        .def_readwrite("two_S", &sec::Spec::two_S)
         .def_readwrite("only_k0", &sec::Spec::only_k0)
         .def_readwrite("only_irrep", &sec::Spec::only_irrep);
 

@@ -1,5 +1,5 @@
 {
-  "commit": "slice-4 (qed.api)",
+  "commit": "slice-4+su2 (qed.api)",
   "note": "qed.api baseline (QED_GRID_API=v2), CPU",
   "cells": [
     {
@@ -11,7 +11,7 @@
       "status": "pass",
       "metric": 1.687538997430238E-14,
       "note": "",
-      "secs": 59.64
+      "secs": 63.28
     },
     {
       "cell": "eigs-none-tri9chi-cpu",
@@ -22,7 +22,7 @@
       "status": "pass",
       "metric": 4.440892098500626E-15,
       "note": "",
-      "secs": 0.19
+      "secs": 0.23
     },
     {
       "cell": "eigs-sz_all-chain12-cpu",
@@ -44,7 +44,7 @@
       "status": "pass",
       "metric": 3.552713678800501E-15,
       "note": "",
-      "secs": 0.08
+      "secs": 0.07
     },
     {
       "cell": "eigs-sz_all-tri9chi-cpu",
@@ -66,7 +66,7 @@
       "status": "pass",
       "metric": 3.019806626980426E-14,
       "note": "",
-      "secs": 0.19
+      "secs": 0.16
     },
     {
       "cell": "eigs-sz_one-tri9-cpu",
@@ -88,7 +88,7 @@
       "status": "pass",
       "metric": 3.5083047578154947E-14,
       "note": "",
-      "secs": 57.25
+      "secs": 61.6
     },
     {
       "cell": "eigs-flip-chain12-cpu",
@@ -154,7 +154,7 @@
       "status": "pass",
       "metric": 5.329070518200751E-15,
       "note": "",
-      "secs": 4.89
+      "secs": 3.94
     },
     {
       "cell": "eigs-lg-tri9-cpu",
@@ -165,7 +165,7 @@
       "status": "pass",
       "metric": 7.993605777301127E-15,
       "note": "",
-      "secs": 0.12
+      "secs": 0.11
     },
     {
       "cell": "eigs-lg-tri9chi-cpu",
@@ -176,7 +176,7 @@
       "status": "pass",
       "metric": 1.3322676295501878E-14,
       "note": "",
-      "secs": 0.28
+      "secs": 0.26
     },
     {
       "cell": "eigs-lg-xyz12-cpu",
@@ -187,7 +187,7 @@
       "status": "pass",
       "metric": 9.769962616701378E-15,
       "note": "",
-      "secs": 0.05
+      "secs": 0.04
     },
     {
       "cell": "eigs-tr-chain12-cpu",
@@ -206,10 +206,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 58.0
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 61.0
     },
     {
       "cell": "eigs-su2-tri9-cpu",
@@ -217,10 +217,10 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.1
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 0.09
     },
     {
       "cell": "vectors-none-chain12-cpu",
@@ -231,7 +231,7 @@
       "status": "pass",
       "metric": 6.235896495615745E-12,
       "note": "residual 6.2e-12 pairing 6.2e-15 lowest 5.3e-15",
-      "secs": 0.16
+      "secs": 0.03
     },
     {
       "cell": "vectors-none-tri9chi-cpu",
@@ -253,7 +253,7 @@
       "status": "pass",
       "metric": 1.5631940186722204E-13,
       "note": "residual 1.9e-14 pairing 1.6e-13 lowest 1.6e-14",
-      "secs": 0.45
+      "secs": 0.41
     },
     {
       "cell": "vectors-sz_all-tri9-cpu",
@@ -286,7 +286,7 @@
       "status": "pass",
       "metric": 1.5631940186722204E-13,
       "note": "residual 1.9e-14 pairing 1.6e-13 lowest 6.2e-15",
-      "secs": 0.29
+      "secs": 0.26
     },
     {
       "cell": "vectors-sz_one-tri9-cpu",
@@ -308,7 +308,7 @@
       "status": "pass",
       "metric": 4.618527782440651E-14,
       "note": "residual 1.8e-14 pairing 4.6e-14 lowest 2.2e-14",
-      "secs": 2.79
+      "secs": 2.94
     },
     {
       "cell": "vectors-flip-chain12-cpu",
@@ -319,7 +319,7 @@
       "status": "pass",
       "metric": 1.5631940186722204E-13,
       "note": "residual 1.9e-14 pairing 1.6e-13 lowest 1.6e-14",
-      "secs": 0.45
+      "secs": 0.43
     },
     {
       "cell": "vectors-abelian-chain12-cpu",
@@ -363,7 +363,7 @@
       "status": "pass",
       "metric": 1.7742117343831263E-14,
       "note": "residual 1.8e-14 pairing 1.2e-14 lowest 1.7e-14",
-      "secs": 0.05
+      "secs": 0.06
     },
     {
       "cell": "vectors-lg-chain12-cpu",
@@ -374,7 +374,7 @@
       "status": "pass",
       "metric": 1.498557533386951E-14,
       "note": "residual 1.5e-14 pairing 1.3e-14 lowest 1.3e-14",
-      "secs": 0.03
+      "secs": 0.08
     },
     {
       "cell": "vectors-lg-tri9-cpu",
@@ -385,7 +385,7 @@
       "status": "pass",
       "metric": 5.329070518200751E-15,
       "note": "residual 3.4e-15 pairing 5.3e-15 lowest 5.3e-15",
-      "secs": 0.01
+      "secs": 0.14
     },
     {
       "cell": "vectors-lg-tri9chi-cpu",
@@ -396,7 +396,7 @@
       "status": "pass",
       "metric": 1.4210854715202004E-14,
       "note": "residual 3.8e-15 pairing 1.4e-14 lowest 3.6e-15",
-      "secs": 0.28
+      "secs": 0.27
     },
     {
       "cell": "vectors-lg-xyz12-cpu",
@@ -426,10 +426,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.04
+      "status": "pass",
+      "metric": 5.3290705182007514E-14,
+      "note": "residual 1.8e-14 pairing 5.3e-14 lowest 1.3e-14",
+      "secs": 0.1
     },
     {
       "cell": "vectors-su2-tri9-cpu",
@@ -437,10 +437,10 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.0
+      "status": "pass",
+      "metric": 1.0969324700921123E-14,
+      "note": "residual 1.1e-14 pairing 8.9e-15 lowest 3.6e-15",
+      "secs": 0.01
     },
     {
       "cell": "spectrum-none-chain12-cpu",
@@ -451,7 +451,7 @@
       "status": "pass",
       "metric": 1.1679546219056647E-13,
       "note": "",
-      "secs": 2.82
+      "secs": 3.4
     },
     {
       "cell": "spectrum-none-tri9chi-cpu",
@@ -462,7 +462,7 @@
       "status": "pass",
       "metric": 2.7533531010703882E-14,
       "note": "",
-      "secs": 0.04
+      "secs": 0.03
     },
     {
       "cell": "spectrum-sz_all-chain12-cpu",
@@ -473,7 +473,7 @@
       "status": "pass",
       "metric": 3.730349362740526E-14,
       "note": "",
-      "secs": 0.06
+      "secs": 0.05
     },
     {
       "cell": "spectrum-sz_all-tri9-cpu",
@@ -506,7 +506,7 @@
       "status": "pass",
       "metric": 4.796163466380676E-14,
       "note": "",
-      "secs": 0.23
+      "secs": 0.33
     },
     {
       "cell": "spectrum-sz_one-tri9-cpu",
@@ -528,7 +528,7 @@
       "status": "pass",
       "metric": 7.505107646466058E-14,
       "note": "",
-      "secs": 1.98
+      "secs": 2.08
     },
     {
       "cell": "spectrum-flip-chain12-cpu",
@@ -539,7 +539,7 @@
       "status": "pass",
       "metric": 3.730349362740526E-14,
       "note": "",
-      "secs": 0.06
+      "secs": 0.05
     },
     {
       "cell": "spectrum-abelian-chain12-cpu",
@@ -616,7 +616,7 @@
       "status": "pass",
       "metric": 1.3322676295501878E-14,
       "note": "",
-      "secs": 0.28
+      "secs": 0.25
     },
     {
       "cell": "spectrum-lg-xyz12-cpu",
@@ -627,7 +627,7 @@
       "status": "pass",
       "metric": 1.1102230246251565E-14,
       "note": "",
-      "secs": 0.05
+      "secs": 0.04
     },
     {
       "cell": "spectrum-tr-chain12-cpu",
@@ -638,7 +638,7 @@
       "status": "pass",
       "metric": 1.3322676295501878E-14,
       "note": "",
-      "secs": 0.01
+      "secs": 0.04
     },
     {
       "cell": "spectrum-su2-chain12-cpu",
@@ -646,10 +646,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.04
+      "status": "pass",
+      "metric": 9.992007221626409E-15,
+      "note": "",
+      "secs": 0.07
     },
     {
       "cell": "spectrum-su2-tri9-cpu",
@@ -657,9 +657,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "status": "pass",
+      "metric": 1.3766765505351941E-14,
+      "note": "",
       "secs": 0.0
     },
     {
@@ -671,7 +671,7 @@
       "status": "pass",
       "metric": 1.5594192603884949E-12,
       "note": "dE/N 7.99e-15 dC/N 1.56e-12",
-      "secs": 2.45
+      "secs": 3.13
     },
     {
       "cell": "th_exact-none-tri9chi-cpu",
@@ -693,7 +693,7 @@
       "status": "pass",
       "metric": 1.2482607540202176E-13,
       "note": "dE/N 5.18e-16 dC/N 1.25e-13",
-      "secs": 0.06
+      "secs": 0.34
     },
     {
       "cell": "th_exact-sz_all-tri9-cpu",
@@ -726,7 +726,7 @@
       "status": "pass",
       "metric": 1.176836406102666E-13,
       "note": "dE/N 1.70e-15 dC/N 1.18e-13",
-      "secs": 0.19
+      "secs": 0.33
     },
     {
       "cell": "th_exact-sz_one-tri9-cpu",
@@ -748,7 +748,7 @@
       "status": "pass",
       "metric": 5.91008723442125E-14,
       "note": "dE/N 6.29e-16 dC/N 5.91e-14",
-      "secs": 2.24
+      "secs": 2.58
     },
     {
       "cell": "th_exact-flip-chain12-cpu",
@@ -759,7 +759,7 @@
       "status": "pass",
       "metric": 1.2482607540202176E-13,
       "note": "dE/N 5.18e-16 dC/N 1.25e-13",
-      "secs": 0.06
+      "secs": 0.05
     },
     {
       "cell": "th_exact-abelian-chain12-cpu",
@@ -836,7 +836,7 @@
       "status": "pass",
       "metric": 1.569731998706124E-14,
       "note": "dE/N 1.68e-15 dC/N 1.57e-14",
-      "secs": 0.35
+      "secs": 0.26
     },
     {
       "cell": "th_exact-lg-xyz12-cpu",
@@ -847,7 +847,7 @@
       "status": "pass",
       "metric": 3.0716170347962666E-15,
       "note": "dE/N 7.40e-16 dC/N 3.07e-15",
-      "secs": 0.11
+      "secs": 0.04
     },
     {
       "cell": "th_exact-tr-chain12-cpu",
@@ -866,10 +866,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.04
+      "status": "pass",
+      "metric": 1.0232555543628526E-13,
+      "note": "dE/N 1.26e-15 dC/N 1.02e-13",
+      "secs": 0.07
     },
     {
       "cell": "th_exact-su2-tri9-cpu",
@@ -877,9 +877,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
-      "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "status": "pass",
+      "metric": 2.6602177251157225E-13,
+      "note": "dE/N 5.43e-16 dC/N 2.66e-13",
       "secs": 0.0
     },
     {
@@ -891,7 +891,7 @@
       "status": "pass",
       "metric": 0.0020536406642707914,
       "note": "err R=50: 1.17e-03, R=200: 2.05e-03",
-      "secs": 0.91
+      "secs": 0.84
     },
     {
       "cell": "th_ftlm-none-tri9chi-cpu",
@@ -902,7 +902,7 @@
       "status": "pass",
       "metric": 0.009373018969018135,
       "note": "err R=50: 1.93e-02, R=200: 9.37e-03",
-      "secs": 0.17
+      "secs": 0.16
     },
     {
       "cell": "th_ftlm-sz_all-chain12-cpu",
@@ -913,7 +913,7 @@
       "status": "pass",
       "metric": 0.0024573623482881577,
       "note": "err R=50: 5.82e-04, R=200: 2.46e-03",
-      "secs": 0.81
+      "secs": 0.77
     },
     {
       "cell": "th_ftlm-sz_all-tri9-cpu",
@@ -924,7 +924,7 @@
       "status": "pass",
       "metric": 0.0058198315811614065,
       "note": "err R=50: 1.67e-03, R=200: 5.82e-03",
-      "secs": 0.15
+      "secs": 0.14
     },
     {
       "cell": "th_ftlm-sz_all-tri9chi-cpu",
@@ -935,7 +935,7 @@
       "status": "pass",
       "metric": 0.003994633168425545,
       "note": "err R=50: 7.62e-03, R=200: 3.99e-03",
-      "secs": 0.11
+      "secs": 0.1
     },
     {
       "cell": "th_ftlm-sz_one-chain12-cpu",
@@ -946,7 +946,7 @@
       "status": "pass",
       "metric": 0.0006852455092342113,
       "note": "err R=50: 1.42e-03, R=200: 6.85e-04",
-      "secs": 0.45
+      "secs": 0.42
     },
     {
       "cell": "th_ftlm-sz_one-tri9-cpu",
@@ -957,7 +957,7 @@
       "status": "pass",
       "metric": 0.004596212247448032,
       "note": "err R=50: 2.10e-03, R=200: 4.60e-03",
-      "secs": 0.07
+      "secs": 0.06
     },
     {
       "cell": "th_ftlm-parity-xyz12-cpu",
@@ -968,7 +968,7 @@
       "status": "pass",
       "metric": 0.0011367861084629431,
       "note": "err R=50: 6.30e-03, R=200: 1.14e-03",
-      "secs": 2.4
+      "secs": 2.52
     },
     {
       "cell": "th_ftlm-flip-chain12-cpu",
@@ -979,7 +979,7 @@
       "status": "pass",
       "metric": 0.0024573623482881577,
       "note": "err R=50: 5.82e-04, R=200: 2.46e-03",
-      "secs": 0.79
+      "secs": 0.75
     },
     {
       "cell": "th_ftlm-abelian-chain12-cpu",
@@ -990,7 +990,7 @@
       "status": "pass",
       "metric": 0.0009855400233812113,
       "note": "err R=50: 3.40e-03, R=200: 9.86e-04",
-      "secs": 1.23
+      "secs": 1.18
     },
     {
       "cell": "th_ftlm-abelian-tri9-cpu",
@@ -1001,7 +1001,7 @@
       "status": "pass",
       "metric": 0.00925764598638078,
       "note": "err R=50: 2.84e-02, R=200: 9.26e-03",
-      "secs": 0.09
+      "secs": 0.08
     },
     {
       "cell": "th_ftlm-abelian-tri9chi-cpu",
@@ -1012,7 +1012,7 @@
       "status": "pass",
       "metric": 0.004054172938478996,
       "note": "err R=50: 8.34e-03, R=200: 4.05e-03",
-      "secs": 0.17
+      "secs": 0.16
     },
     {
       "cell": "th_ftlm-abelian-xyz12-cpu",
@@ -1023,7 +1023,7 @@
       "status": "pass",
       "metric": 0.0021159322243143506,
       "note": "err R=50: 1.01e-02, R=200: 2.12e-03",
-      "secs": 1.82
+      "secs": 1.71
     },
     {
       "cell": "th_ftlm-lg-chain12-cpu",
@@ -1034,7 +1034,7 @@
       "status": "pass",
       "metric": 0.0010643063364542311,
       "note": "err R=50: 1.04e-03, R=200: 1.06e-03",
-      "secs": 1.25
+      "secs": 1.17
     },
     {
       "cell": "th_ftlm-lg-tri9-cpu",
@@ -1045,7 +1045,7 @@
       "status": "pass",
       "metric": 0.009727763826782235,
       "note": "err R=50: 3.20e-02, R=200: 9.73e-03",
-      "secs": 0.16
+      "secs": 0.4
     },
     {
       "cell": "th_ftlm-lg-tri9chi-cpu",
@@ -1056,7 +1056,7 @@
       "status": "pass",
       "metric": 0.015099884750332748,
       "note": "err R=50: 4.37e-03, R=200: 1.51e-02",
-      "secs": 0.6
+      "secs": 0.56
     },
     {
       "cell": "th_ftlm-lg-xyz12-cpu",
@@ -1067,7 +1067,7 @@
       "status": "pass",
       "metric": 0.0008623530278745554,
       "note": "err R=50: 2.92e-03, R=200: 8.62e-04",
-      "secs": 2.1
+      "secs": 1.98
     },
     {
       "cell": "th_ftlm-tr-chain12-cpu",
@@ -1078,7 +1078,7 @@
       "status": "pass",
       "metric": 0.0009855400233812113,
       "note": "err R=50: 3.40e-03, R=200: 9.86e-04",
-      "secs": 1.23
+      "secs": 1.17
     },
     {
       "cell": "th_ftlm-su2-chain12-cpu",
@@ -1086,10 +1086,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.19
+      "note": "ValueError: thermal: sampling restricted to one spin tower needs each block's tower dimension to normalise Z; use method Exact for a total-spin restriction",
+      "secs": 0.1
     },
     {
       "cell": "th_ftlm-su2-tri9-cpu",
@@ -1097,9 +1097,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "note": "ValueError: thermal: sampling restricted to one spin tower needs each block's tower dimension to normalise Z; use method Exact for a total-spin restriction",
       "secs": 0.0
     },
     {
@@ -1111,7 +1111,7 @@
       "status": "pass",
       "metric": 0.012164005288124039,
       "note": "err R=16: 1.34e-02, R=64: 1.22e-02",
-      "secs": 2.59
+      "secs": 2.47
     },
     {
       "cell": "th_mtpq-none-tri9chi-cpu",
@@ -1122,7 +1122,7 @@
       "status": "pass",
       "metric": 0.006741297410064906,
       "note": "err R=16: 5.35e-03, R=64: 6.74e-03",
-      "secs": 0.49
+      "secs": 0.45
     },
     {
       "cell": "th_mtpq-sz_all-chain12-cpu",
@@ -1133,7 +1133,7 @@
       "status": "pass",
       "metric": 0.0164305020499154,
       "note": "err R=16: 1.81e-02, R=64: 1.64e-02",
-      "secs": 2.14
+      "secs": 2.02
     },
     {
       "cell": "th_mtpq-sz_all-tri9-cpu",
@@ -1144,7 +1144,7 @@
       "status": "pass",
       "metric": 0.007390449661882552,
       "note": "err R=16: 8.94e-03, R=64: 7.39e-03",
-      "secs": 0.45
+      "secs": 0.43
     },
     {
       "cell": "th_mtpq-sz_all-tri9chi-cpu",
@@ -1155,7 +1155,7 @@
       "status": "pass",
       "metric": 0.0116367911988027,
       "note": "err R=16: 1.10e-02, R=64: 1.16e-02",
-      "secs": 0.25
+      "secs": 0.23
     },
     {
       "cell": "th_mtpq-sz_one-chain12-cpu",
@@ -1166,7 +1166,7 @@
       "status": "pass",
       "metric": 0.016999463157479577,
       "note": "err R=16: 2.21e-02, R=64: 1.70e-02",
-      "secs": 0.94
+      "secs": 0.89
     },
     {
       "cell": "th_mtpq-sz_one-tri9-cpu",
@@ -1177,7 +1177,7 @@
       "status": "pass",
       "metric": 0.008356736528209736,
       "note": "err R=16: 9.48e-03, R=64: 8.36e-03",
-      "secs": 0.15
+      "secs": 0.14
     },
     {
       "cell": "th_mtpq-parity-xyz12-cpu",
@@ -1188,7 +1188,7 @@
       "status": "wrong",
       "metric": 0.042411834107188996,
       "note": "err R=16: 3.12e-02, R=64: 4.24e-02",
-      "secs": 3.34
+      "secs": 3.37
     },
     {
       "cell": "th_mtpq-flip-chain12-cpu",
@@ -1199,7 +1199,7 @@
       "status": "pass",
       "metric": 0.0164305020499154,
       "note": "err R=16: 1.81e-02, R=64: 1.64e-02",
-      "secs": 2.13
+      "secs": 2.05
     },
     {
       "cell": "th_mtpq-abelian-chain12-cpu",
@@ -1210,7 +1210,7 @@
       "status": "pass",
       "metric": 0.017141631300425675,
       "note": "err R=16: 1.87e-02, R=64: 1.71e-02",
-      "secs": 3.47
+      "secs": 3.23
     },
     {
       "cell": "th_mtpq-abelian-tri9-cpu",
@@ -1221,7 +1221,7 @@
       "status": "pass",
       "metric": 0.024327190507236886,
       "note": "err R=16: 2.92e-02, R=64: 2.43e-02",
-      "secs": 1.2
+      "secs": 1.14
     },
     {
       "cell": "th_mtpq-abelian-tri9chi-cpu",
@@ -1232,7 +1232,7 @@
       "status": "pass",
       "metric": 0.01392618888323686,
       "note": "err R=16: 1.56e-02, R=64: 1.39e-02",
-      "secs": 0.6
+      "secs": 0.57
     },
     {
       "cell": "th_mtpq-abelian-xyz12-cpu",
@@ -1243,7 +1243,7 @@
       "status": "pass",
       "metric": 0.02121290671675698,
       "note": "err R=16: 2.26e-02, R=64: 2.12e-02",
-      "secs": 2.83
+      "secs": 2.67
     },
     {
       "cell": "th_mtpq-lg-chain12-cpu",
@@ -1254,7 +1254,7 @@
       "status": "pass",
       "metric": 0.015542830696993174,
       "note": "err R=16: 2.82e-02, R=64: 1.55e-02",
-      "secs": 3.98
+      "secs": 3.73
     },
     {
       "cell": "th_mtpq-lg-tri9-cpu",
@@ -1265,7 +1265,7 @@
       "status": "pass",
       "metric": 0.015073981326774375,
       "note": "err R=16: 1.87e-02, R=64: 1.51e-02",
-      "secs": 2.47
+      "secs": 2.12
     },
     {
       "cell": "th_mtpq-lg-tri9chi-cpu",
@@ -1276,7 +1276,7 @@
       "status": "pass",
       "metric": 0.020493596624882014,
       "note": "err R=16: 2.80e-02, R=64: 2.05e-02",
-      "secs": 1.41
+      "secs": 1.4
     },
     {
       "cell": "th_mtpq-lg-xyz12-cpu",
@@ -1287,7 +1287,7 @@
       "status": "pass",
       "metric": 0.021800923608186196,
       "note": "err R=16: 2.13e-02, R=64: 2.18e-02",
-      "secs": 4.13
+      "secs": 3.93
     },
     {
       "cell": "th_mtpq-tr-chain12-cpu",
@@ -1298,7 +1298,7 @@
       "status": "pass",
       "metric": 0.017141631300425675,
       "note": "err R=16: 1.87e-02, R=64: 1.71e-02",
-      "secs": 3.48
+      "secs": 3.32
     },
     {
       "cell": "th_mtpq-su2-chain12-cpu",
@@ -1306,10 +1306,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.25
+      "note": "ValueError: thermal: sampling restricted to one spin tower needs each block's tower dimension to normalise Z; use method Exact for a total-spin restriction",
+      "secs": 0.04
     },
     {
       "cell": "th_mtpq-su2-tri9-cpu",
@@ -1317,10 +1317,10 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.0
+      "note": "ValueError: thermal: sampling restricted to one spin tower needs each block's tower dimension to normalise Z; use method Exact for a total-spin restriction",
+      "secs": 0.02
     },
     {
       "cell": "dyn0_zz-none-chain12-cpu",
@@ -1329,9 +1329,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 5.75583601624004E-14,
+      "metric": 5.725674323153134E-14,
       "note": "rel L1 0.000",
-      "secs": 1.67
+      "secs": 1.68
     },
     {
       "cell": "dyn0_zz-none-tri9chi-cpu",
@@ -1340,9 +1340,9 @@
       "model": "tri9chi",
       "backend": "cpu",
       "status": "pass",
-      "metric": 4.75525542403554E-13,
+      "metric": 4.754102490687513E-13,
       "note": "rel L1 0.000",
-      "secs": 0.15
+      "secs": 0.14
     },
     {
       "cell": "dyn0_zz-sz_all-chain12-cpu",
@@ -1351,9 +1351,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 9.674979974187972E-13,
+      "metric": 9.672399156773605E-13,
       "note": "rel L1 0.000",
-      "secs": 2.59
+      "secs": 2.51
     },
     {
       "cell": "dyn0_zz-sz_all-tri9-cpu",
@@ -1362,9 +1362,9 @@
       "model": "tri9",
       "backend": "cpu",
       "status": "pass",
-      "metric": 1.3183299179749993E-13,
+      "metric": 1.3181034125336718E-13,
       "note": "rel L1 0.000",
-      "secs": 0.02
+      "secs": 0.05
     },
     {
       "cell": "dyn0_zz-sz_all-tri9chi-cpu",
@@ -1373,9 +1373,9 @@
       "model": "tri9chi",
       "backend": "cpu",
       "status": "pass",
-      "metric": 1.6573379397375754E-13,
+      "metric": 1.66236220327393E-13,
       "note": "rel L1 0.000",
-      "secs": 0.07
+      "secs": 0.06
     },
     {
       "cell": "dyn0_zz-sz_one-chain12-cpu",
@@ -1384,9 +1384,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 9.77856056390451E-13,
+      "metric": 9.779427085207981E-13,
       "note": "rel L1 0.000",
-      "secs": 1.93
+      "secs": 1.73
     },
     {
       "cell": "dyn0_zz-sz_one-tri9-cpu",
@@ -1395,7 +1395,7 @@
       "model": "tri9",
       "backend": "cpu",
       "status": "pass",
-      "metric": 7.40064918056309E-14,
+      "metric": 7.332657012128917E-14,
       "note": "rel L1 0.000",
       "secs": 0.01
     },
@@ -1406,9 +1406,9 @@
       "model": "xyz12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 8.30483260651145E-15,
+      "metric": 1.0233731758703587E-14,
       "note": "rel L1 0.000",
-      "secs": 8.53
+      "secs": 8.19
     },
     {
       "cell": "dyn0_zz-flip-chain12-cpu",
@@ -1417,9 +1417,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 9.674896025735539E-13,
+      "metric": 9.701082640100269E-13,
       "note": "rel L1 0.000",
-      "secs": 2.74
+      "secs": 2.33
     },
     {
       "cell": "dyn0_zz-abelian-chain12-cpu",
@@ -1430,7 +1430,7 @@
       "status": "pass",
       "metric": 1.1777116441568598E-13,
       "note": "rel L1 0.000",
-      "secs": 1.65
+      "secs": 1.48
     },
     {
       "cell": "dyn0_zz-abelian-tri9-cpu",
@@ -1441,7 +1441,7 @@
       "status": "pass",
       "metric": 3.598537776910645E-14,
       "note": "rel L1 0.000",
-      "secs": 0.02
+      "secs": 0.01
     },
     {
       "cell": "dyn0_zz-abelian-tri9chi-cpu",
@@ -1452,7 +1452,7 @@
       "status": "pass",
       "metric": 9.512722687552746E-14,
       "note": "rel L1 0.000",
-      "secs": 0.04
+      "secs": 0.03
     },
     {
       "cell": "dyn0_zz-abelian-xyz12-cpu",
@@ -1463,7 +1463,7 @@
       "status": "pass",
       "metric": 9.138071244426433E-14,
       "note": "rel L1 0.000",
-      "secs": 1.7
+      "secs": 1.47
     },
     {
       "cell": "dyn0_zz-lg-chain12-cpu",
@@ -1472,9 +1472,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 1.1531674020954732E-13,
+      "metric": 1.1777116441568598E-13,
       "note": "rel L1 0.000",
-      "secs": 1.73
+      "secs": 1.64
     },
     {
       "cell": "dyn0_zz-lg-tri9-cpu",
@@ -1496,7 +1496,7 @@
       "status": "pass",
       "metric": 9.512722687552746E-14,
       "note": "rel L1 0.000",
-      "secs": 0.31
+      "secs": 0.27
     },
     {
       "cell": "dyn0_zz-lg-xyz12-cpu",
@@ -1505,9 +1505,9 @@
       "model": "xyz12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 9.315035905356098E-14,
+      "metric": 9.342278228199847E-14,
       "note": "rel L1 0.000",
-      "secs": 1.7
+      "secs": 1.5
     },
     {
       "cell": "dyn0_zz-tr-chain12-cpu",
@@ -1518,7 +1518,7 @@
       "status": "pass",
       "metric": 1.1777116441568598E-13,
       "note": "rel L1 0.000",
-      "secs": 1.65
+      "secs": 1.7
     },
     {
       "cell": "dyn0_zz-su2-chain12-cpu",
@@ -1526,9 +1526,9 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
       "secs": 0.03
     },
     {
@@ -1537,9 +1537,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
       "secs": 0.0
     },
     {
@@ -1551,7 +1551,7 @@
       "status": "pass",
       "metric": 5.93732039637622E-14,
       "note": "rel L1 0.000",
-      "secs": 1.73
+      "secs": 1.5
     },
     {
       "cell": "dyn0_pm-none-tri9chi-cpu",
@@ -1562,7 +1562,7 @@
       "status": "pass",
       "metric": 4.71907303491951E-13,
       "note": "rel L1 0.000",
-      "secs": 0.15
+      "secs": 0.13
     },
     {
       "cell": "dyn0_pm-sz_all-chain12-cpu",
@@ -1573,7 +1573,7 @@
       "status": "pass",
       "metric": 9.61718538576916E-13,
       "note": "rel L1 0.000",
-      "secs": 2.62
+      "secs": 2.27
     },
     {
       "cell": "dyn0_pm-sz_all-tri9-cpu",
@@ -1606,7 +1606,7 @@
       "status": "pass",
       "metric": 9.719862035877358E-13,
       "note": "rel L1 0.000",
-      "secs": 1.84
+      "secs": 1.62
     },
     {
       "cell": "dyn0_pm-sz_one-tri9-cpu",
@@ -1628,7 +1628,7 @@
       "status": "pass",
       "metric": 9.61718538576916E-13,
       "note": "rel L1 0.000",
-      "secs": 2.62
+      "secs": 2.4
     },
     {
       "cell": "dyn0_pm-abelian-chain12-cpu",
@@ -1637,9 +1637,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 1.1094591996826535E-13,
+      "metric": 1.1090511086291996E-13,
       "note": "rel L1 0.000",
-      "secs": 1.66
+      "secs": 1.58
     },
     {
       "cell": "dyn0_pm-abelian-tri9-cpu",
@@ -1650,7 +1650,7 @@
       "status": "pass",
       "metric": 3.1648385926569574E-14,
       "note": "rel L1 0.000",
-      "secs": 0.02
+      "secs": 0.01
     },
     {
       "cell": "dyn0_pm-abelian-tri9chi-cpu",
@@ -1672,7 +1672,7 @@
       "status": "pass",
       "metric": 1.1094591996826535E-13,
       "note": "rel L1 0.000",
-      "secs": 1.63
+      "secs": 1.59
     },
     {
       "cell": "dyn0_pm-lg-tri9-cpu",
@@ -1694,7 +1694,7 @@
       "status": "pass",
       "metric": 9.560442721046686E-14,
       "note": "rel L1 0.000",
-      "secs": 0.3
+      "secs": 0.29
     },
     {
       "cell": "dyn0_pm-tr-chain12-cpu",
@@ -1703,9 +1703,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 1.1090511086291996E-13,
+      "metric": 1.1094591996826535E-13,
       "note": "rel L1 0.000",
-      "secs": 1.6
+      "secs": 1.62
     },
     {
       "cell": "dyn0_pm-su2-chain12-cpu",
@@ -1713,10 +1713,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.03
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
+      "secs": 0.09
     },
     {
       "cell": "dyn0_pm-su2-tri9-cpu",
@@ -1724,9 +1724,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
       "secs": 0.0
     },
     {
@@ -1736,9 +1736,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.00970909755777761,
+      "metric": 0.009710165670804514,
       "note": "rel L1 0.010",
-      "secs": 12.18
+      "secs": 11.73
     },
     {
       "cell": "dynT_zz-none-tri9chi-cpu",
@@ -1747,9 +1747,9 @@
       "model": "tri9chi",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.015791698728127485,
+      "metric": 0.015791698728127773,
       "note": "rel L1 0.016",
-      "secs": 0.64
+      "secs": 0.65
     },
     {
       "cell": "dynT_zz-sz_all-chain12-cpu",
@@ -1758,9 +1758,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.007356514020900092,
+      "metric": 0.007358381684111925,
       "note": "rel L1 0.007",
-      "secs": 7.76
+      "secs": 8.44
     },
     {
       "cell": "dynT_zz-sz_all-tri9-cpu",
@@ -1769,9 +1769,9 @@
       "model": "tri9",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.015957235376304713,
+      "metric": 0.015957235376304744,
       "note": "rel L1 0.016",
-      "secs": 0.62
+      "secs": 0.93
     },
     {
       "cell": "dynT_zz-sz_all-tri9chi-cpu",
@@ -1782,7 +1782,7 @@
       "status": "pass",
       "metric": 0.03337989369635118,
       "note": "rel L1 0.033",
-      "secs": 0.54
+      "secs": 0.6
     },
     {
       "cell": "dynT_zz-sz_one-chain12-cpu",
@@ -1791,9 +1791,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.02184405649956131,
+      "metric": 0.021843864210278063,
       "note": "rel L1 0.022",
-      "secs": 2.87
+      "secs": 3.05
     },
     {
       "cell": "dynT_zz-sz_one-tri9-cpu",
@@ -1813,9 +1813,9 @@
       "model": "xyz12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.007757514762641351,
+      "metric": 0.0077575171981105985,
       "note": "rel L1 0.008",
-      "secs": 13.3
+      "secs": 16.79
     },
     {
       "cell": "dynT_zz-flip-chain12-cpu",
@@ -1824,9 +1824,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.007344318252624464,
+      "metric": 0.007349236854177493,
       "note": "rel L1 0.007",
-      "secs": 8.43
+      "secs": 8.36
     },
     {
       "cell": "dynT_zz-abelian-chain12-cpu",
@@ -1835,9 +1835,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.006000785413529787,
+      "metric": 0.0060007854135298005,
       "note": "rel L1 0.006",
-      "secs": 9.89
+      "secs": 9.68
     },
     {
       "cell": "dynT_zz-abelian-tri9-cpu",
@@ -1848,7 +1848,7 @@
       "status": "pass",
       "metric": 0.016264821512410765,
       "note": "rel L1 0.016",
-      "secs": 0.33
+      "secs": 0.79
     },
     {
       "cell": "dynT_zz-abelian-tri9chi-cpu",
@@ -1859,7 +1859,7 @@
       "status": "pass",
       "metric": 0.03719239460308909,
       "note": "rel L1 0.037",
-      "secs": 0.43
+      "secs": 0.42
     },
     {
       "cell": "dynT_zz-abelian-xyz12-cpu",
@@ -1868,9 +1868,9 @@
       "model": "xyz12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.007336999471658287,
+      "metric": 0.007336991419482179,
       "note": "rel L1 0.007",
-      "secs": 9.42
+      "secs": 9.53
     },
     {
       "cell": "dynT_zz-lg-chain12-cpu",
@@ -1879,9 +1879,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.006000785413529807,
+      "metric": 0.0060007854135298196,
       "note": "rel L1 0.006",
-      "secs": 9.84
+      "secs": 9.72
     },
     {
       "cell": "dynT_zz-lg-tri9-cpu",
@@ -1892,7 +1892,7 @@
       "status": "pass",
       "metric": 0.00948616475740519,
       "note": "rel L1 0.009",
-      "secs": 1.33
+      "secs": 1.29
     },
     {
       "cell": "dynT_zz-lg-tri9chi-cpu",
@@ -1903,7 +1903,7 @@
       "status": "pass",
       "metric": 0.03719239460308909,
       "note": "rel L1 0.037",
-      "secs": 0.68
+      "secs": 0.67
     },
     {
       "cell": "dynT_zz-lg-xyz12-cpu",
@@ -1912,9 +1912,9 @@
       "model": "xyz12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.007336991422105877,
+      "metric": 0.0073369914156946195,
       "note": "rel L1 0.007",
-      "secs": 9.39
+      "secs": 9.49
     },
     {
       "cell": "dynT_zz-tr-chain12-cpu",
@@ -1923,9 +1923,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.006000785413529808,
+      "metric": 0.006000785413529815,
       "note": "rel L1 0.006",
-      "secs": 9.8
+      "secs": 9.66
     },
     {
       "cell": "dynT_zz-su2-chain12-cpu",
@@ -1933,10 +1933,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.04
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
+      "secs": 0.03
     },
     {
       "cell": "dynT_zz-su2-tri9-cpu",
@@ -1944,9 +1944,9 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
       "secs": 0.0
     },
     {
@@ -1958,7 +1958,7 @@
       "status": "pass",
       "metric": 0.011496632990708603,
       "note": "rel L1 0.011",
-      "secs": 8.98
+      "secs": 12.92
     },
     {
       "cell": "dynT_pm-none-tri9chi-cpu",
@@ -1969,7 +1969,7 @@
       "status": "pass",
       "metric": 0.02296833358523807,
       "note": "rel L1 0.023",
-      "secs": 0.57
+      "secs": 1.35
     },
     {
       "cell": "dynT_pm-sz_all-chain12-cpu",
@@ -1980,7 +1980,7 @@
       "status": "pass",
       "metric": 0.01132135942750089,
       "note": "rel L1 0.011",
-      "secs": 8.21
+      "secs": 8.18
     },
     {
       "cell": "dynT_pm-sz_all-tri9-cpu",
@@ -1991,7 +1991,7 @@
       "status": "pass",
       "metric": 0.009783636435985744,
       "note": "rel L1 0.010",
-      "secs": 0.64
+      "secs": 0.63
     },
     {
       "cell": "dynT_pm-sz_all-tri9chi-cpu",
@@ -2013,7 +2013,7 @@
       "status": "pass",
       "metric": 0.014041542790887812,
       "note": "rel L1 0.014",
-      "secs": 2.81
+      "secs": 2.69
     },
     {
       "cell": "dynT_pm-sz_one-tri9-cpu",
@@ -2024,7 +2024,7 @@
       "status": "pass",
       "metric": 0.06599264264516838,
       "note": "rel L1 0.066",
-      "secs": 0.15
+      "secs": 0.34
     },
     {
       "cell": "dynT_pm-flip-chain12-cpu",
@@ -2035,7 +2035,7 @@
       "status": "pass",
       "metric": 0.01132135942750089,
       "note": "rel L1 0.011",
-      "secs": 8.18
+      "secs": 8.31
     },
     {
       "cell": "dynT_pm-abelian-chain12-cpu",
@@ -2044,9 +2044,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.008296466845876113,
+      "metric": 0.008296466845876097,
       "note": "rel L1 0.008",
-      "secs": 9.83
+      "secs": 9.22
     },
     {
       "cell": "dynT_pm-abelian-tri9-cpu",
@@ -2057,7 +2057,7 @@
       "status": "pass",
       "metric": 0.021189586294699993,
       "note": "rel L1 0.021",
-      "secs": 0.33
+      "secs": 0.31
     },
     {
       "cell": "dynT_pm-abelian-tri9chi-cpu",
@@ -2068,7 +2068,7 @@
       "status": "pass",
       "metric": 0.041153979250150366,
       "note": "rel L1 0.041",
-      "secs": 0.42
+      "secs": 0.41
     },
     {
       "cell": "dynT_pm-lg-chain12-cpu",
@@ -2077,9 +2077,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.00829646684587611,
+      "metric": 0.008296466845876115,
       "note": "rel L1 0.008",
-      "secs": 9.8
+      "secs": 9.73
     },
     {
       "cell": "dynT_pm-lg-tri9-cpu",
@@ -2090,7 +2090,7 @@
       "status": "pass",
       "metric": 0.02795579495098338,
       "note": "rel L1 0.028",
-      "secs": 1.3
+      "secs": 1.27
     },
     {
       "cell": "dynT_pm-lg-tri9chi-cpu",
@@ -2101,7 +2101,7 @@
       "status": "pass",
       "metric": 0.041153979250150366,
       "note": "rel L1 0.041",
-      "secs": 0.69
+      "secs": 0.68
     },
     {
       "cell": "dynT_pm-tr-chain12-cpu",
@@ -2110,9 +2110,9 @@
       "model": "chain12",
       "backend": "cpu",
       "status": "pass",
-      "metric": 0.008296466845876156,
+      "metric": 0.008296466845876135,
       "note": "rel L1 0.008",
-      "secs": 9.69
+      "secs": 9.74
     },
     {
       "cell": "dynT_pm-su2-chain12-cpu",
@@ -2120,10 +2120,10 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.04
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
+      "secs": 0.09
     },
     {
       "cell": "dynT_pm-su2-tri9-cpu",
@@ -2131,10 +2131,10 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "missing",
+      "status": "refused",
       "metric": null,
-      "note": "content 'su2' is not in the sector-resolved API yet",
-      "secs": 0.0
+      "note": "ValueError: dynamics: restricting the initial states to one spin tower is not supported",
+      "secs": 0.02
     }
   ]
 }

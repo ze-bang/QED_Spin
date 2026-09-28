@@ -79,6 +79,11 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     std::uint64_t seed = t.seed ? t.seed : std::random_device{}();
     const bool u1 = sz_content(H) == SzContent::U1 && s.use_sz;
 
+    if (s.two_S >= 0 && t.method != ThermalSpec::Method::Exact)
+        throw std::invalid_argument(
+            "thermal: sampling restricted to one spin tower needs each block's tower dimension "
+            "to normalise Z; use method Exact for a total-spin restriction");
+    const auto s2c = detail::s2_carrier_for(s, n_sites);
     ThermalCurves out;
     out.T  = t.temperatures;
     out.e0 = std::numeric_limits<double>::infinity();
@@ -88,10 +93,14 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                const auto& mv = block_mv(*bi);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                if (!bop.op) continue;
+                const auto& mv = *bop.op;
                 BlockThermo b;
                 if (t.method == ThermalSpec::Method::Exact) {
-                    const auto ev = solve_block_full(mv);
+                    std::vector<double> ev;
+                    for (double e : solve_block_full(mv)) if (!bop.is_ghost(e)) ev.push_back(e);
+                    if (ev.empty()) continue;
                     out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
                     b = exact_block(ev, beta);
                 } else {
@@ -100,7 +109,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed);
                     for (double e : b.E) out.e0 = std::min(out.e0, e);
                 }
-                b.weight   = static_cast<double>(bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror));
+                b.weight   = static_cast<double>(bop.multiplicity);
                 b.sz       = sub.n_up >= 0 ? 0.5 * (n_sites - 2 * sub.n_up) : 0.0;
                 b.mirrored = sub.mirror == 2;
                 out.total_dim += bi->tag.dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);

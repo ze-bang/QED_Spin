@@ -48,6 +48,10 @@ struct Spec {
     bool use_sz        = true;      ///< decompose by Sz / parity when H conserves it
     int  spin_flip     = -1;        ///< -1 auto, 0 off, 1 require
     int  time_reversal = -1;        ///< -1 auto, 0 off, 1 require
+    /// Restrict to total spin S = two_S / 2 (-1: no restriction). H must be SU(2)
+    /// symmetric; the walk runs the Sz = S sector with every block projected onto the
+    /// spin-S tower, and each level counts 2S + 1 times.
+    int  two_S         = -1;
     std::vector<int> only_k0;       ///< restrict to these star representatives
     std::vector<int> only_irrep;    ///< restrict to these little-group irreps
 };

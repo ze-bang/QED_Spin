@@ -88,6 +88,8 @@ using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
 DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const ::Operator& O,
                         const DynamicsSpec& d) {
     if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
+    if (s.two_S >= 0)
+        throw std::invalid_argument("dynamics: restricting the initial states to one spin tower is not supported");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
     const auto shifts = n_up_shifts(O);

@@ -33,6 +33,8 @@ def _sym(m, content):
         return Symmetry(spatial=gens, point_group=False, time_reversal="require")
     if content == "lg":
         return Symmetry(spatial="auto")
+    if content == "su2":
+        return Symmetry(spatial=None, total_spin=0.0 if m.N % 2 == 0 else 0.5)
     raise Missing(f"content {content!r} is not in the sector-resolved API yet")
 
 

@@ -13,6 +13,8 @@ into the engine's :class:`qed._core.sectors.Spec`:
 * ``spin_flip`` / ``time_reversal`` -- ``"auto"`` (use when H has it), ``"off"``,
   ``"require"`` (fail when H lacks it).
 * ``point_group`` -- ``False`` keeps only the abelian part.
+* ``total_spin`` -- a number S restricts to total spin S (H must be SU(2) symmetric);
+  each level then counts 2S + 1 times.
 
 :meth:`select` narrows the sectors (a star representative, a little-group irrep)
 without changing the symmetry.
@@ -41,6 +43,7 @@ class Symmetry:
     spin_flip: str = "auto"
     time_reversal: str = "auto"
     point_group: bool = True
+    total_spin: Optional[float] = None
     only_k0: Sequence[int] = field(default_factory=tuple)
     only_irrep: Sequence[int] = field(default_factory=tuple)
 
@@ -115,6 +118,12 @@ class Symmetry:
             spec.n_up = int(sz)
         spec.spin_flip = _toggle(self.spin_flip, "spin_flip")
         spec.time_reversal = _toggle(self.time_reversal, "time_reversal")
+        if self.total_spin is not None:
+            two_s = round(2 * float(self.total_spin))
+            if abs(two_s - 2 * float(self.total_spin)) > 1e-9 or two_s < 0:
+                raise ValueError("total_spin must be a non-negative multiple of 1/2, "
+                                 f"got {self.total_spin!r}")
+            spec.two_S = int(two_s)
         spec.only_k0 = list(self.only_k0)
         spec.only_irrep = list(self.only_irrep)
         return spec
