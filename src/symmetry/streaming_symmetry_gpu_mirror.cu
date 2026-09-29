@@ -93,12 +93,12 @@ acquire_gpu_shared_rank(
     const std::shared_ptr<const ed::symmetry::SharedRankLookup>& srl)
 {
     static std::mutex mtx;
-    static std::map<const void*, std::weak_ptr<GpuSharedRankTable>> registry;
+    static std::map<std::uint64_t, std::weak_ptr<GpuSharedRankTable>> registry;
     // Keep-alive FIFO: per-sector GPU mirrors are transient (rebuilt per
     // solve), so a pure weak registry would re-upload the table between
     // consecutive sector solves. A run touches at most a couple of
     // (N, n_up) subspaces, so a tiny strong cache pins the recent tables.
-    static std::vector<std::pair<const void*,
+    static std::vector<std::pair<std::uint64_t,
                                  std::shared_ptr<GpuSharedRankTable>>> keep;
     // Jul 2026: BYTE-aware eviction. A count cap of 4 pinned up to 4 x 36 GB
     // at N >= 34 half filling -- guaranteed device OOM the moment a job
@@ -114,7 +114,9 @@ acquire_gpu_shared_rank(
     }();
 
     std::lock_guard<std::mutex> lk(mtx);
-    auto& slot = registry[static_cast<const void*>(srl.get())];
+    for (auto it = registry.begin(); it != registry.end();)   // drop tables nobody holds
+        it = it->second.expired() ? registry.erase(it) : std::next(it);
+    auto& slot = registry[srl->uid];   // by table identity: a freed table's address can be reused
     if (auto sp = slot.lock()) return sp;
     auto sp = std::make_shared<GpuSharedRankTable>();
     sp->d_shared_of_rank = srl->shared_of_rank;   // one H2D per (N, n_up)
@@ -125,7 +127,7 @@ acquire_gpu_shared_rank(
                      srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
     }
     slot = sp;
-    keep.emplace_back(static_cast<const void*>(srl.get()), sp);
+    keep.emplace_back(srl->uid, sp);
     auto bytes_of = [](const std::shared_ptr<GpuSharedRankTable>& t) {
         return static_cast<double>(t->d_shared_of_rank.size())
              * sizeof(std::int32_t);

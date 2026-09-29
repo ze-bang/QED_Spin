@@ -54,6 +54,7 @@
 #include <ed/symmetry/orbit_table.h>
 #include <ed/symmetry/symmetry_cache.h>   // B8: acquire_orbit_table_* (Stage-3 cache)
 #include <ed/symmetry/rep_sector_data.h>
+#include <ed/symmetry/sector_basis.h>      // rep_rank_table_enabled (rank-table budget)
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
 #include <ed/symmetry/canonical_thermo.h>        // canonical_thermo_from_eigs
@@ -640,6 +641,7 @@ struct EngineContext {
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
                                                         // (EXTENDED indices when flip)
     std::shared_ptr<const ed::symmetry::OrbitTable> otab;
+    std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed-Sz: shared rank table, or null
     ed::symmetry::CompiledGroup          cg;            // A (or A'), byte-LUT
     int                                  n_sites = 0;
     // Stage 9a: A' = A x Z2 (global spin flip as an XOR element). Element

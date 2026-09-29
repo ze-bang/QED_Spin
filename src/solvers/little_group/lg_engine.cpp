@@ -213,10 +213,15 @@ build_k_sector(const EngineContext& cx, int k, int n_up) {
         for (std::size_t g = cx.A.size(); g < cx.nA_ext(); ++g)
             rd.flip_masks[g] = cx.flip_mask;
     }
+    if (cx.srl) {
+        rd.shared_rank = cx.srl;
+        rd.local_of_shared.assign(cx.otab->reps.size(), std::int32_t{-1});
+    }
     for (std::size_t i = 0; i < cx.otab->reps.size(); ++i) {
         const double nsq = ed::symmetry::projected_norm_sq_stab(
             cx.otab->stabilizer_of(i), rd.characters);
         if (nsq <= 1e-12) continue;
+        if (cx.srl) rd.local_of_shared[i] = static_cast<std::int32_t>(rd.reps.size());
         rd.reps.push_back(cx.otab->reps[i]);
         rd.inv_norms.push_back(1.0 / std::sqrt(nsq));
     }
@@ -449,6 +454,11 @@ void make_engine_context(const ::Operator&                    op,
     if (opt.n_up >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
             static_cast<std::uint64_t>(n_sites), opt.n_up, cx.cg);
+        // One rank -> representative table for the whole Sz sector, shared by every momentum
+        // sector built from it: O(1) index lookups on the host, and one device copy on the GPU.
+        ed::core::combinadic::BinomialTable b(n_sites);
+        if (ed::symmetry::rep_rank_table_enabled(b.at(n_sites, opt.n_up)))
+            cx.srl = ed::symmetry::make_shared_rank_lookup(cx.otab->reps, n_sites, opt.n_up);
     } else if (opt.sz_parity >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
             static_cast<std::uint64_t>(n_sites), opt.sz_parity, cx.cg);

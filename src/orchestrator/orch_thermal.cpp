@@ -307,6 +307,37 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 } catch (...) {
                     have_bounds = false;
                 }
+            } else {
+                // Device lanes: the same estimate from a short Lanczos run on this backend
+                // (vectors stay device-resident); the extreme Ritz values of 60 steps.
+                auto& be = *backend_uptr;
+                const std::uint64_t bdim = H.geometry().local_dim;
+                std::vector<Complex> seed_host(bdim);
+                std::mt19937_64 gen(opts.random_seed ? opts.random_seed : 0x9E3779B97F4A7C15ULL);
+                std::normal_distribution<double> nd(0.0, 1.0);
+                for (auto& z : seed_host) z = Complex(nd(gen), nd(gen));
+                auto seed = be.make_zero_vector(bdim);
+                be.copy_from_host(seed_host.data(), seed.get(), bdim);
+                ed::krylov::LanczosKernelOptions bo;
+                bo.max_iter   = static_cast<std::size_t>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
+                bo.reorth     = ed::krylov::ReorthPolicy::None;
+                bo.keep_basis = false;
+                bo.dim_cap    = bdim;
+                try {
+                    const auto lk = ed::krylov::lanczos_kernel(be, matvec, bdim, seed.get(), bo);
+                    std::vector<double> d = lk.alpha, e;
+                    for (std::size_t i = 1; i < lk.alpha.size(); ++i) e.push_back(lk.beta[i]);
+                    e.resize(std::max<std::size_t>(d.size(), 1));
+                    if (!d.empty() && LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()),
+                                                    d.data(), e.data(), nullptr, 1) == 0) {
+                        e_min_est = *std::min_element(d.begin(), d.end());
+                        e_max_est = *std::max_element(d.begin(), d.end());
+                        have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est)
+                                    && e_max_est > e_min_est;
+                    }
+                } catch (...) {
+                    have_bounds = false;
+                }
             }
 
             double L_auto;

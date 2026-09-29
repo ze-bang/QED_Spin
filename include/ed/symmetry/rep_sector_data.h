@@ -30,6 +30,7 @@
 
 #include <complex>
 #include <cstdlib>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -55,6 +56,8 @@ namespace ed::symmetry {
 // ---------------------------------------------------------------------------
 struct SharedRankLookup {
     std::vector<std::int32_t>           shared_of_rank;  // rank -> shared idx, -1
+    /// Unique per table (device caches key on it; an address can be reused after a free).
+    std::uint64_t                       uid = 0;
     ed::core::combinadic::BinomialTable binom;
     int                                 n_sites = 0;
     int                                 n_up    = -1;
@@ -66,6 +69,8 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
 {
     if (n_up < 0 || n_sites <= 0) return nullptr;
     auto srl = std::make_shared<SharedRankLookup>();
+    static std::atomic<std::uint64_t> next_uid{1};
+    srl->uid     = next_uid.fetch_add(1);
     srl->n_sites = n_sites;
     srl->n_up    = n_up;
     srl->binom.resize(n_sites);
