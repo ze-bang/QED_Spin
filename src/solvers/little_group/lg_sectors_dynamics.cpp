@@ -10,6 +10,9 @@
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
 #include <ed/sectors/dynamics.h>
+#ifdef WITH_CUDA
+#include <ed/matvec/backends/cuda_backend.cuh>
+#endif
 
 #include <map>
 
@@ -64,7 +67,7 @@ std::vector<Subspace> targets_of(const Subspace& src, const std::set<int>& shift
 // Every non-empty momentum sector of one subspace, with its H matvec.
 struct Target {
     std::shared_ptr<const ed::symmetry::RepSectorData> rd;
-    std::shared_ptr<const ed::matvec::MatVecOperator>  H;
+    std::shared_ptr<RepSectorMatVec>                   H;
 };
 
 std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std::vector<Perm>& A,
@@ -75,7 +78,7 @@ std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std
             if (rd.reps.empty()) return;
             Target t;
             t.rd = ed::solvers::share_rep_sector(std::move(rd));
-            t.H  = ed::solvers::make_rep_sector_matvec(H, t.rd);
+            t.H  = std::make_shared<RepSectorMatVec>(H, t.rd);
             out.push_back(std::move(t));
         });
     return out;
@@ -109,6 +112,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
         EigsOptions eo;
         eo.vectors = true;
+        eo.device  = d.device;
         EigsResult gm;
         for (eo.k = 4;; eo.k *= 2) {
             gm = eigs(H, n_sites, u, eo);
@@ -150,8 +154,21 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                     if (n2 < 1e-24) continue;
                     reached.insert({tsub.n_up * 1000 + tsub.sz_parity, static_cast<int>(ti)});
                     cf.global_n = n;
-                    auto apply = [&t](const Complex* in, Complex* o, std::size_t nn) { t.H->apply(in, o, nn); };
-                    const auto r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
+                    ed::observables::CfSpectralResult r;
+                    const bool gpu = d.device != Device::Cpu && ed::have_cuda()
+                                     && (d.device == Device::Gpu || n >= (std::size_t{1} << 14));
+                    if (gpu) {
+#ifdef WITH_CUDA
+                        t.H->enable_device(true);
+                        ed::matvec::CudaBackend cbe;
+                        r = ed::observables::cf_spectral_from_vector(cbe, t.H->bind_cuda(), n, phi.data(),
+                                                                     d.omega, cf);
+                        ++out.device_blocks;
+#endif
+                    } else {
+                        auto apply = [&t](const Complex* in, Complex* o, std::size_t nn) { t.H->apply(in, o, nn); };
+                        r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
+                    }
                     for (std::size_t i = 0; i < S.size(); ++i) S[i] += r.spectral_function[i];
                 }
             }

@@ -93,6 +93,60 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     return b;
 }
 
+/// Dense spectra of many blocks: on the host one block at a time, or -- with a device --
+/// materialised as the walk visits them and solved in one batched cuSOLVER call at the end
+/// (the walk streams stars, so the matrices are the only thing that outlives a star).
+class DenseBatch {
+public:
+    explicit DenseBatch(Device device)
+        : gpu_(device != Device::Cpu && ed::have_cuda()) {}
+
+    /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
+    std::size_t add(const ed::matvec::MatVecOperator& mv) {
+        using namespace ed::solvers::lg_detail;
+        const std::size_t id = spectra_.size();
+        spectra_.emplace_back();
+        if (!gpu_) {
+            spectra_.back() = solve_block_full(mv);
+            return id;
+        }
+        const Eigen::MatrixXcd Hb = materialize(mv);
+        const std::size_t nb = static_cast<std::size_t>(Hb.rows());
+        packed_.offset.push_back(packed_.data.size());
+        packed_.block_dim.push_back(static_cast<int>(nb));
+        packed_.block_irrep_dim.push_back(1);
+        packed_.data.insert(packed_.data.end(), Hb.data(), Hb.data() + nb * nb);   // column-major
+        queued_.push_back(id);
+        return id;
+    }
+
+    /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
+    void solve() {
+        if (queued_.empty()) return;
+        const std::vector<double> ev = ed::solvers::lg_blocks_batched_eigenvalues_gpu(packed_);
+        std::size_t off = 0;
+        for (std::size_t q = 0; q < queued_.size(); ++q) {
+            const std::size_t nb = static_cast<std::size_t>(packed_.block_dim[q]);
+            spectra_[queued_[q]].assign(ev.begin() + static_cast<long>(off),
+                                        ev.begin() + static_cast<long>(off + nb));
+            off += nb;
+        }
+        device_blocks_ += queued_.size();
+        queued_.clear();
+        packed_ = {};
+    }
+
+    [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
+    [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
+
+private:
+    bool gpu_;
+    ed::solvers::LgBlocksPacked       packed_;
+    std::vector<std::size_t>          queued_;
+    std::vector<std::vector<double>>  spectra_;
+    std::size_t                       device_blocks_ = 0;
+};
+
 /// The S^2 operator a total-spin restriction needs (null without one).
 inline std::shared_ptr<::Operator> s2_carrier_for(const Spec& s, int n_sites) {
     return s.two_S >= 0 ? ed::ops::make_S2_carrier(static_cast<std::uint64_t>(n_sites)) : nullptr;

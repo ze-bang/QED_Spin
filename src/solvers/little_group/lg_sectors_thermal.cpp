@@ -90,6 +90,11 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     out.T  = t.temperatures;
     out.e0 = std::numeric_limits<double>::infinity();
     std::vector<BlockThermo> blocks;
+    // Exact: every block's spectrum, batched onto the GPU when asked; the thermodynamics
+    // of each block are formed once the batch is solved.
+    detail::DenseBatch batch(t.method == ThermalSpec::Method::Exact ? t.device : Device::Cpu);
+    struct Pending { std::size_t id; std::size_t block; detail::BlockOp filter; };
+    std::vector<Pending> pending;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
         detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
@@ -100,11 +105,9 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                 const auto& mv = *bop.op;
                 BlockThermo b;
                 if (t.method == ThermalSpec::Method::Exact) {
-                    std::vector<double> ev;
-                    for (double e : solve_block_full(mv)) if (!bop.is_ghost(e)) ev.push_back(e);
-                    if (ev.empty()) continue;
-                    out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
-                    b = exact_block(ev, beta);
+                    detail::BlockOp filter = bop;
+                    filter.op.reset();
+                    pending.push_back({batch.add(mv), blocks.size(), filter});
                 } else {
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -120,6 +123,21 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                 blocks.push_back(std::move(b));
             }
         });
+    }
+    batch.solve();
+    if (t.method == ThermalSpec::Method::Exact) {
+        out.device_blocks = batch.device_blocks();
+        std::vector<BlockThermo> kept;
+        for (const auto& p : pending) {
+            std::vector<double> ev;
+            for (double e : batch.spectrum(p.id)) if (!p.filter.is_ghost(e)) ev.push_back(e);
+            if (ev.empty()) continue;
+            out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
+            BlockThermo b = exact_block(ev, beta);
+            b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.mirrored = blocks[p.block].mirrored;
+            kept.push_back(std::move(b));
+        }
+        blocks = std::move(kept);
     }
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
     out.blocks = blocks.size();

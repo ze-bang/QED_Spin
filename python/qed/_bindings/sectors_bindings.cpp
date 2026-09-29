@@ -122,14 +122,15 @@ void bind_sectors(py::module_& m) {
         .def_readonly("total_dim", &sec::SpectrumResult::total_dim)
         .def_readonly("flip_engaged", &sec::SpectrumResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::SpectrumResult::tr_engaged)
+        .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });
 
     s.def("spectrum",
-          [](const ::Operator& H, int n_sites, const sec::Spec& spec) {
+          [](const ::Operator& H, int n_sites, const sec::Spec& spec, sec::Device device) {
               py::gil_scoped_release nogil;
-              return sec::spectrum(H, n_sites, spec);
+              return sec::spectrum(H, n_sites, spec, device);
           },
-          py::arg("H"), py::arg("n_sites"), py::arg("spec"),
+          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("device") = sec::Device::Cpu,
           "The complete spectrum of H, every symmetry block diagonalised densely.");
 
     py::enum_<sec::ThermalSpec::Method>(s, "ThermalMethod")
@@ -177,7 +178,8 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("krylov", &sec::DynamicsSpec::krylov)
         .def_readwrite("samples", &sec::DynamicsSpec::samples)
         .def_readwrite("seed", &sec::DynamicsSpec::seed)
-        .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol);
+        .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol)
+        .def_readwrite("device", &sec::DynamicsSpec::device);
 
     py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")
         .def_readonly("omega", &sec::DynamicsCurves::omega)
@@ -185,7 +187,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("S", &sec::DynamicsCurves::S)
         .def_readonly("e0", &sec::DynamicsCurves::e0)
         .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
-        .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors);
+        .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors)
+        .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks);
 
     s.def("dynamics",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, const ::Operator& O,

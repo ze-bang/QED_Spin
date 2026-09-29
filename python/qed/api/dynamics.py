@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from .. import _core
+from . import _device
 from .symmetry import Symmetry
 
 
@@ -21,13 +22,14 @@ class DynamicsResult:
     S: np.ndarray
     e0: float
     ground_manifold: int
+    device_blocks: int
     symmetry: Symmetry = field(repr=False)
 
 
 def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
              T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
              krylov: int = 200, samples: int = 30, seed: int = 0,
-             degeneracy_tol: float = 1e-8) -> DynamicsResult:
+             degeneracy_tol: float = 1e-8, device: str = "cpu") -> DynamicsResult:
     """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.
 
     ``T=None``: the ground state, averaged over a degenerate ground manifold.
@@ -45,6 +47,8 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.samples = int(samples)
     d.seed = int(seed)
     d.degeneracy_tol = float(degeneracy_tol)
+    d.device = _device.resolve(device)
     r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H), O, d)
     return DynamicsResult(omega=np.asarray(r.omega), T=np.asarray(r.T), S=np.asarray(r.S),
-                          e0=float(r.e0), ground_manifold=int(r.ground_manifold), symmetry=sym)
+                          e0=float(r.e0), ground_manifold=int(r.ground_manifold),
+                          device_blocks=int(r.device_blocks), symmetry=sym)

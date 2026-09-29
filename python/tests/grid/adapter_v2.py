@@ -75,22 +75,25 @@ def vectors(m, H, content, device, k):
 
 
 def spectrum(m, H, content, device):
-    if device != "cpu":
-        raise Missing("the sector-resolved spectrum runs on the CPU only so far")
-    return _spectrum(H, sym=_sym(m, content)).energies
+    r = _spectrum(H, sym=_sym(m, content), device=device)
+    if device == "gpu" and r.device_blocks == 0:
+        raise Missing("no block ran on the device")
+    return r.energies
 
 
 def thermal(m, H, content, device, method, T, samples, krylov, seed):
     r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
                  krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device)
-    if device == "gpu" and method.lower() != "exact" and r.device_blocks == 0:
+    if device == "gpu" and r.device_blocks == 0:
         raise Missing("no block ran on the device")
     return {"T": r.T, "E": r.E, "C": r.C}
 
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
-    if device != "cpu":
-        raise Missing("the sector-resolved dynamics runs on the CPU only so far")
+    if device != "cpu" and T is not None:
+        raise Missing("finite-temperature dynamics runs on the CPU only so far")
     r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
-                  krylov=krylov, samples=samples, seed=7)
+                  krylov=krylov, samples=samples, seed=7, device=device)
+    if device == "gpu" and r.device_blocks == 0:
+        raise Missing("no continued fraction ran on the device")
     return r.S[0]

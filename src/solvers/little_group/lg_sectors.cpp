@@ -270,9 +270,12 @@ std::vector<double> SpectrumResult::expanded() const {
     return e;
 }
 
-SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s) {
+SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device device) {
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
+    detail::DenseBatch batch(device);
+    struct Entry { std::size_t id; Level proto; detail::BlockOp filter; };
+    std::vector<Entry> entries;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
         detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
@@ -280,18 +283,26 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s) {
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
                 if (!bop.op) continue;
-                for (double e : solve_block_full(*bop.op)) {
-                    if (bop.is_ghost(e)) continue;
-                    Level L;
-                    L.energy = e; L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
-                    res.levels.push_back(L);
-                    res.total_dim += bop.multiplicity;
-                }
+                Level L;
+                L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
+                const std::size_t id = batch.add(*bop.op);
+                bop.op.reset();                    // keep only the ghost filter past the star
+                entries.push_back({id, L, bop});
             }
         });
     }
+    batch.solve();
+    res.device_blocks = batch.device_blocks();
+    for (const auto& en : entries)
+        for (double e : batch.spectrum(en.id)) {
+            if (en.filter.is_ghost(e)) continue;
+            Level L = en.proto;
+            L.energy = e;
+            res.levels.push_back(L);
+            res.total_dim += L.multiplicity;
+        }
     std::stable_sort(res.levels.begin(), res.levels.end(),
                      [](const Level& a, const Level& b) { return a.energy < b.energy; });
     return res;

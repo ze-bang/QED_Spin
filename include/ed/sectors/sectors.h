@@ -132,12 +132,14 @@ struct SpectrumResult {
     std::uint64_t      total_dim = 0;       ///< sum of multiplicities (the Hilbert-space dimension)
     bool               flip_engaged = false;
     bool               tr_engaged   = false;
+    std::size_t        device_blocks = 0;   ///< blocks diagonalised on a GPU
 
     /// Every eigenvalue, multiplicities expanded, ascending.
     [[nodiscard]] std::vector<double> expanded() const;
 };
 
-[[nodiscard]] SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s);
+[[nodiscard]] SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s,
+                                      Device device = Device::Cpu);
 
 /// Expand a rep-basis vector into the Sz sector n_up (the C(N, n_up) states in
 /// ascending integer order) or, for n_up < 0, the full 2^N space.

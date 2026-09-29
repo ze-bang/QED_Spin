@@ -36,6 +36,7 @@ struct DynamicsSpec {
     std::size_t         samples        = 30;   ///< T > 0: random vectors per source sector
     std::uint64_t       seed           = 0;    ///< 0 = draw one
     double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window
+    Device              device         = Device::Cpu;   ///< T = 0 continued fractions on a GPU
 };
 
 struct DynamicsCurves {
@@ -45,6 +46,7 @@ struct DynamicsCurves {
     double                           e0 = 0.0;
     int                              ground_manifold = 0;   ///< T = 0: levels averaged over
     std::size_t                      target_sectors = 0;    ///< sectors O reached
+    std::size_t                      device_blocks  = 0;    ///< continued fractions run on a GPU
 };
 
 [[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s,
