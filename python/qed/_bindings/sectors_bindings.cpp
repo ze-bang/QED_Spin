@@ -95,6 +95,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("flip_engaged", &sec::EigsResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
+        .def_readonly("pruned_blocks", &sec::EigsResult::pruned_blocks)
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
         .def("sector_vector", [](const sec::EigsResult& r, int i) {
                  const auto& v = r.vectors.at(static_cast<std::size_t>(i));
@@ -201,15 +202,18 @@ void bind_sectors(py::module_& m) {
 
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,
-             int dense_max_dim, int block_size, bool allow_partial, sec::Device device) {
+             int dense_max_dim, int block_size, bool allow_partial, sec::Device device,
+             bool prune, double prune_margin) {
               sec::EigsOptions o;
               o.k = k; o.vectors = vectors; o.dense_max_dim = dense_max_dim;
               o.block_size = block_size; o.allow_partial = allow_partial; o.device = device;
+              o.prune = prune; o.prune_margin = prune_margin;
               py::gil_scoped_release nogil;
               return sec::eigs(H, n_sites, spec, o);
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("k") = 1,
           py::arg("vectors") = false, py::arg("dense_max_dim") = 64, py::arg("block_size") = 1,
           py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
+          py::arg("prune") = true, py::arg("prune_margin") = 0.02,
           "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
 }

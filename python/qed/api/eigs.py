@@ -27,6 +27,7 @@ class EigResult:
     symmetry: Symmetry
     complete: bool
     device_blocks: int
+    pruned_blocks: int
     _raw: object
     _spec: object
     _n_sites: int
@@ -59,19 +60,22 @@ class EigResult:
 
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
          block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
-         device: str = "cpu") -> EigResult:
+         device: str = "cpu", prune: bool = True) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises when a block cannot certify levels
-    that may fall inside the window, unless ``allow_partial``.
+    that may fall inside the window, unless ``allow_partial``. ``prune`` solves only the blocks
+    whose short Lanczos estimate lies near the window (``prune=False``: every block).
     """
     sym = Symmetry.auto() if sym is None else sym
     spec = sym.resolve(H)
     n = int(H.num_sites)
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
                              dense_max_dim=int(dense_max_dim), block_size=int(block_size),
-                             allow_partial=bool(allow_partial), device=_device.resolve(device))
+                             allow_partial=bool(allow_partial), device=_device.resolve(device),
+                             prune=bool(prune))
     return EigResult(energies=np.asarray(raw.energies(int(k)), float), levels=list(raw.levels),
                      k=int(k), symmetry=sym, complete=bool(raw.complete),
-                     device_blocks=int(raw.device_blocks), _raw=raw, _spec=spec,
+                     device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
+                     _raw=raw, _spec=spec,
                      _n_sites=n)

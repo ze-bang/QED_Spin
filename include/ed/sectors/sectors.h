@@ -92,6 +92,14 @@ struct EigsOptions {
     int  block_size    = 1;     ///< >1: block Krylov-Schur inside each block
     bool allow_partial = false; ///< return an incomplete window instead of throwing
     Device device      = Device::Cpu;
+    /// Rows each block contributes (0: enough for k given its multiplicity). With `cut`
+    /// false every block's rows are returned, not only the lowest k across blocks.
+    int  per_block     = 0;
+    bool cut           = true;
+    /// Solve only the blocks whose 40-step Lanczos estimate lies within prune_margin
+    /// (relative) of the k-th level found so far. False: solve every block.
+    bool   prune        = true;
+    double prune_margin = 0.02;
 };
 
 /// One eigenvalue of one block. The level occurs `multiplicity` times in the spectrum.
@@ -118,6 +126,7 @@ struct EigsResult {
     bool                     flip_engaged = false;
     bool                     tr_engaged   = false;
     std::size_t              device_blocks = 0;   ///< blocks solved on a GPU
+    std::size_t              pruned_blocks = 0;   ///< blocks skipped by the estimate test
 
     /// Energies with multiplicities expanded, the lowest k.
     [[nodiscard]] std::vector<double> energies(int k) const;

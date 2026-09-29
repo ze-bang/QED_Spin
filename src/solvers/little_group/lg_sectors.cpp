@@ -63,6 +63,44 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
     return r.backend.lane == "gpu";
 }
 
+// The lowest Ritz value after 40 Lanczos steps from a fixed random start: an upper bound on
+// the block's lowest level (on the device when the block has a device kernel).
+double estimate_lowest(const detail::BlockOp& bop, Device device) {
+    const auto& op = static_cast<const ed::LinearOperator&>(*bop.op);
+    if (bop.on_device) {
+        ed::workflows::SolveOptions so;
+        so.num_eigs  = 1;
+        so.max_iter  = 40;
+        so.method    = ed::workflows::SolveMethod::Lanczos;
+        so.tolerance = 1e-6;
+        so.backend.allow_gpu = true;
+        if (device == Device::Gpu) so.backend.gpu_dim_floor = 0;
+        const auto r = ed::workflows::solve(op, so);
+        if (!r.eigenvalues.empty()) return r.eigenvalues.front();
+    }
+    const std::size_t n = op.dim();
+    std::vector<Complex> v0(n);
+    std::mt19937_64 gen(0xE57A7EULL);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    for (auto& c : v0) c = Complex(nd(gen), nd(gen));
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter   = std::min<std::size_t>(40, n);
+    kopts.reorth     = ed::krylov::ReorthPolicy::None;
+    kopts.keep_basis = false;
+    kopts.dim_cap    = n;
+    ed::matvec::CpuBackend be;
+    auto apply = [&op](const Complex* in, Complex* o2, std::size_t nn) { op.apply(in, o2, nn); };
+    const auto k = ed::krylov::lanczos_kernel(be, apply, n, v0.data(), kopts);
+    std::vector<double> d = k.alpha, e;
+    for (std::size_t i = 1; i < k.alpha.size(); ++i) e.push_back(k.beta[i]);
+    if (d.empty()) return -std::numeric_limits<double>::infinity();
+    e.resize(std::max<std::size_t>(d.size(), 1));
+    if (LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()), d.data(), e.data(),
+                      nullptr, 1) != 0)
+        return -std::numeric_limits<double>::infinity();     // never prune on a failed estimate
+    return *std::min_element(d.begin(), d.end());
+}
+
 std::uint64_t state_index(std::uint64_t st, int n_up) {
     if (n_up < 0) return st;
     std::uint64_t r = 0;
@@ -168,20 +206,17 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     std::vector<BlockEnd> ends;
 
     const auto s2c = detail::s2_carrier_for(s, n_sites);
-    for (const Subspace& sub : subspaces(H, n_sites, s)) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
-        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
-            res.flip_engaged = res.flip_engaged || cx.flip_half;
-            res.tr_engaged   = res.tr_engaged || tr_on;
-            for (const auto& bi : sb.blocks) {
+    // Solve one block and append its rows.
+    auto solve_block = [&](const Subspace& sub, StarBuild& sb,
+                           const std::shared_ptr<LittleGroupBlock::Impl>& bi) {
                 const std::size_t dim = bi->tag.dim;
-                if (dim == 0) continue;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
-                if (!bop.op) continue;
+                if (!bop.op) return;
                 const std::uint64_t mult = bop.multiplicity;
-                if (s.two_S < 0) res.total_dim += dim * mult;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
-                const std::uint64_t need = (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
+                const std::uint64_t need = o.per_block > 0
+                    ? static_cast<std::uint64_t>(o.per_block)
+                    : (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
                 const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));
                 const ed::matvec::MatVecOperator& mv = *bop.op;
                 bool converged = true;
@@ -227,7 +262,61 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                     }
                     rows.push_back({L, false});
                 }
+    };
+
+    // Pruning (default): every block above the dense crossover gets a short Lanczos
+    // estimate first -- an upper bound on its lowest level -- and is solved only when that
+    // estimate lies within `prune_margin` (relative) of the k-th level found so far, in order
+    // of increasing estimate. A block whose 40-step estimate is still far above its true
+    // minimum could be skipped wrongly; prune = false solves every block.
+    const bool prune = o.prune && o.cut && o.per_block == 0 && s.two_S < 0;
+    struct Candidate { std::size_t sub; int k0, irrep, flip; double estimate; };
+    std::vector<Candidate> candidates;
+    const auto subs = subspaces(H, n_sites, s);
+    for (std::size_t si = 0; si < subs.size(); ++si) {
+        const Subspace& sub = subs[si];
+        const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
+        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+            res.flip_engaged = res.flip_engaged || cx.flip_half;
+            res.tr_engaged   = res.tr_engaged || tr_on;
+            for (const auto& bi : sb.blocks) {
+                const std::size_t dim = bi->tag.dim;
+                if (dim == 0) continue;
+                if (s.two_S < 0)
+                    res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
+                const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim);
+                if (!prune || dim <= floor_) { solve_block(sub, sb, bi); continue; }
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
+                candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
+                                      estimate_lowest(bop, o.device)});
             }
+        });
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.estimate < b.estimate; });
+    for (const Candidate& c : candidates) {
+        // The k-th level found so far (with multiplicity); +inf while fewer than k are known.
+        std::vector<const Row*> sorted;
+        for (const auto& r : rows) sorted.push_back(&r);
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const Row* a, const Row* b) { return a->level.energy < b->level.energy; });
+        double kth = std::numeric_limits<double>::infinity();
+        std::uint64_t acc = 0;
+        for (const Row* r : sorted) {
+            acc += r->level.multiplicity;
+            if (acc >= static_cast<std::uint64_t>(o.k)) { kth = r->level.energy; break; }
+        }
+        if (c.estimate > kth + o.prune_margin * std::max(1.0, std::abs(kth))) {
+            ++res.pruned_blocks;
+            continue;
+        }
+        Spec star = s;
+        star.only_k0 = {c.k0};
+        const Subspace& sub = subs[c.sub];
+        const LittleGroupOptions opt = detail::engine_options(star, sub, o.dense_max_dim, o.block_size);
+        detail::walk(H, n_sites, star, opt, [&](const EngineContext&, bool, StarBuild& sb) {
+            for (const auto& bi : sb.blocks)
+                if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip) solve_block(sub, sb, bi);
         });
     }
 
@@ -238,7 +327,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     for (const auto& r : rows) {
         res.levels.push_back(r.level);
         acc += r.level.multiplicity;
-        if (acc >= static_cast<std::uint64_t>(o.k)) { cut = r.level.energy; break; }
+        if (o.cut && acc >= static_cast<std::uint64_t>(o.k)) { cut = r.level.energy; break; }
     }
     // A block that stopped short owes levels above its last certified one. They can lie
     // below the cut -- or fill a window that came up short -- so the window is incomplete.

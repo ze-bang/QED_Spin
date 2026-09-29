@@ -59,8 +59,9 @@ def _device_engaged(device):
 
 
 def eigs(m, H, content, device, k):
+    # GPU cells solve every block (prune=False), so the device path is what they measure.
     with _device_engaged(device):
-        r = _eigs(H, k, sym=_sym(m, content), device=device)
+        r = _eigs(H, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
     if device == "gpu" and r.device_blocks == 0 and content != "su2":
         raise Missing("no block ran on the device")
     return np.sort(r.energies)
@@ -68,7 +69,7 @@ def eigs(m, H, content, device, k):
 
 def vectors(m, H, content, device, k):
     with _device_engaged(device):
-        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device)
+        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=False)
     if device == "gpu" and r.device_blocks == 0 and content != "su2":
         raise Missing("no block ran on the device")
     return r.energies, r.vectors(basis="full")
