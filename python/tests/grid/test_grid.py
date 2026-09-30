@@ -176,8 +176,12 @@ def _run(task, content, mname, device, monkeypatch):
         # Sampled: at small N the statistical error alone can exceed the tolerance at low T.
         # A cell passes inside tolerance, or when 4x the samples shrinks the error the way
         # sampling noise does (~1/2); a bias (a bug) does not shrink.
+        # The 4R run is the expensive half; it only decides cells that miss at R.
         R = {"FTLM": 50, "mTPQ": 16}[method]
-        e1, e4 = max(err(R)), max(err(4 * R))
+        e1 = max(err(R))
+        if e1 < max(tol):
+            return True, e1, f"err R={R}: {e1:.2e}"
+        e4 = max(err(4 * R))
         ok = (e4 < max(tol)) or (e4 < 0.65 * e1)
         return ok, e4, f"err R={R}: {e1:.2e}, R={4 * R}: {e4:.2e}"
 
