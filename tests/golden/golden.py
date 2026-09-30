@@ -141,7 +141,7 @@ def select(cases, only):
 
 
 def cmd_record(args):
-    from cases import build_cases
+    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
     cases = select(build_cases(args.device), args.only)
     records, quarantine = {}, {}
     for c in cases:
@@ -180,7 +180,7 @@ def cmd_bless(args):
     """Re-record EXACTLY the named cases into an existing reference (determinism checked
     by a second run) and keep every other record; the file's meta keeps a log of what
     was re-blessed, at which commit and why."""
-    from cases import build_cases
+    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
     if not args.only and not args.new:
         print("bless needs --only (exact case names) or --new: re-blessing everything is `record`")
         return 2
@@ -221,7 +221,7 @@ def cmd_retire(args):
     removed on purpose. Refuses while cases.py still produces any of them (retiring a
     live case would hide a regression). The dropped records move into meta["retired"]
     with the commit, date and reason, so every deletion stays auditable."""
-    from cases import build_cases
+    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
     if not args.only:
         print("retire needs --only with exact case names")
         return 2
@@ -250,7 +250,7 @@ def cmd_retire(args):
 
 
 def cmd_compare(args):
-    from cases import build_cases
+    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
     with gzip.open(args.ref, "rt") as f:
         doc = json.load(f)
     ref, quarantine = doc["records"], doc.get("quarantine", {})
@@ -291,7 +291,7 @@ def cmd_compare(args):
 
 
 def cmd_list(args):
-    from cases import build_cases
+    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
     for c in select(build_cases(args.device), args.only):
         print(f"{c.tier:10s} {c.name}")
     return 0

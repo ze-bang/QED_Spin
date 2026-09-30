@@ -22,7 +22,7 @@ a = ap.parse_args()
 
 cases = importlib.import_module(f"cases_{a.api}").CASES
 fn, _ = cases[a.case]
-sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+sha = os.environ.get("QED_COMMIT") or subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                      cwd=HERE).stdout.strip()
 t0 = time.perf_counter()
 out = fn()
