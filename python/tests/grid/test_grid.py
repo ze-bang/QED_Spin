@@ -52,6 +52,10 @@ ETA = 0.1
 T_EXACT = np.linspace(0.2, 4.0, 12)
 T_SAMPLED = np.linspace(0.4, 4.0, 10)
 T_DYN = 1.0
+# GPU sampled cells: largest allowed difference to the CPU path at the same seeds (both draw the
+# same vectors). Measured on gate 62285710: thermal <= 5e-15; dynamics <= 6e-8 on complex H,
+# where rounding differences pass through two Lanczos runs and their overlap matrix.
+GPU_VS_CPU = {"FTLM": 1e-8, "mTPQ": 1e-8, "dynamics": 1e-6}
 
 
 def _cells():
@@ -173,6 +177,14 @@ def _run(task, content, mname, device, monkeypatch):
         if method == "exact":
             eE, eC = err(1)
             return eE < tol[0] and eC < tol[1], max(eE, eC), f"dE/N {eE:.2e} dC/N {eC:.2e}"
+        if device == "gpu":
+            # The CPU cell pins the method against the dense oracle. The device path must
+            # reproduce the CPU path: same seeds, hence the same random vectors, at a few samples.
+            run = lambda dev: api.thermal(m, H, content, dev, method, T, samples=4, krylov=60, seed=7)  # noqa: E731
+            got, cpu = run("gpu"), run("cpu")
+            d = max(float(np.max(np.abs(got[q] - cpu[q]))) for q in ("E", "C")) / m.N
+            lim = GPU_VS_CPU[method]
+            return d < lim, d, f"gpu vs cpu, 4 samples: {d:.1e} (limit {lim:.0e})"
         # Sampled: at small N the statistical error alone can exceed the tolerance at low T.
         # A cell passes inside tolerance, or when 4x the samples shrinks the error the way
         # sampling noise does (~1/2); a bias (a bug) does not shrink.
@@ -190,6 +202,12 @@ def _run(task, content, mname, device, monkeypatch):
         T = None if task.startswith("dyn0") else T_DYN
         terms = fourier(m.N, m.coords, m.shape, Q[mname], op)
         obs = Model("obs", m.N, terms, [], (), []).operator()
+        if device == "gpu" and T is not None:   # as for sampled thermodynamics: GPU == CPU
+            run = lambda dev: api.dynamics(m, H, content, dev, obs, Q[mname], OMEGA, ETA, T,  # noqa: E731
+                                           samples=4, krylov=40)
+            got, cpu = run("gpu"), run("cpu")
+            d = _rel_l1(got, cpu)
+            return d < GPU_VS_CPU["dynamics"], d, f"gpu vs cpu, 4 samples: rel L1 {d:.1e}"
         got = api.dynamics(m, H, content, device, obs, Q[mname], OMEGA, ETA, T,
                            samples=60, krylov=150 if T is None else 80)
         ref = orc.lehmann(terms, OMEGA, ETA, T, init=orc.mask(sel))

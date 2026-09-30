@@ -3,7 +3,7 @@
 # build job, whose log directory collects every task's exit code; KIND is cpu | gpu.
 #SBATCH --job-name=gate_task
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=16G
-#SBATCH --time=00:40:00
+#SBATCH --time=00:20:00
 #SBATCH --output=logs/gate/%x-%A_%a.out
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
