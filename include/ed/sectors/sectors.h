@@ -60,6 +60,14 @@ struct Spec {
     int  two_S         = -1;
     std::vector<int> only_k0;       ///< restrict to these star representatives
     std::vector<int> only_irrep;    ///< restrict to these little-group irreps
+    /// A list of character constraints [(element index, chi)]: a constraint on `abelian`
+    /// keeps the stars holding a momentum with chi_k(abelian[i]) = chi for every pair; one on
+    /// `residues` (-1: the identity) keeps the blocks whose little-co-group irrep has
+    /// chi_sigma(residues[i]) = chi, and needs every listed residue in the little group.
+    /// A block passes when it meets any one constraint of the list (empty list: all pass).
+    using CharConstraint = std::vector<std::pair<int, Complex>>;
+    std::vector<CharConstraint> only_momentum;
+    std::vector<CharConstraint> only_irrep_chars;
 };
 
 /// What H conserves along the Sz axis.
@@ -104,6 +112,12 @@ struct EigsOptions {
 struct Level {
     double        energy       = 0.0;
     ed::solvers::LittleGroupBlockTag tag;   ///< the block's quantum numbers
+    /// chi_k(a) for every a of Spec::abelian: the momentum of the star representative (the
+    /// other members of the star are isospectral and counted in the multiplicity).
+    std::vector<Complex> momentum;
+    /// (residue index, chi_sigma) over the little co-group, -1 the identity; empty for a
+    /// block without a co-group decomposition.
+    std::vector<std::pair<int, Complex>> irrep_characters;
     int           mirror       = 1;         ///< flip fold of the subspace
     std::uint64_t multiplicity = 1;         ///< tag.multiplicity x mirror
     int           vector       = -1;        ///< index into EigsResult::vectors, -1 = none

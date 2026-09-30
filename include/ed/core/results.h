@@ -98,6 +98,8 @@ struct ThermalResult {
     std::optional<FTLMResults>       ftlm;
     KrylovDiagnostics                krylov;
     BackendMetadata                  backend;
+    /// <O>(T) per ThermalOptions::observables, index-aligned with thermo.temperatures.
+    std::vector<std::vector<std::complex<double>>> observables;
 };
 
 }  // namespace ed

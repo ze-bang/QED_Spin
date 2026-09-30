@@ -250,6 +250,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                     L.tag          = bi->tag;
                     L.mirror       = sub.mirror;
                     L.multiplicity = mult;
+                    detail::label(L, sb);
                     if (o.vectors) {
                         BlockVector bv;
                         if (bi->gop) {                               // group sector: its own basis
@@ -383,6 +384,7 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
                 if (!bop.op) continue;
                 Level L;
                 L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
+                detail::label(L, sb);
                 const std::size_t id = batch.add(*bop.op);
                 bop.op.reset();                    // keep only the ghost filter past the star
                 entries.push_back({id, L, bop});

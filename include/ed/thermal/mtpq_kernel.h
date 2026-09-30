@@ -25,8 +25,11 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <type_traits>
 
 #include <ed/matvec/backend.h>
+#include <ed/matvec/matvec_batcher.h>
 #include <ed/thermal/tpq_seeding.h>
 #include <ed/thermal/tpq_kernel.h>
 
@@ -47,6 +50,11 @@ struct MtpqOptions {
     /// projection). Must leave a normalisable vector; a zero result
     /// throws (the targeted subspace has no weight in this block).
     std::function<void(Complex*, std::size_t)> seed_transform;
+
+    /// Device multi-vector H: on a CUDA run up to `batch_width` samples advance in lockstep and
+    /// share each H apply (see FtlmOptions::batch_matvec).
+    ed::LinearOperator::MultiMatvecFn batch_matvec;
+    std::size_t batch_width = 8;
 };
 
 struct MtpqResult {
@@ -105,7 +113,10 @@ MtpqResult mtpq_kernel(Backend&       backend,
     out.sample_energies.reserve(opts.num_samples);
     out.sample_variances.reserve(opts.num_samples);
 
-    for (std::size_t s = 0; s < opts.num_samples; ++s) {
+    // One sample's trajectory; samples are independent and are stored in sample order, however
+    // they were run.
+    struct Sample { double final_E = 0.0; std::vector<double> betas, Es, vars; };
+    auto sample = [&](auto& backend, auto&& apply_H, std::size_t s) {
         const std::uint64_t seed = opts.random_seed
                                     ? (opts.random_seed + s)
                                     : ed::tpq_per_sample_seed(s);
@@ -181,12 +192,38 @@ MtpqResult mtpq_kernel(Backend&       backend,
             traj_vars.push_back(var_k);
             return true;
         };
-        auto kres = tpq_kernel<Backend>(backend, apply_H, local_n,
-                                        seed_dev.get(), kopts, on_step);
-        out.energies.push_back(final_E);
-        out.sample_inv_temps.push_back(std::move(traj_betas));
-        out.sample_energies.push_back(std::move(traj_Es));
-        out.sample_variances.push_back(std::move(traj_vars));
+        auto kres = tpq_kernel<std::decay_t<decltype(backend)>>(backend, apply_H, local_n, seed_dev.get(),
+                                                                kopts, on_step);
+        (void)kres;
+        return Sample{final_E, std::move(traj_betas), std::move(traj_Es), std::move(traj_vars)};
+    };
+
+    std::vector<Sample> samples(opts.num_samples);
+    bool batched = false;
+#ifdef WITH_CUDA
+    if constexpr (std::is_same_v<std::decay_t<Backend>, ed::matvec::CudaBackend>) {
+        // Up to batch_width samples in lockstep sharing each H apply (see MatvecBatcher).
+        if (opts.batch_matvec && opts.batch_width > 1 && opts.num_samples > 1) {
+            batched = true;
+            for (std::size_t s0 = 0; s0 < opts.num_samples; s0 += opts.batch_width) {
+                const std::size_t k = std::min(opts.batch_width, opts.num_samples - s0);
+                ed::matvec::MatvecBatcher b;
+                const auto H = b.wrap(opts.batch_matvec);
+                b.run(k, [&](std::size_t i) {
+                    ed::matvec::CudaBackend be;
+                    samples[s0 + i] = sample(be, H, s0 + i);
+                });
+            }
+        }
+    }
+#endif
+    if (!batched)
+        for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(backend, apply_H, s);
+    for (auto& smp : samples) {
+        out.energies.push_back(smp.final_E);
+        out.sample_inv_temps.push_back(std::move(smp.betas));
+        out.sample_energies.push_back(std::move(smp.Es));
+        out.sample_variances.push_back(std::move(smp.vars));
     }
     return out;
 }

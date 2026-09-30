@@ -143,6 +143,8 @@ struct LittleGroupStarInfo {
     std::vector<int> little_elems;
     std::vector<std::vector<std::complex<double>>> little_characters;
     std::vector<int> little_irrep_dims;
+    /// chi_k0(a) over the RAW abelian group (the caller's order) for the representative.
+    std::vector<std::complex<double>> momentum;
 };
 
 /// Streaming sweep over every non-empty RAW momentum sector of one diagonal

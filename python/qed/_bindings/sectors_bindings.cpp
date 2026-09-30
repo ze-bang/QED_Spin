@@ -71,6 +71,17 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s, int n_site
     }
     d["level_energy"] = arr(energy); d["level_mirror"] = arr(mirror);
     d["level_multiplicity"] = arr(mult); d["level_vector"] = arr(vector); d["level_tag"] = arr(tag);
+    // Physical labels, ragged per level: momentum characters, co-group (residue, character).
+    std::vector<std::int64_t> moff{0}, ioff{0}, ielem;
+    std::vector<std::complex<double>> mchi, ichi;
+    for (const auto& L : r.levels) {
+        mchi.insert(mchi.end(), L.momentum.begin(), L.momentum.end());
+        moff.push_back(static_cast<std::int64_t>(mchi.size()));
+        for (const auto& [e, c] : L.irrep_characters) { ielem.push_back(e); ichi.push_back(c); }
+        ioff.push_back(static_cast<std::int64_t>(ielem.size()));
+    }
+    d["level_momentum"] = arr(mchi); d["level_momentum_offset"] = arr(moff);
+    d["level_irrep_elems"] = arr(ielem); d["level_irrep_chars"] = arr(ichi); d["level_irrep_offset"] = arr(ioff);
 
     // Vectors, with each distinct basis stored once.
     std::map<const void*, std::int64_t> basis_id;
@@ -132,6 +143,22 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         L.tag.tr_folded = t[8] != 0; L.tag.dim = static_cast<std::uint64_t>(t[9]);
         L.tag.multiplicity = static_cast<std::uint64_t>(t[10]);
         r.levels.push_back(L);
+    }
+    if (d.contains("level_momentum")) {
+        const auto mchi = vec<std::complex<double>>(d, "level_momentum");
+        const auto moff = vec<std::int64_t>(d, "level_momentum_offset");
+        const auto ielem = vec<std::int64_t>(d, "level_irrep_elems");
+        const auto ichi = vec<std::complex<double>>(d, "level_irrep_chars");
+        const auto ioff = vec<std::int64_t>(d, "level_irrep_offset");
+        if (moff.size() != r.levels.size() + 1 || ioff.size() != r.levels.size() + 1)
+            throw std::invalid_argument("load_eigs: level labels have the wrong shape");
+        for (std::size_t i = 0; i < r.levels.size(); ++i) {
+            auto& L = r.levels[i];
+            L.momentum.assign(mchi.begin() + moff[i], mchi.begin() + moff[i + 1]);
+            for (auto j = ioff[i]; j < ioff[i + 1]; ++j)
+                L.irrep_characters.emplace_back(static_cast<int>(ielem[static_cast<std::size_t>(j)]),
+                                                ichi[static_cast<std::size_t>(j)]);
+        }
     }
     std::vector<std::shared_ptr<const ed::symmetry::RepSectorData>> bases;
     const auto nb = vec<std::int64_t>(d, "n_bases").at(0);
@@ -200,7 +227,9 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("time_reversal", &sec::Spec::time_reversal)
         .def_readwrite("two_S", &sec::Spec::two_S)
         .def_readwrite("only_k0", &sec::Spec::only_k0)
-        .def_readwrite("only_irrep", &sec::Spec::only_irrep);
+        .def_readwrite("only_irrep", &sec::Spec::only_irrep)
+        .def_readwrite("only_momentum", &sec::Spec::only_momentum)
+        .def_readwrite("only_irrep_chars", &sec::Spec::only_irrep_chars);
 
     py::enum_<sec::Device>(s, "Device")
         .value("Cpu", sec::Device::Cpu)
@@ -224,6 +253,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("multiplicity", &sec::Level::multiplicity)
         .def_readonly("mirror", &sec::Level::mirror)
         .def_readonly("vector", &sec::Level::vector)
+        .def_readonly("momentum", &sec::Level::momentum)
+        .def_readonly("irrep_characters", &sec::Level::irrep_characters)
         .def_property_readonly("n_up", [](const sec::Level& l) { return l.tag.n_up; })
         .def_property_readonly("sz_parity", [](const sec::Level& l) { return l.tag.sz_parity; })
         .def_property_readonly("k0", [](const sec::Level& l) { return l.tag.k0; })
@@ -312,7 +343,8 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("krylov", &sec::ThermalSpec::krylov)
         .def_readwrite("exact_states", &sec::ThermalSpec::exact_states)
         .def_readwrite("seed", &sec::ThermalSpec::seed)
-        .def_readwrite("device", &sec::ThermalSpec::device);
+        .def_readwrite("device", &sec::ThermalSpec::device)
+        .def_readwrite("observables", &sec::ThermalSpec::observables);
 
     py::class_<sec::ThermalCurves>(s, "ThermalCurves")
         .def_readonly("T", &sec::ThermalCurves::T)
@@ -323,6 +355,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("F", &sec::ThermalCurves::F)
         .def_readonly("M", &sec::ThermalCurves::M)
         .def_readonly("chi", &sec::ThermalCurves::chi)
+        .def_readonly("O", &sec::ThermalCurves::O)
         .def_readonly("e0", &sec::ThermalCurves::e0)
         .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
         .def_readonly("blocks", &sec::ThermalCurves::blocks)

@@ -72,6 +72,10 @@ struct ThermalOptions {
     /// loops; the stochastic trace then runs over that subspace.
     std::function<void(Complex*, std::size_t)> seed_transform;
 
+    /// Static observables for FTLM (Method::FTLM only): <O>(T) is returned in
+    /// ThermalResult::observables. Each is bound to the backend the run selects.
+    std::vector<std::shared_ptr<const LinearOperator>> observables;
+
     /// Method discriminator (matches the legacy auto/thermal lane tags).
     enum class Method : std::uint8_t {
         FTLM = 0, mTPQ = 2, OFTLM = 5,

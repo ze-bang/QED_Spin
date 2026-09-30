@@ -17,7 +17,7 @@ GPU_TASKS=(
   "golden_gpu|ED_SYM_LG_GPU=1 python -u tests/golden/golden.py compare --device gpu --ref ${REF}/gpu.json.gz"
   "grid_gpu_levels|${GRID} -k 'gpu and (eigs or vectors or expect or spectrum)'"
   "grid_gpu_exact_ftlm|${GRID} -k 'gpu and (th_exact or th_ftlm)'"
-  "grid_gpu_mtpq|${GRID} -k 'gpu and th_mtpq'"
+  "grid_gpu_mtpq|${GRID} -k 'gpu and (th_mtpq or th_O)'"
   "grid_gpu_dyn0|${GRID} -k 'gpu and dyn0'"
   "grid_gpu_dynT_zz|${GRID} -k 'gpu and dynT_zz'"
   "grid_gpu_dynT_pm|${GRID} -k 'gpu and dynT_pm'"

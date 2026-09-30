@@ -444,27 +444,25 @@ conj_cuDoubleComplex(cuDoubleComplex z) {
     return make_cuDoubleComplex(cuCreal(z), -cuCimag(z));
 }
 
-template <class BasisPolicy, class Scalar>
-__device__ __forceinline__ Scalar rep_gather_row_device(
+// Every connection of row r_idx: visit(j, c) with c = conj(h * proj) for each term reaching the
+// orbit of index j. The single- and multi-vector gathers accumulate c * in[j] in this order.
+template <class BasisPolicy, class Visit>
+__device__ __forceinline__ void rep_row_visit(
     const BasisPolicy&       basis,
     double                   spin_l,
     const DeviceTermStorage& terms,
     std::uint64_t            r_idx,
-    const Scalar* __restrict__ in)
+    Visit&&                  visit)
 {
-    using ST = ScalarTraits<Scalar>;
     const double spin_sq = spin_l * spin_l;
     const std::uint64_t s = basis.state_of(r_idx);  // representative rep_r
-    Scalar acc = ST::zero();
 
-    // For each connected (s', h): accumulate conj(h*proj)*in[j], j=orbit(s').
+    // For each connected (s', h): visit conj(h*proj) at j = orbit(s').
     auto gather = [&](std::uint64_t s_prime, cuDoubleComplex h) {
         cuDoubleComplex proj;
         const std::uint64_t j = basis.index_and_projection(s_prime, proj);
         if (j == ed::matvec::basis::kDeviceNotFound) return;
-        const cuDoubleComplex hp = cuCmul(h, proj);
-        acc = ST::add(acc,
-                      ST::mul(ST::from_coeff(conj_cuDoubleComplex(hp)), in[j]));
+        visit(j, conj_cuDoubleComplex(cuCmul(h, proj)));
     };
 
     // 1. One-body diagonal (Sz_k): s' = s
@@ -537,6 +535,21 @@ __device__ __forceinline__ Scalar rep_gather_row_device(
             cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
         gather(cur, scalar);
     }
+}
+
+template <class BasisPolicy, class Scalar>
+__device__ __forceinline__ Scalar rep_gather_row_device(
+    const BasisPolicy&       basis,
+    double                   spin_l,
+    const DeviceTermStorage& terms,
+    std::uint64_t            r_idx,
+    const Scalar* __restrict__ in)
+{
+    using ST = ScalarTraits<Scalar>;
+    Scalar acc = ST::zero();
+    rep_row_visit(basis, spin_l, terms, r_idx, [&](std::uint64_t j, cuDoubleComplex c) {
+        acc = ST::add(acc, ST::mul(ST::from_coeff(c), in[j]));
+    });
     return acc;
 }
 
@@ -585,6 +598,78 @@ inline cudaError_t launch_apply_terms_rep_symmetry_gpu_gather(
     return cudaGetLastError();
 }
 
+
+// ---------------------------------------------------------------------------
+// Multi-vector GATHER: one walk over a row's terms and orbit lookups serves NV vectors (the
+// lookup, not the arithmetic, dominates a row). Each vector is accumulated in the same order as
+// the single-vector kernel, so every output is bit-identical to a single apply.
+// ---------------------------------------------------------------------------
+template <class Scalar, int NV>
+struct RepGatherPointers {
+    const Scalar* in[NV];
+    Scalar*       out[NV];
+};
+
+template <class BasisPolicy, class Scalar, int NV>
+__global__ void apply_terms_rep_symmetry_gather_multi(
+    BasisPolicy                   basis,
+    double                        spin_l,
+    DeviceTermStorage             terms,
+    RepGatherPointers<Scalar, NV> p)
+{
+    using ST = ScalarTraits<Scalar>;
+    const std::uint64_t dim = basis.dim();
+    const std::uint64_t r =
+        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (r >= dim) return;
+    Scalar acc[NV];
+#pragma unroll
+    for (int v = 0; v < NV; ++v) acc[v] = ST::zero();
+    rep_row_visit(basis, spin_l, terms, r, [&](std::uint64_t j, cuDoubleComplex c) {
+        const Scalar cs = ST::from_coeff(c);
+#pragma unroll
+        for (int v = 0; v < NV; ++v) acc[v] = ST::add(acc[v], ST::mul(cs, p.in[v][j]));
+    });
+#pragma unroll
+    for (int v = 0; v < NV; ++v) p.out[v][r] = ST::mul_real(acc[v], basis.inv_norms[r]);
+}
+
+/// out[i] = H in[i] for i < k (device pointers), in launches of up to 8 vectors.
+template <class BasisPolicy, class Scalar>
+inline cudaError_t launch_apply_terms_rep_symmetry_gpu_gather_multi(
+    BasisPolicy           basis,
+    double                spin_l,
+    DeviceTermStorage     terms,
+    const Scalar* const*  ins,
+    Scalar* const*        outs,
+    std::size_t           k,
+    cudaStream_t          stream = 0,
+    int                   threads_per_block = 256)
+{
+    const std::uint64_t dim = basis.dim();
+    if (dim == 0 || k == 0) return cudaSuccess;
+    const auto blocks = static_cast<unsigned int>(
+        (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
+        static_cast<std::uint64_t>(threads_per_block));
+    auto launch = [&](auto nv_tag, std::size_t off) {
+        constexpr int NV = decltype(nv_tag)::value;
+        RepGatherPointers<Scalar, NV> p;
+        for (int v = 0; v < NV; ++v) { p.in[v] = ins[off + v]; p.out[v] = outs[off + v]; }
+        apply_terms_rep_symmetry_gather_multi<BasisPolicy, Scalar, NV>
+            <<<blocks, static_cast<unsigned int>(threads_per_block), 0, stream>>>(basis, spin_l, terms, p);
+    };
+    std::size_t off = 0;
+    while (off < k) {
+        const std::size_t left = k - off;
+        if (left >= 8)      { launch(std::integral_constant<int, 8>{}, off); off += 8; }
+        else if (left >= 4) { launch(std::integral_constant<int, 4>{}, off); off += 4; }
+        else if (left >= 2) { launch(std::integral_constant<int, 2>{}, off); off += 2; }
+        else                { launch(std::integral_constant<int, 1>{}, off); off += 1; }
+        const cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+    }
+    return cudaSuccess;
+}
 }  // namespace ed::matvec::kernel::gpu
 
 #endif  // WITH_CUDA

@@ -33,11 +33,16 @@ struct ThermalSpec {
     std::size_t   exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
     std::uint64_t seed         = 0;     ///< 0 = draw one
     Device        device       = Device::Cpu;
+    /// Static observables <O>(T) (method Exact or FTLM without exact_states). Each O is
+    /// averaged over the symmetries every block uses, so it may break them; with a spin
+    /// restriction it must be SU(2) invariant. Exact runs diagonalise these blocks on the host.
+    std::vector<const ::Operator*> observables;
 };
 
 struct ThermalCurves {
     std::vector<double> T, lnZ, E, C, S, F;
     std::vector<double> M, chi;          ///< empty unless H conserves Sz
+    std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables
     double        e0        = 0.0;       ///< lowest energy seen (exact: the ground state)
     std::uint64_t total_dim = 0;
     std::size_t   blocks    = 0;

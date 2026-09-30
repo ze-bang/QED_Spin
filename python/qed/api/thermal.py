@@ -16,7 +16,8 @@ _METHODS = {"exact", "ftlm", "mtpq"}
 @dataclass
 class ThermalResult:
     """Thermodynamics per temperature. ``M`` and ``chi`` (magnetisation per system and
-    susceptibility per site) are present when H conserves Sz."""
+    susceptibility per site) are present when H conserves Sz. ``O``: <O>(T) per requested
+    observable, a complex array [len(observables), len(T)] (None without observables)."""
 
     T: np.ndarray
     E: np.ndarray
@@ -26,6 +27,7 @@ class ThermalResult:
     lnZ: np.ndarray
     M: Optional[np.ndarray]
     chi: Optional[np.ndarray]
+    O: Optional[np.ndarray]
     method: str
     e0: float
     blocks: int
@@ -35,7 +37,7 @@ class ThermalResult:
 
 def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
             samples: int = 40, krylov: Optional[int] = None, exact_states: int = 0,
-            seed: int = 0, device: str = "cpu") -> ThermalResult:
+            seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None) -> ThermalResult:
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
@@ -43,6 +45,11 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     or ``"mtpq"`` (microcanonical thermal pure quantum states). ``krylov`` is the FTLM
     Lanczos depth (default 100) or the mTPQ step count (default: automatic). ``samples``
     random vectors per block; ``seed`` 0 draws one.
+
+    ``observables``: operators O whose thermal averages <O>(T) = Tr(e^{-H/T} O) / Z are
+    returned in ``O`` (methods ``"exact"`` and ``"ftlm"`` without ``exact_states``). O may
+    break the symmetries: each block uses O averaged over the symmetries it resolves, which
+    has the same thermal average. Under ``total_spin`` every O must be SU(2) invariant.
     """
     key = str(method).lower()
     if key not in _METHODS:
@@ -57,9 +64,12 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     t.exact_states = int(exact_states)
     t.seed = int(seed)
     t.device = _device.resolve(device)
+    ops = [] if observables is None else list(observables)
+    t.observables = ops
     r = _core.sectors.thermal(H, int(H.num_sites), sym.resolve(H), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
     return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), S=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
                          M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,
+                         O=np.asarray(r.O, complex) if ops else None,
                          method=key, e0=float(r.e0), blocks=int(r.blocks),
                          device_blocks=int(r.device_blocks), symmetry=sym)

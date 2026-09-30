@@ -20,6 +20,9 @@ LittleGroupBlock& LittleGroupBlock::operator=(LittleGroupBlock&&) noexcept
 
 std::vector<std::complex<double>>
 LittleGroupBlock::lift_to_rep(const std::complex<double>* v) const {
+    if (!impl_->hk)       // a star solved on the group-sector path never builds its k-sector
+        throw std::logic_error("lift_to_rep: this group-sector block has no momentum sector; "
+                               "its vectors live in the group sector");
     const std::size_t nrep = impl_->hk->dim();
     if (impl_->gop)       // group-sector block: re-express in the k-sector (a subgroup of G_k), norm kept
         return lift_group_vector(impl_->gop->rep_data(), impl_->hk->rep_data(), v);

@@ -26,6 +26,40 @@ namespace {
     return opt.n_up >= 0 && ed::env::flag("ED_SYM_LG_GROUP_SECTOR", true);
 }
 
+// Dimension of the momentum sector k0 (extended index) at fixed n_up, without building it: the multiplicity of the
+// irrep in the permutation representation on n_up-subsets (Burnside), (1/|A'|) sum_g conj(chi(g)) Tr U_g. Tr U_a
+// counts the subsets that are unions of cycles of a (coefficient of x^n_up in prod_cycles (1 + x^len)); a flip
+// element F.a fixes a state only when every cycle of a alternates, 2^cycles states if all cycles are even.
+[[nodiscard]] std::uint64_t burnside_dim(const EngineContext& cx, int k0, int n_up) {
+    const int N = cx.n_sites;
+    const auto& chi = cx.giA.irreps[static_cast<std::size_t>(k0 % cx.n_irr_raw)].character;
+    const double fs = cx.flip_half ? ((k0 / cx.n_irr_raw == 0) ? 1.0 : -1.0) : 1.0;
+    Complex acc(0, 0);
+    for (std::size_t g = 0; g < cx.A.size(); ++g) {
+        const auto& a = cx.A[g];
+        std::vector<char> seen(static_cast<std::size_t>(N), 0);
+        std::vector<double> poly(static_cast<std::size_t>(N) + 1, 0.0);
+        poly[0] = 1.0;
+        int cycles = 0;
+        bool all_even = true;
+        for (int s = 0; s < N; ++s) {
+            if (seen[static_cast<std::size_t>(s)]) continue;
+            int len = 0;
+            for (int t = s; !seen[static_cast<std::size_t>(t)]; t = a[static_cast<std::size_t>(t)]) {
+                seen[static_cast<std::size_t>(t)] = 1;
+                ++len;
+            }
+            ++cycles;
+            all_even = all_even && len % 2 == 0;
+            for (int d = N; d >= len; --d) poly[static_cast<std::size_t>(d)] += poly[static_cast<std::size_t>(d - len)];
+        }
+        acc += std::conj(chi[g]) * poly[static_cast<std::size_t>(n_up)];
+        if (cx.flip_half && all_even) acc += std::conj(fs * chi[g]) * std::ldexp(1.0, cycles);
+    }
+    const double dim = acc.real() / static_cast<double>(cx.nA_ext());
+    return static_cast<std::uint64_t>(std::llround(dim));
+}
+
 // The group-sector fast path. Returns true when every wanted irrep of the star is one-dimensional and the star was
 // built here; false (with the reason under ED_SYM_PROFILE / verbose) sends the star down the isotypic W path,
 // unchanged. Everything the W path derives from monomials is derived here from permutations:
@@ -41,7 +75,7 @@ namespace {
 // publish the same co-group, characters and irrep labels.
 [[nodiscard]] bool
 try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
-               const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag,
+               const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag, std::uint64_t dim_k,
                StarBuild& sb, double* t_isotypic)
 {
     auto decline = [&](const std::string& why) {
@@ -51,8 +85,6 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         return false;
     };
     const auto t0 = std::chrono::steady_clock::now();
-    const RepSectorMatVec& hk = *sb.hk;
-    const auto& rdr = hk.rep_data();
     const int N = cx.n_sites;
     std::map<std::vector<int>, int> aidx;
     for (std::size_t a = 0; a < cx.A.size(); ++a) aidx[cx.A[a]] = static_cast<int>(a);
@@ -141,9 +173,9 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
             group_sector_from_table(tab, Gp, N, opt.n_up, flip, chars_of(ii)));
         one_dim_total += secs[static_cast<std::size_t>(ii)]->reps.size();
     }
-    if (all_one_dim ? one_dim_total != rdr.reps.size() : one_dim_total >= rdr.reps.size())
+    if (all_one_dim ? one_dim_total != dim_k : one_dim_total >= dim_k)
         return decline("group-sector dims (" + std::to_string(one_dim_total) + ") do not tile the k-sector ("
-                       + std::to_string(rdr.reps.size()) + ")");
+                       + std::to_string(dim_k) + ")");
     // Label parity with the W path. There, a co-group element that acts as a SCALAR on this k-sector (a small sector
     // lying entirely in irreps that agree on it, e.g. every state odd under a reflection) has a monomial proportional
     // to the identity's, is merged into the identity coset (same_coset), and the published co-group shrinks. Decline
@@ -151,7 +183,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     // content is not resolved, so any d > 1 irrep on which the element is scalar counts) -- so a caller never sees the
     // two lanes label the same sector differently. Sectors at scale populate every irrep and never trip this.
     {
-        const std::uint64_t rest = rdr.reps.size() - one_dim_total;
+        const std::uint64_t rest = dim_k - one_dim_total;
         for (int e = 1; e < nP; ++e) {
             bool have = false, scalar = true;
             Complex c(0, 0);
@@ -181,7 +213,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
     if (tr_on && opt.only_irrep.empty()) {
         bool sector_real = true;
-        for (const Complex& c : rdr.characters) if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
+        for (const Complex& c : chiA) if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
         for (int ii = 0; ii < nIr && sector_real; ++ii) {
             if (pair_of[static_cast<std::size_t>(ii)] >= 0 || !secs[static_cast<std::size_t>(ii)]) continue;
             const auto& ci = giP.irreps[static_cast<std::size_t>(ii)].character;
@@ -223,7 +255,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     if (t_isotypic) *t_isotypic += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (lg_diag)
         std::fprintf(stderr, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu\n",
-                     k0, Gx, sb.blocks.size(), rdr.reps.size());
+                     k0, Gx, sb.blocks.size(), dim_k);
     return true;
 }
 
@@ -248,13 +280,38 @@ build_star_blocks(const ::Operator&         op,
     auto t0 = tick();
 
     StarBuild sb;
-    auto rd = build_k_sector(cx, k0, opt.n_up);
     LittleGroupStarInfo& info = sb.info;
     info.k0          = k0;
     info.star_size   = m_star;
     info.members.assign(members.begin(), members.end());
     info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
-    if (plan_print) {
+
+    LittleGroupBlockTag base_tag;
+    base_tag.n_up        = opt.n_up;
+    base_tag.sz_parity   = opt.sz_parity;
+    base_tag.k0          = k0;
+    base_tag.k_raw       = k0 % cx.n_irr_raw;
+    base_tag.flip_parity = info.flip_parity;
+    base_tag.star_size   = m_star;
+
+    // The group-sector path needs only the momentum sector's dimension (Burnside), so the sector itself -- the
+    // largest object of a star (3.8e8 representatives at N = 36, Gamma) -- is built only when the path declines.
+    // A star it solves has no k-sector operator (sb.hk stays null; its blocks carry their group sectors).
+    std::uint64_t dim_k = 0;
+    if (group_sector_enabled(opt)) {
+        dim_k = burnside_dim(cx, k0, opt.n_up);
+        if (plan_print)
+            std::fprintf(stderr, "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d dim=%llu\n",
+                         k0, k0 % cx.n_irr_raw, info.flip_parity, m_star, static_cast<unsigned long long>(dim_k));
+        if (dim_k == 0) return sb;
+        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
+        if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb,
+                           profile ? t_isotypic : nullptr))
+            return sb;
+    }
+
+    auto rd = build_k_sector(cx, k0, opt.n_up);
+    if (plan_print && !group_sector_enabled(opt)) {
         std::fprintf(stderr,
             "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
             "dim=%llu\n",
@@ -267,26 +324,15 @@ build_star_blocks(const ::Operator&         op,
         // for it. Plan runs the monomial + isotypic decomposition and skips
         // just the eigensolves, which is where the cost actually is.
     }
+    if (group_sector_enabled(opt) && rd.reps.size() != dim_k)       // the count the path relied on
+        throw std::logic_error("little group: Burnside dimension " + std::to_string(dim_k)
+                               + " != momentum sector " + std::to_string(rd.reps.size()));
     if (rd.reps.empty()) return sb;
 
     sb.hk = std::make_shared<RepSectorMatVec>(op, std::move(rd));
     RepSectorMatVec& hk = *sb.hk;
     const auto& rdr = hk.rep_data();
     if (profile) { *t_sector += secs(t0, tick()); t0 = tick(); }
-
-    LittleGroupBlockTag base_tag;
-    base_tag.n_up        = opt.n_up;
-    base_tag.sz_parity   = opt.sz_parity;
-    base_tag.k0          = k0;
-    base_tag.k_raw       = k0 % cx.n_irr_raw;
-    base_tag.flip_parity = info.flip_parity;
-    base_tag.star_size   = m_star;
-
-    if (group_sector_enabled(opt)) {
-        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
-        if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, sb, profile ? t_isotypic : nullptr))
-            return sb;
-    }
 
     // Little co-group: identity + residues fixing k0, validated, ONE
     // representative per coset of A. Residues in the same coset act as

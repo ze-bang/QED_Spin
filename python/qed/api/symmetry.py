@@ -16,12 +16,15 @@ into the engine's :class:`qed._core.sectors.Spec`:
 * ``total_spin`` -- a number S restricts to total spin S (H must be SU(2) symmetric);
   each level then counts 2S + 1 times.
 
-:meth:`select` narrows the sectors (a star representative, a little-group irrep)
-without changing the symmetry.
+:meth:`select` narrows the sectors (a momentum, a little-group irrep named by its character,
+or the engine's star/irrep indices) without changing the symmetry.
 """
 from __future__ import annotations
 
+import cmath
+import math
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 from typing import Any, Optional, Sequence
 
 from .. import _core
@@ -46,6 +49,8 @@ class Symmetry:
     total_spin: Optional[float] = None
     only_k0: Sequence[int] = field(default_factory=tuple)
     only_irrep: Sequence[int] = field(default_factory=tuple)
+    only_momentum: Sequence = field(default_factory=tuple)          # (((perm), Fraction), ...) per request
+    only_irrep_character: Sequence = field(default_factory=tuple)   # (((perm), chi), ...) per request
 
     @classmethod
     def auto(cls) -> "Symmetry":
@@ -56,8 +61,21 @@ class Symmetry:
         return cls(spatial=None, sz="off", spin_flip="off", time_reversal="off")
 
     def select(self, *, sz: Any = None, k0: Optional[Sequence[int]] = None,
-               irrep: Optional[Sequence[int]] = None) -> "Symmetry":
-        """The same symmetry restricted to some sectors."""
+               irrep: Optional[Sequence[int]] = None, momentum: Any = None,
+               irrep_character: Any = None) -> "Symmetry":
+        """The same symmetry restricted to some sectors.
+
+        ``momentum``: ``{T: theta}`` keeps the momenta with T|psi> = exp(-2 pi i theta)|psi>
+        for each given translation T (a permutation in the abelian group; theta a fraction
+        of a full turn, see :func:`momentum_of`). A list of such mappings keeps any of them.
+        A level answers for its whole star, so a selected star also counts its partners.
+        ``irrep_character``: ``{R: chi}`` keeps the little-co-group irreps with character
+        chi on each given point-group element R (a coset representative, as listed by
+        :meth:`groups`; the identity names the irrep dimension); a list keeps any of them.
+        Blocks whose little group lacks some R are dropped. Time reversal is not folded
+        under this selection, so each irrep is its own block.
+        ``k0`` / ``irrep``: the engine's own star and irrep indices, as reported on levels.
+        """
         out = self
         if sz is not None:
             out = replace(out, sz=sz)
@@ -65,6 +83,15 @@ class Symmetry:
             out = replace(out, only_k0=tuple(int(k) for k in k0))
         if irrep is not None:
             out = replace(out, only_irrep=tuple(int(i) for i in irrep))
+        if momentum is not None:
+            reqs = [momentum] if isinstance(momentum, dict) else list(momentum)
+            out = replace(out, only_momentum=tuple(
+                tuple((tuple(int(x) for x in T), Fraction(th).limit_denominator(1 << 20))
+                      for T, th in r.items()) for r in reqs))
+        if irrep_character is not None:
+            reqs = [irrep_character] if isinstance(irrep_character, dict) else list(irrep_character)
+            out = replace(out, only_irrep_character=tuple(
+                tuple((tuple(int(x) for x in R), complex(c)) for R, c in r.items()) for r in reqs))
         return out
 
     # ------------------------------------------------------------------
@@ -139,4 +166,81 @@ class Symmetry:
             spec.two_S = int(two_s)
         spec.only_k0 = list(self.only_k0)
         spec.only_irrep = list(self.only_irrep)
+        if self.only_momentum:
+            index = {tuple(a): i for i, a in enumerate(spec.abelian)}
+            reqs = []
+            for req in self.only_momentum:
+                c = []
+                for T, th in req:
+                    if T not in index:
+                        raise ValueError(f"select(momentum=...): {list(T)} is not in the abelian group")
+                    c.append((index[T], complex(cmath.exp(-2j * cmath.pi * float(th)))))
+                reqs.append(c)
+            spec.only_momentum = reqs
+        if self.only_irrep_character:
+            ident = tuple(range(int(H.num_sites)))
+            index = {tuple(r): i for i, r in enumerate(spec.residues)}
+            reqs = []
+            for req in self.only_irrep_character:
+                c = []
+                for R, chi in req:
+                    if R == ident:
+                        c.append((-1, chi))
+                    elif R in index:
+                        c.append((index[R], chi))
+                    else:
+                        raise ValueError(f"select(irrep_character=...): {list(R)} is not a point-group "
+                                         "coset representative (see Symmetry.groups)")
+                reqs.append(c)
+            spec.only_irrep_chars = reqs
         return spec
+
+
+def _order(p) -> int:
+    seen, order = set(), 1
+    for s in range(len(p)):
+        if s in seen:
+            continue
+        n, t = 0, s
+        while t not in seen:
+            seen.add(t)
+            t = p[t]
+            n += 1
+        order = order * n // math.gcd(order, n)
+    return order
+
+
+def momentum_of(level, spec, translations) -> tuple:
+    """The momentum of a level along each translation T: the fraction theta in [0, 1) with
+    T|psi> = exp(-2 pi i theta)|psi>, where T acts on basis states as
+    bit i of T|s> = bit T[i] of |s>. The level's star representative is reported."""
+    index = {tuple(a): i for i, a in enumerate(spec.abelian)}
+    out = []
+    for T in translations:
+        key = tuple(int(x) for x in T)
+        if key not in index:
+            raise ValueError(f"momentum_of: {list(T)} is not in the abelian group")
+        chi = complex(level.momentum[index[key]])
+        theta = (-cmath.phase(chi) / (2 * cmath.pi)) % 1.0
+        out.append(Fraction(theta).limit_denominator(_order(key)) % 1)
+    return tuple(out)
+
+
+def irrep_characters_of(level, spec, n_sites: int) -> dict:
+    """{R: chi_sigma(R)} over the level's little co-group, R the coset representatives
+    (the identity included: its character is the irrep dimension); empty for a block
+    without a co-group decomposition."""
+    ident = tuple(range(n_sites))
+    return {(ident if e < 0 else tuple(spec.residues[e])): complex(c) for e, c in level.irrep_characters}
+
+
+class Labelled:
+    """Physical labels of the levels of a result holding ``levels``, ``_spec``, ``_n_sites``."""
+
+    def momentum(self, i: int, translations) -> tuple:
+        """Momentum of ``levels[i]`` along each translation (see :func:`momentum_of`)."""
+        return momentum_of(self.levels[i], self._spec, translations)
+
+    def irrep_characters(self, i: int) -> dict:
+        """Little-co-group characters of ``levels[i]`` (see :func:`irrep_characters_of`)."""
+        return irrep_characters_of(self.levels[i], self._spec, self._n_sites)

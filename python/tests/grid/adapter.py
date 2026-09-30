@@ -95,12 +95,13 @@ def spectrum(m, H, content, device):
     return r.energies
 
 
-def thermal(m, H, content, device, method, T, samples, krylov, seed):
+def thermal(m, H, content, device, method, T, samples, krylov, seed, observables=None):
     r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
-                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device)
+                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device,
+                 observables=observables)
     if device == "gpu" and r.device_blocks == 0:
         raise Missing("no block ran on the device")
-    return {"T": r.T, "E": r.E, "C": r.C}
+    return {"T": r.T, "E": r.E, "C": r.C, "O": r.O}
 
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):

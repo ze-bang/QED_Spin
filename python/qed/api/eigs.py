@@ -8,17 +8,17 @@ import numpy as np
 
 from .. import _core
 from . import _device
-from .symmetry import Symmetry
+from .symmetry import Labelled, Symmetry
 
 
 @dataclass
-class EigResult:
+class EigResult(Labelled):
     """Lowest levels of H. ``energies`` repeats each level by its multiplicity.
 
     ``levels`` holds one entry per distinct block eigenvalue (energy, multiplicity and
     the block's quantum numbers). :meth:`vectors` returns orthonormal eigenvectors of
     the lowest k energies, completing degenerate multiplets through the symmetry
-    operations.
+    operations. :meth:`momentum` and :meth:`irrep_characters` name a level physically.
     """
 
     energies: np.ndarray

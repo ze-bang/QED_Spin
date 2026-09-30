@@ -48,4 +48,12 @@ ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
         "through CpuBackend (device='cpu').");
 }
 
+ed::LinearOperator::MultiMatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/,
+                                               double                         /*spin_l*/,
+                                               const ed::matvec::TermStorage& /*terms*/) {
+    throw std::logic_error(
+        "ed::symmetry::make_sector_matvec_gpu_rep_multi: built without WITH_CUDA.");
+}
+
 #endif  // !WITH_CUDA

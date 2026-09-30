@@ -42,6 +42,14 @@ make_sector_matvec_gpu_rep(const RepSectorData&            rep,
                            double                          spin_l,
                            const ed::matvec::TermStorage&  terms);
 
+/// The same sector matvec on k vectors at once (device pointers ins[i] -> outs[i]): one walk
+/// over each row's terms and orbit lookups serves up to 8 vectors, and every output equals
+/// the single-vector apply bit for bit.
+ed::LinearOperator::MultiMatvecFn
+make_sector_matvec_gpu_rep_multi(const RepSectorData&            rep,
+                                 double                          spin_l,
+                                 const ed::matvec::TermStorage&  terms);
+
 /// HOST-pointer twin of ``make_sector_matvec_gpu_rep`` for callers whose
 /// Krylov loop keeps its vectors in host RAM (the little-group engine's
 /// CPU Lanczos): owns persistent device in/out buffers and stages one

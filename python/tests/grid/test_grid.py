@@ -41,7 +41,7 @@ CONTENT_MODELS = {
     "tr":      ["chain12"],
     "su2":     ["chain12", "tri9"],
 }
-TASKS = ["eigs", "vectors", "expect", "spectrum", "th_exact", "th_ftlm", "th_mtpq",
+TASKS = ["eigs", "vectors", "expect", "spectrum", "th_exact", "th_ftlm", "th_mtpq", "th_Oexact", "th_Oftlm",
          "dyn0_zz", "dyn0_pm", "dynT_zz", "dynT_pm"]
 BACKENDS = ["cpu", "gpu"]
 
@@ -157,6 +157,37 @@ def _run(task, content, mname, device, monkeypatch):
         err = float(np.max(np.abs(got - ref_spec)))
         return err < 1e-8, err, ""
 
+    if task.startswith("th_O"):
+        # <O>(T) for operators that break translations; the third is odd under time reversal
+        # (zero unless H breaks it). Under a spin restriction only the SU(2)-invariant bond.
+        method = "exact" if task == "th_Oexact" else "FTLM"
+        T = T_EXACT if method == "exact" else T_SAMPLED
+        ops = [dot(0, 1)]
+        if content != "su2":
+            ops += [[(1.0, (("z", 0), ("z", 2)))],
+                    [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
+        Os = [Model("obs", m.N, t, [], (), []).operator() for t in ops]
+        ref = orc.thermal_expect(sel, ops, T)
+        if method != "exact":
+            monkeypatch.setenv("ED_THERMAL_EXACT_SMALL", "0")
+
+        def run(dev, samples):
+            return api.thermal(m, H, content, dev, method, T, samples=samples, krylov=60, seed=7,
+                               observables=Os)["O"]
+
+        if method == "exact":
+            err = float(np.max(np.abs(run(device, 1) - ref)))
+            return err < 1e-8, err, f"max |dO| {err:.2e}"
+        if device == "gpu":
+            d = float(np.max(np.abs(run("gpu", 4) - run("cpu", 4))))
+            lim = GPU_VS_CPU["FTLM"]
+            return d < lim, d, f"gpu vs cpu, 4 samples: {d:.1e} (limit {lim:.0e})"
+        e1 = float(np.max(np.abs(run(device, 50) - ref)))
+        if e1 < 0.02:
+            return True, e1, f"err R=50: {e1:.2e}"
+        e4 = float(np.max(np.abs(run(device, 200) - ref)))
+        return (e4 < 0.02) or (e4 < 0.65 * e1), e4, f"err R=50: {e1:.2e}, R=200: {e4:.2e}"
+
     if task.startswith("th_"):
         method = {"th_exact": "exact", "th_ftlm": "FTLM", "th_mtpq": "mTPQ"}[task]
         T = T_EXACT if method == "exact" else T_SAMPLED
@@ -202,7 +233,12 @@ def _run(task, content, mname, device, monkeypatch):
         T = None if task.startswith("dyn0") else T_DYN
         terms = fourier(m.N, m.coords, m.shape, Q[mname], op)
         obs = Model("obs", m.N, terms, [], (), []).operator()
-        if device == "gpu" and T is not None:   # as for sampled thermodynamics: GPU == CPU
+        # As for sampled thermodynamics, the device path must reproduce the CPU path -- except under
+        # a spin restriction. There the target Lanczos starts from O|r> with no weight on the fully
+        # polarised states at the band edge, roundoff leaking toward them grows geometrically, and
+        # GPU and CPU agree only to 2.6e-6 at one sample and up to 7.7e-4 at 2-4 (chain12, diag
+        # 62311516; each side is bit-reproducible): those cells are held to the dense reference.
+        if device == "gpu" and T is not None and content != "su2":
             run = lambda dev: api.dynamics(m, H, content, dev, obs, Q[mname], OMEGA, ETA, T,  # noqa: E731
                                            samples=4, krylov=40)
             got, cpu = run("gpu"), run("cpu")
@@ -210,7 +246,8 @@ def _run(task, content, mname, device, monkeypatch):
             return d < GPU_VS_CPU["dynamics"], d, f"gpu vs cpu, 4 samples: rel L1 {d:.1e}"
         got = api.dynamics(m, H, content, device, obs, Q[mname], OMEGA, ETA, T,
                            samples=60, krylov=150 if T is None else 80)
-        ref = orc.lehmann(terms, OMEGA, ETA, T, init=orc.mask(sel))
+        init = orc.eigbasis(sel) if sel is not None and sel[0] == "S" else orc.mask(sel)
+        ref = orc.lehmann(terms, OMEGA, ETA, T, init=init)
         err = _rel_l1(got, ref)
         tol = 0.02 if T is None else 0.2
         return err < tol, err, f"rel L1 {err:.3f}"

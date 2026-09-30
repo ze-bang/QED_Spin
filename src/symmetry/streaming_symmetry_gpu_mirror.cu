@@ -385,14 +385,14 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
 // O(full-Sz-dim) projection table is allocated or streamed -- this is the
 // resident N=32 Sz+Symm path.
 // =============================================================================
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
-                                         double                         spin_l,
-                                         const ed::matvec::TermStorage& terms)
+namespace ed::symmetry::gpu_mirror::detail {
+
+// The resident device mirror of (sector, operator), shared by every bind of it.
+std::shared_ptr<const GpuRepSectorMirror>
+acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
+                   double                         spin_l,
+                   const ed::matvec::TermStorage& terms)
 {
-    using ed::symmetry::gpu_mirror::GpuRepSectorMirror;
-    using ed::symmetry::gpu_mirror::detail::build_rep_mirror;
-    using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
 
     // B7: memoise the resident device mirror across binds. A single GS solve
     // binds the operator several times (phase-1 scan, phase-2 refine, vector
@@ -566,6 +566,18 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
         }
     }
 
+    return mirror;
+}
+
+}  // namespace ed::symmetry::gpu_mirror::detail
+
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
+                                         double                         spin_l,
+                                         const ed::matvec::TermStorage& terms)
+{
+    using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
+    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, spin_l, terms);
     const double spin = spin_l;
     const std::uint64_t dim_captured = mirror->dim;
 
@@ -587,6 +599,30 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
     };
 }
 
+
+// k vectors per call through the multi-vector gather (one row walk serves up to 8 of them).
+ed::LinearOperator::MultiMatvecFn
+ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& rep,
+                                               double                         spin_l,
+                                               const ed::matvec::TermStorage& terms)
+{
+    using ed::symmetry::gpu_mirror::detail::cuda_check;
+    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, spin_l, terms);
+    const double spin = spin_l;
+    const std::uint64_t dim_captured = mirror->dim;
+    return [mirror, spin, dim_captured](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
+                                        std::size_t n, std::size_t k) {
+        if (n != dim_captured)
+            throw std::runtime_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: size mismatch (" +
+                                     std::to_string(n) + " vs " + std::to_string(dim_captured) + ")");
+        cuda_check(ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu_gather_multi<
+                       ed::matvec::basis::DeviceRepSymmetryBasisPolicy, cuDoubleComplex>(
+                       mirror->basis_view(), spin, mirror->terms_view(),
+                       reinterpret_cast<const cuDoubleComplex* const*>(ins),
+                       reinterpret_cast<cuDoubleComplex* const*>(outs), k),
+                   "apply_terms_rep_symmetry multi-vector kernel launch");
+    };
+}
 // ---------------------------------------------------------------------------
 // Host-pointer twin: persistent device staging buffers around the resident
 // mirror, one H2D + D2H per apply. Built for the little-group engine's CPU

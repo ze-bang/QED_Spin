@@ -3,6 +3,7 @@ degeneracy window, refusal of symmetries H does not have, and the argument check
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -129,3 +130,94 @@ def test_saved_eigs_reload_with_vectors_expect_and_matrix_elements(tmp_path):
     for i in range(n):
         for j in range(n):
             assert abs(s.matrix_element(sp, i, j) - r.matrix_element(sp, i, j)) < 1e-14
+
+
+def _permute(v, p):
+    """P v with bit i of P|s> = bit p[i] of |s> (the engine's action of a permutation)."""
+    out = np.zeros_like(v)
+    for s in range(len(v)):
+        t = 0
+        for i, pi in enumerate(p):
+            t |= ((s >> pi) & 1) << i
+        out[t] = v[s]
+    return out
+
+
+def test_momentum_labels_select_and_match_the_vectors():
+    H = _ring(8, 0.3)
+    T = _translations(8)[0]
+    sym = qed.Symmetry(spatial=[T], point_group=False, sz=4, spin_flip="off", time_reversal="off")
+    full = qed.spectrum(H, sym=sym)
+    parts = []
+    for m in range(8):
+        sel = qed.spectrum(H, sym=sym.select(momentum={tuple(T): Fraction(m, 8)}))
+        assert sel.levels
+        assert all(sel.momentum(i, [T]) == (Fraction(m, 8),) for i in range(len(sel.levels)))
+        parts.append(sel.energies)
+    np.testing.assert_allclose(np.sort(np.concatenate(parts)), np.sort(full.energies), atol=1e-10)
+    # The label is the eigenvalue of the translation: T|psi> = exp(-2 pi i theta)|psi>.
+    r = qed.eigs(H, 6, sym=sym, vectors=True)
+    assert all(L.multiplicity == 1 for L in r.levels[:6])
+    for i, v in enumerate(r.vectors()):
+        (theta,) = r.momentum(i, [T])
+        np.testing.assert_allclose(_permute(v, T), np.exp(-2j * np.pi * float(theta)) * v, atol=1e-10)
+
+
+def test_irrep_character_selects_the_little_group_irreps():
+    n = 8
+    H = _ring(n, 0.3)
+    T = _translations(n)[0]
+    R = [(-i) % n for i in range(n)]                 # the reflection through site 0
+    sym = qed.Symmetry(spatial=[T, R], sz=4, spin_flip="off", time_reversal="off")
+    _, residues = sym.groups(H)
+    assert residues
+    Rr = tuple(residues[0])
+    full = qed.spectrum(H, sym=sym)
+    having = [i for i in range(len(full.levels)) if Rr in full.irrep_characters(i)]
+    assert having
+    got = []
+    for chi in (1.0, -1.0):
+        sel = qed.spectrum(H, sym=sym.select(irrep_character={Rr: chi}))
+        for i in range(len(sel.levels)):
+            assert abs(sel.irrep_characters(i)[Rr] - chi) < 1e-8
+        got.append(sel.energies)
+    want = np.concatenate([[full.levels[i].energy] * int(full.levels[i].multiplicity) for i in having])
+    np.testing.assert_allclose(np.sort(np.concatenate(got)), np.sort(want), atol=1e-10)
+
+
+def test_saved_eigs_keep_the_level_labels(tmp_path):
+    H = _ring(8, 0.3)
+    T = _translations(8)[0]
+    r = qed.eigs(H, 4, sym=qed.Symmetry(spatial=[T, [(-i) % 8 for i in range(8)]]), vectors=True)
+    r.save(tmp_path / "l.npz")
+    s = qed.load_eigs(tmp_path / "l.npz")
+    for i in range(len(r.levels)):
+        assert s.momentum(i, [T]) == r.momentum(i, [T])
+        assert s.irrep_characters(i) == r.irrep_characters(i)
+
+
+def test_thermal_observables_need_exact_or_ftlm():
+    H = _ring(6)
+    bond = qed.input.HamiltonianBuilder(6).heisenberg([(0, 1)], J=1.0).to_operator()
+    with pytest.raises(ValueError, match="observables"):
+        qed.thermal(H, [1.0], method="mtpq", observables=[bond])
+    with pytest.raises(ValueError, match="observables"):
+        qed.thermal(H, [1.0], method="ftlm", exact_states=4, observables=[bond])
+
+
+def test_group_sectors_are_built_without_the_momentum_sector(capfd, monkeypatch):
+    # D_12 ring at every Sz (flip at half filling): stars with a co-group take the group-sector
+    # path, which sizes the momentum sector by Burnside instead of building it; a declined star
+    # builds it and cross-checks that count. The spectrum must be the plain one.
+    n = 12
+    H = _ring(n, 0.3)
+    T = _translations(n)[0]
+    R = [(-i) % n for i in range(n)]
+    monkeypatch.setenv("ED_SYM_PROFILE", "1")
+    got = qed.spectrum(H, sym=qed.Symmetry(spatial=[T, R])).energies
+    err = capfd.readouterr().err
+    assert "group-sector path," in err
+    assert "do not tile" not in err
+    monkeypatch.delenv("ED_SYM_PROFILE")
+    ref = qed.spectrum(H, sym=qed.Symmetry.none()).energies
+    np.testing.assert_allclose(np.sort(got), np.sort(ref), atol=1e-10)

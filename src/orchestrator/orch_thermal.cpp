@@ -60,6 +60,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
     ed::parallel::pin_omp_threads_once();
 
+    if (!opts.observables.empty() && opts.method != ThermalOptions::Method::FTLM)
+        throw std::invalid_argument("ed::thermal: observables need Method::FTLM");
     BackendVariant variant = select_backend(H.geometry(), opts.backend);
 
     // Memory guard (thermal lane). The operator's basis is already built, so
@@ -165,7 +167,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // stand down and let the sampling kernel honour the projection.
         // (Exact per-tower thermo needs the tower projection applied before
         // diagonalising, which this fallback does not do.)
-        !opts.seed_transform) {
+        !opts.seed_transform && opts.observables.empty()) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
         full_diagonalization(H, D, D, eigs, /*compute_eigenvectors=*/false);
@@ -192,6 +194,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             kopts.num_samples = opts.num_samples;
             kopts.random_seed = opts.random_seed;
             kopts.seed_transform = opts.seed_transform;  // Stage 12f
+            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>)
+                kopts.batch_matvec = H.bind_cuda_multi();   // samples share each device H apply
             auto matvec = H.template bind<B>();
 
             // -------------------------------------------------------------
@@ -414,6 +418,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
                 kopts.seed_transform = opts.seed_transform;  // Stage 12f
+                for (const auto& O : opts.observables) {
+                    if (!std::is_same_v<B, ed::matvec::CpuBackend> && !O->geometry().supports_device_matvec)
+                        throw std::invalid_argument("ed::thermal: an observable has no device kernel for the selected GPU lane");
+                    kopts.observables.push_back(O->template bind<B>());
+                }
+                if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>)
+                    kopts.batch_matvec = H.bind_cuda_multi();   // samples share each device H apply
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
                     *backend_uptr, matvec, H.geometry().local_dim,
@@ -421,6 +432,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 R.thermo.energy = std::move(kres.energy);
                 R.thermo.specific_heat = std::move(kres.heat_capacity);
                 R.thermo.entropy = std::move(kres.entropy);
+                R.observables = std::move(kres.observables);
             }
             R.ground_state_energy = R.thermo.energy.empty()
                 ? 0.0

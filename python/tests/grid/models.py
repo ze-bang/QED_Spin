@@ -267,10 +267,13 @@ class Oracle:
     def lehmann(self, obs_terms, omega, eta, T=None, deg_tol=1e-8, init=None):
         """S(omega) = sum_m p_m sum_n |<n|O|m>|^2 L(omega - E_n + E_m), with p_m the ground
         manifold (T=0) or Boltzmann weights over the initial states; ``init`` (a basis mask)
-        restricts the initial states to the eigenstates of H inside that block."""
+        restricts the initial states to the eigenstates of H inside that block, or is the
+        (E, W) eigenbasis of the initial states itself (a spin tower, from ``eigbasis``)."""
         O = dense(obs_terms, self.m.N)
         E, V = self.E, self.V
-        if init is not None:
+        if isinstance(init, tuple):
+            Eb, Vi = init
+        elif init is not None:
             idx = np.flatnonzero(init)
             Eb, Vb = np.linalg.eigh(self.H[np.ix_(idx, idx)])
             Vi = np.zeros((len(E), len(Eb)), complex)
@@ -328,6 +331,19 @@ class Oracle:
         W = np.zeros((len(self.E), len(E)), complex)
         W[idx] = V
         return E, W
+
+    def thermal_expect(self, sel, obs_list, T):
+        """<O>(T) = Tr(e^{-H/T} O) / Z over the selection, one row per operator."""
+        E, W = self.eigbasis(sel)
+        out = []
+        for terms in obs_list:
+            d = np.sum(W.conj() * (sparse(terms, self.m.N) @ W), axis=0)
+            row = []
+            for t in np.asarray(T, float):
+                w = np.exp(-(E - E.min()) / t)
+                row.append(complex((w * d).sum() / w.sum()))
+            out.append(row)
+        return np.array(out)
 
     def cluster_traces(self, sel, obs_terms, tol=1e-8):
         """[(E, dim, Tr(P_E O))] over the degenerate clusters of H inside the selection --

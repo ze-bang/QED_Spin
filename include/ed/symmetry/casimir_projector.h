@@ -36,8 +36,8 @@
 // floating-point drift. `CasimirProjectedOperator` therefore wraps any
 // sector matvec without changing its spectrum on the targeted tower --
 // Lanczos / Krylov-Schur / FTLM / mTPQ consume it via the ordinary
-// `LinearOperator` surface. Host memory space only (the device-resident
-// wrapper is the Stage-12h audit follow-up).
+// `LinearOperator` surface. The wrapped operator lives on the host; when it and S^2 both
+// have a device mirror, `bind_cuda` runs the whole apply (H and the projection) there.
 // =============================================================================
 
 #include <algorithm>
@@ -49,6 +49,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <ed/config/env_registry.h>
@@ -56,6 +57,9 @@
 #include <ed/matvec/matvec.h>
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/su2_dims.h>
+#ifdef WITH_CUDA
+#include <ed/matvec/backends/cuda_backend.cuh>
+#endif
 
 namespace ed::symmetry {
 
@@ -158,6 +162,32 @@ public:
         return static_cast<int>(excluded_.size());
     }
     [[nodiscard]] int two_S() const noexcept { return two_S_; }
+    [[nodiscard]] const std::shared_ptr<const ed::matvec::MatVecOperator>& s2() const noexcept { return s2_; }
+
+#ifdef WITH_CUDA
+    /// `project` on device vectors: `s2_dev` is the device S^2 matvec, `w` a device scratch
+    /// vector of `dim`.
+    void project_device(const ed::matvec::CudaBackend& be, const ed::LinearOperator::MatvecFn& s2_dev,
+                        std::complex<double>* v, std::complex<double>* w, std::uint64_t dim) const {
+        const double lam_t = 0.25 * two_S_ * (two_S_ + 2);
+        double n = be.nrm2(v, dim);
+        if (n == 0.0) return;
+        be.scale(1.0 / n, v, dim);
+        double log_scale = std::log(n), sign = 1.0;
+        for (const double lam : excluded_) {
+            s2_dev(v, w, dim);
+            be.axpy(-lam, v, w, dim);
+            be.copy(w, v, dim);
+            n = be.nrm2(v, dim);
+            if (n == 0.0) return;                    // annihilated: v is the zero vector
+            be.scale(1.0 / n, v, dim);
+            const double denom = lam_t - lam;
+            log_scale += std::log(n) - std::log(std::abs(denom));
+            if (denom < 0.0) sign = -sign;
+        }
+        be.scale(sign * std::exp(log_scale), v, dim);
+    }
+#endif
 
     /// In-place EXACT P_S v (per-factor renormalisation is undone through
     /// the log-space multiplier). `v` and the scratch live on the host.
@@ -261,8 +291,7 @@ public:
         }
         if (h_->memory_space() != ed::matvec::MemorySpace::Host) {
             throw std::invalid_argument(
-                "CasimirProjectedOperator: host memory space only "
-                "(device-resident targeting is the Stage-12h follow-up)");
+                "CasimirProjectedOperator: the wrapped operator must live on the host");
         }
         ghost_shift_ = estimate_ghost_shift();
     }
@@ -303,7 +332,54 @@ public:
     /// The mu placing the off-tower ghost spectrum (see class comment).
     [[nodiscard]] double ghost_shift() const noexcept { return ghost_shift_; }
 
+    /// Move the ghost spectrum to `mu`. Above the band (the default) suits lowest-level solves;
+    /// a Krylov run that uses its VECTORS across the whole band (FTLM dynamics) wants it inside
+    /// the tower's spectrum instead: an extreme eigenvalue is exactly what Lanczos amplifies, so
+    /// roundoff leaving the tower grows exponentially there and not at an interior point.
+    void place_ghost(double mu) noexcept { ghost_shift_ = mu; }
+
+#ifdef WITH_CUDA
+    /// Device-capable when H and S^2 both have a device mirror.
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g = LinearOperator::geometry();
+        g.supports_device_matvec = device_parts().first != nullptr;
+        return g;
+    }
+
+    /// The same apply with every vector on the device.
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        const auto [h, s2] = device_parts();
+        if (!h) return bind_cpu();
+        struct Scratch {
+            ed::matvec::CudaBackend be;
+            ed::matvec::Backend::UniqueVec w;
+            explicit Scratch(std::size_t n) : w(be.make_zero_vector(n)) {}
+        };
+        auto st = std::make_shared<Scratch>(dim());
+        return [this, st, hd = h->bind_cuda(), sd = s2->bind_cuda()](const Complex* in, Complex* out,
+                                                                     std::size_t n) {
+            hd(in, out, n);
+            if (freq_ > 0 && (++apply_count_ % freq_) == 0) {
+                st->be.axpy(-ghost_shift_, in, out, n);
+                projector_->project_device(st->be, sd, out, st->w.get(), n);
+                st->be.axpy(ghost_shift_, in, out, n);
+            }
+        };
+    }
+#endif
+
 private:
+#ifdef WITH_CUDA
+    /// (H, S^2) when both have a device mirror, else nulls.
+    [[nodiscard]] std::pair<const ed::LinearOperator*, const ed::LinearOperator*> device_parts() const {
+        const auto* h  = dynamic_cast<const ed::LinearOperator*>(h_.get());
+        const auto* s2 = dynamic_cast<const ed::LinearOperator*>(projector_->s2().get());
+        if (h && s2 && h->geometry().supports_device_matvec && s2->geometry().supports_device_matvec)
+            return {h, s2};
+        return {nullptr, nullptr};
+    }
+#endif
+
     /// One-time spectral-radius estimate for the ghost shift: a dozen
     /// power iterations from a fixed-seed random start give |lambda|_max
     /// from below; the 2x + 1 margin keeps mu above the true radius (and

@@ -126,6 +126,13 @@ public:
     }
     [[nodiscard]] virtual MatvecFn bind_cuda() const { return bind_cpu(); }
 
+    /// k vectors per call on the device: outs[i] = A ins[i] (device pointers, each of dim()).
+    /// Operators whose device kernel can serve several vectors in one pass return it; the
+    /// default (empty) means callers apply the vectors one at a time.
+    using MultiMatvecFn = std::function<void(const Complex* const* ins, Complex* const* outs,
+                                             std::size_t n, std::size_t k)>;
+    [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
+
     // -------------------------------------------------------------------
     // Wave 1.1 of the SOTA Performance rollout (May 2026): orchestrator
     // real-Hermitian fast-path dispatch.

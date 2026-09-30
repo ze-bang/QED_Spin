@@ -119,6 +119,16 @@ struct FtlmCrossIrrepOptions {
     std::uint64_t random_seed    = 0;
     /// Verbose progress to stdout. Off by default.
     bool        verbose          = false;
+    /// Applied in place to each (host) random vector before use, e.g. a projection onto one
+    /// spin tower; the kernel renormalises the result. The trace then runs over the image of
+    /// the transform, whose dimension is `trace_dim` (0: the whole source sector).
+    std::function<void(Complex*, std::size_t)> seed_transform;
+    std::size_t trace_dim        = 0;
+    /// Device multi-vector source and target H (LinearOperator::bind_cuda_multi): on a CUDA run
+    /// up to `batch_width` samples advance in lockstep and share each H apply. O must then be
+    /// safe to apply from several threads at once.
+    std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src, batch_dst;
+    std::size_t batch_width      = 8;
 };
 
 /// One sector's UN-normalised FTLM cross-irrep accumulators. Keyed

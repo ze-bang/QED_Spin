@@ -41,6 +41,7 @@
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backend.h>
+#include <ed/matvec/matvec_batcher.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/ftlm.h>
@@ -107,9 +108,23 @@ struct FtlmOptions {
     /// one spin tower). Must leave a normalisable vector; a zero result
     /// throws (the targeted subspace has no weight in this block).
     std::function<void(Complex*, std::size_t)> seed_transform;
+
+    /// Static observables: each applies O to a backend vector (in, out, n). The kernel also
+    /// returns <O>(T) = sum_r sum_ij e^{-beta (e_i + e_j) / 2} <r|psi_i><psi_i|O|psi_j><psi_j|r> / Z
+    /// (the symmetric, low-temperature Lanczos form), from the Krylov basis of each sample: it is
+    /// kept and fully reorthogonalised, and O is applied once to each of its vectors.
+    std::vector<std::function<void(const Complex*, Complex*, std::size_t)>> observables;
+
+    /// Device multi-vector H (LinearOperator::bind_cuda_multi). On a CUDA run it lets up to
+    /// `batch_width` samples advance in lockstep, each H apply serving all of them in one
+    /// launch; every sample computes exactly what it would alone.
+    ed::LinearOperator::MultiMatvecFn batch_matvec;
+    std::size_t batch_width = 8;
 };
 
 struct FtlmResult {
+    /// <O>(T) per observable of FtlmOptions::observables, index-aligned with temperatures.
+    std::vector<std::vector<Complex>> observables;
     std::vector<double> betas;
     std::vector<double> temperatures;        ///< 1/betas, or opts.temperatures verbatim (grid order)
     std::vector<double> partition_function;
@@ -277,11 +292,17 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
     }
     const int n_int = static_cast<int>(local_n);
 
-    std::vector<::ThermodynamicData> per_sample;
-    per_sample.reserve(opts.num_samples);
-    double ground_state_estimate = std::numeric_limits<double>::infinity();
-
-    for (std::size_t s = 0; s < opts.num_samples; ++s) {
+    // One sample: its Ritz data and thermodynamics, and each observable in its Ritz basis.
+    // Samples are independent; they are combined below in sample order, however they were run.
+    const std::size_t n_obs = opts.observables.size();
+    struct Sample {
+        bool ok = false;
+        std::vector<double> ritz, weights, Y;                  // Y[i m + a]: Ritz vector i
+        std::vector<std::vector<Complex>> A;                  // A[o][i + j m] = <psi_i|O_o|psi_j>
+        ::ThermodynamicData td;
+    };
+    auto sample = [&](const auto& be, auto&& apply, std::size_t s) {
+        Sample out;
         // ---- 1. Seed v_0 on the host, copy to backend ----
         // The CPU driver's draw verbatim (same engine, same Gaussian
         // stream, same dznrm2 + zscal normalisation), so both lanes start
@@ -304,13 +325,14 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             cblas_zscal(n_int, &scale, v0_host.data(), 1);
         }
 
-        auto d_v0 = backend.make_zero_vector(local_n);
-        backend.copy_from_host(v0_host.data(), d_v0.get(), local_n);
+        auto d_v0 = be.make_zero_vector(local_n);
+        be.copy_from_host(v0_host.data(), d_v0.get(), local_n);
 
         // ---- 2. Lanczos: tridiagonal (basis kept only for full reorth) ----
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter = opts.krylov_dim;
-        if (opts.full_reorthogonalization) {
+        // Observables need the Krylov basis itself, orthonormal (the Ritz vectors are built from it).
+        if (opts.full_reorthogonalization || n_obs > 0) {
             kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
             kopts.keep_basis = true;
         } else {
@@ -321,36 +343,131 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             kopts.keep_basis = false;
         }
 
-        std::vector<double> ritz_values;
-        std::vector<double> weights;
         {
-            auto k = ed::krylov::lanczos_kernel(
-                backend,
-                std::forward<MatvecFn>(apply_H),
-                local_n, d_v0.get(), kopts);
+            auto k = ed::krylov::lanczos_kernel(be, apply, local_n, d_v0.get(), kopts);
 
             // ---- 3. Diagonalise tridiagonal on host -> ritz + weights ----
             // (the kept basis, if any, is released at the end of this
             // block, before the host-side post-processing).
             if (!k.alpha.empty()) {
                 diagonalize_tridiagonal_ritz(
-                    k.alpha, k.beta, ritz_values, weights);
+                    k.alpha, k.beta, out.ritz, out.weights, n_obs > 0 ? &out.Y : nullptr);
+            }
+            // Observables in the Ritz basis, A_ij = <psi_i|O|psi_j> = (Y^T B Y)_ij with
+            // B_ab = <v_a|O|v_b> from one O apply per Krylov vector.
+            const std::size_t m = out.ritz.size();
+            if (n_obs > 0 && m > 0) {
+                if (k.basis.size() < m) {
+                    out.ritz.clear();
+                } else {
+                    std::vector<const Complex*> V(m);
+                    for (std::size_t a = 0; a < m; ++a) V[a] = k.basis[a].get();
+                    auto w = be.make_zero_vector(local_n);
+                    std::vector<Complex> B(m * m), col(m), T1(m * m);
+                    out.A.assign(n_obs, std::vector<Complex>(m * m));
+                    for (std::size_t o = 0; o < n_obs; ++o) {
+                        for (std::size_t b = 0; b < m; ++b) {
+                            opts.observables[o](V[b], w.get(), local_n);
+                            be.dot_many(V.data(), m, w.get(), local_n, col.data());
+                            for (std::size_t a = 0; a < m; ++a) B[a + b * m] = col[a];
+                        }
+                        for (std::size_t i = 0; i < m; ++i)
+                            for (std::size_t b = 0; b < m; ++b) {
+                                Complex acc(0, 0);
+                                for (std::size_t a = 0; a < m; ++a) acc += out.Y[i * m + a] * B[a + b * m];
+                                T1[i + b * m] = acc;
+                            }
+                        for (std::size_t i = 0; i < m; ++i)
+                            for (std::size_t j = 0; j < m; ++j) {
+                                Complex acc(0, 0);
+                                for (std::size_t b = 0; b < m; ++b) acc += T1[i + b * m] * out.Y[j * m + b];
+                                out.A[o][i + j * m] = acc;
+                            }
+                    }
+                }
             }
         }
-        if (ritz_values.empty()) {
+        if (out.ritz.empty()) {
             // CPU-driver parity: a failed sample is dropped, not fatal.
             std::cerr << "  Warning: Tridiagonal diagonalization failed "
                          "(sample " << s << ")" << std::endl;
-            continue;
+            return out;
         }
-        ground_state_estimate =
-            std::min(ground_state_estimate, ritz_values.front());
-
         // ---- 4. Host-side thermodynamics for this sample ----
-        ::ThermodynamicData td = ::compute_ftlm_thermodynamics(
-            ritz_values, weights, temperatures,
+        out.td = ::compute_ftlm_thermodynamics(
+            out.ritz, out.weights, temperatures,
             static_cast<std::uint64_t>(global_n));
-        per_sample.push_back(std::move(td));
+        out.ok = true;
+        return out;
+    };
+
+    std::vector<Sample> samples(opts.num_samples);
+    bool batched = false;
+#ifdef WITH_CUDA
+    if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
+        // Up to batch_width samples in lockstep, each on its own thread and backend, sharing
+        // every H apply (one multi-vector launch). The observables are applied per sample.
+        if (opts.batch_matvec && opts.batch_width > 1 && opts.num_samples > 1) {
+            batched = true;
+            for (std::size_t s0 = 0; s0 < opts.num_samples; s0 += opts.batch_width) {
+                const std::size_t k = std::min(opts.batch_width, opts.num_samples - s0);
+                ed::matvec::MatvecBatcher b;
+                const auto H = b.wrap(opts.batch_matvec);
+                b.run(k, [&](std::size_t i) {
+                    const ed::matvec::CudaBackend be;
+                    samples[s0 + i] = sample(be, H, s0 + i);
+                });
+            }
+        }
+    }
+#endif
+    if (!batched)
+        for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(backend, apply_H, s);
+
+    std::vector<::ThermodynamicData> per_sample;
+    per_sample.reserve(opts.num_samples);
+    double ground_state_estimate = std::numeric_limits<double>::infinity();
+    // Observable sums over all samples, against the running lowest Ritz value obs_ref.
+    std::vector<double> obs_z;
+    std::vector<std::vector<Complex>> obs_num;
+    double obs_ref = 0.0;
+    for (auto& smp : samples) {
+        if (!smp.ok) continue;
+        const auto& ritz_values = smp.ritz;
+        if (n_obs > 0) {
+            const std::size_t m = ritz_values.size();
+            // Symmetric (low-temperature Lanczos) estimator: sum_ij e^{-beta (e_i + e_j) / 2}
+            // <r|psi_i> A_ij <psi_j|r>, exact for the lowest state already at one sample, where
+            // the one-sided FTLM form sum_i e^{-beta e_i} <r|psi_i><psi_i|O|r> fluctuates at low T.
+            const double smin = *std::min_element(ritz_values.begin(), ritz_values.end());
+            if (obs_z.empty()) {
+                obs_z.assign(temperatures.size(), 0.0);
+                obs_num.assign(n_obs, std::vector<Complex>(temperatures.size(), Complex(0, 0)));
+                obs_ref = smin;
+            } else if (smin < obs_ref) {
+                for (std::size_t t = 0; t < temperatures.size(); ++t) {
+                    const double f = std::exp(-(obs_ref - smin) / temperatures[t]);
+                    obs_z[t] *= f;
+                    for (auto& row : obs_num) row[t] *= f;
+                }
+                obs_ref = smin;
+            }
+            std::vector<double> g(m);                           // e^{-beta (e_i - ref) / 2} c_i
+            for (std::size_t t = 0; t < temperatures.size(); ++t) {
+                for (std::size_t i = 0; i < m; ++i) {
+                    g[i] = std::exp(-0.5 * (ritz_values[i] - obs_ref) / temperatures[t]) * smp.Y[i * m];
+                    obs_z[t] += g[i] * g[i];
+                }
+                for (std::size_t o = 0; o < n_obs; ++o) {
+                    Complex acc(0, 0);
+                    for (std::size_t j = 0; j < m; ++j)
+                        for (std::size_t i = 0; i < m; ++i) acc += g[i] * smp.A[o][i + j * m] * g[j];
+                    obs_num[o][t] += acc;
+                }
+            }
+        }
+        ground_state_estimate = std::min(ground_state_estimate, ritz_values.front());
+        per_sample.push_back(std::move(smp.td));
     }
 
     if (per_sample.empty()) {
@@ -383,7 +500,12 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             1.0 / static_cast<double>(per_sample.size());
         for (auto& z : legacy.thermo_data.Z_sample) z *= inv_n;
     }
-    return to_ftlm_result(legacy, grid.betas);
+    FtlmResult out = to_ftlm_result(legacy, grid.betas);
+    for (auto& row : obs_num) {
+        for (std::size_t t = 0; t < row.size(); ++t) row[t] /= obs_z[t];
+        out.observables.push_back(std::move(row));
+    }
+    return out;
 }
 
 }  // namespace detail

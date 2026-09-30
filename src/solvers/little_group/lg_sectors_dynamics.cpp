@@ -10,7 +10,10 @@
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
 #include <ed/observables/ftlm_dynamics_kernel.h>
+#include <ed/krylov/lanczos_kernel.h>
 #include <ed/sectors/dynamics.h>
+#include <ed/symmetry/casimir_projector.h>
+#include <ed/symmetry/su2_dims.h>
 #ifdef WITH_CUDA
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/matvec/device_csr.h>
@@ -36,6 +39,8 @@ Spec unfolded(const Spec& s) {
     u.time_reversal = 0;
     u.only_k0.clear();
     u.only_irrep.clear();
+    u.only_momentum.clear();
+    u.only_irrep_chars.clear();
     return u;
 }
 
@@ -184,13 +189,55 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
     return out;
 }
 
+// Same momentum: the characters of the (shared) abelian group agree.
+bool same_momentum(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSectorData& b) {
+    if (a.group_size != b.group_size) return false;
+    for (std::size_t g = 0; g < a.characters.size(); ++g)
+        if (std::abs(a.characters[g] - b.characters[g]) > 1e-9) return false;
+    return true;
+}
+
+// Total S- = sum_i S-_i: commutes with the lattice, lowers Sz by one (sets one bit).
+std::vector<::Operator::TransformData> total_s_minus(int n_sites) {
+    std::vector<::Operator::TransformData> t(static_cast<std::size_t>(n_sites));
+    for (int i = 0; i < n_sites; ++i) {
+        t[static_cast<std::size_t>(i)].op_type     = 1;
+        t[static_cast<std::size_t>(i)].site_index  = static_cast<std::uint64_t>(i);
+        t[static_cast<std::size_t>(i)].coefficient = Complex(1.0, 0.0);
+    }
+    return t;
+}
+
+// The middle of a spin tower's spectrum: the extreme Ritz values of a short Lanczos run on the
+// projected operator, started inside the tower (the off-tower ghost excluded).
+double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
+    const std::size_t n = hp.dim();
+    std::vector<Complex> v(n);
+    std::mt19937_64 gen(0x70E4ULL);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    for (auto& z : v) z = Complex(nd(gen), nd(gen));
+    if (hp.prepare_start_vector(v.data(), n) < 1e-12) return hp.ghost_shift();
+    ed::krylov::LanczosKernelOptions lo;
+    lo.max_iter   = std::min<std::size_t>(n, 30);
+    lo.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
+    lo.keep_basis = false;
+    ed::matvec::CpuBackend be;
+    auto mv = [&hp](const Complex* in, Complex* out, std::size_t nn) { hp.apply(in, out, nn); };
+    const auto k = ed::krylov::lanczos_kernel(be, mv, n, v.data(), lo);
+    std::vector<double> ritz, w;
+    if (!k.alpha.empty()) diagonalize_tridiagonal_ritz(k.alpha, k.beta, ritz, w);
+    const double mu = hp.ghost_shift();
+    double lo_e = std::numeric_limits<double>::infinity(), hi_e = -lo_e;
+    for (double r : ritz)
+        if (std::abs(r - mu) > 1e-6 * std::max(1.0, std::abs(mu))) { lo_e = std::min(lo_e, r); hi_e = std::max(hi_e, r); }
+    return std::isfinite(lo_e) ? 0.5 * (lo_e + hi_e) : mu;
+}
+
 }  // namespace
 
 DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const ::Operator& O,
                         const DynamicsSpec& d) {
     if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
-    if (s.two_S >= 0)
-        throw std::invalid_argument("dynamics: restricting the initial states to one spin tower is not supported");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
     const auto shifts = n_up_shifts(O);
@@ -224,8 +271,33 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
         auto t_gm = std::chrono::steady_clock::now();
         const auto manifold = ground_manifold(H, n_sites, u, d.degeneracy_tol, d.device, out.e0);
+        // With a spin tower the solve returns the Sz = S member of each multiplet; the other
+        // members follow by total S- (normalised), each in the same momentum sector one Sz lower.
+        std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)
+        const auto s_minus = total_s_minus(n_sites);
+        for (const auto& [L, v] : manifold) {
+            states.push_back({v, L.tag.sz_parity});
+            for (int m = 0; m < s.two_S; ++m) {
+                const BlockVector& x = states.back().first;
+                const auto& ts = sectors_of({x.basis->n_up + 1, -1, 1});
+                const auto t = std::find_if(ts.begin(), ts.end(),
+                                            [&](const Target& c) { return same_momentum(*x.basis, *c.rd); });
+                if (t == ts.end())
+                    throw std::runtime_error("dynamics: no momentum sector one Sz lower holds the multiplet");
+                ed::dssf::CrossSectorOrbitObservable lower(
+                    Ref::from_rep(*x.basis, static_cast<std::uint64_t>(n_sites)), 0,
+                    Ref::from_rep(*t->rd, static_cast<std::uint64_t>(n_sites)), 0, s_minus, spin);
+                BlockVector y{t->rd, std::vector<Complex>(t->rd->reps.size())};
+                lower.apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
+                double n2 = 0.0;
+                for (const auto& c : y.amplitudes) n2 += std::norm(c);
+                if (n2 < 1e-20) throw std::runtime_error("dynamics: S- annihilated a tower state above Sz = -S");
+                for (auto& c : y.amplitudes) c /= std::sqrt(n2);
+                states.push_back({std::move(y), -1});
+            }
+        }
         phase["ground manifold"] += clock_since(t_gm);
-        out.ground_manifold = static_cast<int>(manifold.size());
+        out.ground_manifold = static_cast<int>(states.size());
 
         std::vector<double> S(d.omega.size(), 0.0);
         ed::matvec::CpuBackend be;
@@ -236,8 +308,8 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         // The kernel reads a zero shift as "choose one"; E0 = 0 must still be E0.
         cf.energy_shift = out.e0 != 0.0 ? out.e0 : std::numeric_limits<double>::denorm_min();
         std::set<std::pair<int, int>> reached;
-        for (const auto& [L, v] : manifold) {
-            const Subspace src{v.basis->n_up, L.tag.sz_parity, 1};
+        for (const auto& [v, parity] : states) {
+            const Subspace src{v.basis->n_up, parity, 1};
             for (const Subspace& tsub : targets_of(src, shifts, n_sites)) {
                 const auto& ts = sectors_of(tsub);
                 auto t_pr = std::chrono::steady_clock::now();
@@ -281,7 +353,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                 }
             }
         }
-        for (auto& x : S) x /= static_cast<double>(manifold.size());
+        for (auto& x : S) x /= static_cast<double>(states.size());
         out.S.push_back(std::move(S));
         out.target_sectors = reached.size();
         report();
@@ -297,12 +369,56 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
     // use. Build them all first (the cache is not thread-safe), with the targets they reach.
-    struct Job { const Target* src; Subspace sub; std::vector<const Target*> targets; };
+    // With a spin tower the initial states are its members at every Sz = S .. -S. Each source
+    // samples seeds projected onto the tower; a momentum sector holds one member per multiplet
+    // at every such Sz, so its tower dimension is its dimension at Sz = S less that of the same
+    // momentum at Sz = S + 1 (one set bit fewer).
+    struct Job {
+        const Target* src; Subspace sub; std::vector<const Target*> targets;
+        std::shared_ptr<const ed::symmetry::LowdinS2Projector> tower;
+        std::shared_ptr<RepSectorMatVec> s2;
+        // H with the off-tower drift scrubbed (the thermal blocks' wrapper): roundoff that leaves
+        // the tower is sent to a ghost level above the band instead of growing in the Krylov space.
+        std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> Hp;
+        std::uint64_t tower_dim = 0;
+    };
+    std::vector<Subspace> source_subs = subspaces(H, n_sites, u);
+    std::shared_ptr<::Operator> s2c;
+    if (s.two_S >= 0) {
+        const int n0 = source_subs.front().n_up;
+        for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 + m, -1, 1});
+        s2c = detail::s2_carrier_for(u, n_sites);
+    }
+    auto tower_dim_of = [&](const Target& src) -> std::uint64_t {
+        const int n0 = source_subs.front().n_up;
+        auto dim_at = [&](int n_up) -> std::uint64_t {
+            if (n_up < 0) return 0;
+            for (const Target& c : sectors_of({n_up, -1, 1}))
+                if (same_momentum(*src.rd, *c.rd)) return c.rd->reps.size();
+            return 0;
+        };
+        const std::uint64_t at = dim_at(n0), above = dim_at(n0 - 1);
+        if (above > at)
+            throw std::runtime_error("dynamics: a momentum sector is larger at Sz = S + 1 than at Sz = S");
+        return at - above;
+    };
     std::vector<Job> jobs;
     std::set<const Target*> reached;
-    for (const Subspace& sub : subspaces(H, n_sites, u)) {
+    std::uint64_t multiplets = 0;
+    for (const Subspace& sub : source_subs) {
         for (const Target& src : sectors_of(sub)) {
-            Job j{&src, sub, {}};
+            Job j{&src, sub, {}, nullptr, nullptr, nullptr, 0};
+            if (s.two_S >= 0) {
+                j.tower_dim = tower_dim_of(src);
+                if (j.tower_dim == 0) continue;
+                if (sub.n_up == source_subs.front().n_up) multiplets += j.tower_dim;
+                j.s2    = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
+                j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
+                    j.s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
+                auto hp = std::make_shared<ed::symmetry::CasimirProjectedOperator>(src.H, j.tower, 1);
+                hp->place_ghost(tower_midpoint(*hp));   // interior: Lanczos does not amplify it
+                j.Hp = hp;
+            }
             for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
                 const auto& ts = sectors_of(tsub);
                 auto t_pr = std::chrono::steady_clock::now();
@@ -314,6 +430,10 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
             jobs.push_back(std::move(j));
         }
     }
+    if (s.two_S >= 0 && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
+        throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
+                                 + std::to_string(s.two_S) + "/2 multiplets, expected "
+                                 + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
 
     // One source: FTLM against each reachable target with the same samples (seeded from the
     // source index, so the result does not depend on scheduling). A source O annihilates still
@@ -324,6 +444,10 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         fo.num_samples = d.samples;
         fo.broadening  = d.eta;
         fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (i + 1);
+        if (const auto p = jobs[i].tower) {
+            fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
+            fo.trace_dim      = jobs[i].tower_dim;
+        }
         return fo;
     };
     auto observable = [&](const Job& j, const Target& t) {
@@ -352,7 +476,8 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         const Job& j = jobs[i];
         const auto fo = options(i);
         const std::size_t dim_src = j.src->rd->reps.size();
-        auto H_src = [&j](const Complex* in, Complex* o, int nn) { j.src->H->apply(in, o, static_cast<std::size_t>(nn)); };
+        const ed::matvec::MatVecOperator& Hs = j.Hp ? static_cast<const ed::matvec::MatVecOperator&>(*j.Hp) : *j.src->H;
+        auto H_src = [&Hs](const Complex* in, Complex* o, int nn) { Hs.apply(in, o, static_cast<std::size_t>(nn)); };
         return collect(j, [&](const Target* t) {
             if (!t) {
                 auto zero = [](const Complex*, Complex* o, int nn) { std::fill(o, o + nn, Complex(0, 0)); };
@@ -374,19 +499,38 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         const std::size_t dim_src = j.src->rd->reps.size();
         ed::matvec::CudaBackend cbe;
         j.src->H->enable_device(true);
-        const auto H_src = j.src->H->bind_cuda();
+        if (j.s2) j.s2->enable_device(true);
+        const auto H_src = j.Hp ? j.Hp->bind_cuda() : j.src->H->bind_cuda();
+        // Samples in lockstep (one multi-vector launch per H apply) when both H have a
+        // multi-vector kernel, O is thread-safe, and their Krylov bases fit in half the free memory.
+        const ed::LinearOperator& src_op = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
+        auto batched = [&](const ed::LinearOperator& dst_op, std::size_t dim_dst) {
+            auto f = fo;
+            auto ms = src_op.bind_cuda_multi();
+            auto md = dst_op.bind_cuda_multi();
+            std::size_t free_b = 0, total_b = 0;
+            if (!ms || !md || cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) return f;
+            const double per_sample = 16.0 * static_cast<double>(d.krylov) * static_cast<double>(dim_src + 3 * dim_dst);
+            const auto width = static_cast<std::size_t>(0.5 * static_cast<double>(free_b) / per_sample);
+            if (width < 2) return f;
+            f.batch_src   = std::move(ms);
+            f.batch_dst   = std::move(md);
+            f.batch_width = std::min<std::size_t>(width, 8);
+            return f;
+        };
         return collect(j, [&](const Target* t) {
             if (!t) {
                 auto zero = [&cbe](const Complex*, Complex* o, std::size_t nn) { cbe.fill_zero(o, nn); };
                 return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, dim_src, dim_src,
-                                                             d.temperatures, d.omega, fo);
+                                                             d.temperatures, d.omega, batched(src_op, dim_src));
             }
             const auto obs = observable(j, *t);
             const std::size_t dim_dst = t->rd->reps.size();
             t->H->enable_device(true);
             const auto H_dst = t->H->bind_cuda();
             ed::matvec::DeviceMatvecFn O_ap;
-            if (const auto c = obs.csr(); c.row_ptr)
+            const auto c = obs.csr();
+            if (c.row_ptr)
                 O_ap = ed::matvec::make_device_csr_matvec(c.row_ptr, c.col, c.val, c.rows, c.nnz);
             else    // no CSR within budget: stage through the host walk
                 O_ap = [&obs, &cbe, dim_src](const Complex* in, Complex* o, std::size_t nn) {
@@ -396,7 +540,8 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                     cbe.copy_from_host(ho.data(), o, nn);
                 };
             return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, O_ap, dim_src, dim_dst,
-                                                         d.temperatures, d.omega, fo);
+                                                         d.temperatures, d.omega,
+                                                         c.row_ptr ? batched(*t->H, dim_dst) : fo);
         });
 #else
         return run(i);
@@ -427,6 +572,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     for (std::size_t i : small) {        // warm the lazily built operators before going parallel
         std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
         jobs[i].src->H->apply(x.data(), y.data(), x.size());
+        if (jobs[i].s2) jobs[i].s2->apply(x.data(), y.data(), x.size());
         for (const Target* t : jobs[i].targets) {
             std::vector<Complex> a(t->rd->reps.size(), Complex(0, 0)), b(a.size());
             t->H->apply(a.data(), b.data(), a.size());

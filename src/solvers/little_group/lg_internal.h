@@ -290,6 +290,12 @@ public:
 #endif
         return bind_cpu();
     }
+    [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
+#ifdef WITH_CUDA
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, tv_.spin_l, terms_);
+#endif
+        return {};
+    }
     [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const {
         return rd_;
     }
