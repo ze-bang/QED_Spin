@@ -109,9 +109,6 @@ add_library(ed_core STATIC
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_parallel ${ED_COMMON_LINK_LIBS})
-target_link_libraries(ed_core PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
 if(WITH_CUDA)
     # Host-compiled TUs of ed_core include <cuComplex.h>/<cublas_v2.h>
     # transitively (linear_operator.h -> cuda_backend.cuh under WITH_CUDA).
@@ -151,9 +148,6 @@ add_library(ed_matvec STATIC
 )
 target_include_directories(ed_matvec PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_matvec PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
-target_link_libraries(ed_matvec PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
 target_compile_options(ed_matvec PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
@@ -196,9 +190,6 @@ target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_parallel ${ED_C
 # ed_symmetry (the permutation DSL, group closure) and ed_dssf (observable
 # assembly) are part of ed_solvers_cpu's public link surface.
 target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry ed_dssf)
-target_link_libraries(ed_solvers_cpu PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
 target_compile_options(ed_solvers_cpu PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
@@ -219,23 +210,15 @@ add_library(ed_dssf STATIC
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_dssf PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
-target_link_libraries(ed_dssf PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
 target_compile_options(ed_dssf PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_symmetry: programmatic site-permutation symmetry DSL (P2.11 / audit
-# §3.10). Builds `SymmetryGroupInfo` from a list of permutation
-# generators without going through the JSON detour (`automorphism_finder.py`
-# + automorphism_results/*.json + SymmetryGroupInfo::loadFromDirectory).
-#
-# Depends on ed_core because `SymmetryGroupInfo` is declared inside
-# `ed/core/construct_ham.h` (alongside the `Operator` definition that
-# consumes it).
+# ed_symmetry: programmatic site-permutation DSL (P2.11 / audit §3.10) --
+# permutation algebra + generate_group -- and the numerical irrep
+# decomposition (irreps.cpp).
 # -----------------------------------------------------------------------------
 add_library(ed_symmetry STATIC
     ${SYMMETRY_DIR}/group.cpp
@@ -330,9 +313,6 @@ if(WITH_CUDA)
         CUDA::curand
         CUDA::cusolver
         ${ED_COMMON_LINK_LIBS}
-    )
-    target_link_libraries(ed_solvers_gpu PUBLIC
-        "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
     )
     set_target_properties(ed_solvers_gpu PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

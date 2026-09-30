@@ -46,7 +46,6 @@
 #include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/gosper.h>
 #include <ed/symmetry/sym_profile.h>
-#include <ed/core/symmetry_metadata.h>  // SymmetryGroupInfo
 
 namespace ed::symmetry {
 
@@ -256,18 +255,6 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
     return tab;
 }
 
-/// SymmetryGroupInfo convenience wrapper (pure site permutations).
-[[nodiscard]] inline OrbitTable
-build_orbit_table_fixed_sz_streaming(std::uint64_t            n_bits,
-                                     int                      n_up,
-                                     const SymmetryGroupInfo& info) {
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
-    return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg);
-}
-
 /// Stage 5b: the flip-extended group G' = G x Z2 -- elements
 /// [g_0..g_{|G|-1}, g_0*F, .., g_{|G|-1}*F] with F = XOR all-ones
 /// (the global spin flip; it commutes with every site permutation, so
@@ -291,11 +278,6 @@ make_flip_extended_group_from_perms(std::vector<std::vector<int>> perms,
     for (std::size_t g = Gs; g < 2 * Gs; ++g) flips[g] = all_ones;
     return CompiledGroup::from_elements(perms2, flips,
                                         static_cast<int>(n_bits));
-}
-
-[[nodiscard]] inline CompiledGroup
-make_flip_extended_group(const SymmetryGroupInfo& info, std::uint64_t n_bits) {
-    return make_flip_extended_group_from_perms(info.max_clique, n_bits);
 }
 
 /// Fused rep + stabilizer scan over the full 2^N Hilbert space for an
@@ -464,17 +446,6 @@ build_orbit_table_parity_compiled(std::uint64_t        n_bits,
     tab.stab_elems = std::move(global.sets);
     prof.set_items(tab.reps.size());
     return tab;
-}
-
-/// Fused rep + stabilizer scan over the full 2^N Hilbert space. ``reps``
-/// bit-identical to ``enumerate_full_orbit_reps``.
-[[nodiscard]] inline OrbitTable
-build_orbit_table_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
-    return build_orbit_table_full_compiled(n_bits, cg);
 }
 
 }  // namespace ed::symmetry

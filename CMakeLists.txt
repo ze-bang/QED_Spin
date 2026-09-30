@@ -185,7 +185,7 @@ include(EDBlasProfile)
 # =============================================================================
 # OTHER DEPENDENCIES
 # =============================================================================
-# Eigen3, nlohmann/json, optional CUDAToolkit (gated by
+# Eigen3, optional CUDAToolkit (gated by
 # WITH_CUDA), and ARPACK. Each is independent of the BLAS profile above.
 include(EDDependencies)
 
@@ -529,11 +529,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_env_registry               tests/unit/test_env_registry.cpp USE_CATCH2)
     # The available-memory probe honours the job's cgroup limit (Krylov basis caps).
     ed_add_test(test_mem_guard                  tests/unit/test_mem_guard.cpp USE_CATCH2)
-    # Phase 3a #5: SortedUint64Index — drop-in replacement for
-    # `unordered_map<uint64_t, size_t>` in the streaming-symmetry hot path.
-    # Coverage: empty / build / duplicate-key / clear / sort-invariant +
-    # 1M-entry stress vs unordered_map oracle (memory + correctness).
-    ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
 
     # ed_input library lockdown (lattice generators + HamiltonianBuilder).
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
@@ -547,13 +542,13 @@ if(BUILD_ED_TESTS)
     # (execution-planner test removed with the planner)
     # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
-    # Stage-2 SymmetryEngine v2: fused OrbitTable + prefiltered parallel sector build
+    # Stage-2 SymmetryEngine v2: fused OrbitTable (hash, Burnside sum rule)
     ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp USE_CATCH2)
     # Stage-3 SymmetryEngine v2: content-addressed OrbitTable cache (registry + disk)
     ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp USE_CATCH2)
     # Stage-5 SymmetryEngine v2: spin-flip commutation check (SectorTransporter gate)
     ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
-    # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
+    # Stage-6 SymmetryEngine v2: the real-Hamiltonian gate of time-reversal pairing
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
     # Stage-12a SU(2) rollout: S^2 Casimir in the TermStorage schema + labeling
     ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp USE_CATCH2)
@@ -569,26 +564,13 @@ if(BUILD_ED_TESTS)
     # minimalist-architecture rev (May 2026). TPQ dynamical correlators
     # become workflow-level compositions of mtpq_kernel +
     # time_evolution_correlator (Phase 6 / Phase 7).
-    ed_add_test(test_chain_extensibility        tests/unit/test_chain_extensibility.cpp USE_CATCH2)
-    # Operator-collapse refactor (Jun 2026): owning ``SectorBasis`` that
-    # completes the basis triplet (FullSpaceSubspace / FixedSzSubspace /
-    # SectorBasis) and yields the POD SymmetryBasisPolicy. Pins build()
-    # / adopt() lookup round-trips + norm parity against
-    # compute_orbit_for_state for the Heisenberg Z_N ring (N=6).
-    ed_add_test(test_sector_basis               tests/unit/test_sector_basis.cpp USE_CATCH2)
-    # P2: the unified CpuMatVecBackend<SymmetryBasisPolicy> + make_cpu_symmetry_backend
-    # factory reproduce the legacy StreamingSymmetryOperator::applySymmetrized matvec
-    # byte-for-byte in every momentum sector (Heisenberg Z_N ring, N=6).
-    # P2 (fixed-Sz symmetry lane): the SAME generic backend reproduces the
-    # legacy FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSz matvec
-    # byte-for-byte in every momentum sector (half-filled Heisenberg Z_N ring,
-    # N=6, n_up=3) -- orbits built over a FixedSzSubspace instead of full space.
     # "Optimized symmetry ED + NLCE" (Jun 2026), Phase 1 gate: the CPU
     # on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
     # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
-    # reproduces the orbit-CSR reference matvec in every momentum sector
-    # WITHOUT materialising the per-sector orbit CSR (rep data from the
-    # CSR-free getRepSectorData). Heisenberg Z_N ring, N=6/8.
+    # reproduces an independent full-space reference (H applied to the
+    # expanded symmetric states) in every momentum sector of the
+    # Heisenberg Z_N ring, N=6/8; GATHER, SCATTER, rank-table, two-level
+    # lookup and reduced-CSR forms agree.
     ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp USE_CATCH2)
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
@@ -597,8 +579,7 @@ if(BUILD_ED_TESTS)
     )
 
     # P2.11: lock down the programmatic symmetry DSL (ed::sym::Permutation
-    # algebra + group_from_generators + Bloch-momentum convention +
-    # phantom-irrep filter). Lives in ed_symmetry.
+    # algebra + generate_group closure). Lives in ed_symmetry.
     ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp USE_CATCH2)
     target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
 

@@ -46,6 +46,38 @@
 namespace ed::symmetry {
 
 // ---------------------------------------------------------------------------
+// O(1) rep reverse-lookup gate ("Optimized symmetry ED" plan, Phase A).
+//
+// The CSR-free rep matvec can resolve ``state -> orbit index`` either by a
+// binary search over the sorted ``reps`` array (O(log dim), zero extra memory)
+// or by a dense combinadic rank table (O(1), C(n_sites,n_up) int32). For an
+// iterative solver doing thousands of matvecs the table is reused every
+// iteration, so it pays for itself -- but it costs ~2.4 GiB at N=32, so it is
+// gated by a memory budget.
+//
+//   ED_SYM_REP_RANKTABLE = "0"  -> force OFF (always binary search)
+//                          "1"  -> force ON  (build regardless of budget)
+//                          unset -> build when table bytes <= budget
+//   ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 8) sets the budget.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
+    if (table_entries == 0) return false;
+    const char* force = ed::env::raw("ED_SYM_REP_RANKTABLE");
+    if (force != nullptr && force[0] == '0' && force[1] == '\0') return false;
+    if (force != nullptr && force[0] == '1' && force[1] == '\0') return true;
+    double budget_gib = 8.0;
+    if (const char* b = ed::env::raw("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
+        const double parsed = std::atof(b);
+        if (parsed > 0.0) budget_gib = parsed;
+    }
+    const long double table_bytes =
+        static_cast<long double>(table_entries) * sizeof(std::int32_t);
+    const long double budget_bytes =
+        static_cast<long double>(budget_gib) * 1024.0L * 1024.0L * 1024.0L;
+    return table_bytes <= budget_bytes;
+}
+
+// ---------------------------------------------------------------------------
 // SharedRankLookup -- Stage 4 of the SymmetryEngine v2 plan
 // (docs/architecture/SYMMETRY_V2_DESIGN.md): ONE dense
 // ``combinadic rank -> shared-rep-index`` table per (n_sites, n_up),
@@ -309,80 +341,5 @@ struct RepSectorData {
                    static_cast<std::size_t>(group_size) * n_sites;
     }
 };
-
-// Compose the per-sector spatial character ``chi_k(g)`` for every group
-// element from the per-generator ``phase_factors`` and the cached
-// ``power_representation`` -- the SAME Bloch-convention product that
-// ``ed::symmetry::compute_orbit_for_state`` / ``SpatialProjector::character``
-// use, so the on-the-fly phase matches the orbit-CSR reference bit-for-bit:
-//
-//   chi_k(g) = product_gen phase_factors[gen] ^ power_representation[g][gen]
-//
-// Templated on the group-info type to avoid pulling the (heavier) symmetry
-// metadata header into this value-type header; any type exposing
-// ``max_clique`` + ``power_representation`` (i.e. ``SymmetryGroupInfo``)
-// satisfies it.
-template <class GroupInfoT>
-[[nodiscard]] inline std::vector<std::complex<double>>
-sector_characters_from(const GroupInfoT&                        info,
-                       const std::vector<std::complex<double>>& phase_factors) {
-    const std::size_t G = info.max_clique.size();
-    std::vector<std::complex<double>> chi(G, std::complex<double>(1.0, 0.0));
-    // phase_factors: PER-ELEMENT (length |G|, χ(max_clique[g]) directly) or
-    // PER-GENERATOR (length num_generators, reconstruct via power_representation).
-    // C12: disambiguate on the generator COUNT rather than length==|G| alone.
-    // The two forms collide only when #generators == |G| -- impossible for a
-    // MINIMAL generating set of a non-trivial group (num_gen = #invariant
-    // factors << |G|), but a caller listing |G| redundant generators would
-    // otherwise be mis-read as per-element. Prefer the per-generator reading
-    // when the length matches the generator count and that differs from |G|;
-    // fall to per-element (unambiguous data) when the length is |G|.
-    const std::size_t num_gen =
-        (G > 0 && !info.power_representation.empty())
-            ? info.power_representation[0].size() : 0;
-    const bool per_generator =
-        (num_gen != 0 && phase_factors.size() == num_gen && num_gen != G);
-    const bool per_element =
-        (!per_generator && phase_factors.size() == G);
-    if (!per_generator && !per_element) {
-        // Malformed metadata (length matches neither |G| nor #generators):
-        // keep the trivial (identity) characters rather than indexing out of
-        // bounds -- the caller's Burnside / sum-rule guard then flags the
-        // resulting sector dims.
-        return chi;
-    }
-    for (std::size_t g = 0; g < G; ++g) {
-        if (per_element) {
-            chi[g] = phase_factors[g];
-            continue;
-        }
-        const auto& powers = info.power_representation[g];
-        std::complex<double> c(1.0, 0.0);
-        for (std::size_t k = 0; k < powers.size() && k < phase_factors.size();
-             ++k) {
-            const std::complex<double> phase = phase_factors[k];
-            for (int p = 0; p < powers[k]; ++p) c *= phase;
-        }
-        chi[g] = c;
-    }
-    return chi;
-}
-
-// Flatten a group's site permutations (``max_clique``) into the row-major
-// ``perms_flat`` layout the device policy consumes.
-template <class GroupInfoT>
-[[nodiscard]] inline std::vector<int>
-flatten_group_perms(const GroupInfoT& info, int n_sites) {
-    const std::size_t G = info.max_clique.size();
-    std::vector<int> flat(G * static_cast<std::size_t>(n_sites), 0);
-    for (std::size_t g = 0; g < G; ++g) {
-        const auto& perm = info.max_clique[g];
-        for (int i = 0; i < n_sites; ++i) {
-            flat[g * static_cast<std::size_t>(n_sites) + i] =
-                (i < static_cast<int>(perm.size())) ? perm[i] : i;
-        }
-    }
-    return flat;
-}
 
 } // namespace ed::symmetry

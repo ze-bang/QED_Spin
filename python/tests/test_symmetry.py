@@ -2,13 +2,8 @@
 
 The C++ side is covered by ``tests/unit/test_symmetry_dsl.cpp`` and the
 ``Catch2`` ctest suite. This module checks the *bridge*: that the helpers are
-reachable from ``qed.symmetry``, that the dictionary returned by the
-group builders has the same shape as the legacy
-``SymmetryGroupInfo::loadFromDirectory`` output, and that the permutation
-algebra matches the C++ semantics (``(a o b)[i] = a[b[i]]``).
-
-We deliberately do not assert numerical phases beyond their unit modulus --
-exact phases are locked down by ``test_symmetry_dsl.cpp``.
+reachable from ``qed.symmetry`` and that the permutation algebra matches the
+C++ semantics (``(a o b)[i] = a[b[i]]``).
 """
 
 from __future__ import annotations

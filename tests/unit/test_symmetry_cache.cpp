@@ -4,8 +4,9 @@
 // Stage-3 guards of the SymmetryEngine v2 plan
 // (docs/architecture/SYMMETRY_V2_DESIGN.md):
 //
-//   * orbit_table_key_* reproduces the content_hash the builders stamp
-//     (the cache key can be computed without building).
+//   * the cache key the acquire_*_compiled front-ends compute without
+//     building reproduces the content_hash the builders stamp (the table
+//     lands on disk under that key).
 //   * save/load round-trips every field bit-identically.
 //   * acquire_* returns the SAME shared table from the in-process
 //     registry on a second call, and loads from disk in a fresh key
@@ -16,6 +17,7 @@
 // =============================================================================
 #include "common/catch2_harness.h"
 
+#include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/group.h>
 #include <ed/symmetry/orbit_table.h>
 #include <ed/symmetry/symmetry_cache.h>
@@ -48,28 +50,43 @@ bool tables_equal(const OrbitTable& a, const OrbitTable& b) {
            a.content_hash == b.content_hash;
 }
 
+// Z_N translations of a ring, compiled.
+CompiledGroup translations(int N) {
+    return CompiledGroup::from_permutations(
+        ed::sym::generate_group({ed::sym::translation(N)}), N);
+}
+
+// The dihedral group of the ring (translations + reflection), compiled.
+CompiledGroup dihedral(int N) {
+    return CompiledGroup::from_permutations(
+        ed::sym::generate_group({ed::sym::translation(N), ed::sym::reflection_1d(N)}), N);
+}
+
 }  // namespace
 
-TEST_CASE("orbit_table_key_* matches the built table's content_hash",
+TEST_CASE("the acquire cache key matches the built table's content_hash",
           "[symmetry_cache]") {
     const int N = 12;
-    const SymmetryGroupInfo info = ed::sym::translation_group_1d(N);
+    const CompiledGroup cg = translations(N);
+    const std::string dir = scratch_dir("key");
     for (int n_up : {4, N / 2}) {
-        const OrbitTable tab =
-            build_orbit_table_fixed_sz_streaming(N, n_up, info);
-        REQUIRE(orbit_table_key_fixed_sz(N, n_up, info) == tab.content_hash);
+        const OrbitTable tab = build_orbit_table_fixed_sz_streaming(N, n_up, cg);
+        const auto acq = acquire_orbit_table_fixed_sz_compiled(N, n_up, cg, dir);
+        REQUIRE(tables_equal(tab, *acq));
+        REQUIRE(fs::exists(detail::otab_path(dir, tab.content_hash)));
     }
-    const OrbitTable full = build_orbit_table_full(N, info);
-    REQUIRE(orbit_table_key_full(N, info) == full.content_hash);
+    const OrbitTable full = build_orbit_table_full_compiled(N, cg);
+    const auto acq_full = acquire_orbit_table_full_compiled(N, cg, dir);
+    REQUIRE(tables_equal(full, *acq_full));
+    REQUIRE(fs::exists(detail::otab_path(dir, full.content_hash)));
+    fs::remove_all(dir);
 }
 
 TEST_CASE("save/load round-trips the OrbitTable bit-identically",
           "[symmetry_cache]") {
     const int N = 12;
-    const SymmetryGroupInfo info =
-        ed::sym::translation_group_with_reflection_1d(N);
     const OrbitTable tab =
-        build_orbit_table_fixed_sz_streaming(N, N / 2, info);
+        build_orbit_table_fixed_sz_streaming(N, N / 2, dihedral(N));
     REQUIRE(!tab.empty());
 
     const std::string dir = scratch_dir("roundtrip");
@@ -87,9 +104,9 @@ TEST_CASE("save/load round-trips the OrbitTable bit-identically",
 TEST_CASE("corrupted / truncated cache files fall back to rebuild",
           "[symmetry_cache]") {
     const int N = 10;
-    const SymmetryGroupInfo info = ed::sym::translation_group_1d(N);
+    const CompiledGroup cg = translations(N);
     const OrbitTable tab =
-        build_orbit_table_fixed_sz_streaming(N, N / 2, info);
+        build_orbit_table_fixed_sz_streaming(N, N / 2, cg);
     const std::string dir = scratch_dir("corrupt");
     REQUIRE(save_orbit_table(tab, dir));
     const std::string path =
@@ -115,7 +132,7 @@ TEST_CASE("corrupted / truncated cache files fall back to rebuild",
         REQUIRE(load_orbit_table(tab.content_hash, dir) == nullptr);
     }
     // acquire still yields a correct table (rebuild path).
-    const auto rebuilt = acquire_orbit_table_fixed_sz(N, N / 2, info, dir);
+    const auto rebuilt = acquire_orbit_table_fixed_sz_compiled(N, N / 2, cg, dir);
     REQUIRE(tables_equal(tab, *rebuilt));
     fs::remove_all(dir);
 }
@@ -123,30 +140,30 @@ TEST_CASE("corrupted / truncated cache files fall back to rebuild",
 TEST_CASE("acquire: in-process registry returns the same shared table",
           "[symmetry_cache]") {
     const int N = 11;  // distinct N so other tests' registry entries don't alias
-    const SymmetryGroupInfo info = ed::sym::translation_group_1d(N);
+    const CompiledGroup cg = translations(N);
 
-    const auto a = acquire_orbit_table_fixed_sz(N, 5, info, /*cache_dir=*/{});
-    const auto b = acquire_orbit_table_fixed_sz(N, 5, info, /*cache_dir=*/{});
+    const auto a = acquire_orbit_table_fixed_sz_compiled(N, 5, cg, /*cache_dir=*/{});
+    const auto b = acquire_orbit_table_fixed_sz_compiled(N, 5, cg, /*cache_dir=*/{});
     REQUIRE(a.get() == b.get());  // same object, zero rebuild
 
     // Different subspace: different table.
-    const auto c = acquire_orbit_table_fixed_sz(N, 4, info, {});
+    const auto c = acquire_orbit_table_fixed_sz_compiled(N, 4, cg, {});
     REQUIRE(c.get() != a.get());
 }
 
 TEST_CASE("acquire: disk hit in a fresh process is simulated via save+load",
           "[symmetry_cache]") {
     const int N = 13;
-    const SymmetryGroupInfo info = ed::sym::translation_group_1d(N);
+    const CompiledGroup cg = translations(N);
     const std::string dir = scratch_dir("diskhit");
 
     // Cold: builds and saves.
-    const auto cold = acquire_orbit_table_fixed_sz(N, 6, info, dir);
+    const auto cold = acquire_orbit_table_fixed_sz_compiled(N, 6, cg, dir);
     REQUIRE(fs::exists(detail::otab_path(dir, cold->content_hash)));
 
     // Simulate a fresh process: bypass the registry by loading directly.
     const auto warm =
-        load_orbit_table(orbit_table_key_fixed_sz(N, 6, info), dir);
+        load_orbit_table(cold->content_hash, dir);
     REQUIRE(warm != nullptr);
     REQUIRE(tables_equal(*cold, *warm));
     fs::remove_all(dir);

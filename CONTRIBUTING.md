@@ -56,7 +56,6 @@ If you want them set automatically every time you configure, copy
   `.clang-format`.
 - `#pragma once` for include guards (no `#ifndef X_H` boilerplate).
 - Use `std::filesystem`, not `system("mkdir -p ...")`.
-- Use `nlohmann::json`, not the bespoke parser in `construct_ham.h`.
 
 ## Tests
 

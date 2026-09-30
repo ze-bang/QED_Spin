@@ -37,7 +37,6 @@
 #include <Eigen/Sparse>
 #include <ed/core/basis_utils.h>
 #include <ed/core/linear_operator.h>
-#include <ed/core/symmetry_metadata.h>
 #include <ed/core/thermal_types.h>  // transitive: solvers/observables, ftlm, etc.
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec.h>
@@ -291,15 +290,6 @@ public:
         if (backend_) backend_->invalidate_caches();
     }
 
-    // ------------------------------------------------------------------
-    // Symmetry-derived metadata. Populated by the streaming/distributed
-    // symmetry pipelines that derive from Operator; the base class only
-    // carries the slots so derived ctors and external diagnostics can
-    // share one symmetry-info type. Empty on a plain Operator.
-    // ------------------------------------------------------------------
-    std::vector<int>  symmetrized_block_ham_sizes;  ///< |basis| per kept sector
-    SymmetryGroupInfo symmetry_info;                ///< max_clique + sectors
-
     uint64_t getNumBits() const { return n_bits_; }
     float    getSpin()    const { return spin_l_; }
 
@@ -382,8 +372,6 @@ public:
           transform_data_(other.transform_data_),
           three_body_data_(other.three_body_data_),
           terms_(other.terms_),
-          symmetrized_block_ham_sizes(other.symmetrized_block_ham_sizes),
-          symmetry_info(other.symmetry_info),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
           terms_fresh_(other.terms_fresh_.load()),
@@ -398,8 +386,6 @@ public:
           transform_data_(std::move(other.transform_data_)),
           three_body_data_(std::move(other.three_body_data_)),
           terms_(std::move(other.terms_)),
-          symmetrized_block_ham_sizes(std::move(other.symmetrized_block_ham_sizes)),
-          symmetry_info(std::move(other.symmetry_info)),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
           terms_fresh_(other.terms_fresh_.load()),
@@ -424,8 +410,6 @@ public:
             terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
-            symmetrized_block_ham_sizes      = other.symmetrized_block_ham_sizes;
-            symmetry_info                    = other.symmetry_info;
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             backend_.reset();
@@ -443,8 +427,6 @@ public:
             terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
-            symmetrized_block_ham_sizes      = std::move(other.symmetrized_block_ham_sizes);
-            symmetry_info                    = std::move(other.symmetry_info);
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             backend_.reset();

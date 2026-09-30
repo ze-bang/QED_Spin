@@ -5,13 +5,7 @@
 # in cmake/EDBlasProfile.cmake):
 #
 #   * Eigen3              REQUIRED   linear algebra (header-only)
-#   * nlohmann/json       REQUIRED   JSON parsing (find_package() with
-#                                    FetchContent fallback to v3.11.3)
 #   * CUDAToolkit         optional   gated by WITH_CUDA
-#
-# Note: nlohmann_json is exposed via link_libraries() so its INTERFACE
-# include directories propagate to every subsequently-defined target.
-# It is header-only, so this carries no link-time symbols.
 #
 # P1.1 / audit Q5.
 # =============================================================================
@@ -19,39 +13,6 @@
 # Find Eigen3
 find_package(Eigen3 REQUIRED)
 include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
-
-# -----------------------------------------------------------------------------
-# nlohmann/json (P0.15 / audit Q8).
-# Replaces three brittle hand-rolled JSON parsers in
-# include/ed/core/construct_ham.h that walked strings with .find('[') / .substr().
-# We prefer a system-installed nlohmann_json (most distros ship it as
-# nlohmann-json3-dev), and fall back to FetchContent for portability on
-# clusters where it is not installed.
-# -----------------------------------------------------------------------------
-find_package(nlohmann_json 3.7.0 QUIET)
-if(NOT nlohmann_json_FOUND)
-    message(STATUS "nlohmann_json not found system-wide; fetching via FetchContent")
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
-        GIT_SHALLOW    TRUE
-    )
-    set(JSON_BuildTests OFF CACHE INTERNAL "")
-    set(JSON_Install    OFF CACHE INTERNAL "")
-    FetchContent_MakeAvailable(nlohmann_json)
-else()
-    message(STATUS "nlohmann_json found: ${nlohmann_json_VERSION}")
-endif()
-
-# nlohmann_json is header-only. We deliberately do NOT use a global
-# `link_libraries(nlohmann_json::nlohmann_json)` here, because that would
-# bake the imported target into INTERFACE_LINK_LIBRARIES of our exported
-# static libraries -- and a fetched target cannot be exported via
-# install(EXPORT). EDLibraries.cmake instead wires nlohmann_json into each
-# library via `$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>`. Downstream
-# consumers refind it via QEDConfig.cmake's find_dependency(nlohmann_json).
 
 # CUDA setup
 if(WITH_CUDA)

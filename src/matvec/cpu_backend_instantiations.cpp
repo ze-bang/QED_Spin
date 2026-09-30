@@ -29,7 +29,6 @@
 
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec_backend.h>
-#include <ed/matvec/symmetry_basis_policy.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/term_storage.h>
 

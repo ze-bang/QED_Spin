@@ -50,34 +50,6 @@
 
 namespace ed::symmetry {
 
-// ---------------------------------------------------------------------------
-// Cache keys WITHOUT building the table (CompiledGroup compilation is
-// microseconds). Must match the content_hash the builders stamp -- pinned
-// by tests/unit/test_symmetry_cache.cpp.
-// ---------------------------------------------------------------------------
-[[nodiscard]] inline std::uint64_t
-orbit_table_key_fixed_sz(std::uint64_t n_bits, int n_up,
-                         const SymmetryGroupInfo& info) {
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
-    return cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL)
-        ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
-}
-
-[[nodiscard]] inline std::uint64_t
-orbit_table_key_full(std::uint64_t n_bits, const SymmetryGroupInfo& info) {
-    const CompiledGroup cg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(info.max_clique[0].size()));
-    return cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL);
-}
 
 namespace detail {
 
@@ -351,25 +323,9 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
 // ---------------------------------------------------------------------------
 // Acquire front-ends. ``cache_dir == ""`` -> registry only (no disk).
 // ---------------------------------------------------------------------------
-[[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_orbit_table_fixed_sz(std::uint64_t n_bits, int n_up,
-                             const SymmetryGroupInfo& info,
-                             const std::string& cache_dir = {}) {
-    const auto vg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(n_bits));
-    return detail::acquire_impl(
-        orbit_table_key_fixed_sz(n_bits, n_up, info), cache_dir,
-        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, info); },
-        [&](const OrbitTable& t) {
-            return detail::orbit_table_consistent(t, vg, n_bits, n_up, -1);
-        });
-}
-
-/// Stage 5b: acquire with a caller-supplied CompiledGroup (flip-extended
-/// lanes). Same key formula as the info-based fixed-Sz path, so the disk
-/// cache + registry work identically (the flip elements change the group
+/// Acquire the fixed-Sz orbit table of a CompiledGroup (possibly
+/// flip-extended). The key is computed without building the table, so the
+/// disk cache + registry are consulted first (flip elements change the group
 /// hash and therefore the key).
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
@@ -385,22 +341,6 @@ acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
         [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); },
         [&](const OrbitTable& t) {
             return detail::orbit_table_consistent(t, cg, n_bits, n_up, -1);
-        });
-}
-
-[[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_orbit_table_full(std::uint64_t n_bits,
-                         const SymmetryGroupInfo& info,
-                         const std::string& cache_dir = {}) {
-    const auto vg = info.max_clique.empty()
-        ? CompiledGroup{}
-        : CompiledGroup::from_permutations(
-              info.max_clique, static_cast<int>(n_bits));
-    return detail::acquire_impl(
-        orbit_table_key_full(n_bits, info), cache_dir,
-        [&] { return build_orbit_table_full(n_bits, info); },
-        [&](const OrbitTable& t) {
-            return detail::orbit_table_consistent(t, vg, n_bits, -1, -1);
         });
 }
 

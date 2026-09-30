@@ -2,34 +2,22 @@
 // src/dssf/cross_sector_orbit_observable.cpp
 //
 // Implementation of ed::dssf::CrossSectorOrbitObservable. See the
-// header for the math; this file is the inner hot loop.
+// header for the math; this file is the inner hot loop:
 //
-// The algorithm mirrors `StreamingSymmetryOperator::applyHamiltonianTermsFullSpace`
-// (the same-sector matvec inner loop in
-// `include/ed/core/streaming_symmetry.h`) but routes the projection
-// through the *destination* sector's orbit basis instead of the
-// source sector's:
-//
-//   for each input orbit-basis index alpha in [0, dim_src):
-//     c_alpha = in[alpha]
-//     for each (s, alpha_s) in orbit_alpha (source sector):
-//       weighted = c_alpha * alpha_s / norm_alpha
+//   for each source rep index alpha in [0, dim_src):
+//     for each group element g of the source sector:
+//       s = g(rep_alpha), weighted = conj(chi(g)) / norm_alpha
 //       for each transform T in transforms_:
 //         (s', h) = apply T to s        // bit-flip / Sz-sign action
-//         k = dst.lookupBasisIndex(dst_sector, s')
-//         if k == kNotFound: skip
-//         beta_s' = dst.sector(dst_sector).basis_states[k].findCoeff(s')
-//         out[k] += weighted * h * conj(beta_s') * group_norm / norm_k
-//
-// This is the SOTA spectral-function building block that closes the
-// cross-irrep gap in docs/architecture/SYMMETRY.md Section 3.
+//         (k, proj) = dst.index_and_projection(s')
+//         if k < 0: skip
+//         A[k, alpha] += weighted * h * proj * group_norm
 // =============================================================================
 
 #include <ed/dssf/cross_sector_orbit_observable.h>
 
 #include <ed/config/env_registry.h>
 #include <ed/core/basis_utils.h>          // popcount (defensive, mirrors CrossSectorObservable)
-#include <ed/core/sorted_uint64_index.h>  // SortedUint64Index::kNotFound
 #include <ed/matvec/symmetry_matvec_backend.h>  // rep_policy_from (Stage 8d)
 
 #include <algorithm>
@@ -109,11 +97,11 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
     }
     group_norm_ = 1.0 / std::sqrt(static_cast<double>(G)
                                   * static_cast<double>(Gd));
-    // Stage 8d: build the POD policy views once. The rep-lane inner loops
-    // regenerate the orbit / projection arithmetically through these.
-    if (src_.is_rep()) src_pol_ = ed::matvec::rep_policy_from(*src_.rd);
-    if (dst_.is_rep()) dst_pol_ = ed::matvec::rep_policy_from(*dst_.rd);
-    if ((src_.is_rep() && G > 256) || (dst_.is_rep() && G > 256)) {
+    // Build the POD policy views once; the inner loops regenerate the orbit /
+    // projection arithmetically through these.
+    src_pol_ = ed::matvec::rep_policy_from(*src_.rd);
+    dst_pol_ = ed::matvec::rep_policy_from(*dst_.rd);
+    if (G > 256) {
         throw std::invalid_argument(
             "CrossSectorOrbitObservable: rep-lane refs support group_size "
             "<= 256 (index_and_projection stack buffer).");
@@ -213,75 +201,32 @@ inline TermResult applyOneTerm(
 // ---------------------------------------------------------------------------
 template <class Emit>
 void CrossSectorOrbitObservable::walk_columns_(Emit&& emit) const {
-    const SymmetrySector* src_sec =
-        src_.is_rep() ? nullptr : &src_.sector(src_sector_);
-    const SymmetrySector* dst_sec =
-        dst_.is_rep() ? nullptr : &dst_.sector(dst_sector_);
     const double S = static_cast<double>(spin_l_);
-    const bool src_rep = src_.is_rep();
-    const bool dst_rep = dst_.is_rep();
-    const int  G_src   = static_cast<int>(src_.group_size());
+    const int  G_src = static_cast<int>(src_.group_size());
 
     #pragma omp parallel
     {
-        // Destination projection, shared by both source lanes. Orbit lane:
-        // sorted-index lookup + findCoeff; rep lane: index_and_projection
-        // (identical arithmetic, pinned by test_rep_cross_sector.cpp).
+        // Destination projection: index_and_projection of the target rep policy.
         auto scatter_dst = [&](std::uint64_t alpha, Complex weighted, std::uint64_t s_prime) {
-            if (dst_rep) {
-                Complex proj;
-                const std::int64_t k =
-                    dst_pol_.index_and_projection(s_prime, proj);
-                if (k < 0) return;
-                emit(alpha, static_cast<std::size_t>(k), weighted * proj * group_norm_);
-                return;
-            }
-            const std::size_t k = dst_.lookupBasisIndex(dst_sector_, s_prime);
-            if (k == ed::core::SortedUint64Index::kNotFound) return;
-            const auto& state_k = dst_sec->basis_states[k];
-            if (!(state_k.norm > 0.0)) return;
-            const Complex beta_s_prime = state_k.findCoeff(s_prime);
-            // Same projection formula as applyHamiltonianTermsFullSpace
-            // (streaming_symmetry.h:1288) with the destination orbit
-            // basis providing beta_s_prime / norm_k.
-            emit(alpha, k, weighted * std::conj(beta_s_prime) * group_norm_ / state_k.norm);
+            Complex proj;
+            const std::int64_t k = dst_pol_.index_and_projection(s_prime, proj);
+            if (k < 0) return;
+            emit(alpha, static_cast<std::size_t>(k), weighted * proj * group_norm_);
         };
 
         #pragma omp for schedule(dynamic, 64)
         for (std::int64_t ia = 0; ia < static_cast<std::int64_t>(dim_src_); ++ia) {
             const std::uint64_t alpha = static_cast<std::uint64_t>(ia);
-            if (src_rep) {
-                // Rep lane: regenerate the source orbit per group element.
-                // The per-state expansion coefficient alpha_s of the orbit
-                // basis is sum_{g: g(rep)=s} conj(chi(g)); summing per-g is
-                // the same sum without the dedup.
-                const std::uint64_t rep = src_pol_.state_of(alpha);
-                const double inv_norm_alpha = src_pol_.inv_norm_of(alpha);
-                for (int g = 0; g < G_src; ++g) {
-                    const std::uint64_t s = src_pol_.apply_perm(rep, g);
-                    const Complex chi_g   = src_pol_.characters[g];
-                    const Complex weighted = std::conj(chi_g) * inv_norm_alpha;
-                    for (const auto& t : transforms_) {
-                        const TermResult r = applyOneTerm(s, t, S);
-                        if (r.valid) scatter_dst(alpha, weighted * r.amp, r.s_prime);
-                    }
-                }
-                continue;
-            }
-
-            const auto& state_alpha = src_sec->basis_states[alpha];
-            const double norm_alpha = state_alpha.norm;
-            if (!(norm_alpha > 0.0)) continue;
-
-            // Walk the orbit of the source basis state, mirroring
-            // streaming_symmetry.h:467-477 (same expansion that the
-            // same-sector matvec uses).
-            const std::size_t orbit_sz = state_alpha.orbit_elements.size();
-            for (std::size_t orbit_idx = 0; orbit_idx < orbit_sz; ++orbit_idx) {
-                const std::uint64_t s        = state_alpha.orbit_elements[orbit_idx];
-                const Complex       alpha_s  = state_alpha.orbit_coefficients[orbit_idx];
-                if (std::abs(alpha_s) < 1e-15) continue;
-                const Complex weighted = alpha_s / norm_alpha;
+            // Regenerate the source orbit per group element. The per-state
+            // expansion coefficient of the orbit basis is
+            // sum_{g: g(rep)=s} conj(chi(g)); summing per-g is the same sum
+            // without the dedup.
+            const std::uint64_t rep = src_pol_.state_of(alpha);
+            const double inv_norm_alpha = src_pol_.inv_norm_of(alpha);
+            for (int g = 0; g < G_src; ++g) {
+                const std::uint64_t s = src_pol_.apply_perm(rep, g);
+                const Complex chi_g   = src_pol_.characters[g];
+                const Complex weighted = std::conj(chi_g) * inv_norm_alpha;
                 for (const auto& t : transforms_) {
                     const TermResult r = applyOneTerm(s, t, S);
                     if (r.valid) scatter_dst(alpha, weighted * r.amp, r.s_prime);

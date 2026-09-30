@@ -24,7 +24,6 @@
 #include <utility>
 
 #include <ed/matvec/matvec_backend.h>
-#include <ed/matvec/symmetry_basis_policy.h>
 #include <ed/matvec/rep_symmetry_basis_policy.h>
 #include <ed/symmetry/rep_sector_data.h>
 

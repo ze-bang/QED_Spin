@@ -5,33 +5,31 @@
 // the CPU on-the-fly representative SpMV
 // (``ed::matvec::make_cpu_rep_symmetry_backend`` +
 // ``CpuMatVecBackend<RepSymmetryBasisPolicy>`` driving the dedicated
-// ``apply_terms_rep_symmetry`` kernel) reproduces the orbit-CSR reference
-// matvec (legacy ``FixedSzStreamingSymmetryOperator::applySymmetrizedFixedSz``
-// AND the unified ``CpuMatVecBackend<SymmetryBasisPolicy>``) to ~1e-12 in
-// EVERY momentum sector, on random complex vectors -- WITHOUT materialising
-// the per-sector orbit CSR (the rep backend is built from the CSR-free
-// ``getRepSectorData``).
+// ``apply_terms_rep_symmetry`` kernel) reproduces an INDEPENDENT reference
+// to ~1e-12 in EVERY momentum sector, on random complex vectors: each
+// symmetric basis state is expanded over the full 2^N basis
+// (``applyPermutation`` + characters), the full-space ``Operator`` is
+// applied, and the result is projected back. The rep data come from the
+// CSR-free orbit table, exactly as the little-group engine builds them.
 //
-// This is the bottom-up "rep matvec == CSR matvec" gate. The
+// This is the bottom-up "rep matvec == full-space matvec" gate. The
 // (Sz x irrep) spectrum-union == dense gate lives at the Python/integration
-// level (Phase 2/3).
+// level.
 // =============================================================================
 
 #include "common/catch2_harness.h"
-#include "common/symmetry_reference.h"
 
+#include <ed/core/basis_utils.h>      // applyPermutation
 #include <ed/core/operator.h>
+#include <ed/matvec/reduced_symmetry_csr.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/rep_symmetry_basis_policy.h>
 #include <ed/matvec/term_storage.h>
-#include <ed/symmetry/projector.h>
-#include <ed/symmetry/rep_sector_data.h>
-#include <ed/symmetry/sector_basis.h>
+#include <ed/symmetry/compiled_group.h>
+#include <ed/symmetry/group.h>
 #include <ed/symmetry/orbit_table.h>
-#include <ed/symmetry/subspace.h>
-
-#include <functional>
+#include <ed/symmetry/rep_sector_data.h>
 
 #include <algorithm>
 #include <chrono>
@@ -40,93 +38,75 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <vector>
 
 using namespace ed_tests;
 
 namespace {
 
-// CSR-free rep description of an already-built sector: only orbit_rep + norm of
-// each basis state, plus the group's characters and flattened permutations.
-// n_up stays -1 unless every representative shares one popcount.
-ed::symmetry::RepSectorData rep_sector_data_from_sector(const ::SymmetrySector&  sec,
-                                                        const SymmetryGroupInfo& info,
-                                                        int                      n_sites) {
+// Z_N ring translations T^m (element m = 0 .. N-1).
+std::vector<std::vector<int>> zn_elements(int N) {
+    std::vector<std::vector<int>> e;
+    for (int m = 0; m < N; ++m) e.push_back(ed::sym::translation(N, m));
+    return e;
+}
+
+// Characters of momentum sector k: chi_k(T^m) = exp(2 pi i k m / N).
+std::vector<Complex> zn_characters(int N, int k) {
+    std::vector<Complex> chi;
+    const double two_pi = 2.0 * std::acos(-1.0);
+    for (int m = 0; m < N; ++m) chi.push_back(std::polar(1.0, two_pi * k * m / N));
+    return chi;
+}
+
+// Fixed-Sz orbit table of the ring (min-image representatives + stabilizers).
+ed::symmetry::OrbitTable zn_orbit_table(int N, std::int64_t n_up) {
+    return ed::symmetry::build_orbit_table_fixed_sz_streaming(
+        static_cast<std::uint64_t>(N), static_cast<int>(n_up),
+        ed::symmetry::CompiledGroup::from_permutations(zn_elements(N), N));
+}
+
+// CSR-free rep data of momentum sector k: surviving representatives with
+// their closed-form norms (the little-group engine's recipe).
+ed::symmetry::RepSectorData zn_sector(const ed::symmetry::OrbitTable& tab,
+                                      int N, std::int64_t n_up, int k) {
     ed::symmetry::RepSectorData d;
-    d.n_sites    = n_sites;
-    d.group_size = static_cast<int>(info.max_clique.size());
-    d.reps.reserve(sec.basis_states.size());
-    d.inv_norms.reserve(sec.basis_states.size());
-    int  n_up    = -1;
-    bool uniform = true;
-    for (const auto& bs : sec.basis_states) {
-        d.reps.push_back(bs.orbit_rep);
-        d.inv_norms.push_back(bs.norm > 0.0 ? 1.0 / bs.norm : 0.0);
-        const int pc = __builtin_popcountll(bs.orbit_rep);
-        if (n_up < 0) n_up = pc;
-        else if (pc != n_up) uniform = false;
+    d.n_sites    = N;
+    d.group_size = N;
+    d.n_up       = static_cast<int>(n_up);
+    d.characters = zn_characters(N, k);
+    for (const auto& p : zn_elements(N))
+        d.perms_flat.insert(d.perms_flat.end(), p.begin(), p.end());
+    for (std::size_t i = 0; i < tab.size(); ++i) {
+        const double nsq = ed::symmetry::projected_norm_sq(tab, i, d.characters);
+        if (nsq <= 1e-12) continue;
+        d.reps.push_back(tab.reps[i]);
+        d.inv_norms.push_back(1.0 / std::sqrt(nsq));
     }
-    d.n_up = uniform ? n_up : -1;
-    if (!info.power_representation.empty() && !sec.phase_factors.empty())
-        d.characters = ed::symmetry::sector_characters_from(info, sec.phase_factors);
-    d.perms_flat = ed::symmetry::flatten_group_perms(info, n_sites);
     return d;
 }
 
-std::vector<int> translation_perm(int N, int shift) {
-    std::vector<int> p(N);
-    for (int i = 0; i < N; ++i) p[i] = ((i - shift) % N + N) % N;
-    return p;
-}
-
-void write_zN_translation_fixtures(const std::string& dir, int N) {
-    const std::string root = dir + "/automorphism_results";
-    std::error_code ec;
-    std::filesystem::create_directories(root, ec);
-    {
-        std::ofstream f(root + "/max_clique.json");
-        f << "[";
-        for (int g = 0; g < N; ++g) {
-            const auto p = translation_perm(N, g);
-            f << "[";
-            for (size_t i = 0; i < p.size(); ++i) {
-                f << p[i] << (i + 1 < p.size() ? "," : "");
-            }
-            f << "]" << (g + 1 < N ? "," : "");
-        }
-        f << "]";
-    }
-    {
-        std::ofstream f(root + "/minimal_generators.json");
-        const auto p = translation_perm(N, 1);
-        f << "{\"generators\":[{\"permutation\":[";
-        for (size_t i = 0; i < p.size(); ++i) {
-            f << p[i] << (i + 1 < p.size() ? "," : "");
-        }
-        f << "],\"order\":" << N << "}]}";
-    }
-    {
-        std::ofstream f(root + "/sector_metadata.json");
-        f << std::setprecision(17);
-        f << "{\"sectors\":[";
-        for (int k = 0; k < N; ++k) {
-            const double angle = -2.0 * M_PI * static_cast<double>(k) /
-                                 static_cast<double>(N);
-            const double re = std::cos(angle);
-            const double im = std::sin(angle);
-            f << "{\"sector_id\":" << k
-              << ",\"quantum_numbers\":[" << k << "]"
-              << ",\"phase_factors\":[{\"real\":" << re
-              << ",\"imag\":" << im << "}]}";
-            if (k + 1 < N) f << ",";
-        }
-        f << "]}";
+// Independent reference: out = (1/|G|) P^dagger H P in, with the columns of P
+// the expanded symmetric states inv_norm_j * sum_g conj(chi(g)) |g(r_j)>.
+void apply_rep_reference(const ed::symmetry::RepSectorData& rd,
+                         const Operator& H, const Complex* in, Complex* out) {
+    const std::uint64_t full = 1ULL << rd.n_sites;
+    const auto elems = zn_elements(rd.n_sites);
+    const std::size_t dim = rd.reps.size();
+    std::vector<Complex> psi(full, Complex(0.0, 0.0)), phi(full, Complex(0.0, 0.0));
+    for (std::size_t j = 0; j < dim; ++j)
+        for (std::size_t g = 0; g < elems.size(); ++g)
+            psi[applyPermutation(rd.reps[j], elems[g])] +=
+                in[j] * rd.inv_norms[j] * std::conj(rd.characters[g]);
+    H.apply(psi.data(), phi.data(), full);
+    const double group_norm = 1.0 / static_cast<double>(elems.size());
+    for (std::size_t k = 0; k < dim; ++k) {
+        Complex acc(0.0, 0.0);
+        for (std::size_t g = 0; g < elems.size(); ++g)
+            acc += rd.characters[g] * phi[applyPermutation(rd.reps[k], elems[g])];
+        out[k] = acc * (group_norm * rd.inv_norms[k]);
     }
 }
 
@@ -175,11 +155,6 @@ TermView_t make_term_view(const ed::matvec::TermStorage& soa,
 }
 
 void run_case(int N, std::int64_t n_up) {
-    std::string dir = make_scratch_dir(
-        "rep_symmetry_backend",
-        "heis_N" + std::to_string(N) + "_nup" + std::to_string(n_up));
-    write_zN_translation_fixtures(dir, N);
-
     auto full_op = build_heisenberg_pbc_full(
         static_cast<std::uint64_t>(N), 1.0);
 
@@ -189,41 +164,14 @@ void run_case(int N, std::int64_t n_up) {
         [](const Complex& c) { return c; });
     const TermView_t tv = make_term_view(soa, /*spin_l=*/0.5, /*is_real=*/true);
 
-    SymmetryGroupInfo info;
-    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
-    const ed::symmetry::FixedSzSubspace fixed =
-        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N),
-                                             n_up);
-    const ed::symmetry::SpatialProjector spatial(info);
-    const std::vector<std::uint64_t> reps =
-        ed::symmetry::build_orbit_table_fixed_sz_streaming(
-            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
-    const double group_size =
-        static_cast<double>(info.max_clique.size());
+    const ed::symmetry::OrbitTable tab = zn_orbit_table(N, n_up);
 
-    std::function<void(const Complex*, Complex*, std::size_t)> full_apply =
-        [&full_op](const Complex* x, Complex* y, std::size_t n) {
-            full_op->apply(x, y, n);
-        };
-
-    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
-        // Carrier-free owning SectorBasis over the fixed-Sz subspace.
-        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
-            fixed, spatial,
-            info.sectors[s].quantum_numbers,
-            info.sectors[s].phase_factors,
-            reps, /*sector_id=*/s);
-        const std::size_t sd = sb.dim();
+    for (int k = 0; k < N; ++k) {
+        ed::symmetry::RepSectorData rd = zn_sector(tab, N, n_up, k);
+        const std::size_t sd = rd.reps.size();
         if (sd == 0) continue;
-
-        // CSR-free rep data (reads only orbit_rep + norm from the sector).
-        ed::symmetry::RepSectorData rd =
-            rep_sector_data_from_sector(sb.sector(), info, N);
-        INFO("sector " << s << " dim " << sd
-             << " rep dim " << rd.reps.size()
-             << " usable " << rd.usable());
+        INFO("sector " << k << " dim " << sd << " usable " << rd.usable());
         REQUIRE(rd.usable());
-        REQUIRE(rd.reps.size() == sd);
 
         auto backend = ed::matvec::make_cpu_rep_symmetry_backend<
             ed::matvec::DiagOneBody, ed::matvec::OffDiagOneBody,
@@ -236,15 +184,13 @@ void run_case(int N, std::int64_t n_up) {
             if (probe == 0) {
                 std::fill(x.begin(), x.end(), Complex(1.0, 0.0));
             } else {
-                x = random_unit_vector(sd, (s + 7) * 1000003ULL + probe * 17 + N);
+                x = random_unit_vector(sd, (k + 7) * 1000003ULL + probe * 17 + N);
             }
 
             std::vector<Complex> y_ref(sd, Complex(0.0, 0.0));
             std::vector<Complex> y_rep(sd, Complex(0.0, 0.0));
 
-            ed_tests::apply_symmetrized_reference(
-                sb.sector(), static_cast<std::uint64_t>(N), group_size,
-                full_apply, x.data(), y_ref.data(), sd);
+            apply_rep_reference(rd, *full_op, x.data(), y_ref.data());
             backend->apply_complex(&tv, x.data(), y_rep.data(), sd);
 
             double max_abs_diff = 0.0;
@@ -253,7 +199,7 @@ void run_case(int N, std::int64_t n_up) {
                 max_abs_diff = std::max(max_abs_diff, std::abs(y_rep[i] - y_ref[i]));
                 ref_scale    = std::max(ref_scale, std::abs(y_ref[i]));
             }
-            INFO("sector " << s << " probe " << probe
+            INFO("sector " << k << " probe " << probe
                  << " max_abs_diff " << max_abs_diff
                  << " ref_scale " << ref_scale);
             REQUIRE(max_abs_diff < 1e-11 * (1.0 + ref_scale));
@@ -270,35 +216,19 @@ void run_case(int N, std::int64_t n_up) {
 // IDENTICAL matvec as the O(log dim) binary-search fallback.
 // ---------------------------------------------------------------------------
 void run_parity_case(int N, std::int64_t n_up) {
-    std::string dir = make_scratch_dir(
-        "rep_symmetry_parity",
-        "heis_N" + std::to_string(N) + "_nup" + std::to_string(n_up));
-    write_zN_translation_fixtures(dir, N);
-
     auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
         soa, full_op->transform_data_, full_op->three_body_data_,
         [](const Complex& c) { return c; });
 
-    SymmetryGroupInfo info;
-    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
-    const ed::symmetry::FixedSzSubspace fixed =
-        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
-    const ed::symmetry::SpatialProjector spatial(info);
-    const std::vector<std::uint64_t> reps =
-        ed::symmetry::build_orbit_table_fixed_sz_streaming(
-            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
+    const ed::symmetry::OrbitTable tab = zn_orbit_table(N, n_up);
+    const std::vector<std::uint64_t>& reps = tab.reps;
 
-    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
-        ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
-            fixed, spatial, info.sectors[s].quantum_numbers,
-            info.sectors[s].phase_factors, reps, /*sector_id=*/s);
-        const std::size_t sd = sb.dim();
+    for (int k = 0; k < N; ++k) {
+        ed::symmetry::RepSectorData rd = zn_sector(tab, N, n_up, k);
+        const std::size_t sd = rd.reps.size();
         if (sd == 0) continue;
-
-        ed::symmetry::RepSectorData rd =
-            rep_sector_data_from_sector(sb.sector(), info, N);
         REQUIRE(rd.usable());
 
         // Binary-search policy (no rank table).
@@ -309,7 +239,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             std::vector<Complex> x =
                 (probe == 0)
                     ? std::vector<Complex>(sd, Complex(1.0, 0.0))
-                    : random_unit_vector(sd, (s + 11) * 2654435761ULL + probe + N);
+                    : random_unit_vector(sd, (k + 11) * 2654435761ULL + probe + N);
 
             std::vector<Complex> y_scatter(sd, Complex(0.0, 0.0));
             std::vector<Complex> y_gather(sd, Complex(0.0, 0.0));
@@ -331,13 +261,13 @@ void run_parity_case(int N, std::int64_t n_up) {
                 gs_diff = std::max(gs_diff, std::abs(y_gather[i] - y_scatter[i]));
                 scale   = std::max(scale, std::abs(y_scatter[i]));
             }
-            INFO("GATHER==SCATTER sector " << s << " probe " << probe
+            INFO("GATHER==SCATTER sector " << k << " probe " << probe
                  << " diff " << gs_diff << " scale " << scale);
             REQUIRE(gs_diff < 1e-11 * (1.0 + scale));
 
             // O(1) rank-table path must equal the binary-search GATHER exactly.
             ed::symmetry::RepSectorData rd_tab =
-                rep_sector_data_from_sector(sb.sector(), info, N);
+                zn_sector(tab, N, n_up, k);
             rd_tab.build_rank_table();
             REQUIRE(rd_tab.has_rank_table());
             const auto pol_tab = ed::matvec::rep_policy_from(rd_tab);
@@ -354,7 +284,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             for (std::size_t i = 0; i < sd; ++i) {
                 tab_diff = std::max(tab_diff, std::abs(y_gather_tab[i] - y_gather[i]));
             }
-            INFO("O(1) vs O(log) GATHER sector " << s << " diff " << tab_diff);
+            INFO("O(1) vs O(log) GATHER sector " << k << " diff " << tab_diff);
             REQUIRE(tab_diff < 1e-13 * (1.0 + scale));
 
             // Stage 2b (SymmetryEngine v2): the rep-assembled reduced CSR
@@ -373,7 +303,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             for (std::size_t i = 0; i < sd; ++i) {
                 csr_diff = std::max(csr_diff, std::abs(y_csr[i] - y_gather[i]));
             }
-            INFO("rep-CSR vs GATHER sector " << s << " diff " << csr_diff);
+            INFO("rep-CSR vs GATHER sector " << k << " diff " << csr_diff);
             REQUIRE(csr_diff < 1e-12 * (1.0 + scale));
 
             // Stage 4 (SymmetryEngine v2): the two-level shared-rank lookup
@@ -381,7 +311,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             // reproduce the binary-search GATHER exactly (same lookup result
             // -> identical arithmetic).
             ed::symmetry::RepSectorData rd_two =
-                rep_sector_data_from_sector(sb.sector(), info, N);
+                zn_sector(tab, N, n_up, k);
             rd_two.shared_rank = ed::symmetry::make_shared_rank_lookup(
                 reps, N, static_cast<int>(n_up));
             REQUIRE(rd_two.shared_rank != nullptr);
@@ -411,7 +341,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             for (std::size_t i = 0; i < sd; ++i) {
                 two_diff = std::max(two_diff, std::abs(y_two[i] - y_gather[i]));
             }
-            INFO("two-level vs binary-search GATHER sector " << s
+            INFO("two-level vs binary-search GATHER sector " << k
                  << " diff " << two_diff);
             REQUIRE(two_diff == 0.0);
         }
@@ -438,32 +368,15 @@ TEST_CASE("rep_symmetry_backend: dense-vector GATHER vs SCATTER throughput",
     };
     const int N = env_int("ED_BENCH_N", 20);
     const std::int64_t n_up = env_int("ED_BENCH_NUP", N / 2);
-    std::string dir = make_scratch_dir("rep_symmetry_bench",
-                                       "heis_N" + std::to_string(N) +
-                                       "_nup" + std::to_string(n_up));
-    write_zN_translation_fixtures(dir, N);
-
     auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
         soa, full_op->transform_data_, full_op->three_body_data_,
         [](const Complex& c) { return c; });
 
-    SymmetryGroupInfo info;
-    REQUIRE_NOTHROW(info.loadFromDirectory(dir));
-    const ed::symmetry::FixedSzSubspace fixed =
-        ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
-    const ed::symmetry::SpatialProjector spatial(info);
-    const std::vector<std::uint64_t> reps =
-        ed::symmetry::build_orbit_table_fixed_sz_streaming(
-            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
-
     // Largest sector (k=0).
-    ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
-        fixed, spatial, info.sectors[0].quantum_numbers,
-        info.sectors[0].phase_factors, reps, 0);
-    ed::symmetry::RepSectorData rd =
-        rep_sector_data_from_sector(sb.sector(), info, N);
+    const ed::symmetry::OrbitTable tab = zn_orbit_table(N, n_up);
+    ed::symmetry::RepSectorData rd = zn_sector(tab, N, n_up, 0);
     rd.build_rank_table();
     const auto pol = ed::matvec::rep_policy_from(rd);
     const std::size_t sd = rd.reps.size();
@@ -534,14 +447,14 @@ TEST_CASE("rep_symmetry_backend: GATHER == SCATTER + O(1) rank-table parity "
     run_parity_case(8, 3);
 }
 
-TEST_CASE("rep_symmetry_backend: CPU rep matvec matches orbit-CSR reference "
+TEST_CASE("rep_symmetry_backend: CPU rep matvec matches the full-space reference "
           "(N=6, n_up=3)",
           "[symmetry][matvec_backend][rep][N6]")
 {
     run_case(6, 3);
 }
 
-TEST_CASE("rep_symmetry_backend: CPU rep matvec matches orbit-CSR reference "
+TEST_CASE("rep_symmetry_backend: CPU rep matvec matches the full-space reference "
           "(N=8, n_up=4 and n_up=3)",
           "[symmetry][matvec_backend][rep][N8]")
 {

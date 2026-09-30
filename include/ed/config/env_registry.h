@@ -70,8 +70,6 @@ struct Row {
       "=0 forces binary-search rank lookup, =1 forces the dense combinadic rank table regardless of budget")\
     X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "8.0",              \
       "Memory budget for the per-sector dense int32 rank table")               \
-    X("ED_SYM_REQUIRE_ABELIAN", Flag, "symmetry", "false (auto-restrict)",     \
-      "=1 makes a non-abelian generator set a hard error instead of auto-restricting to a maximal abelian subgroup")\
     X("ED_SYM_SU2_REPROJECT_FREQ", Integer, "symmetry", "1",                   \
       "Lowdin drift-scrub cadence: project every k-th wrapped apply; 0 = seed projection only")\
     X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \

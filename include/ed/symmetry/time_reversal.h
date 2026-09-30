@@ -16,7 +16,7 @@
 //     spec(H | k)  ==  spec(H | -k),    dim(k) == dim(-k),
 //     Z_k(beta)    ==  Z_{-k}(beta).
 //
-// The sector loop therefore solves ONE member of each conjugate pair
+// The sector walk therefore solves ONE member of each conjugate pair
 // {k, -k} and copies the result to the partner; self-conjugate sectors
 // (real characters: k = 0, k = pi, parity irreps) additionally take the
 // existing real-Hermitian fast path (`is_real_hermitian()` already
@@ -35,7 +35,6 @@
 #include <cstdlib>
 #include <vector>
 
-#include <ed/core/symmetry_metadata.h>  // SymmetryGroupInfo
 #include <ed/matvec/term_storage.h>
 
 namespace ed::symmetry {
@@ -56,37 +55,6 @@ hamiltonian_is_real(const ed::matvec::TermStorage& t,
     for (const auto& x : t.offdiag_two_body) if (!ok(x.coefficient)) return false;
     for (const auto& x : t.three_body)       if (!ok(x.coefficient)) return false;
     return true;
-}
-
-/// Conjugate-sector pairing: partner[s] = index of the sector whose
-/// per-generator phase factors are the complex conjugates of sector s's
-/// (i.e. the -k sector), or -1 when no match is found (malformed
-/// metadata -- callers must then skip pairing for s). Self-conjugate
-/// sectors (real characters) map to themselves.
-[[nodiscard]] inline std::vector<std::int32_t>
-conjugate_sector_pairing(const SymmetryGroupInfo& info,
-                         double tol = 1e-10) {
-    const std::size_t n = info.sectors.size();
-    std::vector<std::int32_t> partner(n, -1);
-    for (std::size_t s = 0; s < n; ++s) {
-        const auto& pf = info.sectors[s].phase_factors;
-        for (std::size_t t = 0; t < n; ++t) {
-            const auto& qf = info.sectors[t].phase_factors;
-            if (qf.size() != pf.size()) continue;
-            bool match = true;
-            for (std::size_t g = 0; g < pf.size(); ++g) {
-                if (std::abs(qf[g] - std::conj(pf[g])) > tol) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) {
-                partner[s] = static_cast<std::int32_t>(t);
-                break;
-            }
-        }
-    }
-    return partner;
 }
 
 }  // namespace ed::symmetry

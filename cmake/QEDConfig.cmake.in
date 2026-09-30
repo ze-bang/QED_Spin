@@ -39,11 +39,6 @@ if(NOT TARGET Eigen3::Eigen)
     find_dependency(Eigen3 NO_MODULE)
 endif()
 
-# nlohmann_json (used by construct_ham loaders).
-if(NOT TARGET nlohmann_json::nlohmann_json)
-    find_dependency(nlohmann_json)
-endif()
-
 if(QED_WITH_CUDA)
     find_dependency(CUDAToolkit)
 endif()

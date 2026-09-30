@@ -1,62 +1,22 @@
 // =============================================================================
 // include/ed/symmetry/group.h
 //
-// `ed::sym` -- a small, programmatic DSL for building site-permutation
-// symmetry groups without going through the JSON detour
-// (`automorphism_results/{max_clique, minimal_generators,
-// sector_metadata}.json`) that the legacy `automorphism_finder.py`
-// pipeline assumes (P2.11 / audit §3.10).
-//
-// Why?
-// ----
-// The existing engine consumes a fully-elaborated `SymmetryGroupInfo`
-// (defined in `ed/core/construct_ham.h`): the full `max_clique` of group
-// elements, the minimal `generators` + their orders, the corresponding
-// `power_representation`, and the desired list of irrep `sectors`.
-// Today users get there in two ways:
-//
-//   1. They write a `connectivity_graph.json`, run
-//      `automorphism_finder.py`, then point the C++ engine at the
-//      resulting `automorphism_results/` directory.
-//   2. They open the `SymmetryGroupInfo` struct manually and fill its
-//      seven public fields by hand, with no validation.
-//
-// Path 1 is heavyweight (Python, Nauty, JSON, file I/O) and path 2 is a
-// landmine (you have to know the conventions for the BFS-based
-// `power_representation` and the abelian sector enumeration).
-//
-// The DSL below covers the four cases that account for ~95% of
-// collaborator usage:
-//
-//   * 1D translation group  (`translation_group_1d(N)`)
-//   * 1D translation × reflection D_N
-//     (`translation_group_with_reflection_1d(N)`)
-//   * arbitrary point group from a list of permutation generators
-//     (`group_from_generators(N, gens, [gen_orders])`)
-//   * Z2 spatial inversion (`reflection_1d(N)`) -- the single-generator
-//     building block that powers the others
-//
-// All builders return a `SymmetryGroupInfo` ready to be assigned to
-// `Operator::symmetry_info` (or `FixedSzOperator::symmetry_info`); from
-// that point on, the existing `generateSymmetrySectors*` machinery
-// works unchanged.
+// `ed::sym` -- a small, programmatic DSL for site-permutation groups
+// (P2.11 / audit §3.10): the permutation algebra (identity / validate /
+// compose / power / order), the common builders (translation,
+// reflection_1d, site_swap) and `generate_group`, which closes a list of
+// generators into the full group. Exposed to Python as `qed._core.sym`.
 //
 // What this DSL does NOT do
 // -------------------------
-//   * Internal Z2 spin-flip. The on-the-fly engine only handles
-//     site-permutation symmetries; spin-flip is a bit-XOR action, not
-//     a permutation, so it lives outside this DSL. (The fixed-Sz
-//     workflow already takes care of U(1) charge conservation.)
-//   * 2D / 3D point groups beyond what the user can describe by listing
-//     site permutations. For lattices with non-trivial site labels
-//     (e.g. kagome, pyrochlore), keep using the Python automorphism
-//     pipeline -- this DSL is the programmatic shortcut for the simple
-//     cases.
+//   * Internal Z2 spin-flip. Spin-flip is a bit-XOR action, not a site
+//     permutation, so it lives outside this DSL.
+//   * Irreps / sectors: the symmetry engine derives characters from the
+//     group itself (ed/symmetry/irreps.h).
 //
 // All functions throw `std::invalid_argument` on malformed input
-// (wrong-length permutation, non-bijective permutation, generator
-// order zero, ...). Validation is cheap (<1us per generator), so we
-// always run it.
+// (wrong-length permutation, non-bijective permutation, ...). Validation
+// is cheap (<1us per generator), so we always run it.
 // =============================================================================
 
 #pragma once
@@ -65,10 +25,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-// Bring in SymmetryGroupInfo (declared in ed/core/construct_ham.h, alongside
-// the Operator definition that consumes it).
-#include <ed/core/construct_ham.h>
 
 namespace ed::sym {
 
@@ -209,76 +165,13 @@ inline void validate(const Permutation& g, int n_sites) {
 }
 
 // ---------------------------------------------------------------------------
-// Group / sector enumeration
+// Group closure
 // ---------------------------------------------------------------------------
 
 /// Expand a list of generators into the full group (BFS by left-multiplication).
 /// Result is sorted (by lexicographic permutation order) so every caller gets
-/// a canonical, deterministic ordering -- important because
-/// `power_representation[i]` is keyed by position in `max_clique`.
+/// a canonical, deterministic ordering.
 [[nodiscard]] std::vector<Permutation>
 generate_group(const std::vector<Permutation>& generators);
-
-/// True iff the generators pairwise commute (`g_i o g_j == g_j o g_i`). A
-/// group is abelian iff its generators pairwise commute, so this single check
-/// decides abelianness without expanding the full group.
-[[nodiscard]] bool is_abelian(const std::vector<Permutation>& generators);
-
-/// A generating set of a MAXIMAL ABELIAN subgroup of the group whose elements
-/// are `group_elements` (typically `generate_group(generators)`). Greedy: it
-/// keeps adding an element as a new generator whenever it commutes with every
-/// already-selected generator (which guarantees the generated subgroup stays
-/// abelian) and is not already in the subgroup. `preferred` elements (e.g. the
-/// translations) are tried first so the retained subgroup keeps them.
-///
-/// Why this exists: the symmetry-projection layer only implements 1-D (abelian)
-/// irreps. Reducing by a NON-abelian group while projecting onto 1-D characters
-/// drops the d>=2 irrep content -> incomplete spectrum. Restricting to a maximal
-/// abelian subgroup yields a COMPLETE, correct reduction (just a coarser factor
-/// `|A|` instead of `|G|`). See `group_from_generators`.
-[[nodiscard]] std::vector<Permutation>
-maximal_abelian_subgroup_generators(
-    const std::vector<Permutation>& preferred,
-    const std::vector<Permutation>& group_elements);
-
-/// Build a fully-populated `SymmetryGroupInfo` from `generators`.
-///
-/// The returned struct is ready to be assigned to
-/// `Operator::symmetry_info` (or `FixedSzOperator::symmetry_info`):
-///
-///   - `generators`         = the input list (validated)
-///   - `generator_orders`   = `order(g)` for each `g`
-///   - `max_clique`         = `generate_group(generators)`
-///   - `power_representation[i]` = BFS solution `(p_0,...,p_{k-1})` with
-///                                  `g_0^{p_0} o ... o g_{k-1}^{p_{k-1}} = max_clique[i]`
-///   - `sectors`            = the abelian-irrep enumeration described below
-///
-/// If `sector_quantum_numbers` is empty (the default) the abelian
-/// product `Z_{o_0} x ... x Z_{o_{k-1}}` is enumerated automatically:
-/// every tuple `(q_0, ..., q_{k-1})` with `0 <= q_i < o_i` becomes a
-/// sector with phase factors `phi_a = prod_k exp(-2 pi i q_k p_{a,k} / o_k)`
-/// where `(p_{a,k})` is the power representation of group element
-/// `max_clique[a]`. The legacy `filterInvalidSectors()` step removes
-/// any "phantom irreps" produced by non-trivial generator relations.
-///
-/// @throws std::invalid_argument on any malformed generator (wrong
-///         length, non-bijective, etc.).
-[[nodiscard]] SymmetryGroupInfo
-group_from_generators(int n_sites,
-                      std::vector<Permutation> generators,
-                      std::vector<std::vector<int>> sector_quantum_numbers = {});
-
-/// Convenience: the cyclic translation group `Z_N` on a 1D ring of `N`
-/// sites, with all `N` momentum sectors enumerated. Equivalent to
-/// `group_from_generators(N, {translation(N)})`.
-[[nodiscard]] SymmetryGroupInfo translation_group_1d(int n_sites);
-
-/// Convenience: the dihedral group `D_N = Z_N x_| Z_2` on a 1D ring,
-/// generated by `translation(N)` (order N) and `reflection_1d(N)`
-/// (order 2). All `2N` sectors of the full abelian projection are
-/// enumerated and then `filterInvalidSectors()` prunes the phantom
-/// ones produced by the relation `R T R = T^{-1}`.
-[[nodiscard]] SymmetryGroupInfo
-translation_group_with_reflection_1d(int n_sites);
 
 } // namespace ed::sym

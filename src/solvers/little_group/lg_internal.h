@@ -51,7 +51,6 @@
 #include <ed/symmetry/orbit_table.h>
 #include <ed/symmetry/symmetry_cache.h>   // B8: acquire_orbit_table_* (Stage-3 cache)
 #include <ed/symmetry/rep_sector_data.h>
-#include <ed/symmetry/sector_basis.h>      // rep_rank_table_enabled (rank-table budget)
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
 #include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
