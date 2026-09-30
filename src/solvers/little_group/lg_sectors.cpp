@@ -8,6 +8,7 @@
 
 #include <ed/sectors/sectors.h>
 #include <ed/core/basis_utils.h>
+#include <ed/symmetry/commute_check.h>
 
 namespace ed::sectors {
 
@@ -130,6 +131,21 @@ SzContent sz_content(const ::Operator& H) {
 }
 
 std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s) {
+    // A permutation H does not commute with would give silently wrong spectra.
+    for (const auto* set : {&s.abelian, &s.residues})
+        for (const Perm& g : *set) {
+            std::vector<char> hit(static_cast<std::size_t>(n_sites), 0);
+            bool perm = g.size() == static_cast<std::size_t>(n_sites);
+            for (int x : g) {
+                if (!perm || x < 0 || x >= n_sites || hit[static_cast<std::size_t>(x)]) { perm = false; break; }
+                hit[static_cast<std::size_t>(x)] = 1;
+            }
+            if (!perm)
+                throw std::invalid_argument("sectors: a symmetry is not a permutation of the "
+                                            + std::to_string(n_sites) + " sites");
+            if (!ed::symmetry::hamiltonian_commutes_with_permutation(H.transform_data_, H.three_body_data_, g))
+                throw std::invalid_argument("sectors: H does not commute with a supplied site permutation");
+        }
     const SzContent c = sz_content(H);
     if (s.n_up >= 0 && c != SzContent::U1)
         throw std::invalid_argument("sectors: n_up names an Sz sector, but H does not conserve Sz");
