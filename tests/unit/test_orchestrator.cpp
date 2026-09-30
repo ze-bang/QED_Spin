@@ -36,10 +36,7 @@ TEST_CASE("workflows::solve recovers the 6-site Heisenberg ground state",
     opts.tolerance      = 1e-10;
     opts.compute_vectors = false;
     opts.method         = ed::SolveMethod::Lanczos;
-    // Single-rank CPU-lane smoke test: plain Operators advertise
-    // supports_device_matvec on WITH_CUDA builds (operator-collapse Phase 2a),
-    // so without this pin the run would auto-dispatch to the GPU lane. The GPU
-    // lane is validated separately in test_operator_gpu_parity / the gpu tree.
+    // Single-rank CPU-lane smoke test; pin the CPU lane explicitly.
     opts.backend.allow_gpu = false;
 
     auto res = ed::workflows::solve(*H, opts);

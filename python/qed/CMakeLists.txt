@@ -7,7 +7,7 @@
 # the binding inherits BLAS/LAPACK/OpenMP transitively. When the
 # top-level build sets ``WITH_CUDA=ON`` we additionally PRIVATE-link
 # ``ed_solvers_gpu``, which holds the device lanes (the operators'
-# ``bind_cuda()`` CudaMatVecBackend mirrors, the rep-sector mirror, the
+# rep-sector device mirror, the
 # little-group GPU eigensolver) that the workflow bindings dispatch into.
 #
 # When built via scikit-build-core (pip install [-e] .), the binary lands in

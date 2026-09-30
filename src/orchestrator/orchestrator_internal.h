@@ -66,7 +66,6 @@
 #include <ed/thermal/oftlm_kernel.h>
 #include <cstdio>
 #include <ed/thermal/mtpq_kernel.h>
-#include <ed/thermal/mtpq_f32.h>
 
 #include <algorithm>
 #include <chrono>

@@ -11,7 +11,6 @@
 // the temperature bookkeeping live in the calling driver. Consumers:
 //
 //   * the `ed::workflows::thermal` orchestrator via `mtpq_kernel.h`
-//   * the fp32 GPU lane (`src/solvers/gpu/mtpq_f32_impl.cuh`)
 //
 // Phase 2.4 of the Minimalist ED Collapse (May 2026).
 // =============================================================================

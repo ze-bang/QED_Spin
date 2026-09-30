@@ -158,7 +158,6 @@ endif()
 # Source directories - new organized layout
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(CORE_DIR ${SRC_DIR}/core)
 set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(DSSF_DIR ${SRC_DIR}/dssf)
@@ -173,7 +172,6 @@ include_directories(${INCLUDE_DIR}/ed/solvers)
 include_directories(${INCLUDE_DIR}/ed/gpu)
 include_directories(${INCLUDE_DIR}/ed/matvec)
 include_directories(${SRC_DIR})
-include_directories(${CORE_DIR})
 include_directories(${SOLVERS_CPU_DIR})
 include_directories(${SOLVERS_GPU_DIR})
 
@@ -475,11 +473,6 @@ if(BUILD_ED_TESTS)
     # it fresh against an actual consumer.
     ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
-    # Operator-collapse Phase 2a (Jun 2026): orchestrator-level GPU parity
-    # for the plain Operator / FixedSzOperator device-mirror lane
-    # (supports_device_matvec + bind_cuda -> CudaMatVecBackend). SKIPs at
-    # runtime without a CUDA device; no-op TU when WITH_CUDA is OFF.
-    ed_add_test(test_operator_gpu_parity        tests/unit/test_operator_gpu_parity.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     # test_method_canonicalize retired in the minimalist-architecture rev
     # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
@@ -597,14 +590,6 @@ if(BUILD_ED_TESTS)
     # WITHOUT materialising the per-sector orbit CSR (rep data from the
     # CSR-free getRepSectorData). Heisenberg Z_N ring, N=6/8.
     ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp USE_CATCH2)
-    # P3a: CudaMatVecBackend<DeviceFullBasisPolicy> (GPU twin of CpuMatVecBackend)
-    # matvec matches the host CpuMatVecBackend to <1e-9 across every term bin and
-    # both scalar lanes (complex apply + real apply_real) on the full Hilbert
-    # space. CUDA-only; plain main() harness (not Catch2). Needs a GPU at runtime
-    # (skips cleanly with exit 0 when no device is present).
-    if(WITH_CUDA)
-        ed_add_test(test_cuda_matvec_backend    tests/unit/test_cuda_matvec_backend.cu)
-    endif()
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
     target_compile_definitions(test_dssf_operator_spec PRIVATE

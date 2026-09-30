@@ -106,16 +106,6 @@ add_library(ed_core STATIC
     # multiple-definition / undefined-reference traps of a single
     # source compiled into both libraries.
     ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cpp
-    # Phase 2a operator-collapse GPU parity (Jun 2026) -- WEAK ed_core
-    # fallbacks for the NON-VIRTUAL GPU mirror hooks on Operator /
-    # FixedSzOperator (cuda_mirror_available_ + bind_cuda_*_impl_). Under
-    # WITH_CUDA these report "no device mirror" and are overridden by the
-    # strong defs in operator_gpu.cu (ed_solvers_gpu) for any binary that
-    # links the GPU archive; CPU-only binaries keep the weak fallback so
-    # they still link. bind_cuda()/geometry() stay inline in the headers,
-    # so Operator's vtable has no key function pinned to ed_solvers_gpu.
-    # Empty TU when WITH_CUDA is OFF (the hooks are never referenced).
-    ${CORE_DIR}/operator_gpu.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_parallel ${ED_COMMON_LINK_LIBS})
@@ -299,27 +289,20 @@ set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 if(WITH_CUDA)
     set(ED_SOLVERS_GPU_SOURCES
-        # The GPU paths run off the unified host operators' bind_cuda()
-        # device matvec (CudaBackend / CudaMatVecBackend) and the rep-sector
-        # mirror below. combinadic.cu defines the shared constant-memory
+        # The GPU paths run off the rep-sector device mirror below and the
+        # little-group block kernels; combinadic.cu defines the shared
+        # constant-memory
         # Pascal table the device basis policies rank fixed-Sz states with.
         ${SOLVERS_GPU_DIR}/combinadic.cu
         ${SOLVERS_GPU_DIR}/little_group_gpu.cu
         # Phase A of the "Backend x Symmetries x Workflows" plan
         # (May 2026) -- real lazy GPU sector mirror for
-        # StreamingSymmetryOperator + FixedSz variant. Lives here (and
+        # the rep sectors. Lives here (and
         # not in ed_core) because it pulls in <cuda_runtime.h> +
         # thrust + the device basis policy headers. The ed_core .cpp
         # twin is an empty TU when WITH_CUDA is ON, so there is no
         # multiple-definition risk.
         ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
-        # Phase 2a operator-collapse GPU parity (Jun 2026) -- STRONG defs of
-        # the Operator / FixedSzOperator GPU mirror hooks
-        # (cuda_mirror_available_ + bind_cuda_*_impl_), routing the
-        # full-Hilbert / fixed-Sz GPU matvec through the SOTA no-atomic
-        # CudaMatVecBackend. Override the weak ed_core fallbacks
-        # (operator_gpu.cpp) wherever this archive is linked.
-        ${CORE_DIR}/operator_gpu.cu
         # device CSR of the cross-sector probe (finite-T dynamics on GPU)
         ${SRC_DIR}/matvec/device_csr.cu
     )

@@ -7,7 +7,7 @@
 // Represents operators as lists of one/two/three-body spin terms stored
 // in branch-free Structure-of-Arrays (``ed::matvec::TermStorage``) for
 // vectorised SpMV. Implements the ``ed::matvec::MatVecOperator`` interface
-// so solvers can consume Operator / FixedSzOperator / future symmetry-
+// so solvers can consume Operator / symmetry-
 // adapted operators through one polymorphic surface.
 //
 // Public API surface
@@ -51,7 +51,7 @@ using Complex = std::complex<double>;
 // Operator now implements the matvec-unification boundary
 // (ed::matvec::MatVecOperator). This makes apply(), dim(),
 // memory_space() and is_hermitian() virtual, which lets solvers and
-// dispatchers consume Operator / FixedSzOperator / future symmetry-
+// dispatchers consume Operator / symmetry-
 // adapted operators through one interface --- no more dispatching by
 // inspecting concrete pointer types or by wrapping apply() inside a
 // std::function. The virtual destructor also fixes the latent slicing
@@ -217,7 +217,7 @@ public:
      * AoS sizes match what was committed last time).
      *
      * Called automatically by ``term_view_()`` (and therefore by all of
-     * ``apply``, ``apply_real``, ``buildFixedSzMatrix`` etc.) before the
+     * ``apply``, ``apply_real`` etc.) before the
      * matvec kernel reads ``terms_``. Public so that callers reading the
      * SoA bins directly (e.g. the distributed code's parity-mask
      * collection) can force a refresh after touching the AoS vectors.
@@ -355,65 +355,6 @@ public:
         return "Operator(n_bits=" + std::to_string(n_bits_) + ")";
     }
 
-    // -------------------------------------------------------------------
-    // GPU lane (operator-collapse GPU unification, Jun 2026).
-    //
-    // On WITH_CUDA builds the full-Hilbert / fixed-Sz Operator advertises
-    // device-matvec capability so ``ed::select_backend`` picks the
-    // ``CudaBackend`` lane (the operator stays host-resident; ``bind_cuda``
-    // lazily builds a ``CudaMatVecBackend`` device mirror -- the SOTA
-    // no-atomic gather kernel).
-    // Mirrors ``ed::symmetry::SectorOperator``'s gate;
-    // ``ED_GPU_OPERATOR_MIRROR=0`` forces the CPU route for bisection.
-    // -------------------------------------------------------------------
-    [[nodiscard]] ed::Geometry geometry() const override {
-        ed::Geometry g = ed::LinearOperator::geometry();
-#ifdef WITH_CUDA
-        // True only when the strong GPU definition (ed_solvers_gpu) is on the
-        // link line AND ED_GPU_OPERATOR_MIRROR != 0. CPU-only binaries (the
-        // benchmarks, ed_distributed_main, the bfg drivers) link only the weak
-        // ed_core fallback, which returns false, so they never select the
-        // CudaBackend lane for a device mirror they cannot build.
-        g.supports_device_matvec = cuda_mirror_available_();
-#endif
-        return g;
-    }
-
-    // Build a device-resident matvec (CudaMatVecBackend over the
-    // FullBasisPolicy). Kept INLINE -- delegating to the NON-VIRTUAL helper
-    // ``bind_cuda_full_impl_`` -- on purpose: an out-of-line virtual would
-    // become Operator's vtable key function and pin the whole vtable inside
-    // ``ed_solvers_gpu``, breaking every CPU-only binary that constructs an
-    // Operator under WITH_CUDA. With the override inline the vtable stays
-    // weak/COMDAT (emitted in each TU) so all binaries link; the GPU work
-    // hides behind the weak/strong helper split described at its declaration.
-    [[nodiscard]] ed::LinearOperator::MatvecFn bind_cuda() const override {
-#ifdef WITH_CUDA
-        return bind_cuda_full_impl_();
-#else
-        return bind_cpu();
-#endif
-    }
-
-    // fp32 device matvec (memory-halving mTPQ lane). Same inline-override /
-    // non-virtual-helper split as bind_cuda() so Operator's vtable stays weak.
-    [[nodiscard]] bool supports_cuda_f32() const noexcept override {
-#ifdef WITH_CUDA
-        return cuda_mirror_available_();
-#else
-        return false;
-#endif
-    }
-    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
-    bind_cuda_f32() const override {
-#ifdef WITH_CUDA
-        return bind_cuda_f32_impl_();
-#else
-        throw std::runtime_error(
-            "Operator::bind_cuda_f32: built without WITH_CUDA");
-#endif
-    }
-
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {
         if (n_bits >= 64) {
             throw std::runtime_error("Operator: n_bits = " + std::to_string(n_bits)
@@ -427,7 +368,7 @@ public:
     // ``backend_`` is a unique_ptr to a polymorphic strategy that owns
     // mutable per-instance state (CSR caches, scratch buffers) and may
     // hold non-owning views onto basis-policy data living on the operator
-    // itself (basis_states_ / lin_index_ in FixedSzOperator). Naive
+    // itself (in a derived basis-restricted operator). Naive
     // copy/move would either fail (unique_ptr is non-copyable) or leave
     // the destination's backend pointing at the SOURCE's basis tables.
     //
@@ -471,8 +412,6 @@ public:
         // ``other``'s soon-to-be-moved-from members. The destination's
         // backend will be rebuilt lazily on the next apply().
         other.backend_.reset();
-        // Same for the lazy device mirror (rebuilt on next bind_cuda()).
-        other.cuda_backend_.reset();
     }
 
     Operator& operator=(const Operator& other) {
@@ -490,7 +429,6 @@ public:
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             backend_.reset();
-            cuda_backend_.reset();
         }
         return *this;
     }
@@ -511,8 +449,6 @@ public:
             real_cache_                      = other.real_cache_;
             backend_.reset();
             other.backend_.reset();
-            cuda_backend_.reset();
-            other.cuda_backend_.reset();
         }
         return *this;
     }
@@ -532,7 +468,7 @@ public:
     // selection, scratch-buffer reuse) behind one strategy object. The
     // backend is constructed lazily on the first apply* call via the
     // virtual ``make_backend_`` factory, which derived classes override
-    // (FixedSzOperator constructs an Sz-projected backend).
+    // (a basis-restricted operator constructs its own backend).
     //
     // Tunable via the environment:
     //   ED_CSR_FORCE      0|1   force matrix-free / force assembled (default
@@ -560,7 +496,7 @@ public:
      * ``isReal()``; behaviour is undefined for complex-coefficient
      * Hamiltonians.
      *
-     * Virtual so derived basis-restricted operators (``FixedSzOperator``)
+     * Virtual so derived basis-restricted operators
      * dispatch through the correct dim check rather than slicing to the
      * full-Hilbert ``2^N`` path.
      *
@@ -598,14 +534,14 @@ public:
     // Fast dense assembly for the FULL Hilbert space (index == state). Fills
     // column `j` directly from the sparse term enumerator -- O(nnz) instead of
     // O(dim) full matvecs. Reentrant (term reads only) -> parallel over columns.
-    // SubspaceOperator overrides this for the reduced lanes (fixed-Sz mapping;
-    // symmetry returns false).
+    // Basis-restricted operators override this (symmetry sectors
+    // return false).
     [[nodiscard]] bool try_build_dense_columns(Complex* dense,
                                                std::size_t N) const override {
         const std::uint64_t D = static_cast<std::uint64_t>(dim());
         if (static_cast<std::size_t>(D) != N) return false;
         // Commit the SoA term cache BEFORE the parallel loop (the
-        // SubspaceOperator override already does) -- besides skipping the
+        // basis-restricted overrides do too) -- besides skipping the
         // per-thread first-call contention, this was the F6 (Jul 2026)
         // corruption site before commitPendingTransforms was made
         // thread-safe: a cold operator's first term_view_() raced across
@@ -762,56 +698,16 @@ protected:
     // -------------------------------------------------------------------
     // Matvec backend. Lazily constructed on the first apply() / apply_real()
     // call via the virtual ``make_backend_`` factory below. Derived classes
-    // (FixedSzOperator) override the factory to plug in a different basis
+    // may override the factory to plug in a different basis
     // policy without re-implementing apply() itself.
     // -------------------------------------------------------------------
     mutable std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
-
-    // Lazily-built device matvec mirror (CudaMatVecBackend), engaged by
-    // ``bind_cuda()`` on WITH_CUDA builds. ``shared_ptr`` so the bound
-    // ``MatvecFn`` can capture it and keep it alive for the duration of a GPU
-    // solve even if this Operator's ``bind_cuda`` is called again. Null on
-    // host-only runs. The slot lives on the base so both ``Operator`` and
-    // ``FixedSzOperator`` reuse it; ``FixedSzOperator::bind_cuda`` builds the
-    // fixed-Sz device backend into the same slot.
-    mutable std::shared_ptr<ed::matvec::MatVecBackendBase> cuda_backend_;
-
-#ifdef WITH_CUDA
-    // -------------------------------------------------------------------
-    // GPU mirror hooks (operator-collapse Phase 2a, Jun 2026).
-    //
-    // These are deliberately NON-VIRTUAL so they are never a vtable key
-    // function: ``bind_cuda()`` / ``geometry()`` stay inline (weak vtable)
-    // and merely delegate here. Two definitions of each symbol exist:
-    //
-    //   * a WEAK fallback in ``src/core/operator_gpu.cpp`` (ed_core, always
-    //     on the link line): ``cuda_mirror_available_`` returns false and
-    //     ``bind_cuda_full_impl_`` returns ``bind_cpu()``. This is what
-    //     CPU-only binaries (benchmarks, ed_distributed_main, bfg drivers)
-    //     resolve, so they advertise no device mirror and never build one.
-    //   * a STRONG override in ``src/core/operator_gpu.cu`` (ed_solvers_gpu):
-    //     the real env gate + CudaMatVecBackend device matvec. Because
-    //     ed_solvers_gpu precedes ed_core in the link order, GPU binaries
-    //     pull the strong definitions and the weak ones are never linked.
-    //
-    // The orchestrator GPU-parity test asserts lane=="gpu", so a misordered
-    // link that silently kept the weak fallback fails loudly rather than
-    // degrading to CPU.
-    // -------------------------------------------------------------------
-    [[nodiscard]] static bool cuda_mirror_available_() noexcept;
-    [[nodiscard]] ed::LinearOperator::MatvecFn bind_cuda_full_impl_() const;
-    // fp32 twin (memory-halving mTPQ lane). Weak fallback in operator_gpu.cpp
-    // (throws), strong definition in operator_gpu.cu (reuses cuda_backend_).
-    [[nodiscard]] ed::LinearOperator::Fp32DeviceMatvecFn
-    bind_cuda_f32_impl_() const;
-#endif
 
     /**
      * @brief Construct a fresh matvec backend for this operator.
      *
      * Returns a CpuMatVecBackend parameterised on the appropriate basis
-     * policy. Operator returns a FullBasisPolicy backend; FixedSzOperator
-     * overrides to return a FixedSzBasisPolicy backend. New basis types
+     * policy. Operator returns a FullBasisPolicy backend; other basis types
      * (symmetry-projected sectors, distributed, GPU) plug in the same way.
      */
     [[nodiscard]] virtual std::unique_ptr<ed::matvec::MatVecBackendBase>

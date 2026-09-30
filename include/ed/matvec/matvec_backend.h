@@ -52,11 +52,10 @@
 // The backend owns the CSR caches and the scratch buffers; the operator owns
 // the term storage. The basis-policy choice is made by which concrete backend
 // is constructed (CpuMatVecBackend<FullBasisPolicy> for the full Hilbert
-// space, CpuMatVecBackend<FixedSzBasisPolicy> for an Sz-projected sector).
+// space, CpuMatVecBackend<RepSymmetryBasisPolicy> for a symmetry sector).
 //
-// This file is host-only on purpose: a CudaMatVecBackend belongs in a future
-// ed/matvec/cuda_matvec_backend.cuh and would slot in under the same base
-// class.
+// This file is host-only on purpose; the device matvec of the rep sectors lives
+// in the GPU sector mirror (streaming_symmetry_gpu_mirror.cu).
 // =============================================================================
 
 #include <ed/config/env_registry.h>
@@ -208,62 +207,6 @@ public:
 
     // Drop assembled-CSR caches whenever the operator's term list mutates.
     virtual void invalidate_caches() = 0;
-
-    // -----------------------------------------------------------------
-    // Device-pointer fast path (operator-collapse GPU unification,
-    // Jun 2026).
-    //
-    // The host ``apply_complex`` / ``apply_real`` above take HOST
-    // pointers and a device backend (CudaMatVecBackend) stages them
-    // H2D / D2H internally. That is correct for a host-driven solver
-    // loop, but the orchestrator's CUDA lane keeps every Krylov vector
-    // resident on the device and hands the bound matvec DEVICE
-    // pointers. These three hooks express that contract:
-    //
-    //   * ``upload_terms``        : snapshot the host term SoA to the
-    //                               device once (so the per-apply path
-    //                               needs no host TermView). No-op on
-    //                               host backends.
-    //   * ``apply_complex_device``/``apply_real_device`` : run the SpMV
-    //                               with in/out already in device
-    //                               memory. ``upload_terms`` must have
-    //                               been called first.
-    //
-    // The defaults make host backends throw if a device apply is
-    // requested -- only ``CudaMatVecBackend`` overrides them. Used by
-    // ``LinearOperator::bind_cuda()`` for ``Operator``.
-    // -----------------------------------------------------------------
-    virtual void upload_terms(const void* /*term_view_erased*/) {}
-
-    virtual void apply_complex_device(const Complex* /*d_in*/,
-                                      Complex*       /*d_out*/,
-                                      std::size_t    /*n*/) {
-        throw std::runtime_error(
-            "MatVecBackendBase::apply_complex_device: this backend has "
-            "no device-pointer matvec");
-    }
-
-    virtual void apply_real_device(const double* /*d_in*/,
-                                   double*       /*d_out*/,
-                                   std::size_t   /*n*/) {
-        throw std::runtime_error(
-            "MatVecBackendBase::apply_real_device: this backend has "
-            "no device-pointer matvec");
-    }
-
-    // Single-precision complex device apply (fp32 mTPQ lane). The in/out
-    // pointers are ``cuFloatComplex*`` in DEVICE memory, erased to ``void*``
-    // so this host-only header need not include ``<cuComplex.h>``. Only
-    // ``CudaMatVecBackend`` (full / fixed-Sz) overrides it; every other
-    // backend throws. Consumed by ``LinearOperator::bind_cuda_f32()`` /
-    // ``ed::thermal::mtpq_f32``.
-    virtual void apply_complex_device_f32(const void* /*d_in*/,
-                                          void*       /*d_out*/,
-                                          std::size_t /*n*/) {
-        throw std::runtime_error(
-            "MatVecBackendBase::apply_complex_device_f32: this backend has "
-            "no fp32 device-pointer matvec");
-    }
 };
 
 // ---------------------------------------------------------------------------

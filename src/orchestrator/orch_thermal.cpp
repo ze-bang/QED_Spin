@@ -60,61 +60,28 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
     ed::parallel::pin_omp_threads_once();
 
-    BackendVariant variant;
-#ifdef WITH_CUDA
-    // fp32 single-GPU mTPQ fits one H100 (2 x complex<float> = 68.7 GB at
-    // 2^32). The default gpu_mem_fits() estimate uses complex<double> x fudge 8
-    // (= 549 GB) and would REJECT the GPU, falling to the CPU lane -- whose
-    // 2^32 spectral-bound Lanczos auto-tune then OOM-kills the host. Force the
-    // GPU lane here; the fp32 driver manages its own (fitting) device memory.
-    if (opts.mtpq_fp32
-        && opts.method == ThermalOptions::Method::mTPQ
-        && H.supports_cuda_f32()
-        && ed::have_cuda()) {
-        variant = BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
-    } else
-#endif
-    {
-        variant = select_backend(H.geometry(), opts.backend);
-    }
+    BackendVariant variant = select_backend(H.geometry(), opts.backend);
 
     // Memory guard (thermal lane). The operator's basis is already built, so
     // the binding constraint is the kernel WORKING SET: FTLM keeps a
     // krylov_dim window of length-N vectors; TPQ a handful. Throw cleanly
     // before the Krylov-basis allocation rather than OOM-crash. H.global_dim()
     // is the per-call working dim (symmetry iterates sectors a level up, so this
-    // is the sector dim there). FTLM and LTLM both keep one sample's Krylov
-    // basis at a time (LTLM routes through the FTLM kernel); TPQ is O(1)
-    // state vectors.
+    // is the sector dim there). FTLM and OFTLM keep one sample's Krylov basis
+    // at a time; TPQ is O(1) state vectors.
     {
         const std::uint64_t D = H.global_dim();
         std::uint64_t vecs;
-        std::uint64_t elem = 16ull;  // complex<double>
-        bool fp32_lane = false;
-#ifdef WITH_CUDA
-        // fp32 single-GPU mTPQ lane: the lean driver keeps just two
-        // complex<float> device vectors (psi + w), so the working set is
-        // D * 2 * 8 bytes (68.7 GB at 2^32), a quarter of the double estimate
-        // -- otherwise this guard's 8-vector complex<double> estimate (549 GB
-        // at 2^32) would refuse the run before the driver ever allocates.
-        fp32_lane = opts.mtpq_fp32
-                 && opts.method == ThermalOptions::Method::mTPQ
-                 && H.supports_cuda_f32();
-#endif
-        if (fp32_lane) {
-            vecs = 2;
-            elem = 8ull;  // complex<float>
-        } else {
-            switch (opts.method) {
-                case ThermalOptions::Method::FTLM:
-                    vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
-                case ThermalOptions::Method::OFTLM:
-                    // per-sample Krylov basis + the exact-eigenpair Lanczos basis
-                    vecs = std::max<std::size_t>(opts.krylov_dim, 4)
-                         + 2 * opts.num_exact + 34; break;
-                default:  // mTPQ: a handful of state vectors
-                    vecs = 8; break;
-            }
+        constexpr std::uint64_t elem = 16ull;  // complex<double>
+        switch (opts.method) {
+            case ThermalOptions::Method::FTLM:
+                vecs = std::max<std::size_t>(opts.krylov_dim, 4) + 4; break;
+            case ThermalOptions::Method::OFTLM:
+                // per-sample Krylov basis + the exact-eigenpair Lanczos basis
+                vecs = std::max<std::size_t>(opts.krylov_dim, 4)
+                     + 2 * opts.num_exact + 34; break;
+            default:  // mTPQ: a handful of state vectors
+                vecs = 8; break;
         }
         ed::core::guard_working_set(D * vecs * elem, "ed::thermal");
     }
@@ -374,28 +341,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? std::max<std::size_t>(std::min(reach_iters, MTPQ_HARD_CAP), 1)
                 : opts.krylov_dim;
 
-            ed::thermal::MtpqResult kres;
-#ifdef WITH_CUDA
-            // fp32 single-GPU lane: half-footprint state vectors let the full
-            // 2^32 Hilbert space run mTPQ on one 80 GB H100. Reuses the L /
-            // max_iter auto-tune computed above (kopts); the driver manages its
-            // own device memory (bypasses the double CudaBackend vectors).
-            if (ed::env::flag("ED_MTPQ_VERBOSE", false)) {
-                std::fprintf(stderr,
-                    "[mtpq-lane] mtpq_fp32=%d supports_cuda_f32=%d -> %s\n",
-                    (int)opts.mtpq_fp32, (int)H.supports_cuda_f32(),
-                    (opts.mtpq_fp32 && H.supports_cuda_f32()) ? "FP32-GPU"
-                                                              : "double");
-            }
-            if (opts.mtpq_fp32 && H.supports_cuda_f32()) {
-                kres = ed::thermal::mtpq_f32(H, kopts);
-            } else
-#endif
-            {
-                kres = ed::thermal::mtpq_kernel<B>(
-                    *backend_uptr, matvec, H.geometry().local_dim,
-                    H.geometry().global_dim, kopts);
-            }
+            ed::thermal::MtpqResult kres = ed::thermal::mtpq_kernel<B>(
+                *backend_uptr, matvec, H.geometry().local_dim,
+                H.geometry().global_dim, kopts);
             R.ground_state_energy = kres.energies.empty()
                 ? 0.0 : *std::min_element(kres.energies.begin(),
                                           kres.energies.end());

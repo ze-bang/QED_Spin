@@ -25,10 +25,6 @@
 //   * cell 1H (Full)        -- FullBasisPolicy
 //   * cell 5H (RepSymmetry) -- RepSymmetryBasisPolicy (symmetry sectors, with
 //                              or without fixed Sz)
-//
-// The CUDA host cells live in cuda_matvec_backend.cuh (compiled only under
-// WITH_CUDA) -- not a CpuMatVecBackend specialization, so out of scope for
-// this TU.
 // =============================================================================
 
 #include <ed/matvec/basis_policy.h>

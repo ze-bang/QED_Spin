@@ -15,8 +15,8 @@
 // Runtime SKIPs (Catch2 SUCCEED + return) keep the build-only CUDA lane
 // happy on CI hosts without an attached GPU.
 //
-// The device matvec in both Lanczos cases is the host Operator's
-// `bind_cuda()` (CudaMatVecBackend over the full Hilbert space).
+// The device matvec in both Lanczos cases stages each vector through the
+// host Operator (staged_device_matvec).
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -53,6 +53,19 @@ bool gpu_available() {
         return false;
     }
     return count > 0;
+}
+
+// Device-pointer matvec for the Lanczos-kernel tests: stage each vector
+// through the host Operator (the kernel under test is the CUDA Backend, not
+// a device SpMV).
+std::function<void(const Complex*, Complex*, std::size_t)>
+staged_device_matvec(ed::matvec::CudaBackend& be, const Operator& H) {
+    return [&be, &H](const Complex* in, Complex* out, std::size_t n) {
+        std::vector<Complex> hin(n), hout(n);
+        be.copy_to_host(in, hin.data(), n);
+        H.apply(hin.data(), hout.data(), n);
+        be.copy_from_host(hout.data(), out, n);
+    };
 }
 
 }  // namespace
@@ -138,8 +151,8 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
     REQUIRE(cpu_res.alpha.size() > 0);
 
     // ---- CUDA lane: same kernel, CUDA backend ----
-    auto gpu_H = cpu_H->bind_cuda();
     ed::matvec::CudaBackend cuda;
+    auto gpu_H = staged_device_matvec(cuda, *cpu_H);
 
     auto d_v0 = cuda.make_zero_vector(dim);
     cuda.copy_from_host(v0.data(), d_v0.get(), dim);
@@ -383,8 +396,8 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     REQUIRE(ref.eigs.size() >= 2);
 
     // ---- Pass 1: build the Krylov basis with CudaBackend, reconstruct y_0 --
-    auto gpu_op = cpu_op->bind_cuda();
     ed::matvec::CudaBackend cuda;
+    auto gpu_op = staged_device_matvec(cuda, *cpu_op);
 
     // v0_a: a random unit vector. The canonical basis vector |000…0⟩ lives
     // in a 1-D Sz sector for the all-down state on Heisenberg PBC, so H

@@ -113,16 +113,6 @@ struct ThermalOptions {
     // "auto". Ignored by every non-mTPQ lane.
     // -----------------------------------------------------------------
     double      energy_shift   = 0.0;
-
-    // -----------------------------------------------------------------
-    // fp32 single-GPU mTPQ (memory-halving lane, July 2026). When true AND
-    // the operator advertises ``supports_cuda_f32()`` (full-Hilbert Operator
-    // on a WITH_CUDA build) AND the method is mTPQ, the orchestrator routes
-    // to ``ed::thermal::mtpq_f32``: state vectors + matvec in complex<float>
-    // (half the footprint, so the full 2^32 Hilbert space fits two vectors on
-    // one 80 GB H100), reductions accumulated in double. Ignored otherwise.
-    // -----------------------------------------------------------------
-    bool        mtpq_fp32      = false;
 };
 
 // ---------------------------------------------------------------------------

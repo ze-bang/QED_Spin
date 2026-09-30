@@ -2,29 +2,17 @@
 // =============================================================================
 // include/ed/matvec/term_kernels_gpu.cuh
 //
-// CUDA twin of ``ed::matvec::kernel::apply_terms``.
+// CUDA twins of the representative (symmetry-sector) term kernels:
+// ``apply_terms_rep_symmetry_scatter`` (one thread per source representative,
+// atomicAdd into the output) and ``apply_terms_rep_symmetry_gather`` (one
+// thread per output row, no atomics). Both drive the same per-term gate math
+// as the host kernels in ``term_kernels.h``; the coeff-modifier and
+// leave-basis branches are gated on the same compile-time policy traits.
 //
-// ``apply_terms_gpu_scatter`` handles the full-Hilbert and fixed-Sz
-// (BasisPolicy, Scalar) pairs; the representative kernels below handle
-// the symmetry sectors. The coeff-modifier and leave-basis branches are
-// gated on the same compile-time traits as the CPU twin
-// (``has_coeff_modifier`` / ``may_leave_basis``), so trivial policies emit
-// the same instruction sequence the bespoke per-bin kernels did.
-//
-// Term storage is uploaded once at construct time and consumed as a
-// POD ``DeviceTermStorage`` view. The SoA bins (5 + three-body) match
-// the host SoA in ``term_storage.h`` 1:1. Field names are duck-typed
-// the same way ``term_kernels.h`` consumes them on the host -- so the
-// same bin types from ``ed/matvec/term_storage.h`` are uploaded
-// verbatim (their layout is trivially copyable to device memory).
-//
-// One thread per input state. The thread iterates every term bin,
-// computes the contribution, and ``atomicAdd``s into the output. This
-// gives the same scatter semantics as the CPU radix-sort + flush;
-// modulo atomic ordering the result is bit-identical.
-//
-// This template family plus the rep-walk kernels below are the only
-// full-Hilbert / fixed-Sz / symmetry device matvec path.
+// Term storage is uploaded once and consumed as a POD ``DeviceTermStorage``
+// view. The SoA bins (5 + three-body) match the host SoA in ``term_storage.h``
+// 1:1, so the same bin types are uploaded verbatim (their layout is trivially
+// copyable to device memory).
 // =============================================================================
 
 #ifdef WITH_CUDA
@@ -103,15 +91,6 @@ atomic_add_complex(double* dst, double val) {
     atomicAdd(dst, val);
 }
 
-// Single-precision complex atomicAdd (fp32 mTPQ lane). Same split-into-two
-// strategy as the double overload; float atomicAdd is available on all
-// targeted architectures (>= SM 2.0).
-__device__ __forceinline__ void
-atomic_add_complex(cuFloatComplex* dst, cuFloatComplex val) {
-    atomicAdd(&reinterpret_cast<float*>(dst)[0], cuCrealf(val));
-    atomicAdd(&reinterpret_cast<float*>(dst)[1], cuCimagf(val));
-}
-
 // ---------------------------------------------------------------------------
 // Scalar helpers (templated on Scalar = cuDoubleComplex or double).
 // ---------------------------------------------------------------------------
@@ -142,38 +121,6 @@ struct ScalarTraits<cuDoubleComplex> {
     }
 };
 
-// Single-precision complex lane (fp32 mTPQ). Term coefficients are stored /
-// uploaded as cuDoubleComplex; ``from_coeff`` narrows them to fp32 once,
-// per emit. Vectors (in/out) are cuFloatComplex, halving the device
-// footprint so the full 2^32 Hilbert space fits two vectors on one H100.
-template <>
-struct ScalarTraits<cuFloatComplex> {
-    using device_t = cuFloatComplex;
-    __device__ static inline cuFloatComplex zero() {
-        return make_cuFloatComplex(0.0f, 0.0f);
-    }
-    __device__ static inline cuFloatComplex from_coeff(cuDoubleComplex c) {
-        return make_cuFloatComplex(static_cast<float>(cuCreal(c)),
-                                   static_cast<float>(cuCimag(c)));
-    }
-    __device__ static inline cuFloatComplex from_real(double r) {
-        return make_cuFloatComplex(static_cast<float>(r), 0.0f);
-    }
-    __device__ static inline cuFloatComplex mul(cuFloatComplex a, cuFloatComplex b) {
-        return cuCmulf(a, b);
-    }
-    __device__ static inline cuFloatComplex mul_real(cuFloatComplex a, double r) {
-        const float rf = static_cast<float>(r);
-        return make_cuFloatComplex(cuCrealf(a) * rf, cuCimagf(a) * rf);
-    }
-    __device__ static inline cuFloatComplex add(cuFloatComplex a, cuFloatComplex b) {
-        return cuCaddf(a, b);
-    }
-    __device__ static inline float abs2(cuFloatComplex a) {
-        return cuCrealf(a) * cuCrealf(a) + cuCimagf(a) * cuCimagf(a);
-    }
-};
-
 template <>
 struct ScalarTraits<double> {
     using device_t = double;
@@ -191,14 +138,9 @@ struct ScalarTraits<double> {
 // state ``s`` with an optional ``pre_phase`` multiplier and atomicAdd the
 // contributions into ``out``.
 //
-// This is the shared term-walk body extracted (verbatim) from the former
-// ``process_source`` lambda inside ``apply_terms_gpu_scatter`` so that the
-// trivial-policy kernel and the on-the-fly representative kernel
-// (``apply_terms_rep_symmetry_scatter``) drive IDENTICAL term logic -- the
-// only thing that differs between them is how the source state(s) and the
-// ``pre_phase`` are produced, and how the destination index + projection
-// are looked up (both delegated to the BasisPolicy). Keeping one body
-// guarantees the rep kernel cannot diverge from the validated reference.
+// The shared term-walk body of the representative kernels: one body keeps the
+// scatter kernel's term logic identical to the validated reference; the
+// destination index + projection lookup is delegated to the BasisPolicy.
 //
 // Compile-time branches (gated on the BasisPolicy traits):
 //   * ``has_coeff_modifier`` -- per-emit projection multiplier looked up via
@@ -389,47 +331,6 @@ __device__ __forceinline__ void process_source_terms(
 }
 
 // ---------------------------------------------------------------------------
-// THE KERNEL.
-//
-// One thread per input state ``i``. For each term, accumulate
-// contributions and atomicAdd into the output (one computational state per
-// row: the Full / FixedSz policies). Compile-time branches:
-//
-//   * ``BasisPolicy::has_coeff_modifier`` -- gates the per-emit
-//     phase-from-projection multiplier (symmetry policies pre-bake it
-//     into the hash; trivial policies elide the multiply entirely).
-//   * ``BasisPolicy::may_leave_basis`` -- gates the ``index_of``
-//     check. Full basis never leaves; fixed-Sz / symmetry may.
-//
-// ``Scalar`` is ``cuDoubleComplex`` for the production complex path
-// or ``double`` for the real (Hermitian + real-coefficient) fast lane
-// the CPU side exposes via ``bind_real_cpu``.
-// ---------------------------------------------------------------------------
-template <class BasisPolicy, class Scalar>
-__global__ void apply_terms_gpu_scatter(
-    BasisPolicy           basis,
-    double                spin_l,
-    DeviceTermStorage     terms,
-    const Scalar* __restrict__ in,
-    Scalar*       __restrict__ out)
-{
-    static_assert(!BasisPolicy::needs_orbit_walk,
-                  "apply_terms_gpu_scatter applies H to one state per row");
-    using ST = ScalarTraits<Scalar>;
-    const std::uint64_t dim = basis.dim();
-    const std::uint64_t i =
-        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= dim) return;
-
-    const Scalar coeff_in = in[i];
-    if (ST::abs2(coeff_in) < 1e-30) return;  // skip negligible amplitudes
-
-    process_source_terms<BasisPolicy, Scalar>(
-        basis, spin_l, terms, basis.state_of(i),
-        make_cuDoubleComplex(1.0, 0.0), coeff_in, i, out);
-}
-
-// ---------------------------------------------------------------------------
 // apply_terms_rep_symmetry_scatter -- on-the-fly representative SpMV.
 //
 // HERMITIAN-ONLY CONTRACT (audit 2026-07-30): this scatter emits
@@ -452,7 +353,7 @@ __global__ void apply_terms_gpu_scatter(
 // "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
 //
 // One thread per orbit representative ``i``. Unlike
-// ``apply_terms_gpu_scatter`` with a symmetry policy, this does NOT walk an
+// an orbit-CSR scatter, this does NOT walk an
 // orbit CSR: it applies the Hamiltonian terms to the single representative
 // ``reps[i]`` (``basis.state_of(i)``) with ``pre_phase = inv_norms[i]``, and
 // the policy's ``index_and_projection`` regenerates the destination orbit
@@ -488,40 +389,8 @@ __global__ void apply_terms_rep_symmetry_scatter(
 }
 
 // ---------------------------------------------------------------------------
-// Host-side launcher. Picks a reasonable block size (256 threads/block)
-// and dispatches the kernel. ``out`` MUST be zeroed by the caller (via
-// cudaMemset or a parallel zero-fill kernel) before invocation -- this
-// kernel only atomicAdds.
-// ---------------------------------------------------------------------------
-template <class BasisPolicy, class Scalar>
-inline cudaError_t launch_apply_terms_gpu(
-    BasisPolicy           basis,
-    double                spin_l,
-    DeviceTermStorage     terms,
-    const Scalar*         d_in,
-    Scalar*               d_out,
-    cudaStream_t          stream = 0,
-    int                   threads_per_block = 256)
-{
-    const std::uint64_t dim = basis.dim();
-    if (dim == 0) return cudaSuccess;
-
-    const std::uint64_t blocks =
-        (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
-        static_cast<std::uint64_t>(threads_per_block);
-
-    apply_terms_gpu_scatter<BasisPolicy, Scalar>
-        <<<static_cast<unsigned int>(blocks),
-           static_cast<unsigned int>(threads_per_block),
-           0, stream>>>
-        (basis, spin_l, terms, d_in, d_out);
-
-    return cudaGetLastError();
-}
-
-// ---------------------------------------------------------------------------
 // Host-side launcher for the on-the-fly representative kernel. Same contract
-// as ``launch_apply_terms_gpu`` (``d_out`` MUST be pre-zeroed by the caller).
+// ``d_out`` MUST be pre-zeroed by the caller (the kernel only atomicAdds).
 // ---------------------------------------------------------------------------
 template <class BasisPolicy, class Scalar>
 inline cudaError_t launch_apply_terms_rep_symmetry_gpu(
@@ -550,374 +419,6 @@ inline cudaError_t launch_apply_terms_rep_symmetry_gpu(
 }
 
 // ===========================================================================
-// GATHER device kernel (SOTA matrix-apply plan, Phase 4).
-//
-// One thread per OUTPUT row r. The thread accumulates the full row of
-// ``out = H * in`` in a register and performs a SINGLE global write -- NO
-// atomicAdd, NO output pre-zero (memset). This is the device twin of the host
-// ``apply_terms_gather`` / ``gather_row_terms``, with the identical (corrected)
-// off-diagonal existence gates: for an operator that maps column c -> row r,
-// the ROW bit after the operator acted equals ``op_type`` (and the column is
-// ``c = r XOR flip``). The diagonal is computed inline from the (small,
-// cache-resident) diagonal bins and fused into the same register accumulator
-// -- the GPU-appropriate form of "precomputed diagonal" (a separately
-// uploaded diag[] array would only add HBM read traffic on a memory-bound
-// kernel).
-//
-// Supported only for the trivial / fixed-Sz policies (no orbit walk, no
-// coeff modifier): gathering a symmetry/representative row would require
-// inverting the group action, so those keep the validated atomic-scatter
-// kernels above.
-// ===========================================================================
-template <class BasisPolicy, class Scalar>
-__device__ __forceinline__ Scalar gather_row_device(
-    const BasisPolicy&       basis,
-    double                   spin_l,
-    const DeviceTermStorage& terms,
-    std::uint64_t            r_idx,
-    const Scalar* __restrict__ in)
-{
-    using ST = ScalarTraits<Scalar>;
-    static_assert(!BasisPolicy::needs_orbit_walk && !BasisPolicy::has_coeff_modifier,
-                  "gather_row_device supports only trivial / fixed-Sz policies");
-    const double spin_sq = spin_l * spin_l;
-    const std::uint64_t r_state = basis.state_of(r_idx);
-    const Scalar v_r = in[r_idx];
-    Scalar acc = ST::zero();
-
-    // Resolve the value of column ``c_state`` (a bitstring): for may_leave_basis
-    // policies look up the array index via the hash; otherwise the bitstring is
-    // the index. Returns whether the column is in-basis through ``ok``.
-    auto col_val = [&](std::uint64_t c_state, bool& ok) -> Scalar {
-        if constexpr (BasisPolicy::may_leave_basis) {
-            const std::uint64_t j = basis.index_of(c_state);
-            if (j == ed::matvec::basis::kDeviceNotFound) { ok = false; return ST::zero(); }
-            ok = true;
-            return in[j];
-        } else {
-            ok = true;
-            return in[c_state];
-        }
-    };
-
-    // ---- Diagonal one-body (Sz): column == row ----
-    for (std::uint32_t t = 0; t < terms.num_diag_one_body; ++t) {
-        const auto& term = terms.diag_one_body[t];
-        const double sign = ((r_state >> term.site_index) & 1) ? -1.0 : 1.0;
-        const cuDoubleComplex c = load_coeff(term.coefficient);
-        acc = ST::add(acc, ST::mul(ST::from_coeff(c),
-                                   ST::mul_real(v_r, spin_l * sign)));
-    }
-    // ---- Off-diagonal one-body (S+/S-): row bit == op_type ----
-    for (std::uint32_t t = 0; t < terms.num_offdiag_one_body; ++t) {
-        const auto& term = terms.offdiag_one_body[t];
-        const std::uint64_t bit = (r_state >> term.site_index) & 1ULL;
-        if (bit != term.op_type) continue;
-        bool ok; const Scalar vc = col_val(r_state ^ (1ULL << term.site_index), ok);
-        if (!ok) continue;
-        const cuDoubleComplex c = load_coeff(term.coefficient);
-        acc = ST::add(acc, ST::mul(ST::from_coeff(c), vc));
-    }
-    // ---- Diagonal two-body (Sz Sz): column == row ----
-    for (std::uint32_t t = 0; t < terms.num_diag_two_body; ++t) {
-        const auto& term = terms.diag_two_body[t];
-        const double sa = ((r_state >> term.site_index_1) & 1) ? -1.0 : 1.0;
-        const double sb = ((r_state >> term.site_index_2) & 1) ? -1.0 : 1.0;
-        const cuDoubleComplex c = load_coeff(term.coefficient);
-        acc = ST::add(acc, ST::mul(ST::from_coeff(c),
-                                   ST::mul_real(v_r, spin_sq * sa * sb)));
-    }
-    // ---- Mixed two-body (Sz S+/-): row flip bit == flip_op_type ----
-    for (std::uint32_t t = 0; t < terms.num_mixed_two_body; ++t) {
-        const auto& term = terms.mixed_two_body[t];
-        const std::uint64_t flip_bit = (r_state >> term.flip_site) & 1ULL;
-        if (flip_bit != term.flip_op_type) continue;
-        const std::uint64_t b_state = r_state ^ (1ULL << term.flip_site);
-        const double sz_sign = ((b_state >> term.sz_site) & 1) ? -1.0 : 1.0;
-        bool ok; const Scalar vc = col_val(b_state, ok);
-        if (!ok) continue;
-        const cuDoubleComplex c = load_coeff(term.coefficient);
-        acc = ST::add(acc, ST::mul(ST::from_coeff(c),
-                                   ST::mul_real(vc, spin_l * sz_sign)));
-    }
-    // ---- Off-diagonal two-body (S+/- S+/-): both row bits == op_type ----
-    for (std::uint32_t t = 0; t < terms.num_offdiag_two_body; ++t) {
-        const auto& term = terms.offdiag_two_body[t];
-        const std::uint64_t b1 = (r_state >> term.site_index_1) & 1ULL;
-        const std::uint64_t b2 = (r_state >> term.site_index_2) & 1ULL;
-        if (!(b1 == term.op_type_1 && b2 == term.op_type_2)) continue;
-        const std::uint64_t c_state =
-            r_state ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
-        bool ok; const Scalar vc = col_val(c_state, ok);
-        if (!ok) continue;
-        const cuDoubleComplex c = load_coeff(term.coefficient);
-        acc = ST::add(acc, ST::mul(ST::from_coeff(c), vc));
-    }
-    // ---- Three-body: reconstruct source b = r XOR flip_xor, forward-walk ----
-    for (std::uint32_t t = 0; t < terms.num_three_body; ++t) {
-        const auto& term = terms.three_body[t];
-        std::uint64_t flip_xor = 0;
-        if (term.op_type_1 != kOpSz) flip_xor ^= (1ULL << term.site_index_1);
-        if (term.op_type_2 != kOpSz) flip_xor ^= (1ULL << term.site_index_2);
-        if (term.op_type_3 != kOpSz) flip_xor ^= (1ULL << term.site_index_3);
-        const std::uint64_t b_state = r_state ^ flip_xor;
-
-        std::uint64_t walking = b_state;
-        cuDoubleComplex scalar = load_coeff(term.coefficient);
-        bool valid = true;
-        auto step = [&](std::uint8_t op_type, std::uint64_t site) {
-            if (!valid) return;
-            if (op_type == kOpSz) {
-                const double sg = ((walking >> site) & 1) ? -1.0 : 1.0;
-                scalar = make_cuDoubleComplex(cuCreal(scalar) * spin_l * sg,
-                                              cuCimag(scalar) * spin_l * sg);
-            } else {
-                const std::uint64_t b = (walking >> site) & 1ULL;
-                if (b != op_type) walking ^= (1ULL << site);
-                else              valid = false;
-            }
-        };
-        step(term.op_type_1, term.site_index_1);
-        step(term.op_type_2, term.site_index_2);
-        step(term.op_type_3, term.site_index_3);
-        if (!valid || walking != r_state) continue;
-        if (cuCreal(scalar) * cuCreal(scalar) +
-            cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
-        bool ok; const Scalar vc = col_val(b_state, ok);
-        if (!ok) continue;
-        acc = ST::add(acc, ST::mul(ST::from_coeff(scalar), vc));
-    }
-    return acc;
-}
-
-template <class BasisPolicy, class Scalar>
-__global__ void apply_terms_gpu_gather(
-    BasisPolicy           basis,
-    double                spin_l,
-    DeviceTermStorage     terms,
-    const Scalar* __restrict__ in,
-    Scalar*       __restrict__ out)
-{
-    const std::uint64_t dim = basis.dim();
-    const std::uint64_t r =
-        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (r >= dim) return;
-    out[r] = gather_row_device<BasisPolicy, Scalar>(basis, spin_l, terms, r, in);
-}
-
-// ---------------------------------------------------------------------------
-// Host-side launcher for the GATHER kernel. Unlike the scatter launcher, the
-// caller does NOT need to pre-zero ``d_out`` (every row is overwritten).
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// GPU audit (2026-09): WARP-per-row gather. The thread-per-row kernel above
-// issues one dependent random load at a time per row (Lin lookup -> in[j]),
-// with warp divergence on every gate test, so it runs ~10x below the L2
-// random-access rate. Here the 32 lanes of a warp take the row's terms in
-// parallel (lane l handles flattened term indices l, l+32, ...), which puts
-// up to 32 independent gathers in flight per row; the partial sums are
-// warp-reduced with shuffles and lane 0 writes out[r]. Rows of local spin
-// models carry ~N terms, so one pass over the lanes covers N <= 32.
-// ``ED_GPU_GATHER_WARP=1`` selects this kernel; thread-per-row is the default (see below).
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ double warp_shfl_down_scalar(double v, int off) {
-    return __shfl_down_sync(0xffffffffu, v, off);
-}
-__device__ __forceinline__ cuDoubleComplex warp_shfl_down_scalar(cuDoubleComplex v, int off) {
-    return make_cuDoubleComplex(__shfl_down_sync(0xffffffffu, cuCreal(v), off),
-                                __shfl_down_sync(0xffffffffu, cuCimag(v), off));
-}
-__device__ __forceinline__ cuFloatComplex warp_shfl_down_scalar(cuFloatComplex v, int off) {
-    return make_cuFloatComplex(__shfl_down_sync(0xffffffffu, cuCrealf(v), off),
-                               __shfl_down_sync(0xffffffffu, cuCimagf(v), off));
-}
-
-template <class BasisPolicy, class Scalar>
-__global__ void __launch_bounds__(256)
-apply_terms_gpu_gather_warp(
-    BasisPolicy           basis,
-    double                spin_l,
-    DeviceTermStorage     terms,
-    const Scalar* __restrict__ in,
-    Scalar*       __restrict__ out)
-{
-    using ST = ScalarTraits<Scalar>;
-    static_assert(!BasisPolicy::needs_orbit_walk && !BasisPolicy::has_coeff_modifier,
-                  "apply_terms_gpu_gather_warp supports only trivial / fixed-Sz policies");
-    const std::uint64_t dim  = basis.dim();
-    const unsigned      lane = threadIdx.x & 31u;
-    const std::uint64_t r    =
-        (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
-    if (r >= dim) return;                       // whole warp exits together (dim-aligned)
-
-    const std::uint64_t r_state = basis.state_of(r);
-    const Scalar        v_r     = in[r];
-    const double        spin_sq = spin_l * spin_l;
-    Scalar acc = ST::zero();
-
-    auto col_val = [&](std::uint64_t c_state, bool& ok) -> Scalar {
-        if constexpr (BasisPolicy::may_leave_basis) {
-            const std::uint64_t j = basis.index_of(c_state);
-            if (j == ed::matvec::basis::kDeviceNotFound) { ok = false; return ST::zero(); }
-            ok = true;
-            return in[j];
-        } else {
-            ok = true;
-            return in[c_state];
-        }
-    };
-
-    const std::uint32_t n1 = terms.num_diag_one_body;
-    const std::uint32_t n2 = terms.num_offdiag_one_body;
-    const std::uint32_t n3 = terms.num_diag_two_body;
-    const std::uint32_t n4 = terms.num_mixed_two_body;
-    const std::uint32_t n5 = terms.num_offdiag_two_body;
-    const std::uint32_t n6 = terms.num_three_body;
-    const std::uint32_t total = n1 + n2 + n3 + n4 + n5 + n6;
-
-    for (std::uint32_t i = lane; i < total; i += 32u) {
-        std::uint32_t t = i;
-        if (t < n1) {
-            const auto& term = terms.diag_one_body[t];
-            const double sign = ((r_state >> term.site_index) & 1) ? -1.0 : 1.0;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
-                                       ST::mul_real(v_r, spin_l * sign)));
-            continue;
-        }
-        t -= n1;
-        if (t < n2) {
-            const auto& term = terms.offdiag_one_body[t];
-            const std::uint64_t bit = (r_state >> term.site_index) & 1ULL;
-            if (bit != term.op_type) continue;
-            bool ok; const Scalar vc = col_val(r_state ^ (1ULL << term.site_index), ok);
-            if (!ok) continue;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)), vc));
-            continue;
-        }
-        t -= n2;
-        if (t < n3) {
-            const auto& term = terms.diag_two_body[t];
-            const double sa = ((r_state >> term.site_index_1) & 1) ? -1.0 : 1.0;
-            const double sb = ((r_state >> term.site_index_2) & 1) ? -1.0 : 1.0;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
-                                       ST::mul_real(v_r, spin_sq * sa * sb)));
-            continue;
-        }
-        t -= n3;
-        if (t < n4) {
-            const auto& term = terms.mixed_two_body[t];
-            const std::uint64_t flip_bit = (r_state >> term.flip_site) & 1ULL;
-            if (flip_bit != term.flip_op_type) continue;
-            const std::uint64_t b_state = r_state ^ (1ULL << term.flip_site);
-            const double sz_sign = ((b_state >> term.sz_site) & 1) ? -1.0 : 1.0;
-            bool ok; const Scalar vc = col_val(b_state, ok);
-            if (!ok) continue;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)),
-                                       ST::mul_real(vc, spin_l * sz_sign)));
-            continue;
-        }
-        t -= n4;
-        if (t < n5) {
-            const auto& term = terms.offdiag_two_body[t];
-            const std::uint64_t b1 = (r_state >> term.site_index_1) & 1ULL;
-            const std::uint64_t b2 = (r_state >> term.site_index_2) & 1ULL;
-            if (!(b1 == term.op_type_1 && b2 == term.op_type_2)) continue;
-            const std::uint64_t c_state =
-                r_state ^ (1ULL << term.site_index_1) ^ (1ULL << term.site_index_2);
-            bool ok; const Scalar vc = col_val(c_state, ok);
-            if (!ok) continue;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(load_coeff(term.coefficient)), vc));
-            continue;
-        }
-        t -= n5;
-        {
-            const auto& term = terms.three_body[t];
-            std::uint64_t flip_xor = 0;
-            if (term.op_type_1 != kOpSz) flip_xor ^= (1ULL << term.site_index_1);
-            if (term.op_type_2 != kOpSz) flip_xor ^= (1ULL << term.site_index_2);
-            if (term.op_type_3 != kOpSz) flip_xor ^= (1ULL << term.site_index_3);
-            const std::uint64_t b_state = r_state ^ flip_xor;
-            std::uint64_t walking = b_state;
-            cuDoubleComplex scalar = load_coeff(term.coefficient);
-            bool valid = true;
-            auto step = [&](std::uint8_t op_type, std::uint64_t site) {
-                if (!valid) return;
-                if (op_type == kOpSz) {
-                    const double sg = ((walking >> site) & 1) ? -1.0 : 1.0;
-                    scalar = make_cuDoubleComplex(cuCreal(scalar) * spin_l * sg,
-                                                  cuCimag(scalar) * spin_l * sg);
-                } else {
-                    const std::uint64_t b = (walking >> site) & 1ULL;
-                    if (b != op_type) walking ^= (1ULL << site);
-                    else              valid = false;
-                }
-            };
-            step(term.op_type_1, term.site_index_1);
-            step(term.op_type_2, term.site_index_2);
-            step(term.op_type_3, term.site_index_3);
-            if (!valid || walking != r_state) continue;
-            if (cuCreal(scalar) * cuCreal(scalar) +
-                cuCimag(scalar) * cuCimag(scalar) < 1e-30) continue;
-            bool ok; const Scalar vc = col_val(b_state, ok);
-            if (!ok) continue;
-            acc = ST::add(acc, ST::mul(ST::from_coeff(scalar), vc));
-        }
-    }
-    // Warp reduction (all 32 lanes are active: the early exit above is per warp).
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc = ST::add(acc, warp_shfl_down_scalar(acc, off));
-    if (lane == 0) out[r] = acc;
-}
-
-// Measured on an RTX 4080 SUPER (Heisenberg chain, fixed Sz, complex vectors):
-// the warp-per-row kernel is ~3x SLOWER than thread-per-row (637 vs 183 us at
-// N = 20, 8.8 vs 3.2 ms at N = 24) -- spreading a row's terms over the lanes
-// turns the per-term struct loads from one broadcast per warp into 32 scattered
-// loads, and the extra instruction count outweighs the added memory-level
-// parallelism. Thread-per-row stays the default; ED_GPU_GATHER_WARP=1 selects
-// the warp kernel for further experiments (e.g. long-range models with
-// hundreds of terms per row, where the lane split may pay off).
-inline bool gpu_gather_use_thread_kernel() {
-    static const bool v = [] {
-        return !ed::env::flag("ED_GPU_GATHER_WARP", false);
-    }();
-    return v;
-}
-
-template <class BasisPolicy, class Scalar>
-inline cudaError_t launch_apply_terms_gpu_gather(
-    BasisPolicy           basis,
-    double                spin_l,
-    DeviceTermStorage     terms,
-    const Scalar*         d_in,
-    Scalar*               d_out,
-    cudaStream_t          stream = 0,
-    int                   threads_per_block = 256)
-{
-    const std::uint64_t dim = basis.dim();
-    if (dim == 0) return cudaSuccess;
-    if (!gpu_gather_use_thread_kernel()) {
-        // Warp per row: 8 rows per 256-thread block.
-        const std::uint64_t warps_per_block = 256ull / 32ull;
-        const std::uint64_t blocks = (dim + warps_per_block - 1) / warps_per_block;
-        apply_terms_gpu_gather_warp<BasisPolicy, Scalar>
-            <<<static_cast<unsigned int>(blocks), 256u, 0, stream>>>
-            (basis, spin_l, terms, d_in, d_out);
-        return cudaGetLastError();
-    }
-    const std::uint64_t blocks =
-        (dim + static_cast<std::uint64_t>(threads_per_block) - 1) /
-        static_cast<std::uint64_t>(threads_per_block);
-    apply_terms_gpu_gather<BasisPolicy, Scalar>
-        <<<static_cast<unsigned int>(blocks),
-           static_cast<unsigned int>(threads_per_block),
-           0, stream>>>
-        (basis, spin_l, terms, d_in, d_out);
-    return cudaGetLastError();
-}
-
-// ===========================================================================
 // REP-SYMMETRY GATHER device kernel ("Optimized symmetry ED" plan, Phase C).
 //
 // The lock-free row-GATHER twin of ``apply_terms_rep_symmetry_scatter``. One
@@ -933,7 +434,7 @@ inline cudaError_t launch_apply_terms_gpu_gather(
 // Each ``out[r]`` is written exactly ONCE -- NO atomicAdd, NO output pre-zero.
 // The diagonal is included naturally (diagonal terms emit ``rep_r`` which maps
 // back to ``r``), so no separate diag[] array is uploaded -- the GPU-appropriate
-// "precomputed diagonal" (Phase B), identical in spirit to ``apply_terms_gpu_gather``.
+// "precomputed diagonal" (Phase B).
 //
 // Mirrors ``process_source_terms`` term-by-term (same FORWARD gates, applying
 // H to ``rep_r``), differing only in the gather accumulation vs atomic scatter.

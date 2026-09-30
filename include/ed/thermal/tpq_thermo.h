@@ -7,8 +7,8 @@
 // Takes the per-sample (beta_k, E_k, var_k) trajectories DIRECTLY (no
 // HDF5/text round-trip) and interpolates onto the caller's temperature
 // grid. Called by the unified ``ed::workflows::thermal`` orchestrator for
-// the mTPQ lane (both the backend-templated kernel in ``mtpq_kernel.h``
-// and the fp32 GPU lane in ``mtpq_f32.h`` emit these trajectories).
+// the mTPQ lane (the backend-templated kernel in ``mtpq_kernel.h``
+// emits these trajectories).
 // =============================================================================
 
 #include <algorithm>

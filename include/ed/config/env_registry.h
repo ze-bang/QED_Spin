@@ -134,20 +134,12 @@ struct Row {
       "Forces the complex LAPACK driver even when the assembled matrix is real (A/B + equivalence checks)")\
     X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
       "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
-    X("ED_MTPQ_VERBOSE", Flag, "thermal", "false",                             \
-      "Prints the mTPQ fp32-vs-double lane-selection decision to stderr")      \
     X("ED_TPQ_BASE_SEED", Integer, "thermal", "0 -> non-deterministic, time-seeded",\
       "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
-    X("ED_GPU_OPERATOR_MIRROR", Flag, "gpu", "true (mirror on)",               \
-      "=0 disables the full-Hilbert / fixed-Sz device mirror (CPU-vs-GPU bisection)")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
       "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors")\
-    X("ED_GPU_SYNC_LAUNCH", Flag, "gpu", "false (async launches)",             \
-      "=1 restores a host sync after every matvec launch (diagnostic for the 2026-09-11 async change)")\
-    X("ED_GPU_GATHER_WARP", Flag, "gpu", "false (thread-per-row kernel)",      \
-      "=1 selects the warp-per-row GPU gather kernel instead of thread-per-row")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\
       "=0/false/FALSE/no/NO disables the dim-aware automatic thread-budget scaling; any other value leaves it on")\
     X("ED_AUTO_THREADS_PER_K", Integer, "threads-numa", "8",                   \
