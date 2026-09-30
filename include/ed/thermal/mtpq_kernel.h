@@ -41,7 +41,6 @@ struct MtpqOptions {
     double      large_value    = 1.0e5;
     double      target_beta    = 1000.0;
     std::uint64_t random_seed  = 0;
-    std::string output_dir;
 
     /// User-supplied inverse temperatures at which the kernel should
     /// snapshot (copy to host) the running TPQ state. The kernel walks

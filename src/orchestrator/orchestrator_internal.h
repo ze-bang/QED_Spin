@@ -14,9 +14,8 @@
 //     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
 //                  or the FTLM / OFTLM kernels
 //
-// The orchestrator carries the legacy CLI behaviour ONLY for the
-// `output_dir` HDF5 trail; everything else is the new uniform Result
-// shape from `include/ed/core/results.h`.
+// Every lane returns the uniform Result shape from
+// `include/ed/core/results.h`; nothing is written to disk.
 //
 // Carries the include block every orchestrator translation unit needs, the
 // Hermitian-input guard the entry points share, and the declarations of
@@ -29,8 +28,7 @@
 // select_backend), same env reads, same dispatch order.
 //
 // File map
-//   orch_common.cpp    shared plumbing: the solve() HDF5 persistence
-//                      finalizer, the exact-small thermal env probe
+//   orch_common.cpp    shared plumbing: the exact-small thermal env probe
 //   orch_solve.cpp     solve() + the backend-templated solve_on<Backend>
 //                      lanes (Lanczos / BlockLanczos / BlockKrylovSchur /
 //                      KrylovSchur / FullDiag). The ONLY translation unit
@@ -45,7 +43,6 @@
 #include <ed/orchestrator.h>
 #include <ed/core/solver_defaults.h>
 
-#include <ed/core/hdf5_io.h>             // saveDiagonalizationResults (uniform eigenvector dump)
 #include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
 #include <ed/krylov/block_lanczos_kernel.h>
 #include <ed/krylov/block_krylov_schur_kernel.h>
@@ -95,13 +92,6 @@ namespace ed::workflows {
 // carry external linkage with their one definition in orch_common.cpp.
 // ---------------------------------------------------------------------------
 namespace orch_detail {
-
-/// solve() persistence finalizer: centralises the post-kernel HDF5 emission
-/// so every dispatch lane hits the same on-disk contract. Full contract: see
-/// the definition in orch_common.cpp.
-void apply_solve_save_finalizer(GroundStateResult& R,
-                                const Geometry& geom,
-                                const SolveOptions& opts);
 
 /// ED_THERMAL_EXACT_SMALL=0 forces the real sampling kernel even at
 /// D <= SMALL_THERMAL_DIM. Read per call so a test can toggle it without

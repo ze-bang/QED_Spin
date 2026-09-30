@@ -28,7 +28,7 @@ include(EDBenchmark)
 
 # Helper that mirrors `ed_add_test` from the top-level CMakeLists.txt: every
 # benchmark gets its own binary linking against ed_solvers_cpu (which
-# transitively pulls in ed_core, ed_io, BLAS/LAPACK/HDF5/ARPACK).
+# transitively pulls in ed_core, BLAS/LAPACK).
 function(ed_add_benchmark bench_name bench_source)
     add_executable(${bench_name} ${bench_source})
     target_link_libraries(${bench_name} PRIVATE

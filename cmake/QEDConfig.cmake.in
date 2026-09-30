@@ -6,7 +6,7 @@
 #
 # Provides the imported targets:
 #
-#   QED::ed_io           Pure I/O helpers
+#   QED::ed_parallel     Thread budget + OpenMP thread pinning
 #   QED::ed_core         Core types/config
 #   QED::ed_solvers_cpu  CPU eigensolvers + thermal methods
 #   QED::ed_solvers_gpu  GPU/CUDA solvers (only if installed with WITH_CUDA=ON)
@@ -17,7 +17,7 @@
 #   target_link_libraries(my_app PRIVATE QED::ed_solvers_cpu)
 #
 # Re-finds the transitive dependencies that the imported targets reference
-# (BLAS / LAPACK / HDF5 / OpenMP / optionally CUDAToolkit).
+# (BLAS / LAPACK / OpenMP / optionally CUDAToolkit).
 # -----------------------------------------------------------------------------
 
 include(CMakeFindDependencyMacro)
@@ -32,11 +32,6 @@ find_dependency(Threads)
 # OpenMP is optional but extremely commonly enabled.
 if(NOT TARGET OpenMP::OpenMP_CXX)
     find_dependency(OpenMP)
-endif()
-
-# HDF5 with C++ bindings.
-if(NOT HDF5_FOUND)
-    find_dependency(HDF5 COMPONENTS CXX)
 endif()
 
 # Eigen3 (header-only, used pervasively).

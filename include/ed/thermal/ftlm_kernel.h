@@ -75,7 +75,6 @@ struct FtlmOptions {
     std::vector<double> temperatures;
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
-    std::string output_dir;              ///< unused since WP10 C5 (no per-sample dumps)
 
     /// Knob parity with the legacy FTLMParameters (audit 2026-07-31):
     /// the CPU lane used to forward only krylov/samples/seed and let

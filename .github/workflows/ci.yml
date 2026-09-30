@@ -45,8 +45,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -56,7 +54,6 @@ jobs:
           g++ --version | head -1
           cmake --version | head -1
           pkg-config --modversion openblas || true
-          pkg-config --modversion hdf5 || true
 
       - name: Configure (preset ci-linux)
         run: cmake --preset ci-linux
@@ -102,8 +99,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -153,8 +148,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -203,8 +196,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -265,8 +256,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -336,8 +325,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 
@@ -439,8 +426,6 @@ jobs:
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 

@@ -51,7 +51,6 @@ struct BlockKrylovSchurOptions {
     std::size_t   max_restarts    = 50;
     double        tolerance       = 1e-10;
     bool          compute_vectors = false;
-    std::string   output_dir;
     std::uint64_t global_n        = 0;
     std::size_t   reorth_period   = 1;    ///< full reorth every K blocks (1 = always)
     /// Memory cap on the per-cycle subspace, in resident length-N vectors

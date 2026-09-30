@@ -69,9 +69,6 @@ struct SolveOptions {
     /// this false for large-N eigenvalue runs whose full basis exceeds the budget;
     /// env ED_BLOCK_LANCZOS_LEAN=1 forces lean. Ignored when compute_vectors=true.
     bool        block_lanczos_keep_basis = true;
-    /// Output directory for HDF5 results (legacy behaviour). Empty
-    /// means "do not write".
-    std::string output_dir;
     SolveMethod method         = SolveMethod::Auto;
     BackendConstraints backend;
 
@@ -212,7 +209,6 @@ struct ThermalOptions {
     std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
     std::vector<double> betas;
     std::uint64_t random_seed  = 0;
-    std::string output_dir;
     BackendConstraints backend;
 
     // -----------------------------------------------------------------
@@ -267,11 +263,8 @@ struct ThermalOptions {
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
     // user-supplied probe-betas for TPQ state-vector snapshots. The
     // orchestrator passes this through to ``MtpqOptions::probe_betas``
-    // Empty (default) -> no snapshots
-    // are taken. Ignored by FTLM / OFTLM (which never have
-    // a meaningful TPQ state to snapshot). Combine with
-    // ``output_dir`` to land the saved states on disk under
-    // ``ed_results.h5`` (``/tpq/samples/sample_<s>/state_beta_<b>``).
+    // Empty (default) -> no snapshots are taken. Ignored by FTLM / OFTLM
+    // (which never have a meaningful TPQ state to snapshot).
     // -----------------------------------------------------------------
     std::vector<double> probe_betas;
 };

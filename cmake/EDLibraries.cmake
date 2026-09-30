@@ -3,21 +3,19 @@
 #
 # Defines the project's first-class static libraries:
 #
-#   ed_io           Pure I/O helpers (basis vector storage, lanczos basis
-#                   buffer, HDF5IO result files). No solver dependencies.
-#   ed_core         Core types. Depends on ed_io.
-#   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
-#                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
-#                   LTLM, observables, dynamics). Depends on
-#                   ed_core and ed_io.
+#   ed_parallel     Thread budget + OpenMP thread pinning.
+#   ed_core         Core types. Depends on ed_parallel.
+#   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos,
+#                   Krylov-Schur, full diagonalization, TPQ, FTLM, OFTLM,
+#                   observables, dynamics). Depends on ed_core.
 #   ed_solvers_gpu  All GPU/CUDA solvers (only built when WITH_CUDA). Depends
-#                   on ed_core, ed_io, and the CUDA runtime/cuBLAS/cuSPARSE/
+#                   on ed_core and the CUDA runtime/cuBLAS/cuSPARSE/
 #                   cuRAND/cuSOLVER imported targets.
 #
 # Each library exposes its include directories and link dependencies via
-# PUBLIC properties, so executables (ED, the
+# PUBLIC properties, so executables (the
 # test binaries) only need to write `target_link_libraries(<exe> PRIVATE
-# ed_solvers_cpu)` -- the include path and BLAS/LAPACK/HDF5/OpenMP/CUDA
+# ed_solvers_cpu)` -- the include path and BLAS/LAPACK/OpenMP/CUDA
 # link stack propagate automatically.
 #
 # This module is a pure structural refactor: every TU that the previous
@@ -40,7 +38,6 @@ list(APPEND ED_COMMON_LINK_LIBS
     ${LAPACK_LIBRARIES}
     ${LAPACKE_LIBRARIES}
     ${EXTRA_LINALG_LIBRARIES}
-    ${HDF5_LIBRARIES}
 )
 
 # OpenMP must already have been found by the parent CMakeLists.txt (we put
@@ -58,7 +55,6 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/core>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
@@ -67,22 +63,13 @@ set(_ED_PUBLIC_INCLUDES
 )
 
 # -----------------------------------------------------------------------------
-# ed_parallel: NUMA-aware first-touch + thread-pinning hooks (Phase 3a #4).
+# ed_parallel: thread-budget + OpenMP thread-pinning hooks (Phase 3a #4).
 #
-# Tiny utility library: a single TU that exposes
-# `ed::parallel::first_touch_complex` / `first_touch_bytes` /
-# `pin_omp_threads_once` / `describe_numa_state`. Both knobs are
-# DEFAULT-OFF (`ED_NUMA_FIRST_TOUCH`, `ED_NUMA_PIN_THREADS`); turning them
-# on never changes numerical results, only page placement and thread
-# affinity. Linked PUBLIC into ed_io and ed_solvers_cpu so the in-memory
-# basis tile loader (`lanczos_reorth.cpp`) and the Lanczos / FTLM /
-# selective-reorth entry points can call into the helpers without
-# pulling in an extra optional dep.
-#
-# Intentionally NO libnuma dependency: the first cut works on any Linux +
-# glibc + OpenMP system. Explicit `numa_alloc_onnode` / `mbind` placement
-# can be added later as a follow-up if profiling justifies it (would need
-# a `find_library(NUMA numa)` and a WITH_LIBNUMA option).
+# Tiny utility library: `ed::parallel::ThreadBudgetScope` /
+# `auto_threads_for_dim` and `pin_omp_threads_once` (knob
+# `ED_NUMA_PIN_THREADS`, default off; it never changes numerical results,
+# only thread affinity). Linked PUBLIC into ed_core and ed_solvers_cpu.
+# Intentionally NO libnuma dependency.
 # -----------------------------------------------------------------------------
 add_library(ed_parallel STATIC
     ${PARALLEL_DIR}/numa.cpp
@@ -103,31 +90,6 @@ target_compile_options(ed_parallel PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_parallel PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# -----------------------------------------------------------------------------
-# ed_io: I/O helpers (basis vector / lanczos basis buffer / HDF5IO)
-# -----------------------------------------------------------------------------
-add_library(ed_io STATIC
-    ${IO_DIR}/basis_vector_storage.cpp
-    ${IO_DIR}/hdf5_io_file.cpp
-    ${IO_DIR}/hdf5_io_eigen.cpp
-    ${IO_DIR}/hdf5_io_tpq.cpp
-    ${IO_DIR}/hdf5_io_thermal.cpp
-    ${IO_DIR}/lanczos_basis_buffer.cpp
-    ${IO_DIR}/lanczos_checkpoint.cpp
-    ${IO_DIR}/lanczos_reorth.cpp
-)
-target_include_directories(ed_io PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_io PUBLIC ed_parallel ${ED_COMMON_LINK_LIBS})
-target_link_libraries(ed_io PUBLIC
-    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
-)
-target_compile_options(ed_io PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-)
-# -fPIC so this archive can be linked into the pybind11 shared module
-# (`_core.so`). Harmless overhead for the C++-only executables.
-set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_core: core types and the CPU stub of the lazy GPU sector mirror.
@@ -156,7 +118,7 @@ add_library(ed_core STATIC
     ${CORE_DIR}/operator_gpu.cpp
 )
 target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_core PUBLIC ed_parallel ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_core PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -244,7 +206,7 @@ set(ED_SOLVERS_CPU_SOURCES
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_parallel ${ED_COMMON_LINK_LIBS})
 
 # ed_symmetry (the permutation DSL, group closure) and ed_dssf (observable
 # assembly) are part of ed_solvers_cpu's public link surface.
@@ -271,7 +233,6 @@ add_library(ed_dssf STATIC
     ${DSSF_DIR}/cross_sector_orbit_observable.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_include_directories(ed_dssf PRIVATE ${HDF5_INCLUDE_DIRS})
 target_link_libraries(ed_dssf PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_dssf PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"

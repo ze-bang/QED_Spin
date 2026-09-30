@@ -84,40 +84,8 @@ enum class ReorthPolicy : std::uint8_t {
     /// internally). Cheap (constant per-iter cost; never grows) but
     /// only counteracts the immediate-neighbor loss-of-orthogonality
     /// that three-term recurrence accrues -- accumulated drift past
-    /// ~30 iterations still appears. Matches the legacy main-body
-    /// `lanczos()` CPU code path that this kernel replaces.
+    /// ~30 iterations still appears.
     LocalDGKS3,
-};
-
-/// In-memory resume state for re-entering `lanczos_kernel` after a
-/// previous run was interrupted (or for chaining two runs with
-/// different `max_iter`s). Mirrors the on-disk
-/// `ed::io::lanczos_io::LanczosCheckpoint` schema but lives entirely
-/// in backend memory so the kernel doesn't have to round-trip through
-/// the I/O layer on every resume.
-///
-/// Bridge functions in `ed/io/lanczos_checkpoint.h` convert between
-/// the host-side `LanczosCheckpoint` (with `ComplexVector` payload)
-/// and a `LanczosResumeState` (with `Backend::UniqueVec` payload).
-///
-/// On entry to the kernel:
-///   * `alpha.size() == j_start`
-///   * `beta.size()  == j_start + 1` (beta[0] is the legacy sentinel)
-///   * `v_curr`, `v_prev` are dimension-`local_n` backend vectors
-///   * `ring_vectors` holds up to 3 most-recent basis vectors when the
-///     reorth policy is `LocalDGKS3`; ignored otherwise.
-///   * `basis` holds every basis vector V_0..V_{j_start - 1} when the
-///     resume run is replaying a FullCGS2 / PeriodicCGS2 run; the
-///     kernel will own these going forward. May be empty for
-///     LocalDGKS3 / None policies (the kernel doesn't need them).
-struct LanczosResumeState {
-    std::size_t                                  j_start = 0;
-    std::vector<double>                          alpha;
-    std::vector<double>                          beta;
-    ed::matvec::Backend::UniqueVec               v_curr;
-    ed::matvec::Backend::UniqueVec               v_prev;
-    std::vector<ed::matvec::Backend::UniqueVec>  ring_vectors;
-    std::vector<ed::matvec::Backend::UniqueVec>  basis;
 };
 
 /// Options for `lanczos_kernel`.
@@ -168,35 +136,20 @@ struct LanczosKernelOptions {
     /// cost of a few extra Krylov iterations near convergence).
     std::size_t convergence_check_interval = 0;
 
-    /// Optional per-iteration checkpoint hook. Invoked AFTER the swap-
-    /// rotate has produced V_{j+1}, so the hook sees the same state
-    /// the legacy `lanczos.cpp` checkpoint stored:
+    /// Optional per-iteration hook. Invoked AFTER the swap-rotate has
+    /// produced V_{j+1}:
     ///
-    ///   * `iteration_count == j + 1` (number of completed iterations,
-    ///     matching the legacy `cp.iteration` field).
+    ///   * `iteration_count == j + 1` (number of completed iterations).
     ///   * `alpha.size() == j + 1`, `beta.size() == j + 2`.
     ///   * `v_curr` points to V_{j+1} (the next vector that will be
     ///     used in iteration j+1) in backend memory; `v_prev` points
     ///     to V_j. Both buffers MUST be treated as read-only by the
     ///     hook --- the kernel reuses them in the next iteration.
     ///
-    /// Designed for `lanczos.cpp`-style checkpoint / restart: the hook
-    /// can serialise (alpha, beta, V_{j+1}, V_j, RNG state) to disk
-    /// every `on_step_interval` steps and the calling context can
-    /// resume from a kernel re-entry whose `LanczosResumeState` has
-    /// `j_start = iteration_count`, `v_curr = V_{iteration_count}`,
-    /// `v_prev = V_{iteration_count - 1}`.
-    ///
-    /// Note: on the LAST iteration (j + 1 == cap), the rotation
-    /// happens but no further matvec is done; the hook still fires
-    /// so a checkpoint includes the final V_{cap}.
-    ///
-    /// The `ring_view` argument is a pointer to the current LocalDGKS3
-    /// ring buffer, in chronological order (oldest first), or nullptr
-    /// when the reorth policy is not LocalDGKS3. Lifetime: only valid
-    /// for the duration of the callback. The hook can use this view
-    /// to persist the ring state into a checkpoint so a future resume
-    /// starts with full local-reorth quality from iter 0.
+    /// Used by the two-pass eigenvector reconstruction in the solve lane
+    /// (the replayed recurrence streams V_j past the hook). On the LAST
+    /// iteration (j + 1 == cap) the rotation happens but no further
+    /// matvec is done; the hook still fires.
     ///
     /// Default `nullptr` (no hook called).
     std::function<void(std::size_t iteration_count,
@@ -204,8 +157,7 @@ struct LanczosKernelOptions {
                        const std::vector<double>& beta,
                        const Complex* v_curr,
                        const Complex* v_prev,
-                       std::size_t local_n,
-                       const std::vector<const Complex*>* ring_view)>
+                       std::size_t local_n)>
         on_step;
 
     /// Stride (in iterations) between `on_step` invocations. 0 disables
@@ -268,7 +220,7 @@ struct LanczosKernelOptions {
     /// well-conditioned spectra (validated to 1e-9 by the Apr 25
     /// xdiag bake-off + the SOTA-symmetry suite). K=3 was the
     /// pre-Wave-2.1 default and remains reachable via env
-    /// ``ED_LANCZOS_REORTH_K`` (read by `lanczos()` /
+    /// ``ED_LANCZOS_REORTH_K`` (read by the solve
     /// orchestrator) or by setting this field explicitly when
     /// constructing options manually. Raise it for problems with
     /// near-degenerate ground states where loss of orthogonality
@@ -279,21 +231,6 @@ struct LanczosKernelOptions {
     /// resulting correction sits below the round-off floor). Default
     /// sqrt(eps) ~= 1.49e-8, matching the legacy lanczos.cpp constant.
     double local_ortho_threshold = 1.49011611938476562e-08;
-
-    /// Optional in-memory resume state. When non-null, the kernel
-    /// skips the v0 init / first-iteration setup and continues from
-    /// `state->j_start` with the supplied alpha/beta/v_curr/v_prev
-    /// (and ring buffer for LocalDGKS3 / basis for FullCGS2).
-    /// Ownership of the state transfers to the kernel on entry; the
-    /// kernel populates `R.basis` (and a separate `R.ring_vectors`
-    /// after the run, accessible via the `on_step` hook) with the
-    /// state at termination.
-    ///
-    /// The pointer is intentionally raw (not unique_ptr) so the
-    /// caller can build the state on the stack and let it die after
-    /// the call. The kernel does NOT take ownership of the pointer
-    /// itself; only of the unique_ptr-owned vectors inside.
-    LanczosResumeState* resume_state = nullptr;
 };
 
 /// Output of `lanczos_kernel`. `basis` is populated iff
@@ -307,16 +244,6 @@ struct LanczosKernelResult {
     /// Orthonormal Krylov basis in backend memory. Each vector is
     /// dimension `local_n`. Empty iff `opts.keep_basis == false`.
     std::vector<ed::matvec::Backend::UniqueVec> basis;
-    /// Final v_curr / v_prev / ring buffer. Owned by the caller. Used
-    /// by checkpoint writers so a resumed run can pick up exactly where
-    /// this one left off. Only populated when `opts.resume_state` is
-    /// non-null OR `opts.on_step` is configured AND the run terminates
-    /// before `max_iter` (e.g. via `convergence_check`). The full set
-    /// is always emitted when the run terminates by hitting `cap`,
-    /// regardless.
-    ed::matvec::Backend::UniqueVec   v_curr;
-    ed::matvec::Backend::UniqueVec   v_prev;
-    std::vector<ed::matvec::Backend::UniqueVec> ring_vectors;
     /// Number of iterations actually completed (may be less than
     /// `opts.max_iter` if Lanczos broke down via beta < tol).
     std::size_t                      iters_done = 0;
@@ -391,20 +318,16 @@ LanczosKernelResult lanczos_kernel(
     R.alpha.reserve(opts.max_iter);
     R.beta.reserve(opts.max_iter + 1);
 
-    const bool          resuming = (opts.resume_state != nullptr);
-    const std::size_t   j_start  = resuming ? opts.resume_state->j_start : 0;
-
     // Working vectors. Three are mandatory; w doubles as the SpMV
-    // output target. On a resume, v_curr / v_prev are handed to us;
-    // otherwise we allocate fresh and copy v0 into v_curr.
-    Backend::UniqueVec v_prev;
-    Backend::UniqueVec v_curr;
+    // output target. v0 is copied into a fresh v_curr.
+    auto v_prev = be.make_zero_vector(local_n);
+    auto v_curr = be.make_zero_vector(local_n);
     auto w = be.make_zero_vector(local_n);
 
-    // Ring buffer for LocalDGKS3 reorth. Implemented as a vector of
-    // backend-owned vectors plus an explicit (head, count) pair to
-    // avoid the cost of an erase()/insert() on the hot path. Sized
-    // to opts.local_ring_size when LocalDGKS3 is active.
+    // Ring buffer for LocalDGKS3 reorth with K >= 3. Implemented as a
+    // vector of backend-owned vectors plus an explicit (head, count)
+    // pair to avoid the cost of an erase()/insert() on the hot path.
+    // Sized to opts.local_ring_size when LocalDGKS3 is active.
     std::vector<Backend::UniqueVec> ring;
     std::size_t                     ring_head  = 0;
     std::size_t                     ring_count = 0;
@@ -421,66 +344,34 @@ LanczosKernelResult lanczos_kernel(
 
     const std::size_t expected_total = opts.max_iter;
 
-    if (resuming) {
-        // Adopt the resume state. Vectors are moved out of the state
-        // (they live in backend memory already; no extra allocation).
-        R.alpha = std::move(opts.resume_state->alpha);
-        R.beta  = std::move(opts.resume_state->beta);
-        if (R.beta.empty()) R.beta.push_back(0.0);
-        v_curr  = std::move(opts.resume_state->v_curr);
-        v_prev  = std::move(opts.resume_state->v_prev);
-        if (!v_curr || !v_prev) {
-            throw std::invalid_argument(
-                "lanczos_kernel: resume_state missing v_curr/v_prev");
-        }
-        if (R.alpha.size() != j_start) {
-            throw std::invalid_argument(
-                "lanczos_kernel: resume_state alpha.size() != j_start");
-        }
-        if (R.beta.size() != j_start + 1) {
-            throw std::invalid_argument(
-                "lanczos_kernel: resume_state beta.size() != j_start + 1");
-        }
-        if (opts.reorth == ReorthPolicy::LocalDGKS3) {
-            ring        = std::move(opts.resume_state->ring_vectors);
-            ring_count  = ring.size();
-            ring_head   = 0;  // resume convention: head = 0 after the move
-        }
-        if (opts.keep_basis) {
-            basis = std::move(opts.resume_state->basis);
-            basis_ptrs.reserve(std::max(basis.size(), expected_total));
-            for (auto& bv : basis) basis_ptrs.push_back(bv.get());
-        }
-    } else {
-        v_prev = be.make_zero_vector(local_n);
-        v_curr = be.make_zero_vector(local_n);
-        R.beta.push_back(0.0);  // beta[0] unused, matches legacy ABI.
+    R.beta.push_back(0.0);  // beta[0] unused, matches legacy ABI.
 
-        // Normalise the initial vector in-place (we own a fresh copy).
-        be.copy(v0_local, v_curr.get(), local_n);
-        const double v0_norm = be.nrm2(v_curr.get(), local_n);
-        if (!(v0_norm > 0.0)) {
-            throw std::invalid_argument(
-                "lanczos_kernel: initial vector has non-positive norm");
-        }
-        be.scale(Complex(1.0 / v0_norm, 0.0), v_curr.get(), local_n);
+    // Normalise the initial vector in-place (we own a fresh copy).
+    be.copy(v0_local, v_curr.get(), local_n);
+    const double v0_norm = be.nrm2(v_curr.get(), local_n);
+    if (!(v0_norm > 0.0)) {
+        throw std::invalid_argument(
+            "lanczos_kernel: initial vector has non-positive norm");
+    }
+    be.scale(Complex(1.0 / v0_norm, 0.0), v_curr.get(), local_n);
 
-        if (opts.keep_basis) {
-            basis.reserve(expected_total);
-            basis_ptrs.reserve(expected_total);
-            auto first = be.make_zero_vector(local_n);
-            be.copy(v_curr.get(), first.get(), local_n);
-            basis_ptrs.push_back(first.get());
-            basis.emplace_back(std::move(first));
-        }
-        if (opts.reorth == ReorthPolicy::LocalDGKS3) {
-            ring.reserve(std::max<std::size_t>(opts.local_ring_size, 1));
-            auto first = be.make_zero_vector(local_n);
-            be.copy(v_curr.get(), first.get(), local_n);
-            ring.emplace_back(std::move(first));
-            ring_count = 1;
-            ring_head  = 0;
-        }
+    if (opts.keep_basis) {
+        basis.reserve(expected_total);
+        basis_ptrs.reserve(expected_total);
+        auto first = be.make_zero_vector(local_n);
+        be.copy(v_curr.get(), first.get(), local_n);
+        basis_ptrs.push_back(first.get());
+        basis.emplace_back(std::move(first));
+    }
+    const bool ring_needed =
+        (opts.reorth == ReorthPolicy::LocalDGKS3 && opts.local_ring_size > 2);
+    if (ring_needed) {
+        ring.reserve(opts.local_ring_size);
+        auto first = be.make_zero_vector(local_n);
+        be.copy(v_curr.get(), first.get(), local_n);
+        ring.emplace_back(std::move(first));
+        ring_count = 1;
+        ring_head  = 0;
     }
 
     // Reorth pointer set. When `aux_ortho_ptrs` is non-empty (the
@@ -509,7 +400,7 @@ LanczosKernelResult lanczos_kernel(
         (opts.dim_cap > 0) ? opts.dim_cap : local_n;
     const std::size_t cap = std::min<std::size_t>(opts.max_iter, dim_bound);
 
-    for (std::size_t j = j_start; j < cap; ++j) {
+    for (std::size_t j = 0; j < cap; ++j) {
         const double t0 = profile_on ? now_us() : 0.0;
         // w = H * v_curr (matvec is opaque to this kernel --- it may
         // be a halo-aware distributed apply, a cuBLAS-backed SpMV, etc.)
@@ -530,7 +421,7 @@ LanczosKernelResult lanczos_kernel(
 
         const bool fuse_local_k12 =
             (opts.reorth == ReorthPolicy::LocalDGKS3) &&
-            (opts.local_ring_size <= 2) && (j > 0 || j_start > 0);
+            (opts.local_ring_size <= 2) && (j > 0);
         Complex overlap_curr{0.0, 0.0};
         if (fuse_local_k12) {
             // w -= alpha[j] * v_curr, and the LocalDGKS3 overlap <v_curr, w>
@@ -605,7 +496,7 @@ LanczosKernelResult lanczos_kernel(
                 // K>=1: project against V_j (= v_curr). The overlap was
                 // computed in the fused recurrence pass above; for K == 1
                 // the projection itself is folded into the norm pass.
-                if (j > 0 || j_start > 0) {
+                if (j > 0) {
                     const Complex overlap = fuse_local_k12
                         ? overlap_curr
                         : be.dot(v_curr.get(), w.get(), local_n);
@@ -669,35 +560,14 @@ LanczosKernelResult lanczos_kernel(
         // Compute V_{j+1} = w / beta_{j+1} and rotate, BEFORE the
         // on_step / convergence_check hooks. After the rotation:
         //   v_prev = V_j, v_curr = V_{j+1}, w = scratch.
-        // This way the on_step hook sees the same state the legacy
-        // `lanczos.cpp` body wrote to checkpoint:
-        //   cp.iteration  = j + 1
-        //   cp.v_current  = V_{j+1}
-        //   cp.v_prev     = V_j
-        // (matching the legacy convention so checkpoints round-trip
-        //  bit-for-bit semantically across the migration).
         be.scale(Complex(1.0 / bnext, 0.0), w.get(), local_n);
         std::swap(v_prev, v_curr);
         std::swap(v_curr, w);
 
-        // Update the LocalDGKS3 ring buffer with V_{j+1} so the
-        // on_step hook can snapshot it for resume. Ring is internal
-        // state and unaffected by basis-keep semantics.
-        //
-        // Wave 2.3: skip the ring update for K<=2 -- the reorth path
-        // reads v_curr/v_prev directly in that regime. The only
-        // remaining reason to maintain the ring is the on_step hook
-        // emitting ``ring_view`` for checkpointing; we still populate
-        // it when an on_step hook is registered.
-        const bool ring_needed_for_reorth =
-            (opts.reorth == ReorthPolicy::LocalDGKS3 &&
-             opts.local_ring_size > 2);
-        const bool ring_needed_for_checkpoint =
-            (opts.reorth == ReorthPolicy::LocalDGKS3 &&
-             opts.on_step != nullptr);
-        if (ring_needed_for_reorth || ring_needed_for_checkpoint) {
-            const std::size_t cap_ring =
-                std::max<std::size_t>(opts.local_ring_size, 1);
+        // Update the LocalDGKS3 ring buffer with V_{j+1}. Wave 2.3: only
+        // for K >= 3 -- the K <= 2 reorth path reads v_curr/v_prev directly.
+        if (ring_needed) {
+            const std::size_t cap_ring = opts.local_ring_size;
             if (ring_count < cap_ring) {
                 auto slot = be.make_zero_vector(local_n);
                 be.copy(v_curr.get(), slot.get(), local_n);
@@ -709,39 +579,22 @@ LanczosKernelResult lanczos_kernel(
             }
         }
 
-        // Per-iteration checkpoint hook. Fires AFTER rotation so the
-        // hook sees v_curr = V_{j+1}, v_prev = V_j (the same vectors
-        // the legacy `lanczos.cpp` checkpoint stored). The
-        // `iteration_count` passed to the hook is `j + 1`, matching
-        // the legacy `cp.iteration` semantic.
+        // Per-iteration hook. Fires AFTER rotation so the hook sees
+        // v_curr = V_{j+1}, v_prev = V_j; `iteration_count` is `j + 1`.
         if (opts.on_step &&
             opts.on_step_interval > 0 &&
             ((j + 1) % opts.on_step_interval == 0))
         {
-            // Materialise the chronological ring-buffer view as raw
-            // pointers (oldest first). Only populated when the
-            // LocalDGKS3 policy is active.
-            std::vector<const Complex*> ring_view;
-            const std::vector<const Complex*>* ring_view_ptr = nullptr;
-            if (opts.reorth == ReorthPolicy::LocalDGKS3 && ring_count > 0) {
-                const std::size_t cap_ring = ring.size();
-                ring_view.reserve(ring_count);
-                for (std::size_t k = 0; k < ring_count; ++k) {
-                    const std::size_t slot = (ring_head + k) % cap_ring;
-                    ring_view.push_back(ring[slot].get());
-                }
-                ring_view_ptr = &ring_view;
-            }
             opts.on_step(j + 1, R.alpha, R.beta,
-                         v_curr.get(), v_prev.get(), local_n, ring_view_ptr);
+                         v_curr.get(), v_prev.get(), local_n);
         }
 
         const double t5 = profile_on ? now_us() : 0.0;
         if (profile_on) t_ring_us += (t5 - t4);
 
         // Optional Ritz-convergence early-exit. We run the callback
-        // AFTER on_step (so a checkpoint always gets written for the
-        // iteration that triggered the break) but BEFORE the next
+        // AFTER on_step (so the hook sees every completed step, including
+        // the one that triggered the break) but BEFORE the next
         // matvec. See the `LanczosKernelOptions::convergence_check`
         // comment for the exact alpha/beta sizes on entry.
         if (opts.convergence_check &&
@@ -809,22 +662,6 @@ LanczosKernelResult lanczos_kernel(
         (void)iters_profiled;  // available for callers that want it
     }
 
-    // Emit final v_curr / v_prev / ring buffer so callers can checkpoint
-    // a resume-ready snapshot. We move out the unique_ptrs we own.
-    R.v_curr = std::move(v_curr);
-    R.v_prev = std::move(v_prev);
-    if (opts.reorth == ReorthPolicy::LocalDGKS3) {
-        // Linearise the ring buffer in chronological order (oldest first)
-        // so consumers don't have to know about the (head, count) layout.
-        R.ring_vectors.reserve(ring_count);
-        const std::size_t cap_ring = ring.size();
-        if (cap_ring > 0) {
-            for (std::size_t k = 0; k < ring_count; ++k) {
-                const std::size_t slot = (ring_head + k) % cap_ring;
-                R.ring_vectors.emplace_back(std::move(ring[slot]));
-            }
-        }
-    }
     return R;
 }
 

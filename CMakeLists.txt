@@ -161,7 +161,6 @@ set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(CORE_DIR ${SRC_DIR}/core)
 set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
-set(IO_DIR ${SRC_DIR}/io)
 set(DSSF_DIR ${SRC_DIR}/dssf)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
@@ -171,14 +170,12 @@ set(MATVEC_DIR ${SRC_DIR}/matvec)  # Matvec-unification revamp (Phase 1)
 include_directories(${INCLUDE_DIR})
 include_directories(${INCLUDE_DIR}/ed/core)
 include_directories(${INCLUDE_DIR}/ed/solvers)
-include_directories(${INCLUDE_DIR}/ed/io)
 include_directories(${INCLUDE_DIR}/ed/gpu)
 include_directories(${INCLUDE_DIR}/ed/matvec)
 include_directories(${SRC_DIR})
 include_directories(${CORE_DIR})
 include_directories(${SOLVERS_CPU_DIR})
 include_directories(${SOLVERS_GPU_DIR})
-include_directories(${IO_DIR})
 
 # =============================================================================
 # BLAS / LAPACK / LAPACKE BACKEND
@@ -190,7 +187,7 @@ include(EDBlasProfile)
 # =============================================================================
 # OTHER DEPENDENCIES
 # =============================================================================
-# Eigen3, nlohmann/json, HDF5 (CXX), optional CUDAToolkit (gated by
+# Eigen3, nlohmann/json, optional CUDAToolkit (gated by
 # WITH_CUDA), and ARPACK. Each is independent of the BLAS profile above.
 include(EDDependencies)
 
@@ -210,7 +207,7 @@ endif()
 # =============================================================================
 # STATIC LIBRARIES
 # =============================================================================
-# Defines ed_io / ed_core / ed_solvers_cpu / ed_solvers_gpu (the last only
+# Defines ed_parallel / ed_core / ed_solvers_cpu / ed_solvers_gpu (the last only
 # when WITH_CUDA). Each library exposes its include directories and its link
 # stack via PUBLIC properties so the executables below need only
 # `target_link_libraries(<exe> PRIVATE ed_solvers_cpu ...)`.
@@ -235,7 +232,7 @@ endif()
 #
 # Layout under <prefix>:
 #   include/ed/                 public headers (kept hierarchical)
-#   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
+#   lib/                        libed_core.a, libed_solvers_cpu.a, ...
 #                               libed_solvers_gpu.a (when WITH_CUDA)
 #   lib/cmake/QED/              QEDConfig.cmake, QEDConfigVersion.cmake,
 #                               QEDTargets.cmake
@@ -243,7 +240,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu)
+set(_ED_INSTALL_TARGETS ed_parallel ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu)
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -409,7 +406,7 @@ if(BUILD_ED_TESTS)
     # Helper to declare a test executable. Each test gets its own binary so
     # CTest can run them in parallel and report failures independently.
     # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
-    # ed_io, BLAS/LAPACK/HDF5/ARPACK/OpenMP), and against ed_solvers_gpu
+    # BLAS/LAPACK/ARPACK/OpenMP), and against ed_solvers_gpu
     # when CUDA is enabled. This guarantees tests are compiled against the
     # exact same TUs as the production binaries.
     #
@@ -484,19 +481,6 @@ if(BUILD_ED_TESTS)
     # (supports_device_matvec + bind_cuda -> CudaMatVecBackend). SKIPs at
     # runtime without a CUDA device; no-op TU when WITH_CUDA is OFF.
     ed_add_test(test_operator_gpu_parity        tests/unit/test_operator_gpu_parity.cpp USE_CATCH2)
-    # Eigenvector-save contract (May 2026): every CPU-single-rank solver
-    # method (Lanczos / BlockLanczos / KrylovSchur / FullDiag) MUST honor
-    # `compute_vectors=true` + `output_dir=...` by writing
-    # `<output_dir>/ed_results.h5` and reporting the path via
-    # `GroundStateResult::hdf5_path` (which `EDResults.eigenvectors_path`
-    # mirrors on the Python side).
-    ed_add_test(test_eigenvector_save           tests/unit/test_eigenvector_save.cpp USE_CATCH2)
-    # Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026):
-    # mirror-image of `test_eigenvector_save` but for
-    # `ed::workflows::thermal` -- pins the uniform `ed_results.h5`
-    # contract for FTLM (thermo curves) and
-    # mTPQ / cTPQ (trajectory + probe-beta state vectors).
-    ed_add_test(test_thermal_save               tests/unit/test_thermal_save.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     # test_method_canonicalize retired in the minimalist-architecture rev
     # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
@@ -552,23 +536,8 @@ if(BUILD_ED_TESTS)
     # (sample_seed.h), is run-to-run bit-identical, and is what the CPU
     # front door returns.
     ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp USE_CATCH2)
-    # ED Cleanup Sweep Phase 5 (May 2026): test_dssf_tune / test_diag_tune
-    # locked down the cross-cutting DSSF / diag tune heuristics that
-    # were deleted along with `include/ed/auto/{diag,dssf}_tune.h`.
-    # The per-kernel knobs are now exercised by the kernel-specific
-    # tests below.
-    ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
-    ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
-    # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
-    # solver (round-trip + resume-equivalence + validation-error coverage).
-    ed_add_test(test_lanczos_checkpoint         tests/unit/test_lanczos_checkpoint.cpp USE_CATCH2)
-    # Phase 3a #2: Out-of-core blocked-tile reorthogonalization (CGS correctness,
-    # threshold + skip filters, in-memory + on-disk tile loading, end-to-end
-    # tile-size invariance for lanczos_selective_reorth).
-    ed_add_test(test_lanczos_reorth             tests/unit/test_lanczos_reorth.cpp USE_CATCH2)
-    # Phase 3a #4: NUMA first-touch + thread-pinning hooks (env-knob defaults +
-    # parsing, threshold + counter contract, idempotent pinning, end-to-end
-    # Lanczos eigenvalue invariance with knobs on vs off).
+    # Phase 3a #4: OpenMP thread-pinning hook (env-knob default + parsing,
+    # idempotent pinning).
     ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
     # The environment registry: one meaning of "set" per value type, unique rows,
     # the unknown-name scan.
@@ -615,7 +584,6 @@ if(BUILD_ED_TESTS)
     # minimalist-architecture rev (May 2026). TPQ dynamical correlators
     # become workflow-level compositions of mtpq_kernel +
     # time_evolution_correlator (Phase 6 / Phase 7).
-    ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_chain_extensibility        tests/unit/test_chain_extensibility.cpp USE_CATCH2)
     # Operator-collapse refactor (Jun 2026): owning ``SectorBasis`` that
     # completes the basis triplet (FullSpaceSubspace / FixedSzSubspace /
@@ -651,12 +619,6 @@ if(BUILD_ED_TESTS)
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
     )
 
-    # P2.3 (DSSF PR-D): bit-for-bit lockdown of the legacy /dynamical/ and
-    # /correlations/ HDF5 schemas, so the unified /dssf/ writer cannot
-    # accidentally regress them. Reaches into ed_solvers_cpu for HDF5IO.
-    ed_add_test(test_dssf_legacy_schema         tests/unit/test_dssf_legacy_schema.cpp USE_CATCH2)
-    target_include_directories(test_dssf_legacy_schema PRIVATE ${HDF5_INCLUDE_DIRS})
-
     # P2.11: lock down the programmatic symmetry DSL (ed::sym::Permutation
     # algebra + group_from_generators + Bloch-momentum convention +
     # phantom-irrep filter). Lives in ed_symmetry.
@@ -682,14 +644,4 @@ if(BUILD_ED_TESTS)
     # surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
     # (+ CudaBackend when WITH_CUDA).
     ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp USE_CATCH2)
-
-    # Regression test of the on-disk fallback path for the Lanczos basis
-    # buffer. `force_disk_storage()` is cached per-process, so we reuse the
-    # variants binary in a separate subprocess with ED_LANCZOS_DISK=1.
-    add_test(NAME test_lanczos_variants_disk COMMAND test_lanczos_variants)
-    set_tests_properties(test_lanczos_variants_disk PROPERTIES
-        ENVIRONMENT "ED_LANCZOS_DISK=1;ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch_disk"
-        TIMEOUT 240
-    )
-
 endif()

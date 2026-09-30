@@ -14,7 +14,7 @@
 // Heisenberg chain, regardless of which solver the caller picks.
 //
 // The Lanczos-family numerical accuracy is already covered by
-// `test_lanczos_variants` / `test_full_diagonalization`. This file is
+// `test_lanczos_kernel` / `test_full_diagonalization`. This file is
 // intentionally about the DISPATCH WIRING: every ground-state method
 // must be reachable from `workflows::solve` and return the same answer.
 //

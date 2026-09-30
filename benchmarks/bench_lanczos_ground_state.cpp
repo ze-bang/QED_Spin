@@ -2,7 +2,7 @@
 // benchmarks/bench_lanczos_ground_state.cpp
 //
 // Ground-state Lanczos micro-benchmark on 1D Heisenberg rings (PBC).
-// Tracks the wall time of one full lanczos() call to find the bottom
+// Tracks the wall time of one full Lanczos run to find the bottom
 // eigenvalue, which is the canonical workload for ED ground-state runs.
 //
 // Audit ref: P2.13.
@@ -12,6 +12,10 @@
 
 #include <ed/core/construct_ham.h>
 #include <ed/solvers/lanczos.h>
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/ritz_convergence.h>
+#include <ed/krylov/tridiag_eigensolver.h>
+#include <ed/matvec/backends/cpu_backend.h>
 
 #include <complex>
 #include <cstdint>
@@ -76,16 +80,28 @@ void BM_LanczosGroundState(benchmark::State& state) {
     const uint64_t dim = (1ULL << N);
 
     auto op = make_heisenberg_chain_pbc(N);
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        op->apply(in, out, static_cast<size_t>(n));
-    };
 
     CoutSilencer silence;
+    std::vector<Complex> v0(dim);
+    for (uint64_t i = 0; i < dim; ++i)
+        v0[i] = Complex(1.0 + 0.001 * static_cast<double>(i % 97), 0.0);
     for (auto _ : state) {
-        std::vector<double> eigs;
-        // dir="/dev/null" -> skip HDF5 dump (see lanczos.cpp solve_tridiagonal_matrix).
-        lanczos(Hv, dim, /*max_iter=*/kry, /*exct=*/1, /*tol=*/1e-10,
-                eigs, /*dir=*/"/dev/null", /*eigenvectors=*/false);
+        // The complex kernel lane: K=1 local DGKS, Ritz-value stop every
+        // 5 iterations (the solve lane's eigenvalues-only settings).
+        ed::krylov::LanczosKernelOptions opts;
+        opts.max_iter   = kry;
+        opts.keep_basis = false;
+        opts.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
+        opts.convergence_check =
+            ed::krylov::make_smallest_ritz_convergence(1, 1e-10);
+        opts.convergence_check_interval = 5;
+        auto mv = [&](const Complex* in, Complex* out, std::size_t n) {
+            op->apply(in, out, n);
+        };
+        auto res = ed::krylov::lanczos_kernel(
+            ed::matvec::default_cpu_backend(), mv, dim, v0.data(), opts);
+        const auto eigs = ed::krylov::detail::solve_tridiag(
+            res.alpha, res.beta, res.alpha.size());
         benchmark::DoNotOptimize(eigs.data());
         benchmark::ClobberMemory();
     }

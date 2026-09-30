@@ -51,10 +51,6 @@ struct KrylovSchurOptions {
     /// Maximum restart cycles before we give up (matches the legacy
     /// `::krylov_schur` body's hard limit).
     std::size_t max_restarts    = 30;
-    /// Optional output directory (kept for ABI compat; not consumed
-    /// here -- the kernel returns eigenvalues / eigenvectors via the
-    /// result struct).
-    std::string output_dir;
     /// Global problem dimension. Distributed backends MUST set this so
     /// the per-cycle `lanczos_kernel<Backend>` knows the global cap.
     /// Default 0 means "use local_n" (single-rank / single-GPU runs).

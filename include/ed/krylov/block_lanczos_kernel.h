@@ -59,7 +59,6 @@ struct BlockLanczosOptions {
     std::size_t block_size      = 4;
     double      tolerance       = 1e-10;
     bool        compute_vectors = false;
-    std::string output_dir;
     /// Optional global dimension (for sanity; not used internally).
     std::uint64_t global_n      = 0;
     /// Periodic full reorthogonalisation interval (every K iterations).
@@ -161,8 +160,7 @@ inline void build_projected_matrix(
 //                   i.e. column-major in BLAS terms). Caller provides
 //                   to keep the kernel deterministic across processes;
 //                   pass nullptr to let the kernel generate a random
-//                   block from `opts.output_dir` hashing (TODO: not yet
-//                   used --- random_device for now).
+//                   block (random_device).
 // ----------------------------------------------------------------------------
 template <typename Backend, typename MatvecFn>
 BlockLanczosResult block_lanczos_kernel(Backend&                  backend,

@@ -130,11 +130,9 @@ struct Row {
       "=1 enables the per-iteration us timing breakdown in lanczos_real")      \
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
       "=1 enables per-bucket us timers inside lanczos_kernel (A/B against lanczos_real)")\
-    X("ED_LANCZOS_COMPLEX_SEED", Flag, "krylov", "false (real-only seed)",     \
-      "=1 reverts the random Krylov seed to fully complex (legacy behaviour)") \
-    X("ED_LANCZOS_REORTH_K", Integer, "krylov", "1 (kernel lanes); legacy real lane clamps to [0,4]",\
+    X("ED_LANCZOS_REORTH_K", Integer, "krylov", "1 (kernel lane); real lane clamps to [0,4]",\
       "Local-reorthogonalisation ring width for the LocalDGKS3 policy")        \
-    X("ED_LANCZOS_CHECK_EVERY", Integer, "krylov", "5 at both sites",          \
+    X("ED_LANCZOS_CHECK_EVERY", Integer, "krylov", "5",                        \
       "Ritz-convergence check cadence (=1 restores per-iteration checking)")   \
     X("ED_LANCZOS_EIGVEC_TWOPASS", Flag, "krylov", "true (two-pass on)",       \
       "=0 restores the kept-basis FullCGS2 eigenvector lane instead of the two-pass no-reorth reconstruction")\
@@ -148,16 +146,6 @@ struct Row {
       "OMP/BLAS team size for the dense dsytrd/zhetrd reduction")              \
     X("ED_FULLDIAG_FORCE_COMPLEX", Flag, "krylov", "false (real fast path allowed)",\
       "Forces the complex LAPACK driver even when the assembled matrix is real (A/B + equivalence checks)")\
-    X("ED_LANCZOS_REORTH_TILE", Integer, "krylov", "16",                       \
-      "Tile width for the disk-backed full-reorthogonalisation pass")          \
-    X("ED_LANCZOS_DISK", Flag, "krylov", "false",                              \
-      "Any value but \"\"/0/false/FALSE/no/NO forces the Lanczos basis onto disk instead of in-memory buffers (read once per process)")\
-    X("ED_LANCZOS_CHECKPOINT_DIR", Path, "io-hdf5", "\"\" (checkpointing disabled)",\
-      "Directory for the HDF5 Lanczos checkpoint; non-empty enables checkpointing")\
-    X("ED_LANCZOS_CHECKPOINT_INTERVAL", Integer, "io-hdf5", "100",             \
-      "Iterations between checkpoint writes")                                  \
-    X("ED_LANCZOS_RESUME", Flag, "io-hdf5", "false",                           \
-      "Resume a Lanczos run from the checkpoint file if one exists")           \
     X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
       "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
     X("ED_MTPQ_VERBOSE", Flag, "thermal", "false",                             \
@@ -182,18 +170,10 @@ struct Row {
       "Aim for one OMP/BLAS worker per K * 1024 basis states")                 \
     X("ED_AUTO_THREADS_CEIL", Integer, "threads-numa", "8",                    \
       "Soft cap on the auto-derived thread count; =0 disables the soft cap (use min(dim/per_k, max_t))")\
-    X("ED_NUMA_FIRST_TOUCH", Flag, "threads-numa", "false",                    \
-      "Enables NUMA-aware first-touch page placement for large vectors")       \
     X("ED_NUMA_PIN_THREADS", Flag, "threads-numa", "false",                    \
       "Pins OMP worker threads to cores (irreversible, applied once per process via std::once_flag)")\
     X("ED_MEM_GUARD_OFF", Flag, "memory-guard", "false (guard active)",        \
       "Disables the \"estimated working set exceeds ~90% of available RAM\" pre-allocation throw")\
-    X("ED_HDF5_COMPRESSION_LEVEL", Integer, "io-hdf5", "4",                    \
-      "Deflate level 0 (off) .. 9 (max) for HDF5 datasets")                    \
-    X("ED_HDF5_CHUNK_TARGET_BYTES", Integer, "io-hdf5", "256 * 1024 (256 KiB)",\
-      "Target HDF5 chunk size in bytes")                                       \
-    X("ED_HDF5_SHUFFLE", Flag, "io-hdf5", "true",                              \
-      "Enables the HDF5 shuffle filter before deflate")                        \
     X("QED_CORE_DIR", Path, "python", "unset (extension inside the package)",  \
       "Prepends a build directory containing _core*.so to qed.__path__")       \
     X("ED_VERBOSE_TRILINEAR", Flag, "debug", "\"0\"",                          \

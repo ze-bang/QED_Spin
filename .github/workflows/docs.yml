@@ -42,8 +42,6 @@ jobs:
             graphviz \
             libopenblas-dev \
             liblapacke-dev \
-            libhdf5-dev \
-            libhdf5-cpp-103 \
             libeigen3-dev \
             pkg-config
 

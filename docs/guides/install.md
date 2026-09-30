@@ -19,7 +19,6 @@ analogous):
 sudo apt-get install -y \
     build-essential cmake ninja-build pkg-config \
     libopenblas-dev liblapacke-dev \
-    libhdf5-dev libhdf5-cpp-103 \
     libeigen3-dev
 ```
 

@@ -63,7 +63,6 @@
 //   test_sector_thermo     : validates combine_sector_thermodynamics math
 //   test_auto_thermal      : smoke-tests orchestrator wiring
 //   test_kernel_facades    : pin individual kernel signatures
-//   test_thermal_save      : pin HDF5 persistence contract
 //   THIS FILE              : pin numerical accuracy against dense reference
 // =============================================================================
 

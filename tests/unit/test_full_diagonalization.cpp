@@ -27,10 +27,8 @@ void run_full_diag_for_N(uint64_t N, double tol) {
         op->apply(in, out, static_cast<size_t>(n));
     };
 
-    std::string outdir = make_scratch_dir("full_diag_N" + std::to_string(N));
-
     std::vector<double> eigs;
-    full_diagonalization(Hv, dim, /*num_eigs=*/dim, eigs, outdir,
+    full_diagonalization(Hv, dim, /*num_eigs=*/dim, eigs,
                          /*compute_eigenvectors=*/false);
 
     require_eigs_close(eigs, ref.eigs, ref.eigs.size(), tol,

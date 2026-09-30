@@ -65,7 +65,7 @@ void BM_FullDiagonalization(benchmark::State& state) {
     for (auto _ : state) {
         std::vector<double> eigs;
         full_diagonalization(Hv, dim, /*num_eigs=*/dim, eigs,
-                             /*dir=*/"", /*compute_eigenvectors=*/false);
+                             /*compute_eigenvectors=*/false);
         benchmark::DoNotOptimize(eigs.data());
         benchmark::ClobberMemory();
     }

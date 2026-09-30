@@ -182,13 +182,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         opts.method == ThermalOptions::Method::mTPQ  ||
         opts.method == ThermalOptions::Method::FTLM  ||
         opts.method == ThermalOptions::Method::OFTLM;
-    // NOTE: this must NOT return early. Everything below the method dispatch --
-    // the universal-save persistence finalizer above all -- has to run for the
-    // exact result exactly as it does for a sampled one, or the fallback
-    // silently strips the caller's output_dir contract (R.hdf5_path empty ->
-    // Python's sector_hdf5_paths empty). That is a bug this file has already
-    // shipped once, on the solve verb (see apply_solve_save_finalizer's note).
-    // So: fill R.thermo, then flag the dispatch chain to stand down.
+    // NOTE: this must NOT return early. Everything below the method dispatch
+    // (free energy, timing, lane metadata) has to run for the exact result
+    // exactly as it does for a sampled one. So: fill R.thermo, then flag the
+    // dispatch chain to stand down.
     bool exact_thermo_done = false;
     if (is_sampling_thermo_method &&
         exact_small_thermal_enabled() &&
@@ -208,7 +205,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         opts.probe_betas.empty()) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
-        full_diagonalization(H, D, D, eigs, /*dir=*/"", /*compute_eigenvectors=*/false);
+        full_diagonalization(H, D, D, eigs, /*compute_eigenvectors=*/false);
         if (!eigs.empty()) {
             R.thermo = compute_canonical_thermo_from_eigs(
                 eigs, R.thermo.temperatures);
@@ -222,8 +219,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
     if (exact_thermo_done) {
         // The small-D exact fallback already filled R.thermo. Skip the
-        // estimator, but fall through to the shared tail (persistence
-        // finalizer, timing, lane metadata) like every other method.
+        // estimator, but fall through to the shared tail (free energy,
+        // timing, lane metadata) like every other method.
     } else if (opts.method == ThermalOptions::Method::mTPQ) {
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
@@ -231,7 +228,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             ed::thermal::MtpqOptions kopts;
             kopts.num_samples = opts.num_samples;
             kopts.random_seed = opts.random_seed;
-            kopts.output_dir  = opts.output_dir;
             kopts.probe_betas = opts.probe_betas;
             kopts.seed_transform = opts.seed_transform;  // Stage 12f
             auto matvec = H.template bind<B>();
@@ -443,8 +439,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 }
             }
             // Pillar 1 (May 2026): lift the per-sample TPQ trajectory
-            // + state-vector snapshots into the outer ThermalResult so
-            // the uniform finalizer (below) can persist them.
+            // + state-vector snapshots into the outer ThermalResult.
             R.tpq_sample_betas     = std::move(kres.sample_inv_temps);
             R.tpq_sample_energies  = std::move(kres.sample_energies);
             R.tpq_sample_variances = std::move(kres.sample_variances);
@@ -491,7 +486,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
-                kopts.output_dir  = opts.output_dir;
                 kopts.seed_transform = opts.seed_transform;  // Stage 12f
                 auto matvec = H.template bind<B>();
                 auto kres = ed::thermal::ftlm_kernel<B>(
@@ -519,7 +513,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         kopts.num_exact   = opts.num_exact;
         kopts.betas       = opts.betas;
         kopts.random_seed = opts.random_seed;
-        kopts.output_dir  = opts.output_dir;
         auto kres = ed::thermal::oftlm_cpu(
             apply_H, H.geometry().global_dim, kopts);
         R.thermo.energy        = std::move(kres.energy);
@@ -550,107 +543,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             R.thermo.free_energy.push_back(
                 R.thermo.energy[i]
                 - R.thermo.temperatures[i] * R.thermo.entropy[i]);
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): uniform
-    // thermal persistence finalizer. Mirrors the contract that lives in
-    // ``ed::workflows::solve`` (l. 458-510): when ``opts.output_dir``
-    // is set, persist the result to ``<output_dir>/ed_results.h5`` and
-    // surface the resulting path via ``R.hdf5_path``.
-    //
-    // Method-conditional payload (user-confirmed policy):
-    //   - mTPQ: the full per-sample (beta, E, var, step)
-    //     trajectory (one row per kernel step, appended via
-    //     ``HDF5IO::appendTPQThermodynamics``), plus state vectors at
-    //     the betas closest to ``opts.probe_betas`` written via
-    //     ``HDF5IO::saveTPQState``.
-    //   - FTLM / OFTLM: aggregated thermodynamic curves
-    //     (``T, E, Cv, S, F``) only -- no state vectors.
-    // -----------------------------------------------------------------
-    // The unified file ships:
-    //   * mTPQ: per-sample trajectory rows, plus the probe-beta state
-    //     snapshots when they are populated.
-    //   * FTLM / OFTLM: aggregated thermodynamic curves.
-    if (!opts.output_dir.empty()
-            && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
-        try {
-            std::error_code ec;
-            std::filesystem::create_directories(opts.output_dir, ec);
-            const std::string h5_path =
-                opts.output_dir + "/ed_results.h5";
-            // Creates the file (or opens it) and lays down the
-            // standard group skeleton (``/eigendata``, ``/tpq``,
-            // ``/spectral_data`` ...).
-            HDF5IO::createOrOpenFile(opts.output_dir);
-
-            const bool is_tpq =
-                (opts.method == ThermalOptions::Method::mTPQ
-);
-            if (is_tpq) {
-                // (a) Per-sample trajectory rows.
-                const std::size_t S =
-                    std::min({R.tpq_sample_betas.size(),
-                              R.tpq_sample_energies.size(),
-                              R.tpq_sample_variances.size()});
-                for (std::size_t s = 0; s < S; ++s) {
-                    HDF5IO::ensureTPQSampleGroup(h5_path, s);
-                    const auto& bs = R.tpq_sample_betas[s];
-                    const auto& es = R.tpq_sample_energies[s];
-                    const auto& vs = R.tpq_sample_variances[s];
-                    const std::size_t K =
-                        std::min({bs.size(), es.size(), vs.size()});
-                    for (std::size_t k = 0; k < K; ++k) {
-                        HDF5IO::TPQThermodynamicPoint pt;
-                        pt.beta     = bs[k];
-                        pt.energy   = es[k];
-                        pt.variance = vs[k];
-                        pt.doublon  = 0.0;
-                        pt.step     = static_cast<std::uint64_t>(k);
-                        HDF5IO::appendTPQThermodynamics(h5_path, s, pt);
-                    }
-                }
-                // (b) State-vector snapshots at probe-betas.
-                for (const auto& snap : R.tpq_state_snapshots) {
-                    if (snap.psi.empty()) continue;
-                    HDF5IO::ensureTPQSampleGroup(h5_path, snap.sample_index);
-                    HDF5IO::saveTPQState(h5_path,
-                                         snap.sample_index,
-                                         snap.effective_beta,
-                                         snap.psi,
-                                         /*overwrite=*/true);
-                }
-            } else {
-                // FTLM / OFTLM: aggregated thermodynamic
-                // curves. The kernel facades do not surface per-T
-                // standard errors (those live on ``FTLMResults`` for
-                // the legacy CLI path); the shared-file saver below
-                // requires parallel arrays of equal length, so we
-                // ship zero-valued error vectors of matching size.
-                const std::size_t N = R.thermo.temperatures.size();
-                const std::vector<double> zeros(N, 0.0);
-                const char* label =
-                    (opts.method == ThermalOptions::Method::FTLM)   ? "FTLM"
-                  : "thermal";
-                HDF5IO::saveFTLMThermodynamics(
-                    h5_path,
-                    R.thermo.temperatures,
-                    R.thermo.energy, zeros,
-                    R.thermo.specific_heat, zeros,
-                    R.thermo.entropy, zeros,
-                    R.thermo.free_energy, zeros,
-                    static_cast<std::uint64_t>(opts.num_samples),
-                    std::string(label));
-            }
-            R.hdf5_path = h5_path;
-        } catch (const std::exception& e) {
-            // Non-fatal: skip persistence on I/O failure but surface
-            // the cause via a backend note. The caller still gets the
-            // in-memory ``R`` back; the empty ``R.hdf5_path`` flags
-            // that no on-disk file was produced.
-            std::cerr << "ed::thermal: persistence finalizer failed: "
-                      << e.what() << std::endl;
         }
     }
 

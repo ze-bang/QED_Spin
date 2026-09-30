@@ -46,7 +46,6 @@ struct OftlmOptions {
     std::size_t   exact_krylov = 0;    ///< Lanczos steps for the exact eigenpairs (0 -> auto)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
     std::uint64_t random_seed  = 0;
-    std::string   output_dir;
 };
 
 /// Orthogonalized FTLM on a single (CPU, single-rank) sector.

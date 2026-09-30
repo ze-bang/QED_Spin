@@ -4,7 +4,7 @@
 # Build target: pybind11 module `qed._core`.
 #
 # Linked against the project's CPU static-library stack (ed_solvers_cpu) so
-# the binding inherits BLAS/LAPACK/HDF5/OpenMP transitively. When the
+# the binding inherits BLAS/LAPACK/OpenMP transitively. When the
 # top-level build sets ``WITH_CUDA=ON`` we additionally PRIVATE-link
 # ``ed_solvers_gpu``, which holds the device lanes (the operators'
 # ``bind_cuda()`` CudaMatVecBackend mirrors, the rep-sector mirror, the

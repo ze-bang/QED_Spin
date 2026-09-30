@@ -7,7 +7,6 @@
 #   * Eigen3              REQUIRED   linear algebra (header-only)
 #   * nlohmann/json       REQUIRED   JSON parsing (find_package() with
 #                                    FetchContent fallback to v3.11.3)
-#   * HDF5 (CXX)          REQUIRED   binary I/O for diagonalization output
 #   * CUDAToolkit         optional   gated by WITH_CUDA
 #
 # Note: nlohmann_json is exposed via link_libraries() so its INTERFACE
@@ -53,30 +52,6 @@ endif()
 # install(EXPORT). EDLibraries.cmake instead wires nlohmann_json into each
 # library via `$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>`. Downstream
 # consumers refind it via QEDConfig.cmake's find_dependency(nlohmann_json).
-
-# Find HDF5 (with C++ bindings)
-# Prefer HDF5_DIR from environment (set by module system)
-if(DEFINED ENV{HDF5_DIR} AND NOT HDF5_ROOT)
-    set(HDF5_ROOT $ENV{HDF5_DIR})
-    message(STATUS "Using HDF5_ROOT from environment: ${HDF5_ROOT}")
-endif()
-find_package(HDF5 REQUIRED COMPONENTS CXX)
-include_directories(SYSTEM ${HDF5_INCLUDE_DIRS})
-message(STATUS "HDF5 found: ${HDF5_VERSION}")
-message(STATUS "HDF5 include directories: ${HDF5_INCLUDE_DIRS}")
-message(STATUS "HDF5 libraries: ${HDF5_LIBRARIES}")
-add_definitions(${HDF5_DEFINITIONS})
-
-# Extract HDF5 include directories from imported target if variable is empty
-# (needed for modern HDF5 config mode with CUDA)
-if(TARGET hdf5_cpp-shared)
-    get_target_property(HDF5_CPP_INCLUDE_DIRS hdf5_cpp-shared INTERFACE_INCLUDE_DIRECTORIES)
-    if(HDF5_CPP_INCLUDE_DIRS)
-        list(APPEND HDF5_INCLUDE_DIRS ${HDF5_CPP_INCLUDE_DIRS})
-        list(REMOVE_DUPLICATES HDF5_INCLUDE_DIRS)
-        message(STATUS "HDF5 include directories (from target): ${HDF5_INCLUDE_DIRS}")
-    endif()
-endif()
 
 # CUDA setup
 if(WITH_CUDA)

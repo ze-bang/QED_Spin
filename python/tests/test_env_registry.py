@@ -12,7 +12,7 @@ import qed
 def test_dump_covers_every_family():
     text = qed.debug_env()
     for name in ("ED_SYM_LG_SEED", "ED_LANCZOS_REORTH_K", "ED_GPU_SYM_CACHE_GIB",
-                 "ED_THERMAL_EXACT_SMALL", "ED_HDF5_COMPRESSION_LEVEL", "QED_CORE_DIR"):
+                 "ED_THERMAL_EXACT_SMALL", "ED_NUMA_PIN_THREADS", "QED_CORE_DIR"):
         assert name in text
     assert "ED_LANCZOS" not in qed.debug_env("ED_SYM_")
     assert len(qed._core.env_names()) > 60

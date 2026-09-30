@@ -37,7 +37,6 @@ The same shape is exposed in Python as
 | Multi-rank MPI | production for **one** thing: across-sector distribution of the `ED` CLI under `mpirun` (each rank builds and solves a dim-balanced subset of the symmetry sectors, spectrum `Allgatherv`'d). There is no within-sector (distributed-vector) lane — that family was removed in Jul 2026 |
 | Multi-GPU NCCL (`MultiGpuCommunicator`, `MpiCudaBackend`) | compiles (library `ed_multi_gpu`) and is unit-tested, but **no production lane selects it**: `select_backend` only picks the MPI backends for a distributed operator geometry, and no operator produces one any more |
 | First-class Python bindings (`import qed`) | production |
-| HDF5 I/O for eigenvectors, thermodynamic curves, DSSF traces | production |
 
 ---
 

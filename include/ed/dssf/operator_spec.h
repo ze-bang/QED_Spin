@@ -94,8 +94,7 @@ struct OperatorSpec {
     /// When set, the ladder-basis swap of the first operator index
     /// (`first = 1 - first` for op != 2) is also skipped, and the
     /// observable name uses just the first operator label (e.g. "Sz")
-    /// instead of the concatenation ("SzSz"). HDF5 group names are
-    /// pinned bit-for-bit by `tests/unit/test_dssf_legacy_schema.cpp`.
+    /// instead of the concatenation ("SzSz").
     bool single_obs_only{false};
 
     /// If set, restrict the `sublattice` builder to exactly one
@@ -105,7 +104,7 @@ struct OperatorSpec {
     ///
     /// In `single_obs_only` mode (single_expectation workflow) the
     /// emitted name uses just `_sub<sub_i>` rather than the full
-    /// `_sub<sub_i>_sub<sub_j>` (pinned by `test_dssf_legacy_schema.cpp`).
+    /// `_sub<sub_i>_sub<sub_j>`.
     std::optional<std::pair<std::uint64_t, std::uint64_t>> sublattice_filter;
 };
 

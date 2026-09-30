@@ -49,17 +49,6 @@ using ComplexMatrix = std::vector<ComplexVector>;
  */
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
 
-ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N);
-
-// Helper function to write a basis vector to file
-bool write_basis_vector(const std::string& temp_dir, uint64_t index, const ComplexVector& vec, uint64_t N);
-
-// Helper function to solve tridiagonal eigenvalue problem
-int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
-                            uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 
-                            const std::string& temp_dir, const std::string& evec_dir, 
-                            bool eigenvectors, uint64_t N);
-
 /**
  * @brief Diagonalize tridiagonal matrix and extract Ritz values and weights
  * 
@@ -99,35 +88,25 @@ void estimate_spectral_bounds(
     double& e_min,
     double& e_max);
 
-// Default Lanczos with three-vector LOCAL reorthogonalization (DGKS-style),
-// basis vectors kept in RAM by default (use ED_LANCZOS_DISK=1 for disk).
-//
-// Best for small-to-medium Krylov spaces where the three-term recurrence
-// stays numerically clean.
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct,
-             double tol, std::vector<double>& eigenvalues, std::string dir = "",
-             bool eigenvectors = false);
-
 // -----------------------------------------------------------------------------
-// Real-arithmetic Lanczos (eigenvalues only).                Phase 6 #7
+// Real-arithmetic Lanczos.                                   Phase 6 #7
 //
 // When the Hamiltonian is real and we use a real starting vector, the entire
 // Krylov basis stays real in exact arithmetic and to machine precision in
-// finite arithmetic. ``lanczos()`` above always uses ``std::complex<double>``
-// storage, which doubles every BLAS-1 call's memory traffic and FLOP count
-// over the strictly-needed amount.
+// finite arithmetic. The complex ``ed::krylov::lanczos_kernel`` stores
+// ``std::complex<double>``, which doubles every BLAS-1 call's memory traffic
+// and FLOP count over the strictly-needed amount.
 //
 // This entry point uses real (double) storage end-to-end:
-//   * 4x4 working set: v_prev, v_current, v_next, w  (each ``N * 8`` bytes)
-//   * BLAS-1: cblas_daxpy / cblas_ddot / cblas_dnrm2 / cblas_dscal
+//   * a short ring of recent vectors plus w  (each ``N * 8`` bytes)
+//   * fused real BLAS-1 kernels (ed/parallel/fused_blas1.h)
 //   * H is a real-arithmetic matrix-vector product: ``f(in_re, out_re, N)``
 //
-// Eigenvalue-only by contract (no basis I/O, no Ritz reconstruction). For
-// eigenvector reconstruction, fall back to the complex ``lanczos()``.
+// No stored basis: eigenvectors come from a second, replayed pass through
+// ``LanczosRealExtras::on_basis_vector`` (see the solve lane).
 //
-// Algorithmic choices match ``lanczos()``: 3-vector ring-buffer DGKS local
-// reorth, periodic eigenvalue convergence check on the Lanczos tridiagonal
-// every 10 iters, breakdown on beta < tol.
+// Local DGKS reorth against the most recent vectors, relative Ritz-value
+// convergence check on the Lanczos tridiagonal, breakdown on beta < tol.
 // -----------------------------------------------------------------------------
 //
 // ``iters_out`` / ``converged_out`` (optional): number of Lanczos steps taken
@@ -161,7 +140,8 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   uint64_t* iters_out = nullptr, bool* converged_out = nullptr,
                   LanczosRealExtras* extras = nullptr);
 
-// Full diagonalization algorithm optimized for sparse matrices.
+// Dense full diagonalization (LAPACK) of a block inside the dense window
+// (ED_FULLDIAG_DENSE_MAX, default 120000); larger blocks throw.
 //
 // `op_for_dense` (optional): when non-null AND it supports it
 // (`try_build_dense_columns`), the dense matrix is assembled DIRECTLY from the
@@ -171,10 +151,9 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
 // by GPU / wrapped-matvec callers that have no operator handle).
 // ``eigenvectors_out`` (optional): receives the requested eigenvectors in
 // memory (one std::vector<Complex> per eigenvalue, in the operator's basis)
-// when ``compute_eigenvectors`` is set -- independent of whether ``dir``
-// persists them to HDF5.
+// when ``compute_eigenvectors`` is set.
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
-                       std::vector<double>& eigenvalues, std::string dir = "",
+                       std::vector<double>& eigenvalues,
                        bool compute_eigenvectors = true,
                        const ed::matvec::MatVecOperator* op_for_dense = nullptr,
                        std::vector<std::vector<Complex>>* eigenvectors_out = nullptr);
@@ -184,10 +163,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
 inline void full_diagonalization(const ed::matvec::MatVecOperator& H_op,
                                  uint64_t N, uint64_t num_eigs,
                                  std::vector<double>& eigenvalues,
-                                 std::string dir = "",
                                  bool compute_eigenvectors = true)
 {
     full_diagonalization(ed::matvec::as_apply_function(H_op),
-                         N, num_eigs, eigenvalues, std::move(dir),
-                         compute_eigenvectors);
+                         N, num_eigs, eigenvalues, compute_eigenvectors);
 }

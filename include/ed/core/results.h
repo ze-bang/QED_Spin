@@ -91,15 +91,12 @@ struct KrylovDiagnostics {
 
 // ---------------------------------------------------------------------------
 // EigenvectorRef --- an opaque handle to the eigenvectors produced by
-// a `solve` call. The orchestrator may choose any of three storage
-// strategies; the caller switches on the active member.
+// a `solve` call: host vectors, or a flag saying they stayed in backend
+// memory.
 // ---------------------------------------------------------------------------
 struct EigenvectorRef {
     /// Host-side storage, one vector per eigenvalue.
     std::vector<std::vector<Complex>>  host;
-    /// HDF5 file path where eigenvectors were persisted (in lieu of
-    /// host storage, for memory-bound runs).
-    std::string                         hdf5_path;
     /// Boolean flag set when the kernel computed eigenvectors but
     /// returned them only on the originating backend's memory (caller
     /// can extract via the LinearOperator + Backend).
@@ -151,10 +148,6 @@ struct GroundStateResult {
     std::optional<EigenvectorRef> eigenvectors;
     KrylovDiagnostics             krylov;
     BackendMetadata               backend;
-    /// Optional HDF5 result file path that mirrors the legacy
-    /// `HDF5IO::saveDiagonalizationResults` output. Empty when
-    /// eigenvectors weren't requested AND no auto-save was triggered.
-    std::string                   hdf5_path;
 
     // -----------------------------------------------------------------
     // Streaming-symmetry attribution (May 2026 SOTA upgrade).
@@ -258,7 +251,6 @@ struct ThermalResult {
     std::optional<FTLMResults>       ftlm;
     KrylovDiagnostics                krylov;
     BackendMetadata                  backend;
-    std::string                      hdf5_path;
 
     // -----------------------------------------------------------------
     // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ

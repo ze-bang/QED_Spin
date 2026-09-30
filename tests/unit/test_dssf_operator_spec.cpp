@@ -20,7 +20,7 @@
 // We deliberately avoid asserting the matrix elements of the constructed
 // Operators (that's covered by test_operator_apply / test_observables);
 // here we only assert the *shape* of the output and the bookkeeping that
-// downstream HDF5 schemas (`test_dssf_legacy_schema.cpp`) depend on.
+// downstream observable naming depends on.
 // =============================================================================
 
 #include "common/catch2_harness.h"

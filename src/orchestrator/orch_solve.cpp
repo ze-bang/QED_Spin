@@ -324,13 +324,6 @@ GroundStateResult solve_on(Backend& be,
                 // consistent with the variant-driven helper used at
                 // the bottom of solve() / thermal().
                 R.backend.lane = ed::lane_label_for<Backend>();
-                // "Universal save contract" follow-up (May 2026): the
-                // lanczos_real fast path used to ``return R`` here and
-                // silently bypass every persistence finalizer below.
-                // Run the shared finalizer so this lane lands on the
-                // same ``ed_results.h5`` on-disk contract as every
-                // other dispatch path.
-                apply_solve_save_finalizer(R, geom, opts);
                 return R;
             }
         }
@@ -505,8 +498,7 @@ GroundStateResult solve_on(Backend& be,
             k2.on_step_interval  = 1;
             k2.on_step = [&](std::size_t it, const std::vector<double>&,
                              const std::vector<double>&, const Complex*,
-                             const Complex* v_prev, std::size_t n,
-                             const std::vector<const Complex*>*) {
+                             const Complex* v_prev, std::size_t n) {
                 const std::size_t jidx = it - 1;          // v_prev = V_j
                 if (jidx < m && jidx == added) {
                     for (std::size_t k = 0; k < n_keep; ++k)
@@ -609,7 +601,6 @@ GroundStateResult solve_on(Backend& be,
         kopts.max_iter        = max_iter;
         kopts.tolerance       = opts.tolerance;
         kopts.compute_vectors = opts.compute_vectors;
-        kopts.output_dir      = opts.output_dir;
         // Reorth profile: full (stored basis) vs lean (local-only, eigenvalues).
         // Eigenvectors force full; else the planner's lean recommendation (the
         // full block basis would not fit the budget) OR the caller's opt forces
@@ -653,7 +644,6 @@ GroundStateResult solve_on(Backend& be,
         kopts.max_iter        = max_iter;
         kopts.tolerance       = opts.tolerance;
         kopts.compute_vectors = opts.compute_vectors;
-        kopts.output_dir      = opts.output_dir;
         kopts.global_n        = geom.global_dim;
         kopts.max_subspace_vectors = subspace_cap_vectors;
         auto kres = ed::krylov::block_krylov_schur_kernel(be, matvec,
@@ -684,7 +674,6 @@ GroundStateResult solve_on(Backend& be,
         kopts.tolerance       = opts.tolerance;
         kopts.compute_vectors = opts.compute_vectors;
         kopts.global_n        = geom.global_dim;
-        kopts.output_dir      = opts.output_dir;
         kopts.max_subspace_vectors = subspace_cap_vectors;
         auto kres = ed::krylov::krylov_schur_kernel(be, matvec,
             geom.local_dim, seed, kopts);
@@ -708,9 +697,8 @@ GroundStateResult solve_on(Backend& be,
         // path for small dimensions (<= 2^12 by default) so the O(N^3)
         // dense step is affordable.
         //
-        // "Universal save contract" follow-up (May 2026): the
-        // FullDiag column-extraction loop in
-        // ``::full_diagonalization`` (lanczos.cpp:1483-1488) calls
+        // The FullDiag column-extraction loop in
+        // ``::full_diagonalization`` (lanczos.cpp) calls
         // ``H(unit_vec.data(), col_j.data(), N)`` with host
         // ``std::vector<Complex>`` storage. If we hand it a matvec
         // bound to a non-CPU backend (e.g. the streaming-symmetry
@@ -741,20 +729,14 @@ GroundStateResult solve_on(Backend& be,
         // stays SEQUENTIAL because the CPU matvec is not reentrant.
         std::vector<std::vector<Complex>> fd_vecs;
         full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
-                             opts.output_dir,
                              opts.compute_vectors,
                              /*op_for_dense=*/&H,
                              opts.compute_vectors ? &fd_vecs : nullptr);
         if (opts.compute_vectors && !fd_vecs.empty()) {
-            // Audit 2026-09: the dense lane used to persist vectors to
-            // HDF5 only; with output_dir empty the caller got nothing.
+            // Audit 2026-09: the dense lane hands its vectors back in memory.
             EigenvectorRef evref;
             evref.host = std::move(fd_vecs);
             R.eigenvectors = std::move(evref);
-        }
-        if (!opts.output_dir.empty()
-                && !HDF5IO::isDisabledOutputPath(opts.output_dir)) {
-            R.hdf5_path = opts.output_dir + "/ed_results.h5";
         }
         const std::size_t n_keep = std::min<std::size_t>(
             opts.num_eigs, eigs.size());
@@ -762,39 +744,6 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.iters_done = 0;
         R.krylov.converged  = true;
     }
-
-    // ---------------------------------------------------------------------
-    // Uniform eigenvector HDF5 dump (May 2026 contract).
-    //
-    // Before this block, only the FullDiag lane persisted eigenvectors when
-    // `opts.output_dir` was set (via `full_diagonalization(...)`).
-    // Lanczos / BlockLanczos / KrylovSchur silently dropped the
-    // `output_dir` argument: the Krylov kernels accept it in their
-    // `Options` structs but never read it (header-comment is an explicit
-    // "TODO: not yet used"), so callers got `R.eigenvectors->host`
-    // populated but `R.hdf5_path` empty and Python's
-    // `EDResults.eigenvectors_path` silently empty as well.
-    //
-    // This finalizer hooks every method that lands eigenvectors in the
-    // shared host buffer onto the same HDF5 path the FullDiag lane and
-    // the streaming-symmetry CLI use. Guards:
-    //   * `opts.compute_vectors` was actually requested,
-    //   * the caller supplied a non-empty, non-/dev/null `output_dir`,
-    //   * the kernel populated host-side eigenvectors,
-    //   * no upstream path already wrote (and recorded) the file.
-    // ---------------------------------------------------------------------
-    // ---------------------------------------------------------------------
-    // Universal persistence finalizer (May 2026 follow-up). Pinned by
-    // the long block-comment on ``apply_solve_save_finalizer`` above.
-    //
-    // Writes ``<out>/ed_results.h5`` with ``/eigendata/eigenvalues``
-    // (always) and ``/eigendata/eigenvector_*`` (when ``compute_vectors``
-    // is set and the kernel populated host-side eigenvectors).
-    //
-    // No-op when ``R.hdf5_path`` was already filled by the FullDiag
-    // upstream lane.
-    // ---------------------------------------------------------------------
-    apply_solve_save_finalizer(R, geom, opts);
 
     // Phase D (May 2026): truthful lane reporting. The legacy line
     //

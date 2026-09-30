@@ -1,9 +1,5 @@
 #include <ed/config/env_registry.h>
 #include <ed/solvers/lanczos.h>
-#include <ed/core/hdf5_io.h>
-#include <ed/io/lanczos_basis_buffer.h>
-#include <ed/io/lanczos_checkpoint.h>
-#include <ed/io/lanczos_reorth.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/fused_blas1.h>
@@ -14,65 +10,8 @@
 #endif
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
-#include <filesystem>
 #include <limits>
 #include <iomanip>
-#include <memory>
-
-// -----------------------------------------------------------------------------
-// RAII-style helper: register an in-memory basis buffer for the lifetime of a
-// solver, and silently fall back to on-disk storage if the user forced disk
-// mode via ED_LANCZOS_DISK=1. When in memory mode, no filesystem work (mkdir
-// /rm -rf) is performed; when in disk mode the legacy path is preserved so
-// existing behaviour is unchanged.
-// -----------------------------------------------------------------------------
-namespace {
-
-class BasisBufferScope {
-public:
-    BasisBufferScope(const std::string& key, uint64_t N, uint64_t reserve_vectors)
-        : key_(key), in_memory_(!lanczos_io::force_disk_storage()) {
-        if (in_memory_) {
-            lanczos_io::register_basis_buffer(key_, N, reserve_vectors);
-        } else {
-            // Legacy on-disk path: ensure the directory exists.
-            std::error_code ec;
-            std::filesystem::create_directories(key_, ec);
-        }
-    }
-
-    ~BasisBufferScope() {
-        if (in_memory_) {
-            lanczos_io::release_basis_buffer(key_);
-        } else {
-            // Legacy on-disk path: best-effort cleanup without shell out.
-            std::error_code ec;
-            std::filesystem::remove_all(key_, ec);
-        }
-    }
-
-    bool in_memory() const { return in_memory_; }
-
-    BasisBufferScope(const BasisBufferScope&) = delete;
-    BasisBufferScope& operator=(const BasisBufferScope&) = delete;
-
-private:
-    std::string key_;
-    bool in_memory_;
-};
-
-} // anonymous namespace
-
-// Single source of truth for "should the random Krylov seed be real?".
-// Default is real-only (zero imag) so the Operator::apply() dispatcher
-// can take the real-CSR / apply_real fast path for the entire Krylov
-// space when the Hamiltonian is real (audit follow-up). Setting the
-// env var ED_LANCZOS_COMPLEX_SEED=1 reverts to a fully complex seed
-// (legacy behaviour, useful for testing complex spectra).
-inline bool ed_use_complex_lanczos_seed() {
-    return ed::env::flag("ED_LANCZOS_COMPLEX_SEED", false);
-}
 
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     // i.i.d. standard complex Gaussian: real and imag parts ~ N(0, 1), then
@@ -89,58 +28,6 @@ ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     Complex scale_factor = Complex(1.0 / norm, 0.0);
     cblas_zscal(N, &scale_factor, v.data(), 1);
     return v;
-}
-
-ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N) {
-    // Fast path: in-memory buffer. This is the normal case once a solver has
-    // registered its temp_dir via BasisBufferScope.
-    ComplexVector vec;
-    if (lanczos_io::get_basis_vector(temp_dir, index, vec)) {
-        return vec;
-    }
-
-    // Fallback: legacy on-disk storage (used when ED_LANCZOS_DISK=1 or when
-    // a solver has not yet been ported to register a buffer).
-    vec.assign(N, Complex(0.0, 0.0));
-    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ifstream infile(filename, std::ios::binary);
-    if (!infile) {
-        std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-        return vec;
-    }
-    infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-    return vec;
-}
-
-// Helper function to write a basis vector to file (or to the in-memory buffer
-// registered for `temp_dir`).
-bool write_basis_vector(const std::string& temp_dir, uint64_t index, const ComplexVector& vec, uint64_t N) {
-    // Fast path: in-memory buffer. Most call sites append in order
-    // (index == size), but restart algorithms (Krylov-Schur, IRL, thick
-    // restart) overwrite indices in place after a basis rotation.
-    if (lanczos_io::has_basis_buffer(temp_dir)) {
-        uint64_t sz = lanczos_io::basis_buffer_size(temp_dir);
-        if (index == sz) {
-            if (lanczos_io::append_basis_vector(temp_dir, vec)) {
-                return true;
-            }
-        } else if (index < sz) {
-            if (lanczos_io::set_basis_vector(temp_dir, index, vec)) {
-                return true;
-            }
-        }
-        // Gap in indices: fall through to disk path to preserve correctness.
-    }
-
-    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ofstream outfile(filename, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return false;
-    }
-    outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
-    outfile.close();
-    return true;
 }
 
 // Diagonalize tridiagonal matrix and extract Ritz values and weights
@@ -262,622 +149,17 @@ void estimate_spectral_bounds(
     e_max = ritz.back();
 }
 
-// Helper function to solve tridiagonal eigenvalue problem
-int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
-                            uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 
-                            const std::string& temp_dir, const std::string& evec_dir, 
-                            bool eigenvectors, uint64_t N) {
-    // Save only the first exct eigenvalues, or all of them if m < exct
-    uint64_t n_eigenvalues = std::min(exct, m);
-    
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
-    }
-    
-    uint64_t info;
-    
-    if (eigenvectors) {
-        // Choose between dstemr (MRRR, range='I') and dstevd (D&C, all evals).
-        //
-        // dstemr with range='I' computes only the lowest n_eigenvalues
-        // eigenpairs in O(m * n_eigenvalues) time. dstevd computes all m
-        // eigenpairs in O(m^3) time and we discard everything past
-        // n_eigenvalues. For typical Lanczos runs (m ~ 200, n_eigenvalues
-        // ~ 10-50), dstemr is 5-20x faster.
-        //
-        // For very small m or n_eigenvalues / m close to 1, dstevd's
-        // tighter constants win; switch over at the empirical 50% threshold.
-        // dstemr also benefits from MRRR's O(n) per-eigenvector storage.
-        const bool use_dstemr = (m >= 32) && (n_eigenvalues * 2 < m);
-
-        // dstemr writes the requested eigenpairs to (W, Z); dstevd overwrites
-        // diag with eigenvalues and writes Z densely. Allocate the smaller
-        // m * n_eigenvalues block when using dstemr to also save memory.
-        const lapack_int ldz = static_cast<lapack_int>(m);
-        std::vector<double> evecs;
-        std::vector<double> w_only;
-        std::vector<lapack_int> isuppz;
-        lapack_int m_found = 0;
-        lapack_logical tryrac = 1;  // try high accuracy first
-
-        if (use_dstemr) {
-            // dstemr requires a fresh copy of d/e because it overwrites them.
-            // It also requires e to have m elements (not m-1) -- the trailing
-            // entry is workspace.
-            std::vector<double> d_copy = diag;
-            std::vector<double> e_copy(m);
-            for (int i = 0; i < (int)m - 1; ++i) e_copy[i] = offdiag[i];
-            e_copy[m - 1] = 0.0;
-
-            evecs.assign(static_cast<size_t>(m) * n_eigenvalues, 0.0);
-            w_only.assign(m, 0.0);
-            isuppz.assign(2 * std::max<size_t>(1, n_eigenvalues), 0);
-
-            info = LAPACKE_dstemr(LAPACK_COL_MAJOR, 'V', 'I',
-                                  static_cast<lapack_int>(m),
-                                  d_copy.data(), e_copy.data(),
-                                  /*vl=*/0.0, /*vu=*/0.0,
-                                  /*il=*/1, /*iu=*/static_cast<lapack_int>(n_eigenvalues),
-                                  &m_found, w_only.data(),
-                                  evecs.data(), ldz,
-                                  static_cast<lapack_int>(n_eigenvalues),
-                                  isuppz.data(), &tryrac);
-            if (info == 0) {
-                // Replace the prefix of diag with the n_eigenvalues smallest
-                // (already sorted ascending by dstemr).
-                for (size_t k = 0; k < n_eigenvalues; ++k) diag[k] = w_only[k];
-            }
-        } else {
-            evecs.assign(static_cast<size_t>(m) * m, 0.0);
-            info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(),
-                                   offdiag.data(), evecs.data(), m);
-        }
-        
-        if (info != 0) {
-            std::cerr << (use_dstemr ? "LAPACKE_dstemr" : "LAPACKE_dstevd")
-                      << " failed with error code " << info << std::endl;
-            return info;
-        }
-        
-        std::cout << "Transforming eigenvectors..." << std::endl;
-
-        std::vector<ComplexVector> full_vectors(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
-        std::vector<ComplexVector> compensation(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
-
-        // ldz_eff = m for both paths (dstemr ldz is the full m, even though
-        // only the first n_eigenvalues columns are meaningful).
-        const int ldz_eff = static_cast<int>(m);
-
-        for (int j = 0; j < m; j++) {
-            ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
-
-            #pragma omp parallel for schedule(static)
-            for (int i = 0; i < n_eigenvalues; i++) {
-                double coef = evecs[j + i * ldz_eff];
-                ComplexVector& full_vector = full_vectors[i];
-                ComplexVector& comp_vec = compensation[i];
-
-                for (int k = 0; k < N; k++) {
-                    Complex contrib = basis_j[k] * coef;
-                    Complex y = contrib - comp_vec[k];
-                    Complex t = full_vector[k] + y;
-                    comp_vec[k] = (t - full_vector[k]) - y;
-                    full_vector[k] = t;
-                }
-            }
-        }
-
-        for (int i = 0; i < n_eigenvalues; i++) {
-            ComplexVector& full_vector = full_vectors[i];
-
-            double norm = cblas_dznrm2(N, full_vector.data(), 1);
-            if (norm < 1e-14) {
-                std::cerr << "Warning: Eigenvector " << i << " has very small norm: " << norm << std::endl;
-                continue;
-            }
-
-            Complex scale = Complex(1.0/norm, 0.0);
-            cblas_zscal(N, &scale, full_vector.data(), 1);
-
-            if (i > 0 && i < 10) {
-                std::string prev_file = evec_dir + "/eigenvector_" + std::to_string(i-1) + ".dat";
-                std::ifstream prev_infile(prev_file, std::ios::binary);
-                if (prev_infile) {
-                    ComplexVector prev_vec(N);
-                    prev_infile.read(reinterpret_cast<char*>(prev_vec.data()), N * sizeof(Complex));
-                    prev_infile.close();
-
-                    Complex overlap;
-                    cblas_zdotc_sub(N, prev_vec.data(), 1, full_vector.data(), 1, &overlap);
-
-                    if (std::abs(overlap) > 1e-10) {
-                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i
-                                  << " have overlap " << std::abs(overlap) << std::endl;
-
-                        Complex neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, prev_vec.data(), 1, full_vector.data(), 1);
-
-                        norm = cblas_dznrm2(N, full_vector.data(), 1);
-                        scale = Complex(1.0/norm, 0.0);
-                        cblas_zscal(N, &scale, full_vector.data(), 1);
-                    }
-                }
-            }
-
-            // Save eigenvector using HDF5 in main output directory
-            // (unified ed_results.h5). Skip when no output_dir was set,
-            // or when the caller pinned ``/dev/null`` to disable I/O --
-            // see the matching guard on the eigenvalues dump below.
-            if (!evec_dir.empty() && evec_dir != "/dev/null") {
-                try {
-                    std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
-                    HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
-                } catch (const std::exception& e) {
-                    std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
-                }
-            }
-        }
-        
-        std::cout << "Saved " << n_eigenvalues << " eigenvectors" << std::endl;
-
-    } else {
-        // Eigenvalues only. Same selection as above: dstemr (range='I') is
-        // O(m * n_eigenvalues); dstevd is O(m^2). dstemr wins handily for
-        // typical Lanczos parameters.
-        const bool use_dstemr = (m >= 32) && (n_eigenvalues * 2 < m);
-        if (use_dstemr) {
-            std::vector<double> d_copy = diag;
-            std::vector<double> e_copy(m);
-            for (int i = 0; i < (int)m - 1; ++i) e_copy[i] = offdiag[i];
-            e_copy[m - 1] = 0.0;
-            std::vector<double> w_only(m, 0.0);
-            std::vector<lapack_int> isuppz(2 * std::max<size_t>(1, n_eigenvalues), 0);
-            lapack_int m_found = 0;
-            lapack_logical tryrac = 1;
-            info = LAPACKE_dstemr(LAPACK_COL_MAJOR, 'N', 'I',
-                                  static_cast<lapack_int>(m),
-                                  d_copy.data(), e_copy.data(),
-                                  /*vl=*/0.0, /*vu=*/0.0,
-                                  /*il=*/1, /*iu=*/static_cast<lapack_int>(n_eigenvalues),
-                                  &m_found, w_only.data(),
-                                  /*z=*/nullptr, /*ldz=*/static_cast<lapack_int>(m),
-                                  /*nzc=*/0, isuppz.data(), &tryrac);
-            if (info == 0) {
-                for (size_t k = 0; k < n_eigenvalues; ++k) diag[k] = w_only[k];
-            }
-        } else {
-            info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(),
-                                   offdiag.data(), nullptr, m);
-        }
-        
-        if (info != 0) {
-            std::cerr << (use_dstemr ? "LAPACKE_dstemr" : "LAPACKE_dstevd")
-                      << " failed with error code " << info << std::endl;
-            return info;
-        }
-    }
-    
-    // Copy eigenvalues
-    eigenvalues.resize(n_eigenvalues);
-    std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
-
-    // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5).
-    // Convention: ``evec_dir == "/dev/null"`` OR ``evec_dir.empty()``
-    // disables the HDF5 dump entirely. Useful for benchmarks that don't
-    // want disk I/O in the timed loop and for tests that don't care
-    // about persistence (no output_dir set => no per-test scratch race).
-    if (!evec_dir.empty() && evec_dir != "/dev/null") {
-        try {
-            std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
-            HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
-            std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
-        }
-    }
-
-    return info;
-}
-
-// =============================================================================
-// `lanczos` -- minimalist orchestrator over `ed::krylov::lanczos_kernel<CpuBackend>`
-// =============================================================================
-//
-// Phase 2.1 of the Minimalist ED Collapse (May 2026): the hand-rolled
-// three-term recurrence that lived here previously has been retired in
-// favour of the unified kernel. The kernel now exposes:
-//
-//   * `ReorthPolicy::LocalDGKS3` + `local_ring_size` for the legacy
-//     3-vector ring-buffer reorth this code path historically used.
-//   * `LanczosResumeState` + `LanczosKernelOptions::resume_state` to
-//     adopt an alpha/beta/v_curr/v_prev snapshot from disk and continue
-//     from iteration `j_start`.
-//   * `LanczosKernelOptions::on_step` (added in Phase 4.1 of the
-//     Krylov-unification gap-fill) for the per-iteration callback that
-//     this orchestrator uses to (a) write basis vectors to disk for
-//     eigenvector reconstruction and (b) periodically checkpoint the
-//     Krylov state.
-//
-// The body collapses to:
-//
-//   1. Build v0 (random or restored from checkpoint).
-//   2. Build a `LanczosResumeState` if `ED_LANCZOS_RESUME=1`.
-//   3. Configure the kernel options (LocalDGKS3, convergence_check,
-//      on_step for basis I/O + checkpointing).
-//   4. Call `lanczos_kernel<CpuBackend>` once.
-//   5. Solve the small tridiagonal problem and (optionally) reconstruct
-//      eigenvectors from the on-disk basis.
-//
-// Net: ~120 LOC orchestrator + helpers, replacing ~450 LOC of inline
-// recurrence + reorth + checkpointing + convergence-checking. Numerical
-// behaviour is identical -- the kernel's LocalDGKS3 implementation
-// matches the legacy `recent_vectors` ring slot-for-slot (head/count
-// indexing, sqrt(eps) threshold, threshold-gated axpy).
-// =============================================================================
-
-namespace {
-
-// Bridge: lanczos_io::LanczosCheckpoint (host-side ComplexVector payload)
-//   -> ed::krylov::LanczosResumeState (backend UniqueVec payload).
-//
-// Allocates the backend vectors via `be` and copies the checkpoint
-// contents into them. The kernel takes ownership of the unique_ptrs on
-// entry; the caller doesn't need to keep the state alive after the
-// kernel call.
-ed::krylov::LanczosResumeState
-to_resume_state(const ed::matvec::CpuBackend& be,
-                lanczos_io::LanczosCheckpoint& cp) {
-    using namespace ed::matvec;
-    ed::krylov::LanczosResumeState s;
-    s.j_start = cp.iteration;
-    s.alpha   = std::move(cp.alpha);
-    s.beta    = std::move(cp.beta);
-
-    const std::size_t n = cp.N;
-    s.v_curr = be.make_zero_vector(n);
-    s.v_prev = be.make_zero_vector(n);
-    be.copy_from_host(cp.v_current.data(), s.v_curr.get(), n);
-    be.copy_from_host(cp.v_prev.data(),    s.v_prev.get(), n);
-
-    s.ring_vectors.reserve(cp.ring_vectors.size());
-    for (auto& vec : cp.ring_vectors) {
-        auto u = be.make_zero_vector(n);
-        be.copy_from_host(vec.data(), u.get(), n);
-        s.ring_vectors.emplace_back(std::move(u));
-    }
-    return s;
-}
-
-}  // namespace
-
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct,
-             double tol, std::vector<double>& eigenvalues, std::string dir,
-             bool eigenvectors) {
-
-    // Phase 6 #2: dim-aware OMP+BLAS thread cap. Without this the default
-    // 16-thread team turns the SpMV into 18 ms/iter at N=16 (dim=65k); the
-    // optimum is ~4-8 threads at 1 ms/iter.
-    const ed::parallel::ThreadBudgetScope budget(
-        ed::parallel::auto_threads_for_dim(N));
-
-    using ed::matvec::CpuBackend;
-    using ed::matvec::default_cpu_backend;
-    using namespace ed::krylov;
-
-    auto& backend = default_cpu_backend();
-
-    // ===== Krylov-state checkpoint / restart =====
-    // Off by default (zero overhead). Activated by ED_LANCZOS_CHECKPOINT_DIR;
-    // resume requested by ED_LANCZOS_RESUME=1.
-    const bool        ckpt_resume        = lanczos_io::checkpoint_resume_requested();
-    const bool        ckpt_write_enabled = lanczos_io::checkpoint_enabled();
-    const std::string ckpt_dir           = lanczos_io::checkpoint_dir();
-    const uint64_t    ckpt_interval      = lanczos_io::checkpoint_interval();
-
-    // Eigenvector reconstruction reads basis vectors v_0..v_{m-1} from
-    // temp_dir. A resumed run does NOT have the early basis vectors; only
-    // the most recent two (v_prev, v_current) plus the ring buffer survive.
-    // Fail loud now rather than silently producing garbage later.
-    if (ckpt_resume && eigenvectors) {
-        throw std::runtime_error(
-            "Lanczos resume currently supports eigenvalue-only mode "
-            "(eigenvectors=false). Re-run without ED_LANCZOS_RESUME for "
-            "eigenvector reconstruction, or remove the checkpoint to start "
-            "fresh.");
-    }
-
-    lanczos_io::LanczosCheckpoint loaded_cp;
-    if (ckpt_resume) {
-        loaded_cp = lanczos_io::read_lanczos_checkpoint(ckpt_dir);
-        if (loaded_cp.N != N) {
-            throw std::runtime_error(
-                "Lanczos resume: checkpoint dim N=" +
-                std::to_string(loaded_cp.N) + " != requested N=" +
-                std::to_string(N));
-        }
-    }
-
-    // Initialize random starting vector (complex- or real-seed per env).
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    ComplexVector v0_host(N);
-    const bool complex_seed = ed_use_complex_lanczos_seed();
-    if (ckpt_resume) {
-        if (!loaded_cp.rng_state_text.empty()) {
-            lanczos_io::restore_mt19937_state(gen, loaded_cp.rng_state_text);
-        }
-        // v0 ignored by the kernel on a resume; we pass the loaded
-        // v_current via the resume state below.
-    } else if (complex_seed) {
-        for (uint64_t i = 0; i < N; i++) v0_host[i] = Complex(dist(gen), dist(gen));
-    } else {
-        for (uint64_t i = 0; i < N; i++) v0_host[i] = Complex(dist(gen), 0.0);
-    }
-    
-    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1).
-    // Only allocated when eigenvectors are requested; the kernel itself
-    // does not retain a basis under LocalDGKS3 (the 3-vector ring is
-    // internal), so the on-disk basis is the sole channel for eigenvector
-    // reconstruction.
-    std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir + "/lanczos_basis_vectors");
-    max_iter = std::min(N, max_iter);
-    std::unique_ptr<BasisBufferScope> basis_scope;
-    if (eigenvectors) {
-        basis_scope = std::make_unique<BasisBufferScope>(temp_dir, N, max_iter);
-        // Write V_0 to disk so eigenvector recon has index 0; on_step then
-        // writes V_1..V_{max_iter-1} as the kernel produces them.
-        if (!ckpt_resume) {
-            // Normalize v0_host before writing (the kernel will also
-            // normalize on entry, so this matches the on-disk normalized
-            // V_0 the kernel will use).
-            double v0_norm = cblas_dznrm2(N, v0_host.data(), 1);
-            if (v0_norm > 0.0) {
-                Complex inv = Complex(1.0 / v0_norm, 0.0);
-                cblas_zscal(N, &inv, v0_host.data(), 1);
-            }
-            write_basis_vector(temp_dir, 0, v0_host, N);
-        }
-    }
-
-    // NUMA first-touch + thread pinning (preserved from the legacy body):
-    // pin once per process before the first big OMP region. Basis-sized
-    // first-touch is handled by `CpuBackend::allocate` (aligned alloc) +
-    // `make_zero_vector` (memset, which OS first-touch will paginate
-    // onto the calling thread's NUMA node).
-    ed::parallel::pin_omp_threads_once();
-
-    // ---- assemble LanczosKernelOptions + (optional) resume state ------
-    LanczosKernelOptions opts;
-    opts.max_iter     = max_iter;
-    opts.keep_basis   = false;   // ring buffer is internal; disk is the eigenvector channel
-    opts.breakdown_tol = tol;     // legacy body used `tol` for breakdown too
-
-    // Wave 2.1 + correction (cf. orchestrator.cpp): K=1 LocalDGKS3 is
-    // safe for eigenvalues-only paths. ``lanczos()`` writes the basis
-    // to disk in the ``on_step`` hook when eigenvectors are
-    // requested, but the kernel itself does not need ``keep_basis``
-    // -- the disk basis is the channel, and the legacy code did not
-    // do full reorth between iters even in the eigenvectors=true
-    // case. We preserve that behaviour explicitly here. Production
-    // users on near-degenerate spectra can opt in to higher K via
-    // ``ED_LANCZOS_REORTH_K``.
-    opts.reorth = ReorthPolicy::LocalDGKS3;
-    if (const char* k_env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
-        try {
-            const long k_val = std::stol(k_env);
-            if (k_val >= 1 && k_val <= 64) {
-                opts.local_ring_size = static_cast<std::size_t>(k_val);
-            }
-        } catch (...) {
-            // malformed env: silently keep the default.
-        }
-    }
-
-    // Eigenvalue convergence: relative tol on the lowest `exct` Ritz
-    // pairs, checked every `convergence_check_interval` iters once we
-    // have at least `exct` pairs.
-    //
-    // Wave 2.6 of the SOTA Performance rollout (May 2026): every-5 is
-    // the safest default --- it amortises the O(m^2) LAPACK tridiag
-    // eigensolve over 5 iterations (a tiny overshoot vs ideal m,
-    // typically <5 extra matvecs out of 50-200) and matches the
-    // distributed lane (`distributed_lanczos_kernel.h:295`). Callers
-    // who need exact-best-m termination can re-enable per-iter
-    // checking via env ``ED_LANCZOS_CHECK_EVERY=1``.
-    std::vector<double> prev_eigenvalues_outer;
-    opts.convergence_check_interval = 5;
-    if (const char* ce = ed::env::raw("ED_LANCZOS_CHECK_EVERY")) {
-        try {
-            const long ci = std::stol(ce);
-            if (ci >= 1 && ci <= 1000) {
-                opts.convergence_check_interval = static_cast<std::size_t>(ci);
-            }
-        } catch (...) {
-            // malformed env: keep the default.
-        }
-    }
-    opts.convergence_check =
-        [&prev_eigenvalues_outer, exct, tol]
-        (const std::vector<double>& a, const std::vector<double>& b) -> bool {
-            const std::size_t m_cur = a.size();
-            if (m_cur < exct) return false;
-            std::vector<double> diag = a;
-            std::vector<double> offdiag(m_cur - 1);
-            for (std::size_t ii = 0; ii < m_cur - 1; ++ii) offdiag[ii] = b[ii + 1];
-            uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N',
-                                           static_cast<int>(m_cur),
-                                           diag.data(), offdiag.data(),
-                                           nullptr, static_cast<int>(m_cur));
-            if (info != 0) return false;
-            const std::size_t n_check = std::min<std::size_t>(exct, m_cur);
-            std::vector<double> current(diag.begin(), diag.begin() + n_check);
-            bool converged = false;
-            if (prev_eigenvalues_outer.size() >= n_check) {
-                double worst = 0.0;
-                for (std::size_t ii = 0; ii < n_check; ++ii) {
-                    const double d = std::max(std::abs(current[ii]), 1e-300);
-                    worst = std::max(worst,
-                        std::abs(current[ii] - prev_eigenvalues_outer[ii]) / d);
-                }
-                converged = (worst < tol);
-            }
-            prev_eigenvalues_outer = std::move(current);
-            return converged;
-        };
-
-    // on_step:  (1) write the just-built basis vector to disk when
-    // eigenvectors are requested; (2) periodic checkpoint to
-    // `ckpt_dir`. Convention: `iteration_count` = number of completed
-    // iters; `v_curr` is V_{iteration_count} (the next vector for the
-    // resumed run), `v_prev` is V_{iteration_count - 1}. Matches the
-    // legacy `cp.iteration` / `cp.v_current` / `cp.v_prev` semantics.
-    //
-    // Wave 2.4 of the SOTA Performance rollout (May 2026): skip the
-    // hook entirely when neither eigenvectors nor checkpointing are
-    // active. The kernel then bypasses both the per-iter callback
-    // dispatch AND the LocalDGKS3 ``ring_view`` materialisation that
-    // exists solely for the hook (see ``lanczos_kernel.h:633-643``),
-    // which is otherwise free O(K) pointer copy per iter.
-    const bool on_step_needed = eigenvectors || ckpt_write_enabled;
-    if (on_step_needed) {
-    opts.on_step_interval = 1;
-    opts.on_step =
-        [&backend, &gen, N, eigenvectors, &temp_dir,
-         ckpt_write_enabled, &ckpt_dir, ckpt_interval, max_iter, exct, tol,
-         complex_seed]
-        (std::size_t iteration_count,
-         const std::vector<double>& a,
-         const std::vector<double>& b,
-         const Complex* v_curr,
-         const Complex* v_prev,
-         std::size_t local_n,
-         const std::vector<const Complex*>* ring_view) {
-            // Basis vector write for eigenvector reconstruction. The
-            // legacy code wrote basis up to index `max_iter - 1`; the
-            // final V_{max_iter} that the kernel may produce is not
-            // needed by the tridiag solver, so we gate the write here.
-            if (eigenvectors && iteration_count < max_iter) {
-                ComplexVector host(local_n);
-                backend.copy_to_host(v_curr, host.data(), local_n);
-                write_basis_vector(temp_dir, iteration_count, host, local_n);
-            }
-            // Checkpoint write.
-            const bool last_iter   = (iteration_count == static_cast<std::size_t>(max_iter));
-            const bool checkpoint_due =
-                ckpt_write_enabled && ckpt_interval > 0 &&
-                ((iteration_count % ckpt_interval == 0) || last_iter);
-            if (!checkpoint_due) return;
-            lanczos_io::LanczosCheckpoint cp;
-            cp.N = N;
-            cp.max_iter     = max_iter;
-            cp.exct         = exct;
-            cp.tol          = tol;
-            cp.complex_seed = complex_seed;
-            cp.iteration    = iteration_count;
-            cp.alpha        = a;
-            cp.beta         = b;
-            cp.v_current.resize(local_n);
-            cp.v_prev.resize(local_n);
-            backend.copy_to_host(v_curr, cp.v_current.data(), local_n);
-            backend.copy_to_host(v_prev, cp.v_prev.data(),    local_n);
-            // Persist the LocalDGKS3 ring buffer to disk so a future
-            // resume starts with full reorth quality from iter 0.
-            cp.ring_head = 0;
-            if (ring_view != nullptr) {
-                cp.ring_vectors.reserve(ring_view->size());
-                for (const Complex* p : *ring_view) {
-                    ComplexVector host(local_n);
-                    backend.copy_to_host(p, host.data(), local_n);
-                    cp.ring_vectors.emplace_back(std::move(host));
-                }
-            }
-            cp.last_w_norm         = b.back();
-            cp.rng_state_text      = lanczos_io::capture_mt19937_state(gen);
-            cp.eigenvalues_converged = false;
-            try {
-                lanczos_io::write_lanczos_checkpoint(ckpt_dir, cp);
-            } catch (const std::exception& e) {
-                std::cerr << "[lanczos] checkpoint write failed at iter "
-                          << iteration_count << ": " << e.what() << std::endl;
-            }
-        };
-    }  // end if (on_step_needed)
-
-    // Resume state for kernel re-entry.
-    std::unique_ptr<LanczosResumeState> resume_state;
-    if (ckpt_resume) {
-        resume_state = std::make_unique<LanczosResumeState>(
-            to_resume_state(backend, loaded_cp));
-        opts.resume_state = resume_state.get();
-        std::cout << "Lanczos: RESUMING from checkpoint at iteration "
-                  << resume_state->j_start << " (last beta="
-                  << std::scientific << std::setprecision(4)
-                  << loaded_cp.last_w_norm << std::defaultfloat << ")"
-                  << std::endl;
-    }
-
-    std::cout << "Lanczos: max_iter=" << max_iter
-              << ", n_eig=" << exct
-              << ", tol=" << tol;
-    if (ckpt_resume) std::cout << " (resuming from j=" << resume_state->j_start << ")";
-    if (ckpt_write_enabled) {
-        std::cout << " [checkpoint every " << ckpt_interval
-                  << " iters -> " << ckpt_dir << "]";
-    }
-    std::cout << std::endl;
-
-    // The kernel needs a 3-arg matvec; the legacy H is also 3-arg, but
-    // with `int` last param (vs the kernel's `std::size_t`).
-    auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
-        H(in, out, static_cast<int>(n));
-    };
-
-    LanczosKernelResult R = lanczos_kernel(
-        backend, matvec, static_cast<std::size_t>(N), v0_host.data(), opts);
-
-    // ---- post-processing ----
-    std::vector<double>& alpha = R.alpha;
-    std::vector<double>& beta  = R.beta;
-    uint64_t m = R.iters_done;
-    std::cout << "Lanczos: " << m << " iterations" << std::endl;
-
-    // ``dir.empty()`` -> "do not save" (see the SolveOptions::output_dir
-    // doc string in include/ed/orchestrator.h). The downstream sink
-    // ``solve_tridiagonal_matrix`` already special-cases ``/dev/null``
-    // and now also treats the empty string the same way -- both mean
-    // "skip the HDF5 dump". Defaulting to "." silently dumped
-    // ``./ed_results.h5`` from every test that forgot to set output_dir
-    // and produced the parallel-ctest race condition we saw in CI.
-    std::string evec_dir = dir;
-    uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues,
-                                              temp_dir, evec_dir, eigenvectors, N);
-    if (info != 0) {
-        std::cerr << "Tridiagonal eigenvalue solver failed with error code "
-                  << info << std::endl;
-        return;
-    }
-}
-
-// The pre-Phase-2.1 hand-rolled body is gone; the canonical
-// implementation lives entirely in `ed::krylov::lanczos_kernel`
-// + the orchestrator above (consult git history for the legacy body).
-
 // =============================================================================
 // lanczos_real -- real-storage / real-arithmetic Lanczos for eigenvalues only.
 //
 // Phase 6 #7: when the Hamiltonian is real and the seed is real, the entire
-// Krylov basis stays real. ``lanczos()`` above forces complex storage, paying
-// 2x memory traffic and 2x BLAS-1 FLOPs over the strictly-needed amount. At
-// N = 18-22 (FixedSz Heisenberg, Krylov dim < 1M) the iter is BLAS-1 bound,
-// so this halving of BLAS-1 traffic is the single largest residual win.
+// Krylov basis stays real. The complex ``lanczos_kernel`` stores complex
+// vectors, paying 2x memory traffic and 2x BLAS-1 FLOPs over the
+// strictly-needed amount. At N = 18-22 (Krylov dim < 1M) the iter is BLAS-1
+// bound, so this halving of BLAS-1 traffic is the single largest residual win.
 //
-// Mirrors the algorithm in ``lanczos()``: 3-vector ring DGKS local reorth,
-// periodic eigenvalue convergence on the Lanczos tridiagonal every 10 iters,
-// breakdown on beta < tol. Eigenvalues only -- no basis I/O.
+// Local DGKS reorth against a short ring of recent vectors, relative Ritz-value
+// convergence test, breakdown on beta < tol. No stored basis.
 // =============================================================================
 // Cullum-Willoughby ghost filter on the ascending Ritz values ``theta`` of the
 // m x m Lanczos tridiagonal (alpha, beta[1..m-1]). Returns the ascending list
@@ -929,7 +211,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     if (converged_out) *converged_out = false;
     const bool fixed_iters = extras && extras->fixed_iterations;
     // Mirror the Lanczos thread-budget heuristic so the OMP+BLAS thread cap
-    // is consistent with the complex path (see lanczos() above).
+    // is consistent with the complex kernel lanes.
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
 
@@ -1296,39 +578,20 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
               << (converged ? " [converged]" : "") << std::endl;
 }
 
-// Full diagonalization: dense LAPACK inside the dense window, matrix-free
-// Lanczos for partial requests above it.
+// Full diagonalization: dense LAPACK inside the dense window; larger blocks
+// are refused (they belong to the Krylov lanes).
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
-                       std::vector<double>& eigenvalues, std::string dir,
+                       std::vector<double>& eigenvalues,
                        bool compute_eigenvectors,
                        const ed::matvec::MatVecOperator* op_for_dense,
                        std::vector<std::vector<Complex>>* eigenvectors_out) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
     if (eigenvectors_out) eigenvectors_out->clear();
 
-    // Phase 6.1: dim-aware OMP+BLAS thread cap. Full diag is BLAS-3 dense
-    // LAPACK -- the cap rarely hurts (LAPACK already saturates) but
-    // matters when ``num_eigs`` is small enough to take the sparse
-    // restart fallback below, which loops H * v in the same way Lanczos
-    // does.
+    // Phase 6.1: dim-aware OMP+BLAS thread cap for the column build; the
+    // dense eigensolve below lifts it (see dense_solve_budget).
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
-
-    // ``dir.empty()`` means "do not write" -- pinned by the SolveOptions
-    // contract (``output_dir`` doc string in include/ed/orchestrator.h)
-    // and by the FTLM thermal_persist contract. We used to default ``dir
-    // = "."`` here which silently spammed ``./ed_results.h5`` from every
-    // test/example/run that forgot to pass an output_dir. With parallel
-    // ctest (``-j$(nproc)``) that turned into a real race-condition (HDF5
-    // can't open the same file concurrently from multiple processes
-    // without SWMR) and made GCC Release CI fail intermittently. Now we
-    // skip the directory creation entirely when no path was supplied;
-    // the ``!dir.empty()`` guards on every ``saveDiagonalizationResults``
-    // call below already do the right thing.
-    if (compute_eigenvectors && !dir.empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-    }
 
     // Dense window: LAPACK (zheevd/dsyevd) computes the COMPLETE spectrum
     // correctly and stably up to this dimension. 120000 aligns with the
@@ -1337,13 +600,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     // complex / ~115 GB real (transient peak ~1.5x during the real-path
     // conversion) -- fat-node territory, and undersized machines fail as
     // a clean bad_alloc up front, before any solve work. Above the
-    // window, a PARTIAL request (num_eigs < N/2) routes to matrix-free
-    // Lanczos; a FULL-spectrum request is a hard error (the historical
-    // Eigen-sparse "full diagonalization" fallback was both wrong -- an
-    // iterative solver cannot deliver all N eigenvalues -- and broken:
-    // glibc heap corruption at N=32768 on symmetry-free clusters;
-    // retired 2026-07-20). ED_FULLDIAG_DENSE_MAX overrides in either
-    // direction.
+    // window the call is a hard error. ED_FULLDIAG_DENSE_MAX overrides in
+    // either direction.
     uint64_t DENSE_THRESHOLD = 120000;
     if (const char* env_max = ed::env::raw("ED_FULLDIAG_DENSE_MAX")) {
         const unsigned long long v = std::strtoull(env_max, nullptr, 10);
@@ -1495,16 +753,13 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
                 eigenvalues.resize(m_found);
                 for (lapack_int i = 0; i < m_found; ++i) eigenvalues[i] = evals[i];
-                if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
+                if (compute_eigenvectors && eigenvectors_out != nullptr) {
                     std::vector<std::vector<Complex>> eigenvector_list(m_found);
                     for (lapack_int i = 0; i < m_found; ++i) {
                         eigenvector_list[i].resize(N);
                         for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(revecs[static_cast<size_t>(i) * N + j], 0.0);
                     }
-                    if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial, real)");
-                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
-                } else if (!dir.empty()) {
-                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial, real)");
+                    *eigenvectors_out = std::move(eigenvector_list);
                 }
             } else {
                 info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
@@ -1513,16 +768,13 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 std::cout << "Eigenvalue decomposition completed (divide-and-conquer, real)" << std::endl;
                 eigenvalues.resize(actual_num_eigs);
                 for (size_t i = 0; i < actual_num_eigs; ++i) eigenvalues[i] = evals[i];
-                if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
+                if (compute_eigenvectors && eigenvectors_out != nullptr) {
                     std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
                     for (size_t i = 0; i < actual_num_eigs; ++i) {
                         eigenvector_list[i].resize(N);
                         for (size_t j = 0; j < N; ++j) eigenvector_list[i][j] = Complex(rdense[i * N + j], 0.0);
                     }
-                    if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (real)");
-                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
-                } else if (!dir.empty()) {
-                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (real)");
+                    *eigenvectors_out = std::move(eigenvector_list);
                 }
             }
         } else if (use_partial_solver) {
@@ -1568,9 +820,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 eigenvalues[i] = evals[i];
             }
             
-            // Save results using unified HDF5 function
-            if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
-                std::cout << "Saving " << m_found << " eigenvectors to disk..." << std::endl;
+            // Hand the requested eigenvectors back in memory
+            if (compute_eigenvectors && eigenvectors_out != nullptr) {
                 
                 // Convert to vector of vectors format - read directly from evecs_partial
                 std::vector<std::vector<Complex>> eigenvector_list(m_found);
@@ -1582,10 +833,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                     }
                 }
                 
-                if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial)");
-                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
-            } else if (!dir.empty()) {
-                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial)");
+                *eigenvectors_out = std::move(eigenvector_list);
             }
         } else {
             // ===== Full eigenvalue computation using zheevd (divide-and-conquer) =====
@@ -1613,10 +861,9 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 eigenvalues[i] = evals[i];
             }
             
-            // Save results using unified HDF5 function
+            // Hand the requested eigenvectors back in memory
             // Note: eigenvectors are now stored IN dense_matrix (column-major)
-            if (compute_eigenvectors && (!dir.empty() || eigenvectors_out != nullptr)) {
-                std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
+            if (compute_eigenvectors && eigenvectors_out != nullptr) {
                 
                 // Convert dense_matrix (which now contains eigenvectors) to vector of vectors format
                 // No intermediate copy needed - read directly from dense_matrix
@@ -1629,45 +876,21 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                     }
                 }
                 
-                if (!dir.empty()) HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
-                if (eigenvectors_out) *eigenvectors_out = std::move(eigenvector_list);
-            } else if (!dir.empty()) {
-                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization");
+                *eigenvectors_out = std::move(eigenvector_list);
             }
         }
-    } 
-    else if (num_eigs < N / 2) {
-        // Above the dense window with a PARTIAL request: matrix-free
-        // Lanczos directly on H. (The retired Eigen-sparse branch rebuilt
-        // the operator as a SparseMatrix via N unit-vector matvecs and then
-        // ran Lanczos on it with max_iter = 2*num_eigs -- far too few
-        // iterations to converge anything; same budget shape as
-        // lowest_dense_floor now.)
-        const uint64_t li = std::min<uint64_t>(
-            std::max<uint64_t>(40 * num_eigs, 400), N);
-        std::cout << "Dimension " << N << " exceeds the dense window ("
-                  << DENSE_THRESHOLD << "); solving " << num_eigs
-                  << " eigenvalues with matrix-free Lanczos (max_iter="
-                  << li << ")" << std::endl;
-        lanczos(H, N, li, num_eigs, 1e-10, eigenvalues, dir,
-                compute_eigenvectors);
-    }
-    else {
-        // Full-spectrum request above the dense window: HARD ERROR.
-        // The old fallback here ("sparse full diagonalization",
-        // Eigen::SelfAdjointEigenSolver over a SparseMatrix) densified
-        // internally on one thread, heap-corrupted at N=32768 on
-        // symmetry-free clusters, and could not honestly deliver all N
-        // eigenvalues -- retired 2026-07-20. A complete spectrum needs the
-        // dense eigensolver; when the block does not fit the window the
-        // caller must shrink it (symmetry) or raise the window on purpose.
+    } else {
+        // Above the dense window: HARD ERROR. The callers (the solve lane's
+        // FullDiag method and the small-block thermal fallback) only route
+        // small blocks here; Krylov lanes serve everything larger. The old
+        // Eigen-sparse "full diagonalization" fallback densified internally
+        // on one thread, heap-corrupted at N=32768 on symmetry-free clusters,
+        // and could not honestly deliver all N eigenvalues (retired
+        // 2026-07-20).
         throw std::runtime_error(
-            "full_diagonalization: full-spectrum request at dimension " +
-            std::to_string(N) + " exceeds the dense limit (" +
-            std::to_string(DENSE_THRESHOLD) + "). No exact full-spectrum "
-            "solver exists past this size (the Eigen-sparse fallback was "
-            "removed as incorrect). Reduce the block with symmetry, request "
-            "num_eigs < dim/2 (routes to matrix-free Lanczos), or set "
+            "full_diagonalization: dimension " + std::to_string(N) +
+            " exceeds the dense limit (" + std::to_string(DENSE_THRESHOLD) +
+            "). Reduce the block with symmetry, use a Krylov method, or set "
             "ED_FULLDIAG_DENSE_MAX above " + std::to_string(N) +
             " if the dense matrix genuinely fits in RAM.");
     }
