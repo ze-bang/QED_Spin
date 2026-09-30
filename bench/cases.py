@@ -1,5 +1,5 @@
-"""Benchmark cases on the sector-resolved API (qed.api): the same case names and the same
-work as cases_v1.py, so bench/run.py timings compare one-to-one."""
+"""Benchmark cases: each is one qed call on a size that engages the real kernels. The
+resource string is the sbatch request of that case (walltime about twice the last run)."""
 from __future__ import annotations
 
 import sys
@@ -12,7 +12,6 @@ from grid.models import Model, chain, fourier, triangular  # noqa: E402
 
 from qed.api import Symmetry, dynamics, eigs, thermal  # noqa: E402
 
-from cases_v1 import CASES as _V1  # noqa: E402  (resources are shared)
 
 
 def _szq(m, q):
@@ -78,4 +77,13 @@ def tri20_lg_exact_thermal_cpu():
     return {"E(Tmin)": float(r.E[0]), "C_max": float(np.max(r.C))}
 
 
-CASES = {name: (globals()[name], res) for name, (_, res) in _V1.items()}
+CASES = {
+    "tri30_lg_eigs_cpu":          (tri30_lg_eigs_cpu,          "-c 32 --mem=96G -t 0:15:00"),
+    "chain32_abelian_eigs_gpu":   (chain32_abelian_eigs_gpu,   "-c 16 --mem=96G -t 1:00:00 --gpus-per-node=h100:1"),
+    "chain28_ftlm_cpu":           (chain28_ftlm_cpu,           "-c 32 --mem=64G -t 0:30:00"),
+    "chain28_ftlm_gpu":           (chain28_ftlm_gpu,           "-c 16 --mem=64G -t 0:30:00 --gpus-per-node=h100:1"),
+    "chain30_mtpq_gpu":           (chain30_mtpq_gpu,           "-c 16 --mem=64G -t 4:00:00 --gpus-per-node=h100:1"),
+    "chain30_dyn0_cpu":           (chain30_dyn0_cpu,           "-c 32 --mem=64G -t 0:30:00"),
+    "chain24_dynT_cpu":           (chain24_dynT_cpu,           "-c 32 --mem=32G -t 1:30:00"),
+    "tri20_lg_exact_thermal_cpu": (tri20_lg_exact_thermal_cpu, "-c 32 --mem=64G -t 1:00:00"),
+}

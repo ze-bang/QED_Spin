@@ -1,6 +1,6 @@
-"""Grid adapter for the sector-resolved API (qed.api). Tasks the new API does not
-cover yet fall through to the current API (adapter_v1), so a grid run always
-measures every cell."""
+"""Grid adapter: one function per task over qed.api. Each takes the model, the symmetry
+content, the device and the task knobs, and returns plain numpy data for the oracle.
+`Missing` means the API has no route for the cell."""
 from __future__ import annotations
 
 import contextlib
@@ -15,8 +15,20 @@ from qed.api import expect as _expect
 from qed.api import spectrum as _spectrum
 from qed.api import thermal as _thermal
 
-from . import adapter_v1 as _v1
-from .adapter_v1 import Missing, selection  # noqa: F401  (re-exported for the grid)
+
+class Missing(Exception):
+    """The API has no route for the cell."""
+
+
+def selection(m, content):
+    """Which part of the dense spectrum the cell's answer lives in."""
+    if content == "sz_one":
+        return ("n_up", m.N // 2)
+    if content == "parity":
+        return ("parity", 0)
+    if content == "su2":
+        return ("S", 0.0 if m.N % 2 == 0 else 0.5)
+    return None
 
 
 def _sym(m, content):

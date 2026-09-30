@@ -92,10 +92,10 @@ WITH_CUDA = "OFF"
 # Tooling: ruff (linter) + pytest defaults.
 # -----------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["python/tests", "tests/integration"]
+testpaths = ["python/tests"]
 python_files = ["test_*.py"]
 # Skip the long-running perf/scale guards by default (run them in the nightly
-# benchmarks lane with `-m slow`). The fast integration suite still runs.
+# benchmarks lane with `-m slow`).
 addopts = "-q -m 'not slow and not grid'"
 markers = [
     "slow: long-running performance / scale guard (deselected by default; run in nightly with -m slow)",

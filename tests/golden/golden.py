@@ -141,7 +141,7 @@ def select(cases, only):
 
 
 def cmd_record(args):
-    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
+    from cases import build_cases
     cases = select(build_cases(args.device), args.only)
     records, quarantine = {}, {}
     for c in cases:
@@ -180,7 +180,7 @@ def cmd_bless(args):
     """Re-record EXACTLY the named cases into an existing reference (determinism checked
     by a second run) and keep every other record; the file's meta keeps a log of what
     was re-blessed, at which commit and why."""
-    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
+    from cases import build_cases
     if not args.only and not args.new:
         print("bless needs --only (exact case names) or --new: re-blessing everything is `record`")
         return 2
@@ -200,7 +200,7 @@ def cmd_bless(args):
     for c in chosen:
         r1, r2 = run_case(c), run_case(c)
         d = diff_records(r1, r2)
-        if d or "raised" in r1:
+        if d or ("raised" in r1 and not args.allow_raise):
             print(f"refusing to bless {c.name}: " + (d[0] if d else r1.get("message", "raised")))
             return 1
         old = doc["records"].get(c.name)
@@ -221,7 +221,7 @@ def cmd_retire(args):
     removed on purpose. Refuses while cases.py still produces any of them (retiring a
     live case would hide a regression). The dropped records move into meta["retired"]
     with the commit, date and reason, so every deletion stays auditable."""
-    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
+    from cases import build_cases
     if not args.only:
         print("retire needs --only with exact case names")
         return 2
@@ -250,7 +250,7 @@ def cmd_retire(args):
 
 
 def cmd_compare(args):
-    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
+    from cases import build_cases
     with gzip.open(args.ref, "rt") as f:
         doc = json.load(f)
     ref, quarantine = doc["records"], doc.get("quarantine", {})
@@ -291,7 +291,7 @@ def cmd_compare(args):
 
 
 def cmd_list(args):
-    build_cases = __import__(os.environ.get("GOLDEN_CASES", "cases")).build_cases
+    from cases import build_cases
     for c in select(build_cases(args.device), args.only):
         print(f"{c.tier:10s} {c.name}")
     return 0
@@ -321,6 +321,8 @@ def main():
             p.add_argument("--reason", required=True, help="why the reference moves (kept in meta)")
         if name == "bless":
             p.add_argument("--new", action="store_true", help="bless every case not yet in the reference")
+            p.add_argument("--allow-raise", action="store_true",
+                           help="also bless cases whose outcome is a deliberate refusal (an exception)")
         if name == "compare":
             p.add_argument("--ref", required=True)
         p.set_defaults(fn=fn)

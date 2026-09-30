@@ -1,26 +1,14 @@
-# `examples/` — the tour
+# `examples/`
 
-Five short, heavily-commented, runnable scripts cover every real knob
-the library exposes. Each runs standalone in seconds:
+Four short scripts, one per task; each runs in seconds:
 
-```bash
-python3 examples/tour/01_ground_state.py
-```
+| script | verbs |
+|---|---|
+| [`01_levels.py`](01_levels.py) | `qed.eigs` (levels, labels, eigenvectors), `qed.expect` |
+| [`02_thermal.py`](02_thermal.py) | `qed.thermal`: exact, FTLM, FTLM with exact low-lying states, mTPQ |
+| [`03_dynamics.py`](03_dynamics.py) | `qed.dynamics` at T = 0 and finite T |
+| [`04_symmetry.py`](04_symmetry.py) | `qed.find_symmetries`, `qed.Symmetry` options, sector selection |
 
-| script | verb | what it covers |
-|---|---|---|
-| [`tour/01_ground_state.py`](tour/01_ground_state.py) | `qed.solve` | `symmetry="auto"`, per-symmetry toggles (`spin_flip=` / `time_reversal=` / `point_group=` with auto/on/off/require), solvers, devices, per-sector attribution, eigenvectors |
-| [`tour/02_finite_temperature.py`](tour/02_finite_temperature.py) | `qed.thermal` | mTPQ/FTLM/LTLM, the flat sector pool + flip/TR/star copies, Sz windows, seeds, devices |
-| [`tour/03_dynamics_dssf.py`](tour/03_dynamics_dssf.py) | `qed.spectral` | momentum-resolved probes (S^z_Q / S^±_Q), ground-state + finite-T DSSF through the sector machinery, selection rules, broadening/Krylov knobs |
-| [`tour/04_symmetry_toolkit.py`](tour/04_symmetry_toolkit.py) | — | `find_symmetries`, `GeneratorSet.describe()`, sector selection, the four-state toggles, Sz-parity halves (`sz="even"/"odd"`), true non-abelian `point_group="full"`, env escapes |
-| [`tour/05_tpq_dssf.py`](tour/05_tpq_dssf.py) | thermal → spectral | finite-temperature DSSF from mTPQ states: persist a snapshot at each β, seed the continued fraction with the warm state (`initial_state=`) |
-
-The tour is CI-guarded: the `linux-tour` lane builds the wheel and
-runs every script end-to-end on each push.
-
-For exhaustive per-configuration coverage — every
-(backend × symmetry × method) combination — the test suites are the
-reference: `python/tests/` + `tests/integration/` (Python) and
-`tests/unit/` (C++), plus the verified capability matrix in
-`docs/perf/capability_matrix_2026-07-20.md` /
-`benchmarks/bench_capability_matrix.py`.
+Every verb takes `sym=` (default `qed.Symmetry.auto()`) and `device=` (`"cpu"`, `"gpu"`,
+`"auto"`). Correctness of every task x symmetry x backend combination is pinned by the
+coverage grid in `python/tests/grid/`.

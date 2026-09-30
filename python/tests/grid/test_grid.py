@@ -21,10 +21,8 @@ import pytest
 qed = pytest.importorskip("qed")
 pytest.importorskip("pynauty")
 
-import importlib  # noqa: E402
 
-# QED_GRID_API selects the API under test (v1: qed.solve/thermal/spectral; v2: qed.api).
-api = importlib.import_module(f".adapter_{os.environ.get('QED_GRID_API', 'v1')}", __package__)
+from . import adapter as api  # noqa: E402
 from .models import MODELS, Model, dot, fourier, oracle, sparse  # noqa: E402
 
 pytestmark = pytest.mark.grid
@@ -67,8 +65,7 @@ def _cells():
 
 
 def _baseline(backend):
-    api_tag = os.environ.get("QED_GRID_API", "v1")
-    p = HERE / (f"baseline_{backend}.json" if api_tag == "v1" else f"baseline_{api_tag}_{backend}.json")
+    p = HERE / f"baseline_{backend}.json"
     if not p.exists():
         return {}
     return {r["cell"]: r["status"] for r in json.loads(p.read_text())["cells"]}
