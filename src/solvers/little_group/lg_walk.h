@@ -51,6 +51,7 @@ struct BlockOp {
     double        ghost        = std::numeric_limits<double>::infinity();
     std::uint64_t multiplicity = 1;
     bool          on_device    = false;   ///< the operator may be bound to a CUDA backend
+    std::shared_ptr<const ed::symmetry::LowdinS2Projector> projector;   ///< onto the tower (SU(2) only)
     [[nodiscard]] bool is_ghost(double e) const {
         return std::isfinite(ghost) && e > ghost - 1e-6 * std::max(1.0, std::abs(ghost));
     }
@@ -88,6 +89,7 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     auto proj = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
     auto wrapped = std::make_shared<ed::symmetry::CasimirProjectedOperator>(b.op, proj, 1);
     b.ghost = wrapped->ghost_shift();
+    b.projector = proj;
     b.op = wrapped;
     b.multiplicity *= static_cast<std::uint64_t>(s.two_S + 1);
     return b;
@@ -123,7 +125,11 @@ public:
     /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
     void solve() {
         if (queued_.empty()) return;
+#ifdef WITH_CUDA
         const std::vector<double> ev = ed::solvers::lg_blocks_batched_eigenvalues_gpu(packed_);
+#else
+        const std::vector<double> ev;   // unreachable: nothing is queued without a device
+#endif
         std::size_t off = 0;
         for (std::size_t q = 0; q < queued_.size(); ++q) {
             const std::size_t nb = static_cast<std::size_t>(packed_.block_dim[q]);

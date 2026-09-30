@@ -7,6 +7,9 @@
 #include "lg_walk.h"
 
 #include <ed/sectors/thermal.h>
+#include <ed/symmetry/su2_dims.h>
+
+#include <map>
 
 namespace ed::sectors {
 
@@ -39,8 +42,10 @@ BlockThermo exact_block(const std::vector<double>& ev, const std::vector<double>
     return b;
 }
 
+// `tower`: the seeds are projected onto it, and Z counts its states instead of the block's.
 BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
-                          const std::vector<double>& beta, std::uint64_t seed, bool* on_gpu) {
+                          const std::vector<double>& beta, std::uint64_t seed, bool* on_gpu,
+                          const detail::BlockOp* tower = nullptr, std::uint64_t tower_dim = 0) {
     ed::workflows::ThermalOptions o;
     o.method        = t.method == ThermalSpec::Method::mTPQ ? ed::workflows::ThermalOptions::Method::mTPQ
                     : (t.exact_states > 0 ? ed::workflows::ThermalOptions::Method::OFTLM
@@ -54,19 +59,37 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     o.time_reversal = 0;
     o.backend.allow_gpu = t.device != Device::Cpu;
     if (t.device == Device::Gpu) o.backend.gpu_dim_floor = 0;
+    if (tower) {
+        auto p = tower->projector;
+        o.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
+    }
     const auto r = ed::workflows::thermal(op, o);
     *on_gpu = r.backend.lane == "gpu";
     const auto& d = r.thermo;
     if (d.energy.size() != beta.size())
         throw std::runtime_error("thermal: a block returned " + std::to_string(d.energy.size())
                                  + " temperatures, expected " + std::to_string(beta.size()));
+    // The kernels' free energy carries ln(dim) of the block they sampled; a projected trace
+    // runs over the tower.
+    const double ln_ratio = tower ? std::log(static_cast<double>(tower_dim) / static_cast<double>(op.dim())) : 0.0;
     BlockThermo b;
     for (std::size_t i = 0; i < beta.size(); ++i) {
-        b.lnZ.push_back(-beta[i] * d.free_energy[i]);
+        b.lnZ.push_back(-beta[i] * d.free_energy[i] + ln_ratio);
         b.E.push_back(d.energy[i]);
         b.E2.push_back(d.specific_heat[i] / (beta[i] * beta[i]) + d.energy[i] * d.energy[i]);
     }
     return b;
+}
+
+// Block dimensions of one subspace by (momentum, little-group irrep), summed over flip parity.
+using BlockKey = std::pair<int, int>;
+std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub) {
+    std::map<BlockKey, std::uint64_t> d;
+    if (sub.n_up < 0 || sub.n_up > n_sites) return d;
+    detail::walk(H, n_sites, s, detail::engine_options(s, sub, 64, 1), [&](const EngineContext&, bool, StarBuild& sb) {
+        for (const auto& bi : sb.blocks) d[{bi->tag.k_raw, bi->tag.irrep}] += bi->tag.dim;
+    });
+    return d;
 }
 
 }  // namespace
@@ -81,10 +104,20 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     std::uint64_t seed = t.seed ? t.seed : std::random_device{}();
     const bool u1 = sz_content(H) == SzContent::U1 && s.use_sz;
 
-    if (s.two_S >= 0 && t.method != ThermalSpec::Method::Exact)
-        throw std::invalid_argument(
-            "thermal: sampling restricted to one spin tower needs each block's tower dimension "
-            "to normalise Z; use method Exact for a total-spin restriction");
+    // Sampling one spin tower: every multiplet has exactly one Sz = S member and S+ commutes
+    // with the lattice symmetries, so a block's tower dimension is its dimension at Sz = S
+    // less that of the same (momentum, irrep) block at Sz = S + 1 (one set bit fewer).
+    const bool tower_sampling = s.two_S >= 0 && t.method != ThermalSpec::Method::Exact;
+    std::map<BlockKey, std::uint64_t> dim_at, dim_above;
+    std::uint64_t multiplets = 0;
+    if (tower_sampling) {
+        if (t.exact_states > 0)
+            throw std::invalid_argument("thermal: exact_states (OFTLM) cannot be restricted to one spin tower; "
+                                        "use FTLM or mTPQ");
+        const Subspace hw = subspaces(H, n_sites, s).front();
+        dim_at    = block_dims(H, n_sites, s, hw);
+        dim_above = block_dims(H, n_sites, s, {hw.n_up - 1, -1, 1});
+    }
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     ThermalCurves out;
     out.T  = t.temperatures;
@@ -100,6 +133,17 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
+                std::uint64_t tower_dim = 0;
+                if (tower_sampling) {
+                    const BlockKey key{bi->tag.k_raw, bi->tag.irrep};
+                    const auto it = dim_above.find(key);
+                    const std::uint64_t at = dim_at.at(key), above = it == dim_above.end() ? 0 : it->second;
+                    if (above > at)
+                        throw std::runtime_error("thermal: a block is larger at Sz = S + 1 than at Sz = S; "
+                                                 "its labels do not match across Sz");
+                    tower_dim = at - above;
+                    if (tower_dim == 0) continue;
+                }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device);
                 if (!bop.op) continue;
                 const auto& mv = *bop.op;
@@ -112,7 +156,9 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
                     bool on_gpu = false;
-                    b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu);
+                    b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu,
+                                      tower_sampling ? &bop : nullptr, tower_dim);
+                    multiplets += tower_dim * bi->tag.multiplicity;
                     if (on_gpu) ++out.device_blocks;
                     for (double e : b.E) out.e0 = std::min(out.e0, e);
                 }
@@ -124,6 +170,12 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             }
         });
     }
+    // Every multiplet counted once: the Sz = S / S + 1 labels matched block for block.
+    if (tower_sampling && s.only_k0.empty() && s.only_irrep.empty()
+        && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
+        throw std::runtime_error("thermal: the blocks hold " + std::to_string(multiplets) + " spin-"
+                                 + std::to_string(s.two_S) + "/2 multiplets, expected "
+                                 + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
     batch.solve();
     if (t.method == ThermalSpec::Method::Exact) {
         out.device_blocks = batch.device_blocks();
