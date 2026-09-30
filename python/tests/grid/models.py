@@ -114,6 +114,21 @@ def dense(terms, N):
     return M
 
 
+def sparse(terms, N):
+    """The same matrix as :func:`dense`, stored sparse (an observable has few terms)."""
+    import scipy.sparse as sp
+
+    rows, cols, vals = [], [], []
+    for c, ops in terms:
+        for s in range(1 << N):
+            a, t = _apply(ops, s)
+            if a:
+                rows.append(t)
+                cols.append(s)
+                vals.append(c * a)
+    return sp.csr_matrix((np.asarray(vals, complex), (rows, cols)), shape=(1 << N, 1 << N))
+
+
 def fourier(N, coords, shape, q, op):
     """(1/sqrt N) sum_j exp(-i Q.r_j) S^op_j as terms."""
     out = []
@@ -296,3 +311,32 @@ class Oracle:
         if kind == "parity":
             return self.pop % 2 == val
         raise ValueError(sel)
+
+    # -- expectation values ------------------------------------------------
+    @functools.lru_cache(maxsize=None)
+    def eigbasis(self, sel):
+        """(E, W): eigenpairs of H inside the selection, W in the full basis."""
+        if sel is None:
+            return self.E, self.V
+        if sel[0] == "S":
+            w, U = self.s2_eig()
+            P = U[:, np.abs(w - sel[1] * (sel[1] + 1)) < 1e-6]
+            E, V = np.linalg.eigh(P.conj().T @ self.H @ P)
+            return E, P @ V
+        idx = np.flatnonzero(self.mask(sel))
+        E, V = np.linalg.eigh(self.H[np.ix_(idx, idx)])
+        W = np.zeros((len(self.E), len(E)), complex)
+        W[idx] = V
+        return E, W
+
+    def cluster_traces(self, sel, obs_terms, tol=1e-8):
+        """[(E, dim, Tr(P_E O))] over the degenerate clusters of H inside the selection --
+        what any partner choice must reproduce as sum over the cluster of multiplicity x <O>."""
+        E, W = self.eigbasis(sel)
+        diag = np.sum(W.conj() * (sparse(obs_terms, self.m.N) @ W), axis=0)
+        out, a = [], 0
+        for b in range(1, len(E) + 1):
+            if b == len(E) or E[b] - E[a] > tol:
+                out.append((float(E[a]), b - a, complex(diag[a:b].sum())))
+                a = b
+        return out

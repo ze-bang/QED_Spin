@@ -8,6 +8,7 @@
 #include <ed/sectors/sectors.h>
 #include <ed/sectors/thermal.h>
 #include <ed/sectors/dynamics.h>
+#include <ed/sectors/expect.h>
 
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
@@ -116,7 +117,19 @@ void bind_sectors(py::module_& m) {
                  for (auto& v : vs) out.append(to_array(std::move(v)));
                  return out;
              }, py::arg("spec"), py::arg("n_sites"), py::arg("level"), py::arg("n_up") = -1,
-             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space).");
+             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space).")
+        .def("expect", [](const sec::EigsResult& r, const sec::Spec& spec, int n_sites,
+                          const std::vector<const ::Operator*>& ops) {
+                 py::gil_scoped_release nogil;
+                 return sec::expect(r, spec, n_sites, ops);
+             }, py::arg("spec"), py::arg("n_sites"), py::arg("ops"),
+             "<O> per level averaged over its symmetry multiplet: [level][op].")
+        .def("matrix_element", [](const sec::EigsResult& r, int n_sites, const ::Operator& O,
+                                  std::size_t i, std::size_t j) {
+                 py::gil_scoped_release nogil;
+                 return sec::matrix_element(r, n_sites, O, i, j);
+             }, py::arg("n_sites"), py::arg("O"), py::arg("i"), py::arg("j"),
+             "<v_i|O|v_j> between the vectors of levels i and j.");
 
     py::class_<sec::SpectrumResult>(s, "SpectrumResult")
         .def_readonly("levels", &sec::SpectrumResult::levels)

@@ -154,3 +154,11 @@ def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
                        num_random_vectors=samples if T is not None else None,
                        device=device, verbose=False, **kw)
     return _curves(res, T)
+
+
+def expect(m, H, content, device, ops, k):
+    raise Missing("per-level expectation values are a qed.api verb")
+
+
+def matrix_elements(m, H, content, device, O, k):
+    raise Missing("matrix elements between levels are a qed.api verb")

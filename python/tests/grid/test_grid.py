@@ -25,7 +25,7 @@ import importlib  # noqa: E402
 
 # QED_GRID_API selects the API under test (v1: qed.solve/thermal/spectral; v2: qed.api).
 api = importlib.import_module(f".adapter_{os.environ.get('QED_GRID_API', 'v1')}", __package__)
-from .models import MODELS, Model, fourier, oracle  # noqa: E402
+from .models import MODELS, Model, dot, fourier, oracle, sparse  # noqa: E402
 
 pytestmark = pytest.mark.grid
 
@@ -43,7 +43,7 @@ CONTENT_MODELS = {
     "tr":      ["chain12"],
     "su2":     ["chain12", "tri9"],
 }
-TASKS = ["eigs", "vectors", "spectrum", "th_exact", "th_ftlm", "th_mtpq",
+TASKS = ["eigs", "vectors", "expect", "spectrum", "th_exact", "th_ftlm", "th_mtpq",
          "dyn0_zz", "dyn0_pm", "dynT_zz", "dynT_pm"]
 BACKENDS = ["cpu", "gpu"]
 
@@ -119,6 +119,35 @@ def _run(task, content, mname, device, monkeypatch):
         low = float(np.max(np.abs(np.sort([e for e, _ in ray]) - ref_spec[:2])))
         err = max(res, pair, low)
         return err < 1e-6, err, f"residual {res:.1e} pairing {pair:.1e} lowest {low:.1e}"
+
+    if task == "expect":
+        # Per degenerate cluster, sum of multiplicity x <O> must be Tr(P_E O) for any partner
+        # choice. The ops break translations; the second changes Sz, the third is odd under
+        # complex conjugation (it averages to zero over time-reversed partners).
+        ops = [dot(0, 1)]
+        if content != "su2":
+            ops += [[(1.0, (("z", 0), ("z", 2))), (0.3, (("+", 0),)), (0.3, (("-", 0),))],
+                    [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
+        rows = api.expect(m, H, content, device, [Model("obs", m.N, t, [], (), []).operator() for t in ops], k=4)
+        worst, checked = 0.0, 0
+        for oi, t in enumerate(ops):
+            for E, dim, tr in orc.cluster_traces(sel, t):
+                mine = [(mult, vals[oi]) for e, mult, vals in rows if abs(e - E) < 1e-7]
+                if sum(mult for mult, _ in mine) != dim:
+                    continue                          # cluster cut by the k window
+                worst = max(worst, abs(sum(mult * v for mult, v in mine) - tr))
+                checked += 1
+        if checked < len(ops):
+            return False, math.inf, f"{checked} complete clusters"
+        # <v_i|O|v_j> between returned vectors, with an O that changes Sz and breaks translations.
+        me_worst = 0.0
+        if content != "su2":
+            O = Model("obs", m.N, ops[1], [], (), []).operator()
+            Od = sparse(ops[1], m.N)
+            for got, vi, vj in api.matrix_elements(m, H, content, device, O, k=4):
+                me_worst = max(me_worst, abs(got - np.vdot(vi, Od @ vj)))
+        err = max(worst, me_worst)
+        return err < 1e-7, err, f"{checked} clusters, matrix elements {me_worst:.1e}"
 
     if task == "spectrum":
         got = api.spectrum(m, H, content, device)

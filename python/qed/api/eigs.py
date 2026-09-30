@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -56,6 +56,20 @@ class EigResult:
                 continue                     # no component in this Sz sector
             out.extend(vs[: self.k - len(out)])
         return out
+
+    def expect(self, ops: Sequence) -> np.ndarray:
+        """<O> in each entry of ``levels``, averaged over the level's symmetry multiplet:
+        a complex array [len(levels), len(ops)]. Needs ``vectors=True``."""
+        single = not isinstance(ops, (list, tuple))
+        ops = [ops] if single else list(ops)
+        vals = np.asarray(self._raw.expect(self._spec, self._n_sites, ops), complex)
+        return vals.reshape(len(self.levels), len(ops))
+
+    def matrix_element(self, O, i: int, j: int) -> complex:
+        """<v_i| O |v_j> between the vectors of ``levels[i]`` and ``levels[j]`` -- the
+        partners the solver returned, from which each level's multiplet is expanded.
+        ``O`` is arbitrary: it may change Sz and break every symmetry."""
+        return complex(self._raw.matrix_element(self._n_sites, O, int(i), int(j)))
 
 
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,

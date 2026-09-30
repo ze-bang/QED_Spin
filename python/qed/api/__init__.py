@@ -2,9 +2,10 @@
 every symmetry block of H through one engine."""
 from .dynamics import DynamicsResult, dynamics
 from .eigs import EigResult, eigs
+from .expect import ExpectResult, expect
 from .spectrum import SpectrumResult, spectrum
 from .symmetry import Symmetry
 from .thermal import ThermalResult, thermal
 
-__all__ = ["Symmetry", "eigs", "EigResult", "spectrum", "SpectrumResult", "thermal",
+__all__ = ["Symmetry", "eigs", "EigResult", "expect", "ExpectResult", "spectrum", "SpectrumResult", "thermal",
            "ThermalResult", "dynamics", "DynamicsResult"]

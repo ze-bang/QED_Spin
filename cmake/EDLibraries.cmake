@@ -231,6 +231,7 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_sectors.cpp
     ${SRC_DIR}/solvers/little_group/lg_sectors_thermal.cpp
     ${SRC_DIR}/solvers/little_group/lg_sectors_dynamics.cpp
+    ${SRC_DIR}/solvers/little_group/lg_sectors_expect.cpp
     ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
     ${SRC_DIR}/solvers/little_group/lg_spectrum.cpp
     ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp

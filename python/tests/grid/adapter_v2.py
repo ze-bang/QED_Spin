@@ -11,6 +11,7 @@ import numpy as np
 from qed.api import Symmetry
 from qed.api import dynamics as _dynamics
 from qed.api import eigs as _eigs
+from qed.api import expect as _expect
 from qed.api import spectrum as _spectrum
 from qed.api import thermal as _thermal
 
@@ -96,3 +97,21 @@ def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
     if device == "gpu" and r.device_blocks == 0:
         raise Missing("no dynamics kernel ran on the device")
     return r.S[0]
+
+
+def expect(m, H, content, device, ops, k):
+    """[(energy, multiplicity, values per op)] for the levels of the lowest-k window."""
+    with _device_engaged(device):
+        r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
+    if device == "gpu" and r.eigs.device_blocks == 0 and content != "su2":
+        raise Missing("no block ran on the device")
+    return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
+
+
+def matrix_elements(m, H, content, device, O, k):
+    """[(<v_i|O|v_j> from the API, v_i, v_j in the full basis)] over the first levels."""
+    with _device_engaged(device):
+        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=(device == "cpu"))
+    n = min(3, len(r.levels))
+    full = [r._raw.multiplet(r._spec, r._n_sites, i, -1)[0] for i in range(n)]
+    return [(r.matrix_element(O, i, j), full[i], full[j]) for i in range(n) for j in range(n)]
