@@ -21,7 +21,6 @@
 
 #include <Eigen/Dense>
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
 #include <ed/operators/casimir.h>
 #include <ed/symmetry/casimir_projector.h>
@@ -196,8 +195,7 @@ TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
           "[casimir_proj]") {
     const std::uint64_t N = 8;
     const int n_up = 3;  // Sz = -1, dim = C(8,3) = 56
-    auto s2sz = std::make_shared<FixedSzOperator>(N, 0.5f, n_up);
-    s2sz->copyTermsFrom(*make_S2_carrier(N));
+    auto s2sz = std::make_shared<ed_tests::SzSectorOperator>(make_S2_carrier(N), n_up);
     const std::uint64_t dim = s2sz->dim();
     REQUIRE(dim == 56);
 
@@ -230,10 +228,10 @@ TEST_CASE("CasimirProjectedOperator preserves H on the tower and scrubs "
           "drift", "[casimir_proj]") {
     const std::uint64_t N = 6;
     const int n_up = 3;
-    auto h = std::make_shared<FixedSzOperator>(N, 0.5f, n_up);
-    add_heisenberg_ring(*h, N);
-    auto s2sz = std::make_shared<FixedSzOperator>(N, 0.5f, n_up);
-    s2sz->copyTermsFrom(*make_S2_carrier(N));
+    auto h_full = std::make_shared<::Operator>(N, 0.5f);
+    add_heisenberg_ring(*h_full, N);
+    auto h = std::make_shared<ed_tests::SzSectorOperator>(h_full, n_up);
+    auto s2sz = std::make_shared<ed_tests::SzSectorOperator>(make_S2_carrier(N), n_up);
     const std::uint64_t dim = h->dim();
 
     const auto towers = allowed_two_S_in_block(static_cast<int>(N), n_up);

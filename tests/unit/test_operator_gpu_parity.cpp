@@ -2,7 +2,7 @@
 // tests/unit/test_operator_gpu_parity.cpp
 //
 // Orchestrator-level GPU parity for the operator-collapse Phase 2a lane:
-// a plain host ``Operator`` / ``FixedSzOperator`` now advertises
+// a plain host ``Operator`` now advertises
 // ``geometry().supports_device_matvec`` and its ``bind_cuda()`` builds a
 // ``CudaMatVecBackend`` device mirror (the SOTA no-atomic gather kernel).
 //
@@ -59,31 +59,6 @@ TEST_CASE("operator GPU parity: full Operator ground state matches CPU "
 
     constexpr std::uint64_t N = 8;
     auto H = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-
-    const auto cpu = solve_lane(*H, /*allow_gpu=*/false);
-    const auto gpu = solve_lane(*H, /*allow_gpu=*/true);
-
-    REQUIRE_FALSE(cpu.eigenvalues.empty());
-    REQUIRE_FALSE(gpu.eigenvalues.empty());
-    REQUIRE(cpu.backend.lane == "cpu");
-    REQUIRE(gpu.backend.lane == "gpu");
-
-    INFO("E_cpu=" << cpu.eigenvalues[0] << "  E_gpu=" << gpu.eigenvalues[0]
-         << "  |Δ|=" << std::abs(cpu.eigenvalues[0] - gpu.eigenvalues[0]));
-    REQUIRE(std::abs(cpu.eigenvalues[0] - gpu.eigenvalues[0]) < 1e-8);
-}
-
-TEST_CASE("operator GPU parity: FixedSzOperator sector ground state matches "
-          "CPU and dispatches to the GPU lane",
-          "[operator_gpu_parity][solve][fixed_sz]") {
-    if (!ed::have_cuda()) {
-        SKIP("No CUDA device available -- skipping operator GPU parity test.");
-    }
-
-    constexpr std::uint64_t N    = 8;
-    constexpr std::int64_t  n_up = 4;  // half-filled sector
-    auto H = ed_tests::build_heisenberg_chain_fixed_sz(
-        N, /*J=*/1.0, n_up, /*periodic=*/true);
 
     const auto cpu = solve_lane(*H, /*allow_gpu=*/false);
     const auto gpu = solve_lane(*H, /*allow_gpu=*/true);

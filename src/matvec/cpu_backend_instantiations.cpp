@@ -9,21 +9,20 @@
 // it carries the matrix-free kernel (apply_terms<Policy,Scalar> for Complex
 // AND double), the Eigen CSR assemble/cache machinery, and the real-input
 // fast path. Before this TU every header that instantiated a backend
-// (operator.h Full lane, fixed_sz_operator.h FixedSz lane, sector_operator.h
+// (operator.h Full lane, the former FixedSz lane, sector_operator.h
 // + the streaming-symmetry unified .cpp Symmetry lane) re-instantiated the
 // whole tree, multiplying compile time across the codebase.
 //
-// This TU instantiates each of the THREE host cells of the grid exactly once,
+// This TU instantiates each of the two host cells of the grid exactly once,
 // over the single canonical term-view shape that every Operator uses (the six
 // SoA record types from term_storage.h). Pairing these explicit definitions
 // with ``extern template`` declarations in a later increment lets the rest of
 // the build consume the prebuilt symbols instead of recompiling them; on its
-// own this TU is a compile-coverage proof that all three host cells are
+// own this TU is a compile-coverage proof that both host cells are
 // coherent and instantiable as a standalone library object.
 //
-// The three host cells:
+// The host cells:
 //   * cell 1H (Full)        -- FullBasisPolicy
-//   * cell 2H (FixedSz)     -- FixedSzBasisPolicy
 //   * cell 5H (RepSymmetry) -- RepSymmetryBasisPolicy (symmetry sectors, with
 //                              or without fixed Sz)
 //
@@ -46,11 +45,6 @@ namespace ed::matvec {
 template class CpuMatVecBackend<basis::FullBasisPolicy,
                                 DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                 MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
-
-template class CpuMatVecBackend<basis::FixedSzBasisPolicy,
-                                DiagOneBody, OffDiagOneBody, DiagTwoBody,
-                                MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
-
 
 // cell 5H (RepSymmetry) -- on-the-fly representative SpMV (Jun 2026). The
 // rep policy forces the complex matrix-free path (is_rep_symmetry==true

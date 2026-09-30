@@ -12,12 +12,10 @@
 //   #include <ed/core/basis_utils.h>           // popcount, generateFixedSzBasis, LinIndexTable
 //   #include <ed/core/symmetry_metadata.h>     // SectorMetadata, SymmetryGroupInfo
 //   #include <ed/core/operator.h>              // Operator (full Hilbert space)
-//   #include <ed/core/fixed_sz_operator.h>     // FixedSzOperator
 //   #include <ed/core/operator_builders.h>     // ed::ops::add_sum / add_sublattice / ...
 // =============================================================================
 
 #include <ed/core/basis_utils.h>
 #include <ed/core/symmetry_metadata.h>
 #include <ed/core/operator.h>
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator_builders.h>

@@ -50,8 +50,6 @@ ed::dssf::OperatorSpec base_spec() {
     s.unit_cell_size   = 4;
     s.num_sites        = 4;
     s.spin_length      = 0.5f;
-    s.use_fixed_sz     = false;
-    s.n_up             = 0;
     s.positions_file   = ED_TEST_POSITIONS_4SITE;
     return s;
 }

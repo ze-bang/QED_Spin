@@ -48,8 +48,8 @@ namespace ed::ops {
 
 /// S^2_tot as a full `::Operator` carrier (AoS terms, spin-1/2), consumable
 /// by every per-sector factory that restricts H itself: the rep-basis
-/// RepSectorMatVec (lg_walk.h block_operator builds it over a block basis), the
-/// fixed-Sz `SubspaceOperator` builders, and the dense assembly paths.
+/// RepSectorMatVec (lg_walk.h block_operator builds it over a block basis) and
+/// the dense assembly paths.
 [[nodiscard]] inline std::shared_ptr<::Operator>
 make_S2_carrier(std::uint64_t n_sites) {
     using Cx = std::complex<double>;

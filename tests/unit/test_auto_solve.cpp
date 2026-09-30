@@ -5,19 +5,18 @@
 // Tests exercise the public Backend-agnostic surface: numerical
 // correctness of eigenvalues over CPU lane, full-diag fallback for
 // small problems, Lanczos / KrylovSchur kernels, and the
-// sector-projection workflow when the caller passes a FixedSzOperator.
+// sector-projection workflow when the caller passes a fixed-Sz sector operator.
 //
 // Migrated from the legacy `ed::auto_pilot::solve(...)` API during the
 // ED Cleanup Sweep Phase 2 (May 2026). The legacy auto-pilot's
 // `auto_basis` / `sz` / `Device` heuristics are gone --- those decisions
-// are now the caller's responsibility (build a FixedSzOperator yourself
+// are now the caller's responsibility (build a fixed-Sz sector operator yourself
 // for sector projection; set `BackendConstraints{.allow_gpu = true}` to
 // opt into the GPU lane).
 // =============================================================================
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/orchestrator.h>
 
 #include <memory>
@@ -55,11 +54,11 @@ TEST_CASE("workflows::solve picks FullDiag on small full Hilbert space "
                        "workflows::solve N=4 ground manifold (auto -> FullDiag)");
 }
 
-TEST_CASE("workflows::solve over a FixedSzOperator at n_up = N/2 lands "
+TEST_CASE("workflows::solve over a fixed-Sz sector operator at n_up = N/2 lands "
           "on the global ground state for the Heisenberg chain",
           "[workflows][fixed_sz]") {
     // The legacy `auto_pilot::solve(..., auto_basis = On)` heuristic
-    // auto-built a FixedSzOperator and called the underlying solver on
+    // auto-built a fixed-Sz sector operator and called the underlying solver on
     // it. Under the new surface the caller does the projection
     // explicitly; correctness must match.
     const uint64_t N = 4;

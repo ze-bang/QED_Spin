@@ -31,29 +31,6 @@
 namespace ed::dssf {
 namespace {
 
-// Build a fixed-Sz observable via ``build`` (a callable that appends terms to
-// a FixedSzOperator&), then emit BOTH a sliced value-type Operator (the legacy
-// obs_1/obs_2 entry) AND a type-preserving shared_ptr<FixedSzOperator>
-// (obs_1_fs/obs_2_fs). Slicing a fixed-Sz operator into a value-type Operator
-// destroys the dimension semantics, so the shared_ptr is what CPU dispatch
-// must actually apply -- see ObservablePairs docs.
-template <typename BuildFn>
-void push_fs_a(ObservablePairs& out, const OperatorSpec& spec, BuildFn&& build) {
-    auto p = std::make_shared<FixedSzOperator>(spec.num_sites, spec.spin_length,
-                                               spec.n_up);
-    build(*p);
-    out.obs_1.push_back(Operator(*p));
-    out.obs_1_fs.push_back(p);
-}
-template <typename BuildFn>
-void push_fs_b(ObservablePairs& out, const OperatorSpec& spec, BuildFn&& build) {
-    auto p = std::make_shared<FixedSzOperator>(spec.num_sites, spec.spin_length,
-                                               spec.n_up);
-    build(*p);
-    out.obs_2.push_back(Operator(*p));
-    out.obs_2_fs.push_back(p);
-}
-
 // Build a full-Hilbert observable value-type Operator via ``build``.
 template <typename BuildFn>
 Operator make_full(const OperatorSpec& spec, BuildFn&& build) {
@@ -112,13 +89,8 @@ void append_sum_pair(const OperatorSpec& spec,
     auto build1 = [&](auto& op) { ed::ops::add_sum(op, w1, Q, pf, use_xyz_basis); };
     auto build2 = [&](auto& op) { ed::ops::add_sum(op, w2, Q, pf, use_xyz_basis); };
 
-    if (spec.use_fixed_sz) {
-        push_fs_a(out, spec, build1);
-        if (emit_b) push_fs_b(out, spec, build2);
-    } else {
-        out.obs_1.push_back(make_full(spec, build1));
-        if (emit_b) out.obs_2.push_back(make_full(spec, build2));
-    }
+    out.obs_1.push_back(make_full(spec, build1));
+    if (emit_b) out.obs_2.push_back(make_full(spec, build2));
 }
 
 void append_transverse_pair(const OperatorSpec& spec,
@@ -141,13 +113,8 @@ void append_transverse_pair(const OperatorSpec& spec,
         auto build2 = [&](auto& op) {
             ed::ops::add_transverse(op, w2, Q, e, pf, use_xyz_basis);
         };
-        if (spec.use_fixed_sz) {
-            push_fs_a(out, spec, build1);
-            push_fs_b(out, spec, build2);
-        } else {
-            out.obs_1.push_back(make_full(spec, build1));
-            out.obs_2.push_back(make_full(spec, build2));
-        }
+        out.obs_1.push_back(make_full(spec, build1));
+        out.obs_2.push_back(make_full(spec, build2));
     };
     emit(e1_vec);
     emit(e2_vec);
@@ -172,13 +139,8 @@ void append_sublattice_pair(const OperatorSpec& spec,
     auto build2 = [&](auto& op) {
         ed::ops::add_sublattice(op, sub_j, U, w2, Q, pf);
     };
-    if (spec.use_fixed_sz) {
-        push_fs_a(out, spec, build1);
-        if (emit_b) push_fs_b(out, spec, build2);
-    } else {
-        out.obs_1.push_back(make_full(spec, build1));
-        if (emit_b) out.obs_2.push_back(make_full(spec, build2));
-    }
+    out.obs_1.push_back(make_full(spec, build1));
+    if (emit_b) out.obs_2.push_back(make_full(spec, build2));
 }
 
 void append_experimental_pair(const OperatorSpec& spec,
@@ -190,13 +152,8 @@ void append_experimental_pair(const OperatorSpec& spec,
     auto build = [&](auto& op) {
         ed::ops::add_experimental(op, spec.theta, Q, pf);
     };
-    if (spec.use_fixed_sz) {
-        push_fs_a(out, spec, build);
-        if (emit_b) push_fs_b(out, spec, build);
-    } else {
-        out.obs_1.push_back(make_full(spec, build));
-        if (emit_b) out.obs_2.push_back(make_full(spec, build));
-    }
+    out.obs_1.push_back(make_full(spec, build));
+    if (emit_b) out.obs_2.push_back(make_full(spec, build));
 }
 
 void append_transverse_experimental_pair(const OperatorSpec& spec,
@@ -210,13 +167,8 @@ void append_transverse_experimental_pair(const OperatorSpec& spec,
         auto build = [&](auto& op) {
             ed::ops::add_transverse_experimental(op, spec.theta, Q, e, pf);
         };
-        if (spec.use_fixed_sz) {
-            push_fs_a(out, spec, build);
-            push_fs_b(out, spec, build);
-        } else {
-            out.obs_1.push_back(make_full(spec, build));
-            out.obs_2.push_back(make_full(spec, build));
-        }
+        out.obs_1.push_back(make_full(spec, build));
+        out.obs_2.push_back(make_full(spec, build));
     };
     emit(e1_vec);
     emit(e2_vec);

@@ -150,18 +150,13 @@ set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #   * kernel::apply_terms  the *single* matrix-free term-evaluation
 #                          implementation, parameterised on basis policy
 #                          and scalar type
-#   * OperatorAdapter /    legacy Operator / FixedSzOperator wrapped as
-#     FixedSzOperatorAdapter MatVecOperator instances (Phase 2 collapses
-#                          these so the Operator implementations call
-#                          directly into the shared kernel)
 #
-# Layered above ed_core (which owns Operator / FixedSzOperator term
+# Layered above ed_core (which owns the Operator term
 # storage); consumed by ed_solvers_cpu and ed_solvers_gpu.
 # -----------------------------------------------------------------------------
 add_library(ed_matvec STATIC
-    ${MATVEC_DIR}/sanity_check.cpp
-    # P6: explicit instantiation of the three host CpuMatVecBackend cells
-    # (Full / FixedSz / Symmetry) over the canonical term-view shape.
+    # P6: explicit instantiation of the host CpuMatVecBackend cells
+    # (Full / RepSymmetry) over the canonical term-view shape.
     ${MATVEC_DIR}/cpu_backend_instantiations.cpp
 )
 target_include_directories(ed_matvec PUBLIC ${_ED_PUBLIC_INCLUDES})

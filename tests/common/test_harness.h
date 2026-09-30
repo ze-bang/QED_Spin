@@ -12,6 +12,7 @@
 // =============================================================================
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -204,30 +206,40 @@ inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
     return op;
 }
 
-// Same as above but in a fixed-Sz sector (n_up = number of up spins).
-inline std::unique_ptr<FixedSzOperator>
+// A full-space Operator restricted to the fixed-Sz sector with `n_up` set
+// bits: embed, apply the full H, gather. Test-only (tiny N); the library's
+// Sz sectors are rep sectors of the little-group engine.
+class SzSectorOperator final : public ed::LinearOperator {
+public:
+    SzSectorOperator(std::shared_ptr<const Operator> full, int64_t n_up)
+        : full_(std::move(full)) {
+        const uint64_t N = full_->getNumBits();
+        for (uint64_t s = 0; s < (1ULL << N); ++s)
+            if (__builtin_popcountll(s) == n_up) states_.push_back(s);
+        xin_.assign(1ULL << N, Complex(0.0, 0.0));
+        xout_.assign(1ULL << N, Complex(0.0, 0.0));
+    }
+    void apply(const Complex* in, Complex* out, std::size_t n) const override {
+        std::fill(xin_.begin(), xin_.end(), Complex(0.0, 0.0));
+        for (std::size_t i = 0; i < n; ++i) xin_[states_[i]] = in[i];
+        full_->apply(xin_.data(), xout_.data(), xin_.size());
+        for (std::size_t i = 0; i < n; ++i) out[i] = xout_[states_[i]];
+    }
+    [[nodiscard]] std::size_t dim() const override { return states_.size(); }
+    [[nodiscard]] const Operator& full() const noexcept { return *full_; }
+
+private:
+    std::shared_ptr<const Operator> full_;
+    std::vector<uint64_t>           states_;
+    mutable std::vector<Complex>    xin_, xout_;
+};
+
+// Same chain as above, restricted to the fixed-Sz sector with n_up up spins.
+inline std::unique_ptr<SzSectorOperator>
 build_heisenberg_chain_fixed_sz(uint64_t N, double J, int64_t n_up,
                                 bool periodic = false) {
-    auto op = std::make_unique<FixedSzOperator>(N, 0.5f, n_up);
-    const Complex J_real(J, 0.0);
-    const Complex J_half(0.5 * J, 0.0);
-    const uint64_t last = periodic ? N : (N - 1);
-    for (uint64_t i = 0; i < last; ++i) {
-        uint64_t j = (i + 1) % N;
-        Operator::TransformData t;
-        t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
-        t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-
-        t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
-        t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
-    }
-    return op;
+    return std::make_unique<SzSectorOperator>(
+        std::shared_ptr<const Operator>(build_heisenberg_chain(N, J, periodic)), n_up);
 }
 
 // -----------------------------------------------------------------------------
@@ -278,7 +290,7 @@ inline DenseReference reference_from_operator(const Operator& op, uint64_t dim) 
 }
 
 inline DenseReference
-reference_from_fixed_sz_operator(const FixedSzOperator& op, uint64_t dim) {
+reference_from_fixed_sz_operator(const ed::matvec::MatVecOperator& op, uint64_t dim) {
     DenseReference r;
     auto Hv = [&](const Complex* in, Complex* out, int n) {
         op.apply(in, out, static_cast<size_t>(n));

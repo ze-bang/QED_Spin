@@ -49,7 +49,7 @@
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
 // Execution planner / feasibility "dictator" removed (sensible defaults +
 // env-override leaf hooks instead). The matvec/symmetry leaf policy hooks
-// (sym_matvec_policy_hook, basis_policy_hook, the ED_CSR_* env) still provide
+// (sym_matvec_policy_hook and the ED_CSR_* env) still provide
 // the default + env-override behaviour, consumed lazily inside the operator
 // backends; the orchestrator no longer overrides them.
 #include <ed/symmetry/canonical_thermo.h>   // canonical_thermo_from_eigs (single impl)

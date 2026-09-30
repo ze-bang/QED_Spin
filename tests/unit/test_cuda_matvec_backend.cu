@@ -31,7 +31,7 @@
 #include <ed/matvec/matvec_backend.h>        // CpuMatVecBackend, make_cpu_full_basis_backend, TermViewT
 #include <ed/matvec/term_storage.h>          // TermStorage + canonical bins
 #include <ed/matvec/cuda_matvec_backend.cuh>  // CudaMatVecBackend, make_cuda_full_backend
-#include <ed/core/basis_utils.h>             // generateFixedSzBasis, LinIndexTable
+#include <ed/core/basis_utils.h>
 
 using Complex = std::complex<double>;
 using namespace ed::matvec;
@@ -211,87 +211,6 @@ int main() {
             cpu->apply_complex(&tv, x.data(), yc.data(), dim);
             gpu->apply_complex(&tv, x.data(), yg.data(), dim);
             expect_close(yc, yg, 1e-9, "complex-mixed complex apply");
-        }
-    }
-
-    // ======================================================================
-    // P3b: Fixed-Sz lane. Half-filled sector of N=8 (dim = C(8,4) = 70).
-    // The CUDA backend uploads a sorted basis + open-addressing hash via
-    // DeviceFixedSzBasisPolicyHolder; compare against the host
-    // CpuMatVecBackend<FixedSzBasisPolicy> (Lin-index lookup). Sz-conserving
-    // terms (SzSz + S+S-/S-S+) stay in the sector; any sector-leaving term
-    // is dropped identically by both backends' index_of(), so CPU==GPU is a
-    // valid equivalence check either way.
-    // ======================================================================
-    const int Nf = 8;
-    const auto fixed_basis = generateFixedSzBasis(Nf, Nf / 2);  // sorted, dim 70
-    const std::size_t fdim = fixed_basis.size();
-    LinIndexTable lin;
-    lin.build(Nf, Nf / 2, fixed_basis);
-
-    // --- Case 4: real Heisenberg on the Sz sector, complex apply ------------
-    {
-        TermStorage ts;
-        add_heisenberg_pbc(ts, Nf);
-        TV tv = make_view(ts, /*is_real=*/true, spin_l);
-
-        auto cpu = make_cpu_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, lin);
-        auto gpu = make_cuda_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, spin_l);
-
-        for (int p = 0; p < 3; ++p) {
-            auto x = random_complex_vec(fdim, 4000 + p);
-            std::vector<Complex> yc(fdim), yg(fdim);
-            cpu->apply_complex(&tv, x.data(), yc.data(), fdim);
-            gpu->apply_complex(&tv, x.data(), yg.data(), fdim);
-            expect_close(yc, yg, 1e-9, "fixed-sz heisenberg complex apply");
-        }
-    }
-
-    // --- Case 5: real Heisenberg on the Sz sector, REAL apply_real ----------
-    {
-        TermStorage ts;
-        add_heisenberg_pbc(ts, Nf);
-        TV tv = make_view(ts, /*is_real=*/true, spin_l);
-
-        auto cpu = make_cpu_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, lin);
-        auto gpu = make_cuda_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, spin_l);
-
-        for (int p = 0; p < 3; ++p) {
-            auto x = random_real_vec(fdim, 5000 + p);
-            std::vector<double> yc(fdim), yg(fdim);
-            cpu->apply_real(&tv, x.data(), yc.data(), fdim);
-            gpu->apply_real(&tv, x.data(), yg.data(), fdim);
-            expect_close_real(yc, yg, 1e-9, "fixed-sz heisenberg real apply_real");
-        }
-    }
-
-    // --- Case 6: complex mixed on the Sz sector, complex apply --------------
-    {
-        TermStorage ts;
-        add_complex_mixed(ts, Nf);
-        TV tv = make_view(ts, /*is_real=*/false, spin_l);
-
-        auto cpu = make_cpu_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, lin);
-        auto gpu = make_cuda_fixed_sz_backend<
-            DiagOneBody, OffDiagOneBody, DiagTwoBody, MixedTwoBody,
-            OffDiagTwoBody, ThreeBodyTerm>(fixed_basis, spin_l);
-
-        for (int p = 0; p < 3; ++p) {
-            auto x = random_complex_vec(fdim, 6000 + p);
-            std::vector<Complex> yc(fdim), yg(fdim);
-            cpu->apply_complex(&tv, x.data(), yc.data(), fdim);
-            gpu->apply_complex(&tv, x.data(), yg.data(), fdim);
-            expect_close(yc, yg, 1e-9, "fixed-sz complex-mixed complex apply");
         }
     }
 

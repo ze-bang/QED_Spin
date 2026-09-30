@@ -456,7 +456,6 @@ if(BUILD_ED_TESTS)
     endfunction()
 
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
-    ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp USE_CATCH2)
     # Krylov-kernel unification Phase A: one Lanczos algorithm shared by
     # CPU / GPU via the abstract Backend interface.
     # This test pins agreement with the legacy sequential-MGS body and

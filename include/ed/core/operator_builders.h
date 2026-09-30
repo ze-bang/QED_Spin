@@ -4,8 +4,7 @@
 //
 // Free term-builder functions that replace the concrete operator subclass zoo
 // (the former ``operator_types.h`` / ``fixed_sz_operator_types.h``). Each builder
-// takes any Operator-like object (``Operator`` for the full Hilbert space or
-// ``FixedSzOperator`` for a fixed-Sz sector) by reference and appends terms via
+// takes an ``Operator`` by reference and appends terms via
 // the canonical typed AoS API (``addOneBodyTerm`` / ``addTwoBodyTerm``),
 // reusing the shared geometry / phase math in ``operator_types_detail.h``.
 //
@@ -13,13 +12,10 @@
 //   * basis-aligned single-op : op in {0=S+, 1=S-, 2=Sz}     (matches file fmt)
 //   * Cartesian single-op     : op in {0=Sx, 1=Sy, 2=Sz}     (use_xyz = true)
 //
-// Sx / Sy expand into canonical S+/S- terms via the Cartesian helper, so they
-// are perfectly valid in a fixed-Sz sector (the spin-flip terms scatter out of
-// the sector and vanish under the basis-policy ``index_of`` lookup).
+// Sx / Sy expand into canonical S+/S- terms via the Cartesian helper.
 // =============================================================================
 
 #include <ed/core/operator.h>
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator_types_detail.h>
 
 #include <cmath>

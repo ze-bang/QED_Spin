@@ -69,7 +69,6 @@
 #include "common/catch2_harness.h"
 #include "common/test_harness.h"
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
 #include <ed/core/thermal_types.h>
 #include <ed/orchestrator.h>
@@ -162,7 +161,7 @@ std::unique_ptr<Operator> make_full_heisen() {
     return build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
 }
 
-std::unique_ptr<FixedSzOperator> make_sz_heisen(int64_t n_up) {
+std::unique_ptr<SzSectorOperator> make_sz_heisen(int64_t n_up) {
     return build_heisenberg_chain_fixed_sz(N_SITES, J, n_up, /*periodic=*/true);
 }
 
@@ -360,9 +359,9 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
 }
 
 // ===========================================================================
-// 2. U(1) / Sz symmetry — per-sector FixedSzOperator + recombination
+// 2. U(1) / Sz symmetry — per-sector Sz operator + recombination
 //
-//    For each n_up ∈ [0, N] run thermal on the corresponding FixedSzOperator,
+//    For each n_up ∈ [0, N] run thermal on the corresponding Sz-sector operator,
 //    then combine by free-energy weighting (combine_sectors below).
 //
 //    Note: for mTPQ the combination uses the TPQ free-energy (which has

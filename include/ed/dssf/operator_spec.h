@@ -23,7 +23,6 @@
 #pragma once
 
 #include <ed/core/construct_ham.h>
-#include <ed/core/fixed_sz_operator.h>
 
 #include <array>
 #include <cstdint>
@@ -75,14 +74,6 @@ struct OperatorSpec {
     /// Local spin quantum number (typically 0.5).
     float spin_length{0.5f};
 
-    /// If true, build operators restricted to a fixed-Sz sector with
-    /// `n_up` up-spins. Otherwise build full Hilbert-space operators.
-    bool use_fixed_sz{false};
-
-    /// Number of up-spins for the fixed-Sz sector (ignored when
-    /// `use_fixed_sz` is false).
-    std::int64_t n_up{0};
-
     /// Path to the lattice positions file (passed through to every
     /// `*Operator(...)` constructor).
     std::string positions_file;
@@ -122,18 +113,6 @@ struct ObservablePairs {
     std::vector<Operator>    obs_1;
     std::vector<Operator>    obs_2;
     std::vector<std::string> names;
-
-    /// Audit #2 (FixedSz->Operator path): parallel
-    /// `shared_ptr<FixedSzOperator>` arrays of equal length to obs_1/obs_2,
-    /// populated only when `spec.use_fixed_sz` is true. Needed because
-    /// slicing a fixed-Sz operator into a value-type `Operator`
-    /// destroys the dimension semantics: the base `Operator::apply` checks
-    /// `size != (1ULL << n_bits_)` and throws on the smaller fixed-Sz
-    /// dimension. CPU dispatch in workflows that consume these vectors
-    /// must call `obs_1_fs[i]->apply(...)` instead of `obs_1[i].apply(...)`
-    /// when `use_fixed_sz` is true.
-    std::vector<std::shared_ptr<FixedSzOperator>> obs_1_fs;
-    std::vector<std::shared_ptr<FixedSzOperator>> obs_2_fs;
 };
 
 /**

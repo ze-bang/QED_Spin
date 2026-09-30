@@ -20,13 +20,12 @@
 // Migrated from the legacy `ed::auto_pilot::solve(...)` API during the
 // ED Cleanup Sweep Phase 2 (May 2026). Auto-Sz projection has moved
 // from auto_pilot into the caller: tests that previously relied on
-// implicit projection now build a `FixedSzOperator` themselves before
+// implicit projection now build a fixed-Sz sector operator themselves before
 // calling `workflows::solve`.
 // =============================================================================
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/orchestrator.h>
 
 #include <algorithm>
@@ -49,7 +48,7 @@ constexpr double   kTolEnergy  = 1e-8;
 // Pinned dense reference for the 8-site chain. Cheap (256x256 LAPACK).
 struct Fixture {
     std::unique_ptr<Operator>          H_full;
-    std::unique_ptr<FixedSzOperator>   H_sz;        // n_up = N/2
+    std::unique_ptr<SzSectorOperator>  H_sz;        // n_up = N/2
     DenseReference                     ref;
 };
 inline Fixture make_fixture() {
@@ -167,7 +166,7 @@ TEST_CASE("workflows::solve e2e: explicit FullDiag on Sz=0 sector matches "
 }
 
 // ---------------------------------------------------------------------------
-// 3. FixedSzOperator dimension cap. Requesting more eigenvalues than the
+// 3. Sz-sector dimension cap. Requesting more eigenvalues than the
 //    sector can hold must be safely truncated.
 // ---------------------------------------------------------------------------
 TEST_CASE("workflows::solve e2e: requesting more eigenvalues than the "

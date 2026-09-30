@@ -69,25 +69,6 @@ inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, int64_t n_up)
 }
 
 /**
- * Build inverse mapping: basis state (integer) -> index in fixed-Sz basis
- *
- * NOTE: prefer LinIndexTable below for any non-trivial basis. unordered_map
- * uses ~25 GB for N=32 fixed-Sz; LinIndexTable uses ~768 KB for the same
- * problem with strictly faster lookup and no cache misses inside the SpMV
- * inner loop.
- *
- * @param basis Vector of basis states
- * @return Unordered map from state to index
- */
-inline std::unordered_map<uint64_t, int> buildBasisIndexMap(const std::vector<uint64_t>& basis) {
-    std::unordered_map<uint64_t, int> index_map;
-    for (size_t i = 0; i < basis.size(); ++i) {
-        index_map[basis[i]] = i;
-    }
-    return index_map;
-}
-
-/**
  * Lin (1990) two-table O(1) state-to-index lookup for a fixed-Sz basis.
  *
  * Split the bit-packed state s = (u << n_lower) | l. Store two arrays:

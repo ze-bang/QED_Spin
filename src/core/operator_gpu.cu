@@ -37,8 +37,6 @@
 
 #include <ed/config/env_registry.h>
 #include <ed/core/operator.h>
-#include <ed/core/fixed_sz_operator.h>
-#include <ed/planner/basis_policy_hook.h>
 #include <ed/matvec/cuda_matvec_backend.cuh>
 
 // STRONG definitions of the non-virtual GPU mirror hooks. They override the
@@ -95,65 +93,6 @@ ed::LinearOperator::Fp32DeviceMatvecFn Operator::bind_cuda_f32_impl_() const {
     auto backend = cuda_backend_;
     return [backend](const void* in, void* out, std::size_t n) {
         backend->apply_complex_device_f32(in, out, n);
-    };
-}
-
-// Operator-collapse Phase 4: FixedSzOperator is now the alias
-// SubspaceOperator<FixedSzBasisPolicy, Host>; this strong definition of its
-// bind_cuda_impl_ member specialization replaces the legacy
-// FixedSzOperator::bind_cuda_fixed_sz_impl_. The sector basis states come from
-// the owned FixedSzSubspace producer.
-template <>
-ed::LinearOperator::MatvecFn
-ed::SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
-                     ed::matvec::MemorySpace::Host>::bind_cuda_impl_() const {
-    if (!cuda_backend_) {
-        // The device lookup (sorted-states array + open-addressing hash)
-        // requires the MATERIALIZED basis; a tableless producer's
-        // basis_states() is empty, and handing it through built 0-dim
-        // device tables under a full-dim apply (SIGSEGV -- caught by the
-        // 30-site diagnostic, config g7). Materialize a TEMPORARY sorted
-        // list for the upload when it fits the basis byte budget; decline
-        // loudly otherwise instead of crashing.
-        if (producer_.is_tableless()) {
-            const std::uint64_t dim = producer_.dim();
-            const double bytes = static_cast<double>(dim) * 8.0;
-            if (bytes > ed::planner::fixed_sz_table_budget_bytes()) {
-                throw std::runtime_error(
-                    "FixedSz bind_cuda: the device basis tables need the "
-                    "materialized basis list ("
-                    + std::to_string(bytes / 1e9)
-                    + " GB > ED_FIXED_SZ_TABLE_BUDGET_GIB); run "
-                    "device='cpu' or raise the budget.");
-            }
-            std::vector<std::uint64_t> states;
-            states.reserve(dim);
-            for (std::uint64_t i = 0; i < dim; ++i)
-                states.push_back(producer_.state_of(i));   // ascending
-            cuda_backend_ = ed::matvec::make_cuda_fixed_sz_backend<
-                DiagonalOneBody, OffDiagonalOneBody,
-                DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-                ThreeBodyTransformData>(states,
-                                        static_cast<double>(spin_l_),
-                                        "CudaMatVecBackend<FixedSz>",
-                                        &producer_.lin_index());   // implicit Lin table
-        } else {
-            cuda_backend_ = ed::matvec::make_cuda_fixed_sz_backend<
-                DiagonalOneBody, OffDiagonalOneBody,
-                DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-                ThreeBodyTransformData>(producer_.basis_states(),
-                                        static_cast<double>(spin_l_),
-                                        "CudaMatVecBackend<FixedSz>",
-                                        &producer_.lin_index());
-        }
-    }
-    const auto tv = term_view_();
-    cuda_backend_->invalidate_caches();
-    cuda_backend_->upload_terms(&tv);
-
-    auto backend = cuda_backend_;
-    return [backend](const Complex* in, Complex* out, std::size_t n) {
-        backend->apply_complex_device(in, out, n);
     };
 }
 

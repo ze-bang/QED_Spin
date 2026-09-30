@@ -9,8 +9,8 @@
 //   * assembled-CSR SpMV (Eigen RowMajor SparseMatrix, OpenMP-parallel rows)
 //
 // and the real-vs-complex specialisation, behind ONE polymorphic interface.
-// Operator (and its FixedSzOperator subclass) hold a unique_ptr to a backend
-// and their public apply()/apply_real() methods are one-line delegations.
+// Operator holds a unique_ptr to a backend
+// and its public apply()/apply_real() methods are one-line delegations.
 //
 // Relationship to ed/matvec/backend.h:
 // ------------------------------------
@@ -25,7 +25,7 @@
 //
 // Why this exists (matvec-unification, Phase 4 — May 2026):
 // --------------------------------------------------------
-// Before this header, Operator::apply() and FixedSzOperator::apply() each
+// Before this header, Operator::apply() and the fixed-Sz operator each
 // contained the same three-way dispatch tree
 //
 //     if (CSR built || sparse_dispatch_enabled(dim)) {
@@ -231,8 +231,7 @@ public:
     //
     // The defaults make host backends throw if a device apply is
     // requested -- only ``CudaMatVecBackend`` overrides them. Used by
-    // ``LinearOperator::bind_cuda()`` for ``Operator`` /
-    // ``FixedSzOperator``.
+    // ``LinearOperator::bind_cuda()`` for ``Operator``.
     // -----------------------------------------------------------------
     virtual void upload_terms(const void* /*term_view_erased*/) {}
 
@@ -988,7 +987,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Factory helpers. Operator and FixedSzOperator use these to construct their
+// Factory helper. Operator uses it to construct its
 // backend lazily on first apply().
 //
 // The TermView template arguments are passed explicitly so the backend's
@@ -1011,51 +1010,9 @@ make_cpu_full_basis_backend(std::uint64_t n_bits,
         "CpuFullBasis(n_bits=" + std::to_string(n_bits) + ")");
 }
 
-template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
-          class OffDiagTwo, class ThreeBody>
-[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
-make_cpu_fixed_sz_backend(const std::vector<std::uint64_t>& basis_states,
-                          const LinIndexTable&              lin_index,
-                          std::uint64_t                     default_csr_cutoff = (1ULL << 22))
-{
-    using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
-                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
-                                     OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_tunables(default_csr_cutoff);
-    return std::make_unique<Backend>(
-        basis::make_fixed_sz_basis(basis_states, lin_index),
-        tunables,
-        "CpuFixedSz(dim=" + std::to_string(basis_states.size()) + ")");
-}
-
-// Tableless combinadic fixed-Sz backend. Same CpuMatVecBackend<FixedSzBasisPolicy>
-// type as make_cpu_fixed_sz_backend (so no extra template instantiation), but the
-// policy is in combinadic mode: the C(N,n_up) basis vector + Lin table are never
-// allocated; lookups go through the O(N) combinadic rank/unrank over ``binom``.
-template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
-          class OffDiagTwo, class ThreeBody>
-[[nodiscard]] inline std::unique_ptr<MatVecBackendBase>
-make_cpu_combinadic_fixed_sz_backend(
-    int                                        n_bits,
-    int                                        n_up,
-    const ed::core::combinadic::BinomialTable& binom,
-    std::uint64_t                              dim,
-    std::uint64_t default_csr_cutoff = (1ULL << 22),
-    const LinIndexTable*                       lin = nullptr)
-{
-    using Backend = CpuMatVecBackend<basis::FixedSzBasisPolicy,
-                                     DiagOne, OffDiagOne, DiagTwo, MixedTwo,
-                                     OffDiagTwo, ThreeBody>;
-    auto tunables = detail::read_tunables(default_csr_cutoff);
-    return std::make_unique<Backend>(
-        basis::make_combinadic_fixed_sz_basis(n_bits, n_up, binom, dim, lin),
-        tunables,
-        "CpuCombinadicFixedSz(dim=" + std::to_string(dim) + ")");
-}
-
 // ---------------------------------------------------------------------------
-// P6 (operator-collapse): extern-template declarations for the two trivial-
-// basis host cells of the Operator<BasisPolicy, MemSpace> grid, over the
+// P6 (operator-collapse): extern-template declaration for the trivial-
+// basis host cell of the Operator<BasisPolicy, MemSpace> grid, over the
 // single canonical term-view shape every Operator instantiates (the six SoA
 // record types from term_storage.h; see the Operator::DiagonalOneBody ...
 // aliases). The matching explicit instantiation DEFINITIONS live in
@@ -1070,10 +1027,6 @@ make_cpu_combinadic_fixed_sz_backend(
 // this leaf header deliberately avoids).
 // ---------------------------------------------------------------------------
 extern template class CpuMatVecBackend<basis::FullBasisPolicy,
-                                       DiagOneBody, OffDiagOneBody, DiagTwoBody,
-                                       MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
-
-extern template class CpuMatVecBackend<basis::FixedSzBasisPolicy,
                                        DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                        MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 

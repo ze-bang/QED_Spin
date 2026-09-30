@@ -34,7 +34,6 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/projector_chain.h>
 #include <ed/symmetry/subspace.h>
@@ -159,24 +158,4 @@ TEST_CASE("orthogonal composition: compute_trivial_orbit returns a unit orbit",
         REQUIRE(co.empty());
         REQUIRE(std::abs(ns) < 1e-15);
     }
-}
-
-TEST_CASE("orthogonal composition: subspace() view round-trips through FixedSzOperator",
-          "[symmetry][projector_chain][future_axes][abi_smoke]")
-{
-    // FixedSzOperator -> ed::symmetry::FixedSzSubspace view -> the
-    // ``ed::matvec::basis::FixedSzBasisPolicy`` POD view consumed by
-    // the matvec kernels. Confirms the chain of references stays
-    // valid: the operator owns the storage, the Subspace observes it,
-    // and the kernel-facing policy is derived from the Subspace.
-    FixedSzOperator op(6, 0.5f, 3);
-    auto sub = op.subspace();
-    REQUIRE(sub.n_bits() == 6);
-    REQUIRE(sub.n_up()   == 3);
-    REQUIRE(sub.dim()    == op.getFixedSzDim());
-
-    auto policy = sub.policy();
-    REQUIRE(policy.dim() == sub.dim());
-    REQUIRE(policy.state_of(0) == sub.state_of(0));
-    REQUIRE(policy.index_of(sub.state_of(0)) == 0);
 }

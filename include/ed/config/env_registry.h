@@ -114,10 +114,6 @@ struct Row {
       "Projected-basis dim below which assembled CSR is preferred over matrix-free")\
     X("ED_MATVEC_SCATTER", Flag, "krylov", "false (gather kernel)",            \
       "=1 falls back to the legacy atomic-SCATTER SpMV kernel (bisection escape hatch) instead of the lock-free row-GATHER")\
-    X("ED_FIXED_SZ_TABLELESS", Tristate, "memory-guard", "unset -> planner slot, then the dimension/budget heuristic",\
-      "=1 forces the tableless combinadic fixed-Sz basis, =0 forces the materialized list")\
-    X("ED_FIXED_SZ_TABLE_BUDGET_GIB", Real, "memory-guard", "16.0",            \
-      "Byte budget for the materialized fixed-Sz basis list; above it the basis flips to tableless")\
     X("ED_LANCZOS_PROFILE", Flag, "krylov", "false",                           \
       "=1 enables the per-iteration us timing breakdown in lanczos_real")      \
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
@@ -146,8 +142,6 @@ struct Row {
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_OPERATOR_MIRROR", Flag, "gpu", "true (mirror on)",               \
       "=0 disables the full-Hilbert / fixed-Sz device mirror (CPU-vs-GPU bisection)")\
-    X("ED_GPU_SYMMETRY_MIRROR", Flag, "gpu", "true (mirror on)",               \
-      "=0 disables the symmetry-sector device mirror, so select_backend stays on the CPU lane")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
       "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors")\
     X("ED_GPU_SYNC_LAUNCH", Flag, "gpu", "false (async launches)",             \

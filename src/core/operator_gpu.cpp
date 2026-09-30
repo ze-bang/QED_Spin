@@ -30,7 +30,6 @@
 
 #include <stdexcept>
 
-#include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
 #include <ed/thermal/mtpq_f32.h>
 
@@ -65,15 +64,5 @@ mtpq_f32(const ed::LinearOperator& /*H*/, const MtpqOptions& /*opts*/) {
         "(binary not linked against ed_solvers_gpu / built without CUDA)");
 }
 }  // namespace ed::thermal
-
-// Operator-collapse Phase 4: weak fallback for the FixedSz alias
-// (SubspaceOperator<FixedSzBasisPolicy, Host>). Replaces the legacy
-// FixedSzOperator::bind_cuda_fixed_sz_impl_ weak fallback.
-template <>
-__attribute__((weak)) ed::LinearOperator::MatvecFn
-ed::SubspaceOperator<ed::matvec::basis::FixedSzBasisPolicy,
-                     ed::matvec::MemorySpace::Host>::bind_cuda_impl_() const {
-    return bind_cpu();
-}
 
 #endif  // WITH_CUDA

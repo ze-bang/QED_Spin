@@ -409,8 +409,6 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("unit_cell_size",    &ed::dssf::OperatorSpec::unit_cell_size)
         .def_readwrite("num_sites",         &ed::dssf::OperatorSpec::num_sites)
         .def_readwrite("spin_length",       &ed::dssf::OperatorSpec::spin_length)
-        .def_readwrite("use_fixed_sz",      &ed::dssf::OperatorSpec::use_fixed_sz)
-        .def_readwrite("n_up",              &ed::dssf::OperatorSpec::n_up)
         .def_readwrite("positions_file",    &ed::dssf::OperatorSpec::positions_file)
         .def_readwrite("single_obs_only",   &ed::dssf::OperatorSpec::single_obs_only)
         .def_readwrite("sublattice_filter", &ed::dssf::OperatorSpec::sublattice_filter)
