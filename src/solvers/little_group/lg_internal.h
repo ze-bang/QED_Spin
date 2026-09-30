@@ -337,8 +337,19 @@ private:
             + terms_.mixed_two_body.size()
             + terms_.offdiag_two_body.size()
             + terms_.three_body.size();
-        if (!ed::planner::sector_csr_within_budget(dim, terms_per_row))
-            return;
+        if (!ed::planner::sector_csr_within_budget(dim, terms_per_row)) {
+            // The bound puts every term on every row; most terms vanish on most states
+            // (a J1-J2 chain fills about a quarter), so measure the fill before declining.
+            const double fill = ed::matvec::sampled_reduced_symmetry_row_length<
+                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
+                    rd_->make_policy(), tv_.spin_l,
+                    terms_.diag_one_body, terms_.offdiag_one_body,
+                    terms_.diag_two_body, terms_.mixed_two_body,
+                    terms_.offdiag_two_body, terms_.three_body);
+            const auto per_row = static_cast<std::uint64_t>(std::ceil(1.1 * fill)) + 1;
+            if (per_row >= terms_per_row || !ed::planner::sector_csr_within_budget(dim, per_row))
+                return;
+        }
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             reduced_csr());
         if (ed::env::flag("ED_SYM_PROFILE", false)) {

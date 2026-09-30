@@ -19,6 +19,9 @@
 // sectors where even the reduced matrix does not fit.
 // =============================================================================
 
+#include <algorithm>
+#include <cmath>
+#include <complex>
 #include <cstdint>
 #include <memory>
 #include <type_traits>
@@ -109,6 +112,72 @@ struct ReducedSymmetryCsr {
 // naturally). CSR * v therefore equals the rep-walk gather to machine
 // precision -- pinned by tests/unit/test_reduced_symmetry_csr.cpp.
 // ---------------------------------------------------------------------------
+namespace detail {
+
+// Row r of the reduced sector matrix: (column, value) pairs sorted by column, zeros dropped.
+template <class RepPolicy, class Scalar,
+          class D1, class O1, class D2, class M2, class O2, class T3>
+inline void reduced_symmetry_row(const RepPolicy& basis, double spin_l,
+                                 const D1& diag_one_body, const O1& offdiag_one_body,
+                                 const D2& diag_two_body, const M2& mixed_two_body,
+                                 const O2& offdiag_two_body, const T3& three_body,
+                                 std::uint64_t r, std::vector<std::pair<std::uint32_t, Scalar>>& dstrow) {
+    const std::uint64_t rep_r = basis.state_of(r);
+    const Scalar inv_norm_r = kernel::coerce_coeff<Scalar>(
+        std::complex<double>(basis.inv_norm_of(r), 0.0));
+    std::unordered_map<std::uint32_t, Scalar> acc;
+    kernel::apply_term_to_state<Scalar>(
+        rep_r, spin_l,
+        diag_one_body, offdiag_one_body, diag_two_body,
+        mixed_two_body, offdiag_two_body, three_body,
+        [&](std::uint64_t s_prime, const Scalar& h) {
+            std::complex<double> proj;
+            const std::int64_t j = basis.index_and_projection(s_prime, proj);
+            if (j < 0) return;
+            acc[static_cast<std::uint32_t>(j)] +=
+                inv_norm_r * kernel::conj_scalar<Scalar>(
+                    h * kernel::coerce_coeff<Scalar>(proj));
+        });
+    dstrow.clear();
+    dstrow.reserve(acc.size());
+    for (const auto& kv : acc)
+        if (std::abs(kv.second) > 0.0) dstrow.emplace_back(kv.first, kv.second);
+    std::sort(dstrow.begin(), dstrow.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+}
+
+}  // namespace detail
+
+// Mean row length of the reduced sector matrix from `samples` evenly spaced rows -- the
+// real fill, for budgeting a build whose term-count bound (every term on every row) is
+// several times too high.
+template <class RepPolicy, class Scalar,
+          class D1, class O1, class D2, class M2, class O2, class T3>
+[[nodiscard]] inline double sampled_reduced_symmetry_row_length(
+    const RepPolicy& basis, double spin_l,
+    const D1& diag_one_body, const O1& offdiag_one_body,
+    const D2& diag_two_body, const M2& mixed_two_body,
+    const O2& offdiag_two_body, const T3& three_body, std::uint64_t samples = 4096)
+{
+    const std::uint64_t dim = basis.dim();
+    if (dim == 0) return 0.0;
+    const std::uint64_t n = std::min(samples, dim);
+    std::uint64_t total = 0;
+    #pragma omp parallel reduction(+ : total)
+    {
+        std::vector<std::pair<std::uint32_t, Scalar>> row;
+        #pragma omp for schedule(static)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const std::uint64_t r = static_cast<std::uint64_t>(i) * dim / n;
+            detail::reduced_symmetry_row<RepPolicy, Scalar>(basis, spin_l, diag_one_body, offdiag_one_body,
+                                                            diag_two_body, mixed_two_body, offdiag_two_body,
+                                                            three_body, r, row);
+            total += row.size();
+        }
+    }
+    return static_cast<double>(total) / static_cast<double>(n);
+}
+
 template <class RepPolicy, class Scalar,
           class D1, class O1, class D2, class M2, class O2, class T3>
 [[nodiscard]] inline ReducedSymmetryCsr<Scalar> build_reduced_symmetry_csr_rep(
@@ -135,28 +204,9 @@ template <class RepPolicy, class Scalar,
     const std::uint64_t par = std::numeric_limits<std::uint64_t>::max();
 #endif
     auto build_row = [&](std::uint64_t r, std::vector<std::pair<std::uint32_t, Scalar>>& dstrow) {
-        const std::uint64_t rep_r = basis.state_of(r);
-        const Scalar inv_norm_r = kernel::coerce_coeff<Scalar>(
-            std::complex<double>(basis.inv_norm_of(r), 0.0));
-        std::unordered_map<std::uint32_t, Scalar> acc;
-        kernel::apply_term_to_state<Scalar>(
-            rep_r, spin_l,
-            diag_one_body, offdiag_one_body, diag_two_body,
-            mixed_two_body, offdiag_two_body, three_body,
-            [&](std::uint64_t s_prime, const Scalar& h) {
-                std::complex<double> proj;
-                const std::int64_t j = basis.index_and_projection(s_prime, proj);
-                if (j < 0) return;
-                acc[static_cast<std::uint32_t>(j)] +=
-                    inv_norm_r * kernel::conj_scalar<Scalar>(
-                        h * kernel::coerce_coeff<Scalar>(proj));
-            });
-        dstrow.clear();
-        dstrow.reserve(acc.size());
-        for (const auto& kv : acc)
-            if (std::abs(kv.second) > 0.0) dstrow.emplace_back(kv.first, kv.second);
-        std::sort(dstrow.begin(), dstrow.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        detail::reduced_symmetry_row<RepPolicy, Scalar>(basis, spin_l, diag_one_body, offdiag_one_body,
+                                                        diag_two_body, mixed_two_body, offdiag_two_body,
+                                                        three_body, r, dstrow);
     };
 
     // pass 1: row lengths (row_ptr[r + 1] holds the length of row r until the prefix sum)
