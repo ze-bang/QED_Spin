@@ -192,6 +192,49 @@ TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity
         REQUIRE(std::abs(res.eigenvalues[i] - ref[static_cast<long>(i)]) < 1e-7);
 }
 
+TEST_CASE("krylov::krylov_schur_kernel degeneracy probe recovers skipped copies",
+          "[kernel-facade][krylov-schur][degeneracy]") {
+    // Diagonal H = diag(0, 1, 1, 2, 2, 2, 3, 4, ...) and a start vector with no weight on
+    // e_2, e_4, e_5: those components stay exactly zero through every matvec and
+    // reorthogonalisation, so the restarted single-vector method finds 0, 1, 2, 3, 4, 5 and
+    // skips the second 1 and two of the 2s. The probe must restore the multiplicities.
+    constexpr std::size_t dim = 200;
+    std::vector<double> d(dim);
+    const double head[] = {0.0, 1.0, 1.0, 2.0, 2.0, 2.0};
+    for (std::size_t i = 0; i < dim; ++i) d[i] = i < 6 ? head[i] : static_cast<double>(i) - 3.0;
+    auto apply = [&d](const Complex* in, Complex* out, std::size_t n) {
+        for (std::size_t i = 0; i < n; ++i) out[i] = d[i] * in[i];
+    };
+    ed::matvec::CpuBackend backend;
+    std::mt19937_64 gen(7);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Complex> v0(dim);
+    for (auto& z : v0) z = Complex(nd(gen), nd(gen));
+    v0[2] = v0[4] = v0[5] = Complex(0.0, 0.0);
+
+    ed::krylov::KrylovSchurOptions opts;
+    opts.num_eigs     = 6;
+    opts.max_iter     = 40;
+    opts.tolerance    = 1e-10;
+    opts.max_restarts = 200;
+    opts.compute_vectors = true;
+    const auto res = ed::krylov::krylov_schur_kernel(backend, apply, dim, v0.data(), opts);
+    REQUIRE(res.converged);
+    REQUIRE(res.eigenvalues.size() == 6);
+    for (std::size_t i = 0; i < 6; ++i) REQUIRE(std::abs(res.eigenvalues[i] - head[i]) < 1e-8);
+    // The recovered copies are genuine, mutually orthogonal eigenvectors.
+    for (std::size_t a = 0; a < 6; ++a)
+        for (std::size_t b = 0; b <= a; ++b) {
+            const Complex ov = backend.dot(res.eigenvectors[a].get(), res.eigenvectors[b].get(), dim);
+            REQUIRE(std::abs(ov - (a == b ? 1.0 : 0.0)) < 1e-8);
+        }
+
+    opts.probe_degeneracy = false;   // the failure the probe exists for
+    const auto bare = ed::krylov::krylov_schur_kernel(backend, apply, dim, v0.data(), opts);
+    REQUIRE(bare.eigenvalues.size() == 6);
+    REQUIRE(std::abs(bare.eigenvalues.back() - 5.0) < 1e-8);
+}
+
 TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap)",
           "[kernel-facade][subspace]") {
     using ed::krylov::krylov_subspace_dim;

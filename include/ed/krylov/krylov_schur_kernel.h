@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/krylov/krylov_schur_kernel.h
 //
-// Backend-templated thick-restart Krylov-Schur kernel. Builds on top of
+// Backend-templated restarted Krylov-Schur with locking, built on
 // `ed::krylov::lanczos_kernel<Backend>`:
 //
 //   for restart cycle r = 0..R-1:
@@ -17,15 +17,10 @@
 //        (`V_local * y` --- a local linear combination of the basis)
 //        and append to the locked set.
 //     5. Re-seed with a non-locked Ritz vector and continue.
+//   then the degeneracy probe: one cycle from a fresh random start (see the body).
 //
-// Single body drives the four deployment targets (CPU / CUDA / MPI /
-// MPI+CUDA). The only Backend-specific operations are the basis-vector
-// reconstruction (one `axpy_many` per locked vector) and the seed
-// generation (caller-provided via `seed_local`).
-//
-// Phase 2.2 of the Minimalist ED Collapse (May 2026): replaces the
-// previous CPU-only `static_assert`-guarded forward to the legacy
-// `::krylov_schur` body.
+// The same body serves every Backend (CPU / CUDA); only the basis-vector
+// reconstruction (`axpy_many`) and the seed transfer touch backend memory.
 // =============================================================================
 
 #include <algorithm>
@@ -34,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -72,6 +68,9 @@ struct KrylovSchurOptions {
     /// footprint is PREDICTABLE: m_max <= max_subspace_vectors regardless of
     /// max_iter. See ed::krylov::krylov_subspace_dim.
     std::uint64_t max_subspace_vectors = 0;
+    /// After convergence, look for a level the single-vector restarts skipped (a second copy
+    /// of a degenerate eigenvalue) with one extra cycle from a fresh random start.
+    bool        probe_degeneracy = true;
 };
 
 struct KrylovSchurResult {
@@ -143,116 +142,125 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
     }
 
     KrylovSchurResult R;
-    bool              converged = false;
 
-    for (std::size_t restart = 0; restart < opts.max_restarts; ++restart) {
-        // --- step 1: project seed against the locked set (CGS2 by hand) -
+    // CGS2 against the locked set.
+    auto deflate = [&](Complex* v) {
         for (int pass = 0; pass < 2; ++pass) {
             for (auto& lv : locked_vecs) {
-                const Complex c = be.dot(lv.get(), v_seed.get(), local_n);
-                be.axpy(-c, lv.get(), v_seed.get(), local_n);
+                const Complex c = be.dot(lv.get(), v, local_n);
+                be.axpy(-c, lv.get(), v, local_n);
             }
         }
+    };
+    struct Cycle {
+        LanczosKernelResult      kres;
+        std::vector<double>      evals, evecs_cm;
+        std::vector<std::size_t> idx;          // ascending Ritz values
+        std::size_t              m = 0;
+        double                   beta_last = 0.0;
+    };
+    // One Lanczos factorisation from v_seed, orthogonal to the locked set. False when the
+    // seed lies in the locked span or nothing was built.
+    auto run_cycle = [&](Cycle& c) -> bool {
+        deflate(v_seed.get());
         const double seed_norm = be.nrm2(v_seed.get(), local_n);
-        if (seed_norm < 1e-13) {
-            // Seed collapsed onto the locked subspace -- nothing more to
-            // extract via this cycle. Bail out cleanly.
-            break;
-        }
+        if (seed_norm < 1e-13) return false;
         be.scale(Complex(1.0 / seed_norm, 0.0), v_seed.get(), local_n);
-
-        // --- step 2: per-cycle Lanczos -------------------------------
         std::vector<const Complex*> aux;
         aux.reserve(locked_vecs.size());
         for (auto& lv : locked_vecs) aux.push_back(lv.get());
-
         LanczosKernelOptions kopts;
-        kopts.max_iter      = m_max;
-        kopts.reorth        = ReorthPolicy::FullCGS2;
-        kopts.keep_basis    = true;
-        kopts.breakdown_tol = opts.breakdown_tol;
-        kopts.dim_cap       = static_cast<std::size_t>(global_dim);
+        kopts.max_iter       = m_max;
+        kopts.reorth         = ReorthPolicy::FullCGS2;
+        kopts.keep_basis     = true;
+        kopts.breakdown_tol  = opts.breakdown_tol;
+        kopts.dim_cap        = static_cast<std::size_t>(global_dim);
         kopts.aux_ortho_ptrs = std::move(aux);
-
-        auto kres = lanczos_kernel(be, matvec, local_n, v_seed.get(), kopts);
-        R.iters_done += kres.iters_done;
-        R.restarts    = restart + 1;
-        if (kres.alpha.empty()) break;
-
-        // --- step 3: solve the projected tridiag -----------------------
-        std::vector<double> evals, weights, evecs_cm;
-        solve_tridiag_with_eigenvectors(kres.alpha, kres.beta,
-                                        kres.alpha.size(),
-                                        evals, weights, evecs_cm);
-        const std::size_t m_eff    = kres.alpha.size();
-        const double      beta_last = kres.beta.back();
-
-        std::vector<std::size_t> idx(m_eff);
-        std::iota(idx.begin(), idx.end(), std::size_t{0});
-        std::sort(idx.begin(), idx.end(),
-                  [&](std::size_t a, std::size_t b) {
-                      return evals[a] < evals[b];
-                  });
-
-        const std::size_t need = (k_target > locked_evals.size())
-                                     ? (k_target - locked_evals.size())
-                                     : 0;
-        std::size_t newly_locked = 0;
-        for (std::size_t r = 0; r < std::min(need, m_eff); ++r) {
-            const std::size_t i = idx[r];
-            const double residual =
-                std::abs(beta_last) *
-                std::abs(evecs_cm[i * m_eff + (m_eff - 1)]);
-            if (residual >= opts.tolerance) break;
-
-            // Reconstruct phi = sum_j evec[i][j] * basis[j] (local).
-            auto phi = be.make_zero_vector(local_n);
-            {
-                std::vector<Complex> coefs(m_eff);
-                std::vector<const Complex*> basis_ptrs(m_eff);
-                for (std::size_t j = 0; j < m_eff; ++j) {
-                    coefs[j] = Complex(evecs_cm[i * m_eff + j], 0.0);
-                    basis_ptrs[j] = kres.basis[j].get();
-                }
-                be.axpy_many(coefs.data(), basis_ptrs.data(), m_eff,
-                             phi.get(), local_n);
-            }
-            // Project against the existing locked set (CGS2).
-            for (int pass = 0; pass < 2; ++pass) {
-                for (auto& lv : locked_vecs) {
-                    const Complex c = be.dot(lv.get(), phi.get(), local_n);
-                    be.axpy(-c, lv.get(), phi.get(), local_n);
-                }
-            }
-            const double pn = be.nrm2(phi.get(), local_n);
-            if (pn < 1e-14) break;
-            be.scale(Complex(1.0 / pn, 0.0), phi.get(), local_n);
-            locked_evals.push_back(evals[i]);
-            locked_vecs.emplace_back(std::move(phi));
-            ++newly_locked;
+        c.kres = lanczos_kernel(be, matvec, local_n, v_seed.get(), kopts);
+        R.iters_done += c.kres.iters_done;
+        ++R.restarts;
+        if (c.kres.alpha.empty()) return false;
+        std::vector<double> weights;
+        solve_tridiag_with_eigenvectors(c.kres.alpha, c.kres.beta, c.kres.alpha.size(),
+                                        c.evals, weights, c.evecs_cm);
+        c.m         = c.kres.alpha.size();
+        c.beta_last = c.kres.beta.back();
+        c.idx.resize(c.m);
+        std::iota(c.idx.begin(), c.idx.end(), std::size_t{0});
+        std::sort(c.idx.begin(), c.idx.end(),
+                  [&](std::size_t a, std::size_t b) { return c.evals[a] < c.evals[b]; });
+        return true;
+    };
+    auto ritz_vector = [&](const Cycle& c, std::size_t i, Complex* out) {
+        be.fill_zero(out, local_n);
+        std::vector<Complex> coefs(c.m);
+        std::vector<const Complex*> basis_ptrs(c.m);
+        for (std::size_t j = 0; j < c.m; ++j) {
+            coefs[j]      = Complex(c.evecs_cm[i * c.m + j], 0.0);
+            basis_ptrs[j] = c.kres.basis[j].get();
         }
-
-        if (locked_evals.size() >= k_target) {
-            converged = true;
-            break;
-        }
-
-        // --- step 5: re-seed with a non-locked Ritz vector ----------
-        const std::size_t seed_rank =
-            std::min<std::size_t>(newly_locked, m_eff - 1);
-        const std::size_t i_seed = idx[seed_rank];
-        {
-            be.fill_zero(v_seed.get(), local_n);
-            std::vector<Complex> coefs(m_eff);
-            std::vector<const Complex*> basis_ptrs(m_eff);
-            for (std::size_t j = 0; j < m_eff; ++j) {
-                coefs[j] = Complex(evecs_cm[i_seed * m_eff + j], 0.0);
-                basis_ptrs[j] = kres.basis[j].get();
+        be.axpy_many(coefs.data(), basis_ptrs.data(), c.m, out, local_n);
+    };
+    // Restart cycles until `target` pairs are locked or `budget` cycles are spent. Pairs lock
+    // strictly from the bottom of each cycle; the next cycle starts from the lowest unlocked
+    // Ritz vector.
+    auto lock_until = [&](std::size_t target, std::size_t budget) {
+        for (std::size_t cycle = 0; cycle < budget && locked_evals.size() < target; ++cycle) {
+            Cycle c;
+            if (!run_cycle(c)) return;
+            const std::size_t need = target - locked_evals.size();
+            std::size_t newly_locked = 0;
+            for (std::size_t r = 0; r < std::min(need, c.m); ++r) {
+                const std::size_t i = c.idx[r];
+                const double residual =
+                    std::abs(c.beta_last) * std::abs(c.evecs_cm[i * c.m + (c.m - 1)]);
+                if (residual >= opts.tolerance) break;
+                auto phi = be.make_zero_vector(local_n);
+                ritz_vector(c, i, phi.get());
+                deflate(phi.get());
+                const double pn = be.nrm2(phi.get(), local_n);
+                if (pn < 1e-14) break;
+                be.scale(Complex(1.0 / pn, 0.0), phi.get(), local_n);
+                locked_evals.push_back(c.evals[i]);
+                locked_vecs.emplace_back(std::move(phi));
+                ++newly_locked;
             }
-            be.axpy_many(coefs.data(), basis_ptrs.data(), m_eff,
-                         v_seed.get(), local_n);
+            if (locked_evals.size() >= target) return;
+            ritz_vector(c, c.idx[std::min<std::size_t>(newly_locked, c.m - 1)], v_seed.get());
+            if (c.kres.iters_done == 0) return;
         }
-        if (kres.iters_done == 0) break;
+    };
+
+    lock_until(k_target, opts.max_restarts);
+    bool converged = locked_evals.size() >= k_target;
+
+    // Degeneracy probe. Every cycle restarts from one Ritz vector orthogonal to the locked
+    // set, so a second copy of a locked eigenvalue carries only roundoff weight from then on
+    // and a higher level can be locked in its place. A fresh random start deflated against
+    // the locked set has a generic component on it; a Ritz value of that start below the
+    // highest locked level is an upper bound on a level that was skipped. Lock it, keep the
+    // k lowest, and look again.
+    if (converged && opts.probe_degeneracy) {
+        std::mt19937_64 gen(0xDE6E4E7AULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        std::vector<Complex> host(local_n);
+        for (std::size_t round = 0; round < k_target; ++round) {
+            const double top = *std::max_element(locked_evals.begin(), locked_evals.end());
+            const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::max(1.0, std::abs(top)));
+            for (auto& z : host) z = Complex(nd(gen), nd(gen));
+            be.copy_from_host(host.data(), v_seed.get(), local_n);
+            Cycle c;
+            if (!run_cycle(c) || c.evals[c.idx[0]] >= top - gap) break;
+            ritz_vector(c, c.idx[0], v_seed.get());
+            const std::size_t before = locked_evals.size();
+            lock_until(before + 1, opts.max_restarts);
+            if (locked_evals.size() == before) { converged = false; break; }   // skipped, not recovered
+            while (locked_evals.size() > k_target) {
+                const auto hi = std::max_element(locked_evals.begin(), locked_evals.end()) - locked_evals.begin();
+                locked_evals.erase(locked_evals.begin() + hi);
+                locked_vecs.erase(locked_vecs.begin() + hi);
+            }
+        }
     }
 
     // Sort the locked spectrum ascending.
@@ -271,7 +279,7 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
             R.eigenvectors.emplace_back(std::move(locked_vecs[i]));
         }
     }
-    R.converged = converged || (locked_evals.size() >= k_target);
+    R.converged = converged;
     return R;
 }
 
