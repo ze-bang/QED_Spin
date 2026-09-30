@@ -174,61 +174,28 @@ struct RepSymmetryBasisPolicy {
     // orbit index ``k`` (or -1) and writes ``conj(beta_state) * inv_norms[k]``
     // into ``proj_out``.
     //
-    // Optimization (Fix 1): all |G| permuted images are computed ONCE into a
-    // stack array. The first pass finds the minimum (representative), the second
-    // pass accumulates the projection phase from the same images — halving the
-    // apply_perm call count vs the prior two-pass approach (representative() +
-    // separate scan). group_size is bounded by realistic lattice groups (≤256).
-    // Cap on the one-scan image cache. Groups this large are unusual (D4h on a
-    // 4x8 N=32 lattice is |G|=256, the largest common lattice case) but a
-    // flip-extension doubles |G|, and NLCE point groups can exceed it -- so
-    // |G| > kMaxG must NOT overrun the stack buffer. Matches the device policy's
-    // identically named guard (device_basis_policy.cuh).
-    static constexpr int kMaxG = 512;   // 36d full little group with flip: |G| = 288 (a 4 KB stack buffer)
-
+    // One pass over the group with a running minimum: the character sum restarts whenever a
+    // smaller image appears and grows on ties, so it ends as the sum over the elements that
+    // map the state to its representative, in ascending element order (the same terms, in
+    // the same order, as a separate second pass). No image buffer, no bound on |G|.
     [[nodiscard]] inline std::int64_t
     index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
         if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
-
-        if (group_size <= kMaxG) {
-            // Fast path: compute all |G| images once into a stack buffer; the
-            // representative (min) and the character accumulation both read it.
-            std::uint64_t images[kMaxG];
-            std::uint64_t rb = state;
-            for (int g = 0; g < group_size; ++g) {
-                images[g] = apply_perm(state, g);
-                if (images[g] < rb) rb = images[g];
-            }
-            const std::int64_t k = index_of_rep(rb);
-            if (k < 0) return -1;
-            double acc_re = 0.0, acc_im = 0.0;
-            for (int h = 0; h < group_size; ++h) {
-                if (images[h] == rb) {
-                    acc_re += characters[h].real();   // conj: +real
-                    acc_im -= characters[h].imag();   //       -imag
-                }
-            }
-            const double s = inv_norms[static_cast<std::size_t>(k)];
-            proj_out = Complex(acc_re * s, acc_im * s);
-            return k;
-        }
-
-        // |G| > kMaxG: two-pass, buffer-free (recompute images in pass 2).
-        // Rare and slower, but correct rather than a stack overrun.
-        std::uint64_t rb = state;
-        for (int g = 1; g < group_size; ++g) {
+        std::uint64_t rb = ~std::uint64_t{0};
+        double acc_re = 0.0, acc_im = 0.0;
+        for (int g = 0; g < group_size; ++g) {
             const std::uint64_t img = apply_perm(state, g);
-            if (img < rb) rb = img;
+            if (img < rb) {
+                rb = img;
+                acc_re = 0.0 + characters[g].real();   // conj: +real (from 0.0, as a sum)
+                acc_im = 0.0 - characters[g].imag();   //       -imag
+            } else if (img == rb) {
+                acc_re += characters[g].real();
+                acc_im -= characters[g].imag();
+            }
         }
         const std::int64_t k = index_of_rep(rb);
         if (k < 0) return -1;
-        double acc_re = 0.0, acc_im = 0.0;
-        for (int h = 0; h < group_size; ++h) {
-            if (apply_perm(state, h) == rb) {
-                acc_re += characters[h].real();
-                acc_im -= characters[h].imag();
-            }
-        }
         const double s = inv_norms[static_cast<std::size_t>(k)];
         proj_out = Complex(acc_re * s, acc_im * s);
         return k;

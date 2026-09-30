@@ -119,8 +119,6 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     }
     const bool flip = cx.flip_half;
     const std::size_t Gx = (flip ? 2 : 1) * Gp.size();
-    if (ed::have_cuda() && Gx > 256)
-        return decline("|G| > 256 on a CUDA host (the device rep gather caps the group at 256)");
     const double fs = flip ? ((k0 / cx.n_irr_raw == 0) ? 1.0 : -1.0) : 1.0;
     auto chars_of = [&](int ii) {
         const auto& cs = giP.irreps[static_cast<std::size_t>(ii)].character;
