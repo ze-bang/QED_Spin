@@ -130,13 +130,6 @@ flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
     return true;
 }
 
-/// Env gate for the Stage-5 Sz transporter (default ON; set
-/// ED_SYM_SPIN_FLIP=0 to disable for bisection). Read per call so tests
-/// can toggle it from Python without process restarts.
-[[nodiscard]] inline bool spin_flip_transport_enabled() noexcept {
-    return ed::env::flag("ED_SYM_SPIN_FLIP", true);
-}
-
 /// [H, X] == 0 at the term level (see header comment for the mapping).
 [[nodiscard]] inline bool
 hamiltonian_is_spin_flip_symmetric(const ed::matvec::TermStorage& t) noexcept {

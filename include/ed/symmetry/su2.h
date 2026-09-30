@@ -49,13 +49,6 @@
 
 namespace ed::symmetry {
 
-/// Env gate for the SU(2) axis (default ON; set ED_SYM_SU2=0 to veto
-/// detection-driven labeling/exploitation for bisection). Read per call so
-/// tests can toggle from Python without process restarts.
-[[nodiscard]] inline bool su2_enabled() noexcept {
-    return ed::env::flag("ED_SYM_SU2", true);
-}
-
 /// [H, S_tot] == 0 at the term level (see header comment for the mapping).
 [[nodiscard]] inline bool
 hamiltonian_is_su2_symmetric(const ed::matvec::TermStorage& t,

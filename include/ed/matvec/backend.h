@@ -183,29 +183,6 @@ public:
         throw std::runtime_error("Backend::gemm not implemented for this backend");
     }
 
-    /// Standard ZGEMV: y = alpha * op(A) * x + beta * y. op(A) is m x n.
-    virtual void gemv(char /*opA*/,
-                      std::size_t /*m*/, std::size_t /*n*/,
-                      Complex /*alpha*/,
-                      const Complex* /*A*/, std::size_t /*lda*/,
-                      const Complex* /*x*/, std::size_t /*incx*/,
-                      Complex /*beta*/,
-                      Complex* /*y*/, std::size_t /*incy*/) const {
-        throw std::runtime_error("Backend::gemv not implemented for this backend");
-    }
-
-    /// Triangular solve: solve op(A) X = alpha B  or  X op(A) = alpha B
-    /// in-place, writing X to B. A is `ka x ka` upper- or lower-triangular,
-    /// B is `m x n`. `side` = 'L' (left) or 'R' (right); `uplo` = 'U' or
-    /// 'L'; `transA` = 'N'/'T'/'C'; `diag` = 'N' (non-unit) or 'U' (unit).
-    virtual void trsm(char /*side*/, char /*uplo*/, char /*transA*/, char /*diag*/,
-                      std::size_t /*m*/, std::size_t /*n*/,
-                      Complex /*alpha*/,
-                      const Complex* /*A*/, std::size_t /*lda*/,
-                      Complex* /*B*/, std::size_t /*ldb*/) const {
-        throw std::runtime_error("Backend::trsm not implemented for this backend");
-    }
-
     /// In-place tall-skinny QR. On entry, `A` is `m_local x b`
     /// column-major. On exit, `A` holds Q (orthonormal columns) and
     /// `R_host` (size `b*b`, column-major) holds the upper-triangular

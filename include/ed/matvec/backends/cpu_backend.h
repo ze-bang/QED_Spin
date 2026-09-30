@@ -307,37 +307,6 @@ public:
                     &beta,  C, static_cast<int>(ldc));
     }
 
-    void gemv(char opA,
-              std::size_t m, std::size_t n,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              const Complex* x, std::size_t incx,
-              Complex beta,
-              Complex* y, std::size_t incy) const override {
-        if (m == 0 || n == 0) return;
-        cblas_zgemv(CblasColMajor, trans_(opA),
-                    static_cast<int>(m), static_cast<int>(n),
-                    &alpha, A, static_cast<int>(lda),
-                            x, static_cast<int>(incx),
-                    &beta,  y, static_cast<int>(incy));
-    }
-
-    void trsm(char side, char uplo, char transA, char diag,
-              std::size_t m, std::size_t n,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              Complex* B, std::size_t ldb) const override {
-        if (m == 0 || n == 0) return;
-        const CBLAS_SIDE      sd = (side == 'L' || side == 'l') ? CblasLeft  : CblasRight;
-        const CBLAS_UPLO      up = (uplo == 'U' || uplo == 'u') ? CblasUpper : CblasLower;
-        const CBLAS_TRANSPOSE tr = trans_(transA);
-        const CBLAS_DIAG      dg = (diag == 'U' || diag == 'u') ? CblasUnit  : CblasNonUnit;
-        cblas_ztrsm(CblasColMajor, sd, up, tr, dg,
-                    static_cast<int>(m), static_cast<int>(n),
-                    &alpha, A, static_cast<int>(lda),
-                            B, static_cast<int>(ldb));
-    }
-
     /// In-place tall-skinny QR using LAPACK ZGEQRF + ZUNGQR. On exit
     /// the column-major A holds Q (m x b), and R_host (column-major,
     /// b x b) holds the upper triangle from ZGEQRF (extracted before
@@ -399,7 +368,7 @@ private:
 // Thread-local accessor. CpuBackend holds mutable scratch buffers in
 // dot_many() that are not safe to share across concurrent callers. Using
 // thread_local gives each thread its own instance so the outer sector-
-// parallel loop (ED_SYM_SECTOR_PARALLEL=1) can call lanczos_kernel from
+// parallel loop can call lanczos_kernel from
 // multiple OMP threads simultaneously without racing on the scratch storage.
 [[nodiscard]] inline CpuBackend& default_cpu_backend() {
     static thread_local CpuBackend instance;

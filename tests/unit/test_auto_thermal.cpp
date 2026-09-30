@@ -16,7 +16,6 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/ed_types.h>
 #include <ed/orchestrator.h>
 
 #include <cmath>

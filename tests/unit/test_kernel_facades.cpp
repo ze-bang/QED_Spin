@@ -18,7 +18,6 @@
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
 
-#include <ed/observables/expectation.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -256,24 +255,4 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
         backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
 
     REQUIRE_FALSE(res.energies.empty());
-}
-
-TEST_CASE("observables::expectation_value reproduces <psi|H|psi>",
-          "[kernel-facade][observables][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::matvec::CpuBackend backend;
-    std::vector<Complex> psi(dim, Complex(0.0, 0.0));
-    psi[0] = Complex(1.0, 0.0);                  // |0...0> Neel-flavoured basis state
-    std::vector<Complex> out(dim, Complex(0.0, 0.0));
-
-    Complex e = ed::observables::expectation_value(
-        backend, *H, psi.data(), out.data(), dim);
-
-    // <0...0| H | 0...0> = 0 for any traceless Heisenberg term + half-shift;
-    // here only Sz Sz contributes => +N/4 on the fully-polarised state.
-    REQUIRE(std::abs(e.imag()) < 1e-12);
 }

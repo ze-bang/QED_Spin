@@ -18,24 +18,6 @@ LittleGroupBlock::LittleGroupBlock(LittleGroupBlock&&) noexcept = default;
 LittleGroupBlock& LittleGroupBlock::operator=(LittleGroupBlock&&) noexcept
     = default;
 
-const LittleGroupBlockTag& LittleGroupBlock::tag() const noexcept {
-    return impl_->tag;
-}
-ed::LinearOperator& LittleGroupBlock::op() const noexcept {
-    if (impl_->gop) return static_cast<ed::LinearOperator&>(*impl_->gop);   // group-sector block
-    return impl_->pop ? static_cast<ed::LinearOperator&>(*impl_->pop)
-                      : static_cast<ed::LinearOperator&>(*impl_->hk);
-}
-const ed::symmetry::RepSectorData& LittleGroupBlock::rep_data() const noexcept {
-    return impl_->hk->rep_data();
-}
-bool LittleGroupBlock::projected() const noexcept {
-    return impl_->W != nullptr || impl_->gop != nullptr;
-}
-bool LittleGroupBlock::gpu_engaged() const noexcept {
-    if (impl_->gop) return impl_->gop->gpu_engaged();
-    return impl_->hk != nullptr && impl_->hk->gpu_engaged();
-}
 std::vector<std::complex<double>>
 LittleGroupBlock::lift_to_rep(const std::complex<double>* v) const {
     const std::size_t nrep = impl_->hk->dim();

@@ -12,7 +12,6 @@
 // Op-type conventions (unchanged from the legacy zoo):
 //   * basis-aligned single-op : op in {0=S+, 1=S-, 2=Sz}     (matches file fmt)
 //   * Cartesian single-op     : op in {0=Sx, 1=Sy, 2=Sz}     (use_xyz = true)
-//   * add_single_site         : op in {0=S+, 1=S-, 2=Sz, 3=Sx, 4=Sy}
 //
 // Sx / Sy expand into canonical S+/S- terms via the Cartesian helper, so they
 // are perfectly valid in a fixed-Sz sector (the spin-flip terms scatter out of
@@ -33,51 +32,6 @@
 namespace ed::ops {
 
 using Complex = std::complex<double>;
-
-// ---------------------------------------------------------------------------
-// add_single_site : op in {0=S+, 1=S-, 2=Sz, 3=Sx, 4=Sy}
-// ---------------------------------------------------------------------------
-template <class OperatorT>
-inline void add_single_site(OperatorT& op, std::uint64_t which, std::uint64_t site) {
-    const std::uint64_t num_site = op.getNumBits();
-    if (which > 4) {
-        throw std::invalid_argument(
-            "ed::ops::add_single_site: op must be 0 (S+), 1 (S-), 2 (Sz), "
-            "3 (Sx), or 4 (Sy)");
-    }
-    if (site >= num_site) {
-        throw std::invalid_argument(
-            "ed::ops::add_single_site: site index >= num_site");
-    }
-    if (which <= 2) {
-        op.addOneBodyTerm(static_cast<std::uint8_t>(which), site, Complex(1.0, 0.0));
-    } else {
-        // which = 3 -> Sx (Cartesian alpha = 0); which = 4 -> Sy (alpha = 1).
-        ed::core::detail::add_cartesian_site_term(op, which - 3, site,
-                                                  Complex(1.0, 0.0));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// add_double_site : op_i / op_j in {0=S+, 1=S-, 2=Sz}, unit weight
-// ---------------------------------------------------------------------------
-template <class OperatorT>
-inline void add_double_site(OperatorT& op,
-                            std::uint64_t op_i, std::uint64_t site_i,
-                            std::uint64_t op_j, std::uint64_t site_j) {
-    const std::uint64_t num_site = op.getNumBits();
-    if (op_i > 2 || op_j > 2) {
-        throw std::invalid_argument(
-            "ed::ops::add_double_site: op must be 0 (S+), 1 (S-), or 2 (Sz)");
-    }
-    if (site_i >= num_site || site_j >= num_site) {
-        throw std::invalid_argument(
-            "ed::ops::add_double_site: site index >= num_site");
-    }
-    op.addTwoBodyTerm(static_cast<std::uint8_t>(op_i), site_i,
-                      static_cast<std::uint8_t>(op_j), site_j,
-                      Complex(1.0, 0.0));
-}
 
 // ---------------------------------------------------------------------------
 // add_sum : S^a_Q = (1/sqrt(N)) sum_i S^a_i e^{iQ.R_i}
@@ -182,16 +136,6 @@ inline void add_transverse_experimental(OperatorT& op, double theta,
         ed::core::detail::add_experimental_site_term(
             op, site, phases[site], cos_theta, sin_theta);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Convenience value factory for the common single-site full-basis observable.
-// ---------------------------------------------------------------------------
-inline Operator make_single_site(std::uint64_t num_site, float spin_l,
-                                 std::uint64_t which, std::uint64_t site) {
-    Operator op(num_site, spin_l);
-    add_single_site(op, which, site);
-    return op;
 }
 
 }  // namespace ed::ops

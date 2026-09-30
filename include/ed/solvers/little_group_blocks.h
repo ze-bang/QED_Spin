@@ -15,11 +15,12 @@
 //     factor system, failed monomial probe, incomplete covering -- the
 //     engine's graceful-fallback floor).
 //
-// The handle exposes the block as an `ed::LinearOperator`, so anything the
+// Each block is an `ed::LinearOperator` inside the engine, so anything the
 // orchestrator can drive (Lanczos, dense eigensolve, FTLM / TPQ sampling
 // kernels via ed::workflows::thermal) runs inside the reduced dimension with
-// no kernel changes. Ownership is by shared_ptr: all irrep blocks of one star
-// co-own their star's matrix-free H_{k0} (RepSectorMatVec).
+// no kernel changes; the public handle lifts block vectors back to the
+// momentum-sector rep basis. Ownership is by shared_ptr: all irrep blocks of
+// one star co-own their star's matrix-free H_{k0} (RepSectorMatVec).
 //
 // The concrete types behind the handle (RepSectorMatVec, SparseColumns,
 // ProjectedBlockOp, Monomial) stay PRIVATE to the engine (src/solvers/little_group/lg_internal.h) -- this
@@ -68,7 +69,7 @@ struct LittleGroupBlockTag {
 // -----------------------------------------------------------------------------
 // Owned handle to one diagonal block. Copyable (shared ownership); the
 // underlying operator is lazily materialised state (reduced CSR / GPU mirror)
-// shared by every copy, so `gpu_engaged()` is truthful only after applies ran.
+// shared by every copy.
 // One in-flight apply per DISTINCT block at a time (the internal scratch is
 // per-block); concurrent applies on different blocks of the same star are
 // safe -- the shared H_{k0} apply path is re-entrant.
@@ -83,18 +84,9 @@ public:
     LittleGroupBlock(LittleGroupBlock&&) noexcept;
     LittleGroupBlock& operator=(LittleGroupBlock&&) noexcept;
 
-    [[nodiscard]] const LittleGroupBlockTag& tag() const noexcept;
-    /// The block as a LinearOperator (projected sandwich or plain H_{k0}).
-    [[nodiscard]] ed::LinearOperator& op() const noexcept;
-    /// The star's momentum-sector rep data (shared across the star's blocks).
-    [[nodiscard]] const ed::symmetry::RepSectorData& rep_data() const noexcept;
-    /// True when this is an isotypic W^dag H W block (irrep >= 0).
-    [[nodiscard]] bool projected() const noexcept;
-    /// Truthful post-apply report from the star's H_{k0} matvec.
-    [[nodiscard]] bool gpu_engaged() const noexcept;
     /// U2a: lift a block-coordinate vector to the momentum sector's rep
     /// basis, u = W_sigma v (identity copy for plain blocks). `v` must
-    /// have tag().dim entries; the result has rep_data().reps.size().
+    /// have the block dimension; the result has one entry per momentum-sector rep.
     /// W's columns are orthonormal (SVD), so norms are preserved.
     [[nodiscard]] std::vector<std::complex<double>>
     lift_to_rep(const std::complex<double>* v) const;

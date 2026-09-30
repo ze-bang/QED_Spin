@@ -40,7 +40,6 @@
 
 #include <ed/config/env_registry.h>   // typed environment accessors
 #include <ed/orchestrator.h>
-#include <ed/core/solver_defaults.h>
 
 #include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
 #include <ed/krylov/krylov_schur_kernel.h>
@@ -50,7 +49,7 @@
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
 // Execution planner / feasibility "dictator" removed (sensible defaults +
 // env-override leaf hooks instead). The matvec/symmetry leaf policy hooks
-// (csr_policy_hook, sym_matvec_policy_hook, basis_policy_hook) still provide
+// (sym_matvec_policy_hook, basis_policy_hook, the ED_CSR_* env) still provide
 // the default + env-override behaviour, consumed lazily inside the operator
 // backends; the orchestrator no longer overrides them.
 #include <ed/symmetry/canonical_thermo.h>   // canonical_thermo_from_eigs (single impl)

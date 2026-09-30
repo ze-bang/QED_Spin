@@ -10,7 +10,7 @@
 // into the diagonal subspaces to walk -- each Sz sector, each Sz-parity half, or the
 // full space -- and folds n_up <-> N - n_up into one solve when H is spin-flip
 // symmetric. Inside one subspace the little-group engine splits by momentum star and
-// little-group irrep; for_each_star() streams those blocks one star at a time.
+// little-group irrep, streamed one momentum star at a time.
 //
 // eigs() is the lowest-k eigensolve over every block: each block's lowest levels,
 // weighted by multiplicity (|star| x irrep dimension x time-reversal fold x flip
@@ -74,12 +74,6 @@ struct Subspace {
 
 [[nodiscard]] std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s);
 
-using StarFn = std::function<void(const ed::solvers::LittleGroupStarInfo&,
-                                  std::vector<ed::solvers::LittleGroupBlock>&)>;
-
-/// Stream one subspace's blocks, one star resident at a time.
-void for_each_star(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub,
-                   const StarFn& fn);
 
 // -----------------------------------------------------------------------------
 // Lowest-level eigensolve

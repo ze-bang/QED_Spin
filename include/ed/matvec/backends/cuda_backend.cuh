@@ -122,23 +122,6 @@ public:
         return static_cast<int>(n);
     }
 
-    /// Audit 2026-07-31: the dot_many/axpy_many staging cache is keyed
-    /// on the basis POINTER array only (see `stage_basis_`) -- it has no
-    /// content epoch. If a caller mutates an already-staged basis
-    /// vector's CONTENTS in place (same address, same count -- e.g. a
-    /// thick-restart driver recombining locked Ritz vectors, then
-    /// reusing this backend instance), the stale staged column is
-    /// silently reused and orthogonality quietly degrades. Call this
-    /// after any in-place mutation of vectors previously passed to
-    /// `dot_many` / `axpy_many` on this instance; the next batched call
-    /// re-stages everything. (The in-repo kernels construct a fresh
-    /// backend per run and never hit this; the hazard is the class
-    /// contract for external reuse.)
-    void invalidate_staging() const {
-        staging_fingerprint_.clear();
-        staging_n_ = 0;
-    }
-
     /// Construct a CudaBackend on the *current* CUDA device. Set the
     /// device with `cudaSetDevice(id)` BEFORE constructing if you want
     /// to pin to a specific GPU; the handle binds to whichever device
@@ -268,16 +251,6 @@ public:
         int dev = -1;
         cudaGetDevice(&dev);
         return "CudaBackend(cuBLAS, device=" + std::to_string(dev) + ")";
-    }
-
-    /// Direct access to the owned cuBLAS handle for callers that need
-    /// to share it with their own SpMV (e.g. the `MatvecFn` passed to
-    /// `lanczos_kernel`). The handle's pointer-mode is HOST -- if a
-    /// caller temporarily switches it to DEVICE for a fused inner
-    /// loop, the caller MUST restore HOST before returning, or the
-    /// next dot()/nrm2() will read garbage.
-    [[nodiscard]] cublasHandle_t cublas_handle() const noexcept {
-        return handle_;
     }
 
     // ------------------------------------------------------------------
@@ -543,51 +516,6 @@ public:
             "cublasZgemm");
     }
 
-    void gemv(char opA,
-              std::size_t m, std::size_t n,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              const Complex* x, std::size_t incx,
-              Complex beta,
-              Complex* y, std::size_t incy) const override {
-        if (m == 0 || n == 0) return;
-        const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
-        const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
-        cuda_backend_detail::check_cublas(
-            cublasZgemv(handle_,
-                cuda_backend_detail::to_cublas_op(opA),
-                static_cast<int>(m), as_blas_int(n),
-                &a,
-                reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
-                reinterpret_cast<const cuDoubleComplex*>(x), static_cast<int>(incx),
-                &b,
-                reinterpret_cast<cuDoubleComplex*>(y), static_cast<int>(incy)),
-            "cublasZgemv");
-    }
-
-    void trsm(char side, char uplo, char transA, char diag,
-              std::size_t m, std::size_t n,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              Complex* B, std::size_t ldb) const override {
-        if (m == 0 || n == 0) return;
-        const cublasSideMode_t  sd = (side  == 'L' || side  == 'l')
-                                       ? CUBLAS_SIDE_LEFT  : CUBLAS_SIDE_RIGHT;
-        const cublasFillMode_t  up = (uplo  == 'U' || uplo  == 'u')
-                                       ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
-        const cublasDiagType_t  dg = (diag  == 'U' || diag  == 'u')
-                                       ? CUBLAS_DIAG_UNIT : CUBLAS_DIAG_NON_UNIT;
-        const cublasOperation_t tr = cuda_backend_detail::to_cublas_op(transA);
-        const cuDoubleComplex   a  = make_cuDoubleComplex(alpha.real(), alpha.imag());
-        cuda_backend_detail::check_cublas(
-            cublasZtrsm(handle_, sd, up, tr, dg,
-                static_cast<int>(m), as_blas_int(n),
-                &a,
-                reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
-                reinterpret_cast<cuDoubleComplex*>(B), static_cast<int>(ldb)),
-            "cublasZtrsm");
-    }
-
     /// In-place tall-skinny QR via cuSolver ZGEQRF + ZUNGQR. `A` is on
     /// device (m_local x b column-major); R_host is host scratch
     /// (b x b column-major).
@@ -686,8 +614,8 @@ private:
 
     // Persistent staging buffer for batched dot_many / axpy_many. Sized
     // lazily to fit (n x m) complex<double>. Owned by the backend so
-    // the cost amortises across all Lanczos / FTLM / KS calls that
-    // share the singleton `default_cuda_backend()`.
+    // the cost amortises across all Lanczos / FTLM / KS calls on this
+    // instance.
     mutable Complex*     staging_buf_       = nullptr;
     mutable std::size_t  staging_capacity_  = 0;  // bytes
     mutable std::size_t  staging_n_         = 0;  // row count of staged content
@@ -807,22 +735,5 @@ private:
         staging_n_ = n;
     }
 };
-
-/// Singleton accessor mirroring `default_cpu_backend()`. Lives in
-/// function-local static storage so cublasCreate/Destroy are deferred
-/// to first use (avoids a constructor-time CUDA dependency for binaries
-/// that link the header but never touch the GPU).
-///
-/// thread_local (audit 2026-07-31, matching the CPU twin): the instance
-/// carries mutable staging state (`staging_fingerprint_` /
-/// `staging_buf_` / `coeffs_dev_`) that two threads would race --
-/// exactly the corruption the CPU accessor's thread_local fixed for
-/// ED_SYM_SECTOR_PARALLEL. One cuBLAS handle per calling thread is the
-/// supported cuBLAS threading model. (No in-repo call site exists today;
-/// this de-arms the landmine before one appears.)
-[[nodiscard]] inline CudaBackend& default_cuda_backend() {
-    static thread_local CudaBackend instance;
-    return instance;
-}
 
 }  // namespace ed::matvec

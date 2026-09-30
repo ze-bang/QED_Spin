@@ -40,12 +40,6 @@
 
 namespace ed::symmetry {
 
-/// Env gate for the Stage-6 pairing (default ON; ED_SYM_TIME_REVERSAL=0
-/// disables). Read per call so tests can toggle from Python.
-[[nodiscard]] inline bool time_reversal_pairing_enabled() noexcept {
-    return ed::env::flag("ED_SYM_TIME_REVERSAL", true);
-}
-
 /// True iff every term coefficient is real (imag <= tol): the condition
 /// under which complex conjugation commutes with H in the computational
 /// basis.

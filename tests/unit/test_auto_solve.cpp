@@ -19,7 +19,6 @@
 
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/orchestrator.h>
-#include <ed/operators/spin_ops.h>
 
 #include <memory>
 #include <string>

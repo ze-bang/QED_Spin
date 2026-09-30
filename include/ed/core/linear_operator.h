@@ -200,47 +200,6 @@ public:
         return bind_real_cpu();
     }
 
-    // -------------------------------------------------------------------
-    // Wave C2 (May 2026): batched multi-column matvec.
-    //
-    // Block solvers (stochastic traces over R random vectors,
-    // FTLM block-Lanczos, GMRES variants) benefit from amortising
-    // any per-matvec overhead (orbit walk, term-table prefetch, OMP
-    // team spin-up) across a "batch" of input columns processed
-    // simultaneously. Default implementations just loop the existing
-    // single-column ``apply`` / ``apply_real`` so every operator
-    // already supports the API; operators with a faster batched
-    // path (notably ``StreamingSymmetryOperator::SectorView`` which
-    // can share orbit traversal) override.
-    //
-    // Buffers are laid out as ``in_block[col * dim + i]`` and
-    // ``out_block[col * dim + i]`` (column-major contiguous).
-    // -------------------------------------------------------------------
-
-    /// Complex batched matvec. Defaults to ``batch`` calls to
-    /// ``apply()``. Override when there is a faster per-batch path.
-    virtual void apply_batch(const Complex* in_block,
-                             Complex* out_block,
-                             std::size_t dim,
-                             std::size_t batch) const {
-        for (std::size_t b = 0; b < batch; ++b) {
-            this->apply(in_block + b * dim, out_block + b * dim, dim);
-        }
-    }
-
-    /// Real batched matvec. Only legal when ``is_real_hermitian()``.
-    /// Default routes each column through ``bind_real_cpu()``'s
-    /// single-column lane.
-    virtual void apply_batch_real(const double* in_block,
-                                  double* out_block,
-                                  std::size_t dim,
-                                  std::size_t batch) const {
-        auto mv = this->bind_real_cpu();
-        for (std::size_t b = 0; b < batch; ++b) {
-            mv(in_block + b * dim, out_block + b * dim, dim);
-        }
-    }
-
     /// Tagged dispatch helper. The template indirection makes calls
     /// from the orchestrators read more naturally:
     ///     auto mv = op.bind<CpuBackend>();

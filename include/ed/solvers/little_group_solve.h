@@ -105,23 +105,7 @@ struct LittleGroupStarInfo {
                                ///< k + s*n_irr_raw when flip is engaged)
     int  star_size     = 1;    ///< |star| (spectrum multiplicity factor)
     int  little_order  = 1;    ///< |P_k0| actually used (1 = plain fallback)
-    bool projected     = false;///< true when the little-group blocks were used
-    std::uint64_t dim_k0 = 0;  ///< k0 sector dimension (#surviving reps)
     int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
-    int  tr_pairs      = 0;    ///< 9b: # sigma <-> sigma* pairs solved once
-    /// Did this star's matvec actually run the GPU rep-gather? REPORTED by the
-    /// engine, never inferred from the caller's device= request: the gate
-    /// (reduced-CSR declined AND >= 2^20 reps AND a device present) is
-    /// internal, and small blocks legitimately stay on the CPU however loudly
-    /// the caller asked for a GPU. A lane label that echoes the request rather
-    /// than the fact is worse than none -- assertions against it are toothless.
-    bool gpu_engaged   = false;
-    /// Did the star's matvec serve its applies from the lazily-built
-    /// reduced sector CSR? Truthful, post-solve, same contract as
-    /// gpu_engaged: false + !gpu_engaged after solves ran means the
-    /// CSR-free gather walk served them (the matvec-regime engagement
-    /// signal the permutation sweep asserts against).
-    bool csr_engaged   = false;
     /// Every extended irrep index folded into this star (always includes
     /// ``k0``). The engine has always known this -- the star loop iterates
     /// ``(k0, members)`` -- but only published ``star_size``, which is not

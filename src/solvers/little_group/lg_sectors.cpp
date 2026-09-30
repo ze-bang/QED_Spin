@@ -195,17 +195,6 @@ std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s)
     return out;
 }
 
-void for_each_star(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub,
-                   const StarFn& fn) {
-    const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
-    detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
-        std::vector<LittleGroupBlock> blocks;
-        blocks.reserve(sb.blocks.size());
-        for (auto& b : sb.blocks) blocks.emplace_back(b);
-        fn(sb.info, blocks);
-    });
-}
-
 std::vector<double> EigsResult::energies(int k) const {
     std::vector<double> e;
     for (const auto& l : levels)

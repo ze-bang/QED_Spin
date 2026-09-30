@@ -29,7 +29,7 @@ TEST_CASE("env registry: rows are unique and well formed", "[env]") {
         REQUIRE(std::string(r.meaning).size() > 0);
         REQUIRE(std::string(r.scope).size() > 0);
     }
-    REQUIRE(seen.size() > 60);
+    REQUIRE(seen.size() > 40);
     REQUIRE(ed::env::is_registered("ED_SYM_LG_SEED"));
     REQUIRE_FALSE(ed::env::is_registered("ED_SYM_LG_SEEDD"));
 }

@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <ed/core/solver_defaults.h>
 
 #include <iostream>
 #include <complex>

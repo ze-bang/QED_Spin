@@ -57,7 +57,7 @@ GroundStateResult solve_on(Backend& be,
     // Sensible defaults (planner removed). The caller's explicit method /
     // max_iter win; otherwise a simple dim-based default. No memory-budget
     // pre-flight refusal, and no CSR / symmetry-matvec override -- the leaf
-    // policy hooks (csr_policy_hook / sym_matvec_policy_hook / basis_policy_hook)
+    // policy hooks (sym_matvec_policy_hook / basis_policy_hook, ED_CSR_* env)
     // keep their default + env-override behaviour, consumed lazily at first
     // matvec.
     // -----------------------------------------------------------------------

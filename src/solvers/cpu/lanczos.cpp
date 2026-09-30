@@ -696,7 +696,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         //
         // Nesting-aware: when this runs INSIDE a sector-parallel region (the
         // streaming-symmetry FULL loop spreads independent sectors across cores
-        // via `omp parallel for if(ED_SYM_SECTOR_PARALLEL)`), keep the eigensolve
+        // via an outer `omp parallel for`), keep the eigensolve
         // single-threaded -- otherwise N_sectors x P_cores oversubscribes. A
         // standalone FULL solve takes all cores.
         // Audit 2026-09: "all cores" is wrong for small blocks. OpenBLAS's

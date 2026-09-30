@@ -9,9 +9,6 @@
 //     Sz^2 + Sz + S-_tot S+_tot, element by element (N = 4, 5);
 //   * spectrum is exactly { S(S+1) } with multiplicity (2S+1) * M(N,S),
 //     M(N,S) = C(N, N/2-S) - C(N, N/2-S-1)  (multiplet counting);
-//   * snap_two_S: parity of N, |Sz| floor, flip-parity mask, tolerance;
-//   * s2_expectation certifies eigenvectors (tiny residual) and refuses
-//     a 50/50 mix of different-S eigenvectors (large residual).
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -28,9 +25,6 @@
 
 using Cx = std::complex<double>;
 using ed::ops::make_S2_carrier;
-using ed::ops::s2_eigenvalue_of_two_S;
-using ed::ops::s2_expectation;
-using ed::ops::snap_two_S;
 
 namespace {
 
@@ -80,6 +74,14 @@ std::uint64_t multiplet_count_ref(std::uint64_t N, int two_S) {
     return binom(N, k) - binom(N, k - 1);
 }
 
+// Snap an S^2 eigenvalue to 2S when it is an allowed S(S+1) for n_sites
+// spin-1/2 sites (2S of the parity of N, 2S <= N); -1 otherwise.
+int snap_two_S(double s2, int n_sites) {
+    for (int ts = n_sites % 2; ts <= n_sites; ts += 2)
+        if (std::abs(s2 - 0.25 * ts * (ts + 2)) <= 1e-6) return ts;
+    return -1;
+}
+
 }  // namespace
 
 TEST_CASE("S^2 carrier matches the algebraic reference", "[casimir]") {
@@ -116,71 +118,3 @@ TEST_CASE("S^2 spectrum is {S(S+1)} with multiplet-counting multiplicities",
     }
 }
 
-TEST_CASE("append_S2_total and the carrier agree term-for-term", "[casimir]") {
-    const std::uint64_t N = 5;
-    ed::matvec::TermStorage t;
-    ed::ops::append_S2_total(t, N);
-    auto op = make_S2_carrier(N);
-    const auto& ct = op->getTerms();
-    REQUIRE(t.diag_two_body.size() == ct.diag_two_body.size());
-    REQUIRE(t.offdiag_two_body.size() == ct.offdiag_two_body.size());
-    REQUIRE(t.diag_one_body.empty());
-    REQUIRE(t.offdiag_one_body.empty());
-    REQUIRE(t.mixed_two_body.empty());
-    REQUIRE(t.three_body.empty());
-    // N identity shifts + N(N-1)/2 zz pairs; 2 ladder terms per pair.
-    REQUIRE(t.diag_two_body.size() == N + N * (N - 1) / 2);
-    REQUIRE(t.offdiag_two_body.size() == N * (N - 1));
-}
-
-TEST_CASE("snap_two_S: parity, |Sz| floor, flip mask, tolerance", "[casimir]") {
-    // N = 6: allowed two_S in {0, 2, 4, 6}; S(S+1) in {0, 2, 6, 12}.
-    REQUIRE(snap_two_S(0.0, 6) == 0);
-    REQUIRE(snap_two_S(2.0 + 5e-7, 6) == 2);
-    REQUIRE(snap_two_S(2.0 + 5e-3, 6) == -1);      // outside tol
-    // Odd N = 5: allowed two_S in {1, 3, 5}; S(S+1) in {0.75, 3.75, 8.75}.
-    REQUIRE(snap_two_S(0.75, 5) == 1);
-    REQUIRE(snap_two_S(0.0, 5) == -1);             // 0 not allowed for odd N
-    // |Sz| floor: N = 6, n_up = 1 -> Sz = -2 -> two_S >= 4.
-    REQUIRE(snap_two_S(6.0, 6, /*n_up=*/1) == 4);
-    REQUIRE(snap_two_S(2.0, 6, /*n_up=*/1) == -1);  // S = 1 < |Sz|
-    // Flip parity at half filling, N = 6: X eigenvalue (-1)^{N/2 - S}.
-    // two_S = 6 -> (6-6)/2 = 0 even -> parity 0; two_S = 4 -> odd -> parity 1.
-    REQUIRE(snap_two_S(12.0, 6, 3, /*flip_parity=*/0) == 6);
-    REQUIRE(snap_two_S(12.0, 6, 3, /*flip_parity=*/1) == -1);
-    REQUIRE(snap_two_S(6.0, 6, 3, /*flip_parity=*/1) == 4);
-}
-
-TEST_CASE("s2_expectation certifies pure-S vectors and flags mixtures",
-          "[casimir]") {
-    const std::uint64_t N = 4;
-    auto op = make_S2_carrier(N);
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(dense_of(*op));
-    const auto& evals = es.eigenvalues();
-    const auto& evecs = es.eigenvectors();
-    const std::uint64_t dim = 1ULL << N;
-
-    // Pure eigenvector: expectation == eigenvalue, residual ~ 0.
-    {
-        std::vector<Cx> v(dim);
-        for (std::uint64_t i = 0; i < dim; ++i) v[i] = evecs(i, 0);
-        double res = -1.0;
-        const double s2 = s2_expectation(*op, v.data(), dim, &res);
-        REQUIRE(std::abs(s2 - evals[0]) < 1e-10);
-        REQUIRE(res < ed::ops::kS2CertifyTol);
-    }
-    // 50/50 mixture of the lowest (S=0) and highest (S=N/2) eigenvectors:
-    // expectation is between the S(S+1) points and the residual is O(1).
-    {
-        const Eigen::Index last = evals.size() - 1;
-        REQUIRE(std::abs(evals[0] - evals[last]) > 1.0);
-        std::vector<Cx> v(dim);
-        const double inv = 1.0 / std::sqrt(2.0);
-        for (std::uint64_t i = 0; i < dim; ++i)
-            v[i] = inv * (evecs(i, 0) + evecs(i, last));
-        double res = -1.0;
-        const double s2 = s2_expectation(*op, v.data(), dim, &res);
-        REQUIRE(res > 0.1);
-        REQUIRE(snap_two_S(s2, static_cast<int>(N)) == -1);
-    }
-}

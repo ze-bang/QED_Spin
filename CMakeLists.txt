@@ -499,13 +499,6 @@ if(BUILD_ED_TESTS)
     # matvec wiring through the virtual `LinearOperator::apply` and
     # the orchestrator's solver-family switch in one place.
     ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
-    # Matvec-unification audit follow-up: cross-sector Z-recombination of
-    # finite-T ThermodynamicData. The streaming-symmetry kernel relies on
-    # `ed::core::combine_sector_thermodynamics` to merge per-sector
-    # ThermodynamicData blocks back into the full-Hilbert thermo.
-    # Reference is the dense `calculate_thermodynamics_from_spectrum` on
-    # the union of all sector spectra.
-    ed_add_test(test_sector_thermo              tests/unit/test_sector_thermo.cpp USE_CATCH2)
     # Full Unified-Interface Collapse, Wave F-partial (May 2026):
     # `tests/unit/test_dispatch_streaming_thermo.cpp` and its target
     # were removed together with `include/ed/core/dispatch.h`. The

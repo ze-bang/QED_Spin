@@ -60,7 +60,7 @@
 //
 // Relationship to existing tests
 // -------------------------------
-//   test_sector_thermo     : validates combine_sector_thermodynamics math
+//   (sector recombination: combine_sectors, in this file)
 //   test_auto_thermal      : smoke-tests orchestrator wiring
 //   test_kernel_facades    : pin individual kernel signatures
 //   THIS FILE              : pin numerical accuracy against dense reference
@@ -71,7 +71,6 @@
 
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
-#include <ed/core/sector_thermo.h>
 #include <ed/core/thermal_types.h>
 #include <ed/orchestrator.h>
 #include <ed/symmetry/canonical_thermo.h>
@@ -364,7 +363,7 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
 // 2. U(1) / Sz symmetry — per-sector FixedSzOperator + recombination
 //
 //    For each n_up ∈ [0, N] run thermal on the corresponding FixedSzOperator,
-//    then combine via `ed::core::combine_sector_thermodynamics`.
+//    then combine by free-energy weighting (combine_sectors below).
 //
 //    Note: for mTPQ the combination uses the TPQ free-energy (which has
 //    a biased integration constant) as the sector weight.  Only the combined
@@ -374,26 +373,61 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (full Hilbert)",
 
 namespace {
 
+// Recombine per-sector thermodynamics into the full system by free-energy
+// weighting: Z = sum_s exp(-beta F_s) (shifted by the smallest F_s),
+// E and <E^2> by the canonical mixture rule, S = beta (E - F).
+ThermodynamicData combine_sectors(const std::vector<ThermodynamicData>& sec) {
+    ThermodynamicData out;
+    out.temperatures = sec.front().temperatures;
+    const std::size_t nt = out.temperatures.size();
+    out.energy.assign(nt, 0.0);
+    out.specific_heat.assign(nt, 0.0);
+    out.entropy.assign(nt, 0.0);
+    out.free_energy.assign(nt, 0.0);
+    for (std::size_t t = 0; t < nt; ++t) {
+        const double T = out.temperatures[t], beta = 1.0 / T;
+        double F_ref = sec[0].free_energy[t];
+        for (const auto& s : sec)
+            if (std::isfinite(s.free_energy[t]) && s.free_energy[t] < F_ref) F_ref = s.free_energy[t];
+        std::vector<double> Z(sec.size(), 0.0);
+        double Zt = 0.0;
+        for (std::size_t s = 0; s < sec.size(); ++s) {
+            double z = std::exp(-beta * (sec[s].free_energy[t] - F_ref));
+            if (!std::isfinite(z) || z < 0.0) z = 0.0;
+            Z[s] = z;
+            Zt += z;
+        }
+        double E = 0.0, E2 = 0.0;
+        for (std::size_t s = 0; s < sec.size(); ++s) {
+            const double w = Z[s] / Zt, Es = sec[s].energy[t];
+            E  += w * Es;
+            E2 += w * (sec[s].specific_heat[t] / (beta * beta) + Es * Es);
+        }
+        out.free_energy[t]   = F_ref - T * std::log(Zt);
+        out.energy[t]        = E;
+        out.specific_heat[t] = beta * beta * (E2 - E * E);
+        out.entropy[t]       = beta * (E - out.free_energy[t]);
+    }
+    return out;
+}
+
 void sz_trial(ThermalOptions::Method m, uint64_t seed,
               const ThermodynamicData& ref,
               double tol_E_combo = TOL_E) {
     std::vector<ThermodynamicData> sector_thermos;
-    std::vector<uint64_t>          sector_dims;
 
     for (int64_t n_up = 0; n_up <= static_cast<int64_t>(N_SITES); ++n_up) {
         auto op = make_sz_heisen(n_up);
-        const uint64_t dim = op->dim();
 
         auto opts = opts_for(m, seed + static_cast<uint64_t>(n_up) * 17ULL);
         auto R    = ed::workflows::thermal(*op, opts);
         REQUIRE(R.backend.lane == "cpu");
 
         sector_thermos.push_back(R.thermo);
-        sector_dims.push_back(dim);
     }
 
     const ThermodynamicData combined =
-        ed::core::combine_sector_thermodynamics(sector_thermos, sector_dims);
+        combine_sectors(sector_thermos);
 
     const bool full_compare = method_combine_reliable(m);
     check_thermo_close(combined, ref,

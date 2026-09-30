@@ -202,7 +202,6 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         if (!sp || sp->reps.empty()) continue;
         const int jj = pair_of[static_cast<std::size_t>(ii)];
         if (jj >= 0 && jj < ii) continue;                   // partner solved
-        if (jj > ii) ++info.tr_pairs;
         sp->build_perm_lut();
         auto impl = std::make_shared<LittleGroupBlock::Impl>();
         impl->tag              = base_tag;
@@ -221,7 +220,6 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     info.little_characters.clear();
     info.little_irrep_dims.clear();
     for (const auto& ir : giP.irreps) { info.little_characters.push_back(ir.character); info.little_irrep_dims.push_back(ir.dim); }
-    info.projected = true;
     if (t_isotypic) *t_isotypic += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (lg_diag)
         std::fprintf(stderr, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu\n",
@@ -255,7 +253,6 @@ build_star_blocks(const ::Operator&         op,
     info.k0          = k0;
     info.star_size   = m_star;
     info.members.assign(members.begin(), members.end());
-    info.dim_k0      = rd.reps.size();
     info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
     if (plan_print) {
         std::fprintf(stderr,
@@ -443,7 +440,6 @@ build_star_blocks(const ::Operator&         op,
                         if (jj >= 0 && jj < ii) continue;  // partner solved
                         const int mult = (jj > ii) ? 2 * m_star * d
                                                    : m_star * d;
-                        if (jj > ii) ++info.tr_pairs;
                         auto Wsp = std::make_shared<const SparseColumns>(
                             std::move(W));
                         auto impl = std::make_shared<LittleGroupBlock::Impl>();
@@ -506,7 +502,6 @@ build_star_blocks(const ::Operator&         op,
         impl->hk = sb.hk;
         sb.blocks.push_back(std::move(impl));
     }
-    info.projected = projected;
     return sb;
 }
 

@@ -72,20 +72,12 @@ struct Row {
       "Memory budget for the per-sector dense int32 rank table")               \
     X("ED_SYM_REQUIRE_ABELIAN", Flag, "symmetry", "false (auto-restrict)",     \
       "=1 makes a non-abelian generator set a hard error instead of auto-restricting to a maximal abelian subgroup")\
-    X("ED_SYM_SPIN_FLIP", Flag, "symmetry", "true",                            \
-      "=0 disables the Sz flip transport (spec(n_up) = spec(N - n_up))")       \
-    X("ED_SYM_TIME_REVERSAL", Flag, "symmetry", "true",                        \
-      "=0 disables conjugate-sector TR pairing")                               \
-    X("ED_SYM_SU2", Flag, "symmetry", "true",                                  \
-      "=0 vetoes the SU(2) total-spin axis (labels, Lowdin targeting, S-resolution)")\
     X("ED_SYM_SU2_REPROJECT_FREQ", Integer, "symmetry", "1",                   \
       "Lowdin drift-scrub cadence: project every k-th wrapped apply; 0 = seed projection only")\
-    X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> planner slot, then RepReducedCsr",\
+    X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \
       "Exactly \"1\" forces the reduced-CSR symmetry matvec, exactly \"0\" the CSR-free rep walk (read once per process)")\
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", Real, "symmetry", "8.0",                 \
       "AGGREGATE reduced-CSR byte budget; over-budget sectors fall back to the CSR-free walk")\
-    X("ED_SYM_SECTOR_PARALLEL", Tristate, "symmetry", "unset -> many-tiny-sectors heuristic (off on the GPU lane)",\
-      "Set: a value starting with '1' forces the sector-parallel outer OMP loops on, any other value (even \"\") off; one sector is always off")\
     X("ED_SYM_CSR_DIM_MAX", Integer, "symmetry", "0 -> falls back to ED_CSR_DIM_MAX, then the caller default 1<<13",\
       "Symmetry-lane CSR-vs-matrix-free dimension cutoff")                     \
     X("ED_SYM_LG_FLIP", Flag, "little-group", "true",                          \
@@ -174,8 +166,6 @@ struct Row {
       "Disables the \"estimated working set exceeds ~90% of available RAM\" pre-allocation throw")\
     X("QED_CORE_DIR", Path, "python", "unset (extension inside the package)",  \
       "Prepends a build directory containing _core*.so to qed.__path__")       \
-    X("ED_VERBOSE_TRILINEAR", Flag, "debug", "\"0\"",                          \
-      "Prints trilinear-triplet counts when building the pyrochlore super-exchange term list")\
     X("ED_ENV_STRICT", Flag, "python", "false",                                  \
       "=1 makes an undeclared ED_* variable in the environment an import error instead of a warning") \
     /* end of table */

@@ -15,7 +15,7 @@ def test_dump_covers_every_family():
                  "ED_THERMAL_EXACT_SMALL", "ED_NUMA_PIN_THREADS", "QED_CORE_DIR"):
         assert name in text
     assert "ED_LANCZOS" not in qed.debug_env("ED_SYM_")
-    assert len(qed._core.env_names()) > 60
+    assert len(qed._core.env_names()) > 40
 
 
 def test_snapshot_reports_set_variables(monkeypatch):
