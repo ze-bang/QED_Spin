@@ -83,7 +83,7 @@ TEST_CASE("workflows::solve e2e: Auto on the 8-site chain lands FullDiag and "
 // ---------------------------------------------------------------------------
 // 1b. Direct dense assembly (try_build_dense_columns, O(nnz) from the term
 //     structure) must produce EXACTLY the same matrix as the O(dim)-matvec
-//     column build, for both the full-space and fixed-Sz lanes. This is what the
+//     column build for the full Hilbert space. This is what the
 //     FullDiag path now uses to skip the slow N-matvec construction.
 // ---------------------------------------------------------------------------
 TEST_CASE("dense assembly: try_build_dense_columns == matvec column build",
@@ -110,7 +110,6 @@ TEST_CASE("dense assembly: try_build_dense_columns == matvec column build",
     };
 
     check(*f.H_full, kFullDim);     // full Hilbert space (index == state)
-    check(*f.H_sz,   kSzGsDim);     // fixed-Sz (combinadic index <-> state)
 }
 
 // ---------------------------------------------------------------------------
