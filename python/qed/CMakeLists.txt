@@ -94,6 +94,4 @@ else()
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ DESTINATION python/qed
             FILES_MATCHING PATTERN "*.py"
             PATTERN "_bindings" EXCLUDE PATTERN "__pycache__" EXCLUDE)
-    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../edlib/ DESTINATION python/edlib
-            FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
 endif()

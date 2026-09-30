@@ -1,38 +1,14 @@
-"""``qed.input``: standalone C++ lattice + Hamiltonian builder library.
+"""``qed.input``: lattices and the Hamiltonian builder (the C++ ``ed::input`` library).
 
-This module re-exports the C++ ``ed::input`` library through pybind11.
-It is the modern, programmatic replacement for the legacy
-``python/edlib/helper_*.py`` family, which historically had to write
-``InterAll.dat`` / ``Trans.dat`` / ``positions.dat`` to disk before the
-``./ED`` driver could read them back.
+``HamiltonianBuilder`` accumulates one-, two- and three-body terms in the (S+, S-, Sz)
+basis and ``to_operator()`` returns a ``qed.Operator`` for the verbs:
 
-Two ways to use it
-------------------
+.. code-block:: python
 
-1. **In-process (recommended for notebooks and Python-side workflows).**
-   ``HamiltonianBuilder.to_operator()`` returns a fully populated
-   ``qed.Operator`` you can pass straight to :func:`qed.eigs`,
-   :func:`qed.spectrum`, :func:`qed.thermal`, :func:`qed.dynamics`, ...
-
-   .. code-block:: python
-
-      import qed as qed
-      lat = qed.input.lattice.chain(8, pbc=True)
-      H = (qed.input.HamiltonianBuilder(lat.num_sites)
-                .heisenberg(lat.nn_pairs(), 1.0)
-                .to_operator())
-      E = qed.spectrum(H).energies
-
-2. **Disk output** (the ``InterAll.dat`` / ``Trans.dat`` directory format read by
-   ``Operator.load_inter_all`` / ``load_trans``). Same builder, different finaliser:
-
-   .. code-block:: python
-
-      import qed as qed
-      lat = qed.input.lattice.pyrochlore(2, 2, 2, pbc=True)
-      builder = (qed.input.HamiltonianBuilder(lat.num_sites)
-                       .pyrochlore_non_kramers(lat, Jxx=1.0, Jyy=0.5, Jzz=0.7))
-      builder.write_directory("/tmp/pyro_2x2x2", lattice=lat)
+   import qed
+   lat = qed.input.lattice.chain(8, pbc=True)
+   H = qed.input.HamiltonianBuilder(lat.num_sites).heisenberg(lat.nn_pairs(), 1.0).to_operator()
+   E = qed.spectrum(H).energies
 
 Available lattice generators (``qed.input.lattice``)
 -----------------------------------------------------------
@@ -78,22 +54,18 @@ from __future__ import annotations
 from . import _core as _core
 from ._core.input import (  # type: ignore[attr-defined]
     Bond,
-    FileOptions,
     HamiltonianBuilder,
     Lattice,
     Op,
     Plaquette,
-    io,
     lattice,
 )
 
 __all__ = [
     "Bond",
-    "FileOptions",
     "HamiltonianBuilder",
     "Lattice",
     "Op",
     "Plaquette",
-    "io",
     "lattice",
 ]

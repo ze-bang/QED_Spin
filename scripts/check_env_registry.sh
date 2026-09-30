@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REG=include/ed/config/env_registry.h
 INC="--include=*.h --include=*.cpp --include=*.cu --include=*.cuh --include=*.py"
-src_dirs="include src python/qed python/edlib"
+src_dirs="include src python/qed"
 reg=$(grep -oE 'X\("(ED|QED)_[A-Z0-9_]+"' "${REG}" | grep -oE '(ED|QED)_[A-Z0-9_]+' | sort -u)
 dup=$(grep -oE 'X\("(ED|QED)_[A-Z0-9_]+"' "${REG}" | sort | uniq -d || true)
 # names that appear as a string literal on a line that reads the environment or calls one

@@ -37,37 +37,6 @@ class Operator;
 
 namespace ed::input {
 
-// File-output configuration for `write_directory()`. Defaults match the
-// canonical filenames consumed by `./ED <dir>` and `loadFromDirectory`.
-struct FileOptions {
-    std::string trans_filename = "Trans.dat";
-    std::string inter_all_filename = "InterAll.dat";
-    std::string three_body_filename = "ThreeBodyG.dat";
-    std::string positions_filename = "positions.dat";
-
-    // Drop terms with `|coeff| < tol` from the written file (the C++
-    // loader applies the same threshold; keeping it consistent here
-    // avoids cluttering the output with numerical-zero noise).
-    double tol = 1e-15;
-
-    // If non-empty, also write standard observable files (one_body /
-    // two_body correlations) for these spin operator codes.
-    std::vector<Op> one_body_obs = {Op::Sp, Op::Sm, Op::Sz};
-    std::vector<std::pair<Op, Op>> two_body_obs = {
-        {Op::Sp, Op::Sp}, {Op::Sp, Op::Sm}, {Op::Sp, Op::Sz},
-        {Op::Sm, Op::Sp}, {Op::Sm, Op::Sm}, {Op::Sm, Op::Sz},
-        {Op::Sz, Op::Sp}, {Op::Sz, Op::Sm}, {Op::Sz, Op::Sz},
-    };
-
-    // If non-empty, also write a `positions.dat` based on the Lattice
-    // passed to `write_directory`.
-    bool write_positions = true;
-
-    // If true, write a small `lattice.json` capturing num_sites, sublattice
-    // indices, and lattice vectors -- handy when you want the directory to
-    // be self-describing without round-tripping through the Python helpers.
-    bool write_lattice_metadata = false;
-};
 
 // =============================================================================
 // HamiltonianBuilder
@@ -206,16 +175,6 @@ public:
     // (used by the pybind11 bindings to wire into `qed.Operator`).
     void emit_into(Operator& op) const;
 
-    // Write the legacy directory format (`InterAll.dat`, `Trans.dat`,
-    // `ThreeBodyG.dat`, `positions.dat`) consumed by `./ED <dir>` and
-    // `Operator::loadFromDirectory`.
-    //
-    // The `lat` argument supplies the positions; pass nullptr to skip
-    // writing the positions/lattice metadata.
-    void write_directory(
-        const std::string& output_dir,
-        const Lattice* lat = nullptr,
-        const FileOptions& opts = {}) const;
 
     // ------------------------------------------------------------------
     // Inspection

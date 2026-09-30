@@ -33,10 +33,10 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21",
-    "h5py>=3.0",
 ]
 
 [project.optional-dependencies]
+symmetry = ["pynauty", "networkx"]     # qed.find_symmetries / Symmetry(spatial="auto")
 test = ["pytest>=7", "pytest-xdist"]
 docs = ["sphinx>=7", "sphinx_rtd_theme", "breathe"]
 dev = [
@@ -62,7 +62,7 @@ Repository = "https://github.com/ze-bang/QED"
 cmake.version = ">=3.18"
 cmake.build-type = "Release"
 build-dir = "build/python-{build_type}"
-wheel.packages = ["python/qed", "python/edlib"]
+wheel.packages = ["python/qed"]
 wheel.install-dir = "."
 wheel.exclude = ["**/__pycache__/**", "**/*.pyc"]
 sdist.include = [
@@ -70,7 +70,6 @@ sdist.include = [
     "src",
     "cmake",
     "python/qed",
-    "python/edlib",
     "CMakeLists.txt",
     "pyproject.toml",
     "README.md",

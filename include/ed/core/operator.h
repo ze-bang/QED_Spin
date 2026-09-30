@@ -14,8 +14,6 @@
 // ------------------
 //   * Construction:        Operator(n_bits, spin_l)
 //   * Term mutation:       addOneBodyTerm / addTwoBodyTerm / addThreeBodyTerm
-//                          (plus loadFromFile / loadFromInterAllFile /
-//                          loadThreeBodyTerm for HPhi-style text loaders)
 //   * Matvec:              apply / apply_real (route through CpuMatVecBackend)
 //   * Properties:          isReal, dim, memory_space, is_hermitian
 //   * Assembled matrix:    getSparseMatrix (for dense diagonalisation /
@@ -31,10 +29,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
-#include <fstream>
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -657,7 +653,7 @@ public:
     // The default tolerance (1e-15) is the IEEE-754 round-off floor; raise
     // it if you load coefficients from low-precision text files.
     //
-    // Result is cached per-operator; addOneBodyTerm() / loadFromFile() / etc.
+    // Result is cached per-operator; addOneBodyTerm() / addTwoBodyTerm() / etc.
     // invalidate the cache via invalidateMatrixCaches().
     // ========================================================================
 
@@ -727,126 +723,6 @@ public:
         mat.setFromTriplets(triplets.begin(), triplets.end());
         return mat;
     }
-
-    // ========================================================================
-    // HPhi-style text loaders.
-    //
-    // All three files share the same 5-line header
-    //   <separator>
-    //   <label>  <num_terms>
-    //   <separator>
-    //   <separator>
-    //   <separator>
-    // followed by ``num_terms`` data lines. ``open_hphi_file_`` parses that
-    // header and positions the stream at the first data line.
-    // ========================================================================
-
-    void loadFromFile(const std::string& filename) {
-        std::ifstream file;
-        uint64_t numLines = open_hphi_file_(filename, file);
-        std::string line;
-        uint64_t lineCount = 0;
-        while (std::getline(file, line) && lineCount < numLines) {
-            std::istringstream lineStream(line);
-            uint64_t Op, indx;
-            double E, F;
-            if (!(lineStream >> Op >> indx >> E >> F)) continue;
-            Complex coeff(E, F);
-            if (std::abs(coeff) < 1e-15) continue;
-
-            if (indx >= n_bits_) {
-                throw std::runtime_error("Trans.dat: site index " + std::to_string(indx) +
-                    " >= num_sites " + std::to_string(n_bits_) +
-                    " at line " + std::to_string(lineCount + 1));
-            }
-            addOneBodyTerm(static_cast<uint8_t>(Op), indx, coeff);
-            ++lineCount;
-        }
-    }
-
-    void loadFromInterAllFile(const std::string& filename) {
-        std::ifstream file;
-        uint64_t numLines = open_hphi_file_(filename, file);
-        std::string line;
-        uint64_t lineCount = 0;
-        while (std::getline(file, line) && lineCount < numLines) {
-            std::istringstream lineStream(line);
-            uint64_t Op_i, indx_i, Op_j, indx_j;
-            double E, F;
-            if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
-            Complex coeff(E, F);
-            if (std::abs(coeff) < 1e-15) continue;
-
-            if (indx_i >= n_bits_ || indx_j >= n_bits_) {
-                throw std::runtime_error(
-                    "Site index out of bounds in " + filename + ": found site " +
-                    std::to_string(std::max(indx_i, indx_j)) + " but num_sites=" +
-                    std::to_string(n_bits_) +
-                    ". Check --num_sites parameter matches Hamiltonian file.");
-            }
-            addTwoBodyTerm(static_cast<uint8_t>(Op_i), indx_i,
-                           static_cast<uint8_t>(Op_j), indx_j, coeff);
-            ++lineCount;
-        }
-    }
-
-    /// HPhi-style 3-body file: ``op_i site_i op_j site_j op_k site_k re im``.
-    /// Matches ``ed::input::write_three_body_file``.
-    void loadThreeBodyTerm(const std::string& filename) {
-        std::ifstream file;
-        uint64_t numLines = open_hphi_file_(filename, file);
-        std::string line;
-        uint64_t lineCount = 0;
-        uint64_t skipped_oob = 0;
-        while (std::getline(file, line) && lineCount < numLines) {
-            std::istringstream lineStream(line);
-            uint64_t op_i, site_i, op_j, site_j, op_k, site_k;
-            double real_part, imag_part;
-            if (!(lineStream >> op_i >> site_i >> op_j >> site_j
-                            >> op_k >> site_k >> real_part >> imag_part)) {
-                continue;
-            }
-            Complex coeff(real_part, imag_part);
-            if (std::abs(coeff) < 1e-15) continue;
-
-            if (site_i >= n_bits_ || site_j >= n_bits_ || site_k >= n_bits_) {
-                ++skipped_oob;
-                ++lineCount;
-                continue;
-            }
-            addThreeBodyTerm(static_cast<uint8_t>(op_i), site_i,
-                             static_cast<uint8_t>(op_j), site_j,
-                             static_cast<uint8_t>(op_k), site_k,
-                             coeff);
-            ++lineCount;
-        }
-
-        std::cout << "Loaded " << three_body_data_.size() << " three-body terms from "
-                  << filename;
-        if (skipped_oob > 0) {
-            std::cout << " (skipped " << skipped_oob << " out-of-bounds terms)";
-        }
-        std::cout << std::endl;
-    }
-
-    /// Unit-weight one/two-body convenience setters used by the
-    /// correlation-function builder in ed_wrapper.h. They mirror the
-    /// HPhi correlation-file semantics where the file's E/F columns are
-    /// ignored and the operator carries weight 1.
-    void loadonebodycorrelation(uint64_t Op, uint64_t indx) {
-        addOneBodyTerm(static_cast<uint8_t>(Op), indx, Complex(1.0, 0.0));
-    }
-    void loadtwobodycorrelation(uint64_t Op1, uint64_t indx1,
-                                uint64_t Op2, uint64_t indx2) {
-        addTwoBodyTerm(static_cast<uint8_t>(Op1), indx1,
-                       static_cast<uint8_t>(Op2), indx2, Complex(1.0, 0.0));
-    }
-
-    // Symmetry-adapted basis & block assembly live in
-    // ed/core/streaming_symmetry.h (single-rank / disk-streaming) and
-    // ed/distributed/distributed_symmetry_operator.h (MPI). Those
-    // canonical pipelines own their own block builders; Operator no
-    // longer carries any text/HDF5 symmetry-block API of its own.
 
 protected:
     // -------------------------------------------------------------------
@@ -975,30 +851,6 @@ protected:
         tv.spin_l      = static_cast<double>(spin_l_);
         tv.is_real     = isReal();
         return tv;
-    }
-
-    /// Parse the 5-line HPhi text header and position ``out_stream`` at
-    /// the first data line. Returns the number of data lines to read.
-    /// Header layout:
-    ///   <separator>
-    ///   <label> <num_terms>
-    ///   <separator>
-    ///   <separator>
-    ///   <separator>
-    static uint64_t open_hphi_file_(const std::string& filename,
-                                    std::ifstream& out_stream) {
-        out_stream.open(filename);
-        if (!out_stream.is_open()) {
-            throw std::runtime_error("Could not open file: " + filename);
-        }
-        std::string line, label;
-        std::getline(out_stream, line);              // separator
-        std::getline(out_stream, line);              // "<label> <num>"
-        std::istringstream iss(line);
-        uint64_t num_terms = 0;
-        iss >> label >> num_terms;
-        for (uint64_t i = 0; i < 3; ++i) std::getline(out_stream, line);
-        return num_terms;
     }
 };
 

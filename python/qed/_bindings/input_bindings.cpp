@@ -10,23 +10,16 @@
 //   * Lattice                     - geometry container (positions, sublattice,
 //                                   nn_bonds, nnn_bonds, nnnn_bonds, label,
 //                                   pbc, lattice_vectors).
-//   * lattice.chain / square /    - generators that mirror the legacy
-//     triangular / honeycomb /      `python/edlib/helper_*.py` family.
+//   * lattice.chain / square /    - lattice generators
+//     triangular / honeycomb /
 //     kagome / pyrochlore /
 //     from_neighbor_lists /
 //     from_cluster_file
 //   * HamiltonianBuilder          - fluent term accumulator.
-//   * FileOptions                 - directory-output configuration.
-//   * Free file writers           - low-level `Trans.dat` / `InterAll.dat` /
-//                                   `ThreeBodyG.dat` / `positions.dat` /
-//                                   `one_body_correlations*.dat` /
-//                                   `two_body_correlations**.dat` /
-//                                   momentum-projected observable writers.
 //
 // `HamiltonianBuilder.to_operator()` returns a `qed.Operator`, the
 // same Python class produced by `Operator(num_sites)` -- so users can drop
-// the result straight into `lanczos`, `full_diagonalization`,
-// `finite_temperature_lanczos`, etc.
+// the result straight into `qed.eigs`, `qed.thermal`, `qed.dynamics`, ...
 //
 // The Python-side facade in `python/qed/input.py` re-exports this
 // submodule under `qed.input`.
@@ -55,12 +48,10 @@ namespace py = pybind11;
 namespace {
 
 using ed::input::Bond;
-using ed::input::FileOptions;
 using ed::input::HamiltonianBuilder;
 using ed::input::Lattice;
 using ed::input::Op;
 using ed::input::Plaquette;
-using ed::input::Position;
 
 using BondPair = std::pair<std::size_t, std::size_t>;
 
@@ -112,8 +103,7 @@ inline std::vector<std::array<std::size_t, 4>> plaquettes_from_py(
 void bind_input(py::module_& parent) {
     py::module_ m = parent.def_submodule(
         "input",
-        "Standalone C++ lattice + Hamiltonian builder library "
-        "(replaces python/edlib/helper_*.py).");
+        "Lattices and the Hamiltonian builder (the ed::input library).");
 
     // ---------------------------------------------------------------------
     // Op enum
@@ -210,24 +200,6 @@ void bind_input(py::module_& parent) {
            py::arg("path"));
 
     // ---------------------------------------------------------------------
-    // FileOptions
-    // ---------------------------------------------------------------------
-    py::class_<FileOptions>(m, "FileOptions", R"pbdoc(
-        Output configuration for `HamiltonianBuilder.write_directory`.
-    )pbdoc")
-        .def(py::init<>())
-        .def_readwrite("trans_filename", &FileOptions::trans_filename)
-        .def_readwrite("inter_all_filename", &FileOptions::inter_all_filename)
-        .def_readwrite("three_body_filename", &FileOptions::three_body_filename)
-        .def_readwrite("positions_filename", &FileOptions::positions_filename)
-        .def_readwrite("tol", &FileOptions::tol)
-        .def_readwrite("one_body_obs", &FileOptions::one_body_obs)
-        .def_readwrite("two_body_obs", &FileOptions::two_body_obs)
-        .def_readwrite("write_positions", &FileOptions::write_positions)
-        .def_readwrite("write_lattice_metadata",
-                       &FileOptions::write_lattice_metadata);
-
-    // ---------------------------------------------------------------------
     // HamiltonianBuilder
     // ---------------------------------------------------------------------
     py::class_<HamiltonianBuilder>(m, "HamiltonianBuilder", R"pbdoc(
@@ -235,9 +207,7 @@ void bind_input(py::module_& parent) {
 
         Accumulates one-/two-/three-body terms in the canonical (S+, S-, Sz)
         basis used by `qed.Operator`. Materialise the result via
-        :meth:`to_operator` (in-memory, no file I/O) or :meth:`write_directory`
-        (legacy `InterAll.dat` / `Trans.dat` / `ThreeBodyG.dat` /
-        `positions.dat` files consumed by the production `./ED` driver).
+        :meth:`to_operator`.
     )pbdoc")
         .def(py::init<std::size_t, double>(),
              py::arg("num_sites"), py::arg("spin") = 0.5)
@@ -392,16 +362,6 @@ void bind_input(py::module_& parent) {
              },
              py::arg("operator"),
              "Append the accumulated terms onto an existing operator.")
-        .def("write_directory",
-             [](const HamiltonianBuilder& self, const std::string& output_dir,
-                const Lattice* lat, const FileOptions& opts) {
-                 self.write_directory(output_dir, lat, opts);
-             },
-             py::arg("output_dir"),
-             py::arg("lattice") = static_cast<const Lattice*>(nullptr),
-             py::arg("opts") = FileOptions{},
-             "Write the legacy directory format (`InterAll.dat`, `Trans.dat`, "
-             "`ThreeBodyG.dat`, `positions.dat`) read by `Operator.load_inter_all` / `load_trans`.")
 
         // Inspection -----------------------------------------------------
         .def_property_readonly("num_sites", &HamiltonianBuilder::num_sites)
@@ -414,30 +374,4 @@ void bind_input(py::module_& parent) {
                    self.two_body_terms().size() +
                    self.three_body_terms().size();
         });
-
-    // ---------------------------------------------------------------------
-    // Free file writers (low-level escape hatches matching file_io.h)
-    // ---------------------------------------------------------------------
-    py::module_ mio = m.def_submodule(
-        "io",
-        "Low-level Trans.dat / InterAll.dat / ThreeBodyG.dat / positions.dat "
-        "writers (most users want HamiltonianBuilder.write_directory).");
-
-    mio.def("write_one_body_correlation_file",
-            &ed::input::write_one_body_correlation_file,
-            py::arg("path"), py::arg("op"), py::arg("num_sites"));
-    mio.def("write_two_body_correlation_file",
-            &ed::input::write_two_body_correlation_file,
-            py::arg("path"), py::arg("op_i"), py::arg("op_j"),
-            py::arg("num_sites"));
-    mio.def("write_positions_file", &ed::input::write_positions_file,
-            py::arg("path"), py::arg("positions"));
-    mio.def("write_momentum_observable_file",
-            [](const std::string& path, Op op,
-               const std::array<double, 3>& q,
-               const std::vector<Position>& positions) {
-                ed::input::write_momentum_observable_file(path, op, q, positions);
-            },
-            py::arg("path"), py::arg("op"), py::arg("q"),
-            py::arg("positions"));
 }

@@ -1,14 +1,10 @@
 """Tests for the standalone ``qed.input`` C++ library bindings.
 
-Cross-checks ``HamiltonianBuilder`` against exact values and against
-``Operator.load_trans`` / ``Operator.load_inter_all`` round-trips for a
+Cross-checks ``HamiltonianBuilder`` and the lattice generators against exact values for a
 handful of textbook lattices.
 """
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import numpy as np
 import pytest
@@ -100,30 +96,6 @@ def test_pyrochlore_non_kramers_runs_without_error():
     e = _ground_state(H)
     # Spectrum must be finite real number.
     assert np.isfinite(e)
-
-
-# ----------------------------------------------------------------------
-# write_directory roundtrip vs in-process Operator
-# ----------------------------------------------------------------------
-
-def test_write_directory_roundtrip_matches_in_memory():
-    lat = lattice.chain(4, pbc=False)
-    builder = (qinput.HamiltonianBuilder(lat.num_sites)
-                     .heisenberg(lat.nn_pairs(), 1.0))
-
-    with tempfile.TemporaryDirectory() as td:
-        builder.write_directory(td, lattice=lat)
-        assert os.path.exists(os.path.join(td, "Trans.dat"))
-        assert os.path.exists(os.path.join(td, "InterAll.dat"))
-        assert os.path.exists(os.path.join(td, "positions.dat"))
-
-        op_loaded = qed.Operator(lat.num_sites)
-        op_loaded.load_trans(os.path.join(td, "Trans.dat"))
-        op_loaded.load_inter_all(os.path.join(td, "InterAll.dat"))
-
-        e_loaded = _ground_state(op_loaded)
-        e_inmem = _ground_state(builder.to_operator())
-        assert np.isclose(e_loaded, e_inmem, atol=1e-10)
 
 
 # ----------------------------------------------------------------------

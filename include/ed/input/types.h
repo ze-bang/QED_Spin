@@ -2,14 +2,12 @@
 // include/ed/input/types.h
 //
 // Common types for the ed_input library: spin operator enum, term records,
-// and small typedefs shared between lattice geometry, the Hamiltonian
-// builder, and the file writers.
+// and small typedefs shared by the lattice geometry and the Hamiltonian
+// builder.
 //
 // All terms speak the canonical (S+, S-, Sz) basis used by the C++
-// `Operator` (`include/ed/core/construct_ham.h`). This is the same basis
-// used in `Trans.dat` / `InterAll.dat` / `ThreeBodyG.dat`, so writing
-// these files (or building a programmatic `Operator`) is a one-step
-// translation with no extra basis change.
+// `Operator` (`include/ed/core/construct_ham.h`), so building an Operator is a
+// one-step translation with no basis change.
 // =============================================================================
 
 #pragma once

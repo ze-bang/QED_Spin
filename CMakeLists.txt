@@ -383,7 +383,7 @@ endif()
 #
 # A small, fast set of regression tests that exercise the matrix-free Operator
 # path, the fixed-Sz operator, full diagonalization, every Lanczos-family
-# solver, the in-memory basis buffer, and the Trans.dat/InterAll.dat loaders.
+# solver and the in-memory basis buffer.
 # Enable with `-DBUILD_ED_TESTS=ON` (defaults to ON) and run with `ctest`.
 # =============================================================================
 option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
@@ -581,9 +581,7 @@ if(BUILD_ED_TESTS)
     # 1M-entry stress vs unordered_map oracle (memory + correctness).
     ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
 
-    ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
-    # ed_input library lockdown (lattice generators + HamiltonianBuilder +
-    # write_directory roundtrip vs Operator::loadFromDirectory).
+    # ed_input library lockdown (lattice generators + HamiltonianBuilder).
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
     target_link_libraries(test_input_library PRIVATE ed_input)
     # Retired in the minimalist-architecture rev (May 2026):

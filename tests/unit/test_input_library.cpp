@@ -1,8 +1,8 @@
 // =============================================================================
 // test_input_library (Catch2 v3)
 //
-// Lockdown for the standalone `ed::input` C++ library that replaces the
-// Python `edlib/helper_*.py` workflow. Coverage:
+// Lockdown for the standalone `ed::input` C++ library (lattices and the
+// Hamiltonian builder). Coverage:
 //
 //   1. `lattice::chain` produces the expected NN bond structure (PBC + OBC).
 //   2. `lattice::square` produces |E| = 2 * Lx * Ly under PBC.
@@ -11,10 +11,7 @@
 //   4. `HamiltonianBuilder::heisenberg` materialises the same matrix-free
 //      Operator as the existing programmatic `build_heisenberg_chain`
 //      fixture (spectra match to 1e-12).
-//   5. `HamiltonianBuilder::write_directory` -> `Operator::loadFromDirectory`
-//      round-trips the same Heisenberg chain (loader path + builder path
-//      give identical spectra).
-//   6. `HamiltonianBuilder::xxz` collapses to the Heisenberg case when
+//   5. `HamiltonianBuilder::xxz` collapses to the Heisenberg case when
 //      Jxy == Jz.
 // =============================================================================
 
@@ -25,7 +22,6 @@
 
 #include <Eigen/Dense>
 #include <complex>
-#include <filesystem>
 #include <memory>
 #include <vector>
 
@@ -91,39 +87,6 @@ TEST_CASE("HamiltonianBuilder::heisenberg matches programmatic Operator",
                  std::max(ref.H.norm(), 1e-30);
     INFO("||H_built - H_ref|| / ||H_ref|| = " << err);
     REQUIRE(err < 1e-12);
-}
-
-TEST_CASE("HamiltonianBuilder::write_directory + loadFromDirectory roundtrip",
-          "[input][builder][io]") {
-    const uint64_t N = 4;
-    const uint64_t dim = 1ULL << N;
-    auto chain = lat::chain(N, /*pbc=*/false);
-
-    HamiltonianBuilder builder(N);
-    builder.heisenberg(chain.nn_pairs(), 1.0);
-
-    std::string dir = make_scratch_dir("input_builder_io");
-    ed::input::FileOptions opts;
-    opts.write_lattice_metadata = true;
-    builder.write_directory(dir, &chain, opts);
-
-    REQUIRE(std::filesystem::exists(dir + "/Trans.dat"));
-    REQUIRE(std::filesystem::exists(dir + "/InterAll.dat"));
-    REQUIRE(std::filesystem::exists(dir + "/positions.dat"));
-
-    auto op_loaded = std::make_unique<Operator>(N, 0.5f);
-    op_loaded->loadFromFile(dir + "/Trans.dat");
-    op_loaded->loadFromInterAllFile(dir + "/InterAll.dat");
-    auto loaded = reference_from_operator(*op_loaded, dim);
-
-    auto op_ref = build_heisenberg_chain(N, 1.0);
-    auto ref = reference_from_operator(*op_ref, dim);
-
-    require_eigs_close(loaded.eigs, ref.eigs, dim, 1e-10,
-                       "loaded-from-builder-files vs programmatic Heisenberg");
-    double err = (loaded.H - ref.H).norm() /
-                 std::max(ref.H.norm(), 1e-30);
-    REQUIRE(err < 1e-10);
 }
 
 TEST_CASE("HamiltonianBuilder::xxz collapses to heisenberg when Jxy == Jz",

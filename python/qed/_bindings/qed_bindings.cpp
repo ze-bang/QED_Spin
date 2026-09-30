@@ -1,7 +1,7 @@
 // =============================================================================
 // python/qed/_bindings/qed_bindings.cpp -- the pybind11 module `qed._core`.
 //
-//   * Operator: the spin-1/2 Hamiltonian / observable builder (terms, file loaders,
+//   * Operator: the spin-1/2 Hamiltonian / observable builder (terms,
 //     apply, and the term iterators symmetry discovery reads);
 //   * input (input_bindings.cpp): lattices and the Hamiltonian DSL;
 //   * sectors (sectors_bindings.cpp): the symmetry-sector verbs behind qed.api;
@@ -155,15 +155,7 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
 
 
 // =============================================================================
-// Phase 9: in-process introspection helpers used by the unified workflow API
-// (`qed.workflow.find_symmetries` / `qed.workflow.diag`).
-//
-// Without these the Python facade would have to either (a) round-trip the
-// operator through `HamiltonianBuilder.write_directory` and re-parse the
-// resulting `Trans.dat` / `InterAll.dat`, or (b) crack open the C++
-// `transform_data_` POD layout from Python, which is brittle. Exposing
-// small "iterate the terms" / "is Sz conserved?"
-// helpers gives symmetry discovery a clean, type-safe surface.
+// Term iterators and the Sz-conservation check, read by symmetry discovery (qed.discovery).
 // =============================================================================
 
 // Returns true iff every (one-, two-, three-body) term commutes with total
@@ -324,12 +316,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("op_type_3"), py::arg("site_3"),
              py::arg("coeff"),
              "Append a three-body term `coeff * Op1[s1] Op2[s2] Op3[s3]`.")
-        .def("load_trans", &Operator::loadFromFile,
-             py::arg("filename"),
-             "Load one-body terms from an mVMC-style Trans.dat file.")
-        .def("load_inter_all", &Operator::loadFromInterAllFile,
-             py::arg("filename"),
-             "Load two-body terms from an mVMC-style InterAll.dat file.")
         .def("apply", &op_apply,
              py::arg("vec"),
              "Compute H * v on a 1-D complex128 array.")

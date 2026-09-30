@@ -19,11 +19,11 @@ Permutation = list[int]
 def _operator_to_graph_records(
     operator: Operator,
 ) -> tuple[dict[int, tuple[int, float, float]], list[dict[str, Any]]]:
-    """Build (vertex_weights, edges) records the legacy
+    """Build (vertex_weights, edges) records the
     ``automorphism_finder`` routines consume."""
     num_sites = int(operator.num_sites)
 
-    # Trans.dat-style: vertex_id -> (op_type, real, imag).
+    # One-body terms: vertex_id -> (op_type, real, imag).
     vertex_weights: dict[int, tuple[int, float, float]] = {
         i: (2, 0.0, 0.0) for i in range(num_sites)  # default: bare Sz
     }
@@ -31,7 +31,7 @@ def _operator_to_graph_records(
         c = complex(coeff)
         vertex_weights[int(site)] = (int(op_type), float(c.real), float(c.imag))
 
-    # InterAll.dat-style edges: list of dicts.
+    # Two-body terms as edges: list of dicts.
     edges: list[dict[str, Any]] = []
     for op1, s1, op2, s2, coeff in operator.iter_two_body_terms():
         c = complex(coeff)
@@ -668,7 +668,7 @@ def _find_symmetries_impl(
     # Imports kept inside the function so that find_symmetries() doesn't
     # force pynauty / networkx onto users who never call it.
     try:
-        from edlib.automorphism_finder import (  # type: ignore
+        from ._automorphism import (  # type: ignore
             AutomorphismCliqueAnalyzer,
             AutomorphismFinder,
             MaximalAbelianSubgroupFinder,

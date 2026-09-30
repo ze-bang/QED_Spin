@@ -4,8 +4,7 @@
 // Implementation of `ed::input::HamiltonianBuilder`. The builder
 // accumulates one-/two-/three-body terms in the canonical (S+, S-, Sz)
 // basis used by `class Operator` (see `include/ed/core/construct_ham.h`)
-// and emits them either as an in-process Operator or as the legacy
-// directory-of-text-files format consumed by `./ED <dir>`.
+// and emits them into an in-process Operator.
 // =============================================================================
 
 #include <ed/input/hamiltonian_builder.h>
@@ -14,14 +13,11 @@
 #include <array>
 #include <cmath>
 #include <complex>
-#include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <stdexcept>
 #include <string>
 
 #include <ed/core/construct_ham.h>
-#include <ed/input/file_io.h>
 
 namespace ed::input {
 
@@ -50,14 +46,6 @@ inline std::complex<double> non_kramer_factor(int sub_a, int sub_b) {
     return row[j];
 }
 
-inline std::string op_to_string(Op op) {
-    switch (op) {
-        case Op::Sp: return "S+";
-        case Op::Sm: return "S-";
-        case Op::Sz: return "Sz";
-    }
-    return "??";
-}
 
 }  // namespace
 
@@ -460,51 +448,6 @@ std::shared_ptr<Operator> HamiltonianBuilder::to_operator() const {
                                          static_cast<float>(spin_));
     emit_into(*op);
     return op;
-}
-
-void HamiltonianBuilder::write_directory(
-    const std::string& output_dir,
-    const Lattice* lat,
-    const FileOptions& opts) const {
-    namespace fs = std::filesystem;
-    fs::create_directories(output_dir);
-    const std::string trans_path = output_dir + "/" + opts.trans_filename;
-    const std::string inter_path = output_dir + "/" + opts.inter_all_filename;
-    write_trans_file(trans_path, one_body_, opts.tol);
-    write_inter_all_file(inter_path, two_body_, opts.tol);
-    if (!three_body_.empty()) {
-        write_three_body_file(output_dir + "/" + opts.three_body_filename,
-                              three_body_, opts.tol);
-    }
-    if (lat && opts.write_positions) {
-        write_positions_file(output_dir + "/" + opts.positions_filename,
-                             lat->positions);
-    }
-    // Observable files
-    for (Op op : opts.one_body_obs) {
-        const std::string name =
-            "one_body_correlations" + op_to_string(op) + ".dat";
-        write_one_body_correlation_file(output_dir + "/" + name, op,
-                                        num_sites_);
-    }
-    for (auto [oa, ob] : opts.two_body_obs) {
-        const std::string name = "two_body_correlations" +
-                                 op_to_string(oa) + op_to_string(ob) + ".dat";
-        write_two_body_correlation_file(output_dir + "/" + name, oa, ob,
-                                        num_sites_);
-    }
-    if (lat && opts.write_lattice_metadata) {
-        std::ofstream meta(output_dir + "/lattice.json");
-        meta << "{\n  \"num_sites\": " << num_sites_ << ",\n";
-        meta << "  \"label\": \"" << lat->label << "\",\n";
-        meta << "  \"pbc\": " << (lat->pbc ? "true" : "false") << ",\n";
-        meta << "  \"sublattice\": [";
-        for (std::size_t i = 0; i < lat->sublattice.size(); ++i) {
-            meta << lat->sublattice[i];
-            if (i + 1 < lat->sublattice.size()) meta << ", ";
-        }
-        meta << "]\n}\n";
-    }
 }
 
 double HamiltonianBuilder::l1_norm() const noexcept {
