@@ -306,7 +306,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
             acc += r->level.multiplicity;
             if (acc >= static_cast<std::uint64_t>(o.k)) { kth = r->level.energy; break; }
         }
-        if (c.estimate > kth + o.prune_margin * std::max(1.0, std::abs(kth))) {
+        if (c.estimate > kth + std::max(o.prune_margin * std::max(1.0, std::abs(kth)), o.window)) {
             ++res.pruned_blocks;
             continue;
         }
@@ -325,14 +325,15 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     std::uint64_t acc = 0;
     double cut = std::numeric_limits<double>::infinity();
     for (const auto& r : rows) {
+        if (std::isfinite(cut) && !(o.window > 0.0 && r.level.energy <= cut + o.window)) break;
         res.levels.push_back(r.level);
         acc += r.level.multiplicity;
-        if (o.cut && acc >= static_cast<std::uint64_t>(o.k)) { cut = r.level.energy; break; }
+        if (o.cut && acc >= static_cast<std::uint64_t>(o.k) && !std::isfinite(cut)) cut = r.level.energy;
     }
     // A block that stopped short owes levels above its last certified one. They can lie
     // below the cut -- or fill a window that came up short -- so the window is incomplete.
     for (const auto& e : ends)
-        if (e.short_ && e.last <= cut) res.complete = false;
+        if (e.short_ && e.last <= cut + o.window) res.complete = false;
     if (!res.complete && !o.allow_partial)
         throw std::runtime_error(
             "eigs: " + std::to_string(res.partial_blocks) + " block(s) could not certify their "

@@ -9,9 +9,11 @@
 #include <ed/dssf/cross_sector_orbit_observable.h>
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
+#include <ed/observables/ftlm_dynamics_kernel.h>
 #include <ed/sectors/dynamics.h>
 #ifdef WITH_CUDA
 #include <ed/matvec/backends/cuda_backend.cuh>
+#include <ed/matvec/device_csr.h>
 #endif
 
 #include <map>
@@ -144,13 +146,14 @@ std::vector<bool> reachable(const ed::symmetry::RepSectorData& src, const std::v
     return out;
 }
 
-// The ground manifold: every level within `tol` of E0, with vectors. A vector-free sweep gives
-// each block's lowest level; only the blocks at E0 are then solved with vectors, deeper until a
+// The ground manifold: every level within `tol` of E0, with vectors. A vector-free, pruned
+// k = 1 solve with a `tol` window finds the blocks at E0 (a block whose Lanczos estimate is
+// far above E0 is never solved); only those are then solved with vectors, deeper until a
 // level above the window shows up, which catches degeneracies inside a block.
 std::vector<std::pair<Level, BlockVector>>
 ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Device device, double& e0) {
     EigsOptions eo;
-    eo.vectors = false; eo.per_block = 1; eo.cut = false; eo.device = device;
+    eo.k = 1; eo.window = tol; eo.device = device;
     const EigsResult first = eigs(H, n_sites, u, eo);
     eo.vectors = true;
     e0 = first.levels.front().energy;
@@ -167,6 +170,8 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
         for (int pb = 2;; pb *= 2) {
             EigsOptions deep = eo;
             deep.per_block = pb;
+            deep.cut       = false;
+            deep.window    = 0.0;
             const EigsResult r = eigs(H, n_sites, one, deep);
             const bool exhausted = static_cast<int>(r.levels.size()) < pb;
             if (exhausted || r.levels.back().energy > e0 + tol) {
@@ -312,49 +317,113 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
 
     // One source: FTLM against each reachable target with the same samples (seeded from the
     // source index, so the result does not depend on scheduling). A source O annihilates still
-    // weighs in the partition function.
-    auto run = [&](std::size_t i) {
-        const Job& j = jobs[i];
-        const std::size_t dim_src = j.src->rd->reps.size();
-        auto H_src = [&j](const Complex* in, Complex* o, int nn) { j.src->H->apply(in, o, static_cast<std::size_t>(nn)); };
+    // weighs in the partition function: `kernel(nullptr)` runs it against a zero O.
+    auto options = [&](std::size_t i) {
         ed::observables::FtlmCrossIrrepOptions fo;
         fo.krylov_dim  = d.krylov;
         fo.num_samples = d.samples;
         fo.broadening  = d.eta;
         fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (i + 1);
+        return fo;
+    };
+    auto observable = [&](const Job& j, const Target& t) {
+        return ed::dssf::CrossSectorOrbitObservable(
+            Ref::from_rep(*j.src->rd, static_cast<std::uint64_t>(n_sites)), 0,
+            Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0, O.transform_data_, spin);
+    };
+    auto collect = [&](const Job& j, auto&& kernel) {
         Source src;
         bool any = false;
         for (const Target* t : j.targets) {
-            ed::dssf::CrossSectorOrbitObservable obs(
-                Ref::from_rep(*j.src->rd, static_cast<std::uint64_t>(n_sites)), 0,
-                Ref::from_rep(*t->rd, static_cast<std::uint64_t>(n_sites)), 0, O.transform_data_, spin);
-            auto H_dst = [t](const Complex* in, Complex* o, int nn) { t->H->apply(in, o, static_cast<std::size_t>(nn)); };
-            auto O_ap  = [&obs](const Complex* in, Complex* o, int nn) { obs.apply(in, o, static_cast<std::size_t>(nn)); };
-            auto r = ed::observables::ftlm_cross_irrep_kernel_one_sector(
-                H_src, H_dst, O_ap, dim_src, t->rd->reps.size(), d.temperatures, d.omega, fo);
+            auto r = kernel(t);
             if (!any) { src.Z = r.Z; src.emin = r.E_min; any = true;
                         for (double T : d.temperatures) src.S[T].assign(nW, 0.0); }
             for (double T : d.temperatures)
                 for (std::size_t w = 0; w < nW; ++w) src.S[T][w] += r.S_real.at(T)[w];
         }
         if (!any) {
-            auto zero = [](const Complex*, Complex* o, int nn) { std::fill(o, o + nn, Complex(0, 0)); };
-            auto r = ed::observables::ftlm_cross_irrep_kernel_one_sector(
-                H_src, H_src, zero, dim_src, dim_src, d.temperatures, d.omega, fo);
+            auto r = kernel(nullptr);
             src.Z = r.Z; src.emin = r.E_min;
             for (double T : d.temperatures) src.S[T].assign(nW, 0.0);
         }
         return src;
     };
+    auto run = [&](std::size_t i) {
+        const Job& j = jobs[i];
+        const auto fo = options(i);
+        const std::size_t dim_src = j.src->rd->reps.size();
+        auto H_src = [&j](const Complex* in, Complex* o, int nn) { j.src->H->apply(in, o, static_cast<std::size_t>(nn)); };
+        return collect(j, [&](const Target* t) {
+            if (!t) {
+                auto zero = [](const Complex*, Complex* o, int nn) { std::fill(o, o + nn, Complex(0, 0)); };
+                return ed::observables::ftlm_cross_irrep_kernel_one_sector(
+                    H_src, H_src, zero, dim_src, dim_src, d.temperatures, d.omega, fo);
+            }
+            const auto obs = observable(j, *t);
+            auto H_dst = [t](const Complex* in, Complex* o, int nn) { t->H->apply(in, o, static_cast<std::size_t>(nn)); };
+            auto O_ap  = [&obs](const Complex* in, Complex* o, int nn) { obs.apply(in, o, static_cast<std::size_t>(nn)); };
+            return ed::observables::ftlm_cross_irrep_kernel_one_sector(
+                H_src, H_dst, O_ap, dim_src, t->rd->reps.size(), d.temperatures, d.omega, fo);
+        });
+    };
+    // The same estimator with both Krylov bases, H and O on the device.
+    auto run_device = [&](std::size_t i) {
+#ifdef WITH_CUDA
+        const Job& j = jobs[i];
+        const auto fo = options(i);
+        const std::size_t dim_src = j.src->rd->reps.size();
+        ed::matvec::CudaBackend cbe;
+        j.src->H->enable_device(true);
+        const auto H_src = j.src->H->bind_cuda();
+        return collect(j, [&](const Target* t) {
+            if (!t) {
+                auto zero = [&cbe](const Complex*, Complex* o, std::size_t nn) { cbe.fill_zero(o, nn); };
+                return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, dim_src, dim_src,
+                                                             d.temperatures, d.omega, fo);
+            }
+            const auto obs = observable(j, *t);
+            const std::size_t dim_dst = t->rd->reps.size();
+            t->H->enable_device(true);
+            const auto H_dst = t->H->bind_cuda();
+            ed::matvec::DeviceMatvecFn O_ap;
+            if (const auto c = obs.csr(); c.row_ptr)
+                O_ap = ed::matvec::make_device_csr_matvec(c.row_ptr, c.col, c.val, c.rows, c.nnz);
+            else    // no CSR within budget: stage through the host walk
+                O_ap = [&obs, &cbe, dim_src](const Complex* in, Complex* o, std::size_t nn) {
+                    std::vector<Complex> hi(dim_src), ho(nn);
+                    cbe.copy_to_host(in, hi.data(), dim_src);
+                    obs.apply(hi.data(), ho.data(), nn);
+                    cbe.copy_from_host(ho.data(), o, nn);
+                };
+            return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, O_ap, dim_src, dim_dst,
+                                                         d.temperatures, d.omega, fo);
+        });
+#else
+        return run(i);
+#endif
+    };
 
-    // Small sectors run concurrently, one thread each: at a few thousand states a Lanczos step
-    // is too short for a thread team (measured 8x slower at 32 threads than at 4). Large ones
-    // run one at a time with every thread.
+    // On a device every source large enough to fill it (all of them for Device::Gpu) runs
+    // there, one at a time.
     std::vector<Source> sources(jobs.size());
-    std::vector<std::size_t> small, large;
-    for (std::size_t i = 0; i < jobs.size(); ++i)
-        (jobs[i].src->rd->reps.size() < (std::size_t{1} << 16) ? small : large).push_back(i);
+    std::vector<std::size_t> host_jobs, device_jobs;
+    const bool gpu_ok = d.device != Device::Cpu && ed::have_cuda();
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const std::size_t dim = jobs[i].src->rd->reps.size();
+        (gpu_ok && (d.device == Device::Gpu || dim >= (std::size_t{1} << 16)) ? device_jobs : host_jobs)
+            .push_back(i);
+    }
     auto t_k = std::chrono::steady_clock::now();
+    for (std::size_t i : device_jobs) { sources[i] = run_device(i); ++out.device_blocks; }
+    phase["ftlm kernel (device)"] += clock_since(t_k);
+
+    // On the host, small sectors run concurrently, one thread each: at a few thousand states a
+    // Lanczos step is too short for a thread team (measured 8x slower at 32 threads than at 4).
+    // Large ones run one at a time with every thread.
+    std::vector<std::size_t> small, large;
+    for (std::size_t i : host_jobs)
+        (jobs[i].src->rd->reps.size() < (std::size_t{1} << 16) ? small : large).push_back(i);
+    t_k = std::chrono::steady_clock::now();
     for (std::size_t i : small) {        // warm the lazily built operators before going parallel
         std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
         jobs[i].src->H->apply(x.data(), y.data(), x.size());

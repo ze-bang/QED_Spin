@@ -414,3 +414,23 @@ void CrossSectorOrbitObservable::apply(const Complex* in,
 }
 
 }  // namespace ed::dssf
+
+namespace ed::dssf {
+
+CrossSectorOrbitObservable::CsrView CrossSectorOrbitObservable::csr() const {
+    if (!csr_built_ && !csr_refused_) {
+        std::lock_guard<std::mutex> lock(csr_mutex_);
+        if (!csr_built_ && !csr_refused_) build_csr_();
+    }
+    CsrView v;
+    if (!csr_built_) return v;
+    v.row_ptr = csr_row_ptr_.data();
+    v.col     = csr_col_.data();
+    v.val     = csr_val_.data();
+    v.rows    = dim_dst_;
+    v.cols    = dim_src_;
+    v.nnz     = csr_val_.size();
+    return v;
+}
+
+}  // namespace ed::dssf

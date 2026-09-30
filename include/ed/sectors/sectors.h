@@ -100,6 +100,10 @@ struct EigsOptions {
     /// (relative) of the k-th level found so far. False: solve every block.
     bool   prune        = true;
     double prune_margin = 0.02;
+    /// Also keep every level within `window` (absolute) above the k-th; pruning never drops
+    /// a block that could hold one. Each block still contributes only its quota of rows, so
+    /// this finds the partners of a level in OTHER blocks (e.g. a degenerate ground state).
+    double window       = 0.0;
 };
 
 /// One eigenvalue of one block. The level occurs `multiplicity` times in the spectrum.

@@ -60,12 +60,14 @@ class EigResult:
 
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
          block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
-         device: str = "cpu", prune: bool = True) -> EigResult:
+         device: str = "cpu", prune: bool = True, window: float = 0.0) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises when a block cannot certify levels
     that may fall inside the window, unless ``allow_partial``. ``prune`` solves only the blocks
     whose short Lanczos estimate lies near the window (``prune=False``: every block).
+    ``window > 0`` also returns every block's lowest level within ``window`` above the k-th
+    (the partners of a degenerate level in other blocks); ``energies`` then lists them all.
     """
     sym = Symmetry.auto() if sym is None else sym
     spec = sym.resolve(H)
@@ -73,8 +75,9 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
                              dense_max_dim=int(dense_max_dim), block_size=int(block_size),
                              allow_partial=bool(allow_partial), device=_device.resolve(device),
-                             prune=bool(prune))
-    return EigResult(energies=np.asarray(raw.energies(int(k)), float), levels=list(raw.levels),
+                             prune=bool(prune), window=float(window))
+    rows = int(k) if window <= 0 else sum(int(L.multiplicity) for L in raw.levels)
+    return EigResult(energies=np.asarray(raw.energies(rows), float), levels=list(raw.levels),
                      k=int(k), symmetry=sym, complete=bool(raw.complete),
                      device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
                      _raw=raw, _spec=spec,

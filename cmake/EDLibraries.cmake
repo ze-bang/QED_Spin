@@ -404,6 +404,8 @@ if(WITH_CUDA)
         # observable engine: device sweep of rep_matrix_elements (CPU stub in
         # rep_matrix_elements.cpp under !WITH_CUDA)
         ${SRC_DIR}/observables/rep_matrix_elements_gpu.cu
+        # device CSR of the cross-sector probe (finite-T dynamics on GPU)
+        ${SRC_DIR}/matvec/device_csr.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

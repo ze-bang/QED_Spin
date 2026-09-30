@@ -203,17 +203,17 @@ void bind_sectors(py::module_& m) {
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,
              int dense_max_dim, int block_size, bool allow_partial, sec::Device device,
-             bool prune, double prune_margin) {
+             bool prune, double prune_margin, double window) {
               sec::EigsOptions o;
               o.k = k; o.vectors = vectors; o.dense_max_dim = dense_max_dim;
               o.block_size = block_size; o.allow_partial = allow_partial; o.device = device;
-              o.prune = prune; o.prune_margin = prune_margin;
+              o.prune = prune; o.prune_margin = prune_margin; o.window = window;
               py::gil_scoped_release nogil;
               return sec::eigs(H, n_sites, spec, o);
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("k") = 1,
           py::arg("vectors") = false, py::arg("dense_max_dim") = 64, py::arg("block_size") = 1,
           py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
-          py::arg("prune") = true, py::arg("prune_margin") = 0.02,
+          py::arg("prune") = true, py::arg("prune_margin") = 0.02, py::arg("window") = 0.0,
           "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
 }

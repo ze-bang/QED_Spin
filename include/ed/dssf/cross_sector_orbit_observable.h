@@ -205,6 +205,15 @@ public:
         };
     }
 
+    /// The rectangular matrix as CSR (row per target state), built on first use.
+    /// Empty pointers when the build was refused by ED_XSEC_CSR_BUDGET_GIB.
+    struct CsrView {
+        const std::int64_t*  row_ptr = nullptr;
+        const std::uint32_t* col     = nullptr;
+        const Complex*       val     = nullptr;
+        std::size_t          rows = 0, cols = 0, nnz = 0;
+    };
+    [[nodiscard]] CsrView csr() const;
     std::size_t dim_src() const { return dim_src_; }
     std::size_t dim_dst() const { return dim_dst_; }
 

@@ -91,10 +91,8 @@ def thermal(m, H, content, device, method, T, samples, krylov, seed):
 
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
-    if device != "cpu" and T is not None:
-        raise Missing("finite-temperature dynamics runs on the CPU only so far")
     r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
                   krylov=krylov, samples=samples, seed=7, device=device)
     if device == "gpu" and r.device_blocks == 0:
-        raise Missing("no continued fraction ran on the device")
+        raise Missing("no dynamics kernel ran on the device")
     return r.S[0]
