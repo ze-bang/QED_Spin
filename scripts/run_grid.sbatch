@@ -1,11 +1,11 @@
 #!/bin/bash
 # Run the task x symmetry x backend coverage grid (python/tests/grid) on a compute node.
 #   sbatch --account=<acct> scripts/run_grid.sbatch                        # CPU cells
-#   sbatch --account=<acct> --export=ALL,QED_VARIANT=cuda --gpus-per-node=h100:1 \
+#   sbatch --account=<acct> --export=ALL,QED_VARIANT=cuda --gpus-per-node=nvidia_h100_80gb_hbm3_1g.10gb:1 \
 #          scripts/run_grid.sbatch                                          # CPU + GPU cells
 # The measured table lands in logs/grid-<variant>-<jobid>.json. GRID_K selects cells (pytest -k).
 #SBATCH --job-name=qed_grid
-#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=32G
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=12G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 set -uo pipefail

@@ -5,8 +5,8 @@
 # Every stage runs even if an earlier one fails; the summary at the end lists each exit code.
 # GOLDEN_REF (default pre-refactor-2026-09) selects the golden reference set.
 #SBATCH --job-name=qed_gate
-#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=96G --gpus-per-node=h100:1
-#SBATCH --time=03:00:00
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=40G --gpus-per-node=nvidia_h100_80gb_hbm3_1g.10gb:1
+#SBATCH --time=04:30:00
 #SBATCH --output=logs/%x-%j.out
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
