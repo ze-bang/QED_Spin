@@ -1,8 +1,7 @@
 // =============================================================================
 // test_eigenvector_save  (Catch2 v3)
 //
-// Locks in the May 2026 contract for `ed::workflows::solve(H, opts)` and the
-// Python-named `ed::api::solve(...)` facade: whenever
+// Locks in the May 2026 contract for `ed::workflows::solve(H, opts)`:
 //
 //     opts.compute_vectors == true       (Python: compute_eigenvectors=True)
 //     opts.output_dir      != ""         (Python: output_dir="...")
@@ -24,14 +23,10 @@
 //   3. `HDF5IO::loadEigenvalues` round-trips the eigenvalues bit-for-bit.
 //   4. `HDF5IO::loadEigenvector` round-trips the ground-state vector to
 //      within a Hilbert-space phase (|<psi_loaded|psi_memory>| ~ 1).
-//
-// Plus the Python-facing `ed::api::solve(...)` smoke (one cell) asserting
-// the facade preserves the same hdf5_path contract.
 // =============================================================================
 
 #include "common/catch2_harness.h"
 
-#include <ed/api.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/core/operator.h>
 #include <ed/orchestrator.h>
@@ -138,28 +133,6 @@ TEST_CASE("ed::workflows::solve persists eigenvectors for KrylovSchur",
 TEST_CASE("ed::workflows::solve persists eigenvectors for FullDiag",
           "[orchestrator][eigenvector-save]") {
     check_solve_persists(ed::workflows::SolveMethod::FullDiag, "full");
-}
-
-TEST_CASE("ed::api::solve mirrors the hdf5_path contract",
-          "[api-mirror][eigenvector-save]") {
-    auto H = heisen();
-    const std::string outdir = make_scratch_dir("api_save", "lanczos");
-
-    ed::api::SolveOptions opts;
-    opts.num_eigenvalues     = 1;
-    opts.solver              = "lanczos";
-    opts.compute_eigenvectors = true;
-    opts.tolerance           = 1e-12;
-    opts.output_dir          = outdir;
-
-    auto R = ed::api::solve(*H, opts);
-
-    CHECK(std::filesystem::exists(outdir + "/ed_results.h5"));
-    CHECK(R.hdf5_path == outdir + "/ed_results.h5");
-    REQUIRE(R.eigenvectors.has_value());
-    REQUIRE(!R.eigenvectors->host.empty());
-
-    std::filesystem::remove_all(outdir);
 }
 
 TEST_CASE("ed::workflows::solve leaves hdf5_path empty when output_dir is unset",

@@ -144,11 +144,6 @@ add_library(ed_core STATIC
     # multiple-definition / undefined-reference traps of a single
     # source compiled into both libraries.
     ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cpp
-    # Phase A operator-collapse GPU parity (Jun 2026) -- CPU-only stub
-    # for ed::symmetry::SectorOperator::bind_cuda(). Empty TU under
-    # WITH_CUDA (strong def comes from sector_operator_gpu.cu in
-    # ed_solvers_gpu below); throwing stub when WITH_CUDA is OFF.
-    ${SRC_DIR}/symmetry/sector_operator_gpu.cpp
     # Phase 2a operator-collapse GPU parity (Jun 2026) -- WEAK ed_core
     # fallbacks for the NON-VIRTUAL GPU mirror hooks on Operator /
     # FixedSzOperator (cuda_mirror_available_ + bind_cuda_*_impl_). Under
@@ -221,7 +216,6 @@ set_target_properties(ed_matvec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
 # -----------------------------------------------------------------------------
 set(ED_SOLVERS_CPU_SOURCES
-    ${SOLVERS_CPU_DIR}/observables.cpp
     ${SOLVERS_CPU_DIR}/lanczos.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
@@ -233,16 +227,9 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_sectors_dynamics.cpp
     ${SRC_DIR}/solvers/little_group/lg_sectors_expect.cpp
     ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
-    ${SRC_DIR}/solvers/little_group/lg_spectrum.cpp
     ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp
     ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
-    ${SRC_DIR}/solvers/little_group/lg_thermal.cpp
-    ${SRC_DIR}/solvers/little_group/lg_vectors.cpp
-    ${SRC_DIR}/solvers/little_group/lg_observables.cpp
-    ${SRC_DIR}/solvers/little_group/lg_matrix_elements.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
-    ${SRC_DIR}/observables/masked_program.cpp
-    ${SRC_DIR}/observables/rep_matrix_elements.cpp
     # WP14: the ~2700-line src/orchestrator.cpp was split by concern into
     # src/orchestrator/ (pure move; see orchestrator_internal.h for the
     # file map). orch_solve.cpp is the single TU that instantiates the
@@ -251,15 +238,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/orchestrator/orch_common.cpp
     ${SRC_DIR}/orchestrator/orch_solve.cpp
     ${SRC_DIR}/orchestrator/orch_thermal.cpp
-    ${SRC_DIR}/orchestrator/orch_spectral.cpp
-    ${SRC_DIR}/orchestrator/orch_su2.cpp
-    # Phase A of the "mirror examples" plan (May 2026): Python-named
-    # kwargs facade + small helpers (build introspection, find_symmetries,
-    # estimate_resources, suggest_workflow, thermal_auto). Implementation
-    # is header-light, lives alongside the orchestrator TUs.
-    ${SRC_DIR}/api/api_facade.cpp
-    ${SRC_DIR}/api/build_introspection.cpp
-    ${SRC_DIR}/api/symmetry_helpers.cpp
     # (execution-planner "dictator" + feasibility advisor removed: sensible
     #  defaults + env-override leaf policy hooks instead.)
 )
@@ -268,12 +246,8 @@ add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
 
-# Phase A of the "mirror examples" plan (May 2026): the Python-mirror
-# facade `src/api/symmetry_helpers.cpp` calls `ed::sym::translation_group_1d`
-# / `group_from_generators`, which live in `ed_symmetry`. Pull the
-# library into ed_solvers_cpu's PUBLIC link surface so downstream
-# consumers (tests, examples, new SDK callers) do not have to remember
-# the dep.
+# ed_symmetry (the permutation DSL, group closure) and ed_dssf (observable
+# assembly) are part of ed_solvers_cpu's public link surface.
 target_link_libraries(ed_solvers_cpu PUBLIC ed_symmetry ed_dssf)
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
@@ -390,11 +364,6 @@ if(WITH_CUDA)
         # twin is an empty TU when WITH_CUDA is ON, so there is no
         # multiple-definition risk.
         ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
-        # Phase A operator-collapse GPU parity (Jun 2026) -- strong def of
-        # ed::symmetry::SectorOperator::bind_cuda(), built once into
-        # ed_solvers_gpu (reuses make_sector_matvec_gpu from the mirror TU
-        # above). The ed_core .cpp twin is an empty TU under WITH_CUDA.
-        ${SRC_DIR}/symmetry/sector_operator_gpu.cu
         # Phase 2a operator-collapse GPU parity (Jun 2026) -- STRONG defs of
         # the Operator / FixedSzOperator GPU mirror hooks
         # (cuda_mirror_available_ + bind_cuda_*_impl_), routing the
@@ -402,9 +371,6 @@ if(WITH_CUDA)
         # CudaMatVecBackend. Override the weak ed_core fallbacks
         # (operator_gpu.cpp) wherever this archive is linked.
         ${CORE_DIR}/operator_gpu.cu
-        # observable engine: device sweep of rep_matrix_elements (CPU stub in
-        # rep_matrix_elements.cpp under !WITH_CUDA)
-        ${SRC_DIR}/observables/rep_matrix_elements_gpu.cu
         # device CSR of the cross-sector probe (finite-T dynamics on GPU)
         ${SRC_DIR}/matvec/device_csr.cu
     )

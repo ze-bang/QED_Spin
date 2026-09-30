@@ -1,5 +1,5 @@
 // =============================================================================
-// src/solvers/little_group/lg_block_solve.cpp -- per-block eigensolves (dense / Lanczos), crossover, star filter
+// src/solvers/little_group/lg_block_solve.cpp -- per-block eigensolves (dense / Lanczos / Krylov-Schur), crossover
 // Part of the little-group engine; see lg_internal.h for the file map.
 // =============================================================================
 
@@ -77,7 +77,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 }
 
 // Shared dense/Lanczos crossover for the lowest-k path. Kept in one place so
-// the GPU deferred-batch lane below makes exactly the same dense-vs-Lanczos
+// the device lane of the sectors eigensolve (lg_sectors.cpp) makes exactly the same dense-vs-Lanczos
 // decision as the CPU ``solve_block_lowest``.
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
     // DEFAULT iteration cap on purpose (not lg_lowest_max_iter): raising
@@ -107,16 +107,6 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
     if (const long long df = ed::env::integer("ED_SYM_LG_DENSE_FLOOR", -1); df >= 0)
         dense_floor = static_cast<std::uint64_t>(df);
     return dense_floor;
-}
-
-// Batched-GPU-eigensolve gate: opt.use_gpu is the request; ED_SYM_LG_GPU=0 is
-// the global little-group GPU veto (same env var that gates the rep-gather);
-// a present device is required. Failures inside the lane degrade to the CPU
-// path (the engine's graceful-degradation contract).
-[[nodiscard]] bool lg_gpu_eigensolve_enabled(const LittleGroupOptions& opt) {
-    if (!opt.use_gpu) return false;
-    if (!ed::env::flag("ED_SYM_LG_GPU", true)) return false;   // =0 vetoes
-    return ed::have_cuda();
 }
 
 // Several lowest levels of one block above the dense crossover: thick-restart
@@ -443,57 +433,46 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     return keep;
 }
 
-// Dimension of the (n_up | parity | full) subspace this walk must tile.
-[[nodiscard]] std::uint64_t
-subspace_dim_of(int n_sites, const LittleGroupOptions& opt) {
-    if (opt.n_up >= 0) {
-        long double c = 1.0L;
-        const int kk = std::min(opt.n_up, n_sites - opt.n_up);
-        for (int i = 0; i < kk; ++i)
-            c = c * (n_sites - i) / (i + 1);
-        return static_cast<std::uint64_t>(c + 0.5L);
-    }
-    if (opt.sz_parity >= 0) return std::uint64_t{1} << (n_sites - 1);
-    return std::uint64_t{1} << n_sites;
-}
-
-// -----------------------------------------------------------------------------
-// Star selection from the environment (ED_SYM_LG_ONLY_K0), the job-splitting form
-// of LittleGroupOptions::only_k0.
-//
-// Precedence: an explicit opt.only_k0 WINS -- the environment is consulted only when
-// the caller named no star. (It used to be the other way round: an exported variable
-// silently replaced the argument, so a driver that passed only_k0 could be made to
-// solve a different star by a leftover export in the job script.) When both are
-// present the variable is ignored, with one line on stderr saying so.
-// "plan" flips plan mode where the caller honours it; prefer opt.plan_only.
-// -----------------------------------------------------------------------------
-void parse_only_k0_env(std::set<int>& only_k0, bool& plan_only) {
-    const std::string fs = ed::env::text("ED_SYM_LG_ONLY_K0");
-    if (fs.empty()) return;
-    if (!only_k0.empty()) {
-        static bool noted = false;
-        if (!noted) {
-            noted = true;
-            std::fprintf(stderr,
-                "[little_group] ED_SYM_LG_ONLY_K0=%s ignored: the caller passed only_k0 "
-                "explicitly, and an argument takes precedence over the environment\n",
-                fs.c_str());
+// The lowest `want` eigenpairs of one block, in block coordinates. Dense below the
+// lowest-k crossover (exact); one level through the certified ground-state solver
+// (memory-light two-pass lane at frontier dimensions); several levels through
+// (block) Krylov-Schur with vectors. `converged` is false when the block could not
+// certify the requested window; the certified prefix is still returned.
+[[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
+solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
+                       int dense_max_dim, int block_size, bool* converged) {
+    *converged = true;
+    const std::size_t nb = mv.dim();
+    std::vector<double> ev;
+    std::vector<std::vector<Complex>> vv;
+    if (nb == 0) return {ev, vv};
+    const std::size_t k = std::min<std::size_t>(std::max(want, 1), nb);
+    if (nb <= lowest_dense_floor(k, dense_max_dim) || nb <= 2) {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(mv));
+        if (es.info() != Eigen::Success)
+            throw std::runtime_error("little_group: dense block eigensolve failed");
+        for (std::size_t j = 0; j < k; ++j) {
+            ev.push_back(es.eigenvalues()(static_cast<Eigen::Index>(j)));
+            std::vector<Complex> v(nb);
+            for (std::size_t i = 0; i < nb; ++i)
+                v[i] = es.eigenvectors()(static_cast<Eigen::Index>(i),
+                                         static_cast<Eigen::Index>(j));
+            vv.push_back(std::move(v));
         }
-        return;
+        return {ev, vv};
     }
-    if (fs == "plan") {
-        plan_only = true;
-        return;
+    if (k == 1 && block_size <= 1) {
+        try {
+            auto [e0, v] = solve_gs_vector(mv, dense_max_dim);
+            ev.push_back(e0);
+            vv.push_back(std::move(v));
+        } catch (const std::runtime_error&) {
+            *converged = false;            // residual guard failed: certify nothing
+        }
+        return {ev, vv};
     }
-    std::size_t pos = 0;
-    while (pos < fs.size()) {
-        const std::size_t c = fs.find(',', pos);
-        const std::string tok = fs.substr(pos, c == std::string::npos ? c : c - pos);
-        if (!tok.empty()) only_k0.insert(std::stoi(tok));
-        if (c == std::string::npos) break;
-        pos = c + 1;
-    }
+    ev = solve_block_lowest_krylov_schur(mv, k, block_size, converged, &vv);
+    return {ev, vv};
 }
 
 }  // namespace lg_detail

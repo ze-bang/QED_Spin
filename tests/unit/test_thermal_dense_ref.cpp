@@ -9,9 +9,7 @@
 //
 //   Methods   : FTLM, mTPQ
 //   Symmetry  : none (full Hilbert),
-//               U(1)/Sz (per-Sz-sector recombination),
-//               spatial (Z_N translation + combine_sector_thermodynamics),
-//               Sz × spatial (U(1) × Z_N, flat combine)
+//               U(1)/Sz (per-Sz-sector recombination)
 //   Backends  : CPU (always),
 //               GPU (if WITH_CUDA and a device is present at runtime)
 //   Trials    : three independent random seeds per method
@@ -55,8 +53,8 @@
 // pins the fallback itself.
 //
 // Both grids are precomputed and passed via ``opts.betas`` so they exactly
-// match ``calculate_thermodynamics_from_spectrum``'s internal log-spaced
-// grid.  The orchestrator's default builds a LINEAR T-axis from
+// match the log-spaced T grid of the dense reference (dense_reference below).
+// The orchestrator's default builds a LINEAR T-axis from
 // ``temp_min/temp_max/num_temp_bins``, which would cause element-wise
 // temperature mismatches.
 //
@@ -77,9 +75,7 @@
 #include <ed/core/sector_thermo.h>
 #include <ed/core/thermal_types.h>
 #include <ed/orchestrator.h>
-#include <ed/solvers/observables.h>
-#include <ed/symmetry/sector_operator.h>
-#include <ed/symmetry/sector_set.h>
+#include <ed/symmetry/canonical_thermo.h>
 
 #ifdef WITH_CUDA
 #include <ed/matvec/backends/cuda_backend.cuh>
@@ -139,8 +135,8 @@ constexpr double TOL_S  = 0.15;
 const std::vector<uint64_t> SEEDS = {42ULL, 1337ULL, 99991ULL};
 
 // ---------------------------------------------------------------------------
-// Build a log-spaced beta grid that exactly matches the internal T grid of
-// `calculate_thermodynamics_from_spectrum` (which is log-spaced internally).
+// Build a log-spaced beta grid; dense_reference evaluates the exact
+// thermodynamics on the same grid.
 // Passing opts.betas directly avoids the linear-vs-log T-grid mismatch that
 // would otherwise corrupt the element-wise comparison.
 // ---------------------------------------------------------------------------
@@ -178,7 +174,9 @@ std::unique_ptr<FixedSzOperator> make_sz_heisen(int64_t n_up) {
 ThermodynamicData dense_reference(double t_min, double t_max, uint64_t n) {
     auto H   = make_full_heisen();
     auto ref = reference_from_operator(*H, 1ULL << N_SITES);
-    return calculate_thermodynamics_from_spectrum(ref.eigs, t_min, t_max, n);
+    std::vector<double> T;
+    for (double b : logspaced_betas(t_min, t_max, n)) T.push_back(1.0 / b);
+    return ed::symmetry::canonical_thermo_from_eigs(ref.eigs, T);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +229,7 @@ void check_thermo_close(const ThermodynamicData& got,
 // ---------------------------------------------------------------------------
 // ThermalOptions builders
 // Each uses opts.betas (log-spaced) rather than temp_min/temp_max/num_bins
-// to ensure the T grid matches calculate_thermodynamics_from_spectrum.
+// to ensure the T grid matches the dense reference.
 // ---------------------------------------------------------------------------
 
 ThermalOptions make_ftlm_opts(uint64_t seed, bool allow_gpu = false) {
@@ -316,74 +314,6 @@ void run_trial(OpT& H,
                        TOL_E, TOL_CV, TOL_S,
                        label + " seed=" + std::to_string(seed),
                        method_compare_entropy(m));
-}
-
-// ---------------------------------------------------------------------------
-// Z_N translation symmetry fixture  (mirrors test_thermal_save.cpp helper)
-// ---------------------------------------------------------------------------
-std::string write_zN_fixture(uint64_t N, const std::string& suite,
-                              const std::string& tag) {
-    const std::string root = make_scratch_dir(suite, tag);
-    const std::string sym  = root + "/automorphism_results";
-    std::error_code ec;
-    std::filesystem::create_directories(sym, ec);
-
-    auto perm = [N](int shift) {
-        std::vector<int> p(N);
-        for (uint64_t i = 0; i < N; ++i)
-            p[i] = (static_cast<int>(i) - shift
-                    + static_cast<int>(N)) % static_cast<int>(N);
-        return p;
-    };
-
-    { // max_clique.json: all N cyclic shifts
-        std::ofstream f(sym + "/max_clique.json");
-        f << "[";
-        for (uint64_t g = 0; g < N; ++g) {
-            auto p = perm(static_cast<int>(g));
-            f << "[";
-            for (std::size_t i = 0; i < p.size(); ++i)
-                f << p[i] << (i + 1 < p.size() ? "," : "");
-            f << "]" << (g + 1 < N ? "," : "");
-        }
-        f << "]";
-    }
-    { // minimal_generators.json: shift-by-1 generator
-        std::ofstream f(sym + "/minimal_generators.json");
-        auto p = perm(1);
-        f << "{\"generators\":[{\"permutation\":[";
-        for (std::size_t i = 0; i < p.size(); ++i)
-            f << p[i] << (i + 1 < p.size() ? "," : "");
-        f << "],\"order\":" << N << "}]}";
-    }
-    { // sector_metadata.json: k = 0 .. N-1
-        std::ofstream f(sym + "/sector_metadata.json");
-        f.precision(17);
-        f << "{\"sectors\":[";
-        for (uint64_t k = 0; k < N; ++k) {
-            const double a = -2.0 * M_PI * static_cast<double>(k)
-                             / static_cast<double>(N);
-            f << "{\"sector_id\":" << k
-              << ",\"quantum_numbers\":[" << k << "]"
-              << ",\"phase_factors\":[{\"real\":" << std::cos(a)
-              << ",\"imag\":" << std::sin(a) << "}]}";
-            if (k + 1 < N) f << ",";
-        }
-        f << "]}";
-    }
-    return root;
-}
-
-// Heisenberg PBC term builder for SectorOperator.
-void add_heisen_pbc_terms(ed::symmetry::SectorOperator& op, uint64_t N, double Jc) {
-    using Complex = std::complex<double>;
-    const Complex Jr(Jc, 0.0), Jh(0.5 * Jc, 0.0);
-    for (uint64_t i = 0; i < N; ++i) {
-        const uint64_t j = (i + 1) % N;
-        op.addTwoBodyTerm(2, i, 2, j, Jr);
-        op.addTwoBodyTerm(0, i, 1, j, Jh);
-        op.addTwoBodyTerm(1, i, 0, j, Jh);
-    }
 }
 
 // For sector-combination tests: whether to compare entropy or just E+Cv
@@ -502,162 +432,7 @@ TEST_CASE("thermal methods vs dense reference: U(1)/Sz symmetry",
 }
 
 // ===========================================================================
-// 3. Spatial (Z_N translation) symmetry — per-sector SectorOperator +
-//    recombination
-// ===========================================================================
-
-namespace {
-
-void spatial_trial(ThermalOptions::Method m, uint64_t seed,
-                   const std::string& sym_root,
-                   const ThermodynamicData& ref,
-                   double tol_E_combo = TOL_E) {
-    SymmetryGroupInfo info;
-    info.loadFromDirectory(sym_root);
-
-    auto ops = ed::symmetry::build_full_sector_operators_lazy(
-        N_SITES, 0.5f, info,
-        [](ed::symmetry::SectorOperator& op) {
-            add_heisen_pbc_terms(op, N_SITES, J);
-        });
-    REQUIRE_FALSE(ops.empty());
-
-    std::vector<ThermodynamicData> sector_thermos;
-    std::vector<uint64_t>          sector_dims;
-
-    for (std::size_t s = 0; s < ops.size(); ++s) {
-        auto& op = *ops[s];
-        REQUIRE(op.dim() > 0);
-        auto opts = opts_for(m, seed + s * 31ULL);
-        auto R    = ed::workflows::thermal(op, opts);
-        REQUIRE(R.backend.lane == "cpu");
-        sector_thermos.push_back(R.thermo);
-        sector_dims.push_back(op.dim());
-    }
-
-    const ThermodynamicData combined =
-        ed::core::combine_sector_thermodynamics(sector_thermos, sector_dims);
-
-    const bool full_compare = method_combine_reliable(m);
-    check_thermo_close(combined, ref,
-                       tol_E_combo, TOL_CV, TOL_S,
-                       method_name(m) + "/spatial seed=" + std::to_string(seed),
-                       full_compare && method_compare_entropy(m));
-    if (!full_compare)
-        for (auto cv : combined.specific_heat) REQUIRE(std::isfinite(cv));
-}
-
-} // namespace
-
-TEST_CASE("thermal methods vs dense reference: spatial Z_N translation symmetry",
-          "[thermal][dense-ref][spatial-sym]") {
-
-    setenv("ED_GPU_SYMMETRY_MIRROR", "0", 1);
-    const std::string sym_root =
-        write_zN_fixture(N_SITES, "thermal_dense_ref", "spatial");
-
-    SECTION("FTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : SEEDS)
-            spatial_trial(ThermalOptions::Method::FTLM, seed, sym_root, ref);
-    }
-
-    SECTION("mTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        for (uint64_t seed : SEEDS)
-            spatial_trial(ThermalOptions::Method::mTPQ, seed, sym_root, ref,
-                          /*tol_E_combo=*/0.5);
-    }
-
-    std::filesystem::remove_all(sym_root);
-}
-
-// ===========================================================================
-// 4. Sz × spatial (U(1) × Z_N) — both symmetry axes simultaneously
-//
-//    Loop over all (n_up, irrep) pairs, run thermal on each SectorOperator,
-//    then flat-combine all sector thermo blocks.
-//
-//    Two representative seeds; E+Cv checked for all methods;
-//    S additionally checked for FTLM.
-// ===========================================================================
-
-namespace {
-
-void sz_spatial_trial(ThermalOptions::Method m, uint64_t seed,
-                      const std::string& sym_root,
-                      const ThermodynamicData& ref,
-                      double tol_E_combo = TOL_E) {
-    SymmetryGroupInfo info;
-    info.loadFromDirectory(sym_root);
-
-    std::vector<ThermodynamicData> all_thermos;
-    std::vector<uint64_t>          all_dims;
-
-    for (int64_t n_up = 0; n_up <= static_cast<int64_t>(N_SITES); ++n_up) {
-        auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
-            N_SITES, 0.5f, n_up, info,
-            [](ed::symmetry::SectorOperator& op) {
-                add_heisen_pbc_terms(op, N_SITES, J);
-            });
-        for (std::size_t s = 0; s < ops.size(); ++s) {
-            auto& op = *ops[s];
-            if (op.dim() == 0) continue;
-
-            const uint64_t ss = seed
-                + static_cast<uint64_t>(n_up) * 97ULL
-                + static_cast<uint64_t>(s)    * 13ULL;
-            auto opts = opts_for(m, ss);
-            auto R    = ed::workflows::thermal(op, opts);
-            REQUIRE(R.backend.lane == "cpu");
-
-            all_thermos.push_back(R.thermo);
-            all_dims.push_back(op.dim());
-        }
-    }
-    REQUIRE_FALSE(all_thermos.empty());
-
-    const ThermodynamicData combined =
-        ed::core::combine_sector_thermodynamics(all_thermos, all_dims);
-
-    const bool full_compare = method_combine_reliable(m);
-    check_thermo_close(combined, ref,
-                       tol_E_combo, TOL_CV, TOL_S,
-                       method_name(m) + "/sz+spatial seed=" + std::to_string(seed),
-                       full_compare && method_compare_entropy(m));
-    if (!full_compare)
-        for (auto cv : combined.specific_heat) REQUIRE(std::isfinite(cv));
-}
-
-} // namespace
-
-TEST_CASE("thermal methods vs dense reference: Sz + spatial (U(1) × Z_N)",
-          "[thermal][dense-ref][sz-spatial-sym]") {
-
-    setenv("ED_GPU_SYMMETRY_MIRROR", "0", 1);
-    const std::string sym_root =
-        write_zN_fixture(N_SITES, "thermal_dense_ref", "sz_spatial");
-
-    const std::vector<uint64_t> seeds2 = {42ULL, 1337ULL};
-
-    SECTION("FTLM") {
-        const auto ref = dense_reference(T_BROAD_MIN, T_BROAD_MAX, N_BROAD);
-        for (uint64_t seed : seeds2)
-            sz_spatial_trial(ThermalOptions::Method::FTLM, seed, sym_root, ref);
-    }
-
-    SECTION("mTPQ") {
-        const auto ref = dense_reference(T_HIGH_MIN, T_HIGH_MAX, N_HIGH);
-        for (uint64_t seed : seeds2)
-            sz_spatial_trial(ThermalOptions::Method::mTPQ, seed, sym_root, ref,
-                             /*tol_E_combo=*/0.5);
-    }
-
-    std::filesystem::remove_all(sym_root);
-}
-
-// ===========================================================================
-// 5. GPU backend — if WITH_CUDA and a device is present at runtime
+// 3. GPU backend — if WITH_CUDA and a device is present at runtime
 //
 //    Run each method with allow_gpu=true and verify it still agrees with
 //    the dense reference.  Skipped (SUCCEED) on GPU-less hosts.

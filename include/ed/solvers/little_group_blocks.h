@@ -2,14 +2,14 @@
 // =============================================================================
 // include/ed/solvers/little_group_blocks.h
 //
-// Unified-stack U1a: the little-group engine's (momentum sector x isotypic
-// irrep) blocks as FIRST-CLASS, OWNED handles -- the surface that lets every
-// verb (eigenvalues today; thermal sampling, U1b; eigenvectors, U2a) consume
-// the same maximal block decomposition instead of re-deriving it per verb.
+// The little-group engine's (momentum sector x isotypic irrep) blocks as
+// OWNED handles, consumed by the ed::sectors verbs (include/ed/sectors/).
 //
 // A LittleGroupBlock wraps ONE diagonal block of H:
 //
 //   * a PROJECTED block  W_sigma^dag H_{k0} W_sigma   (dim = m_sigma), or
+//   * a GROUP-SECTOR block (1-dim irrep solved in the rep basis of the full
+//     little group), or
 //   * the PLAIN k0 block H_{k0}                        (dim = #reps(k0))
 //     when the star declined projection (trivial little co-group, projective
 //     factor system, failed monomial probe, incomplete covering -- the
@@ -19,26 +19,19 @@
 // orchestrator can drive (Lanczos, dense eigensolve, FTLM / TPQ sampling
 // kernels via ed::workflows::thermal) runs inside the reduced dimension with
 // no kernel changes. Ownership is by shared_ptr: all irrep blocks of one star
-// co-own their star's matrix-free H_{k0} (RepSectorMatVec), so a caller may
-// keep any subset of blocks alive independently of the set.
-//
-// Memory note: a LittleGroupBlockSet holds every star's RepSectorData
-// simultaneously (O(#reps) per star). At frontier N prefer consuming stars
-// one at a time (the engine-internal per-star builder does exactly that);
-// this set surface is sized for the verb loops and tests at small-to-mid N.
+// co-own their star's matrix-free H_{k0} (RepSectorMatVec).
 //
 // The concrete types behind the handle (RepSectorMatVec, SparseColumns,
 // ProjectedBlockOp, Monomial) stay PRIVATE to the engine (src/solvers/little_group/lg_internal.h) -- this
 // header is deliberately pimpl so the basis layer keeps zero new surface.
 // =============================================================================
 
+#include <complex>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-#include <ed/orchestrator.h>                // ed::workflows::ThermalOptions (U1b)
-#include <ed/solvers/little_group_solve.h>  // LittleGroupOptions, LittleGroupSpectrum
-#include <ed/observables/masked_program.h>  // MaskedOperator (block observables)
+#include <ed/solvers/little_group_solve.h>  // LittleGroupOptions, LittleGroupStarInfo
 
 namespace ed {
 class LinearOperator;  // include/ed/core/linear_operator.h
@@ -51,9 +44,8 @@ namespace ed::solvers {
 
 // -----------------------------------------------------------------------------
 // One block's quantum-number tag. `k0` / `k_raw` are ENGINE-INTERNAL irrep
-// indices -- k_raw is NOT the physical momentum; decode momenta through
-// `LittleGroupSpectrum::irrep_characters` (chi_k of the abelian generators),
-// exactly like decode_star_for_sector does on the Python side.
+// indices -- k_raw is NOT the physical momentum; decode momenta through the
+// abelian irrep characters chi_k (EngineContext::giA in the engine).
 // -----------------------------------------------------------------------------
 struct LittleGroupBlockTag {
     int n_up      = -1;   ///< fixed-Sz subspace (-1 = none)
@@ -106,303 +98,9 @@ public:
     /// W's columns are orthonormal (SVD), so norms are preserved.
     [[nodiscard]] std::vector<std::complex<double>>
     lift_to_rep(const std::complex<double>* v) const;
-    /// d_sigma partners (Jul 2026): given a REP-BASIS eigenvector of this
-    /// block (row 0 of irrep sigma -- the W_sigma construction's row),
-    /// return the d-1 degenerate partners via the shift projector
-    /// P_{j0} = (d/|P|) sum_p conj(D_{j0}(p)) M_p. Empty for d == 1 and
-    /// plain blocks. Partners are normalized; certify with your own
-    /// residual pin (they are eigenvectors of H_k0 at the same E).
-    [[nodiscard]] std::vector<std::vector<std::complex<double>>>
-    degenerate_partners(
-        const std::vector<std::complex<double>>& u_rep) const;
 
 private:
     std::shared_ptr<Impl> impl_;
 };
-
-// -----------------------------------------------------------------------------
-// Every block of every star of one (subspace, group) decomposition, in the
-// engine's canonical row order (stars ascending by k0; within a star, irreps
-// ascending; TR-folded later partners absent -- their weight is in the earlier
-// partner's multiplicity; a declined star contributes its single plain block).
-// `meta` carries the star table / irrep characters / flip+tr flags exactly as
-// the spectra do (its eigenvalue fields stay empty; gpu_engaged reflects
-// construction only -- blocks report their own truthfully after applies).
-// -----------------------------------------------------------------------------
-struct LittleGroupBlockSet {
-    std::vector<LittleGroupBlock> blocks;
-    LittleGroupSpectrum           meta;
-};
-
-/// Build the block decomposition WITHOUT solving anything. Honours
-/// LittleGroupOptions the same way the spectrum entry points do
-/// (n_up / sz_parity / spin_flip / time_reversal / only_k0 / only_irrep;
-/// ED_SYM_LG_ONLY_K0 applies only when opt.only_k0 is empty; "plan" is ignored here --
-/// this factory never solves).
-[[nodiscard]] LittleGroupBlockSet
-build_little_group_blocks(const ::Operator&                    op,
-                          const std::vector<std::vector<int>>& abelian_group,
-                          const std::vector<std::vector<int>>& residue_perms,
-                          int                                  n_sites,
-                          const LittleGroupOptions&            opt);
-
-// =============================================================================
-// U1b: SAMPLED thermodynamics inside the projected blocks.
-//
-// Where little_group_thermodynamics (little_group_solve.h) EXACT-diagonalizes
-// every block (the point_group='full' contract), this runs the caller's
-// sampling method (FTLM / mTPQ / OFTLM) per block through
-// ed::workflows::thermal(block.op(), ...) -- same kernels, same mem_guard,
-// same small-dim exact fallback -- and Z-recombines with each block's
-// spectral multiplicity folded in as a free-energy shift
-// F_b[t] -= T[t] * ln(m_b)  (exactly Z_b -> m_b * Z_b).
-// =============================================================================
-struct LittleGroupThermalResult {
-    ThermodynamicData                 thermo;      ///< combined across blocks
-    std::vector<LittleGroupBlockTag>  block_tags;  ///< one per solved block
-    /// Per-block thermodynamics BEFORE the multiplicity F-shift
-    /// (diagnostics / tests), parallel to block_tags.
-    std::vector<ThermodynamicData>    per_block;
-    /// The weight actually folded into each block's Z: tag.multiplicity
-    /// times the Sz flip-transport mirror factor (2 for a mirrored
-    /// n_up != N/2 subspace in the unnamed-Sz sweep, else 1).
-    std::vector<std::uint64_t>        weights;
-    double ground_state_energy = 0.0; ///< min per-block GS estimate
-    bool   projected_any       = false;
-    bool   gpu_engaged         = false;
-};
-
-[[nodiscard]] LittleGroupThermalResult
-little_group_thermal(const ::Operator&                    op,
-                     const std::vector<std::vector<int>>& abelian_group,
-                     const std::vector<std::vector<int>>& residue_perms,
-                     int                                  n_sites,
-                     ed::workflows::ThermalOptions        topts,
-                     const LittleGroupOptions&            opt);
-
-// =============================================================================
-// U2b: FLIP-AWARE expansion of a rep-basis vector to computational-basis
-// amplitudes. The regeneration arithmetic is the rep matvec's own
-// (RepSymmetryBasisPolicy::apply_perm applies the Stage-5b XOR flip masks;
-// the characters are extended), so this works identically for raw and
-// flip-extended (k, +/-) sectors -- the expansion the orbit-CSR lane
-// refuses ("no orbit-CSR form exists for flip-projected sectors") exists
-// arithmetically here.
-//
-// Returns a DENSE 2^n_sites amplitude vector, normalized. Sized for
-// moderate N (tests, DSSF sources, observable evaluation); at frontier N
-// consume the rep-basis vector directly instead.
-// =============================================================================
-[[nodiscard]] std::vector<std::complex<double>>
-expand_rep_vector_to_computational(
-    const ed::symmetry::RepSectorData&        rd,
-    const std::vector<std::complex<double>>&  u);
-
-// =============================================================================
-// U2b-r2: the lowest-k EIGENPAIRS of the block decomposition, vectors
-// included -- the capability whose absence forced eigenvector consumers
-// off the projection lane. Per block: dense below the crossover, else
-// FullCGS2 Lanczos with kept basis; every returned pair is
-// residual-CERTIFIED in the momentum sector's rep basis
-// (||H_k0 u - E u|| / ||u|| <= 1e-8 after the isotypic lift) -- an
-// uncertified pair is dropped, never returned.
-//
-// Vectors are returned in the REP BASIS of their momentum sector
-// (rows[i].vec over sectors[rows[i].sector_slot]); expand to
-// computational amplitudes with expand_rep_vector_to_computational
-// (flip-aware). A row with multiplicity > 1 carries ONE representative
-// vector -- the star/TR/d_sigma partners are isospectral copies whose
-// vectors need the U3 fold transport (not yet built); consumers that
-// need every partner's vector must solve those sectors directly.
-// =============================================================================
-struct LittleGroupVectorRow {
-    double                            eigenvalue = 0.0;
-    LittleGroupBlockTag               tag;          ///< incl. multiplicity
-    std::vector<std::complex<double>> vec;          ///< rep basis, certified
-    std::size_t                       sector_slot = 0;  ///< into sectors[]
-};
-
-struct LittleGroupVectors {
-    std::vector<LittleGroupVectorRow>        rows;     ///< ascending eigenvalue
-    std::vector<ed::symmetry::RepSectorData> sectors;  ///< one per touched star
-    bool flip_engaged = false;
-    bool tr_engaged   = false;
-    /// Audit 2026-08-01: refusal accounting. ``refused_blocks`` counts
-    /// blocks that refused rows they might hold (Lanczos breakdown,
-    /// dstevd failure, or an uncertified row inside the requested
-    /// window); ``refused_rows`` counts rows whose LIFT failed the
-    /// residual guard. A SHORT window with refusals throws in
-    /// ``little_group_lowest_vectors``; a full window with nonzero
-    /// counts means the returned "lowest k" may start above a refused
-    /// true level -- consumers must check.
-    std::size_t refused_blocks = 0;
-    std::size_t refused_rows   = 0;
-};
-
-[[nodiscard]] LittleGroupVectors
-little_group_lowest_vectors(const ::Operator&                    op,
-                            const std::vector<std::vector<int>>& abelian_group,
-                            const std::vector<std::vector<int>>& residue_perms,
-                            int                                  n_sites,
-                            int                                  k,
-                            const LittleGroupOptions&            opt);
-
-// A DIAGONAL observable: sum_t weights[t] * prod_{i in sites[t]} S^z_i (a site may
-// repeat; S^z_i^2 = 1/4). Any number of sites per term -- four-point dimer
-// correlators D(t,t',delta) = sum_c <B_{t,c} B_{t',c+delta}> are one term per cell.
-// Evaluated as sum_r |u_r|^2 O(rep_r) in the momentum sector's rep basis, which is
-// exact for an operator that is diagonal AND invariant under the abelian group (it
-// then acts as the number O(r) on each orbit state). So it must be translation
-// invariant, and flip even when the flip is folded; it need NOT be invariant under
-// the point-group residues (the block vector is lifted to the rep basis first).
-struct DiagonalObservable {
-    std::vector<double>           weights;
-    std::vector<std::vector<int>> sites;
-};
-
-// =============================================================================
-// Expectation values <n|O_i|n> of the lowest `k` levels of every (star, irrep, flip)
-// block -- computed in the momentum sector's representative basis, never expanded
-// to 2^N, so they are available wherever the block solve is (N = 36 included).
-//
-// Each observable is applied through the SAME sector basis as H (one copy of the
-// reps / norms / permutation tables per star). Observables must share H's
-// symmetries -- commute with every abelian element and residue at the term level,
-// with the global spin flip when that engages, be real when time reversal folds,
-// and conserve Sz when n_up is fixed -- or the call throws naming the offender: a
-// sector basis cannot represent an operator that mixes its sectors.
-//
-// With O_i = dH/dlambda_i these are the Hellmann-Feynman derivatives dE_n/dlambda_i.
-//
-// Rows: one per (block, level), levels ascending within a block, blocks in the
-// engine's canonical star / irrep order. `residuals` is ||H u - E u|| / ||u|| of
-// each lifted state in the rep basis; a block that could not certify its levels
-// is counted in `unconverged_blocks` and contributes its certified prefix only.
-// =============================================================================
-struct LittleGroupExpectations {
-    std::vector<double>                  energies;
-    std::vector<LittleGroupLabel>        labels;     ///< parallel to energies
-    std::vector<int>                     level;      ///< 0 = block ground, 1, ...
-    std::vector<int>                     multiplicity;  ///< |star| x d_sigma (x2 TR fold)
-    std::vector<std::vector<double>>     values;     ///< values[row][i] = <n|O_i|n>
-    std::vector<std::vector<double>>     diagonal_values;  ///< [row][j] = <n|D_j|n>
-    std::vector<double>                  residuals;  ///< rep-basis residual per row
-    std::vector<LittleGroupStarInfo>     stars;
-    std::vector<std::vector<std::complex<double>>> irrep_characters;
-    bool        flip_engaged       = false;
-    bool        tr_engaged         = false;
-    std::size_t unconverged_blocks = 0;
-};
-
-[[nodiscard]] LittleGroupExpectations
-little_group_block_expectations(const ::Operator&                    op,
-                                const std::vector<const ::Operator*>& observables,
-                                const std::vector<std::vector<int>>& abelian_group,
-                                const std::vector<std::vector<int>>& residue_perms,
-                                int                                  n_sites,
-                                int                                  k,
-                                const LittleGroupOptions&            opt,
-                                const std::vector<DiagonalObservable>& diagonal = {});
-
-// =============================================================================
-// U3: FOLD TRANSPORT for vectors -- the partners a fold skipped. A star
-// fold proves spec(k') == spec(k0) by U_p; this applies that U_p (or the
-// antiunitary K for a TR pair) to an actual eigenvector:
-//
-//   U_p |b_i^{k0}> = conj(chi_{k'}(a*)) (N_j / N_i) |b_j^{k'}>
-//
-// -- the cross-sector generalization of the engine's monomial rows (same
-// canonicalization, destination characters/norms). Returns the partner
-// sector's RepSectorData plus the transported vector, residual-certified
-// by the CALLER's pin (transport itself is exact bookkeeping; a failed
-// canonicalization or a non-unit phase throws).
-//
-// Scope: star members (residue mapping k0 -> k_dst), TR conjugates
-// (complex conjugation), and the FLIP MIRROR (n_up_dst = N - n_up,
-// k0_dst == k0_src, XOR pre-map; requires [H, prod sigma^x] == 0).
-// The d_sigma-internal degenerate copies (sigma_0j isotypic columns)
-// remain a documented follow-up.
-// =============================================================================
-[[nodiscard]] std::pair<ed::symmetry::RepSectorData,
-                        std::vector<std::complex<double>>>
-little_group_transport(const ::Operator&                    op,
-                       const std::vector<std::vector<int>>& abelian_group,
-                       const std::vector<std::vector<int>>& residue_perms,
-                       int                                  n_sites,
-                       int                                  k0_src,
-                       int                                  k0_dst,
-                       const std::vector<std::complex<double>>& vec,
-                       const LittleGroupOptions&            opt,
-                       int                                  n_up_dst = -1);
-
-// -----------------------------------------------------------------------------
-// Matrix elements of general observables between block eigenstates, evaluated in
-// the representative basis (observable engine: masked_program.h,
-// rep_matrix_elements.h). Stars are solved one at a time; only each star's rep
-// data and the lifted vectors are kept, so sectors of different flip parity can
-// be paired afterwards.
-//
-// States: the lowest `levels` eigenpairs of every block (option filters such as
-// only_k0 apply), plus, with `partners`, the d_sigma - 1 degenerate partners of
-// every row of a multi-dimensional irrep (partner > 0). TR-folded sigma* partners
-// are NOT generated. Observables need no symmetry: each is projected onto the
-// component that can connect the two sectors, so a single bond, plaquette or
-// string is a valid input, and selection-rule zeros come out exactly 0.
-//
-// Pairs: `diagonal` = <n|O|n>; `same_momentum` = every ordered (bra, ket) whose
-// stars share the representative momentum k_raw (any irrep, level, partner or
-// flip parity). Cross-momentum pairs are not supported yet.
-// -----------------------------------------------------------------------------
-struct LittleGroupMEOptions {
-    enum class Pairs { diagonal, same_momentum };
-    int   levels   = 1;                     ///< eigenpairs per block
-    bool  partners = true;                  ///< add multi-dim irrep partners
-    Pairs pairs    = Pairs::same_momentum;
-    bool  use_gpu  = false;                 ///< GPU sweep of the matrix elements
-    /// Empty: every observable on every pair. Otherwise OFF-diagonal pairs (bra != ket)
-    /// evaluate only these observable indices; their other entries are NaN. Diagonal
-    /// pairs always carry every observable.
-    std::vector<int> pair_observables;
-    /// Hand the lifted state vectors and their sector data back (LittleGroupMEResult::
-    /// vectors / sectors / state_sector) so a caller can store them and evaluate
-    /// observables later (rep_matrix_elements) without re-solving.
-    bool return_vectors = false;
-};
-
-struct LittleGroupMEState {
-    double           energy = 0.0;
-    LittleGroupLabel label;
-    int              star_k0  = -1;   ///< star (sector) the vector lives in
-    int              level    = 0;    ///< 0 = block ground state, 1, ...
-    int              partner  = 0;    ///< 0 = the solved row, 1..d-1 = partners
-    std::uint64_t    multiplicity = 1;
-    double           residual = 0.0;  ///< ||H u - E u|| in the rep basis
-};
-
-struct LittleGroupMEResult {
-    std::vector<LittleGroupMEState>  states;
-    std::vector<std::pair<int, int>> pairs;    ///< (bra, ket) indices into states
-    /// values[p][o] = <states[pairs[p].first] | O_o | states[pairs[p].second]>
-    std::vector<std::vector<std::complex<double>>> values;
-    std::vector<LittleGroupStarInfo> stars;
-    std::vector<std::vector<std::complex<double>>> irrep_characters;
-    bool        flip_engaged       = false;
-    bool        tr_engaged         = false;
-    std::size_t unconverged_blocks = 0;
-    /// With return_vectors: the rep-basis vector of every state (normalised), the sector
-    /// data of every star that holds states, and the sector index of each state.
-    std::vector<std::vector<std::complex<double>>>                    vectors;
-    std::vector<std::shared_ptr<const ed::symmetry::RepSectorData>>   sectors;
-    std::vector<int>                                                  state_sector;
-};
-
-[[nodiscard]] LittleGroupMEResult
-little_group_block_observables(const ::Operator&                                  op,
-                               const std::vector<ed::observables::MaskedOperator>& ops,
-                               const std::vector<std::vector<int>>&               abelian_group,
-                               const std::vector<std::vector<int>>&               residue_perms,
-                               int                                                n_sites,
-                               const LittleGroupOptions&                          opt,
-                               const LittleGroupMEOptions&                        me = {});
 
 }  // namespace ed::solvers

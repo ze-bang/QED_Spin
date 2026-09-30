@@ -1,5 +1,6 @@
 // =============================================================================
-// src/solvers/little_group/lg_ground_state.cpp -- certified ground-state vector and the k-sector factories
+// src/solvers/little_group/lg_ground_state.cpp -- certified ground-state vector of one
+// block, the streamed raw momentum sectors, and shared sector data.
 // Part of the little-group engine; see lg_internal.h for the file map.
 // =============================================================================
 
@@ -9,12 +10,7 @@ namespace ed::solvers {
 
 using namespace lg_detail;
 
-// =============================================================================
-// Stage 9d: public factories for the factorized GS-DSSF (composed in the
-// bindings with CrossSectorOrbitObservable + cf_spectral_from_vector).
-// =============================================================================
-
-namespace lg_detail {   // solve_gs_vector is also used by lg_observables.cpp
+namespace lg_detail {   // solve_gs_vector backs solve_block_eigenpairs (lg_block_solve.cpp)
 
 // TWO-PASS no-reorth ground-state Ritz vector (2026-07-19).
 //
@@ -274,168 +270,6 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
 
 }  // namespace lg_detail
 
-LittleGroupGroundState little_group_ground_state(
-    const ::Operator&                    op,
-    const std::vector<std::vector<int>>& abelian_group,
-    const std::vector<std::vector<int>>& residue_perms,
-    int                                  n_sites,
-    const LittleGroupOptions&            opt)
-{
-    EngineContext cx;
-    bool tr_on = false;
-    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
-                        cx, tr_on);
-    const auto stars = star_partition(cx, tr_on);
-
-    // U2a: the lowest-1 probe walk runs per isotypic BLOCK (dims m_sigma,
-    // strictly below dim_k0 on projected stars) instead of per plain
-    // momentum sector -- the block factory's reduction now serves the
-    // vector path too. Ties (degenerate GS straddling blocks) keep the
-    // first block encountered; the residual guard below is basis-exact
-    // either way.
-    int         best_k0  = -1;
-    std::size_t best_blk = 0;
-    double      best_e   = 0.0;
-    // Star filter (opt.only_k0 / ED_SYM_LG_ONLY_K0). The eigenvalue verbs
-    // honour it via run_little_group, but this vector path walked EVERY star
-    // unconditionally, so naming a momentum block here was silently ignored
-    // -- at 36 sites that is ~14 stars x ~10 h instead of the one the caller
-    // asked for. Same precedence as elsewhere: opt.only_k0 wins over the env var.
-    std::set<int> gs_only_k0(opt.only_k0.begin(), opt.only_k0.end());
-    {
-        bool ignore_plan = false;
-        parse_only_k0_env(gs_only_k0, ignore_plan);
-    }
-    std::size_t   n_unconverged  = 0;
-    // The winning star is KEPT from the scan instead of rebuilt: at N = 36 a star
-    // build is minutes to an hour of sector construction, and the rebuild repeated
-    // it (with its reduced CSR or device mirror) for nothing.
-    StarBuild best_sb;
-    std::uint64_t worst_scan_dim = 0;
-    for (const auto& [k0, members] : stars) {
-        if (!gs_only_k0.empty() && gs_only_k0.count(k0) == 0) continue;
-        StarBuild sb = build_star_blocks(op, cx, tr_on, k0, members, opt,
-                                         false, nullptr, nullptr, nullptr);
-        if (!sb.hk) continue;
-        bool star_holds_best = false;
-        for (std::size_t bi = 0; bi < sb.blocks.size(); ++bi) {
-            const auto& impl = *sb.blocks[bi];
-            const ed::matvec::MatVecOperator& mv = block_mv(impl);
-            bool conv = true;
-            const auto ev = solve_block_lowest(mv, 1, opt.dense_max_dim,
-                                               &conv);
-            if (!conv || ev.empty()) {
-                // An unconverged E0 scan used to be SILENTLY skipped here
-                // (the honest gate returns nothing), so at frontier dims
-                // the true GS block could lose the scan to a smaller
-                // converged block -- and solve_gs_vector would then
-                // certify a beautiful eigenpair of the WRONG block.
-                // Loud, per the point_group='full' contract.
-                ++n_unconverged;
-                worst_scan_dim = std::max(worst_scan_dim, mv.dim());
-                continue;
-            }
-            if (best_k0 < 0 || ev[0] < best_e) {
-                best_e   = ev[0];
-                best_k0  = k0;
-                best_blk = bi;
-                star_holds_best = true;
-            }
-        }
-        if (star_holds_best) best_sb = std::move(sb);
-    }
-    if (n_unconverged > 0)
-        throw std::runtime_error(
-            "little_group_ground_state: the E0 block scan failed to "
-            "converge on " + std::to_string(n_unconverged) + " block(s) "
-            "(largest dim " + std::to_string(worst_scan_dim) + ") within "
-            "the Lanczos budget, so the winner would be chosen among the "
-            "remainder and the reported ground state could be wrong. "
-            "Raise ED_SYM_LG_LOWEST_MAX_ITER (default max(40k, 400)) or "
-            "split the scan by star via ED_SYM_LG_ONLY_K0.");
-    if (best_k0 < 0)
-        throw std::runtime_error("little_group_ground_state: no non-empty "
-                                 "momentum sector in this subspace.");
-
-    // Solve the winning block WITH its eigenvector (the star kept from the scan);
-    // lift u = W_sigma v back to the rep basis.
-    StarBuild& win = best_sb;
-    if (!win.hk || best_blk >= win.blocks.size())
-        throw std::runtime_error("little_group_ground_state: winning star "
-                                 "kept from the scan is inconsistent (internal)");
-    LittleGroupBlock block(win.blocks[best_blk]);
-
-    LittleGroupGroundState gs;
-    gs.k0 = best_k0;
-    gs.rd = block.rep_data();               // copy; blocks may be dropped
-    bool lifted = false;
-    if (block.projected()) {
-        auto [e0, v] = solve_gs_vector(block.op(), opt.dense_max_dim);
-        auto u = block.lift_to_rep(v.data());
-        // Residual guard IN THE REP BASIS: the lift must reproduce an
-        // eigenvector of the full momentum-sector H_k0, not merely of
-        // the sandwich. A failed guard falls back to the plain re-solve
-        // below (correct, merely less reduced) -- never ship an
-        // unguarded vector.
-        // (lifted_residual: on H_k0, or in the block for a group sector, whose lift intertwines exactly)
-        double den = 1e-300;
-        for (const auto& c : u) den += std::norm(c);
-        const double lift_res = lifted_residual(*win.blocks[best_blk], v.data(), u, e0);
-        // The lift is an isometry onto an H-invariant subspace, so the rep-basis
-        // residual equals the block residual solve_gs_vector just certified against
-        // lg_gs_resid_tol(), up to roundoff. Guard at 2x that tolerance: a fixed
-        // 1e-8 here sent every projected ground state to the unprojected re-solve
-        // whenever ED_SYM_LG_GS_RESID_TOL was relaxed (and borderline ones by
-        // roundoff even at the default) -- the measured ~36x GS-path slowdown.
-        const double lift_tol = 2.0 * lg_gs_resid_tol();
-        if (lift_res <= lift_tol) {
-            const double inv = 1.0 / std::sqrt(den);
-            for (auto& c : u) c *= inv;
-            gs.energy      = e0;
-            gs.vec         = std::move(u);
-            gs.irrep       = block.tag().irrep;
-            gs.flip_parity = block.tag().flip_parity;
-            lifted = true;
-        } else {
-            std::fprintf(stderr,
-                "[little_group] GS lift residual %.3e > %.1e at k0=%d "
-                "irrep=%d -- falling back to the plain sector re-solve\n",
-                lift_res, lift_tol, best_k0, block.tag().irrep);
-        }
-    }
-    if (!lifted) {
-        auto [e0, u]   = solve_gs_vector(*win.hk, opt.dense_max_dim);
-        gs.energy      = e0;
-        gs.vec         = std::move(u);
-        gs.irrep       = -1;
-        gs.flip_parity = block.tag().flip_parity;
-    }
-    return gs;
-}
-
-std::vector<ed::symmetry::RepSectorData> little_group_k_sectors(
-    const ::Operator&                    op,
-    const std::vector<std::vector<int>>& abelian_group,
-    int                                  n_sites,
-    int                                  n_up,
-    int                                  sz_parity)
-{
-    LittleGroupOptions o;
-    o.n_up          = n_up;
-    o.sz_parity     = sz_parity;
-    o.spin_flip     = 0;      // destination sectors are RAW (9d v1)
-    o.time_reversal = 0;      // folding never applies to matrix elements
-    EngineContext cx;
-    bool tr_on = false;
-    make_engine_context(op, abelian_group, {}, n_sites, o, cx, tr_on);
-    std::vector<ed::symmetry::RepSectorData> out;
-    for (int k = 0; k < cx.n_irr_raw; ++k) {
-        auto rd = build_k_sector(cx, k, n_up);
-        if (!rd.reps.empty()) out.push_back(std::move(rd));
-    }
-    return out;
-}
-
 void little_group_k_sectors_stream(
     const ::Operator&                    op,
     const std::vector<std::vector<int>>& abelian_group,
@@ -444,10 +278,10 @@ void little_group_k_sectors_stream(
     int                                  sz_parity,
     const std::function<void(ed::symmetry::RepSectorData&)>& fn)
 {
-    // Streaming twin of little_group_k_sectors: build ONE raw momentum
+    // Build ONE raw momentum
     // sector at a time, hand it to ``fn``, then free it before building the
-    // next. Holding every k-sector resident (as little_group_k_sectors
-    // returns) costs ~15-20 GB/sector at N=36 half-filling -- 12 sectors
+    // next. Holding every k-sector resident
+    // costs ~15-20 GB/sector at N=36 half-filling -- 12 sectors
     // OOMs a 128 GB node. This keeps the resident set at one destination
     // sector for the factorized static/dynamical structure-factor loops.
     LittleGroupOptions o;
@@ -464,34 +298,12 @@ void little_group_k_sectors_stream(
     }
 }
 
-std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
-    const ::Operator&             op,
-    ed::symmetry::RepSectorData   rd,
-    bool                          force_gpu)
-{
-    return std::make_unique<RepSectorMatVec>(op, std::move(rd), force_gpu);
-}
-
 std::shared_ptr<const ed::symmetry::RepSectorData>
 share_rep_sector(ed::symmetry::RepSectorData rd)
 {
     auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
     p->build_perm_lut();
     return p;
-}
-
-std::unique_ptr<ed::matvec::MatVecOperator> make_rep_sector_matvec(
-    const ::Operator&                                  op,
-    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
-    bool                                               force_gpu)
-{
-    if (!rd) throw std::invalid_argument("make_rep_sector_matvec: null sector");
-    return std::make_unique<RepSectorMatVec>(op, std::move(rd), force_gpu);
-}
-
-bool rep_sector_matvec_gpu_engaged(const ed::matvec::MatVecOperator& mv) {
-    const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv);
-    return hk != nullptr && hk->gpu_engaged();
 }
 
 }  // namespace ed::solvers

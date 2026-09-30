@@ -2,38 +2,25 @@
 // =============================================================================
 // include/ed/orchestrator.h
 //
-// Three top-level entry points the public-facing API now collapses to:
+// Two top-level entry points over any `ed::LinearOperator`:
 //
 //     ed::solve     -- ground-state eigenproblem (Lanczos / Krylov-Schur /
 //                       Block-Lanczos / full diag), one of the four
 //                       Backend lanes auto-selected via select_backend.
 //     ed::thermal   -- finite-temperature workflows (FTLM / OFTLM /
 //                       mTPQ).
-//     ed::spectral  -- dynamical correlators (DSSF ground state /
-//                       finite-T) via continued-fraction Lanczos.
 //
-// Replaces the legacy `auto/solve.cpp`, `auto/thermal.cpp`,
-// `auto/dssf.cpp` orchestrators and the per-deployment `ed_wrapper*`
-// stack. The new entries:
+// Both:
 //
 //   * accept any `ed::LinearOperator` (no separate CPU / GPU / MPI / etc
 //     entry point);
 //   * dispatch under `std::visit(select_backend(...))` so the kernel
 //     family runs on the right Backend;
-//   * return `GroundStateResult` / `ThermalResult` / `SpectralResult`
-//     (Phase 3.3) with backend metadata + Krylov diagnostics carried
-//     uniformly across lanes.
+//   * return `GroundStateResult` / `ThermalResult` (Phase 3.3) with
+//     backend metadata + Krylov diagnostics carried uniformly across lanes.
 //
-// Phase 4.2 of the Minimalist ED Collapse (May 2026).
-//
-// Implementation note: the full kernel/method-selection logic in
-// `ed::solve` is non-trivial (Krylov-Schur for many-eigs, single-vector
-// Lanczos for one-eig, full diag for small dims). The minimal first
-// landing keeps that decision tree centralised in `src/orchestrator.cpp`
-// and uses ONLY the unified `lanczos_kernel<Backend>` (single-vector)
-// + `block_lanczos_kernel<Backend>` (multi-eig) + `krylov_schur_kernel<Backend>`
-// codepaths from Phase 2 --- which is everything every consumer in the
-// project actually exercises today.
+// The ed::sectors verbs (include/ed/sectors/) run these on each symmetry
+// block. Implementation: src/orchestrator/ (see orchestrator_internal.h).
 // =============================================================================
 
 #include <complex>
@@ -50,23 +37,13 @@
 #include <ed/core/results.h>
 #include <ed/core/select_backend.h>
 
-// Stage-12 helper forward declarations (audit 2026-07-31): the SU(2)
-// workflow surface below names these by shared_ptr / reference only.
-class Operator;
-namespace ed::matvec { class MatVecOperator; }
-namespace ed::symmetry {
-class CasimirProjectedOperator;
-class LowdinS2Projector;
-}  // namespace ed::symmetry
-
 // `ed::thermal` and `ed::observables` already exist as namespaces (the
 // per-kernel headers from Phase 2). To avoid a function/namespace
-// collision, the three orchestrator entry points live under
+// collision, the orchestrator entry points live under
 // `ed::workflows::`. The public-facing convention is:
 //
 //     auto gs = ed::workflows::solve(H, opts);
 //     auto th = ed::workflows::thermal(H, opts);
-//     auto sp = ed::workflows::spectral(H, observables, opts);
 //
 // `ed::solve` is also exported as a top-level alias (since `ed::solve`
 // does not clash with any existing namespace) for ergonomics.
@@ -228,9 +205,7 @@ struct ThermalOptions {
     } method = Method::FTLM;
 
     // ---------------------------------------------------------------
-    // Defaults aligned to `python/qed/thermal.py`, so the two surfaces
-    // line up when `ed::api::ThermalOptions` is passed through
-    // `to_legacy()`.
+    // Sampling defaults.
     // ---------------------------------------------------------------
     std::size_t num_samples    = 40;
     std::size_t krylov_dim     = 100;
@@ -301,89 +276,6 @@ struct ThermalOptions {
     std::vector<double> probe_betas;
 };
 
-struct SpectralOptions {
-    enum class Method : std::uint8_t {
-        GroundStateCF = 0,   ///< compute_ground_state_dssf via cf_spectral_kernel
-        /// Finite-T FTLM dynamics. ``ed::workflows::spectral`` rejects it
-        /// (std::invalid_argument): it needs temperatures, which the
-        /// finite-T spectral path (FTLM cross-irrep kernel) provides.
-        FtlmDynamical = 1,
-    } method = Method::GroundStateCF;
-
-    std::size_t krylov_dim    = 200;
-    double      broadening    = 0.05;
-    double      omega_min     = -10.0;
-    double      omega_max     =  10.0;
-    std::size_t num_omega     = 200;
-    /// Optional ground-state energy shift (used to align the CF
-    /// resolvent). 0 means "auto-detect from the tridiag".
-    double      energy_shift  = 0.0;
-    std::string output_dir;
-    BackendConstraints backend;
-
-    // -----------------------------------------------------------------
-    // CLI parity knobs: FTLM-dynamical sample count and the
-    // observable-type label used by the CLI.
-    // -----------------------------------------------------------------
-
-    /// Number of random samples for finite-T FTLM averaging (finite-T
-    /// spectral path). Ignored by GroundStateCF (which uses the
-    /// ground-state vector).
-    std::size_t num_samples   = 30;
-
-    /// Observable-type label carried for HDF5 output / Python
-    /// roundtripping (e.g., "Sz", "Sx_Sx", "Sz_Sz"). Optional --
-    /// orchestrator does not consume it; the CLI uses it for naming.
-    std::string observable_type;
-
-    // -----------------------------------------------------------------
-    // SOTA streaming-symmetry spectral controls (May 2026).
-    // -----------------------------------------------------------------
-
-    /// Momentum transfer Q of the probe operator (in fractional
-    /// reciprocal-lattice units, e.g. ``Q = (1/3, 0)`` for a three-site
-    /// chain). Used by the streaming-symmetry spectral workflow to
-    /// pick the (initial, final) sector pairs that survive the
-    /// selection rule ``k_final = k_initial + Q``. Empty => no
-    /// momentum filter (every sector pair is walked).
-    std::vector<double> momentum_transfer;
-
-    /// Tolerance for the momentum-transfer match (in units of the
-    /// fractional reciprocal-lattice coordinate). Pairs whose
-    /// ``|k_final - k_initial - Q| mod 1`` exceeds this threshold are
-    /// skipped. Default chosen so cubic-symmetry lattice integer
-    /// quanta are not accidentally rejected.
-    double      momentum_tolerance = 1e-6;
-
-    /// Filter for the streaming-symmetry sector loop. See
-    /// ``SolveOptions::selected_sectors``. Empty => walk every
-    /// (initial, final) pair surviving the selection rule.
-    std::vector<std::size_t> selected_sectors;
-
-    // -----------------------------------------------------------------
-    // Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026):
-    // user-supplied seed state for the GroundStateCF lane. When
-    // non-empty the orchestrator skips the inner Lanczos GS solve and
-    // feeds this vector (after L2-renormalisation) straight into
-    // ``cf_spectral_kernel`` -- this is the TPQ-to-CF pipeline (use
-    // ``ThermalOptions::probe_betas`` to persist a TPQ state at
-    // beta = 1/T, reload it via h5py, pass it here).
-    //
-    // Length MUST equal ``H.geometry().local_dim``. Empty (default)
-    // keeps the legacy behaviour: compute the GS via Lanczos and use
-    // it as the seed.
-    // -----------------------------------------------------------------
-    std::vector<std::complex<double>> initial_state;
-
-    /// Stage 12g (SU(2) rollout): optional labeler for the CF source
-    /// state. Called with the (host, unit-norm) seed after the inner GS
-    /// solve / initial_state staging; returns the certified two_S (-1 on
-    /// certification failure) and writes the raw <S^2> through the out
-    /// pointer. Installed by the workflow bindings whenever the
-    /// Hamiltonian is SU(2)-invariant; fills SpectralResult::gs_two_S.
-    std::function<int(const Complex*, std::size_t, double*)> su2_labeler;
-};
-
 // ---------------------------------------------------------------------------
 // Public entry points.
 //
@@ -391,11 +283,8 @@ struct SpectralOptions {
 //                    Block-Lanczos / Krylov-Schur / full-diag based on
 //                    (num_eigs, geometry().global_dim, opts.method).
 // `ed::thermal`   -- finite-T workflow. Switches on `opts.method`.
-// `ed::spectral`  -- dynamical correlators. `observables` is a span of
-//                    operator pointers (typically size 1: the
-//                    spin/charge operator).
 //
-// All three orchestrators construct the appropriate Backend internally
+// Both orchestrators construct the appropriate Backend internally
 // via `select_backend(H.geometry(), opts.backend)` and return a uniform
 // Result struct (Phase 3.3) carrying the BackendMetadata that fired.
 // ---------------------------------------------------------------------------
@@ -406,78 +295,17 @@ GroundStateResult solve(const LinearOperator&  H,
 ThermalResult     thermal(const LinearOperator& H,
                            ThermalOptions        opts = {});
 
-SpectralResult    spectral(const LinearOperator&                          H,
-                            const std::vector<const LinearOperator*>&     observables,
-                            SpectralOptions                               opts = {});
-
-// ---------------------------------------------------------------------------
-// Stage 12 (SU(2) rollout) workflow helpers -- hoisted from the pybind TU
-// (audit 2026-07-31): the tower-thermodynamics driver and the Lowdin
-// targeting plumbing were business logic living only in the Python
-// bindings, unreachable from the C++ API or the CLI. They are now part
-// of the ed::workflows surface; the bindings wrap them thinly.
-// ---------------------------------------------------------------------------
-
-/// Would `solve(op, opts)` take the FullDiag route? (method == FullDiag,
-/// or Auto with global_dim <= 2^12 -- keep in sync with the Auto
-/// resolution inside solve().) Policy consumers: the bindings pin
-/// allow_gpu=false for FullDiag; the SU(2) targeting forces the Krylov
-/// lane (FullDiag has no seed and would return every tower).
-[[nodiscard]] bool will_use_full_diag(const LinearOperator& op,
-                                      const SolveOptions&   opts) noexcept;
-
-/// Term-level SU(2) detection on an in-memory carrier operator.
-[[nodiscard]] bool op_is_su2_symmetric(const ::Operator& op);
-
-/// Resolve the SU(2) engagement for a call: true when the machinery
-/// (targeting / labeling) should run. Throws when a hard request
-/// (numeric total_spin, or label_total_spin == 1) cannot be met --
-/// either the ED_SYM_SU2=0 veto or a non-SU(2)-invariant Hamiltonian.
-[[nodiscard]] bool resolve_su2_engagement(const ::Operator& base,
-                                          int   two_total_spin,
-                                          int   label_total_spin,
-                                          const char* where);
-
-/// The Lowdin projector + ghost-shifted wrapped operator for one solve
-/// block. `wrapped == nullptr` marks a tower not admissible in the block.
-struct Su2Targeting {
-    std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> wrapped;
-    std::shared_ptr<const ed::symmetry::LowdinS2Projector>        projector;
-};
-[[nodiscard]] Su2Targeting make_su2_targeting(
-    std::shared_ptr<const ed::matvec::MatVecOperator> h,
-    std::shared_ptr<const ed::matvec::MatVecOperator> s2,
-    int n_sites, int n_up, int two_total_spin);
-
-/// Solve one block on the SU(2) targeting lane: projected seed, Krylov
-/// lane forced, the "zero seed" refusal (no tower weight in this block)
-/// mapped to an empty result.
-[[nodiscard]] GroundStateResult solve_su2_targeted(
-    const ed::symmetry::CasimirProjectedOperator&                 wrapped,
-    const std::shared_ptr<const ed::symmetry::LowdinS2Projector>& projector,
-    SolveOptions opts);
-
-/// Thermodynamics of ONE spin-S tower (opts.two_total_spin = 2S) in its
-/// highest-weight Sz sector: exact highest-weight spectral differencing
-/// for small blocks (honours ED_THERMAL_EXACT_SMALL=0), Lowdin-projected
-/// sampling above the dense window with F/S re-normalised from the
-/// sector dim to the tower dim M(N,S). Recombine towers with (2S+1)
-/// weights (combine_sector_thermodynamics degeneracy overload).
-[[nodiscard]] ThermalResult thermal_su2_tower(const ::Operator& op,
-                                              ThermalOptions    opts);
-
 }  // namespace ed::workflows
 
 namespace ed {
-// Top-level alias for the most-used entry point. `thermal` and `spectral`
-// don't get aliases (they would shadow the kernel namespaces).
+// Top-level alias for the most-used entry point. `thermal` does not get an
+// alias (it would shadow the kernel namespace).
 using ed::workflows::solve;
 
 // Option structs and result enums get top-level aliases so callers can
-// write `ed::SolveOptions` / `ed::ThermalOptions` / `ed::SpectralOptions`
+// write `ed::SolveOptions` / `ed::ThermalOptions`
 // without reaching into `ed::workflows::`.
 using ed::workflows::SolveOptions;
 using ed::workflows::ThermalOptions;
-using ed::workflows::SpectralOptions;
 using ed::workflows::SolveMethod;
 }  // namespace ed

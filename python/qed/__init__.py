@@ -1,49 +1,22 @@
-"""qed: Python interface to the C++ exact-diagonalization engine.
+"""qed: exact diagonalization of spin-1/2 Hamiltonians over every symmetry they have.
 
-The public surface is intentionally small: **three verbs**:
+Five verbs, one engine. Each resolves a :class:`Symmetry` against ``H`` (momenta,
+little-group irreps, Sz or its parity, spin flip, time reversal, total spin) and runs
+block by block on the CPU or a GPU:
 
-* :func:`qed.solve(H, ...) <qed.solve>` -- ground-state /
-  eigenvalue diagonalization. Picks the solver / device / Sz sector
-  automatically; opt-out via the matching kwargs.
+* :func:`eigs` -- the lowest levels, with eigenvectors on demand;
+* :func:`spectrum` -- every eigenvalue;
+* :func:`thermal` -- thermodynamics: exact, FTLM (``exact_states`` for OFTLM) or mTPQ;
+* :func:`dynamics` -- S(omega) at T = 0 or finite T;
+* :func:`expect` -- expectation values in the lowest levels (and
+  :meth:`EigResult.matrix_element` between them).
 
-* :func:`qed.thermal(H, ...) <qed.thermal>` -- finite-temperature
-  thermodynamics (FTLM / OFTLM / mTPQ). Iterates the
-  Sz axis automatically when Sz is conserved.
-
-* :func:`qed.spectral(H, observables, ...) <qed.spectral>` --
-  spectral / dynamical structure factors (ground-state continued
-  fraction, FTLM dynamical) of an in-memory ``H`` and a list of
-  observable operators.
-
-All three call into the unified C++ orchestrator
-(``ed::workflows::{solve, thermal, spectral}`` in C++) and accept
-plain keyword arguments -- there are no separate ``SolveOptions`` /
-``ThermalOptions`` / ``SpectralOptions`` Python types.
-
-Operators are built via :class:`qed.input.HamiltonianBuilder` (the
-canonical fluent DSL) or directly via :class:`qed.Operator` /
-:class:`qed.FixedSzOperator`. The C++ ``ed::make_operator(OperatorSpec)``
-factory is the C++-side mirror; its Python binding lands in a follow-up
-commit.
-
-Quick start
------------
+Operators come from :class:`qed.input.HamiltonianBuilder` or :class:`qed.Operator`.
 
     >>> import qed
-    >>> N = 6
-    >>> b = qed.input.HamiltonianBuilder(num_sites=N)
-    >>> b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
-    >>> H = b.to_operator()
-    >>> sorted(qed.solve(H, num_eigenvalues=2).eigenvalues)[:2]   # doctest: +SKIP
-    [-2.802..., -1.0]
-
-Submodules
-----------
-
-* :mod:`qed.input` -- lattice + Hamiltonian DSL.
-* :mod:`qed.symmetry` -- programmatic permutation-group helpers.
-* :mod:`qed.dssf` -- DSSF observable-pair builders (data helpers only;
-  the actual workflow lives in :func:`qed.spectral`).
+    >>> b = qed.input.HamiltonianBuilder(6)
+    >>> b.heisenberg(bonds=[(i, (i + 1) % 6) for i in range(6)], J=1.0)   # doctest: +SKIP
+    >>> qed.eigs(b.to_operator(), 2).energies                              # doctest: +SKIP
 """
 
 from __future__ import annotations
@@ -58,36 +31,13 @@ from ._locate_core import extend_package_path as _extend_package_path
 __path__ = _extend_package_path(__path__, _os.path.dirname(_os.path.abspath(__file__)))
 
 from . import _core as _core
-from ._core import (
-    Operator,
-    FixedSzOperator,
-    OP_SPLUS,
-    OP_SMINUS,
-    OP_SZ,
-    DiagonalizationMethod,
-    EDParameters,
-    EDResults,
-    ThermodynamicData,
-    has_cuda_build,
-    has_mpi_build,
-)
+from ._core import OP_SMINUS, OP_SPLUS, OP_SZ, Operator, has_cuda_build
 
-from . import dssf  # DSSF observable-pair data helpers
-from . import input  # standalone C++ ed_input library bindings
-from . import symmetry  # programmatic site-permutation symmetry DSL
-from . import helpers  # re-export edlib utilities under qed.helpers
+from . import dssf  # observable builders for dynamics
+from . import input  # lattice + Hamiltonian DSL
 from . import lattice  # lattice geometries: space group + physical labels
-from . import little_group  # labelled block spectra and <n|O|n>
-from . import workflow  # internal implementation module for qed.solve
-from .workflow import (  # noqa: E402  (top-level re-exports)
-    GeneratorSet,
-    SymmetryReport,
-    solve,
-    full_spectrum,
-    find_symmetries,
-    list_diag_parameters,
-    solver_device_support,
-)
+from . import symmetry  # programmatic site-permutation helpers
+from .discovery import GeneratorSet, SymmetryReport, find_symmetries
 
 
 def debug_env(prefix: str = "") -> str:
@@ -128,52 +78,18 @@ def _check_environment() -> None:
 
 
 _check_environment()
-from . import thermal as _thermal_module  # one canonical finite-T entry point
-from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
-from . import spectral as _spectral_module  # one canonical spectral entry point
-from .spectral import spectral  # noqa: E402
 
-# (feasibility / pre-flight planner removed: sensible defaults instead.)
+from .api import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
+                  ThermalResult, dynamics, eigs, expect, spectrum, thermal)
 
-__version__: Final[str] = "0.3.0"
+__version__: Final[str] = "0.4.0"
 
 __all__ = [
-    # Core operator types
-    "Operator",
-    "FixedSzOperator",
-    "OP_SPLUS",
-    "OP_SMINUS",
-    "OP_SZ",
-    # Low-level solver primitives (rarely needed; consider qed.solve instead)
-    # Enums and parameter helpers
-    "DiagonalizationMethod",
-    "EDParameters",
-    "EDResults",
-    "ThermodynamicData",
-    "has_cuda_build",
-    "has_mpi_build",
-    # The three canonical entry points
-    "solve",
-    "full_spectrum",
-    "thermal",
-    "spectral",
-    # Result types
-    "ThermalResult",
-    "ThermalSectorEntry",
-    # Symmetry helpers
-    "GeneratorSet",
-    "SymmetryReport",
-    "find_symmetries",
-    # Submodules
-    "dssf",
-    "input",
-    "symmetry",
-    "helpers",
-    "lattice",
-    "little_group",
-    "workflow",
-    # Helpers
-    "list_diag_parameters",
-    "solver_device_support",
+    "Operator", "OP_SPLUS", "OP_SMINUS", "OP_SZ",
+    "Symmetry", "eigs", "EigResult", "spectrum", "SpectrumResult", "thermal", "ThermalResult",
+    "dynamics", "DynamicsResult", "expect", "ExpectResult",
+    "find_symmetries", "GeneratorSet", "SymmetryReport",
+    "has_cuda_build", "debug_env", "env_snapshot",
+    "dssf", "input", "lattice", "symmetry",
     "__version__",
 ]

@@ -39,9 +39,7 @@
 // =============================================================================
 
 #include <ed/core/operator.h>
-#include <ed/core/results.h>   // ThermodynamicData
-#include <ed/matvec/matvec.h>              // 9d: MatVecOperator factory
-#include <ed/symmetry/rep_sector_data.h>   // 9d: RepSectorData
+#include <ed/symmetry/rep_sector_data.h>
 
 #include <complex>
 #include <cstdint>
@@ -55,14 +53,6 @@ struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
     int  dense_max_dim = 64;   ///< per-block dense/Lanczos crossover (lowest-k path)
-    bool use_gpu       = false;///< Batched cuSOLVER stream-pool eigensolve of
-                               ///< the dense blocks (full-spectrum path AND the
-                               ///< lowest-k path's dense-crossover blocks) --
-                               ///< restored 2026-07-20 as the little-group-owned
-                               ///< `little_group_gpu.cu` after the Family-6 SAB
-                               ///< removal had silently no-op'd it. Also gates
-                               ///< backend.allow_gpu for in-block sampling in
-                               ///< the thermal binding; ED_SYM_LG_GPU=0 vetoes.
     bool verbose       = false;
     /// Stage 9a: spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the
@@ -78,21 +68,13 @@ struct LittleGroupOptions {
     /// same ``k0`` that ``LittleGroupStarInfo::k0`` reports). Empty = every
     /// star, the default.
     ///
-    /// This is the programmatic form of the ED_SYM_LG_ONLY_K0 job-splitting
-    /// env var, added so a caller can NAME a momentum block and have the
-    /// engine do only that block's work -- previously naming a sector forced
-    /// the whole call off the projection lane and onto the abelian one, i.e.
-    /// asking for a smaller block silently bought a BIGGER one (the
-    /// (n_up,k) sector instead of (n_up,k,irrep)).
-    ///
     /// Note a star is the solve unit: members of one star are isospectral by
     /// construction (the point-group residue maps them onto each other), so
     /// restricting to a star representative answers for every member of that
-    /// star. The env var still wins when set, so existing job scripts keep
-    /// working.
+    /// star.
     std::vector<int> only_k0;
     /// Solve ONLY these little-co-group irreps (indices into the star's own
-    /// isotypic decomposition -- the same index ``LittleGroupLabel::irrep``
+    /// isotypic decomposition -- the same index ``LittleGroupBlockTag::irrep``
     /// reports, and the row index of ``LittleGroupStarInfo::little_characters``).
     /// Empty = every irrep, the default.
     ///
@@ -109,18 +91,6 @@ struct LittleGroupOptions {
     /// irrep forfeits a 2x fold that is irrelevant next to the |P_k| the
     /// projection already bought.
     std::vector<int> only_irrep;
-    /// Build every star's sector and report it (``stars`` + the full
-    /// ``irrep_characters`` table), solving NOTHING. The programmatic form of
-    /// ED_SYM_LG_ONLY_K0="plan".
-    ///
-    /// This is what makes ``only_k0`` usable from a caller who knows physics
-    /// rather than engine indices: ``only_k0`` filters on star
-    /// REPRESENTATIVES, and a caller's momentum may be a non-representative
-    /// MEMBER of a star, so it must first read the star membership (and
-    /// decode its momentum from ``irrep_characters``, since k_raw is an
-    /// internal irrep index and NOT the momentum). Plan, decode, then solve
-    /// the one star.
-    bool plan_only = false;
     /// Lowest-k solves above the dense crossover: 1 (default) = single-vector
     /// Krylov-Schur with locking when k > 1 (the basis-free scan when k = 1);
     /// p >= 2 = block Krylov-Schur with block width p, which also resolves an
@@ -166,9 +136,9 @@ struct LittleGroupStarInfo {
     // The little co-group P_k0 of THIS star, published so a caller can NAME an
     // irrep by its character instead of by an index.
     //
-    // `LittleGroupLabel::irrep` is an index into decompose_irreps' own
+    // `LittleGroupBlockTag::irrep` is an index into decompose_irreps' own
     // ordering -- engine-internal, exactly like `k_raw` (which is NOT the
-    // momentum). Momentum is nameable because `irrep_characters` publishes
+    // momentum). Momentum is nameable because the abelian irrep characters give
     // chi_k over the ABELIAN group; the co-group's characters had no such
     // table, so a `irrep=<index>` API would have handed callers an internal
     // convention and called it physics. These three fields are that missing
@@ -180,7 +150,7 @@ struct LittleGroupStarInfo {
     //                             what makes the character columns identifiable
     //                             as permutations the caller already holds.
     //   little_characters[s][e]-- chi_sigma(element e) for irrep s. Rows are
-    //                             parallel to `LittleGroupLabel::irrep`.
+    //                             parallel to `LittleGroupBlockTag::irrep`.
     //   little_irrep_dims[s]   -- d_sigma. Sum of d_sigma^2 == little_order.
     //
     // Empty when the star was not projected (trivial co-group, or a graceful
@@ -191,134 +161,12 @@ struct LittleGroupStarInfo {
     std::vector<int> little_irrep_dims;
 };
 
-/// Stage 9f: per-eigenvalue quantum-number label, parallel to
-/// ``LittleGroupSpectrum::eigenvalues``. ``k_raw`` is the star
-/// REPRESENTATIVE's abelian irrep index -- fold partners (star members,
-/// TR conjugates) share the representative's label; the full membership
-/// is in ``stars[]``. ``irrep`` indexes the little co-group's irrep
-/// decomposition at that star (-1 = plain / unprojected block; for a
-/// TR-folded sigma/sigma* pair it names the SOLVED member).
-struct LittleGroupLabel {
-    int k_raw       = -1;   ///< abelian irrep (momentum) of the star rep
-    int flip_parity = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
-    int irrep       = -1;   ///< little-co-group irrep index; -1 = plain block
-    int irrep_dim   = 1;    ///< d_sigma (1 for plain blocks)
-    /// Jul 2026: true iff the block delivered the full requested window of
-    /// DISTINCT, residual-bound-converged Ritz values (dense blocks are
-    /// exact and always true). A budget-capped Lanczos that found fewer is
-    /// flagged false -- merged campaigns must be able to tell.
-    bool converged  = true;
-};
-
-struct LittleGroupSpectrum {
-    /// Distinct block eigenvalues, ascending, with their TOTAL multiplicity
-    /// (|star| × d_σ). Σ multiplicities == subspace dimension.
-    std::vector<double> eigenvalues;
-    std::vector<int>    multiplicities;
-    std::vector<LittleGroupLabel>    labels;   ///< 9f: parallel to eigenvalues
-    /// 9f: character table of the RAW abelian irreps in the engine's own
-    /// ordering -- ``irrep_characters[k_raw][a]`` = chi_k(A[a]) with ``a``
-    /// indexing the caller's ``abelian_group`` element order. This is what
-    /// makes ``k_raw`` physically unambiguous: read the momentum off the
-    /// translation generator's phase instead of trusting an index
-    /// convention (decompose_irreps ordering != directory sector order).
-    std::vector<std::vector<std::complex<double>>> irrep_characters;
-    std::vector<LittleGroupStarInfo> stars;
-    std::uint64_t       total_dim = 0;
-    bool                flip_engaged = false;  ///< 9a: A' = A x Z2 was used
-    bool                tr_engaged   = false;  ///< 9b: TR folding was active
-    /// Blocks whose lowest-k solve did not converge. Such a block contributes only
-    /// its converged prefix (possibly nothing) to ``eigenvalues``, so this count is
-    /// the only trace of it -- consumers must check it before trusting a window.
-    std::size_t         unconverged_blocks = 0;
-    /// True iff ANY star's matvec ran on the GPU rep-gather. This is the
-    /// engine's truthful lane report; the Python project lane surfaces it as
-    /// ``EDResults.backend.lane`` (which it previously did not set at all).
-    bool                gpu_engaged  = false;
-
-    /// Flat sorted spectrum with multiplicities expanded (dense-diag shape).
-    [[nodiscard]] std::vector<double> expanded() const;
-};
-
-/// Full spectrum of H over the (n_up | parity | full) subspace, factorized
-/// star-by-star. `abelian_group` must be the CLOSED abelian group (all |A|
-/// elements); `residue_perms` are point-group coset representatives (any
-/// subset -- fewer residues just means less reduction).
-[[nodiscard]] LittleGroupSpectrum
-little_group_full_spectrum(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    const std::vector<std::vector<int>>&  residue_perms,
-    int                                   n_sites,
-    const LittleGroupOptions&             opt = {});
-
-/// Lowest `k` eigenvalues (dense on small blocks, Lanczos on the projected
-/// matrix-free matvec otherwise), multiplicities expanded and sorted.
-[[nodiscard]] std::vector<double>
-little_group_lowest_eigenvalues(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    const std::vector<std::vector<int>>&  residue_perms,
-    int                                   n_sites,
-    int                                   k,
-    const LittleGroupOptions&             opt = {});
-
-/// Stage 9f: lowest-`k`-per-block spectrum WITH labels (the structured form
-/// `little_group_lowest_eigenvalues` flattens). Each block contributes its
-/// lowest `k`; consumers expand by multiplicity and truncate.
-[[nodiscard]] LittleGroupSpectrum
-little_group_lowest_spectrum(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    const std::vector<std::vector<int>>&  residue_perms,
-    int                                   n_sites,
-    int                                   k,
-    const LittleGroupOptions&             opt = {});
-
-/// Stage 9d: the ground state localized in its momentum sector by the
-/// star walk (flip/TR folds reduce the search), then solved PLAIN
-/// (unprojected) in that sector with an in-memory eigenvector -- dense
-/// for small blocks, FullCGS2 Lanczos Ritz vector otherwise, residual-
-/// guarded (throws rather than returning a stale pair). The vector is
-/// expressed in ``rd``'s rep basis, ready for
-/// ``CrossSectorOrbitObservable::OperatorRef::from_rep``.
-struct LittleGroupGroundState {
-    double                             energy = 0.0;
-    int                                k0     = -1;  ///< extended irrep index
-    ed::symmetry::RepSectorData        rd;           ///< the GS sector
-    std::vector<std::complex<double>>  vec;          ///< GS in rd's basis
-    /// U2a labels: which isotypic block held the GS (-1 = the plain k0
-    /// block -- either the star declined projection, or the projected
-    /// lift failed its residual guard and the engine fell back to the
-    /// plain re-solve). The vec contract is UNCHANGED either way: a
-    /// rep-basis vector of rd, ready for CrossSectorOrbitObservable.
-    int                                irrep       = -1;
-    int                                flip_parity = -1;
-};
-
-[[nodiscard]] LittleGroupGroundState
-little_group_ground_state(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    const std::vector<std::vector<int>>&  residue_perms,
-    int                                   n_sites,
-    const LittleGroupOptions&             opt = {});
-
-/// Stage 9d: every non-empty RAW momentum sector of one diagonal
-/// subspace (destination sweep of the factorized DSSF -- folding never
-/// applies to matrix elements, so destinations enumerate raw irreps).
-[[nodiscard]] std::vector<ed::symmetry::RepSectorData>
-little_group_k_sectors(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    int                                   n_sites,
-    int                                   n_up      = -1,
-    int                                   sz_parity = -1);
-
-/// Streaming twin of ``little_group_k_sectors``: invoke ``fn`` on each
-/// non-empty raw momentum sector one at a time, freeing it before the next
-/// is built. Bounds the resident set to a single destination sector (each
-/// is ~15-20 GB at N=36 half-filling; holding all 12 OOMs a 128 GB node).
+/// Streaming sweep over every non-empty RAW momentum sector of one diagonal
+/// subspace (destination sweep of the factorized DSSF -- folding never applies
+/// to matrix elements, so destinations enumerate raw irreps): invoke ``fn`` on
+/// each sector one at a time, freeing it before the next is built. Bounds the
+/// resident set to a single destination sector (each is ~15-20 GB at N=36
+/// half-filling; holding all 12 OOMs a 128 GB node).
 void little_group_k_sectors_stream(
     const ::Operator&                     op,
     const std::vector<std::vector<int>>&  abelian_group,
@@ -327,47 +175,10 @@ void little_group_k_sectors_stream(
     int                                   sz_parity,
     const std::function<void(ed::symmetry::RepSectorData&)>& fn);
 
-/// Stage 9d: matrix-free H restricted to one rep-basis sector (public
-/// factory over the engine's internal RepSectorMatVec). ``force_gpu``
-/// (GS-DSSF GPU lane, 2026-07-20) tries the device rep-gather FIRST with
-/// the dimension floor dropped -- reduced CSR becomes the fallback instead
-/// of the short-circuit; ED_SYM_LG_GPU=0 still vetoes and any device
-/// failure degrades gracefully.
-[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
-make_rep_sector_matvec(
-    const ::Operator&            op,
-    ed::symmetry::RepSectorData  rd,
-    bool                         force_gpu = false);
-
 /// One shared, read-only copy of a sector basis with its permutation LUT built, so
 /// several operators on the SAME (k, n_up) sector (H and a batch of probes) do not
 /// each copy the reps / norms / perm tables (1-2 GB at N = 36).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData>
 share_rep_sector(ed::symmetry::RepSectorData rd);
-
-/// As above, over a sector shared with share_rep_sector() (or rep_data_ptr() of an
-/// existing sector operator). The operator must be G-invariant and Hermitian, like
-/// every operator on this lane (the gather kernels apply O^dagger).
-[[nodiscard]] std::unique_ptr<ed::matvec::MatVecOperator>
-make_rep_sector_matvec(
-    const ::Operator&                                  op,
-    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
-    bool                                               force_gpu = false);
-
-/// Truthful device report for a matvec built by make_rep_sector_matvec:
-/// did its GPU rep-gather actually engage? (Lazy -- meaningful only after
-/// the first apply(); false for foreign operator types.)
-[[nodiscard]] bool
-rep_sector_matvec_gpu_engaged(const ed::matvec::MatVecOperator& mv);
-
-/// Exact canonical thermodynamics from the factorized full spectrum.
-[[nodiscard]] ThermodynamicData
-little_group_thermodynamics(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    const std::vector<std::vector<int>>&  residue_perms,
-    int                                   n_sites,
-    const std::vector<double>&            temperatures,
-    const LittleGroupOptions&             opt = {});
 
 }  // namespace ed::solvers

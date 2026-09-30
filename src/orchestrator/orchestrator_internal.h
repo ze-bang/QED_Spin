@@ -3,7 +3,7 @@
 // src/orchestrator/orchestrator_internal.h -- PRIVATE to the workflow
 // orchestrator.
 //
-// The three entry points dispatch through `ed::select_backend` to choose
+// The two entry points dispatch through `ed::select_backend` to choose
 // one of the four concrete Backends (Cpu / Cuda / Mpi / MpiCuda) and
 // invoke the matching templated kernel from Phase 2:
 //
@@ -13,14 +13,13 @@
 //                  or full_diag fallback                  (small dim)
 //     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
 //                  or the FTLM / OFTLM kernels
-//     ed::spectral  -> cf_spectral_kernel<Backend>
 //
 // The orchestrator carries the legacy CLI behaviour ONLY for the
 // `output_dir` HDF5 trail; everything else is the new uniform Result
 // shape from `include/ed/core/results.h`.
 //
 // Carries the include block every orchestrator translation unit needs, the
-// Hermitian-input guard the three entry points share, and the declarations of
+// Hermitian-input guard the entry points share, and the declarations of
 // the shared plumbing helpers whose definitions live in orch_common.cpp.
 // Nothing outside src/orchestrator/ includes this header: the public surface
 // is include/ed/orchestrator.h.
@@ -40,11 +39,6 @@
 //                      lives here and nowhere else.
 //   orch_thermal.cpp   thermal(): exact-small eigenspectrum fallback, mTPQ
 //                      sampling, FTLM / OFTLM lanes, all-Sz sweep
-//   orch_spectral.cpp  spectral(): the GroundStateCF lane plus the host GS
-//                      seed refinement
-//   orch_su2.cpp       Stage 12 SU(2) helpers: full-diag predicate, SU(2)
-//                      invariance probe, Lowdin targeting, highest-weight
-//                      tower thermodynamics
 // =============================================================================
 
 #include <ed/config/env_registry.h>   // typed environment accessors
@@ -65,22 +59,12 @@
 // (csr_policy_hook, sym_matvec_policy_hook, basis_policy_hook) still provide
 // the default + env-override behaviour, consumed lazily inside the operator
 // backends; the orchestrator no longer overrides them.
-#include <ed/planner/csr_policy_hook.h>     // ScopedCsrOverride (refine_gs_seed_host)
-#include <ed/core/operator.h>               // Operator introspection (term SoA, N)
-#include <ed/core/fixed_sz_operator.h>      // Stage 12: highest-weight sector carrier
-#include <ed/matvec/term_storage.h>         // Stage 12: classify_route for SU(2) probe
-#include <ed/operators/casimir.h>           // Stage 12: make_S2_carrier
-#include <ed/symmetry/su2.h>                // Stage 12: su2_enabled / invariance probe
-#include <ed/symmetry/su2_dims.h>           // Stage 12: multiplet_count / highest weight
-#include <ed/symmetry/casimir_projector.h>  // Stage 12: Lowdin projector + wrapper
-#include <ed/symmetry/sector_operator.h>    // SectorOperator (group_size introspection)
 #include <ed/symmetry/canonical_thermo.h>   // canonical_thermo_from_eigs (single impl)
 
 #include <fstream>   // /proc/meminfo
 #include <string>
 #include <unistd.h>  // sysconf
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/observables/cf_spectral_kernel.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/thermal/tpq_thermo.h>  // compute_tpq_thermo_from_trajectories aggregator

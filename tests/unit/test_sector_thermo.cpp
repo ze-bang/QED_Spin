@@ -22,7 +22,7 @@
 
 #include <ed/core/sector_thermo.h>
 #include <ed/core/thermal_types.h>
-#include <ed/solvers/observables.h>
+#include <ed/symmetry/canonical_thermo.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -55,6 +55,18 @@ inline PartitionedSpectra partition_spectrum(const std::vector<double>& eigs,
         out.per_sector_eigs[i % num_sectors].push_back(eigs[i]);
     }
     return out;
+}
+
+// Canonical thermodynamics of a spectrum on a log-spaced grid T_min..T_max
+// (the dense reference every combination below is checked against).
+inline ThermodynamicData calculate_thermodynamics_from_spectrum(
+    const std::vector<double>& eigs, double T_min, double T_max, std::size_t num_points) {
+    std::vector<double> T(num_points);
+    const double step = num_points > 1
+        ? (std::log(T_max) - std::log(T_min)) / static_cast<double>(num_points - 1) : 0.0;
+    for (std::size_t i = 0; i < num_points; ++i)
+        T[i] = std::exp(std::log(T_min) + static_cast<double>(i) * step);
+    return ed::symmetry::canonical_thermo_from_eigs(eigs, T);
 }
 
 inline std::vector<double> heisenberg_chain_spectrum(uint64_t N) {

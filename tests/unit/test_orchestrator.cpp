@@ -2,14 +2,12 @@
 // tests/unit/test_orchestrator.cpp
 //
 // Phase 4.2 of the Minimalist ED Collapse (May 2026): smoke tests for
-// `ed::workflows::solve` / `ed::workflows::thermal` /
-// `ed::workflows::spectral`. Drives them on the same small Heisenberg
-// chain used elsewhere in the unit suite, asserting:
+// `ed::workflows::solve` / `ed::workflows::thermal`. Drives them on the
+// same small Heisenberg chain used elsewhere in the unit suite, asserting:
 //
 //   * `ed::workflows::solve` returns the textbook ground-state energy
 //     of the 6-site periodic AFM Heisenberg chain (E_0 = -2.8027757...).
 //   * `ed::workflows::thermal` returns a positive set of TPQ energies.
-//   * `ed::workflows::spectral` returns a non-empty spectral function.
 //
 // These tests exercise the full BackendVariant dispatch path
 // (single-rank lane only --- the multi-rank and GPU lanes are validated
@@ -69,28 +67,5 @@ TEST_CASE("workflows::thermal runs the mTPQ lane end-to-end",
     opts.backend.allow_gpu = false;  // single-rank CPU-lane smoke test (see above)
 
     auto res = ed::workflows::thermal(*H, opts);
-    REQUIRE(res.backend.lane == "cpu");
-}
-
-TEST_CASE("workflows::spectral produces a non-empty CF spectral function",
-          "[orchestrator][spectral][phase4]") {
-    constexpr std::uint64_t N = 4;
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    // Use H as its own "observable" for this smoke test --- the kernel
-    // doesn't care which operator we pass; it just exercises the CF
-    // Lanczos path.
-    ed::SpectralOptions opts;
-    opts.krylov_dim = 30;
-    opts.omega_min  = -5.0;
-    opts.omega_max  =  5.0;
-    opts.num_omega  =  21;
-    opts.backend.allow_gpu = false;  // single-rank CPU-lane smoke test (see above)
-
-    std::vector<const ed::LinearOperator*> obs = {H.get()};
-    auto res = ed::workflows::spectral(*H, obs, opts);
-
-    REQUIRE(res.omega.size() == 21);
-    REQUIRE(res.S_real.size() == 21);
     REQUIRE(res.backend.lane == "cpu");
 }

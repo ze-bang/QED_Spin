@@ -1,33 +1,14 @@
 // =============================================================================
-// python/qed/_bindings/qed_bindings.cpp
+// python/qed/_bindings/qed_bindings.cpp -- the pybind11 module `qed._core`.
 //
-// pybind11 binding module `qed._core`.
+//   * Operator: the spin-1/2 Hamiltonian / observable builder (terms, file loaders,
+//     apply, and the term iterators symmetry discovery reads);
+//   * input (input_bindings.cpp): lattices and the Hamiltonian DSL;
+//   * sectors (sectors_bindings.cpp): the symmetry-sector verbs behind qed.api;
+//   * dssf, symmetry: observable assembly and site-permutation helpers;
+//   * the environment registry (env_*) and build / device probes.
 //
-// What we expose (Phase 1, deliberately a small surface):
-//   * Operator                     -- spin-1/2 Hamiltonian builder.
-//                                     methods: add_one_body, add_two_body,
-//                                              add_three_body, load_trans,
-//                                              load_inter_all, apply, num_sites,
-//                                              dimension, hilbert_dim
-//   * FixedSzOperator              -- same builder restricted to a fixed Sz
-//                                     sector.
-//   * full_diagonalization()       -- dense LAPACK eigensolve via apply().
-//   * lanczos()                    -- iterative Lanczos for the bottom of
-//                                     the spectrum.
-//   * finite_temperature_lanczos() -- FTLM thermodynamics.
-//   * low_temperature_lanczos()    -- LTLM thermodynamics.
-//   * compute_thermodynamics_from_spectrum() -- partition-function helper.
-//
-// Design notes:
-//   * NumPy is the only required runtime dependency on the Python side; we
-//     marshal complex vectors as `numpy.ndarray[complex128]`.
-//   * All long-running solvers release the GIL via `py::call_guard<py::gil_scoped_release>()`.
-//   * Builder methods accept Python complex scalars (or floats) for coupling
-//     constants.
-//   * Operator op-types are a Python IntEnum: SP=0, SM=1, SZ=2 (matching the
-//     C++ TransformData convention).
-//
-// P2.7 / audit "modern python interface".
+// Complex vectors cross as numpy complex128 arrays; long solves release the GIL.
 // =============================================================================
 
 #include <pybind11/pybind11.h>
@@ -38,29 +19,13 @@
 
 #include <ed/config/env_registry.h>
 #include <ed/core/construct_ham.h>
+#include <ed/core/select_backend.h>
 #include <ed/dssf/operator_spec.h>
-#include <ed/planner/basis_policy_hook.h>   // ScopedBasisRepr / prefer_tableless_fixed_sz (leaf)
-#include <ed/solvers/ftlm.h>
-#include <ed/solvers/lanczos.h>
-#include <ed/solvers/observables.h>
+#include <ed/symmetry/commute_check.h>
 #include <ed/symmetry/group.h>
-#include <ed/symmetry/irreps.h>
-#include <ed/solvers/little_group_solve.h>  // Stage 7 factorized non-abelian
-#include <ed/solvers/little_group_blocks.h> // U1b: little_group_thermal
-#include <ed/core/select_backend.h>         // have_cuda (sweep GPU cell)
-#include <ed/core/hdf5_io.h>                // r2b: canonical eigenvector save
-#include <ed/symmetry/spin_flip.h>
-#include <ed/symmetry/env_gates.h>  // Stage 10b: gate inventory + dump  // sz_axis_of (Stage 8d diagonal-axis compose)
-#include <ed/dssf/cross_sector_orbit_observable.h>  // 9d: rectangular rep apply
-#include <ed/observables/cf_spectral_kernel.h>      // 9d: cf_spectral_from_vector
-#include <ed/matvec/backends/cpu_backend.h>         // 9d: CF backend
-#include <ed/thermal/ftlm_kernel.h>                 // Family-2 front door
 
-#include "dispatcher_bindings.h"
 #include "input_bindings.h"
-#include "little_group_bindings.h"
 #include "sectors_bindings.h"
-#include "workflow_bindings.h"
 
 #include <complex>
 #include <cstdint>
@@ -188,18 +153,6 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
     return to_numpy(out);
 }
 
-ComplexArray fop_apply(const FixedSzOperator& op, const ComplexArray& vin) {
-    auto v = from_numpy(vin);
-    const uint64_t d = op.getFixedSzDim();
-    if (v.size() != d) {
-        throw std::invalid_argument(
-            "input vector length " + std::to_string(v.size()) +
-            " != fixed-Sz dim " + std::to_string(d));
-    }
-    ComplexVec out(d, Complex(0.0, 0.0));
-    op.apply(v.data(), out.data(), d);
-    return to_numpy(out);
-}
 
 // =============================================================================
 // Phase 9: in-process introspection helpers used by the unified workflow API
@@ -209,8 +162,8 @@ ComplexArray fop_apply(const FixedSzOperator& op, const ComplexArray& vin) {
 // operator through `HamiltonianBuilder.write_directory` and re-parse the
 // resulting `Trans.dat` / `InterAll.dat`, or (b) crack open the C++
 // `transform_data_` POD layout from Python, which is brittle. Exposing
-// small "iterate the terms" / "is Sz conserved?" / "clone into FixedSz"
-// helpers gives the workflow layer a clean, type-safe surface.
+// small "iterate the terms" / "is Sz conserved?"
+// helpers gives symmetry discovery a clean, type-safe surface.
 // =============================================================================
 
 // Returns true iff every (one-, two-, three-body) term commutes with total
@@ -282,50 +235,6 @@ py::list op_iter_three_body(const Operator& op) {
     return out;
 }
 
-// Allocate a fresh FixedSzOperator on the same number of sites and copy
-// the source operator's term lists across. The fixed-Sz operator inherits
-// `transform_data_` / `three_body_data_` straight from `Operator`, so a
-// member-wise copy gets us a fully working sector-restricted operator
-// without having to re-add each term.
-// C(n, k), overflow-clamped to UINT64_MAX (a basis that large is astronomically
-// infeasible -> the clamp correctly drives the tableless / refuse decision).
-[[nodiscard]] inline std::uint64_t binom_u64(unsigned n, unsigned k) {
-    if (k > n) return 0;
-    k = std::min(k, n - k);
-    std::uint64_t r = 1;
-    for (unsigned i = 0; i < k; ++i) {
-        const std::uint64_t num = n - i;
-        if (r > (std::numeric_limits<std::uint64_t>::max)() / num)
-            return (std::numeric_limits<std::uint64_t>::max)();
-        r = r * num / (i + 1);   // exact in this multiplicative order
-    }
-    return r;
-}
-
-std::unique_ptr<FixedSzOperator>
-op_make_fixed_sz(const Operator& op, int64_t n_up) {
-    if (n_up < 0 || n_up > static_cast<int64_t>(op.getNumBits())) {
-        throw std::invalid_argument(
-            "n_up = " + std::to_string(n_up) +
-            " out of range [0, num_sites=" + std::to_string(op.getNumBits()) + "]");
-    }
-
-    // Planner removed: pick the fixed-Sz basis representation from the
-    // basis_policy_hook leaf -- env ED_FIXED_SZ_TABLELESS wins, otherwise the
-    // materialized C(N,n_up) default. (The cost-model "completion guarantee"
-    // pre-flight is gone; set ED_FIXED_SZ_TABLELESS=1 for the tableless
-    // combinadic basis when the materialized array would not fit.)
-    const ed::planner::ScopedBasisRepr basis_guard(
-        ed::planner::prefer_tableless_fixed_sz() ? ed::planner::BasisRepr::Tableless
-                                                 : ed::planner::BasisRepr::Default);
-
-    auto fop = std::make_unique<FixedSzOperator>(
-        op.getNumBits(), op.getSpin(), n_up);
-    fop->transform_data_  = op.transform_data_;
-    fop->three_body_data_ = op.three_body_data_;
-    fop->invalidateMatrixCaches();
-    return fop;
-}
 
 } // namespace
 
@@ -345,10 +254,6 @@ PYBIND11_MODULE(_core, m) {
     // the Python facade.
     bind_input(m);
 
-    // NOTE: bind_dispatcher() runs at the END of the module (after
-    // Operator and FixedSzOperator are registered) because it attaches
-    // `set_symmetry_info_from_dict` / `get_symmetry_info_as_dict` methods
-    // to those classes via m.attr("Operator").
 
     py::class_<Operator>(m, "Operator", R"pbdoc(
         Spin-1/2 Hamiltonian builder backed by the C++ matrix-free apply().
@@ -445,21 +350,11 @@ PYBIND11_MODULE(_core, m) {
              "``iter_one_body_terms``.")
         .def("iter_three_body_terms", &op_iter_three_body,
              "List of ``(op_type_1, site_1, op_type_2, site_2, op_type_3, "
-             "site_3, coeff)`` tuples for every three-body term.")
-        .def("make_fixed_sz", &op_make_fixed_sz,
-             py::arg("n_up"),
-             "Return a new ``FixedSzOperator`` on the same sites with the "
-             "same one-/two-/three-body terms, restricted to the Sz sector "
-             "with ``n_up`` up spins. Equivalent to ``FixedSzOperator(...)`` "
-             "+ replaying every ``add_one_body`` / ``add_two_body`` call, "
-             "but routed through a single C++ copy of the term arrays.");
+             "site_3, coeff)`` tuples for every three-body term.");
 
     m.def("have_cuda", [] { return ed::have_cuda(); },
           "True when this build has CUDA support AND a device is present "
           "(the same gate the engine's GPU rep-gather consults).");
-    m.def("dump_env_gates", [] { return ed::symmetry::dump_env_gates(); },
-          "The ED_SYM_* rows of the environment registry with their live values, "
-          "defaults and meanings (kept for callers of the old name; see env_dump).");
     m.def("env_dump", [](const std::string& prefix) { return ed::env::dump(prefix.c_str()); },
           py::arg("prefix") = "",
           "Every registered ED_* / QED_* environment variable whose name starts with "
@@ -481,31 +376,28 @@ PYBIND11_MODULE(_core, m) {
               return out;
           },
           "Names of all registered environment variables.");
+    m.def("has_cuda_build", [] {
+#ifdef WITH_CUDA
+              return true;
+#else
+              return false;
+#endif
+          },
+          "True when this build was compiled with CUDA (a device may still be absent).");
+    m.def("check_generators_commute",
+          [](const Operator& op, const std::vector<std::vector<int>>& generators) {
+              std::vector<bool> out;
+              out.reserve(generators.size());
+              for (const auto& g : generators)
+                  out.push_back(ed::symmetry::hamiltonian_commutes_with_permutation(
+                      op.transform_data_, op.three_body_data_, g));
+              return out;
+          },
+          py::arg("op"), py::arg("generators"),
+          "Per permutation: does relabelling H's term sites by it leave the terms invariant "
+          "([H, U_g] = 0, exact, no matvec)?");
 
-
-    // The little-group verbs (little_group_bindings.cpp).
-    bind_little_group(m);
     bind_sectors(m);
-    py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
-        Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.
-
-        Parameters
-        ----------
-        num_sites : int
-        n_up : int
-            Number of up spins. Must satisfy 0 <= n_up <= num_sites.
-        spin : float, optional
-            Local spin quantum number (default 0.5).
-    )pbdoc")
-        .def(py::init([](uint64_t num_sites, int64_t n_up, float spin) {
-            return std::make_unique<FixedSzOperator>(num_sites, spin, n_up);
-        }),
-             py::arg("num_sites"),
-             py::arg("n_up"),
-             py::arg("spin") = 0.5f)
-        .def_property_readonly("dimension", &FixedSzOperator::getFixedSzDim,
-                               "Reduced sector dimension C(num_sites, n_up).")
-        .def("apply", &fop_apply, py::arg("vec"));
 
     // ed::dssf -- structure-factor observable assembly (P2.8 / DSSF PR-G).
     auto m_dssf = m.def_submodule("dssf",
@@ -611,13 +503,8 @@ PYBIND11_MODULE(_core, m) {
 
     // ed::sym -- programmatic site-permutation symmetry DSL (P2.11).
     auto m_sym = m.def_submodule("symmetry",
-        "Bindings for the ed::sym C++ library: programmatic site-permutation "
-        "symmetry groups (translation, reflection, dihedral, custom). "
-        "Replaces the JSON detour through automorphism_finder.py for the "
-        "common 1D / point-group cases. The returned dictionary is the "
-        "bridge to the C++ engine: assign it to "
-        "`Operator.symmetry_info` (when that binding lands) or persist it "
-        "back through the legacy automorphism_results/ JSON files.");
+        "Site permutations: identity, composition, powers, order, translations, "
+        "reflections, swaps, and the closure of a generating set.");
 
     m_sym.def("identity", &ed::sym::identity, py::arg("n_sites"),
         "Identity permutation on `n_sites` sites.");
@@ -640,125 +527,4 @@ PYBIND11_MODULE(_core, m) {
         "Expand a list of generators into the full group (BFS). The result "
         "is sorted lexicographically for deterministic ordering.");
 
-    // group_from_generators returns SymmetryGroupInfo. We expose it as a
-    // Python dict so collaborators don't need to know the C++ struct
-    // internals; the dict can be re-marshalled back to JSON via the
-    // automorphism_results/ schema if they want to persist it.
-    m_sym.def("group_from_generators",
-        [](int n_sites,
-           std::vector<ed::sym::Permutation> generators,
-           std::vector<std::vector<int>> sector_quantum_numbers) {
-            auto info = ed::sym::group_from_generators(
-                n_sites, std::move(generators),
-                std::move(sector_quantum_numbers));
-            py::dict d;
-            d["num_generators"]       = info.num_generators;
-            d["generator_orders"]     = info.generator_orders;
-            d["generators"]           = info.generators;
-            d["max_clique"]           = info.max_clique;
-            d["power_representation"] = info.power_representation;
-            py::list sectors;
-            for (const auto& s : info.sectors) {
-                py::dict sd;
-                sd["sector_id"]       = s.sector_id;
-                sd["quantum_numbers"] = s.quantum_numbers;
-                py::list pf;
-                for (const auto& z : s.phase_factors) {
-                    pf.append(std::complex<double>(z.real(), z.imag()));
-                }
-                sd["phase_factors"] = pf;
-                sectors.append(sd);
-            }
-            d["sectors"] = sectors;
-            return d;
-        },
-        py::arg("n_sites"),
-        py::arg("generators"),
-        py::arg("sector_quantum_numbers") = std::vector<std::vector<int>>{},
-        R"pbdoc(
-        Build a fully-elaborated SymmetryGroupInfo from generators and
-        return it as a dict with the same keys the JSON-driven path
-        produces: ``num_generators``, ``generator_orders``,
-        ``generators``, ``max_clique``, ``power_representation``,
-        and ``sectors`` (list of {sector_id, quantum_numbers,
-        phase_factors}). When ``sector_quantum_numbers`` is omitted,
-        the full abelian product is enumerated and any phantom irreps
-        produced by generator relations are removed.
-        )pbdoc");
-
-    m_sym.def("translation_group_1d",
-        [](int n_sites) {
-            auto info = ed::sym::translation_group_1d(n_sites);
-            py::dict d;
-            d["num_generators"]       = info.num_generators;
-            d["generator_orders"]     = info.generator_orders;
-            d["generators"]           = info.generators;
-            d["max_clique"]           = info.max_clique;
-            d["power_representation"] = info.power_representation;
-            py::list sectors;
-            for (const auto& s : info.sectors) {
-                py::dict sd;
-                sd["sector_id"]       = s.sector_id;
-                sd["quantum_numbers"] = s.quantum_numbers;
-                py::list pf;
-                for (const auto& z : s.phase_factors) {
-                    pf.append(std::complex<double>(z.real(), z.imag()));
-                }
-                sd["phase_factors"] = pf;
-                sectors.append(sd);
-            }
-            d["sectors"] = sectors;
-            return d;
-        },
-        py::arg("n_sites"),
-        "Convenience: cyclic translation group Z_N on a 1D ring with all "
-        "N momentum sectors enumerated.");
-
-    // -------------------------------------------------------------------------
-    // Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +
-    // streaming dispatchers + build introspection. Must run AFTER
-    // Operator and FixedSzOperator are bound (it attaches symmetry methods
-    // to them via m.attr("Operator")). See dispatcher_bindings.{h,cpp}.
-    // -------------------------------------------------------------------------
-    bind_dispatcher(m);
-
-    // -------------------------------------------------------------------------
-    // ED Cleanup Sweep Phase 1 (May 2026): `ed::workflows::solve/thermal/
-    // spectral` entry points. Routes through select_backend on every call;
-    // intended to replace the legacy `exact_diagonalization_*` family.
-    // See workflow_bindings.cpp.
-    // -------------------------------------------------------------------------
-    bind_workflows(m);
-
-    // -------------------------------------------------------------------------
-    // SymmetryGroupInfo as the C++ side sees it, built from memory. Test hook
-    // for the phase convention the symmetric lanes rely on.
-    // -------------------------------------------------------------------------
-    auto group_info_dict = [](const SymmetryGroupInfo& g) {
-        py::list secs;
-        for (const auto& s : g.sectors) {
-            py::dict d;
-            d["sector_id"]       = s.sector_id;
-            d["quantum_numbers"] = s.quantum_numbers;
-            d["phase_factors"]   = s.phase_factors;
-            secs.append(d);
-        }
-        py::dict out;
-        out["generators"]           = g.generators;
-        out["generator_orders"]     = g.generator_orders;
-        out["max_clique"]           = g.max_clique;
-        out["power_representation"] = g.power_representation;
-        out["sectors"]              = secs;
-        return out;
-    };
-    m.def("_symmetry_info_from_memory",
-          [group_info_dict](const std::vector<std::vector<int>>& max_clique,
-                            const std::vector<std::vector<int>>& generators,
-                            const std::vector<int>& generator_orders,
-                            const std::vector<std::pair<uint64_t, std::vector<int>>>& sectors) {
-              return group_info_dict(SymmetryGroupInfo::from_memory(
-                  max_clique, generators, generator_orders, sectors));
-          },
-          py::arg("max_clique"), py::arg("generators"), py::arg("generator_orders"),
-          py::arg("sectors"));
 }

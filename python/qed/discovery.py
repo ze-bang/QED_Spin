@@ -1,19 +1,12 @@
-"""qed.discovery -- symmetry-group discovery and normalization (layer L6).
-
-Split out of ``workflow.py`` (Stage 10b): the group-discovery machinery is
-its own responsibility -- ``find_symmetries`` (colored-graph automorphisms
--> abelian clique + retained residue), the ``GeneratorSet`` /
-``SymmetryReport`` containers, the ``symmetry=`` / toggle normalization
-(``resolve_auto_symmetry``, ``resolve_discrete_toggle``), and the
-``[H, U_g] = 0`` validation of explicit generator input. ``workflow.py``
-re-exports every public name, so existing imports keep working.
+"""Symmetry discovery: the automorphisms of H's coloured interaction graph that commute
+with H (``find_symmetries``), returned as a ``GeneratorSet`` -- an abelian clique (the
+momenta) plus the retained point-group residues -- inside a ``SymmetryReport``.
 """
 
 from __future__ import annotations
 
 import math
 import os
-import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Union
 
@@ -21,7 +14,7 @@ from . import _core as _core
 from ._core import Operator  # type: ignore[attr-defined]
 
 Permutation = list[int]
-SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
+
 
 def _operator_to_graph_records(
     operator: Operator,
@@ -208,8 +201,8 @@ def _make_generator_set_from_clique(
     # minimal in COUNT, not relation-free: a 4x4 torus yields three order-4
     # generators spanning a group of order 16, where prod(orders) says 64.
     # Overstating |A| makes correct dim/|A| blocks look like the engine is
-    # forfeiting a factor it never had. See star_reduction.abelian_order.
-    from .star_reduction import abelian_order
+    # forfeiting a factor it never had. See _group_structure.abelian_order.
+    from ._group_structure import abelian_order
     group_size = abelian_order(gens, orders)
     return GeneratorSet(
         name=name,
@@ -274,8 +267,8 @@ class GeneratorSet:
         # By explicit list of indices:
         custom    = full.subgroup([1])            # same as full[1]
 
-        # Then pass any GeneratorSet to qed.solve(...):
-        eigs = qed.solve(H, symmetry=rot_only).eigenvalues
+        # Then use any GeneratorSet as the spatial symmetry:
+        E = qed.eigs(H, 4, sym=qed.Symmetry(spatial=rot_only)).energies
 
     The returned subgroup is a fresh :class:`GeneratorSet` whose
     ``group_size`` is the number of DISTINCT permutations the selected
@@ -301,7 +294,7 @@ class GeneratorSet:
         """Precise group structure: abelian invariant factors,
         generator permutations, residue conjugation relations and
         common-case recognition (dihedral / direct product)."""
-        from .star_reduction import describe_group
+        from ._group_structure import describe_group
         return describe_group(self.generators, self.orders,
                               self.star_perms, name=self.name)
 
@@ -369,7 +362,7 @@ class GeneratorSet:
         # TRUE order of the span, not prod(sub_orders): the parent's
         # generators are minimal in count, not relation-free, so a selected
         # subset can be dependent too.
-        from .star_reduction import abelian_order
+        from ._group_structure import abelian_order
         sub_size = abelian_order(sub_gens, sub_orders)
         return GeneratorSet(
             name=f"{self.name}[{','.join(str(i) for i in norm)}]",
@@ -452,7 +445,7 @@ class SymmetryReport:
             for n_up, dim in self.sz_sectors:
                 lines.append(f"    sz={n_up:3d}   dim={dim}")
             lines.append(
-                "  -> pass `sz=<n_up>` to qed.solve(...) to restrict "
+                "  -> Symmetry(sz=<n_up>) restricts "
                 "to a sector."
             )
         else:
@@ -469,8 +462,8 @@ class SymmetryReport:
             lines.append(f"      {gs.description}")
         lines.append("")
         lines.append(
-            "  -> pass any GeneratorSet (or list[Permutation]) as "
-            "`symmetry=...` to qed.solve(...)."
+            "  -> use any GeneratorSet (or list[Permutation]) as "
+            "qed.Symmetry(spatial=...)."
         )
         if (
             self.full_set is not None
@@ -482,10 +475,6 @@ class SymmetryReport:
                 "subset with e.g. report.full_set[0] / "
                 "report.full_set.subgroup([0,2])."
             )
-        lines.append(
-            "  -> call qed.list_diag_parameters() to see every "
-            "knob qed.solve(...) supports via extra_params=..."
-        )
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -692,7 +681,7 @@ def _find_symmetries_impl(
         raise ImportError(
             "find_symmetries() requires pynauty and networkx. Install "
             "with `pip install pynauty networkx` (or skip find_symmetries "
-            "entirely and pass your own generators to qed.solve(...))."
+            "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
 
     # The legacy pipeline prints quite a lot. The cheapest way to silence
@@ -752,7 +741,7 @@ def _find_symmetries_impl(
             # maximal-abelian clique is always VALID (smaller A only folds
             # less); the residue below carries the rest of the point group
             # into the little-group lane, which recovers the reduction.
-            from .point_group_routing import greedy_maximal_abelian
+            from ._groups import greedy_maximal_abelian
             clique = [list(pp) for pp in
                       greedy_maximal_abelian(all_automorphisms)]
             if verbose:
@@ -787,7 +776,7 @@ def _find_symmetries_impl(
                 # (same set, computed later at O(|star|*|A|) per call) --
                 # store the deduped form once. The greedy clique is a
                 # CLOSED group, so left-cosets partition the complement.
-                from .point_group_routing import _compose as _pg_compose
+                from ._groups import _compose as _pg_compose
                 _Aset = _clique_keys
                 _star, _covered = [], set(_Aset)
                 for pp in all_automorphisms:
@@ -841,224 +830,4 @@ def _find_symmetries_impl(
         trivial_set=trivial,
     )
 
-
-# ---------------------------------------------------------------------------
-# diag
-# ---------------------------------------------------------------------------
-
-
-def _validate_explicit_generators(operator, symmetry, *, verbose=True) -> None:
-    """A2: verify an EXPLICIT / bridge-supplied generator set commutes with H.
-
-    The abelian rep lane trusts its generators; an ``"auto"`` automorphism is
-    a symmetry of H's coloured interaction graph by construction, but a
-    hand-supplied ``GeneratorSet`` or raw permutation list is unchecked -- a
-    wrong permutation (site-ordering mismatch, off-by-one) yields silently
-    wrong spectra with correct-looking per-sector sum rules. The check is
-    term-level and exact (no matvec). Raises ``RuntimeError`` on the first
-    non-commuting generator; set ``ED_SYM_SKIP_COMMUTE_CHECK=1`` to bypass.
-    """
-    if os.environ.get("ED_SYM_SKIP_COMMUTE_CHECK") == "1":
-        return
-    if symmetry is None or isinstance(symmetry, dict):
-        return                       # directory-form / no group: nothing to check
-    if not isinstance(operator, Operator):
-        return                       # can't term-inspect a non-in-memory operator
-    gens = getattr(symmetry, "generators", None)
-    if gens is None and isinstance(symmetry, (list, tuple)) and symmetry \
-            and isinstance(symmetry[0], (list, tuple)):
-        gens = symmetry             # raw permutation list
-    if not gens:
-        return
-    gens = [list(g) for g in gens]
-    try:
-        ok = list(_core.check_generators_commute(operator, gens))
-    except Exception:
-        return                       # checker unavailable -> don't block the run
-    bad = [i for i, c in enumerate(ok) if not c]
-    if bad:
-        raise RuntimeError(
-            f"qed: symmetry generator(s) {bad} do NOT commute with H "
-            f"([H, U_g] != 0 at the term level). An explicit / bridge-"
-            f"supplied permutation that is not a symmetry of H produces "
-            f"silently wrong spectra. Check the site-ordering of the "
-            f"permutation(s) against the Hamiltonian's site labels, or set "
-            f"ED_SYM_SKIP_COMMUTE_CHECK=1 to bypass if you are certain."
-        )
-
-
-def resolve_auto_symmetry(
-    operator: Operator,
-    symmetry: Any,
-    *,
-    verbose: bool = True,
-    lattice: Optional[Any] = None,
-) -> Any:
-    """Normalise the string forms of ``symmetry=``.
-
-    * ``"auto"`` -- run :func:`find_symmetries` on ``operator`` and use
-      the largest commuting generator set found (``None`` -- i.e. no
-      spatial projection -- when the automorphism group is trivial or
-      when the optional ``pynauty``/``networkx`` dependencies are
-      missing). This is the "maximal block diagonalisation" switch: the
-      spatial sectors compose with the U(1) Sz axis (``sz=`` /
-      ``auto_sz``), the spin-flip transporter/projector and the
-      time-reversal pairing, each of which independently auto-detects.
-    * ``"off"`` / ``"none"`` -- explicit no-spatial-symmetry.
-    * anything else (GeneratorSet, permutation list, dict, None) is
-      returned unchanged (after an EXPLICIT-generator [H, U_g] = 0
-      check -- see :func:`_validate_explicit_generators`).
-    """
-    if not isinstance(symmetry, str):
-        # A2: an explicit / bridge-supplied generator set is unchecked --
-        # validate it commutes with H before the rep lane trusts it (the
-        # "auto" and "translation" sets resolved below are symmetries of H
-        # by construction and skip the check).
-        _validate_explicit_generators(operator, symmetry, verbose=verbose)
-        return symmetry
-    key = symmetry.strip().lower()
-    if key in ("off", "none", ""):
-        return None
-    if key in ("translation", "translations"):
-        if lattice is None:
-            raise ValueError(
-                "symmetry='translation' needs lattice=... (positions + "
-                "lattice vectors identify which automorphisms are pure "
-                "translations). Pass the qed.input.Lattice the "
-                "Hamiltonian was built on."
-            )
-        try:
-            # translation_only=True: skips the max-clique analyzer (NP-hard;
-            # hangs for hours on large high-symmetry clusters). The full
-            # automorphism list -- and with it the translation set's
-            # star_perms residue -- is still computed, so star reduction
-            # and the little-group lane keep the whole point group.
-            report = find_symmetries(operator, lattice=lattice,
-                                     verbose=False, translation_only=True)
-        except ImportError as exc:
-            warnings.warn(
-                f"symmetry='translation': automorphism search "
-                f"unavailable ({exc}); running without spatial "
-                "symmetry.", RuntimeWarning, stacklevel=3)
-            return None
-        gen = report.translation_set
-        if gen is None or not getattr(gen, "generators", None):
-            if verbose:
-                print("[qed] symmetry='translation': no lattice "
-                      "translations commute with H -- no spatial "
-                      "projection.")
-            return None
-        if verbose:
-            print(f"[qed] symmetry='translation': |T| = "
-                  f"{gen.group_size}; point-group residue retained "
-                  f"({len(gen.star_perms)} automorphisms -> star "
-                  "reduction).")
-        return gen
-    if key != "auto":
-        raise ValueError(
-            f"symmetry={symmetry!r}: string forms are 'auto', "
-            "'translation' or 'off' (or pass a GeneratorSet / "
-            "permutation list / dict)."
-        )
-    try:
-        report = find_symmetries(operator, verbose=False)
-    except ImportError as exc:
-        warnings.warn(
-            f"symmetry='auto': automorphism search unavailable ({exc}); "
-            "running without spatial symmetry. Install pynauty + "
-            "networkx to enable it.",
-            RuntimeWarning, stacklevel=3)
-        return None
-    gen = report.full_set
-    u1 = ("U(1) Sz conserved" if report.has_u1_sz
-          else "U(1) Sz NOT conserved")
-    if gen is None or not getattr(gen, "generators", None):
-        if verbose:
-            print(f"[qed] symmetry='auto': {u1}; trivial automorphism "
-                  "group -- no spatial projection (flip/TR still "
-                  "auto-detect).")
-        return None
-    if verbose:
-        print(f"[qed] symmetry='auto': {u1}; using generator set "
-              f"{gen.name!r} (|G| = {gen.group_size}).")
-    return gen
-
-
-def resolve_discrete_toggle(
-    operator: Optional[Operator],
-    value: Any,
-    which: str,
-    *,
-    verbose: bool = True,
-) -> int:
-    """Map a ``spin_flip=`` / ``time_reversal=`` kwarg to the C++
-    toggle int (-1 auto / 0 off / 1 require), with detection reporting.
-
-    * ``"auto"`` / ``None`` / ``-1`` -- exploit the symmetry when the
-      Hamiltonian carries it, silently skip when it does not.
-    * ``"on"`` / ``True`` -- same as auto, but REPORT: confirms the
-      detection when the symmetry is present, warns (and continues
-      without it) when it is absent. Never fails.
-    * ``"off"`` / ``False`` / ``0`` -- never exploit it.
-    * ``"require"`` / ``1`` -- hard contract: the run throws when the
-      Hamiltonian does not carry the symmetry.
-
-    ``which`` is ``"spin_flip"`` or ``"time_reversal"``. ``operator``
-    may be None (directory-form callers); ``"on"`` then defers to auto
-    with a note, since the term-level detection needs the in-memory
-    operator.
-    """
-    if value is None or value == "auto" or value == -1:
-        return -1
-    if value is False or value == "off" or value == 0:
-        return 0
-    if value == "require" or value == 1:
-        return 1
-    if value is True or value == "on":
-        det = None
-        if operator is not None:
-            try:
-                det = bool(
-                    _core.detect_hamiltonian_symmetries(operator)[which])
-            except Exception:
-                det = None
-        if det is None:
-            if verbose:
-                print(f"[qed] {which}='on': detection needs the "
-                      "in-memory operator here; deferring to auto "
-                      "(the C++ layer engages it only when present).")
-            return -1
-        if det:
-            if verbose:
-                print(f"[qed] {which}: Hamiltonian carries it -> "
-                      "exploiting.")
-            return -1
-        warnings.warn(
-            f"{which}='on' requested but the Hamiltonian does not carry "
-            f"this symmetry"
-            + (" ([H, prod sigma^x] != 0 -- e.g. a Zeeman field or "
-               "unpaired S+/S- terms)" if which == "spin_flip" else
-               " (complex matrix elements in the computational basis)")
-            + "; running without it.",
-            RuntimeWarning, stacklevel=3)
-        return 0
-    raise ValueError(
-        f"{which} must be one of 'auto'|'on'|'off'|'require' "
-        f"(or None / bool), got {value!r}")
-
-
-def _full_group_generators(symmetry) -> Optional[list]:
-    """Generators of the FULL (possibly non-abelian) spatial group: the
-    abelian clique generators plus the retained residue automorphisms.
-    None when there is no spatial symmetry or no residue is known."""
-    gens = getattr(symmetry, "generators", None)
-    if not gens:
-        return None
-    star = list(getattr(symmetry, "star_perms", None) or [])
-    return [list(g) for g in gens] + [list(p) for p in star]
-
-
-# Stage 9c: `_little_group_parts` retired -- the (abelian, residue) split
-# now lives in point_group_routing.split_nonabelian, which additionally
-# handles explicit non-abelian generator lists.
 

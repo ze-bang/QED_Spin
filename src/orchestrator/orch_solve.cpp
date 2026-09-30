@@ -322,7 +322,7 @@ GroundStateResult solve_on(Backend& be,
                 // label is the template's lane unconditionally. Using
                 // ed::lane_label_for<Backend>() keeps the labels
                 // consistent with the variant-driven helper used at
-                // the bottom of solve() / thermal() / spectral().
+                // the bottom of solve() / thermal().
                 R.backend.lane = ed::lane_label_for<Backend>();
                 // "Universal save contract" follow-up (May 2026): the
                 // lanczos_real fast path used to ``return R`` here and

@@ -15,11 +15,8 @@
 //     operator S+, the same statement holds inside ANY spatial symmetry
 //     sector:
 //       dim(sector, spin S) = dim(sector, Sz = S) - dim(sector, Sz = S+1).
-//     The right-hand side is two calls to the existing exact Burnside /
-//     Molien per-sector formula (make_operator.h sector_dims_burnside) at
-//     adjacent n_up -- NO orbit walk, free at planning time. The
-//     group-aware wrapper `sector_dims_s_resolved` lives next to
-//     `sector_dims_burnside` in make_operator.h; this header holds the
+//     The right-hand side is two exact per-sector dimensions (Burnside /
+//     Molien) at adjacent n_up -- NO orbit walk. This header holds the
 //     group-free combinatorics so light-weight callers (tests, Python
 //     pre-flight, the projector's allowed-S sets) need no operator
 //     machinery.

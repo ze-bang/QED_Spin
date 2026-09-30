@@ -1,19 +1,11 @@
-"""``qed.dssf``: DSSF observable-pair data helpers.
+"""``qed.dssf``: operators for dynamical structure factors.
 
-This module re-exports the C++ ``ed::dssf`` observable-pair builder so
-Python notebooks and downstream scripts build DSSF observable names and
-ordering the same way the C++ side does.
-
-The actual workflow lives in :func:`qed.spectral`; the ``compute`` and
-``run_from_directory`` helpers that used to live here were removed
-during the May-2026 surface unification. Use:
-
-* :func:`qed.spectral(H, observables, ...) <qed.spectral>` -- spectral / structure-factor calculation.
-
-Quick start (observable assembly):
+Builds the momentum-resolved spin operators (and their names and ordering) the way the
+C++ ``ed::dssf`` layer does; feed them to :func:`qed.dynamics`.
 
 .. code-block:: python
 
+    import numpy as np
     import qed
 
     spec = qed.dssf.OperatorSpec()
@@ -28,11 +20,7 @@ Quick start (observable assembly):
     spec.positions_file    = "/abs/path/to/positions.dat"
 
     pairs = qed.dssf.build_observable_pairs(spec)
-    for name in pairs.names:
-        print(name)
-
-    # Feed the pairs into qed.spectral or any in-process solver:
-    res = qed.spectral(H, pairs.obs_1, omega=np.linspace(-2, 2, 200))
+    S = qed.dynamics(H, pairs.obs_1[0], np.linspace(-2, 2, 200)).S[0]
 """
 
 from __future__ import annotations

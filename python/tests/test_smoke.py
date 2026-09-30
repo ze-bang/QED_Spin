@@ -33,12 +33,6 @@ def test_operator_dimension_for_spin_half_chain():
     assert math.isclose(op.spin, 0.5)
 
 
-def test_fixed_sz_dimension_matches_binomial():
-    """For 4 sites with 2 up-spins, the fixed-Sz block has dim C(4,2)=6."""
-    fop = qed.FixedSzOperator(num_sites=4, n_up=2, spin=0.5)
-    assert fop.dimension == 6
-
-
 def test_apply_zero_vector_is_zero():
     """Applying any operator to the zero vector must return the zero vector."""
     op = qed.Operator(num_sites=3, spin=0.5)

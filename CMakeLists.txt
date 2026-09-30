@@ -497,26 +497,7 @@ if(BUILD_ED_TESTS)
     # contract for FTLM (thermo curves) and
     # mTPQ / cTPQ (trajectory + probe-beta state vectors).
     ed_add_test(test_thermal_save               tests/unit/test_thermal_save.cpp USE_CATCH2)
-    # Pillar 3 of the "Save and DSSF Upgrades" plan (May 2026): pins the
-    # ``SpectralOptions::initial_state`` contract on the GroundStateCF
-    # lane (auto-GS, user-supplied GS, and TPQ-style warm seeds).
-    ed_add_test(test_spectral_initial_state     tests/unit/test_spectral_initial_state.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
-    # Full Unified-Interface Collapse, end-to-end acceptance (May 2026):
-    # walks every (source x axis x workflow x method) cell of the
-    # unified interface on the same 6-site Heisenberg ring and asserts
-    # numerical agreement against the Bethe-ansatz reference E_0.
-    ed_add_test(test_unified_interface_e2e      tests/integration/test_unified_interface_e2e.cpp USE_CATCH2)
-    # Operator-collapse option-1 acceptance (Jun 2026): the
-    # `ed::make_sector_operators(OperatorSpec)` factory routes a
-    # directory-loaded Hamiltonian through the P5 sector-set enumerator
-    # and solves each sector via ed::workflows::solve, cross-checking the
-    # full union spectrum against the legacy streaming-symmetry path.
-    ed_add_test(test_make_sector_operators_e2e  tests/integration/test_make_sector_operators_e2e.cpp USE_CATCH2)
-    # Wave A acceptance (Full unified-interface collapse, May 2026):
-    # the `ed::make_operator(OperatorSpec)` factory + the new
-    # `bind_<Backend>` override matrix.
-    ed_add_test(test_make_operator              tests/unit/test_make_operator.cpp USE_CATCH2)
     # test_method_canonicalize retired in the minimalist-architecture rev
     # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
     # enum aliases and ARPACK/SCALAPACK/DAVIDSON/LOBPCG variants this
@@ -571,11 +552,6 @@ if(BUILD_ED_TESTS)
     # (sample_seed.h), is run-to-run bit-identical, and is what the CPU
     # front door returns.
     ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp USE_CATCH2)
-    # Smoke-test the unified spectral entry point
-    # `ed::workflows::spectral(DSSFRequest, SpectralOptions)`:
-    # method-selection rule + QEDConfig-null guard.
-    ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
-    target_link_libraries(test_auto_dssf PRIVATE ed_dssf ed_input)
     # ED Cleanup Sweep Phase 5 (May 2026): test_dssf_tune / test_diag_tune
     # locked down the cross-cutting DSSF / diag tune heuristics that
     # were deleted along with `include/ed/auto/{diag,dssf}_tune.h`.
@@ -610,7 +586,6 @@ if(BUILD_ED_TESTS)
     # write_directory roundtrip vs Operator::loadFromDirectory).
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
     target_link_libraries(test_input_library PRIVATE ed_input)
-    ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     # Retired in the minimalist-architecture rev (May 2026):
     #   * test_thermal_methods   (Hybrid thermal + GPU/MPI alias paths gone)
     #   * test_ftlm_jp           (FTLM double-Lanczos dynamical kernel gone)
@@ -618,10 +593,6 @@ if(BUILD_ED_TESTS)
     #   * test_ftlm_sssf         (FTLM SSSF static-structure-factor kernel gone)
     # The dynamical-correlator coverage moves to Phase 6 primitives.
     # (execution-planner test removed with the planner)
-    # Streaming/tableless basis construction (Gosper enum + membership subspace)
-    ed_add_test(test_streaming_enum             tests/unit/test_streaming_enum.cpp USE_CATCH2)
-    # Closed-form orbit-projected norm primitive (shared by every sector builder)
-    ed_add_test(test_rep_projection             tests/unit/test_rep_projection.cpp USE_CATCH2)
     # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
     # Stage-2 SymmetryEngine v2: fused OrbitTable + prefiltered parallel sector build
@@ -630,15 +601,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp USE_CATCH2)
     # Stage-5 SymmetryEngine v2: spin-flip commutation check (SectorTransporter gate)
     ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
-    # Stage-5b SymmetryEngine v2: in-sector flip projection ((k,+/-) spectrum union)
-    ed_add_test(test_flip_projection            tests/unit/test_flip_projection.cpp USE_CATCH2)
-    # U1a lane unification: owned little-group block handles (tiling/covering/spectra)
-    ed_add_test(test_little_group_blocks        tests/unit/test_little_group_blocks.cpp USE_CATCH2)
-    # group-sector lane: full-little-group rep basis for 1-dim irreps + its dispatch in the block factory
-    ed_add_test(test_group_sector               tests/unit/test_group_sector.cpp USE_CATCH2)
-    # observable engine: MaskedTerm / MaskedOperator algebra against dense matrices
-    ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp USE_CATCH2)
-    ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp USE_CATCH2)
     # Stage-6 SymmetryEngine v2: time-reversal conjugate-sector pairing map
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
     # Stage-12a SU(2) rollout: S^2 Casimir in the TermStorage schema + labeling
@@ -649,8 +611,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp USE_CATCH2)
     # Stage-12d SU(2) rollout: Lowdin total-spin projector + targeting wrapper
     ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp USE_CATCH2)
-    # Stage-8 SymmetryEngine v2: composition planning (toggles, windows, TR actions)
-    ed_add_test(test_sector_plan                tests/unit/test_sector_plan.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
     # Phase E (TPQ dynamical correlator) -- retired in the
@@ -658,11 +618,6 @@ if(BUILD_ED_TESTS)
     # become workflow-level compositions of mtpq_kernel +
     # time_evolution_correlator (Phase 6 / Phase 7).
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
-    ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
-    # Phase R5 of the "Orthogonal symmetry composition: Subspace x
-    # ProjectorChain" plan (May 2026): byte-equality + extensibility
-    # pinning for the new (Subspace, ProjectorChain) decomposition.
-    ed_add_test(test_projector_chain            tests/unit/test_projector_chain.cpp USE_CATCH2)
     ed_add_test(test_chain_extensibility        tests/unit/test_chain_extensibility.cpp USE_CATCH2)
     # Operator-collapse refactor (Jun 2026): owning ``SectorBasis`` that
     # completes the basis triplet (FullSpaceSubspace / FixedSzSubspace /
@@ -684,30 +639,6 @@ if(BUILD_ED_TESTS)
     # WITHOUT materialising the per-sector orbit CSR (rep data from the
     # CSR-free getRepSectorData). Heisenberg Z_N ring, N=6/8.
     ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp USE_CATCH2)
-    # P2c: the standalone per-sector ed::symmetry::SectorOperator (owning
-    # SectorBasis + symmetry backend, no parent StreamingSymmetryOperator)
-    # matches the legacy applySymmetrized matvec in every sector and its
-    # dense k=0 spectrum yields the Bethe-ansatz GS (Heisenberg Z_N, N=6).
-    ed_add_test(test_sector_operator            tests/unit/test_sector_operator.cpp USE_CATCH2)
-    # P5: build_full_sector_operators / build_fixed_sz_sector_operators emit a flat
-    # vector of standalone SectorOperators (one per surviving sector) whose dims tile
-    # the Hilbert space (full) / fixed-Sz subspace and whose min ground state is the
-    # Bethe-ansatz GS (Heisenberg Z_N, N=6) -- the SectorView fan-out replacement.
-    ed_add_test(test_sector_set                 tests/unit/test_sector_set.cpp USE_CATCH2)
-    # Non-abelian safety guard (restrict to maximal abelian subgroup)
-    ed_add_test(test_nonabelian_guard           tests/unit/test_nonabelian_guard.cpp USE_CATCH2)
-    # Operator-collapse refactor (Phase C, Jun 2026): the production cutover --
-    # StreamingSymmetryHandle::sector(k) routes through the standalone
-    # SectorOperator (collapse target); the legacy SectorView and the
-    # ED_SYMMETRY_SECTOR_OPERATOR gate were removed. Verifies the handle
-    # returns a SectorOperator and the min sector GS is the Bethe GS (N=6).
-    ed_add_test(test_sector_loop_gate           tests/unit/test_sector_loop_gate.cpp USE_CATCH2)
-    # Cutover-safety invariant: the legacy StreamingSymmetryOperator and the new
-    # build_full_sector_operators path emit the SAME per-sector basis ORDERING
-    # (orbit_rep + orbit_elements sequence), not just matching dims/eigenvalues
-    # (which are basis-order-invariant). Guards the sector index -> basis index
-    # mapping that keys HDF5 orbit caches + cross-sector observables (N=6 Z_N).
-    ed_add_test(test_symmetry_ordering_parity   tests/unit/test_symmetry_ordering_parity.cpp USE_CATCH2)
     # P3a: CudaMatVecBackend<DeviceFullBasisPolicy> (GPU twin of CpuMatVecBackend)
     # matvec matches the host CpuMatVecBackend to <1e-9 across every term bin and
     # both scalar lanes (complex apply + real apply_real) on the full Hilbert
@@ -715,31 +646,6 @@ if(BUILD_ED_TESTS)
     # (skips cleanly with exit 0 when no device is present).
     if(WITH_CUDA)
         ed_add_test(test_cuda_matvec_backend    tests/unit/test_cuda_matvec_backend.cu)
-        # Phase A operator-collapse GPU parity (Jun 2026): a standalone
-        # ed::symmetry::SectorOperator (from make_sector_operators -> the P5
-        # sector-set enumerator, no StreamingSymmetryOperator) is backend-
-        # complete on the GPU -- its bind_cuda() matvec matches its own CPU
-        # apply to <1e-9 across every full-Hilbert and fixed-Sz (n_up=3)
-        # sector of the Heisenberg Z_N ring (N=6). CUDA-only; plain main().
-        ed_add_test(test_sector_operator_gpu tests/unit/test_sector_operator_gpu.cu)
-        # "On-the-fly representative SpMV for streaming symmetry" plan
-        # (Jun 2026): with ED_GPU_SYMMETRY_REP=1 a fixed-Sz SectorOperator's
-        # bind_cuda() takes the resident on-the-fly representative path
-        # (apply_terms_rep_symmetry_scatter -- NO orbit CSR / no
-        # O(full-Sz-dim) projection table). The rep matvec matches the CPU
-        # applySymmetrized reference to <1e-10 across every momentum sector
-        # of the Heisenberg Z_N ring at N=6 (n_up=3) and N=8 (n_up=4, |G|=8,
-        # non-trivial complex characters). CUDA-only; plain main().
-        ed_add_test(test_rep_symmetry_gpu tests/unit/test_rep_symmetry_gpu.cu)
-
-        # CSR-free lazy sector loop ("scan other region", Jun 2026): drives
-        # the fixed-Sz streaming operator THROUGH StreamingSymmetryHandle and
-        # pins that (a) the handle hands out a rep-lazy SectorOperator whose
-        # dim is known WITHOUT materialising the ~24 GiB/sector host orbit CSR,
-        # (b) bind_cuda's GPU rep path never materialises it either, (c) the GPU
-        # matvec matches the CPU apply reference to <1e-10, and (d) the CPU
-        # apply fallback lazily materialises the CSR. CUDA-only; plain main().
-        ed_add_test(test_rep_lazy_sector_loop tests/unit/test_rep_lazy_sector_loop.cu)
     endif()
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)

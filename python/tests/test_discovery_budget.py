@@ -9,7 +9,7 @@ Three seams pinned here (all landed together, Jul 2026):
   ``star_perms``, so the factorized little-group lane keeps the whole
   point group either way.
 
-* ``qed.full_spectrum`` trivial-spatial-group blocking: with no spatial
+* trivial-spatial-group blocking in ``qed.spectrum``: with no spatial
   symmetry the sweep still blocks by Sz (or native Sz-parity) with
   flip-transport folds, instead of one plain 2^N dense solve.
 
@@ -31,9 +31,7 @@ qed = pytest.importorskip("qed")
 pytest.importorskip("pynauty")
 
 from qed import _core  # noqa: E402
-from qed.point_group_routing import (  # noqa: E402
-    greedy_maximal_abelian, resolve_projection_lane, split_nonabelian,
-)
+from qed._groups import greedy_maximal_abelian, split_nonabelian  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +167,8 @@ def test_k8_budget_branch_returns_fast_with_residue():
 def test_k8_projection_lane_engages_and_matches_dense():
     H = _complete_graph(8)
     rep = qed.find_symmetries(H, verbose=False)
-    lane = resolve_projection_lane(rep.full_set, point_group="auto",
-                                   consumer="full_spectrum",
-                                   eigenvalues_only=True)
-    assert lane.mode == "project"
-    ev = np.sort(np.asarray(qed.full_spectrum(
-        H, symmetry=rep.full_set, verbose=False).eigenvalues, float))
+    assert not isinstance(split_nonabelian(rep.full_set), str)   # abelian part + cosets exist
+    ev = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=rep.full_set)).energies)
     ev0 = _dense_oracle(H, 8)
     assert len(ev) == 1 << 8
     np.testing.assert_allclose(ev, ev0, atol=1e-10)
@@ -186,10 +180,8 @@ def test_budget_one_equals_default_spectrum():
     H = _ring(6)
     r_greedy = qed.find_symmetries(H, verbose=False, clique_budget=1)
     r_exact = qed.find_symmetries(H, verbose=False)
-    ea = np.sort(np.asarray(qed.full_spectrum(
-        H, symmetry=r_greedy.full_set, verbose=False).eigenvalues, float))
-    eb = np.sort(np.asarray(qed.full_spectrum(
-        H, symmetry=r_exact.full_set, verbose=False).eigenvalues, float))
+    ea = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=r_greedy.full_set)).energies)
+    eb = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=r_exact.full_set)).energies)
     np.testing.assert_allclose(ea, eb, atol=1e-12)
 
 
@@ -226,9 +218,7 @@ def test_greedy_maximal_abelian_is_closed_abelian():
 def test_trivial_group_sz_blocked_sweep_matches_oracle():
     n = 10
     H = _bent_tree_xxz(n)
-    ev = np.sort(np.asarray(qed.full_spectrum(
-        H, symmetry="auto", spin_flip="auto", time_reversal="auto",
-        verbose=False).eigenvalues, float))
+    ev = np.sort(qed.spectrum(H).energies)
     assert len(ev) == 1 << n
     np.testing.assert_allclose(ev, _sz_block_oracle(H, n), atol=1e-10)
 
@@ -239,8 +229,7 @@ def test_trivial_group_named_sz_returns_that_block():
     n = 8
     H = _bent_tree_xxz(n)
     from math import comb
-    ev = np.asarray(qed.full_spectrum(
-        H, symmetry=None, sz=3, verbose=False).eigenvalues, float)
+    ev = qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=3)).energies
     assert len(ev) == comb(n, 3)
     full = _sz_block_oracle(H, n)
     # every named-block eigenvalue appears in the full spectrum
@@ -267,8 +256,6 @@ def test_cold_plain_dense_assembly_no_term_loss():
     b_op = b.to_operator()
     b_op.add_two_body(_core.OP_SZ, 0, _core.OP_SPLUS, 1, 0.2 + 0j)
     b_op.add_two_body(_core.OP_SZ, 0, _core.OP_SMINUS, 1, 0.2 + 0j)
-    ev = np.sort(np.asarray(qed.full_spectrum(
-        b_op, symmetry=None, spin_flip=False, time_reversal=False,
-        point_group=False, verbose=False).eigenvalues, float))
+    ev = np.sort(qed.spectrum(b_op, sym=qed.Symmetry.none()).energies)
     assert len(ev) == 1 << n
     np.testing.assert_allclose(ev, _dense_oracle(b_op, n), atol=1e-10)

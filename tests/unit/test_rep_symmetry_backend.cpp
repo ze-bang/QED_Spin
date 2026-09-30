@@ -28,7 +28,7 @@
 #include <ed/symmetry/projector.h>
 #include <ed/symmetry/rep_sector_data.h>
 #include <ed/symmetry/sector_basis.h>
-#include <ed/symmetry/sector_set.h>
+#include <ed/symmetry/orbit_table.h>
 #include <ed/symmetry/subspace.h>
 
 #include <functional>
@@ -51,6 +51,33 @@
 using namespace ed_tests;
 
 namespace {
+
+// CSR-free rep description of an already-built sector: only orbit_rep + norm of
+// each basis state, plus the group's characters and flattened permutations.
+// n_up stays -1 unless every representative shares one popcount.
+ed::symmetry::RepSectorData rep_sector_data_from_sector(const ::SymmetrySector&  sec,
+                                                        const SymmetryGroupInfo& info,
+                                                        int                      n_sites) {
+    ed::symmetry::RepSectorData d;
+    d.n_sites    = n_sites;
+    d.group_size = static_cast<int>(info.max_clique.size());
+    d.reps.reserve(sec.basis_states.size());
+    d.inv_norms.reserve(sec.basis_states.size());
+    int  n_up    = -1;
+    bool uniform = true;
+    for (const auto& bs : sec.basis_states) {
+        d.reps.push_back(bs.orbit_rep);
+        d.inv_norms.push_back(bs.norm > 0.0 ? 1.0 / bs.norm : 0.0);
+        const int pc = __builtin_popcountll(bs.orbit_rep);
+        if (n_up < 0) n_up = pc;
+        else if (pc != n_up) uniform = false;
+    }
+    d.n_up = uniform ? n_up : -1;
+    if (!info.power_representation.empty() && !sec.phase_factors.empty())
+        d.characters = ed::symmetry::sector_characters_from(info, sec.phase_factors);
+    d.perms_flat = ed::symmetry::flatten_group_perms(info, n_sites);
+    return d;
+}
 
 std::vector<int> translation_perm(int N, int shift) {
     std::vector<int> p(N);
@@ -169,7 +196,8 @@ void run_case(int N, std::int64_t n_up) {
                                              n_up);
     const ed::symmetry::SpatialProjector spatial(info);
     const std::vector<std::uint64_t> reps =
-        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+        ed::symmetry::build_orbit_table_fixed_sz_streaming(
+            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
     const double group_size =
         static_cast<double>(info.max_clique.size());
 
@@ -188,10 +216,9 @@ void run_case(int N, std::int64_t n_up) {
         const std::size_t sd = sb.dim();
         if (sd == 0) continue;
 
-        // CSR-free rep data from the same production helper the sector-set
-        // builder uses (reads only orbit_rep + norm from the sector).
+        // CSR-free rep data (reads only orbit_rep + norm from the sector).
         ed::symmetry::RepSectorData rd =
-            ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+            rep_sector_data_from_sector(sb.sector(), info, N);
         INFO("sector " << s << " dim " << sd
              << " rep dim " << rd.reps.size()
              << " usable " << rd.usable());
@@ -260,7 +287,8 @@ void run_parity_case(int N, std::int64_t n_up) {
         ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
     const ed::symmetry::SpatialProjector spatial(info);
     const std::vector<std::uint64_t> reps =
-        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+        ed::symmetry::build_orbit_table_fixed_sz_streaming(
+            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
 
     for (std::size_t s = 0; s < info.sectors.size(); ++s) {
         ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
@@ -270,7 +298,7 @@ void run_parity_case(int N, std::int64_t n_up) {
         if (sd == 0) continue;
 
         ed::symmetry::RepSectorData rd =
-            ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+            rep_sector_data_from_sector(sb.sector(), info, N);
         REQUIRE(rd.usable());
 
         // Binary-search policy (no rank table).
@@ -309,7 +337,7 @@ void run_parity_case(int N, std::int64_t n_up) {
 
             // O(1) rank-table path must equal the binary-search GATHER exactly.
             ed::symmetry::RepSectorData rd_tab =
-                ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+                rep_sector_data_from_sector(sb.sector(), info, N);
             rd_tab.build_rank_table();
             REQUIRE(rd_tab.has_rank_table());
             const auto pol_tab = ed::matvec::rep_policy_from(rd_tab);
@@ -353,7 +381,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             // reproduce the binary-search GATHER exactly (same lookup result
             // -> identical arithmetic).
             ed::symmetry::RepSectorData rd_two =
-                ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+                rep_sector_data_from_sector(sb.sector(), info, N);
             rd_two.shared_rank = ed::symmetry::make_shared_rank_lookup(
                 reps, N, static_cast<int>(n_up));
             REQUIRE(rd_two.shared_rank != nullptr);
@@ -427,14 +455,15 @@ TEST_CASE("rep_symmetry_backend: dense-vector GATHER vs SCATTER throughput",
         ed::symmetry::FixedSzSubspace::build(static_cast<std::uint64_t>(N), n_up);
     const ed::symmetry::SpatialProjector spatial(info);
     const std::vector<std::uint64_t> reps =
-        ed::symmetry::enumerate_fixed_sz_orbit_reps(fixed, info);
+        ed::symmetry::build_orbit_table_fixed_sz_streaming(
+            static_cast<std::uint64_t>(N), static_cast<int>(n_up), info).reps;
 
     // Largest sector (k=0).
     ed::symmetry::SectorBasis sb = ed::symmetry::SectorBasis::build(
         fixed, spatial, info.sectors[0].quantum_numbers,
         info.sectors[0].phase_factors, reps, 0);
     ed::symmetry::RepSectorData rd =
-        ed::symmetry::rep_sector_data_from_sector(sb.sector(), info, N);
+        rep_sector_data_from_sector(sb.sector(), info, N);
     rd.build_rank_table();
     const auto pol = ed::matvec::rep_policy_from(rd);
     const std::size_t sd = rd.reps.size();

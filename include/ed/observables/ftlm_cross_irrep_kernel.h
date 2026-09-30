@@ -149,13 +149,11 @@ struct FtlmCrossIrrepSectorResult {
 
 /// FTLM cross-irrep dynamical kernel for ONE source/target sector
 /// pair. The caller is responsible for:
-///   * resolving the target sector via the selection rule
-///     (``include/ed/core/sector_loop.h::resolve_target_sector``),
+///   * resolving the target sector via the selection rule,
 ///   * building the cross-sector observable apply lambda from a
 ///     ``ed::dssf::CrossSectorOrbitObservable``,
 ///   * aggregating the per-sector accumulators across source
-///     sectors (typically via the bundled
-///     ``combine_sector_dynamical_spectra`` helper below).
+///     sectors (the ed::sectors dynamics verb does this).
 ///
 /// @param H_src       matvec on dim_src (source sector restricted H)
 /// @param H_dst       matvec on dim_dst (target sector restricted H)
@@ -174,42 +172,5 @@ FtlmCrossIrrepSectorResult ftlm_cross_irrep_kernel_one_sector(
     const std::vector<double>&        temperatures,
     const std::vector<double>&        omega_grid,
     const FtlmCrossIrrepOptions&      opts);
-
-/// F-shifted Z-weighted recombination of per-sector dynamical
-/// spectra. Mirrors ``ed::core::combine_sector_thermodynamics`` but
-/// for an omega-resolved spectral function. Returns the final
-/// thermal-averaged S(omega, T) per temperature, ready for the
-/// ``SpectralResult`` payload.
-///
-/// The math is the linearity of the trace:
-///
-///   S_total(omega, T) = (sum_k S_k(omega, T)_num) / (sum_k Z_k(T)_den).
-///
-/// where each per-sector pair carries the dim_src * (Σ ...) numerator
-/// and dim_src * (Σ ...) denominator (NOT yet divided), and the
-/// final division gives the total thermal-averaged spectral function.
-///
-/// We use the F-shift (subtract the global F_min(T) before
-/// exponentiating) to defend against floating-point underflow when
-/// per-sector Z's span many orders of magnitude. The per-sector
-/// kernel above stores E_min separately, but for spectral combination
-/// the Z numerators already encode their own exp(-beta E_min^sector)
-/// references; we therefore implement a *global*-F-shifted
-/// recombination at this layer.
-///
-/// @param sector_results  one entry per (k_src, k_dst) sector pair.
-/// @param temperatures    same set the caller passed to the kernel.
-/// @param num_omega       frequency-grid length.
-/// @return  ``{T -> S_real[omega]}`` and ``{T -> S_imag[omega]}`` of
-///          the combined spectral function.
-struct DynamicalSpectraMerged {
-    std::map<double, std::vector<double>>  S_real;
-    std::map<double, std::vector<double>>  S_imag;
-};
-
-DynamicalSpectraMerged combine_sector_dynamical_spectra(
-    const std::vector<FtlmCrossIrrepSectorResult>& sector_results,
-    const std::vector<double>&                     temperatures,
-    std::size_t                                    num_omega);
 
 }  // namespace ed::observables

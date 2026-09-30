@@ -219,8 +219,8 @@ public:
 
     /// Per-sector quantum-number labels for the source / target
     /// (mirror of ``SymBasisState::quantum_numbers``). Used by the
-    /// streaming-symmetry spectral workflow to populate
-    /// ``SpectralSectorEntry`` tags and the selection-rule label.
+    /// streaming-symmetry spectral workflow to label
+    /// sector pairs and the selection rule.
     /// Rep-lane refs carry no SymmetrySector metadata -- callers on
     /// that lane label from the handle's SectorTag instead (the
     /// cross-irrep bindings already do).

@@ -17,7 +17,7 @@
 //     vector at the nearest kernel-step beta and write it to
 //     ``/tpq/samples/sample_<s>/states/beta_<b>``.
 //   * mTPQ ``ThermalResult::tpq_state_snapshots`` carries the host-side
-//     state vectors so callers can chain them into ``ed::workflows::spectral``
+//     state vectors so callers can chain them into a spectral calculation
 //     (the TPQ-to-CF pipeline) without an HDF5 round-trip.
 //
 // Covered methods: FTLM (thermo-only) + mTPQ
@@ -30,8 +30,6 @@
 #include <ed/core/hdf5_io.h>
 #include <ed/core/operator.h>
 #include <ed/orchestrator.h>
-#include <ed/symmetry/sector_operator.h>
-#include <ed/symmetry/sector_set.h>
 
 #include <H5Cpp.h>
 
@@ -39,7 +37,6 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -152,90 +149,19 @@ TEST_CASE("ed::thermal leaves hdf5_path empty when output_dir is unset",
 }
 
 // =============================================================================
-// Save & DSSF Upgrades follow-up (May 2026): the "TPQ + symmetry + save thermal
-// states" matrix.
+// Save & DSSF Upgrades follow-up (May 2026): TPQ state snapshots of a
+// sector-restricted operator.
 //
-// Three regression points pinned by the test cases below:
-//
-//   1. FixedSzOperator + mTPQ + probe_betas:
-//      ``ThermalResult::tpq_state_snapshots`` carries vectors of length
-//      ``sector_dim`` (not the full Hilbert dim) and the HDF5 mirror at
-//      ``/tpq/samples/sample_<s>/states/beta_<b>`` round-trips them
-//      byte-for-byte under ``HDF5IO::loadTPQState``.
-//
-//   2. StreamingSymmetryOperator::SectorView + mTPQ + probe_betas:
-//      Same contract for symmetry sectors. The state vectors are
-//      stored in the ORBIT basis (length = sector dim, NOT full Hilbert
-//      dim). This is the matvec basis the ``CF`` lane
-//      consumes, so the saved data is directly chainable into the
-//      TPQ-to-CF spectral pipeline without an embedToFull round trip.
-//
-//   3. FixedSzStreamingSymmetryOperator::SectorView + mTPQ + probe_betas:
-//      The same contract holds for the Sz+symmetry SectorView.
-//
-// All three cells share one root cause class: when the persistence
-// finalizer at the bottom of ``ed::workflows::thermal`` runs against a
-// symmetry-projected operator, every dim/state_snapshot must use the
-// view's ``local_dim`` instead of the parent operator's full Hilbert
-// dim. The tests confirm that ``snap.psi.size() == H.dim()`` and that
-// the on-disk dataset shape matches.
+// FixedSzOperator + mTPQ + probe_betas:
+// ``ThermalResult::tpq_state_snapshots`` carries vectors of length
+// ``sector_dim`` (not the full Hilbert dim) and the HDF5 mirror at
+// ``/tpq/samples/sample_<s>/states/beta_<b>`` round-trips them
+// byte-for-byte under ``HDF5IO::loadTPQState``: the persistence finalizer
+// at the bottom of ``ed::workflows::thermal`` must use the operator's
+// ``local_dim`` instead of the full Hilbert dim.
 // =============================================================================
 
 namespace {
-
-// Build a tiny Z_N translation fixture on disk so we can construct a
-// ``StreamingSymmetryOperator`` against it. Returns the fixture root.
-inline std::string write_zN_translation_fixture(uint64_t N,
-                                                const std::string& suite,
-                                                const std::string& tag) {
-    const std::string root = make_scratch_dir(suite, tag);
-    const std::string sym  = root + "/automorphism_results";
-    std::error_code ec;
-    std::filesystem::create_directories(sym, ec);
-    auto perm = [&](int shift) {
-        std::vector<int> p(N);
-        for (uint64_t i = 0; i < N; ++i)
-            p[i] = ((static_cast<int>(i) - shift) % static_cast<int>(N)
-                      + static_cast<int>(N)) % static_cast<int>(N);
-        return p;
-    };
-    {
-        std::ofstream f(sym + "/max_clique.json");
-        f << "[";
-        for (uint64_t g = 0; g < N; ++g) {
-            auto p = perm(static_cast<int>(g));
-            f << "[";
-            for (size_t i = 0; i < p.size(); ++i)
-                f << p[i] << (i + 1 < p.size() ? "," : "");
-            f << "]" << (g + 1 < N ? "," : "");
-        }
-        f << "]";
-    }
-    {
-        std::ofstream f(sym + "/minimal_generators.json");
-        auto p = perm(1);
-        f << "{\"generators\":[{\"permutation\":[";
-        for (size_t i = 0; i < p.size(); ++i)
-            f << p[i] << (i + 1 < p.size() ? "," : "");
-        f << "],\"order\":" << N << "}]}";
-    }
-    {
-        std::ofstream f(sym + "/sector_metadata.json");
-        f.precision(17);
-        f << "{\"sectors\":[";
-        for (uint64_t k = 0; k < N; ++k) {
-            const double a = -2.0 * M_PI * static_cast<double>(k)
-                                / static_cast<double>(N);
-            f << "{\"sector_id\":" << k
-              << ",\"quantum_numbers\":[" << k << "]"
-              << ",\"phase_factors\":[{\"real\":" << std::cos(a)
-              << ",\"imag\":" << std::sin(a) << "}]}";
-            if (k + 1 < N) f << ",";
-        }
-        f << "]}";
-    }
-    return root;
-}
 
 template <class Op>
 inline void fill_heisenberg_pbc(Op& op, uint64_t N, double J) {
@@ -252,29 +178,6 @@ inline void fill_heisenberg_pbc(Op& op, uint64_t N, double J) {
         t.op_type = 1; t.op_type_2 = 0;
         op.transform_data_.push_back(t);
     }
-}
-
-inline void add_heisenberg_pbc_terms(ed::symmetry::SectorOperator& op,
-                                     uint64_t N, double J) {
-    const Complex J_real(J, 0.0);
-    const Complex J_half(0.5 * J, 0.0);
-    for (uint64_t i = 0; i < N; ++i) {
-        const uint64_t j = (i + 1) % N;
-        op.addTwoBodyTerm(2, i, 2, j, J_real);
-        op.addTwoBodyTerm(0, i, 1, j, J_half);
-        op.addTwoBodyTerm(1, i, 0, j, J_half);
-    }
-}
-
-// Pick the largest non-empty sector operator from a freshly built set.
-inline ed::symmetry::SectorOperator&
-largest_sector(std::vector<std::unique_ptr<ed::symmetry::SectorOperator>>& ops) {
-    std::size_t pick = 0, best = 0;
-    for (std::size_t s = 0; s < ops.size(); ++s) {
-        const std::size_t d = ops[s]->dim();
-        if (d > best) { best = d; pick = s; }
-    }
-    return *ops[pick];
 }
 
 }  // namespace
@@ -315,57 +218,6 @@ TEST_CASE("ed::thermal persists FixedSzOperator mTPQ snapshots at sector dim",
     }
 
     std::filesystem::remove_all(outdir);
-}
-
-TEST_CASE("ed::thermal persists fixed-Sz symmetry-sector mTPQ snapshots",
-          "[orchestrator][thermal-save][tpq][symmetry]") {
-    constexpr uint64_t N = 6;
-    setenv("ED_GPU_SYMMETRY_MIRROR", "0", 1);
-    const std::string sym_dir = write_zN_translation_fixture(
-        N, "thermal_save", "fsz_sym_mtpq_sym");
-
-    SymmetryGroupInfo info;
-    info.loadFromDirectory(sym_dir);
-    auto ops = ed::symmetry::build_fixed_sz_sector_operators_lazy(
-        N, 0.5f, int64_t(N / 2), info,
-        [&](ed::symmetry::SectorOperator& op) {
-            add_heisenberg_pbc_terms(op, N, 1.0);
-        });
-    ed::symmetry::SectorOperator& view = largest_sector(ops);
-    REQUIRE(view.dim() > 0);
-
-    const std::string outdir = make_scratch_dir(
-        "thermal_save", "fsz_sym_mtpq_out");
-    ed::workflows::ThermalOptions opts;
-    opts.method        = ed::workflows::ThermalOptions::Method::mTPQ;
-    opts.num_samples   = 1;
-    opts.krylov_dim    = 20;
-    opts.temp_min      = 0.1;
-    opts.temp_max      = 5.0;
-    opts.num_temp_bins = 6;
-    opts.random_seed   = 19;
-    opts.output_dir    = outdir;
-    opts.probe_betas   = {0.5, 2.0};
-
-    auto R = ed::workflows::thermal(view, opts);
-
-    REQUIRE_FALSE(R.tpq_state_snapshots.empty());
-    const std::size_t sector_dim = view.dim();
-    for (const auto& snap : R.tpq_state_snapshots) {
-        REQUIRE(snap.psi.size() == sector_dim);
-    }
-    const std::string h5 = outdir + "/ed_results.h5";
-    CHECK(R.hdf5_path == h5);
-    for (const auto& snap : R.tpq_state_snapshots) {
-        std::vector<Complex> loaded;
-        REQUIRE(HDF5IO::loadTPQState(h5, snap.sample_index,
-                                      snap.effective_beta, loaded));
-        REQUIRE(loaded.size() == sector_dim);
-    }
-
-    std::filesystem::remove_all(outdir);
-    std::filesystem::remove_all(sym_dir);
-    unsetenv("ED_GPU_SYMMETRY_MIRROR");
 }
 
 TEST_CASE("ed::thermal honours /dev/null sentinel",

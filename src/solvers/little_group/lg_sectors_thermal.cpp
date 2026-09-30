@@ -6,6 +6,7 @@
 
 #include "lg_walk.h"
 
+#include <ed/orchestrator.h>              // ed::workflows::thermal
 #include <ed/sectors/thermal.h>
 #include <ed/symmetry/su2_dims.h>
 

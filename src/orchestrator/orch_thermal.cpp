@@ -199,8 +199,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // SUBSPACE (e.g. one spin tower). The exact fallback diagonalises
         // the whole block and would silently ignore the restriction --
         // stand down and let the sampling kernel honour the projection.
-        // (Callers wanting exact per-tower thermo use the differencing
-        // route in workflows_thermal_su2_tower instead.)
+        // (Exact per-tower thermo needs the tower projection applied before
+        // diagonalising, which this fallback does not do.)
         !opts.seed_transform &&
         // When the caller requested TPQ state snapshots (probe_betas), the exact
         // fallback cannot produce them -- run the real TPQ trajectory instead

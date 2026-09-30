@@ -70,7 +70,7 @@ class Symmetry:
     # ------------------------------------------------------------------
     def groups(self, H) -> tuple[list[list[int]], list[list[int]]]:
         """(closed abelian group, point-group coset representatives) for H."""
-        from ..point_group_routing import close_group, split_nonabelian
+        from .._groups import close_group, split_nonabelian
 
         n = int(H.num_sites)
         identity = [list(range(n))]
@@ -82,10 +82,23 @@ class Symmetry:
                 raise ValueError(f"spatial must be 'auto', a GeneratorSet, a permutation list "
                                  f"or None, got {spatial!r}")
             from ..discovery import find_symmetries
-            spatial = find_symmetries(H, verbose=False).full_set
+            try:
+                spatial = find_symmetries(H, verbose=False).full_set
+            except ImportError as e:        # the graph-automorphism search needs pynauty
+                import warnings
+                warnings.warn(f"Symmetry(spatial='auto'): {e}; continuing without spatial "
+                              "symmetry", RuntimeWarning, stacklevel=3)
+                return identity, []
+            if spatial is None:               # H has no spatial symmetry
+                return identity, []
         gens = getattr(spatial, "generators", None)
         if gens is not None and not gens:
             return identity, []
+        # Group arithmetic on a map that is not a bijection never closes (its powers never
+        # return to the identity): refuse it before any.
+        for p in (gens if gens is not None else spatial):
+            if sorted(int(x) for x in p) != list(range(n)):
+                raise ValueError(f"spatial symmetry: {list(p)} is not a permutation of the {n} sites")
         if self.point_group:
             split = split_nonabelian(spatial)
             if not isinstance(split, str):
@@ -95,7 +108,7 @@ class Symmetry:
         A = close_group([list(g) for g in base])
         if A is None:
             raise ValueError("the spatial group exceeds the closure cap")
-        from ..point_group_routing import greedy_maximal_abelian
+        from .._groups import greedy_maximal_abelian
         if gens is None:            # a raw permutation list may be non-abelian
             A = greedy_maximal_abelian(A)
         return [list(a) for a in A], []

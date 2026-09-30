@@ -413,8 +413,8 @@ build_isotypic_columns(const std::vector<Monomial>&     M,
 }
 
 // Shared context setup: decompose A, resolve flip/TR engagement, acquire
-// the orbit table, map the residues. Used by run_little_group and the
-// Stage-9d ground-state / sector factories.
+// the orbit table, map the residues. Used by the star walk (lg_walk.h) and
+// the streamed k-sector factory (lg_ground_state.cpp).
 void make_engine_context(const ::Operator&                    op,
                          const std::vector<std::vector<int>>& abelian_group,
                          const std::vector<std::vector<int>>& residue_perms,

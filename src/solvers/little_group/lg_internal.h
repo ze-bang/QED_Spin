@@ -1,12 +1,11 @@
-#pragma once
 // =============================================================================
 // src/solvers/little_group/lg_internal.h -- PRIVATE to the little-group engine.
 //
 // The concrete types (RepSectorMatVec, ProjectedBlockOp, Monomial, SparseColumns,
-// EngineContext, StarBuild), the star-walk template, and the declarations of the
-// helpers that more than one engine translation unit calls. Nothing outside
-// src/solvers/little_group/ includes this header: the public surface is
-// little_group_solve.h and little_group_blocks.h.
+// EngineContext, StarBuild) and the declarations of the helpers that more than
+// one engine translation unit calls. Nothing outside src/solvers/little_group/
+// includes this header: the public surface is ed::sectors (include/ed/sectors/),
+// built on the block handles of little_group_blocks.h.
 //
 // The engine is deliberately defensive: the star folding (solve one momentum
 // per residue orbit, multiply the spectrum) is exact by construction; every
@@ -16,14 +15,13 @@
 //
 // File map
 //   lg_engine.cpp        EngineContext construction, k-sectors, monomials, irrep tables
-//   lg_block_solve.cpp   per-block eigensolves (dense / Lanczos), crossover, star filter
+//   lg_block_solve.cpp   per-block eigensolves (dense / Lanczos / Krylov-Schur), crossover
 //   lg_stars.cpp         per-star block construction (build_star_blocks)
+//   lg_group_sector.cpp  full-little-group sectors for 1-dim irreps (build_star_blocks fast path)
 //   lg_blocks.cpp        LittleGroupBlock handle
-//   lg_spectrum.cpp      full / lowest spectra, build_little_group_blocks
-//   lg_ground_state.cpp  certified ground-state vector, k-sector factories
-//   lg_thermal.cpp       exact and sampled thermodynamics over the blocks
-//   lg_vectors.cpp       lowest eigenpairs with vectors, fold transport, expansion
-//   lg_observables.cpp   expectation values <n|O|n> of block eigenstates (rep basis)
+//   lg_ground_state.cpp  certified ground-state vector, streamed k-sectors, shared sector data
+//   lg_walk.h            the star walk and block operators of the ed::sectors verbs
+//   lg_sectors*.cpp      the ed::sectors verbs (spectrum / thermal / dynamics / expect)
 // =============================================================================
 
 #include <ed/solvers/little_group_solve.h>
@@ -48,7 +46,6 @@
 #endif
 #include <ed/matvec/reduced_symmetry_csr.h>     // B4: build_reduced_symmetry_csr_rep
 #include <ed/matvec/term_storage.h>
-#include <ed/solvers/lanczos.h>                  // ::lanczos / ::full_diagonalization
 #include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/orbit_table.h>
@@ -57,8 +54,6 @@
 #include <ed/symmetry/sector_basis.h>      // rep_rank_table_enabled (rank-table budget)
 #include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
 #include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
-#include <ed/symmetry/canonical_thermo.h>        // canonical_thermo_from_eigs
-#include <ed/core/sector_thermo.h>               // U1b: combine_sector_thermodynamics
 #include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
 #include <ed/core/select_backend.h>           // ed::have_cuda()
 #include <ed/solvers/little_group_gpu.h>      // batched GPU block eigensolve
@@ -679,8 +674,8 @@ struct FlipEngagement {
 };
 
 // -----------------------------------------------------------------------------
-// U1a: per-star block construction -- everything run_little_group's star loop
-// does EXCEPT the eigensolves: k0 sector build, monomial little co-group with
+// U1a: per-star block construction -- everything a star walk does
+// EXCEPT the eigensolves: k0 sector build, monomial little co-group with
 // the numeric [M_p, H] = 0 probe, abstract-table decomposition, isotypic
 // bases, TR sigma/sigma* pairing, and the graceful decline to the plain
 // H_k0 floor block. Returns the blocks in the engine's canonical row order
@@ -688,7 +683,7 @@ struct FlipEngagement {
 // multiplicity; plain floor block iff not projected).
 //
 // `sb.hk == nullptr` marks an empty sector (info still filled). The three
-// profile accumulators keep run_little_group's historical phase boundaries;
+// profile accumulators time the sector / monomial / isotypic phases;
 // pass nullptr when not profiling.
 // -----------------------------------------------------------------------------
 struct StarBuild {
@@ -732,14 +727,10 @@ star_partition(const EngineContext& cx, bool tr_on);
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::matvec::MatVecOperator& mv);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
-[[nodiscard]] bool lg_gpu_eigensolve_enabled(const LittleGroupOptions& opt);
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
                    int dense_max_dim, bool* converged_out = nullptr,
                    int block_size = 1);
-[[nodiscard]] std::uint64_t
-subspace_dim_of(int n_sites, const LittleGroupOptions& opt);
-void parse_only_k0_env(std::set<int>& only_k0, bool& plan_only);
 
 // lg_ground_state.cpp: certified lowest eigenpair of one block (dense / FullCGS2 /
 // two-pass by dimension); throws when the residual guard fails.
@@ -753,7 +744,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
                                 int block_size, bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
-// lg_observables.cpp: the lowest `want` eigenpairs of one block in block coordinates
+// lg_block_solve.cpp: the lowest `want` eigenpairs of one block in block coordinates
 // (dense / certified GS vector / Krylov-Schur by size); *converged false when the
 // window could not be certified (the certified prefix is still returned).
 [[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
@@ -784,13 +775,7 @@ struct LittleGroupBlock::Impl {
     std::shared_ptr<lg_detail::RepSectorMatVec>      hk;    // shared across the star's blocks
     std::shared_ptr<const lg_detail::SparseColumns>  W;     // null => plain floor block
     std::unique_ptr<lg_detail::ProjectedBlockOp>     pop;   // null => op() is *hk
-    // d_sigma partners (Jul 2026): the star's validated monomials + this
-    // irrep's D-matrices, retained so degenerate_partners() can apply the
-    // shift projector P_{j0} = (d/|P|) sum_p conj(D_{j0}(p)) M_p. Null /
-    // empty on plain blocks and d == 1 irreps.
-    std::shared_ptr<const std::vector<lg_detail::Monomial>>   M;
-    std::vector<std::vector<std::complex<double>>> Dmats;  // per p, d*d row-major
-    // Group-sector block (Sep 2026, group_sector.h): a 1-dim irrep solved in the rep basis of the FULL little group
+    // Group-sector block (Sep 2026, lg_group_sector.cpp): a 1-dim irrep solved in the rep basis of the FULL little group
     // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on `gsec`; `hk`
     // stays the star's k-sector (rep_data(), the lift target). Null on isotypic (W) and plain blocks.
     std::shared_ptr<const ed::symmetry::RepSectorData> gsec;
@@ -805,41 +790,7 @@ namespace lg_detail {
     return *b.hk;
 }
 
-// ||H u - E u|| / ||u|| for a block eigenpair: v in block coordinates, u = lift(v). A group-sector block's lift is an
-// isometry intertwining its operator with H_k0 (every element of G commutes with H, checked term by term at dispatch),
-// so the residual is taken in the block itself: no H_k0 apply, which at N = 36 would build the k-sector CSR (~290 GB)
-// the group sector exists to avoid. Any other block (v == nullptr included: shift-projector partners) certifies the
-// lift on H_k0 as before -- the sandwich residual does not cover W.
-// A star's engagement report: the k-sector operator or any group-sector block operator (which a group-sector star
-// applies INSTEAD of H_k0) built the reduced CSR / ran on the device.
-inline void report_engagement(StarBuild& sb) {
-    bool csr = sb.hk && sb.hk->csr_engaged(), gpu = sb.hk && sb.hk->gpu_engaged();
-    for (const auto& b : sb.blocks)
-        if (b && b->gop) { csr = csr || b->gop->csr_engaged(); gpu = gpu || b->gop->gpu_engaged(); }
-    sb.info.csr_engaged = csr;
-    sb.info.gpu_engaged = gpu;
-}
-
-[[nodiscard]] inline double lifted_residual(const LittleGroupBlock::Impl& b, const Complex* v,
-                                            const std::vector<Complex>& u, double E) {
-    const bool in_block = b.gop != nullptr && v != nullptr;
-    const ed::matvec::MatVecOperator& H = in_block ? static_cast<const ed::matvec::MatVecOperator&>(*b.gop)
-                                                   : static_cast<const ed::matvec::MatVecOperator&>(*b.hk);
-    const std::size_t n = H.dim();
-    const Complex* x = in_block ? v : u.data();
-    std::vector<Complex> hx(n);
-    H.apply(x, hx.data(), n);
-    double num = 0.0, den = 0.0;
-    #pragma omp parallel for reduction(+ : num, den) schedule(static) if(n > 65536)
-    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
-        const std::size_t i = static_cast<std::size_t>(ii);
-        num += std::norm(hx[i] - E * x[i]);
-        den += std::norm(x[i]);
-    }
-    return den > 0.0 ? std::sqrt(num / den) : std::numeric_limits<double>::infinity();
-}
-
-// lg_group_sector.cpp: the pieces build_group_sector is made of, shared with the build_star_blocks fast path.
+// lg_group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, lg_stars.cpp).
 [[nodiscard]] ed::symmetry::OrbitTable
 group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip);
 [[nodiscard]] ed::symmetry::RepSectorData
@@ -849,151 +800,5 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
 [[nodiscard]] std::vector<Complex>
 lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
-}  // namespace lg_detail
-
-namespace lg_detail {
-
-// The star walk shared by every consumer. ``solve_block(mv, plain)`` returns
-// the block eigenvalues to record (full spectrum or lowest-k).
-template <class SolveFn>
-LittleGroupSpectrum run_little_group(
-    const ::Operator&                    op,
-    const std::vector<std::vector<int>>& abelian_group,
-    const std::vector<std::vector<int>>& residue_perms,
-    int                                  n_sites,
-    const LittleGroupOptions&            opt,
-    SolveFn&&                            solve_block)
-{
-    EngineContext cx;
-    bool tr_on = false;
-    make_engine_context(op, abelian_group, residue_perms, n_sites, opt,
-                        cx, tr_on);
-    const auto stars = star_partition(cx, tr_on);
-
-    // ED_SYM_PROFILE=1: per-phase wall-time accounting (Stage-0 style --
-    // make the cost visible; the little-group engine is CONSTRUCTION-
-    // dominated at small-mid N, and this is how you see it).
-    const bool profile = [] {
-        return ed::env::flag("ED_SYM_PROFILE", false);
-    }();
-    double t_sector = 0, t_monomial = 0, t_isotypic = 0, t_solve = 0;
-    auto tick = [] { return std::chrono::steady_clock::now(); };
-    auto secs = [](auto a, auto b) {
-        return std::chrono::duration<double>(b - a).count();
-    };
-
-    // Star filter for job splitting (Jul 2026): at 36 sites one star's
-    // Lanczos is ~3 h on an H100 and the walk is ~14 stars -- no single
-    // job survives, and the all-at-end output loses everything on timeout.
-    // ED_SYM_LG_ONLY_K0="7,43" solves only the listed star representatives
-    // (extended irrep indices, the ``k0`` this loop iterates); the caller
-    // merges rows across jobs (stars are disjoint solve units).
-    // ED_SYM_LG_ONLY_K0="plan" builds every star's sector (dims + sizes),
-    // prints one line per star, and solves nothing -- the cheap pass that
-    // tells the job scripts which k0 values exist.
-    // opt.plan_only / opt.only_k0 are the PROGRAMMATIC forms: a caller reading
-    // the star table, or naming a momentum block so the engine does only that
-    // block's work. ED_SYM_LG_ONLY_K0 is the job-splitting form and applies when the
-    // caller named no star, so job scripts that export it keep working unchanged.
-    bool plan_only = opt.plan_only;
-    std::set<int> only_k0(opt.only_k0.begin(), opt.only_k0.end());
-    parse_only_k0_env(only_k0, plan_only);
-
-    LittleGroupSpectrum out;
-    out.flip_engaged = cx.flip_half;
-    out.tr_engaged   = tr_on;
-    out.irrep_characters.reserve(static_cast<std::size_t>(cx.n_irr_raw));
-    for (int kk = 0; kk < cx.n_irr_raw; ++kk)
-        out.irrep_characters.push_back(
-            cx.giA.irreps[static_cast<std::size_t>(kk)].character);
-    for (const auto& [k0, members] : stars) {
-        if (!only_k0.empty() && only_k0.count(k0) == 0) continue;
-        auto t_star = tick();
-        // U1a: the star's blocks come from the shared factory -- monomials,
-        // isotypic bases, TR pairing, and the plain-floor decline all live
-        // in build_star_blocks now; this loop only SOLVES. Plan mode builds
-        // everything (the character table must exist) and solves nothing.
-        StarBuild sb = build_star_blocks(
-            op, cx, tr_on, k0, members, opt, /*plan_print=*/plan_only,
-            profile ? &t_sector : nullptr,
-            profile ? &t_monomial : nullptr,
-            profile ? &t_isotypic : nullptr);
-        if (!sb.hk) { out.stars.push_back(sb.info); continue; }
-        auto t0 = tick();
-        if (!plan_only) {
-            for (const auto& bi : sb.blocks) {
-                LittleGroupLabel lab;
-                lab.k_raw       = bi->tag.k_raw;
-                lab.flip_parity = bi->tag.flip_parity;
-                lab.irrep       = bi->tag.irrep;
-                lab.irrep_dim   = bi->tag.irrep_dim;
-                const ed::matvec::MatVecOperator& mv = block_mv(*bi);
-                const int mult = static_cast<int>(bi->tag.multiplicity);
-                const auto ev = solve_block(mv, mult, lab);
-                if (!lab.converged) ++out.unconverged_blocks;
-                for (double e : ev) {
-                    out.eigenvalues.push_back(e);
-                    out.multiplicities.push_back(mult);
-                    out.labels.push_back(lab);
-                }
-            }
-        }
-        // Truthful lane report: ask the matvec what it DID (lazy, so this is
-        // only meaningful after the solves above ran). Small blocks stay on
-        // the CPU however loudly the caller asked for a GPU -- that is the
-        // engine's own 2^20-rep gate, and echoing the request instead would
-        // make every GPU assertion toothless.
-        report_engagement(sb);
-        if (sb.info.gpu_engaged) out.gpu_engaged = true;
-        out.stars.push_back(sb.info);
-        if (profile) {
-            t_solve += secs(t0, tick());
-            // Per-star progress line: at 36 sites a star is a ~3 h solve
-            // unit and this is the only liveness/salvage signal in the log.
-            double e_min = std::numeric_limits<double>::infinity();
-            for (double e : out.eigenvalues) e_min = std::min(e_min, e);
-            std::fprintf(stderr,
-                "[little_group profile] star k0=%d done in %.1fs "
-                "(dim=%llu, projected=%d, running E_min=%.10f)\n",
-                k0, secs(t_star, tick()),
-                static_cast<unsigned long long>(sb.info.dim_k0),
-                sb.info.projected ? 1 : 0, e_min);
-        }
-    }
-    if (profile) {
-        std::fprintf(stderr,
-            "[little_group profile] sector=%.3fs monomial=%.3fs "
-            "isotypic=%.3fs solve=%.3fs (stars=%zu)\n",
-            t_sector, t_monomial, t_isotypic, t_solve, stars.size());
-    }
-
-    // Coverage tripwire (Jul 2026): lowest-k walks have no multiplicity sum
-    // rule, so a dropped or mis-partitioned star was previously silent. When
-    // every star was visited (no filter), |star| x dim(rep) summed over the
-    // walk must tile the subspace exactly -- character-theory exactness, so
-    // any mismatch is a bookkeeping bug, not physics. Plan mode gets the
-    // same check for free (dims are computed there too).
-    if (only_k0.empty()) {
-        std::uint64_t got = 0;
-        for (const auto& s : out.stars)
-            got += static_cast<std::uint64_t>(s.star_size) * s.dim_k0;
-        const std::uint64_t want = subspace_dim_of(n_sites, opt);
-        if (got != want) {
-            std::fprintf(stderr,
-                "[little_group] COVERAGE FAIL: stars tile %llu of %llu "
-                "subspace states -- treat this walk's results as suspect\n",
-                static_cast<unsigned long long>(got),
-                static_cast<unsigned long long>(want));
-        } else if (profile || plan_only) {
-            std::fprintf(stderr,
-                "[little_group] coverage OK: %zu stars tile %llu states\n",
-                out.stars.size(), static_cast<unsigned long long>(want));
-        }
-    }
-
-    for (int m : out.multiplicities) out.total_dim += static_cast<std::uint64_t>(m);
-    return out;
-}
-
 }  // namespace lg_detail
 }  // namespace ed::solvers

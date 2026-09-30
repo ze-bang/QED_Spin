@@ -1,13 +1,11 @@
-// Group-sector lane (include/ed/solvers/group_sector.h): a symmetric basis under the FULL little group of a block,
-// assembled from the engine's existing pieces (orbit table, closed-form norms, rep-sector matvec + reduced CSR,
-// little-group block eigensolver). The lg_detail helpers are shared with the build_star_blocks fast path
-// (lg_stars.cpp), which makes this lane the engine default for one-dimensional irreps.
+// Group-sector fast path: a symmetric basis under the FULL little group of a block (translations x little co-group
+// x {1, flip}) in a 1-dim representation, so the block dimension is C(N, n_up) / |G| instead of the whole k-sector.
+// Assembled from the engine's existing pieces (orbit table, closed-form norms, rep-sector matvec + reduced CSR);
+// build_star_blocks (lg_stars.cpp, try_group_path) makes this the engine default for one-dimensional irreps.
 #include "lg_internal.h"
 
-#include <ed/solvers/group_sector.h>
 #include <ed/symmetry/orbit_table.h>
 
-#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -19,10 +17,6 @@
 namespace ed::solvers {
 
 namespace {
-double seconds_since(std::chrono::steady_clock::time_point t0) {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-}
-
 void check_group_args(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip) {
     if (perms.empty()) throw std::invalid_argument("group sector: empty group");
     if (n_sites <= 0 || n_sites > 64) throw std::invalid_argument("group sector: need 0 < n_sites <= 64");
@@ -109,79 +103,5 @@ lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepS
 }
 
 }  // namespace lg_detail
-
-ed::symmetry::RepSectorData
-build_group_sector(const std::vector<std::vector<int>>&     perms,
-                   int                                      n_sites,
-                   int                                      n_up,
-                   bool                                     flip,
-                   const std::vector<std::complex<double>>& characters)
-{
-    const ed::symmetry::OrbitTable tab = lg_detail::group_orbit_table(perms, n_sites, n_up, flip);
-    return lg_detail::group_sector_from_table(tab, perms, n_sites, n_up, flip, characters);
-}
-
-GroupSectorSolveResult
-solve_group_sector(const ::Operator&                                  op,
-                   std::shared_ptr<const ed::symmetry::RepSectorData> rd,
-                   const GroupSectorSolveOptions&                     opt)
-{
-    GroupSectorSolveResult out;
-    if (!rd || rd->reps.empty()) return out;
-    const auto t0 = std::chrono::steady_clock::now();
-    auto data = std::make_shared<ed::symmetry::RepSectorData>(*rd);
-    data->build_perm_lut();                                  // the shared-data constructor requires the LUT
-    const lg_detail::RepSectorMatVec hk(op, std::shared_ptr<const ed::symmetry::RepSectorData>(data));
-    out.dim     = hk.dim();
-    out.t_setup = seconds_since(t0);
-
-    const auto t1 = std::chrono::steady_clock::now();
-    bool conv = false;
-    auto [ev, vv] = lg_detail::solve_block_eigenpairs(hk, opt.levels, opt.dense_max_dim, opt.block_size, &conv);
-    out.t_solve   = seconds_since(t1);
-    out.converged = conv;
-    out.energies  = ev;
-
-    const std::size_t n = hk.dim();
-    std::vector<std::complex<double>> w(n);
-    for (std::size_t j = 0; j < vv.size(); ++j) {
-        hk.apply(vv[j].data(), w.data(), n);
-        double r2 = 0.0;
-        #pragma omp parallel for reduction(+ : r2) schedule(static)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            const auto d = w[static_cast<std::size_t>(i)] - ev[j] * vv[j][static_cast<std::size_t>(i)];
-            r2 += std::norm(d);
-        }
-        out.residuals.push_back(std::sqrt(r2));
-    }
-    if (opt.return_vectors) out.vectors = std::move(vv);
-    return out;
-}
-
-std::vector<std::complex<double>>
-convert_group_vector(const std::vector<std::complex<double>>& v,
-                     const ed::symmetry::RepSectorData&       src,
-                     const ed::symmetry::RepSectorData&       dst,
-                     bool                                     conjugate)
-{
-    if (v.size() != src.reps.size())
-        throw std::invalid_argument("convert_group_vector: vector length != source sector dimension");
-    auto s = std::make_shared<ed::symmetry::RepSectorData>(src); s->build_perm_lut();
-    auto d = std::make_shared<ed::symmetry::RepSectorData>(dst); d->build_perm_lut();
-    if (conjugate) return lg_detail::lift_group_vector(*s, *d, v.data());
-    // conjugate = false is kept only so the convention test can show it fails with complex characters
-    auto w = lg_detail::lift_group_vector(*s, *d, v.data());
-    const auto ps = s->make_policy(); const auto pd = d->make_policy();
-    #pragma omp parallel for schedule(static)
-    for (long long jj = 0; jj < static_cast<long long>(w.size()); ++jj) {
-        const std::size_t j = static_cast<std::size_t>(jj);
-        Complex a, b;
-        const std::int64_t i = ps.index_and_projection(d->reps[j], a);
-        pd.index_and_projection(d->reps[j], b);
-        if (i >= 0 && std::abs(a) > 0 && std::abs(b) > 0)
-            w[j] *= (a / b) / (std::conj(a) / std::conj(b));
-    }
-    return w;
-}
 
 }  // namespace ed::solvers

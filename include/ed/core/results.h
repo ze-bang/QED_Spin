@@ -3,7 +3,7 @@
 // include/ed/core/results.h
 //
 // Unified result types for the Phase-4 orchestrators (`ed::solve`,
-// `ed::thermal`, `ed::spectral`). Folds the four legacy per-deployment
+// `ed::thermal`). Folds the four legacy per-deployment
 // result structs --- `EDResults`, `DistributedLanczosResult`,
 // `DistributedLanczosGPUResult`, `DistributedEigenpairsResult` --- into
 // a single shape per workflow, with the Backend identity carried in a
@@ -277,76 +277,6 @@ struct ThermalResult {
     std::vector<std::vector<double>>    tpq_sample_variances;
     /// One entry per snapshot the kernel actually recorded.
     std::vector<TpqStateSnapshot>       tpq_state_snapshots;
-};
-
-// ---------------------------------------------------------------------------
-// Per-sector contribution to the spectral function. Used when
-// `ed::workflows::spectral` walks a set of (irrep_initial,
-// irrep_final) sector pairs and accumulates the
-// selection-rule-filtered pieces of ``S(Q, omega)``.
-// ---------------------------------------------------------------------------
-struct SpectralSectorEntry {
-    /// Tag for the *initial* sector (where the ground state lives).
-    SectorTag           initial;
-    /// Tag for the *final* sector (where O|psi_0> lives).
-    SectorTag           final_;
-    /// This sector's contribution to S_real / S_imag on the shared
-    /// omega grid. Empty when the (initial, final) pair was filtered
-    /// out by the selection rule.
-    std::vector<double> S_real;
-    std::vector<double> S_imag;
-    /// Static (equal-time) structure factor for this (initial, final)
-    /// pair: ``||O_Q|psi_0>||^2 = sum_n |<n|O_Q|0>|^2``. Computed for
-    /// free from the CF pivot norm by the cross-irrep spectral
-    /// workflows; 0 when not populated.
-    double              static_sf = 0.0;
-    /// Free-form per-pair diagnostics (e.g. transition matrix element).
-    std::vector<std::pair<std::string, std::string>> notes;
-};
-
-// ---------------------------------------------------------------------------
-// SpectralResult --- output of `ed::spectral(H, observables, opts)`.
-// Carries the (omega, S(omega)) grid plus error bars.
-// ---------------------------------------------------------------------------
-struct SpectralResult {
-    std::vector<double> omega;
-    std::vector<double> S_real;
-    std::vector<double> S_imag;
-    /// Stochastic error bars (only populated for FTLM / sample-based lanes).
-    std::vector<double> errors_real;
-    std::vector<double> errors_imag;
-    KrylovDiagnostics   krylov;
-    BackendMetadata     backend;
-    std::string         hdf5_path;
-
-    // -----------------------------------------------------------------
-    // Streaming-symmetry attribution (May 2026 SOTA upgrade).
-    // -----------------------------------------------------------------
-    //
-    // When the result was produced by the streaming-symmetry spectral
-    // workflow, `per_sector_pair` lists every (initial-sector,
-    // final-sector) pair that survived the momentum / point-group
-    // selection rule, together with that pair's contribution to the
-    // merged S(omega) array. `selection_rule_label` describes the
-    // physical filter that was applied (e.g. ``"k_final = k_initial +
-    // Q"`` for spin spectral functions). Empty when no symmetry was
-    // exploited.
-    std::vector<SpectralSectorEntry> per_sector_pair;
-    std::string                       selection_rule_label;
-
-    // -----------------------------------------------------------------
-    // SU(2) total-spin label of the SOURCE ground state (Stage 12g).
-    // -----------------------------------------------------------------
-    //
-    // Filled by the GroundStateCF lane when the caller installed an
-    // ``SpectralOptions::su2_labeler`` (the workflow bindings do so
-    // whenever the Hamiltonian is SU(2)-invariant). ``gs_two_S = -1``
-    // means unlabeled (axis off, non-SU(2) H, or certification failed);
-    // ``gs_s2`` carries the raw <S^2> when a labeler ran (else NaN-free
-    // -1). Wigner-Eckart: a rank-1 (spin-operator) probe connects the
-    // GS only to final states with S' in {S-1, S, S+1}.
-    int    gs_two_S = -1;
-    double gs_s2    = -1.0;
 };
 
 }  // namespace ed

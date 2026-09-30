@@ -429,7 +429,6 @@ build_star_blocks(const ::Operator&         op,
                 if (profile) { *t_isotypic += secs(t0, tick()); t0 = tick(); }
                 if (covered == rdr.reps.size()) {
                     projected = true;
-                    auto M_sp = std::make_shared<const std::vector<Monomial>>(M);
                     for (int ii = 0; ii < nIr; ++ii) {
                         if (!opt.only_irrep.empty()
                             && std::find(opt.only_irrep.begin(),
@@ -459,19 +458,13 @@ build_star_blocks(const ::Operator&         op,
                         impl->W   = Wsp;
                         impl->pop = std::make_unique<ProjectedBlockOp>(
                             sb.hk, Wsp);
-                        if (d > 1) {
-                            impl->M     = M_sp;
-                            impl->Dmats =
-                                giP.irreps[static_cast<std::size_t>(ii)]
-                                    .matrices;
-                        }
                         sb.blocks.push_back(std::move(impl));
                     }
                     info.little_order = static_cast<int>(M.size());
                     // Publish P_k0's character table: the vocabulary that
                     // lets a caller name an irrep by its CHARACTER instead
                     // of by decompose_irreps' internal index. Rows are
-                    // parallel to LittleGroupLabel::irrep; columns are
+                    // parallel to LittleGroupBlockTag::irrep; columns are
                     // identified by little_elems (residue indices into the
                     // caller's own residue_perms, -1 = identity).
                     info.little_elems = M_res;

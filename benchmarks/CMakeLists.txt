@@ -50,25 +50,6 @@ ed_add_benchmark(bench_operator_apply       bench_operator_apply.cpp)
 ed_add_benchmark(bench_lanczos_ground_state bench_lanczos_ground_state.cpp)
 ed_add_benchmark(bench_full_diagonalization bench_full_diagonalization.cpp)
 
-# Standalone (NOT Google-Benchmark) full-spectrum dense-vs-symmetry driver:
-# it carries its own main() and forks each phase to measure isolated peak
-# RSS, so it links ed_solvers_cpu directly without benchmark_main.
-add_executable(bench_symmetry_full_spectrum bench_symmetry_full_spectrum.cpp)
-target_link_libraries(bench_symmetry_full_spectrum PRIVATE ed_solvers_cpu ed_symmetry)
-# The carrier-free symmetry sector path builds ed::symmetry::SectorOperator,
-# whose vtable key function (bind_cuda) lives in ed_solvers_gpu under CUDA
-# (the ed_core .cpp twin is an empty TU when WITH_CUDA is ON).
-if(WITH_CUDA)
-    target_link_libraries(bench_symmetry_full_spectrum PRIVATE
-        ed_solvers_gpu
-        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
-endif()
-target_include_directories(bench_symmetry_full_spectrum PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(bench_symmetry_full_spectrum PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
-set_target_properties(bench_symmetry_full_spectrum PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 # Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026): track the
 # speed-up of the omega-parallel Lehmann inner loop used by the
 # FtlmDynamical single-T lane. Reports a (serial, parallel) pair per
@@ -80,7 +61,6 @@ set(_ed_bench_targets
     bench_lanczos_ground_state
     bench_full_diagonalization
     bench_dssf_omega_parallel
-    bench_symmetry_full_spectrum
 )
 
 # Convenience meta-target that pulls in everything so a single
@@ -90,27 +70,6 @@ add_custom_target(ed_benchmarks DEPENDS ${_ed_bench_targets})
 message(STATUS
     "Benchmarks enabled: build with `cmake --build build --target ed_benchmarks`."
 )
-
-# 2026-09 performance-audit driver: times ed::workflows::solve on fixed-Sz Heisenberg
-# chains (eigenvalues / eigenvectors / window) and prints one JSON line per case.
-add_executable(bench_audit_solve bench_audit_solve.cpp)
-target_link_libraries(bench_audit_solve PRIVATE ed_solvers_cpu ed_symmetry)
-if(WITH_CUDA)
-    target_link_libraries(bench_audit_solve PRIVATE ed_solvers_gpu
-        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
-endif()
-target_compile_options(bench_audit_solve PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
-set_target_properties(bench_audit_solve PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-
-# 2026-09 performance-audit driver for the thermal lanes (FTLM / mTPQ).
-add_executable(bench_audit_thermal bench_audit_thermal.cpp)
-target_link_libraries(bench_audit_thermal PRIVATE ed_solvers_cpu ed_symmetry)
-if(WITH_CUDA)
-    target_link_libraries(bench_audit_thermal PRIVATE ed_solvers_gpu
-        CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)
-endif()
-target_compile_options(bench_audit_thermal PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
-set_target_properties(bench_audit_thermal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 if(WITH_CUDA)
     # 2026-09 GPU audit: raw CudaMatVecBackend gather SpMV throughput.

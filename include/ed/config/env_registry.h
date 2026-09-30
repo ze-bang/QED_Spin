@@ -74,8 +74,6 @@ struct Row {
       "=1 makes a non-abelian generator set a hard error instead of auto-restricting to a maximal abelian subgroup")\
     X("ED_SYM_SPIN_FLIP", Flag, "symmetry", "true",                            \
       "=0 disables the Sz flip transport (spec(n_up) = spec(N - n_up))")       \
-    X("ED_SYM_SPIN_FLIP_PROJECT", Flag, "symmetry", "true",                    \
-      "=0 disables the (k,+-) in-sector flip projection")                      \
     X("ED_SYM_TIME_REVERSAL", Flag, "symmetry", "true",                        \
       "=0 disables conjugate-sector TR pairing")                               \
     X("ED_SYM_SU2", Flag, "symmetry", "true",                                  \
@@ -95,15 +93,13 @@ struct Row {
     X("ED_SYM_LG_TR", Flag, "little-group", "true",                            \
       "=0 disables TR star/sigma folding inside the engine")                   \
     X("ED_SYM_LG_GROUP_SECTOR", Flag, "little-group", "true",                  \
-      "=0 vetoes the full-little-group basis for 1-dim irreps (group_sector.h)")\
+      "=0 vetoes the full-little-group basis for 1-dim irreps (lg_group_sector.cpp)")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
     X("ED_SYM_LG_SEED", Integer, "little-group", "0 (base seed 0x51ED0B70)",   \
       "Offsets the lowest-k Lanczos start vector (multi-seed degeneracy verification)")\
     X("ED_SYM_LG_DENSE_FLOOR", Integer, "little-group", "max(dense_max_dim, 4 * max_iter_cap)",\
       "Raises the dense/Lanczos crossover so larger blocks solve exactly (=1 in tests forces the Lanczos path at toy dims)")\
-    X("ED_SYM_LG_DENSE_BATCH_GIB", Real, "little-group", "8.0 (8ULL << 30 bytes)",\
-      "Byte budget for the CPU deferred dense-eigensolve batch; =0 solves every block inline")\
     X("ED_SYM_LG_TWO_PASS_MIN_DIM", Integer, "little-group", "1 << 22 (4.2M)", \
       "Dim floor above which the GS vector uses two-pass no-reorth Lanczos instead of FullCGS2 + kept basis (memory cap)")\
     X("ED_SYM_LG_LOWEST_MAX_ITER", Integer, "little-group", "dflt argument if > 0, else max(40*k, 400)",\
@@ -116,18 +112,10 @@ struct Row {
       "Residual acceptance tolerance for the certified little-group GS vector")\
     X("ED_SYM_LG_KS_TOL", Real, "little-group", "1e-9",                        \
       "Absolute residual tolerance of the per-block Krylov-Schur solves (levels >= 2)")\
-    X("ED_SYM_LG_ONLY_K0", Text, "little-group", "unset (solve every star)",   \
-      "=\"7,43\" solves only those star reps (job splitting); =\"plan\" lists (k0, |star|, dim) per star and solves nothing")\
-    X("ED_SYM_LITTLE_GROUP", Flag, "little-group", "\"1\"",                    \
-      "=0: point_group='auto' degrades to abelian folds; 'full' raises")       \
-    X("ED_SYM_LG_THERMAL", Flag, "little-group", "\"1\"",                      \
-      "=0 restores pre-U1b behaviour: thermal 'auto' never projects, sampling methods keep the abelian sector lane")\
     X("ED_SYM_CLIQUE_BUDGET", Integer, "symmetry", "512 (_DEFAULT_CLIQUE_BUDGET)",\
       "|Aut| above which find_symmetries switches from exact max-clique to greedy maximal-abelian (hang guard)")\
     X("ED_SYM_NO_DETECT_MEMO", Flag, "symmetry", "\"0\" (memo on)",            \
       "=1 disables the find_symmetries content memo")                          \
-    X("ED_SYM_SKIP_COMMUTE_CHECK", Flag, "symmetry", "\"0\" (check on)",       \
-      "=1 skips the [H, U_g] = 0 validation of explicit generators")           \
     X("ED_CSR_FORCE", Tristate, "krylov", "-1 (use the dim cutoff)",           \
       "=1 always assemble CSR, =0 never (matrix-free always), unset -> use csr_cutoff_dim")\
     X("ED_CSR_DIM_MAX", Integer, "krylov", "the factory's default_cutoff argument: 1<<20 full-Hilbert, 1<<22 fi...",\
@@ -206,12 +194,8 @@ struct Row {
       "Target HDF5 chunk size in bytes")                                       \
     X("ED_HDF5_SHUFFLE", Flag, "io-hdf5", "true",                              \
       "Enables the HDF5 shuffle filter before deflate")                        \
-    X("ED_TIME_CONSTRUCTION", Flag, "debug", "false",                          \
-      "Times and reports the sector/operator construction phase")              \
     X("QED_CORE_DIR", Path, "python", "unset (extension inside the package)",  \
       "Prepends a build directory containing _core*.so to qed.__path__")       \
-    X("QED_SZ_WORKERS", Integer, "python", "len(_n_up_values) (one worker per Sz sector)",\
-      "Process/thread fan-out across Sz sectors in the thermal sweep")         \
     X("ED_VERBOSE_TRILINEAR", Flag, "debug", "\"0\"",                          \
       "Prints trilinear-triplet counts when building the pyrochlore super-exchange term list")\
     X("ED_ENV_STRICT", Flag, "python", "false",                                  \

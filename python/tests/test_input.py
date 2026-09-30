@@ -70,7 +70,7 @@ def test_from_neighbor_lists_roundtrip():
 # ----------------------------------------------------------------------
 
 def _ground_state(op):
-    return float(np.asarray(qed.full_spectrum(op, verbose=False).eigenvalues).min())
+    return float(np.min(qed.spectrum(op, sym=qed.Symmetry.none()).energies))
 
 
 def test_heisenberg_open_chain_4_ground_state():
@@ -151,6 +151,6 @@ def test_low_level_add_one_body():
                .add_one_body(qinput.Op.Sz, 0, 1.0)
                .add_one_body(qinput.Op.Sz, 1, 1.0)
                .to_operator())
-    eigs = sorted(np.real(qed.full_spectrum(H, verbose=False).eigenvalues))
+    eigs = sorted(qed.spectrum(H, sym=qed.Symmetry.none()).energies)
     # Sz_0 + Sz_1 has eigenvalues -1, 0, 0, 1.
     assert np.allclose(eigs, [-1.0, 0.0, 0.0, 1.0], atol=1e-12)

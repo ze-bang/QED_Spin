@@ -6,6 +6,7 @@
 
 #include "lg_walk.h"
 
+#include <ed/orchestrator.h>              // ed::workflows::solve
 #include <ed/sectors/sectors.h>
 #include <ed/core/basis_utils.h>
 #include <ed/symmetry/commute_check.h>

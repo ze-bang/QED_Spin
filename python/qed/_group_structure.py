@@ -1,31 +1,12 @@
-"""Stage 7a (SymmetryEngine v2): point-group star reduction + group
-structure analysis.
-
-The sector projector is abelian-only, but the automorphism pipeline
-usually finds a LARGER, non-abelian group G (e.g. the ring's dihedral
-D_N, a 2D torus's translations x mirrors). This module exploits the
-non-abelian residue without any new projection machinery:
-
-  For p in G outside the abelian subgroup A, conjugation permutes the
-  A-irreps: chi_k -> chi_k^p with chi_k^p(t) = chi_k(p^-1 t p). The
-  unitary U_p maps the k sector onto the k^p sector, so the two blocks
-  are ISOSPECTRAL -- solve one representative per orbit ("star") and
-  copy the spectrum to the partners. This composes with time-reversal
-  pairing and the spin-flip (k, +/-) synthetic sectors inside the C++
-  plan layer (``ed::symmetry::sector_orbit_canonical``).
-
-``sector_star_maps`` computes the k -> k^p image tables that the C++
-side consumes; ``describe_group`` reports the group structure
-precisely (abelian invariant factors, residue relations, dihedral /
-direct-product recognition).
+"""Group structure of a symmetry found by discovery: the order of an abelian group from
+its generators, and a readable description (abelian invariant factors, the residues,
+dihedral / direct-product recognition).
 """
 from __future__ import annotations
 
-import cmath
 from itertools import product as _iproduct
-from typing import Any, Optional, Sequence
+from typing import Sequence
 
-__all__ = ["sector_star_maps", "star_maps_from_info", "describe_group"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,80 +64,7 @@ def _enumerate_abelian(generators, orders):
 
 
 # ---------------------------------------------------------------------------
-# star maps
-# ---------------------------------------------------------------------------
-def sector_star_maps(
-    generators: Sequence[Sequence[int]],
-    orders: Sequence[int],
-    sectors: Sequence[dict],
-    star_perms: Sequence[Sequence[int]],
-) -> list[list[int]]:
-    """k -> image irrep index under each residue permutation.
-
-    For each ``p`` that normalises the abelian subgroup A, returns one
-    map ``m`` with ``m[k]`` the index of the A-irrep obtained by
-    conjugating chi_k with p (``-1`` where unresolved; a ``p`` that
-    does not normalise A is dropped entirely). Either conjugation
-    direction yields a valid isospectral bijection, so the convention
-    is not physically significant.
-    """
-    if not generators or not star_perms:
-        return []
-    elems = _enumerate_abelian(generators, orders)
-    gens = [tuple(g) for g in generators]
-
-    # Irrep lookup: quantum numbers m_i <-> generator phases.
-    def gen_phases(qn):
-        return tuple(cmath.exp(2j * cmath.pi * m / o)
-                     for m, o in zip(qn, orders))
-
-    phase_index = {}
-    for k, sec in enumerate(sectors):
-        key = tuple(round(z.real, 9) + 1j * round(z.imag, 9)
-                    for z in gen_phases(sec["quantum_numbers"]))
-        phase_index[key] = k
-
-    maps: list[list[int]] = []
-    for p in star_perms:
-        p = tuple(p)
-        pinv = _inverse(p)
-        conj_exps = []
-        ok = True
-        for g in gens:
-            c = _compose(pinv, _compose(g, p))
-            if c not in elems:
-                ok = False          # p does not normalise A
-                break
-            conj_exps.append(elems[c])
-        if not ok:
-            continue
-        m_out = []
-        for sec in sectors:
-            qn = sec["quantum_numbers"]
-            key = []
-            for exps in conj_exps:
-                z = 1.0 + 0.0j
-                for mj, aj, oj in zip(qn, exps, orders):
-                    z *= cmath.exp(2j * cmath.pi * mj * aj / oj)
-                key.append(round(z.real, 9) + 1j * round(z.imag, 9))
-            m_out.append(phase_index.get(tuple(key), -1))
-        maps.append(m_out)
-    return maps
-
-
-def star_maps_from_info(info: dict, star_perms) -> list[list[int]]:
-    """Convenience wrapper over the ``group_from_generators`` /
-    ``_normalize_symmetry_info`` dict shape."""
-    if not info or not star_perms:
-        return []
-    return sector_star_maps(info.get("generators", []),
-                            info.get("generator_orders", []),
-                            info.get("sectors", []),
-                            star_perms)
-
-
-# ---------------------------------------------------------------------------
-# group structure report
+# group description
 # ---------------------------------------------------------------------------
 def _perm_order(p):
     p = tuple(p)
