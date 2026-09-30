@@ -136,7 +136,7 @@ TEST_CASE("su2 detect: fields and DM-type terms break it", "[su2]") {
     }
     {
         TermStorage t = base;
-        t.add_three_body(2, 0, 2, 1, 2, 2, Cx(0.1, 0.0));  // conservative
+        t.add_three_body(2, 0, 2, 1, 2, 2, Cx(0.1, 0.0));  // Sz Sz Sz: not a scalar
         REQUIRE_FALSE(hamiltonian_is_su2_symmetric(t));
     }
     // Zero-coefficient noise terms must NOT flip the verdict.
@@ -145,6 +145,43 @@ TEST_CASE("su2 detect: fields and DM-type terms break it", "[su2]") {
         t.add_one_body(2, 0, Cx(0.0, 0.0));
         t.add_three_body(2, 0, 2, 1, 2, 2, Cx(0.0, 0.0));
         REQUIRE(hamiltonian_is_su2_symmetric(t));
+    }
+}
+
+
+// Scalar chirality lambda S_a.(S_b x S_c) = lambda (i/2) sum_cyc (S+_a S-_b - S-_a S+_b) Sz_c,
+// written in a scrambled factor order: accepted; any single wrong sign: refused.
+namespace {
+void add_chirality(TermStorage& t, std::uint64_t a, std::uint64_t b, std::uint64_t c, double lambda,
+                   double flip_last = 1.0) {
+    const Cx h(0.0, 0.5 * lambda);
+    const std::uint64_t s[3] = {a, b, c};
+    for (int r = 0; r < 3; ++r) {
+        const std::uint64_t i = s[r], j = s[(r + 1) % 3], k = s[(r + 2) % 3];
+        t.add_three_body(2, k, 0, i, 1, j, h);                       // S+_i S-_j Sz_k
+        t.add_three_body(1, i, 2, k, 0, j, (r == 2 ? flip_last : 1.0) * -h);   // -S-_i S+_j Sz_k
+    }
+}
+}  // namespace
+
+TEST_CASE("su2 detect: scalar chirality is SU(2) invariant", "[su2]") {
+    {
+        TermStorage t;
+        add_heisenberg_bond(t, 0, 1, 1.0);
+        add_chirality(t, 2, 0, 1, 0.3);
+        add_chirality(t, 1, 3, 2, -0.7);
+        REQUIRE(hamiltonian_is_su2_symmetric(t));
+    }
+    {
+        TermStorage t;
+        add_chirality(t, 0, 1, 2, 0.3, -1.0);   // one term with the wrong sign
+        REQUIRE_FALSE(hamiltonian_is_su2_symmetric(t));
+    }
+    {
+        TermStorage t;
+        add_chirality(t, 0, 1, 2, 0.3);
+        t.add_three_body(0, 0, 1, 1, 0, 2, Cx(0.05, 0.0));   // S+S-S+: changes Sz
+        REQUIRE_FALSE(hamiltonian_is_su2_symmetric(t));
     }
 }
 

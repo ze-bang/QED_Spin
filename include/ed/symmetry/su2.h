@@ -24,19 +24,21 @@
 //                                      site_1 == site_2 entries are pure
 //                                      identity shifts (spin_sq = 1/4 per
 //                                      state) and are ignored.
-//   * three_body                     : conservative -> any presence breaks it
-//                                      (scalar chirality S_i.(S_j x S_k) IS
-//                                      SU(2)-invariant; extend when needed).
+//   * three_body                     : allowed only as the scalar chirality
+//                                      lambda S_a.(S_b x S_c) per triple (the one
+//                                      SU(2) scalar of three spin-1/2 sites).
 //
 // Isotropy is PER BOND: a lattice with different Heisenberg J on different
 // bonds still qualifies. The check mirrors sz_axis_of /
 // hamiltonian_is_spin_flip_symmetric (same file family, same SoA input,
 // same conservative bias) and satisfies the algebra containment
-//     su2  =>  (sz_axis_of == U1)  &&  spin_flip  &&  time_reversal-real
+//     su2  =>  (sz_axis_of == U1)  &&  spin_flip   (and real, without chirality)
 // which the unit tests assert as an internal consistency tripwire.
 // =============================================================================
 
 #include <ed/config/env_registry.h>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -69,8 +71,44 @@ hamiltonian_is_su2_symmetric(const ed::matvec::TermStorage& t,
         if (nonzero(d.coefficient)) return false;
     for (const auto& d : t.mixed_two_body)
         if (nonzero(d.coefficient)) return false;
-    for (const auto& d : t.three_body)
-        if (nonzero(d.coefficient)) return false;
+    // Three-body: the only SU(2) scalar of three spin-1/2 sites is the chirality
+    //   chi_abc = S_a . (S_b x S_c) = (i/2) sum_cyc (S+_a S-_b - S-_a S+_b) Sz_c,
+    // i.e. with the factors ordered by site (a < b < c) the six terms
+    //   (+,-,z) (z,+,-) (-,z,+) : +i/2      (-,+,z) (z,-,+) (+,z,-) : -i/2.
+    // Each triple must carry lambda times exactly that pattern.
+    {
+        static constexpr int kPattern[6][3] = {{0, 1, 2}, {2, 0, 1}, {1, 2, 0},    // +i/2
+                                               {1, 0, 2}, {2, 1, 0}, {0, 2, 1}};   // -i/2
+        std::map<std::array<std::uint64_t, 3>, std::map<std::array<int, 3>, Cx>> triples;
+        for (const auto& d : t.three_body) {
+            if (!nonzero(d.coefficient)) continue;
+            std::array<std::pair<std::uint64_t, int>, 3> f{{{d.site_index_1, d.op_type_1},
+                                                             {d.site_index_2, d.op_type_2},
+                                                             {d.site_index_3, d.op_type_3}}};
+            std::sort(f.begin(), f.end());
+            if (f[0].first == f[1].first || f[1].first == f[2].first) return false;
+            triples[{f[0].first, f[1].first, f[2].first}][{f[0].second, f[1].second, f[2].second}]
+                += d.coefficient;
+        }
+        for (const auto& [sites, terms] : triples) {
+            (void)sites;
+            const auto at = [&terms](const int* ops) {
+                const auto it = terms.find({ops[0], ops[1], ops[2]});
+                return it == terms.end() ? Cx(0.0, 0.0) : it->second;
+            };
+            const Cx lambda = at(kPattern[0]) / Cx(0.0, 0.5);
+            for (int p = 0; p < 6; ++p) {
+                const Cx want = lambda * Cx(0.0, p < 3 ? 0.5 : -0.5);
+                if (std::abs(at(kPattern[p]) - want) > tol * (1.0 + std::abs(want))) return false;
+            }
+            for (const auto& [ops, c] : terms)      // nothing outside the pattern
+                if (nonzero(c) && std::none_of(std::begin(kPattern), std::end(kPattern),
+                                               [&ops](const int* q) {
+                                                   return ops[0] == q[0] && ops[1] == q[1] && ops[2] == q[2];
+                                               }))
+                    return false;
+        }
+    }
 
     // Aggregate per unordered pair {i < j}:
     //   czz  : coefficient of Sz_i Sz_j
