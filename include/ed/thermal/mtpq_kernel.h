@@ -42,15 +42,6 @@ struct MtpqOptions {
     double      target_beta    = 1000.0;
     std::uint64_t random_seed  = 0;
 
-    /// User-supplied inverse temperatures at which the kernel should
-    /// snapshot (copy to host) the running TPQ state. The kernel walks
-    /// every step and tracks, per probe-beta, the step whose
-    /// estimator-beta is closest; the host-staged state at that step
-    /// lands in ``MtpqResult::state_snapshots``. Empty (default) means
-    /// "no state snapshots" -- the kernel allocates no host buffers and
-    /// runs identically to the pre-snapshot path.
-    std::vector<double> probe_betas;
-
     /// Stage 12f (SU(2) rollout): host-side transform applied to every
     /// TPQ sample seed before staging (e.g. the Lowdin total-spin
     /// projection). Must leave a normalisable vector; a zero result
@@ -78,16 +69,6 @@ struct MtpqResult {
     std::vector<std::vector<double>> sample_inv_temps;
     std::vector<std::vector<double>> sample_energies;
     std::vector<std::vector<double>> sample_variances;
-
-    /// Host-side TPQ state snapshots. Outer index = sample,
-    /// inner index = ``MtpqOptions::probe_betas`` slot. Each inner
-    /// vector has length ``local_n`` once populated, and the matching
-    /// ``state_snapshot_betas[s][p]`` carries the actual kernel-step
-    /// beta the snapshot was taken at (the nearest beta_k to the
-    /// caller's requested probe beta). Empty when ``probe_betas`` was
-    /// empty.
-    std::vector<std::vector<std::vector<Complex>>> state_snapshots;
-    std::vector<std::vector<double>>               state_snapshot_betas;
 };
 
 namespace detail {
@@ -123,16 +104,6 @@ MtpqResult mtpq_kernel(Backend&       backend,
     out.sample_inv_temps.reserve(opts.num_samples);
     out.sample_energies.reserve(opts.num_samples);
     out.sample_variances.reserve(opts.num_samples);
-    const bool want_snapshots = !opts.probe_betas.empty();
-    if (want_snapshots) {
-        out.state_snapshots.assign(
-            opts.num_samples,
-            std::vector<std::vector<Complex>>(opts.probe_betas.size()));
-        out.state_snapshot_betas.assign(
-            opts.num_samples,
-            std::vector<double>(opts.probe_betas.size(),
-                                std::numeric_limits<double>::quiet_NaN()));
-    }
 
     for (std::size_t s = 0; s < opts.num_samples; ++s) {
         const std::uint64_t seed = opts.random_seed
@@ -179,19 +150,6 @@ MtpqResult mtpq_kernel(Backend&       backend,
         traj_Es.reserve(opts.max_iter + 1);
         traj_vars.reserve(opts.max_iter + 1);
         auto scratch   = backend.make_zero_vector(local_n);
-        // Per-probe-beta best-so-far distance tracker. The on_step
-        // callback walks each user-requested probe beta and, whenever
-        // the current step's estimator beta_k is closer than what we
-        // have stashed, copies the running TPQ state to host and
-        // overwrites the snapshot slot. The host buffer is allocated
-        // lazily on the first hit so empty `probe_betas` skips all
-        // staging.
-        std::vector<double> best_dist;
-        std::vector<Complex> host_buf;
-        if (want_snapshots) {
-            best_dist.assign(opts.probe_betas.size(),
-                             std::numeric_limits<double>::infinity());
-        }
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
             double E_k, H2_k;
             if (info.moments_valid) {
@@ -221,24 +179,6 @@ MtpqResult mtpq_kernel(Backend&       backend,
             traj_betas.push_back(beta_k);
             traj_Es.push_back(E_k);
             traj_vars.push_back(var_k);
-            if (want_snapshots) {
-                bool host_copied = false;
-                for (std::size_t p = 0; p < opts.probe_betas.size(); ++p) {
-                    const double d = std::abs(beta_k - opts.probe_betas[p]);
-                    if (d < best_dist[p]) {
-                        if (!host_copied) {
-                            host_buf.assign(info.local_n, Complex{0.0, 0.0});
-                            info.backend->copy_to_host(info.psi,
-                                                       host_buf.data(),
-                                                       info.local_n);
-                            host_copied = true;
-                        }
-                        out.state_snapshots[s][p] = host_buf;
-                        out.state_snapshot_betas[s][p] = beta_k;
-                        best_dist[p] = d;
-                    }
-                }
-            }
             return true;
         };
         auto kres = tpq_kernel<Backend>(backend, apply_H, local_n,

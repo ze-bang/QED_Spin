@@ -1,6 +1,6 @@
 // =============================================================================
 // src/orchestrator/orch_solve.cpp -- ed::workflows::solve and its backend
-// lanes (Lanczos / BlockLanczos / BlockKrylovSchur / KrylovSchur / FullDiag).
+// lanes (Lanczos / KrylovSchur / FullDiag).
 //
 // This is the only orchestrator translation unit that instantiates a
 // backend-templated eigensolver, so ``solve_on<CudaBackend>`` (and the CUDA
@@ -78,8 +78,8 @@ GroundStateResult solve_on(Backend& be,
     // for every problem that needs more than 32 Krylov iterations (i.e.
     // any dim above ~1e4): energies wrong at 1e-7 and "eigenvectors" with
     // residuals of 1e-3..1e-2 at tolerance 1e-10. The Krylov lanes all
-    // have Ritz-value early exit, so the cap only has to be generous; the
-    // block methods count blocks and keep the old default.
+    // have Ritz-value early exit, so the cap only has to be generous (the
+    // FullDiag lane ignores it).
     // Default iteration budget when the caller left it at 0. For the
     // restarted lanes ``max_iter`` is the PER-CYCLE Krylov dimension (each
     // cycle costs O(m^2 n) with full reorthogonalisation and runs to m
@@ -109,7 +109,7 @@ GroundStateResult solve_on(Backend& be,
     // Leaf memory guard: throw cleanly before the dominant allocation rather
     // than OOM-crash. H.global_dim() is the actual working dimension (full /
     // fixed-Sz block / symmetry sector). Coarse: dense matrix for full diag;
-    // stored Krylov basis (~max_iter vectors, x block_size) when eigenvectors
+    // stored Krylov basis (~max_iter vectors) when eigenvectors
     // are kept; a handful of work vectors otherwise.
     {
         const std::uint64_t D = H.global_dim();
@@ -119,9 +119,6 @@ GroundStateResult solve_on(Backend& be,
             est = D * D * CX;
         } else if (opts.compute_vectors && !eigvec_two_pass) {
             std::uint64_t vecs = std::max<std::uint64_t>(max_iter, 4);
-            if (method == SolveMethod::BlockLanczos ||
-                method == SolveMethod::BlockKrylovSchur)
-                vecs *= std::max<std::size_t>(1, opts.block_size);
             est = D * vecs * CX;
         } else {
             est = D * 8ull * CX;  // eigenvalues-only: ring-buffer work vectors
@@ -148,22 +145,6 @@ GroundStateResult solve_on(Backend& be,
             sumsq += a * a + b * b;
         }
         const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
-        for (auto& z : seed_host) z *= inv;
-    }
-    // Stage 12 (SU(2) rollout): caller-supplied seed transform (e.g. the
-    // Lowdin total-spin projection). Applied on the host copy before
-    // staging; the transform is responsible for leaving a usable
-    // (normalisable) vector or throwing.
-    if (opts.seed_transform) {
-        opts.seed_transform(seed_host.data(), seed_host.size());
-        double sumsq = 0.0;
-        for (const auto& z : seed_host) sumsq += std::norm(z);
-        if (!(sumsq > 0.0)) {
-            throw std::runtime_error(
-                "ed::solve: seed_transform produced a zero seed (the "
-                "targeted symmetry sector has no weight in this block)");
-        }
-        const double inv = 1.0 / std::sqrt(sumsq);
         for (auto& z : seed_host) z *= inv;
     }
     auto seed_backend = be.make_zero_vector(geom.local_dim);
@@ -202,11 +183,10 @@ GroundStateResult solve_on(Backend& be,
             // eigenvalue WINDOWS (num_eigs > 1, with the Ritz residual
             // bounds the window contract requires) and EIGENVECTORS via a
             // real two-pass reconstruction, so the complex kernel is only
-            // used when the operator is genuinely complex, a seed transform
-            // is installed, or the two-pass lane is disabled by env.
+            // used when the operator is genuinely complex or the two-pass
+            // lane is disabled by env.
             bool real_done = false;
             if (!force_complex
-                    && !opts.seed_transform  // draws its own seed internally
                     && (!opts.compute_vectors || eigvec_two_pass)
                     && H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
@@ -594,79 +574,6 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.iters_done = kres.iters_done;
         if (!ritz_bounds.empty())
             R.krylov.ritz_residuals = std::move(ritz_bounds);
-    } else if (method == SolveMethod::BlockLanczos) {
-        ed::krylov::BlockLanczosOptions kopts;
-        kopts.num_eigs        = opts.num_eigs;
-        kopts.block_size      = opts.block_size;
-        kopts.max_iter        = max_iter;
-        kopts.tolerance       = opts.tolerance;
-        kopts.compute_vectors = opts.compute_vectors;
-        // Reorth profile: full (stored basis) vs lean (local-only, eigenvalues).
-        // Eigenvectors force full; else the planner's lean recommendation (the
-        // full block basis would not fit the budget) OR the caller's opt forces
-        // lean; ED_BLOCK_LANCZOS_LEAN=1 is the explicit override. The planner
-        // path is what makes block-Lanczos memory-bounded (guarantee completion).
-        if (opts.compute_vectors) {
-            kopts.keep_basis = true;   // eigenvectors require the stored basis
-        } else {
-            // Honour the caller's flag; ED_BLOCK_LANCZOS_LEAN=1 forces the lean
-            // (no stored basis) mode. Any other value leaves the caller's choice alone
-            // -- the variable used to FORCE keep_basis=true whenever it was set to
-            // anything but "1", including "0" and "".
-            kopts.keep_basis = opts.block_lanczos_keep_basis;
-            if (ed::env::flag("ED_BLOCK_LANCZOS_LEAN", false)) kopts.keep_basis = false;
-        }
-        auto kres = ed::krylov::block_lanczos_kernel(be, matvec,
-            geom.local_dim, geom.global_dim, kopts);
-        R.eigenvalues = std::move(kres.eigenvalues);
-        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
-            EigenvectorRef evref;
-            evref.host.reserve(kres.eigenvectors.size());
-            std::vector<Complex> tmp(geom.local_dim);
-            for (auto& v : kres.eigenvectors) {
-                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
-                evref.host.push_back(tmp);
-            }
-            R.eigenvectors = std::move(evref);
-        }
-        R.krylov.iters_done    = kres.blocks_built;
-        R.krylov.converged     = kres.converged;
-        R.krylov.ritz_residuals = kres.residuals;
-        R.krylov.n_converged   = kres.n_converged;
-        R.krylov.resid_history = kres.resid_history;
-        if (!kres.residuals.empty())
-            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
-                                                       kres.residuals.end());
-    } else if (method == SolveMethod::BlockKrylovSchur) {
-        ed::krylov::BlockKrylovSchurOptions kopts;
-        kopts.num_eigs        = opts.num_eigs;
-        kopts.block_size      = opts.block_size;
-        kopts.max_iter        = max_iter;
-        kopts.tolerance       = opts.tolerance;
-        kopts.compute_vectors = opts.compute_vectors;
-        kopts.global_n        = geom.global_dim;
-        kopts.max_subspace_vectors = subspace_cap_vectors;
-        auto kres = ed::krylov::block_krylov_schur_kernel(be, matvec,
-            geom.local_dim, geom.global_dim, kopts);
-        R.eigenvalues = std::move(kres.eigenvalues);
-        if (opts.compute_vectors && !kres.eigenvectors.empty()) {
-            EigenvectorRef evref;
-            evref.host.reserve(kres.eigenvectors.size());
-            std::vector<Complex> tmp(geom.local_dim);
-            for (auto& v : kres.eigenvectors) {
-                be.copy_to_host(v.get(), tmp.data(), geom.local_dim);
-                evref.host.push_back(tmp);
-            }
-            R.eigenvectors = std::move(evref);
-        }
-        R.krylov.iters_done    = kres.restarts;
-        R.krylov.converged     = kres.converged;
-        R.krylov.ritz_residuals = kres.residuals;
-        R.krylov.n_converged   = kres.n_converged;
-        R.krylov.resid_history = kres.resid_history;
-        if (!kres.residuals.empty())
-            R.krylov.residual_norm = *std::max_element(kres.residuals.begin(),
-                                                       kres.residuals.end());
     } else if (method == SolveMethod::KrylovSchur) {
         ed::krylov::KrylovSchurOptions kopts;
         kopts.num_eigs        = opts.num_eigs;
@@ -712,8 +619,8 @@ GroundStateResult solve_on(Backend& be,
         // FullDiag column build on the GPU. Pin it to the CPU
         // binding (``LinearOperator::bind_cpu()`` is supported by
         // every Operator subclass and is the fallback path
-        // ``LinearOperator::bind<CpuBackend>()`` selects). Krylov /
-        // BlockLanczos / KrylovSchur lanes above keep the original
+        // ``LinearOperator::bind<CpuBackend>()`` selects). The Lanczos /
+        // KrylovSchur lanes above keep the original
         // device-bound matvec since they operate entirely in the
         // backend's memory space.
         ed::LinearOperator::MatvecFn cpu_matvec = H.bind_cpu();

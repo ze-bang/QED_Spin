@@ -2,36 +2,18 @@
 // =============================================================================
 // include/ed/thermal/tpq_kernel.h
 //
-// Unified, backend-templated TPQ kernel. Covers BOTH thermodynamic
-// flavours used throughout the project:
+// Backend-templated microcanonical TPQ kernel: iterate
+// |psi_{k+1}> = (L*I - H)|psi_k> / ||(L*I - H)|psi_k>||, handing each
+// iterate (and its energy moments) to a per-step callback that reads off
+// the inverse temperature beta_k = 2 k / (L - E_k).
 //
-//     Method::Microcanonical    --- iterate |psi_{k+1}> = (L*I - H)|psi_k>
-//                                  / ||(L*I - H)|psi_k>||. Each iterate
-//                                  corresponds to an inverse-temperature
-//                                  beta_k = (large_value - <H>_k) / variance
-//                                  (read off by the per-step callback).
+// The kernel itself does ONLY the iteration; observable measurement and
+// the temperature bookkeeping live in the calling driver. Consumers:
 //
-//     Method::CanonicalTaylor   --- propagate by e^{-delta_beta/2 · H} via a
-//                                  Taylor expansion of order `taylor_order`,
-//                                  renormalise after every step. Each step
-//                                  advances beta by delta_beta so that after
-//                                  k steps the state is e^{-β/2 H}|r⟩ with
-//                                  β = k·delta_beta, giving the canonical
-//                                  thermal energy E(β) from ⟨ψ|H|ψ⟩.
-//
-// The kernel itself does ONLY the iteration; all HDF5 result bookkeeping,
-// observable measurement, MPI sample partitioning, log-spaced temperature
-// checkpoint logic etc lives in the calling driver. This split allows the
-// same kernel body to drive:
-//
-//   * the `ed::workflows::thermal` orchestrator (`src/orchestrator.cpp`)
+//   * the `ed::workflows::thermal` orchestrator via `mtpq_kernel.h`
 //   * the fp32 GPU lane (`src/solvers/gpu/mtpq_f32_impl.cuh`)
-// (the original consumers -- `TPQ.cpp::microcanonical_tpq` / `::canonical_tpq`,
-//  `gpu_tpq.cu`, `distributed_tpq*.cpp` -- were all retired by Jul 2026)
 //
-// Phase 2.4 of the Minimalist ED Collapse (May 2026): see
-// `ed/thermal/mtpq_kernel.h` for the
-// thin facade headers that the test_kernel_facades test consumes.
+// Phase 2.4 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
 #include <algorithm>
@@ -51,26 +33,15 @@ using Complex = std::complex<double>;
 
 enum class TpqMethod : std::uint8_t {
     Microcanonical = 0,
-    CanonicalTaylor = 1,
 };
 
-/// Configuration for the unified TPQ iteration kernel.
+/// Configuration for the TPQ iteration kernel.
 struct TpqKernelOptions {
     TpqMethod   method        = TpqMethod::Microcanonical;
-    /// Microcanonical: total number of iterations (k = 0..max_iter).
-    /// CanonicalTaylor: ignored; `beta_steps` drives the loop instead.
+    /// Total number of iterations (k = 0..max_iter).
     std::size_t max_iter      = 0;
-    /// Microcanonical large_value L in |psi_{k+1}> = (L*I - H)|psi_k>.
+    /// Large value L in |psi_{k+1}> = (L*I - H)|psi_k>.
     double      large_value   = 1.0e5;
-    /// CanonicalTaylor: Taylor expansion order p. 50 is the historical
-    /// default; the truncation is benign for delta_beta * ||H|| <= 1.
-    std::size_t taylor_order  = 50;
-    /// CanonicalTaylor: imaginary-time step. The kernel calls back at
-    /// every step, so the driver decides what to record.
-    double      delta_beta    = 0.1;
-    /// CanonicalTaylor: number of delta_beta steps to take. The driver
-    /// can shorten the loop via `on_step` returning false.
-    std::size_t beta_steps    = 0;
     /// Renormalise after every step? Default true matches mTPQ /
     /// imaginary-time-evolution convention.
     bool        normalize_each_step = true;
@@ -86,12 +57,10 @@ struct TpqStepInfo {
     const Complex* psi;        ///< current state, backend memory, length local_n
     std::size_t    local_n;
     std::size_t    step;       ///< 0-based step counter
-    double         beta;       ///< current inverse temperature or 0 (mTPQ)
+    double         beta;       ///< always 0 (the driver derives beta_k)
     double         norm_before_normalize;
-    /// Audit H4 (2026-09): the microcanonical lane computes H psi_k once
-    /// per step and hands the moments to the callback, so drivers no
-    /// longer need a second matvec. `moments_valid == false` on the
-    /// canonical-Taylor lane (drivers fall back to their own matvec).
+    /// Audit H4 (2026-09): the kernel computes H psi_k once per step and
+    /// hands the moments to the callback, so drivers need no second matvec.
     bool           moments_valid = false;
     double         energy        = 0.0;   ///< Re <psi|H|psi>   (psi normalised)
     double         h2            = 0.0;   ///< <psi|H^2|psi> = ||H psi||^2
@@ -108,44 +77,6 @@ struct TpqKernelResult {
     ed::matvec::Backend::UniqueVec psi_final;
     std::size_t                    steps_done = 0;
 };
-
-namespace detail {
-
-template <typename Backend, typename MatvecFn>
-void apply_microcanonical_step(Backend& be, MatvecFn&& apply_H,
-                               double large_value,
-                               Complex* psi, Complex* scratch,
-                               std::size_t local_n) {
-    // scratch <- H psi
-    apply_H(psi, scratch, local_n);
-    // scratch <- L * psi - scratch == (L - H) psi
-    be.scale(Complex(-1.0, 0.0), scratch, local_n);
-    be.axpy(Complex(large_value, 0.0), psi, scratch, local_n);
-    // psi <- scratch
-    be.copy(scratch, psi, local_n);
-}
-
-template <typename Backend, typename MatvecFn>
-void apply_taylor_step(Backend& be, MatvecFn&& apply_H,
-                       double delta_beta, std::size_t taylor_order,
-                       Complex* psi, Complex* term, Complex* Hterm,
-                       std::size_t local_n) {
-    // result = sum_{n=0}^{p} (-delta_beta)^n / n! * H^n psi
-    // Implemented Horner-free: term <- H * term every iteration,
-    // accumulate scaled term into psi (which doubles as `result`).
-    // We need a fresh copy of psi at n=0 so accumulation does not
-    // contaminate the H multiplications; stage that into `term`.
-    be.copy(psi, term, local_n);  // term = H^0 psi
-    double coef = 1.0;
-    for (std::size_t order = 1; order <= taylor_order; ++order) {
-        apply_H(term, Hterm, local_n);
-        std::swap(term, Hterm);  // pointer-swap (caller-owned buffers)
-        coef *= (-delta_beta) / static_cast<double>(order);
-        be.axpy(Complex(coef, 0.0), term, psi, local_n);
-    }
-}
-
-}  // namespace detail
 
 /// Run TPQ iteration on `apply_H` starting from `psi_seed` (backend
 /// memory). The kernel takes ownership of a fresh backend buffer holding
@@ -164,7 +95,6 @@ TpqKernelResult tpq_kernel(Backend&                        be,
 
     auto psi    = be.make_zero_vector(local_n);
     auto scratchA = be.make_zero_vector(local_n);
-    auto scratchB = be.make_zero_vector(local_n);
     be.copy(psi_seed, psi.get(), local_n);
 
     // Normalise seed defensively.
@@ -215,46 +145,6 @@ TpqKernelResult tpq_kernel(Backend&                        be,
                 TpqStepInfo<Backend> info{&be, psi.get(), local_n,
                                           k, /*beta=*/0.0, nrm};
                 info.moments_valid = true; info.energy = Ek; info.h2 = H2k;
-                if (!on_step(info)) break;
-            }
-        }
-    } else {
-        // Step 0 callback so drivers can record the beta=0 baseline.
-        if (on_step) {
-            TpqStepInfo<Backend> info{&be, psi.get(), local_n,
-                                      /*step=*/0, /*beta=*/0.0,
-                                      /*norm_before_normalize=*/1.0};
-            if (!on_step(info)) {
-                TpqKernelResult R;
-                R.psi_final = std::move(psi);
-                R.steps_done = 0;
-                return R;
-            }
-        }
-        const std::size_t total = opts.beta_steps;
-        double beta = 0.0;
-        for (std::size_t k = 1; k <= total; ++k) {
-            // The canonical-TPQ energy formula is
-            //   E_r(β) = ⟨r|e^{-βH/2} H e^{-βH/2}|r⟩ / ⟨r|e^{-βH}|r⟩
-            // which requires the state to be e^{-βH/2}|r⟩.  Each imaginary-
-            // time step must therefore advance the exponent by Δβ/2, not Δβ,
-            // so that after k steps the state is e^{-k(Δβ/2)H}|r⟩ = e^{-β/2 H}|r⟩
-            // and ⟨ψ|H|ψ⟩/⟨ψ|ψ⟩ = E_canonical(β = k·Δβ).  Using Δβ instead
-            // of Δβ/2 would produce E_canonical(2β) — a factor-of-2 error in
-            // the temperature axis.
-            detail::apply_taylor_step(be, apply_H, opts.delta_beta / 2.0,
-                                      opts.taylor_order,
-                                      psi.get(), scratchA.get(),
-                                      scratchB.get(), local_n);
-            const double nrm = be.nrm2(psi.get(), local_n);
-            if (opts.normalize_each_step && nrm > 0.0) {
-                be.scale(Complex(1.0 / nrm, 0.0), psi.get(), local_n);
-            }
-            beta += opts.delta_beta;
-            ++steps;
-            if (on_step) {
-                TpqStepInfo<Backend> info{&be, psi.get(), local_n,
-                                          k, beta, nrm};
                 if (!on_step(info)) break;
             }
         }

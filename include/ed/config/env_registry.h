@@ -138,8 +138,6 @@ struct Row {
       "=0 restores the kept-basis FullCGS2 eigenvector lane instead of the two-pass no-reorth reconstruction")\
     X("ED_FORCE_COMPLEX_LANCZOS", Flag, "krylov", "false",                     \
       "=1 returns the pre-Wave-1.1 unified complex Lanczos kernel (A/B + bisection)")\
-    X("ED_BLOCK_LANCZOS_LEAN", Flag, "krylov", "false (honour the caller)",    \
-      "=1 forces keep_basis = false in the block-Lanczos eigenvalue-only lane")\
     X("ED_FULLDIAG_DENSE_MAX", Integer, "krylov", "120000",                    \
       "Dimension threshold below which full diagonalization uses the dense LAPACK path")\
     X("ED_FULLDIAG_THREADS", Integer, "krylov", "max(1, N / 1024)",            \

@@ -45,7 +45,6 @@ ed::GroundStateResult solve_lane(const ed::LinearOperator& H, bool allow_gpu) {
     opts.method          = ed::SolveMethod::Lanczos;
     opts.backend.allow_gpu = allow_gpu;
     opts.backend.gpu_dim_floor = 0;  // explicit lane comparison at tiny dim
-    opts.backend.allow_mpi = false;
     return ed::workflows::solve(H, opts);
 }
 

@@ -251,7 +251,6 @@ ThermalOptions make_mtpq_opts(uint64_t seed, bool allow_gpu = false) {
     // Coldest comparison at β=1/3.0; trajectory clamps at β=0.331 — ΔE<0.001.
     o.krylov_dim   = 200;
     o.betas        = BETAS_HIGH;
-    o.temp_min     = T_HIGH_MIN;   // sets beta_target inside orchestrator
     o.random_seed  = seed;
     o.backend.allow_gpu = allow_gpu;
     return o;

@@ -2,13 +2,10 @@
 // =============================================================================
 // include/ed/core/results.h
 //
-// Unified result types for the Phase-4 orchestrators (`ed::solve`,
-// `ed::thermal`). Folds the four legacy per-deployment
-// result structs --- `EDResults`, `DistributedLanczosResult`,
-// `DistributedLanczosGPUResult`, `DistributedEigenpairsResult` --- into
-// a single shape per workflow, with the Backend identity carried in a
-// `BackendMetadata` blob so downstream consumers can branch on lane
-// without re-reading the function signature.
+// Result types of the orchestrators (`ed::solve`, `ed::thermal`): one shape
+// per workflow, with the Backend identity carried in a `BackendMetadata`
+// blob so downstream consumers can branch on lane without re-reading the
+// function signature.
 //
 // Phase 3.3 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
@@ -21,27 +18,6 @@
 #include <vector>
 
 #include <ed/core/thermal_types.h>  // ThermodynamicData, FTLMResults
-
-/**
- * @brief Eigenvalue + thermodynamics + FTLM result envelope.
- *
- * Global (::EDResults) to match its call sites (the Python
- * ``qed.workflow._ed_result_from_*`` adapters and the CLI HDF5 emit step in
- * ``src/cli/workflows.cpp``). For ground-state lanes only ``eigenvalues`` /
- * ``eigenvectors_*`` are populated; thermal lanes fill ``thermo_data`` (the
- * temperature scan) and ``ftlm_results`` (error-bar statistics).
- *
- * Consolidation Family 10: relocated here from the retired
- * ``ed_legacy_types.h`` (a one-struct "slim residue" file) to co-locate it
- * with the other result envelopes it references.
- */
-struct EDResults {
-    std::vector<double> eigenvalues;
-    bool eigenvectors_computed = false;
-    std::string eigenvectors_path;
-    ThermodynamicData thermo_data;
-    FTLMResults       ftlm_results;
-};
 
 namespace ed {
 
@@ -65,7 +41,7 @@ struct BackendMetadata {
 };
 
 // ---------------------------------------------------------------------------
-// KrylovDiagnostics --- the Lanczos / Krylov-Schur / Block-Lanczos
+// KrylovDiagnostics --- the Lanczos / Krylov-Schur
 // internals every orchestrator carries through. Replaces the bespoke
 // `tridiag_alpha` / `tridiag_eigenvalues` fields the existing distributed
 // result types each spelled differently. Set sparingly --- callers that
@@ -80,11 +56,6 @@ struct KrylovDiagnostics {
     double              residual_norm = 0.0;
     /// Per-Ritz-value residual estimates `|beta_last * y[m-1, k]|`.
     std::vector<double> ritz_residuals;
-    /// How many returned eigenvalues met the tolerance (<= eigenvalues.size()).
-    std::size_t         n_converged   = 0;
-    /// Convergence curve: residual of the worst target / first unconverged Ritz
-    /// pair after each iteration (block Lanczos) / restart (block Krylov-Schur).
-    std::vector<double> resid_history;
     /// Did the kernel converge to the requested tolerance?
     bool                converged     = false;
 };
@@ -104,146 +75,22 @@ struct EigenvectorRef {
 };
 
 // ---------------------------------------------------------------------------
-// SectorTag --- compact quantum-number label attached to per-sector
-// output by the streaming-symmetry workflows. Lets downstream consumers
-// (CLI table, Python, HDF5) print an eigenvalue / thermo block / S(omega)
-// alongside the (sector_index, irrep, Sz, dim) it came from instead of
-// the legacy "anonymous sorted doubles" payload.
-//
-// `quantum_numbers` mirrors `ed::SymmetrySector::quantum_numbers`
-// (defined in `ed/core/streaming_symmetry.h`): when the
-// automorphism_results/ directory provides per-sector momentum / point-
-// group labels, those land in `quantum_numbers` element-wise. The
-// orchestrator does not interpret the entries; it just carries them
-// through so the caller's downstream code can index into the labels
-// they care about.
-// ---------------------------------------------------------------------------
-struct SectorTag {
-    /// Linear sector index in `[0, num_sectors)`. The order matches the
-    /// `make_operator(streaming_symmetry=true)` loop and the per-sector
-    /// HDF5 directory names (``sector_<sector_index>/``).
-    std::size_t      sector_index = 0;
-    /// Dimension of the per-sector basis (number of orbits in the
-    /// symmetry block; equals `SectorView::dim()`).
-    std::uint64_t    sector_dim   = 0;
-    /// Per-sector quantum numbers (e.g. ``[k_x, k_y, ..., irrep_id]``).
-    /// Empty when no automorphism metadata is attached.
-    std::vector<int> quantum_numbers;
-    /// Number of "up" spins for the fixed-Sz sub-axis. -1 means
-    /// "fixed-Sz axis is off" (full Hilbert per irrep).
-    int              n_up         = -1;
-    /// SU(2) total-spin label as 2S (doubled so odd-N half-integer spins
-    /// stay exact; Stage 12 SU(2) rollout). -1 means "no total-spin
-    /// resolution on this block".
-    int              two_S        = -1;
-};
-
-// ---------------------------------------------------------------------------
-// GroundStateResult --- output of `ed::solve(H, opts)`. Replaces
-// `EDResults`, `DistributedLanczosResult`, `DistributedLanczosGPUResult`,
-// `DistributedEigenpairsResult`.
+// GroundStateResult --- output of `ed::solve(H, opts)`.
 // ---------------------------------------------------------------------------
 struct GroundStateResult {
     std::vector<double>           eigenvalues;
     std::optional<EigenvectorRef> eigenvectors;
     KrylovDiagnostics             krylov;
     BackendMetadata               backend;
-
-    // -----------------------------------------------------------------
-    // Streaming-symmetry attribution (May 2026 SOTA upgrade).
-    // -----------------------------------------------------------------
-    //
-    // When the result was produced by a streaming-symmetry workflow
-    // (CLI ``run_streaming_symmetry_workflow`` or Python
-    // ``_core.workflows_solve_streaming_symmetry_directory``), these
-    // fields tag every eigenvalue with the sector it came from. They
-    // are EMPTY for the orchestrator-only `ed::workflows::solve(*op,
-    // opts)` lane (which operates on a single `LinearOperator`).
-    //
-    // Invariants when non-empty:
-    //   * `sector_tags.size() == num_sectors_touched` (one entry per
-    //     non-empty sector that contributed).
-    //   * `eigenvalues_per_sector[k].size()` is the number of
-    //     eigenvalues sector `k` contributed before the global merge.
-    //   * `sector_index_of_eigenvalue[i]` indexes into `sector_tags`
-    //     and tells you which sector each entry of `eigenvalues`
-    //     originated from (parallel to `eigenvalues`).
-    //
-    // The legacy "sorted doubles only" payload remains in `eigenvalues`
-    // unchanged; consumers that do not care about provenance can ignore
-    // the new fields and the behaviour is identical to the pre-collapse
-    // streaming kernel.
-    std::vector<SectorTag>              sector_tags;
-    std::vector<std::vector<double>>    eigenvalues_per_sector;
-    std::vector<std::size_t>            sector_index_of_eigenvalue;
-
-    // -----------------------------------------------------------------
-    // SU(2) total-spin labels (Stage 12a of the SU(2) rollout).
-    // -----------------------------------------------------------------
-    //
-    // Parallel to `eigenvalues` when non-empty, produced by the post-hoc
-    // <S^2> labeler on an SU(2)-invariant Hamiltonian:
-    //   * `s2_of_eigenvalue[i]`    -- raw <psi_i|S^2|psi_i>;
-    //   * `two_S_of_eigenvalue[i]` -- CERTIFIED snapped label 2S, or -1
-    //     when the vector failed certification (e.g. an accidental
-    //     energy degeneracy mixed different-S eigenvectors) or no
-    //     eigenvector was available to label.
-    // Empty when the Hamiltonian is not SU(2)-invariant, labeling is
-    // toggled off, or the lane never materializes vectors.
-    std::vector<double>                 s2_of_eigenvalue;
-    std::vector<int>                    two_S_of_eigenvalue;
-};
-
-// ---------------------------------------------------------------------------
-// Per-sector thermodynamics entry. Carries both the legacy Sz label
-// (`sz_index` / `n_up`) and the SOTA streaming-symmetry attribution
-// (`sector_index`, `quantum_numbers`, `sector_dim`) so that downstream
-// consumers can identify which irrep / Sz / orbit-basis block produced
-// the per-sector thermo block.
-// ---------------------------------------------------------------------------
-struct ThermalSectorEntry {
-    /// Legacy Sz index (kept for compatibility with the pre-collapse
-    /// `ThermalSectorEntry` from the Python facade).
-    int                 sz_index = 0;
-    double              ground_state_energy = 0.0;
-    ThermodynamicData   thermo;
-    /// Free-form per-sector diagnostics.
-    std::vector<std::pair<std::string, std::string>> notes;
-
-    // -----------------------------------------------------------------
-    // Streaming-symmetry attribution (May 2026 SOTA upgrade).
-    // -----------------------------------------------------------------
-    SectorTag           tag;
 };
 
 // ---------------------------------------------------------------------------
 // ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
-// LTLM / mTPQ family.
+// OFTLM / mTPQ family.
 // ---------------------------------------------------------------------------
-/// One snapshotted TPQ state. Pillar 1 of the "Save and DSSF Upgrades"
-/// plan (May 2026). The orchestrator's thermal finalizer iterates these
-/// and lands each one in ``/tpq/samples/sample_<s>/state_beta_<b>`` of
-/// the shared ``ed_results.h5`` file via ``HDF5IO::saveTPQState``.
-struct TpqStateSnapshot {
-    std::size_t            sample_index    = 0;
-    /// Inverse temperature the caller requested via ``ThermalOptions
-    /// ::probe_betas``. Kept so the snapshot's provenance survives a
-    /// round-trip through HDF5 (the on-disk dataset name uses the
-    /// effective beta, since that is what the state actually
-    /// realises).
-    double                 requested_beta  = 0.0;
-    /// Closest kernel-step beta to ``requested_beta``. Used as the
-    /// HDF5 dataset key.
-    double                 effective_beta  = 0.0;
-    /// Host-side TPQ state vector, length ``H.geometry().local_dim``.
-    std::vector<Complex>   psi;
-};
-
 struct ThermalResult {
-    /// Combined (across sectors / samples) thermodynamic functions.
+    /// Combined (across samples) thermodynamic functions.
     ThermodynamicData                thermo;
-    /// Per-sector breakdown when the workflow ran a multi-Sz loop.
-    std::vector<ThermalSectorEntry>  per_sector;
     /// Ground-state energy for diagnostic / shift purposes.
     double                           ground_state_energy = 0.0;
     /// Optional FTLM raw results (Ritz triples per sample). Empty
@@ -251,24 +98,6 @@ struct ThermalResult {
     std::optional<FTLMResults>       ftlm;
     KrylovDiagnostics                krylov;
     BackendMetadata                  backend;
-
-    // -----------------------------------------------------------------
-    // Pillar 1 of the "Save and DSSF Upgrades" plan (May 2026): TPQ
-    // trajectory + state-snapshot surface. Populated only by the mTPQ
-    // branch of ``ed::workflows::thermal``; empty for
-    // FTLM / OFTLM.
-    //
-    // The trajectory fields are mirror-images of
-    // ``MtpqResult::sample_*`` --
-    // outer index = sample, inner index = kernel step. The orchestrator
-    // copies them into ``R`` after the visit so the uniform finalizer
-    // can persist them via ``HDF5IO::appendTPQThermodynamics``.
-    // -----------------------------------------------------------------
-    std::vector<std::vector<double>>    tpq_sample_betas;
-    std::vector<std::vector<double>>    tpq_sample_energies;
-    std::vector<std::vector<double>>    tpq_sample_variances;
-    /// One entry per snapshot the kernel actually recorded.
-    std::vector<TpqStateSnapshot>       tpq_state_snapshots;
 };
 
 }  // namespace ed

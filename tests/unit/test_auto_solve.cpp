@@ -4,7 +4,7 @@
 // Smoke-tests the unified `ed::workflows::solve(H, opts)` orchestrator.
 // Tests exercise the public Backend-agnostic surface: numerical
 // correctness of eigenvalues over CPU lane, full-diag fallback for
-// small problems, Lanczos / KrylovSchur / BlockLanczos kernels, and the
+// small problems, Lanczos / KrylovSchur kernels, and the
 // sector-projection workflow when the caller passes a FixedSzOperator.
 //
 // Migrated from the legacy `ed::auto_pilot::solve(...)` API during the
@@ -154,8 +154,6 @@ TEST_CASE("workflows::solve runs on CPU when the caller forbids the GPU "
     SolveOptions opts;
     opts.num_eigs = 1;
     opts.backend.allow_gpu     = false;
-    opts.backend.allow_mpi     = false;
-    opts.backend.allow_mpi_gpu = false;
 
     auto res = ed::workflows::solve(*H, opts);
     REQUIRE(res.eigenvalues.size() >= 1);

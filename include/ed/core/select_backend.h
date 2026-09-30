@@ -13,8 +13,6 @@
 //   1. if have_cuda() AND gpu_mem_fits AND allow_gpu --> CudaBackend
 //   2. else                                          --> CpuBackend
 //
-// `allow_mpi` / `allow_mpi_gpu` are accepted and ignored.
-//
 // Phase 4.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
@@ -39,8 +37,6 @@ namespace ed {
 
 struct BackendConstraints {
     bool allow_gpu     = true;
-    bool allow_mpi     = true;
-    bool allow_mpi_gpu = true;
     /// Per-rank GPU memory budget. Empty means "no limit; trust the
     /// `cudaGetDeviceProperties` query". When set, gpu_mem_fits is
     /// computed as `bytes_per_complex * geometry.local_dim *

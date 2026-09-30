@@ -8,7 +8,6 @@
 // invoke the matching templated kernel from Phase 2:
 //
 //     ed::solve     -> lanczos_kernel<Backend>            (single eig)
-//                  or block_lanczos_kernel<Backend>      (multi eig, BLAS-3)
 //                  or krylov_schur_kernel<Backend>       (many eigs / harder problems)
 //                  or full_diag fallback                  (small dim)
 //     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
@@ -30,8 +29,8 @@
 // File map
 //   orch_common.cpp    shared plumbing: the exact-small thermal env probe
 //   orch_solve.cpp     solve() + the backend-templated solve_on<Backend>
-//                      lanes (Lanczos / BlockLanczos / BlockKrylovSchur /
-//                      KrylovSchur / FullDiag). The ONLY translation unit
+//                      lanes (Lanczos / KrylovSchur / FullDiag). The ONLY
+//                      translation unit
 //                      that instantiates a backend-templated eigensolver,
 //                      so the CudaBackend instantiation of the solve path
 //                      lives here and nowhere else.
@@ -44,8 +43,6 @@
 #include <ed/core/solver_defaults.h>
 
 #include <ed/core/mem_guard.h>           // leaf working-set guard (clean error vs OOM)
-#include <ed/krylov/block_lanczos_kernel.h>
-#include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>

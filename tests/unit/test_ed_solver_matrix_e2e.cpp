@@ -6,9 +6,8 @@
 // that the unified `<Backend>`-templated kernels
 //
 //   (a) `lanczos_kernel<CpuBackend>`
-//   (b) `block_lanczos_kernel<CpuBackend>`
-//   (c) `krylov_schur_kernel<CpuBackend>`
-//   (d) the FullDiag (LAPACK zheevd) fallback
+//   (b) `krylov_schur_kernel<CpuBackend>`
+//   (c) the FullDiag (LAPACK zheevd) fallback
 //
 // all return the same ground-state energy on a small Sz-conserving
 // Heisenberg chain, regardless of which solver the caller picks.
@@ -148,24 +147,8 @@ TEST_CASE("workflows::solve e2e: explicit KrylovSchur returns the lowest "
     REQUIRE(res.eigenvalues.size() >= 5);
     // The GS is in n_up=4; the dense reference's higher eigenvalues
     // may live in other Sz sectors. We require the GS to agree tightly;
-    // the in-sector excitations are validated separately by
-    // test_block_lanczos.
-    REQUIRE(std::abs(res.eigenvalues[0] - f.ref.eigs[0]) < kTolEnergy);
-}
-
-TEST_CASE("workflows::solve e2e: explicit BlockLanczos returns several "
-          "Sz=0 sector eigenvalues",
-          "[workflows][e2e][gs][block_lanczos]") {
-    auto f = make_fixture();
-
-    SolveOptions opts;
-    opts.num_eigs   = 8;
-    opts.block_size = 4;
-    opts.method     = SolveMethod::BlockLanczos;
-    opts.tolerance  = 1e-12;
-
-    auto res = ed::workflows::solve(*f.H_sz, opts);
-    REQUIRE(res.eigenvalues.size() >= 1);
+    // the in-sector excitations are validated separately by the
+    // kernel tests.
     REQUIRE(std::abs(res.eigenvalues[0] - f.ref.eigs[0]) < kTolEnergy);
 }
 

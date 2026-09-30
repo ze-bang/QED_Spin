@@ -56,8 +56,6 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     o.num_exact     = t.exact_states;
     o.betas         = beta;
     o.random_seed   = seed;
-    o.spin_flip     = 0;       // one plain block: nothing to re-enter
-    o.time_reversal = 0;
     o.backend.allow_gpu = t.device != Device::Cpu;
     if (t.device == Device::Gpu) o.backend.gpu_dim_floor = 0;
     if (tower) {

@@ -198,11 +198,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // stand down and let the sampling kernel honour the projection.
         // (Exact per-tower thermo needs the tower projection applied before
         // diagonalising, which this fallback does not do.)
-        !opts.seed_transform &&
-        // When the caller requested TPQ state snapshots (probe_betas), the exact
-        // fallback cannot produce them -- run the real TPQ trajectory instead
-        // (accepting the small-sector variance the user implicitly opted into).
-        opts.probe_betas.empty()) {
+        !opts.seed_transform) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
         full_diagonalization(H, D, D, eigs, /*compute_eigenvectors=*/false);
@@ -228,7 +224,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             ed::thermal::MtpqOptions kopts;
             kopts.num_samples = opts.num_samples;
             kopts.random_seed = opts.random_seed;
-            kopts.probe_betas = opts.probe_betas;
             kopts.seed_transform = opts.seed_transform;  // Stage 12f
             auto matvec = H.template bind<B>();
 
@@ -259,14 +254,17 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             //        L_stab = E_max + buffer   (strictly above the ceiling)
             //        L      = max(L_res, L_stab)
             //   3. Size the iteration count INDEPENDENTLY so the trajectory
-            //      still brackets beta_max = 1/temp_min:
+            //      still brackets beta_max, the largest requested beta:
             //        steps ~ beta_max * (L - E_min) / 2.
             // Resolution and cold-reach are thus decoupled; matvecs are
             // cheap so over-provisioning steps is affordable.
             // -------------------------------------------------------------
             const double dbeta_target = 0.02;  // internal quality knob
-            const double beta_max = (opts.temp_min > 0.0)
-                ? 1.0 / opts.temp_min : 100.0;
+            // The coldest requested point: opts.betas comes from the caller or,
+            // when empty, from the temp_min/temp_max grid built above.
+            double beta_max = 0.0;
+            for (double b : opts.betas) beta_max = std::max(beta_max, b);
+            if (!(beta_max > 0.0)) beta_max = 100.0;
 
             double e_min_est = 0.0, e_max_est = 0.0;
             bool have_bounds = false;
@@ -360,7 +358,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
             // Iteration budget contract:
             //   * krylov_dim == 0  -> AUTO: size the step count so the
-            //     trajectory brackets beta_max = 1/temp_min, using
+            //     trajectory brackets beta_max (the largest requested beta), using
             //     steps ~ beta_max*(L - E_min)/2 (capped for safety).
             //   * krylov_dim  > 0  -> RESPECT the caller's value exactly
             //     (expert override / explicit ``max_iterations=...``).
@@ -436,25 +434,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     // is authoritative -- overwrite R.thermo with the
                     // aggregator's output (which uses our T grid).
                     R.thermo = std::move(td);
-                }
-            }
-            // Pillar 1 (May 2026): lift the per-sample TPQ trajectory
-            // + state-vector snapshots into the outer ThermalResult.
-            R.tpq_sample_betas     = std::move(kres.sample_inv_temps);
-            R.tpq_sample_energies  = std::move(kres.sample_energies);
-            R.tpq_sample_variances = std::move(kres.sample_variances);
-            for (std::size_t s = 0; s < kres.state_snapshots.size(); ++s) {
-                for (std::size_t p = 0; p < kres.state_snapshots[s].size(); ++p) {
-                    auto& psi = kres.state_snapshots[s][p];
-                    if (psi.empty()) continue;
-                    TpqStateSnapshot snap;
-                    snap.sample_index   = s;
-                    snap.requested_beta = (p < opts.probe_betas.size())
-                                              ? opts.probe_betas[p]
-                                              : 0.0;
-                    snap.effective_beta = kres.state_snapshot_betas[s][p];
-                    snap.psi            = std::move(psi);
-                    R.tpq_state_snapshots.push_back(std::move(snap));
                 }
             }
         }, variant);

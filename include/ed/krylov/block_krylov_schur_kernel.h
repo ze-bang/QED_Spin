@@ -5,7 +5,7 @@
 // Block Krylov-Schur (thick-restart block Lanczos) for Hermitian operators.
 //
 // This is the block generalization of `krylov_schur_kernel` and the restarted
-// generalization of `block_lanczos_kernel`. For a Hermitian H, Krylov-Schur
+// generalization of block Lanczos. For a Hermitian H, Krylov-Schur
 // reduces to thick-restart Lanczos; the *block* variant carries `p` vectors per
 // step, so it resolves eigenvalues of multiplicity up to `p` (and tightly
 // clustered groups) in a single cycle -- exactly the regime where single-vector
@@ -29,20 +29,83 @@
 // nothing symmetry-specific lives here.
 // =============================================================================
 
-#include <ed/krylov/block_lanczos_kernel.h>   // detail helpers + Complex + LAPACKE
+#include <ed/core/blas_lapack_wrapper.h>
 #include <ed/krylov/subspace_policy.h>        // krylov_subspace_dim (shared sizing)
 #include <ed/matvec/backend.h>
+#include <ed/matvec/backends/cpu_backend.h>
+#ifdef WITH_CUDA
+#include <ed/matvec/backends/cuda_backend.cuh>
+#endif
 
 #include <algorithm>
+#include <cmath>
+#include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace ed::krylov {
+
+using Complex = std::complex<double>;
+
+namespace detail {
+
+// ----------------------------------------------------------------------------
+// Hermitianise an (b x b) column-major block in place. Cheap (b is small),
+// stays on host for simplicity --- all backends only need a tiny round-trip.
+// ----------------------------------------------------------------------------
+inline void hermitianize_inplace(Complex* A, std::size_t b) {
+    for (std::size_t c = 0; c < b; ++c) {
+        A[c + c * b] = Complex(std::real(A[c + c * b]), 0.0);
+        for (std::size_t r = c + 1; r < b; ++r) {
+            const Complex avg = 0.5 * (A[r + c * b] + std::conj(A[c + r * b]));
+            A[r + c * b] = avg;
+            A[c + r * b] = std::conj(avg);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Build the (m*b) x (m*b) block-tridiag projected matrix on host from the
+// alpha / beta blocks. Used for the convergence check and the final eigensolve.
+// ----------------------------------------------------------------------------
+inline void build_projected_matrix(
+        const std::vector<std::vector<Complex>>& alpha_blocks,
+        const std::vector<std::vector<Complex>>& beta_blocks,
+        std::size_t b,
+        std::vector<Complex>& matrix /*out*/) {
+    const std::size_t m = alpha_blocks.size();
+    const std::size_t total = m * b;
+    matrix.assign(total * total, Complex(0.0, 0.0));
+    for (std::size_t blk = 0; blk < m; ++blk) {
+        const auto& A = alpha_blocks[blk];
+        const std::size_t off = blk * b;
+        for (std::size_t c = 0; c < b; ++c) {
+            for (std::size_t r = 0; r < b; ++r) {
+                matrix[(off + r) + (off + c) * total] = A[r + c * b];
+            }
+        }
+    }
+    for (std::size_t blk = 0; blk + 1 < m; ++blk) {
+        const auto& B = beta_blocks[blk];
+        const std::size_t off = blk * b;
+        for (std::size_t c = 0; c < b; ++c) {
+            for (std::size_t r = 0; r < b; ++r) {
+                matrix[(off + b + r) + (off + c) * total]   = B[r + c * b];
+                matrix[(off + r) + (off + b + c) * total]   = std::conj(B[c + r * b]);
+            }
+        }
+    }
+}
+
+}  // namespace detail
+
 
 struct BlockKrylovSchurOptions {
     std::size_t   num_eigs        = 1;

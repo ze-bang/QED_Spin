@@ -108,8 +108,6 @@ TEST_CASE("workflows::thermal respects BackendConstraints.allow_gpu = false "
     opts.krylov_dim    = 40;
     opts.random_seed   = 42;
     opts.backend.allow_gpu     = false;
-    opts.backend.allow_mpi     = false;
-    opts.backend.allow_mpi_gpu = false;
 
     auto res = ed::workflows::thermal(*H, opts);
     REQUIRE(res.backend.lane == "cpu");
