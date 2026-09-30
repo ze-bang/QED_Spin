@@ -71,6 +71,16 @@ class EigResult:
         ``O`` is arbitrary: it may change Sz and break every symmetry."""
         return complex(self._raw.matrix_element(self._n_sites, O, int(i), int(j)))
 
+    def save(self, path) -> None:
+        """Write the result to an ``.npz`` file: the levels with their block labels, the
+        vectors in the sector basis they were solved in (each basis once), and the symmetry
+        data. :func:`qed.load_eigs` restores it; :meth:`vectors`, :meth:`expect` and
+        :meth:`matrix_element` then work without H."""
+        arrays = {k: np.asarray(v) for k, v in
+                  _core.sectors.eigs_to_arrays(self._raw, self._spec, self._n_sites).items()}
+        np.savez_compressed(path, format_version=np.int64(1), k=np.int64(self.k),
+                            energies=np.asarray(self.energies), **arrays)
+
 
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
          block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
@@ -96,3 +106,16 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
                      device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
                      _raw=raw, _spec=spec,
                      _n_sites=n)
+
+
+def load_eigs(path) -> "EigResult":
+    """An :class:`EigResult` written by :meth:`EigResult.save` (``symmetry`` is None: the
+    resolved group data travels in the file instead)."""
+    with np.load(path) as f:
+        d = {key: f[key] for key in f.files}
+    if int(d.get("format_version", 0)) != 1:
+        raise ValueError(f"{path}: not an EigResult file (format_version 1)")
+    raw, spec, n = _core.sectors.eigs_from_arrays(d)
+    return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
+                     symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),
+                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(n))

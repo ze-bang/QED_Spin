@@ -80,13 +80,13 @@ def _check_environment() -> None:
 _check_environment()
 
 from .api import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
-                  ThermalResult, dynamics, eigs, expect, spectrum, thermal)
+                  ThermalResult, dynamics, eigs, expect, load_eigs, spectrum, thermal)
 
 __version__: Final[str] = "0.4.0"
 
 __all__ = [
     "Operator", "OP_SPLUS", "OP_SMINUS", "OP_SZ",
-    "Symmetry", "eigs", "EigResult", "spectrum", "SpectrumResult", "thermal", "ThermalResult",
+    "Symmetry", "eigs", "EigResult", "load_eigs", "spectrum", "SpectrumResult", "thermal", "ThermalResult",
     "dynamics", "DynamicsResult", "expect", "ExpectResult",
     "find_symmetries", "GeneratorSet", "SymmetryReport",
     "has_cuda_build", "debug_env", "env_snapshot",

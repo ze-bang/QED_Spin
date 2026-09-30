@@ -32,3 +32,14 @@ def bond(i, j):
 e = qed.expect(H, [bond(0, 1), bond(0, 2)], 4)
 for E, mult, (nn, nnn) in zip(e.energies, e.multiplicities, e.values.real):
     print(f"  E = {E:.8f}  x{mult}  <S0.S1> = {nn:+.6f}  <S0.S2> = {nnn:+.6f}")
+
+# Save the levels with their vectors (kept in the compact symmetry-sector basis) and reload
+# them later: vectors, expect and matrix_element work on the reloaded result without H.
+import os
+import tempfile
+
+path = os.path.join(tempfile.mkdtemp(), "levels.npz")
+r.save(path)
+again = qed.load_eigs(path)
+print("reloaded:", np.allclose(again.energies, r.energies),
+      np.allclose(again.expect([bond(0, 1)]), r.expect([bond(0, 1)])))

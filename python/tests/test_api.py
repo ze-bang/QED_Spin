@@ -108,3 +108,24 @@ def test_auto_symmetry_on_a_hamiltonian_without_spatial_symmetry():
     got = np.sort(qed.spectrum(H).energies)
     want = np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies)
     np.testing.assert_allclose(got, want, atol=1e-10)
+
+
+def test_saved_eigs_reload_with_vectors_expect_and_matrix_elements(tmp_path):
+    H = _ring(8, 0.3)
+    sym = qed.Symmetry(spatial=_translations(8))
+    r = qed.eigs(H, 4, sym=sym, vectors=True)
+    bond = qed.input.HamiltonianBuilder(8).heisenberg([(0, 1)], J=1.0).to_operator()
+    sp = qed.Operator(8, 0.5)
+    sp.add_one_body(qed.OP_SPLUS, 0, 1.0)
+    path = tmp_path / "levels.npz"
+    r.save(path)
+    s = qed.load_eigs(path)
+    np.testing.assert_array_equal(s.energies, r.energies)
+    assert [L.multiplicity for L in s.levels] == [L.multiplicity for L in r.levels]
+    for a, b in zip(s.vectors(), r.vectors()):
+        np.testing.assert_allclose(a, b, atol=1e-14)
+    np.testing.assert_allclose(s.expect([bond]), r.expect([bond]), atol=1e-14)
+    n = len(r.levels)
+    for i in range(n):
+        for j in range(n):
+            assert abs(s.matrix_element(sp, i, j) - r.matrix_element(sp, i, j)) < 1e-14

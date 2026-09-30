@@ -14,6 +14,10 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
+#include <map>
+#include <string>
+
 namespace py = pybind11;
 namespace sec = ed::sectors;
 
@@ -32,6 +36,154 @@ py::array_t<double> to_real_array(std::vector<double> v) {
     return py::array_t<double>({heap->size()}, {sizeof(double)}, heap->data(), owner);
 }
 
+// ---- EigsResult <-> flat arrays (EigResult.save / qed.load_eigs) ---------------------------
+// Everything a result needs to be used again: its levels with their block labels, its vectors
+// in the sector basis they were solved in, each basis once (representatives, norms, characters,
+// group action), and the Spec. Derived tables (the permutation lookup) are rebuilt on load.
+
+template <class T>
+py::array_t<T> arr(const std::vector<T>& v) {
+    return py::array_t<T>(static_cast<py::ssize_t>(v.size()), v.data());
+}
+
+template <class T>
+std::vector<T> vec(const py::dict& d, const char* key) {
+    auto a = py::array_t<T, py::array::c_style | py::array::forcecast>::ensure(d[key]);
+    if (!a) throw std::invalid_argument(std::string("load_eigs: bad array ") + key);
+    return std::vector<T>(a.data(), a.data() + a.size());
+}
+
+py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s, int n_sites) {
+    py::dict d;
+    const std::size_t nl = r.levels.size();
+    std::vector<double> energy(nl);
+    std::vector<std::int64_t> mirror(nl), mult(nl), vector(nl), tag(nl * 11);
+    for (std::size_t i = 0; i < nl; ++i) {
+        const auto& L = r.levels[i];
+        const auto& t = L.tag;
+        energy[i] = L.energy; mirror[i] = L.mirror;
+        mult[i] = static_cast<std::int64_t>(L.multiplicity); vector[i] = L.vector;
+        const std::int64_t row[11] = {t.n_up, t.sz_parity, t.k0, t.k_raw, t.flip_parity, t.irrep,
+                                      t.irrep_dim, t.star_size, t.tr_folded ? 1 : 0,
+                                      static_cast<std::int64_t>(t.dim),
+                                      static_cast<std::int64_t>(t.multiplicity)};
+        std::copy(row, row + 11, tag.begin() + static_cast<std::ptrdiff_t>(11 * i));
+    }
+    d["level_energy"] = arr(energy); d["level_mirror"] = arr(mirror);
+    d["level_multiplicity"] = arr(mult); d["level_vector"] = arr(vector); d["level_tag"] = arr(tag);
+
+    // Vectors, with each distinct basis stored once.
+    std::map<const void*, std::int64_t> basis_id;
+    std::vector<std::int64_t> vbasis, voffset{0};
+    std::vector<std::complex<double>> amps;
+    for (const auto& v : r.vectors) {
+        auto [it, fresh] = basis_id.emplace(v.basis.get(), static_cast<std::int64_t>(basis_id.size()));
+        if (fresh) {
+            const auto& b = *v.basis;
+            const std::string p = "basis" + std::to_string(it->second) + "_";
+            d[py::str(p + "reps")] = arr(b.reps);
+            d[py::str(p + "inv_norms")] = arr(b.inv_norms);
+            d[py::str(p + "characters")] = arr(b.characters);
+            d[py::str(p + "perms")] = arr(b.perms_flat);
+            d[py::str(p + "flip_masks")] = arr(b.flip_masks);
+            d[py::str(p + "shape")] = arr(std::vector<std::int64_t>{b.group_size, b.n_sites, b.n_up});
+        }
+        vbasis.push_back(it->second);
+        amps.insert(amps.end(), v.amplitudes.begin(), v.amplitudes.end());
+        voffset.push_back(static_cast<std::int64_t>(amps.size()));
+    }
+    d["n_bases"] = arr(std::vector<std::int64_t>{static_cast<std::int64_t>(basis_id.size())});
+    d["vector_basis"] = arr(vbasis); d["vector_offset"] = arr(voffset); d["vector_amplitudes"] = arr(amps);
+
+    auto perms = [](const std::vector<sec::Perm>& ps) {
+        std::vector<std::int64_t> flat;
+        for (const auto& p : ps) flat.insert(flat.end(), p.begin(), p.end());
+        return flat;
+    };
+    d["spec_abelian"] = arr(perms(s.abelian)); d["spec_residues"] = arr(perms(s.residues));
+    d["spec_only_k0"] = arr(std::vector<std::int64_t>(s.only_k0.begin(), s.only_k0.end()));
+    d["spec_only_irrep"] = arr(std::vector<std::int64_t>(s.only_irrep.begin(), s.only_irrep.end()));
+    d["spec_scalars"] = arr(std::vector<std::int64_t>{s.n_up, s.sz_parity, s.use_sz ? 1 : 0, s.spin_flip,
+                                                      s.time_reversal, s.two_S, n_sites});
+    d["result_scalars"] = arr(std::vector<std::int64_t>{
+        static_cast<std::int64_t>(r.total_dim), static_cast<std::int64_t>(r.partial_blocks),
+        r.complete ? 1 : 0, r.flip_engaged ? 1 : 0, r.tr_engaged ? 1 : 0,
+        static_cast<std::int64_t>(r.device_blocks), static_cast<std::int64_t>(r.pruned_blocks)});
+    return d;
+}
+
+py::tuple eigs_from_arrays(const py::dict& d) {
+    sec::EigsResult r;
+    const auto energy = vec<double>(d, "level_energy");
+    const auto mirror = vec<std::int64_t>(d, "level_mirror");
+    const auto mult = vec<std::int64_t>(d, "level_multiplicity");
+    const auto vector = vec<std::int64_t>(d, "level_vector");
+    const auto tag = vec<std::int64_t>(d, "level_tag");
+    if (tag.size() != 11 * energy.size()) throw std::invalid_argument("load_eigs: level_tag has the wrong shape");
+    for (std::size_t i = 0; i < energy.size(); ++i) {
+        sec::Level L;
+        const std::int64_t* t = tag.data() + 11 * i;
+        L.energy = energy[i]; L.mirror = static_cast<int>(mirror[i]);
+        L.multiplicity = static_cast<std::uint64_t>(mult[i]); L.vector = static_cast<int>(vector[i]);
+        L.tag.n_up = static_cast<int>(t[0]); L.tag.sz_parity = static_cast<int>(t[1]);
+        L.tag.k0 = static_cast<int>(t[2]); L.tag.k_raw = static_cast<int>(t[3]);
+        L.tag.flip_parity = static_cast<int>(t[4]); L.tag.irrep = static_cast<int>(t[5]);
+        L.tag.irrep_dim = static_cast<int>(t[6]); L.tag.star_size = static_cast<int>(t[7]);
+        L.tag.tr_folded = t[8] != 0; L.tag.dim = static_cast<std::uint64_t>(t[9]);
+        L.tag.multiplicity = static_cast<std::uint64_t>(t[10]);
+        r.levels.push_back(L);
+    }
+    std::vector<std::shared_ptr<const ed::symmetry::RepSectorData>> bases;
+    const auto nb = vec<std::int64_t>(d, "n_bases").at(0);
+    for (std::int64_t b = 0; b < nb; ++b) {
+        const std::string p = "basis" + std::to_string(b) + "_";
+        auto rd = std::make_shared<ed::symmetry::RepSectorData>();
+        rd->reps = vec<std::uint64_t>(d, (p + "reps").c_str());
+        rd->inv_norms = vec<double>(d, (p + "inv_norms").c_str());
+        rd->characters = vec<std::complex<double>>(d, (p + "characters").c_str());
+        rd->perms_flat = vec<int>(d, (p + "perms").c_str());
+        rd->flip_masks = vec<std::uint64_t>(d, (p + "flip_masks").c_str());
+        const auto shape = vec<std::int64_t>(d, (p + "shape").c_str());
+        rd->group_size = static_cast<int>(shape.at(0));
+        rd->n_sites = static_cast<int>(shape.at(1));
+        rd->n_up = static_cast<int>(shape.at(2));
+        rd->build_perm_lut();
+        bases.push_back(std::move(rd));
+    }
+    const auto vbasis = vec<std::int64_t>(d, "vector_basis");
+    const auto voffset = vec<std::int64_t>(d, "vector_offset");
+    const auto amps = vec<std::complex<double>>(d, "vector_amplitudes");
+    for (std::size_t i = 0; i < vbasis.size(); ++i) {
+        sec::BlockVector v;
+        v.basis = bases.at(static_cast<std::size_t>(vbasis[i]));
+        v.amplitudes.assign(amps.begin() + voffset[i], amps.begin() + voffset[i + 1]);
+        if (v.amplitudes.size() != v.basis->reps.size())
+            throw std::invalid_argument("load_eigs: a vector does not match its basis");
+        r.vectors.push_back(std::move(v));
+    }
+    const auto sc = vec<std::int64_t>(d, "result_scalars");
+    r.total_dim = static_cast<std::uint64_t>(sc.at(0)); r.partial_blocks = static_cast<std::size_t>(sc.at(1));
+    r.complete = sc.at(2) != 0; r.flip_engaged = sc.at(3) != 0; r.tr_engaged = sc.at(4) != 0;
+    r.device_blocks = static_cast<std::size_t>(sc.at(5)); r.pruned_blocks = static_cast<std::size_t>(sc.at(6));
+
+    sec::Spec s;
+    const auto ss = vec<std::int64_t>(d, "spec_scalars");
+    const int n = static_cast<int>(ss.at(6));
+    auto perms = [n](const std::vector<std::int64_t>& flat) {
+        std::vector<sec::Perm> out;
+        for (std::size_t i = 0; n > 0 && i + static_cast<std::size_t>(n) <= flat.size(); i += static_cast<std::size_t>(n))
+            out.emplace_back(flat.begin() + static_cast<std::ptrdiff_t>(i), flat.begin() + static_cast<std::ptrdiff_t>(i) + n);
+        return out;
+    };
+    s.abelian = perms(vec<std::int64_t>(d, "spec_abelian"));
+    s.residues = perms(vec<std::int64_t>(d, "spec_residues"));
+    for (auto k : vec<std::int64_t>(d, "spec_only_k0")) s.only_k0.push_back(static_cast<int>(k));
+    for (auto k : vec<std::int64_t>(d, "spec_only_irrep")) s.only_irrep.push_back(static_cast<int>(k));
+    s.n_up = static_cast<int>(ss.at(0)); s.sz_parity = static_cast<int>(ss.at(1)); s.use_sz = ss.at(2) != 0;
+    s.spin_flip = static_cast<int>(ss.at(3)); s.time_reversal = static_cast<int>(ss.at(4));
+    s.two_S = static_cast<int>(ss.at(5));
+    return py::make_tuple(std::move(r), std::move(s), n);
+}
 }  // namespace
 
 void bind_sectors(py::module_& m) {
@@ -213,6 +365,10 @@ void bind_sectors(py::module_& m) {
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("O"), py::arg("dynamics"),
           "S(omega) = <O^dag delta(omega - H + E) O> over the momentum sectors of H.");
 
+    s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"), py::arg("n_sites"),
+          "A result as named arrays (qed.api EigResult.save).");
+    s.def("eigs_from_arrays", &eigs_from_arrays, py::arg("arrays"),
+          "(result, spec, n_sites) from eigs_to_arrays output (qed.load_eigs).");
     s.def("eigs",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,
              int dense_max_dim, int block_size, bool allow_partial, sec::Device device,
