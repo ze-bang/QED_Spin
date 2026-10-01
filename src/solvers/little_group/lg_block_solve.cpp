@@ -183,6 +183,25 @@ bool lowest_levels(std::size_t m, const double* w, Bound&& bound, double scale, 
     return found >= k;
 }
 
+// The leading invariant block of a Lanczos run (alpha[0..m), beta[i] the off-diagonal between steps
+// i-1 and i): its size is the step before the first off-diagonal at roundoff level, 1e-12 of the
+// largest |alpha| or |beta| seen. The kernel keeps iterating past an invariant subspace (FTLM wants
+// the full tridiagonal), and from there the recurrence is built from roundoff: it re-finds the other
+// copy of each degenerate level, coupled to the converged copy at that same roundoff, and the two
+// mix at O(1), so no copy certifies (the 7-state magnon block of the odd Ising ring, the tiny tri9
+// blocks). The leading block's Ritz values are exact eigenvalues. Without such an off-diagonal: m.
+inline std::size_t leading_block(const std::vector<double>& alpha, const std::vector<double>& beta,
+                                 std::size_t m) {
+    double scale = 0.0;
+    for (std::size_t i = 0; i < m; ++i) {
+        scale = std::max(scale, std::abs(alpha[i]));
+        if (i + 1 < beta.size()) scale = std::max(scale, std::abs(beta[i + 1]));
+    }
+    for (std::size_t i = 1; i < m; ++i)
+        if (std::abs(beta[i]) <= 1e-12 * scale) return i;
+    return m;
+}
+
 }  // namespace
 
 // Several lowest levels of one block above the dense crossover: thick-restart
@@ -325,8 +344,10 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
         kopts.convergence_check =
             [kk](const std::vector<double>& alpha,
                  const std::vector<double>& beta) -> bool {
-                const int m = static_cast<int>(alpha.size());
-                if (static_cast<std::size_t>(m) < kk + 2) return false;
+                const std::size_t m_all = alpha.size();
+                const int m = static_cast<int>(leading_block(alpha, beta, m_all));
+                // An exhausted Krylov space (m < m_all) is exact; a live run needs a few steps.
+                if (static_cast<std::size_t>(m) == m_all && m_all < kk + 2) return false;
                 Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
                 for (int i = 0; i < m; ++i)
                     T(i, i) = alpha[static_cast<std::size_t>(i)];
@@ -359,9 +380,9 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     v0.reset();
     BlockSolution sol;
     sol.applies = Hc.applies;
-    const std::size_t m = kres.alpha.size();
-    if (m == 0) return sol;
-    std::vector<double> diag = kres.alpha;
+    if (kres.alpha.empty()) return sol;
+    const std::size_t m = leading_block(kres.alpha, kres.beta, kres.alpha.size());
+    std::vector<double> diag(kres.alpha.begin(), kres.alpha.begin() + static_cast<long>(m));
     std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
     for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
     std::vector<double> z(m * m, 0.0);
@@ -491,17 +512,22 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) 
         be.copy(seed.get(), vc.get(), n);
         bool done = false;
         std::size_t m = 0;
+        double scale = 0.0;                    // largest |alpha| or |beta| so far
         while (!done && m < max_iter) {
             H(vc.get(), w.get(), n);
             const double a = std::real(be.dot(vc.get(), w.get(), n));
             alpha.push_back(a);
+            scale = std::max(scale, std::abs(a));
             const double bprev = beta.back();
             be.axpy(Complex(-a, 0.0), vc.get(), w.get(), n);
             be.axpy(Complex(-bprev, 0.0), vp.get(), w.get(), n);
             const double b = be.nrm2(w.get(), n);
             beta.push_back(b);
             ++m;
-            if (!(b > 1e-300)) { done = true; break; }   // invariant subspace
+            // An invariant subspace (see leading_block): its tridiagonal is exact; going on would
+            // build vectors from roundoff.
+            if (!(b > 1e-12 * scale)) { done = true; break; }
+            scale = std::max(scale, b);
             std::swap(vp, vc);
             std::swap(vc, w);
             be.scale(Complex(1.0 / b, 0.0), vc.get(), n);
