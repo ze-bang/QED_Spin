@@ -134,7 +134,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
     // uses the same absolute free-energy convention (F includes ln(D) at
-    // high T) as compute_tpq_thermo_from_trajectories, so it plugs in
+    // high T) as the mTPQ canonical estimator, so it plugs in
     // correctly to combine_sector_thermodynamics for Sz/spatial recombination.
     // -----------------------------------------------------------------------
     const bool is_sampling_thermo_method =
@@ -189,33 +189,15 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             auto matvec = H.template bind<B>();
 
             // -------------------------------------------------------------
-            // mTPQ auto-tune.
-            //
-            // The microcanonical iteration |psi_{k+1}> = (L*I - H)|psi_k>
-            // advances the effective inverse temperature by
-            //   Delta_beta ~ 2 / (L - <H>),     beta_k = 2 k / (L - E_k).
-            // So L sets BOTH (a) the high-temperature resolution (small
-            // Delta_beta needs large L) and -- together with the step
-            // count -- (b) the coldest temperature reached. Coupling L to
-            // ``temp_min`` would let a colder target shrink L, coarsening
-            // Delta_beta and biasing the specific heat / entropy (and
-            // risking L < E_max, which makes (L - H) indefinite and
-            // corrupts the trajectory).
-            //
-            // Recipe:
-            //   1. Measure the true spectral bounds (E_min, E_max) with a
-            //      short Lanczos (estimate_spectral_bounds).
-            //   2. Pick L from ONE resolution knob: Delta_beta_target.
-            //        L_res  = <H>_inf + 2 / Delta_beta_target
-            //        L_stab = E_max + buffer   (strictly above the ceiling)
-            //        L      = max(L_res, L_stab)
-            //   3. Size the iteration count INDEPENDENTLY so the trajectory
-            //      still brackets beta_max, the largest requested beta:
-            //        steps ~ beta_max * (L - E_min) / 2.
-            // Resolution and cold-reach are thus decoupled; matvecs are
-            // cheap so over-provisioning steps is affordable.
+            // mTPQ. Every sample runs psi_k = (L - H)^k psi_0 / ||.|| and records E_k and the
+            // growth factors; the canonical estimator (tpq_thermo.h) turns them into ln Z, E
+            // and C at every requested beta at once. Recipe:
+            //   1. spectral bounds (E_min, E_max) from a short Lanczos;
+            //   2. L just above E_max (the series' terms peak near j* = beta (L - E_min), so
+            //      L - E_max is pure cost);
+            //   3. steps so the series converges at the coldest beta: j* + 8 sqrt(j*) terms;
+            //      a target the trajectory cannot reach is refused, never clamped.
             // -------------------------------------------------------------
-            const double dbeta_target = 0.02;  // internal quality knob
             // The coldest requested point: opts.betas comes from the caller or,
             // when empty, from the temp_min/temp_max grid built above.
             double beta_max = 0.0;
@@ -226,7 +208,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             bool have_bounds = false;
             if (std::isfinite(opts.e_min_override)
                 && std::isfinite(opts.e_max_override)
-                && opts.e_max_override > opts.e_min_override) {
+                && opts.e_max_override >= opts.e_min_override) {
                 // Caller-supplied bounds (e.g. estimated once on the
                 // largest sector and reused across the Sz loop).
                 e_min_est = opts.e_min_override;
@@ -253,7 +235,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                         gen, e_min_est, e_max_est);
                     have_bounds = std::isfinite(e_min_est)
                                 && std::isfinite(e_max_est)
-                                && e_max_est > e_min_est;
+                                && e_max_est >= e_min_est;
                 } catch (...) {
                     have_bounds = false;
                 }
@@ -283,92 +265,64 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                         e_min_est = *std::min_element(d.begin(), d.end());
                         e_max_est = *std::max_element(d.begin(), d.end());
                         have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est)
-                                    && e_max_est > e_min_est;
+                                    && e_max_est >= e_min_est;
                     }
                 } catch (...) {
                     have_bounds = false;
                 }
             }
 
-            double L_auto;
-            if (have_bounds) {
-                const double W      = e_max_est - e_min_est;
-                const double e_high = 0.5 * (e_min_est + e_max_est);
-                const double L_res  = e_high + 2.0 / std::max(dbeta_target, 1e-6);
-                const double L_stab = e_max_est + std::max(0.05 * W, 1e-9);
-                L_auto = std::max(L_res, L_stab);
-            } else {
-                // Failed estimate: resolution-driven floor plus a
-                // conservative dim-based pad.
-                const double bandwidth_proxy = std::log2(
-                    static_cast<double>(std::max<std::uint64_t>(
-                        H.geometry().global_dim, 2)));
-                L_auto = 2.0 / std::max(dbeta_target, 1e-6) + bandwidth_proxy;
-            }
+            if (!have_bounds)
+                throw ed::ConvergenceError("mTPQ: the spectral bounds of the block could not be estimated");
+            // L just above the spectrum: the series' terms peak near j* = beta (L - E_min), so a
+            // larger L only costs steps. The margin covers the Lanczos estimate of E_max, a
+            // lower bound on it.
+            const double W = e_max_est - e_min_est;
+            const double L = (opts.energy_shift > 0.0)
+                ? opts.energy_shift
+                : e_max_est + std::max({0.05 * W, 1e-6 * std::max(1.0, std::abs(e_max_est)), 1e-9});
+            kopts.large_value = L;
 
-            // Expert override (HPhi-style ``LargeValue``): a finite,
-            // positive ``energy_shift`` pins L and skips the auto-tune.
-            kopts.large_value = (opts.energy_shift > 0.0)
-                ? opts.energy_shift : L_auto;
-
-            // Iteration budget contract:
-            //   * krylov_dim == 0  -> AUTO: size the step count so the
-            //     trajectory brackets beta_max (the largest requested beta), using
-            //     steps ~ beta_max*(L - E_min)/2 (capped for safety).
-            //   * krylov_dim  > 0  -> RESPECT the caller's value exactly
-            //     (expert override / explicit ``max_iterations=...``).
-            // This keeps the default surface clean (no knob needed -- the
-            // auto path guarantees the requested coldest T is reached)
-            // while never silently overriding an explicit request.
-            const double e_low = have_bounds ? e_min_est : 0.0;
-            const std::size_t reach_iters = static_cast<std::size_t>(
-                std::ceil(beta_max
-                          * (kopts.large_value - e_low) / 2.0)) + 16;
+            // Steps: sized so the canonical series converges at the coldest requested beta
+            // (krylov_dim == 0), or the caller's count exactly.
             constexpr std::size_t MTPQ_HARD_CAP = 200000;
-            kopts.max_iter = (opts.krylov_dim == 0)
-                ? std::max<std::size_t>(std::min(reach_iters, MTPQ_HARD_CAP), 1)
-                : opts.krylov_dim;
-
-            ed::thermal::MtpqResult kres = ed::thermal::mtpq_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
-            R.ground_state_energy = kres.energies.empty()
-                ? 0.0 : *std::min_element(kres.energies.begin(),
-                                          kres.energies.end());
-            // Aggregate per-sample (beta_k, E_k, var_k) trajectories
-            // into ThermodynamicData on the requested temperature grid.
-            if (!R.thermo.temperatures.empty()) {
-                // Say so when the trajectory never reached the
-                // coldest requested temperature -- the aggregator otherwise
-                // extrapolates silently (measured: E(T=0.2) off by 12% at
-                // N = 20 with a 100-step cap).
-                double beta_reached = 0.0;
-                for (const auto& tr : kres.sample_inv_temps)
-                    for (double b : tr) beta_reached = std::max(beta_reached, b);
-                double beta_wanted = 0.0;
-                for (double T : R.thermo.temperatures)
-                    if (T > 0.0) beta_wanted = std::max(beta_wanted, 1.0 / T);
-                if (beta_wanted > 0.0 && beta_reached < 0.999 * beta_wanted) {
-                    ED_LOG(Warn, "[mTPQ] the trajectory reached beta = %g but the temperature grid "
-                           "asks for beta = %g (T_min = %g); results below T = %g are "
-                           "extrapolated. Raise max_iterations / leave krylov_dim unset so the "
-                           "step count is sized automatically.",
-                           beta_reached, beta_wanted, 1.0 / beta_wanted,
-                           1.0 / std::max(beta_reached, 1e-300));
-                    R.backend.notes.emplace_back(
-                        "mtpq_beta_reached", std::to_string(beta_reached) + " < wanted "
-                        + std::to_string(beta_wanted));
-                }
-                ThermodynamicData td = ed::thermal::compute_tpq_thermo_from_trajectories(
-                    kres.sample_inv_temps, kres.sample_energies,
-                    kres.sample_variances, R.thermo.temperatures,
+            const bool auto_steps = opts.krylov_dim == 0;
+            std::size_t steps = auto_steps ? ed::thermal::mtpq_steps_for(beta_max, L, e_min_est)
+                                           : opts.krylov_dim;
+            if (steps > MTPQ_HARD_CAP)
+                throw ed::ResourceLimit("mTPQ: T_min = " + std::to_string(1.0 / beta_max) + " needs "
+                                        + std::to_string(steps) + " steps per sample (cap "
+                                        + std::to_string(MTPQ_HARD_CAP) + "); ask for a warmer T_min");
+            for (int attempt = 0;; ++attempt) {
+                kopts.max_iter = std::max<std::size_t>(steps, 1);
+                ed::thermal::MtpqResult kres = ed::thermal::mtpq_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+                R.ground_state_energy = kres.energies.empty()
+                    ? 0.0 : *std::min_element(kres.energies.begin(), kres.energies.end());
+                if (R.thermo.temperatures.empty()) break;
+                auto mt = ed::thermal::mtpq_canonical_thermo(
+                    kres.sample_energies, kres.sample_log_norms, L, R.thermo.temperatures,
                     static_cast<double>(H.geometry().global_dim));
-                if (!td.energy.empty()) {
-                    // As for FTLM, the caller's T grid
-                    // is authoritative -- overwrite R.thermo with the
-                    // aggregator's output (which uses our T grid).
-                    R.thermo = std::move(td);
+                if (mt.unconverged.empty()) {
+                    R.thermo = std::move(mt.thermo);
+                    break;
                 }
+                // Too cold for the trajectory. An auto-sized run had underestimated the
+                // spectral range: run once more with twice the steps. Never clamp.
+                double T_reached = std::numeric_limits<double>::infinity();
+                for (std::size_t t = 0; t < R.thermo.temperatures.size(); ++t)
+                    if (std::find(mt.unconverged.begin(), mt.unconverged.end(), t) == mt.unconverged.end())
+                        T_reached = std::min(T_reached, R.thermo.temperatures[t]);
+                if (auto_steps && attempt == 0 && 2 * steps <= MTPQ_HARD_CAP) {
+                    steps *= 2;
+                    continue;
+                }
+                throw ed::ConvergenceError(
+                    "mTPQ: " + std::to_string(steps) + " steps reach T = "
+                    + (std::isfinite(T_reached) ? std::to_string(T_reached) : std::string("none of the targets"))
+                    + " but the grid asks for T = " + std::to_string(1.0 / beta_max)
+                    + (auto_steps ? std::string("") : std::string("; raise krylov or leave it unset")));
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {

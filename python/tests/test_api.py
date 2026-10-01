@@ -403,3 +403,71 @@ def test_a_block_smaller_than_k_returns_its_whole_spectrum():
     r = qed.eigs(H, 7, sym=qed.Symmetry(spatial=None, sz=2, spin_flip="off", time_reversal="off"))
     assert r.complete
     np.testing.assert_allclose(np.asarray(r.energies), np.sort(diag[n_set == 2]), atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Thermodynamics: the canonical mTPQ estimator and cancellation-free moments
+# ---------------------------------------------------------------------------
+
+def _heisenberg_ring(n, J=1.0):
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=J)
+    return b.to_operator()
+
+
+def test_mtpq_values_do_not_depend_on_the_temperature_grid():
+    # ln Z, E and C at a temperature come from that temperature alone (audit L6-silent-01: ln Z
+    # was a trapezoid integral of E over the caller's grid, and it weighted the blocks).
+    H = _heisenberg_ring(12)
+    T0 = 0.3
+    sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")
+    one = qed.thermal(H, [T0], method="mtpq", samples=8, seed=5, sym=sym)
+    many = qed.thermal(H, np.linspace(T0, 10.0, 40), method="mtpq", samples=8, seed=5, sym=sym)
+    for f in ("lnZ", "E", "C", "S", "F"):
+        a, b = getattr(one, f)[0], getattr(many, f)[0]
+        assert abs(a - b) <= 1e-12 * max(1.0, abs(b)), (f, a, b)
+
+
+def test_mtpq_matches_exact_and_does_not_depend_on_the_energy_scale():
+    # Exact in expectation (no microcanonical variance bias: audit C11-thermal-01), and the same
+    # dimensionless problem gives the same numbers -- and takes the same steps -- at any scale of
+    # H (P4-thermal-01: J = 0.04 took 23x the steps of J = 1).
+    Ts = np.array([0.8, 1.6, 3.2])
+    ref = qed.thermal(_heisenberg_ring(12), Ts, method="exact", sym=qed.Symmetry.none())
+    r1 = qed.thermal(_heisenberg_ring(12), Ts, method="mtpq", samples=40, seed=3, sym=qed.Symmetry.none())
+    np.testing.assert_allclose(r1.E, ref.E, rtol=0.03)
+    np.testing.assert_allclose(r1.C, ref.C, rtol=0.15)
+    r2 = qed.thermal(_heisenberg_ring(12, J=0.04), 0.04 * Ts, method="mtpq", samples=40, seed=3,
+                     sym=qed.Symmetry.none())
+    np.testing.assert_allclose(np.asarray(r2.E) / 0.04, r1.E, rtol=1e-9)
+    np.testing.assert_allclose(r2.C, r1.C, rtol=1e-8)
+    np.testing.assert_allclose(r2.S, r1.S, rtol=1e-9)
+
+
+def test_mtpq_refuses_a_temperature_its_trajectory_cannot_reach():
+    # 20 steps cannot reach T = 0.02: refused, never clamped (audit C11-thermal-05: C grew as 1/T^2).
+    with pytest.raises(qed.errors.ConvergenceError):
+        qed.thermal(_heisenberg_ring(12), [0.02], method="mtpq", krylov=20, samples=2, seed=1,
+                    sym=qed.Symmetry.none())
+
+
+@pytest.mark.parametrize("offset", [0.0, 1000.0])
+def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
+    # Six decoupled dimers: C = 6 beta^2 3 e^-beta / (1 + 3 e^-beta)^2. At beta = 40 the variance
+    # (~1e-14) is far below ulp(E0^2), where raw second moments cancel to rounding noise; a
+    # constant added to H must not change C either (audit C06-symmetry-core-01, L2-numerics-01).
+    n = 12
+    H = qed.Operator(n, 0.5)
+    for i in range(0, n, 2):
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, i + 1, 0.5)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, i + 1, 0.5)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, 1.0)
+    for i in range(n):
+        if offset:
+            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i, 4.0 * offset / n)     # S^z S^z = 1/4 on spin 1/2
+    betas = np.array([10.0, 25.0, 40.0])
+    x = 3.0 * np.exp(-betas)
+    exact = 6.0 * betas ** 2 * x / (1.0 + x) ** 2
+    for sym in (qed.Symmetry.none(), qed.Symmetry(spatial=None)):
+        C = np.asarray(qed.thermal(H, 1.0 / betas, method="exact", sym=sym).C)
+        np.testing.assert_allclose(C, exact, rtol=1e-6)

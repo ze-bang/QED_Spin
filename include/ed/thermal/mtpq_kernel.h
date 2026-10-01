@@ -34,9 +34,7 @@ using Complex = std::complex<double>;
 struct MtpqOptions {
     std::size_t num_samples    = 1;
     std::size_t max_iter       = 1000;
-    std::size_t temp_interval  = 1;
     double      large_value    = 1.0e5;
-    double      target_beta    = 1000.0;
     std::uint64_t random_seed  = 0;
 
     /// Host-side transform applied to every
@@ -52,25 +50,15 @@ struct MtpqOptions {
 };
 
 struct MtpqResult {
-    /// Final-iterate energy per sample (for callers that only need the
-    /// long-imaginary-time E proxy).
+    /// Final-iterate energy per sample (an upper bound on the ground-state energy).
     std::vector<double> energies;
 
-    /// Per-sample (beta_k, E_k, var_k) trajectories for the
-    /// orchestrator's ThermodynamicData post-processor. Each outer
-    /// vector has length ``num_samples``; inner vector lengths equal
-    /// the number of kernel steps that ran for that sample (the
-    /// kernel exits early if ``max_iter`` is hit or ``on_step``
-    /// returns false). beta_k is the classical microcanonical-TPQ
-    /// estimator
-    ///   beta_k = 2 k / (large_value - E_k)
-    /// (step >= 1; step == 0 contributes a beta=0 baseline so the
-    /// recombiner has a high-T anchor). var_k = <H^2> - E_k^2,
-    /// extracted as ||H psi||^2 - E_k^2 from the existing scratch
-    /// vector at no extra matvec cost.
-    std::vector<std::vector<double>> sample_inv_temps;
+    /// Per sample, the trajectory psi_k = (L - H)^k psi_0 / ||.||, psi_0 a unit random vector:
+    /// sample_energies[s][k] = <psi_k|H|psi_k> for k = 0..K, and sample_log_norms[s][k - 1] =
+    /// ln ||(L - H) psi_{k-1}|| for k = 1..K. They give every moment <psi_0|(L - H)^j|psi_0>
+    /// (j <= 2K + 1) the canonical estimator of tpq_thermo.h sums.
     std::vector<std::vector<double>> sample_energies;
-    std::vector<std::vector<double>> sample_variances;
+    std::vector<std::vector<double>> sample_log_norms;
 };
 
 namespace detail {
@@ -103,21 +91,19 @@ MtpqResult mtpq_kernel(Backend&       backend,
 {
     MtpqResult out;
     out.energies.reserve(opts.num_samples);
-    out.sample_inv_temps.reserve(opts.num_samples);
     out.sample_energies.reserve(opts.num_samples);
-    out.sample_variances.reserve(opts.num_samples);
+    out.sample_log_norms.reserve(opts.num_samples);
 
     // One sample's trajectory; samples are independent and are stored in sample order, however
     // they were run.
-    struct Sample { double final_E = 0.0; std::vector<double> betas, Es, vars; };
+    struct Sample { double final_E = 0.0; std::vector<double> Es, log_norms; };
     auto sample = [&](auto& backend, auto&& apply_H, std::size_t s) {
         const std::uint64_t seed = opts.random_seed
                                     ? (opts.random_seed + s)
                                     : ed::tpq_per_sample_seed(s);
         auto host_seed = detail::mtpq_make_seed(local_n, seed);
-        // Subspace projection of the TPQ seed (e.g. Lowdin
-        // total-spin), renormalised so the microcanonical estimator's
-        // unit-norm contract holds.
+        // Subspace projection of the TPQ seed (e.g. Lowdin total-spin), renormalised: the
+        // moments are those of a unit start vector.
         if (opts.seed_transform) {
             opts.seed_transform(host_seed.data(), local_n);
             double sumsq = 0.0;
@@ -141,55 +127,32 @@ MtpqResult mtpq_kernel(Backend&       backend,
         kopts.large_value = opts.large_value;
         kopts.normalize_each_step = true;
 
-        // Capture both the final-iterate energy AND the
-        // per-step (beta_k, E_k, var_k) trajectory for ThermodynamicData
-        // recombination by the orchestrator. The variance comes free
-        // from the existing scratch vector via <H^2> = ||H psi||^2 -- no
-        // extra matvec, just one extra dot product per step.
-        double final_E = 0.0;
-        std::vector<double> traj_betas;
-        std::vector<double> traj_Es;
-        std::vector<double> traj_vars;
-        // Reserve max_iter + 1 (the step=0 baseline + max_iter steps).
-        traj_betas.reserve(opts.max_iter + 1);
-        traj_Es.reserve(opts.max_iter + 1);
-        traj_vars.reserve(opts.max_iter + 1);
-        auto scratch   = backend.make_zero_vector(local_n);
+        // E_k comes from the step's own H apply; the norm of (L - H) psi_{k-1} before
+        // normalisation is the step's growth factor.
+        Sample out_s;
+        out_s.Es.reserve(opts.max_iter + 1);
+        out_s.log_norms.reserve(opts.max_iter);
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
-            double E_k, H2_k;
-            if (info.moments_valid) {
-                // Moments come from the step's own matvec.
-                E_k = info.energy; H2_k = info.h2;
-            } else {
-                apply_H(info.psi, scratch.get(), info.local_n);
-                E_k = std::real(backend.dot(info.psi, scratch.get(), info.local_n));
-                // <H^2> = ||H psi||^2 since H is Hermitian and psi is normalised.
-                H2_k = std::real(backend.dot(scratch.get(), scratch.get(), info.local_n));
-            }
-            final_E = E_k;
-            const double var_k = std::max(H2_k - E_k * E_k, 0.0);
-            // mTPQ effective inverse temperature.
-            //   step == 0: beta = 0 (high-T baseline anchor)
-            //   step >= 1: beta_k = 2 k / (L - E_k) when (L - E_k) > 0
-            // Skip points where the denominator would be non-positive
-            // (E_k > L means the seed/state has energy above the
-            // microcanonical shift -- the formula is undefined there).
-            double beta_k = 0.0;
+            const double E_k = info.energy;
+            // L must lie above the spectrum: (L - H) is then positive and every moment is too.
+            if (!(E_k < opts.large_value))
+                throw std::runtime_error("mtpq_kernel: the iterate's energy " + std::to_string(E_k)
+                                         + " is not below the shift L = " + std::to_string(opts.large_value)
+                                         + " (L must exceed the largest eigenvalue)");
             if (info.step >= 1) {
-                const double denom = opts.large_value - E_k;
-                if (denom > 0.0) {
-                    beta_k = 2.0 * static_cast<double>(info.step) / denom;
-                }
+                if (!(info.norm_before_normalize > 0.0))
+                    throw std::runtime_error("mtpq_kernel: (L - H) psi vanished at step "
+                                             + std::to_string(info.step));
+                out_s.log_norms.push_back(std::log(info.norm_before_normalize));
             }
-            traj_betas.push_back(beta_k);
-            traj_Es.push_back(E_k);
-            traj_vars.push_back(var_k);
+            out_s.Es.push_back(E_k);
+            out_s.final_E = E_k;
             return true;
         };
         auto kres = tpq_kernel<std::decay_t<decltype(backend)>>(backend, apply_H, local_n, seed_dev.get(),
                                                                 kopts, on_step);
         (void)kres;
-        return Sample{final_E, std::move(traj_betas), std::move(traj_Es), std::move(traj_vars)};
+        return out_s;
     };
 
     std::vector<Sample> samples(opts.num_samples);
@@ -215,9 +178,8 @@ MtpqResult mtpq_kernel(Backend&       backend,
         for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(backend, apply_H, s);
     for (auto& smp : samples) {
         out.energies.push_back(smp.final_E);
-        out.sample_inv_temps.push_back(std::move(smp.betas));
         out.sample_energies.push_back(std::move(smp.Es));
-        out.sample_variances.push_back(std::move(smp.vars));
+        out.sample_log_norms.push_back(std::move(smp.log_norms));
     }
     return out;
 }

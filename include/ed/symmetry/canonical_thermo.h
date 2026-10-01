@@ -35,15 +35,21 @@ canonical_thermo_from_eigs(const std::vector<double>& eigs,
         const double t = T[i];
         if (!(t > 0.0)) continue;
         const double beta = 1.0 / t;
-        double Z = 0.0, E = 0.0, E2 = 0.0;
+        double Z = 0.0, E = 0.0;
         for (double e : eigs) {
             const double w = std::exp(-beta * (e - E0));
-            Z += w; E += w * e; E2 += w * e * e;
+            Z += w; E += w * (e - E0);
         }
         if (!(Z > 0.0)) continue;
-        const double Eavg  = E / Z;
-        const double E2avg = E2 / Z;
-        const double Cv    = beta * beta * (E2avg - Eavg * Eavg);
+        const double Eavg = E0 + E / Z;
+        // Second pass: the central moment (raw <E^2> - <E>^2 cancels to rounding noise once
+        // C T^2 drops below ulp(E^2)).
+        double V = 0.0;
+        for (double e : eigs) {
+            const double d = e - Eavg;
+            V += std::exp(-beta * (e - E0)) * d * d;
+        }
+        const double Cv    = beta * beta * V / Z;
         const double F     = E0 - t * std::log(Z);   // -T ln Z_full
         const double S     = (Eavg - F) / t;
         td.energy[i]        = Eavg;

@@ -19,8 +19,8 @@ struct ThermodynamicData {
     // Z_sample[t] = Σ_i w_i * exp(-β_t * (E_i - e_min))
     // These are needed to properly average across samples
     std::vector<double> Z_sample;     // Partition function samples (for FTLM averaging)
-    std::vector<double> E_weighted;   // Σ_i w_i * E_i * exp(-β*(E_i - e_min)) for energy averaging
-    std::vector<double> E2_weighted;  // Σ_i w_i * E_i^2 * exp(-β*(E_i - e_min)) for Cv
+    std::vector<double> E_weighted;   // Σ_i w_i * (E_i - e_min) * exp(-β*(E_i - e_min)): moments about e_min
+    std::vector<double> E2_weighted;  // Σ_i w_i * (E_i - e_min)^2 * exp(-β*(E_i - e_min)) (no E^2 cancellation)
     double e_min = 0.0;               // Reference energy (ground state) for this sample
 };
 

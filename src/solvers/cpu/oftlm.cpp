@@ -204,9 +204,9 @@ FtlmResult oftlm_cpu(
         double Z = 0.0, EZ = 0.0, E2Z = 0.0;
         for (double e : exact_eigs) {
             const double bw = std::exp(-beta * (e - e_min));
-            Z   += bw;
-            EZ  += e * bw;
-            E2Z += e * e * bw;
+            Z   += bw;                         // moments about e_min: no E^2 cancellation
+            EZ  += (e - e_min) * bw;
+            E2Z += (e - e_min) * (e - e_min) * bw;
         }
 
         // Stochastic part (complement space).
@@ -216,8 +216,8 @@ FtlmResult oftlm_cpu(
                 const double e  = sp.ritz[j];
                 const double bw = sp.weights[j] * std::exp(-beta * (e - e_min));
                 Zr   += bw;
-                EZr  += e * bw;
-                E2Zr += e * e * bw;
+                EZr  += (e - e_min) * bw;
+                E2Zr += (e - e_min) * (e - e_min) * bw;
             }
         }
         Z   += pref * Zr;
@@ -226,10 +226,11 @@ FtlmResult oftlm_cpu(
 
         out.partition_function[t] = Z;
         if (Z > 1e-300) {
-            const double E   = EZ / Z;
-            const double E2  = E2Z / Z;
+            const double dE  = EZ / Z;
+            const double dE2 = E2Z / Z;
+            const double E   = e_min + dE;
             out.energy[t]        = E;
-            out.heat_capacity[t] = beta * beta * (E2 - E * E);
+            out.heat_capacity[t] = beta * beta * std::max(dE2 - dE * dE, 0.0);
             // Z here is the full (shifted) trace Tr e^{-beta(H-e_min)}, so
             // S = ln Z_true + beta<E> = ln Z + beta(<E> - e_min).
             out.entropy[t]       = std::log(Z) + beta * (E - e_min);

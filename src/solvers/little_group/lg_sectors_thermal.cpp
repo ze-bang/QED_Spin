@@ -22,7 +22,7 @@ namespace {
 
 // One block's contribution at every temperature.
 struct BlockThermo {
-    std::vector<double> lnZ, E, E2;
+    std::vector<double> lnZ, E, V;   // ln Z, <E>, and the central variance <(E - <E>)^2>
     double weight = 1.0;       // multiplicity
     double sz = 0.0;           // magnetisation of the block's subspace
     bool   mirrored = false;   // holds +sz and -sz in equal parts
@@ -36,16 +36,21 @@ BlockThermo exact_block(const std::vector<double>& ev, const std::vector<double>
     const double e0 = *std::min_element(ev.begin(), ev.end());
     if (q) b.O.assign(q->size(), {});
     for (double bt : beta) {
-        double z = 0.0, e = 0.0, e2 = 0.0;
+        double z = 0.0, e = 0.0;
         std::vector<Complex> o(q ? q->size() : 0, Complex(0, 0));
         for (std::size_t n = 0; n < ev.size(); ++n) {
             const double x = ev[n], w = std::exp(-bt * (x - e0));
-            z += w; e += w * x; e2 += w * x * x;
+            z += w; e += w * (x - e0);
             for (std::size_t k = 0; k < o.size(); ++k) o[k] += w * (*q)[k][n];
         }
         b.lnZ.push_back(std::log(z) - bt * e0);
-        b.E.push_back(e / z);
-        b.E2.push_back(e2 / z);
+        b.E.push_back(e0 + e / z);
+        double v = 0.0;                    // second pass: the central moment, free of cancellation
+        for (std::size_t n = 0; n < ev.size(); ++n) {
+            const double dx = ev[n] - e0 - e / z;
+            v += std::exp(-bt * (ev[n] - e0)) * dx * dx;
+        }
+        b.V.push_back(v / z);
         for (std::size_t k = 0; k < o.size(); ++k) b.O[k].push_back(o[k] / z);
     }
     return b;
@@ -87,7 +92,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     for (std::size_t i = 0; i < beta.size(); ++i) {
         b.lnZ.push_back(-beta[i] * d.free_energy[i] + ln_ratio);
         b.E.push_back(d.energy[i]);
-        b.E2.push_back(d.specific_heat[i] / (beta[i] * beta[i]) + d.energy[i] * d.energy[i]);
+        b.V.push_back(d.specific_heat[i] / (beta[i] * beta[i]));
     }
     const std::size_t n_obs = folded ? obs.size() / 2 : obs.size();
     for (std::size_t k = 0; k < n_obs; ++k) {
@@ -272,7 +277,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                                                   &on_gpu, tower_sampling ? &d.bop : nullptr, d.tower_dim, d.obs,
                                                   d.folded);
                     BlockThermo& b = blocks[d.block];
-                    b.lnZ = std::move(r.lnZ); b.E = std::move(r.E); b.E2 = std::move(r.E2); b.O = std::move(r.O);
+                    b.lnZ = std::move(r.lnZ); b.E = std::move(r.E); b.V = std::move(r.V); b.O = std::move(r.O);
                 } catch (...) {
 #pragma omp critical(thermal_failure)
                     if (!failure) failure = std::current_exception();
@@ -320,20 +325,30 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     for (std::size_t i = 0; i < nT; ++i) {
         double mx = -std::numeric_limits<double>::infinity();
         for (const auto& b : blocks) mx = std::max(mx, std::log(b.weight) + b.lnZ[i]);
-        double z = 0.0, e = 0.0, e2 = 0.0, m = 0.0, m2 = 0.0;
+        double z = 0.0, e = 0.0, m = 0.0, m2 = 0.0;
         std::vector<Complex> ob(n_obs, Complex(0, 0));
-        for (const auto& b : blocks) {
-            const double p = std::exp(std::log(b.weight) + b.lnZ[i] - mx);
-            z += p; e += p * b.E[i]; e2 += p * b.E2[i];
-            if (!b.mirrored) m += p * b.sz;
-            m2 += p * b.sz * b.sz;
-            for (std::size_t k = 0; k < n_obs; ++k) ob[k] += p * b.O[k][i];
+        std::vector<double> p(blocks.size());
+        for (std::size_t j = 0; j < blocks.size(); ++j) {
+            const auto& b = blocks[j];
+            p[j] = std::exp(std::log(b.weight) + b.lnZ[i] - mx);
+            z += p[j]; e += p[j] * b.E[i];
+            if (!b.mirrored) m += p[j] * b.sz;
+            m2 += p[j] * b.sz * b.sz;
+            for (std::size_t k = 0; k < n_obs; ++k) ob[k] += p[j] * b.O[k][i];
         }
-        e /= z; e2 /= z; m /= z; m2 /= z;
+        e /= z; m /= z; m2 /= z;
+        // Law of total variance: each block's own variance plus the spread of the block means
+        // (raw second moments would cancel to rounding noise once C T^2 < ulp(E^2)).
+        double var = 0.0;
+        for (std::size_t j = 0; j < blocks.size(); ++j) {
+            const double d = blocks[j].E[i] - e;
+            var += p[j] * (blocks[j].V[i] + d * d);
+        }
+        var /= z;
         const double bt = beta[i];
         out.lnZ[i] = mx + std::log(z);
         out.E[i]   = e;
-        out.C[i]   = bt * bt * (e2 - e * e);
+        out.C[i]   = bt * bt * var;
         out.S[i]   = out.lnZ[i] + bt * e;
         out.F[i]   = -out.lnZ[i] / bt;
         if (u1) { out.M[i] = m; out.chi[i] = bt * (m2 - m * m) / n_sites; }

@@ -57,7 +57,8 @@
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/numa.h>            // pin_omp_threads_once
 #include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/thermal/tpq_thermo.h>  // compute_tpq_thermo_from_trajectories aggregator
+#include <ed/thermal/tpq_thermo.h>  // mtpq_canonical_thermo, mtpq_steps_for
+#include <ed/core/errors.h>         // ed::ConvergenceError, ed::ResourceLimit
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>

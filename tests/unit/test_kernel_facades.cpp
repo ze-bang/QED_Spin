@@ -17,6 +17,7 @@
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
+#include <ed/thermal/tpq_thermo.h>
 
 
 #include <Eigen/Dense>
@@ -238,11 +239,78 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
     ed::thermal::MtpqOptions opts;
     opts.num_samples  = 1;
     opts.max_iter     = 50;
-    opts.target_beta  = 5.0;
     opts.large_value  = 50.0;
 
     auto res = ed::thermal::mtpq_kernel(
         backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
 
     REQUIRE_FALSE(res.energies.empty());
+}
+
+TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonical average exactly",
+          "[kernel-facade][mtpq]") {
+    // One sample's moments mu_j = <psi0|(L - H)^j|psi0> sum to S_0(beta) = e^{beta L}
+    // <psi0|e^{-beta H}|psi0>, so the estimator's ln Z, E and C are those of the ensemble
+    // weighted by |<n|psi0>|^2 times D -- checked against the dense spectral decomposition of
+    // the same start vector, at any beta the trajectory reaches.
+    constexpr std::uint64_t N   = 6;
+    constexpr std::size_t   dim = std::size_t{1} << N;
+    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
+    ed::matvec::CpuBackend backend;
+    MatvecCallable apply{H.get()};
+
+    Eigen::MatrixXcd Hd(static_cast<Eigen::Index>(dim), static_cast<Eigen::Index>(dim));
+    std::vector<Complex> unit(dim), col(dim);
+    for (std::size_t j = 0; j < dim; ++j) {
+        std::fill(unit.begin(), unit.end(), Complex(0, 0));
+        unit[j] = Complex(1, 0);
+        apply(unit.data(), col.data(), dim);
+        for (std::size_t i = 0; i < dim; ++i)
+            Hd(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = col[i];
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hd);
+    const Eigen::VectorXd ev = es.eigenvalues();
+    const double L = ev(static_cast<Eigen::Index>(dim) - 1) + 0.5;
+
+    ed::thermal::MtpqOptions opts;
+    opts.num_samples = 1;
+    opts.random_seed = 99;
+    opts.large_value = L;
+    opts.max_iter    = 300;
+    const auto res = ed::thermal::mtpq_kernel(backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    REQUIRE(res.sample_energies.size() == 1);
+    REQUIRE(res.sample_energies[0].size() == 301);
+    REQUIRE(res.sample_log_norms[0].size() == 300);
+
+    // The kernel's start vector: seed random_seed + sample index.
+    const auto psi0 = ed::thermal::detail::mtpq_make_seed(dim, 99);
+    Eigen::VectorXcd p(static_cast<Eigen::Index>(dim));
+    for (std::size_t i = 0; i < dim; ++i) p(static_cast<Eigen::Index>(i)) = psi0[i];
+    const Eigen::VectorXd w = (es.eigenvectors().adjoint() * p).cwiseAbs2();
+
+    const std::vector<double> Ts = {0.25, 0.5, 1.0, 4.0};
+    const auto mt = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, Ts,
+                                                       static_cast<double>(dim));
+    REQUIRE(mt.unconverged.empty());
+    for (std::size_t t = 0; t < Ts.size(); ++t) {
+        const double beta = 1.0 / Ts[t];
+        double z = 0.0, ez = 0.0;
+        for (Eigen::Index i = 0; i < ev.size(); ++i) {
+            const double b = w(i) * std::exp(-beta * (ev(i) - ev(0)));
+            z += b; ez += b * ev(i);
+        }
+        const double E = ez / z;
+        double v = 0.0;
+        for (Eigen::Index i = 0; i < ev.size(); ++i)
+            v += w(i) * std::exp(-beta * (ev(i) - ev(0))) * (ev(i) - E) * (ev(i) - E);
+        v /= z;
+        const double lnZ = std::log(static_cast<double>(dim)) + std::log(z) - beta * ev(0);
+        REQUIRE(std::abs(mt.thermo.energy[t] - E) < 1e-10);
+        REQUIRE(std::abs(-beta * mt.thermo.free_energy[t] - lnZ) < 1e-10);
+        REQUIRE(std::abs(mt.thermo.specific_heat[t] - beta * beta * v) < 1e-8);
+    }
+    // A target colder than 300 steps reach is reported as such, never clamped.
+    const auto cold = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, {0.005},
+                                                         static_cast<double>(dim));
+    REQUIRE(cold.unconverged.size() == 1);
 }

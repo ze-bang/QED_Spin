@@ -73,8 +73,8 @@ ThermodynamicData compute_ftlm_thermodynamics(
             double shifted_energy = ritz_values[i] - e_min;
             double boltz = weights[i] * std::exp(-beta * shifted_energy);
             Z_sample += boltz;
-            E_weighted_sum += ritz_values[i] * boltz;
-            E2_weighted_sum += ritz_values[i] * ritz_values[i] * boltz;
+            E_weighted_sum += shifted_energy * boltz;                    // moments about e_min:
+            E2_weighted_sum += shifted_energy * shifted_energy * boltz;  // no E^2 cancellation
         }
         
         // Store raw values for averaging
@@ -84,12 +84,13 @@ ThermodynamicData compute_ftlm_thermodynamics(
         
         // Compute derived quantities for this sample
         if (Z_sample > 1e-300) {
-            double E_avg = E_weighted_sum / Z_sample;
-            double E2_avg = E2_weighted_sum / Z_sample;
+            double E_avg = e_min + E_weighted_sum / Z_sample;
+            double dE = E_weighted_sum / Z_sample;
+            double dE2 = E2_weighted_sum / Z_sample;
             
             // Thermodynamic quantities
             thermo.energy[t] = E_avg;
-            thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+            thermo.specific_heat[t] = beta * beta * std::max(dE2 - dE * dE, 0.0);
             
             // Entropy: S = ln(Z_true) + β*E = ln(D) + ln(Z_sample) + β*(E - E_min)
             thermo.entropy[t] = ln_D + std::log(Z_sample) + beta * (E_avg - e_min);
@@ -198,13 +199,17 @@ void average_ftlm_samples(
             double beta = 1.0 / T;
             
             for (int s = 0; s < n_samples; s++) {
-                // Rescale Z_sample to common reference energy
+                // Rescale to the common reference e_min_global: x - e_min_global
+                // = (x - e_min_s) + delta for the moments about each sample's e_min.
                 double delta_e = sample_data[s].e_min - e_min_global;
                 double rescale = std::exp(-beta * delta_e);
+                const double z1 = sample_data[s].Z_sample[t];
+                const double e1 = sample_data[s].E_weighted[t];
+                const double e2 = sample_data[s].E2_weighted[t];
                 
-                Z_avg[t] += sample_data[s].Z_sample[t] * rescale;
-                E_weighted_avg[t] += sample_data[s].E_weighted[t] * rescale;
-                E2_weighted_avg[t] += sample_data[s].E2_weighted[t] * rescale;
+                Z_avg[t] += z1 * rescale;
+                E_weighted_avg[t] += (e1 + delta_e * z1) * rescale;
+                E2_weighted_avg[t] += (e2 + 2.0 * delta_e * e1 + delta_e * delta_e * z1) * rescale;
             }
             
             Z_avg[t] /= n_samples;
@@ -218,11 +223,12 @@ void average_ftlm_samples(
             double beta = 1.0 / T;
             
             if (Z_avg[t] > 1e-300) {
-                double E_avg = E_weighted_avg[t] / Z_avg[t];
-                double E2_avg = E2_weighted_avg[t] / Z_avg[t];
+                double dE = E_weighted_avg[t] / Z_avg[t];
+                double dE2 = E2_weighted_avg[t] / Z_avg[t];
+                double E_avg = e_min_global + dE;
                 
                 results.thermo_data.energy[t] = E_avg;
-                results.thermo_data.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+                results.thermo_data.specific_heat[t] = beta * beta * std::max(dE2 - dE * dE, 0.0);
                 
                 // S = ln(D) + ln(<Z_sample>) + β*(<E> - e_min_global)
                 results.thermo_data.entropy[t] = ln_D + std::log(Z_avg[t]) + beta * (E_avg - e_min_global);

@@ -1,273 +1,150 @@
 #pragma once
 // =============================================================================
-// include/ed/thermal/tpq_thermo.h -- TPQ trajectory -> ThermodynamicData
-// aggregation.
+// include/ed/thermal/tpq_thermo.h -- canonical thermodynamics from mTPQ
+// trajectories.
 //
-// Takes the per-sample (beta_k, E_k, var_k) trajectories in memory
-// and interpolates onto the caller's temperature
-// grid. Called by the unified ``ed::workflows::thermal`` orchestrator for
-// the mTPQ lane (the backend-templated kernel in ``mtpq_kernel.h``
-// emits these trajectories).
+// A microcanonical TPQ trajectory psi_k = (L - H)^k psi_0 / ||.|| (psi_0 a
+// unit random vector, L above the spectrum) records E_k = <psi_k|H|psi_k> and
+// the growth factors n_k = ||(L - H) psi_{k-1}||. With Q_k = prod_{i<=k} n_i^2
+// they are the moments of the start vector,
+//
+//   mu_{2k}   = <psi_0|(L - H)^{2k}|psi_0>   = Q_k,
+//   mu_{2k+1} = <psi_0|(L - H)^{2k+1}|psi_0> = Q_k (L - E_k),
+//
+// and the canonical TPQ state follows from them at every beta (Sugiura and
+// Shimizu, PRL 111, 010401 (2013)):
+//
+//   S_m(beta) = sum_j beta^j mu_{j+m} / j!      (= <psi_0|(L-H)^m e^{beta (L-H)}|psi_0>),
+//   ln Z      = ln D - beta L + ln S_0,
+//   E         = L - S_1 / S_0,
+//   Var(H)    = S_2 / S_0 - (S_1 / S_0)^2,   C = beta^2 Var(H),
+//
+// with each S_m averaged over the samples first (E[<psi_0|A|psi_0>] = Tr A / D).
+// Exact in expectation at every beta: no interpolation, no temperature grid in
+// ln Z, no microcanonical variance bias. The sums run in log space. A beta is
+// usable when every sample's series has decayed by its last term; colder
+// targets are reported (the caller extends the run or refuses), never clamped.
 // =============================================================================
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <cstdint>
+#include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <ed/core/thermal_types.h>  // ThermodynamicData
 
 namespace ed::thermal {
 
+struct MtpqThermo {
+    ThermodynamicData   thermo;        ///< on the requested temperatures (all of them)
+    /// Indices of the temperatures whose series did not converge in some sample (too cold for
+    /// the trajectory length); their values are not to be used.
+    std::vector<std::size_t> unconverged;
+};
+
+namespace detail {
+
+inline double log_sum_exp(const std::vector<double>& x, std::size_t n) {
+    double mx = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < n; ++i) mx = std::max(mx, x[i]);
+    if (!std::isfinite(mx)) return mx;
+    double s = 0.0;
+    for (std::size_t i = 0; i < n; ++i) s += std::exp(x[i] - mx);
+    return mx + std::log(s);
+}
+
+}  // namespace detail
+
 /**
- * @brief Aggregate per-sample TPQ trajectories into ThermodynamicData
- *        on a user-supplied temperature grid (in-memory variant).
+ * Canonical thermodynamics from mTPQ trajectories (see the file comment).
  *
- * Math: for each target temperature T (target_temperatures[t]), linearly
- * interpolate every sample's (beta_k, E_k, var_k) at beta_target = 1/T,
- * Welford-average across samples that bracket the target. Specific
- * heat C_v = beta^2 * <var>.
- *
- * Samples whose trajectories don't bracket a given target beta are
- * clamped to their nearest trajectory endpoint (beta=0 baseline on the
- * warm side, the asymptotic deepest-beta iterate on the cold side).
- *
- * Returns an empty ``ThermodynamicData`` (all vectors zero-length)
- * when ``sample_*.empty()`` or ``target_temperatures.empty()``.
- *
- * @param sample_inv_temps    Per-sample beta_k trajectory
- * @param sample_energies     Per-sample E_k trajectory (same length)
- * @param sample_variances    Per-sample var_k trajectory (same length)
- * @param target_temperatures Temperature grid for the output
- * @param hilbert_dim         Hilbert-space dimension D of the (sub)space
- *                            the trajectories live in. When ``> 1`` the
- *                            entropy and free energy are reconstructed in
- *                            ABSOLUTE form via thermodynamic integration
- *                            ``ln Z(beta) = ln(D) - \int_0^beta <E> dbeta'``,
- *                            so ``S(T->inf) -> ln(D)`` and ``F`` carries the
- *                            correct dimensional normalisation. This is what
- *                            makes the per-sector ``F_s`` usable as a
- *                            Boltzmann weight in
- *                            ``combine_sector_thermodynamics`` (U(1)/Sz and
- *                            spatial recombination). When ``0`` (default) the
- *                            zero-baseline integration ``S(T_min)=0`` is used.
+ * @param sample_energies   per sample, E_k for k = 0..K
+ * @param sample_log_norms  per sample, ln n_k for k = 1..K
+ * @param L                 the shift the trajectories were run with (above the spectrum)
+ * @param temperatures      target temperatures (> 0)
+ * @param dim               dimension D of the space the start vectors fill
  */
-inline ThermodynamicData compute_tpq_thermo_from_trajectories(
-    const std::vector<std::vector<double>>& sample_inv_temps,
-    const std::vector<std::vector<double>>& sample_energies,
-    const std::vector<std::vector<double>>& sample_variances,
-    const std::vector<double>& target_temperatures,
-    double hilbert_dim = 0.0
-) {
-    ThermodynamicData thermo{};
+inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& sample_energies,
+                                        const std::vector<std::vector<double>>& sample_log_norms,
+                                        double L, const std::vector<double>& temperatures, double dim) {
+    MtpqThermo out;
+    ThermodynamicData& td = out.thermo;
+    const std::size_t nT = temperatures.size(), R = sample_energies.size();
+    td.temperatures = temperatures;
+    td.energy.assign(nT, 0.0);
+    td.specific_heat.assign(nT, 0.0);
+    td.entropy.assign(nT, 0.0);
+    td.free_energy.assign(nT, 0.0);
+    if (nT == 0 || R == 0) return out;
 
-    const std::size_t num_samples = sample_inv_temps.size();
-    const std::size_t num_T = target_temperatures.size();
-    if (num_samples == 0 || num_T == 0) {
-        return thermo;
-    }
-    // Shape sanity: every sample carries its three arrays in lockstep.
-    if (sample_energies.size() != num_samples
-        || sample_variances.size() != num_samples) {
-        return thermo;
-    }
-
-    // Pre-sort every sample's trajectory by beta so the per-target
-    // interpolation can use a single linear scan (kernels emit in
-    // step-monotone order; for mTPQ beta is also step-monotone since
-    // E_k drifts slowly, but defend against rounding-driven inversions).
-    std::vector<std::vector<std::array<double, 3>>> sorted(num_samples);
-    for (std::size_t s = 0; s < num_samples; ++s) {
-        const auto& betas = sample_inv_temps[s];
-        const auto& Es    = sample_energies[s];
-        const auto& vars  = sample_variances[s];
-        if (betas.size() != Es.size() || Es.size() != vars.size()) {
-            continue;  // skip malformed sample; cf. shape-mismatch policy
+    // ln mu_j per sample, j = 0..2K+1.
+    std::vector<std::vector<double>> ln_mu(R);
+    std::size_t j_max = 0;
+    for (std::size_t r = 0; r < R; ++r) {
+        const auto& E = sample_energies[r];
+        const auto& n = sample_log_norms[r];
+        const std::size_t K = n.size();
+        if (E.size() != K + 1)
+            throw std::invalid_argument("mtpq_canonical_thermo: a sample has " + std::to_string(E.size())
+                                        + " energies for " + std::to_string(K) + " steps");
+        auto& m = ln_mu[r];
+        m.resize(2 * K + 2);
+        double lnQ = 0.0;
+        for (std::size_t k = 0; k <= K; ++k) {
+            if (k > 0) lnQ += 2.0 * n[k - 1];
+            if (!(E[k] < L))
+                throw std::invalid_argument("mtpq_canonical_thermo: E_k >= L (L must exceed the spectrum)");
+            m[2 * k] = lnQ;
+            m[2 * k + 1] = lnQ + std::log(L - E[k]);
         }
-        sorted[s].reserve(betas.size());
-        for (std::size_t k = 0; k < betas.size(); ++k) {
-            if (std::isfinite(betas[k]) && std::isfinite(Es[k])
-                && std::isfinite(vars[k])) {
-                sorted[s].push_back({betas[k], Es[k], vars[k]});
+        j_max = std::max(j_max, m.size());
+    }
+    std::vector<double> ln_fact(j_max + 1, 0.0);              // ln j!
+    for (std::size_t j = 1; j <= j_max; ++j) ln_fact[j] = ln_fact[j - 1] + std::log(static_cast<double>(j));
+
+    // A series has converged when its last term is below 1e-15 of the sum and the terms decrease.
+    constexpr double kTailLog = -34.5;
+    const double lnD = std::log(std::max(dim, 1.0));
+    std::vector<double> terms(j_max), per_sample(R);
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double T = temperatures[t];
+        if (!(T > 0.0)) throw std::invalid_argument("mtpq_canonical_thermo: temperatures must be positive");
+        const double beta = 1.0 / T, ln_beta = std::log(beta);
+        double lnS[3];
+        bool converged = true;
+        for (int m = 0; m < 3; ++m) {
+            for (std::size_t r = 0; r < R; ++r) {
+                const auto& mu = ln_mu[r];
+                const std::size_t n_terms = mu.size() - static_cast<std::size_t>(m);
+                for (std::size_t j = 0; j < n_terms; ++j)
+                    terms[j] = static_cast<double>(j) * ln_beta + mu[j + static_cast<std::size_t>(m)] - ln_fact[j];
+                const double s = detail::log_sum_exp(terms, n_terms);
+                if (n_terms >= 2 && (terms[n_terms - 1] - s > kTailLog || terms[n_terms - 1] > terms[n_terms - 2]))
+                    converged = false;
+                per_sample[r] = s;
             }
+            lnS[m] = detail::log_sum_exp(per_sample, R) - std::log(static_cast<double>(R));
         }
-        std::sort(sorted[s].begin(), sorted[s].end(),
-                  [](const auto& a, const auto& b) { return a[0] < b[0]; });
+        if (!converged) out.unconverged.push_back(t);
+        const double a = std::exp(lnS[1] - lnS[0]);          // L - E
+        const double var = std::max(std::exp(lnS[2] - lnS[0]) - a * a, 0.0);
+        const double lnZ = lnD - beta * L + lnS[0];
+        td.energy[t]        = L - a;
+        td.specific_heat[t] = beta * beta * var;
+        td.free_energy[t]   = -lnZ / beta;
+        td.entropy[t]       = lnZ + beta * td.energy[t];
     }
+    return out;
+}
 
-    // Per-target Welford running mean across samples.
-    std::vector<double> energy_mean(num_T, 0.0);
-    std::vector<double> cv_mean(num_T, 0.0);
-    std::vector<std::uint64_t> counts(num_T, 0);
-
-    // Per-sample contribution to every target T:
-    //   * In-bracket beta:   linear interpolation of (E_k, var_k).
-    //   * target_beta > beta_max_traj (asked colder than the trajectory
-    //     reaches): clamp to the last trajectory point. For mTPQ this
-    //     is the asymptotic ground-state-projected state, which is the
-    //     correct extrapolation for T < T_min_traj. For canonical trajectories this is
-    //     the deepest beta the Taylor evolution reached.
-    //   * target_beta < beta_min_traj (asked warmer than beta=0): use
-    //     the first trajectory point (which is the beta=0 baseline,
-    //     <H> on the random seed -- the high-T limit).
-    //
-    // The clamp is per sample, never per bin: filling an uncovered bin
-    // from its warmer neighbour gives a wrong E(T_min) whenever a
-    // trajectory's β_max_traj stops just below β_target = 1/T_min.
-    bool any_covered = false;
-    for (std::size_t s = 0; s < num_samples; ++s) {
-        const auto& tr = sorted[s];
-        if (tr.empty()) continue;
-        any_covered = true;
-        const double beta_min = tr.front()[0];
-        const double beta_max = tr.back()[0];
-        for (std::size_t t = 0; t < num_T; ++t) {
-            const double T = target_temperatures[t];
-            const double target_beta = 1.0 / std::max(T, 1e-300);
-
-            double E_t, var_t;
-            if (target_beta <= beta_min) {
-                // Above-bracket warm: clamp to first point (beta=0 baseline).
-                E_t   = tr.front()[1];
-                var_t = tr.front()[2];
-            } else if (target_beta >= beta_max) {
-                // Below-bracket cold: clamp to last point (asymptotic E).
-                E_t   = tr.back()[1];
-                var_t = tr.back()[2];
-            } else {
-                // In-bracket: linear interpolation. Kernel emits in
-                // step-monotone order so the trajectory size is bounded
-                // by ``max_iter``; linear scan beats upper_bound's
-                // branch-mispredict cost on the small-N arrays.
-                std::size_t i_low = 0;
-                for (std::size_t i = 0; i + 1 < tr.size(); ++i) {
-                    if (tr[i][0] <= target_beta && tr[i + 1][0] >= target_beta) {
-                        i_low = i;
-                        break;
-                    }
-                }
-                const std::size_t i_high = i_low + 1;
-                const double beta_l = tr[i_low][0];
-                const double beta_h = tr[i_high][0];
-                const double alpha = (beta_h > beta_l)
-                    ? (target_beta - beta_l) / (beta_h - beta_l)
-                    : 0.0;
-                E_t   = tr[i_low][1] * (1.0 - alpha) + tr[i_high][1] * alpha;
-                var_t = tr[i_low][2] * (1.0 - alpha) + tr[i_high][2] * alpha;
-            }
-            const double Cv_t = target_beta * target_beta * var_t;
-
-            ++counts[t];
-            energy_mean[t] += (E_t  - energy_mean[t]) / counts[t];
-            cv_mean[t]     += (Cv_t - cv_mean[t])     / counts[t];
-        }
-    }
-
-    if (!any_covered) {
-        return thermo;  // no usable sample
-    }
-
-    std::vector<double> entropy(num_T, 0.0);
-    std::vector<double> free_energy(num_T, 0.0);
-
-    if (hilbert_dim > 1.0) {
-        // ABSOLUTE thermodynamics via thermodynamic integration of the
-        // energy over inverse temperature:
-        //
-        //   ln Z(beta) = ln(D) - \int_0^beta <E>(beta') dbeta'
-        //   F(beta)    = -ln Z(beta) / beta
-        //   S(beta)    = beta * <E>(beta) + ln Z(beta)
-        //
-        // This anchors the high-T entropy correctly (S(T->inf) -> ln(D),
-        // since at beta=0 the integral vanishes and S = ln(D)) and gives
-        // the ABSOLUTE free energy. Crucially, the absolute F is what makes
-        // each sector's free energy usable as a Boltzmann weight inside
-        // ``combine_sector_thermodynamics``; a zero-baseline integration
-        // drops the per-sector ln(dim_s) constant and so biases the
-        // Sz / spatial recombination.
-        //
-        // The [0, beta_first] head segment must be anchored at the TRUE
-        // beta=0 energy <E>(0) = Tr(H)/D, NOT at the warmest target's
-        // energy. Using E(beta_first) for the head over-counts the
-        // integral by ~0.5*(E(0) - E(beta_first))*beta_first, which shows
-        // up as a constant ~1% offset in S(T) across the whole curve
-        // (and a matching error in F). Every mTPQ sample already records
-        // the beta=0 baseline as its first trajectory point
-        // (<rand|H|rand> -> Tr(H)/D as samples accumulate), so we recover
-        // <E>(0) for free from the sorted fronts -- a moment-exact anchor
-        // with no extra matvec.
-        const double lnD = std::log(hilbert_dim);
-        double E_inf = 0.0;
-        std::uint64_t e_inf_cnt = 0;
-        for (std::size_t s = 0; s < num_samples; ++s) {
-            if (!sorted[s].empty()) {
-                E_inf += sorted[s].front()[1];  // smallest-beta (~0) point
-                ++e_inf_cnt;
-            }
-        }
-        if (e_inf_cnt > 0) {
-            E_inf /= static_cast<double>(e_inf_cnt);
-        } else {
-            E_inf = energy_mean[0];
-        }
-
-        // Visit target temperatures in ascending-beta (descending-T) order
-        // without assuming the caller's grid ordering.
-        std::vector<std::size_t> order(num_T);
-        for (std::size_t i = 0; i < num_T; ++i) order[i] = i;
-        std::sort(order.begin(), order.end(),
-                  [&](std::size_t a, std::size_t b) {
-                      const double ba = 1.0
-                          / std::max(target_temperatures[a], 1e-300);
-                      const double bb = 1.0
-                          / std::max(target_temperatures[b], 1e-300);
-                      return ba < bb;
-                  });
-
-        double integral  = 0.0;
-        double prev_beta  = 0.0;
-        double prev_E     = E_inf;  // exact <E>(beta=0) = Tr(H)/D anchor
-        for (std::size_t r = 0; r < num_T; ++r) {
-            const std::size_t t = order[r];
-            const double beta = 1.0
-                / std::max(target_temperatures[t], 1e-300);
-            const double E_t = energy_mean[t];
-            integral += 0.5 * (prev_E + E_t) * (beta - prev_beta);
-            const double lnZ = lnD - integral;
-            free_energy[t] = -lnZ / std::max(beta, 1e-300);
-            entropy[t]     = beta * E_t + lnZ;
-            prev_beta = beta;
-            prev_E    = E_t;
-        }
-    } else {
-        // No Hilbert dimension supplied: trapezoidal integration of
-        // C_v / T -> entropy (zero baseline at the coldest target).
-        // F = E - T S.
-        for (std::size_t i = 1; i < num_T; ++i) {
-            const double T1 = target_temperatures[i - 1];
-            const double T2 = target_temperatures[i];
-            const double Cv1 = cv_mean[i - 1];
-            const double Cv2 = cv_mean[i];
-            if (T1 > 0.0 && T2 > 0.0) {
-                entropy[i] = entropy[i - 1]
-                           + 0.5 * (T2 - T1) * (Cv1 / T1 + Cv2 / T2);
-            } else {
-                entropy[i] = entropy[i - 1];
-            }
-        }
-        for (std::size_t i = 0; i < num_T; ++i) {
-            free_energy[i] = energy_mean[i]
-                           - target_temperatures[i] * entropy[i];
-        }
-    }
-
-    thermo.temperatures   = target_temperatures;
-    thermo.energy         = std::move(energy_mean);
-    thermo.specific_heat  = std::move(cv_mean);
-    thermo.entropy        = std::move(entropy);
-    thermo.free_energy    = std::move(free_energy);
-    return thermo;
+/// The steps a trajectory needs for the canonical series to converge down to beta_max: its terms
+/// beta^j mu_j / j! peak near j* = beta_max (L - E_min) with a width of about sqrt(j*).
+inline std::size_t mtpq_steps_for(double beta_max, double L, double e_min) {
+    const double j_star = std::max(0.0, beta_max * (L - e_min));
+    return static_cast<std::size_t>(std::ceil(0.5 * (j_star + 8.0 * std::sqrt(j_star + 1.0) + 40.0)));
 }
 
 }  // namespace ed::thermal
