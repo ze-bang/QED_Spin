@@ -348,6 +348,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             if (!empty[i]) kept.push_back(std::move(blocks[i]));
         blocks = std::move(kept);
     }
+    detail::require_some_level(s, blocks.empty(), "thermal");
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
     out.blocks = blocks.size();
     for (const auto& b : blocks) out.placement.add(b.device, b.dense);

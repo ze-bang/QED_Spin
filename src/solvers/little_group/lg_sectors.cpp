@@ -243,6 +243,9 @@ std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s)
         const int n = (n_sites - s.two_S) / 2;              // the Sz = S member of each multiplet
         if (s.n_up >= 0 && s.n_up != n)
             throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
+        if (s.sz_parity >= 0 && n % 2 != s.sz_parity)
+            throw ed::InvalidRequest("sectors: sz_parity and the total-spin restriction name disjoint sectors "
+                                     "(the spin-S tower is solved at the set-bit count " + std::to_string(n) + ")");
         out.push_back({n, -1, 1});
         return out;
     }
@@ -442,6 +445,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
         });
     }
 
+    detail::require_some_level(s, rows.empty(), "eigs");
     std::stable_sort(rows.begin(), rows.end(),
                      [](const Row& a, const Row& b) { return a.level.energy < b.level.energy; });
     std::uint64_t acc = 0;
@@ -525,6 +529,7 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
             res.levels.push_back(L);
             res.total_dim += L.multiplicity;
         }
+    detail::require_some_level(s, res.levels.empty(), "spectrum");
     std::stable_sort(res.levels.begin(), res.levels.end(),
                      [](const Level& a, const Level& b) { return a.energy < b.energy; });
     return res;

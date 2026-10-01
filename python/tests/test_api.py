@@ -561,3 +561,30 @@ def test_thermal_under_total_spin_counts_whole_multiplets():
     assert "restricted_ensemble" in [c for c, _ in r.diagnostics]
     full = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None))
     assert "restricted_ensemble" not in [c for c, _ in full.diagnostics]
+
+
+def test_a_selection_without_a_state_of_the_spin_raises():
+    # Under total_spin a selected block can hold no state of that spin: on the 4-site ring the
+    # k = 0 sector at Sz = 1 holds only the S = 2 multiplet's member. The verbs answered for an
+    # empty space, and dynamics at T = 0 read past an empty level list (a crash).
+    n = 4
+    H = _ring(n)
+    T = tuple(_translations(n)[0])
+    base = qed.Symmetry(spatial=[list(T)], point_group=False, total_spin=1)
+    empty, held = base.select(momentum={T: 0}), base.select(momentum={T: Fraction(1, 2)})
+    O = _sz_q(n, math.pi)
+    for verb in (lambda s: qed.eigs(H, 1, sym=s), lambda s: qed.spectrum(H, sym=s),
+                 lambda s: qed.thermal(H, [1.0], method="exact", sym=s),
+                 lambda s: qed.dynamics(H, O, [0.0, 1.0], sym=s)):
+        with pytest.raises(qed.errors.EmptySelection):
+            verb(empty)
+        verb(held)
+
+
+def test_sz_parity_must_agree_with_the_total_spin():
+    # The S = 1 tower of 4 sites sits at one set bit (odd): sz='even' names a disjoint sector.
+    H = _ring(4)
+    with pytest.raises(qed.errors.InvalidRequest, match="disjoint"):
+        qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="even"))
+    np.testing.assert_allclose(qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="odd")).energies,
+                               qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1)).energies, atol=1e-12)

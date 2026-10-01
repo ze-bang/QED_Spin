@@ -345,14 +345,24 @@ inline void label(Level& L, const ed::solvers::lg_detail::StarBuild& sb) {
         L.irrep_characters.emplace_back(r, c * (*chars)[static_cast<std::size_t>(e)]);
 }
 
+inline bool has_selection(const Spec& s) {
+    return !s.only_k0.empty() || !s.only_irrep.empty() || !s.only_momentum.empty() || !s.only_irrep_chars.empty();
+}
+
 /// A verb whose selection (momentum, star, irrep, irrep character) matched no block raises
 /// EmptySelection instead of answering for an empty space.
 inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* verb) {
-    const bool selects = !s.only_k0.empty() || !s.only_irrep.empty() || !s.only_momentum.empty()
-                      || !s.only_irrep_chars.empty();
-    if (selects && n_blocks == 0)
+    if (has_selection(s) && n_blocks == 0)
         throw ed::EmptySelection(std::string(verb) + ": the selection matches no block: no star of the "
                                  "requested Sz sectors has that momentum, star index or little-group irrep");
+}
+
+/// The same after the spin-tower filter: under total_spin a selected block can hold no state of
+/// the requested spin (every state of it belongs to a higher multiplet).
+inline void require_some_level(const Spec& s, bool none, const char* verb) {
+    if (has_selection(s) && none)
+        throw ed::EmptySelection(std::string(verb) + ": the selected blocks hold no state of total spin S = "
+                                 + (s.two_S % 2 ? std::to_string(s.two_S) + "/2" : std::to_string(s.two_S / 2)));
 }
 
 /// device='gpu' needs a usable device before anything runs.

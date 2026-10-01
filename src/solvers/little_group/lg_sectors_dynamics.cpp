@@ -174,6 +174,8 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
     const EigsResult first = eigs(H, n_sites, u, eo);
     placement += first.placement;
     eo.vectors = true;
+    if (first.levels.empty())        // eigs raises for a selection; nothing else leaves it empty
+        throw ed::EmptySelection("dynamics: the requested sectors hold no state");
     e0 = first.levels.front().energy;
     std::vector<std::pair<Level, BlockVector>> out;
     std::set<std::tuple<int, int, int>> done;
