@@ -146,7 +146,7 @@ def _permute(v, p):
     return out
 
 
-def test_momentum_labels_select_and_match_the_vectors():
+def test_momentum_select_and_match_the_vectors():
     H = _ring(8, 0.3)
     T = _translations(8)[0]
     sym = qed.Symmetry(spatial=[T], point_group=False, sz=4, spin_flip="off", time_reversal="off")
