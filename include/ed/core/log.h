@@ -63,7 +63,7 @@ struct State {
     std::size_t         dropped  = 0;
 };
 [[nodiscard]] inline State& state() {
-    static State s;
+    static State& s = *new State;   // never destroyed: objects torn down at exit may still log
     return s;
 }
 }  // namespace detail
