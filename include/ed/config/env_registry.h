@@ -59,7 +59,7 @@ struct Row {
 // X(name, kind, scope, default_text, meaning)
 #define ED_ENV_TABLE(X)                                                        \
     X("ED_SYM_PROFILE", Flag, "symmetry", "0",                                 \
-      "Prints symmetry-construction / little-group phase timers and lane-decline reasons to stderr")\
+      "Logs symmetry-construction / little-group phase timers and lane-decline reasons at Info")\
     X("ED_SYM_CACHE", Flag, "symmetry", "true (enabled)",                      \
       "=0 disables the .otab orbit-table disk cache layer")                    \
     X("ED_SYM_CACHE_DIR", Path, "symmetry", "\"\" -> caller falls back to <lattice_dir>/basis_cache",\
@@ -81,7 +81,7 @@ struct Row {
     X("ED_MATVEC_SCATTER", Flag, "krylov", "false (gather kernel)",            \
       "=1 uses the atomic-scatter SpMV kernel instead of the lock-free row gather (for bisection)")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
-      "=1 enables per-bucket us timers inside lanczos_kernel (A/B against lanczos_real)")\
+      "=1 logs per-bucket us timers inside lanczos_kernel at Info (A/B against lanczos_real)")\
     X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
       "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
@@ -98,6 +98,8 @@ struct Row {
       "Prepends a build directory containing _core*.so to qed.__path__")       \
     X("ED_ENV_STRICT", Flag, "python", "false",                                  \
       "=1 makes an undeclared ED_* variable in the environment an import error instead of a warning") \
+    X("QED_LOG_LEVEL", Text, "python", "warn (ED_SYM_PROFILE=1: info)",          \
+      "Log level at import (off|error|warn|info|debug); above warn the records also stream to stderr") \
     /* end of table */
 
 inline const std::vector<Row>& rows() {

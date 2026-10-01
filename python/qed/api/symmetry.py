@@ -95,8 +95,9 @@ class Symmetry:
         return out
 
     # ------------------------------------------------------------------
-    def groups(self, H) -> tuple[list[list[int]], list[list[int]]]:
-        """(closed abelian group, point-group coset representatives) for H."""
+    def groups(self, H, diagnostics: Optional[list] = None) -> tuple[list[list[int]], list[list[int]]]:
+        """(closed abelian group, point-group coset representatives) for H. ``diagnostics``,
+        when given, receives a (code, message) pair for each fallback taken."""
         from .._groups import close_group, split_nonabelian
 
         n = int(H.num_sites)
@@ -113,8 +114,10 @@ class Symmetry:
                 spatial = find_symmetries(H, verbose=False).full_set
             except ImportError as e:        # the graph-automorphism search needs pynauty
                 import warnings
-                warnings.warn(f"Symmetry(spatial='auto'): {e}; continuing without spatial "
-                              "symmetry", RuntimeWarning, stacklevel=3)
+                msg = f"Symmetry(spatial='auto'): {e}; continuing without spatial symmetry"
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
+                if diagnostics is not None:
+                    diagnostics.append(("auto_spatial_skipped", msg))
                 return identity, []
             if spatial is None:               # H has no spatial symmetry
                 return identity, []
@@ -140,9 +143,10 @@ class Symmetry:
             A = greedy_maximal_abelian(A)
         return [list(a) for a in A], []
 
-    def resolve(self, H) -> "_core.sectors.Spec":
+    def resolve(self, H, diagnostics: Optional[list] = None) -> "_core.sectors.Spec":
+        """The engine's Spec for H; ``diagnostics`` as in :meth:`groups`."""
         spec = _core.sectors.Spec()
-        spec.abelian, spec.residues = self.groups(H)
+        spec.abelian, spec.residues = self.groups(H, diagnostics)
         sz = self.sz
         if isinstance(sz, str):
             key = sz.lower()

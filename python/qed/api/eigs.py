@@ -1,12 +1,12 @@
 """``qed.eigs``: the lowest k levels of H over every symmetry sector, with vectors on demand."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import numpy as np
 
-from .. import _core
+from .. import _core, _log
 from . import _device
 from .symmetry import Labelled, Symmetry
 
@@ -19,6 +19,11 @@ class EigResult(Labelled):
     the block's quantum numbers). :meth:`vectors` returns orthonormal eigenvectors of
     the lowest k energies, completing degenerate multiplets through the symmetry
     operations. :meth:`momentum` and :meth:`irrep_characters` name a level physically.
+    ``diagnostics``: (code, message) pairs for fallbacks the run took (e.g. an incomplete
+    window under ``allow_partial``).
+    ``block_stats``: one dict per solved block -- dimension, the lane that applied H
+    (dense, csr, walk, gpu-gather, device), phase seconds (orbit tables, star build, CSR
+    build, applies, the rest of the solve), nnz and the number of applies.
     """
 
     energies: np.ndarray
@@ -31,7 +36,10 @@ class EigResult(Labelled):
     _raw: object
     _spec: object
     _n_sites: int
+    diagnostics: list = field(default_factory=list)
+    block_stats: list = field(default_factory=list)
 
+    @_log.replays
     def vectors(self, basis: str = "full", n_up: Optional[int] = None) -> list:
         """Eigenvectors of the lowest k energies.
 
@@ -57,6 +65,7 @@ class EigResult(Labelled):
             out.extend(vs[: self.k - len(out)])
         return out
 
+    @_log.replays
     def expect(self, ops: Sequence) -> np.ndarray:
         """<O> in each entry of ``levels``, averaged over the level's symmetry multiplet:
         a complex array [len(levels), len(ops)]. Needs ``vectors=True``."""
@@ -65,6 +74,7 @@ class EigResult(Labelled):
         vals = np.asarray(self._raw.expect(self._spec, self._n_sites, ops), complex)
         return vals.reshape(len(self.levels), len(ops))
 
+    @_log.replays
     def matrix_element(self, O, i: int, j: int) -> complex:
         """<v_i| O |v_j> between the vectors of ``levels[i]`` and ``levels[j]`` -- the
         partners the solver returned, from which each level's multiplet is expanded.
@@ -82,6 +92,7 @@ class EigResult(Labelled):
                             energies=np.asarray(self.energies), **arrays)
 
 
+@_log.replays
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
          block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
          device: str = "cpu", prune: bool = True, window: float = 0.0) -> EigResult:
@@ -94,7 +105,8 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     (the partners of a degenerate level in other blocks); ``energies`` then lists them all.
     """
     sym = Symmetry.auto() if sym is None else sym
-    spec = sym.resolve(H)
+    diagnostics: list = []
+    spec = sym.resolve(H, diagnostics)
     n = int(H.num_sites)
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
                              dense_max_dim=int(dense_max_dim), block_size=int(block_size),
@@ -104,8 +116,9 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     return EigResult(energies=np.asarray(raw.energies(rows), float), levels=list(raw.levels),
                      k=int(k), symmetry=sym, complete=bool(raw.complete),
                      device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
-                     _raw=raw, _spec=spec,
-                     _n_sites=n)
+                     _raw=raw, _spec=spec, _n_sites=n,
+                     diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
+                     block_stats=list(raw.block_stats))
 
 
 def load_eigs(path) -> "EigResult":

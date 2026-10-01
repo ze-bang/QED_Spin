@@ -21,15 +21,3 @@
 #ifndef LAPACK_COMPLEX_CPP
     #define LAPACK_COMPLEX_CPP
 #endif
-
-#ifdef DEBUG_BLAS_BACKEND
-    #include <iostream>
-    namespace {
-        struct BlasBackendReporter {
-            BlasBackendReporter() {
-                std::cout << "Using BLAS/LAPACK backend: " << BLAS_LAPACK_BACKEND << std::endl;
-            }
-        };
-        static BlasBackendReporter g_blas_backend_reporter;
-    }
-#endif

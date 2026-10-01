@@ -11,7 +11,6 @@ from __future__ import annotations
 import itertools
 import json
 import math
-import os
 import time
 from pathlib import Path
 
@@ -76,12 +75,7 @@ def _baseline(backend):
 
 
 def _gpu_available():
-    if not qed.has_cuda_build():
-        return False
-    try:
-        return qed._core.cuda_device_count() > 0  # type: ignore[attr-defined]
-    except AttributeError:
-        return os.system("nvidia-smi -L > /dev/null 2>&1") == 0
+    return qed.has_cuda_build() and qed._core.cuda_device_count() > 0
 
 
 def _rel_l1(a, b):

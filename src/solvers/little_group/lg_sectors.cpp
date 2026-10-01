@@ -45,10 +45,11 @@ std::vector<std::uint64_t> sz_states(int n_sites, int n_up) {
 }
 
 // One block solved by the orchestrator, which binds it to a CUDA backend when the block has a
-// device kernel. Returns whether it actually ran on the device.
+// device kernel. Returns whether it actually ran on the device; `iters` receives its Krylov
+// iterations.
 bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, Device device,
                            std::vector<double>& ev, std::vector<std::vector<Complex>>& vv,
-                           bool& converged) {
+                           bool& converged, std::size_t& iters) {
     ed::workflows::SolveOptions so;
     so.num_eigs        = static_cast<std::size_t>(want);
     so.compute_vectors = vectors;
@@ -62,6 +63,7 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
         vv.assign(r.eigenvectors->host.begin(), r.eigenvectors->host.begin() + static_cast<long>(ev.size()));
     }
     converged = static_cast<int>(ev.size()) >= want;
+    iters     = r.krylov.iters_done;
     return r.backend.lane == "gpu";
 }
 
@@ -101,6 +103,43 @@ double estimate_lowest(const detail::BlockOp& bop, Device device) {
                       nullptr, 1) != 0)
         return -std::numeric_limits<double>::infinity();     // never prune on a failed estimate
     return *std::min_element(d.begin(), d.end());
+}
+
+// The phase record of one solved block, logged at Info. `rep` is the block's H; its counters
+// before the solve are passed in (an isotypic block shares them with its star's other blocks).
+BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const RepSectorMatVec& rep,
+                       std::uint64_t applies0, double apply0, double build0, double solve_s,
+                       bool on_device, std::size_t device_iters, double context_orbit_s,
+                       const StarBuild& sb) {
+    BlockStats st;
+    st.k0 = tag.k0; st.irrep = tag.irrep; st.flip_parity = tag.flip_parity; st.n_up = tag.n_up;
+    st.dim             = tag.dim;
+    st.kind            = kind;
+    st.context_orbit_s = context_orbit_s;
+    st.star_orbit_s    = sb.t_orbit;
+    st.star_build_s    = sb.t_build;
+    st.build_s         = rep.build_seconds() - build0;
+    st.nnz             = rep.csr_nnz();
+    st.csr_bytes       = rep.csr_bytes();
+    st.applies         = rep.applies() - applies0;
+    st.apply_s         = rep.apply_seconds() - apply0;
+    st.solve_s         = solve_s;
+    if (on_device) {
+        st.lane    = "device";
+        st.applies = device_iters;
+    } else {
+        st.lane = st.applies == 0 ? "dense" : rep.lane();
+    }
+    st.other_s = std::max(0.0, solve_s - st.apply_s - st.build_s);
+    ED_LOG(Info, "[block] k0=%d irrep=%d flip=%d n_up=%d %s dim=%llu lane=%s | orbit %.3f+%.3f s, star %.3f s, "
+           "build %.3f s, nnz=%llu (%.1f B/nnz) | applies=%llu, %.4g s/apply, other %.3f s, solve %.3f s",
+           st.k0, st.irrep, st.flip_parity, st.n_up, kind, static_cast<unsigned long long>(st.dim),
+           st.lane.c_str(), st.context_orbit_s, st.star_orbit_s, st.star_build_s, st.build_s,
+           static_cast<unsigned long long>(st.nnz),
+           st.nnz ? static_cast<double>(st.csr_bytes) / static_cast<double>(st.nnz) : 0.0,
+           static_cast<unsigned long long>(st.applies), st.applies ? st.apply_s / static_cast<double>(st.applies) : 0.0,
+           st.other_s, st.solve_s);
+    return st;
 }
 
 std::uint64_t state_index(std::uint64_t st, int n_up) {
@@ -214,7 +253,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     // Solve one block and append its rows.
     auto solve_block = [&](const Subspace& sub, StarBuild& sb,
-                           const std::shared_ptr<LittleGroupBlock::Impl>& bi) {
+                           const std::shared_ptr<LittleGroupBlock::Impl>& bi, double context_orbit_s) {
                 const std::size_t dim = bi->tag.dim;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 if (!bop.op) return;
@@ -228,15 +267,28 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 bool converged = true;
                 std::vector<double> ev;
                 std::vector<std::vector<Complex>> vv;
+                // H of this block (an isotypic block shares its star's k-sector operator, so the
+                // counters are read as differences).
+                const RepSectorMatVec& rep = bi->gop ? *bi->gop : *sb.hk;
+                const std::uint64_t applies0 = rep.applies();
+                const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
+                const auto t0 = std::chrono::steady_clock::now();
+                bool on_device = false;
+                std::size_t device_iters = 0;
                 if (bop.on_device && dim > lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim)) {
-                    if (solve_by_orchestrator(bop, want, o.vectors, o.device, ev, vv, converged))
-                        ++res.device_blocks;
+                    on_device = solve_by_orchestrator(bop, want, o.vectors, o.device, ev, vv, converged,
+                                                      device_iters);
+                    if (on_device) ++res.device_blocks;
                 } else if (o.vectors) {
                     std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim,
                                                               o.block_size, &converged);
                 } else {
                     ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged, o.block_size);
                 }
+                res.block_stats.push_back(block_stats(
+                    bi->tag, bi->gop ? "group" : (bi->W ? "isotypic" : "plain"), rep, applies0, apply0,
+                    build0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                    on_device, device_iters, context_orbit_s, sb));
                 // Off-tower ghosts sit above the spectrum: once one appears the tower is exhausted.
                 bool ghost_seen = false;
                 for (std::size_t i = 0; i < ev.size(); ++i)
@@ -292,7 +344,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 if (s.two_S < 0)
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim);
-                if (!prune || dim <= floor_) { solve_block(sub, sb, bi); continue; }
+                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.t_orbit_table); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       estimate_lowest(bop, o.device)});
@@ -321,9 +373,10 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
         star.only_k0 = {c.k0};
         const Subspace& sub = subs[c.sub];
         const LittleGroupOptions opt = detail::engine_options(star, sub, o.dense_max_dim, o.block_size);
-        detail::walk(H, n_sites, star, opt, [&](const EngineContext&, bool, StarBuild& sb) {
+        detail::walk(H, n_sites, star, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks)
-                if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip) solve_block(sub, sb, bi);
+                if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip)
+                    solve_block(sub, sb, bi, cx.t_orbit_table);
         });
     }
 
@@ -347,6 +400,10 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
             "lowest levels, and the uncertified levels may lie inside the requested window of "
             + std::to_string(o.k) + ". Raise the iteration budget or the dense crossover, or "
             "allow a partial window.");
+    if (!res.complete)
+        res.diagnostics.emplace_back("partial_window",
+            std::to_string(res.partial_blocks) + " block(s) could not certify their lowest levels; "
+            "uncertified levels may lie inside the returned window");
     // Drop vectors of levels that fell outside the window.
     if (o.vectors) {
         std::vector<BlockVector> kept;

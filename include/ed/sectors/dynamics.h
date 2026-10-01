@@ -47,6 +47,7 @@ struct DynamicsCurves {
     int                              ground_manifold = 0;   ///< T = 0: levels averaged over
     std::size_t                      target_sectors = 0;    ///< sectors O reached
     std::size_t                      device_blocks  = 0;    ///< continued fractions / FTLM sources run on a GPU
+    Diagnostics                      diagnostics;
 };
 
 [[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s,

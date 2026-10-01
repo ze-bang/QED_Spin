@@ -80,8 +80,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
 {
     auto decline = [&](const std::string& why) {
         if (lg_diag)
-            std::fprintf(stderr, "[little_group] star k0=%d: group-sector path declined -- %s; isotypic (W) path.\n",
-                         k0, why.c_str());
+            ED_LOG(Info, "[little_group] star k0=%d: group-sector path declined -- %s; isotypic (W) path.",
+                   k0, why.c_str());
         return false;
     };
     const auto t0 = std::chrono::steady_clock::now();
@@ -163,7 +163,9 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         return c;
     };
 
+    const auto t_tab = std::chrono::steady_clock::now();
     const ed::symmetry::OrbitTable tab = group_orbit_table(Gp, N, opt.n_up, flip);
+    sb.t_orbit = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_tab).count();
     std::vector<std::shared_ptr<ed::symmetry::RepSectorData>> secs(static_cast<std::size_t>(nIr));
     std::uint64_t one_dim_total = 0;
     bool all_one_dim = true;
@@ -254,8 +256,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     for (const auto& ir : giP.irreps) { info.little_characters.push_back(ir.character); info.little_irrep_dims.push_back(ir.dim); }
     if (t_isotypic) *t_isotypic += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (lg_diag)
-        std::fprintf(stderr, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu\n",
-                     k0, Gx, sb.blocks.size(), dim_k);
+        ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu",
+               k0, Gx, sb.blocks.size(), dim_k);
     return true;
 }
 
@@ -301,10 +303,11 @@ build_star_blocks(const ::Operator&         op,
     if (group_sector_enabled(opt)) {
         dim_k = burnside_dim(cx, k0, opt.n_up);
         if (plan_print)
-            std::fprintf(stderr, "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d dim=%llu\n",
-                         k0, k0 % cx.n_irr_raw, info.flip_parity, m_star, static_cast<unsigned long long>(dim_k));
+            ED_LOG(Info, "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d dim=%llu",
+                   k0, k0 % cx.n_irr_raw, info.flip_parity, m_star, static_cast<unsigned long long>(dim_k));
         if (dim_k == 0) return sb;
-        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
+        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
+                          || ed::logging::enabled(ed::logging::Level::Debug);
         if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb,
                            profile ? t_isotypic : nullptr))
             return sb;
@@ -312,9 +315,9 @@ build_star_blocks(const ::Operator&         op,
 
     auto rd = build_k_sector(cx, k0, opt.n_up);
     if (plan_print && !group_sector_enabled(opt)) {
-        std::fprintf(stderr,
+        ED_LOG(Info,
             "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
-            "dim=%llu\n",
+            "dim=%llu",
             k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
             static_cast<unsigned long long>(rd.reps.size()));
         // NOTE: no early return. Plan mode must build the little co-group:
@@ -386,14 +389,15 @@ build_star_blocks(const ::Operator&         op,
     // ED_SYM_PROFILE=1 / verbose, so "why is my Gamma block |P| times too
     // big?" is answerable from the log.
     const bool lg_diag = [&] {
-        return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
+        return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
+            || ed::logging::enabled(ed::logging::Level::Debug);
     }();
     auto decline = [&](const char* why) {
         if (lg_diag)
-            std::fprintf(stderr,
+            ED_LOG(Info,
                 "[little_group] star k0=%d (dim=%zu, |little co-group|=%zu): "
                 "NOT projected -- %s. Correct, but this block keeps its "
-                "full k-sector size.\n",
+                "full k-sector size.",
                 k0, rdr.reps.size(), M.size(), why);
     };
     if (M.size() > 1) {

@@ -14,7 +14,6 @@
 //   2. else                                          --> CpuBackend
 // =============================================================================
 
-#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -24,6 +23,7 @@
 #include <variant>
 
 #include <ed/core/linear_operator.h>
+#include <ed/core/log.h>
 #include <ed/matvec/backends/cpu_backend.h>
 
 #ifdef WITH_CUDA
@@ -72,11 +72,9 @@ using BackendVariant = std::variant<
 // ---------------------------------------------------------------------------
 inline bool have_cuda() noexcept {
 #ifdef WITH_CUDA
-    // Probed once per process. Environment-difference failures must be
-    // LOUD: a wheel built against a newer CUDA toolkit than the node's
-    // driver reports cudaErrorInsufficientDriver here, and swallowing it
-    // would silently degrade every GPU lane to CPU. One clear diagnostic,
-    // then the documented CPU fallback.
+    // Probed once per process. A wheel built against a newer CUDA toolkit
+    // than the node's driver reports cudaErrorInsufficientDriver here;
+    // one Warn record says so, then the documented CPU fallback.
     static const bool ok = [] {
         int n = 0;
         const cudaError_t err = cudaGetDeviceCount(&n);
@@ -90,11 +88,11 @@ inline bool have_cuda() noexcept {
             int drv = 0, rt = 0;
             cudaDriverGetVersion(&drv);
             cudaRuntimeGetVersion(&rt);
-            std::fprintf(stderr,
-                "[qed] CUDA DISABLED: the NVIDIA driver on this machine is "
+            ED_LOG(Warn,
+                "CUDA DISABLED: the NVIDIA driver on this machine is "
                 "too old for this build (driver API %d.%d < runtime %d.%d). "
                 "Every GPU lane falls back to CPU. Fix: update the driver, "
-                "or rebuild against this node's CUDA toolkit.\n",
+                "or rebuild against this node's CUDA toolkit.",
                 drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
         }
         return false;

@@ -11,6 +11,8 @@ import networkx as nx
 import numpy as np
 from pynauty import Graph, autgrp
 
+from . import _log
+
 
 def _round_tuple(t, decimals=8):
     """Round all floats in a tuple to given decimals."""
@@ -149,8 +151,8 @@ def construct_colored_graph(vertex_weights, edges):
     n_bonds = len(bond_pairs)
     n_total = n_original + n_bonds  # original vertices + auxiliary vertices
     
-    print(f"  Edge-colored graph: {n_original} vertices + {n_bonds} auxiliary bond vertices")
-    print(f"  Unique bond types: {len(unique_sigs)}")
+    _log.log(_log.DEBUG, "edge-coloured graph: %d vertices + %d auxiliary bond vertices, %d bond types",
+             n_original, n_bonds, len(unique_sigs))
     
     # Build adjacency for expanded graph
     adjacency_dict = {i: [] for i in range(n_total)}
@@ -280,7 +282,6 @@ class AutomorphismCliqueAnalyzer:
             return self._cached_graph
         
         n_autos = len(automorphisms)
-        print(f"Building commutation graph for {n_autos} automorphisms...")
         G = nx.Graph()
         
         # Add nodes for each automorphism
@@ -291,23 +292,14 @@ class AutomorphismCliqueAnalyzer:
         edge_count = 0
         total_pairs = (n_autos * (n_autos - 1)) // 2
         
-        # Show progress for large graphs
-        show_progress = total_pairs > 10000
-        progress_step = total_pairs // 20 if show_progress else total_pairs + 1
-        
-        pairs_checked = 0
         for i in range(n_autos):
             for j in range(i+1, n_autos):
                 if self.do_permutations_commute(automorphisms[i], automorphisms[j]):
                     G.add_edge(i, j)
                     edge_count += 1
-                
-                pairs_checked += 1
-                if show_progress and pairs_checked % progress_step == 0:
-                    pct = 100 * pairs_checked / total_pairs
-                    print(f"  Progress: {pct:.0f}% ({pairs_checked}/{total_pairs} pairs checked, {edge_count} commuting pairs found)")
         
-        print(f"  Completed: Found {edge_count} commuting pairs out of {total_pairs} total pairs")
+        _log.log(_log.DEBUG, "commutation graph: %d automorphisms, %d of %d pairs commute",
+                 n_autos, edge_count, total_pairs)
         
         # Cache the graph
         self._cached_graph = G
@@ -320,14 +312,13 @@ class AutomorphismCliqueAnalyzer:
         # Build the commutation graph (cached)
         comm_graph = self.build_commutation_graph(automorphisms)
         
-        print(f"Finding maximum clique...")
         # Use NetworkX to find the maximum clique
         max_clique_indices = list(nx.find_cliques(comm_graph))
         
         # Get the maximum clique by size
         if max_clique_indices:
             max_clique = max(max_clique_indices, key=len)
-            print(f"  Maximum clique size: {len(max_clique)}")
+            _log.log(_log.DEBUG, "maximum clique size: %d", len(max_clique))
             return max_clique
         else:
             return []
@@ -509,9 +500,6 @@ class MaximalAbelianSubgroupFinder:
         if not non_identity:
             return []
 
-        print(f"Finding minimal generators for maximal abelian subgroup "
-              f"(input size {len(permutations)})...")
-
         def is_fixed_point_free(p):
             return all(p[i] != i for i in range(n))
 
@@ -571,8 +559,8 @@ class MaximalAbelianSubgroupFinder:
             if cand_size > best_size:
                 best_gens, best_size = cand_gens, cand_size
 
-        print(f"Found {len(best_gens)} generators "
-              f"(maximal abelian subgroup order {best_size})")
+        _log.log(_log.DEBUG, "maximal abelian subgroup: order %d from %d generators (input size %d)",
+                 best_size, len(best_gens), len(permutations))
         return [
             {
                 'permutation': g,

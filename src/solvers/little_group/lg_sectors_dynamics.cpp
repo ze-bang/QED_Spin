@@ -253,7 +253,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     };
     auto report = [&] {
         if (!prof) return;
-        for (const auto& [name, t] : phase) std::fprintf(stderr, "[sym_profile] dynamics %-16s %9.2f s\n", name.c_str(), t);
+        for (const auto& [name, t] : phase) ED_LOG(Info, "[sym_profile] dynamics %-16s %9.2f s", name.c_str(), t);
     };
     std::map<std::pair<int, int>, std::vector<Target>> cache;   // (n_up, parity) -> sectors
     auto sectors_of = [&](const Subspace& sub) -> const std::vector<Target>& {

@@ -9,7 +9,7 @@
 #endif
 #include <cstdlib>
 #include <limits>
-#include <iomanip>
+#include <ed/core/log.h>
 
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     // i.i.d. standard complex Gaussian: real and imag parts ~ N(0, 1), then
@@ -63,7 +63,7 @@ void diagonalize_tridiagonal_ritz(
                                     evecs_ptr, m);
     
     if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed in diagonalize_tridiagonal_ritz with error code " << info << std::endl;
+        ED_LOG(Error, "LAPACKE_dstevd failed in diagonalize_tridiagonal_ritz (info=%d)", static_cast<int>(info));
         ritz_values.clear();
         weights.clear();
         return;
@@ -267,7 +267,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     }
     double norm = cblas_dnrm2(N, v_current, 1);
     if (norm == 0.0) {
-        std::cerr << "lanczos_real: zero starting vector" << std::endl;
+        ED_LOG(Error, "lanczos_real: zero starting vector");
         return;
     }
     cblas_dscal(N, 1.0 / norm, v_current, 1);
@@ -306,8 +306,8 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     const double ortho_threshold = 1e-12;
 
     max_iter = std::min(N, max_iter);
-    std::cout << "Lanczos[real]: max_iter=" << max_iter << ", n_eig=" << exct
-              << ", tol=" << tol << " (real-storage fast path)" << std::endl;
+    ED_LOG(Debug, "Lanczos[real]: max_iter=%llu, n_eig=%llu, tol=%g (real-storage fast path)",
+           static_cast<unsigned long long>(max_iter), static_cast<unsigned long long>(exct), tol);
 
     for (uint64_t j = 0; j < max_iter; ++j) {
         if (extras && extras->on_basis_vector) extras->on_basis_vector(j, v_current);
@@ -350,23 +350,20 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
         norm = ed::parallel::fused_norm2_scale_real(
             N, w.data(), v_next_slab);
 
-        // Print sparingly to match the complex path's verbosity profile.
-        if (j == 0 || (j + 1) % 100 == 0 || j + 1 == max_iter) {
+        if ((j == 0 || (j + 1) % 100 == 0 || j + 1 == max_iter)
+                && ed::logging::enabled(ed::logging::Level::Debug)) {
             const double residual_error = (j == 0)
                 ? norm / (std::abs(alpha_j) + norm)
                 : norm / (std::abs(alpha_j) + std::abs(beta[j]) + norm);
-            std::cout << "Iteration " << j + 1 << " of " << max_iter
-                      << "  |  beta = " << std::scientific << std::setprecision(4)
-                      << norm << "  |  residual = " << residual_error
-                      << std::defaultfloat << std::endl;
+            ED_LOG(Debug, "Lanczos[real]: iteration %llu of %llu  beta = %.4e  residual = %.4e",
+                   static_cast<unsigned long long>(j + 1), static_cast<unsigned long long>(max_iter),
+                   norm, residual_error);
         }
 
         // Breakdown: invariant subspace found.
         if (norm < tol) {
-            std::cout << "Lanczos[real]: invariant subspace at iter "
-                      << j + 1 << " (beta=" << std::scientific
-                      << std::setprecision(2) << norm << std::defaultfloat
-                      << ")" << std::endl;
+            ED_LOG(Debug, "Lanczos[real]: invariant subspace at iter %llu (beta=%.2e)",
+                   static_cast<unsigned long long>(j + 1), norm);
             max_iter = j + 1;
             break;
         }
@@ -448,12 +445,9 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                         }
                     }
                     if (max_rel_change < tol && vec_ok) {
-                        std::cout << "Lanczos[real]: Eigenvalues converged at "
-                                     "iteration " << j + 1
-                                  << " (max rel change = " << std::scientific
-                                  << std::setprecision(4) << max_rel_change
-                                  << " < tol = " << tol << ")"
-                                  << std::defaultfloat << std::endl;
+                        ED_LOG(Debug, "Lanczos[real]: eigenvalues converged at iteration %llu "
+                                      "(max rel change = %.4e < tol = %g)",
+                               static_cast<unsigned long long>(j + 1), max_rel_change, tol);
                         converged = true;
                         max_iter = j + 1;
                         break;
@@ -480,8 +474,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     const int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
                                     diag.data(), offd.data(), nullptr, m);
     if (info != 0) {
-        std::cerr << "Lanczos[real]: tridiagonal solver failed (info="
-                  << info << ")" << std::endl;
+        ED_LOG(Error, "Lanczos[real]: tridiagonal solver failed (info=%d)", info);
         return;
     }
     // Ghost filter (see the convergence check above). The Ritz bounds /
@@ -524,10 +517,9 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     // A run that exhausted the full space (m == N) is exact by construction.
     if (converged_out) *converged_out = converged || (m == N);
 
-    std::cout << "Lanczos[real]: " << m << " iterations, "
-              << total_reorth_count << " local-reorth axpys ("
-              << selective_reorth_count << " passes)"
-              << (converged ? " [converged]" : "") << std::endl;
+    ED_LOG(Debug, "Lanczos[real]: %llu iterations, %llu local-reorth axpys (%llu passes)%s",
+           static_cast<unsigned long long>(m), static_cast<unsigned long long>(total_reorth_count),
+           static_cast<unsigned long long>(selective_reorth_count), converged ? " [converged]" : "");
 }
 
 // Full diagonalization: dense LAPACK inside the dense window; larger blocks
@@ -537,7 +529,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                        bool compute_eigenvectors,
                        const ed::matvec::MatVecOperator* op_for_dense,
                        std::vector<std::vector<Complex>>* eigenvectors_out) {
-    std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
     if (eigenvectors_out) eigenvectors_out->clear();
 
     // Dim-aware OMP+BLAS thread cap for the column build; the
@@ -556,44 +547,27 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     constexpr uint64_t DENSE_THRESHOLD = 120000;
 
     if (N <= DENSE_THRESHOLD) {
-        // For smaller matrices, use dense approach with MKL for best performance
-        std::cout << "Using dense diagonalization with MKL/LAPACK" << std::endl;
-        
-        // Check memory requirements - estimate total needed including workspace
+        // Dense LAPACK. The partial solver (zheevr / dsyevr) needs the matrix plus
+        // num_eigs eigenvectors; the full one overwrites the matrix with them.
         size_t matrix_size = static_cast<size_t>(N) * N;
         size_t bytes_for_matrix = matrix_size * sizeof(Complex);
-        size_t bytes_for_eigenvalues = N * sizeof(double);
-        
+
         // Determine if we can use memory-efficient partial eigenvalue computation
         uint64_t actual_num_eigs = std::min(num_eigs, N);
         bool use_partial_solver = (actual_num_eigs < N / 2) && (N > 1000);  // Use zheevr for subset
-        
-        if (use_partial_solver && compute_eigenvectors) {
-            // zheevr needs: matrix + num_eigs eigenvectors + workspace
-            size_t bytes_for_evecs = static_cast<size_t>(actual_num_eigs) * N * sizeof(Complex);
-            std::cout << "Matrix requires " << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
-            std::cout << "Eigenvectors require " << bytes_for_evecs / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
-            std::cout << "Using memory-efficient partial eigensolver (zheevr) for " << actual_num_eigs << "/" << N << " eigenvalues" << std::endl;
-        } else {
-            // Full solver - eigenvectors overwrite the matrix (no extra allocation needed)
-            std::cout << "Matrix requires " << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0) << " GB of memory" << std::endl;
-        }
-        
+
         // Allocate memory for dense matrix with error checking
         std::vector<Complex> dense_matrix;
         try {
             dense_matrix.resize(matrix_size, Complex(0.0, 0.0));
         } catch (const std::bad_alloc& e) {
-            std::cerr << "Failed to allocate the " << N << "x" << N
-                      << " dense matrix ("
-                      << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0)
-                      << " GB): this machine cannot hold the block. Shrink "
-                      << "the block via symmetry, request fewer eigenvalues, "
-                      << "or run on a node with more RAM." << std::endl;
+            ED_LOG(Error, "failed to allocate the %llu x %llu dense matrix (%.2f GB): this machine "
+                          "cannot hold the block. Shrink the block via symmetry, request fewer "
+                          "eigenvalues, or run on a node with more RAM.",
+                   static_cast<unsigned long long>(N), static_cast<unsigned long long>(N),
+                   bytes_for_matrix / (1024.0 * 1024.0 * 1024.0));
             throw;
         }
-        
-        std::cout << "Constructing dense matrix..." << std::endl;
 
         // FAST PATH: assemble the matrix directly from the operator's sparse term
         // structure -- O(nnz), reentrant, parallel over columns -- instead of N
@@ -608,7 +582,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             // Fallback: build column j = H * e_j. SEQUENTIAL outer loop -- the CPU
             // matvec is NOT reentrant (the backend owns shared CSR/scratch), so it
             // cannot be called concurrently; H parallelizes each column internally.
-            const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);
             for (uint64_t j = 0; j < N; j++) {
                 std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
                 unit_vec[j] = Complex(1.0, 0.0);
@@ -617,22 +590,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 for (uint64_t i = 0; i < N; i++) {
                     dense_matrix[j*N + i] = col_j[i];
                 }
-                if (j % chunk_size == 0 || j == N-1) {
-                    double percentage = 100.0 * j / N;
-                    uint64_t barWidth = 50;
-                    uint64_t pos = barWidth * j / N;
-                    std::cout << "\rProgress: [";
-                    for (uint64_t k = 0; k < barWidth; ++k) {
-                        if (k < pos) std::cout << "=";
-                        else if (k == pos) std::cout << ">";
-                        else std::cout << " ";
-                    }
-                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                    if (j == N-1) std::cout << std::endl;
-                }
             }
         }
-        std::cout << "Dense matrix constructed" << std::endl;
 
         // The enclosing ThreadBudgetScope soft-caps threads at ~8 (tuned for
         // bandwidth-bound Lanczos SpMV / BLAS-1). The dense LAPACK eigensolve
@@ -672,8 +631,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             if (std::abs(dense_matrix[i].imag()) > 1e-12) matrix_is_real = false;
 
         if (matrix_is_real) {
-            std::cout << "Matrix is real -> real LAPACK fast path ("
-                      << (use_partial_solver ? "dsyevr" : "dsyevd") << ")" << std::endl;
             std::vector<double> rdense(matrix_size);
             for (size_t i = 0; i < matrix_size; ++i) rdense[i] = dense_matrix[i].real();
             std::vector<Complex>().swap(dense_matrix);  // free complex buffer (half mem)
@@ -688,8 +645,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                                       evals.data(),
                                       compute_eigenvectors ? revecs.data() : nullptr,
                                       N, isuppz.data());
-                if (info != 0) { std::cerr << "LAPACKE_dsyevr failed with error code " << info << std::endl; return; }
-                std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
+                if (info != 0) { ED_LOG(Error, "LAPACKE_dsyevr failed (info=%d)", static_cast<int>(info)); return; }
                 eigenvalues.resize(m_found);
                 for (lapack_int i = 0; i < m_found; ++i) eigenvalues[i] = evals[i];
                 if (compute_eigenvectors && eigenvectors_out != nullptr) {
@@ -703,8 +659,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             } else {
                 info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, compute_eigenvectors ? 'V' : 'N',
                                       'U', N, rdense.data(), N, evals.data());
-                if (info != 0) { std::cerr << "LAPACKE_dsyevd failed with error code " << info << std::endl; return; }
-                std::cout << "Eigenvalue decomposition completed (divide-and-conquer, real)" << std::endl;
+                if (info != 0) { ED_LOG(Error, "LAPACKE_dsyevd failed (info=%d)", static_cast<int>(info)); return; }
                 eigenvalues.resize(actual_num_eigs);
                 for (size_t i = 0; i < actual_num_eigs; ++i) eigenvalues[i] = evals[i];
                 if (compute_eigenvectors && eigenvectors_out != nullptr) {
@@ -747,11 +702,10 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                                   isuppz.data());                    // Support array
             
             if (info != 0) {
-                std::cerr << "LAPACKE_zheevr failed with error code " << info << std::endl;
+                ED_LOG(Error, "LAPACKE_zheevr failed (info=%d)", static_cast<int>(info));
                 return;
             }
             
-            std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
             
             // Extract eigenvalues
             eigenvalues.resize(m_found);
@@ -788,11 +742,10 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                                   evals.data());
             
             if (info != 0) {
-                std::cerr << "LAPACKE_zheevd failed with error code " << info << std::endl;
+                ED_LOG(Error, "LAPACKE_zheevd failed (info=%d)", static_cast<int>(info));
                 return;
             }
             
-            std::cout << "Eigenvalue decomposition completed (divide-and-conquer)" << std::endl;
 
             // Extract requested number of eigenvalues
             eigenvalues.resize(actual_num_eigs);
@@ -828,5 +781,4 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             "). Reduce the block with symmetry or use a Krylov method.");
     }
     
-    std::cout << "Full diagonalization completed successfully" << std::endl;
 }

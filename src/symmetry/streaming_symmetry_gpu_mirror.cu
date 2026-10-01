@@ -21,6 +21,7 @@
 #ifdef WITH_CUDA
 
 #include <ed/config/env_registry.h>
+#include <ed/core/log.h>
 #include <ed/matvec/device_basis_policy.cuh>
 #include <ed/matvec/term_kernels_gpu.cuh>
 #include <ed/matvec/term_storage.h>
@@ -113,9 +114,9 @@ acquire_gpu_shared_rank(
     auto sp = std::make_shared<GpuSharedRankTable>();
     sp->d_shared_of_rank = srl->shared_of_rank;   // one H2D per (N, n_up)
     if (ed::env::flag("ED_SYM_PROFILE", false)) {
-        std::fprintf(stderr,
+        ED_LOG(Info,
                      "[sym_profile] GPU shared rank table uploaded: "
-                     "%zu entries (N=%d, n_up=%d), co-owned by mirrors\n",
+                     "%zu entries (N=%d, n_up=%d), co-owned by mirrors",
                      srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
     }
     slot = sp;
@@ -272,9 +273,9 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
     } else if (ed::env::flag("ED_SYM_PROFILE", false)) {
-        std::fprintf(stderr,
+        ED_LOG(Info,
                      "[sym_profile] GPU rep mirror: binary-search lookup over "
-                     "%zu reps (rank space %llu)\n",
+                     "%zu reps (rank space %llu)",
                      data.reps.size(),
                      static_cast<unsigned long long>(dim_full_sz));
     }
@@ -629,9 +630,9 @@ struct HostPtrStagingProfile {
         if (!on || calls == 0) return;
         const double pcie = t_h2d + t_d2h;
         const double tot  = pcie + t_kernel;
-        std::fprintf(stderr,
+        ED_LOG(Info,
             "[sym_profile] hostptr rep matvec dim=%zu applies=%llu: "
-            "H2D=%.3fs kernel=%.3fs D2H=%.3fs (staging %.1f%% of %.3fs)\n",
+            "H2D=%.3fs kernel=%.3fs D2H=%.3fs (staging %.1f%% of %.3fs)",
             dim, static_cast<unsigned long long>(calls),
             t_h2d, t_kernel, t_d2h,
             tot > 0.0 ? 100.0 * pcie / tot : 0.0, tot);

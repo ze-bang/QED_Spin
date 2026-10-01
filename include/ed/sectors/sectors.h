@@ -33,6 +33,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace ed::sectors {
@@ -45,6 +47,10 @@ using Perm    = std::vector<int>;
 /// dense solve stay on the host. Auto: the device only above the backend's dimension floor.
 /// Results count the blocks that ran on the device.
 enum class Device { Cpu, Gpu, Auto };
+
+/// Things a caller should know about a result that did not stop it: (code, message) pairs,
+/// e.g. ("partial_window", ...) for an eigs window returned incomplete under allow_partial.
+using Diagnostics = std::vector<std::pair<std::string, std::string>>;
 
 struct Spec {
     std::vector<Perm> abelian;      ///< closed abelian group; empty = identity only
@@ -129,6 +135,28 @@ struct BlockVector {
     std::vector<Complex> amplitudes;        ///< normalized
 };
 
+/// Where one solved block spent its time (one entry per block eigensolve, also logged at Info).
+struct BlockStats {
+    int           k0 = 0, irrep = -1, flip_parity = -1, n_up = -1;
+    std::uint64_t dim = 0;
+    std::string   kind;              ///< "group" (full little group), "isotypic" (W), "plain" (k-sector)
+    /// How H was applied: "dense" (materialised), "csr" (reduced CSR), "walk" (CSR-free gather),
+    /// "gpu-gather" (device kernel on host vectors), "device" (whole solve on the device).
+    std::string   lane;
+    double        context_orbit_s = 0.0;  ///< the walk's abelian orbit table (shared by its blocks)
+    double        star_orbit_s    = 0.0;  ///< the star's own group orbit table
+    double        star_build_s    = 0.0;  ///< the whole star build (sector, co-group, blocks)
+    double        build_s         = 0.0;  ///< CSR / device-mirror build charged to this block
+    std::uint64_t nnz             = 0;    ///< reduced-CSR entries (0 without a CSR)
+    std::uint64_t csr_bytes       = 0;
+    std::uint64_t applies         = 0;    ///< H applies (device: Krylov iterations)
+    double        apply_s         = 0.0;  ///< seconds inside those applies
+    /// Solve time outside applies and builds: Krylov vector work (BLAS-1, reorthogonalisation),
+    /// tridiagonal / dense eigensolves.
+    double        other_s         = 0.0;
+    double        solve_s         = 0.0;  ///< the whole block solve
+};
+
 struct EigsResult {
     std::vector<Level>       levels;        ///< ascending, cut so that multiplicities reach k
     std::vector<BlockVector> vectors;
@@ -139,6 +167,8 @@ struct EigsResult {
     bool                     tr_engaged   = false;
     std::size_t              device_blocks = 0;   ///< blocks solved on a GPU
     std::size_t              pruned_blocks = 0;   ///< blocks skipped by the estimate test
+    Diagnostics              diagnostics;
+    std::vector<BlockStats>  block_stats;   ///< one per solved block, in solve order
 
     /// Energies with multiplicities expanded, the lowest k.
     [[nodiscard]] std::vector<double> energies(int k) const;
@@ -154,6 +184,7 @@ struct SpectrumResult {
     bool               flip_engaged = false;
     bool               tr_engaged   = false;
     std::size_t        device_blocks = 0;   ///< blocks diagonalised on a GPU
+    Diagnostics        diagnostics;
 
     /// Every eigenvalue, multiplicities expanded, ascending.
     [[nodiscard]] std::vector<double> expanded() const;

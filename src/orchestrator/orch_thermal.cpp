@@ -349,12 +349,12 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 for (double T : R.thermo.temperatures)
                     if (T > 0.0) beta_wanted = std::max(beta_wanted, 1.0 / T);
                 if (beta_wanted > 0.0 && beta_reached < 0.999 * beta_wanted) {
-                    std::cerr << "[mTPQ] WARNING: the trajectory reached beta = "
-                              << beta_reached << " but the temperature grid asks for beta = "
-                              << beta_wanted << " (T_min = " << 1.0 / beta_wanted
-                              << "); results below T = " << 1.0 / std::max(beta_reached, 1e-300)
-                              << " are extrapolated. Raise max_iterations / leave krylov_dim "
-                                 "unset so the step count is sized automatically." << std::endl;
+                    ED_LOG(Warn, "[mTPQ] the trajectory reached beta = %g but the temperature grid "
+                           "asks for beta = %g (T_min = %g); results below T = %g are "
+                           "extrapolated. Raise max_iterations / leave krylov_dim unset so the "
+                           "step count is sized automatically.",
+                           beta_reached, beta_wanted, 1.0 / beta_wanted,
+                           1.0 / std::max(beta_reached, 1e-300));
                     R.backend.notes.emplace_back(
                         "mtpq_beta_reached", std::to_string(beta_reached) + " < wanted "
                         + std::to_string(beta_wanted));

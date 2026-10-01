@@ -243,9 +243,8 @@ GroundStateResult solve_on(Backend& be,
                         R.eigenvectors = std::move(evref);
                         R.krylov.residual_norm = resid;
                     } else {
-                        std::cout << "Lanczos[real]: two-pass eigenvector not certified "
-                                     "(residual = " << resid << "); using the complex "
-                                     "kept-basis lane" << std::endl;
+                        ED_LOG(Info, "Lanczos[real]: two-pass eigenvector not certified "
+                               "(residual = %g); using the complex kept-basis lane", resid);
                         real_done = false;
                     }
                 }

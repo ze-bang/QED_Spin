@@ -211,6 +211,22 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     s.two_S = static_cast<int>(ss.at(5));
     return py::make_tuple(std::move(r), std::move(s), n);
 }
+
+// One dict per solved block (EigsResult::block_stats).
+py::list block_stats_to_py(const std::vector<sec::BlockStats>& v) {
+    py::list out;
+    for (const auto& b : v) {
+        py::dict d;
+        d["k0"] = b.k0; d["irrep"] = b.irrep; d["flip_parity"] = b.flip_parity; d["n_up"] = b.n_up;
+        d["dim"] = b.dim; d["kind"] = b.kind; d["lane"] = b.lane;
+        d["context_orbit_s"] = b.context_orbit_s; d["star_orbit_s"] = b.star_orbit_s;
+        d["star_build_s"] = b.star_build_s; d["build_s"] = b.build_s;
+        d["nnz"] = b.nnz; d["csr_bytes"] = b.csr_bytes;
+        d["applies"] = b.applies; d["apply_s"] = b.apply_s; d["other_s"] = b.other_s; d["solve_s"] = b.solve_s;
+        out.append(std::move(d));
+    }
+    return out;
+}
 }  // namespace
 
 void bind_sectors(py::module_& m) {
@@ -280,6 +296,9 @@ void bind_sectors(py::module_& m) {
         .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
         .def_readonly("pruned_blocks", &sec::EigsResult::pruned_blocks)
+        .def_readonly("diagnostics", &sec::EigsResult::diagnostics)
+        .def_property_readonly("block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
+                               "Per solved block: dim, lane, phase seconds, nnz, applies (one dict each).")
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
         .def("sector_vector", [](const sec::EigsResult& r, int i) {
                  const auto& v = r.vectors.at(static_cast<std::size_t>(i));
@@ -320,6 +339,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("flip_engaged", &sec::SpectrumResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::SpectrumResult::tr_engaged)
         .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
+        .def_readonly("diagnostics", &sec::SpectrumResult::diagnostics)
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });
 
     s.def("spectrum",
@@ -359,7 +379,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("e0", &sec::ThermalCurves::e0)
         .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
         .def_readonly("blocks", &sec::ThermalCurves::blocks)
-        .def_readonly("device_blocks", &sec::ThermalCurves::device_blocks);
+        .def_readonly("device_blocks", &sec::ThermalCurves::device_blocks)
+        .def_readonly("diagnostics", &sec::ThermalCurves::diagnostics);
 
     s.def("thermal",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, const sec::ThermalSpec& t) {
@@ -387,7 +408,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("e0", &sec::DynamicsCurves::e0)
         .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
         .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors)
-        .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks);
+        .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks)
+        .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
 
     s.def("dynamics",
           [](const ::Operator& H, int n_sites, const sec::Spec& spec, const ::Operator& O,

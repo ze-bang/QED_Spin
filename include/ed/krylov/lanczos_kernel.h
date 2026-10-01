@@ -45,12 +45,12 @@
 // =============================================================================
 
 #include <ed/config/env_registry.h>
+#include <ed/core/log.h>
 #include <algorithm>
 #include <chrono>     // ED_LANCZOS_KERNEL_PROFILE wallclock timers
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>     // profile summary to stderr
 #include <cstdlib>    // getenv
 #include <functional>
 #include <memory>
@@ -623,7 +623,7 @@ LanczosKernelResult lanczos_kernel(
         const auto pct = [&](double x) -> double {
             return (t_total > 0.0) ? 100.0 * x / t_total : 0.0;
         };
-        std::fprintf(stderr,
+        ED_LOG(Info,
             "[lanczos_kernel] iters=%zu total=%.2f ms = "
             "apply %.1f%% (%.1f us/it) "
             "recur %.1f%% (%.1f us/it) "
@@ -631,7 +631,7 @@ LanczosKernelResult lanczos_kernel(
             "norm %.1f%% (%.1f us/it) "
             "ring %.1f%% (%.1f us/it) "
             "check %.1f%% (%.1f us/it) "
-            "other %.1f%%\n",
+            "other %.1f%%",
             iters, t_total / 1000.0,
             pct(t_apply_us),  t_apply_us  * inv_iters,
             pct(t_recur_us),  t_recur_us  * inv_iters,

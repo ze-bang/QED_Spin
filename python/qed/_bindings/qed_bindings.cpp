@@ -6,7 +6,9 @@
 //   * input (input_bindings.cpp): lattices and the Hamiltonian DSL;
 //   * sectors (sectors_bindings.cpp): the symmetry-sector verbs behind qed.api;
 //   * dssf, symmetry: observable assembly and site-permutation helpers;
-//   * the environment registry (env_*) and build / device probes.
+//   * the environment registry (env_*) and build / device probes;
+//   * the log bridge (log_*) behind qed.set_log_level, and the translation of the
+//     ed:: error types (ed/core/errors.h) into qed.errors.
 //
 // Complex vectors cross as numpy complex128 arrays; long solves release the GIL.
 // =============================================================================
@@ -19,6 +21,8 @@
 
 #include <ed/config/env_registry.h>
 #include <ed/core/construct_ham.h>
+#include <ed/core/errors.h>
+#include <ed/core/log.h>
 #include <ed/core/select_backend.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/symmetry/commute_check.h>
@@ -227,9 +231,58 @@ py::list op_iter_three_body(const Operator& op) {
 }
 
 
+// Raise qed.errors.<name>(what); the builtin it derives from if qed.errors cannot be
+// imported (the extension loaded outside the qed package).
+void set_qed_error(const char* name, const char* what, PyObject* fallback) {
+    try {
+        py::object cls = py::module_::import("qed.errors").attr(name);
+        PyErr_SetString(cls.ptr(), what);
+    } catch (py::error_already_set&) {
+        PyErr_SetString(fallback, what);
+    }
+}
+
+void translate_ed_errors(std::exception_ptr p) {
+    try {
+        if (p) std::rethrow_exception(p);
+    } catch (const ed::EmptySelection& e) {
+        set_qed_error("EmptySelection", e.what(), PyExc_ValueError);
+    } catch (const ed::InvalidRequest& e) {
+        set_qed_error("InvalidRequest", e.what(), PyExc_ValueError);
+    } catch (const ed::Unsupported& e) {
+        set_qed_error("Unsupported", e.what(), PyExc_NotImplementedError);
+    } catch (const ed::DeviceUnavailable& e) {
+        set_qed_error("DeviceUnavailable", e.what(), PyExc_RuntimeError);
+    } catch (const ed::DeviceUnsupported& e) {
+        set_qed_error("DeviceUnsupported", e.what(), PyExc_RuntimeError);
+    } catch (const ed::ResourceLimit& e) {
+        set_qed_error("ResourceLimit", e.what(), PyExc_MemoryError);
+    } catch (const ed::ConvergenceError& e) {
+        set_qed_error("ConvergenceError", e.what(), PyExc_RuntimeError);
+    }
+}
+
+int cuda_device_count() {
+#ifdef WITH_CUDA
+    int n = 0;
+    if (cudaGetDeviceCount(&n) != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+    return n;
+#else
+    return 0;
+#endif
+}
+
+
 } // namespace
 
 PYBIND11_MODULE(_core, m) {
+    // ed:: error types -> qed.errors (python/qed/errors.py). Anything else falls through
+    // to pybind11's standard translation.
+    py::register_exception_translator(&translate_ed_errors);
+
     m.doc() =
         "qed._core: pybind11 binding for the C++ exact-diagonalization "
         "engine. See qed.__init__ for the user-facing facade.";
@@ -359,6 +412,28 @@ PYBIND11_MODULE(_core, m) {
 #endif
           },
           "True when this build was compiled with CUDA (a device may still be absent).");
+    m.def("cuda_device_count", &cuda_device_count,
+          "Visible CUDA devices: 0 on a CPU build or when cudaGetDeviceCount fails.");
+
+    // Log bridge (ed/core/log.h). Python owns the configuration; see python/qed/_log.py.
+    m.def("log_configure", [](int level, int fd) {
+              if (level < 0 || level > static_cast<int>(ed::logging::Level::Debug))
+                  throw ed::InvalidRequest("log level must be 0 (off) .. 4 (debug)");
+              ed::logging::set_stream(fd == 1 ? stdout : fd == 2 ? stderr : nullptr);
+              ed::logging::set_level(static_cast<ed::logging::Level>(level));
+          },
+          py::arg("level"), py::arg("fd") = 0,
+          "Set the engine's log level (0 off .. 4 debug) and sink: fd 1 / 2 writes each "
+          "record to stdout / stderr at once, 0 queues them for log_drain().");
+    m.def("log_level", [] { return static_cast<int>(ed::logging::level()); },
+          "The engine's log level, 0 (off) .. 4 (debug).");
+    m.def("log_drain", [] {
+              std::vector<std::pair<int, std::string>> out;
+              for (auto& r : ed::logging::drain())
+                  out.emplace_back(static_cast<int>(r.level), std::move(r.message));
+              return out;
+          },
+          "The queued (level, message) records, oldest first; empties the queue.");
     m.def("check_generators_commute",
           [](const Operator& op, const std::vector<std::vector<int>>& generators) {
               std::vector<bool> out;

@@ -437,6 +437,7 @@ void make_engine_context(const ::Operator&                    op,
         ? ed::symmetry::make_flip_extended_group_from_perms(
               cx.A, static_cast<std::uint64_t>(n_sites))
         : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
+    const auto t_otab = std::chrono::steady_clock::now();
     if (opt.n_up >= 0) {
         cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
             static_cast<std::uint64_t>(n_sites), opt.n_up, cx.cg);
@@ -452,6 +453,7 @@ void make_engine_context(const ::Operator&                    op,
         cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
             static_cast<std::uint64_t>(n_sites), cx.cg);
     }
+    cx.t_orbit_table = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_otab).count();
     build_residue_maps(cx, residue_perms);
 }
 

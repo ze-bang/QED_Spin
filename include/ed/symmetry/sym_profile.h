@@ -2,24 +2,23 @@
 // =============================================================================
 // include/ed/symmetry/sym_profile.h
 //
-// Makes symmetry-construction cost visible. ``ED_SYM_PROFILE=1`` prints
-// one stderr line per construction phase:
+// Makes symmetry-construction cost visible. ``ED_SYM_PROFILE=1`` logs
+// one Info record per construction phase (ed/core/log.h; qed.set_log_level):
 //
 //     [sym-profile] <phase>: <seconds> s  (<items> items)
 //
 // Zero overhead when the env var is unset (one cached bool test per
-// scope). This is intentionally stderr-only plumbing -- the phases it
-// wraps (rep enumeration, stabilizer table, per-irrep sector build)
-// are host-side, single-shot, and upstream of every backend, so a
-// process-global text channel is the right weight.
+// scope). The phases it wraps (rep enumeration, stabilizer table,
+// per-irrep sector build) are host-side, single-shot, and upstream of
+// every backend.
 // =============================================================================
 
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 
 #include <ed/config/env_registry.h>
+#include <ed/core/log.h>
 
 namespace ed::symmetry {
 
@@ -48,12 +47,10 @@ public:
                              std::chrono::steady_clock::now() - t0_)
                              .count();
         if (items_ != kNoItems) {
-            std::fprintf(stderr,
-                         "[sym-profile] %s: %.3f s  (%llu items)\n",
-                         phase_, s,
-                         static_cast<unsigned long long>(items_));
+            ED_LOG(Info, "[sym-profile] %s: %.3f s  (%llu items)", phase_, s,
+                   static_cast<unsigned long long>(items_));
         } else {
-            std::fprintf(stderr, "[sym-profile] %s: %.3f s\n", phase_, s);
+            ED_LOG(Info, "[sym-profile] %s: %.3f s", phase_, s);
         }
     }
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Union
 
 from . import _core as _core
+from . import _log
 from ._core import Operator  # type: ignore[attr-defined]
 
 Permutation = list[int]
@@ -99,8 +100,6 @@ def _translation_autos_from_lattice(
     lattice: Any,
     filter_translation_automorphisms,
     num_sites: int,
-    *,
-    verbose: bool,
 ) -> list[Permutation]:
     """Convert ``Lattice`` into the dict + list[np.array] layout the
     translation filter expects, and apply it."""
@@ -137,16 +136,9 @@ def _translation_autos_from_lattice(
     for i in sites:
         sites[i]["position"] = sites[i]["position"][:lat_dim]
 
-    if verbose:
-        return filter_translation_automorphisms(
-            all_automorphisms, sites, nonzero_lat, cluster_dims
-        )
-    import contextlib, io  # noqa: E401
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        return filter_translation_automorphisms(
-            all_automorphisms, sites, nonzero_lat, cluster_dims
-        )
+    return filter_translation_automorphisms(
+        all_automorphisms, sites, nonzero_lat, cluster_dims
+    )
 
 
 def _infer_cluster_dims(positions: list[Any],
@@ -579,8 +571,8 @@ def _find_symmetries_impl(
         clusters where the full search would be expensive. Requires
         ``lattice`` to be provided.
     verbose : bool, optional
-        If True (default), the underlying automorphism finder prints
-        per-stage progress. Set to False to silence it.
+        True (default): the cost notes are logged at Info, else at Debug
+        (see :func:`qed.set_log_level`; nothing is printed either way).
 
     Returns
     -------
@@ -598,21 +590,21 @@ def _find_symmetries_impl(
     # 0. Pre-flight cost note. The colored-graph automorphism search is
     #     polynomial in the operator's term graph but the Schreier-Sims
     #     enumeration of the resulting permutation group can blow up
-    #     for large highly-symmetric clusters. Surface a one-line note
-    #     when the user is asking for something potentially expensive.
+    #     for large highly-symmetric clusters. Log a one-line note (Info
+    #     with verbose, else Debug) when the request is potentially expensive.
     # ------------------------------------------------------------------
-    if verbose:
-        if num_sites >= 28:
-            print(f"[qed.find_symmetries] N={num_sites}: full Hilbert dim "
-                  f"= 2^{num_sites} = {1 << num_sites:_d}. The automorphism "
-                  "search is on the term graph (cheap), but enumerating the "
-                  "resulting group can take seconds-to-minutes for large "
-                  "clusters with rich point-group symmetry. Pass "
-                  "translation_only=True (with lattice=) to skip the full "
-                  "search if you only need k-point projection.")
-        elif num_sites >= 20:
-            print(f"[qed.find_symmetries] N={num_sites}: searching the "
-                  f"automorphism group (cheap; should finish in <1 s).")
+    note = _log.INFO if verbose else _log.DEBUG
+    if num_sites >= 28:
+        _log.log(note, f"[qed.find_symmetries] N={num_sites}: full Hilbert dim "
+                 f"= 2^{num_sites} = {1 << num_sites:_d}. The automorphism "
+                 "search is on the term graph (cheap), but enumerating the "
+                 "resulting group can take seconds-to-minutes for large "
+                 "clusters with rich point-group symmetry. Pass "
+                 "translation_only=True (with lattice=) to skip the full "
+                 "search if you only need k-point projection.")
+    elif num_sites >= 20:
+        _log.log(note, f"[qed.find_symmetries] N={num_sites}: searching the "
+                 "automorphism group (cheap; should finish in <1 s).")
 
     # ------------------------------------------------------------------
     # 1. U(1) Sz sectors.
@@ -666,23 +658,11 @@ def _find_symmetries_impl(
             "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
 
-    # The automorphism pipeline prints quite a lot. The cheapest way to silence
-    # it is to redirect stdout for the duration of the call.
-    if verbose:
-        all_automorphisms = _run_full_automorphism_pipeline(
-            vertex_weights, edges,
-            construct_colored_graph, autgrp,
-            AutomorphismFinder, filter_hamiltonian_automorphisms,
-        )
-    else:
-        import contextlib, io  # noqa: E401
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            all_automorphisms = _run_full_automorphism_pipeline(
-                vertex_weights, edges,
-                construct_colored_graph, autgrp,
-                AutomorphismFinder, filter_hamiltonian_automorphisms,
-            )
+    all_automorphisms = _run_full_automorphism_pipeline(
+        vertex_weights, edges,
+        construct_colored_graph, autgrp,
+        AutomorphismFinder, filter_hamiltonian_automorphisms,
+    )
 
     all_automorphisms = _keep_hamiltonian_symmetries(operator, all_automorphisms)
     # 3a. Translation-only generator set (when a lattice is provided).
@@ -690,7 +670,6 @@ def _find_symmetries_impl(
         translation_autos = _translation_autos_from_lattice(
             all_automorphisms, lattice,
             filter_translation_automorphisms, num_sites,
-            verbose=verbose,
         )
         if translation_autos:
             translation_set = _make_generator_set_from_clique(
@@ -726,12 +705,10 @@ def _find_symmetries_impl(
             from ._groups import greedy_maximal_abelian
             clique = [list(pp) for pp in
                       greedy_maximal_abelian(all_automorphisms)]
-            if verbose:
-                print(f"[qed.find_symmetries] |Aut| = "
-                      f"{len(all_automorphisms)} exceeds clique_budget = "
-                      f"{clique_budget}; greedy maximal-abelian clique "
-                      f"(|A| = {len(clique)}), full residue retained as "
-                      "coset-representative star_perms")
+            _log.log(note, "[qed.find_symmetries] |Aut| = %d exceeds clique_budget = %d; greedy "
+                     "maximal-abelian clique (|A| = %d), full residue retained as "
+                     "coset-representative star_perms",
+                     len(all_automorphisms), clique_budget, len(clique))
         else:
             clique_indices = AutomorphismCliqueAnalyzer().find_maximum_clique(
                 all_automorphisms

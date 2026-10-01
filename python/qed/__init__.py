@@ -13,6 +13,11 @@ block by block on the CPU or a GPU:
 
 Operators come from :class:`qed.input.HamiltonianBuilder` or :class:`qed.Operator`.
 
+A run that goes well prints nothing; warnings arrive as :class:`qed.errors.QEDWarning`.
+:func:`set_log_level` (or ``QED_LOG_LEVEL``) routes the engine's progress into
+``logging.getLogger("qed")`` or straight to a stream. Errors are the classes of
+:mod:`qed.errors`, each also the builtin it refines (``ValueError``, ...).
+
     >>> import qed
     >>> b = qed.input.HamiltonianBuilder(6)
     >>> b.heisenberg(bonds=[(i, (i + 1) % 6) for i in range(6)], J=1.0)   # doctest: +SKIP
@@ -32,6 +37,12 @@ __path__ = _extend_package_path(__path__, _os.path.dirname(_os.path.abspath(__fi
 
 from . import _core as _core
 from ._core import OP_SMINUS, OP_SPLUS, OP_SZ, Operator, has_cuda_build
+
+from . import errors  # qed.errors: QEDError and the classes the engine raises
+from ._log import configure_from_env as _configure_log_from_env
+from ._log import get_log_level, set_log_level
+
+_configure_log_from_env()
 
 from . import dssf  # observable builders for dynamics
 from . import input  # lattice + Hamiltonian DSL
@@ -89,7 +100,7 @@ __all__ = [
     "Symmetry", "eigs", "EigResult", "load_eigs", "spectrum", "SpectrumResult", "thermal", "ThermalResult",
     "dynamics", "DynamicsResult", "expect", "ExpectResult",
     "find_symmetries", "GeneratorSet", "SymmetryReport",
-    "has_cuda_build", "debug_env", "env_snapshot",
+    "has_cuda_build", "debug_env", "env_snapshot", "set_log_level", "get_log_level", "errors",
     "dssf", "input", "lattice", "symmetry",
     "__version__",
 ]

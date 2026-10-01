@@ -29,7 +29,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -37,6 +36,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <ed/core/log.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec_batcher.h>
@@ -373,8 +373,8 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         }
         if (out.ritz.empty()) {
             // A failed sample is dropped, not fatal.
-            std::cerr << "  Warning: Tridiagonal diagonalization failed "
-                         "(sample " << s << ")" << std::endl;
+            ED_LOG(Warn, "FTLM: tridiagonal diagonalization failed; sample %zu dropped",
+                   static_cast<std::size_t>(s));
             return out;
         }
         // ---- 4. Host-side thermodynamics for this sample ----

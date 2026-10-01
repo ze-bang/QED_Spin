@@ -6,8 +6,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from .. import _core
+from .. import _core, _log
 from . import _device
+from ..errors import InvalidRequest
 from .symmetry import Symmetry
 
 _METHODS = {"exact", "ftlm", "mtpq"}
@@ -17,7 +18,8 @@ _METHODS = {"exact", "ftlm", "mtpq"}
 class ThermalResult:
     """Thermodynamics per temperature. ``M`` and ``chi`` (magnetisation per system and
     susceptibility per site) are present when H conserves Sz. ``O``: <O>(T) per requested
-    observable, a complex array [len(observables), len(T)] (None without observables)."""
+    observable, a complex array [len(observables), len(T)] (None without observables).
+    ``diagnostics``: (code, message) pairs for fallbacks the run took."""
 
     T: np.ndarray
     E: np.ndarray
@@ -33,8 +35,10 @@ class ThermalResult:
     blocks: int
     device_blocks: int
     symmetry: Symmetry = field(repr=False)
+    diagnostics: list = field(default_factory=list)
 
 
+@_log.replays
 def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
             samples: int = 40, krylov: Optional[int] = None, exact_states: int = 0,
             seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None) -> ThermalResult:
@@ -53,7 +57,7 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     """
     key = str(method).lower()
     if key not in _METHODS:
-        raise ValueError(f"method must be one of {sorted(_METHODS)}, got {method!r}")
+        raise InvalidRequest(f"method must be one of {sorted(_METHODS)}, got {method!r}")
     sym = Symmetry.auto() if sym is None else sym
     t = _core.sectors.ThermalSpec()
     t.method = {"exact": _core.sectors.ThermalMethod.Exact, "ftlm": _core.sectors.ThermalMethod.FTLM,
@@ -66,10 +70,12 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     t.device = _device.resolve(device)
     ops = [] if observables is None else list(observables)
     t.observables = ops
-    r = _core.sectors.thermal(H, int(H.num_sites), sym.resolve(H), t)
+    diagnostics: list = []
+    r = _core.sectors.thermal(H, int(H.num_sites), sym.resolve(H, diagnostics), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
     return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), S=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
                          M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,
                          O=np.asarray(r.O, complex) if ops else None,
                          method=key, e0=float(r.e0), blocks=int(r.blocks),
-                         device_blocks=int(r.device_blocks), symmetry=sym)
+                         device_blocks=int(r.device_blocks), symmetry=sym,
+                         diagnostics=diagnostics + [tuple(x) for x in r.diagnostics])

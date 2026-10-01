@@ -361,8 +361,10 @@ void walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::Li
             });
         });
         if (!hit) continue;
+        const auto t_build = std::chrono::steady_clock::now();
         StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt, false,
                                          nullptr, nullptr, nullptr);
+        sb.t_build = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_build).count();
         sb.info.momentum = momentum_of(k0);
         if (!s.only_irrep_chars.empty())
             sb.blocks.erase(std::remove_if(sb.blocks.begin(), sb.blocks.end(), [&](const auto& bi) {

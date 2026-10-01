@@ -2,6 +2,7 @@
 degeneracy window, refusal of symmetries H does not have, and the argument checks."""
 from __future__ import annotations
 
+import logging
 import math
 from fractions import Fraction
 
@@ -95,7 +96,9 @@ def test_auto_symmetry_without_pynauty_warns_and_continues(monkeypatch):
     monkeypatch.setattr(disc, "find_symmetries", no_pynauty)
     H = _ring(6)
     with pytest.warns(RuntimeWarning, match="without spatial"):
-        e = qed.eigs(H, 1).energies[0]
+        r = qed.eigs(H, 1)
+    assert [code for code, _ in r.diagnostics] == ["auto_spatial_skipped"]
+    e = r.energies[0]
     assert abs(e - np.min(qed.spectrum(H, sym=qed.Symmetry.none()).energies)) < 1e-10
 
 
@@ -205,7 +208,7 @@ def test_thermal_observables_need_exact_or_ftlm():
         qed.thermal(H, [1.0], method="ftlm", exact_states=4, observables=[bond])
 
 
-def test_group_sectors_are_built_without_the_momentum_sector(capfd, monkeypatch):
+def test_group_sectors_are_built_without_the_momentum_sector(caplog, monkeypatch):
     # D_12 ring at every Sz (flip at half filling): stars with a co-group take the group-sector
     # path, which sizes the momentum sector by Burnside instead of building it; a declined star
     # builds it and cross-checks that count. The spectrum must be the plain one.
@@ -214,8 +217,13 @@ def test_group_sectors_are_built_without_the_momentum_sector(capfd, monkeypatch)
     T = _translations(n)[0]
     R = [(-i) % n for i in range(n)]
     monkeypatch.setenv("ED_SYM_PROFILE", "1")
-    got = qed.spectrum(H, sym=qed.Symmetry(spatial=[T, R])).energies
-    err = capfd.readouterr().err
+    qed.set_log_level("info")
+    try:
+        with caplog.at_level(logging.INFO, logger="qed"):
+            got = qed.spectrum(H, sym=qed.Symmetry(spatial=[T, R])).energies
+    finally:
+        qed.set_log_level("off")
+    err = caplog.text
     assert "group-sector path," in err
     assert "do not tile" not in err
     monkeypatch.delenv("ED_SYM_PROFILE")

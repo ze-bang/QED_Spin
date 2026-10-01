@@ -70,7 +70,7 @@
 #include <limits>
 #include <cstdlib>
 #include <filesystem>
-#include <iostream>
+#include <ed/core/log.h>
 #include <random>
 #include <stdexcept>
 #include <type_traits>  // std::is_same_v

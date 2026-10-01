@@ -6,8 +6,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from .. import _core
+from .. import _core, _log
 from . import _device
+from ..errors import InvalidRequest
 from .symmetry import Symmetry
 
 
@@ -15,7 +16,7 @@ from .symmetry import Symmetry
 class DynamicsResult:
     """``S[i]`` is S(omega) at temperature ``T[i]``; at T = 0 ``T`` is empty and ``S`` has one
     row. omega is measured from the ground-state energy at T = 0 and is the transferred
-    energy at T > 0."""
+    energy at T > 0. ``diagnostics``: (code, message) pairs for fallbacks the run took."""
 
     omega: np.ndarray
     T: np.ndarray
@@ -24,8 +25,10 @@ class DynamicsResult:
     ground_manifold: int
     device_blocks: int
     symmetry: Symmetry = field(repr=False)
+    diagnostics: list = field(default_factory=list)
 
 
+@_log.replays
 def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
              T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
              krylov: int = 200, samples: int = 30, seed: int = 0,
@@ -42,13 +45,15 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.eta = float(eta)
     d.temperatures = [] if T is None else [float(t) for t in (np.atleast_1d(T))]
     if any(t <= 0 for t in d.temperatures):
-        raise ValueError("temperatures must be positive; use T=None for the ground state")
+        raise InvalidRequest("temperatures must be positive; use T=None for the ground state")
     d.krylov = int(krylov)
     d.samples = int(samples)
     d.seed = int(seed)
     d.degeneracy_tol = float(degeneracy_tol)
     d.device = _device.resolve(device)
-    r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H), O, d)
+    diagnostics: list = []
+    r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H, diagnostics), O, d)
     return DynamicsResult(omega=np.asarray(r.omega), T=np.asarray(r.T), S=np.asarray(r.S),
                           e0=float(r.e0), ground_manifold=int(r.ground_manifold),
-                          device_blocks=int(r.device_blocks), symmetry=sym)
+                          device_blocks=int(r.device_blocks), symmetry=sym,
+                          diagnostics=diagnostics + [tuple(x) for x in r.diagnostics])

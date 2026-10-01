@@ -272,14 +272,11 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
     if (auto hit = reg.find(key)) {
         if (verify(*hit)) {
             if (sym_profile_enabled())
-                std::fprintf(stderr,
-                             "[sym-profile] orbit-table registry HIT (%zu reps)\n",
-                             hit->size());
+                ED_LOG(Info, "[sym-profile] orbit-table registry HIT (%zu reps)", hit->size());
             return hit;
         }
-        std::fprintf(stderr,
-                     "[symmetry-cache] orbit-table registry hit FAILED physical "
-                     "verification (key collision or stale entry) -- rebuilding\n");
+        ED_LOG(Warn, "[symmetry-cache] orbit-table registry hit FAILED physical "
+                     "verification (key collision or stale entry) -- rebuilding");
         reg.erase(key);
     }
     // ED_SYM_CACHE_DIR is honored HERE, at the single choke point, because
@@ -293,15 +290,12 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
     if (auto disk = load_orbit_table(key, dir)) {
         if (verify(*disk)) {
             if (sym_profile_enabled())
-                std::fprintf(stderr,
-                             "[sym-profile] orbit-table disk HIT (%zu reps)\n",
-                             disk->size());
+                ED_LOG(Info, "[sym-profile] orbit-table disk HIT (%zu reps)", disk->size());
             reg.insert(disk);
             return disk;
         }
-        std::fprintf(stderr,
-                     "[symmetry-cache] orbit-table disk hit FAILED physical "
-                     "verification -- rebuilding (file will be overwritten)\n");
+        ED_LOG(Warn, "[symmetry-cache] orbit-table disk hit FAILED physical "
+                     "verification -- rebuilding (file will be overwritten)");
     }
     auto tab = std::make_shared<OrbitTable>(build());
     if (!dir.empty()) {

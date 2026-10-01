@@ -26,6 +26,7 @@
 
 #include <ed/solvers/little_group_solve.h>
 #include <ed/config/env_registry.h>              // typed environment accessors
+#include <ed/core/log.h>                         // ED_LOG
 #include <ed/solvers/little_group_blocks.h>      // owned block handles
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
@@ -186,43 +187,20 @@ public:
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        // The production regime is build-the-reduced-block-ONCE + SpMV per
-        // apply (the RepReducedCsr default); the arithmetic-regeneration
-        // gather walk is the memory-budget fallback only. Without this,
-        // every Lanczos iteration re-derives the matrix elements and
-        // the gather cost eats the entire projection win.
-        // force_gpu_ (GS-DSSF GPU lane): an explicit GPU
-        // request tries the device rep-gather FIRST (dimension floor
-        // dropped) instead of letting the reduced CSR short-circuit it;
-        // if the device build fails the CSR is still built as fallback.
-        if (!force_gpu_) {
-            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
-            if (csr_) {
-                csr_->spmv(in, out);
-                return;
-            }
-        }
-        // GPU rep gather: when the reduced CSR is over budget
-        // (the 36-site regime: ~0.5 TB per momentum block) the arithmetic
-        // gather walk is the only representation, and it is exactly the
-        // workload the resident device mirror was built for. Engage it for
-        // large blocks when a device is present; any construction failure
-        // falls back to the CPU walk permanently (the engine's graceful-
-        // degradation contract). ED_SYM_LG_GPU=0 vetoes, =1 drops the
-        // dimension floor (validation runs on small blocks).
-        std::call_once(gpu_once_, [this] { maybe_build_gpu_(); });
-        if (gpu_fn_) {
+        ensure_lane_();
+        // Two clock reads per apply (tens of ns) against a block above the
+        // dense crossover: always on, so every block can report s/apply.
+        const auto t0 = std::chrono::steady_clock::now();
+        if (gpu_fn_ && (force_gpu_ || !csr_))
             gpu_fn_(in, out, n);
-            return;
-        }
-        if (force_gpu_) {   // device declined: reduced CSR is the fallback
-            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
-            if (csr_) {
-                csr_->spmv(in, out);
-                return;
-            }
-        }
-        backend_->apply_complex(&tv_, in, out, n);
+        else if (csr_)
+            csr_->spmv(in, out);
+        else
+            backend_->apply_complex(&tv_, in, out, n);
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        applies_.fetch_add(1, std::memory_order_relaxed);
+        apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
     }
     [[nodiscard]] std::size_t dim() const override { return rd_->reps.size(); }
     [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
@@ -276,6 +254,34 @@ public:
     }
 
 private:
+    // Choose (once) the representation apply() uses. The production regime is
+    // build-the-reduced-block-ONCE + SpMV per apply (the RepReducedCsr
+    // default); the arithmetic-regeneration gather walk is the memory-budget
+    // fallback only. Without this, every Lanczos iteration re-derives the
+    // matrix elements and the gather cost eats the entire projection win.
+    // force_gpu_ (GS-DSSF GPU lane): an explicit GPU request tries the device
+    // rep-gather FIRST (dimension floor dropped) instead of letting the
+    // reduced CSR short-circuit it; if the device build fails the CSR is still
+    // built as fallback.
+    // GPU rep gather: when the reduced CSR is over budget (the 36-site
+    // regime: ~0.5 TB per momentum block) the arithmetic gather walk is the
+    // only representation, and it is exactly the workload the resident device
+    // mirror was built for. Engage it for large blocks when a device is
+    // present; any construction failure falls back to the CPU walk
+    // permanently (the engine's graceful-degradation contract).
+    // ED_SYM_LG_GPU=0 vetoes, =1 drops the dimension floor (validation runs
+    // on small blocks).
+    void ensure_lane_() const {
+        if (!force_gpu_) {
+            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+            if (csr_) return;
+        }
+        std::call_once(gpu_once_, [this] { maybe_build_gpu_(); });
+        if (gpu_fn_ || !force_gpu_) return;
+        // device declined: reduced CSR is the fallback
+        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+    }
+
     // Lazily build the reduced sector matrix when (a) the policy hook
     // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 /
     // ED_SYM_REP=0 fall back to the gather walk) and (b) an UPPER-BOUND
@@ -308,12 +314,14 @@ private:
             if (per_row >= terms_per_row || !ed::planner::sector_csr_within_budget(dim, per_row))
                 return;
         }
+        const auto t0 = std::chrono::steady_clock::now();
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             reduced_csr());
+        csr_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (ed::env::flag("ED_SYM_PROFILE", false)) {
-            std::fprintf(stderr,
+            ED_LOG(Info,
                          "[sym_profile] little-group block dim=%llu: "
-                         "reduced CSR engaged (nnz=%llu)\n",
+                         "reduced CSR engaged (nnz=%llu)",
                          static_cast<unsigned long long>(dim),
                          static_cast<unsigned long long>(csr_->nnz()));
         }
@@ -331,17 +339,19 @@ private:
         if (!force && rd_->reps.size() < (std::size_t{1} << 20)) return;
         if (!ed::have_cuda()) return;
         try {
+            const auto t0 = std::chrono::steady_clock::now();
             gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
                 *rd_, tv_.spin_l, terms_);
+            gpu_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (ed::env::flag("ED_SYM_PROFILE", false)) {
-                std::fprintf(stderr,
+                ED_LOG(Info,
                              "[sym_profile] little-group block dim=%zu: "
-                             "GPU rep gather engaged\n", rd_->reps.size());
+                             "GPU rep gather engaged", rd_->reps.size());
             }
         } catch (const std::exception& e) {
-            std::fprintf(stderr,
+            ED_LOG(Warn,
                          "[little_group] GPU rep gather declined (%s); "
-                         "using the CPU walk\n", e.what());
+                         "using the CPU walk", e.what());
             gpu_fn_ = nullptr;
         }
     }
@@ -365,7 +375,32 @@ private:
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
     bool                                           force_gpu_ = false;
     bool                                           device_ok_ = false;
+    // Per-operator counters (relaxed: applies may run concurrently).
+    mutable std::atomic<std::uint64_t>             applies_{0};
+    mutable std::atomic<std::uint64_t>             apply_ns_{0};
+    mutable double                                 csr_build_s_ = 0.0;
+    mutable double                                 gpu_build_s_ = 0.0;
 public:
+    /// Host-side applies so far, and their total seconds (representation builds excluded).
+    [[nodiscard]] std::uint64_t applies() const noexcept { return applies_.load(std::memory_order_relaxed); }
+    [[nodiscard]] double apply_seconds() const noexcept {
+        return 1e-9 * static_cast<double>(apply_ns_.load(std::memory_order_relaxed));
+    }
+    /// Seconds spent building the representation apply() engaged (reduced CSR or device mirror).
+    [[nodiscard]] double build_seconds() const noexcept { return csr_build_s_ + gpu_build_s_; }
+    [[nodiscard]] std::uint64_t csr_nnz() const noexcept { return csr_ ? csr_->nnz() : 0; }
+    [[nodiscard]] std::uint64_t csr_bytes() const noexcept {
+        if (!csr_) return 0;
+        return csr_->row_ptr.size() * sizeof(std::uint64_t) + csr_->col_idx.size() * sizeof(std::uint32_t)
+             + csr_->val.size() * sizeof(Complex);
+    }
+    /// The representation host applies use: "csr", "gpu-gather" (device kernel, host
+    /// vectors), "walk" (CSR-free gather), or "none" before the first apply.
+    [[nodiscard]] const char* lane() const noexcept {
+        if (gpu_fn_ && (force_gpu_ || !csr_)) return "gpu-gather";
+        if (csr_) return "csr";
+        return applies() > 0 ? "walk" : "none";
+    }
     /// Did the GPU rep-gather actually engage for this sector? Lazy, so this
     /// is only meaningful after the first apply(). Reported rather than
     /// inferred: the gate (reduced-CSR declined AND >= 2^20 reps AND a device
@@ -420,10 +455,10 @@ struct BlockApplyProfile {
         if (!on || calls == 0) return;
         const double host = t_zero + t_scatter + t_gather;
         const double tot  = host + t_hk;
-        std::fprintf(stderr,
+        ED_LOG(Info,
             "[sym_profile] projected block dim_k0=%zu applies=%llu: "
             "zero=%.3fs scatter=%.3fs H=%.3fs gather=%.3fs "
-            "(non-H %.1f%% of %.3fs)\n",
+            "(non-H %.1f%% of %.3fs)",
             dim, static_cast<unsigned long long>(calls),
             t_zero, t_scatter, t_hk, t_gather,
             tot > 0.0 ? 100.0 * host / tot : 0.0, tot);
@@ -616,6 +651,7 @@ struct EngineContext {
     bool                                 flip_half = false;
     std::uint64_t                        flip_mask = 0;
     int                                  n_irr_raw = 0;
+    double                               t_orbit_table = 0.0;   // seconds to acquire otab (+ srl)
 
     [[nodiscard]] std::size_t nA_ext() const noexcept {
         return A.size() * (flip_half ? 2u : 1u);
@@ -649,6 +685,8 @@ struct StarBuild {
     std::vector<std::shared_ptr<LittleGroupBlock::Impl>> blocks;
     LittleGroupStarInfo               info;
     std::shared_ptr<RepSectorMatVec>  hk;   // null <=> empty sector
+    double t_orbit = 0.0;   // seconds in the star's own orbit table (group-sector path)
+    double t_build = 0.0;   // seconds in build_star_blocks (set by the star walk)
 };
 
 // ---- helpers defined in the engine translation units ----------------------
