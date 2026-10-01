@@ -13,7 +13,9 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/sectors/dynamics.h>
 #include <ed/symmetry/casimir_projector.h>
+#include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/su2_dims.h>
+#include <ed/symmetry/time_reversal.h>
 #ifdef WITH_CUDA
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/matvec/device_csr.h>
@@ -31,17 +33,26 @@ using namespace ed::solvers::lg_detail;
 namespace {
 
 // Momentum sectors only: O is not invariant under the point group, time reversal or
-// the flip, so none of them may fold sectors together.
+// the flip, so none of them may fold sectors together. A momentum selection restricts the
+// source states (the targets are wherever O leads); the selections that name point-group
+// blocks have nothing to select among momentum sectors.
 Spec unfolded(const Spec& s) {
+    if (!s.only_k0.empty() || !s.only_irrep.empty() || !s.only_irrep_chars.empty())
+        throw ed::Unsupported("dynamics: the source states are selected by Sz and momentum only; k0, irrep "
+                              "and irrep_character name point-group blocks, which dynamics does not form");
     Spec u = s;
     u.residues.clear();
     u.spin_flip = 0;
     u.time_reversal = 0;
-    u.only_k0.clear();
-    u.only_irrep.clear();
-    u.only_momentum.clear();
-    u.only_irrep_chars.clear();
     return u;
+}
+
+// Whether a momentum sector passes the spec's momentum selection.
+bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
+    return meets(u.only_momentum, [&](int i) -> std::optional<Complex> {
+        if (i >= 0 && static_cast<std::size_t>(i) < rd.characters.size()) return rd.characters[static_cast<std::size_t>(i)];
+        return std::nullopt;
+    });
 }
 
 // Changes of the set-bit count (a set bit is a down spin) the terms of O produce.
@@ -238,6 +249,19 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
 DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const ::Operator& O,
                         const DynamicsSpec& d) {
     if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
+    // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
+    const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
+    for (double T : d.temperatures)
+        if (!(T > 0.0) || !std::isfinite(T))
+            throw ed::InvalidRequest("dynamics: temperatures must be finite and positive; T=None (an empty "
+                                     "list) is the ground state");
+    if (distinct.size() != d.temperatures.size())
+        throw ed::InvalidRequest("dynamics: a temperature is listed twice");
+    // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
+    if (s.spin_flip == 1 && !ed::symmetry::hamiltonian_is_spin_flip_symmetric(term_soa(H)))
+        throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");
+    if (s.time_reversal == 1 && !ed::symmetry::hamiltonian_is_real(term_soa(H)))
+        throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
     const auto shifts = n_up_shifts(O);
@@ -305,8 +329,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         cf.krylov_dim = std::max<std::size_t>(d.krylov, 2);
         cf.broadening = d.eta;
         cf.tolerance  = 1e-12;
-        // The kernel reads a zero shift as "choose one"; E0 = 0 must still be E0.
-        cf.energy_shift = out.e0 != 0.0 ? out.e0 : std::numeric_limits<double>::denorm_min();
+        cf.energy_shift = out.e0;
         std::set<std::pair<int, int>> reached;
         for (const auto& [v, parity] : states) {
             const Subspace src{v.basis->n_up, parity, 1};
@@ -362,6 +385,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
 
     // ---- T > 0: FTLM over every source sector ----------------------------------------
     out.T = d.temperatures;
+    detail::note_restricted_ensemble(s, out.diagnostics, "dynamics");
     const std::size_t nT = d.temperatures.size(), nW = d.omega.size();
     const auto t_all = std::chrono::steady_clock::now();
     const std::uint64_t seed0 = d.seed ? d.seed : std::random_device{}();
@@ -407,6 +431,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     std::uint64_t multiplets = 0;
     for (const Subspace& sub : source_subs) {
         for (const Target& src : sectors_of(sub)) {
+            if (!selected(u, *src.rd)) continue;
             Job j{&src, sub, {}, nullptr, nullptr, nullptr, 0};
             if (s.two_S >= 0) {
                 j.tower_dim = tower_dim_of(src);
@@ -430,7 +455,10 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
             jobs.push_back(std::move(j));
         }
     }
-    if (s.two_S >= 0 && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
+    if (!u.only_momentum.empty() && jobs.empty())
+        throw ed::EmptySelection("dynamics: the selection matches no source sector: no momentum sector of the "
+                                 "requested Sz sectors has that momentum");
+    if (s.two_S >= 0 && u.only_momentum.empty() && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
         throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
                                  + std::to_string(s.two_S) + "/2 multiplets, expected "
                                  + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));

@@ -354,6 +354,25 @@ inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* 
                                  "requested Sz sectors has that momentum, star index or little-group irrep");
 }
 
+/// A thermal average under a spec that restricts the sectors (a total spin, one Sz sector or
+/// parity, a momentum or irrep selection) describes that restricted ensemble, not the canonical
+/// one: a ("restricted_ensemble", ...) diagnostic says which. Nothing when nothing is restricted.
+inline void note_restricted_ensemble(const Spec& s, Diagnostics& out, const char* verb) {
+    std::vector<std::string> parts;
+    if (s.two_S >= 0)
+        parts.push_back("total spin S = " + (s.two_S % 2 ? std::to_string(s.two_S) + "/2"
+                                                          : std::to_string(s.two_S / 2)));
+    if (s.n_up >= 0) parts.push_back("one Sz sector");
+    if (s.sz_parity >= 0) parts.push_back("one Sz parity");
+    if (!s.only_k0.empty() || !s.only_momentum.empty()) parts.push_back("the selected momenta");
+    if (!s.only_irrep.empty() || !s.only_irrep_chars.empty()) parts.push_back("the selected irreps");
+    if (parts.empty()) return;
+    std::string what = parts.front();
+    for (std::size_t i = 1; i < parts.size(); ++i) what += ", " + parts[i];
+    out.emplace_back("restricted_ensemble", std::string(verb) + ": the averages run over " + what +
+                                                " only: a restricted ensemble, not the canonical one");
+}
+
 /// fn(cx, tr_on, star) for every star of one subspace, one star resident at a time. Returns the
 /// number of blocks handed to fn, after the selection.
 template <class Fn>

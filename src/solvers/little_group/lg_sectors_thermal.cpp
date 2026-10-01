@@ -24,7 +24,8 @@ namespace {
 struct BlockThermo {
     std::vector<double> lnZ, E, V;   // ln Z, <E>, and the central variance <(E - <E>)^2>
     double weight = 1.0;       // multiplicity
-    double sz = 0.0;           // magnetisation of the block's subspace
+    double sz = 0.0;           // <Sz> of the block's states (its subspace's magnetisation)
+    double sz2 = 0.0;          // <Sz^2> of the block's states
     bool   mirrored = false;   // holds +sz and -sz in equal parts
     std::vector<std::vector<Complex>> O;   // <O>_b per observable and temperature
 };
@@ -246,14 +247,22 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     }
                 }
                 b.weight   = static_cast<double>(bop.multiplicity);
-                b.sz       = sub.n_up >= 0 ? 0.5 * (n_sites - 2 * sub.n_up) : 0.0;
-                b.mirrored = sub.mirror == 2;
+                if (s.two_S >= 0) {
+                    // Whole multiplets: every Sz from -S to S in equal parts.
+                    const double S = 0.5 * s.two_S;
+                    b.sz = 0.0; b.sz2 = S * (S + 1.0) / 3.0; b.mirrored = false;
+                } else {
+                    b.sz       = sub.n_up >= 0 ? 0.5 * (n_sites - 2 * sub.n_up) : 0.0;
+                    b.sz2      = b.sz * b.sz;
+                    b.mirrored = sub.mirror == 2;
+                }
                 out.total_dim += bi->tag.dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 blocks.push_back(std::move(b));
             }
         });
     }
     detail::require_some_block(s, n_blocks, "thermal");
+    detail::note_restricted_ensemble(s, out.diagnostics, "thermal");
     if (!deferred.empty()) {
         // Warm the lazily built operators (reduced CSR, projector) before going parallel.
         for (const auto& d : deferred) {
@@ -307,7 +316,8 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             if (ev.empty()) { empty[p.block] = true; continue; }
             out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
             BlockThermo b = exact_block(ev, beta);
-            b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.mirrored = blocks[p.block].mirrored;
+            b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.sz2 = blocks[p.block].sz2;
+            b.mirrored = blocks[p.block].mirrored;
             blocks[p.block] = std::move(b);
         }
         std::vector<BlockThermo> kept;
@@ -333,7 +343,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             p[j] = std::exp(std::log(b.weight) + b.lnZ[i] - mx);
             z += p[j]; e += p[j] * b.E[i];
             if (!b.mirrored) m += p[j] * b.sz;
-            m2 += p[j] * b.sz * b.sz;
+            m2 += p[j] * b.sz2;
             for (std::size_t k = 0; k < n_obs; ++k) ob[k] += p[j] * b.O[k][i];
         }
         e /= z; m /= z; m2 /= z;

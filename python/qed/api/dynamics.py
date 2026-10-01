@@ -36,16 +36,24 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.
 
     ``T=None``: the ground state, averaged over a degenerate ground manifold.
-    ``T=[...]``: finite-temperature Lanczos with ``samples`` random vectors per sector.
-    ``O`` may change Sz (S+, S-) and need not share any symmetry of H.
+    ``T=[...]``: finite-temperature Lanczos with ``samples`` random vectors per sector; a
+    temperature listed twice gets the same row twice.
+    ``O`` may change Sz (S+, S-) and need not share any symmetry of H, so dynamics works in
+    momentum sectors. ``sym.select(sz=..., momentum=...)`` restricts the source states (the
+    ground state of those sectors, or their restricted ensemble at T > 0, flagged in
+    ``diagnostics``); ``k0``, ``irrep`` and ``irrep_character`` name point-group blocks and
+    raise :class:`qed.errors.Unsupported`. ``spin_flip`` / ``time_reversal='require'`` check
+    that H has the symmetry.
     """
     sym = Symmetry.auto() if sym is None else sym
     d = _core.sectors.DynamicsSpec()
     d.omega = [float(w) for w in omega]
     d.eta = float(eta)
-    d.temperatures = [] if T is None else [float(t) for t in (np.atleast_1d(T))]
-    if any(t <= 0 for t in d.temperatures):
-        raise InvalidRequest("temperatures must be positive; use T=None for the ground state")
+    temps = np.zeros(0) if T is None else np.atleast_1d(np.asarray(T, dtype=float))
+    if not np.all(np.isfinite(temps)) or np.any(temps <= 0):
+        raise InvalidRequest("temperatures must be finite and positive; use T=None for the ground state")
+    unique, rows = np.unique(temps, return_inverse=True)
+    d.temperatures = [float(t) for t in unique]
     d.krylov = int(krylov)
     d.samples = int(samples)
     d.seed = int(seed)
@@ -53,7 +61,10 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.device = _device.resolve(device)
     diagnostics: list = []
     r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H, diagnostics), O, d)
-    return DynamicsResult(omega=np.asarray(r.omega), T=np.asarray(r.T), S=np.asarray(r.S),
+    S = np.asarray(r.S)
+    if len(temps):                       # the caller's temperatures, in the caller's order
+        S = S[rows.reshape(-1)]
+    return DynamicsResult(omega=np.asarray(r.omega), T=temps, S=S,
                           e0=float(r.e0), ground_manifold=int(r.ground_manifold),
                           device_blocks=int(r.device_blocks), symmetry=sym,
                           diagnostics=diagnostics + [tuple(x) for x in r.diagnostics])

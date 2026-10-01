@@ -471,3 +471,92 @@ def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
     for sym in (qed.Symmetry.none(), qed.Symmetry(spatial=None)):
         C = np.asarray(qed.thermal(H, 1.0 / betas, method="exact", sym=sym).C)
         np.testing.assert_allclose(C, exact, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Dynamics and thermal labels (audit C12-dynamics-02/03/11, C11-thermal-03)
+# ---------------------------------------------------------------------------
+
+def _sz_q(n, q):
+    O = qed.Operator(n, 0.5)
+    for j in range(n):
+        O.add_one_body(qed.OP_SZ, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
+    return O
+
+
+def test_a_repeated_temperature_repeats_its_row():
+    n = 6
+    H, O = _heisenberg_ring(n), _sz_q(n, math.pi)
+    omega = np.linspace(-2.0, 3.0, 51)
+    kw = dict(eta=0.1, sym=qed.Symmetry.none(), samples=4, seed=7, krylov=60)
+    one = qed.dynamics(H, O, omega, T=[1.0], **kw)
+    two = qed.dynamics(H, O, omega, T=[1.0, 1.0], **kw)
+    np.testing.assert_array_equal(two.S, np.vstack([one.S[0], one.S[0]]))
+    mixed = qed.dynamics(H, O, omega, T=[1.0, 0.5, 1.0], **kw)
+    assert list(mixed.T) == [1.0, 0.5, 1.0]
+    np.testing.assert_array_equal(mixed.S[2], mixed.S[0])
+    for bad in ([0.0], [float("nan")], [float("inf")]):
+        with pytest.raises(qed.errors.InvalidRequest):
+            qed.dynamics(H, O, omega, T=bad, **kw)
+
+
+def test_omega_is_measured_from_a_zero_ground_energy():
+    # The all-up state of the XX ring has E0 = 0 exactly, and S^-_q makes one magnon of energy
+    # cos q: the pole sits at omega = cos q - E0 (an E0 of 0 was read as "unset").
+    n = 6
+    H = qed.Operator(n, 0.5)
+    for i in range(n):
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.5)
+    q = 2 * math.pi / n
+    O = qed.Operator(n, 0.5)
+    for j in range(n):
+        O.add_one_body(qed.OP_SMINUS, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
+    omega = np.linspace(-1.5, 1.5, 601)
+    sym = qed.Symmetry(spatial=_translations(n), point_group=False, sz=0, spin_flip="off",
+                       time_reversal="off")
+    r = qed.dynamics(H, O, omega, eta=0.02, sym=sym)
+    assert r.e0 == 0.0
+    assert abs(omega[np.argmax(r.S[0])] - math.cos(q)) < 0.006
+
+
+def test_dynamics_selects_its_source_by_momentum():
+    n = 8
+    H, O = _ring(n), _sz_q(n, math.pi)
+    omega = np.linspace(0.0, 4.0, 81)
+    T = tuple(_translations(n)[0])
+    base = qed.Symmetry(spatial=[list(T)], point_group=False, spin_flip="off", time_reversal="off")
+    sel = base.select(momentum={T: Fraction(1, 2)})
+    r_all, r_sel = (qed.dynamics(H, O, omega, sym=s) for s in (base, sel))
+    assert r_sel.e0 == pytest.approx(qed.eigs(H, 1, sym=sel).energies[0], abs=1e-9)
+    assert r_sel.e0 > r_all.e0 + 1e-3 and not np.allclose(r_sel.S[0], r_all.S[0])
+    hot = qed.dynamics(H, O, omega, T=[1.0], sym=sel, samples=4, seed=3, krylov=40)
+    assert "restricted_ensemble" in [c for c, _ in hot.diagnostics]
+    with pytest.raises(qed.errors.EmptySelection):
+        qed.dynamics(H, O, omega, sym=base.select(momentum={T: 0.3}))
+    with pytest.raises(qed.errors.Unsupported):
+        qed.dynamics(H, O, omega, sym=base.select(irrep=[0]))
+    with pytest.raises(qed.errors.InvalidRequest, match="spin_flip"):
+        qed.dynamics(_ring_in_field(n), O, omega,
+                     sym=qed.Symmetry(spatial=[list(T)], point_group=False, spin_flip="require"))
+
+
+def _ring_in_field(n, h=0.1):
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=1.0)
+    b.on_site_field(h)
+    return b.to_operator()
+
+
+def test_thermal_under_total_spin_counts_whole_multiplets():
+    # Every S = 1 multiplet has Sz = -1, 0, 1 in equal parts: M = 0 and chi = beta S(S+1)/(3N)
+    # (they came out as M = S, chi = 0), and the run says it is a restricted ensemble.
+    n, S = 8, 1
+    H = _ring(n)
+    T = np.array([0.5, 1.0, 2.0])
+    r = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None, total_spin=S))
+    np.testing.assert_allclose(r.M, 0.0, atol=1e-14)
+    np.testing.assert_allclose(r.chi, S * (S + 1) / (3 * n * T), rtol=1e-12)
+    assert "restricted_ensemble" in [c for c, _ in r.diagnostics]
+    full = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None))
+    assert "restricted_ensemble" not in [c for c, _ in full.diagnostics]

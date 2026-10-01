@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -35,9 +36,9 @@ using Complex = std::complex<double>;
 struct CfSpectralOptions {
     std::size_t krylov_dim       = 200;
     double      broadening       = 0.05;
-    /// If 0 (default) the kernel auto-detects via the smallest tridiag
-    /// eigenvalue.
-    double      energy_shift     = 0.0;
+    /// The energy omega is measured from (E_0 of the source); unset, the
+    /// smallest eigenvalue of the tridiagonal matrix. Zero is a shift like any other.
+    std::optional<double> energy_shift;
     /// Convergence tolerance for the Lanczos tridiag build.
     double      tolerance        = 1e-12;
     /// Global problem dimension, forwarded as the Lanczos dimension cap.
@@ -76,8 +77,8 @@ struct CfSpectralResult {
 // ApplyH must matvec on the *target* sector (same dim as ``phi_seed``).
 // ``E_shift`` is the energy reference (usually E_0 from the source-sector
 // ground-state solve, so omega-axes line up with the standard
-// S(Q, omega) convention). If ``opts.energy_shift == 0`` the kernel falls
-// back to the auto-detect smallest tridiag eigenvalue.
+// S(Q, omega) convention). Without ``opts.energy_shift`` the kernel uses the
+// smallest eigenvalue of the tridiagonal matrix.
 // ----------------------------------------------------------------------------
 template <typename Backend, typename ApplyH>
 CfSpectralResult cf_spectral_from_vector(Backend&                   be,
@@ -135,8 +136,8 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
         return R;
     }
 
-    double E_shift = opts.energy_shift;
-    if (std::abs(E_shift) < 1e-14) {
+    double E_shift = opts.energy_shift.value_or(0.0);
+    if (!opts.energy_shift) {
         std::vector<double> diag_copy = alpha;
         std::vector<double> offdiag(m > 1 ? m - 1 : 1, 0.0);
         for (std::size_t i = 0; i + 1 < m; ++i) offdiag[i] = beta[i + 1];
