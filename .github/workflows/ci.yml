@@ -327,8 +327,11 @@ jobs:
       - name: Build (needed so generated headers exist)
         run: cmake --build build-tidy --target qed_engine -- -j$(nproc)
 
-      - name: Run clang-tidy on src/dssf and src/core (warnings only)
+      - name: Run clang-tidy on src/basis and src/dynamics (warnings only)
         run: |
+          # Bounded for hosted runners: src/basis and src/dynamics only.
+          shopt -s globstar nullglob
+          files=(src/basis/**/*.cpp src/dynamics/**/*.cpp)|
           # Bounded for hosted runners: src/dssf and src/core only.
           shopt -s globstar nullglob
           files=(src/dssf/**/*.cpp src/core/**/*.cpp)
