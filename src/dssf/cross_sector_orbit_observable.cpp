@@ -264,11 +264,7 @@ void CrossSectorOrbitObservable::build_csr_() const {
                      * static_cast<double>(std::max<std::uint64_t>(src_.group_size(), 1))
                      * static_cast<double>(std::max<std::size_t>(transforms_.size(), 1))
                      * 24.0;
-    double budget_gib = 4.0;
-    if (const char* v = ed::env::raw("ED_XSEC_CSR_BUDGET_GIB")) {
-        const double b = std::atof(v);
-        if (b > 0.0) budget_gib = b;
-    }
+    const double budget_gib = std::max(0.0, ed::env::real("ED_XSEC_CSR_BUDGET_GIB", 4.0));
     if (est > budget_gib * 1073741824.0 || dim_src_ > 0xFFFFFFFFull) {
         csr_refused_ = true;
         return;

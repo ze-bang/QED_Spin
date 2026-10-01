@@ -9,8 +9,8 @@
 //   2. Orthogonality of the returned Krylov basis is preserved at
 //      ~ machine epsilon * M (CGS2 guarantee).
 //   3. The breakdown path (||w|| < tol) terminates cleanly.
-//   4. aux_ortho_ptrs deflation, the convergence_check cadence, the
-//      PeriodicCGS2 cadence, and misuse rejection.
+//   4. aux_ortho_ptrs deflation, the convergence_check cadence and
+//      misuse rejection.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -424,105 +424,6 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
         INFO("E_0 (lanczos, early-exit) = " << es.eigenvalues()(0)
              << "  E_0 (dense)         = " << ref.eigs.front());
         REQUIRE(std::abs(es.eigenvalues()(0) - ref.eigs.front()) < 1e-8);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Test: `ReorthPolicy::PeriodicCGS2` actually fires at the documented
-// cadence.
-//
-// PeriodicCGS2 is implemented in the kernel but nothing in the
-// production tree calls `lanczos_kernel` with it. Without a test the
-// policy can rot silently. This pins:
-//
-//   1. `reorth_freq = 1` (fire every step) is **numerically
-//      equivalent** to `FullCGS2`. Same matrix elements, same basis,
-//      same Ritz spectrum to ~ floating-point noise. This is the
-//      strongest "the periodic code path actually runs reorth"
-//      assertion we can make.
-//   2. `reorth_freq = large` (never fires within `max_iter` steps) is
-//      strictly different from `reorth_freq = 1`: the basis
-//      orthogonality on a 6-site PBC Heisenberg chain degrades
-//      visibly across `M = dim` iterations. That divergence proves
-//      the cadence gate is honoured (the kernel doesn't accidentally
-//      fall through to the full-reorth branch).
-// ----------------------------------------------------------------------------
-TEST_CASE("lanczos_kernel `ReorthPolicy::PeriodicCGS2` honours its cadence",
-          "[krylov][kernel][periodic_reorth]") {
-    constexpr int  N   = 6;
-    constexpr auto dim = std::size_t{1} << N;
-    auto op  = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-
-    auto& be = default_cpu_backend();
-    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) {
-        op->apply(in, out, n);
-    };
-
-    auto v0 = random_unit_vector(dim, /*seed=*/0xBEEFCAFEU);
-
-    SECTION("reorth_freq = 1 is bit-equivalent to FullCGS2") {
-        LanczosKernelOptions opts_full;
-        opts_full.max_iter   = 30;
-        opts_full.reorth     = ReorthPolicy::FullCGS2;
-        opts_full.keep_basis = true;
-
-        LanczosKernelOptions opts_p1;
-        opts_p1.max_iter    = 30;
-        opts_p1.reorth      = ReorthPolicy::PeriodicCGS2;
-        opts_p1.reorth_freq = 1;
-        opts_p1.keep_basis  = true;
-
-        auto Rf = lanczos_kernel(be, matvec, dim, v0.data(), opts_full);
-        auto Rp = lanczos_kernel(be, matvec, dim, v0.data(), opts_p1);
-
-        REQUIRE(Rf.alpha.size() == Rp.alpha.size());
-        REQUIRE(Rf.beta.size()  == Rp.beta.size());
-        const std::size_t M = Rf.alpha.size();
-        for (std::size_t j = 0; j < M; ++j) {
-            INFO("j=" << j
-                 << " alpha_full=" << Rf.alpha[j]
-                 << " alpha_periodic=" << Rp.alpha[j]);
-            REQUIRE(std::abs(Rf.alpha[j] - Rp.alpha[j]) < 1e-12);
-        }
-        for (std::size_t j = 0; j < Rf.beta.size(); ++j) {
-            INFO("j=" << j
-                 << " beta_full=" << Rf.beta[j]
-                 << " beta_periodic=" << Rp.beta[j]);
-            REQUIRE(std::abs(Rf.beta[j] - Rp.beta[j]) < 1e-12);
-        }
-    }
-
-    SECTION("reorth_freq > max_iter never fires reorth — basis degrades") {
-        // reorth_freq = 1000 with max_iter = 40 means the (j+1) % 1000
-        // == 0 condition never holds. The kernel runs the bare
-        // three-term recurrence; basis orthogonality degrades visibly
-        // by step ~ dim, proving the cadence gate is real.
-        LanczosKernelOptions opts;
-        opts.max_iter    = 40;
-        opts.reorth      = ReorthPolicy::PeriodicCGS2;
-        opts.reorth_freq = 1000;
-        opts.keep_basis  = true;     // still required by the kernel.
-
-        auto R = lanczos_kernel(be, matvec, dim, v0.data(), opts);
-        const std::size_t M = R.alpha.size();
-        REQUIRE(M >= 5);
-
-        // Find the largest off-diagonal overlap. With no reorth on a
-        // dim=64 chain at M~40, the basis loses orthogonality
-        // catastrophically — at LEAST O(1e-3), often O(1).
-        double max_off_diag = 0.0;
-        for (std::size_t i = 0; i < M; ++i) {
-            for (std::size_t j = i + 1; j < M; ++j) {
-                const Complex z = be.dot(R.basis[i].get(),
-                                         R.basis[j].get(), dim);
-                max_off_diag = std::max(max_off_diag, std::abs(z));
-            }
-        }
-        INFO("no-reorth max_off_diag = " << max_off_diag);
-        // The point of the test: orthogonality is NOT preserved (vs
-        // FullCGS2's ~ 1e-12). 1e-4 is a conservative floor; in
-        // practice we see ~ 0.1+ on the 6-site chain at M=40.
-        REQUIRE(max_off_diag > 1e-4);
     }
 }
 

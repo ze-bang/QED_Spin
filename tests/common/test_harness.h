@@ -15,7 +15,6 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -23,7 +22,6 @@
 #include <random>
 #include <sstream>
 #include <string>
-#include <system_error>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -35,112 +33,6 @@ namespace ed_tests {
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
-
-// -----------------------------------------------------------------------------
-// Simple check/report utilities.
-// -----------------------------------------------------------------------------
-struct TestContext {
-    std::string suite_name;
-    int checks = 0;
-    int failures = 0;
-    std::vector<std::string> failure_messages;
-
-    explicit TestContext(std::string name) : suite_name(std::move(name)) {}
-
-    void record_pass(const std::string& name) {
-        checks++;
-        std::cout << "  [PASS] " << name << std::endl;
-    }
-
-    void record_fail(const std::string& name, const std::string& detail) {
-        checks++;
-        failures++;
-        std::string msg = name + "  --  " + detail;
-        failure_messages.push_back(msg);
-        std::cout << "  [FAIL] " << msg << std::endl;
-    }
-
-    int summary_exit_code() const {
-        std::cout << std::endl;
-        std::cout << "[" << suite_name << "] "
-                  << (checks - failures) << "/" << checks << " checks passed"
-                  << std::endl;
-        if (failures > 0) {
-            std::cout << "FAILURES:\n";
-            for (const auto& m : failure_messages) {
-                std::cout << "  * " << m << "\n";
-            }
-        }
-        return failures == 0 ? 0 : 1;
-    }
-};
-
-// Close comparison helpers.
-inline bool near_eq(double a, double b, double tol) {
-    return std::abs(a - b) <= tol;
-}
-
-inline bool near_eq(Complex a, Complex b, double tol) {
-    return std::abs(a - b) <= tol;
-}
-
-inline bool check(TestContext& ctx, bool cond, const std::string& name,
-                  const std::string& detail = "") {
-    if (cond) {
-        ctx.record_pass(name);
-        return true;
-    }
-    ctx.record_fail(name, detail);
-    return false;
-}
-
-inline bool check_near(TestContext& ctx, double a, double b, double tol,
-                       const std::string& name) {
-    if (near_eq(a, b, tol)) {
-        ctx.record_pass(name);
-        return true;
-    }
-    std::ostringstream os;
-    os << "expected " << std::setprecision(10) << b
-       << " got " << a << " (|diff|=" << std::abs(a - b)
-       << ", tol=" << tol << ")";
-    ctx.record_fail(name, os.str());
-    return false;
-}
-
-// Compare two sorted (or sortable) eigenvalue vectors element by element, on
-// the overlap length. `tol` is absolute.
-inline bool check_eigs_close(TestContext& ctx, std::vector<double> got,
-                             std::vector<double> want, size_t n,
-                             double tol, const std::string& name) {
-    std::sort(got.begin(), got.end());
-    std::sort(want.begin(), want.end());
-    if (got.size() < n || want.size() < n) {
-        std::ostringstream os;
-        os << "not enough eigenvalues: got " << got.size()
-           << " want " << want.size() << " need " << n;
-        ctx.record_fail(name, os.str());
-        return false;
-    }
-    double max_err = 0.0;
-    size_t worst = 0;
-    for (size_t i = 0; i < n; ++i) {
-        double e = std::abs(got[i] - want[i]);
-        if (e > max_err) { max_err = e; worst = i; }
-    }
-    if (max_err <= tol) {
-        std::ostringstream os;
-        os << name << " (n=" << n << ", max|Δλ|=" << max_err << ")";
-        ctx.record_pass(os.str());
-        return true;
-    }
-    std::ostringstream os;
-    os << "worst at i=" << worst << ": got " << std::setprecision(12)
-       << got[worst] << " want " << want[worst] << " |Δ|=" << max_err
-       << " > tol=" << tol;
-    ctx.record_fail(name, os.str());
-    return false;
-}
 
 // -----------------------------------------------------------------------------
 // Hamiltonian fixtures.
@@ -285,17 +177,6 @@ inline DenseReference reference_from_operator(const Operator& op, uint64_t dim) 
     return r;
 }
 
-inline DenseReference
-reference_from_fixed_sz_operator(const ed::matvec::MatVecOperator& op, uint64_t dim) {
-    DenseReference r;
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        op.apply(in, out, static_cast<size_t>(n));
-    };
-    r.H = apply_to_dense(Hv, dim);
-    r.eigs = dense_eigenvalues(r.H);
-    return r;
-}
-
 // -----------------------------------------------------------------------------
 // Miscellaneous helpers.
 // -----------------------------------------------------------------------------
@@ -316,20 +197,6 @@ inline double l2_diff(const ComplexVector& a, const ComplexVector& b) {
     double s = 0.0;
     for (size_t i = 0; i < a.size(); ++i) s += std::norm(a[i] - b[i]);
     return std::sqrt(s);
-}
-
-// Create (and return) a unique per-test temporary directory under
-// `$ED_TEST_TMP_DIR` (default `test_scratch`) as `<suite>_<suffix>/`, so
-// concurrent CTest jobs do not collide and artifacts are easy to wipe.
-inline std::string make_scratch_dir(const std::string& suite,
-                                    const std::string& suffix = "") {
-    const char* base_env = std::getenv("ED_TEST_TMP_DIR");
-    std::string base = base_env && *base_env ? base_env : "test_scratch";
-    std::string dir = base + "/" + suite;
-    if (!suffix.empty()) dir += "_" + suffix;
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    return dir;
 }
 
 } // namespace ed_tests

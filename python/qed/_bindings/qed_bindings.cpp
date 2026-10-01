@@ -91,8 +91,8 @@ void op_add_one_body(Operator& op,
     // would also catch this, but invalidating eagerly here also
     // resets the isReal() cache --- without this, a real-coeff operator that
     // had isReal() probed once will keep claiming real even after a complex
-    // coefficient is added, routing later lanczos() through the lanczos_real
-    // fast path with the wrong matvec.
+    // coefficient is added, and apply() would take the real specialisation
+    // with the wrong matvec.
     op.invalidateMatrixCaches();
 }
 

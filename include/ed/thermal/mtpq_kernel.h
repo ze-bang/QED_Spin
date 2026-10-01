@@ -122,10 +122,8 @@ MtpqResult mtpq_kernel(Backend&       backend,
         backend.copy_from_host(host_seed.data(), seed_dev.get(), local_n);
 
         TpqKernelOptions kopts;
-        kopts.method      = TpqMethod::Microcanonical;
         kopts.max_iter    = opts.max_iter;
         kopts.large_value = opts.large_value;
-        kopts.normalize_each_step = true;
 
         // E_k comes from the step's own H apply; the norm of (L - H) psi_{k-1} before
         // normalisation is the step's growth factor.

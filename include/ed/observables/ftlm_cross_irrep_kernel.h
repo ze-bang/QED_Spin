@@ -91,18 +91,9 @@ struct FtlmCrossIrrepOptions {
     std::size_t krylov_dim       = 200;
     std::size_t num_samples      = 30;
     double      broadening       = 0.05;
-    /// Tolerance for the inner Lanczos breakdown / convergence
-    /// check.
-    double      tolerance        = 1e-12;
-    /// Full reorthogonalisation flag for the outer + inner Lanczos.
-    /// Off by default; turn on for problems with near-degeneracies.
-    bool        full_reorthogonalization = false;
-    std::size_t reorth_frequency = 1;
     /// Random-seed offset; each sample uses
     /// ``random_seed + sample_idx * 12345``.
     std::uint64_t random_seed    = 0;
-    /// Verbose progress to stdout. Off by default.
-    bool        verbose          = false;
     /// Applied in place to each (host) random vector before use, e.g. a projection onto one
     /// spin tower; the kernel renormalises the result. The trace then runs over the image of
     /// the transform, whose dimension is `trace_dim` (0: the whole source sector).

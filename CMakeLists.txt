@@ -425,16 +425,12 @@ if(BUILD_ED_TESTS)
             # otherwise correct skip as a Failed test in the CI lane.
             catch_discover_tests(${test_name}
                 PROPERTIES
-                    ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
                     TIMEOUT 180
                     SKIP_RETURN_CODE 4
             )
         else()
             add_test(NAME ${test_name} COMMAND ${test_name})
-            set_tests_properties(${test_name} PROPERTIES
-                ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
-                TIMEOUT 180
-            )
+            set_tests_properties(${test_name} PROPERTIES TIMEOUT 180)
         endif()
     endfunction()
 

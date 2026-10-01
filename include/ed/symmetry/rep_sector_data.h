@@ -26,8 +26,8 @@
 // translation units can build it and hand it to the CUDA mirror factory.
 // =============================================================================
 
+#include <algorithm>
 #include <complex>
-#include <cstdlib>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -56,11 +56,7 @@ namespace ed::symmetry {
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
     if (table_entries == 0) return false;
-    double budget_gib = 8.0;
-    if (const char* b = ed::env::raw("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
-        const double parsed = std::atof(b);
-        if (parsed > 0.0) budget_gib = parsed;
-    }
+    const double budget_gib = std::max(0.0, ed::env::real("ED_SYM_REP_RANKTABLE_BUDGET_GIB", 8.0));
     const long double table_bytes =
         static_cast<long double>(table_entries) * sizeof(std::int32_t);
     const long double budget_bytes =

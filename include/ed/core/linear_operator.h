@@ -103,11 +103,6 @@ public:
     // -------------------------------------------------------------------
 
     using MatvecFn = std::function<void(const Complex*, Complex*, std::size_t)>;
-    /// Real-valued matvec lambda --- only meaningful when
-    /// ``is_real_hermitian() == true``; the orchestrator never routes a
-    /// complex operator through the real-only Lanczos lane.
-    using RealMatvecFn =
-        std::function<void(const double*, double*, std::size_t)>;
 
     [[nodiscard]] virtual MatvecFn bind_cpu() const {
         return [this](const Complex* in, Complex* out, std::size_t n) {
@@ -122,48 +117,6 @@ public:
     using MultiMatvecFn = std::function<void(const Complex* const* ins, Complex* const* outs,
                                              std::size_t n, std::size_t k)>;
     [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
-
-    // -------------------------------------------------------------------
-    // Orchestrator real-Hermitian fast-path dispatch.
-    //
-    // Every solver consumes a complex matvec by default because the
-    // matvec abstraction (`MatVecOperator::apply`) is complex-valued.
-    // However a large fraction of workloads (Heisenberg, XXZ, any real
-    // spin model) are real-Hermitian, and the `lanczos_real` lane
-    // (`src/solvers/cpu/lanczos.cpp`) is 30-50% faster than the complex
-    // `lanczos_kernel<CpuBackend>` thanks to fused BLAS-1 and a
-    // native-double recurrence.
-    //
-    // The two virtuals below let the orchestrator detect such cases
-    // and dispatch. The default ``is_real_hermitian`` returns false.
-    // Concrete subclasses (notably ``Operator``) override only when
-    // their internal storage genuinely supports a `double*`-typed apply.
-    // -------------------------------------------------------------------
-
-    /// Whether the operator is both real-coefficient AND Hermitian (so
-    /// the Lanczos algorithm is exact under real arithmetic). Default
-    /// is ``false`` -- orchestrators take the standard complex path.
-    [[nodiscard]] virtual bool is_real_hermitian() const noexcept {
-        return false;
-    }
-
-    /// Real-only matvec binding. Only legal to call when
-    /// ``is_real_hermitian() == true``. Defaults to a wrapper that
-    /// shuttles real to complex through ``apply()``; subclasses that
-    /// have a native real path (``Operator::apply_real``) override.
-    [[nodiscard]] virtual RealMatvecFn bind_real_cpu() const {
-        return [this](const double* in, double* out, std::size_t n) {
-            std::vector<Complex> cin(n);
-            std::vector<Complex> cout(n);
-            for (std::size_t i = 0; i < n; ++i) {
-                cin[i] = Complex(in[i], 0.0);
-            }
-            this->apply(cin.data(), cout.data(), n);
-            for (std::size_t i = 0; i < n; ++i) {
-                out[i] = cout[i].real();
-            }
-        };
-    }
 
     /// Tagged dispatch helper. The template indirection makes calls
     /// from the orchestrators read more naturally:

@@ -74,21 +74,11 @@ struct FtlmOptions {
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
 
-    /// Solver knobs. Only ``full_reorthogonalization`` is honoured;
-    /// ``max_iterations``, ``tolerance``, ``reorth_frequency``,
-    /// ``store_intermediate`` and ``compute_error_bars`` are accepted
-    /// and ignored (``FtlmResult`` carries no per-sample data or error
-    /// bars).
-    std::uint64_t max_iterations           = 1000;
-    double        tolerance                = 1e-10;
     /// Stochastic-trace samples do not need a mutually orthogonal Krylov
     /// basis (ghost Ritz values only redistribute weight), so the default
     /// is local reorthogonalisation without a stored basis (no O(M^2 N)
     /// CGS2 traffic, no M x N basis). Set true for kept-basis FullCGS2.
     bool          full_reorthogonalization = false;
-    std::uint64_t reorth_frequency         = 10;
-    bool          store_intermediate       = false;
-    bool          compute_error_bars       = true;
 
     /// Host-side transform applied to every
     /// Gaussian sample seed before it is normalised and staged (e.g. the

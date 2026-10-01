@@ -32,11 +32,9 @@ struct ThermodynamicData {
  */
 struct FTLMResults {
     ThermodynamicData thermo_data;           // Averaged thermodynamic properties
-    std::vector<ThermodynamicData> per_sample_data;  // Per-sample data (if stored)
     std::vector<double> energy_error;        // Standard error in energy
     std::vector<double> specific_heat_error; // Standard error in specific heat
     std::vector<double> entropy_error;       // Standard error in entropy
     std::vector<double> free_energy_error;   // Standard error in free energy
     double ground_state_estimate = 0.0;     // Best estimate of ground state energy
-    uint64_t total_samples = 0;              // Number of samples used
 };

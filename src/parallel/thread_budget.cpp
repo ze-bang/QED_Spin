@@ -36,14 +36,7 @@ void openblas_set_num_threads(int)  __attribute__((weak));
 }
 
 bool auto_threads_disabled() {
-    const char* env = ed::env::raw("ED_AUTO_THREADS");
-    if (!env || env[0] == '\0') return false;
-    if (std::strcmp(env, "0")     == 0) return true;
-    if (std::strcmp(env, "false") == 0) return true;
-    if (std::strcmp(env, "FALSE") == 0) return true;
-    if (std::strcmp(env, "no")    == 0) return true;
-    if (std::strcmp(env, "NO")    == 0) return true;
-    return false;
+    return !ed::env::flag("ED_AUTO_THREADS", true);
 }
 
 int omp_max_threads() {

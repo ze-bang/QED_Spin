@@ -44,19 +44,16 @@ struct CfSpectralOptions {
     /// Global problem dimension, forwarded as the Lanczos dimension cap.
     /// 0 means "use local_n".
     std::uint64_t global_n       = 0;
-    bool        verbose          = false;
 };
 
 struct CfSpectralResult {
     std::vector<double> frequencies;
     std::vector<double> spectral_function;
-    std::size_t         tridiag_size = 0;
     /// max |S_m - S_{m/2}| / max S_m -- the change of the continued
     /// fraction between half and full Krylov depth. Above ~0.05 the spectrum
     /// is not converged at this krylov_dim (an unconverged CF at eta = 0.05 on a
     /// 2.7e6-state block varied by 30 % between otherwise identical runs).
     double              convergence_change = 0.0;
-    double              phi_norm     = 0.0;
     double              energy_shift = 0.0;
 };
 
@@ -111,10 +108,8 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     const double phi_norm = be.nrm2(phi.get(), local_n);
     if (phi_norm < 1e-14) {
         R.spectral_function.assign(omega_grid.size(), 0.0);
-        R.phi_norm = phi_norm;
         return R;
     }
-    R.phi_norm = phi_norm;
     be.scale(Complex(1.0 / phi_norm, 0.0), phi.get(), local_n);
 
     ed::krylov::LanczosKernelOptions kopts;
@@ -130,7 +125,6 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     std::vector<double> alpha = kres.alpha;
     std::vector<double> beta  = kres.beta;
     const std::size_t m = alpha.size();
-    R.tridiag_size = m;
     if (m == 0) {
         R.spectral_function.assign(omega_grid.size(), 0.0);
         return R;

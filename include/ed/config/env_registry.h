@@ -20,7 +20,7 @@
 //             anything else -> true.   (Presence alone never enables a flag:
 //             FOO=0 means off.)
 //   tristate  unset or "" -> nullopt (the engine decides); otherwise as flag.
-//   real      unset, "" or unparsable -> the default.
+//   integer / real   unset, "" or unparsable -> the default.
 //   text      unset -> the default; "" is returned as "".
 // Accessors read the environment on every call (tests toggle gates without
 // restarting the process). A caller that needs a value fixed for the process
@@ -65,27 +65,27 @@ struct Row {
     X("ED_SYM_CACHE_DIR", Path, "symmetry", "\"\" -> caller falls back to <lattice_dir>/basis_cache",\
       "Overrides the on-disk symmetry-cache location")                         \
     X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "8.0",              \
-      "Memory budget for the per-sector dense int32 rank table")               \
+      "Memory budget for the per-sector dense int32 rank table; 0 builds none")\
     X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \
-      "Exactly \"1\" forces the reduced-CSR symmetry matvec, exactly \"0\" the CSR-free rep walk (read once per process)")\
+      "A true word (1) forces the reduced-CSR symmetry matvec, a false word (0) the CSR-free rep walk (read once per process)")\
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", Real, "symmetry", "8.0",                 \
-      "AGGREGATE reduced-CSR byte budget; over-budget sectors fall back to the CSR-free walk")\
+      "AGGREGATE reduced-CSR byte budget; over-budget sectors (all of them at 0) fall back to the CSR-free walk")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
     X("ED_CSR_FORCE", Tristate, "krylov", "-1 (use the dim cutoff)",           \
-      "=1 always assemble CSR, =0 never (matrix-free always), unset -> use csr_cutoff_dim")\
+      "Full-space Operator.apply only: =1 always assemble CSR, =0 never (matrix-free), unset -> the dim cutoff")\
     X("ED_CSR_DIM_MAX", Integer, "krylov", "the caller's default cutoff",\
-      "Projected-basis dim below which assembled CSR is preferred over matrix-free")\
+      "Full-space Operator.apply only: dim below which the assembled CSR is preferred over matrix-free")\
     X("ED_MATVEC_SCATTER", Flag, "krylov", "false (gather kernel)",            \
       "=1 uses the atomic-scatter SpMV kernel instead of the lock-free row gather (for bisection)")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
-      "=1 logs per-bucket us timers inside lanczos_kernel at Info (A/B against lanczos_real)")\
+      "=1 logs per-bucket us timers inside lanczos_kernel at Info")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
-      "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors")\
+      "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors; 0 pins none")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\
-      "=0/false/FALSE/no/NO disables the dim-aware automatic thread-budget scaling; any other value leaves it on")\
+      "A false word (0, false, off, no) disables the dim-aware automatic thread-budget scaling")\
     X("ED_NUMA_PIN_THREADS", Flag, "threads-numa", "false",                    \
       "Pins OMP worker threads to cores (irreversible, applied once per process via std::once_flag)")\
     X("ED_MEM_GUARD_OFF", Flag, "memory-guard", "false (guard active)",        \
@@ -114,9 +114,6 @@ inline const std::vector<Row>& rows() {
 }
 
 // ---- typed accessors ---------------------------------------------------------
-/// The raw value, or nullptr when unset. Prefer the typed accessors.
-[[nodiscard]] inline const char* raw(const char* name) { return std::getenv(name); }
-
 [[nodiscard]] inline bool is_false_word(const char* v) {
     return std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0 || std::strcmp(v, "FALSE") == 0 ||
            std::strcmp(v, "off") == 0 || std::strcmp(v, "OFF") == 0 || std::strcmp(v, "no") == 0 ||
@@ -131,6 +128,15 @@ inline const std::vector<Row>& rows() {
 
 [[nodiscard]] inline bool flag(const char* name, bool dflt) {
     return tristate(name).value_or(dflt);
+}
+
+[[nodiscard]] inline long long integer(const char* name, long long dflt) {
+    const char* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') return dflt;
+    errno = 0;
+    char* end = nullptr;
+    const long long x = std::strtoll(v, &end, 10);
+    return (errno != 0 || end == v) ? dflt : x;
 }
 
 [[nodiscard]] inline double real(const char* name, double dflt) {
@@ -158,15 +164,15 @@ inline const std::vector<Row>& rows() {
 
 /// ED_* names present in the environment that no row declares. QED_* is not scanned:
 /// that prefix is shared with job scripts and sibling packages (QED_NLCE_CACHE, ...),
-/// ED_BUILD_* belongs to the build scripts, ED_TEST_* / ED_BENCH_* / ED_KILL_HASH_GATE_* to
-/// the test and benchmark harnesses.
+/// ED_BUILD_* belongs to the build scripts, ED_TEST_* / ED_BENCH_* to the test and
+/// benchmark harnesses.
 [[nodiscard]] inline std::vector<std::string> unknown() {
     std::vector<std::string> out;
     for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
         const char* s = *e;
         if (std::strncmp(s, "ED_", 3) != 0) continue;
         bool harness = false;
-        for (const char* p : {"ED_BUILD_", "ED_TEST_", "ED_BENCH_", "ED_KILL_HASH_GATE_"})
+        for (const char* p : {"ED_BUILD_", "ED_TEST_", "ED_BENCH_"})
             harness = harness || std::strncmp(s, p, std::strlen(p)) == 0;
         if (harness) continue;
         const char* eq = std::strchr(s, '=');

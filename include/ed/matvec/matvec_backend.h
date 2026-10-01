@@ -10,7 +10,7 @@
 //
 // and the real-vs-complex specialisation, behind ONE polymorphic interface.
 // Operator holds a unique_ptr to a backend
-// and its public apply()/apply_real() methods are one-line delegations.
+// and its public apply() method is a one-line delegation.
 //
 // Relationship to ed/matvec/backend.h:
 // ------------------------------------
@@ -27,8 +27,7 @@
 //
 //   class Operator {
 //       std::unique_ptr<MatVecBackendBase> backend_;
-//       void apply(in, out, n)      { backend_->apply_complex(term_view(), ...); }
-//       void apply_real(in, out, n) { backend_->apply_real(term_view(), ...);    }
+//       void apply(in, out, n) { backend_->apply_complex(term_view(), ...); }
 //   };
 //
 // The backend owns the CSR caches and the scratch buffers; the operator owns
@@ -48,6 +47,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -154,14 +154,14 @@ struct TermViewT {
 // ---------------------------------------------------------------------------
 // Polymorphic base class. Operator stores std::unique_ptr<MatVecBackendBase>
 // so the basis-policy template parameter is type-erased away from callers.
-// The two apply_* methods correspond exactly to the two public matvec entry
-// points on Operator: apply (complex) and apply_real (double, real Ham).
+// apply_complex is Operator::apply; a real operator with a real input vector takes
+// the real specialisation inside it.
 //
 // The signature uses a `const void*` for the term view because the concrete
 // term struct types live in the operator header; the derived class casts
 // back to its known TermViewT instantiation. This is an internal contract:
 // callers always pass the matching TermView for the backend they own, and
-// the operator that owns the backend is the only one that calls apply_*.
+// the operator that owns the backend is the only one that calls apply_complex.
 // ---------------------------------------------------------------------------
 class MatVecBackendBase {
 public:
@@ -172,14 +172,6 @@ public:
                                const Complex* in,
                                Complex*       out,
                                std::size_t    n) = 0;
-
-    // Real-arithmetic fast path. Caller must have verified TermView::is_real.
-    // Throws if the backend cannot honour the real contract (i.e. the
-    // operator has at least one complex coupling).
-    virtual void apply_real(const void*   term_view_erased,
-                            const double* in,
-                            double*       out,
-                            std::size_t   n) = 0;
 
     [[nodiscard]] virtual std::size_t  dim()          const = 0;
     [[nodiscard]] virtual MemorySpace  memory_space() const = 0;
@@ -223,30 +215,24 @@ inline bool read_matvec_scatter() noexcept {
     return ed::env::flag("ED_MATVEC_SCATTER", false);
 }
 
+// ED_CSR_FORCE: 1 forces the assembled CSR, 0 the matrix-free walk, unset -> -1 (the
+// dimension cutoff decides).
+inline int read_csr_force() noexcept {
+    const std::optional<bool> f = ed::env::tristate("ED_CSR_FORCE");
+    return f ? (*f ? 1 : 0) : -1;
+}
+
+// ED_CSR_DIM_MAX when set to a positive value, else `fallback`.
+inline std::uint64_t read_csr_cutoff(std::uint64_t fallback) noexcept {
+    const long long v = ed::env::integer("ED_CSR_DIM_MAX", 0);
+    return v > 0 ? static_cast<std::uint64_t>(v) : fallback;
+}
+
 inline MatVecTunables read_tunables(std::uint64_t default_cutoff) noexcept
 {
     MatVecTunables t;
-    t.csr_cutoff_dim = default_cutoff;
-
-    auto read_force = [](const char* name) -> int {
-        if (!name) return -1;
-        const char* v = std::getenv(name);
-        if (!v) return -1;
-        if (v[0] == '0') return 0;
-        if (v[0] == '1') return 1;
-        return -1;
-    };
-
-    auto read_cutoff = [](const char* name, std::uint64_t fallback) -> std::uint64_t {
-        if (!name) return fallback;
-        const char* v = std::getenv(name);
-        if (!v) return fallback;
-        return static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
-    };
-
-    t.csr_force = read_force("ED_CSR_FORCE");
-
-    t.csr_cutoff_dim = read_cutoff("ED_CSR_DIM_MAX", default_cutoff);
+    t.csr_force      = read_csr_force();
+    t.csr_cutoff_dim = read_csr_cutoff(default_cutoff);
     t.matvec_scatter = read_matvec_scatter();
     return t;
 }
@@ -267,29 +253,8 @@ inline MatVecTunables read_symmetry_tunables(
     std::uint64_t default_cutoff = (1ULL << 13)) noexcept
 {
     MatVecTunables t;
-    t.csr_cutoff_dim = default_cutoff;
-
-    auto read_force = [](const char* name) -> int {
-        if (!name) return -1;
-        const char* v = std::getenv(name);
-        if (!v) return -1;
-        if (v[0] == '0') return 0;
-        if (v[0] == '1') return 1;
-        return -1;
-    };
-    auto read_cutoff = [](const char* name, std::uint64_t fallback) -> std::uint64_t {
-        if (!name) return fallback;
-        const char* v = std::getenv(name);
-        if (!v) return fallback;
-        return static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
-    };
-
-    int force = read_force("ED_CSR_FORCE");
-    t.csr_force = force;  // -1 if unset -> use cutoff
-
-    // ED_CSR_DIM_MAX overrides the caller default.
-    const std::uint64_t unified = read_cutoff("ED_CSR_DIM_MAX", 0);
-    if (unified != 0) t.csr_cutoff_dim = unified;
+    t.csr_force      = read_csr_force();     // -1 if unset -> use the cutoff
+    t.csr_cutoff_dim = read_csr_cutoff(default_cutoff);
     t.matvec_scatter = read_matvec_scatter();
     return t;
 }
@@ -454,45 +419,6 @@ public:
 
             if (tunables_.matvec_scatter) std::fill(out, out + n, Complex{});
             matrix_free_complex(terms, in, out);
-        }
-    }
-
-    void apply_real(const void*   tv,
-                    const double* in,
-                    double*       out,
-                    std::size_t   n) override
-    {
-        const auto& terms = *static_cast<const term_view_t*>(tv);
-        if (!terms.is_real) {
-            throw std::runtime_error(
-                "MatVecBackend::apply_real: operator has complex couplings");
-        }
-        check_size(n);
-
-        // The representative symmetry policy must skip the assembled-CSR
-        // path (the assemble kernel performs no symmetry weighting). The real
-        // matrix-free kernel is valid here only because apply_real is reached
-        // solely when the owning operator reports a real effective matrix
-        // (real terms AND real momentum phases); the real projection is then
-        // exact. Compiled out for the trivial policies.
-        if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
-            // GATHER (default) overwrites every row; only the SCATTER fallback
-            // needs a pre-zeroed accumulator.
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
-            return;
-        } else {
-            const bool use_csr = detail::csr_eligible(
-                tunables_, basis_.dim(), csr_real_built_);
-
-            if (use_csr) {
-                ensure_csr_real(terms);
-                csr_spmv_real(in, out, n);
-                return;
-            }
-
-            if (tunables_.matvec_scatter) std::fill(out, out + n, 0.0);
-            matrix_free_real(terms, in, out);
         }
     }
 

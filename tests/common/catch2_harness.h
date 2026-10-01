@@ -3,9 +3,9 @@
 //
 // Catch2 v3 wrapper around the fixture builders in test_harness.h.
 //
-// We deliberately keep the build_*, reference_from_*, random_unit_vector,
-// and make_scratch_dir helpers in test_harness.h (they are pure functions
-// and have no Catch2 dependency). This header just pulls them in plus the
+// We deliberately keep the build_*, reference_from_*, random_unit_vector
+// and l2_diff helpers in test_harness.h (they are pure functions and have no
+// Catch2 dependency). This header just pulls them in plus the
 // Catch2 macros and provides ED-specific assertion helpers.
 // =============================================================================
 #pragma once
@@ -19,9 +19,7 @@
 namespace ed_tests {
 
 // Compare two sorted-or-sortable eigenvalue vectors element-wise on the
-// overlap length, using `tol` as an absolute tolerance. Mirrors the
-// pre-Catch2 `check_eigs_close` API but reports via Catch2's assertion
-// machinery.
+// overlap length, using `tol` as an absolute tolerance.
 inline void require_eigs_close(std::vector<double> got,
                                std::vector<double> want,
                                size_t n,

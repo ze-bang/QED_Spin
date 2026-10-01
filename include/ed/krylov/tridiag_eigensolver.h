@@ -92,33 +92,6 @@ cullum_willoughby_keep(const std::vector<double>& alpha,
     return keep;
 }
 
-/// Eigenvalues + first-component weights `|<e_0, y_k>|^2` (the FTLM / TPQ
-/// Jacobi-and-Pratt trace-estimator coefficient).
-inline void solve_tridiag_with_weights(const std::vector<double>& alpha,
-                                       const std::vector<double>& beta,
-                                       std::size_t m,
-                                       std::vector<double>& evals,
-                                       std::vector<double>& weights) {
-    evals.clear(); weights.clear();
-    if (m == 0) return;
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-    for (std::size_t i = 0; i < m; ++i) {
-        T(i, i) = alpha[i];
-        if (i + 1 < m) {
-            T(i, i + 1) = beta[i + 1];
-            T(i + 1, i) = beta[i + 1];
-        }
-    }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
-    evals.resize(m); weights.resize(m);
-    const auto& V = es.eigenvectors();
-    for (std::size_t k = 0; k < m; ++k) {
-        evals[k] = es.eigenvalues()(k);
-        const double v0k = V(0, k);
-        weights[k] = v0k * v0k;
-    }
-}
-
 /// Eigenvalues + first-component weights + full column-major eigenvector
 /// matrix (column k starts at `evecs_cm[k * m]`). Used by the Krylov-Schur
 /// kernel to extract Ritz vectors for restart.

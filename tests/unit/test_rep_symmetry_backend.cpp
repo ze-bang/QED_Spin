@@ -79,7 +79,7 @@ ed::symmetry::RepSectorData zn_sector(const ed::symmetry::OrbitTable& tab,
     for (const auto& p : zn_elements(N))
         d.perms_flat.insert(d.perms_flat.end(), p.begin(), p.end());
     for (std::size_t i = 0; i < tab.size(); ++i) {
-        const double nsq = ed::symmetry::projected_norm_sq(tab, i, d.characters);
+        const double nsq = ed::symmetry::projected_norm_sq_stab(tab.stabilizer_of(i), d.characters);
         if (nsq <= 1e-12) continue;
         d.reps.push_back(tab.reps[i]);
         d.inv_norms.push_back(1.0 / std::sqrt(nsq));

@@ -31,10 +31,9 @@
 #include <numeric>
 #include <map>
 
-// Type definition for complex vector and matrix operations
+// Type definitions for complex vectors
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
-using ComplexMatrix = std::vector<ComplexVector>;
 
 /**
  * @brief Generate a random complex vector with i.i.d. complex Gaussian components.
@@ -86,57 +85,6 @@ void estimate_spectral_bounds(
     std::mt19937& gen,
     double& e_min,
     double& e_max);
-
-// -----------------------------------------------------------------------------
-// Real-arithmetic Lanczos.
-//
-// When the Hamiltonian is real and we use a real starting vector, the entire
-// Krylov basis stays real in exact arithmetic and to machine precision in
-// finite arithmetic. The complex ``ed::krylov::lanczos_kernel`` stores
-// ``std::complex<double>``, which doubles every BLAS-1 call's memory traffic
-// and FLOP count over the strictly-needed amount.
-//
-// This entry point uses real (double) storage end-to-end:
-//   * a short ring of recent vectors plus w  (each ``N * 8`` bytes)
-//   * fused real BLAS-1 kernels (ed/parallel/fused_blas1.h)
-//   * H is a real-arithmetic matrix-vector product: ``f(in_re, out_re, N)``
-//
-// No stored basis: eigenvectors come from a second, replayed pass through
-// ``LanczosRealExtras::on_basis_vector`` (see the solve lane).
-//
-// Local DGKS reorth against the most recent vectors, relative Ritz-value
-// convergence check on the Lanczos tridiagonal, breakdown on beta < tol.
-// -----------------------------------------------------------------------------
-//
-// ``iters_out`` / ``converged_out`` (optional): number of Lanczos steps taken
-// and whether the Ritz-value test fired before ``max_iter``.
-//
-// ``LanczosRealExtras`` (optional): deterministic start vector,
-// a per-iteration basis-vector hook (two-pass eigenvector reconstruction),
-// a fixed-iteration mode (pass 2 replays pass 1 exactly), and the final
-// tridiagonal + Ritz residual bounds |beta_m| |z_{m,i}| on output.
-struct LanczosRealExtras {
-    // ---- inputs ----
-    const double* v0 = nullptr;          ///< start vector (length N), nullptr => random
-    bool fixed_iterations = false;       ///< run exactly max_iter steps, no convergence test
-    /// Called at the top of iteration j with V_j (unit norm, length N),
-    /// before the vector is consumed; j = 0, 1, ..., m-1.
-    std::function<void(uint64_t j, const double* v_j)> on_basis_vector;
-    bool want_ritz = false;              ///< fill ritz_bounds / ritz_vectors below
-    bool converge_vectors = false;       ///< also stop only when every requested level's residual bound <= tol*max(1,|E0|)
-    // ---- outputs ----
-    std::vector<double> alpha;           ///< tridiagonal diagonal (m)
-    std::vector<double> beta;            ///< off-diagonal, beta[0] = 0 (m or m+1 entries)
-    double beta_last = 0.0;              ///< |beta_m| (norm after the last step)
-    std::vector<double> ritz_bounds;     ///< |beta_m| |z_{m,i}|, i < n_eig
-    std::vector<double> ritz_vectors;    ///< column-major m x n_eig tridiag eigenvectors
-};
-
-void lanczos_real(std::function<void(const double*, double*, int)> H_real,
-                  uint64_t N, uint64_t max_iter, uint64_t exct,
-                  double tol, std::vector<double>& eigenvalues,
-                  uint64_t* iters_out = nullptr, bool* converged_out = nullptr,
-                  LanczosRealExtras* extras = nullptr);
 
 // Dense full diagonalization (LAPACK) of a block inside the dense window
 // (dimension <= 120000); larger blocks throw.

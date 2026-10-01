@@ -9,8 +9,9 @@
 //   * matrix-vector consistency (apply(v) == Hdense * v) on random v,
 //   * OBC vs PBC ground-state ordering for N=4,
 //   * adding a zero-coefficient term does not perturb the spectrum,
-//   * GATHER == SCATTER kernel equivalence, apply_real == apply, and the
-//     cache-invalidation invariants of the term storage.
+//   * GATHER == SCATTER kernel equivalence, the real-input specialisation ==
+//     the complex kernel, and the cache-invalidation invariants of the term
+//     storage.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -23,9 +24,6 @@
 #include <memory>
 #include <random>
 #include <vector>
-
-#include <ed/matvec/term_kernels_gather.h>
-#include <ed/matvec/term_storage.h>
 
 using namespace ed_tests;
 
@@ -71,8 +69,8 @@ inline void add_rich_complex_terms(Operator& op) {
 }
 
 // Real-only rich term mix (lights up every bin, no imaginary parts) so the
-// real-arithmetic fast path (apply_real -> matrix_free_real -> gather<double>)
-// can be compared against its SCATTER counterpart.
+// real-input specialisation of apply (matrix_free_real -> gather<double>) can
+// be compared against its SCATTER counterpart.
 inline void add_rich_real_terms(Operator& op) {
     op.addOneBodyTerm(2, 0, Complex(0.37, 0.0));
     op.addTwoBodyTerm(2, 0, 2, 1, Complex(0.91, 0.0));
@@ -100,18 +98,16 @@ inline ComplexVector apply_under_mode(bool scatter, Build&& build,
     return out;
 }
 
+// A real vector (dimension >= 1024) takes the real specialisation of apply.
 template <class Build>
-inline std::vector<double> apply_real_under_mode(bool scatter, Build&& build,
+inline std::vector<double> apply_to_real_under_mode(bool scatter, Build&& build,
                                                  const std::vector<double>& v) {
-    ::setenv("ED_CSR_FORCE", "0", 1);
-    if (scatter) ::setenv("ED_MATVEC_SCATTER", "1", 1);
-    else         ::unsetenv("ED_MATVEC_SCATTER");
-    auto op = build();
-    std::vector<double> out(v.size(), 0.0);
-    op->apply_real(v.data(), out.data(), v.size());
-    ::unsetenv("ED_MATVEC_SCATTER");
-    ::unsetenv("ED_CSR_FORCE");
-    return out;
+    ComplexVector vc(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) vc[i] = Complex(v[i], 0.0);
+    const ComplexVector out = apply_under_mode(scatter, build, vc);
+    std::vector<double> re(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) re[i] = out[i].real();
+    return re;
 }
 
 }  // namespace
@@ -136,7 +132,7 @@ TEST_CASE("matvec: GATHER == SCATTER on Full basis (complex, 1/2/3-body)",
 }
 
 TEST_CASE("matvec: GATHER == SCATTER real fast path (Full)",
-          "[operator_apply][gather][equivalence][apply_real]") {
+          "[operator_apply][gather][equivalence][real_input]") {
     SECTION("Full basis") {
         constexpr uint64_t N   = 10;
         constexpr uint64_t dim = 1ULL << N;
@@ -149,8 +145,8 @@ TEST_CASE("matvec: GATHER == SCATTER real fast path (Full)",
         std::mt19937_64 g(2024);
         std::normal_distribution<double> nd(0, 1);
         for (auto& x : v) x = nd(g);
-        auto y_scatter = apply_real_under_mode(true,  build, v);
-        auto y_gather  = apply_real_under_mode(false, build, v);
+        auto y_scatter = apply_to_real_under_mode(true,  build, v);
+        auto y_gather  = apply_to_real_under_mode(false, build, v);
         double s = 0.0;
         for (uint64_t i = 0; i < dim; ++i) {
             double d = y_gather[i] - y_scatter[i];
@@ -227,12 +223,10 @@ TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
     REQUIRE(gap > 1e-10);
 }
 
-TEST_CASE("Operator::apply_real: matches Operator::apply on real Heisenberg",
-          "[operator_apply][apply_real][audit-2.1-phase-1]") {
-    // The real-typed SpMV must be byte-equivalent to the
-    // complex SpMV when the operator is real and the input vector is real.
-    // We use the dim>=1024 threshold from apply()'s dispatch, so N=10 (dim=1024)
-    // exercises both the apply_real direct path and the apply() dispatch path.
+TEST_CASE("Operator::apply: the real-input specialisation agrees with the complex kernel",
+          "[operator_apply][real_input][audit-2.1-phase-1]") {
+    // A real operator applied to a real vector of dimension >= 1024 takes the real
+    // kernel; a complex vector takes the complex one. For real H, H(v + iu) = Hv + iHu.
     constexpr int N = 10;
     constexpr uint64_t dim = 1ULL << N;
     auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
@@ -241,27 +235,27 @@ TEST_CASE("Operator::apply_real: matches Operator::apply on real Heisenberg",
         REQUIRE(op->isReal());
     }
 
-    SECTION("apply_real(re) == real(apply(complex(re)))") {
+    SECTION("H(v + iu) == Hv + i Hu") {
         for (uint64_t seed : {1u, 31415u, 2718281u}) {
-            auto v_complex = random_unit_vector(dim, seed);
-            std::vector<double> v_real(dim);
-            for (uint64_t i = 0; i < dim; ++i) v_real[i] = v_complex[i].real();
-            for (uint64_t i = 0; i < dim; ++i) v_complex[i] = Complex(v_real[i], 0.0);
-
-            std::vector<double> out_real(dim, 0.0);
-            op->apply_real(v_real.data(), out_real.data(), dim);
-
-            ComplexVector out_complex(dim);
-            op->apply(v_complex.data(), out_complex.data(), dim);
-
-            double diff_sq = 0.0;
+            const auto w = random_unit_vector(dim, seed);
+            ComplexVector v(dim), u(dim);
             for (uint64_t i = 0; i < dim; ++i) {
-                double dr = out_complex[i].real() - out_real[i];
-                double di = out_complex[i].imag();
-                diff_sq += dr * dr + di * di;
+                v[i] = Complex(w[i].real(), 0.0);
+                u[i] = Complex(w[i].imag(), 0.0);
             }
-            INFO("seed=" << seed << "  ||apply_real - apply||_2 = " << std::sqrt(diff_sq));
+            ComplexVector hw(dim), hv(dim), hu(dim);
+            op->apply(w.data(), hw.data(), dim);
+            op->apply(v.data(), hv.data(), dim);
+            op->apply(u.data(), hu.data(), dim);
+
+            double diff_sq = 0.0, imag_sq = 0.0;
+            for (uint64_t i = 0; i < dim; ++i) {
+                diff_sq += std::norm(hw[i] - (hv[i] + Complex(0.0, 1.0) * hu[i]));
+                imag_sq += hv[i].imag() * hv[i].imag() + hu[i].imag() * hu[i].imag();
+            }
+            INFO("seed=" << seed << "  ||H(v+iu) - (Hv + iHu)||_2 = " << std::sqrt(diff_sq));
             REQUIRE(std::sqrt(diff_sq) < 1e-12);
+            REQUIRE(imag_sq == 0.0);
         }
     }
 }
@@ -354,68 +348,36 @@ TEST_CASE("Operator: direct AoS push between applies is honoured "
 }
 
 // =============================================================================
-// GATHER three-body kernel respects complex coefficients.
+// The GATHER kernel respects complex three-body coefficients.
 //
-// ``gather_row`` must carry the full complex three-body coupling; taking
-// only ``coefficient.real()`` would silently drop the imaginary part and
-// make the GATHER and SCATTER kernels disagree for any Hamiltonian with
-// a complex three-body term.
-//
-// We exercise gather_row directly against ``Operator::apply`` for a tiny
-// 3-site Hamiltonian with an imaginary-only 3-body coupling:
-// S+_0 S-_1 Sz_2 with i. Both must produce the same y[r] for every r.
+// Taking only ``coefficient.real()`` would silently drop the imaginary part and
+// make the GATHER and SCATTER kernels disagree for any Hamiltonian with a
+// complex three-body term. A tiny 3-site H with the imaginary-only coupling
+// i S+_0 S-_1 Sz_2 is applied by both matrix-free kernels.
 // =============================================================================
-TEST_CASE("matvec::kernel::gather_row: complex three-body matches SCATTER",
+TEST_CASE("matvec: GATHER three-body kernel keeps complex coefficients",
           "[matvec][kernel][regression][s0][three_body]") {
-    using namespace ed::matvec;
     constexpr std::uint64_t N   = 3;
     constexpr std::uint64_t dim = 1ULL << N;
-    const double spin           = 0.5;
-
-    TermStorage T;
-    // i * S+_0 S-_1 Sz_2 -- intentionally pure imaginary so a .real()
-    // truncation would zero out the entire term.
-    T.add_three_body(/*op1=*/0, /*site1=*/0,
-                     /*op2=*/1, /*site2=*/1,
-                     /*op3=*/2, /*site3=*/2,
-                     /*coeff=*/Complex(0.0, 1.0));
-
-    // Random input vector.
+    auto build = [] {
+        auto op = std::make_unique<Operator>(N, /*spin_l=*/0.5f);
+        op->addThreeBodyTerm(/*op1=*/0, /*site1=*/0, /*op2=*/1, /*site2=*/1,
+                             /*op3=*/2, /*site3=*/2, /*coeff=*/Complex(0.0, 1.0));
+        return op;
+    };
     std::mt19937 gen(12345);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    std::vector<Complex> v(dim);
+    ComplexVector v(dim);
     for (auto& z : v) z = Complex(dist(gen), dist(gen));
 
-    // ----- GATHER path -----------------------------------------------
-    std::vector<Complex> y_gather(dim, Complex(0.0, 0.0));
-    auto get_v = [&](std::uint64_t c) -> Complex { return v[c]; };
-    for (std::uint64_t r = 0; r < dim; ++r) {
-        y_gather[r] = kernel::gather_row(r, v[r], T, spin, get_v);
-    }
+    const auto y_scatter = apply_under_mode(/*scatter=*/true,  build, v);
+    const auto y_gather  = apply_under_mode(/*scatter=*/false, build, v);
+    INFO("||y_gather - y_scatter||_2 = " << l2_diff(y_gather, y_scatter));
+    REQUIRE(l2_diff(y_gather, y_scatter) < 1e-12);
 
-    // ----- Reference path (drive ``Operator::apply``) ----------------
-    auto op = std::make_unique<Operator>(N, /*spin_l=*/0.5f);
-    op->addThreeBodyTerm(/*op1=*/0, /*site1=*/0,
-                         /*op2=*/1, /*site2=*/1,
-                         /*op3=*/2, /*site3=*/2,
-                         /*coeff=*/Complex(0.0, 1.0));
-    std::vector<Complex> y_scatter(dim, Complex(0.0, 0.0));
-    op->apply(v.data(), y_scatter.data(), dim);
-
-    double diff_sq = 0.0;
-    for (std::uint64_t r = 0; r < dim; ++r) {
-        const Complex d = y_gather[r] - y_scatter[r];
-        diff_sq += std::norm(d);
-    }
-    INFO("||y_gather - y_scatter||_2 = " << std::sqrt(diff_sq));
-    REQUIRE(std::sqrt(diff_sq) < 1e-12);
-
-    // Also assert the imaginary part actually carried through (a .real()
-    // truncation would leave y_gather identically zero for this pure-imag
-    // coupling).
-    double scatter_norm_sq = 0.0;
-    for (std::uint64_t r = 0; r < dim; ++r) {
-        scatter_norm_sq += std::norm(y_scatter[r]);
-    }
-    REQUIRE(std::sqrt(scatter_norm_sq) > 1e-12);
+    // The pure-imaginary coupling carried through (a .real() truncation would
+    // leave the result identically zero).
+    double norm_sq = 0.0;
+    for (const auto& z : y_gather) norm_sq += std::norm(z);
+    REQUIRE(std::sqrt(norm_sq) > 1e-12);
 }

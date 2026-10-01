@@ -82,20 +82,6 @@ struct KrylovSchurResult {
     bool                                   exhausted  = false;
 };
 
-namespace detail {
-
-// Convenience wrapper with no memory cap. The memory-bounded sizing lives
-// in ed::krylov::krylov_subspace_dim (subspace_policy.h) and is what the kernel,
-// orchestrator, and planner all use so they AGREE on the footprint.
-inline std::size_t ks_subspace_size(std::size_t k, std::size_t max_iter,
-                                    std::size_t global_dim) {
-    return ed::krylov::krylov_subspace_dim(k, max_iter,
-                                           static_cast<std::uint64_t>(global_dim),
-                                           /*max_vectors=*/0);
-}
-
-}  // namespace detail
-
 /// Run thick-restart Krylov-Schur on `matvec` starting from `seed_local`
 /// (already in backend memory, dimension `local_n`).
 template <typename Backend, typename MatvecFn>

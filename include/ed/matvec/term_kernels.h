@@ -389,8 +389,8 @@ inline void apply_terms(
 }
 
 // ---------------------------------------------------------------------------
-// CSR triplet assembly lives in term_kernels_assemble.h
-// (``ed::matvec::kernel::emit_term_triplets``).
+// CSR assembly lives in term_kernels_assemble.h
+// (``ed::matvec::kernel::build_csr_gather``).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

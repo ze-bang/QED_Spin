@@ -14,10 +14,8 @@
 // ------------------
 //   * Construction:        Operator(n_bits, spin_l)
 //   * Term mutation:       addOneBodyTerm / addTwoBodyTerm / addThreeBodyTerm
-//   * Matvec:              apply / apply_real (route through CpuMatVecBackend)
+//   * Matvec:              apply (routes through CpuMatVecBackend)
 //   * Properties:          isReal, dim, memory_space, is_hermitian
-//   * Assembled matrix:    getSparseMatrix (for dense diagonalisation /
-//                          debug dumps; not used by the SpMV hot path)
 //
 // Depends on: basis_utils.h, ed::matvec subsystem, Eigen.
 // =============================================================================
@@ -200,9 +198,8 @@ public:
      * Skips work when the cache is already in sync (``terms_fresh_`` and
      * AoS sizes match what was committed last time).
      *
-     * Called automatically by ``term_view_()`` (and therefore by all of
-     * ``apply``, ``apply_real`` etc.) before the
-     * matvec kernel reads ``terms_``. Public so that callers reading the
+     * Called automatically by ``term_view_()`` (and therefore by ``apply``)
+     * before the matvec kernel reads ``terms_``. Public so that callers reading the
      * SoA bins directly can force a refresh after touching the AoS vectors.
      *
      * The size-tracking check (vs a plain ``terms_fresh_`` flag) is what
@@ -270,16 +267,6 @@ public:
 
     uint64_t getNumBits() const { return n_bits_; }
     float    getSpin()    const { return spin_l_; }
-
-    /// Canonical AoS term storage. The matvec hot path reads from the
-    /// derived SoA cache (``terms_``); this accessor returns the original
-    /// term records.
-    ///
-    /// Deprecated: no in-tree caller. The public ``transform_data_`` field
-    /// is the canonical AoS surface; read that member directly.
-    [[deprecated("Operator::getTransformData has no in-tree callers; "
-                 "read ``transform_data_`` directly.")]]
-    const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
     /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
     /// Public so an alternative-basis matvec backend (the representative-basis
@@ -410,17 +397,12 @@ public:
     // ========================================================================
     // Matvec entry points.
     //
-    // The operator exposes exactly two SpMV entry points:
-    //
-    //   apply(complex, complex, n)   -- universal y = H * x
-    //   apply_real(double, double, n) -- real-arithmetic fast path; caller
-    //                                    must have verified isReal()
-    //
-    // Both are one-line delegations to the matvec backend (ed::matvec::
-    // CpuMatVecBackend), which encapsulates all the dispatch
-    // logic (assembled-CSR vs matrix-free, real vs complex, threshold
-    // selection, scratch-buffer reuse) behind one strategy object. The
-    // backend is constructed lazily on the first apply* call via the
+    // The operator exposes one SpMV entry point, apply(complex, complex, n):
+    // y = H * x. It is a one-line delegation to the matvec backend
+    // (ed::matvec::CpuMatVecBackend), which encapsulates the dispatch
+    // logic (assembled-CSR vs matrix-free, threshold selection, scratch-buffer
+    // reuse) behind one strategy object. The
+    // backend is constructed lazily on the first apply call via the
     // virtual ``make_backend_`` factory, which derived classes override
     // (a basis-restricted operator constructs its own backend).
     //
@@ -438,31 +420,6 @@ public:
         ensure_backend_();
         const auto tv = term_view_();  // rebuilds SoA cache if stale
         backend_->apply_complex(&tv, in, out, size);
-    }
-
-    /**
-     * @brief Real-arithmetic SpMV (out = H * in for real H, in, out).
-     *
-     * Used by ``lanczos_real`` and any solver that wants to skip the
-     * complex<-> real conversion overhead. Caller must have verified
-     * ``isReal()``; behaviour is undefined for complex-coefficient
-     * Hamiltonians.
-     *
-     * Virtual so derived basis-restricted operators
-     * dispatch through the correct dim check rather than slicing to the
-     * full-Hilbert ``2^N`` path.
-     *
-     * The backend chooses between matrix-free and assembled real-CSR
-     * internally; callers see one consolidated entry point.
-     */
-    virtual void apply_real(const double* in, double* out, std::size_t size) const {
-        const std::uint64_t dim = 1ULL << n_bits_;
-        if (size != static_cast<std::size_t>(dim)) {
-            throw std::invalid_argument("Operator::apply_real: input/output vector size mismatch");
-        }
-        ensure_backend_();
-        const auto tv = term_view_();  // rebuilds SoA cache if stale
-        backend_->apply_real(&tv, in, out, size);
     }
 
     // -----------------------------------------------------------------
@@ -505,28 +462,6 @@ public:
         return true;
     }
 
-    // -----------------------------------------------------------------
-    // Expose the real-Hermitian fast path through ``LinearOperator``'s
-    // virtuals so ``ed::workflows::solve`` can dispatch to ``lanczos_real``.
-    //
-    // ``is_real_hermitian()`` is the AND of (i) ``isReal()`` -- the
-    // per-coefficient scan with its own cache -- and (ii) the structural
-    // ``is_hermitian()`` check above. ``bind_real_cpu()`` returns a lambda directly over
-    // ``apply_real`` (already routed through the matvec backend's
-    // native double path), avoiding the complex<->real shuttle that
-    // the ``LinearOperator`` default would impose.
-    // -----------------------------------------------------------------
-    [[nodiscard]] bool is_real_hermitian() const noexcept override {
-        return const_cast<Operator*>(this)->isReal() && is_hermitian();
-    }
-
-    [[nodiscard]] RealMatvecFn bind_real_cpu() const override {
-        const Operator* p = this;
-        return [p](const double* in, double* out, std::size_t n) {
-            p->apply_real(in, out, n);
-        };
-    }
-
     // ========================================================================
     // isReal: tests (and caches) whether all stored couplings are purely real.
     //
@@ -558,46 +493,6 @@ public:
         real_cache_      = all_real;
         real_check_done_ = true;
         return real_cache_;
-    }
-
-    /**
-     * Materialise a column-major Eigen sparse matrix from the canonical
-     * AoS term list.
-     *
-     * Intended for external consumers that need an assembled matrix
-     * (e.g. dense diagonalisation, debugging dumps). The hot SpMV path
-     * uses the matvec backend (see ``apply()``), which owns its own
-     * RowMajor CSR cache; ``getSparseMatrix`` builds a fresh
-     * ColMajor matrix on every call (no internal caching) to keep the
-     * Operator footprint small.
-     *
-     * Deprecated: no in-tree caller (dense diagonalisation assembles H
-     * columnwise). Callers that need an assembled matrix can use
-     * ``emit_term_triplets`` directly.
-     */
-    [[deprecated("Operator::getSparseMatrix has no in-tree callers; "
-                 "construct triplets via "
-                 "ed::matvec::kernel::emit_term_triplets if needed.")]]
-    Eigen::SparseMatrix<Complex> getSparseMatrix() const {
-        const uint64_t dim = 1ULL << n_bits_;
-
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        if (!transform_data_.empty() || !three_body_data_.empty()) {
-            commitPendingTransforms();
-            ed::matvec::basis::FullBasisPolicy basis_pol{
-                static_cast<std::uint64_t>(n_bits_)};
-            ed::matvec::kernel::emit_term_triplets<
-                ed::matvec::basis::FullBasisPolicy, Complex>(
-                    basis_pol, static_cast<double>(spin_l_),
-                    terms_.diag_one_body, terms_.offdiag_one_body,
-                    terms_.diag_two_body, terms_.mixed_two_body,
-                    terms_.offdiag_two_body, terms_.three_body,
-                    triplets);
-        }
-
-        Eigen::SparseMatrix<Complex> mat(dim, dim);
-        mat.setFromTriplets(triplets.begin(), triplets.end());
-        return mat;
     }
 
 protected:
@@ -633,8 +528,8 @@ protected:
     mutable bool real_cache_      = false;
 
     // -------------------------------------------------------------------
-    // Matvec backend. Lazily constructed on the first apply() / apply_real()
-    // call via the virtual ``make_backend_`` factory below. Derived classes
+    // Matvec backend. Lazily constructed on the first apply() call via the
+    // virtual ``make_backend_`` factory below. Derived classes
     // may override the factory to plug in a different basis
     // policy without re-implementing apply() itself.
     // -------------------------------------------------------------------

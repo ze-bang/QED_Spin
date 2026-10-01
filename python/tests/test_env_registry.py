@@ -65,3 +65,8 @@ def test_removed_knobs_are_reported():
     assert r.returncode == 0
     assert "ED_SYM_LG_DENSE_FLOOR (removed: pass qed.eigs" in r.stderr
     assert "ED_THERMAL_EXACT_SMALL (removed: pass qed.thermal" in r.stderr
+
+
+def test_strict_mode_reads_false_words_as_off():
+    r = _import_qed({"ED_SYM_LG_ONLY_KO": "3", "ED_ENV_STRICT": "false"})
+    assert r.returncode == 0 and "imported" in r.stdout

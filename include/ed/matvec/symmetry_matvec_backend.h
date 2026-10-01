@@ -9,7 +9,7 @@
 // leaf header. This header ties the representative symmetry policy to the
 // backend: ``CpuMatVecBackend`` compiles out the assembled-CSR and real-input
 // fast paths for the rep policy (see the ``if constexpr`` guards in
-// apply_complex / apply_real), so a symmetry sector always runs a matrix-free
+// apply_complex), so a symmetry sector always runs a matrix-free
 // or reduced-CSR rep kernel that preserves complex momentum phases.
 //
 // Lifetime: the returned backend stores the policy BY VALUE, but that POD

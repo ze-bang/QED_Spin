@@ -65,7 +65,7 @@ std::uint64_t surviving_total(const OrbitTable& tab, const AbelianGroup& g) {
     std::uint64_t total = 0;
     for (const auto& chi : g.chars)
         for (std::size_t i = 0; i < tab.size(); ++i)
-            if (projected_norm_sq(tab, i, chi) > kNormSqEps) ++total;
+            if (projected_norm_sq_stab(tab.stabilizer_of(i), chi) > kNormSqEps) ++total;
     return total;
 }
 

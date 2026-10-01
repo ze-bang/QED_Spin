@@ -65,9 +65,9 @@ struct OrbitTable {
     }
 };
 
-/// Closed-form orbit-projected norm² of rep ``rep_i`` in the 1-D irrep with
-/// per-element characters ``chi`` (length |G|): |Σ_{h∈Stab}χ(h)|²/|Stab|,
-/// with the |Stab|=1 fast path.
+/// Closed-form orbit-projected norm² of a rep with stabiliser ``st`` in the 1-D irrep
+/// with per-element characters ``chi`` (length |G|): |Σ_{h∈Stab}χ(h)|²/|Stab|, with the
+/// |Stab|=1 fast path. For rep i of a table: projected_norm_sq_stab(tab.stabilizer_of(i), chi).
 [[nodiscard]] inline double
 projected_norm_sq_stab(const std::vector<std::uint16_t>& st,
                        const std::vector<std::complex<double>>& chi) {
@@ -75,13 +75,6 @@ projected_norm_sq_stab(const std::vector<std::uint16_t>& st,
     std::complex<double> sum(0.0, 0.0);
     for (std::uint16_t g : st) sum += chi[g];
     return std::norm(sum) / static_cast<double>(st.size());
-}
-
-[[nodiscard]] inline double
-projected_norm_sq(const OrbitTable&                        tab,
-                  std::size_t                              rep_i,
-                  const std::vector<std::complex<double>>& chi) {
-    return projected_norm_sq_stab(tab.stabilizer_of(rep_i), chi);
 }
 
 namespace detail {

@@ -69,7 +69,7 @@ TEST_CASE("env registry: a number falls back to the default when unset, empty or
 TEST_CASE("env registry: snapshot lists what is set; unknown() catches a misspelt name", "[env]") {
     ScopedEnv good("ED_SYM_SECTOR_CSR_BUDGET_GIB", "7");
     ScopedEnv typo("ED_SYM_SECTOR_CSR_BUDGT_GIB", "7");
-    ScopedEnv harness("ED_TEST_TMP_DIR", "x");
+    ScopedEnv harness("ED_TEST_HARNESS_VAR", "x");
     bool in_snapshot = false;
     for (const auto& kv : ed::env::snapshot())
         in_snapshot = in_snapshot || (kv.first == "ED_SYM_SECTOR_CSR_BUDGET_GIB" && kv.second == "7");
@@ -78,6 +78,6 @@ TEST_CASE("env registry: snapshot lists what is set; unknown() catches a misspel
     const std::set<std::string> u(unk.begin(), unk.end());
     REQUIRE(u.count("ED_SYM_SECTOR_CSR_BUDGT_GIB") == 1);
     REQUIRE(u.count("ED_SYM_SECTOR_CSR_BUDGET_GIB") == 0);
-    REQUIRE(u.count("ED_TEST_TMP_DIR") == 0);      // harness namespace is not scanned
+    REQUIRE(u.count("ED_TEST_HARNESS_VAR") == 0);  // harness namespace is not scanned
     REQUIRE(ed::env::dump("ED_SYM_SECTOR_CSR_BUDGET_GIB").find("ED_SYM_SECTOR_CSR_BUDGET_GIB") != std::string::npos);
 }

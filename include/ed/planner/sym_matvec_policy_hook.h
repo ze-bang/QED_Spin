@@ -13,8 +13,9 @@
 // guards the CSR.
 // =============================================================================
 
+#include <algorithm>
 #include <cstdint>
-#include <cstdlib>
+#include <optional>
 #include <ed/config/env_registry.h>
 
 #ifdef _OPENMP
@@ -42,12 +43,9 @@ enum class SymMatvecRepr : int {
 /// CpuMatVecBackend and the little-group engine (the reduced-CSR sub-choice).
 [[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
     static const int env_override = [] {
-        if (const char* e = ed::env::raw("ED_SYM_REDUCED_CSR")) {
-            if (e[0] == '1' && e[1] == '\0')
-                return static_cast<int>(SymMatvecRepr::RepReducedCsr);
-            if (e[0] == '0' && e[1] == '\0')
-                return static_cast<int>(SymMatvecRepr::RepStream);  // CSR-free rep walk
-        }
+        if (const std::optional<bool> on = ed::env::tristate("ED_SYM_REDUCED_CSR"))
+            return static_cast<int>(*on ? SymMatvecRepr::RepReducedCsr
+                                        : SymMatvecRepr::RepStream);  // CSR-free rep walk
         return static_cast<int>(SymMatvecRepr::Auto);
     }();
     if (env_override != static_cast<int>(SymMatvecRepr::Auto)) return env_override;
@@ -96,11 +94,8 @@ enum class SymMatvecRepr : int {
     const std::uint64_t est_bytes =
         dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
         + (dim + 1) * 8u /* row ptr */;
-    double budget_gib = 8.0;
-    if (const char* v = ed::env::raw("ED_SYM_SECTOR_CSR_BUDGET_GIB")) {
-        const double b = std::atof(v);
-        if (b > 0.0) budget_gib = b;
-    }
+    // 0 (or less) admits nothing: every sector takes the CSR-free walk.
+    double budget_gib = std::max(0.0, ed::env::real("ED_SYM_SECTOR_CSR_BUDGET_GIB", 8.0));
     budget_gib /= static_cast<double>(concurrent_sector_builders());
     return static_cast<double>(est_bytes)
            <= budget_gib * static_cast<double>(1ULL << 30);

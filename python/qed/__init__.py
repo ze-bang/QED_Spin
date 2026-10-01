@@ -65,6 +65,9 @@ def env_snapshot() -> dict:
     return dict(_core.env_snapshot())
 
 
+# The C++ registry's flag spelling (ed::env::is_false_word): these, or unset, are off.
+_FALSE_WORDS = ("", "0", "false", "FALSE", "off", "OFF", "no", "NO")
+
 # Variables that became arguments: the hint names the argument.
 _REMOVED_ENV = {
     "ED_SYM_LG_DENSE_FLOOR": "qed.eigs(..., dense_max_dim=...)",
@@ -92,7 +95,7 @@ def _check_environment() -> None:
             parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
     msg = ("qed: environment variable(s) not read by anything: " + ", ".join(parts)
            + ". See qed.debug_env() for the variables that exist.")
-    if _os.environ.get("ED_ENV_STRICT", "") not in ("", "0"):
+    if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
         raise RuntimeError(msg)
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
 

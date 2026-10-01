@@ -53,6 +53,12 @@ Breaking changes so far:
   honours it exactly, and `None` (the default) keeps the automatic value. `thermal`'s sampled
   methods diagonalise blocks up to it (default 512; 0 always samples); `dynamics` passes it to
   its ground-state solve.
+- **Environment variables read one way.** Every variable goes through the registry's typed
+  readers: the switches (`ED_SYM_REDUCED_CSR`, `ED_CSR_FORCE`, `ED_AUTO_THREADS`,
+  `ED_ENV_STRICT`) take the registry's words (`0`, `false`, `off`, `no` are off, anything else
+  on), and the GiB budgets (`ED_SYM_SECTOR_CSR_BUDGET_GIB`, `ED_SYM_REP_RANKTABLE_BUDGET_GIB`,
+  `ED_XSEC_CSR_BUDGET_GIB`, `ED_GPU_SYM_CACHE_GIB`) honour 0 as "nothing fits" instead of
+  falling back to the default. `ED_ENV_STRICT=false` no longer turns strict mode on.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

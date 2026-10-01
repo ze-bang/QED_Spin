@@ -22,8 +22,6 @@
 //     (CGS2). CGS2 has the same numerical quality as modified
 //     Gram-Schmidt but batches the M projections of each pass into one
 //     dot_many / axpy_many call.
-//   * Optional periodic reorthogonalisation (every `reorth_freq`
-//     iterations) on the same CGS2 path.
 //   * Breakdown detection via beta < tol.
 //   * Optional basis-vector retention for downstream FTLM / 
 //     observable-projection consumers.
@@ -75,9 +73,6 @@ enum class ReorthPolicy : std::uint8_t {
     /// Gram-Schmidt 2 (CGS2). Requires `keep_basis = true` and
     /// O(M^2 * local_n) work (two batched passes per step).
     FullCGS2,
-    /// Periodic reorth (every `reorth_freq` steps) using the CGS2
-    /// machinery. Same arithmetic as Full but skipped on most steps.
-    PeriodicCGS2,
     /// Local DGKS-3 reorth: ring buffer of up to 3 most-recent basis
     /// vectors, project `w` against each via thresholded `axpy`. Does
     /// NOT require `keep_basis = true` (the kernel owns the ring
@@ -103,7 +98,6 @@ struct LanczosKernelOptions {
     double      breakdown_tol = 1e-300;
 
     ReorthPolicy reorth  = ReorthPolicy::FullCGS2;
-    std::size_t reorth_freq = 10;        ///< Used iff reorth == PeriodicCGS2.
     bool keep_basis      = true;         ///< Retain orthonormal basis (req'd for reorth ≠ None).
 
     /// Optional Ritz-convergence early-exit callback. Called every
@@ -208,7 +202,7 @@ struct LanczosKernelOptions {
     /// retains. Range: 1..N. Only consulted when
     /// ``reorth == LocalDGKS3``.
     ///
-    /// Default 1: K=1 local DGKS (as in `lanczos_real`) is the optimum
+    /// Default 1: K=1 local DGKS is the optimum
     /// for our Krylov dimensions on real-Hermitian / well-conditioned
     /// spectra (validated to 1e-9 against xdiag). Set this field
     /// explicitly when constructing options manually for a wider
@@ -219,7 +213,7 @@ struct LanczosKernelOptions {
 
     /// Threshold below which a LocalDGKS3 projection is skipped (the
     /// resulting correction sits below the round-off floor). Default
-    /// sqrt(eps) ~= 1.49e-8 (the same constant as `lanczos_real`).
+    /// sqrt(eps) ~= 1.49e-8.
     double local_ortho_threshold = 1.49011611938476562e-08;
 };
 
@@ -285,15 +279,11 @@ LanczosKernelResult lanczos_kernel(
     std::size_t iters_profiled = 0;
     const double kernel_t0 = profile_on ? now_us() : 0.0;
 
-    // FullCGS2/PeriodicCGS2 require keep_basis (we project against the
-    // growing basis). LocalDGKS3 owns its own ring buffer and does NOT
-    // require keep_basis.
-    const bool needs_kept_basis =
-        (opts.reorth == ReorthPolicy::FullCGS2) ||
-        (opts.reorth == ReorthPolicy::PeriodicCGS2);
-    if (needs_kept_basis && !opts.keep_basis) {
+    // FullCGS2 requires keep_basis (we project against the growing basis).
+    // LocalDGKS3 owns its own ring buffer and does NOT require keep_basis.
+    if (opts.reorth == ReorthPolicy::FullCGS2 && !opts.keep_basis) {
         throw std::invalid_argument(
-            "lanczos_kernel: FullCGS2 / PeriodicCGS2 require keep_basis = true");
+            "lanczos_kernel: FullCGS2 requires keep_basis = true");
     }
     if (opts.max_iter == 0) {
         return LanczosKernelResult{};
@@ -429,7 +419,7 @@ LanczosKernelResult lanczos_kernel(
         // Reorthogonalisation. Three policies share the same
         // dispatch site:
         //
-        //   FullCGS2 / PeriodicCGS2: CGS2 against `aux_ortho_ptrs ∪
+        //   FullCGS2: CGS2 against `aux_ortho_ptrs ∪
         //     basis_ptrs` (two passes; two batched dot_many +
         //     axpy_many per step).
         //
@@ -438,10 +428,7 @@ LanczosKernelResult lanczos_kernel(
         //     vectors. Below threshold the axpy is skipped.
         //
         //   None: nothing.
-        const bool do_cgs2 =
-            (opts.reorth == ReorthPolicy::FullCGS2) ||
-            (opts.reorth == ReorthPolicy::PeriodicCGS2 &&
-             opts.reorth_freq > 0 && ((j + 1) % opts.reorth_freq == 0));
+        const bool do_cgs2 = opts.reorth == ReorthPolicy::FullCGS2;
         if (do_cgs2 && !ortho_ptrs.empty()) {
             coeffs.resize(ortho_ptrs.size());
 

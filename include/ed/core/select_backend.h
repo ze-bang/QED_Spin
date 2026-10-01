@@ -40,11 +40,6 @@ namespace ed {
 
 struct BackendConstraints {
     bool allow_gpu     = true;
-    /// GPU memory budget. Empty means "no limit; trust the
-    /// `cudaGetDeviceProperties` query". When set, gpu_mem_fits is
-    /// computed as `bytes_per_complex * geometry.local_dim *
-    /// fudge_factor <= gpu_mem_bytes`.
-    std::optional<std::size_t> gpu_mem_bytes;
     /// Per-element memory budget multiplier (workspace overhead). 8.0
     /// is a safe default for Lanczos / TPQ which carry ~5 N-length
     /// scratch vectors plus the basis.
@@ -162,7 +157,7 @@ inline bool gpu_mem_fits(const Geometry& geom,
 #ifdef WITH_CUDA
     if (!have_cuda()) return false;
     const std::optional<std::size_t> budget =
-        c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes : free_device_bytes(c.require_gpu);
+        free_device_bytes(c.require_gpu);
     return budget.has_value() && gpu_bytes_needed(geom, c) <= *budget;
 #else
     (void)geom; (void)c;
@@ -213,7 +208,7 @@ inline BackendVariant select_backend(const Geometry& geom,
             throw ed::DeviceUnsupported("device='gpu', but this operator (dim " + std::to_string(geom.local_dim)
                                         + ") has no device kernel; use device='auto' or 'cpu'");
         const std::optional<std::size_t> budget =
-            c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes : free_device_bytes(true);
+            free_device_bytes(true);
         if (!budget)
             throw ed::DeviceUnavailable("device='gpu', but the device's memory cannot be queried "
                                         "(no CUDA context could be created)");

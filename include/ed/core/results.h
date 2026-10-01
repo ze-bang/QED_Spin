@@ -32,7 +32,6 @@ struct BackendMetadata {
     std::string  lane         = "cpu";
     /// The result came from a dense diagonalisation, not a Krylov run.
     bool         dense        = false;
-    std::size_t  cuda_devices = 0;
     double       wall_seconds = 0.0;
     /// Free-form key=value diagnostics (e.g. memory hwm, reorth count).
     std::vector<std::pair<std::string, std::string>> notes;
@@ -64,10 +63,6 @@ struct KrylovDiagnostics {
 struct EigenvectorRef {
     /// Host-side storage, one vector per eigenvalue.
     std::vector<std::vector<Complex>>  host;
-    /// Boolean flag set when the kernel computed eigenvectors but
-    /// returned them only on the originating backend's memory (caller
-    /// can extract via the LinearOperator + Backend).
-    bool                                on_backend = false;
 };
 
 // ---------------------------------------------------------------------------

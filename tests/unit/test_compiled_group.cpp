@@ -46,14 +46,13 @@ TEST_CASE("CompiledGroup::apply matches scalar applyPermutation across N",
     for (int n : {1, 5, 8, 13, 16, 24, 31, 32, 37, 48, 63, 64}) {
         std::vector<std::vector<int>> perms;
         for (int g = 0; g < 6; ++g) perms.push_back(random_perm(n, gen));
-        // Include the identity explicitly (is_identity contract).
+        // Include the identity explicitly.
         std::vector<int> ident(n);
         for (int i = 0; i < n; ++i) ident[i] = i;
         perms.push_back(ident);
 
         const CompiledGroup cg = CompiledGroup::from_permutations(perms, n);
         REQUIRE(cg.size() == perms.size());
-        REQUIRE(cg.is_identity(perms.size() - 1));
 
         for (int trial = 0; trial < 200; ++trial) {
             const std::uint64_t s = random_state(n, gen);
@@ -85,8 +84,11 @@ TEST_CASE("CompiledGroup flip elements XOR after the permutation",
     for (int i = 0; i < n; ++i) ident[i] = i;
     const CompiledGroup cg2 = CompiledGroup::from_elements(
         {ident, ident}, {0ULL, all_ones}, n);
-    REQUIRE(cg2.is_identity(0));
-    REQUIRE(!cg2.is_identity(1));
+    for (int trial = 0; trial < 20; ++trial) {
+        const std::uint64_t s = random_state(n, gen);
+        REQUIRE(cg2.apply(s, 0) == s);
+        REQUIRE(cg2.apply(s, 1) == (s ^ all_ones));
+    }
 }
 
 TEST_CASE("CompiledGroup content_hash: stable and element-sensitive",

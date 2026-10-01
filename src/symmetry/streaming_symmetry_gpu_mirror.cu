@@ -99,12 +99,7 @@ acquire_gpu_shared_rank(
     // ED_GPU_SYM_CACHE_GIB (default 24) bounds the
     // strong cache; the weak registry still dedups concurrent co-owners.
     static const double kBudgetBytes = [] {
-        double gib = 24.0;
-        if (const char* v = ed::env::raw("ED_GPU_SYM_CACHE_GIB")) {
-            const double parsed = std::atof(v);
-            if (parsed > 0.0) gib = parsed;
-        }
-        return gib * 1073741824.0;
+        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 24.0)) * 1073741824.0;
     }();
 
     std::lock_guard<std::mutex> lk(mtx);
@@ -496,12 +491,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of
         // sector arrays at N=36). Shares ED_GPU_SYM_CACHE_GIB semantics.
         static const double kKeepBudget = [] {
-            double gib = 16.0;
-            if (const char* v = ed::env::raw("ED_GPU_SYM_CACHE_GIB")) {
-                const double parsed = std::atof(v);
-                if (parsed > 0.0) gib = parsed;
-            }
-            return gib * 1073741824.0;
+            return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 16.0)) * 1073741824.0;
         }();
         const std::uint64_t key = content_key(rep, terms, spin_l);
         std::lock_guard<std::mutex> lk(mtx);

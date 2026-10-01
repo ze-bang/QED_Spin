@@ -86,13 +86,6 @@ public:
         return out ^ flips_[g];
     }
 
-    /// True iff element ``g`` fixes every state (identity permutation and
-    /// zero flip). Useful for skip-identity micro-optimizations; callers
-    /// whose floating-point summation order must stay fixed should not skip.
-    [[nodiscard]] bool is_identity(std::size_t g) const noexcept {
-        return identity_[g] != 0;
-    }
-
     /// Canonical FNV-1a content hash over (n_sites, per-element perm+flip).
     /// Basis-cache key material.
     [[nodiscard]] std::uint64_t content_hash() const noexcept { return hash_; }
@@ -114,7 +107,6 @@ private:
         cg.stride_  = static_cast<std::size_t>(cg.bpw_) * 256;
         cg.lut_.assign(cg.size_ * cg.stride_, 0ULL);
         cg.flips_   = flip_masks;
-        cg.identity_.assign(cg.size_, 0);
 
         std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
         auto mix = [&h](std::uint64_t v) {
@@ -135,18 +127,15 @@ private:
             // Invert: output bit i reads input bit p[i]  =>  input bit j
             // scatters to output bit p_inv[j].
             int p_inv[64];
-            bool ident = (flip_masks[g] == 0ULL);
             for (int i = 0; i < n_sites; ++i) {
                 if (p[i] < 0 || p[i] >= n_sites) {
                     throw std::invalid_argument(
                         "CompiledGroup: permutation entry out of range");
                 }
                 p_inv[p[i]] = i;
-                if (p[i] != i) ident = false;
                 mix(static_cast<std::uint64_t>(p[i]));
             }
             mix(flip_masks[g]);
-            cg.identity_[g] = ident ? 1 : 0;
 
             std::uint64_t* lut_g = cg.lut_.data() + g * cg.stride_;
             for (int byte_idx = 0; byte_idx < cg.bpw_; ++byte_idx) {
@@ -169,7 +158,6 @@ private:
 
     std::vector<std::uint64_t> lut_;       // size_ * stride_ entries
     std::vector<std::uint64_t> flips_;     // per element XOR mask
-    std::vector<std::uint8_t>  identity_;  // per element identity flag
     std::size_t                size_    = 0;
     std::size_t                stride_  = 0;  // bpw_ * 256
     int                        bpw_     = 0;

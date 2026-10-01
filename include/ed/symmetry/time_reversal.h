@@ -16,9 +16,8 @@
 //
 // The sector walk therefore solves ONE member of each conjugate pair
 // {k, -k} and copies the result to the partner; self-conjugate sectors
-// (real characters: k = 0, k = pi, parity irreps) additionally take the
-// real-Hermitian fast path (`is_real_hermitian()` consults the per-sector
-// character).
+// (real characters: k = 0, k = pi, parity irreps) have real blocks when H is
+// real.
 //
 // Kramers bookkeeping (T^2 = -1 degeneracy tags for odd spin-1/2 counts)
 // is not implemented: it would only affect degeneracy-aware convergence
