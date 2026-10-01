@@ -113,27 +113,42 @@ inline bool have_cuda() noexcept {
 #endif
 }
 
-/// Free device memory, cached for one second (cudaMemGetInfo costs 20-100 ms per call under
-/// WSL2, and the feasibility check only needs an order of magnitude); 0 when the query fails.
-inline std::size_t free_device_bytes() noexcept {
+/// Device memory this process can still allocate, or nothing when the device cannot be queried.
+/// The driver's free count misses what the process freed into its default memory pool (CudaBackend
+/// keeps the pool's memory: release threshold UINT64_MAX), which the next allocation reuses, so
+/// the pool's reserved-but-unused bytes are added. Cached for one second (cudaMemGetInfo costs
+/// 20-100 ms per call under WSL2, and the automatic choice only needs an order of magnitude);
+/// `fresh` bypasses the cache, for a strict device request.
+inline std::optional<std::size_t> free_device_bytes(bool fresh = false) noexcept {
 #ifdef WITH_CUDA
     static std::mutex m;
     static std::size_t cached_free = 0;
     static std::chrono::steady_clock::time_point cached_at{};
     const std::lock_guard<std::mutex> lock(m);
     const auto now = std::chrono::steady_clock::now();
-    if (cached_at == std::chrono::steady_clock::time_point{} || now - cached_at > std::chrono::seconds(1)) {
+    if (fresh || cached_at == std::chrono::steady_clock::time_point{} || now - cached_at > std::chrono::seconds(1)) {
         std::size_t free_bytes = 0, total_bytes = 0;
         if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
             cudaGetLastError();
-            return 0;
+            return std::nullopt;
+        }
+        int dev = -1;
+        cudaMemPool_t pool = nullptr;
+        std::uint64_t reserved = 0, used = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
+                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) == cudaSuccess
+                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess) {
+            if (reserved > used) free_bytes += static_cast<std::size_t>(reserved - used);
+        } else {
+            cudaGetLastError();
         }
         cached_free = free_bytes;
         cached_at   = now;
     }
     return cached_free;
 #else
-    return 0;
+    (void)fresh;
+    return std::nullopt;
 #endif
 }
 
@@ -146,8 +161,9 @@ inline bool gpu_mem_fits(const Geometry& geom,
                           const BackendConstraints& c) noexcept {
 #ifdef WITH_CUDA
     if (!have_cuda()) return false;
-    const std::size_t budget = c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes.value() : free_device_bytes();
-    return gpu_bytes_needed(geom, c) <= budget;
+    const std::optional<std::size_t> budget =
+        c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes : free_device_bytes(c.require_gpu);
+    return budget.has_value() && gpu_bytes_needed(geom, c) <= *budget;
 #else
     (void)geom; (void)c;
     return false;
@@ -196,10 +212,14 @@ inline BackendVariant select_backend(const Geometry& geom,
         if (!device_mv)
             throw ed::DeviceUnsupported("device='gpu', but this operator (dim " + std::to_string(geom.local_dim)
                                         + ") has no device kernel; use device='auto' or 'cpu'");
-        const std::size_t budget = c.gpu_mem_bytes.value_or(free_device_bytes());
+        const std::optional<std::size_t> budget =
+            c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes : free_device_bytes(true);
+        if (!budget)
+            throw ed::DeviceUnavailable("device='gpu', but the device's memory cannot be queried "
+                                        "(no CUDA context could be created)");
         throw ed::ResourceLimit("device='gpu', but a block of dim " + std::to_string(geom.local_dim) + " needs "
                                 + std::to_string(gpu_bytes_needed(geom, c) >> 20) + " MiB of device memory and "
-                                + std::to_string(budget >> 20) + " MiB are free");
+                                + std::to_string(*budget >> 20) + " MiB are free");
     }
 #else
     if (c.require_gpu)

@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -248,7 +249,9 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     }
     // Ranks are 64-bit (C(36,18) ~ 9.1e9); only per-sector INDEX values
     // must fit int32 (they index the sector basis, capped below).
-    const std::uint64_t dim_full_sz = static_cast<std::uint64_t>(dv + 0.5L);
+    const std::uint64_t dim_full_sz =                       // logged only; 2^64 does not fit
+        dv >= 18446744073709551615.0L ? std::numeric_limits<std::uint64_t>::max()
+                                      : static_cast<std::uint64_t>(dv + 0.5L);
     if (data.reps.size() > static_cast<std::size_t>(
             std::numeric_limits<std::int32_t>::max())) {
         throw std::runtime_error(

@@ -19,10 +19,13 @@ using namespace orch_detail;
 namespace {
 
 // Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full
-// diagonalization for tiny spaces, Lanczos otherwise.
+// diagonalization for tiny spaces, Lanczos otherwise. On a device backend the
+// dense lane would run on the host and leave the device idle, so every block
+// above kDenseAlwaysDim runs the device Krylov lane instead.
 [[nodiscard]] SolveMethod default_method_for(const LinearOperator& H,
-                                             std::size_t num_eigs = 1) {
-    if (H.global_dim() <= 1024) return SolveMethod::FullDiag;
+                                             std::size_t num_eigs = 1,
+                                             bool device = false) {
+    if (!device && H.global_dim() <= 1024) return SolveMethod::FullDiag;
     // Single-vector Lanczos reports every degenerate level ONCE (measured: k = 6 on the 14-site ring, dim 3432, returns the
     // 5th level wrong), while Krylov-Schur resolves the multiplicities. A
     // window therefore defaults to Krylov-Schur; a single ground state keeps
@@ -60,7 +63,7 @@ GroundStateResult solve_on(Backend& be,
     // -----------------------------------------------------------------------
     SolveMethod method = (opts.method != SolveMethod::Auto)
         ? opts.method
-        : default_method_for(H, opts.num_eigs);
+        : default_method_for(H, opts.num_eigs, !std::is_same_v<Backend, ed::matvec::CpuBackend>);
     if (method != SolveMethod::FullDiag
             && (H.global_dim() <= kDenseAlwaysDim
                 || 2 * static_cast<std::uint64_t>(opts.num_eigs) >= H.global_dim())) {

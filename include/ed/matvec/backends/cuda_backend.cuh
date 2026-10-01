@@ -54,6 +54,7 @@
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
+#include <ed/core/errors.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/memory_space.h>
 
@@ -65,6 +66,11 @@ namespace ed::matvec {
 namespace cuda_backend_detail {
 
 inline void check_cuda(cudaError_t err, const char* what) {
+    if (err == cudaErrorMemoryAllocation) {
+        cudaGetLastError();
+        throw ed::ResourceLimit(std::string("CudaBackend: ") + what +
+                                " failed: the device is out of memory");
+    }
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CudaBackend: ") + what +
                                  " failed: " + cudaGetErrorString(err));

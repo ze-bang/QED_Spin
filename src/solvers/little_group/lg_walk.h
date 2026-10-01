@@ -362,14 +362,15 @@ inline void require_device(Device d, const char* verb) {
 }
 
 /// device='gpu' runs every Krylov solve on the device, so a block without a device kernel (an
-/// isotypic block of a multi-dimensional irrep) is refused before it is solved.
+/// isotypic W block: a multi-dimensional irrep, or any irrep of an Sz-parity sector) is refused
+/// before it is solved.
 inline void require_device_kernel(Device d, const BlockOp& bop, const ed::solvers::LittleGroupBlockTag& tag,
                                   const char* verb) {
     if (d == Device::Gpu && !bop.on_device)
         throw ed::DeviceUnsupported(
             std::string(verb) + ": device='gpu', but the block of star " + std::to_string(tag.k0) + ", irrep "
             + std::to_string(tag.irrep) + ", n_up " + std::to_string(tag.n_up) + " (dim "
-            + std::to_string(tag.dim) + ") is an isotypic block of a multi-dimensional irrep, which has no "
+            + std::to_string(tag.dim) + ") is an isotypic (W) block, which has no "
             "device kernel; use device='auto' or 'cpu'");
 }
 

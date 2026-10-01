@@ -13,7 +13,8 @@ FTLM device='cpu', fixed seed, in three child processes with ED_SYM_REDUCED_CSR=
   A: ED_SYM_LG_GPU=0, 4 threads (CPU walk reference)
   B: ED_SYM_LG_GPU=1, 4 threads (GPU gather, concurrent deferred loop)
   C: ED_SYM_LG_GPU=1, 1 thread  (GPU gather, serial: isolates the race from GPU rounding)
-CONFIRMED if B deviates from A by > 1e-6 while C agrees with A."""
+CONFIRMED if B deviates from A by > 1e-6 while C agrees with A.
+Restated with the strict device policy: device='cpu' never engages the gather, which is not reproducing."""
 import json
 import os
 import subprocess
@@ -64,7 +65,9 @@ dC = max(abs(x - y) for x, y in zip(A["E"], C["E"])) if C else float("nan")
 msg = (f"max|E_B-E_A|={dB:.3e} max|E_C-E_A|={dC:.3e} gpu-gather engaged(B)={gb} "
        f"device_blocks(B)={B['device_blocks']}")
 if gb == 0:
-    print("REPRO: INCONCLUSIVE GPU gather never engaged under ED_SYM_LG_GPU=1; " + msg)
+    # Since the strict device policy, device='cpu' never engages the GPU gather (it needs a block the
+    # verb allowed onto the device), so the concurrent host loop has no device lane to race on.
+    print("REPRO: NOT_REPRODUCED device='cpu' no longer engages the GPU gather; " + msg)
 elif dB > 1e-6 and (C is None or dC < 1e-6):
     print("REPRO: CONFIRMED concurrent GPU-gather applies corrupt FTLM under device='cpu'; " + msg)
 elif dB > 1e-6:

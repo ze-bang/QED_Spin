@@ -133,7 +133,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         beta.push_back(1.0 / T);
     }
     detail::require_device(t.device, "thermal");
-    if (t.device == Device::Gpu && t.method != ThermalSpec::Method::Exact && t.exact_states > 0)
+    if (t.device == Device::Gpu && t.method == ThermalSpec::Method::FTLM && t.exact_states > 0)
         throw ed::DeviceUnsupported("thermal: OFTLM (exact_states > 0) runs on the host only; with device='gpu' "
                                     "use FTLM without exact_states, or device='auto' or 'cpu'");
     std::uint64_t seed = t.seed ? t.seed : std::random_device{}();
@@ -257,11 +257,11 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                                               tower_sampling ? &bop : nullptr, tower_dim, obs, folded);
                         } catch (const ed::DeviceUnsupported& e) {
                             // Name the block: a small one takes the exact fallback on the host,
-                            // a sampled one without a device kernel (an isotypic block) is refused.
+                            // a sampled one without a device kernel (an isotypic W block) is refused.
                             throw ed::DeviceUnsupported(
                                 "thermal: block of star " + std::to_string(bi->tag.k0) + ", irrep "
                                 + std::to_string(bi->tag.irrep) + ", n_up " + std::to_string(bi->tag.n_up)
-                                + (bi->W ? " (an isotypic block of a multi-dimensional irrep)" : "") + ": "
+                                + (bi->W ? " (an isotypic (W) block)" : "") + ": "
                                 + e.what());
                         }
                         if (on_gpu) ++out.device_blocks;

@@ -1,6 +1,6 @@
 {
   "commit": "the commit that adds this file",
-  "note": "qed.api baseline, GPU, from gate 62312406",
+  "note": "qed.api baseline, GPU, from gate 62312406; isotypic-block cells refused under the strict device policy (gate 62388005)",
   "cells": [
     {
       "cell": "dyn0_pm-abelian-chain12-gpu",
@@ -888,9 +888,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 4.440892098500626E-15,
-      "note": "",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.17
     },
     {
@@ -899,9 +899,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.0658141036401503E-14,
-      "note": "",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.31
     },
     {
@@ -910,9 +910,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.019806626980426E-14,
-      "note": "",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 8, irrep 0, n_up -1 (dim 23) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.17
     },
     {
@@ -1108,9 +1108,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.665575039186734E-16,
-      "note": "3 clusters, matrix elements 1.1e-16",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.08
     },
     {
@@ -1119,9 +1119,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.4432946772330717E-15,
-      "note": "3 clusters, matrix elements 2.1e-16",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.64
     },
     {
@@ -1130,9 +1130,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.4988212677374402E-15,
-      "note": "12 clusters, matrix elements 2.8e-16",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 8, irrep 0, n_up -1 (dim 23) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 1.46
     },
     {
@@ -1768,9 +1768,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 2.775558133138122E-17,
-      "note": "gpu vs cpu, 4 samples: 2.8e-17 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 19, irrep 1, n_up 1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 1) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.41
     },
     {
@@ -1779,9 +1779,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 5.551275760280834E-17,
-      "note": "gpu vs cpu, 4 samples: 5.6e-17 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.74
     },
     {
@@ -1790,9 +1790,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.6653365730277E-16,
-      "note": "gpu vs cpu, 4 samples: 1.7e-16 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 8, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 23) has no device kernel; use device='auto' or 'cpu'",
       "secs": 4.79
     },
     {
@@ -2208,9 +2208,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.7254150381866366E-15,
-      "note": "gpu vs cpu, 4 samples: 3.7e-15 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 19, irrep 1, n_up 1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 1) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.19
     },
     {
@@ -2219,9 +2219,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.79942990649498E-15,
-      "note": "gpu vs cpu, 4 samples: 3.8e-15 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.67
     },
     {
@@ -2230,9 +2230,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.0346096006420944E-15,
-      "note": "gpu vs cpu, 4 samples: 3.0e-15 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 8, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 23) has no device kernel; use device='auto' or 'cpu'",
       "secs": 1.14
     },
     {
@@ -2428,9 +2428,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 7.401486830834377E-17,
-      "note": "gpu vs cpu, 4 samples: 7.4e-17 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 19, irrep 1, n_up 1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 1) has no device kernel; use device='auto' or 'cpu'",
       "secs": 1.0
     },
     {
@@ -2439,9 +2439,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 9.868649107779169E-17,
-      "note": "gpu vs cpu, 4 samples: 9.9e-17 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.77
     },
     {
@@ -2450,9 +2450,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 2.960594732333751E-15,
-      "note": "gpu vs cpu, 4 samples: 3.0e-15 (limit 1e-08)",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: block of star 8, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 23) has no device kernel; use device='auto' or 'cpu'",
       "secs": 3.09
     },
     {
@@ -2648,9 +2648,9 @@
       "content": "lg",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 5.329070518200751E-15,
-      "note": "residual 3.4e-15 pairing 5.3e-15 lowest 5.3e-15",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.03
     },
     {
@@ -2659,9 +2659,9 @@
       "content": "lg",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.4210854715202004E-14,
-      "note": "residual 3.8e-15 pairing 1.4e-14 lowest 3.6e-15",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.32
     },
     {
@@ -2670,9 +2670,9 @@
       "content": "lg",
       "model": "xyz12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.2862601528904634E-14,
-      "note": "residual 3.2e-14 pairing 3.3e-14 lowest 3.1e-14",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 8, irrep 0, n_up -1 (dim 23) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.19
     },
     {

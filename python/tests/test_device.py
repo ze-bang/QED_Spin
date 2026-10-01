@@ -49,20 +49,48 @@ def test_every_verb_reports_where_it_ran():
         assert p["host_krylov"] + p["host_dense"] > 0
 
 
-def test_cpu_never_initialises_cuda():
-    # libcudart loads the driver library (libcuda) at the first CUDA call: a device='cpu' run
-    # must leave it unloaded (select_backend used to probe device memory first).
+def _context_after(device):
+    """Run the verbs with `device` in a fresh process, then report whether any CUDA primary context
+    is active: CONTEXT / CLEAN, or NODRIVER / NODEVICE when there is nothing to look at. (libcuda
+    is mapped at import whatever runs: libcublasLt, which _core links, opens it in its
+    constructor, so only the driver's context state tells whether CUDA was initialised.)"""
     code = (
-        "import qed\n"
+        "import ctypes, qed\n"
         "b = qed.input.HamiltonianBuilder(12)\n"
         "b.heisenberg([(i, (i + 1) % 12) for i in range(12)], J=1.0)\n"
         "H = b.to_operator()\n"
-        "qed.eigs(H, 2, device='cpu')\n"
-        "qed.thermal(H, [1.0], method='ftlm', samples=2, krylov=20, device='cpu')\n"
-        "print('LIBCUDA' if any('libcuda.so' in line for line in open('/proc/self/maps')) else 'CLEAN')\n")
+        "O = qed.Operator(12, 0.5)\n"
+        "O.add_one_body(qed.OP_SZ, 0, 1.0)\n"
+        f"qed.eigs(H, 2, device={device!r})\n"
+        f"qed.thermal(H, [1.0], method='ftlm', samples=2, krylov=20, device={device!r})\n"
+        f"qed.dynamics(H, O, [0.0, 1.0], krylov=20, device={device!r})\n"
+        "try:\n"
+        "    cu = ctypes.CDLL('libcuda.so.1')\n"
+        "except OSError:\n"
+        "    print('NODRIVER'); raise SystemExit\n"
+        "n = ctypes.c_int(0)\n"
+        "if cu.cuInit(0) != 0 or cu.cuDeviceGetCount(ctypes.byref(n)) != 0 or n.value == 0:\n"
+        "    print('NODEVICE'); raise SystemExit\n"
+        "active = 0\n"
+        "for d in range(n.value):\n"
+        "    dev, flags, on = ctypes.c_int(0), ctypes.c_uint(0), ctypes.c_int(0)\n"
+        "    cu.cuDeviceGet(ctypes.byref(dev), d)\n"
+        "    cu.cuDevicePrimaryCtxGetState(dev, ctypes.byref(flags), ctypes.byref(on))\n"
+        "    active |= on.value\n"
+        "print('CONTEXT' if active else 'CLEAN')\n")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr[-500:]
-    assert out.stdout.strip().splitlines()[-1] == "CLEAN"
+    return out.stdout.strip().splitlines()[-1]
+
+
+def test_cpu_never_initialises_cuda():
+    # select_backend used to probe device memory before reading allow_gpu, which created a context.
+    assert _context_after("cpu") in ("CLEAN", "NODRIVER", "NODEVICE")
+
+
+@gpu
+def test_the_context_probe_sees_a_gpu_run():
+    assert _context_after("gpu") == "CONTEXT"
 
 
 @gpu
