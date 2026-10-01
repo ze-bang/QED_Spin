@@ -138,7 +138,7 @@ def test_tri9_automorphisms_are_split_into_cosets():
     report = qed.find_symmetries(H, verbose=False)
     A, residues = report.abelian, report.residues
     assert len(A) * (len(residues) + 1) == 1296 and not report.diagnostics
-    _check_split(A + residues, A, residues)
+    _check_split(close_group(A + residues), A, residues)
     assert len(A) == 27 and len(residues) == 47
 
 
