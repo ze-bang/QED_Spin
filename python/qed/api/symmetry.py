@@ -5,8 +5,11 @@ into the engine's :class:`qed._core.sectors.Spec`:
 
 * ``spatial`` -- ``"auto"`` (the automorphisms of H that commute with it, found by
   :func:`qed.find_symmetries`), a ``GeneratorSet``, a list of site permutations, or
-  ``None``. The group is split into a closed abelian part (the momenta) and one
-  coset representative per point-group element (the little groups).
+  ``None``. The group is split into its largest normal abelian subgroup (the momenta)
+  and one representative per coset of it (the point group); a ``GeneratorSet`` names
+  its own abelian part, which must be normal. With accidental symmetry (a cluster whose
+  graph has more automorphisms than its lattice) the abelian part need not be the lattice
+  translations: pass the translations and point group as a list to label by them.
 * ``sz`` -- ``"auto"`` (decompose by Sz, or by Sz parity when H only conserves that),
   an integer (one Sz sector, counted in set bits), ``"even"`` / ``"odd"`` (one parity
   half), or ``"off"``.
@@ -28,6 +31,7 @@ from fractions import Fraction
 from typing import Any, Optional, Sequence
 
 from .. import _core
+from ..errors import InvalidRequest
 
 _TOGGLE = {"auto": -1, "off": 0, "require": 1}
 
@@ -36,7 +40,7 @@ def _toggle(value: str, name: str) -> int:
     try:
         return _TOGGLE[str(value).lower()]
     except KeyError:
-        raise ValueError(f"{name} must be one of {sorted(_TOGGLE)}, got {value!r}") from None
+        raise InvalidRequest(f"{name} must be one of {sorted(_TOGGLE)}, got {value!r}") from None
 
 
 @dataclass(frozen=True)
@@ -96,9 +100,10 @@ class Symmetry:
 
     # ------------------------------------------------------------------
     def groups(self, H, diagnostics: Optional[list] = None) -> tuple[list[list[int]], list[list[int]]]:
-        """(closed abelian group, point-group coset representatives) for H. ``diagnostics``,
-        when given, receives a (code, message) pair for each fallback taken."""
-        from .._groups import close_group, split_nonabelian
+        """(closed abelian group, point-group coset representatives) for H: the abelian group is
+        normal in the whole spatial group, the identity first. ``diagnostics``, when given,
+        receives a (code, message) pair for each fallback taken."""
+        from .._groups import close_group, spatial_split, split_generator_set
 
         n = int(H.num_sites)
         identity = [list(range(n))]
@@ -107,11 +112,11 @@ class Symmetry:
             return identity, []
         if isinstance(spatial, str):
             if spatial.lower() != "auto":
-                raise ValueError(f"spatial must be 'auto', a GeneratorSet, a permutation list "
-                                 f"or None, got {spatial!r}")
+                raise InvalidRequest(f"spatial must be 'auto', a GeneratorSet, a permutation list "
+                                     f"or None, got {spatial!r}")
             from ..discovery import find_symmetries
             try:
-                spatial = find_symmetries(H, verbose=False).full_set
+                report = find_symmetries(H, verbose=False)
             except ImportError as e:        # the graph-automorphism search needs pynauty
                 import warnings
                 msg = f"Symmetry(spatial='auto'): {e}; continuing without spatial symmetry"
@@ -119,29 +124,30 @@ class Symmetry:
                 if diagnostics is not None:
                     diagnostics.append(("auto_spatial_skipped", msg))
                 return identity, []
-            if spatial is None:               # H has no spatial symmetry
+            if diagnostics is not None:
+                diagnostics.extend(report.diagnostics)
+            A, residues = report.abelian or identity, report.residues
+        else:
+            gens = getattr(spatial, "generators", None)
+            star = list(getattr(spatial, "star_perms", None) or []) if gens is not None else []
+            perms = list(gens) + star if gens is not None else list(spatial)
+            # Group arithmetic on a map that is not a bijection never closes (its powers never
+            # return to the identity): refuse it before any.
+            for p in perms:
+                if sorted(int(x) for x in p) != list(range(n)):
+                    raise InvalidRequest(f"spatial symmetry: {list(p)} is not a permutation of the {n} sites")
+            if not perms:
                 return identity, []
-        gens = getattr(spatial, "generators", None)
-        if gens is not None and not gens:
-            return identity, []
-        # Group arithmetic on a map that is not a bijection never closes (its powers never
-        # return to the identity): refuse it before any.
-        for p in (gens if gens is not None else spatial):
-            if sorted(int(x) for x in p) != list(range(n)):
-                raise ValueError(f"spatial symmetry: {list(p)} is not a permutation of the {n} sites")
-        if self.point_group:
-            split = split_nonabelian(spatial)
-            if not isinstance(split, str):
-                A, residues = split
-                return [list(a) for a in A], [list(r) for r in residues]
-        base = gens if gens is not None else spatial
-        A = close_group([list(g) for g in base])
-        if A is None:
-            raise ValueError("the spatial group exceeds the closure cap")
-        from .._groups import greedy_maximal_abelian
-        if gens is None:            # a raw permutation list may be non-abelian
-            A = greedy_maximal_abelian(A)
-        return [list(a) for a in A], []
+            if gens is not None:            # an explicit split: checked, not re-chosen
+                A, residues = split_generator_set(gens, star, n)
+            else:
+                G = close_group(perms)
+                if G is None:
+                    raise InvalidRequest("the spatial group exceeds the 4096-element closure cap")
+                A, residues, notes = spatial_split(G)
+                if diagnostics is not None:
+                    diagnostics.extend(notes)
+        return [list(a) for a in A], ([list(r) for r in residues] if self.point_group else [])
 
     def resolve(self, H, diagnostics: Optional[list] = None) -> "_core.sectors.Spec":
         """The engine's Spec for H; ``diagnostics`` as in :meth:`groups`."""
@@ -157,7 +163,7 @@ class Symmetry:
             elif key in ("even", "odd"):
                 spec.sz_parity = 0 if key == "even" else 1
             else:
-                raise ValueError(f"sz must be 'auto', 'off', 'even', 'odd' or an int, got {sz!r}")
+                raise InvalidRequest(f"sz must be 'auto', 'off', 'even', 'odd' or an int, got {sz!r}")
         elif sz is not None:
             spec.n_up = int(sz)
         spec.spin_flip = _toggle(self.spin_flip, "spin_flip")
@@ -165,7 +171,7 @@ class Symmetry:
         if self.total_spin is not None:
             two_s = round(2 * float(self.total_spin))
             if abs(two_s - 2 * float(self.total_spin)) > 1e-9 or two_s < 0:
-                raise ValueError("total_spin must be a non-negative multiple of 1/2, "
+                raise InvalidRequest("total_spin must be a non-negative multiple of 1/2, "
                                  f"got {self.total_spin!r}")
             spec.two_S = int(two_s)
         spec.only_k0 = list(self.only_k0)
@@ -177,7 +183,7 @@ class Symmetry:
                 c = []
                 for T, th in req:
                     if T not in index:
-                        raise ValueError(f"select(momentum=...): {list(T)} is not in the abelian group")
+                        raise InvalidRequest(f"select(momentum=...): {list(T)} is not in the abelian group")
                     c.append((index[T], complex(cmath.exp(-2j * cmath.pi * float(th)))))
                 reqs.append(c)
             spec.only_momentum = reqs
@@ -193,7 +199,7 @@ class Symmetry:
                     elif R in index:
                         c.append((index[R], chi))
                     else:
-                        raise ValueError(f"select(irrep_character=...): {list(R)} is not a point-group "
+                        raise InvalidRequest(f"select(irrep_character=...): {list(R)} is not a point-group "
                                          "coset representative (see Symmetry.groups)")
                 reqs.append(c)
             spec.only_irrep_chars = reqs
@@ -223,7 +229,7 @@ def momentum_of(level, spec, translations) -> tuple:
     for T in translations:
         key = tuple(int(x) for x in T)
         if key not in index:
-            raise ValueError(f"momentum_of: {list(T)} is not in the abelian group")
+            raise InvalidRequest(f"momentum_of: {list(T)} is not in the abelian group")
         chi = complex(level.momentum[index[key]])
         theta = (-cmath.phase(chi) / (2 * cmath.pi)) % 1.0
         out.append(Fraction(theta).limit_denominator(_order(key)) % 1)

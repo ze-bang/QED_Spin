@@ -106,8 +106,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         // The W path tests commutation on the sector (monomial_commutes) and could keep a residue this term-level
         // test rejects: leave such a star to it, so both lanes always publish the same co-group.
         if (!ed::symmetry::hamiltonian_commutes_with_permutation(op.transform_data_, op.three_body_data_, p))
-            return decline("residue " + std::to_string(rp) + " fixes k0 but fails the term-level commutation test");
-        P.push_back(p); Pinv.push_back(inverse_perm(p)); P_res.push_back(static_cast<int>(rp));
+            return decline("residue " + std::to_string(cx.residue_spec[rp]) + " fixes k0 but fails the term-level commutation test");
+        P.push_back(p); Pinv.push_back(inverse_perm(p)); P_res.push_back(cx.residue_spec[rp]);
     }
     const int nP = static_cast<int>(P.size());
     if (nP == 1) return decline("trivial little co-group (nothing to gain)");
@@ -377,7 +377,7 @@ build_star_blocks(const ::Operator&         op,
         if (dup) continue;
         if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
         M.push_back(std::move(m));
-        M_res.push_back(static_cast<int>(rp));
+        M_res.push_back(cx.residue_spec[rp]);
     }
     if (profile) { *t_monomial += secs(t0, tick()); t0 = tick(); }
 

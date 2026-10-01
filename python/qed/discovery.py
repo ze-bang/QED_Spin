@@ -1,6 +1,6 @@
 """Symmetry discovery: the automorphisms of H's coloured interaction graph that commute
-with H (``find_symmetries``), returned as a ``GeneratorSet`` -- an abelian clique (the
-momenta) plus the retained point-group residues -- inside a ``SymmetryReport``.
+with H (``find_symmetries``), split into the largest normal abelian subgroup (the momenta)
+and one representative per coset of it (the point group), inside a ``SymmetryReport``.
 """
 
 from __future__ import annotations
@@ -52,13 +52,21 @@ def _run_full_automorphism_pipeline(
     autgrp,
     AutomorphismFinder,
     filter_hamiltonian_automorphisms,
-) -> list[Permutation]:
-    """Run nauty + Hamiltonian filter. Returns the list of valid
-    Hamiltonian-preserving permutations on the original vertices."""
+    cap: int,
+) -> tuple[Optional[list[Permutation]], float]:
+    """Run nauty + Hamiltonian filter: ``(permutations, |Aut|)``, the valid Hamiltonian-
+    preserving permutations on the original vertices and nauty's group order. Above ``cap``
+    nothing is enumerated and the list is None (|Aut| reaches N! for field-only, empty or
+    all-to-all H)."""
     graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(
         vertex_weights, edges
     )
     aut = autgrp(graph)
+    # One auxiliary vertex per interacting pair, so the group of the expanded graph is that
+    # of the original vertices: nauty's count (grpsize1 * 10^grpsize2) is |Aut| itself.
+    size = float(aut[1]) * 10.0 ** int(aut[2])
+    if size > cap:
+        return None, size
     n_total = graph.number_of_vertices
     finder = AutomorphismFinder()
     expanded = finder.generate_all_automorphisms(aut[0], n_total)
@@ -75,7 +83,7 @@ def _run_full_automorphism_pipeline(
 
     # Hamiltonian-preservation safety filter (catches edge-coloring
     # corner cases where the subdivision trick over-counted).
-    return filter_hamiltonian_automorphisms(autos, edges)
+    return filter_hamiltonian_automorphisms(autos, edges), size
 
 
 def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> list[Permutation]:
@@ -168,39 +176,24 @@ def _infer_cluster_dims(positions: list[Any],
     return dims
 
 
-def _make_generator_set_from_clique(
-    clique: list[Permutation],
-    MaximalAbelianSubgroupFinder,
+def _generator_set(
+    abelian: list[Permutation],
+    star_perms: list[Permutation],
     *,
     name: str,
     description: str,
 ) -> GeneratorSet:
-    """Run ``find_minimal_generators`` on the supplied clique and
-    return a typed :class:`GeneratorSet`."""
-    info = MaximalAbelianSubgroupFinder().find_minimal_generators(clique)
-    if not info:
-        return GeneratorSet(
-            name=name,
-            description=description + " (only the identity automorphism was found.)",
-            generators=[],
-            orders=[],
-            group_size=1,
-        )
-    gens = [list(map(int, gi["permutation"])) for gi in info]
-    orders = [int(gi["order"]) for gi in info]
-    # TRUE |A|, not prod(orders). The C++ minimal-generator decomposition is
-    # minimal in COUNT, not relation-free: a 4x4 torus yields three order-4
-    # generators spanning a group of order 16, where prod(orders) says 64.
-    # Overstating |A| makes correct dim/|A| blocks look like the engine is
-    # forfeiting a factor it never had. See _group_structure.abelian_order.
-    from ._group_structure import abelian_order
-    group_size = abelian_order(gens, orders)
+    """A :class:`GeneratorSet` for the closed abelian group ``abelian`` (a generating set of it,
+    each element's order, ``group_size = |abelian|``) with ``star_perms`` as its residues."""
+    from ._groups import _perm_order, abelian_generators
+    gens = abelian_generators(abelian) if len(abelian) > 1 else []
     return GeneratorSet(
         name=name,
         description=description,
         generators=gens,
-        orders=orders,
-        group_size=group_size,
+        orders=[_perm_order(g) for g in gens],
+        group_size=len(abelian),
+        star_perms=[list(p) for p in star_perms],
     )
 
 
@@ -375,18 +368,31 @@ class SymmetryReport:
         Candidate symmetry groups discovered in the operator. The first
         entry is always the trivial one (no symmetry); the rest are
         ranked by group size.
+    abelian : list[Permutation]
+        The split ``Symmetry(spatial="auto")`` uses: the largest normal
+        abelian subgroup of the automorphisms (closed, the identity first;
+        the identity alone without spatial symmetry) ...
+    residues : list[Permutation]
+        ... and one representative per coset of it (the point group).
+    diagnostics : list[tuple[str, str]]
+        (code, message) pairs, e.g. ``("aut_capped", ...)`` when the
+        automorphism group was too large to enumerate and no spatial
+        symmetry is used.
     """
 
     num_sites: int
     has_u1_sz: bool
     sz_sectors: list[tuple[int, int]] = field(default_factory=list)
     generator_sets: list[GeneratorSet] = field(default_factory=list)
+    abelian: list[Permutation] = field(default_factory=list)
+    residues: list[Permutation] = field(default_factory=list)
+    diagnostics: list[tuple[str, str]] = field(default_factory=list)
 
     # Convenience attributes - populated by find_symmetries() -----------
     full_set: Optional[GeneratorSet] = None
-    """The largest commuting subgroup found (max clique → minimal
-    generators). ``None`` if the Hamiltonian has trivial automorphism
-    group beyond identity."""
+    """The split as a GeneratorSet: generators of ``abelian``, with
+    ``residues`` as ``star_perms``. ``None`` if the Hamiltonian has no
+    automorphism beyond the identity."""
 
     translation_set: Optional[GeneratorSet] = None
     """The translation-only generator set, when ``lattice=`` was
@@ -473,7 +479,7 @@ _FIND_SYM_MEMO: "dict[Any, SymmetryReport]" = {}
 _FIND_SYM_MEMO_CAP = 32
 
 
-def _find_symmetries_key(operator, lattice, translation_only, clique_budget):
+def _find_symmetries_key(operator, lattice, translation_only):
     """Content key for the find_symmetries memo, or None to skip caching
     (any part that can't be hashed => compute fresh, never cache wrong)."""
     try:
@@ -484,20 +490,15 @@ def _find_symmetries_key(operator, lattice, translation_only, clique_budget):
             pos = getattr(lattice, "positions", None)
             vec = getattr(lattice, "lattice_vectors", None)
             lat = (repr(pos), repr(vec))
-        return (int(operator.num_sites), terms, three,
-                bool(translation_only), lat, int(clique_budget))
+        return (int(operator.num_sites), terms, three, bool(translation_only), lat)
     except Exception:
         return None
 
 
-# Above this automorphism-group size, find_symmetries sidesteps the NP-hard
-# maximum-clique search (O(|Aut|^2) commutation graph + nx.find_cliques,
-# which enumerates ALL maximal cliques -- hours at |Aut| ~ 3e4) in favour of
-# a greedy maximal-abelian clique with the residue retained as star_perms.
-# 512 keeps the exact maximum clique for every ordinary cluster while
-# capping the pathological highly-symmetric ones (free-site permutations on
-# pyrochlore trees reach |Aut| ~ 1e3-3e4).
-_DEFAULT_CLIQUE_BUDGET = 512
+# The automorphism group is enumerated only up to this order: it must stay enumerable to be split
+# into the abelian part and its cosets. nauty counts the group first, so a larger one (|Aut| = N!
+# for field-only, empty or all-to-all H) costs nothing; such an H runs without spatial symmetry.
+_AUT_ENUMERATION_CAP = 4096
 
 
 def find_symmetries(
@@ -510,30 +511,29 @@ def find_symmetries(
 ) -> SymmetryReport:
     """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
 
-    The colored-graph automorphism search + group closure (~0.5 s) is
-    memoised on the operator's term content (+ lattice + flags), so a
-    ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
-    the search once.
+    The automorphisms of H's coloured interaction graph that commute with H are split into
+    the largest normal abelian subgroup (``report.abelian``, the momenta) and one
+    representative per coset of it (``report.residues``, the point group): the split
+    ``Symmetry(spatial="auto")`` uses. A group of more than 4096 elements is not
+    enumerated; the report then carries no spatial symmetry and says so in ``diagnostics``.
 
-    ``clique_budget``: above this automorphism-group size the exact
-    maximum-clique search (NP-hard; hours at |Aut| ~ 3e4) is replaced by a
-    greedy maximal-abelian clique, with the full non-abelian residue still
-    retained as coset-representative ``star_perms`` -- so the factorized
-    little-group lane keeps the whole point group either way. Default 512
-    (``_DEFAULT_CLIQUE_BUDGET``). A greedy maximal (not maximum) clique
-    is always valid: a smaller abelian core only folds less; the residue
-    grows correspondingly and the projection lane recovers the reduction.
+    The search is memoised on the operator's term content (+ lattice + flags), so a
+    ``spatial="auto"`` sweep that calls this repeatedly on the same H pays it once.
+
+    ``clique_budget`` is accepted and ignored (deprecated): there is no clique search.
     """
-    _budget = (int(clique_budget) if clique_budget is not None
-               else _DEFAULT_CLIQUE_BUDGET)
-    _key = _find_symmetries_key(operator, lattice, translation_only, _budget)
+    if clique_budget is not None:
+        import warnings
+        warnings.warn("find_symmetries(clique_budget=...) has no effect: the abelian part is the "
+                      "largest normal abelian subgroup, found without a clique search",
+                      DeprecationWarning, stacklevel=2)
+    _key = _find_symmetries_key(operator, lattice, translation_only)
     if _key is not None:
         hit = _FIND_SYM_MEMO.get(_key)
         if hit is not None:
             return hit
     result = _find_symmetries_impl(
-        operator, lattice=lattice, translation_only=translation_only,
-        verbose=verbose, clique_budget=_budget)
+        operator, lattice=lattice, translation_only=translation_only, verbose=verbose)
     if _key is not None:
         if len(_FIND_SYM_MEMO) >= _FIND_SYM_MEMO_CAP:
             _FIND_SYM_MEMO.pop(next(iter(_FIND_SYM_MEMO)))
@@ -547,14 +547,13 @@ def _find_symmetries_impl(
     lattice: Optional[Any] = None,
     translation_only: bool = False,
     verbose: bool = True,
-    clique_budget: int = _DEFAULT_CLIQUE_BUDGET,
 ) -> SymmetryReport:
     """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
 
-    Runs the colored-graph automorphism pipeline (powered by
-    ``pynauty`` + ``networkx``) on the in-memory operator's term lists,
-    finds the maximum clique of commuting automorphisms, and reports
-    every distinct generator set the engine produces.
+    Runs the colored-graph automorphism pipeline (``pynauty``) on the
+    in-memory operator's term lists, splits the group into its largest
+    normal abelian subgroup and the cosets of it, and reports every
+    distinct generator set.
 
     Parameters
     ----------
@@ -588,23 +587,13 @@ def _find_symmetries_impl(
 
     # ------------------------------------------------------------------
     # 0. Pre-flight cost note. The colored-graph automorphism search is
-    #     polynomial in the operator's term graph but the Schreier-Sims
-    #     enumeration of the resulting permutation group can blow up
-    #     for large highly-symmetric clusters. Log a one-line note (Info
-    #     with verbose, else Debug) when the request is potentially expensive.
+    #     polynomial in the operator's term graph; the group is enumerated
+    #     only up to _AUT_ENUMERATION_CAP elements. Log a one-line note (Info
+    #     with verbose, else Debug) for large clusters.
     # ------------------------------------------------------------------
     note = _log.INFO if verbose else _log.DEBUG
-    if num_sites >= 28:
-        _log.log(note, f"[qed.find_symmetries] N={num_sites}: full Hilbert dim "
-                 f"= 2^{num_sites} = {1 << num_sites:_d}. The automorphism "
-                 "search is on the term graph (cheap), but enumerating the "
-                 "resulting group can take seconds-to-minutes for large "
-                 "clusters with rich point-group symmetry. Pass "
-                 "translation_only=True (with lattice=) to skip the full "
-                 "search if you only need k-point projection.")
-    elif num_sites >= 20:
-        _log.log(note, f"[qed.find_symmetries] N={num_sites}: searching the "
-                 "automorphism group (cheap; should finish in <1 s).")
+    if num_sites >= 20:
+        _log.log(note, "[qed.find_symmetries] N=%d: searching the automorphism group", num_sites)
 
     # ------------------------------------------------------------------
     # 1. U(1) Sz sectors.
@@ -639,13 +628,10 @@ def _find_symmetries_impl(
     )
     generator_sets.append(trivial)
 
-    # Imports kept inside the function so that find_symmetries() doesn't
-    # force pynauty / networkx onto users who never call it.
+    # Imported here so that pynauty is needed only by find_symmetries().
     try:
         from ._automorphism import (  # type: ignore
-            AutomorphismCliqueAnalyzer,
             AutomorphismFinder,
-            MaximalAbelianSubgroupFinder,
             construct_colored_graph,
             filter_hamiltonian_automorphisms,
             filter_translation_automorphisms,
@@ -653,17 +639,26 @@ def _find_symmetries_impl(
         from pynauty import autgrp  # type: ignore
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
-            "find_symmetries() requires pynauty and networkx. Install "
-            "with `pip install pynauty networkx` (or skip find_symmetries "
+            "find_symmetries() requires pynauty. Install it with "
+            "`pip install pynauty` (or skip find_symmetries "
             "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
+    from ._groups import close_group, spatial_split
 
-    all_automorphisms = _run_full_automorphism_pipeline(
+    diagnostics: list[tuple[str, str]] = []
+    identity = [list(range(num_sites))]
+    all_automorphisms, aut_order = _run_full_automorphism_pipeline(
         vertex_weights, edges,
         construct_colored_graph, autgrp,
         AutomorphismFinder, filter_hamiltonian_automorphisms,
+        cap=_AUT_ENUMERATION_CAP,
     )
-
+    if all_automorphisms is None:
+        msg = (f"|Aut(H)| = {aut_order:.6g} exceeds {_AUT_ENUMERATION_CAP}: no spatial symmetry "
+               "is used. Pass Symmetry(spatial=[...]) with generators of a subgroup to use one.")
+        _log.log(note, "[qed.find_symmetries] %s", msg)
+        diagnostics.append(("aut_capped", msg))
+        all_automorphisms = identity
     all_automorphisms = _keep_hamiltonian_symmetries(operator, all_automorphisms)
     # 3a. Translation-only generator set (when a lattice is provided).
     if lattice is not None:
@@ -671,119 +666,64 @@ def _find_symmetries_impl(
             all_automorphisms, lattice,
             filter_translation_automorphisms, num_sites,
         )
-        if translation_autos:
-            translation_set = _make_generator_set_from_clique(
-                translation_autos,
-                MaximalAbelianSubgroupFinder,
+        translations = close_group(translation_autos) if translation_autos else None
+        if translations is not None and len(translations) > 1:
+            # The ENTIRE point group is this set's residue -- translations
+            # project, the point group folds the k sectors into isospectral
+            # stars (the textbook space-group split).
+            _t_keys = set(translations)
+            translation_set = _generator_set(
+                [list(t) for t in translations],
+                [list(pp) for pp in all_automorphisms if tuple(pp) not in _t_keys],
                 name="translation",
                 description=(
                     "Pure lattice translations (preserves all positions "
                     "modulo the supercell)."
                 ),
             )
-            # The ENTIRE point group is this set's residue --
-            # translations project, the point group folds the k sectors
-            # into isospectral stars (the textbook space-group split).
-            _t_keys = {tuple(pp) for pp in translation_autos}
-            translation_set.star_perms = [
-                list(pp) for pp in all_automorphisms
-                if tuple(pp) not in _t_keys
-            ]
             generator_sets.append(translation_set)
 
-    # 3b. Full automorphism (max clique → minimal generators) when not
-    #     restricted to translations.
+    # 3b. The split the engine uses: the largest normal abelian subgroup (the momenta) and
+    #     one representative per coset of it (the point group).
+    abelian, residues = identity, []
     if not translation_only and len(all_automorphisms) > 1:
-        _budgeted = len(all_automorphisms) > clique_budget
-        if _budgeted:
-            # Clique budget: the exact maximum-clique search is NP-hard
-            # (O(|Aut|^2) commutation graph + nx.find_cliques enumerating
-            # ALL maximal cliques -- hours at |Aut| ~ 3e4). A greedy
-            # maximal-abelian clique is always VALID (smaller A only folds
-            # less); the residue below carries the rest of the point group
-            # into the little-group lane, which recovers the reduction.
-            from ._groups import greedy_maximal_abelian
-            clique = [list(pp) for pp in
-                      greedy_maximal_abelian(all_automorphisms)]
-            _log.log(note, "[qed.find_symmetries] |Aut| = %d exceeds clique_budget = %d; greedy "
-                     "maximal-abelian clique (|A| = %d), full residue retained as "
-                     "coset-representative star_perms",
-                     len(all_automorphisms), clique_budget, len(clique))
-        else:
-            clique_indices = AutomorphismCliqueAnalyzer().find_maximum_clique(
-                all_automorphisms
-            )
-            clique = [all_automorphisms[i] for i in clique_indices]
-        if clique:
-            full_set = _make_generator_set_from_clique(
-                clique,
-                MaximalAbelianSubgroupFinder,
-                name="full_automorphism",
-                description=(
-                    "Largest abelian subgroup of the lattice + Hamiltonian "
-                    "automorphism group."
-                ),
-            )
-            # Retain the non-abelian residue (automorphisms
-            # outside the abelian clique) for star reduction and group
-            # structure reporting.
-            _clique_keys = {tuple(pp) for pp in clique}
-            if _budgeted:
-                # ONE representative per A-coset instead of the raw
-                # complement: at |Aut| ~ 3e4 the complement would be ~3e4
-                # star_perms that split_nonabelian dedups per coset anyway
-                # (same set, computed later at O(|star|*|A|) per call) --
-                # store the deduped form once. The greedy clique is a
-                # CLOSED group, so left-cosets partition the complement.
-                from ._groups import _compose as _pg_compose
-                _Aset = _clique_keys
-                _star, _covered = [], set(_Aset)
-                for pp in all_automorphisms:
-                    t = tuple(pp)
-                    if t in _covered:
-                        continue
-                    _star.append(list(t))
-                    _covered.update(_pg_compose(a, t) for a in _Aset)
-                full_set.star_perms = _star
-            else:
-                full_set.star_perms = [
-                    list(pp) for pp in all_automorphisms
-                    if tuple(pp) not in _clique_keys
-                ]
-            if (
-                translation_set is None
-                or _generators_equal(full_set.generators,
-                                     translation_set.generators)
-            ):
-                if translation_set is None:
-                    generator_sets.append(full_set)
-            else:
-                generator_sets.append(full_set)
+        abelian, residues, notes = spatial_split(all_automorphisms)
+        diagnostics.extend(notes)
+        full_set = _generator_set(
+            abelian, residues,
+            name="full_automorphism",
+            description=(
+                "Largest normal abelian subgroup of the Hamiltonian "
+                "automorphism group, with one representative per coset."
+            ),
+        )
+        if translation_set is None or not _generators_equal(full_set.generators,
+                                                            translation_set.generators):
+            generator_sets.append(full_set)
 
-            # When the full set has > 1 generator, emit each individual
-            # generator as its own GeneratorSet too, so users can browse
-            # the available subgroups by name (e.g.
-            # ``report.get("full_automorphism[0]")``) without needing to
-            # call ``full_set.subgroup(...)`` manually. We don't enumerate
-            # *all* 2**k − 1 subgroups -- the per-generator set is the
-            # most physically meaningful axis (rotation alone, reflection
-            # alone, ...). Pairwise / higher combos are still trivially
-            # available via ``full_set.subgroup([i, j, ...])``.
-            if full_set is not None and len(full_set.generators) > 1:
-                for i in range(len(full_set.generators)):
-                    sub = full_set.subgroup([i])
-                    sub.description = (
-                        f"Single-generator subgroup of "
-                        f"{full_set.name!r} (generator index {i}, "
-                        f"order {sub.orders[0]})."
-                    )
-                    generator_sets.append(sub)
+        # When the full set has > 1 generator, emit each individual
+        # generator as its own GeneratorSet too, so users can browse
+        # the available subgroups by name (e.g.
+        # ``report.get("full_automorphism[0]")``) without needing to
+        # call ``full_set.subgroup(...)`` manually.
+        if len(full_set.generators) > 1:
+            for i in range(len(full_set.generators)):
+                sub = full_set.subgroup([i])
+                sub.description = (
+                    f"Single-generator subgroup of "
+                    f"{full_set.name!r} (generator index {i}, "
+                    f"order {sub.orders[0]})."
+                )
+                generator_sets.append(sub)
 
     return SymmetryReport(
         num_sites=num_sites,
         has_u1_sz=has_sz,
         sz_sectors=sz_sectors,
         generator_sets=generator_sets,
+        abelian=[list(a) for a in abelian],
+        residues=[list(r) for r in residues],
+        diagnostics=diagnostics,
         full_set=full_set,
         translation_set=translation_set,
         trivial_set=trivial,

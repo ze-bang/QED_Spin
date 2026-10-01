@@ -119,8 +119,11 @@ conjugate_irrep_map(const EngineContext& cx) {
 }
 
 // Map each residue's conjugation action onto the abelian irreps
-// (chi_k -> chi_k', with chi_{k'}(a') = chi_k(p^{-1} a' p)); residues that do
-// not normalise A are dropped.
+// (chi_k -> chi_k', with chi_{k'}(a') = chi_k(p^{-1} a' p)). A residue that does
+// not normalise A maps a momentum sector onto no sector at all: refused, since
+// stars, multiplets and labels would all be wrong (qed.Symmetry always passes a
+// normal A). Each kept residue remembers its index in the caller's list, which
+// is what the published little-co-group elements name.
 void build_residue_maps(EngineContext& cx,
                         const std::vector<std::vector<int>>& residue_perms) {
     const int nA = static_cast<int>(cx.A.size());
@@ -128,7 +131,8 @@ void build_residue_maps(EngineContext& cx,
     for (int a = 0; a < nA; ++a) aidx[cx.A[static_cast<std::size_t>(a)]] = a;
 
     const int n_irr = static_cast<int>(cx.giA.irreps.size());
-    for (const auto& p : residue_perms) {
+    for (std::size_t ip = 0; ip < residue_perms.size(); ++ip) {
+        const auto& p = residue_perms[ip];
         if (aidx.count(p)) continue;                       // p in A: no new info
         bool dup = false;
         for (const auto& q : cx.residues) if (q == p) { dup = true; break; }
@@ -136,16 +140,19 @@ void build_residue_maps(EngineContext& cx,
         const auto p_inv = inverse_perm(p);
         // conj_by_pinv[a'] = index of p^{-1} · a' · p
         std::vector<int> conj(static_cast<std::size_t>(nA), -1);
-        bool ok = true;
-        for (int a = 0; a < nA && ok; ++a) {
+        for (int a = 0; a < nA; ++a) {
             const auto e = compose(compose(p_inv, cx.A[static_cast<std::size_t>(a)]), p);
             const auto it = aidx.find(e);
-            if (it == aidx.end()) ok = false;
-            else conj[static_cast<std::size_t>(a)] = it->second;
+            if (it == aidx.end())
+                throw ed::InvalidRequest(
+                    "sectors: residue " + std::to_string(ip) + " does not normalise the abelian "
+                    "group; the abelian part must be a normal subgroup of the spatial group "
+                    "(qed.Symmetry chooses one when given the permutations as a list)");
+            conj[static_cast<std::size_t>(a)] = it->second;
         }
-        if (!ok) continue;                                 // p does not normalise A
 
         // Sector map: k -> k' with chi_{k'}(a) == chi_k(conj(a)) for all a.
+        bool ok = true;
         std::vector<int> mp(static_cast<std::size_t>(n_irr), -1);
         for (int k = 0; k < n_irr && ok; ++k) {
             const auto& chi_k = cx.giA.irreps[static_cast<std::size_t>(k)].character;
@@ -163,7 +170,9 @@ void build_residue_maps(EngineContext& cx,
             if (hit < 0) ok = false;
             else mp[static_cast<std::size_t>(k)] = hit;
         }
-        if (!ok) continue;
+        if (!ok)                                           // conjugation permutes the irreps of A
+            throw std::logic_error("little_group: residue " + std::to_string(ip) + " normalises A, "
+                                   "but its conjugation matches no permutation of A's irreps");
         // Lift to extended irrep indices. A spatial residue
         // commutes with the global flip (p^-1 (a F) p = (p^-1 a p) F), so the
         // conjugation action is parity-diagonal: (k, s) -> (mp[k], s).
@@ -177,6 +186,7 @@ void build_residue_maps(EngineContext& cx,
             mp = std::move(mp2);
         }
         cx.residues.push_back(p);
+        cx.residue_spec.push_back(static_cast<int>(ip));
         cx.irrep_map.push_back(std::move(mp));
     }
 }

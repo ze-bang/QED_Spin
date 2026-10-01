@@ -9,11 +9,16 @@ When a dropped residue precedes a kept one, irrep_characters() attaches the char
 the wrong permutation and select(irrep_character=) matches the wrong element or nothing.
 
 Test: K4 Heisenberg (complete graph on 4 sites), spatial=[(0123) 4-cycle, (01) swap].
-The greedy split gives A = C4 and five residues (the elements fixing site 0); only the
-reflection (0,3,2,1) normalises C4.
-(a) every key R reported by irrep_characters(i) must be a permutation of which the level's
-    own vector is an eigenvector (|<v|U_R|v>| = 1, convention independent);
-(b) select(irrep_character={(0,3,2,1): chi}) must return levels when such blocks exist."""
+(a) for every level of a ONE-dimensional little-co-group irrep, every key R reported by
+    irrep_characters(i) satisfies <v|U_R|v> = chi(R) (or its conjugate) for the level's own
+    vector (a d-dimensional irrep has no such identity; its levels are skipped);
+(b) selecting by a character a level reports, select(irrep_character={R: chi}), returns that
+    level's energy;
+(c) a residue the engine skips (one inside A, prepended to Spec.residues) shifts nothing: the
+    reported (permutation, character) pairs are the same.
+(The audit's first version asserted |<v|U_R|v>| = 1 for every irrep and a non-empty selection
+for every (residue, +-1); both fail for correct labels once A is the normal Klein group and
+the co-group S_3 has a two-dimensional irrep.)"""
 import signal
 
 import numpy as np
@@ -29,27 +34,11 @@ H = b.to_operator()
 gens = [[1, 2, 3, 0], [1, 0, 2, 3]]
 sym = qed.Symmetry(spatial=gens, sz=NUP, spin_flip="off", time_reversal="off")
 A, res = sym.groups(H)
-A = [tuple(a) for a in A]
-res = [tuple(r) for r in res]
-Aset = set(A)
-
-
-def inv(p):
-    q = [0] * len(p)
-    for i, x in enumerate(p):
-        q[x] = i
-    return tuple(q)
-
-
-def comp(p, q):
-    return tuple(p[q[i]] for i in range(len(p)))
-
-
-normalising = [r for r in res if all(comp(comp(inv(r), a), r) in Aset for a in A)]
-print(f"|A|={len(A)} residues={res} normalising={normalising}")
+print(f"|A|={len(A)} residues={[tuple(r) for r in res]}")
 
 states = [s for s in range(1 << N) if bin(s).count("1") == NUP]
 sidx = {s: i for i, s in enumerate(states)}
+ident = tuple(range(N))
 
 
 def U(p):
@@ -64,39 +53,51 @@ def U(p):
 
 
 problems = []
+checked = 0
+selections = 0
 try:
     e = qed.eigs(H, len(states), sym=sym, vectors=True)
-    ident = tuple(range(N))
     for i, L in enumerate(e.levels):
         chars = e.irrep_characters(i)
         if not chars or L.vector < 0:
             continue
-        v = np.asarray(e._raw.multiplet(e._spec, N, i, NUP)[0], complex)
-        for R, chi in chars.items():
+        if abs(chars[ident] - 1) < 1e-9:                         # (a): one-dimensional irreps
+            v = np.asarray(e._raw.multiplet(e._spec, N, i, NUP)[0], complex)
+            for R, chi in chars.items():
+                if R == ident:
+                    continue
+                ov = np.vdot(v, U(R) @ v)
+                checked += 1
+                print(f"level {i} E={L.energy:+.6f} key {R} chi={chi:.3f} <v|U_R|v>={ov:.6f}")
+                if min(abs(ov - chi), abs(ov - np.conj(chi))) > 1e-8:
+                    problems.append(f"level {i}: character {chi:.3f} reported on {R} but <v|U_R|v>={ov:.4f}")
+        for R, chi in chars.items():                             # (b)
             if R == ident:
                 continue
-            ov = abs(np.vdot(v, U(R) @ v))
-            print(f"level {i} E={L.energy:+.6f} mult={L.multiplicity} reported key {R} chi={chi:.3f}"
-                  f" |<v|U_R|v>|={ov:.6f}")
-            if abs(ov - 1.0) > 1e-8:
-                problems.append(f"level {i}: character reported on {R} but |<v|U_R|v>|={ov:.4f}")
+            sel = qed.spectrum(H, sym=sym.select(irrep_character={R: chi}))
+            selections += 1
+            if len(sel.energies) == 0 or np.abs(np.asarray(sel.energies) - L.energy).min() > 1e-9:
+                problems.append(f"select {R}:{chi:.3f} misses level {i} (E={L.energy:+.6f})")
+    # (c) a skipped residue in front of the caller's list
+    spec = sym.resolve(H)
+    shifted = sym.resolve(H)
+    shifted.residues = [list(spec.abelian[1])] + [list(p) for p in spec.residues]
+
+    def labels(s):
+        r = qed._core.sectors.eigs(H, N, s, k=len(states))
+        return sorted((round(L.energy, 9),
+                       tuple(sorted((tuple(s.residues[k]) if k >= 0 else (), round(c.real, 9), round(c.imag, 9))
+                                    for k, c in L.irrep_characters)))
+                      for L in r.levels)
+    if labels(spec) != labels(shifted):
+        problems.append("a residue skipped by the engine shifts the reported co-group elements")
 except Exception as ex:
     problems.append(f"eigs/labels raised {type(ex).__name__}: {str(ex)[:120]}")
 
-# (b) selection by the residue the engine actually uses
-for R in normalising:
-    for chi in (1.0, -1.0):
-        try:
-            s2 = sym.select(irrep_character={R: chi})
-            e2 = qed.eigs(H, 1, sym=s2, allow_partial=True)
-            n = len(e2.levels)
-        except Exception as ex:
-            n = f"raised {type(ex).__name__}: {str(ex)[:80]}"
-        print(f"select(irrep_character={{{R}: {chi:+.0f}}}) -> {n} levels")
-        if n == 0 or isinstance(n, str):
-            problems.append(f"select {R}:{chi:+.0f} gave {n} levels")
-
+if not checked or not selections:
+    problems.append(f"nothing checked ({checked} characters, {selections} selections)")
 if problems:
     print("REPRO: CONFIRMED " + "; ".join(problems))
 else:
-    print("REPRO: NOT_REPRODUCED labels are eigen-consistent and selection by the kept residue works")
+    print(f"REPRO: NOT_REPRODUCED {checked} characters eigen-consistent, {selections} selections hit, "
+          "skipped residues shift nothing")

@@ -1,6 +1,6 @@
 # Sourced by the golden-harness job scripts (from the repository root).
 #   QED_CLUSTER       scripts/clusters/<name>.env to load        (default: alliance)
-#   QED_VENV          virtualenv with pytest / networkx / pynauty
+#   QED_VENV          virtualenv with pytest / pynauty
 #   QED_PYBIND11_DIR  pybind11 CMake package, if not discoverable
 #   QED_VARIANT       which build the run jobs test: cpu | cuda  (default: cuda)
 set +u

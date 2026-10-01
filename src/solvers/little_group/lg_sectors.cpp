@@ -44,6 +44,43 @@ std::vector<std::uint64_t> sz_states(int n_sites, int n_up) {
     return out;
 }
 
+// A permutation of the n_sites sites, else InvalidRequest.
+void require_permutation(const Perm& g, int n_sites) {
+    std::vector<char> hit(static_cast<std::size_t>(n_sites), 0);
+    bool perm = g.size() == static_cast<std::size_t>(n_sites);
+    for (int x : g) {
+        if (!perm || x < 0 || x >= n_sites || hit[static_cast<std::size_t>(x)]) { perm = false; break; }
+        hit[static_cast<std::size_t>(x)] = 1;
+    }
+    if (!perm)
+        throw ed::InvalidRequest("sectors: a symmetry is not a permutation of the " + std::to_string(n_sites)
+                                 + " sites");
+}
+
+// Every residue normalises the abelian group (p A p^-1 = A), else InvalidRequest: a residue that
+// does not maps a momentum sector onto no sector, and the stars, multiplets and labels built from
+// it would be wrong. qed.Symmetry always passes a normal A.
+void require_normal(const Spec& s, int n_sites) {
+    const auto A = detail::abelian_or_identity(s, n_sites);
+    for (const Perm& g : A) require_permutation(g, n_sites);
+    const std::set<Perm> in_A(A.begin(), A.end());
+    Perm p_inv(static_cast<std::size_t>(n_sites)), c(static_cast<std::size_t>(n_sites));
+    for (std::size_t i = 0; i < s.residues.size(); ++i) {
+        const Perm& p = s.residues[i];
+        require_permutation(p, n_sites);
+        for (int j = 0; j < n_sites; ++j) p_inv[static_cast<std::size_t>(p[static_cast<std::size_t>(j)])] = j;
+        for (const Perm& a : A) {
+            for (std::size_t j = 0; j < c.size(); ++j)                  // p o a o p^-1
+                c[j] = p[static_cast<std::size_t>(a[static_cast<std::size_t>(p_inv[j])])];
+            if (!in_A.count(c))
+                throw ed::InvalidRequest(
+                    "sectors: residue " + std::to_string(i) + " does not normalise the abelian group; the "
+                    "abelian part must be a normal subgroup of the spatial group (qed.Symmetry chooses one "
+                    "when given the permutations as a list)");
+        }
+    }
+}
+
 // One block solved by the orchestrator, which binds it to a CUDA backend when the block has a
 // device kernel. Returns whether it actually ran on the device; `iters` receives its Krylov
 // iterations.
@@ -171,21 +208,13 @@ SzContent sz_content(const ::Operator& H) {
 }
 
 std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s) {
-    // A permutation H does not commute with would give silently wrong spectra.
+    // A permutation H does not commute with would give silently wrong spectra; a residue that
+    // does not normalise the abelian group, wrong stars, multiplets and labels.
+    require_normal(s, n_sites);
     for (const auto* set : {&s.abelian, &s.residues})
-        for (const Perm& g : *set) {
-            std::vector<char> hit(static_cast<std::size_t>(n_sites), 0);
-            bool perm = g.size() == static_cast<std::size_t>(n_sites);
-            for (int x : g) {
-                if (!perm || x < 0 || x >= n_sites || hit[static_cast<std::size_t>(x)]) { perm = false; break; }
-                hit[static_cast<std::size_t>(x)] = 1;
-            }
-            if (!perm)
-                throw std::invalid_argument("sectors: a symmetry is not a permutation of the "
-                                            + std::to_string(n_sites) + " sites");
+        for (const Perm& g : *set)
             if (!ed::symmetry::hamiltonian_commutes_with_permutation(H.transform_data_, H.three_body_data_, g))
-                throw std::invalid_argument("sectors: H does not commute with a supplied site permutation");
-        }
+                throw ed::InvalidRequest("sectors: H does not commute with a supplied site permutation");
     const SzContent c = sz_content(H);
     if (s.n_up >= 0 && c != SzContent::U1)
         throw std::invalid_argument("sectors: n_up names an Sz sector, but H does not conserve Sz");
@@ -494,6 +523,7 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
 std::vector<std::vector<Complex>>
 multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, int n_up) {
     if (!v.basis) throw std::invalid_argument("multiplet: level has no vector");
+    require_normal(s, n_sites);          // a loaded result never went through the walk
     const int sector_nup = v.basis->n_up;
     if (n_up >= 0 && sector_nup != n_up && !(level.mirror == 2 && sector_nup == n_sites - n_up))
         throw std::invalid_argument("multiplet: the level has no component in Sz sector n_up");

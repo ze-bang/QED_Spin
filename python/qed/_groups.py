@@ -1,23 +1,41 @@
-"""Permutation groups: closure, a maximal abelian subgroup, and the split of a symmetry
-group into its abelian part (the momenta) and coset representatives (the point group).
+"""Permutation groups: closure, and the split of a symmetry group G into an abelian part A (the
+momenta) and one representative per coset of A (the point group).
 
-A greedy commuting subgroup is always safe: a smaller abelian part only means larger
-stars (less momentum reduction), never wrong physics.
+The sector engine needs A to be NORMAL in the group G' it is given (G' = A . residues): a residue
+p then maps each momentum sector of A onto another (chi_k -> chi_k(p^-1 . p)), which is what makes
+stars, little groups and multiplets. A union of whole conjugacy classes of G whose elements commute
+pairwise generates a normal abelian subgroup, so :func:`normal_abelian_split` grows A class by class
+from every seed class and keeps the largest (ties: more fixed-point-free elements -- the
+translations -- then higher element orders).
+
+The engine works through the co-group G'/A per star, so :func:`spatial_split` keeps |G'/A| at most
+``_CO_GROUP_CAP``: a group without a large normal abelian subgroup (S_n of an all-to-all or
+field-only H) uses a maximal abelian subgroup A and its normaliser G' = N_G(A) instead.
+
+Convention (as irreps.cpp): (g.e)[i] = e[g[i]].
 """
 from __future__ import annotations
 
-__all__ = ["close_group", "greedy_maximal_abelian", "split_nonabelian"]
+import math
 
-_GROUP_CLOSURE_CAP = 4096   # A (and the closed full group) must stay enumerable
+import numpy as np
+
+from .errors import InvalidRequest
+
+__all__ = ["close_group", "normal_abelian_split", "spatial_split", "split_generator_set",
+           "split_nonabelian", "abelian_generators"]
+
+_GROUP_CLOSURE_CAP = 4096   # G (and so A) must stay enumerable
+_CO_GROUP_CAP = 64          # |G'/A|: the full cubic point group (48) fits
 
 
 def _compose(g, e):
-    """U-composition convention (matches irreps.cpp): (g.e)[i] = e[g[i]]."""
+    """(g.e)[i] = e[g[i]]."""
     return tuple(e[g[i]] for i in range(len(g)))
 
 
 def close_group(gens, cap=_GROUP_CLOSURE_CAP):
-    """BFS closure of a permutation set. None when the group exceeds cap."""
+    """BFS closure of a permutation set, sorted (the identity first). None when the group exceeds cap."""
     gens = [tuple(g) for g in gens]
     if not gens:
         return None
@@ -39,121 +57,317 @@ def close_group(gens, cap=_GROUP_CLOSURE_CAP):
     return sorted(elems)
 
 
-def _commute(a, b):
-    return _compose(a, b) == _compose(b, a)
-
-
-def greedy_maximal_abelian(elements, cap=_GROUP_CLOSURE_CAP):
-    """Greedy maximal commuting subgroup of an already-enumerated
-    permutation group.
-
-    Seed with the HIGHEST-order elements first: long cycles (translations)
-    build a large cyclic core, where naive sorted order tends to lock in an
-    early involution (e.g. a reflection) and end up with a small Klein-type
-    subgroup. Any commuting closure is *valid* -- smaller A only folds
-    less -- this ordering just maximizes the reduction.
-
-    Returns the CLOSED abelian subgroup as a sorted list of tuples (always
-    contains the identity; ``[]`` for empty input). Shared by
-    ``split_nonabelian``'s raw-list branch and ``find_symmetries``' clique
-    budget (``clique_budget=``), which uses it to sidestep the NP-hard
-    maximum-clique search on very large automorphism groups.
-    """
-    G = [tuple(e) for e in elements]
-    if not G:
-        return []
-    n = len(G[0])
-
-    def _order(e):
-        k, c = 1, e
-        ident = tuple(range(len(e)))
-        while c != ident:
-            c = _compose(e, c)
-            k += 1
-        return k
-
-    A = [tuple(range(n))]
-    Aset = set(A)
-    for e in sorted(G, key=lambda e: (-_order(e), e)):
-        if e in Aset:
+def _perm_order(p) -> int:
+    seen = [False] * len(p)
+    order = 1
+    for s in range(len(p)):
+        if seen[s]:
             continue
-        if all(_commute(e, a) for a in A):
-            closed = close_group(A + [e])
-            if closed is not None and len(closed) <= cap:
-                A = [tuple(a) for a in closed]
-                Aset = set(A)
-    return sorted(Aset)
+        length, t = 0, s
+        while not seen[t]:
+            seen[t] = True
+            t = p[t]
+            length += 1
+        order = order * length // math.gcd(order, length)
+    return order
+
+
+class _Enumerated:
+    """A closed permutation group as sorted rows (the identity is row 0) with a row index, the
+    order of each element and whether it moves every site."""
+
+    def __init__(self, G):
+        self.elems = sorted({tuple(int(x) for x in g) for g in G})
+        self.P = np.asarray(self.elems, dtype=np.int64)
+        self.index = {g: i for i, g in enumerate(self.elems)}
+        n = self.P.shape[1]
+        if self.elems[0] != tuple(range(n)):
+            raise InvalidRequest("the permutation group does not contain the identity (not closed)")
+        self.orders = np.array([_perm_order(p) for p in self.elems], dtype=np.int64)
+        self.fpf = (self.P != np.arange(n)).all(axis=1)
+
+    def __len__(self) -> int:
+        return len(self.elems)
+
+    def lookup(self, rows: np.ndarray) -> np.ndarray:
+        """Indices of the rows of a permutation array; KeyError when one is not in the group."""
+        idx = self.index
+        return np.fromiter((idx[r] for r in map(tuple, rows.tolist())), dtype=np.int64, count=len(rows))
+
+    def right_mult(self, i: int) -> np.ndarray:
+        """t[j] = index of elems[j] . elems[i]."""
+        return self.lookup(self.P[i][self.P])
+
+    def conjugation(self, i: int) -> np.ndarray:
+        """t[j] = index of s o x_j o s^-1 (function composition), s = elems[i]."""
+        s = self.P[i]
+        return self.lookup(s[self.P[:, np.argsort(s)]])
+
+    def commute(self, i: int, j: int) -> bool:
+        a, b = self.P[i], self.P[j]
+        return bool(np.array_equal(a[b], b[a]))
+
+    def key(self, members: np.ndarray) -> tuple:
+        """Preference among subgroups: larger, then more fixed-point-free elements, then higher orders."""
+        return (len(members), int(self.fpf[members].sum()),
+                tuple(sorted(self.orders[members].tolist(), reverse=True)))
+
+
+def _closure(E: _Enumerated, gens: list[int]) -> np.ndarray:
+    """Membership mask of the subgroup generated by ``gens`` (indices)."""
+    right = [E.right_mult(g) for g in gens]
+    inside = np.zeros(len(E), dtype=bool)
+    inside[0] = True
+    frontier = np.zeros(1, dtype=np.int64)
+    while frontier.size and right:
+        nxt = np.unique(np.concatenate([t[frontier] for t in right]))
+        nxt = nxt[~inside[nxt]]
+        inside[nxt] = True
+        frontier = nxt
+    return inside
+
+
+def _generating_set(E: _Enumerated) -> list[int]:
+    """A small generating set of E (indices): high-order elements first, each added only when it
+    lies outside the subgroup generated so far (so at most log2 |G| of them)."""
+    gens: list[int] = []
+    inside = np.zeros(len(E), dtype=bool)
+    inside[0] = True
+    for c in sorted(range(1, len(E)), key=lambda i: (-int(E.orders[i]), i)):
+        if inside[c]:
+            continue
+        gens.append(c)
+        inside = _closure(E, gens)
+        if inside.all():
+            break
+    return gens
+
+
+def _conjugacy_classes(E: _Enumerated, gens: list[int]) -> tuple[np.ndarray, list[np.ndarray]]:
+    """(label per element, members per class): the orbits of conjugation by the generators."""
+    conj = [E.conjugation(g) for g in gens]
+    label = np.full(len(E), -1, dtype=np.int64)
+    classes = []
+    for i in range(len(E)):
+        if label[i] >= 0:
+            continue
+        cid = len(classes)
+        label[i] = cid
+        members, frontier = [i], [i]
+        while frontier:
+            nxt = []
+            for x in frontier:
+                for t in conj:
+                    y = int(t[x])
+                    if label[y] < 0:
+                        label[y] = cid
+                        members.append(y)
+                        nxt.append(y)
+            frontier = nxt
+        classes.append(np.array(sorted(members), dtype=np.int64))
+    return label, classes
+
+
+def _normal_abelian(E: _Enumerated) -> np.ndarray:
+    """Indices of the largest normal abelian subgroup of E the class-union search finds."""
+    m = len(E)
+    gens = _generating_set(E)
+    if all(E.commute(a, b) for a in gens for b in gens):
+        return np.arange(m)                                # E is abelian
+    label, classes = _conjugacy_classes(E, gens)
+    nC = len(classes)
+    # K[C, D]: every element of class C commutes with every element of class D. It suffices that one
+    # element of C commutes with all of D (conjugating by g maps D onto itself).
+    by_class = np.argsort(label, kind="stable")
+    starts = np.searchsorted(label[by_class], np.arange(nC))
+    K = np.empty((nC, nC), dtype=bool)
+    for C, members in enumerate(classes):
+        x = E.P[members[0]]
+        commutes = (x[E.P] == E.P[:, x]).all(axis=1)
+        K[C] = np.logical_and.reduceat(commutes[by_class], starts)
+    self_commuting = np.diag(K).copy()
+    rep = [int(c[0]) for c in classes]
+    priority = sorted(range(nC), key=lambda C: (not E.fpf[rep[C]], -int(E.orders[rep[C]]),
+                                               -len(classes[C]), C))
+    id_class = int(label[0])
+    # One greedy pass per seed class. The union U of the classes it keeps is a group: for a, b in U
+    # the class of ab consists of products of elements of U, so it commutes with all of U and with
+    # itself, and was kept when the pass reached it. It is normal (a union of classes) and maximal
+    # (any class commuting with all of U would have been kept).
+    best_key, best = None, np.zeros(1, dtype=np.int64)
+    for seed in priority:
+        if seed == id_class or not self_commuting[seed]:
+            continue
+        keep = np.zeros(nC, dtype=bool)
+        keep[[id_class, seed]] = True
+        compatible = K[:, seed] & self_commuting
+        for C in priority:
+            if not keep[C] and compatible[C]:
+                keep[C] = True
+                compatible &= K[:, C]
+        members = np.sort(np.concatenate([classes[C] for C in np.flatnonzero(keep)]))
+        key = E.key(members)
+        if best_key is None or key > best_key:
+            best_key, best = key, members
+    return best
+
+
+def _maximal_abelian(E: _Enumerated) -> np.ndarray:
+    """Indices of a maximal abelian subgroup: elements taken greedily, fixed-point-free and high
+    order first, each one when it commutes with every generator kept so far."""
+    gens: list[int] = []
+    inside = np.zeros(len(E), dtype=bool)
+    inside[0] = True
+    for c in sorted(range(1, len(E)), key=lambda i: (not E.fpf[i], -int(E.orders[i]), i)):
+        if not inside[c] and all(E.commute(c, g) for g in gens):
+            gens.append(c)
+            inside = _closure(E, gens)
+    return np.flatnonzero(inside)
+
+
+def _normalizer(E: _Enumerated, A: np.ndarray) -> np.ndarray:
+    """Indices of N_G(A): the elements g with g A g^-1 = A (checked on generators of A)."""
+    in_a = np.zeros(len(E), dtype=bool)
+    in_a[A] = True
+    sub = _Enumerated(E.P[A])
+    keep = np.ones(len(E), dtype=bool)
+    inverse = np.argsort(E.P, axis=1)
+    for g in _generating_set(sub):
+        a = sub.P[g]
+        rows = np.take_along_axis(E.P, a[inverse], axis=1)       # g o a o g^-1, one row per g
+        keep &= in_a[E.lookup(rows)]
+    return np.flatnonzero(keep)
+
+
+def _cosets(E: _Enumerated, A: np.ndarray, within: np.ndarray) -> list[int]:
+    """One representative (the first in sorted order) per coset of A in the subgroup ``within``,
+    other than A itself."""
+    covered = np.ones(len(E), dtype=bool)
+    covered[within] = False
+    covered[A] = True
+    A_rows = E.P[A]
+    reps = []
+    for i in within:
+        if covered[i]:
+            continue
+        reps.append(int(i))
+        covered[E.lookup(E.P[i][A_rows])] = True              # the coset A . g_i
+    return reps
+
+
+def _checked(E: _Enumerated, A: np.ndarray, within: np.ndarray, residues: list[int]):
+    """The split as permutation lists, after asserting that A is normal in ``within`` and that the
+    cosets tile it -- guaranteed by construction, so a failure is a bug here."""
+    in_a = np.zeros(len(E), dtype=bool)
+    in_a[A] = True
+    A_rows = E.P[A]
+    for r in residues:
+        s = E.P[r]
+        assert in_a[E.lookup(s[A_rows[:, np.argsort(s)]])].all(), "group split: A is not normal"
+    assert len(within) % len(A) == 0 and len(residues) == len(within) // len(A) - 1, \
+        "group split: the cosets do not tile the group"
+    return [list(E.elems[i]) for i in A], [list(E.elems[i]) for i in residues]
+
+
+def normal_abelian_split(G) -> tuple[list[list[int]], list[list[int]]]:
+    """``(A, residues)`` for a closed permutation group ``G``: ``A`` (sorted, the identity first) the
+    largest normal abelian subgroup the class-union search finds, ``residues`` one representative per
+    coset of A other than A itself. A may be the identity alone (S_5 on five sites has no non-trivial
+    normal abelian subgroup); then every other element is a residue."""
+    E = _Enumerated(G)
+    A = _normal_abelian(E)
+    every = np.arange(len(E))
+    return _checked(E, A, every, _cosets(E, A, every))
+
+
+def spatial_split(G, cap: int = _CO_GROUP_CAP):
+    """``(A, residues, diagnostics)``: the split the sector engine uses for the closed group ``G``.
+
+    The normal abelian split of G when its co-group |G/A| is at most ``cap``. Otherwise the larger
+    of a maximal abelian subgroup A with its normaliser N_G(A) (co-group at most ``cap``) and an
+    abelian part alone: a smaller symmetry group, but every residue still normalises A.
+    ``diagnostics`` holds one (code, message) pair when G was cut down."""
+    E = _Enumerated(G)
+    every = np.arange(len(E))
+    A = _normal_abelian(E)
+    if len(E) // len(A) <= cap:
+        return (*_checked(E, A, every, _cosets(E, A, every)), [])
+    A_max = _maximal_abelian(E)
+    N = _normalizer(E, A_max)
+    options = [(E.key(A), A, A), (E.key(A_max), A_max, A_max)]
+    if len(N) // len(A_max) <= cap:
+        options.append(((len(N),) + E.key(A_max)[1:], A_max, N))
+    _, A_use, within = max(options, key=lambda o: o[0])
+    msg = (f"the spatial group has {len(E)} elements, but its largest normal abelian subgroup only "
+           f"{len(A)}: a co-group of {len(E) // len(A)} exceeds {cap}. Using a subgroup of "
+           f"{len(within)} elements (abelian part {len(A_use)}).")
+    return (*_checked(E, A_use, within, _cosets(E, A_use, within)), [("co_group_capped", msg)])
+
+
+def abelian_generators(A) -> list[list[int]]:
+    """A generating set of the closed abelian group ``A``: high-order elements first, each one only
+    when it lies outside the group generated so far."""
+    E = _Enumerated(A)
+    return [list(E.elems[i]) for i in _generating_set(E)]
+
+
+def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list[int]], list[list[int]]]:
+    """``(A, residues)`` for an explicit split: A the group the generators close (the identity alone
+    without generators), residues one per coset of A among ``star_perms``. Raises InvalidRequest when
+    A is not abelian or a residue does not normalise it."""
+    star = [tuple(int(x) for x in p) for p in star_perms]
+    gens = [tuple(int(x) for x in g) for g in generators]
+    n = len(gens[0]) if gens else (len(star[0]) if star else n_sites)
+    if n is None:
+        raise InvalidRequest("split_generator_set: no permutations and no n_sites")
+    if not gens:
+        A = [tuple(range(n))]
+    else:
+        A = close_group(gens)
+        if A is None:
+            raise InvalidRequest(f"the abelian group exceeds the {_GROUP_CLOSURE_CAP}-element closure cap")
+    for a in gens:
+        for b in gens:
+            if _compose(a, b) != _compose(b, a):
+                raise InvalidRequest("the generators of the abelian part do not commute")
+    a_set = set(A)
+    residues, covered = [], set(a_set)
+    for p in star:
+        if p in covered:
+            continue
+        p_inv = tuple(int(x) for x in np.argsort(p))
+        if any(_compose(_compose(p_inv, a), p) not in a_set for a in gens):
+            raise InvalidRequest(f"the residue {list(p)} does not normalise the abelian part: the abelian "
+                                 "part must be a normal subgroup (pass the permutations as one list and "
+                                 "qed.Symmetry chooses one)")
+        residues.append(list(p))
+        covered.update(_compose(a, p) for a in A)
+    return [list(a) for a in A], residues
 
 
 def split_nonabelian(symmetry_or_gens):
-    """``(abelian_elements, residue_perms)`` for the factorized engine,
-    or a ``str`` decline reason.
+    """``(abelian_elements, residue_perms)`` for the sector engine, or a ``str`` saying why there is
+    nothing to split.
 
-    * ``GeneratorSet``-like input (``generators`` + ``star_perms``): the
-      abelian clique is closed; the retained residue is the coset set --
-      the original ``_little_group_parts`` behaviour.
-    * explicit permutation list: the FULL group is closed, a maximal
-      abelian subgroup is chosen greedily (any commuting closure is
-      valid -- smaller A just folds less), and one representative per
-      A-coset of the remainder becomes the residue set.
+    * ``GeneratorSet``-like input (``generators`` + ``star_perms``): see :func:`split_generator_set`.
+    * a permutation list: the group it generates, split by :func:`spatial_split`.
     """
     gens = getattr(symmetry_or_gens, "generators", None)
     if gens is not None:
         star = list(getattr(symmetry_or_gens, "star_perms", None) or [])
-        if not gens:
+        if not gens and not star:
             return "the symmetry has no spatial generators"
-        A = close_group([list(g) for g in gens])
-        if A is None:
-            return (f"the abelian group exceeds the {_GROUP_CLOSURE_CAP}-"
-                    "element closure cap")
-        if not star:
-            return ("no point-group residue is retained on the symmetry "
-                    "(symmetry='auto' or a find_symmetries GeneratorSet "
-                    "carry one; pure-abelian input has nothing to project)")
-        # Dedup the retained residues modulo A. find_symmetries carries the
-        # FULL non-clique content as star_perms (e.g. all 30 elements of the
-        # C2*A coset on a 5x6 torus; 396 on the 6x6 C6v torus). Same-coset
-        # residues act as proportional monomials -- the engine validates and
-        # discards each duplicate, paying the O(dim) monomial build per
-        # element for zero extra reduction (measured 4x total at 30 sites).
-        # One representative per A-coset is the complete input.
-        Aset = {tuple(a) for a in A}
-        residues, covered = [], set(Aset)
-        for p in star:
-            tp = tuple(p)
-            if tp in covered:
-                continue
-            residues.append(list(tp))
-            covered.update(_compose(a, tp) for a in Aset)
+        A, residues = split_generator_set(gens, star)
         if not residues:
-            return ("every retained residue lies in the abelian group -- "
-                    "nothing to project beyond the momentum sectors")
-        return ([list(e) for e in A], residues)
-
-    # Explicit raw permutation list.
+            return "no point-group residue outside the abelian group"
+        return A, residues
     perms = [tuple(p) for p in (symmetry_or_gens or [])]
     if not perms:
         return "no generators given"
     G = close_group(perms)
     if G is None:
-        return (f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element "
-                "cap -- pass a GeneratorSet from find_symmetries instead")
-    # Greedy maximal commuting subgroup (the closure of pairwise-commuting
-    # elements is abelian by construction) -- see greedy_maximal_abelian.
-    A = greedy_maximal_abelian(G)
-    Aset = set(A)
-    if len(A) <= 1:
-        return "no non-trivial abelian subgroup found in the closed group"
-    # One representative per A-coset of the remainder.
-    residues, covered = [], set(Aset)
-    for e in G:
-        if e in covered:
-            continue
-        residues.append(list(e))
-        covered.update(_compose(a, e) for a in Aset)
+        return f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element cap"
+    A, residues, _ = spatial_split(G)
     if not residues:
-        return ("the input group is abelian -- nothing to project beyond "
-                "the momentum sectors (use the abelian rep lane)")
-    return ([list(a) for a in sorted(Aset)], residues)
-
-
+        return "the input group is abelian -- nothing to project beyond the momentum sectors"
+    return A, residues

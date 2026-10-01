@@ -101,7 +101,7 @@ jobs:
       - name: Upgrade pip + install build tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy pynauty
 
       - name: Build + install qed wheel (editable not yet supported by scikit-build-core fully)
         env:
@@ -149,7 +149,7 @@ jobs:
           CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy pynauty
           python -m pip install -v .
 
       - name: Run the examples
@@ -194,7 +194,7 @@ jobs:
           CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy pynauty
           python -m pip install -v .
 
       - name: Run the CPU coverage grid

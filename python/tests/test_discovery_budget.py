@@ -1,13 +1,13 @@
-"""Clique budget + trivial-group blocked sweep + dense-assembly regressions.
+"""Group-size caps + trivial-group blocked sweep + dense-assembly regressions.
 
 Three seams pinned here:
 
-* ``find_symmetries(clique_budget=...)``: above the budget the NP-hard
-  maximum-clique search (``nx.find_cliques`` over the O(|Aut|^2)
-  commutation graph -- hours at |Aut| ~ 3e4) is replaced by a greedy
-  maximal-abelian clique with the residue retained as coset-representative
-  ``star_perms``, so the factorized little-group lane keeps the whole
-  point group either way.
+* the size caps of ``Symmetry(spatial="auto")``: nauty counts the
+  automorphism group before anything is enumerated, so |Aut| = N! (complete
+  graph, field-only H) costs nothing and runs without spatial symmetry; a
+  group without a large normal abelian subgroup (S_6) is cut down to a
+  maximal abelian subgroup and its normaliser, so the engine's co-group
+  stays small. Both report a diagnostic, and both match a dense oracle.
 
 * trivial-spatial-group blocking in ``qed.spectrum``: with no spatial
   symmetry the sweep still blocks by Sz (or native Sz-parity) with
@@ -23,6 +23,8 @@ Three seams pinned here:
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
@@ -30,7 +32,6 @@ qed = pytest.importorskip("qed")
 pytest.importorskip("pynauty")
 
 from qed import _core  # noqa: E402
-from qed._groups import greedy_maximal_abelian, split_nonabelian  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -147,67 +148,70 @@ def _sz_block_oracle(op, n):
 
 
 # ---------------------------------------------------------------------------
-# 1. Clique budget
+# 1. Group size caps
 # ---------------------------------------------------------------------------
 
-def test_k8_budget_branch_returns_fast_with_residue():
-    """|Aut| = 8! = 40320: the pre-budget max-clique path would hang for
-    hours; the budgeted path must return promptly with a non-empty abelian
-    core AND a non-empty coset-representative residue."""
+def _codes(diagnostics):
+    return [c for c, _ in diagnostics]
+
+
+def test_huge_automorphism_group_is_not_enumerated():
+    """|Aut| = 8! = 40320: nauty counts the group and nothing is enumerated -- the
+    report carries no spatial symmetry and says why (it used to take minutes)."""
     H = _complete_graph(8)
+    t0 = time.time()
     rep = qed.find_symmetries(H, verbose=False)
-    fs = rep.full_set
-    assert fs is not None and fs.generators, "no abelian core found on K8"
-    assert fs.star_perms, "budget branch must retain the residue"
-    # Coset representatives, not the raw complement: far fewer than |Aut|.
-    assert len(fs.star_perms) < 40320 // 2
+    assert time.time() - t0 < 10
+    assert rep.full_set is None and rep.abelian == [list(range(8))] and rep.residues == []
+    assert _codes(rep.diagnostics) == ["aut_capped"]
 
 
-def test_k8_projection_lane_engages_and_matches_dense():
+def test_huge_group_runs_without_spatial_symmetry_and_matches_dense():
     H = _complete_graph(8)
+    r = qed.spectrum(H)
+    assert "aut_capped" in _codes(r.diagnostics)
+    np.testing.assert_allclose(np.sort(r.energies), _dense_oracle(H, 8), atol=1e-10)
+
+
+def test_field_only_default_eigs_is_instant():
+    """A paramagnet's coupling graph has |Aut| = N! (audit C02-discovery-03)."""
+    H = qed.Operator(10, 0.5)
+    for i in range(10):
+        H.add_one_body(_core.OP_SZ, i, 1.0)
+    t0 = time.time()
+    r = qed.eigs(H, 1)
+    assert time.time() - t0 < 10
+    assert abs(r.energies[0] + 5.0) < 1e-12 and "aut_capped" in _codes(r.diagnostics)
+
+
+def test_co_group_cap_uses_a_normaliser_and_matches_dense():
+    """S_6 (K6) has no non-trivial normal abelian subgroup: its co-group would be the whole
+    720-element group. The split falls back to a maximal abelian subgroup and its normaliser."""
+    H = _complete_graph(6)
     rep = qed.find_symmetries(H, verbose=False)
-    assert not isinstance(split_nonabelian(rep.full_set), str)   # abelian part + cosets exist
-    ev = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=rep.full_set)).energies)
-    ev0 = _dense_oracle(H, 8)
-    assert len(ev) == 1 << 8
-    np.testing.assert_allclose(ev, ev0, atol=1e-10)
+    assert _codes(rep.diagnostics) == ["co_group_capped"]
+    assert 1 < len(rep.abelian) and len(rep.residues) + 1 <= 64
+    r = qed.spectrum(H)
+    assert "co_group_capped" in _codes(r.diagnostics)
+    np.testing.assert_allclose(np.sort(r.energies), _dense_oracle(H, 6), atol=1e-10)
 
 
-def test_budget_one_equals_default_spectrum():
-    """Forcing the greedy on a small ring must give the identical spectrum
-    the exact max-clique path gives."""
+def test_clique_budget_is_deprecated_and_ignored():
     H = _ring(6)
-    r_greedy = qed.find_symmetries(H, verbose=False, clique_budget=1)
-    r_exact = qed.find_symmetries(H, verbose=False)
-    ea = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=r_greedy.full_set)).energies)
-    eb = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=r_exact.full_set)).energies)
+    with pytest.warns(DeprecationWarning, match="clique_budget"):
+        r1 = qed.find_symmetries(H, verbose=False, clique_budget=1)
+    assert qed.find_symmetries(H, verbose=False) is r1          # one memo entry: the budget is gone
+
+
+def test_default_split_matches_explicit_list_spectrum():
+    """The ring's automorphisms (D6) give the same spectrum whether found or listed."""
+    H = _ring(6)
+    t = [(i + 1) % 6 for i in range(6)]
+    r = [(-i) % 6 for i in range(6)]
+    ea = np.sort(qed.spectrum(H).energies)
+    eb = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=[t, r])).energies)
     np.testing.assert_allclose(ea, eb, atol=1e-12)
-
-
-def test_memo_keys_on_budget():
-    """The find_symmetries memo must not serve a budget-A result to a
-    budget-B caller."""
-    H = _ring(6)
-    r1 = qed.find_symmetries(H, verbose=False, clique_budget=1)
-    r2 = qed.find_symmetries(H, verbose=False)
-    assert r1 is not r2
-    # And repeated same-budget calls DO hit the memo.
-    assert qed.find_symmetries(H, verbose=False, clique_budget=1) is r1
-
-
-def test_greedy_maximal_abelian_is_closed_abelian():
-    from itertools import permutations
-    G = [list(p) for p in permutations(range(4))]  # S4, |G|=24
-    A = greedy_maximal_abelian(G)
-    assert tuple(range(4)) in A
-
-    def comp(g, e):
-        return tuple(e[g[i]] for i in range(len(g)))
-
-    for a in A:
-        for b in A:
-            assert comp(a, b) == comp(b, a), "not abelian"
-            assert comp(a, b) in set(A), "not closed"
+    np.testing.assert_allclose(ea, _dense_oracle(H, 6), atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

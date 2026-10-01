@@ -26,6 +26,7 @@
 
 #include <ed/solvers/little_group_solve.h>
 #include <ed/config/env_registry.h>              // typed environment accessors
+#include <ed/core/errors.h>                      // ed::InvalidRequest
 #include <ed/core/log.h>                         // ED_LOG
 #include <ed/solvers/little_group_blocks.h>      // owned block handles
 
@@ -639,6 +640,7 @@ struct EngineContext {
     std::vector<std::vector<int>>        A;             // RAW abelian perms
     ed::symmetry::GroupIrreps            giA;           // irreps of RAW A
     std::vector<std::vector<int>>        residues;      // usable, deduped, no identity
+    std::vector<int>                     residue_spec;  // per residue: its index in the caller's list
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
                                                         // (EXTENDED indices when flip)
     std::shared_ptr<const ed::symmetry::OrbitTable> otab;

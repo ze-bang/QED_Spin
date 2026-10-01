@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-symmetry = ["pynauty", "networkx"]     # qed.find_symmetries / Symmetry(spatial="auto")
+symmetry = ["pynauty"]                 # qed.find_symmetries / Symmetry(spatial="auto")
 test = ["pytest>=7", "pytest-xdist"]
 docs = ["sphinx>=7", "sphinx_rtd_theme", "breathe"]
 dev = [
