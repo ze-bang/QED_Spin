@@ -140,7 +140,7 @@ def tri36_K_E_cpu():
 
 # ---- 36-site kagome (the BFG campaign's 36d torus) -------------------------------------------
 def _bfg36_k3(device, jpm=-0.5):
-    """Gamma A1 in both spin-flip halves, 3 levels per block (bench/baseline/bfg36_group_blocks)."""
+    """Gamma A1 in both spin-flip halves, 3 levels per block."""
     H, _ = bm.bfg36(jpm)
     sym = Symmetry(sz=18)
     r = eigs(H, 3, sym=bm.select_block(sym, H), prune=False, device=device)

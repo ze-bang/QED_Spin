@@ -45,9 +45,7 @@ compile_commands.json
 *.ptx
 
 # ---------------------------------------------------------------------------
-# Benchmark log files (the JSON artifact `bench_all_backends.json` IS
-# checked in as the reference data backing docs/benchmarks/BENCHMARKS.md;
-# the verbose .log file is not.)
+# Benchmark logs written at the repository root
 # ---------------------------------------------------------------------------
 bench_all_backends.log
 bench_vs_quspin*.log
@@ -135,12 +133,6 @@ ed_results*/
 # Bench output directories
 bench_bl_*/
 bench_full*/
-
-# Benchmark JSON / output artifacts written at the repo root by
-# benchmarks/bench_*.{cpp,py}. These change every run and shouldn't
-# be in version control.
-/bench_*.json
-/benchmarks/*.json
 
 # Allow tracked test fixtures back in
 !tests/fixtures/**

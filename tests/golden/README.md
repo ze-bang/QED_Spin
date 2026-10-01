@@ -38,7 +38,7 @@ exactly (the default `dense_max_dim` of `qed.thermal`) and sample the larger one
 
 ## Running (compute nodes only)
 
-    sbatch scripts/golden/build.sbatch
+    scripts/gate/submit.sh <account> --build-only        # builds the extension (submits a job)
     sbatch --export=ALL,DEVICE=cpu,MODE=record,REF=tests/golden/refs/<tag>/cpu.json.gz  scripts/golden/run.sbatch
     sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
     sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch

@@ -24,7 +24,7 @@
 #                    build host and the run hosts have different CPUs)
 # Extra arguments after `--` go to the cmake configure step.
 #
-# On a cluster, run this inside a job (e.g. sbatch scripts/golden/build.sbatch), not on a
+# On a cluster, run this inside a job (e.g. scripts/gate/submit.sh <account> --build-only), not on a
 # login node.
 set -euo pipefail
 
