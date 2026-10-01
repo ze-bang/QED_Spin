@@ -281,7 +281,8 @@ LanczosKernelResult lanczos_kernel(
 
     // FullCGS2 requires keep_basis (we project against the growing basis).
     // LocalDGKS3 owns its own ring buffer and does NOT require keep_basis.
-    if (opts.reorth == ReorthPolicy::FullCGS2 && !opts.keep_basis) {
+    const bool needs_kept_basis = opts.reorth == ReorthPolicy::FullCGS2;
+    if (needs_kept_basis && !opts.keep_basis) {
         throw std::invalid_argument(
             "lanczos_kernel: FullCGS2 requires keep_basis = true");
     }

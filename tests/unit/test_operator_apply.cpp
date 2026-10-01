@@ -360,7 +360,7 @@ TEST_CASE("matvec: GATHER three-body kernel keeps complex coefficients",
     constexpr std::uint64_t N   = 3;
     constexpr std::uint64_t dim = 1ULL << N;
     auto build = [] {
-        auto op = std::make_unique<Operator>(N, /*spin_l=*/0.5f);
+        auto op = std::make_unique<Operator>(std::uint64_t{N}, /*spin_l=*/0.5f);
         op->addThreeBodyTerm(/*op1=*/0, /*site1=*/0, /*op2=*/1, /*site2=*/1,
                              /*op3=*/2, /*site3=*/2, /*coeff=*/Complex(0.0, 1.0));
         return op;
