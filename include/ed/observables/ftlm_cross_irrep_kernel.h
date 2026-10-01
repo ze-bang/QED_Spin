@@ -54,7 +54,7 @@
 // --------------
 // The kernel is a thin specialisation of the multi-sample FTLM
 // (fully reorthogonalised ``ed::krylov::lanczos_kernel`` runs plus
-// ``diagonalize_tridiagonal_ritz``). The two differences are:
+// ``tridiag_eig``). The two differences are:
 //
 //   1. The outer matvec is ``H_src`` on dim_src; the inner matvec
 //      is ``H_dst`` on dim_dst. Both are passed as

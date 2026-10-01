@@ -24,8 +24,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include <ed/core/blas_lapack_wrapper.h>
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 #include <ed/solvers/ftlm.h>   // for continued_fraction_spectral_function
 
@@ -125,16 +125,8 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     }
 
     double E_shift = opts.energy_shift.value_or(0.0);
-    if (!opts.energy_shift) {
-        std::vector<double> diag_copy = alpha;
-        std::vector<double> offdiag(m > 1 ? m - 1 : 1, 0.0);
-        for (std::size_t i = 0; i + 1 < m; ++i) offdiag[i] = beta[i + 1];
-        const lapack_int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N',
-            static_cast<lapack_int>(m),
-            diag_copy.data(), offdiag.data(),
-            nullptr, 1);
-        if (info == 0 && !diag_copy.empty()) E_shift = diag_copy[0];
-    }
+    if (!opts.energy_shift)
+        E_shift = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/false).values.front();
     for (auto& a : alpha) a -= E_shift;
     R.energy_shift = E_shift;
 

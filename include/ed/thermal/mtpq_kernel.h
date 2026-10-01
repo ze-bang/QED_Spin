@@ -24,9 +24,10 @@
 
 #include <ed/core/errors.h>
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec_batcher.h>
-#include <ed/solvers/lanczos.h>      // estimate_spectral_bounds; LAPACKE_dstev
+#include <ed/solvers/lanczos.h>      // estimate_spectral_bounds
 #include <ed/thermal/tpq_seeding.h>
 #include <ed/thermal/tpq_kernel.h>
 #include <ed/thermal/tpq_thermo.h>
@@ -251,13 +252,10 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
         bo.keep_basis = false;
         try {
             const auto lk = ed::krylov::lanczos_kernel(be, H, bdim, seed.get(), bo);
-            std::vector<double> d = lk.alpha, e;
-            for (std::size_t i = 1; i < lk.alpha.size(); ++i) e.push_back(lk.beta[i]);
-            e.resize(std::max<std::size_t>(d.size(), 1));
-            if (!d.empty() && LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()),
-                                            d.data(), e.data(), nullptr, 1) == 0) {
-                e_min_est = *std::min_element(d.begin(), d.end());
-                e_max_est = *std::max_element(d.begin(), d.end());
+            if (!lk.alpha.empty()) {
+                const auto t = ed::krylov::tridiag_eig(lk.alpha, lk.beta, lk.alpha.size(), /*vectors=*/false);
+                e_min_est = t.values.front();
+                e_max_est = t.values.back();
                 have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est) && e_max_est >= e_min_est;
             }
         } catch (...) {

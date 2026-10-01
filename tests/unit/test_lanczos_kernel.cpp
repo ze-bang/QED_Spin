@@ -17,6 +17,7 @@
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/solvers/lanczos.h>
 
@@ -491,4 +492,55 @@ TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
         REQUIRE(std::isfinite(b));
         REQUIRE(b >= 0.0);
     }
+}
+
+// -----------------------------------------------------------------------------
+// tridiag_eig: the one tridiagonal eigensolve, in lanczos_kernel's convention.
+// -----------------------------------------------------------------------------
+TEST_CASE("tridiag_eig solves the Lanczos tridiagonal",
+          "[krylov][tridiag]") {
+    std::mt19937_64 rng(0x7D1A6ull);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    const std::size_t m = 9;
+    std::vector<double> alpha(m), beta(m + 1);
+    for (auto& a : alpha) a = dist(rng);
+    for (auto& b : beta) b = dist(rng);   // beta[0] and beta[m] lie outside the m x m block
+
+    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
+    for (std::size_t i = 0; i < m; ++i) {
+        T(i, i) = alpha[i];
+        if (i + 1 < m) T(i, i + 1) = T(i + 1, i) = beta[i + 1];
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+
+    const auto t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+    REQUIRE(t.values.size() == m);
+    REQUIRE(t.vectors.size() == m * m);
+    double wsum = 0.0;
+    for (const double w : t.weights()) wsum += w;
+    CHECK(std::abs(wsum - 1.0) < 1e-13);
+    for (std::size_t j = 0; j < m; ++j) {
+        CHECK(std::abs(t.values[j] - es.eigenvalues()(static_cast<Eigen::Index>(j))) < 1e-13);
+        Eigen::VectorXd z(m);
+        for (std::size_t i = 0; i < m; ++i) z(static_cast<Eigen::Index>(i)) = t.z(i, j);
+        CHECK((T * z - t.values[j] * z).norm() < 1e-13);
+    }
+
+    const auto v = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/false);
+    REQUIRE(v.vectors.empty());
+    for (std::size_t j = 0; j < m; ++j) CHECK(std::abs(v.values[j] - t.values[j]) < 1e-13);
+
+    // A leading block: the first 4 steps only.
+    const auto lead = ed::krylov::tridiag_eig(alpha, beta, 4, /*vectors=*/false);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> e4(T.topLeftCorner(4, 4));
+    for (std::size_t j = 0; j < 4; ++j)
+        CHECK(std::abs(lead.values[j] - e4.eigenvalues()(static_cast<Eigen::Index>(j))) < 1e-13);
+
+    CHECK(ed::krylov::tridiag_eig(alpha, beta, 0, true).values.empty());
+    const auto one = ed::krylov::tridiag_eig(alpha, beta, 1, true);
+    CHECK(one.values[0] == alpha[0]);
+    CHECK(std::abs(one.weights()[0] - 1.0) < 1e-15);
+
+    alpha[3] = std::nan("");
+    CHECK_THROWS_AS(ed::krylov::tridiag_eig(alpha, beta, m, true), ed::ConvergenceError);
 }

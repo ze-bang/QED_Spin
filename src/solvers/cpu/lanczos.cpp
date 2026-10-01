@@ -1,6 +1,7 @@
 #include <ed/solvers/lanczos.h>
 #include <ed/core/linear_operator.h>
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
@@ -26,60 +27,6 @@ ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
     Complex scale_factor = Complex(1.0 / norm, 0.0);
     cblas_zscal(N, &scale_factor, v.data(), 1);
     return v;
-}
-
-// Diagonalize tridiagonal matrix and extract Ritz values and weights
-void diagonalize_tridiagonal_ritz(
-    const std::vector<double>& alpha,
-    const std::vector<double>& beta,
-    std::vector<double>& ritz_values,
-    std::vector<double>& weights,
-    std::vector<double>* evecs
-) {
-    uint64_t m = alpha.size();
-    
-    // Prepare diagonal and off-diagonal arrays for LAPACK
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
-    
-    // Allocate eigenvector storage
-    std::vector<double> evecs_local;
-    double* evecs_ptr = nullptr;
-    
-    if (evecs != nullptr) {
-        evecs->resize(m * m);
-        evecs_ptr = evecs->data();
-    } else {
-        evecs_local.resize(m * m);
-        evecs_ptr = evecs_local.data();
-    }
-    
-    // Diagonalize
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, 
-                                    diag.data(), offdiag.data(), 
-                                    evecs_ptr, m);
-    
-    if (info != 0) {
-        ED_LOG(Error, "LAPACKE_dstevd failed in diagonalize_tridiagonal_ritz (info=%d)", static_cast<int>(info));
-        ritz_values.clear();
-        weights.clear();
-        return;
-    }
-    
-    // Extract Ritz values (eigenvalues are now in diag, sorted)
-    ritz_values.resize(m);
-    std::copy(diag.begin(), diag.end(), ritz_values.begin());
-    
-    // Extract weights: squared first component of each eigenvector
-    weights.resize(m);
-    for (int i = 0; i < m; i++) {
-        // First component of eigenvector i (column-major: evecs[0 + i*m])
-        double first_component = evecs_ptr[i * m];  // First row, column i
-        weights[i] = first_component * first_component;
-    }
 }
 
 void estimate_spectral_bounds(
@@ -138,11 +85,9 @@ void estimate_spectral_bounds(
     if (alpha.empty())
         throw std::runtime_error("estimate_spectral_bounds: Lanczos produced 0 iterations");
 
-    std::vector<double> ritz, weights;
-    diagonalize_tridiagonal_ritz(alpha, beta, ritz, weights, /*evecs=*/nullptr);
-    if (ritz.empty())
-        throw std::runtime_error("estimate_spectral_bounds: Ritz step returned 0 eigenpairs");
-
+    // Values from the vector solve (dstedc), as this estimate has always used.
+    const std::vector<double> ritz =
+        ed::krylov::tridiag_eig(alpha, beta, alpha.size(), /*vectors=*/true).values;
     e_min = ritz.front();
     e_max = ritz.back();
 }

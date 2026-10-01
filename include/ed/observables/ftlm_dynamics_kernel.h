@@ -14,9 +14,10 @@
 // =============================================================================
 
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/matvec_batcher.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
-#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector, diagonalize_tridiagonal_ritz
+#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector
 
 #include <algorithm>
 #include <cmath>
@@ -81,9 +82,9 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         auto kh = lanczos(Hs, r.get(), dim_src);
         if (kh.alpha.empty() || kh.basis.size() < kh.alpha.size()) return out;
         const std::size_t mH = kh.alpha.size();
-        std::vector<double> wts, VH;                             // VH[i * mH + a]
-        diagonalize_tridiagonal_ritz(kh.alpha, kh.beta, out.ritz, wts, &VH);
-        if (out.ritz.empty()) return out;
+        ed::krylov::TridiagEig th = ed::krylov::tridiag_eig(kh.alpha, kh.beta, mH, /*vectors=*/true);
+        const std::vector<double> VH = std::move(th.vectors);   // VH[i * mH + a]
+        out.ritz = std::move(th.values);
         out.kind = Sample::Kind::ZOnly;
         out.c.resize(mH);
         for (std::size_t i = 0; i < mH; ++i) out.c[i] = VH[i * mH];
@@ -97,9 +98,9 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         auto ks = lanczos(Hd, phi.get(), dim_dst);
         if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) return out;
         const std::size_t mS = ks.alpha.size();
-        std::vector<double> ritzS, wtsS, VS;                     // VS[j * mS + b]
-        diagonalize_tridiagonal_ritz(ks.alpha, ks.beta, ritzS, wtsS, &VS);
-        if (ritzS.empty()) return out;
+        ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
+        const std::vector<double> ritzS = std::move(ts.values);
+        const std::vector<double> VS = std::move(ts.vectors);   // VS[j * mS + b]
 
         // W[a + b mH] = <O v_a | w_b> from one GEMM over backend-resident blocks.
         auto A = bk.make_zero_vector(dim_dst * mH);

@@ -110,12 +110,18 @@ C++ API (installed headers; nothing in Python changes):
   Gone: `ThermodynamicData`, `FTLMResults` (`<ed/core/thermal_types.h>`),
   `compute_ftlm_thermodynamics`, `average_ftlm_samples` and
   `<ed/symmetry/canonical_thermo.h>`.
+- `ed::krylov::tridiag_eig(alpha, beta, m, vectors)` (`<ed/krylov/tridiag.h>`) is the one
+  eigensolve of a Lanczos tridiagonal. `diagonalize_tridiagonal_ritz`,
+  `ed::krylov::detail::solve_tridiag` and `cullum_willoughby_keep` are gone.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)
 block, which has no device kernel; use device='auto' or 'cpu'"). A sampled `thermal` block
 small enough for the dense solve whose LAPACK solve fails (a non-finite H) raises
-RuntimeError instead of falling through to the sampling kernel.
+RuntimeError instead of falling through to the sampling kernel. A non-finite Lanczos
+tridiagonal (again a non-finite H) raises `ConvergenceError` everywhere: FTLM and OFTLM used to
+drop the sample, dynamics the source, the continued fraction to shift by 0, and the pruning
+estimate to keep the block.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

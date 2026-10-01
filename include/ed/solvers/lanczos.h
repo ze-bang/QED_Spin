@@ -49,26 +49,6 @@ namespace ed { class LinearOperator; }
 ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
 
 /**
- * @brief Diagonalize tridiagonal matrix and extract Ritz values and weights
- * 
- * This is a lightweight helper for FTLM-style calculations that just need
- * the Ritz values and weights (squared first component) without full eigenvector reconstruction.
- * 
- * @param alpha Diagonal elements of tridiagonal matrix
- * @param beta Off-diagonal elements (beta[0] should be 0)
- * @param ritz_values Output: eigenvalues sorted in ascending order
- * @param weights Output: squared first component of each eigenvector (for FTLM weighting)
- * @param evecs Optional output: eigenvectors in column-major order (m x m)
- */
-void diagonalize_tridiagonal_ritz(
-    const std::vector<double>& alpha,
-    const std::vector<double>& beta,
-    std::vector<double>& ritz_values,
-    std::vector<double>& weights,
-    std::vector<double>* evecs = nullptr
-);
-
-/**
  * @brief Estimate the extreme eigenvalues [e_min, e_max] of a Hermitian H.
  *
  * Blocks with dim <= 512 are assembled densely and the exact extremes are

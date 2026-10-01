@@ -39,11 +39,12 @@
 
 #include <ed/core/log.h>
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec_batcher.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz, generateGaussianRandomVector
+#include <ed/solvers/lanczos.h>      // generateGaussianRandomVector
 #include <ed/thermal/curves.h>
 #include <ed/thermal/sample_seed.h>
 
@@ -187,9 +188,9 @@ struct SampleMoments {
 ///     is a no-op: ``auto_threads_for_dim`` never exceeds the current
 ///     ``omp_get_max_threads()`` and the scope only touches the runtimes
 ///     when the requested count differs from the current one;
-///   * a sample whose Lanczos / tridiagonal solve yields no Ritz values
-///     is skipped (with a warning) instead of aborting the run; the
-///     call throws only if every sample failed;
+///   * a sample whose Lanczos run yields no Ritz values is skipped (with a
+///     warning) instead of aborting the run; the call throws if every sample
+///     failed, and a failed tridiagonal solve (a non-finite H) throws;
 ///   * ``ground_state_estimate`` is the minimum lowest Ritz value over
 ///     the valid samples;
 ///   * sample ``s`` starts from the vector drawn with engine
@@ -202,7 +203,7 @@ struct SampleMoments {
 ///      device-side scratch via ``backend.copy_from_host``.
 ///   2. ``lanczos_kernel<Backend>`` (krylov_dim, keep_basis=false) ->
 ///      tridiagonal ``(alpha, beta)``.
-///   3. Host-side ``diagonalize_tridiagonal_ritz`` ->
+///   3. Host-side ``tridiag_eig`` ->
 ///      ``ritz_values`` + first-component ``weights``.
 ///   4. Host-side ``detail::sample_moments``: the sample's Boltzmann moments per beta.
 ///
@@ -310,8 +311,10 @@ FtlmResult ftlm_kernel(const Backend& backend,
             // (the kept basis, if any, is released at the end of this
             // block, before the host-side post-processing).
             if (!k.alpha.empty()) {
-                diagonalize_tridiagonal_ritz(
-                    k.alpha, k.beta, out.ritz, out.weights, n_obs > 0 ? &out.Y : nullptr);
+                ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/true);
+                out.weights = t.weights();
+                out.ritz    = std::move(t.values);
+                if (n_obs > 0) out.Y = std::move(t.vectors);
             }
             // Observables in the Ritz basis, A_ij = <psi_i|O|psi_j> = (Y^T B Y)_ij with
             // B_ab = <v_a|O|v_b> from one O apply per Krylov vector.
@@ -349,7 +352,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
         }
         if (out.ritz.empty()) {
             // A failed sample is dropped, not fatal.
-            ED_LOG(Warn, "FTLM: tridiagonal diagonalization failed; sample %zu dropped",
+            ED_LOG(Warn, "FTLM: sample %zu has no Ritz values; dropped",
                    static_cast<std::size_t>(s));
             return out;
         }

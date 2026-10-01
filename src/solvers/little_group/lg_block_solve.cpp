@@ -389,16 +389,7 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     sol.applies = Hc.applies;
     if (kres.alpha.empty()) return sol;
     const std::size_t m = leading_block(kres.alpha, kres.beta, kres.alpha.size());
-    std::vector<double> diag(kres.alpha.begin(), kres.alpha.begin() + static_cast<long>(m));
-    std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
-    for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
-    std::vector<double> z(m * m, 0.0);
-    const lapack_int info = LAPACKE_dstevd(
-        LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
-        diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
-    if (info != 0)
-        throw std::runtime_error("little_group: lowest-k tridiag eigensolve "
-                                 "failed (dstevd info != 0)");
+    const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(kres.alpha, kres.beta, m, /*vectors=*/true);
     // Ghost handling: with a local reorth ring at dim ~1e8 the Ritz
     // window fills with ghost COPIES of converged extremes faster than
     // genuine upper levels converge. On this path a single-vector recurrence
@@ -410,7 +401,7 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // tridiag is m <= a few hundred).
     const double beta_m = (kres.beta.size() > m) ? std::abs(kres.beta[m]) : 0.0;
     const double scale  = std::max(
-        {std::abs(diag.front()), std::abs(diag[m - 1]), 1e-300});
+        {std::abs(t.values.front()), std::abs(t.values[m - 1]), 1e-300});
     // CONTIGUITY (pairs with the gate above): walk the Ritz values
     // ASCENDING, merge ghost copies into levels, and take the k lowest levels
     // -- STOPPING at the first unconverged one. Skipping past it would
@@ -420,8 +411,8 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // the block unconverged; it is never silently replaced by a higher value.
     // A budget-capped block that could not deliver k converged levels must be
     // DISTINGUISHABLE from a converged one downstream.
-    sol.converged = lowest_levels(m, diag.data(),
-                                  [&](std::size_t j) { return beta_m * std::abs(z[(m - 1) + j * m]); },
+    sol.converged = lowest_levels(m, t.values.data(),
+                                  [&](std::size_t j) { return beta_m * std::abs(t.z(m - 1, j)); },
                                   scale, k, &sol.values);
     return sol;
 }
@@ -472,14 +463,8 @@ BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
     const auto k = ed::krylov::lanczos_kernel(be, Hc, n, v0.get(), kopts);
     v0.reset();
     est.applies = Hc.applies;
-    std::vector<double> d = k.alpha, e;
-    for (std::size_t i = 1; i < k.alpha.size(); ++i) e.push_back(k.beta[i]);
-    if (d.empty()) return est;
-    e.resize(std::max<std::size_t>(d.size(), 1));
-    if (LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()), d.data(), e.data(),
-                      nullptr, 1) != 0)
-        return est;                                          // never prune on a failed estimate
-    est.theta = *std::min_element(d.begin(), d.end());
+    if (k.alpha.empty()) return est;
+    est.theta = ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/false).values.front();
     return est;
 }
 
@@ -540,27 +525,17 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) 
             be.scale(Complex(1.0 / b, 0.0), vc.get(), n);
             if (m >= 3 && m % 10 == 0) {
                 // Paige bound on the smallest Ritz value only.
-                std::vector<double> d(alpha), e(m > 1 ? m - 1 : 1, 0.0);
-                for (std::size_t i = 0; i + 1 < m; ++i) e[i] = beta[i + 1];
-                std::vector<double> zz(m * m, 0.0);
-                if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m), d.data(),
-                                   e.data(), zz.data(), static_cast<lapack_int>(m)) == 0) {
-                    const double scale = std::max({std::abs(d[0]), std::abs(d[m - 1]), 1e-300});
-                    if (beta[m] * std::abs(zz[m - 1]) < 1e-9 * scale) done = true;
-                }
+                const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+                const double tscale = std::max({std::abs(t.values[0]), std::abs(t.values[m - 1]), 1e-300});
+                if (beta[m] * std::abs(t.z(m - 1, 0)) < 1e-9 * tscale) done = true;
             }
         }
         if (m == 0) return std::nullopt;
         std::vector<double> ritz_z;   // column 0
         {
-            std::vector<double> d(alpha), e(m > 1 ? m - 1 : 1, 0.0);
-            for (std::size_t i = 0; i + 1 < m; ++i) e[i] = beta[i + 1];
-            std::vector<double> zz(m * m, 0.0);
-            if (LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m), d.data(), e.data(),
-                               zz.data(), static_cast<lapack_int>(m)) != 0)
-                return std::nullopt;
-            E0 = d[0];
-            ritz_z.assign(zz.begin(), zz.begin() + static_cast<long>(m));
+            const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+            E0 = t.values[0];
+            ritz_z.assign(t.vectors.begin(), t.vectors.begin() + static_cast<long>(m));
         }
         // ---------------- pass 2: replay + accumulate ------------------
         be.fill_zero(u.get(), n);
@@ -629,19 +604,12 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         const std::size_t m = kres.alpha.size();
         g.applies = Hc.applies;
         if (m == 0) return g;
-        std::vector<double> diag = kres.alpha;
-        std::vector<double> off(m > 1 ? m - 1 : 1, 0.0);
-        for (std::size_t i = 0; i + 1 < m; ++i) off[i] = kres.beta[i + 1];
-        std::vector<double> z(m * m, 0.0);
-        const lapack_int info = LAPACKE_dstevd(
-            LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
-            diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
-        if (info != 0) return g;
-        E0 = diag[0];
+        const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(kres.alpha, kres.beta, m, /*vectors=*/true);
+        E0 = t.values[0];
         u.assign(n, Complex(0, 0));
         std::vector<Complex> vj_host;
         for (std::size_t j = 0; j < m; ++j) {
-            const double yj = z[j];              // column 0, row j
+            const double yj = t.z(j, 0);
             if (std::abs(yj) < 1e-300) continue;
             const Complex* vj = kres.basis[j].get();
             if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {

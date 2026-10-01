@@ -40,7 +40,8 @@
 #include <ed/krylov/krylov_schur_kernel.h>       // multi-level blocks: locked KS
 #include <ed/krylov/subspace_policy.h>          // memory-capped Krylov basis
 #include <ed/core/mem_guard.h>                  // job-aware available RAM
-#include <ed/core/blas_lapack_wrapper.h>         // LAPACKE_dstevd
+#include <ed/core/blas_lapack_wrapper.h>         // LAPACKE_dsyevd / zheevd (dense blocks)
+#include <ed/krylov/tridiag.h>                  // tridiag_eig
 #include <ed/planner/sym_matvec_policy_hook.h>   // RepReducedCsr default
 #include <ed/parallel/thread_budget.h>           // serial-BLAS scope
                                                  // for the CPU dense batch

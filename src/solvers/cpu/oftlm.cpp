@@ -9,9 +9,9 @@
 #include <ed/thermal/oftlm_kernel.h>
 
 #include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector,
-                                  // diagonalize_tridiagonal_ritz
+#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector
 
 #include <algorithm>
 #include <cmath>
@@ -107,20 +107,20 @@ Curves oftlm_cpu(
         auto lres = run_lanczos(apply_H, v0, N, lopts);
         const auto& basis = lres.basis;
 
-        std::vector<double> ritz, weights, tri_evecs;   // tri_evecs: m*m col-major
-        diagonalize_tridiagonal_ritz(lres.alpha, lres.beta, ritz, weights, &tri_evecs);
+        const ed::krylov::TridiagEig t =
+            ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
 
-        const std::size_t m = ritz.size();
+        const std::size_t m = t.m;
         Nv = std::min<std::size_t>(Nv, m);
         exact_eigs.reserve(Nv);
         exact_vecs.reserve(Nv);
         for (std::size_t i = 0; i < Nv; ++i) {
-            exact_eigs.push_back(ritz[i]);
-            // |i> = sum_k basis[k] * tri_evecs[k + i*m]   (Ritz vector, column i)
+            exact_eigs.push_back(t.values[i]);
+            // |i> = sum_k basis[k] * z(k, i)   (Ritz vector, column i)
             ComplexVector vi(N, Complex(0.0, 0.0));
             const std::size_t kmax = std::min<std::size_t>(m, basis.size());
             for (std::size_t k = 0; k < kmax; ++k) {
-                const double ck = tri_evecs[k + i * m];
+                const double ck = t.z(k, i);
                 const Complex* bk = basis[k].get();
                 for (std::uint64_t n = 0; n < N; ++n) vi[n] += ck * bk[n];
             }
@@ -165,8 +165,11 @@ Curves oftlm_cpu(
         lopts.breakdown_tol = 1e-10;
         auto lres = run_lanczos(apply_H, v, N, lopts);
 
+        ed::krylov::TridiagEig t =
+            ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
         SampleSpectrum sp;
-        diagonalize_tridiagonal_ritz(lres.alpha, lres.beta, sp.ritz, sp.weights);
+        sp.weights = t.weights();
+        sp.ritz    = std::move(t.values);
         if (!sp.ritz.empty()) samples.push_back(std::move(sp));
     }
 
