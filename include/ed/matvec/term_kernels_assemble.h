@@ -75,6 +75,12 @@ struct OwnedCsr {
 
 namespace detail {
 
+template <class Scalar>
+[[nodiscard]] inline Scalar coerce_to(const std::complex<double>& c) noexcept {
+    if constexpr (std::is_same_v<Scalar, std::complex<double>>) return c;
+    else                                                         return c.real();
+}
+
 // Row entries of <r|H|.> for row bitstring r_state. Emits (col_idx, value)
 // through ``sink``; diagonal first, then the off-diagonal bins in the same
 // gate convention as ``gather_row_terms_state``.
