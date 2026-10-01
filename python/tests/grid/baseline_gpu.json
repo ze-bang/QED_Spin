@@ -833,9 +833,9 @@
       "content": "abelian",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 6.217248937900877E-15,
-      "note": "",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 21} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.02
     },
     {
@@ -844,9 +844,9 @@
       "content": "abelian",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 7.105427357601002E-15,
-      "note": "",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 9} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.03
     },
     {
@@ -1053,9 +1053,9 @@
       "content": "abelian",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 3.3307725037030894E-16,
-      "note": "3 clusters, matrix elements 1.3e-16",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 21} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.05
     },
     {
@@ -1064,9 +1064,9 @@
       "content": "abelian",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 7.771833633700229E-16,
-      "note": "3 clusters, matrix elements 2.2e-16",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 9} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.06
     },
     {
@@ -2593,9 +2593,9 @@
       "content": "abelian",
       "model": "tri9",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.509903313490213E-14,
-      "note": "residual 5.7e-15 pairing 1.5e-14 lowest 7.1e-15",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 21} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.02
     },
     {
@@ -2604,9 +2604,9 @@
       "content": "abelian",
       "model": "tri9chi",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 1.5987211554602254E-14,
-      "note": "residual 5.3e-15 pairing 1.6e-14 lowest 5.3e-15",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 9} -- every block has at most 32 states: dense on the host by design",
       "secs": 0.03
     },
     {
