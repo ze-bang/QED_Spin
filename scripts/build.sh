@@ -72,11 +72,27 @@ ARGS=(-S "${ROOT}" -B "${BUILD}"
 echo "=== qed build: cluster=${CLUSTER} variant=${VARIANT} tests=${TESTS} python=${PYTHON} jobs=${JOBS}"
 echo "=== commit $(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo '?') on $(hostname) -> ${BUILD}"
 cmake "${ARGS[@]}" "${EXTRA[@]}"
-if [[ ${#TARGETS[@]} -gt 0 ]]; then
-    for t in "${TARGETS[@]}"; do cmake --build "${BUILD}" --parallel "${JOBS}" --target "$t"; done
-else
-    cmake --build "${BUILD}" --parallel "${JOBS}"
+# A build killed midway (scancel, walltime) can leave a truncated object newer than its
+# source, which make then takes as up to date. The marker exists only while a build runs,
+# so finding it means the last one was killed: what that build wrote is removed and rebuilt.
+MARK="${BUILD}/.build-running"
+if [[ -f "${MARK}" ]]; then
+    echo "=== the last build in ${BUILD} was interrupted: rebuilding what it wrote"
+    find "${BUILD}" -type f -newer "${MARK}" \
+         \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.so.*' -o -perm -u+x \) -delete
 fi
+touch -d '2 seconds ago' "${MARK}"
+status=0
+if [[ ${#TARGETS[@]} -gt 0 ]]; then
+    for t in "${TARGETS[@]}"; do
+        cmake --build "${BUILD}" --parallel "${JOBS}" --target "$t" || { status=$?; break; }
+    done
+else
+    cmake --build "${BUILD}" --parallel "${JOBS}" || status=$?
+fi
+# A compile error is not an interruption; a build killed by a signal (status > 128) keeps the marker.
+if (( status <= 128 )); then rm -f "${MARK}"; fi
+(( status == 0 )) || exit "${status}"
 
 echo "=== done"
 [[ "${PYTHON}" == ON ]] && ls -l "${BUILD}"/python/qed/_core*.so && \
