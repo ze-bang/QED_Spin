@@ -243,7 +243,7 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
     auto mv = [&hp](const Complex* in, Complex* out, std::size_t nn) { hp.apply(in, out, nn); };
     const auto k = ed::krylov::lanczos_kernel(be, mv, n, v.data(), lo);
     const std::vector<double> ritz =
-        ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/true).values;
+        ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/false).values;
     const double mu = hp.ghost_shift();
     double lo_e = std::numeric_limits<double>::infinity(), hi_e = -lo_e;
     for (double r : ritz)

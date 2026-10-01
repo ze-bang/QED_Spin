@@ -114,10 +114,9 @@ struct LanczosKernelOptions {
     /// Default `nullptr` (no early exit) -- the kernel runs to the
     /// `cap = min(max_iter, local_n)` bound or until breakdown.
     ///
-    /// Typical use: solve the small running tridiagonal and check
-    /// `|Δλ_smallest| / max(|λ_smallest|, 1e-300) < ritz_tol` against
-    /// the prior invocation. See `ed/krylov/ritz_convergence.h` for a
-    /// stateful predicate factory that does exactly that.
+    /// Typical use: solve the running tridiagonal (`tridiag_eig`) and test
+    /// the Paige bound |beta_m z_{m,j}| of the wanted Ritz values, as the
+    /// block lanes' k = 1 scan does (lg_block_solve.cpp).
     std::function<bool(const std::vector<double>& alpha,
                        const std::vector<double>& beta)>
         convergence_check;

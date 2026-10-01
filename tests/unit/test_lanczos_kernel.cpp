@@ -16,7 +16,6 @@
 #include "common/catch2_harness.h"
 
 #include <ed/krylov/lanczos_kernel.h>
-#include <ed/krylov/ritz_convergence.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/solvers/lanczos.h>
@@ -328,8 +327,8 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
 //      here), with the correct alpha/beta sizes at each call. The
 //      probe always returns `false`, so the run consumes the full
 //      `max_iter`.
-//   2. `make_smallest_ritz_convergence(1, 1e-8)` on a 6-site PBC
-//      Heisenberg chain converges to E_0 in ~10-20 iterations; with
+//   2. A Paige-bound check on the lowest Ritz value (tridiag_eig) on a
+//      6-site PBC Heisenberg chain converges to E_0 in ~10-20 iterations; with
 //      `max_iter = 200` the run should exit FAR before that cap. We
 //      pin (a) `iters_done < max_iter`, (b) the converged E_0
 //      matches the dense reference, and (c) the basis size equals
@@ -387,15 +386,19 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
                 std::vector<std::size_t>{6, 11, 16, 21});
     }
 
-    SECTION("`make_smallest_ritz_convergence(1, 1e-8)` exits before max_iter") {
+    SECTION("a Paige-bound check on the lowest Ritz value exits before max_iter") {
         LanczosKernelOptions opts;
         opts.max_iter                  = 200;
         opts.reorth                    = ReorthPolicy::FullCGS2;
         opts.keep_basis                = true;
         opts.convergence_check_interval = 5;
         opts.convergence_check =
-            ed::krylov::make_smallest_ritz_convergence(/*exct=*/1,
-                                                       /*tol=*/1e-8);
+            [](const std::vector<double>& a, const std::vector<double>& b) {
+                const std::size_t m = a.size();
+                const auto t = ed::krylov::tridiag_eig(a, b, m, /*vectors=*/true);
+                return std::abs(b[m]) * std::abs(t.z(m - 1, 0))
+                       < 1e-8 * std::max(1.0, std::abs(t.values[0]));
+            };
 
         auto R = lanczos_kernel(be, matvec, dim, v0.data(), opts);
 
@@ -406,24 +409,13 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
         REQUIRE(R.iters_done >= 5);                 // at least one cadence hit
         REQUIRE(R.basis.size() == R.iters_done);    // no off-by-one
 
-        // Diagonalise the tridiagonal and pin E_0 against the dense
-        // reference. Lanczos with full CGS2 reorth on a 6-site PBC
-        // chain converges E_0 to better than 1e-10 within 30
-        // iterations; we ask for 1e-8 to match the callback's tol.
-        const std::size_t M = R.alpha.size();
-        Eigen::MatrixXd T = Eigen::MatrixXd::Zero(M, M);
-        for (std::size_t i = 0; i < M; ++i) {
-            T(i, i) = R.alpha[i];
-            if (i + 1 < M) {
-                T(i, i + 1) = R.beta[i + 1];
-                T(i + 1, i) = R.beta[i + 1];
-            }
-        }
-        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
-        REQUIRE(es.info() == Eigen::Success);
-        INFO("E_0 (lanczos, early-exit) = " << es.eigenvalues()(0)
+        // Pin E_0 against the dense reference. Lanczos with full CGS2 reorth on a 6-site PBC
+        // chain converges E_0 to better than 1e-10 within 30 iterations; we ask for 1e-8 to
+        // match the callback's bound.
+        const auto t = ed::krylov::tridiag_eig(R.alpha, R.beta, R.alpha.size(), /*vectors=*/false);
+        INFO("E_0 (lanczos, early-exit) = " << t.values[0]
              << "  E_0 (dense)         = " << ref.eigs.front());
-        REQUIRE(std::abs(es.eigenvalues()(0) - ref.eigs.front()) < 1e-8);
+        REQUIRE(std::abs(t.values[0] - ref.eigs.front()) < 1e-8);
     }
 }
 

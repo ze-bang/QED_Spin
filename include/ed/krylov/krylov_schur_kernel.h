@@ -11,7 +11,7 @@
 //        This builds an m-step Lanczos factorisation orthogonal to both
 //        the current cycle's basis AND the locked Ritz vectors.
 //     3. Solve the m x m projected tridiagonal eigenproblem on host
-//        (`solve_tridiag_with_eigenvectors`).
+//        (`tridiag_eig`).
 //     4. For each Ritz pair, evaluate residual = |β_last * y[m-1, i]|.
 //        If below `tolerance`, reconstruct the Ritz vector
 //        (`V_local * y` --- a local linear combination of the basis)
@@ -38,7 +38,7 @@
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim (shared sizing)
-#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag_with_eigenvectors
+#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 
 namespace ed::krylov {
@@ -88,7 +88,6 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
                                       const KrylovSchurOptions& opts)
 {
     using ed::matvec::Backend;
-    using ed::krylov::detail::solve_tridiag_with_eigenvectors;
 
     if (opts.max_iter == 0) {
         throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");
@@ -154,9 +153,9 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         R.iters_done += c.kres.iters_done;
         ++R.restarts;
         if (c.kres.alpha.empty()) return false;
-        std::vector<double> weights;
-        solve_tridiag_with_eigenvectors(c.kres.alpha, c.kres.beta, c.kres.alpha.size(),
-                                        c.evals, weights, c.evecs_cm);
+        TridiagEig t = tridiag_eig(c.kres.alpha, c.kres.beta, c.kres.alpha.size(), /*vectors=*/true);
+        c.evals     = std::move(t.values);
+        c.evecs_cm  = std::move(t.vectors);
         c.m         = c.kres.alpha.size();
         c.beta_last = c.kres.beta.back();
         c.idx.resize(c.m);

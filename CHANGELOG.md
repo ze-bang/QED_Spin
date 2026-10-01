@@ -111,8 +111,10 @@ C++ API (installed headers; nothing in Python changes):
   `compute_ftlm_thermodynamics`, `average_ftlm_samples` and
   `<ed/symmetry/canonical_thermo.h>`.
 - `ed::krylov::tridiag_eig(alpha, beta, m, vectors)` (`<ed/krylov/tridiag.h>`) is the one
-  eigensolve of a Lanczos tridiagonal. `diagonalize_tridiagonal_ritz`,
-  `ed::krylov::detail::solve_tridiag` and `cullum_willoughby_keep` are gone.
+  eigensolve of a Lanczos tridiagonal, Krylov-Schur's restart and the k = 1 scan's
+  convergence gate included (they used Eigen's dense solver; eigenvalues move at roundoff).
+  `diagonalize_tridiagonal_ritz`, `<ed/krylov/tridiag_eigensolver.h>` and
+  `<ed/krylov/ritz_convergence.h>` (`make_smallest_ritz_convergence`) are gone.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

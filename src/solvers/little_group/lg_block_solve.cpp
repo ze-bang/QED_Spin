@@ -352,29 +352,15 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
             [kk](const std::vector<double>& alpha,
                  const std::vector<double>& beta) -> bool {
                 const std::size_t m_all = alpha.size();
-                const int m = static_cast<int>(leading_block(alpha, beta, m_all));
+                const std::size_t m = leading_block(alpha, beta, m_all);
                 // An exhausted Krylov space (m < m_all) is exact; a live run needs a few steps.
-                if (static_cast<std::size_t>(m) == m_all && m_all < kk + 2) return false;
-                Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-                for (int i = 0; i < m; ++i)
-                    T(i, i) = alpha[static_cast<std::size_t>(i)];
-                for (int i = 1; i < m; ++i) {
-                    const double b = beta[static_cast<std::size_t>(i)];
-                    T(i, i - 1) = b;
-                    T(i - 1, i) = b;
-                }
-                Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
-                es.compute(T, Eigen::ComputeEigenvectors);
-                if (es.info() != Eigen::Success) return false;
-                const double beta_m =
-                    (beta.size() > static_cast<std::size_t>(m))
-                        ? std::abs(beta[static_cast<std::size_t>(m)]) : 0.0;
-                const auto& w = es.eigenvalues();
+                if (m == m_all && m_all < kk + 2) return false;
+                const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+                const double beta_m = (beta.size() > m) ? std::abs(beta[m]) : 0.0;
                 const double scale = std::max(
-                    {std::abs(w(0)), std::abs(w(m - 1)), 1e-300});
-                const auto& Z = es.eigenvectors();
-                return lowest_levels(static_cast<std::size_t>(m), w.data(),
-                                     [&](std::size_t j) { return beta_m * std::abs(Z(m - 1, static_cast<Eigen::Index>(j))); },
+                    {std::abs(t.values[0]), std::abs(t.values[m - 1]), 1e-300});
+                return lowest_levels(m, t.values.data(),
+                                     [&](std::size_t j) { return beta_m * std::abs(t.z(m - 1, j)); },
                                      scale, kk, nullptr);
             };
         kopts.convergence_check_interval = 10;
