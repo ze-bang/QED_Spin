@@ -60,17 +60,14 @@ double dense_ground_energy(const MatvecCallable& apply, std::size_t dim) {
 }
 
 void require_finite(const ed::thermal::FtlmResult& r, std::size_t nb) {
-    REQUIRE(r.energy.size() == nb);
-    REQUIRE(r.heat_capacity.size() == nb);
-    REQUIRE(r.entropy.size() == nb);
-    REQUIRE(r.free_energy.size() == nb);
-    REQUIRE(r.partition_function.size() == nb);
+    REQUIRE(r.curves.lnZ.size() == nb);
+    REQUIRE(r.curves.E.size() == nb);
+    REQUIRE(r.curves.V.size() == nb);
     for (std::size_t t = 0; t < nb; ++t) {
-        CHECK(std::isfinite(r.energy[t]));
-        CHECK(std::isfinite(r.heat_capacity[t]));
-        CHECK(std::isfinite(r.entropy[t]));
-        CHECK(std::isfinite(r.free_energy[t]));
-        CHECK(std::isfinite(r.partition_function[t]));
+        CHECK(std::isfinite(r.curves.lnZ[t]));
+        CHECK(std::isfinite(r.curves.E[t]));
+        CHECK(std::isfinite(r.curves.V[t]));
+        CHECK(r.curves.V[t] >= 0.0);
     }
 }
 
@@ -122,13 +119,13 @@ TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
     CHECK(std::abs(full.ground_state_estimate - e0) < 1e-8);
 
     // Deep in the gapped regime both policies see the ground state only.
-    CHECK(std::abs(local.energy.back() - e0) < 1e-4);
-    CHECK(std::abs(full.energy.back() - e0) < 1e-4);
+    CHECK(std::abs(local.curves.E.back() - e0) < 1e-4);
+    CHECK(std::abs(full.curves.E.back() - e0) < 1e-4);
 
     // Same random vectors, different reorth policy: the thermodynamics
     // agree to well within the stochastic error of the trace.
     for (std::size_t t = 0; t < nb; ++t) {
-        CHECK(std::abs(local.energy[t] - full.energy[t])
-              < 1e-6 * (1.0 + std::abs(full.energy[t])));
+        CHECK(std::abs(local.curves.E[t] - full.curves.E[t])
+              < 1e-6 * (1.0 + std::abs(full.curves.E[t])));
     }
 }

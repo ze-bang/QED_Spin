@@ -11,8 +11,8 @@
 #include <ed/parallel/thread_budget.h>
 #include <ed/sectors/thermal.h>
 #include <ed/solvers/lanczos.h>           // full_diagonalization
-#include <ed/symmetry/canonical_thermo.h>
 #include <ed/symmetry/su2_dims.h>
+#include <ed/thermal/curves.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
 #include <ed/thermal/oftlm_kernel.h>
@@ -31,41 +31,13 @@ namespace {
 
 // One block's contribution at every temperature.
 struct BlockThermo {
-    std::vector<double> lnZ, E, V;   // ln Z, <E>, and the central variance <(E - <E>)^2>
+    ed::thermal::Curves c;     // ln Z, <E>, the central variance <(E - <E>)^2>, and <O>_b
     double weight = 1.0;       // multiplicity
     double sz = 0.0;           // <Sz> of the block's states (its subspace's magnetisation)
     double sz2 = 0.0;          // <Sz^2> of the block's states
     bool   mirrored = false;   // holds +sz and -sz in equal parts
-    std::vector<std::vector<Complex>> O;   // <O>_b per observable and temperature
     ed::Lane lane = ed::Lane::HostKrylov;  // where its solve ran
 };
-
-// `q[o][n]`: <n|O_o|n> for each kept eigenvalue n, when observables are asked for.
-BlockThermo exact_block(const std::vector<double>& ev, const std::vector<double>& beta,
-                        const std::vector<std::vector<Complex>>* q = nullptr) {
-    BlockThermo b;
-    const double e0 = *std::min_element(ev.begin(), ev.end());
-    if (q) b.O.assign(q->size(), {});
-    for (double bt : beta) {
-        double z = 0.0, e = 0.0;
-        std::vector<Complex> o(q ? q->size() : 0, Complex(0, 0));
-        for (std::size_t n = 0; n < ev.size(); ++n) {
-            const double x = ev[n], w = std::exp(-bt * (x - e0));
-            z += w; e += w * (x - e0);
-            for (std::size_t k = 0; k < o.size(); ++k) o[k] += w * (*q)[k][n];
-        }
-        b.lnZ.push_back(std::log(z) - bt * e0);
-        b.E.push_back(e0 + e / z);
-        double v = 0.0;                    // second pass: the central moment, free of cancellation
-        for (std::size_t n = 0; n < ev.size(); ++n) {
-            const double dx = ev[n] - e0 - e / z;
-            v += std::exp(-bt * (ev[n] - e0)) * dx * dx;
-        }
-        b.V.push_back(v / z);
-        for (std::size_t k = 0; k < o.size(); ++k) b.O[k].push_back(o[k] / z);
-    }
-    return b;
-}
 
 // One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
 // or -- at most dense_max_dim states, with no tower and no observables -- its exact
@@ -90,9 +62,6 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                                          : std::max<std::size_t>(t.krylov, 4) + 4;
         ed::core::guard_working_set(n * vecs * 16ull, "ed::thermal");
     }
-    std::vector<double> T;
-    T.reserve(beta.size());
-    for (double b : beta) T.push_back(b > 0.0 ? 1.0 / b : 0.0);
 
     ed::BlockRequest req;
     req.task  = oftlm ? ed::Task::Oftlm : ed::Task::Sampled;
@@ -106,13 +75,12 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     BlockThermo b;
     b.lane = ed::place(t.device, req);
 
-    ::ThermodynamicData d;
-    std::vector<std::vector<Complex>> O;
+    ed::thermal::Curves c;
     if (b.lane == ed::Lane::HostDense) {
         std::vector<double> eigs;
         full_diagonalization(op, n, n, eigs, /*compute_eigenvectors=*/false);
         if (eigs.empty()) throw std::runtime_error("thermal: the dense solve of a block returned no eigenvalues");
-        d = ed::symmetry::canonical_thermo_from_eigs(eigs, T);
+        c = ed::thermal::exact_curves(eigs, beta);
     } else if (oftlm) {
         auto host_mv = op.bind_cpu();
         auto apply_H = [&host_mv](const Complex* in, Complex* out, int m) {
@@ -124,18 +92,14 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         ko.num_exact   = t.exact_states;
         ko.betas       = beta;
         ko.random_seed = seed;
-        auto kres = ed::thermal::oftlm_cpu(apply_H, n, ko);
-        d.temperatures  = T;
-        d.energy        = std::move(kres.energy);
-        d.specific_heat = std::move(kres.heat_capacity);
-        d.entropy       = std::move(kres.entropy);
+        c = ed::thermal::oftlm_cpu(apply_H, n, ko);
     } else {
         std::function<void(Complex*, std::size_t)> seed_transform;
         if (tower) {
             auto p = tower->projector;
             seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
         }
-        ed::with_backend(b.lane, [&](auto& be) {
+        c = ed::with_backend(b.lane, [&](auto& be) {
             using B = std::decay_t<decltype(be)>;
             constexpr bool device = !std::is_same_v<B, ed::matvec::CpuBackend>;
             auto H = op.template bind<B>();
@@ -146,8 +110,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 run.seed    = seed;
                 run.seed_transform = seed_transform;
                 if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
-                d = ed::thermal::mtpq(be, H, n, beta, run).thermo;
-                return;
+                return ed::thermal::mtpq(be, H, n, beta, run);
             }
             ed::thermal::FtlmOptions ko;
             ko.num_samples    = t.samples;
@@ -161,40 +124,29 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 ko.observables.push_back(A->template bind<B>());
             }
             if constexpr (device) ko.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
-            auto kres = ed::thermal::ftlm_kernel<B>(be, H, n, ko);
-            d.temperatures  = T;
-            d.energy        = std::move(kres.energy);
-            d.specific_heat = std::move(kres.heat_capacity);
-            d.entropy       = std::move(kres.entropy);
-            O = std::move(kres.observables);
+            return ed::thermal::ftlm_kernel<B>(be, H, n, ko).curves;
         });
     }
-    // F = E - T S where the kernel gave none (FTLM and OFTLM return E, C and S).
-    if (d.free_energy.empty() && !d.energy.empty() && d.energy.size() == d.entropy.size()
-        && d.energy.size() == d.temperatures.size()) {
-        d.free_energy.reserve(d.energy.size());
-        for (std::size_t i = 0; i < d.energy.size(); ++i)
-            d.free_energy.push_back(d.energy[i] - d.temperatures[i] * d.entropy[i]);
-    }
-    if (d.energy.size() != beta.size())
-        throw std::runtime_error("thermal: a block returned " + std::to_string(d.energy.size())
+    if (c.E.size() != beta.size())
+        throw std::runtime_error("thermal: a block returned " + std::to_string(c.E.size())
                                  + " temperatures, expected " + std::to_string(beta.size()));
-    // The kernels' free energy carries ln(dim) of the block they sampled; a projected trace
+    // The kernels' ln Z carries the dimension of the block they sampled; a projected trace
     // runs over the tower.
-    const double ln_ratio = tower ? std::log(static_cast<double>(tower_dim) / static_cast<double>(n)) : 0.0;
-    for (std::size_t i = 0; i < beta.size(); ++i) {
-        b.lnZ.push_back(-beta[i] * d.free_energy[i] + ln_ratio);
-        b.E.push_back(d.energy[i]);
-        b.V.push_back(d.specific_heat[i] / (beta[i] * beta[i]));
+    if (tower) {
+        const double ln_ratio = std::log(static_cast<double>(tower_dim) / static_cast<double>(n));
+        for (double& z : c.lnZ) z += ln_ratio;
     }
+    const std::vector<std::vector<Complex>> O = std::move(c.O);
+    c.O.clear();
     const std::size_t n_obs = folded ? obs.size() / 2 : obs.size();
     for (std::size_t k = 0; k < n_obs; ++k) {
         const auto& a = O.at(folded ? 2 * k : k);
         std::vector<Complex> v(a);
         if (folded)
             for (std::size_t i = 0; i < v.size(); ++i) v[i] = 0.5 * (a[i] + std::conj(O.at(2 * k + 1)[i]));
-        b.O.push_back(std::move(v));
+        c.O.push_back(std::move(v));
     }
+    b.c = std::move(c);
     return b;
 }
 
@@ -325,7 +277,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     }
                     if (ev.empty()) continue;
                     out.e0 = std::min(out.e0, ev.front());
-                    b = exact_block(ev, beta, &q);
+                    b.c = ed::thermal::exact_curves(ev, beta, &q);
                     b.lane = ed::Lane::HostDense;
                 } else if (t.method == ThermalSpec::Method::Exact) {
                     detail::BlockOp filter = bop;
@@ -381,7 +333,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     BlockThermo r = sampled_block(*d.bop.op, t, beta, d.seed, tower_sampling ? &d.bop : nullptr,
                                                   d.tower_dim, d.obs, d.folded, d.tag, d.w_block);
                     BlockThermo& b = blocks[d.block];
-                    b.lnZ = std::move(r.lnZ); b.E = std::move(r.E); b.V = std::move(r.V); b.O = std::move(r.O);
+                    b.c = std::move(r.c);
                     b.lane = r.lane;
                 } catch (...) {
 #pragma omp critical(thermal_failure)
@@ -393,7 +345,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     }
     if (t.method != ThermalSpec::Method::Exact)
         for (const auto& b : blocks)
-            for (double e : b.E) out.e0 = std::min(out.e0, e);
+            for (double e : b.c.E) out.e0 = std::min(out.e0, e);
     // Every multiplet counted once: the Sz = S / S + 1 labels matched block for block.
     if (tower_sampling && s.only_k0.empty() && s.only_irrep.empty() && s.only_momentum.empty()
         && s.only_irrep_chars.empty()
@@ -411,7 +363,8 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             for (double e : batch.spectrum(p.id)) if (!p.filter.is_ghost(e)) ev.push_back(e);
             if (ev.empty()) { empty[p.block] = true; continue; }
             out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
-            BlockThermo b = exact_block(ev, beta);
+            BlockThermo b;
+            b.c = ed::thermal::exact_curves(ev, beta);
             b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.sz2 = blocks[p.block].sz2;
             b.mirrored = blocks[p.block].mirrored;
             b.lane = batch.lane(p.id);
@@ -433,25 +386,25 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     out.O.assign(n_obs, std::vector<Complex>(nT));
     for (std::size_t i = 0; i < nT; ++i) {
         double mx = -std::numeric_limits<double>::infinity();
-        for (const auto& b : blocks) mx = std::max(mx, std::log(b.weight) + b.lnZ[i]);
+        for (const auto& b : blocks) mx = std::max(mx, std::log(b.weight) + b.c.lnZ[i]);
         double z = 0.0, e = 0.0, m = 0.0, m2 = 0.0;
         std::vector<Complex> ob(n_obs, Complex(0, 0));
         std::vector<double> p(blocks.size());
         for (std::size_t j = 0; j < blocks.size(); ++j) {
             const auto& b = blocks[j];
-            p[j] = std::exp(std::log(b.weight) + b.lnZ[i] - mx);
-            z += p[j]; e += p[j] * b.E[i];
+            p[j] = std::exp(std::log(b.weight) + b.c.lnZ[i] - mx);
+            z += p[j]; e += p[j] * b.c.E[i];
             if (!b.mirrored) m += p[j] * b.sz;
             m2 += p[j] * b.sz2;
-            for (std::size_t k = 0; k < n_obs; ++k) ob[k] += p[j] * b.O[k][i];
+            for (std::size_t k = 0; k < n_obs; ++k) ob[k] += p[j] * b.c.O[k][i];
         }
         e /= z; m /= z; m2 /= z;
         // Law of total variance: each block's own variance plus the spread of the block means
         // (raw second moments would cancel to rounding noise once C T^2 < ulp(E^2)).
         double var = 0.0;
         for (std::size_t j = 0; j < blocks.size(); ++j) {
-            const double d = blocks[j].E[i] - e;
-            var += p[j] * (blocks[j].V[i] + d * d);
+            const double d = blocks[j].c.E[i] - e;
+            var += p[j] * (blocks[j].c.V[i] + d * d);
         }
         var /= z;
         const double bt = beta[i];

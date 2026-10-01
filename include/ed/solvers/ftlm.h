@@ -1,5 +1,5 @@
-// ftlm.h - Finite Temperature Lanczos Method implementation
-// Computes thermodynamic properties without full spectrum diagonalization
+// ftlm.h - the continued-fraction spectral function of a Lanczos tridiagonal (P2.5 moves it
+// to dynamics/cf.h; the FTLM thermodynamics live in include/ed/thermal/ftlm_kernel.h).
 
 #pragma once
 
@@ -17,36 +17,6 @@
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
-
-/**
- * @brief Compute thermodynamic observables from a single FTLM sample
- * 
- * Given Ritz values and weights from a Krylov subspace, compute thermodynamic
- * quantities at specified temperatures.
- * 
- * @param ritz_values Eigenvalues from tridiagonal diagonalization
- * @param weights Statistical weights (squared first component of eigenvectors)
- * @param temperatures Temperature points to evaluate
- * @param hilbert_dim Hilbert space dimension (needed for proper entropy normalization)
- * @return ThermodynamicData structure with energy, entropy, specific heat, free energy
- */
-ThermodynamicData compute_ftlm_thermodynamics(
-    const std::vector<double>& ritz_values,
-    const std::vector<double>& weights,
-    const std::vector<double>& temperatures,
-    uint64_t hilbert_dim = 0
-);
-
-/**
- * @brief Average thermodynamic data across multiple samples with error estimation
- * 
- * @param sample_data Vector of per-sample thermodynamic data
- * @param results Output structure to store averaged data and error bars
- */
-void average_ftlm_samples(
-    const std::vector<ThermodynamicData>& sample_data,
-    FTLMResults& results
-);
 
 /**
  * Spectral function S(w) = -Im G(w + i*eta) / pi of the continued fraction

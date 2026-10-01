@@ -206,8 +206,9 @@ TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
     auto res = ed::thermal::ftlm_kernel(
         backend, apply, dim, opts);
 
-    REQUIRE_FALSE(res.energy.empty());
-    REQUIRE_FALSE(res.heat_capacity.empty());
+    REQUIRE(res.curves.E.size() == opts.betas.size());
+    REQUIRE(res.curves.V.size() == opts.betas.size());
+    REQUIRE(res.curves.lnZ.size() == opts.betas.size());
 }
 
 TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
@@ -273,11 +274,13 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
     const Eigen::VectorXd w = (es.eigenvectors().adjoint() * p).cwiseAbs2();
 
     const std::vector<double> Ts = {0.25, 0.5, 1.0, 4.0};
-    const auto mt = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, Ts,
+    std::vector<double> betas;
+    for (double T : Ts) betas.push_back(1.0 / T);
+    const auto mt = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, betas,
                                                        static_cast<double>(dim));
     REQUIRE(mt.unconverged.empty());
     for (std::size_t t = 0; t < Ts.size(); ++t) {
-        const double beta = 1.0 / Ts[t];
+        const double beta = betas[t];
         double z = 0.0, ez = 0.0;
         for (Eigen::Index i = 0; i < ev.size(); ++i) {
             const double b = w(i) * std::exp(-beta * (ev(i) - ev(0)));
@@ -289,12 +292,12 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
             v += w(i) * std::exp(-beta * (ev(i) - ev(0))) * (ev(i) - E) * (ev(i) - E);
         v /= z;
         const double lnZ = std::log(static_cast<double>(dim)) + std::log(z) - beta * ev(0);
-        REQUIRE(std::abs(mt.thermo.energy[t] - E) < 1e-10);
-        REQUIRE(std::abs(-beta * mt.thermo.free_energy[t] - lnZ) < 1e-10);
-        REQUIRE(std::abs(mt.thermo.specific_heat[t] - beta * beta * v) < 1e-8);
+        REQUIRE(std::abs(mt.curves.E[t] - E) < 1e-10);
+        REQUIRE(std::abs(mt.curves.lnZ[t] - lnZ) < 1e-10);
+        REQUIRE(std::abs(beta * beta * (mt.curves.V[t] - v)) < 1e-8);
     }
     // A target colder than 300 steps reach is reported as such, never clamped.
-    const auto cold = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, {0.005},
+    const auto cold = ed::thermal::mtpq_canonical_thermo(res.sample_energies, res.sample_log_norms, L, {200.0},
                                                          static_cast<double>(dim));
     REQUIRE(cold.unconverged.size() == 1);
 }

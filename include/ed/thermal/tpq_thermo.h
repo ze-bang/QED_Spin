@@ -34,14 +34,14 @@
 #include <string>
 #include <vector>
 
-#include <ed/core/thermal_types.h>  // ThermodynamicData
+#include <ed/thermal/curves.h>
 
 namespace ed::thermal {
 
 struct MtpqThermo {
-    ThermodynamicData   thermo;        ///< on the requested temperatures (all of them)
-    /// Indices of the temperatures whose series did not converge in some sample (too cold for
-    /// the trajectory length); their values are not to be used.
+    Curves curves;                     ///< ln Z, E, V on the requested betas (all of them)
+    /// Indices of the betas whose series did not converge in some sample (too cold for the
+    /// trajectory length); their values are not to be used.
     std::vector<std::size_t> unconverged;
 };
 
@@ -64,20 +64,18 @@ inline double log_sum_exp(const std::vector<double>& x, std::size_t n) {
  * @param sample_energies   per sample, E_k for k = 0..K
  * @param sample_log_norms  per sample, ln n_k for k = 1..K
  * @param L                 the shift the trajectories were run with (above the spectrum)
- * @param temperatures      target temperatures (> 0)
+ * @param betas             target inverse temperatures (> 0)
  * @param dim               dimension D of the space the start vectors fill
  */
 inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& sample_energies,
                                         const std::vector<std::vector<double>>& sample_log_norms,
-                                        double L, const std::vector<double>& temperatures, double dim) {
+                                        double L, const std::vector<double>& betas, double dim) {
     MtpqThermo out;
-    ThermodynamicData& td = out.thermo;
-    const std::size_t nT = temperatures.size(), R = sample_energies.size();
-    td.temperatures = temperatures;
-    td.energy.assign(nT, 0.0);
-    td.specific_heat.assign(nT, 0.0);
-    td.entropy.assign(nT, 0.0);
-    td.free_energy.assign(nT, 0.0);
+    Curves& c = out.curves;
+    const std::size_t nT = betas.size(), R = sample_energies.size();
+    c.lnZ.assign(nT, 0.0);
+    c.E.assign(nT, 0.0);
+    c.V.assign(nT, 0.0);
     if (nT == 0 || R == 0) return out;
 
     // ln mu_j per sample, j = 0..2K+1.
@@ -110,9 +108,9 @@ inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& 
     const double lnD = std::log(std::max(dim, 1.0));
     std::vector<double> terms(j_max), per_sample(R);
     for (std::size_t t = 0; t < nT; ++t) {
-        const double T = temperatures[t];
-        if (!(T > 0.0)) throw std::invalid_argument("mtpq_canonical_thermo: temperatures must be positive");
-        const double beta = 1.0 / T, ln_beta = std::log(beta);
+        const double beta = betas[t];
+        if (!(beta > 0.0)) throw std::invalid_argument("mtpq_canonical_thermo: betas must be positive");
+        const double ln_beta = std::log(beta);
         double lnS[3];
         bool converged = true;
         for (int m = 0; m < 3; ++m) {
@@ -131,11 +129,9 @@ inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& 
         if (!converged) out.unconverged.push_back(t);
         const double a = std::exp(lnS[1] - lnS[0]);          // L - E
         const double var = std::max(std::exp(lnS[2] - lnS[0]) - a * a, 0.0);
-        const double lnZ = lnD - beta * L + lnS[0];
-        td.energy[t]        = L - a;
-        td.specific_heat[t] = beta * beta * var;
-        td.free_energy[t]   = -lnZ / beta;
-        td.entropy[t]       = lnZ + beta * td.energy[t];
+        c.lnZ[t] = lnD - beta * L + lnS[0];
+        c.E[t]   = L - a;
+        c.V[t]   = var;
     }
     return out;
 }

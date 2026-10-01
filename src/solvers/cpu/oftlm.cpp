@@ -60,7 +60,7 @@ ed::krylov::LanczosKernelResult run_lanczos(
 
 }  // namespace
 
-FtlmResult oftlm_cpu(
+Curves oftlm_cpu(
     const std::function<void(const Complex*, Complex*, int)>& apply_H,
     std::uint64_t          N,
     const OftlmOptions&    opts)
@@ -190,12 +190,10 @@ FtlmResult oftlm_cpu(
     // -------------------------------------------------------------------------
     // 4. Combine per beta.
     // -------------------------------------------------------------------------
-    FtlmResult out;
-    out.betas = opts.betas;
-    out.partition_function.assign(nT, 0.0);
-    out.energy.assign(nT, 0.0);
-    out.heat_capacity.assign(nT, 0.0);
-    out.entropy.assign(nT, 0.0);
+    Curves out;
+    out.lnZ.assign(nT, 0.0);
+    out.E.assign(nT, 0.0);
+    out.V.assign(nT, 0.0);
 
     for (std::size_t t = 0; t < nT; ++t) {
         const double beta = opts.betas[t];
@@ -224,20 +222,17 @@ FtlmResult oftlm_cpu(
         EZ  += pref * EZr;
         E2Z += pref * E2Zr;
 
-        out.partition_function[t] = Z;
         if (Z > 1e-300) {
             const double dE  = EZ / Z;
             const double dE2 = E2Z / Z;
-            const double E   = e_min + dE;
-            out.energy[t]        = E;
-            out.heat_capacity[t] = beta * beta * std::max(dE2 - dE * dE, 0.0);
-            // Z here is the full (shifted) trace Tr e^{-beta(H-e_min)}, so
-            // S = ln Z_true + beta<E> = ln Z + beta(<E> - e_min).
-            out.entropy[t]       = std::log(Z) + beta * (E - e_min);
+            // Z here is the full (shifted) trace Tr e^{-beta(H-e_min)}: ln Z_full = ln Z - beta e_min.
+            out.lnZ[t] = std::log(Z) - beta * e_min;
+            out.E[t]   = e_min + dE;
+            out.V[t]   = std::max(dE2 - dE * dE, 0.0);
         } else {
-            out.energy[t]        = e_min;
-            out.heat_capacity[t] = 0.0;
-            out.entropy[t]       = 0.0;
+            out.lnZ[t] = -beta * e_min;
+            out.E[t]   = e_min;
+            out.V[t]   = 0.0;
         }
     }
 

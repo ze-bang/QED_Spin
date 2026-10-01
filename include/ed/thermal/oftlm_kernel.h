@@ -17,7 +17,7 @@
 //             + (D - N_V)/R * sum_r sum_j |<r~|psi_j^r>|^2 e^{-beta (eps~_j^r - e_min)}
 //   <E> Z     = sum_{i<N_V} eps_i e^{-beta(...)} + (D-N_V)/R * sum_r sum_j eps~_j |..|^2 e^{-beta(...)}
 //   <E^2> Z   = ... eps~_j^2 ...
-//   Cv        = beta^2 (<E^2> - <E>^2),   S = ln Z + beta(<E> - e_min)
+//   ln Z_full = ln Z - beta e_min,   V = <(H - <H>)^2> (moments about e_min)
 //
 // where |r~> is a random vector orthogonalized against the N_V exact
 // eigenvectors and renormalized, D is the (sector) Hilbert dimension, R the
@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-#include <ed/thermal/ftlm_kernel.h>   // FtlmResult (reused as the return type)
+#include <ed/thermal/curves.h>
 
 namespace ed::thermal {
 
@@ -51,7 +51,7 @@ struct OftlmOptions {
 /// Orthogonalized FTLM on a single (CPU) sector.
 /// @param apply_H  host term-matvec: out = H * in, length N.
 /// @param N        sector Hilbert dimension (local == global on CPU).
-FtlmResult oftlm_cpu(
+Curves oftlm_cpu(
     const std::function<void(const std::complex<double>*,
                              std::complex<double>*, int)>& apply_H,
     std::uint64_t          N,

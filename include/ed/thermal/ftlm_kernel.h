@@ -17,10 +17,12 @@
 //   * For each ``|r>`` run a length-``M`` Lanczos.
 //   * Diagonalise the tridiagonal ``(alpha, beta)`` -> Ritz values + first-
 //     component weights ``|<r | q_k>|^2``.
-//   * Compute ``Z, <E>, Cv, S`` from the Ritz-value Lehmann representation
-//     of the Krylov projection (``compute_ftlm_thermodynamics``).
-//   * Average across samples using the Jensen-correct
-//     ``average_ftlm_samples`` post-processor.
+//   * Per sample, the moments Z, E1, E2 of the Ritz-value Lehmann representation of
+//     the Krylov projection, about that sample's lowest Ritz value
+//     (``detail::sample_moments``).
+//   * Average the moments across samples about one common reference before taking
+//     logarithms (Jensen: <ln Z> != ln <Z>), and return ln Z, E and the central
+//     second moment V per beta (``detail::combine_samples``, ``Curves``).
 // =============================================================================
 
 #include <algorithm>
@@ -41,8 +43,8 @@
 #include <ed/matvec/matvec_batcher.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>      // diagonalize_tridiagonal_ritz, generateGaussianRandomVector
+#include <ed/thermal/curves.h>
 #include <ed/thermal/sample_seed.h>
 
 #ifdef WITH_CUDA
@@ -61,15 +63,7 @@ using Complex = std::complex<double>;
 struct FtlmOptions {
     std::size_t num_samples  = 40;
     std::size_t krylov_dim   = 100;
-    std::vector<double> betas;           ///< inverse-temperature grid (positive)
-
-    /// Optional exact temperature grid. When non-empty it is
-    /// used verbatim as the evaluation grid and reported as
-    /// ``FtlmResult::temperatures``, bypassing the ``T = 1/beta``
-    /// round trip, which can move a grid point by 1 ulp relative to a
-    /// caller that built T directly. ``betas`` may then be left empty (it is filled with
-    /// ``1/T``); if both are given they must have the same length.
-    std::vector<double> temperatures;
+    std::vector<double> betas;           ///< inverse-temperature grid (positive), any order
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
 
@@ -100,86 +94,79 @@ struct FtlmOptions {
 };
 
 struct FtlmResult {
-    /// <O>(T) per observable of FtlmOptions::observables, index-aligned with temperatures.
-    std::vector<std::vector<Complex>> observables;
-    std::vector<double> betas;
-    std::vector<double> temperatures;        ///< 1/betas, or opts.temperatures verbatim (grid order)
-    std::vector<double> partition_function;
-    std::vector<double> energy;
-    std::vector<double> heat_capacity;
-    std::vector<double> entropy;
-    std::vector<double> free_energy;
-    double ground_state_estimate =
-        std::numeric_limits<double>::quiet_NaN();
+    /// ln Z, E, V and <O> per beta of FtlmOptions::betas (lnZ = ln n + ln <Z_r> - beta e_ref).
+    Curves curves;
+    /// The lowest Ritz value over the valid samples (an upper bound on the block's lowest level).
+    double ground_state_estimate = std::numeric_limits<double>::quiet_NaN();
 };
 
 namespace detail {
 
-inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
-                                 const std::vector<double>& betas) {
-    FtlmResult out;
-    out.betas              = betas;
-    out.temperatures       = legacy.thermo_data.temperatures;
-    out.partition_function = legacy.thermo_data.Z_sample;
-    out.energy             = legacy.thermo_data.energy;
-    out.heat_capacity      = legacy.thermo_data.specific_heat;
-    out.entropy            = legacy.thermo_data.entropy;
-    out.free_energy        = legacy.thermo_data.free_energy;
-    out.ground_state_estimate = legacy.ground_state_estimate;
-    return out;
-}
-
-/// The (temperatures, betas) evaluation grid of ``opts``, index-aligned.
-/// ``opts.temperatures`` wins when set (taken verbatim, betas = 1/T unless
-/// the caller supplied them); otherwise T = 1/beta.
-struct FtlmGrid {
-    std::vector<double> temperatures;
-    std::vector<double> betas;
+/// One sample's Boltzmann moments about its lowest Ritz value e_min, per beta:
+/// Z = sum_i w_i e^{-beta (e_i - e_min)}, E1 = sum_i (e_i - e_min) w_i e^{...}, E2 likewise with
+/// (e_i - e_min)^2. Moments about e_min keep E2 free of cancellation.
+struct SampleMoments {
+    double e_min = 0.0;
+    std::vector<double> Z, E1, E2;
 };
 
-inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
-                                  const char* who) {
-    FtlmGrid g;
-    if (!opts.temperatures.empty()) {
-        if (!opts.betas.empty()
-            && opts.betas.size() != opts.temperatures.size()) {
-            throw std::invalid_argument(
-                std::string(who) + ": opts.temperatures and opts.betas "
-                "must have the same length when both are set.");
+[[nodiscard]] inline SampleMoments sample_moments(const std::vector<double>& ritz,
+                                                  const std::vector<double>& weights,
+                                                  const std::vector<double>& betas) {
+    SampleMoments m;
+    m.e_min = *std::min_element(ritz.begin(), ritz.end());
+    m.Z.resize(betas.size());
+    m.E1.resize(betas.size());
+    m.E2.resize(betas.size());
+    for (std::size_t t = 0; t < betas.size(); ++t) {
+        const double beta = betas[t];
+        double z = 0.0, e1 = 0.0, e2 = 0.0;
+        for (std::size_t i = 0; i < ritz.size(); ++i) {
+            const double x = ritz[i] - m.e_min;
+            const double b = weights[i] * std::exp(-beta * x);
+            z += b; e1 += x * b; e2 += x * x * b;
         }
-        for (double t : opts.temperatures) {
-            if (!(t > 0.0)) {
-                throw std::invalid_argument(
-                    std::string(who) + ": opts.temperatures must be "
-                    "strictly positive.");
-            }
+        m.Z[t] = z; m.E1[t] = e1; m.E2[t] = e2;
+    }
+    return m;
+}
+
+/// The FTLM curves of an n-dimensional block from its samples' moments: each sample is rescaled
+/// to the common reference e_ref (the lowest e_min) and the moments are averaged before any
+/// logarithm, so lnZ = ln n + ln <Z> - beta e_ref, E = e_ref + <E1> / <Z> and
+/// V = max(<E2> / <Z> - (<E1> / <Z>)^2, 0). Where <Z> <= 1e-300 the block is its ground
+/// state: lnZ = -beta e_ref, E = e_ref, V = 0.
+[[nodiscard]] inline Curves combine_samples(const std::vector<SampleMoments>& samples, std::uint64_t n,
+                                            const std::vector<double>& betas) {
+    Curves c;
+    const std::size_t nT = betas.size(), R = samples.size();
+    double e_ref = samples.front().e_min;
+    for (const auto& s : samples) e_ref = std::min(e_ref, s.e_min);
+    const double ln_n = std::log(static_cast<double>(n));
+    c.lnZ.resize(nT); c.E.resize(nT); c.V.resize(nT);
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double beta = betas[t];
+        double z = 0.0, e1 = 0.0, e2 = 0.0;
+        for (const auto& s : samples) {
+            // x - e_ref = (x - e_min_s) + d for the moments about each sample's e_min.
+            const double d = s.e_min - e_ref, r = std::exp(-beta * d);
+            z  += s.Z[t] * r;
+            e1 += (s.E1[t] + d * s.Z[t]) * r;
+            e2 += (s.E2[t] + 2.0 * d * s.E1[t] + d * d * s.Z[t]) * r;
         }
-        g.temperatures = opts.temperatures;
-        if (!opts.betas.empty()) {
-            g.betas = opts.betas;
+        z /= static_cast<double>(R); e1 /= static_cast<double>(R); e2 /= static_cast<double>(R);
+        if (z > 1e-300) {
+            const double m1 = e1 / z, m2 = e2 / z;
+            c.lnZ[t] = ln_n + std::log(z) - beta * e_ref;
+            c.E[t]   = e_ref + m1;
+            c.V[t]   = std::max(m2 - m1 * m1, 0.0);
         } else {
-            g.betas.reserve(g.temperatures.size());
-            for (double t : g.temperatures) g.betas.push_back(1.0 / t);
+            c.lnZ[t] = -beta * e_ref;
+            c.E[t]   = e_ref;
+            c.V[t]   = 0.0;
         }
-        return g;
     }
-    if (opts.betas.empty()) {
-        throw std::invalid_argument(
-            std::string(who) + ": opts.betas (or opts.temperatures) must "
-            "be non-empty (the temperature grid is required to evaluate "
-            "Z, <E>, Cv, S).");
-    }
-    g.betas = opts.betas;
-    g.temperatures.reserve(opts.betas.size());
-    for (double b : opts.betas) {
-        if (!(b > 0.0)) {
-            throw std::invalid_argument(
-                std::string(who) + ": opts.betas must be strictly "
-                "positive.");
-        }
-        g.temperatures.push_back(1.0 / b);
-    }
-    return g;
+    return c;
 }
 
 }  // namespace detail
@@ -217,13 +204,11 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 ///      tridiagonal ``(alpha, beta)``.
 ///   3. Host-side ``diagonalize_tridiagonal_ritz`` ->
 ///      ``ritz_values`` + first-component ``weights``.
-///   4. Host-side ``compute_ftlm_thermodynamics`` -> per-sample
-///      ``ThermodynamicData`` on the supplied temperature grid.
+///   4. Host-side ``detail::sample_moments``: the sample's Boltzmann moments per beta.
 ///
-/// After the sample loop we hand the per-sample
-/// ``ThermodynamicData`` vector to ``::average_ftlm_samples`` (the
-/// host-side Jensen-correct averager) so the CPU and GPU lanes produce
-/// identical output to within Lanczos noise.
+/// After the sample loop ``detail::combine_samples`` averages the moments (Jensen-correct)
+/// into the Curves, so the CPU and GPU lanes produce identical output to within Lanczos
+/// noise.
 template <typename Backend, typename MatvecFn>
 FtlmResult ftlm_kernel(const Backend& backend,
                        MatvecFn&&     apply_H,
@@ -241,12 +226,12 @@ FtlmResult ftlm_kernel(const Backend& backend,
         throw std::invalid_argument(
             "ftlm_kernel: num_samples must be > 0");
     }
-    // Beta -> temperature for the host post-processors (or the caller's
-    // exact ``opts.temperatures``). ``compute_ftlm_thermodynamics`` is
-    // temperature-driven; the caller's ordering is preserved so the
-    // returned curves are index-aligned with the grid.
-    const detail::FtlmGrid grid = detail::resolve_ftlm_grid(opts, "ftlm_kernel");
-    const std::vector<double>& temperatures = grid.temperatures;
+    // The curves are index-aligned with opts.betas, in the caller's order.
+    const std::vector<double>& betas = opts.betas;
+    if (betas.empty())
+        throw std::invalid_argument("ftlm_kernel: opts.betas must be non-empty");
+    for (double b : betas)
+        if (!(b > 0.0)) throw std::invalid_argument("ftlm_kernel: opts.betas must be strictly positive");
 
     // Dim-aware OMP+BLAS thread cap. Harmless when the thermal verb
     // already applied it (see the doc comment above).
@@ -274,7 +259,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
         bool ok = false;
         std::vector<double> ritz, weights, Y;                  // Y[i m + a]: Ritz vector i
         std::vector<std::vector<Complex>> A;                  // A[o][i + j m] = <psi_i|O_o|psi_j>
-        ::ThermodynamicData td;
+        detail::SampleMoments mom;
     };
     auto sample = [&](const auto& be, auto&& apply, std::size_t s) {
         Sample out;
@@ -368,10 +353,8 @@ FtlmResult ftlm_kernel(const Backend& backend,
                    static_cast<std::size_t>(s));
             return out;
         }
-        // ---- 4. Host-side thermodynamics for this sample ----
-        out.td = ::compute_ftlm_thermodynamics(
-            out.ritz, out.weights, temperatures,
-            static_cast<std::uint64_t>(local_n));
+        // ---- 4. Host-side Boltzmann moments of this sample ----
+        out.mom = detail::sample_moments(out.ritz, out.weights, betas);
         out.ok = true;
         return out;
     };
@@ -399,8 +382,8 @@ FtlmResult ftlm_kernel(const Backend& backend,
     if (!batched)
         for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(backend, apply_H, s);
 
-    std::vector<::ThermodynamicData> per_sample;
-    per_sample.reserve(opts.num_samples);
+    std::vector<detail::SampleMoments> moments;
+    moments.reserve(opts.num_samples);
     double ground_state_estimate = std::numeric_limits<double>::infinity();
     // Observable sums over all samples, against the running lowest Ritz value obs_ref.
     std::vector<double> obs_z;
@@ -416,21 +399,21 @@ FtlmResult ftlm_kernel(const Backend& backend,
             // the one-sided FTLM form sum_i e^{-beta e_i} <r|psi_i><psi_i|O|r> fluctuates at low T.
             const double smin = *std::min_element(ritz_values.begin(), ritz_values.end());
             if (obs_z.empty()) {
-                obs_z.assign(temperatures.size(), 0.0);
-                obs_num.assign(n_obs, std::vector<Complex>(temperatures.size(), Complex(0, 0)));
+                obs_z.assign(betas.size(), 0.0);
+                obs_num.assign(n_obs, std::vector<Complex>(betas.size(), Complex(0, 0)));
                 obs_ref = smin;
             } else if (smin < obs_ref) {
-                for (std::size_t t = 0; t < temperatures.size(); ++t) {
-                    const double f = std::exp(-(obs_ref - smin) / temperatures[t]);
+                for (std::size_t t = 0; t < betas.size(); ++t) {
+                    const double f = std::exp(-betas[t] * (obs_ref - smin));
                     obs_z[t] *= f;
                     for (auto& row : obs_num) row[t] *= f;
                 }
                 obs_ref = smin;
             }
             std::vector<double> g(m);                           // e^{-beta (e_i - ref) / 2} c_i
-            for (std::size_t t = 0; t < temperatures.size(); ++t) {
+            for (std::size_t t = 0; t < betas.size(); ++t) {
                 for (std::size_t i = 0; i < m; ++i) {
-                    g[i] = std::exp(-0.5 * (ritz_values[i] - obs_ref) / temperatures[t]) * smp.Y[i * m];
+                    g[i] = std::exp(-0.5 * betas[t] * (ritz_values[i] - obs_ref)) * smp.Y[i * m];
                     obs_z[t] += g[i] * g[i];
                 }
                 for (std::size_t o = 0; o < n_obs; ++o) {
@@ -442,46 +425,24 @@ FtlmResult ftlm_kernel(const Backend& backend,
             }
         }
         ground_state_estimate = std::min(ground_state_estimate, ritz_values.front());
-        per_sample.push_back(std::move(smp.td));
+        moments.push_back(std::move(smp.mom));
     }
 
-    if (per_sample.empty()) {
+    if (moments.empty()) {
         throw std::runtime_error(
             "ftlm_kernel: every sample failed (no Ritz values from any "
             "of the " + std::to_string(opts.num_samples) + " samples)");
     }
 
     // ---- 5. Jensen-correct sample averaging ----
-    ::FTLMResults legacy;
-    legacy.ground_state_estimate = ground_state_estimate;
-    ::average_ftlm_samples(per_sample, legacy);
-    legacy.thermo_data.temperatures = temperatures;
-    // Surface the raw Z_sample average too so ``to_ftlm_result`` can
-    // forward it on the partition_function field. ``average_ftlm_samples``
-    // already populates ``legacy.thermo_data.{energy, specific_heat,
-    // entropy}``; we recompute Z_sample as the per-temperature mean
-    // because the averager does not write it into ``legacy.thermo_data``.
-    if (!per_sample.empty()
-        && !per_sample.front().Z_sample.empty()) {
-        legacy.thermo_data.Z_sample.assign(temperatures.size(), 0.0);
-        for (const auto& td : per_sample) {
-            for (std::size_t t = 0; t < temperatures.size(); ++t) {
-                if (t < td.Z_sample.size()) {
-                    legacy.thermo_data.Z_sample[t] += td.Z_sample[t];
-                }
-            }
-        }
-        const double inv_n =
-            1.0 / static_cast<double>(per_sample.size());
-        for (auto& z : legacy.thermo_data.Z_sample) z *= inv_n;
-    }
-    FtlmResult out = detail::to_ftlm_result(legacy, grid.betas);
+    FtlmResult out;
+    out.curves = detail::combine_samples(moments, static_cast<std::uint64_t>(local_n), betas);
+    out.ground_state_estimate = ground_state_estimate;
     for (auto& row : obs_num) {
         for (std::size_t t = 0; t < row.size(); ++t) row[t] /= obs_z[t];
-        out.observables.push_back(std::move(row));
+        out.curves.O.push_back(std::move(row));
     }
     return out;
 }
-
 
 }  // namespace ed::thermal

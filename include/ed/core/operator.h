@@ -33,7 +33,6 @@
 #include <Eigen/Sparse>
 #include <ed/core/basis_utils.h>
 #include <ed/core/linear_operator.h>
-#include <ed/core/thermal_types.h>  // transitive: solvers/observables, ftlm, etc.
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/term_kernels.h>

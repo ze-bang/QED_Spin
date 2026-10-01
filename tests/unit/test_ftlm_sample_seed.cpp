@@ -7,10 +7,7 @@
 // (the recipe shared with OFTLM through ``sample_seed.h``). Pinned by
 //   * recording every draw through a pass-through ``seed_transform`` and
 //     requiring it to equal the recipe bit for bit;
-//   * requiring two runs with the same options to be bit-identical;
-//   * requiring the CpuBackend front door ``ftlm_kernel`` to return exactly
-//     the body's curves on the T = 1/beta grid, and the caller's grid
-//     verbatim when ``opts.temperatures`` is set.
+//   * requiring two runs with the same options to give bit-identical ln Z, E and V.
 // Checked on an 8-site Heisenberg ring (dim 256) and a 14-site ring
 // (dim 16384, above the 8192 thread-budget threshold of
 // ``auto_threads_for_dim``), full reorthogonalisation off and on.
@@ -58,11 +55,9 @@ void require_identical(const std::string& name,
 
 void require_identical(const ed::thermal::FtlmResult& a,
                        const ed::thermal::FtlmResult& b) {
-    require_identical("energy",             a.energy,             b.energy);
-    require_identical("specific_heat",      a.heat_capacity,      b.heat_capacity);
-    require_identical("entropy",            a.entropy,            b.entropy);
-    require_identical("free_energy",        a.free_energy,        b.free_energy);
-    require_identical("partition_function", a.partition_function, b.partition_function);
+    require_identical("lnZ", a.curves.lnZ, b.curves.lnZ);
+    require_identical("E",   a.curves.E,   b.curves.E);
+    require_identical("V",   a.curves.V,   b.curves.V);
     CHECK(a.ground_state_estimate == b.ground_state_estimate);
 }
 
@@ -74,8 +69,6 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
     const auto& backend = ed::matvec::default_cpu_backend();
 
     const std::vector<double> betas = {0.05, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0};
-    std::vector<double> temperatures;
-    for (double b : betas) temperatures.push_back(1.0 / b);
 
     ed::thermal::FtlmOptions opts;
     opts.num_samples              = samples;
@@ -126,24 +119,8 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
         backend, apply, dim, opts);
     const auto second = ed::thermal::ftlm_kernel(
         backend, apply, dim, opts);
-    REQUIRE(first.energy.size() == betas.size());
+    REQUIRE(first.curves.E.size() == betas.size());
     require_identical(first, second);
-
-    // 3. The CpuBackend front door runs this body on the 1/beta grid.
-    const auto front = ed::thermal::ftlm_kernel(
-        backend, apply, dim, opts);
-    CHECK(front.betas == betas);
-    CHECK(front.temperatures == temperatures);
-    require_identical(front, first);
-
-    // 4. An exact temperature grid is reported verbatim.
-    ed::thermal::FtlmOptions exact = opts;
-    exact.betas.clear();
-    exact.temperatures = temperatures;
-    const auto front_t = ed::thermal::ftlm_kernel(
-        backend, apply, dim, exact);
-    CHECK(front_t.temperatures == temperatures);
-    REQUIRE(front_t.energy.size() == temperatures.size());
 }
 
 }  // namespace

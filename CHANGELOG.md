@@ -95,6 +95,15 @@ C++ API (installed headers; nothing in Python changes):
   `BackendVariant` and the lane-label helpers. `ed::Geometry`, `LinearOperator::geometry()`,
   `global_dim()` and `memory_space()` go with them (`Backend::memory_space()` stays). Every
   block is placed by `ed::place` and solved by the block lanes.
+- The thermal kernels return `ed::thermal::Curves` (`<ed/thermal/curves.h>`): ln Z, E, the
+  central second moment V and <O> per beta. `FtlmResult` is `{curves,
+  ground_state_estimate}` (its temperatures / partition_function / entropy / free_energy
+  fields and `FtlmOptions::temperatures` are gone; the curves follow `betas`), `oftlm_cpu`
+  and `mtpq<Backend>` return `Curves`, `MtpqThermo` holds `curves`, and
+  `mtpq_canonical_thermo` takes betas. `ed::thermal::exact_curves` is the one exact formula.
+  Gone: `ThermodynamicData`, `FTLMResults` (`<ed/core/thermal_types.h>`),
+  `compute_ftlm_thermodynamics`, `average_ftlm_samples` and
+  `<ed/symmetry/canonical_thermo.h>`.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

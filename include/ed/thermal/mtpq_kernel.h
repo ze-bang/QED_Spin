@@ -196,14 +196,14 @@ struct MtpqRun {
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
 };
 
-/// The canonical mTPQ thermodynamics of an n-dimensional block at `betas`. Recipe:
+/// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
 ///   1. spectral bounds (E_min, E_max) from a short Lanczos on this backend;
 ///   2. L just above E_max (the series' terms peak near j* = beta (L - E_min), so L - E_max is
 ///      pure cost);
 ///   3. steps so the series converges at the coldest beta: j* + 8 sqrt(j*) terms; a target the
 ///      trajectory cannot reach is refused, never clamped.
 template <typename Backend, typename MatvecFn>
-MtpqThermo mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas,
+Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas,
                 const MtpqRun& run) {
     std::vector<double> temperatures;
     temperatures.reserve(betas.size());
@@ -281,10 +281,10 @@ MtpqThermo mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<doub
     for (int attempt = 0;; ++attempt) {
         kopts.max_iter = std::max<std::size_t>(steps, 1);
         MtpqResult kres = mtpq_kernel<Backend>(be, H, n, kopts);
-        if (temperatures.empty()) return MtpqThermo{};
-        MtpqThermo mt = mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, temperatures,
+        if (betas.empty()) return Curves{};
+        MtpqThermo mt = mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, betas,
                                               static_cast<double>(n));
-        if (mt.unconverged.empty()) return mt;
+        if (mt.unconverged.empty()) return std::move(mt.curves);
         // Too cold for the trajectory. An auto-sized run had underestimated the spectral range:
         // run once more with twice the steps. Never clamp.
         double T_reached = std::numeric_limits<double>::infinity();
