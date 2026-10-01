@@ -65,6 +65,12 @@ Breaking changes so far:
   `"auto"` blocks that stay on the host are solved exactly as under `"cpu"` (same lanes,
   `dense_max_dim` honoured, same placement). On device blocks `block_stats` `applies` counts
   H applies. `ED_NUMA_PIN_THREADS` pins at the entry of every verb.
+- **Fixed: the one-level Krylov scan on small blocks** (reached with a small `dense_max_dim`,
+  and by device blocks of 33-400 states). On a block it could span, the scan's partial
+  reorthogonalisation could return an eigenvalue below the spectrum (the chiral 3x3 torus:
+  -5.31939 against -5.31922). On a small block with degenerate levels, it could refuse a
+  converged level. It now reorthogonalises fully on such blocks and stops at an exhausted
+  Krylov space. Results at the default crossover are unchanged.
 - **Environment variables read one way.** Every variable goes through the registry's typed
   readers: the switches (`ED_SYM_REDUCED_CSR`, `ED_CSR_FORCE`, `ED_AUTO_THREADS`,
   `ED_ENV_STRICT`) take the registry's words (`0`, `false`, `off`, `no` are off, anything else
