@@ -65,11 +65,12 @@ struct KrylovSchurOptions {
     bool        probe_degeneracy = true;
 };
 
-struct KrylovSchurResult {
+template <class Scalar>
+struct KrylovSchurResultT {
     std::vector<double>                    eigenvalues;
     /// Locked Ritz vectors in backend memory, one per converged
     /// eigenvalue. Only populated when `opts.compute_vectors == true`.
-    std::vector<ed::matvec::Backend::UniqueVec> eigenvectors;
+    std::vector<typename ed::matvec::BasicBackend<Scalar>::UniqueVec> eigenvectors;
     std::size_t                            iters_done = 0;
     std::size_t                            restarts   = 0;
     bool                                   converged  = false;
@@ -77,17 +78,20 @@ struct KrylovSchurResult {
     /// num_eigs when the space is smaller).
     bool                                   exhausted  = false;
 };
+using KrylovSchurResult = KrylovSchurResultT<Complex>;
 
 /// Run thick-restart Krylov-Schur on `matvec` starting from `seed_local`
 /// (already in backend memory, dimension `local_n`).
 template <typename Backend, typename MatvecFn>
-KrylovSchurResult krylov_schur_kernel(Backend&       be,
-                                      MatvecFn&&     matvec,
-                                      std::size_t    local_n,
-                                      const Complex* seed_local,
-                                      const KrylovSchurOptions& opts)
+KrylovSchurResultT<typename Backend::scalar_type>
+krylov_schur_kernel(Backend&                             be,
+                    MatvecFn&&                           matvec,
+                    std::size_t                          local_n,
+                    const typename Backend::scalar_type* seed_local,
+                    const KrylovSchurOptions&            opts)
 {
-    using ed::matvec::Backend;
+    using Scalar = typename Backend::scalar_type;
+    using UniqueVec = typename ed::matvec::BasicBackend<Scalar>::UniqueVec;
 
     if (opts.max_iter == 0) {
         throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");
@@ -100,8 +104,8 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         k_target, opts.max_iter, static_cast<std::uint64_t>(local_n), opts.max_subspace_vectors);
 
     // --- locked Ritz set (in backend memory) ---------------------------
-    std::vector<ed::matvec::Backend::UniqueVec> locked_vecs;
-    std::vector<double>                          locked_evals;
+    std::vector<UniqueVec>  locked_vecs;
+    std::vector<double>     locked_evals;
     locked_vecs.reserve(k_target);
     locked_evals.reserve(k_target);
 
@@ -111,27 +115,27 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         be.copy(seed_local, v_seed.get(), local_n);
         const double n0 = be.nrm2(v_seed.get(), local_n);
         if (n0 > 0.0) {
-            be.scale(Complex(1.0 / n0, 0.0), v_seed.get(), local_n);
+            be.scale(Scalar(1.0 / n0), v_seed.get(), local_n);
         }
     }
 
-    KrylovSchurResult R;
+    KrylovSchurResultT<Scalar> R;
 
     // CGS2 against the locked set.
-    auto deflate = [&](Complex* v) {
+    auto deflate = [&](Scalar* v) {
         for (int pass = 0; pass < 2; ++pass) {
             for (auto& lv : locked_vecs) {
-                const Complex c = be.dot(lv.get(), v, local_n);
+                const Scalar c = be.dot(lv.get(), v, local_n);
                 be.axpy(-c, lv.get(), v, local_n);
             }
         }
     };
     struct Cycle {
-        LanczosKernelResult      kres;
-        std::vector<double>      evals, evecs_cm;
-        std::vector<std::size_t> idx;          // ascending Ritz values
-        std::size_t              m = 0;
-        double                   beta_last = 0.0;
+        LanczosKernelResultT<Scalar> kres;
+        std::vector<double>          evals, evecs_cm;
+        std::vector<std::size_t>     idx;          // ascending Ritz values
+        std::size_t                  m = 0;
+        double                       beta_last = 0.0;
     };
     // One Lanczos factorisation from v_seed, orthogonal to the locked set. False when the
     // seed lies in the locked span or nothing was built.
@@ -139,11 +143,11 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         deflate(v_seed.get());
         const double seed_norm = be.nrm2(v_seed.get(), local_n);
         if (seed_norm < 1e-13) return false;
-        be.scale(Complex(1.0 / seed_norm, 0.0), v_seed.get(), local_n);
-        std::vector<const Complex*> aux;
+        be.scale(Scalar(1.0 / seed_norm), v_seed.get(), local_n);
+        std::vector<const Scalar*> aux;
         aux.reserve(locked_vecs.size());
         for (auto& lv : locked_vecs) aux.push_back(lv.get());
-        LanczosKernelOptions kopts;
+        LanczosKernelOptionsT<Scalar> kopts;
         kopts.max_iter       = m_max;
         kopts.reorth         = ReorthPolicy::FullCGS2;
         kopts.keep_basis     = true;
@@ -164,12 +168,12 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
                   [&](std::size_t a, std::size_t b) { return c.evals[a] < c.evals[b]; });
         return true;
     };
-    auto ritz_vector = [&](const Cycle& c, std::size_t i, Complex* out) {
+    auto ritz_vector = [&](const Cycle& c, std::size_t i, Scalar* out) {
         be.fill_zero(out, local_n);
-        std::vector<Complex> coefs(c.m);
-        std::vector<const Complex*> basis_ptrs(c.m);
+        std::vector<Scalar> coefs(c.m);
+        std::vector<const Scalar*> basis_ptrs(c.m);
         for (std::size_t j = 0; j < c.m; ++j) {
-            coefs[j]      = Complex(c.evecs_cm[i * c.m + j], 0.0);
+            coefs[j]      = Scalar(c.evecs_cm[i * c.m + j]);
             basis_ptrs[j] = c.kres.basis[j].get();
         }
         be.axpy_many(coefs.data(), basis_ptrs.data(), c.m, out, local_n);
@@ -181,10 +185,10 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
     // a degenerate level (the Ising ring: a few distinct levels, each thousands of times).
     std::mt19937_64 fresh_gen(0xF8E5A7C3ULL);
     std::normal_distribution<double> fresh_nd(0.0, 1.0);
-    std::vector<Complex> fresh_host;
+    std::vector<Scalar> fresh_host;
     auto fresh_seed = [&] {
         fresh_host.resize(local_n);
-        for (auto& z : fresh_host) z = Complex(fresh_nd(fresh_gen), fresh_nd(fresh_gen));
+        for (auto& z : fresh_host) z = gaussian_entry<Scalar>(fresh_nd, fresh_gen);
         be.copy_from_host(fresh_host.data(), v_seed.get(), local_n);
     };
     // Set when two fresh starts in a row lie in the locked span: the locked vectors span the
@@ -215,7 +219,7 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
                 deflate(phi.get());
                 const double pn = be.nrm2(phi.get(), local_n);
                 if (pn < 1e-14) break;
-                be.scale(Complex(1.0 / pn, 0.0), phi.get(), local_n);
+                be.scale(Scalar(1.0 / pn), phi.get(), local_n);
                 locked_evals.push_back(c.evals[i]);
                 locked_vecs.emplace_back(std::move(phi));
                 ++newly_locked;
@@ -239,11 +243,11 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
     if (!locked_evals.empty() && !exhausted && opts.probe_degeneracy) {
         std::mt19937_64 gen(0xDE6E4E7AULL);
         std::normal_distribution<double> nd(0.0, 1.0);
-        std::vector<Complex> host(local_n);
+        std::vector<Scalar> host(local_n);
         for (std::size_t round = 0; round < k_target; ++round) {
             const double top = *std::max_element(locked_evals.begin(), locked_evals.end());
             const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::max(1.0, std::abs(top)));
-            for (auto& z : host) z = Complex(nd(gen), nd(gen));
+            for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
             be.copy_from_host(host.data(), v_seed.get(), local_n);
             Cycle c;
             if (!run_cycle(c) || c.evals[c.idx[0]] >= top - gap) break;

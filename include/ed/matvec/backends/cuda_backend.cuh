@@ -99,7 +99,12 @@ inline cublasOperation_t to_cublas_op(char op) {
 
 }  // namespace cuda_backend_detail
 
-class CudaBackend : public Backend {
+// The device backend for vectors of Scalar. Only std::complex<double> is defined (below).
+template <class Scalar>
+class BasicCudaBackend;
+
+template <>
+class BasicCudaBackend<Complex> : public BasicBackend<Complex> {
 public:
     /// Every cuBLAS BLAS-1 entry point takes a 32-bit count. A bare
     /// `static_cast<int>` would silently wrap at n >= 2^31 (a 32 GiB
@@ -119,7 +124,7 @@ public:
     /// device with `cudaSetDevice(id)` BEFORE constructing if you want
     /// to pin to a specific GPU; the handle binds to whichever device
     /// is active at construction time.
-    CudaBackend() {
+    BasicCudaBackend() {
         using namespace cuda_backend_detail;
         check_cublas(cublasCreate(&handle_), "cublasCreate");
         // Host pointer mode -- dot/nrm2 results go to host memory,
@@ -149,7 +154,7 @@ public:
         if (!pool_available_) cudaGetLastError();
     }
 
-    ~CudaBackend() override {
+    ~BasicCudaBackend() override {
         // Use raw cuda* calls (noexcept) inside the destructor; errors
         // here would only surface as `cudaGetLastError()` from a later
         // call. The driver tears down resources at process exit anyway.
@@ -158,8 +163,8 @@ public:
         if (handle_)       cublasDestroy(handle_);
     }
 
-    CudaBackend(const CudaBackend&)            = delete;
-    CudaBackend& operator=(const CudaBackend&) = delete;
+    BasicCudaBackend(const BasicCudaBackend&)            = delete;
+    BasicCudaBackend& operator=(const BasicCudaBackend&) = delete;
 
     // Move-only. Move transfers ownership of the cuBLAS handle AND the
     // staging buffer cache to the destination; the source is reset to
@@ -167,7 +172,7 @@ public:
     // so callers can return a CudaBackend by value (NRVO can't elide
     // every case once the backend is wrapped in a struct alongside
     // non-trivial state).
-    CudaBackend(CudaBackend&& other) noexcept
+    BasicCudaBackend(BasicCudaBackend&& other) noexcept
         : handle_(other.handle_),
           pool_available_(other.pool_available_),
           staging_buf_(other.staging_buf_),
@@ -184,7 +189,7 @@ public:
         other.coeffs_dev_        = nullptr;
         other.coeffs_capacity_   = 0;
     }
-    CudaBackend& operator=(CudaBackend&& other) noexcept {
+    BasicCudaBackend& operator=(BasicCudaBackend&& other) noexcept {
         if (this != &other) {
             if (staging_buf_) cudaFree(staging_buf_);
             if (coeffs_dev_)  cudaFree(coeffs_dev_);
@@ -568,5 +573,7 @@ private:
         staging_n_ = n;
     }
 };
+
+using CudaBackend = BasicCudaBackend<Complex>;
 
 }  // namespace ed::matvec

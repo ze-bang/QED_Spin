@@ -96,7 +96,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         }
         c = ed::with_backend(b.lane, [&](auto& be) {
             using B = std::decay_t<decltype(be)>;
-            constexpr bool device = !std::is_same_v<B, ed::matvec::CpuBackend>;
+            constexpr bool device = !ed::matvec::is_cpu_backend_v<B>;
             auto H = op.template bind<B>();
             if (mtpq) {
                 ed::thermal::MtpqRun run;

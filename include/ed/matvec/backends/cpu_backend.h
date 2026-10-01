@@ -34,7 +34,13 @@
 
 namespace ed::matvec {
 
-class CpuBackend : public Backend {
+// The host backend for vectors of Scalar. Only std::complex<double> is defined (below);
+// P6.4 adds the double one for real blocks.
+template <class Scalar>
+class BasicCpuBackend;
+
+template <>
+class BasicCpuBackend<Complex> : public BasicBackend<Complex> {
 public:
     [[nodiscard]] MemorySpace memory_space() const override {
         return MemorySpace::Host;
@@ -313,6 +319,15 @@ private:
     mutable std::vector<double> scratch_partial_re_;
     mutable std::vector<double> scratch_partial_im_;
 };
+
+using CpuBackend = BasicCpuBackend<Complex>;
+
+// Whether B is a host backend (of any Scalar): the lanes copy to and from host memory only
+// for the others.
+template <class B>
+inline constexpr bool is_cpu_backend_v = false;
+template <class Scalar>
+inline constexpr bool is_cpu_backend_v<BasicCpuBackend<Scalar>> = true;
 
 // Thread-local accessor. CpuBackend holds mutable scratch buffers in
 // dot_many() that are not safe to share across concurrent callers. Using

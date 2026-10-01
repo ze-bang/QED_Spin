@@ -38,6 +38,22 @@ using ed::Device;
 using ed::Lane;
 using ed::Task;
 
+// The Scalar scaffold: every lane runs the complex-double instantiation, and the host-backend
+// trait (not the concrete type) decides where vectors live.
+static_assert(std::is_same_v<ed::matvec::CpuBackend::scalar_type, std::complex<double>>);
+static_assert(std::is_base_of_v<ed::matvec::Backend, ed::matvec::CpuBackend>);
+static_assert(ed::matvec::is_cpu_backend_v<ed::matvec::CpuBackend>);
+static_assert(std::is_same_v<decltype(ed::krylov::lanczos_kernel(
+                                  std::declval<const ed::matvec::CpuBackend&>(),
+                                  std::declval<ed::LinearOperator::MatvecFn&>(), std::size_t{},
+                                  std::declval<const std::complex<double>*>(),
+                                  std::declval<const ed::krylov::LanczosKernelOptions&>())),
+                             ed::krylov::LanczosKernelResult>);
+#ifdef WITH_CUDA
+static_assert(std::is_base_of_v<ed::matvec::Backend, ed::matvec::CudaBackend>);
+static_assert(!ed::matvec::is_cpu_backend_v<ed::matvec::CudaBackend>);
+#endif
+
 namespace {
 
 // A fake machine: whether a device is visible and how much memory it reports (nullopt: the

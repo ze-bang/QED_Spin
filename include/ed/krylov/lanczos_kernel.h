@@ -7,10 +7,11 @@
 // One template-function body drives both deployment targets in this
 // codebase (CPU and single GPU). It is parameterised on:
 //
-//   1. A `Backend` (from `ed/matvec/backend.h`) that provides the
+//   1. A `BasicBackend<Scalar>` (from `ed/matvec/backend.h`) that provides the
 //      linear-algebra plane: alloc, dot/axpy/scale/nrm2 and batched
-//      dot_many/axpy_many for CGS2 reorth.
-//   2. A `MatvecFn` callable (`void(const Complex*, Complex*, size_t)`)
+//      dot_many/axpy_many for CGS2 reorth. Scalar is the vector element type
+//      (std::complex<double> today); alpha and beta are real either way.
+//   2. A `MatvecFn` callable (`void(const Scalar*, Scalar*, size_t)`)
 //      that knows how to apply H to a vector. The callable hides any
 //      cuBLAS handle / stream wiring from the kernel.
 //
@@ -28,7 +29,7 @@
 //
 // Pointer-convention notes:
 //
-//   * Every `Complex*` in this file is in the backend's memory space
+//   * Every `Scalar*` in this file is in the backend's memory space
 //     (host RAM for `CpuBackend`, device memory for `CudaBackend`).
 //     Callers must NOT mix host pointers into a GPU backend, nor vice
 //     versa --- there is no defensive copy_to/from_host in here. The
@@ -52,7 +53,9 @@
 #include <cstdlib>    // getenv
 #include <functional>
 #include <memory>
+#include <random>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -61,6 +64,14 @@
 namespace ed::krylov {
 
 using Complex = std::complex<double>;
+
+/// One entry of a Gaussian start vector: a complex Scalar takes (re, im) from one expression,
+/// the form every start vector of the engine is drawn in.
+template <class Scalar, class Gen>
+[[nodiscard]] inline Scalar gaussian_entry(std::normal_distribution<double>& nd, Gen& gen) {
+    if constexpr (std::is_floating_point_v<Scalar>) return nd(gen);
+    else return Scalar(nd(gen), nd(gen));
+}
 
 /// Reorthogonalisation policy.
 enum class ReorthPolicy : std::uint8_t {
@@ -83,8 +94,9 @@ enum class ReorthPolicy : std::uint8_t {
     LocalDGKS3,
 };
 
-/// Options for `lanczos_kernel`.
-struct LanczosKernelOptions {
+/// Options for `lanczos_kernel` on vectors of Scalar.
+template <class Scalar>
+struct LanczosKernelOptionsT {
     std::size_t max_iter = 100;          ///< Krylov dimension cap.
 
     /// Genuine-invariant-subspace breakdown threshold on beta_{j+1}.
@@ -128,35 +140,6 @@ struct LanczosKernelOptions {
     /// cost of a few extra Krylov iterations near convergence).
     std::size_t convergence_check_interval = 0;
 
-    /// Optional per-iteration hook. Invoked AFTER the swap-rotate has
-    /// produced V_{j+1}:
-    ///
-    ///   * `iteration_count == j + 1` (number of completed iterations).
-    ///   * `alpha.size() == j + 1`, `beta.size() == j + 2`.
-    ///   * `v_curr` points to V_{j+1} (the next vector that will be
-    ///     used in iteration j+1) in backend memory; `v_prev` points
-    ///     to V_j. Both buffers MUST be treated as read-only by the
-    ///     hook --- the kernel reuses them in the next iteration.
-    ///
-    /// Used by the two-pass eigenvector reconstruction in the solve lane
-    /// (the replayed recurrence streams V_j past the hook). On the LAST
-    /// iteration (j + 1 == cap) the rotation happens but no further
-    /// matvec is done; the hook still fires.
-    ///
-    /// Default `nullptr` (no hook called).
-    std::function<void(std::size_t iteration_count,
-                       const std::vector<double>& alpha,
-                       const std::vector<double>& beta,
-                       const Complex* v_curr,
-                       const Complex* v_prev,
-                       std::size_t local_n)>
-        on_step;
-
-    /// Stride (in iterations) between `on_step` invocations. 0 disables
-    /// the hook entirely (the kernel never calls the callback even when
-    /// it is non-null). Default 0.
-    std::size_t on_step_interval = 0;
-
     /// Optional FIXED set of vectors (in backend memory) that every
     /// reorthogonalisation pass also projects out of `w`. The set is
     /// closed at construction time (the kernel does not append to it)
@@ -183,7 +166,7 @@ struct LanczosKernelOptions {
     ///
     /// Default empty (the kernel only orthogonalises against its own
     /// growing basis). NOT consulted when `reorth == None`.
-    std::vector<const Complex*> aux_ortho_ptrs;
+    std::vector<const Scalar*> aux_ortho_ptrs;
 
     /// Number of recent basis vectors the LocalDGKS3 ring buffer
     /// retains. Range: 1..N. Only consulted when
@@ -203,10 +186,12 @@ struct LanczosKernelOptions {
     /// sqrt(eps) ~= 1.49e-8.
     double local_ortho_threshold = 1.49011611938476562e-08;
 };
+using LanczosKernelOptions = LanczosKernelOptionsT<Complex>;
 
 /// Output of `lanczos_kernel`. `basis` is populated iff
 /// `opts.keep_basis == true`; ownership transfers to the caller.
-struct LanczosKernelResult {
+template <class Scalar>
+struct LanczosKernelResultT {
     /// Diagonal of the tridiagonal matrix, size = `iters_done`.
     std::vector<double>              alpha;
     /// Sub-diagonal of the tridiagonal matrix, size = `iters_done + 1`.
@@ -214,11 +199,12 @@ struct LanczosKernelResult {
     std::vector<double>              beta;
     /// Orthonormal Krylov basis in backend memory. Each vector is
     /// dimension `local_n`. Empty iff `opts.keep_basis == false`.
-    std::vector<ed::matvec::Backend::UniqueVec> basis;
+    std::vector<typename ed::matvec::BasicBackend<Scalar>::UniqueVec> basis;
     /// Number of iterations actually completed (may be less than
     /// `opts.max_iter` if Lanczos broke down via beta < tol).
     std::size_t                      iters_done = 0;
 };
+using LanczosKernelResult = LanczosKernelResultT<Complex>;
 
 // ---------------------------------------------------------------------------
 // THE KERNEL.
@@ -227,7 +213,7 @@ struct LanczosKernelResult {
 /// Run a Lanczos iteration on `H` starting from `v0_local` (dimension
 /// `local_n`). The matvec callable signature is
 ///
-///     void matvec(const Complex* in, Complex* out, std::size_t local_n);
+///     void matvec(const Scalar* in, Scalar* out, std::size_t local_n);
 ///
 /// where pointers are in `be`'s memory space.
 ///
@@ -238,15 +224,15 @@ struct LanczosKernelResult {
 /// 1 - kappa of the norm (kappa = 1/sqrt(2) is the classical choice).
 inline constexpr double kDgksKappa = 0.7071067811865476;
 
-template <typename MatvecFn>
-LanczosKernelResult lanczos_kernel(
-    const ed::matvec::Backend& be,
+template <typename Scalar, typename MatvecFn>
+LanczosKernelResultT<Scalar> lanczos_kernel(
+    const ed::matvec::BasicBackend<Scalar>& be,
     MatvecFn&& matvec,
     std::size_t local_n,
-    const Complex* v0_local,
-    const LanczosKernelOptions& opts)
+    const Scalar* v0_local,
+    const LanczosKernelOptionsT<Scalar>& opts)
 {
-    using ed::matvec::Backend;
+    using UniqueVec = typename ed::matvec::BasicBackend<Scalar>::UniqueVec;
 
     // ------------------------------------------------------------------
     // Per-bucket microsecond timers, opt-in via env
@@ -274,13 +260,13 @@ LanczosKernelResult lanczos_kernel(
             "lanczos_kernel: FullCGS2 requires keep_basis = true");
     }
     if (opts.max_iter == 0) {
-        return LanczosKernelResult{};
+        return LanczosKernelResultT<Scalar>{};
     }
     // NB: `local_n == 0` does not short-circuit here. All host BLAS-1
     // locals below operate trivially on a length-0 buffer; the backend's
     // `make_zero_vector` is expected to handle `n == 0` (CpuBackend does).
 
-    LanczosKernelResult R;
+    LanczosKernelResultT<Scalar> R;
     R.alpha.reserve(opts.max_iter);
     R.beta.reserve(opts.max_iter + 1);
 
@@ -294,9 +280,9 @@ LanczosKernelResult lanczos_kernel(
     // vector of backend-owned vectors plus an explicit (head, count)
     // pair to avoid the cost of an erase()/insert() on the hot path.
     // Sized to opts.local_ring_size when LocalDGKS3 is active.
-    std::vector<Backend::UniqueVec> ring;
-    std::size_t                     ring_head  = 0;
-    std::size_t                     ring_count = 0;
+    std::vector<UniqueVec> ring;
+    std::size_t            ring_head  = 0;
+    std::size_t            ring_count = 0;
 
     // Optional basis storage. We keep TWO parallel structures:
     //
@@ -305,8 +291,8 @@ LanczosKernelResult lanczos_kernel(
     //
     // Keeping them in sync requires that we never reallocate `basis`
     // while `basis_ptrs` is being read --- so we reserve up front.
-    std::vector<Backend::UniqueVec> basis;
-    std::vector<const Complex*>     basis_ptrs;
+    std::vector<UniqueVec>     basis;
+    std::vector<const Scalar*> basis_ptrs;
 
     const std::size_t expected_total = opts.max_iter;
 
@@ -319,7 +305,7 @@ LanczosKernelResult lanczos_kernel(
         throw std::invalid_argument(
             "lanczos_kernel: initial vector has non-positive norm");
     }
-    be.scale(Complex(1.0 / v0_norm, 0.0), v_curr.get(), local_n);
+    be.scale(Scalar(1.0 / v0_norm), v_curr.get(), local_n);
 
     if (opts.keep_basis) {
         basis.reserve(expected_total);
@@ -349,15 +335,15 @@ LanczosKernelResult lanczos_kernel(
     // per pass regardless of how the caller splits the work between
     // aux and basis.
     const std::size_t n_aux = opts.aux_ortho_ptrs.size();
-    std::vector<const Complex*> ortho_ptrs;
+    std::vector<const Scalar*> ortho_ptrs;
     if (needs_kept_basis) {
         ortho_ptrs.reserve(n_aux + expected_total);
-        for (const Complex* p : opts.aux_ortho_ptrs) ortho_ptrs.push_back(p);
+        for (const Scalar* p : opts.aux_ortho_ptrs) ortho_ptrs.push_back(p);
         for (auto* p : basis_ptrs) ortho_ptrs.push_back(p);
     }
 
     // Scratch for CGS2 coefficients.
-    std::vector<Complex> coeffs;
+    std::vector<Scalar> coeffs;
     if (needs_kept_basis) {
         coeffs.reserve(n_aux + expected_total);
     }
@@ -378,28 +364,28 @@ LanczosKernelResult lanczos_kernel(
         // v_curr; overlap = <v_curr,w>} become two single-pass calls, and
         // for LocalDGKS3 with K <= 2 the projection onto v_curr is folded
         // into the norm pass below (three fused regions per iteration).
-        const Complex aj = (j > 0)
-            ? be.axpy_dot(Complex(-R.beta[j], 0.0), v_prev.get(), w.get(),
+        const Scalar aj = (j > 0)
+            ? be.axpy_dot(Scalar(-R.beta[j]), v_prev.get(), w.get(),
                           v_curr.get(), local_n)
             : be.dot(v_curr.get(), w.get(), local_n);
-        R.alpha.push_back(aj.real());
+        R.alpha.push_back(std::real(aj));
 
         const bool fuse_local_k12 =
             (opts.reorth == ReorthPolicy::LocalDGKS3) &&
             (opts.local_ring_size <= 2) && (j > 0);
-        Complex overlap_curr{0.0, 0.0};
+        Scalar overlap_curr{};
         if (fuse_local_k12) {
             // w -= alpha[j] * v_curr, and the LocalDGKS3 overlap <v_curr, w>
-            overlap_curr = be.axpy_dot(Complex(-R.alpha[j], 0.0), v_curr.get(),
+            overlap_curr = be.axpy_dot(Scalar(-R.alpha[j]), v_curr.get(),
                                        w.get(), v_curr.get(), local_n);
         } else {
             // w -= alpha[j] * v_curr
-            be.axpy(Complex(-R.alpha[j], 0.0),
+            be.axpy(Scalar(-R.alpha[j]),
                     v_curr.get(), w.get(), local_n);
         }
         // Deferred projection coefficient folded into the norm pass (K == 1).
         bool    defer_axpy = false;
-        Complex defer_coef{0.0, 0.0};
+        Scalar  defer_coef{};
         const double t2 = profile_on ? now_us() : 0.0;
         if (profile_on) t_recur_us += (t2 - t1);
 
@@ -453,7 +439,7 @@ LanczosKernelResult lanczos_kernel(
                 // computed in the fused recurrence pass above; for K == 1
                 // the projection itself is folded into the norm pass.
                 if (j > 0) {
-                    const Complex overlap = fuse_local_k12
+                    const Scalar overlap = fuse_local_k12
                         ? overlap_curr
                         : be.dot(v_curr.get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
@@ -468,7 +454,7 @@ LanczosKernelResult lanczos_kernel(
                 // K==2: also project against V_{j-1} (= v_prev) when
                 // available. At j == 0 there is no prior basis vector.
                 if (K == 2 && j > 0) {
-                    const Complex overlap =
+                    const Scalar overlap =
                         be.dot(v_prev.get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
                         be.axpy(-overlap, v_prev.get(), w.get(), local_n);
@@ -483,7 +469,7 @@ LanczosKernelResult lanczos_kernel(
                 for (std::size_t k = 0; k < k_max; ++k) {
                     const std::size_t slot =
                         (ring_head + ring_count - 1 - k) % cap_ring;
-                    const Complex overlap =
+                    const Scalar overlap =
                         be.dot(ring[slot].get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
                         be.axpy(-overlap, ring[slot].get(), w.get(), local_n);
@@ -513,9 +499,9 @@ LanczosKernelResult lanczos_kernel(
         if (bnext < opts.breakdown_tol) break;
 
         // Compute V_{j+1} = w / beta_{j+1} and rotate, BEFORE the
-        // on_step / convergence_check hooks. After the rotation:
+        // convergence_check hook. After the rotation:
         //   v_prev = V_j, v_curr = V_{j+1}, w = scratch.
-        be.scale(Complex(1.0 / bnext, 0.0), w.get(), local_n);
+        be.scale(Scalar(1.0 / bnext), w.get(), local_n);
         std::swap(v_prev, v_curr);
         std::swap(v_curr, w);
 
@@ -534,23 +520,11 @@ LanczosKernelResult lanczos_kernel(
             }
         }
 
-        // Per-iteration hook. Fires AFTER rotation so the hook sees
-        // v_curr = V_{j+1}, v_prev = V_j; `iteration_count` is `j + 1`.
-        if (opts.on_step &&
-            opts.on_step_interval > 0 &&
-            ((j + 1) % opts.on_step_interval == 0))
-        {
-            opts.on_step(j + 1, R.alpha, R.beta,
-                         v_curr.get(), v_prev.get(), local_n);
-        }
-
         const double t5 = profile_on ? now_us() : 0.0;
         if (profile_on) t_ring_us += (t5 - t4);
 
-        // Optional Ritz-convergence early-exit. We run the callback
-        // AFTER on_step (so the hook sees every completed step, including
-        // the one that triggered the break) but BEFORE the next
-        // matvec. See the `LanczosKernelOptions::convergence_check`
+        // Optional Ritz-convergence early-exit, after the rotation and BEFORE the
+        // next matvec. See the `LanczosKernelOptions::convergence_check`
         // comment for the exact alpha/beta sizes on entry.
         if (opts.convergence_check &&
             opts.convergence_check_interval > 0 &&

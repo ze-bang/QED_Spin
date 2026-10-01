@@ -137,6 +137,13 @@ C++ API (installed headers; nothing in Python changes):
   `FtlmCrossIrrepSectorResult` live in `<ed/observables/ftlm_dynamics_kernel.h>`, whose
   `ftlm_dynamics_kernel(backend, ...)` serves the host too. Gone:
   `CrossSectorOrbitObservable::as_apply_function`.
+- The vector element type is a template parameter (only `std::complex<double>` is
+  instantiated): `ed::matvec::Backend`, `CpuBackend` and `CudaBackend` are aliases of
+  `BasicBackend<Complex>`, `BasicCpuBackend<Complex>` and `BasicCudaBackend<Complex>`, each
+  with `scalar_type`; `lanczos_kernel` and `krylov_schur_kernel` take the scalar type from
+  the backend, and `LanczosKernelOptions`, `LanczosKernelResult` and `KrylovSchurResult`
+  alias `LanczosKernelOptionsT<Complex>` and the like. `ed::matvec::is_cpu_backend_v<B>`
+  tells a host backend of any scalar type. `LanczosKernelOptions::on_step` (no caller) is gone.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

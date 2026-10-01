@@ -47,15 +47,6 @@
 #include <ed/thermal/curves.h>
 #include <ed/thermal/sample_seed.h>
 
-#ifdef WITH_CUDA
-// Forward declaration so the ``if constexpr`` branch below can refer to
-// CudaBackend without dragging the full ``cuda_backend.cuh`` into every
-// consumer of this header. The thermal verb (which actually calls
-// ``ftlm_kernel<CudaBackend>``) pulls the full definition via
-// ``select_backend.h``.
-namespace ed { namespace matvec { class CudaBackend; } }
-#endif
-
 namespace ed::thermal {
 
 using Complex = std::complex<double>;

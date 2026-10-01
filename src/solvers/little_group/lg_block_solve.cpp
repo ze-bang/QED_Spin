@@ -125,23 +125,24 @@ solve_block_full(const ed::LinearOperator& mv) {
 
 namespace {
 
-// A unit-variance complex Gaussian start of dimension n from `seed`, drawn on the host and
-// staged on the backend; the host draw is freed before the caller's kernel runs.
+// A unit-variance Gaussian start of dimension n from `seed`, drawn on the host and staged on
+// the backend; the host draw is freed before the caller's kernel runs.
 template <class B>
-ed::matvec::Backend::UniqueVec staged_seed(B& be, std::size_t n, std::uint64_t seed) {
+auto staged_seed(B& be, std::size_t n, std::uint64_t seed) {
+    using Scalar = typename B::scalar_type;
     auto v = be.make_zero_vector(n);
-    std::vector<Complex> host(n);
+    std::vector<Scalar> host(n);
     std::mt19937_64 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
-    for (auto& c : host) c = Complex(nd(gen), nd(gen));
+    for (auto& c : host) c = ed::krylov::gaussian_entry<Scalar>(nd, gen);
     be.copy_from_host(host.data(), v.get(), n);
     return v;
 }
 
 // A backend vector on the host.
 template <class B>
-std::vector<Complex> to_host(B& be, const Complex* v, std::size_t n) {
-    std::vector<Complex> h(n);
+auto to_host(B& be, const typename B::scalar_type* v, std::size_t n) {
+    std::vector<typename B::scalar_type> h(n);
     be.copy_to_host(v, h.data(), n);
     return h;
 }
@@ -598,7 +599,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
             const double yj = t.z(j, 0);
             if (std::abs(yj) < 1e-300) continue;
             const Complex* vj = kres.basis[j].get();
-            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+            if constexpr (!ed::matvec::is_cpu_backend_v<B>) {
                 vj_host.resize(n);
                 be.copy_to_host(vj, vj_host.data(), n);
                 vj = vj_host.data();
@@ -609,7 +610,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
     // Residual guard: the DSSF consumes this vector, so a stale pair is silently-wrong
     // physics -- verify before returning. H u is formed on the backend.
     std::vector<Complex> hu(n);
-    if constexpr (std::is_same_v<B, ed::matvec::CpuBackend>) {
+    if constexpr (ed::matvec::is_cpu_backend_v<B>) {
         Hc(u.data(), hu.data(), n);
     } else {
         auto du = be.make_zero_vector(n), dh = be.make_zero_vector(n);

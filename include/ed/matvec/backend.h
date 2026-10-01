@@ -45,16 +45,20 @@ namespace ed::matvec {
 using Complex = std::complex<double>;
 
 // ----------------------------------------------------------------------------
-// Backend interface. Concrete backends live in ed/matvec/backends/*.h. The
-// interface intentionally takes raw pointers to keep it host/device
-// agnostic --- the *meaning* of those pointers (host RAM vs device memory)
+// Backend interface over the vector element type Scalar (std::complex<double>
+// for every lane today; P6.4 adds double for real blocks). Concrete backends
+// live in ed/matvec/backends/*.h. The interface takes raw pointers to stay
+// host/device agnostic --- the *meaning* of those pointers (host RAM vs device memory)
 // is determined by memory_space().
 //
 // All vector arguments are dimension `n`.
 // ----------------------------------------------------------------------------
-class Backend {
+template <class Scalar>
+class BasicBackend {
 public:
-    virtual ~Backend() = default;
+    using scalar_type = Scalar;
+
+    virtual ~BasicBackend() = default;
 
     // Identity --- which memory space am I responsible for?
     [[nodiscard]] virtual MemorySpace memory_space() const = 0;
@@ -65,37 +69,37 @@ public:
     // matching deallocate() on the same Backend. The unique_ptr helper
     // below handles that pairing for the common case.
     // ------------------------------------------------------------------
-    [[nodiscard]] virtual Complex* allocate(std::size_t n) const = 0;
-    virtual void deallocate(Complex* p) const noexcept = 0;
-    virtual void fill_zero(Complex* p, std::size_t n) const = 0;
-    virtual void copy(const Complex* src, Complex* dst, std::size_t n) const = 0;
+    [[nodiscard]] virtual Scalar* allocate(std::size_t n) const = 0;
+    virtual void deallocate(Scalar* p) const noexcept = 0;
+    virtual void fill_zero(Scalar* p, std::size_t n) const = 0;
+    virtual void copy(const Scalar* src, Scalar* dst, std::size_t n) const = 0;
 
     // Host <-> backend transfer. Mainly used by I/O code that materialises
     // initial vectors from disk or pushes results out; the hot path
     // touches these rarely.
-    virtual void copy_from_host(const Complex* host_src,
-                                Complex* backend_dst,
+    virtual void copy_from_host(const Scalar* host_src,
+                                Scalar* backend_dst,
                                 std::size_t n) const = 0;
-    virtual void copy_to_host(const Complex* backend_src,
-                              Complex* host_dst,
+    virtual void copy_to_host(const Scalar* backend_src,
+                              Scalar* host_dst,
                               std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
-    // Level-1 BLAS primitives, complex-double. Naming mirrors BLAS.
+    // Level-1 BLAS primitives. Naming mirrors BLAS.
     //   axpy:  y <- alpha * x + y
     //   scale: x <- alpha * x
     //   dot:   returns x^H * y   (conj on left)
     //   nrm2:  returns ||x||_2
     // ------------------------------------------------------------------
-    virtual void   axpy(Complex alpha, const Complex* x, Complex* y, std::size_t n) const = 0;
-    virtual void   scale(Complex alpha, Complex* x, std::size_t n) const = 0;
-    [[nodiscard]] virtual Complex dot(const Complex* x, const Complex* y, std::size_t n) const = 0;
-    [[nodiscard]] virtual double  nrm2(const Complex* x, std::size_t n) const = 0;
+    virtual void   axpy(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const = 0;
+    virtual void   scale(Scalar alpha, Scalar* x, std::size_t n) const = 0;
+    [[nodiscard]] virtual Scalar dot(const Scalar* x, const Scalar* y, std::size_t n) const = 0;
+    [[nodiscard]] virtual double  nrm2(const Scalar* x, std::size_t n) const = 0;
 
     // Convenience: y <- alpha*x + beta*y in one pass (saves one stream
     // through y for fused-update inner loops in Lanczos & TPQ).
-    virtual void axpby(Complex alpha, const Complex* x,
-                       Complex beta,  Complex* y, std::size_t n) const = 0;
+    virtual void axpby(Scalar alpha, const Scalar* x,
+                       Scalar beta,  Scalar* y, std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
     // Fused Lanczos-recurrence primitives.
@@ -107,12 +111,12 @@ public:
     // kernels (`lanczos_kernel` issues three fused calls per
     // iteration instead of seven separate BLAS-1 calls).
     // ------------------------------------------------------------------
-    [[nodiscard]] virtual Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
-                                           const Complex* z, std::size_t n) const {
+    [[nodiscard]] virtual Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y,
+                                          const Scalar* z, std::size_t n) const {
         axpy(alpha, x, y, n);
         return dot(z, y, n);
     }
-    [[nodiscard]] virtual double axpy_nrm2(Complex alpha, const Complex* x, Complex* y,
+    [[nodiscard]] virtual double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y,
                                            std::size_t n) const {
         axpy(alpha, x, y, n);
         return nrm2(y, n);
@@ -133,11 +137,11 @@ public:
     /// Compute `coeffs_out[k] = <basis[k], v>` for k in [0, num_basis).
     /// `basis[k]` and `v` are dimension-`n` vectors. The default impl
     /// loops over `dot()`.
-    virtual void dot_many(const Complex* const* basis,
+    virtual void dot_many(const Scalar* const*  basis,
                           std::size_t           num_basis,
-                          const Complex*        v,
+                          const Scalar*         v,
                           std::size_t           n,
-                          Complex*              coeffs_out) const {
+                          Scalar*               coeffs_out) const {
         for (std::size_t k = 0; k < num_basis; ++k) {
             coeffs_out[k] = dot(basis[k], v, n);
         }
@@ -146,10 +150,10 @@ public:
     /// Compute `v += sum_k alphas[k] * basis[k]`. No reductions
     /// involved (axpy is a local operation). The default impl loops
     /// over `axpy()`.
-    virtual void axpy_many(const Complex*        alphas,
-                           const Complex* const* basis,
+    virtual void axpy_many(const Scalar*         alphas,
+                           const Scalar* const*  basis,
                            std::size_t           num_basis,
-                           Complex*              v,
+                           Scalar*               v,
                            std::size_t           n) const {
         for (std::size_t k = 0; k < num_basis; ++k) {
             axpy(alphas[k], basis[k], v, n);
@@ -168,11 +172,11 @@ public:
     /// op(A) is m x k, op(B) is k x n, C is m x n.
     virtual void gemm(char /*opA*/, char /*opB*/,
                       std::size_t /*m*/, std::size_t /*n*/, std::size_t /*k*/,
-                      Complex /*alpha*/,
-                      const Complex* /*A*/, std::size_t /*lda*/,
-                      const Complex* /*B*/, std::size_t /*ldb*/,
-                      Complex /*beta*/,
-                      Complex* /*C*/, std::size_t /*ldc*/) const {
+                      Scalar /*alpha*/,
+                      const Scalar* /*A*/, std::size_t /*lda*/,
+                      const Scalar* /*B*/, std::size_t /*ldb*/,
+                      Scalar /*beta*/,
+                      Scalar* /*C*/, std::size_t /*ldc*/) const {
         throw std::runtime_error("Backend::gemm not implemented for this backend");
     }
 
@@ -181,18 +185,21 @@ public:
     // the cleanest way to express it without forcing every backend to
     // ship a Vector wrapper.
     struct Deleter {
-        const Backend* be;
-        void operator()(Complex* p) const noexcept {
+        const BasicBackend* be;
+        void operator()(Scalar* p) const noexcept {
             if (be && p) be->deallocate(p);
         }
     };
-    using UniqueVec = std::unique_ptr<Complex, Deleter>;
+    using UniqueVec = std::unique_ptr<Scalar, Deleter>;
 
     [[nodiscard]] UniqueVec make_zero_vector(std::size_t n) const {
-        Complex* p = allocate(n);
+        Scalar* p = allocate(n);
         fill_zero(p, n);
         return UniqueVec{p, Deleter{this}};
     }
 };
+
+// The complex-double interface every lane uses today.
+using Backend = BasicBackend<Complex>;
 
 } // namespace ed::matvec

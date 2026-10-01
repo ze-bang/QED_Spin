@@ -778,17 +778,17 @@ star_partition(const EngineContext& cx, bool tr_on);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
 
-/// The memory policy of the lanes on one backend (P4.7's footprint.h and P7.3's resident
-/// basis replace it).
+/// The memory policy of the lanes on one backend, for any vector Scalar (P4.7's footprint.h
+/// and P7.3's resident basis replace it).
 template <class B> struct LanePolicy;
-template <> struct LanePolicy<ed::matvec::CpuBackend> {
+template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
     /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate.
     static std::uint64_t ks_budget_bytes() { return ed::core::available_ram_bytes(); }
     /// The GS vector keeps its Krylov basis up to this dimension, and runs the two-pass above.
     static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
 };
 #ifdef WITH_CUDA
-template <> struct LanePolicy<ed::matvec::CudaBackend> {
+template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> {
     static std::uint64_t ks_budget_bytes() { return 0; }    // no cap, as the device lane had none
     static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector is always two-pass
 };
