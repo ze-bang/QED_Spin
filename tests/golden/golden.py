@@ -13,7 +13,9 @@ stored under "quarantine": they are reported by ``compare`` but never gate).
 
 ``compare`` exits 0 only if every gated case reproduces its reference within the
 tolerance of its tier, no gated case is missing, and no case changed between
-"returned values" and "raised".
+"returned values" and "raised". ``--tol X`` replaces every tier's tolerance (``--tol 0``
+is the bitwise check: every differing value path, with its absolute and relative
+difference); ``--got FILE`` compares a recorded file instead of running the cases.
 
 Run on a compute node (sbatch scripts/golden/*.sbatch); never on a login node.
 """
@@ -67,6 +69,24 @@ def run_case(case):
     return rec
 
 
+def _numeric_diff(x, y, tol):
+    """(differs, count, max abs, max rel) of two equal-shape float arrays.
+
+    Relative differences are taken against max(1, max|reference|), the tier convention;
+    the absolute one is printed beside it. NaN equals NaN; NaN or inf against anything
+    else is a difference whatever the tolerance."""
+    same = (x == y) | (np.isnan(x) & np.isnan(y))
+    if same.all():
+        return False, 0, 0.0, 0.0
+    scale = max(1.0, float(np.max(np.abs(x[np.isfinite(x)]), initial=0.0)))
+    d = np.abs(x - y)
+    d[same] = 0.0
+    bad = ~np.isfinite(d)
+    a = float(np.max(d[~bad], initial=0.0))
+    n = int(np.count_nonzero(~same)) if tol == 0 else int(np.count_nonzero(bad | (d / scale > tol)))
+    return bool(bad.any() or a / scale > tol), n, (np.inf if bad.any() else a), (np.inf if bad.any() else a / scale)
+
+
 def diff_values(a, b, tol, path=""):
     """List of human-readable differences between two value trees."""
     out = []
@@ -83,25 +103,25 @@ def diff_values(a, b, tol, path=""):
         if len(a) != len(b):
             return [f"{path}: length {len(a)} -> {len(b)}"]
         if a and all(isinstance(x, (int, float)) for x in a + b):
-            x, y = np.asarray(a, float), np.asarray(b, float)
-            scale = max(1.0, float(np.max(np.abs(x))))
-            d = float(np.max(np.abs(x - y))) / scale
-            return [f"{path}: max rel diff {d:.2e} > {tol:.0e}"] if d > tol else []
+            differs, n, d_abs, d_rel = _numeric_diff(np.asarray(a, float), np.asarray(b, float), tol)
+            return [f"{path}: max rel diff {d_rel:.2e} > {tol:.0e} (abs {d_abs:.2e}; {n} of {len(a)} values)"] \
+                if differs else []
         for i, (x, y) in enumerate(zip(a, b)):
             out += diff_values(x, y, tol, f"{path}[{i}]")
         return out
     if isinstance(a, float) or isinstance(b, float):
-        d = abs(float(a) - float(b)) / max(1.0, abs(float(a)))
-        return [f"{path}: {a} -> {b}"] if d > tol else []
+        differs, _, d_abs, d_rel = _numeric_diff(np.asarray([a], float), np.asarray([b], float), tol)
+        return [f"{path}: {a!r} -> {b!r} (abs {d_abs:.2e}, rel {d_rel:.2e})"] if differs else []
     return [] if a == b else [f"{path}: {a!r} -> {b!r}"]
 
 
-def diff_records(ref, got):
+def diff_records(ref, got, tol=None):
+    """Differences of one record; ``tol`` overrides the tier's tolerance."""
     if ("raised" in ref) != ("raised" in got):
         return [f"outcome changed: {_outcome(ref)} -> {_outcome(got)}"]
     if "raised" in ref:
         return [] if ref["raised"] == got["raised"] else [f"exception {ref['raised']} -> {got['raised']}"]
-    return diff_values(ref["values"], got["values"], TOL[ref["tier"]])
+    return diff_values(ref["values"], got["values"], TOL[ref["tier"]] if tol is None else tol)
 
 
 def _outcome(r):
@@ -248,38 +268,54 @@ def cmd_retire(args):
     return 0
 
 
-def cmd_compare(args):
+def _load(path):
+    with gzip.open(path, "rt") as f:
+        return json.load(f)
+
+
+def _results(args):
+    """(name, record) pairs: the cases run now, or the records of a --got file."""
+    if args.got:
+        doc = _load(args.got)
+        print(f"this run {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}) "
+              f"from {args.got}")
+        for name, rec in doc["records"].items():
+            if not args.only or any(o in name for o in args.only):
+                yield name, (lambda r=rec: r)
+        return
     from cases import build_cases
-    with gzip.open(args.ref, "rt") as f:
-        doc = json.load(f)
+    print(f"this run {git_sha()[:10]} ({args.device}); qed from {_qed_file()}")
+    for c in select(build_cases(args.device), args.only):
+        yield c.name, (lambda c=c: run_case(c))
+
+
+def cmd_compare(args):
+    doc = _load(args.ref)
     ref, quarantine = doc["records"], doc.get("quarantine", {})
-    cases = select(build_cases(args.device), args.only)
     print(f"reference {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}); "
-          f"this run {git_sha()[:10]} ({args.device}); qed from {_qed_file()}")
+          + ("tier tolerances" if args.tol is None else f"every tolerance {args.tol:.0e}"))
     bad, new, qdiff = [], [], []
     current = {}
-    names = set()
-    for c in cases:
-        names.add(c.name)
-        if c.name not in ref:
-            new.append(c.name)
+    for name, result in _results(args):
+        if name not in ref:
+            new.append(name)
             continue
-        got = run_case(c)
-        current[c.name] = got
-        d = diff_records(ref[c.name], got)
-        gated = c.name not in quarantine
+        got = result()
+        current[name] = got
+        d = diff_records(ref[name], got, args.tol)
+        gated = name not in quarantine
         flag = " " if not d else ("!" if gated else "q")
-        print(f"{flag} {c.name:90s} {got['seconds']:8.2f}s  {d[0] if d else ''}", flush=True)
+        print(f"{flag} {name:90s} {got['seconds']:8.2f}s  {d[0] if d else ''}", flush=True)
         if d and not gated:
-            qdiff.append(c.name)
+            qdiff.append(name)
         if d and gated:
-            bad.append((c.name, d))
-    missing = [] if args.only else sorted(set(ref) - names)
-    print(f"\n{len(cases) - len(bad) - len(new) - len(qdiff)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
+            bad.append((name, d))
+    missing = [] if args.only else sorted(set(ref) - set(current) - set(new))
+    print(f"\n{len(current) - len(bad) - len(qdiff)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
           f"{len(missing)} missing from this run, {len(qdiff)} of {len(quarantine)} quarantined cases differ (not gating)")
-    for name, d in bad:
+    for name, d in bad:                    # with --tol every differing path, else the first six
         print(f"\n  {name}")
-        for line in d[:6]:
+        for line in (d if args.tol is not None else d[:6]):
             print(f"      {line}")
     for name in missing:
         print(f"  MISSING: {name}")
@@ -324,6 +360,10 @@ def main():
                            help="also bless cases whose outcome is a deliberate refusal (an exception)")
         if name == "compare":
             p.add_argument("--ref", required=True)
+            p.add_argument("--tol", type=float, default=None,
+                           help="one tolerance for every tier; 0 lists every value path that differs at all")
+            p.add_argument("--got", default=None,
+                           help="compare the records of this file (a `record --out`) instead of running the cases")
         p.set_defaults(fn=fn)
     args = ap.parse_args()
     sys.exit(args.fn(args))

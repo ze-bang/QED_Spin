@@ -44,6 +44,13 @@ exactly (the default `dense_max_dim` of `qed.thermal`) and sample the larger one
     sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
 
 
+Bitwise evidence for a refactor that claims to change nothing: record the base build once
+(`MODE=record ONCE=1 REF=<scratch>/base_cpu.json.gz`), then on the new build
+`MODE=compare TOL=0 REF=<scratch>/base_cpu.json.gz`. `TOL` replaces every tier's tolerance,
+and at 0 the job lists every value path that differs at all, with its absolute and relative
+difference. `GOT=<file>` compares two recorded files without running anything (run it twice
+on one build to measure run-to-run determinism first). The gate never passes `TOL`.
+
 A change lands only when both compare jobs exit 0 (the gate runs them). Re-blessing a reference is its
 own commit and carries the `compare` output that justified it.
 

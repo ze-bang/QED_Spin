@@ -5,6 +5,8 @@
 #          --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
 # MODE: compare (default) | record | bless (ONLY=<exact names>, REASON=...) | bless_new (REASON=...)
 #       | retire (ONLY=<exact names>, REASON=...). ONLY="substr ..." filters compare/record.
+#       compare: TOL=<x> overrides every tier (0 = bitwise), GOT=<file> compares a recorded file
+#       instead of running; record: ONCE=1 skips the determinism pass.
 # QED_PYTHONPATH points at another build's package (e.g. a frozen snapshot).
 #SBATCH --job-name=qed_golden
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=32G
@@ -32,8 +34,8 @@ if [ "${DEVICE}" = gpu ]; then
 fi
 G="python -u tests/golden/golden.py"
 case "${MODE}" in
-    compare)   ${G} compare --device "${DEVICE}" --ref "${REF}" ${ONLY:+--only ${ONLY}} ;;
-    record)    ${G} record  --device "${DEVICE}" --out "${REF}" ${ONLY:+--only ${ONLY}} ;;
+    compare)   ${G} compare --device "${DEVICE}" --ref "${REF}" ${ONLY:+--only ${ONLY}} ${TOL:+--tol ${TOL}} ${GOT:+--got ${GOT}} ;;
+    record)    ${G} record  --device "${DEVICE}" --out "${REF}" ${ONLY:+--only ${ONLY}} ${ONCE:+--once} ;;
     bless)     ${G} bless   --device "${DEVICE}" --ref "${REF}" --only ${ONLY:?set ONLY=<case names>} --reason "${REASON:?set REASON=...}" ;;
     bless_new) ${G} bless   --device "${DEVICE}" --ref "${REF}" --new --reason "${REASON:?set REASON=...}" ;;
     retire)    ${G} retire  --device "${DEVICE}" --ref "${REF}" --only ${ONLY:?set ONLY=<case names>} --reason "${REASON:?set REASON=...}" ;;
