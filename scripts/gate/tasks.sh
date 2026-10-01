@@ -22,3 +22,13 @@ GPU_TASKS=(
   "grid_gpu_dynT_zz|${GRID} -k 'gpu and dynT_zz'"
   "grid_gpu_dynT_pm|${GRID} -k 'gpu and dynT_pm'"
 )
+# Audit repro ratchet (python/tests/regress): shards bin-packed by the scripts' # SECONDS caps,
+# each <= ~10 min (CPU: 11 shards, max 550 s; GPU: 3 shards, max 570 s). Keep the regress
+# entries LAST in each table: submit.sh gives the CPU ones a longer time limit.
+REGRESS="python -u -m pytest python/tests/regress -q -rfE -p no:cacheprovider"
+for k in $(seq 0 10); do
+    CPU_TASKS+=("regress_cpu_${k}|QED_REGRESS_SHARD=${k}/11 ${REGRESS} -m 'regress and not gpu and not perf and not info'")
+done
+for k in $(seq 0 2); do
+    GPU_TASKS+=("regress_gpu_${k}|QED_REGRESS_SHARD=${k}/3 ${REGRESS} -m 'regress and gpu and not perf and not info'")
+done

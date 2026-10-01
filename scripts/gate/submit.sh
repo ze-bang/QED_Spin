@@ -11,9 +11,15 @@ source scripts/gate/tasks.sh
 mkdir -p logs/gate
 b=$(sbatch --parsable --account="${acct}" scripts/gate/build.sbatch)
 mkdir -p "logs/gate/${b}"
+# The regress_* entries close the CPU table and get 20 minutes; the rest keep 10.
+nr=$(printf '%s\n' "${CPU_TASKS[@]}" | grep -c '^regress_' || true)
+nc=$(( ${#CPU_TASKS[@]} - nr ))
 c=$(sbatch --parsable --account="${acct}" --dependency=afterok:${b} --time=00:10:00 \
-        --array=0-$(( ${#CPU_TASKS[@]} - 1 )) --export=ALL,GATE_ID=${b},KIND=cpu scripts/gate/task.sbatch)
+        --array=0-$(( nc - 1 )) --export=ALL,GATE_ID=${b},KIND=cpu scripts/gate/task.sbatch)
+r=$(sbatch --parsable --account="${acct}" --dependency=afterok:${b} --time=00:20:00 \
+        --array=${nc}-$(( ${#CPU_TASKS[@]} - 1 )) --export=ALL,GATE_ID=${b},KIND=cpu scripts/gate/task.sbatch)
 g=$(sbatch --parsable --account="${acct}" --dependency=afterok:${b} --time=00:20:00 \
         --array=0-$(( ${#GPU_TASKS[@]} - 1 )) --gpus-per-node=nvidia_h100_80gb_hbm3_1g.10gb:1 \
         --export=ALL,GATE_ID=${b},KIND=gpu scripts/gate/task.sbatch)
-echo "gate ${b}: build ${b}, cpu array ${c} (${#CPU_TASKS[@]} tasks), gpu array ${g} (${#GPU_TASKS[@]} tasks)"
+echo "gate ${b}: build ${b}, cpu array ${c} (${nc} tasks), cpu regress array ${r} (${nr} tasks)," \
+     "gpu array ${g} (${#GPU_TASKS[@]} tasks)"
