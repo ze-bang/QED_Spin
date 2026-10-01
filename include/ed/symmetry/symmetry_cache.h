@@ -2,191 +2,31 @@
 // =============================================================================
 // include/ed/symmetry/symmetry_cache.h
 //
-// Content-addressed persistence + in-process sharing for the OrbitTable.
-//
-// Two layers, both keyed by ``OrbitTable::content_hash`` (CompiledGroup
-// element hash x subspace signature x engine version -- Hamiltonian
-// couplings deliberately excluded, which is why parameter sweeps hit):
-//
-//   1. In-process registry: a small FIFO of shared_ptr<const OrbitTable>.
-//      Repeated qed.eigs/thermal/spectrum calls in one process reuse the
-//      table without any rebuild. Always on;
-//      correctness-neutral (tables are immutable once built).
-//
-//   2. Disk cache: ``<cache_dir>/sym_v2/<hash>.otab`` -- a raw
-//      little-endian binary blob (header + reps + stab ids + flattened
-//      stabilizer sets), written atomically (tmp + rename) so a killed
-//      run never leaves a torn file. The stored hash must equal the
-//      filename key AND the recomputed request key, or the file is
-//      ignored and rebuilt (derived data: corruption costs one rebuild,
-//      never wrong physics). Env:
-//         ED_SYM_CACHE=0        disable the DISK layer
-//         ED_SYM_CACHE_DIR=...  override the location for every lattice
+// In-process sharing for the OrbitTable: a small FIFO of shared_ptr<const
+// OrbitTable> keyed by ``OrbitTable::content_hash`` (CompiledGroup element
+// hash x subspace signature x engine version -- Hamiltonian couplings
+// deliberately excluded, which is why parameter sweeps hit). Repeated
+// qed.eigs/thermal/spectrum calls in one process reuse the table without any
+// rebuild; tables are immutable once built. Every hit is spot-verified against
+// the caller's group and subspace before it is used.
 //
 // The acquire_* front-ends below are what the sector builders call; the
 // raw build_orbit_table_* functions in orbit_table.h remain the compute
 // kernels.
 // =============================================================================
 
-#include <ed/config/env_registry.h>
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <deque>
-#include <filesystem>
-#include <fstream>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <utility>
-#include <vector>
 
 #include <ed/symmetry/orbit_table.h>
 #include <ed/symmetry/sym_profile.h>
 
 namespace ed::symmetry {
-
-
-namespace detail {
-
-// ---------------------------------------------------------------------------
-// Disk format. Little-endian POD header + arrays. Version bumps invalidate
-// via kOrbitTableVersion inside the key (a mismatched file is simply never
-// looked up) AND the explicit header field (defense in depth for hand-moved
-// files).
-// ---------------------------------------------------------------------------
-struct OtabHeader {
-    char          magic[8];        // "QEDOTAB\0"
-    std::uint64_t version;         // kOrbitTableVersion
-    std::uint64_t content_hash;
-    std::uint64_t subspace_dim;
-    std::uint64_t n_reps;
-    std::uint64_t n_stab_sets;
-    std::uint64_t stab_elems_total;
-};
-inline constexpr char kOtabMagic[8] = {'Q','E','D','O','T','A','B','\0'};
-
-[[nodiscard]] inline std::string
-otab_path(const std::string& cache_dir, std::uint64_t key) {
-    char hex[17];
-    std::snprintf(hex, sizeof(hex), "%016llx",
-                  static_cast<unsigned long long>(key));
-    return cache_dir + "/sym_v2/" + hex + ".otab";
-}
-
-[[nodiscard]] inline bool disk_cache_enabled() noexcept {
-    return ed::env::flag("ED_SYM_CACHE", true);
-}
-
-[[nodiscard]] inline std::string cache_dir_override() {
-    return ed::env::text("ED_SYM_CACHE_DIR");
-}
-
-}  // namespace detail
-
-// ---------------------------------------------------------------------------
-// save / load (public for tests).
-// Failures are soft everywhere: the cache is derived data, so any I/O or
-// validation problem falls back to "no cache" and the caller rebuilds.
-// ---------------------------------------------------------------------------
-inline bool save_orbit_table(const OrbitTable& tab,
-                             const std::string& cache_dir) {
-    if (cache_dir.empty()) return false;
-    namespace fs = std::filesystem;
-    std::error_code ec;
-
-    const std::string path = detail::otab_path(cache_dir, tab.content_hash);
-    fs::create_directories(fs::path(path).parent_path(), ec);
-    if (ec) return false;
-
-    // Flatten the deduped stabilizer sets.
-    std::vector<std::uint64_t> stab_offsets;
-    std::vector<std::uint16_t> stab_flat;
-    stab_offsets.reserve(tab.stab_elems.size() + 1);
-    stab_offsets.push_back(0);
-    for (const auto& st : tab.stab_elems) {
-        stab_flat.insert(stab_flat.end(), st.begin(), st.end());
-        stab_offsets.push_back(stab_flat.size());
-    }
-
-    detail::OtabHeader h{};
-    std::memcpy(h.magic, detail::kOtabMagic, sizeof(h.magic));
-    h.version          = detail::kOrbitTableVersion;
-    h.content_hash     = tab.content_hash;
-    h.subspace_dim     = tab.subspace_dim;
-    h.n_reps           = tab.reps.size();
-    h.n_stab_sets      = tab.stab_elems.size();
-    h.stab_elems_total = stab_flat.size();
-
-    const std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        auto put = [&f](const void* p, std::size_t n) {
-            f.write(static_cast<const char*>(p),
-                    static_cast<std::streamsize>(n));
-        };
-        put(&h, sizeof(h));
-        put(tab.reps.data(),    tab.reps.size()    * sizeof(std::uint64_t));
-        put(tab.stab_id.data(), tab.stab_id.size() * sizeof(std::uint16_t));
-        put(stab_offsets.data(), stab_offsets.size() * sizeof(std::uint64_t));
-        put(stab_flat.data(),   stab_flat.size()   * sizeof(std::uint16_t));
-        if (!f.good()) {
-            f.close();
-            fs::remove(tmp, ec);
-            return false;
-        }
-    }
-    fs::rename(tmp, path, ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
-}
-
-[[nodiscard]] inline std::shared_ptr<const OrbitTable>
-load_orbit_table(std::uint64_t key, const std::string& cache_dir) {
-    if (cache_dir.empty()) return nullptr;
-    const std::string path = detail::otab_path(cache_dir, key);
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return nullptr;
-
-    detail::OtabHeader h{};
-    f.read(reinterpret_cast<char*>(&h), sizeof(h));
-    if (!f.good()
-        || std::memcmp(h.magic, detail::kOtabMagic, sizeof(h.magic)) != 0
-        || h.version != detail::kOrbitTableVersion
-        || h.content_hash != key
-        || h.n_stab_sets > 65536) {
-        return nullptr;
-    }
-
-    auto tab = std::make_shared<OrbitTable>();
-    tab->content_hash = h.content_hash;
-    tab->subspace_dim = h.subspace_dim;
-    tab->reps.resize(h.n_reps);
-    tab->stab_id.resize(h.n_reps);
-    std::vector<std::uint64_t> stab_offsets(h.n_stab_sets + 1);
-    std::vector<std::uint16_t> stab_flat(h.stab_elems_total);
-
-    auto get = [&f](void* p, std::size_t n) {
-        f.read(static_cast<char*>(p), static_cast<std::streamsize>(n));
-    };
-    get(tab->reps.data(),    h.n_reps * sizeof(std::uint64_t));
-    get(tab->stab_id.data(), h.n_reps * sizeof(std::uint16_t));
-    get(stab_offsets.data(), stab_offsets.size() * sizeof(std::uint64_t));
-    get(stab_flat.data(),    stab_flat.size() * sizeof(std::uint16_t));
-    if (!f.good()) return nullptr;
-
-    tab->stab_elems.resize(h.n_stab_sets);
-    for (std::size_t k = 0; k < h.n_stab_sets; ++k) {
-        const std::uint64_t b = stab_offsets[k], e = stab_offsets[k + 1];
-        if (e < b || e > stab_flat.size()) return nullptr;
-        tab->stab_elems[k].assign(stab_flat.begin() + b, stab_flat.begin() + e);
-    }
-    // Sanity: every stab_id must index a stored set.
-    for (std::uint16_t id : tab->stab_id)
-        if (id >= h.n_stab_sets) return nullptr;
-    return tab;
-}
 
 namespace detail {
 
@@ -232,7 +72,7 @@ private:
     std::deque<std::shared_ptr<const OrbitTable>> entries_;
 };
 
-// Physical verification of a cache hit: registry/disk entries are keyed by a
+// Physical verification of a cache hit: registry entries are keyed by a
 // salted content hash, and correctness must NOT ride on hash quality
 // (structured inputs can collide). Spot-verify sampled reps against the CALLER's group + subspace:
 // membership (bit range, popcount / parity) and canonical-minimum under the
@@ -265,8 +105,7 @@ orbit_table_consistent(const OrbitTable&    t,
 
 template <class BuildFn, class VerifyFn>
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
-             VerifyFn&& verify) {
+acquire_impl(std::uint64_t key, BuildFn&& build, VerifyFn&& verify) {
     auto& reg = OrbitTableRegistry::instance();
     if (auto hit = reg.find(key)) {
         if (verify(*hit)) {
@@ -278,53 +117,27 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
                      "verification (key collision or stale entry) -- rebuilding");
         reg.erase(key);
     }
-    // ED_SYM_CACHE_DIR is honored HERE, at the single choke point, because
-    // some callers (the little-group lane) pass no caller dir. Env override
-    // wins, caller dir second, empty disables the disk layer.
-    std::string dir;
-    if (disk_cache_enabled()) {
-        const std::string ovr = cache_dir_override();
-        dir = !ovr.empty() ? ovr : cache_dir;
-    }
-    if (auto disk = load_orbit_table(key, dir)) {
-        if (verify(*disk)) {
-            if (sym_profile_enabled())
-                ED_LOG(Info, "[sym-profile] orbit-table disk HIT (%zu reps)", disk->size());
-            reg.insert(disk);
-            return disk;
-        }
-        ED_LOG(Warn, "[symmetry-cache] orbit-table disk hit FAILED physical "
-                     "verification -- rebuilding (file will be overwritten)");
-    }
     auto tab = std::make_shared<OrbitTable>(build());
-    if (!dir.empty()) {
-        SymPhaseTimer prof("orbit-table disk save");
-        save_orbit_table(*tab, dir);
-    }
     reg.insert(tab);
     return tab;
 }
 
 }  // namespace detail
 
-// ---------------------------------------------------------------------------
-// Acquire front-ends. ``cache_dir == ""`` -> registry only (no disk).
-// ---------------------------------------------------------------------------
 /// Acquire the fixed-Sz orbit table of a CompiledGroup (possibly
 /// flip-extended). The key is computed without building the table, so the
-/// disk cache + registry are consulted first (flip elements change the group
-/// hash and therefore the key).
+/// registry is consulted first (flip elements change the group hash and
+/// therefore the key).
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
                                       int                  n_up,
-                                      const CompiledGroup& cg,
-                                      const std::string&   cache_dir = {}) {
+                                      const CompiledGroup& cg) {
     const std::uint64_t key = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)
         ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
     return detail::acquire_impl(
-        key, cache_dir,
+        key,
         [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); },
         [&](const OrbitTable& t) {
             return detail::orbit_table_consistent(t, cg, n_bits, n_up, -1);
@@ -334,14 +147,13 @@ acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_parity_compiled(std::uint64_t        n_bits,
                                     int                  parity,
-                                    const CompiledGroup& cg,
-                                    const std::string&   cache_dir = {}) {
+                                    const CompiledGroup& cg) {
     const std::uint64_t key = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)
         ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
     return detail::acquire_impl(
-        key, cache_dir,
+        key,
         [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); },
         [&](const OrbitTable& t) {
             return detail::orbit_table_consistent(t, cg, n_bits, -1, parity);
@@ -350,32 +162,16 @@ acquire_orbit_table_parity_compiled(std::uint64_t        n_bits,
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
 acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
-                                  const CompiledGroup& cg,
-                                  const std::string&   cache_dir = {}) {
+                                  const CompiledGroup& cg) {
     const std::uint64_t key = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
     return detail::acquire_impl(
-        key, cache_dir,
+        key,
         [&] { return build_orbit_table_full_compiled(n_bits, cg); },
         [&](const OrbitTable& t) {
             return detail::orbit_table_consistent(t, cg, n_bits, -1, -1);
         });
-}
-
-/// Resolve the effective disk-cache directory for a lattice fixture
-/// directory:
-///   explicit option > ED_SYM_CACHE_DIR > <lattice_dir>/basis_cache;
-///   ED_SYM_CACHE=0 disables regardless. ``lattice_dir`` may be empty
-///   (in-memory operators): registry-only unless an override names a dir.
-[[nodiscard]] inline std::string
-resolve_sym_cache_dir(const std::string& explicit_dir,
-                      const std::string& lattice_dir) {
-    if (!detail::disk_cache_enabled()) return {};
-    if (!explicit_dir.empty()) return explicit_dir;
-    if (std::string ovr = detail::cache_dir_override(); !ovr.empty()) return ovr;
-    if (!lattice_dir.empty()) return lattice_dir + "/basis_cache";
-    return {};
 }
 
 }  // namespace ed::symmetry

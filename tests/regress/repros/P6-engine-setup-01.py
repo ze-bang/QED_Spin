@@ -24,7 +24,7 @@ for tag, prune in (("A", False), ("B", False), ("C", True)):
 '''
 
 def main():
-    env = dict(os.environ, ED_SYM_PROFILE="1", ED_SYM_CACHE="0")
+    env = dict(os.environ, ED_SYM_PROFILE="1")
     try:
         p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True, text=True, timeout=280)
     except subprocess.TimeoutExpired:

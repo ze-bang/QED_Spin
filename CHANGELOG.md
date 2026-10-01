@@ -46,7 +46,10 @@ Breaking changes so far:
     `dssf.OperatorSpec.spin_length`: sites are spin-1/2 (any other value solved a different
     spin-1/2 model). Write `qed.Operator(N)`;
   - the environment variables `ED_SYM_LG_DENSE_FLOOR` and `ED_THERMAL_EXACT_SMALL` (setting
-    them now warns at import): see `dense_max_dim` below.
+    them now warns at import): see `dense_max_dim` below;
+  - the orbit-table disk cache (`ED_SYM_CACHE`, `ED_SYM_CACHE_DIR`, `<dir>/sym_v2/*.otab`):
+    nothing used it, and concurrent writers could leave a torn table that a later run read
+    back as wrong norms. Orbit tables are still shared within a process.
 - **`dense_max_dim` is the dense crossover, and an argument of `eigs`, `thermal` and
   `dynamics`.** Blocks up to that dimension are diagonalised densely. `eigs` used it only as a
   lower bound (the crossover was max(dense_max_dim, 1600) for k <= 10, 160 k above); it now

@@ -60,10 +60,6 @@ struct Row {
 #define ED_ENV_TABLE(X)                                                        \
     X("ED_SYM_PROFILE", Flag, "symmetry", "0",                                 \
       "Logs symmetry-construction / little-group phase timers and lane-decline reasons at Info")\
-    X("ED_SYM_CACHE", Flag, "symmetry", "true (enabled)",                      \
-      "=0 disables the .otab orbit-table disk cache layer")                    \
-    X("ED_SYM_CACHE_DIR", Path, "symmetry", "\"\" -> caller falls back to <lattice_dir>/basis_cache",\
-      "Overrides the on-disk symmetry-cache location")                         \
     X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "8.0",              \
       "Memory budget for the per-sector dense int32 rank table; 0 builds none")\
     X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \

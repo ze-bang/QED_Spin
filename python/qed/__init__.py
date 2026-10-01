@@ -68,10 +68,12 @@ def env_snapshot() -> dict:
 # The C++ registry's flag spelling (ed::env::is_false_word): these, or unset, are off.
 _FALSE_WORDS = ("", "0", "false", "FALSE", "off", "OFF", "no", "NO")
 
-# Variables that became arguments: the hint names the argument.
+# Variables that were removed: what replaces each (named in the import warning).
 _REMOVED_ENV = {
-    "ED_SYM_LG_DENSE_FLOOR": "qed.eigs(..., dense_max_dim=...)",
-    "ED_THERMAL_EXACT_SMALL": "qed.thermal(..., dense_max_dim=0) to always sample",
+    "ED_SYM_LG_DENSE_FLOOR": "pass qed.eigs(..., dense_max_dim=...)",
+    "ED_THERMAL_EXACT_SMALL": "pass qed.thermal(..., dense_max_dim=0) to always sample",
+    "ED_SYM_CACHE": "the orbit-table disk cache is gone",
+    "ED_SYM_CACHE_DIR": "the orbit-table disk cache is gone",
 }
 
 
@@ -90,7 +92,7 @@ def _check_environment() -> None:
     for n in sorted(unknown):
         near = difflib.get_close_matches(n, names, n=1, cutoff=0.75)
         if n in _REMOVED_ENV:
-            parts.append(f"{n} (removed: pass {_REMOVED_ENV[n]})")
+            parts.append(f"{n} (removed: {_REMOVED_ENV[n]})")
         else:
             parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
     msg = ("qed: environment variable(s) not read by anything: " + ", ".join(parts)

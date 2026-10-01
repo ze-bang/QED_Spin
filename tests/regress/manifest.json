@@ -109,7 +109,7 @@
   {"id":"L2-numerics-02","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":120},
   {"id":"L2-numerics-03","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":120},
   {"id":"L3-concurrency-05","rep":"L3-concurrency-05","sev":"medium","axis":"correctness","status":"fixed","dev":"gpu","seconds":280},
-  {"id":"L3-concurrency-07","rep":"L3-concurrency-07","sev":"low","axis":"robustness","status":"open","dev":"cpu","seconds":120},
+  {"id":"L3-concurrency-07","rep":"L3-concurrency-07","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L3-concurrency-08","rep":"L3-concurrency-08","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L3-concurrency-11","rep":"L3-concurrency-11","sev":"medium","axis":"correctness","status":"open","dev":"gpu","seconds":120},
   {"id":"L3-concurrency-12","rep":"L3-concurrency-12","sev":"low","axis":"correctness","status":"open","dev":"cpu","seconds":120},

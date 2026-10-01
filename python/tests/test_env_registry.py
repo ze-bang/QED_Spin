@@ -59,12 +59,13 @@ def test_flag_set_to_zero_is_off(monkeypatch):
 
 
 def test_removed_knobs_are_reported():
-    """The dense crossovers are arguments now (eigs/thermal dense_max_dim); setting the old
-    variables must not be silently ignored."""
-    r = _import_qed({"ED_SYM_LG_DENSE_FLOOR": "0", "ED_THERMAL_EXACT_SMALL": "0"})
+    """Removed variables (the dense crossovers became eigs/thermal dense_max_dim; the orbit-table
+    disk cache is gone) must not be silently ignored."""
+    r = _import_qed({"ED_SYM_LG_DENSE_FLOOR": "0", "ED_THERMAL_EXACT_SMALL": "0", "ED_SYM_CACHE_DIR": "/tmp/x"})
     assert r.returncode == 0
     assert "ED_SYM_LG_DENSE_FLOOR (removed: pass qed.eigs" in r.stderr
     assert "ED_THERMAL_EXACT_SMALL (removed: pass qed.thermal" in r.stderr
+    assert "ED_SYM_CACHE_DIR (removed: the orbit-table disk cache is gone)" in r.stderr
 
 
 def test_strict_mode_reads_false_words_as_off():
