@@ -18,79 +18,63 @@ def _round_tuple(t, decimals=8):
     """Round all floats in a tuple to given decimals."""
     return tuple(round(x, decimals) for x in t)
 
-def _edge_label(edge, decimals=8):
-    """Create a stable, undirected edge label from edge record."""
-    # Ensure the edge label is independent of direction
-    t1, t2 = edge['type1'], edge['type2']
-    w = _round_tuple(edge['weight'], decimals)
-    tmin, tmax = (t1, t2) if t1 <= t2 else (t2, t1)
-    return (tmin, tmax, w)
 
-def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=10):
-    """Compute vertex colors using Weisfeiler-Lehman refinement with edge/vertex labels.
-    
-    Args:
-        vertex_weights: Dictionary of vertex_id -> (type, weight_real, weight_imag)
-        edges: List of edge dictionaries
-        decimals: Number of decimal places for rounding (default: 8)
-        wl_iterations: Maximum WL refinement iterations (default: 10, increased from 5)
-    
-    Returns:
-        Dictionary mapping vertex_id -> color (integer)
-    """
-    # Collect all vertices that appear in the one-body terms or the edges
-    vertex_ids = set(vertex_weights.keys())
+def _merged(terms):
+    """``(key, coeff)`` pairs -> ``{key: summed coeff}``, zeros dropped. How H spells a coupling
+    (a coefficient split over repeated terms, an explicit zero) must not change its colour."""
+    acc = defaultdict(complex)
+    for key, c in terms:
+        acc[key] += complex(c)
+    return {k: c for k, c in acc.items() if abs(c) > 1e-12}
+
+
+def bond_signatures(edges):
+    """``{(lo, hi): signature}`` for every pair of distinct sites with two-body terms: the terms of
+    the pair merged by operator pair, written from the end that gives the lesser tuple. Site labels
+    order the pair and a symmetry need not preserve that order, so the colour of a bond does not
+    depend on its orientation; the exact term check after the search removes the elements that
+    reverse an antisymmetric coupling (a DM vector)."""
+    by_pair = defaultdict(list)
     for e in edges:
-        vertex_ids.add(e['vertex1'])
-        vertex_ids.add(e['vertex2'])
+        v1, v2 = e['vertex1'], e['vertex2']
+        if v1 == v2:
+            continue
+        ops = (e['type1'], e['type2']) if v1 < v2 else (e['type2'], e['type1'])
+        by_pair[(min(v1, v2), max(v1, v2))].append((ops, complex(*e['weight'])))
+    out = {}
+    for pair, terms in by_pair.items():
+        m = _merged(terms)
+        if m:
+            fwd = tuple(sorted((a, b, _round_tuple((c.real, c.imag))) for (a, b), c in m.items()))
+            bwd = tuple(sorted((b, a, _round_tuple((c.real, c.imag))) for (a, b), c in m.items()))
+            out[pair] = min(fwd, bwd)
+    return out
+
+
+def compute_vertex_colors(vertex_weights, bonds, wl_iterations=10):
+    """Weisfeiler-Lehman colours of the sites: each starts from its one-body signature
+    (``vertex_weights``: site -> tuple of merged ``(op, re, im)`` terms) and is refined by the
+    multiset of (bond signature, neighbour colour) over ``bonds`` (:func:`bond_signatures`).
+    Returns ``{site: colour}``."""
+    vertex_ids = set(vertex_weights)
+    for lo, hi in bonds:
+        vertex_ids.update((lo, hi))
     vertex_ids = sorted(vertex_ids)
-
-    # Build adjacency with edge labels (preserve multiplicity)
-    adj_list = {v: [] for v in vertex_ids}
-    for edge in edges:
-        v1, v2 = edge['vertex1'], edge['vertex2']
-        elabel = _edge_label(edge, decimals=decimals)
-        if v1 != v2:
-            adj_list[v1].append((v2, elabel))
-            adj_list[v2].append((v1, elabel))
-
-    # Initial vertex labels (rounded to avoid floating noise)
-    init_label = {}
-    for v in vertex_ids:
-        vtype, wre, wim = vertex_weights.get(v, (0, 0.0, 0.0))
-        init_label[v] = ('v', int(vtype), round(wre, decimals), round(wim, decimals))
-
-    # WL refinement
-    # colors[v] is an integer color id; token[v] is a structural token used to assign ids deterministically
-    token = {v: init_label[v] for v in vertex_ids}
+    adj = {v: [] for v in vertex_ids}
+    for (lo, hi), sig in bonds.items():
+        adj[lo].append((hi, sig))
+        adj[hi].append((lo, sig))
+    token = {v: ('v', vertex_weights.get(v, ())) for v in vertex_ids}
     colors = {}
-    for it in range(wl_iterations):
-        # Assign integer colors deterministically by sorting unique tokens
-        unique_tokens = sorted(set(token.values()))
-        token_to_id = {tok: i for i, tok in enumerate(unique_tokens)}
-        colors_new = {v: token_to_id[token[v]] for v in vertex_ids}
-
-        # Build next iteration tokens
-        next_token = {}
-        for v in vertex_ids:
-            # multiset of neighbor (edge_label, neighbor_color)
-            neigh = [(lbl, colors_new.get(u, -1)) for (u, lbl) in adj_list[v]]
-            neigh.sort()
-            next_token[v] = (colors_new[v], tuple(neigh))
-
-        # Check stabilization
-        if all(token[v] == next_token[v] for v in vertex_ids):
-            colors = colors_new
+    for _ in range(wl_iterations):
+        ids = {tok: i for i, tok in enumerate(sorted(set(token.values())))}
+        colors = {v: ids[token[v]] for v in vertex_ids}
+        nxt = {v: (colors[v], tuple(sorted((sig, colors[u]) for u, sig in adj[v]))) for v in vertex_ids}
+        if all(token[v] == nxt[v] for v in vertex_ids):
             break
-
-        token = next_token
-        colors = colors_new
-
-    # Final deterministic color compaction
-    unique_final = sorted(set(colors.values()))
-    final_map = {c: i for i, c in enumerate(unique_final)}
-    vertex_colors = {v: final_map[colors[v]] for v in vertex_ids}
-    return vertex_colors
+        token = nxt
+    final = {c: i for i, c in enumerate(sorted(set(colors.values())))}
+    return {v: final[colors[v]] for v in vertex_ids}
 
 def _triple_signature(triple, terms):
     """A label of the three-body terms on a site triple that does not depend on how the triple
@@ -125,8 +109,9 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
             - idx_to_vid: list mapping nauty index -> original vertex_id
             - vid_to_idx: dict mapping original vertex_id -> nauty index
     """
-    # Compute WL-refined vertex colors for original vertices
-    vertex_colors = compute_vertex_colors(vertex_weights, edges)
+    # Two-body terms merged per pair, then WL-refined colours of the sites
+    bonds = bond_signatures(edges)
+    vertex_colors = compute_vertex_colors(vertex_weights, bonds)
 
     # Build stable vertex index mapping for original vertices (0..n-1)
     all_vertices = sorted(vertex_colors.keys())
@@ -134,45 +119,24 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     idx_to_vid = list(all_vertices)
     n_original = len(all_vertices)
 
-    # --- Compute bond signatures ---
-    # Group edges by ordered pair (min_vertex, max_vertex)
-    from collections import defaultdict as _dd
-    bond_terms = _dd(list)
-    for edge in edges:
-        v1, v2 = edge['vertex1'], edge['vertex2']
-        if v1 == v2:
-            continue
-        if v1 not in vid_to_idx or v2 not in vid_to_idx:
-            continue
-        # Store canonical direction info: which vertex is 'left' vs 'right'
-        lo, hi = min(v1, v2), max(v1, v2)
-        # Encode direction relative to canonical order
-        if v1 == lo:
-            term = (edge['type1'], edge['type2'], 
-                    _round_tuple(edge['weight']))
-        else:
-            term = (edge['type2'], edge['type1'], 
-                    _round_tuple(edge['weight']))
-        bond_terms[(lo, hi)].append(term)
-    
-    # Create canonical bond signature for each pair
-    bond_pairs = sorted(bond_terms.keys())
-    bond_signatures = {}
-    for pair in bond_pairs:
-        sig = tuple(sorted(bond_terms[pair]))
-        bond_signatures[pair] = sig
-    
-    # Assign colors to unique bond signatures
-    unique_sigs = sorted(set(bond_signatures.values()))
+    # One auxiliary vertex per interacting pair, coloured by its signature
+    bond_pairs = sorted(bonds)
+    unique_sigs = sorted(set(bonds.values()))
     sig_to_color = {sig: i for i, sig in enumerate(unique_sigs)}
 
-    # Three-body terms, one auxiliary vertex per triple of distinct sites; a term that repeats
-    # a site constrains nothing here, and the exact check after the search still sees it.
-    triple_terms = _dd(list)
+    # Three-body terms, merged per triple of distinct sites (each term as its site -> operator
+    # map), one auxiliary vertex per triple; a term that repeats a site constrains nothing here,
+    # and the exact check after the search still sees it.
+    by_triple = defaultdict(list)
     for sites, ops, coeff in triples:
         if len(set(sites)) == 3 and all(s in vid_to_idx for s in sites):
-            c = complex(coeff)
-            triple_terms[tuple(sorted(sites))].append((sites, ops, _round_tuple((c.real, c.imag))))
+            by_triple[tuple(sorted(sites))].append((tuple(sorted(zip(sites, ops))), complex(coeff)))
+    triple_terms = {}
+    for t, terms in by_triple.items():
+        m = _merged(terms)
+        if m:
+            triple_terms[t] = [(tuple(s for s, _ in key), tuple(o for _, o in key),
+                                _round_tuple((c.real, c.imag))) for key, c in sorted(m.items())]
     triple_list = sorted(triple_terms)
     triple_signatures = {t: _triple_signature(t, triple_terms[t]) for t in triple_list}
     unique_triple_sigs = sorted(set(triple_signatures.values()))
@@ -207,13 +171,13 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     # Auxiliary vertices: color based on bond signature (offset by max vertex color + 1)
     max_vertex_color = max(vertex_colors.values()) + 1 if vertex_colors else 0
     
-    color_to_vertices = _dd(list)
+    color_to_vertices = defaultdict(list)
     for v, c in vertex_colors.items():
         color_to_vertices[c].append(vid_to_idx[v])
     
     for bond_idx, pair in enumerate(bond_pairs):
         aux_idx = n_original + bond_idx
-        bond_color = max_vertex_color + sig_to_color[bond_signatures[pair]]
+        bond_color = max_vertex_color + sig_to_color[bonds[pair]]
         color_to_vertices[bond_color].append(aux_idx)
     for t_idx, t in enumerate(triple_list):
         color_to_vertices[max_vertex_color + triple_to_color[triple_signatures[t]]].append(
@@ -226,50 +190,6 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict, 
               vertex_coloring=coloring)
     return g, vertex_colors, idx_to_vid, vid_to_idx
-
-
-def filter_hamiltonian_automorphisms(automorphisms, edges):
-    """Filter automorphisms to keep only those that preserve the Hamiltonian.
-    
-    An automorphism σ is a valid Hamiltonian symmetry iff for every interaction 
-    term (type1, site1, type2, site2, weight), the mapped term
-    (type1, σ(site1), type2, σ(site2), weight) also exists in the Hamiltonian.
-    
-    Since operators on different sites commute, O_a(i) O_b(j) = O_b(j) O_a(i),
-    so the reversed ordering (type2, σ(site2), type1, σ(site1), weight) is also 
-    accepted as a match.
-    
-    Args:
-        automorphisms: List of permutations (each is a list of site indices)
-        edges: List of edge dictionaries from read_interall_file
-    
-    Returns:
-        List of valid automorphisms
-    """
-    # Build lookup of all Hamiltonian terms as a set
-    ham_terms = set()
-    for edge in edges:
-        key = (edge['type1'], edge['vertex1'], edge['type2'], edge['vertex2'],
-               _round_tuple(edge['weight']))
-        ham_terms.add(key)
-    
-    valid = []
-    for sigma in automorphisms:
-        is_valid = True
-        for edge in edges:
-            w = _round_tuple(edge['weight'])
-            sv1 = sigma[edge['vertex1']]
-            sv2 = sigma[edge['vertex2']]
-            mapped_key = (edge['type1'], sv1, edge['type2'], sv2, w)
-            # Also check reversed site order (operators on different sites commute)
-            reversed_key = (edge['type2'], sv2, edge['type1'], sv1, w)
-            if mapped_key not in ham_terms and reversed_key not in ham_terms:
-                is_valid = False
-                break
-        if is_valid:
-            valid.append(sigma)
-    
-    return valid
 
 
 class AutomorphismFinder:

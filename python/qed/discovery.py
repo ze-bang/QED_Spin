@@ -18,18 +18,20 @@ Permutation = list[int]
 
 def _operator_to_graph_records(
     operator: Operator,
-) -> tuple[dict[int, tuple[int, float, float]], list[dict[str, Any]], list[tuple]]:
+) -> tuple[dict[int, tuple], list[dict[str, Any]], list[tuple]]:
     """Build (vertex_weights, edges, triples) records the
     ``automorphism_finder`` routines consume."""
     num_sites = int(operator.num_sites)
 
-    # One-body terms: vertex_id -> (op_type, real, imag).
-    vertex_weights: dict[int, tuple[int, float, float]] = {
-        i: (2, 0.0, 0.0) for i in range(num_sites)  # default: bare Sz
-    }
+    # One-body terms: each site's terms merged by operator, as a sorted tuple of
+    # (op_type, real, imag) -- every term on the site colours it, not only the last one.
+    onsite: dict[int, dict[int, complex]] = {i: {} for i in range(num_sites)}
     for op_type, site, coeff in operator.iter_one_body_terms():
-        c = complex(coeff)
-        vertex_weights[int(site)] = (int(op_type), float(c.real), float(c.imag))
+        d = onsite[int(site)]
+        d[int(op_type)] = d.get(int(op_type), 0j) + complex(coeff)
+    vertex_weights = {i: tuple(sorted((op, round(c.real, 8), round(c.imag, 8))
+                                      for op, c in d.items() if abs(c) > 1e-12))
+                      for i, d in onsite.items()}
 
     # Two-body terms as edges: list of dicts.
     edges: list[dict[str, Any]] = []
@@ -48,19 +50,18 @@ def _operator_to_graph_records(
 
 
 def _run_full_automorphism_pipeline(
-    vertex_weights: dict[int, tuple[int, float, float]],
+    vertex_weights: dict[int, tuple],
     edges: list[dict[str, Any]],
     triples: list[tuple],
     construct_colored_graph,
     autgrp,
     AutomorphismFinder,
-    filter_hamiltonian_automorphisms,
     cap: int,
 ) -> tuple[Optional[list[Permutation]], float]:
-    """Run nauty + Hamiltonian filter: ``(permutations, |Aut|)``, the valid Hamiltonian-
-    preserving permutations on the original vertices and nauty's group order. Above ``cap``
-    nothing is enumerated and the list is None (|Aut| reaches N! for field-only, empty or
-    all-to-all H)."""
+    """Run nauty: ``(permutations, |Aut|)``, the automorphisms of the coloured interaction graph
+    on the original vertices and nauty's group order (a supergroup of H's symmetries: the exact
+    term check, :func:`_keep_hamiltonian_symmetries`, follows). Above ``cap`` nothing is
+    enumerated and the list is None (|Aut| reaches N! for field-only, empty or all-to-all H)."""
     graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(
         vertex_weights, edges, triples
     )
@@ -84,22 +85,20 @@ def _run_full_automorphism_pipeline(
             seen.add(key)
             autos.append(proj)
 
-    # Hamiltonian-preservation safety filter (catches edge-coloring
-    # corner cases where the subdivision trick over-counted).
-    return filter_hamiltonian_automorphisms(autos, edges), size
+    return autos, size
 
 
 def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> list[Permutation]:
     """Only the automorphisms that commute with the whole operator.
 
-    The colored graph sees which site triples carry three-body terms, but not their
-    orientation: a permutation that reverses a scalar-chirality triangle maps
-    S_i.(S_j x S_k) to minus itself and is still a graph automorphism. Before the triples
-    entered the graph, 1242 of the 1296 automorphisms of the 3x3 triangular torus with
-    chirality on up-triangles were not symmetries, and the projection lane folded k with
-    -k from them. The term-level check is exact and sees every term; the survivors are
-    the intersection of two groups, hence a group."""
-    if not autos or not any(True for _ in operator.iter_three_body_terms()):
+    The colored graph sees which pairs and triples of sites interact, but not the
+    orientation of a coupling: a permutation that reverses a DM bond or a scalar-chirality
+    triangle maps the term to minus itself and is still a graph automorphism. (Before the
+    triples entered the graph, 1242 of the 1296 automorphisms of the 3x3 triangular torus
+    with chirality on up-triangles were not symmetries, and the projection lane folded k
+    with -k from them.) The term-level check is exact and sees every term; the survivors
+    are the intersection of two groups, hence a group."""
+    if not autos:
         return autos
     from . import _core
     keep = list(_core.check_generators_commute(operator, [list(map(int, p)) for p in autos]))
@@ -641,7 +640,6 @@ def _find_symmetries_impl(
         from ._automorphism import (  # type: ignore
             AutomorphismFinder,
             construct_colored_graph,
-            filter_hamiltonian_automorphisms,
             filter_translation_automorphisms,
         )
         from pynauty import autgrp  # type: ignore
@@ -658,7 +656,7 @@ def _find_symmetries_impl(
     all_automorphisms, aut_order = _run_full_automorphism_pipeline(
         vertex_weights, edges, triples,
         construct_colored_graph, autgrp,
-        AutomorphismFinder, filter_hamiltonian_automorphisms,
+        AutomorphismFinder,
         cap=_AUT_ENUMERATION_CAP,
     )
     if all_automorphisms is None:

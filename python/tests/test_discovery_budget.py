@@ -220,6 +220,63 @@ def test_three_body_terms_enter_the_graph():
                                np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
 
 
+def _group(rep):
+    from qed._groups import close_group
+    return {tuple(g) for g in close_group(rep.abelian + rep.residues)}
+
+
+def test_discovery_reads_the_operator_not_its_spelling():
+    """Two triangles with the same Heisenberg + chirality couplings, one written as the expanded
+    term list (repeated operator patterns), the other with those repeats summed: swapping the
+    triangles is a symmetry, and the graph colours must not tell the spellings apart."""
+    from collections import defaultdict
+    from grid.models import dot, triple
+    code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
+    H = qed.Operator(6, 0.5)
+
+    def add(terms):
+        for c, ops in terms:
+            args = [v for op, s in ops for v in (code[op], s)]
+            (H.add_two_body if len(ops) == 2 else H.add_three_body)(*args, c)
+
+    add(dot(0, 1) + dot(1, 2) + dot(2, 0) + triple(0, 1, 2, 0.5))
+    merged = defaultdict(complex)
+    for c, ops in dot(3, 4) + dot(4, 5) + dot(5, 3) + triple(3, 4, 5, 0.5):
+        merged[tuple(ops)] += c
+    add([(c, list(ops)) for ops, c in merged.items() if abs(c) > 1e-15])
+    assert (3, 4, 5, 0, 1, 2) in _group(qed.find_symmetries(H, verbose=False))
+    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
+                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+
+
+def test_every_one_body_term_colours_its_site():
+    """A staggered x field with a uniform z field: each site carries two one-body terms. The
+    one-site translation flips the x field and is no symmetry (only the colour of a site's last
+    term was used, and the default eigs then refused the reported group)."""
+    n = 6
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=1.0)
+    b.zeeman_per_site([(0.3 * (-1) ** i, 0.0, 0.2) for i in range(n)])
+    H = b.to_operator()
+    assert tuple((i + 1) % n for i in range(n)) not in _group(qed.find_symmetries(H, verbose=False))
+    np.testing.assert_allclose(qed.eigs(H, 4).energies,
+                               qed.eigs(H, 4, sym=qed.Symmetry.none()).energies, atol=1e-10)
+
+
+def test_a_uniform_dm_ring_keeps_its_translations():
+    """Audit C02-discovery-05: bonds were coloured in (lower, higher) site order, so the wrap bond
+    of a DM ring looked unlike the others and every translation was lost."""
+    n = 8
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg(bonds, 1.0)
+    b.dm(bonds, [[0.0, 0.0, 0.3]] * n)
+    H = b.to_operator()
+    assert tuple((i + 1) % n for i in range(n)) in _group(qed.find_symmetries(H, verbose=False))
+    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
+                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+
+
 def test_clique_budget_is_deprecated_and_ignored():
     H = _ring(6)
     with pytest.warns(DeprecationWarning, match="clique_budget"):
