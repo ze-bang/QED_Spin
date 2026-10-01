@@ -41,13 +41,22 @@ struct Lattice {
     // 0..1 for honeycomb, 0 for chain/square/triangular).
     std::vector<int> sublattice;
 
-    // Nearest-neighbour bonds, canonicalised (i < j).
+    // Nearest-neighbour bonds, each pair once, oriented as generated: from site r
+    // to the site r + delta it links to (chain i -> i+1, the wrap bond included);
+    // every kagome triangle counter-clockwise; every honeycomb bond from A to B;
+    // every pyrochlore bond from the lower sublattice to the higher. A uniform
+    // DM vector over these bonds is the translation-invariant model.
     std::vector<Bond> nn_bonds;
 
-    // Optional next-nearest and third-nearest bond lists (e.g. for
-    // Kitaev honeycomb or kagome BFG models).
+    // The second and third distance shells (i < j): the pairs whose distance,
+    // the minimum over periodic images on a periodic lattice, is the second /
+    // third smallest of the infinite lattice. On the kagome the third shell holds
+    // both the hexagon diagonals and the straight two-step pairs.
     std::vector<Bond> nnn_bonds;
     std::vector<Bond> nnnn_bonds;
+    // Set by the generators. A lattice built from an adjacency list knows only
+    // the bonds it was given, and asking it for a shell is an error.
+    bool shells_known = false;
 
     // Lattice basis vectors (`{a1, a2, a3}`); unused entries are zeroed out.
     std::array<Position, 3> lattice_vectors{};
@@ -61,10 +70,10 @@ struct Lattice {
 
     // Helpers ---------------------------------------------------------------
 
-    // Returns a sorted, deduplicated copy of `nn_bonds` with i<j canonical
-    // orientation. Useful when feeding the bond list into Hamiltonian
-    // shortcuts that need each edge counted once.
+    // (i, j) of every bond, in order and orientation.
     std::vector<std::pair<std::size_t, std::size_t>> nn_pairs() const;
+    // The second / third distance shell. InvalidRequest for a lattice whose
+    // shells are unknown (built from an adjacency list) unless they were filled in.
     std::vector<std::pair<std::size_t, std::size_t>> nnn_pairs() const;
     std::vector<std::pair<std::size_t, std::size_t>> nnnn_pairs() const;
 
@@ -77,6 +86,13 @@ struct Lattice {
 // =============================================================================
 
 namespace lattice {
+
+// Every generator numbers the sites cell by cell, the first direction fastest
+// (pyrochlore: the last), and the basis sites within a cell. On a periodic
+// length of 2 the two neighbours along a direction are one site, and that pair
+// carries one bond. Lengths must be positive; the lattices with a basis
+// (honeycomb, kagome, pyrochlore) need at least 2 cells along a periodic
+// direction, because 1 would join bonds of different kinds to one pair of sites.
 
 // 1D chain of `length` sites along x-hat.
 Lattice chain(std::size_t length, bool pbc);
@@ -91,8 +107,8 @@ Lattice triangular(std::size_t Lx, std::size_t Ly, bool pbc);
 // in {0, 1, 2} corresponding to the three Kitaev colours x / y / z.
 Lattice honeycomb(std::size_t Lx, std::size_t Ly, bool pbc);
 
-// 2D kagome lattice; 3-site basis. NN within the triangle, NNN across
-// hexagons.
+// 2D kagome lattice; 3-site basis A = (0,0), B = (1/2,0), C = (1/4, sqrt(3)/4)
+// on the triangular Bravais lattice.
 Lattice kagome(std::size_t Lx, std::size_t Ly, bool pbc);
 
 // 3D pyrochlore lattice (FCC of corner-sharing tetrahedra); 4-site basis.
@@ -103,16 +119,21 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc);
 // escape hatch for clusters no factory above covers).
 //
 //   * `positions` -- one entry per site (length = `num_sites`)
-//   * `nn_pairs`  -- nearest-neighbour edges (each `(i, j)` with i != j)
+//   * `nn_pairs`  -- nearest-neighbour edges (i, j), i != j, kept in their
+//                    orientation; a pair listed twice (either way) is one bond
 //   * `sublattice`-- optional; zero-filled if empty.
+// The lattice knows no shells beyond these bonds (nnn_pairs() raises).
 Lattice from_neighbor_lists(
     const std::vector<Position>& positions,
     const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
     const std::vector<int>& sublattice = {});
 
-// Read a `cluster.txt`-style file into a Lattice: a "positions" block
-// ("x y z", "x y" or "id x y [z]" per line) followed by an "edges" /
-// "bonds" block ("i j" per line); '#' starts a comment line.
+// Read a `cluster.txt`-style file into a Lattice. A "positions" block holds one
+// site per line, as "x y", "x y z" or "id x y z" (ids counting from 0 in order);
+// an "edges" or "bonds" block holds one "i j" per line. Headers are case-blind
+// and may end in ':'. A block may state its length, on its header line or alone
+// on its first line, and must then hold exactly that many lines. '#' starts a
+// comment line. Anything else is an InvalidRequest naming the line.
 Lattice from_cluster_file(const std::string& path);
 
 }  // namespace lattice

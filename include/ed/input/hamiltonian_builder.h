@@ -147,6 +147,9 @@ public:
     // For each bond (i, j), with sublattice indices `sub[i]`, `sub[j]`
     // (drawn from `Lattice.sublattice`), the term added is
     //   J_pmpm * gamma(sub[i], sub[j]) * S-_i S-_j   (and h.c.)
+    // The labels must be the pyrochlore's (one per site, in 0..3, different
+    // across every bond), and include_isotropic = false needs Jzz = 0 (Jzz
+    // enters only the XXZ part); anything else is ed::InvalidRequest.
     HamiltonianBuilder& pyrochlore_non_kramers(
         const Lattice& lat,
         double Jxx,

@@ -18,6 +18,7 @@
 #include <string>
 
 #include <ed/core/construct_ham.h>
+#include <ed/core/errors.h>
 
 namespace ed::input {
 
@@ -386,6 +387,36 @@ HamiltonianBuilder& HamiltonianBuilder::pyrochlore_non_kramers(
     if (lat.num_sites != num_sites_) {
         throw std::invalid_argument(
             "pyrochlore_non_kramers: lattice/builder num_sites mismatch");
+    }
+    // The bond phases come from the sublattice labels: refuse labels that cannot be the
+    // pyrochlore's before adding anything.
+    if (lat.sublattice.size() != lat.num_sites) {
+        throw ed::InvalidRequest("pyrochlore_non_kramers: the lattice has " +
+                                 std::to_string(lat.sublattice.size()) + " sublattice labels for " +
+                                 std::to_string(lat.num_sites) + " sites");
+    }
+    for (int u : lat.sublattice) {
+        if (u < 0 || u > 3) {
+            throw ed::InvalidRequest("pyrochlore_non_kramers: sublattice label " + std::to_string(u) +
+                                     " is not one of the pyrochlore's 0..3");
+        }
+    }
+    for (const auto& [i, j] : lat.nn_pairs()) {
+        if (i >= lat.num_sites || j >= lat.num_sites) {
+            throw ed::InvalidRequest("pyrochlore_non_kramers: bond (" + std::to_string(i) + ", " +
+                                     std::to_string(j) + ") names a site past the lattice");
+        }
+        if (lat.sublattice[i] == lat.sublattice[j]) {
+            throw ed::InvalidRequest(
+                "pyrochlore_non_kramers: bond (" + std::to_string(i) + ", " + std::to_string(j) +
+                ") joins two sites of sublattice " + std::to_string(lat.sublattice[i]) +
+                "; the bond phases need the pyrochlore labels (lattice.pyrochlore sets them, "
+                "from_neighbor_lists takes them as sublattice=)");
+        }
+    }
+    if (!include_isotropic && Jzz != 0.0) {
+        throw ed::InvalidRequest("pyrochlore_non_kramers: Jzz enters only the XXZ part, which "
+                                 "include_isotropic=False leaves out; pass Jzz=0");
     }
     if (include_isotropic) xxz(lat.nn_pairs(), (Jxx + Jyy) / 2.0, Jzz);
     // Add the J_pmpm phase-twisted S+S+/S-S- terms (sublattice-dependent).

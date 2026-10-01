@@ -118,7 +118,8 @@ void bind_input(py::module_& parent) {
     // ---------------------------------------------------------------------
     // Bond / Plaquette PODs
     // ---------------------------------------------------------------------
-    py::class_<Bond>(m, "Bond")
+    py::class_<Bond>(m, "Bond", "A bond from site i to site j (kept in that orientation), with an "
+                                "optional bond_type tag, e.g. a Kitaev colour.")
         .def(py::init<std::size_t, std::size_t, int>(),
              py::arg("i"), py::arg("j"), py::arg("bond_type") = 0)
         .def_readwrite("i", &Bond::i)
@@ -146,7 +147,15 @@ void bind_input(py::module_& parent) {
         num_sites : int
         positions : list[tuple[float, float, float]]
         sublattice : list[int]
-        nn_bonds, nnn_bonds, nnnn_bonds : list[Bond]
+        nn_bonds : list[Bond]
+            Each nearest-neighbour pair once, oriented as generated (the
+            chain's wrap bond runs N-1 -> 0, kagome triangles counter-
+            clockwise, honeycomb bonds A -> B), so a uniform DM vector over
+            ``nn_pairs()`` is translation invariant.
+        nnn_bonds, nnnn_bonds : list[Bond]
+            The second and third distance shells (minimum image on a
+            periodic lattice), i < j. ``nnn_pairs()`` / ``nnnn_pairs()``
+            raise for a lattice built from an adjacency list.
         lattice_vectors : tuple of three (float, float, float)
         pbc : bool
         label : str

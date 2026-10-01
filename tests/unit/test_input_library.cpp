@@ -41,11 +41,29 @@ TEST_CASE("ed::input::lattice::chain produces canonical NN bonds",
         REQUIRE(L.nn_bonds.front().j == 1);
         REQUIRE(L.nn_bonds.back().j == 5);
     }
-    SECTION("PBC chain has L bonds") {
+    SECTION("PBC chain has L bonds, the wrap bond oriented L-1 -> 0") {
         auto L = lat::chain(6, /*pbc=*/true);
         REQUIRE(L.nn_bonds.size() == 6);
         REQUIRE(L.pbc == true);
+        REQUIRE(L.nn_bonds.back().i == 5);
+        REQUIRE(L.nn_bonds.back().j == 0);
+        REQUIRE(L.nnn_bonds.size() == 6);
+        REQUIRE(L.nnnn_bonds.size() == 3);   // (i, i+3): one pair per antipodal couple
     }
+}
+
+TEST_CASE("ed::input::lattice::pyrochlore PBC has both tetrahedra",
+          "[input][lattice]") {
+    auto L = lat::pyrochlore(2, 2, 2, /*pbc=*/true);
+    REQUIRE(L.num_sites == 32);
+    REQUIRE(L.nn_bonds.size() == 96);
+    std::vector<int> coord(L.num_sites, 0);
+    for (const auto& b : L.nn_bonds) {
+        ++coord[b.i];
+        ++coord[b.j];
+        REQUIRE(L.sublattice[b.i] < L.sublattice[b.j]);
+    }
+    for (int c : coord) REQUIRE(c == 6);
 }
 
 TEST_CASE("ed::input::lattice::square PBC bond count is 2*Lx*Ly",

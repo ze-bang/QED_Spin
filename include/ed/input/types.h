@@ -37,20 +37,16 @@ inline constexpr std::uint8_t op_to_int(Op op) noexcept {
     return static_cast<std::uint8_t>(op);
 }
 
-// A bond in a graph; canonical orientation is (i < j). The optional
-// `bond_type` tag carries lattice metadata (e.g. Kitaev x/y/z bond colour,
-// nearest-vs-next-nearest, sublattice pair label).
+// A bond from site i to site j, kept in that orientation: it matters for
+// antisymmetric couplings such as Dzyaloshinskii-Moriya. The optional
+// `bond_type` tag carries lattice metadata (e.g. Kitaev x/y/z bond colour).
 struct Bond {
     std::size_t i;
     std::size_t j;
     int bond_type = 0;
 
     Bond() = default;
-    Bond(std::size_t i_, std::size_t j_, int t = 0) : i(i_), j(j_), bond_type(t) {
-        if (i > j) {
-            std::swap(i, j);
-        }
-    }
+    Bond(std::size_t i_, std::size_t j_, int t = 0) : i(i_), j(j_), bond_type(t) {}
 };
 
 inline bool operator==(const Bond& a, const Bond& b) noexcept {
