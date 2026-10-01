@@ -5,7 +5,9 @@
 unit_cell_size=0 with a filter loops forever in add_sublattice (site += 0) appending terms;
 unit_cell_size=0 without a filter returns an empty ObservablePairs; a filter index >= U builds
 a shifted copy of another sublattice. Test: the hang runs in a child process with a timeout and
-a memory cap; the other two cases run in-process."""
+a memory cap; the other two cases run in-process.
+Restated for the single-observable qed.dssf (P2.1 removed the pair modes): the filter (i, j) is
+now the one sublattice i."""
 import os
 import tempfile
 import resource
@@ -27,45 +29,45 @@ def spec(U, filt):
     s = qed.dssf.OperatorSpec()
     s.operator_type = "sublattice"
     s.basis = "ladder"
-    s.spin_combinations = [(2, 2)]
+    s.components = [2]
     s.momentum_points = [[0.0, 0.0, 0.0]]
     s.num_sites = N
     s.unit_cell_size = U
     s.spin_length = 0.5
     s.positions_file = pos
-    s.sublattice_filter = filt
+    s.sublattice = filt
     return s
 
 
 findings = []
 # (1) U=0, no filter -> empty result
 try:
-    p = qed.dssf.build_observable_pairs(spec(0, None))
+    p = qed.dssf.build_observables(spec(0, None))
     print(f"U=0 no filter: len={len(p)}")
     if len(p) == 0:
-        findings.append("U=0 without filter returns 0 pairs silently")
+        findings.append("U=0 without a sublattice returns 0 observables silently")
 except Exception as e:
     print(f"U=0 no filter raised {type(e).__name__}: {e}")
 
-# (2) U=4, filter (5,5) -> sites 5, 9 (shifted sublattice 1), no error
+# (2) U=4, sublattice 5 -> sites 5, 9 (shifted sublattice 1), no error
 try:
-    p = qed.dssf.build_observable_pairs(spec(4, (5, 5)))
-    sites = sorted(int(site) for op, site, c in p.obs_1[0].iter_one_body_terms())
-    print(f"U=4 filter (5,5): sites={sites}")
+    p = qed.dssf.build_observables(spec(4, 5))
+    sites = sorted(int(site) for op, site, c in p.operators[0].iter_one_body_terms())
+    print(f"U=4 sublattice 5: sites={sites}")
     if sites == [5, 9]:
-        findings.append("filter (5,5) with U=4 accepted, sites [5, 9]")
+        findings.append("sublattice 5 with U=4 accepted, sites [5, 9]")
 except Exception as e:
-    print(f"U=4 filter (5,5) raised {type(e).__name__}: {e}")
+    print(f"U=4 sublattice 5 raised {type(e).__name__}: {e}")
 
 # (3) U=0 with filter -> infinite loop; child limited to 2 GB address space, 60 s
 CHILD = r'''
 import qed
 s = qed.dssf.OperatorSpec()
-s.operator_type = "sublattice"; s.basis = "ladder"; s.spin_combinations = [(2, 2)]
+s.operator_type = "sublattice"; s.basis = "ladder"; s.components = [2]
 s.momentum_points = [[0.0, 0.0, 0.0]]; s.num_sites = 12; s.unit_cell_size = 0
-s.spin_length = 0.5; s.positions_file = %r; s.sublattice_filter = (0, 0)
+s.spin_length = 0.5; s.positions_file = %r; s.sublattice = 0
 try:
-    p = qed.dssf.build_observable_pairs(s)
+    p = qed.dssf.build_observables(s)
     print("CHILD returned", len(p))
 except Exception as e:
     print("CHILD raised", type(e).__name__, e)

@@ -21,19 +21,18 @@ with open(pos, "w") as f:
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sum"
 s.basis = "ladder"
-s.spin_combinations = [(2, 2)]
+s.components = [2]
 s.momentum_points = [[0.0, 0.0, 0.0], [np.pi, 0.0, 0.0]]
 s.num_sites = 4
 s.spin_length = 0.5
 s.positions_file = pos
-s.single_obs_only = True
 try:
-    p = qed.dssf.build_observable_pairs(s)
+    p = qed.dssf.build_observables(s)
 except Exception as e:
     print(f"REPRO: NOT_REPRODUCED 2-column file rejected: {type(e).__name__}: {e}")
     raise SystemExit(0)
-c0 = {int(st): complex(c) for op, st, c in p.obs_1[0].iter_one_body_terms()}
-c1 = {int(st): complex(c) for op, st, c in p.obs_1[1].iter_one_body_terms()}
+c0 = {int(st): complex(c) for op, st, c in p.operators[0].iter_one_body_terms()}
+c1 = {int(st): complex(c) for op, st, c in p.operators[1].iter_one_body_terms()}
 print("Q=0 :", c0)
 print("Q=pi:", c1)
 diff = max(abs(c0[i] - c1[i]) for i in range(4))

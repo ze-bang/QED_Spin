@@ -423,22 +423,21 @@ PYBIND11_MODULE(_core, m) {
 
     // ed::dssf -- structure-factor observable assembly.
     auto m_dssf = m.def_submodule("dssf",
-        "Bindings for the ed::dssf C++ library: assemble DSSF/SSSF "
-        "observable pairs from a parameter dict instead of hand-rolling "
-        "Sum/Transverse/Sublattice/Experimental Operator constructors.");
+        "Bindings for the ed::dssf C++ library: assemble the momentum-resolved spin "
+        "operators of DSSF/SSSF evaluations, one per (Q, component).");
 
     py::class_<ed::dssf::OperatorSpec>(m_dssf, "OperatorSpec", R"pbdoc(
-        Parameter object for ``build_observable_pairs``.
+        Parameter object for ``build_observables``.
 
         Mirrors the C++ ``ed::dssf::OperatorSpec`` 1:1; see
         ``include/ed/dssf/operator_spec.h`` for the field-by-field
         documentation. Construct the spec, set the fields you care about,
-        then pass it to :func:`build_observable_pairs`.
+        then pass it to :func:`build_observables`.
     )pbdoc")
         .def(py::init<>())
         .def_readwrite("operator_type",     &ed::dssf::OperatorSpec::operator_type)
         .def_readwrite("basis",             &ed::dssf::OperatorSpec::basis)
-        .def_readwrite("spin_combinations", &ed::dssf::OperatorSpec::spin_combinations)
+        .def_readwrite("components",        &ed::dssf::OperatorSpec::components)
         .def_readwrite("momentum_points",   &ed::dssf::OperatorSpec::momentum_points)
         .def_readwrite("polarization",      &ed::dssf::OperatorSpec::polarization)
         .def_readwrite("theta",             &ed::dssf::OperatorSpec::theta)
@@ -446,55 +445,49 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("num_sites",         &ed::dssf::OperatorSpec::num_sites)
         .def_readwrite("spin_length",       &ed::dssf::OperatorSpec::spin_length)
         .def_readwrite("positions_file",    &ed::dssf::OperatorSpec::positions_file)
-        .def_readwrite("single_obs_only",   &ed::dssf::OperatorSpec::single_obs_only)
-        .def_readwrite("sublattice_filter", &ed::dssf::OperatorSpec::sublattice_filter)
+        .def_readwrite("sublattice",        &ed::dssf::OperatorSpec::sublattice)
         .def("__repr__", [](const ed::dssf::OperatorSpec& s) {
             return "<qed.dssf.OperatorSpec operator_type='" +
                    s.operator_type + "' basis='" + s.basis +
                    "' num_sites=" + std::to_string(s.num_sites) +
                    " momenta=" + std::to_string(s.momentum_points.size()) +
-                   " combos=" + std::to_string(s.spin_combinations.size()) +
+                   " components=" + std::to_string(s.components.size()) +
                    ">";
         });
 
-    py::class_<ed::dssf::ObservablePairs>(m_dssf, "ObservablePairs", R"pbdoc(
-        Result of :func:`build_observable_pairs`.
+    py::class_<ed::dssf::Observables>(m_dssf, "Observables", R"pbdoc(
+        Result of :func:`build_observables`: two parallel lists of equal length,
 
-        Three parallel lists of equal length:
-
-        - ``obs_1`` (list[Operator]):  left  factor of each pair ⟨ψ|O₁†...|ψ⟩.
-        - ``obs_2`` (list[Operator]):  right factor of each pair ⟨...O₂|ψ⟩
-                                       (empty when ``OperatorSpec.single_obs_only``).
-        - ``names``  (list[str]):      byte-stable observable name of each
-                                       pair.
+        - ``operators`` (list[Operator]): one operator per (Q, component), to pass
+          to :func:`qed.dynamics` or :func:`qed.expect`;
+        - ``names`` (list[str]): the byte-stable name of each.
     )pbdoc")
-        .def_readonly("obs_1", &ed::dssf::ObservablePairs::obs_1)
-        .def_readonly("obs_2", &ed::dssf::ObservablePairs::obs_2)
-        .def_readonly("names", &ed::dssf::ObservablePairs::names)
-        .def("__len__", [](const ed::dssf::ObservablePairs& p) {
-            return p.names.size();
+        .def_readonly("operators", &ed::dssf::Observables::operators)
+        .def_readonly("names", &ed::dssf::Observables::names)
+        .def("__len__", [](const ed::dssf::Observables& o) {
+            return o.names.size();
         });
 
-    m_dssf.def("build_observable_pairs",
-        &ed::dssf::build_observable_pairs,
+    m_dssf.def("build_observables",
+        &ed::dssf::build_observables,
         py::arg("spec"),
         R"pbdoc(
-        Build the DSSF/SSSF observable pairs requested by ``spec``.
+        Build the DSSF/SSSF observables requested by ``spec``.
 
         The single source of DSSF/SSSF observable names and ordering.
 
         Returns
         -------
-        ObservablePairs
-            Parallel lists of obs_1 / obs_2 / names. Length is the number
-            of pairs the builder emitted (depends on operator_type x
-            momentum_points x spin_combinations x sublattice geometry).
+        Observables
+            Parallel lists of operators / names. Length is the number of
+            observables the builder emitted (operator_type x momentum_points x
+            components x sublattices; two per entry for the transverse types).
 
         Raises
         ------
         ValueError
             On unrecognized ``operator_type`` or shape-mismatched inputs
-            (see ``ed::dssf::build_observable_pairs`` documentation).
+            (see ``ed::dssf::build_observables`` documentation).
         )pbdoc");
 
     m_dssf.def("compute_transverse_bases",
@@ -510,10 +503,10 @@ PYBIND11_MODULE(_core, m) {
         Compute the (e1, e2) basis used for transverse-component DSSF
         operators at one momentum point.
 
-        - ``e1`` is the polarization vector itself (SF projection).
-        - ``e2 = normalize(Q × polarization)`` (NSF projection), with a
-          fallback to ``{y, polarization}`` or ``{x, polarization}``
-          when ``Q`` is parallel to ``polarization``.
+        - ``e1`` is the polarization vector itself (observables named ``..._NSF``).
+        - ``e2 = normalize(Q × polarization)`` (observables named ``..._SF``), with
+          a fallback to ``{y, polarization}`` or ``{x, polarization}`` when ``Q``
+          is parallel to ``polarization``.
 
         Returns
         -------

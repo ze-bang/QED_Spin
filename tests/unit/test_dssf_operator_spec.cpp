@@ -1,18 +1,18 @@
 // =============================================================================
 // test_dssf_operator_spec (Catch2 v3)
 //
-// Sanity tests for `ed::dssf::build_observable_pairs` /
+// Sanity tests for `ed::dssf::build_observables` /
 // `ed::dssf::compute_transverse_bases`, the single source of truth for
 // DSSF observable construction.
 //
 // What we lock down here:
 //   * `compute_transverse_bases`: Q × polarization basis math, including
 //     the parallel fallback to {y, polarization} or {x, polarization}.
-//   * `build_observable_pairs`:
-//       - `sum`              -> 1 pair per (combo, Q), correct names
-//       - `transverse`       -> 2 pairs per (combo, Q) (NSF then SF)
-//       - `sublattice` filter / no-filter modes
-//       - `single_obs_only`  -> obs_2 stays empty, names use single op
+//   * `build_observables`:
+//       - `sum`          -> 1 observable per (Q, component), single-component names
+//       - `transverse`   -> 2 per (Q, component) (NSF then SF)
+//       - `sublattice`   -> one per sublattice, or the one selected
+//       - `experimental` -> one per Q
 //       - argument validation: empty inputs / wrong sizes throw
 //
 // We deliberately avoid asserting the matrix elements of the constructed
@@ -42,7 +42,7 @@ ed::dssf::OperatorSpec base_spec() {
     ed::dssf::OperatorSpec s;
     s.operator_type    = "sum";
     s.basis            = "ladder";
-    s.spin_combinations = {{2, 2}};                 // SzSz
+    s.components       = {2};                          // Sz
     s.momentum_points  = {{0.0, 0.0, 0.0}};
     s.polarization     = {1.0, 0.0, 0.0};
     s.unit_cell_size   = 4;
@@ -93,18 +93,19 @@ TEST_CASE("compute_transverse_bases: validates input shapes",
                       std::invalid_argument);
 }
 
-TEST_CASE("build_observable_pairs: sum operator -- 1 pair per (combo, Q)",
-          "[dssf][build_pairs][sum]") {
+TEST_CASE("build_observables: sum operator -- 1 observable per (Q, component)",
+          "[dssf][build_observables][sum]") {
     auto spec = base_spec();
-    spec.spin_combinations = {{2, 2}, {0, 1}};
-    spec.momentum_points  = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    spec.components      = {2, 0};
+    spec.momentum_points = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
 
-    auto out = ed::dssf::build_observable_pairs(spec);
+    auto out = ed::dssf::build_observables(spec);
 
-    // 2 momenta * 2 combos = 4 pairs
-    REQUIRE(out.obs_1.size() == 4);
-    REQUIRE(out.obs_2.size() == 4);
+    // 2 momenta * 2 components = 4 observables, momentum-major.
+    REQUIRE(out.operators.size() == 4);
     REQUIRE(out.names.size() == 4);
+    REQUIRE(out.names[0].rfind("Sz_q_Qx", 0) == 0);
+    REQUIRE(out.names[1].rfind("Sp_q_Qx", 0) == 0);   // component 0 is S+, not relabelled
 
     // Names should be deterministic and contain the Q components.
     for (const auto& n : out.names) {
@@ -112,17 +113,15 @@ TEST_CASE("build_observable_pairs: sum operator -- 1 pair per (combo, Q)",
     }
 }
 
-TEST_CASE("build_observable_pairs: transverse operator -- 2 pairs per (combo, Q)",
-          "[dssf][build_pairs][transverse]") {
+TEST_CASE("build_observables: transverse operator -- 2 observables per (Q, component)",
+          "[dssf][build_observables][transverse]") {
     auto spec = base_spec();
     spec.operator_type   = "transverse";
     spec.momentum_points = {{0.0, 0.0, 1.0}};
-    spec.spin_combinations = {{2, 2}};
 
-    auto out = ed::dssf::build_observable_pairs(spec);
+    auto out = ed::dssf::build_observables(spec);
 
-    REQUIRE(out.obs_1.size() == 2);
-    REQUIRE(out.obs_2.size() == 2);
+    REQUIRE(out.operators.size() == 2);
     REQUIRE(out.names.size() == 2);
 
     // Output ordering is NSF then SF; downstream names depend on it.
@@ -130,75 +129,67 @@ TEST_CASE("build_observable_pairs: transverse operator -- 2 pairs per (combo, Q)
     REQUIRE(out.names[1].find("_SF")  != std::string::npos);
 }
 
-TEST_CASE("build_observable_pairs: sublattice -- full triangle vs filter",
-          "[dssf][build_pairs][sublattice]") {
+TEST_CASE("build_observables: sublattice -- every sublattice vs one",
+          "[dssf][build_observables][sublattice]") {
     auto spec = base_spec();
-    spec.operator_type  = "sublattice";
-    spec.unit_cell_size = 2;
-    spec.spin_combinations = {{2, 2}};
-    spec.momentum_points  = {{0.0, 0.0, 0.0}};
+    spec.operator_type   = "sublattice";
+    spec.unit_cell_size  = 2;
+    spec.momentum_points = {{0.0, 0.0, 0.0}};
 
-    SECTION("no filter -> emits the upper-triangular {(0,0),(0,1),(1,1)}") {
-        auto out = ed::dssf::build_observable_pairs(spec);
-        REQUIRE(out.obs_1.size() == 3);
-        REQUIRE(out.obs_2.size() == 3);
-        REQUIRE(out.names.size() == 3);
-        REQUIRE(out.names[0].find("_sub0_sub0") != std::string::npos);
-        REQUIRE(out.names[1].find("_sub0_sub1") != std::string::npos);
-        REQUIRE(out.names[2].find("_sub1_sub1") != std::string::npos);
+    SECTION("no selection -> one observable per sublattice") {
+        auto out = ed::dssf::build_observables(spec);
+        REQUIRE(out.operators.size() == 2);
+        REQUIRE(out.names.size() == 2);
+        REQUIRE(out.names[0].find("_sub0") != std::string::npos);
+        REQUIRE(out.names[1].find("_sub1") != std::string::npos);
     }
 
-    SECTION("filter -> emits exactly that one pair") {
-        spec.sublattice_filter = std::make_pair<std::uint64_t, std::uint64_t>(0, 1);
-        auto out = ed::dssf::build_observable_pairs(spec);
-        REQUIRE(out.obs_1.size() == 1);
-        REQUIRE(out.obs_2.size() == 1);
+    SECTION("selection -> exactly that sublattice") {
+        spec.sublattice = 1;
+        auto out = ed::dssf::build_observables(spec);
+        REQUIRE(out.operators.size() == 1);
         REQUIRE(out.names.size() == 1);
-        REQUIRE(out.names[0].find("_sub0_sub1") != std::string::npos);
+        REQUIRE(out.names[0].find("_sub1") != std::string::npos);
     }
 }
 
-TEST_CASE("build_observable_pairs: single_obs_only skips obs_2 and uses single name",
-          "[dssf][build_pairs][single_obs_only]") {
+TEST_CASE("build_observables: experimental -- one per Q, components ignored",
+          "[dssf][build_observables][experimental]") {
     auto spec = base_spec();
-    spec.single_obs_only = true;
-    spec.spin_combinations = {{2, 2}};
+    spec.operator_type   = "experimental";
+    spec.components.clear();
+    spec.momentum_points = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
 
-    auto out = ed::dssf::build_observable_pairs(spec);
-    REQUIRE(out.obs_1.size() == 1);
-    REQUIRE(out.obs_2.empty());
-    REQUIRE(out.names.size() == 1);
-
-    // Name should start with single op label "Sz" (not "SzSz").
-    REQUIRE(out.names[0].rfind("Sz", 0) == 0);
-    REQUIRE(out.names[0].find("SzSz") == std::string::npos);
+    auto out = ed::dssf::build_observables(spec);
+    REQUIRE(out.operators.size() == 2);
+    REQUIRE(out.names[0].rfind("Experimental_q_Qx", 0) == 0);
 }
 
-TEST_CASE("build_observable_pairs: rejects malformed input",
-          "[dssf][build_pairs][validation]") {
-    SECTION("empty spin combinations") {
+TEST_CASE("build_observables: rejects malformed input",
+          "[dssf][build_observables][validation]") {
+    SECTION("empty components") {
         auto spec = base_spec();
-        spec.spin_combinations.clear();
-        REQUIRE_THROWS_AS(ed::dssf::build_observable_pairs(spec), std::invalid_argument);
+        spec.components.clear();
+        REQUIRE_THROWS_AS(ed::dssf::build_observables(spec), std::invalid_argument);
     }
     SECTION("empty momentum points") {
         auto spec = base_spec();
         spec.momentum_points.clear();
-        REQUIRE_THROWS_AS(ed::dssf::build_observable_pairs(spec), std::invalid_argument);
+        REQUIRE_THROWS_AS(ed::dssf::build_observables(spec), std::invalid_argument);
     }
     SECTION("polarization not a 3-vector") {
         auto spec = base_spec();
         spec.polarization = {1.0, 0.0};
-        REQUIRE_THROWS_AS(ed::dssf::build_observable_pairs(spec), std::invalid_argument);
+        REQUIRE_THROWS_AS(ed::dssf::build_observables(spec), std::invalid_argument);
     }
     SECTION("num_sites = 0") {
         auto spec = base_spec();
         spec.num_sites = 0;
-        REQUIRE_THROWS_AS(ed::dssf::build_observable_pairs(spec), std::invalid_argument);
+        REQUIRE_THROWS_AS(ed::dssf::build_observables(spec), std::invalid_argument);
     }
     SECTION("unknown operator_type") {
         auto spec = base_spec();
         spec.operator_type = "totally_made_up";
-        REQUIRE_THROWS_AS(ed::dssf::build_observable_pairs(spec), std::invalid_argument);
+        REQUIRE_THROWS_AS(ed::dssf::build_observables(spec), std::invalid_argument);
     }
 }

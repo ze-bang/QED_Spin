@@ -27,18 +27,17 @@ with open(pos, "w") as f:
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sum"
 s.basis = "ladder"
-s.spin_combinations = [(3, 3)]
+s.components = [3]
 s.momentum_points = [[np.pi, 0.0, 0.0]]
 s.num_sites = N
 s.spin_length = 0.5
 s.positions_file = pos
-s.single_obs_only = True
 try:
-    p = qed.dssf.build_observable_pairs(s)
+    p = qed.dssf.build_observables(s)
 except Exception as e:
     print(f"REPRO: NOT_REPRODUCED op index 3 rejected: {type(e).__name__}: {e}")
     raise SystemExit(0)
-Ob = p.obs_1[0]
+Ob = p.operators[0]
 terms = Ob.iter_one_body_terms()
 ops = sorted({int(t[0]) for t in terms})
 print(f"name={p.names[0]!r} op_types={ops} nterms={len(terms)}")

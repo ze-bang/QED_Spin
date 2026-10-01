@@ -1,13 +1,13 @@
 // =============================================================================
 // include/ed/dssf/operator_spec.h
 //
-// `ed::dssf::OperatorSpec` and `build_observable_pairs()` -- the canonical,
-// library-level entry point for assembling the (O1, O2, name) triplets that
-// every DSSF/SSSF/static evaluation needs.
+// `ed::dssf::OperatorSpec` and `build_observables()` -- the library-level entry
+// point for assembling the momentum-resolved spin operators a DSSF/SSSF/static
+// evaluation needs, one operator per (Q, component), each with a stable name.
 //
-// Single source of truth for the {operator_type x basis x momentum x
-// spin-combo x fixed-Sz} cross-product: the Python bindings (`qed.dssf`)
-// call this, and it is the only place observable assembly happens.
+// Single source of truth for the {operator_type x basis x momentum x component}
+// cross-product: the Python bindings (`qed.dssf`) call this, and it is the only
+// place observable assembly happens.
 // =============================================================================
 
 #pragma once
@@ -16,7 +16,6 @@
 
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -39,13 +38,13 @@ struct OperatorSpec {
     /// builder always uses xyz internally regardless of this flag.
     std::string basis{"ladder"};
 
-    /// Pairs (op1, op2) where each op is 0/1/2 in the chosen basis. For
-    /// single-observable expectation values (`single_obs_only`), set both
-    /// entries to the same op.
-    std::vector<std::pair<int, int>> spin_combinations;
+    /// Spin components, each 0/1/2 in the chosen basis (ladder: S+, S-, Sz;
+    /// xyz: Sx, Sy, Sz). One operator per (momentum point, component). The
+    /// `experimental*` types take their component from `theta` and ignore this.
+    std::vector<int> components;
 
     /// Momentum grid in units of 2π / a (each Q is a 3-vector). The
-    /// builder iterates the outer product `momentum_points x spin_combinations`.
+    /// builder iterates the outer product `momentum_points x components`.
     std::vector<std::vector<double>> momentum_points;
 
     /// Real-space polarization vector for `transverse*` operators
@@ -68,62 +67,46 @@ struct OperatorSpec {
     /// `*Operator(...)` constructor).
     std::string positions_file;
 
-    /// If true, build only the left observable (`obs_1`) and leave
-    /// `obs_2` empty, for evaluating ⟨ψ|O|ψ⟩ rather than ⟨ψ|O₁†O₂|ψ⟩.
-    ///
-    /// When set, the ladder-basis swap of the first operator index
-    /// (`first = 1 - first` for op != 2) is also skipped, and the
-    /// observable name uses just the first operator label (e.g. "Sz")
-    /// instead of the concatenation ("SzSz").
-    bool single_obs_only{false};
-
-    /// If set, restrict the `sublattice` builder to exactly one
-    /// (sub_i, sub_j) pair instead of iterating over the full
-    /// `i <= j < unit_cell_size` triangle. Ignored for non-sublattice
+    /// If set, the `sublattice` builder emits only this sublattice instead of
+    /// every one in `0 .. unit_cell_size - 1`. Ignored for the other
     /// `operator_type`s.
-    ///
-    /// In `single_obs_only` mode the emitted name uses just `_sub<sub_i>` rather than the full
-    /// `_sub<sub_i>_sub<sub_j>`.
-    std::optional<std::pair<std::uint64_t, std::uint64_t>> sublattice_filter;
+    std::optional<std::uint64_t> sublattice;
 };
 
 /**
- * Output of `build_observable_pairs`: parallel vectors of equal length.
- * Element `i` of `obs_1[i] / obs_2[i] / names[i]` describes the i-th
- * observable pair to evaluate.
+ * Output of `build_observables`: parallel vectors of equal length; element `i`
+ * of `operators` / `names` is the i-th observable.
  *
- * For SF/NSF-decomposed operator types (`transverse`,
- * `transverse_experimental`) we emit two consecutive entries per momentum
- * point: the SF projection first, then the NSF projection.
+ * The `transverse*` types emit two consecutive entries per momentum point (and
+ * component): the projection on e1 = polarization (named `..._NSF`) first, then
+ * the one on e2 (named `..._SF`); see `compute_transverse_bases`.
  */
-struct ObservablePairs {
-    std::vector<Operator>    obs_1;
-    std::vector<Operator>    obs_2;
+struct Observables {
+    std::vector<Operator>    operators;
     std::vector<std::string> names;
 };
 
 /**
- * Build the set of observable pairs requested by `spec`.
+ * Build the observables requested by `spec`.
  *
  * @throws std::invalid_argument if `spec.operator_type` is unrecognized,
- *         `spec.spin_combinations` is empty, `spec.momentum_points` is
- *         empty, or `spec.polarization` is not a 3-vector.
+ *         `spec.components` is empty, `spec.momentum_points` is empty, or
+ *         `spec.polarization` is not a 3-vector.
  */
-ObservablePairs build_observable_pairs(const OperatorSpec& spec);
+Observables build_observables(const OperatorSpec& spec);
 
 /**
  * Compute the (e1, e2) orthonormal basis used by `transverse*` operators
  * at a single momentum point.
  *
- * - `e1` is always the polarization vector itself (the SF/longitudinal
- *   projection).
+ * - `e1` is always the polarization vector itself.
  * - `e2` = normalize(Q × polarization). When Q ∥ polarization the cross
  *   product vanishes and we fall back to {y, polarization} or
  *   {x, polarization} depending on which component of `polarization`
  *   dominates (pinned bit-for-bit by `test_dssf_operator_spec.cpp`).
  *
  * Exposed publicly so Python callers can introspect the bases that
- * `build_observable_pairs` will use internally (e.g. for logging).
+ * `build_observables` will use internally (e.g. for logging).
  *
  * @throws std::invalid_argument if `Q` or `polarization` is not a 3-vector.
  */

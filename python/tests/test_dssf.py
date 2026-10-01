@@ -1,16 +1,16 @@
 """Python-side smoke tests for the ``ed::dssf`` pybind11 bindings, the mirror of
-``tests/unit/test_dssf_operator_spec.cpp``: ``ed::dssf::build_observable_pairs`` /
+``tests/unit/test_dssf_operator_spec.cpp``: ``ed::dssf::build_observables`` /
 ``ed::dssf::compute_transverse_bases``, locking down:
 
-  * the pair count for ``sum`` / ``transverse`` / ``sublattice`` operator types
-  * the ``single_obs_only`` shortcut (empty ``obs_2``, single-op naming)
-  * the ``sublattice_filter`` short-circuit
+  * one observable per (Q, component) for ``sum``, two for ``transverse``, one per
+    sublattice for ``sublattice``, one per Q for ``experimental``
+  * the names (single-component labels, the ``sublattice`` short-circuit)
   * the ``compute_transverse_bases`` math (orthogonal Q⊥pol and parallel Q∥pol)
   * argument validation (empty inputs / wrong-shape vectors / unknown types)
 
 We deliberately avoid asserting matrix elements -- the apply() correctness
 is covered by the C++ ctest baseline. This file checks the *bookkeeping*
-(pair counts, names and ordering) that downstream consumers rely on.
+(counts, names and ordering) that downstream consumers rely on.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _base_spec() -> dssf.OperatorSpec:
     s = dssf.OperatorSpec()
     s.operator_type = "sum"
     s.basis = "ladder"
-    s.spin_combinations = [(2, 2)]               # SzSz
+    s.components = [2]                          # Sz
     s.momentum_points = [[0.0, 0.0, 0.0]]
     s.polarization = [1.0, 0.0, 0.0]
     s.unit_cell_size = 4
@@ -83,115 +83,113 @@ def test_transverse_bases_validates_input_shapes(Q, pol):
 
 
 # ---------------------------------------------------------------------------
-# build_observable_pairs -- shape + naming
+# build_observables -- shape + naming
 # ---------------------------------------------------------------------------
 
-def test_build_pairs_sum_one_per_combo_per_Q():
+def test_sum_one_per_component_per_Q():
     spec = _base_spec()
-    spec.spin_combinations = [(2, 2), (0, 1)]
+    spec.components = [2, 0]
     spec.momentum_points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
 
-    pairs = dssf.build_observable_pairs(spec)
-    # 2 momenta * 2 combos = 4 pairs
-    assert len(pairs) == 4
-    assert len(pairs.obs_1) == 4
-    assert len(pairs.obs_2) == 4
-    assert len(pairs.names) == 4
-    for n in pairs.names:
+    obs = dssf.build_observables(spec)
+    # 2 momenta * 2 components = 4 observables, momentum-major
+    assert len(obs) == 4
+    assert len(obs.operators) == 4
+    assert len(obs.names) == 4
+    assert [n[:2] for n in obs.names] == ["Sz", "Sp", "Sz", "Sp"]
+    for n in obs.names:
         assert "_q_Qx" in n
 
 
-def test_build_pairs_transverse_emits_NSF_then_SF():
+def test_names_carry_the_single_component():
+    spec = _base_spec()
+    obs = dssf.build_observables(spec)
+    assert obs.names[0].startswith("Sz_q_Qx")
+    spec.basis = "xyz"
+    spec.components = [0, 1]
+    assert [n[:2] for n in dssf.build_observables(spec).names] == ["Sx", "Sy"]
+
+
+def test_transverse_emits_NSF_then_SF():
     spec = _base_spec()
     spec.operator_type = "transverse"
     spec.momentum_points = [[0.0, 0.0, 1.0]]
-    spec.spin_combinations = [(2, 2)]
 
-    pairs = dssf.build_observable_pairs(spec)
-    assert len(pairs) == 2
-    assert len(pairs.obs_1) == 2
-    assert len(pairs.obs_2) == 2
+    obs = dssf.build_observables(spec)
+    assert len(obs) == 2
+    assert len(obs.operators) == 2
     # Ordering: NSF first, then SF -- lock that in.
-    assert "_NSF" in pairs.names[0]
-    assert "_SF" in pairs.names[1]
+    assert obs.names[0].endswith("_NSF")
+    assert obs.names[1].endswith("_SF")
 
 
-def test_build_pairs_sublattice_full_triangle():
+def test_sublattice_one_per_sublattice():
     spec = _base_spec()
     spec.operator_type = "sublattice"
     spec.unit_cell_size = 2
-    spec.spin_combinations = [(2, 2)]
-    spec.momentum_points = [[0.0, 0.0, 0.0]]
 
-    pairs = dssf.build_observable_pairs(spec)
-    assert len(pairs) == 3
-    assert "_sub0_sub0" in pairs.names[0]
-    assert "_sub0_sub1" in pairs.names[1]
-    assert "_sub1_sub1" in pairs.names[2]
+    obs = dssf.build_observables(spec)
+    assert len(obs) == 2
+    assert obs.names[0].endswith("_sub0")
+    assert obs.names[1].endswith("_sub1")
 
 
-def test_build_pairs_sublattice_filter_emits_one_pair():
+def test_sublattice_selects_one():
     spec = _base_spec()
     spec.operator_type = "sublattice"
     spec.unit_cell_size = 2
-    spec.spin_combinations = [(2, 2)]
-    spec.momentum_points = [[0.0, 0.0, 0.0]]
-    spec.sublattice_filter = (0, 1)
+    spec.sublattice = 1
 
-    pairs = dssf.build_observable_pairs(spec)
-    assert len(pairs) == 1
-    assert "_sub0_sub1" in pairs.names[0]
+    obs = dssf.build_observables(spec)
+    assert len(obs) == 1
+    assert obs.names[0].endswith("_sub1")
 
 
-def test_build_pairs_single_obs_only_skips_obs_2():
+def test_experimental_one_per_Q_without_components():
     spec = _base_spec()
-    spec.single_obs_only = True
-    spec.spin_combinations = [(2, 2)]
+    spec.operator_type = "experimental"
+    spec.components = []
+    spec.momentum_points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    spec.theta = 0.5
 
-    pairs = dssf.build_observable_pairs(spec)
-    assert len(pairs.obs_1) == 1
-    assert len(pairs.obs_2) == 0
-    # name should start with "Sz", not "SzSz"
-    assert pairs.names[0].startswith("Sz")
-    assert "SzSz" not in pairs.names[0]
+    obs = dssf.build_observables(spec)
+    assert len(obs) == 2
+    assert all(n.startswith("Experimental_q_Qx") and "_theta0.5" in n for n in obs.names)
 
 
 # ---------------------------------------------------------------------------
-# build_observable_pairs -- input validation
+# build_observables -- input validation
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("mutate,desc", [
-    (lambda s: setattr(s, "spin_combinations", []), "empty spin combinations"),
-    (lambda s: setattr(s, "momentum_points",   []), "empty momentum points"),
-    (lambda s: setattr(s, "polarization",      [1.0, 0.0]), "polarization not 3-vector"),
-    (lambda s: setattr(s, "num_sites",         0), "num_sites = 0"),
+    (lambda s: setattr(s, "components",      []), "empty components"),
+    (lambda s: setattr(s, "momentum_points", []), "empty momentum points"),
+    (lambda s: setattr(s, "polarization",    [1.0, 0.0]), "polarization not 3-vector"),
+    (lambda s: setattr(s, "num_sites",       0), "num_sites = 0"),
     (lambda s: setattr(s, "operator_type", "totally_made_up"), "unknown operator_type"),
 ])
-def test_build_pairs_rejects_malformed_input(mutate, desc):
+def test_rejects_malformed_input(mutate, desc):
     spec = _base_spec()
     mutate(spec)
     with pytest.raises(ValueError):
-        dssf.build_observable_pairs(spec)
+        dssf.build_observables(spec)
 
 
 # ---------------------------------------------------------------------------
 # Operator handles round-trip through Python apply()
 # ---------------------------------------------------------------------------
 
-def test_obs_1_handles_are_apply_callable():
-    """The Operator handles returned by build_observable_pairs must support
-    the same apply(complex128 vector) protocol as user-built Operators -- this
-    is what makes them pluggable into Lanczos / FTLM via Python."""
+def test_operators_are_apply_callable():
+    """The Operator handles returned by build_observables must support the same
+    apply(complex128 vector) protocol as user-built Operators -- this is what makes
+    them pluggable into the verbs."""
     import numpy as np
 
     spec = _base_spec()
-    spec.spin_combinations = [(2, 2)]
-    spec.momentum_points = [[0.0, 0.0, 0.0]]
+    obs = dssf.build_observables(spec)
+    assert len(obs) == 1
 
-    pairs = dssf.build_observable_pairs(spec)
-    assert len(pairs) == 1
-
-    op = pairs.obs_1[0]
+    op = obs.operators[0]
     dim = 1 << 4   # num_sites = 4 -> full 16-d Hilbert
     vec = np.zeros(dim, dtype=np.complex128)
     vec[0] = 1.0 + 0j

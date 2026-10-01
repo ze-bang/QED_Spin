@@ -29,6 +29,12 @@ Breaking changes so far:
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.
+- **`qed.dssf` builds one operator per (Q, component).** The pair modes are gone (nothing
+  consumed `obs_2`): `build_observable_pairs` / `ObservablePairs` become `build_observables` /
+  `Observables(operators, names)`, `spin_combinations` becomes `components` (one index per
+  component), `sublattice_filter` becomes `sublattice` (one index), and `single_obs_only` is
+  the only behaviour. Names carry the one component (`Sz_q_...`, `Sp_q_...`); `sublattice`
+  emits each sublattice once.
 - **Removed:**
   - `Operator.conserves_sz`;
   - `qed.lattice` (`TriangularSupercell` and its label helpers);

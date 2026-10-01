@@ -26,14 +26,14 @@ for typ in ("sum", "sublattice", "experimental"):
     s = qed.dssf.OperatorSpec()
     s.operator_type = typ
     s.basis = "ladder"
-    s.spin_combinations = [(2, 2)]
+    s.components = [2]
     s.momentum_points = [[3.141592653589793, 0.0]]
     s.num_sites = 4
     s.unit_cell_size = 2
     s.spin_length = 0.5
     s.positions_file = pos
     try:
-        p = qed.dssf.build_observable_pairs(s)
+        p = qed.dssf.build_observables(s)
         findings.append(f"{typ}:2-vector Q accepted (names[0]={p.names[0]!r})")
     except Exception as e:
         print(f"{typ}: 2-vector Q rejected: {type(e).__name__}: {e}")
@@ -41,10 +41,10 @@ for typ in ("sum", "sublattice", "experimental"):
 CHILD = r'''
 import qed
 s = qed.dssf.OperatorSpec()
-s.operator_type = "sum"; s.basis = "ladder"; s.spin_combinations = [(2, 2)]
+s.operator_type = "sum"; s.basis = "ladder"; s.components = [2]
 s.momentum_points = [[]]; s.num_sites = 4; s.spin_length = 0.5; s.positions_file = %r
 try:
-    qed.dssf.build_observable_pairs(s)
+    qed.dssf.build_observables(s)
     print("CHILD accepted")
 except Exception as e:
     print("CHILD raised", type(e).__name__, e)

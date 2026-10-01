@@ -36,7 +36,7 @@
   {"id":"C08-operator-terms-04","rep":"C02-discovery-07","sev":"high","axis":"robustness","status":"open","dev":"cpu","seconds":60},
   {"id":"C08-operator-terms-05","rep":"C12-dynamics-09","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":20},
   {"id":"C08-operator-terms-06","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":60},
-  {"id":"C08-operator-terms-07","rep":"C08-operator-terms-07","sev":"low","axis":"robustness","status":"open","dev":"cpu","seconds":10},
+  {"id":"C08-operator-terms-07","rep":"C08-operator-terms-07","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":10},
   {"id":"C09-matvec-sym-01","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":30},
   {"id":"C09-matvec-sym-03","rep":"C03-bindings-02","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":60},
   {"id":"C10-krylov-02","rep":"C10-krylov-02","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},

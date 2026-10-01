@@ -23,16 +23,15 @@ def build(kind):
     s = qed.dssf.OperatorSpec()
     s.operator_type = kind
     s.basis = "xyz"
-    s.spin_combinations = [(0, 0)]
+    s.components = [0]
     s.momentum_points = [[0.7, 0.0, 0.0]]
     s.unit_cell_size = 1
     s.num_sites = N
     s.spin_length = 0.5
     s.positions_file = pos
-    s.single_obs_only = True
-    p = qed.dssf.build_observable_pairs(s)
+    p = qed.dssf.build_observables(s)
     terms = {}
-    for op, site, c in p.obs_1[0].iter_one_body_terms():
+    for op, site, c in p.operators[0].iter_one_body_terms():
         terms[(int(op), int(site))] = terms.get((int(op), int(site)), 0) + complex(c)
     return p.names[0], terms
 
