@@ -75,7 +75,7 @@
   {"id":"C16-claims-01","rep":"C16-claims-01","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":30},
   {"id":"C16-claims-02","rep":"C03-bindings-10","sev":"medium","axis":"robustness","status":"open","dev":"gpu","seconds":180},
   {"id":"C16-claims-03","rep":"P1-matvec-cpu-01","sev":"high","axis":"performance","status":"info","dev":"gpu","seconds":120},
-  {"id":"C16-claims-05","rep":"C11-thermal-03","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
+  {"id":"C16-claims-05","rep":"C11-thermal-03","sev":"high","axis":"correctness","status":"open","dev":"cpu","seconds":30},
   {"id":"E3-dead-code-11","rep":"E3-dead-code-11","sev":"low","axis":"elegance","status":"info","dev":"cpu","seconds":60},
   {"id":"E4-python-arch-01","rep":"E4-python-arch-01","sev":"medium","axis":"elegance","status":"info","dev":"cpu","seconds":60},
   {"id":"E4-python-arch-05","rep":"E4-python-arch-05","sev":"medium","axis":"elegance","status":"info","dev":"cpu","seconds":60},
