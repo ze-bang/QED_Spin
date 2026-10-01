@@ -17,16 +17,17 @@ Convention (as irreps.cpp): (g.e)[i] = e[g[i]].
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import numpy as np
 
 from .errors import InvalidRequest
 
 __all__ = ["close_group", "normal_abelian_split", "spatial_split", "split_generator_set",
-           "split_nonabelian", "abelian_generators"]
+           "split_nonabelian", "abelian_generators", "maximal_abelian_subgroup"]
 
 _GROUP_CLOSURE_CAP = 4096   # G (and so A) must stay enumerable
-_CO_GROUP_CAP = 64          # |G'/A|: the full cubic point group (48) fits
+_CO_GROUP_CAP = 128         # |G'/A|: Oh (48) fits, and so do the accidental groups of small tori
 
 
 def _compose(g, e):
@@ -85,6 +86,7 @@ class _Enumerated:
             raise InvalidRequest("the permutation group does not contain the identity (not closed)")
         self.orders = np.array([_perm_order(p) for p in self.elems], dtype=np.int64)
         self.fpf = (self.P != np.arange(n)).all(axis=1)
+        self._right: dict[int, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.elems)
@@ -95,8 +97,16 @@ class _Enumerated:
         return np.fromiter((idx[r] for r in map(tuple, rows.tolist())), dtype=np.int64, count=len(rows))
 
     def right_mult(self, i: int) -> np.ndarray:
-        """t[j] = index of elems[j] . elems[i]."""
-        return self.lookup(self.P[i][self.P])
+        """t[j] = index of elems[j] . elems[i] (cached)."""
+        t = self._right.get(i)
+        if t is None:
+            t = self._right[i] = self.lookup(self.P[i][self.P])
+        return t
+
+    def commutant(self, i: int) -> np.ndarray:
+        """Mask of the elements that commute with element i."""
+        x = self.P[i]
+        return (x[self.P] == self.P[:, x]).all(axis=1)
 
     def conjugation(self, i: int) -> np.ndarray:
         """t[j] = index of s o x_j o s^-1 (function composition), s = elems[i]."""
@@ -212,16 +222,20 @@ def _normal_abelian(E: _Enumerated) -> np.ndarray:
     return best
 
 
-def _maximal_abelian(E: _Enumerated) -> np.ndarray:
-    """Indices of a maximal abelian subgroup: elements taken greedily, fixed-point-free and high
-    order first, each one when it commutes with every generator kept so far."""
+def _maximal_abelian(E: _Enumerated, seed: Optional[int] = None) -> np.ndarray:
+    """Indices of a maximal abelian subgroup containing ``seed``: elements taken greedily,
+    fixed-point-free and high order first, each one when it commutes with every one kept so far."""
+    order = sorted(range(1, len(E)), key=lambda i: (not E.fpf[i], -int(E.orders[i]), i))
     gens: list[int] = []
     inside = np.zeros(len(E), dtype=bool)
     inside[0] = True
-    for c in sorted(range(1, len(E)), key=lambda i: (not E.fpf[i], -int(E.orders[i]), i)):
-        if not inside[c] and all(E.commute(c, g) for g in gens):
-            gens.append(c)
-            inside = _closure(E, gens)
+    commuting = np.ones(len(E), dtype=bool)          # commutes with every generator so far
+    for c in ([seed] if seed is not None else []) + order:
+        if inside[c] or not commuting[c]:
+            continue
+        gens.append(c)
+        commuting &= E.commutant(c)
+        inside = _closure(E, gens)
     return np.flatnonzero(inside)
 
 
@@ -283,20 +297,26 @@ def normal_abelian_split(G) -> tuple[list[list[int]], list[list[int]]]:
 def spatial_split(G, cap: int = _CO_GROUP_CAP):
     """``(A, residues, diagnostics)``: the split the sector engine uses for the closed group ``G``.
 
-    The normal abelian split of G when its co-group |G/A| is at most ``cap``. Otherwise the larger
-    of a maximal abelian subgroup A with its normaliser N_G(A) (co-group at most ``cap``) and an
-    abelian part alone: a smaller symmetry group, but every residue still normalises A.
-    ``diagnostics`` holds one (code, message) pair when G was cut down."""
+    The normal abelian split of G when its co-group |G/A| is at most ``cap``. Otherwise G is cut
+    down to the largest subgroup found among the normalisers N_G(A') (co-group at most ``cap``) of
+    maximal abelian subgroups A' grown from one element of every conjugacy class (conjugate seeds
+    give conjugate subgroups), or an abelian part alone: smaller than G, but every residue still
+    normalises its abelian part. ``diagnostics`` holds one (code, message) pair when G was cut down."""
     E = _Enumerated(G)
     every = np.arange(len(E))
     A = _normal_abelian(E)
     if len(E) // len(A) <= cap:
         return (*_checked(E, A, every, _cosets(E, A, every)), [])
-    A_max = _maximal_abelian(E)
-    N = _normalizer(E, A_max)
-    options = [(E.key(A), A, A), (E.key(A_max), A_max, A_max)]
-    if len(N) // len(A_max) <= cap:
-        options.append(((len(N),) + E.key(A_max)[1:], A_max, N))
+    # (subgroup used, abelian part's key): more reduction first, then a larger abelian part.
+    options = [((len(A), E.key(A)), A, A)]
+    _, classes = _conjugacy_classes(E, _generating_set(E))
+    for members in classes:
+        if members[0] == 0:
+            continue
+        A_c = _maximal_abelian(E, int(members[0]))
+        N = _normalizer(E, A_c)
+        within = N if len(N) // len(A_c) <= cap else A_c
+        options.append(((len(within), E.key(A_c)), A_c, within))
     _, A_use, within = max(options, key=lambda o: o[0])
     msg = (f"the spatial group has {len(E)} elements, but its largest normal abelian subgroup only "
            f"{len(A)}: a co-group of {len(E) // len(A)} exceeds {cap}. Using a subgroup of "
@@ -306,9 +326,19 @@ def spatial_split(G, cap: int = _CO_GROUP_CAP):
 
 def abelian_generators(A) -> list[list[int]]:
     """A generating set of the closed abelian group ``A``: high-order elements first, each one only
-    when it lies outside the group generated so far."""
+    when it lies outside the group generated so far. InvalidRequest when A is not abelian."""
     E = _Enumerated(A)
-    return [list(E.elems[i]) for i in _generating_set(E)]
+    gens = _generating_set(E)
+    if not all(E.commute(a, b) for a in gens for b in gens):
+        raise InvalidRequest("abelian_generators: the group is not abelian")
+    return [list(E.elems[i]) for i in gens]
+
+
+def maximal_abelian_subgroup(G) -> list[list[int]]:
+    """A maximal abelian subgroup of the closed group ``G`` (sorted, the identity first), grown
+    greedily from its fixed-point-free, high-order elements; G itself when it is abelian."""
+    E = _Enumerated(G)
+    return [list(E.elems[i]) for i in _maximal_abelian(E)]
 
 
 def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list[int]], list[list[int]]]:

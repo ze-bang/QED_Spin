@@ -643,7 +643,7 @@ def _find_symmetries_impl(
             "`pip install pynauty` (or skip find_symmetries "
             "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
-    from ._groups import close_group, spatial_split
+    from ._groups import close_group, maximal_abelian_subgroup, spatial_split
 
     diagnostics: list[tuple[str, str]] = []
     identity = [list(range(num_sites))]
@@ -667,6 +667,10 @@ def _find_symmetries_impl(
             filter_translation_automorphisms, num_sites,
         )
         translations = close_group(translation_autos) if translation_autos else None
+        if translations is not None:
+            # The position filter can keep a non-translation on a small torus; the set the
+            # momenta come from must stay abelian.
+            translations = [tuple(t) for t in maximal_abelian_subgroup(translations)]
         if translations is not None and len(translations) > 1:
             # The ENTIRE point group is this set's residue -- translations
             # project, the point group folds the k sectors into isospectral

@@ -190,7 +190,7 @@ def test_co_group_cap_uses_a_normaliser_and_matches_dense():
     H = _complete_graph(6)
     rep = qed.find_symmetries(H, verbose=False)
     assert _codes(rep.diagnostics) == ["co_group_capped"]
-    assert 1 < len(rep.abelian) and len(rep.residues) + 1 <= 64
+    assert 1 < len(rep.abelian) and len(rep.residues) + 1 <= 128
     r = qed.spectrum(H)
     assert "co_group_capped" in _codes(r.diagnostics)
     np.testing.assert_allclose(np.sort(r.energies), _dense_oracle(H, 6), atol=1e-10)

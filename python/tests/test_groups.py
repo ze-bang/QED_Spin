@@ -112,14 +112,30 @@ def test_s4_takes_the_klein_group():
 
 
 def test_symmetric_group_without_normal_abelian_part():
-    # S_5 has no non-trivial normal abelian subgroup: the normal split leaves every element as a
-    # residue, which spatial_split caps by using a maximal abelian subgroup and its normaliser.
-    G = [tuple(p) for p in itertools.permutations(range(5))]
-    A, residues = normal_abelian_split(G)
+    # S_5 and S_6 have no non-trivial normal abelian subgroup: the normal split leaves every element
+    # as a residue. S_5's co-group (120) is within the cap; S_6's (720) is not, and the largest
+    # normaliser of a maximal abelian subgroup is used instead: Z_3 x Z_3 in S_3 wr S_2 (72).
+    G5 = [tuple(p) for p in itertools.permutations(range(5))]
+    A, residues = normal_abelian_split(G5)
     assert len(A) == 1 and len(residues) == 119
-    A, residues, notes = spatial_split(G)
-    _check_split(G, A, residues)
-    assert len(A) > 1 and len(residues) + 1 <= 64 and [c for c, _ in notes] == ["co_group_capped"]
+    A, residues, notes = spatial_split(G5)
+    assert len(A) == 1 and len(residues) == 119 and not notes
+    G6 = [tuple(p) for p in itertools.permutations(range(6))]
+    A, residues, notes = spatial_split(G6)
+    _check_split(G6, A, residues)
+    assert len(A) == 9 and len(A) * (len(residues) + 1) == 72
+    assert [c for c, _ in notes] == ["co_group_capped"]
+
+
+def test_accidental_symmetry_keeps_the_whole_group_within_the_cap():
+    # The 3x3 honeycomb torus with nearest-neighbour bonds has 216 automorphisms, twice its space
+    # group, and a largest normal abelian subgroup of only 3 elements: a co-group of 72 that the
+    # engine takes whole.
+    lat = qed.input.lattice.honeycomb(3, 3, pbc=True)
+    H = _heisenberg(lat.num_sites, lat.nn_pairs())
+    report = qed.find_symmetries(H, verbose=False)
+    assert len(report.abelian) * (len(report.residues) + 1) == 216 and not report.diagnostics
+    _check_split(close_group(report.abelian + report.residues), report.abelian, report.residues)
 
 
 def test_split_does_not_depend_on_the_input_order():
