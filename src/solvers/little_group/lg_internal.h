@@ -331,11 +331,13 @@ private:
     }
 
     // GPU rep-gather engagement (only reached when the reduced CSR was
-    // declined). Default: engage when a CUDA device is present and the
-    // block is large enough that the kernel dominates the H2D/D2H staging
-    // (2^20 reps). ED_SYM_LG_GPU=0 vetoes; =1 removes the floor so 4x4
-    // validation runs exercise the same lane.
+    // declined, and only for a block the verb allowed onto the device:
+    // device='cpu' never touches CUDA). Default: engage when a CUDA device is
+    // present and the block is large enough that the kernel dominates the
+    // H2D/D2H staging (2^20 reps). ED_SYM_LG_GPU=0 vetoes; =1 removes the
+    // floor so 4x4 validation runs exercise the same lane.
     void maybe_build_gpu_() const {
+        if (!device_ok_ && !force_gpu_) return;
         const std::optional<bool> gate = ed::env::tristate("ED_SYM_LG_GPU");
         if (gate.has_value() && !*gate) return;                 // =0 vetoes
         const bool force = force_gpu_ || gate.value_or(false);  // =1 removes the floor

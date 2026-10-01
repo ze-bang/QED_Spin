@@ -17,24 +17,34 @@
 
 #include <cuda_runtime.h>
 
+#include <mutex>
+#include <stdexcept>
+#include <string>
+
 namespace ed::gpu::combinadic {
 
 __device__ __constant__ unsigned long long d_pascal_shared[65][65];
 
+// Once per process, thread-safe; a failed upload throws and the next call tries again.
 void upload_pascal_shared() {
-    static bool uploaded = false;
-    if (uploaded) return;
-    unsigned long long h_pascal[65][65] = {};
-    for (int n = 0; n <= 64; ++n) {
-        h_pascal[n][0] = 1ULL;
-        for (int k = 1; k <= n; ++k) {
-            unsigned long long left  = h_pascal[n - 1][k - 1];
-            unsigned long long right = (k < n) ? h_pascal[n - 1][k] : 0ULL;
-            h_pascal[n][k] = left + right;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        unsigned long long h_pascal[65][65] = {};
+        for (int n = 0; n <= 64; ++n) {
+            h_pascal[n][0] = 1ULL;
+            for (int k = 1; k <= n; ++k) {
+                unsigned long long left  = h_pascal[n - 1][k - 1];
+                unsigned long long right = (k < n) ? h_pascal[n - 1][k] : 0ULL;
+                h_pascal[n][k] = left + right;
+            }
         }
-    }
-    cudaMemcpyToSymbol(d_pascal_shared, h_pascal, sizeof(h_pascal));
-    uploaded = true;
+        const cudaError_t err = cudaMemcpyToSymbol(d_pascal_shared, h_pascal, sizeof(h_pascal));
+        if (err != cudaSuccess) {
+            cudaGetLastError();
+            throw std::runtime_error(std::string("combinadic: uploading the Pascal table failed: ")
+                                     + cudaGetErrorString(err));
+        }
+    });
 }
 
 }  // namespace ed::gpu::combinadic

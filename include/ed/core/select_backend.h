@@ -10,8 +10,10 @@
 // `std::visit` over.
 //
 // Decision order:
+//   0. neither allow_gpu nor require_gpu             --> CpuBackend, before any CUDA call
 //   1. if have_cuda() AND gpu_mem_fits AND allow_gpu --> CudaBackend
-//   2. else                                          --> CpuBackend
+//   2. require_gpu                                   --> throw, saying why the GPU cannot run it
+//   3. else                                          --> CpuBackend
 // =============================================================================
 
 #include <cstddef>
@@ -22,9 +24,12 @@
 #include <type_traits>
 #include <variant>
 
+#include <ed/core/errors.h>
 #include <ed/core/linear_operator.h>
 #include <ed/core/log.h>
 #include <ed/matvec/backends/cpu_backend.h>
+
+#include <mutex>
 
 #ifdef WITH_CUDA
 #  include <cuda_runtime.h>
@@ -52,6 +57,11 @@ struct BackendConstraints {
     /// request the GPU (``device='gpu'``) set this to 0 -- the floor
     /// gates only the automatic promotion, never an explicit choice.
     std::size_t gpu_dim_floor = (std::size_t{1} << 14);
+    /// device='gpu': the operator must run on the device. When it cannot,
+    /// select_backend throws instead of returning the CPU backend:
+    /// DeviceUnavailable (no usable device), DeviceUnsupported (no device
+    /// kernel for this operator), ResourceLimit (not enough device memory).
+    bool require_gpu = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -103,36 +113,41 @@ inline bool have_cuda() noexcept {
 #endif
 }
 
+/// Free device memory, cached for one second (cudaMemGetInfo costs 20-100 ms per call under
+/// WSL2, and the feasibility check only needs an order of magnitude); 0 when the query fails.
+inline std::size_t free_device_bytes() noexcept {
+#ifdef WITH_CUDA
+    static std::mutex m;
+    static std::size_t cached_free = 0;
+    static std::chrono::steady_clock::time_point cached_at{};
+    const std::lock_guard<std::mutex> lock(m);
+    const auto now = std::chrono::steady_clock::now();
+    if (cached_at == std::chrono::steady_clock::time_point{} || now - cached_at > std::chrono::seconds(1)) {
+        std::size_t free_bytes = 0, total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+            cudaGetLastError();
+            return 0;
+        }
+        cached_free = free_bytes;
+        cached_at   = now;
+    }
+    return cached_free;
+#else
+    return 0;
+#endif
+}
+
+/// Device memory the operator's solve needs: `fudge_factor` vectors of its dimension.
+inline std::size_t gpu_bytes_needed(const Geometry& geom, const BackendConstraints& c) noexcept {
+    return static_cast<std::size_t>(geom.local_dim * sizeof(std::complex<double>) * c.fudge_factor);
+}
+
 inline bool gpu_mem_fits(const Geometry& geom,
                           const BackendConstraints& c) noexcept {
 #ifdef WITH_CUDA
     if (!have_cuda()) return false;
-    // Probe the active device's free memory if no explicit budget.
-    std::size_t budget;
-    if (c.gpu_mem_bytes.has_value()) {
-        budget = c.gpu_mem_bytes.value();
-    } else {
-        // cudaMemGetInfo costs 20-100 ms per call under WSL2. Cache the answer for one
-        // second; the feasibility check only needs an order of magnitude.
-        static std::size_t cached_free = 0;
-        static std::chrono::steady_clock::time_point cached_at{};
-        const auto now = std::chrono::steady_clock::now();
-        if (cached_at == std::chrono::steady_clock::time_point{}
-                || now - cached_at > std::chrono::seconds(1)) {
-            std::size_t free_bytes = 0, total_bytes = 0;
-            if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-                cudaGetLastError();
-                return false;
-            }
-            cached_free = free_bytes;
-            cached_at   = now;
-        }
-        budget = cached_free;
-    }
-    const std::size_t per_complex = sizeof(std::complex<double>);
-    const std::size_t need = static_cast<std::size_t>(
-        geom.local_dim * per_complex * c.fudge_factor);
-    return need <= budget;
+    const std::size_t budget = c.gpu_mem_bytes.has_value() ? c.gpu_mem_bytes.value() : free_device_bytes();
+    return gpu_bytes_needed(geom, c) <= budget;
 #else
     (void)geom; (void)c;
     return false;
@@ -145,6 +160,9 @@ inline bool gpu_mem_fits(const Geometry& geom,
 inline BackendVariant select_backend(const Geometry& geom,
                                      const BackendConstraints& c = {})
 {
+    // device='cpu' never initialises CUDA.
+    if (!c.allow_gpu && !c.require_gpu)
+        return BackendVariant{std::make_unique<ed::matvec::CpuBackend>()};
     const bool have_gpu = have_cuda();
     const bool gpu_fits = have_gpu && gpu_mem_fits(geom, c);
     (void)have_gpu;
@@ -168,10 +186,24 @@ inline BackendVariant select_backend(const Geometry& geom,
     // gpu_dim_floor gates only the AUTO promotion: a device-resident
     // operator has already committed to the GPU, and explicit requests
     // arrive with the floor zeroed.
-    const bool dim_ok = op_is_device || geom.local_dim >= c.gpu_dim_floor;
-    if (device_mv && have_gpu && gpu_fits && c.allow_gpu && dim_ok) {
+    const bool dim_ok = op_is_device || c.require_gpu || geom.local_dim >= c.gpu_dim_floor;
+    if (device_mv && have_gpu && gpu_fits && dim_ok) {
         return BackendVariant{std::make_unique<ed::matvec::CudaBackend>()};
     }
+    if (c.require_gpu) {
+        if (!have_gpu)
+            throw ed::DeviceUnavailable("device='gpu', but no usable CUDA device is visible");
+        if (!device_mv)
+            throw ed::DeviceUnsupported("device='gpu', but this operator (dim " + std::to_string(geom.local_dim)
+                                        + ") has no device kernel; use device='auto' or 'cpu'");
+        const std::size_t budget = c.gpu_mem_bytes.value_or(free_device_bytes());
+        throw ed::ResourceLimit("device='gpu', but a block of dim " + std::to_string(geom.local_dim) + " needs "
+                                + std::to_string(gpu_bytes_needed(geom, c) >> 20) + " MiB of device memory and "
+                                + std::to_string(budget >> 20) + " MiB are free");
+    }
+#else
+    if (c.require_gpu)
+        throw ed::DeviceUnavailable("device='gpu', but this build has no CUDA");
 #endif
 
     (void)gpu_fits; (void)op_is_host_only;

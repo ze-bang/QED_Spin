@@ -75,7 +75,9 @@ inline void check_cublas(cublasStatus_t err, const char* what) {
     if (err != CUBLAS_STATUS_SUCCESS) {
         throw std::runtime_error(std::string("CudaBackend: ") + what +
                                  " failed with cuBLAS status " +
-                                 std::to_string(static_cast<int>(err)));
+                                 std::to_string(static_cast<int>(err)) +
+                                 " (last CUDA error: " +
+                                 cudaGetErrorString(cudaPeekAtLastError()) + ")");
     }
 }
 
@@ -136,16 +138,18 @@ public:
         // hardware), `cudaDeviceGetDefaultMemPool` returns an error
         // and we fall back to the synchronous `cudaMalloc` path
         // (see `allocate_impl_`).
-        int dev = -1;
-        if (cudaGetDevice(&dev) == cudaSuccess) {
-            cudaMemPool_t pool = nullptr;
-            if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess) {
-                std::uint64_t threshold = UINT64_MAX;
-                cudaMemPoolSetAttribute(
-                    pool, cudaMemPoolAttrReleaseThreshold, &threshold);
-                pool_available_ = true;
-            }
-        }
+        // Every call here may fail without consequence; each failure is cleared
+        // so it cannot surface later as a misattributed kernel error.
+        int dev = -1, pools = 0;
+        cudaMemPool_t pool = nullptr;
+        std::uint64_t threshold = UINT64_MAX;
+        pool_available_ =
+            cudaGetDevice(&dev) == cudaSuccess
+            && cudaDeviceGetAttribute(&pools, cudaDevAttrMemoryPoolsSupported, dev) == cudaSuccess
+            && pools != 0
+            && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
+            && cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold) == cudaSuccess;
+        if (!pool_available_) cudaGetLastError();
     }
 
     ~CudaBackend() override {
@@ -282,11 +286,8 @@ public:
         // match the path taken in `allocate`; we track this implicitly
         // by `pool_available_` being a const-ish field (set once in the
         // ctor and never flipped).
-        if (pool_available_) {
-            cudaFreeAsync(p, /*stream=*/0);
-        } else {
-            cudaFree(p);
-        }
+        const cudaError_t err = pool_available_ ? cudaFreeAsync(p, /*stream=*/0) : cudaFree(p);
+        if (err != cudaSuccess) cudaGetLastError();   // nothing to do here; do not let it linger
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;

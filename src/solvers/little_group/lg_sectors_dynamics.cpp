@@ -167,10 +167,12 @@ std::vector<bool> reachable(const ed::symmetry::RepSectorData& src, const std::v
 // far above E0 is never solved); only those are then solved with vectors, deeper until a
 // level above the window shows up, which catches degeneracies inside a block.
 std::vector<std::pair<Level, BlockVector>>
-ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Device device, double& e0) {
+ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Device device, double& e0,
+                Placement& placement) {
     EigsOptions eo;
     eo.k = 1; eo.window = tol; eo.device = device;
     const EigsResult first = eigs(H, n_sites, u, eo);
+    placement += first.placement;
     eo.vectors = true;
     e0 = first.levels.front().energy;
     std::vector<std::pair<Level, BlockVector>> out;
@@ -189,6 +191,7 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
             deep.cut       = false;
             deep.window    = 0.0;
             const EigsResult r = eigs(H, n_sites, one, deep);
+            placement += r.placement;
             const bool exhausted = static_cast<int>(r.levels.size()) < pb;
             if (exhausted || r.levels.back().energy > e0 + tol) {
                 for (const auto& R : r.levels)
@@ -257,6 +260,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                                      "list) is the ground state");
     if (distinct.size() != d.temperatures.size())
         throw ed::InvalidRequest("dynamics: a temperature is listed twice");
+    detail::require_device(d.device, "dynamics");
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
     if (s.spin_flip == 1 && !ed::symmetry::hamiltonian_is_spin_flip_symmetric(term_soa(H)))
         throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");
@@ -294,7 +298,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     if (d.temperatures.empty()) {
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
         auto t_gm = std::chrono::steady_clock::now();
-        const auto manifold = ground_manifold(H, n_sites, u, d.degeneracy_tol, d.device, out.e0);
+        const auto manifold = ground_manifold(H, n_sites, u, d.degeneracy_tol, d.device, out.e0, out.placement);
         // With a spin tower the solve returns the Sz = S member of each multiplet; the other
         // members follow by total S- (normalised), each in the same momentum sector one Sz lower.
         std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)
@@ -371,6 +375,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                         auto apply = [&t](const Complex* in, Complex* o, std::size_t nn) { t.H->apply(in, o, nn); };
                         r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
                     }
+                    out.placement.add(gpu, false);
                     phase["continued fraction"] += clock_since(t_cf);
                     for (std::size_t i = 0; i < S.size(); ++i) S[i] += r.spectral_function[i];
                 }
@@ -588,6 +593,8 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     }
     auto t_k = std::chrono::steady_clock::now();
     for (std::size_t i : device_jobs) { sources[i] = run_device(i); ++out.device_blocks; }
+    out.placement.device_krylov += device_jobs.size();
+    out.placement.host_krylov   += host_jobs.size();
     phase["ftlm kernel (device)"] += clock_since(t_k);
 
     // On the host, small sectors run concurrently, one thread each: at a few thousand states a

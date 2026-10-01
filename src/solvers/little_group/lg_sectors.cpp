@@ -93,12 +93,12 @@ void require_normal(const Spec& s, int n_sites) {
 // iterations.
 bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, Device device,
                            std::vector<double>& ev, std::vector<std::vector<Complex>>& vv,
-                           bool& converged, std::size_t& iters) {
+                           bool& converged, std::size_t& iters, bool& dense) {
     ed::workflows::SolveOptions so;
     so.num_eigs        = static_cast<std::size_t>(want);
     so.compute_vectors = vectors;
     so.backend.allow_gpu = true;
-    if (device == Device::Gpu) so.backend.gpu_dim_floor = 0;
+    so.backend.require_gpu = device == Device::Gpu;
     const auto r = ed::workflows::solve(static_cast<const ed::LinearOperator&>(*bop.op), so);
     ev = r.eigenvalues;
     if (vectors) {
@@ -108,6 +108,7 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
     }
     converged = static_cast<int>(ev.size()) >= want;
     iters     = r.krylov.iters_done;
+    dense     = r.backend.dense;
     return r.backend.lane == "gpu";
 }
 
@@ -122,7 +123,7 @@ double estimate_lowest(const detail::BlockOp& bop, Device device) {
         so.method    = ed::workflows::SolveMethod::Lanczos;
         so.tolerance = 1e-6;
         so.backend.allow_gpu = true;
-        if (device == Device::Gpu) so.backend.gpu_dim_floor = 0;
+        so.backend.require_gpu = device == Device::Gpu;
         const auto r = ed::workflows::solve(op, so);
         if (!r.eigenvalues.empty()) return r.eigenvalues.front();
     }
@@ -286,6 +287,7 @@ std::vector<double> EigsResult::energies(int k) const {
 
 EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptions& o) {
     if (o.k < 1) throw std::invalid_argument("eigs: k must be >= 1");
+    detail::require_device(o.device, "eigs");
     struct Row { Level level; bool owed_more; };   // owed_more: block stopped short of its request
     struct BlockEnd { double last; bool short_; };
     EigsResult res;
@@ -317,15 +319,21 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 const auto t0 = std::chrono::steady_clock::now();
                 bool on_device = false;
                 std::size_t device_iters = 0;
-                if (bop.on_device && dim > lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim)) {
+                const bool krylov = dim > lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim);
+                if (krylov) detail::require_device_kernel(o.device, bop, bi->tag, "eigs");
+                if (bop.on_device && krylov) {
+                    bool dense = false;
                     on_device = solve_by_orchestrator(bop, want, o.vectors, o.device, ev, vv, converged,
-                                                      device_iters);
+                                                      device_iters, dense);
                     if (on_device) ++res.device_blocks;
+                    res.placement.add(on_device, dense);
                 } else if (o.vectors) {
                     std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim,
                                                               o.block_size, &converged);
+                    res.placement.add(false, !krylov);
                 } else {
                     ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged, o.block_size);
+                    res.placement.add(false, !krylov);
                 }
                 res.block_stats.push_back(block_stats(
                     bi->tag, bi->gop ? "group" : (bi->W ? "isotypic" : "plain"), rep, applies0, apply0,
@@ -398,6 +406,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim);
                 if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.t_orbit_table); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
+                detail::require_device_kernel(o.device, bop, bi->tag, "eigs");
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       estimate_lowest(bop, o.device)});
             }
@@ -478,6 +487,7 @@ std::vector<double> SpectrumResult::expanded() const {
 }
 
 SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device device) {
+    detail::require_device(device, "spectrum");
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     detail::DenseBatch batch(device);
@@ -505,6 +515,8 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
     detail::require_some_block(s, n_blocks, "spectrum");
     batch.solve();
     res.device_blocks = batch.device_blocks();
+    res.placement.device_dense = batch.device_blocks();
+    res.placement.host_dense   = entries.size() - batch.device_blocks();
     for (const auto& en : entries)
         for (double e : batch.spectrum(en.id)) {
             if (en.filter.is_ghost(e)) continue;

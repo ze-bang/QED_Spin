@@ -71,27 +71,35 @@ def _device_engaged(device):
             os.environ["ED_SYM_LG_DENSE_FLOOR"] = old
 
 
+def _on_device(device, r):
+    """A GPU cell measures the device: no Krylov solve may run on the host (device='gpu' raises
+    instead), and some solve must run on the device."""
+    if device != "gpu":
+        return
+    p = r.placement
+    assert not p.get("host_krylov"), f"device='gpu' ran a Krylov solve on the host: {p}"
+    if not (p.get("device_krylov") or p.get("device_dense")):
+        raise Missing(f"no solve ran on the device: {p}")
+
+
 def eigs(m, H, content, device, k):
     # GPU cells solve every block (prune=False), so the device path is what they measure.
     with _device_engaged(device):
         r = _eigs(H, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
-    if device == "gpu" and r.device_blocks == 0 and content != "su2":
-        raise Missing("no block ran on the device")
+    _on_device(device, r)
     return np.sort(r.energies)
 
 
 def vectors(m, H, content, device, k):
     with _device_engaged(device):
         r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=False)
-    if device == "gpu" and r.device_blocks == 0 and content != "su2":
-        raise Missing("no block ran on the device")
+    _on_device(device, r)
     return r.energies, r.vectors(basis="full")
 
 
 def spectrum(m, H, content, device):
     r = _spectrum(H, sym=_sym(m, content), device=device)
-    if device == "gpu" and r.device_blocks == 0:
-        raise Missing("no block ran on the device")
+    _on_device(device, r)
     return r.energies
 
 
@@ -99,16 +107,14 @@ def thermal(m, H, content, device, method, T, samples, krylov, seed, observables
     r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
                  krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device,
                  observables=observables)
-    if device == "gpu" and r.device_blocks == 0:
-        raise Missing("no block ran on the device")
+    _on_device(device, r)
     return {"T": r.T, "E": r.E, "C": r.C, "O": r.O}
 
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
     r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
                   krylov=krylov, samples=samples, seed=7, device=device)
-    if device == "gpu" and r.device_blocks == 0:
-        raise Missing("no dynamics kernel ran on the device")
+    _on_device(device, r)
     return r.S[0]
 
 
@@ -116,8 +122,7 @@ def expect(m, H, content, device, ops, k):
     """[(energy, multiplicity, values per op)] for the levels of the lowest-k window."""
     with _device_engaged(device):
         r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
-    if device == "gpu" and r.eigs.device_blocks == 0 and content != "su2":
-        raise Missing("no block ran on the device")
+    _on_device(device, r.eigs)
     return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
 
 

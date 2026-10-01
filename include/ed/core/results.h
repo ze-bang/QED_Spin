@@ -28,8 +28,10 @@ using Complex = std::complex<double>;
 // ---------------------------------------------------------------------------
 struct BackendMetadata {
     /// One of: "cpu", "gpu". Set by the orchestrator
-    /// when constructing the result.
+    /// when constructing the result: where the kernel actually ran.
     std::string  lane         = "cpu";
+    /// The result came from a dense diagonalisation, not a Krylov run.
+    bool         dense        = false;
     std::size_t  cuda_devices = 0;
     double       wall_seconds = 0.0;
     /// Free-form key=value diagnostics (e.g. memory hwm, reorth count).

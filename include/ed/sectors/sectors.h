@@ -115,6 +115,21 @@ struct EigsOptions {
     double window       = 0.0;
 };
 
+/// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host. Under
+/// Device::Gpu no Krylov solve runs on the host (a block that cannot run on the device raises);
+/// small blocks may still be solved densely there.
+struct Placement {
+    std::size_t device_krylov = 0, device_dense = 0, host_krylov = 0, host_dense = 0;
+    void add(bool device, bool dense) {
+        ++(device ? (dense ? device_dense : device_krylov) : (dense ? host_dense : host_krylov));
+    }
+    Placement& operator+=(const Placement& o) {
+        device_krylov += o.device_krylov; device_dense += o.device_dense;
+        host_krylov += o.host_krylov; host_dense += o.host_dense;
+        return *this;
+    }
+};
+
 /// One eigenvalue of one block. The level occurs `multiplicity` times in the spectrum.
 struct Level {
     double        energy       = 0.0;
@@ -168,6 +183,7 @@ struct EigsResult {
     bool                     tr_engaged   = false;
     std::size_t              device_blocks = 0;   ///< blocks solved on a GPU
     std::size_t              pruned_blocks = 0;   ///< blocks skipped by the estimate test
+    Placement                placement;
     Diagnostics              diagnostics;
     std::vector<BlockStats>  block_stats;   ///< one per solved block, in solve order
 
@@ -185,6 +201,7 @@ struct SpectrumResult {
     bool               flip_engaged = false;
     bool               tr_engaged   = false;
     std::size_t        device_blocks = 0;   ///< blocks diagonalised on a GPU
+    Placement          placement;
     Diagnostics        diagnostics;
 
     /// Every eigenvalue, multiplicities expanded, ascending.

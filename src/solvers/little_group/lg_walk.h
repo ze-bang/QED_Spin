@@ -156,6 +156,7 @@ public:
 
     [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
     [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
+    [[nodiscard]] bool on_device() const noexcept { return gpu_; }
 
 private:
     bool gpu_;
@@ -352,6 +353,24 @@ inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* 
     if (selects && n_blocks == 0)
         throw ed::EmptySelection(std::string(verb) + ": the selection matches no block: no star of the "
                                  "requested Sz sectors has that momentum, star index or little-group irrep");
+}
+
+/// device='gpu' needs a usable device before anything runs.
+inline void require_device(Device d, const char* verb) {
+    if (d == Device::Gpu && !ed::have_cuda())
+        throw ed::DeviceUnavailable(std::string(verb) + ": device='gpu', but no usable CUDA device is visible");
+}
+
+/// device='gpu' runs every Krylov solve on the device, so a block without a device kernel (an
+/// isotypic block of a multi-dimensional irrep) is refused before it is solved.
+inline void require_device_kernel(Device d, const BlockOp& bop, const ed::solvers::LittleGroupBlockTag& tag,
+                                  const char* verb) {
+    if (d == Device::Gpu && !bop.on_device)
+        throw ed::DeviceUnsupported(
+            std::string(verb) + ": device='gpu', but the block of star " + std::to_string(tag.k0) + ", irrep "
+            + std::to_string(tag.irrep) + ", n_up " + std::to_string(tag.n_up) + " (dim "
+            + std::to_string(tag.dim) + ") is an isotypic block of a multi-dimensional irrep, which has no "
+            "device kernel; use device='auto' or 'cpu'");
 }
 
 /// A thermal average under a spec that restricts the sectors (a total spin, one Sz sector or

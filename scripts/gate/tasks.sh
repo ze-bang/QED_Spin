@@ -14,6 +14,7 @@ CPU_TASKS=(
 )
 GPU_TASKS=(
   "ctest|ctest --test-dir build/cuda-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}"
+  "pytest_gpu|python -u -m pytest python/tests/test_device.py -q -rf -p no:cacheprovider"
   "golden_gpu|ED_SYM_LG_GPU=1 python -u tests/golden/golden.py compare --device gpu --ref ${REF}/gpu.json.gz"
   "grid_gpu_levels|${GRID} -k 'gpu and (eigs or vectors or expect or spectrum)'"
   "grid_gpu_exact_ftlm|${GRID} -k 'gpu and (th_exact or th_ftlm)'"

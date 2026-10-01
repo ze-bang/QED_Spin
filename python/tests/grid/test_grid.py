@@ -264,7 +264,7 @@ def test_cell(task, content, mname, backend, monkeypatch):
         status = "pass" if ok else "wrong"
     except api.Missing as e:
         status, note = "missing", str(e)
-    except (NotImplementedError, ValueError, TypeError) as e:
+    except (NotImplementedError, ValueError, TypeError, qed.errors.DeviceUnsupported) as e:
         status, note = "refused", f"{type(e).__name__}: {e}"
     except RuntimeError as e:  # the verbs raise RuntimeError for some deliberate refusals
         deliberate = any(w in str(e) for w in ("cannot", "not supported", "requires", "refus"))

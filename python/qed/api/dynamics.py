@@ -26,6 +26,7 @@ class DynamicsResult:
     device_blocks: int
     symmetry: Symmetry = field(repr=False)
     diagnostics: list = field(default_factory=list)
+    placement: dict = field(default_factory=dict)
 
 
 @_log.replays
@@ -67,4 +68,5 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     return DynamicsResult(omega=np.asarray(r.omega), T=temps, S=S,
                           e0=float(r.e0), ground_manifold=int(r.ground_manifold),
                           device_blocks=int(r.device_blocks), symmetry=sym,
-                          diagnostics=diagnostics + [tuple(x) for x in r.diagnostics])
+                          diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+                          placement=dict(r.placement))

@@ -36,6 +36,7 @@ class ThermalResult:
     device_blocks: int
     symmetry: Symmetry = field(repr=False)
     diagnostics: list = field(default_factory=list)
+    placement: dict = field(default_factory=dict)
 
 
 @_log.replays
@@ -78,4 +79,5 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
                          O=np.asarray(r.O, complex) if ops else None,
                          method=key, e0=float(r.e0), blocks=int(r.blocks),
                          device_blocks=int(r.device_blocks), symmetry=sym,
-                         diagnostics=diagnostics + [tuple(x) for x in r.diagnostics])
+                         diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+                         placement=dict(r.placement))

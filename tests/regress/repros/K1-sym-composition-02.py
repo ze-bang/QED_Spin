@@ -90,14 +90,18 @@ if ndev > 0:
     T = [(i + 1) % N for i in range(N)]
     R = [(-i) % N for i in range(N)]
     sym = qed.Symmetry(spatial=types.SimpleNamespace(generators=[T], star_perms=[R]))
-    rg = qed.eigs(H, 2, sym=sym, device="gpu", prune=False)
-    rc = qed.eigs(H, 2, sym=sym, device="cpu", prune=False)
-    sp = qed.spectrum(H, sym=sym)
-    blocks = {(L.sz_parity, L.k0, L.irrep, L.flip_parity) for L in sp.levels}
-    nW = sum(1 for b in blocks if b[2] >= 0)
-    gpu_note = (f"gpu: device_blocks={rg.device_blocks} of >= {len(blocks)} solved blocks ({nW} projected W blocks); "
-                f"E0 gpu {rg.energies[0]:.10f} cpu {rc.energies[0]:.10f}")
-    gpu_hit = rg.device_blocks < len(blocks)
+    try:
+        rg = qed.eigs(H, 2, sym=sym, device="gpu", prune=False)
+    except qed.errors.DeviceUnsupported as ex:     # strict device='gpu' refuses the W blocks
+        rg, gpu_note, gpu_hit = None, f"gpu: refused ({str(ex)[:120]})", False
+    if rg is not None:
+        rc = qed.eigs(H, 2, sym=sym, device="cpu", prune=False)
+        sp = qed.spectrum(H, sym=sym)
+        blocks = {(L.sz_parity, L.k0, L.irrep, L.flip_parity) for L in sp.levels}
+        nW = sum(1 for b in blocks if b[2] >= 0)
+        gpu_note = (f"gpu: device_blocks={rg.device_blocks} of >= {len(blocks)} solved blocks ({nW} projected W "
+                    f"blocks); E0 gpu {rg.energies[0]:.10f} cpu {rc.energies[0]:.10f}")
+        gpu_hit = rg.device_blocks < len(blocks)
 else:
     gpu_hit = None
 print(gpu_note)

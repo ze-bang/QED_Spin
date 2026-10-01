@@ -15,7 +15,8 @@ from .symmetry import Labelled, Symmetry
 class SpectrumResult(Labelled):
     """``energies``: every eigenvalue with its multiplicity, ascending. ``levels``: one
     entry per block eigenvalue with the block's quantum numbers and multiplicity.
-    ``device_blocks``: blocks diagonalised on a GPU. ``diagnostics``: (code, message) pairs
+    ``device_blocks``: blocks diagonalised on a GPU; ``placement``: the dense solves on the
+    device and on the host (see :class:`EigResult`). ``diagnostics``: (code, message) pairs
     for fallbacks the run took."""
 
     energies: np.ndarray
@@ -25,6 +26,7 @@ class SpectrumResult(Labelled):
     _spec: object = None
     _n_sites: int = 0
     diagnostics: list = field(default_factory=list)
+    placement: dict = field(default_factory=dict)
 
 
 @_log.replays
@@ -39,4 +41,5 @@ def spectrum(H, *, sym: Optional[Symmetry] = None, device: str = "cpu") -> Spect
     return SpectrumResult(energies=np.asarray(raw.expanded()), levels=list(raw.levels),
                           device_blocks=int(raw.device_blocks), symmetry=sym,
                           _spec=spec, _n_sites=int(H.num_sites),
-                          diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics])
+                          diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
+                          placement=dict(raw.placement))

@@ -47,6 +47,7 @@ struct ThermalCurves {
     std::uint64_t total_dim = 0;
     std::size_t   blocks    = 0;
     std::size_t   device_blocks = 0;   ///< blocks sampled on a GPU
+    Placement     placement;
     Diagnostics   diagnostics;
 };
 

@@ -141,6 +141,7 @@ GroundStateResult solve_on(Backend& be,
     auto seed_backend = be.make_zero_vector(geom.local_dim);
     be.copy_from_host(seed_host.data(), seed_backend.get(), geom.local_dim);
     const Complex* seed = seed_backend.get();
+    bool host_dense = false;   // the FullDiag lane runs on the host whatever the backend
 
     if (method == SolveMethod::Lanczos) {
         // -------------------------------------------------------------
@@ -545,14 +546,16 @@ GroundStateResult solve_on(Backend& be,
         R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
         R.krylov.iters_done = 0;
         R.krylov.converged  = true;
+        host_dense = true;
     }
 
     // The lane label comes from the Backend template parameter, not the
     // operator's memory_space: a host-resident operator that advertises
     // ``supports_device_matvec=true`` runs on ``CudaBackend``, so only
     // ``ed::lane_label_for<Backend>()`` always matches the lane
-    // ``std::visit`` dispatched to.
-    R.backend.lane = ed::lane_label_for<Backend>();
+    // ``std::visit`` dispatched to -- except FullDiag, which ran on the host.
+    R.backend.lane  = host_dense ? "cpu" : ed::lane_label_for<Backend>();
+    R.backend.dense = host_dense;
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();

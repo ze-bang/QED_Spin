@@ -58,7 +58,6 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
 
     if (!opts.observables.empty() && opts.method != ThermalOptions::Method::FTLM)
         throw std::invalid_argument("ed::thermal: observables need Method::FTLM");
-    BackendVariant variant = select_backend(H.geometry(), opts.backend);
 
     // Memory guard (thermal lane). The operator's basis is already built, so
     // the binding constraint is the kernel WORKING SET: FTLM keeps a
@@ -146,7 +145,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // exactly as it does for a sampled one. So: fill R.thermo, then flag the
     // dispatch chain to stand down.
     bool exact_thermo_done = false;
-    if (is_sampling_thermo_method &&
+    bool host_only = false;   // the exact fallback and OFTLM run on the host whatever the backend
+    const bool exact_small =
+        is_sampling_thermo_method &&
         exact_small_thermal_enabled() &&
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
@@ -157,7 +158,13 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         // stand down and let the sampling kernel honour the projection.
         // (Exact per-tower thermo needs the tower projection applied before
         // diagonalising, which this fallback does not do.)
-        !opts.seed_transform && opts.observables.empty()) {
+        !opts.seed_transform && opts.observables.empty();
+    // The exact fallback is a dense solve on the host by design; a device
+    // requirement applies to the sampling kernels only.
+    BackendConstraints constraints = opts.backend;
+    if (exact_small) constraints.require_gpu = false;
+    BackendVariant variant = select_backend(H.geometry(), constraints);
+    if (exact_small) {
         const std::uint64_t D = H.geometry().global_dim;
         std::vector<double> eigs;
         full_diagonalization(H, D, D, eigs, /*compute_eigenvectors=*/false);
@@ -165,9 +172,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             R.thermo = compute_canonical_thermo_from_eigs(
                 eigs, R.thermo.temperatures);
             R.ground_state_energy = eigs.front();
-            // The exact fallback ran on the selected backend lane; label it like
-            // the normal return path.
-            R.backend.lane = ed::lane_label_from_variant(variant);
+            R.backend.dense = true;
+            host_only = true;
             exact_thermo_done = true;
         }
     }
@@ -389,6 +395,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         kopts.random_seed = opts.random_seed;
         auto kres = ed::thermal::oftlm_cpu(
             apply_H, H.geometry().global_dim, kopts);
+        host_only = true;
         R.thermo.energy        = std::move(kres.energy);
         R.thermo.specific_heat = std::move(kres.heat_capacity);
         R.thermo.entropy       = std::move(kres.entropy);
@@ -421,8 +428,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // a host-resident operator that wires a GPU matvec through
     // ``bind_cuda()`` reports ``Host`` memory_space, but
     // ``select_backend`` picks ``CudaBackend`` when ``allow_gpu=true``
-    // and ``supports_device_matvec=true``.
-    R.backend.lane = ed::lane_label_from_variant(variant);
+    // and ``supports_device_matvec=true`` -- except where the work ran on the
+    // host anyway (the exact fallback, OFTLM).
+    R.backend.lane = host_only ? "cpu" : ed::lane_label_from_variant(variant);
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =
         std::chrono::duration<double>(t1 - t0).count();

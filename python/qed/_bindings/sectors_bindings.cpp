@@ -212,6 +212,14 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     return py::make_tuple(std::move(r), std::move(s), n);
 }
 
+// Where a verb's solves ran (sec::Placement), as a dict.
+py::dict placement_to_py(const sec::Placement& p) {
+    py::dict d;
+    d["device_krylov"] = p.device_krylov; d["device_dense"] = p.device_dense;
+    d["host_krylov"] = p.host_krylov; d["host_dense"] = p.host_dense;
+    return d;
+}
+
 // One dict per solved block (EigsResult::block_stats).
 py::list block_stats_to_py(const std::vector<sec::BlockStats>& v) {
     py::list out;
@@ -295,6 +303,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("flip_engaged", &sec::EigsResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
+        .def_property_readonly("placement", [](const sec::EigsResult& r) { return placement_to_py(r.placement); })
         .def_readonly("pruned_blocks", &sec::EigsResult::pruned_blocks)
         .def_readonly("diagnostics", &sec::EigsResult::diagnostics)
         .def_property_readonly("block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
@@ -339,6 +348,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("flip_engaged", &sec::SpectrumResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::SpectrumResult::tr_engaged)
         .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
+        .def_property_readonly("placement", [](const sec::SpectrumResult& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::SpectrumResult::diagnostics)
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });
 
@@ -380,6 +390,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
         .def_readonly("blocks", &sec::ThermalCurves::blocks)
         .def_readonly("device_blocks", &sec::ThermalCurves::device_blocks)
+        .def_property_readonly("placement", [](const sec::ThermalCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::ThermalCurves::diagnostics);
 
     s.def("thermal",
@@ -409,6 +420,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
         .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors)
         .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks)
+        .def_property_readonly("placement", [](const sec::DynamicsCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
 
     s.def("dynamics",

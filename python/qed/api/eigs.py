@@ -24,6 +24,10 @@ class EigResult(Labelled):
     ``block_stats``: one dict per solved block -- dimension, the lane that applied H
     (dense, csr, walk, gpu-gather, device), phase seconds (orbit tables, star build, CSR
     build, applies, the rest of the solve), nnz and the number of applies.
+    ``placement``: how many solves ran as a Krylov or a dense solve on the device or the host
+    (``device_krylov``, ``device_dense``, ``host_krylov``, ``host_dense``). Under
+    ``device="gpu"`` no Krylov solve runs on the host: a block that cannot run on the device
+    raises :class:`qed.errors.DeviceUnsupported`; small blocks may be solved densely there.
     """
 
     energies: np.ndarray
@@ -38,6 +42,7 @@ class EigResult(Labelled):
     _n_sites: int
     diagnostics: list = field(default_factory=list)
     block_stats: list = field(default_factory=list)
+    placement: dict = field(default_factory=dict)
 
     @_log.replays
     def vectors(self, basis: str = "full", n_up: Optional[int] = None) -> list:
@@ -118,7 +123,8 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
                      device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
                      _raw=raw, _spec=spec, _n_sites=n,
                      diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
-                     block_stats=list(raw.block_stats))
+                     block_stats=list(raw.block_stats),
+                     placement=dict(raw.placement))
 
 
 def load_eigs(path) -> "EigResult":

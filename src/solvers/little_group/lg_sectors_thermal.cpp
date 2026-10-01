@@ -28,6 +28,7 @@ struct BlockThermo {
     double sz2 = 0.0;          // <Sz^2> of the block's states
     bool   mirrored = false;   // holds +sz and -sz in equal parts
     std::vector<std::vector<Complex>> O;   // <O>_b per observable and temperature
+    bool   device = false, dense = false;  // where its solve ran: the device, a dense solve
 };
 
 // `q[o][n]`: <n|O_o|n> for each kept eigenvalue n, when observables are asked for.
@@ -74,7 +75,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     o.betas         = beta;
     o.random_seed   = seed;
     o.backend.allow_gpu = t.device != Device::Cpu;
-    if (t.device == Device::Gpu) o.backend.gpu_dim_floor = 0;
+    o.backend.require_gpu = t.device == Device::Gpu;
     if (tower) {
         auto p = tower->projector;
         o.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
@@ -82,6 +83,9 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     o.observables = obs;
     const auto r = ed::workflows::thermal(op, o);
     *on_gpu = r.backend.lane == "gpu";
+    if (t.device == Device::Gpu && !*on_gpu && !r.backend.dense)
+        throw ed::DeviceUnsupported("thermal: device='gpu', but a block of dim " + std::to_string(op.dim())
+                                    + " ran on the host");
     const auto& d = r.thermo;
     if (d.energy.size() != beta.size())
         throw std::runtime_error("thermal: a block returned " + std::to_string(d.energy.size())
@@ -90,6 +94,8 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     // runs over the tower.
     const double ln_ratio = tower ? std::log(static_cast<double>(tower_dim) / static_cast<double>(op.dim())) : 0.0;
     BlockThermo b;
+    b.device = *on_gpu;
+    b.dense  = r.backend.dense;
     for (std::size_t i = 0; i < beta.size(); ++i) {
         b.lnZ.push_back(-beta[i] * d.free_energy[i] + ln_ratio);
         b.E.push_back(d.energy[i]);
@@ -126,6 +132,10 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         if (!(T > 0.0)) throw std::invalid_argument("thermal: temperatures must be positive");
         beta.push_back(1.0 / T);
     }
+    detail::require_device(t.device, "thermal");
+    if (t.device == Device::Gpu && t.method != ThermalSpec::Method::Exact && t.exact_states > 0)
+        throw ed::DeviceUnsupported("thermal: OFTLM (exact_states > 0) runs on the host only; with device='gpu' "
+                                    "use FTLM without exact_states, or device='auto' or 'cpu'");
     std::uint64_t seed = t.seed ? t.seed : std::random_device{}();
     const bool u1 = sz_content(H) == SzContent::U1 && s.use_sz;
 
@@ -229,6 +239,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     if (ev.empty()) continue;
                     out.e0 = std::min(out.e0, ev.front());
                     b = exact_block(ev, beta, &q);
+                    b.dense = true;
                 } else if (t.method == ThermalSpec::Method::Exact) {
                     detail::BlockOp filter = bop;
                     filter.op.reset();
@@ -241,8 +252,18 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                         deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, folded});
                     } else {
                         bool on_gpu = false;
-                        b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu,
-                                          tower_sampling ? &bop : nullptr, tower_dim, obs, folded);
+                        try {
+                            b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu,
+                                              tower_sampling ? &bop : nullptr, tower_dim, obs, folded);
+                        } catch (const ed::DeviceUnsupported& e) {
+                            // Name the block: a small one takes the exact fallback on the host,
+                            // a sampled one without a device kernel (an isotypic block) is refused.
+                            throw ed::DeviceUnsupported(
+                                "thermal: block of star " + std::to_string(bi->tag.k0) + ", irrep "
+                                + std::to_string(bi->tag.irrep) + ", n_up " + std::to_string(bi->tag.n_up)
+                                + (bi->W ? " (an isotypic block of a multi-dimensional irrep)" : "") + ": "
+                                + e.what());
+                        }
                         if (on_gpu) ++out.device_blocks;
                     }
                 }
@@ -287,6 +308,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                                                   d.folded);
                     BlockThermo& b = blocks[d.block];
                     b.lnZ = std::move(r.lnZ); b.E = std::move(r.E); b.V = std::move(r.V); b.O = std::move(r.O);
+                    b.device = r.device; b.dense = r.dense;
                 } catch (...) {
 #pragma omp critical(thermal_failure)
                     if (!failure) failure = std::current_exception();
@@ -318,6 +340,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             BlockThermo b = exact_block(ev, beta);
             b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.sz2 = blocks[p.block].sz2;
             b.mirrored = blocks[p.block].mirrored;
+            b.device = batch.on_device(); b.dense = true;
             blocks[p.block] = std::move(b);
         }
         std::vector<BlockThermo> kept;
@@ -327,6 +350,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     }
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
     out.blocks = blocks.size();
+    for (const auto& b : blocks) out.placement.add(b.device, b.dense);
 
     const std::size_t nT = beta.size();
     out.lnZ.resize(nT); out.E.resize(nT); out.C.resize(nT); out.S.resize(nT); out.F.resize(nT);

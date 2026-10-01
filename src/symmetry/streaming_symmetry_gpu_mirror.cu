@@ -215,7 +215,7 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
 {
     if (!data.usable()) {
         throw std::runtime_error(
-            "build_rep_mirror: RepSectorData is not usable (need n_up >= 0, "
+            "build_rep_mirror: RepSectorData is not usable (need n_up >= -1, "
             "non-empty reps, and matching characters / perms sizes)");
     }
     const int n_sites = data.n_sites;
@@ -223,13 +223,8 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     if (n_sites <= 0 || n_sites > 64 || n_up < -1 || n_up > n_sites) {
         throw std::runtime_error("build_rep_mirror: invalid n_sites / n_up");
     }
-    if (n_up < 0 && n_sites > 31) {
-        // Full-space sector: the reverse table is indexed by the state
-        // itself (2^N int32 entries). 31 bits caps it at 8 GiB.
-        throw std::runtime_error(
-            "build_rep_mirror: full-space rep mirror needs n_sites <= 31 "
-            "(dense state-indexed reverse table)");
-    }
+    // Sz-parity and full-space sectors (n_up < 0) look states up like every other
+    // sector (below): nothing is indexed by the state itself, so N is not capped.
 
     auto mirror = std::make_shared<GpuRepSectorMirror>();
     mirror->spin_l     = spin_l;
@@ -249,7 +244,7 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
             dv /= static_cast<long double>(i + 1);
         }
     } else {
-        dv = static_cast<long double>(1ULL << n_sites);
+        dv = std::ldexp(1.0L, n_sites);         // 2^N; a shift would overflow at N = 64
     }
     // Ranks are 64-bit (C(36,18) ~ 9.1e9); only per-sector INDEX values
     // must fit int32 (they index the sector basis, capped below).
