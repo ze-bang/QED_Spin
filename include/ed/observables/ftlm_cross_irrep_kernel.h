@@ -91,8 +91,8 @@ struct FtlmCrossIrrepOptions {
     std::size_t krylov_dim       = 200;
     std::size_t num_samples      = 30;
     double      broadening       = 0.05;
-    /// Random-seed offset; each sample uses
-    /// ``random_seed + sample_idx * 12345``.
+    /// Base seed: sample s starts from gaussian_vector(dim_src, sample_engine(random_seed, s))
+    /// (0 draws one).
     std::uint64_t random_seed    = 0;
     /// Applied in place to each (host) random vector before use, e.g. a projection onto one
     /// spin tower; the kernel renormalises the result. The trace then runs over the image of

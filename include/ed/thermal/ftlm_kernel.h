@@ -44,7 +44,6 @@
 #include <ed/matvec/matvec_batcher.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/thread_budget.h>  // auto_threads_for_dim + ThreadBudgetScope
-#include <ed/solvers/lanczos.h>      // generateGaussianRandomVector
 #include <ed/thermal/curves.h>
 #include <ed/thermal/sample_seed.h>
 
@@ -195,7 +194,7 @@ struct SampleMoments {
 ///     the valid samples;
 ///   * sample ``s`` starts from the vector drawn with engine
 ///     ``sample_engine(resolve_base_seed(seed), s)`` and
-///     ``generateGaussianRandomVector`` (dznrm2 normalisation), pinned by
+///     ``gaussian_vector`` (dznrm2 normalisation), pinned by
 ///     tests/unit/test_ftlm_sample_seed.cpp.
 ///
 /// Algorithm per sample:
@@ -245,7 +244,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
     // verbatim, and every sample draws from its own ``sample_engine``.
     const std::uint64_t base_seed = resolve_base_seed(opts.random_seed);
 
-    // generateGaussianRandomVector and the BLAS normalisation take int.
+    // The BLAS normalisation of a transformed seed takes int.
     if (local_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument(
             "ftlm_kernel: local_n exceeds the int range of the host "
@@ -269,7 +268,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
         // stream, same dznrm2 + zscal normalisation), so both lanes start
         // every sample from bit-identical vectors.
         std::mt19937 rng = sample_engine(base_seed, static_cast<std::uint64_t>(s));
-        ComplexVector v0_host = generateGaussianRandomVector(n_int, rng);
+        std::vector<Complex> v0_host = gaussian_vector(local_n, rng);
         // Subspace projection of the stochastic seed (e.g.
         // Lowdin total-spin), then renormalise the same way.
         if (opts.seed_transform) {

@@ -267,8 +267,9 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
     REQUIRE(res.sample_energies[0].size() == 301);
     REQUIRE(res.sample_log_norms[0].size() == 300);
 
-    // The kernel's start vector: seed random_seed + sample index.
-    const auto psi0 = ed::thermal::detail::mtpq_make_seed(dim, 99);
+    // The kernel's start vector: sample 0 of base seed 99.
+    std::mt19937 eng = ed::thermal::sample_engine(99, 0);
+    const auto psi0 = ed::thermal::gaussian_vector(dim, eng);
     Eigen::VectorXcd p(static_cast<Eigen::Index>(dim));
     for (std::size_t i = 0; i < dim; ++i) p(static_cast<Eigen::Index>(i)) = psi0[i];
     const Eigen::VectorXd w = (es.eigenvectors().adjoint() * p).cwiseAbs2();

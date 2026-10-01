@@ -3,7 +3,7 @@
 //
 // The FTLM body (``ed::thermal::ftlm_kernel``)
 // draws sample ``s`` as
-//     generateGaussianRandomVector(N, sample_engine(resolve_base_seed(seed), s))
+//     gaussian_vector(N, sample_engine(resolve_base_seed(seed), s))
 // (the recipe shared with OFTLM through ``sample_seed.h``). Pinned by
 //   * recording every draw through a pass-through ``seed_transform`` and
 //     requiring it to equal the recipe bit for bit;
@@ -22,7 +22,6 @@
 #include <cmath>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/core/linear_operator.h>
-#include <ed/solvers/lanczos.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/sample_seed.h>
 
@@ -94,8 +93,7 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
         for (std::size_t s = 0; s < samples; ++s) {
             INFO("sample " << s);
             std::mt19937 eng = ed::thermal::sample_engine(base, s);
-            const ComplexVector ref =
-                generateGaussianRandomVector(static_cast<int>(dim), eng);
+            const std::vector<Complex> ref = ed::thermal::gaussian_vector(dim, eng);
             REQUIRE(ref.size() == dim);
             REQUIRE(drawn[s].size() == dim);
             // The draw is normalised with dznrm2, a threaded reduction above ~8192 entries,

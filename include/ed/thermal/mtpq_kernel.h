@@ -2,12 +2,11 @@
 // =============================================================================
 // include/ed/thermal/mtpq_kernel.h
 //
-// Microcanonical TPQ facade --- thin wrapper around the unified
-// `ed::thermal::tpq_kernel<Backend>` (see `tpq_kernel.h`). Draws a
-// random seed vector per sample (`tpq_per_sample_seed`, or
-// `random_seed + s` when a seed is given), runs the iteration loop on the
-// supplied Backend, and accumulates the per-iterate energy expectation.
-// The trajectory aggregator lives in `include/ed/thermal/tpq_thermo.h`.
+// Microcanonical TPQ on any Backend. Sample s starts from
+// gaussian_vector(n, sample_engine(base, s)) (sample_seed.h) and iterates
+// psi_{k+1} = (L - H) psi_k / ||(L - H) psi_k||, recording E_k = <psi_k|H|psi_k>
+// and the growth factors; `mtpq` sizes the run (spectral bounds, L, steps) and
+// turns the trajectories into canonical curves (tpq_thermo.h).
 // =============================================================================
 
 #include <cmath>
@@ -27,9 +26,7 @@
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec_batcher.h>
-#include <ed/solvers/lanczos.h>      // estimate_spectral_bounds
-#include <ed/thermal/tpq_seeding.h>
-#include <ed/thermal/tpq_kernel.h>
+#include <ed/thermal/sample_seed.h>
 #include <ed/thermal/tpq_thermo.h>
 
 namespace ed::thermal {
@@ -40,6 +37,7 @@ struct MtpqOptions {
     std::size_t num_samples    = 1;
     std::size_t max_iter       = 1000;
     double      large_value    = 1.0e5;
+    /// Base seed of the sample engines; 0 draws one (resolve_base_seed).
     std::uint64_t random_seed  = 0;
 
     /// Host-side transform applied to every
@@ -66,46 +64,26 @@ struct MtpqResult {
     std::vector<std::vector<double>> sample_log_norms;
 };
 
-namespace detail {
-
-// Generate a length-N random unit vector on host, deterministic in
-// `seed` (Gaussian + L2 normalise).
-inline std::vector<Complex> mtpq_make_seed(std::size_t N, std::uint64_t seed) {
-    std::vector<Complex> v(N);
-    std::mt19937_64 gen(seed);
-    std::normal_distribution<double> nd(0.0, 1.0);
-    double sumsq = 0.0;
-    for (auto& z : v) {
-        const double a = nd(gen), b = nd(gen);
-        z = Complex(a, b);
-        sumsq += a * a + b * b;
-    }
-    const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
-    for (auto& z : v) z *= inv;
-    return v;
-}
-
-}  // namespace detail
-
 template <typename Backend, typename MatvecFn>
 MtpqResult mtpq_kernel(Backend&       backend,
                        MatvecFn&&     apply_H,
                        std::size_t    local_n,
                        const MtpqOptions& opts)
 {
+    if (local_n == 0) throw std::invalid_argument("mtpq_kernel: empty block");
     MtpqResult out;
     out.energies.reserve(opts.num_samples);
     out.sample_energies.reserve(opts.num_samples);
     out.sample_log_norms.reserve(opts.num_samples);
+    const std::uint64_t base_seed = resolve_base_seed(opts.random_seed);
+    const double L = opts.large_value;
 
     // One sample's trajectory; samples are independent and are stored in sample order, however
     // they were run.
-    struct Sample { double final_E = 0.0; std::vector<double> Es, log_norms; };
-    auto sample = [&](auto& backend, auto&& apply_H, std::size_t s) {
-        const std::uint64_t seed = opts.random_seed
-                                    ? (opts.random_seed + s)
-                                    : ed::tpq_per_sample_seed(s);
-        auto host_seed = detail::mtpq_make_seed(local_n, seed);
+    struct Sample { std::vector<double> Es, log_norms; };
+    auto sample = [&](auto& be, auto&& apply_H, std::size_t s) {
+        std::mt19937 gen = sample_engine(base_seed, s);
+        std::vector<Complex> host_seed = gaussian_vector(local_n, gen);
         // Subspace projection of the TPQ seed (e.g. Lowdin total-spin), renormalised: the
         // moments are those of a unit start vector.
         if (opts.seed_transform) {
@@ -121,39 +99,39 @@ MtpqResult mtpq_kernel(Backend&       backend,
             const double inv = 1.0 / std::sqrt(sumsq);
             for (auto& z : host_seed) z *= inv;
         }
-
-        auto seed_dev = backend.make_zero_vector(local_n);
-        backend.copy_from_host(host_seed.data(), seed_dev.get(), local_n);
-
-        TpqKernelOptions kopts;
-        kopts.max_iter    = opts.max_iter;
-        kopts.large_value = opts.large_value;
-
-        // E_k comes from the step's own H apply; the norm of (L - H) psi_{k-1} before
-        // normalisation is the step's growth factor.
+        auto psi  = be.make_zero_vector(local_n);
+        auto hpsi = be.make_zero_vector(local_n);
+        be.copy_from_host(host_seed.data(), psi.get(), local_n);
+        {
+            const double n0 = be.nrm2(psi.get(), local_n);
+            if (n0 > 0.0) be.scale(Complex(1.0 / n0, 0.0), psi.get(), local_n);
+        }
         Sample out_s;
         out_s.Es.reserve(opts.max_iter + 1);
         out_s.log_norms.reserve(opts.max_iter);
-        auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
-            const double E_k = info.energy;
+        // One H apply per step: hpsi = H psi_k gives E_k and, below, psi_{k+1} = (L - H) psi_k
+        // (one axpby and a pointer swap).
+        auto energy = [&](std::size_t k) {
+            apply_H(psi.get(), hpsi.get(), local_n);
+            const double E = std::real(be.dot(psi.get(), hpsi.get(), local_n));
             // L must lie above the spectrum: (L - H) is then positive and every moment is too.
-            if (!(E_k < opts.large_value))
-                throw std::runtime_error("mtpq_kernel: the iterate's energy " + std::to_string(E_k)
-                                         + " is not below the shift L = " + std::to_string(opts.large_value)
-                                         + " (L must exceed the largest eigenvalue)");
-            if (info.step >= 1) {
-                if (!(info.norm_before_normalize > 0.0))
-                    throw std::runtime_error("mtpq_kernel: (L - H) psi vanished at step "
-                                             + std::to_string(info.step));
-                out_s.log_norms.push_back(std::log(info.norm_before_normalize));
-            }
-            out_s.Es.push_back(E_k);
-            out_s.final_E = E_k;
-            return true;
+            if (!(E < L))
+                throw ed::ConvergenceError("mtpq_kernel: the energy " + std::to_string(E) + " of step "
+                                           + std::to_string(k) + " is not below the shift L = "
+                                           + std::to_string(L) + " (L must exceed the largest eigenvalue)");
+            out_s.Es.push_back(E);
         };
-        auto kres = tpq_kernel<std::decay_t<decltype(backend)>>(backend, apply_H, local_n, seed_dev.get(),
-                                                                kopts, on_step);
-        (void)kres;
+        energy(0);
+        for (std::size_t k = 1; k <= opts.max_iter; ++k) {
+            be.axpby(Complex(L, 0.0), psi.get(), Complex(-1.0, 0.0), hpsi.get(), local_n);
+            std::swap(psi, hpsi);
+            const double nrm = be.nrm2(psi.get(), local_n);
+            if (!(nrm > 0.0))
+                throw ed::ConvergenceError("mtpq_kernel: (L - H) psi vanished at step " + std::to_string(k));
+            be.scale(Complex(1.0 / nrm, 0.0), psi.get(), local_n);
+            out_s.log_norms.push_back(std::log(nrm));
+            energy(k);
+        }
         return out_s;
     };
 
@@ -179,7 +157,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
     if (!batched)
         for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(backend, apply_H, s);
     for (auto& smp : samples) {
-        out.energies.push_back(smp.final_E);
+        out.energies.push_back(smp.Es.back());
         out.sample_energies.push_back(std::move(smp.Es));
         out.sample_log_norms.push_back(std::move(smp.log_norms));
     }
@@ -192,13 +170,15 @@ struct MtpqRun {
     /// Steps per sample; 0 sizes them for the coldest beta (mtpq_steps_for), with one retry at
     /// twice the count when the trajectory falls short.
     std::size_t   steps   = 0;
+    /// Base seed of the run (0 draws one): the bound estimate and every sample derive from it.
     std::uint64_t seed    = 0;
     std::function<void(Complex*, std::size_t)> seed_transform;
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
 };
 
 /// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
-///   1. spectral bounds (E_min, E_max) from a short Lanczos on this backend;
+///   1. spectral bounds (E_min, E_max): the extreme Ritz values of a 60-step Lanczos (no
+///      reorthogonalisation) on this backend, from the run's auxiliary Gaussian start;
 ///   2. L just above E_max (the series' terms peak near j* = beta (L - E_min), so L - E_max is
 ///      pure cost);
 ///   3. steps so the series converges at the coldest beta: j* + 8 sqrt(j*) terms; a target the
@@ -206,6 +186,7 @@ struct MtpqRun {
 template <typename Backend, typename MatvecFn>
 Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas,
                 const MtpqRun& run) {
+    if (n == 0) throw std::invalid_argument("mtpq: empty block");
     std::vector<double> temperatures;
     temperatures.reserve(betas.size());
     for (double b : betas) temperatures.push_back(b > 0.0 ? 1.0 / b : 0.0);
@@ -213,57 +194,30 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     for (double b : betas) beta_max = std::max(beta_max, b);
     if (!(beta_max > 0.0)) beta_max = 100.0;
 
+    const std::uint64_t base_seed = resolve_base_seed(run.seed);
     MtpqOptions kopts;
     kopts.num_samples    = run.samples;
-    kopts.random_seed    = run.seed;
+    kopts.random_seed    = base_seed;
     kopts.seed_transform = run.seed_transform;
     kopts.batch_matvec   = run.batch_matvec;
 
     double e_min_est = 0.0, e_max_est = 0.0;
-    bool have_bounds = false;
-    if constexpr (std::is_same_v<std::decay_t<Backend>, ed::matvec::CpuBackend>) {
-        // The shared Lanczos spectral-bound estimator on a host-pointer wrapper of the matvec.
-        std::function<void(const Complex*, Complex*, int)> legacy_H =
-            [&H](const std::complex<double>* in, std::complex<double>* out, int m) {
-                H(in, out, static_cast<std::size_t>(m));
-            };
-        const std::uint64_t bdim = n;
-        std::mt19937 gen(run.seed ? static_cast<unsigned>(run.seed) : 0x9E3779B9u);
-        try {
-            const int kry = static_cast<int>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
-            ::estimate_spectral_bounds(legacy_H, bdim, kry, /*tol=*/1e-10, gen, e_min_est, e_max_est);
-            have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est) && e_max_est >= e_min_est;
-        } catch (...) {
-            have_bounds = false;
-        }
-    } else {
-        // Device lanes: the same estimate from a short Lanczos run on this backend (vectors stay
-        // device-resident); the extreme Ritz values of 60 steps.
-        const std::uint64_t bdim = n;
-        std::vector<Complex> seed_host(bdim);
-        std::mt19937_64 gen(run.seed ? run.seed : 0x9E3779B97F4A7C15ULL);
-        std::normal_distribution<double> nd(0.0, 1.0);
-        for (auto& z : seed_host) z = Complex(nd(gen), nd(gen));
-        auto seed = be.make_zero_vector(bdim);
-        be.copy_from_host(seed_host.data(), seed.get(), bdim);
+    {
+        std::mt19937 gen = sample_engine(base_seed, kAuxStream);
+        const std::vector<Complex> start = gaussian_vector(n, gen);
+        auto v0 = be.make_zero_vector(n);
+        be.copy_from_host(start.data(), v0.get(), n);
         ed::krylov::LanczosKernelOptions bo;
-        bo.max_iter   = static_cast<std::size_t>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
+        bo.max_iter   = std::min<std::size_t>(60, n);
         bo.reorth     = ed::krylov::ReorthPolicy::None;
         bo.keep_basis = false;
-        try {
-            const auto lk = ed::krylov::lanczos_kernel(be, H, bdim, seed.get(), bo);
-            if (!lk.alpha.empty()) {
-                const auto t = ed::krylov::tridiag_eig(lk.alpha, lk.beta, lk.alpha.size(), /*vectors=*/false);
-                e_min_est = t.values.front();
-                e_max_est = t.values.back();
-                have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est) && e_max_est >= e_min_est;
-            }
-        } catch (...) {
-            have_bounds = false;
-        }
+        const auto lk = ed::krylov::lanczos_kernel(be, H, n, v0.get(), bo);
+        const auto t  = ed::krylov::tridiag_eig(lk.alpha, lk.beta, lk.alpha.size(), /*vectors=*/false);
+        if (t.values.empty())
+            throw ed::ConvergenceError("mTPQ: the spectral bounds of the block could not be estimated");
+        e_min_est = t.values.front();
+        e_max_est = t.values.back();
     }
-    if (!have_bounds)
-        throw ed::ConvergenceError("mTPQ: the spectral bounds of the block could not be estimated");
     // L just above the spectrum. The margin covers the Lanczos estimate of E_max, a lower bound on it.
     const double W = e_max_est - e_min_est;
     const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(1.0, std::abs(e_max_est)), 1e-9});

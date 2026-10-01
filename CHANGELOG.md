@@ -71,6 +71,11 @@ Breaking changes so far:
   -5.31939 against -5.31922). On a small block with degenerate levels, it could refuse a
   converged level. It now reorthogonalises fully on such blocks and stops at an exhausted
   Krylov space. Results at the default crossover are unchanged.
+- **One random stream for every sampled method.** mTPQ samples and the finite-temperature
+  `dynamics` samples now start from the same per-sample Gaussian draw as FTLM and OFTLM
+  (`sample_engine(seed, s)`), and mTPQ estimates its spectral bounds the same way on every
+  device (a 60-step Lanczos; the host used to diagonalise blocks of up to 512 states). At a
+  fixed `seed`, mTPQ and finite-temperature `dynamics` results change at sampling-noise level.
 - **Environment variables read one way.** Every variable goes through the registry's typed
   readers: the switches (`ED_SYM_REDUCED_CSR`, `ED_CSR_FORCE`, `ED_AUTO_THREADS`,
   `ED_ENV_STRICT`) take the registry's words (`0`, `false`, `off`, `no` are off, anything else
@@ -115,6 +120,12 @@ C++ API (installed headers; nothing in Python changes):
   convergence gate included (they used Eigen's dense solver; eigenvalues move at roundoff).
   `diagonalize_tridiagonal_ritz`, `<ed/krylov/tridiag_eigensolver.h>` and
   `<ed/krylov/ritz_convergence.h>` (`make_smallest_ritz_convergence`) are gone.
+- `ed::thermal::gaussian_vector(n, engine)` (`<ed/thermal/sample_seed.h>`) is the one random
+  start vector; `generateGaussianRandomVector`, `estimate_spectral_bounds`,
+  `<ed/thermal/tpq_seeding.h>` (whose unseeded stream was the wall clock) and
+  `<ed/thermal/tpq_kernel.h>` (`tpq_kernel`, `TpqKernelOptions`, `TpqStepInfo`) are gone:
+  `mtpq_kernel` runs the iteration itself. `MtpqOptions::random_seed` and
+  `FtlmCrossIrrepOptions::random_seed` are base seeds as in FTLM (0 draws one).
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

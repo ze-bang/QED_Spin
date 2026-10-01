@@ -36,37 +36,6 @@ using ComplexVector = std::vector<Complex>;
 
 namespace ed { class LinearOperator; }
 
-/**
- * @brief Generate a random complex vector with i.i.d. complex Gaussian components.
- *
- * Each component has independent N(0,1) real and imaginary parts; the result is
- * then L2-normalised. This is the canonical Hutchinson-style trace estimator
- * (Jaklic & Prelovsek, PRB 49, 5065 (1994); Skilling 1989) and is statistically
- * isotropic on the unit sphere, unlike normalised uniform-cube samples.
- *
- * Use this for FTLM / TPQ-style finite-temperature random sampling.
- */
-ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
-
-/**
- * @brief Estimate the extreme eigenvalues [e_min, e_max] of a Hermitian H.
- *
- * Blocks with dim <= 512 are assembled densely and the exact extremes are
- * returned; larger blocks run a Lanczos sweep without reorthogonalization
- * (krylov_dim clamped to dim, stopping when ||w|| < tol) from a Gaussian
- * random start and return the extreme Ritz values. `gen` is in/out: a
- * deterministically seeded `gen` gives a reproducible estimate.
- * Used by the mTPQ auto-tune to place the shift L above the spectrum.
- */
-void estimate_spectral_bounds(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t dim,
-    int krylov_dim,
-    double tol,
-    std::mt19937& gen,
-    double& e_min,
-    double& e_max);
-
 // Dense full diagonalization (LAPACK) of a block inside the dense window
 // (dimension <= 120000); larger blocks throw.
 //

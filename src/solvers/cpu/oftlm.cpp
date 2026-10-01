@@ -11,7 +11,6 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector
 
 #include <algorithm>
 #include <cmath>
@@ -96,7 +95,7 @@ Curves oftlm_cpu(
 
         std::mt19937 gen(static_cast<std::mt19937::result_type>(
             base_seed ^ 0x9E3779B97F4A7C15ULL));
-        ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(N), gen);
+        ComplexVector v0 = gaussian_vector(N, gen);
         const double n0 = std::sqrt(norm2(v0));
         if (n0 > 0.0) for (auto& c : v0) c /= n0;
 
@@ -139,7 +138,7 @@ Curves oftlm_cpu(
     for (std::size_t s = 0; s < R; ++s) {
         std::mt19937 gen = ed::thermal::sample_engine(base_seed, s);
 
-        ComplexVector v = generateGaussianRandomVector(static_cast<int>(N), gen);
+        ComplexVector v = gaussian_vector(N, gen);
         // Gram-Schmidt against the exact eigenvectors: v -= sum_i |i><i|v>.
         for (const auto& ev : exact_vecs) {
             Complex ov(0.0, 0.0);

@@ -17,7 +17,7 @@
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/matvec_batcher.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
-#include <ed/solvers/lanczos.h>   // generateGaussianRandomVector
+#include <ed/thermal/sample_seed.h>
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +48,7 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
     R.dim_dst = dim_dst;
     for (double T : temperatures) { R.S_real[T].assign(nW, 0.0); R.S_imag[T].assign(nW, 0.0); R.Z[T] = 0.0; }
     double E_min = std::numeric_limits<double>::infinity();
+    const std::uint64_t base_seed = ed::thermal::resolve_base_seed(opts.random_seed);
 
     // One sample: the source Ritz data and, when O reaches the target, the per-source-Ritz
     // spectral rows s_i(w). Samples are independent and are combined below in sample order.
@@ -66,8 +67,8 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
             auto mv = [&H](const Complex* in, Complex* o, std::size_t nn) { H(in, o, nn); };
             return ed::krylov::lanczos_kernel(bk, mv, n, v0, lo);
         };
-        std::mt19937 gen(opts.random_seed + s * 12345ULL);
-        ComplexVector r_host = generateGaussianRandomVector(static_cast<int>(dim_src), gen);
+        std::mt19937 gen = ed::thermal::sample_engine(base_seed, s);
+        std::vector<Complex> r_host = ed::thermal::gaussian_vector(dim_src, gen);
         if (opts.seed_transform) {
             opts.seed_transform(r_host.data(), dim_src);
             double n2 = 0.0;

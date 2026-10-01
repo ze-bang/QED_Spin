@@ -1,7 +1,5 @@
 #include <ed/solvers/lanczos.h>
 #include <ed/core/linear_operator.h>
-#include <ed/krylov/lanczos_kernel.h>
-#include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
@@ -11,86 +9,6 @@
 #include <cstdlib>
 #include <limits>
 #include <ed/core/log.h>
-
-ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
-    // i.i.d. standard complex Gaussian: real and imag parts ~ N(0, 1), then
-    // L2-normalise. This produces an isotropic random vector on the complex
-    // unit sphere and is the standard finite-T trace-estimator distribution
-    // (Jaklic-Prelovsek FTLM, Hutchinson, etc.). Variance bounds and isotropy
-    // properties differ from normalised uniform-cube sampling.
-    std::normal_distribution<double> ndist(0.0, 1.0);
-    ComplexVector v(N);
-    for (int i = 0; i < N; i++) {
-        v[i] = Complex(ndist(gen), ndist(gen));
-    }
-    double norm = cblas_dznrm2(N, v.data(), 1);
-    Complex scale_factor = Complex(1.0 / norm, 0.0);
-    cblas_zscal(N, &scale_factor, v.data(), 1);
-    return v;
-}
-
-void estimate_spectral_bounds(
-    std::function<void(const Complex*, Complex*, int)> H,
-    uint64_t dim,
-    int krylov_dim,
-    double tol,
-    std::mt19937& gen,
-    double& e_min,
-    double& e_max)
-{
-    // On small blocks a Lanczos sweep with krylov_dim > dim returns garbage
-    // bounds. Below 512 states assemble the block densely (dim matvecs) and
-    // take the exact extremes; above, clamp the sweep to dim.
-    if (dim <= 512) {
-        const int n = static_cast<int>(dim);
-        std::vector<Complex> dense(static_cast<std::size_t>(n) * n), unit(n), col(n);
-        for (int j = 0; j < n; ++j) {
-            std::fill(unit.begin(), unit.end(), Complex(0.0, 0.0));
-            unit[j] = Complex(1.0, 0.0);
-            H(unit.data(), col.data(), n);
-            for (int i = 0; i < n; ++i) dense[static_cast<std::size_t>(j) * n + i] = col[i];
-        }
-        std::vector<double> w(n);
-        const int info = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'N', 'U', n,
-                                        reinterpret_cast<lapack_complex_double*>(dense.data()),
-                                        n, w.data());
-        if (info == 0) {
-            e_min = w.front();
-            e_max = w.back();
-            return;
-        }
-        // fall through to the Krylov estimate on a LAPACK failure
-    }
-    krylov_dim = static_cast<int>(std::min<uint64_t>(
-        static_cast<uint64_t>(std::max(krylov_dim, 2)), dim));
-
-    ComplexVector v0 = generateGaussianRandomVector(static_cast<int>(dim), gen);
-
-    // Bare three-term recurrence (extreme Ritz values converge first and are
-    // robust without reorthogonalization), stopping when ||w|| < tol.
-    ed::krylov::LanczosKernelOptions opts;
-    opts.max_iter      = static_cast<std::size_t>(krylov_dim);
-    opts.reorth        = ed::krylov::ReorthPolicy::None;
-    opts.keep_basis    = false;
-    opts.breakdown_tol = tol;
-    auto matvec = [&H](const Complex* in, Complex* out, std::size_t n) {
-        H(in, out, static_cast<int>(n));
-    };
-    auto result = ed::krylov::lanczos_kernel(
-        ed::matvec::default_cpu_backend(), matvec,
-        static_cast<std::size_t>(dim), v0.data(), opts);
-    std::vector<double> alpha = std::move(result.alpha);
-    std::vector<double> beta  = std::move(result.beta);
-
-    if (alpha.empty())
-        throw std::runtime_error("estimate_spectral_bounds: Lanczos produced 0 iterations");
-
-    // Values from the vector solve (dstedc), as this estimate has always used.
-    const std::vector<double> ritz =
-        ed::krylov::tridiag_eig(alpha, beta, alpha.size(), /*vectors=*/true).values;
-    e_min = ritz.front();
-    e_max = ritz.back();
-}
 
 // Full diagonalization: dense LAPACK inside the dense window; larger blocks
 // are refused (they belong to the Krylov lanes).

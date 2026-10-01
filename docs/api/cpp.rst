@@ -32,13 +32,14 @@ Krylov kernels
 
 .. doxygenfile:: ed/krylov/lanczos_kernel.h
 .. doxygenfile:: ed/krylov/krylov_schur_kernel.h
+.. doxygenfile:: ed/krylov/tridiag.h
 
 Thermodynamics kernels
 ----------------------
 
 .. doxygenfile:: ed/thermal/ftlm_kernel.h
 .. doxygenfile:: ed/thermal/mtpq_kernel.h
-.. doxygenfile:: ed/thermal/tpq_kernel.h
+.. doxygenfile:: ed/thermal/sample_seed.h
 
 Dynamics kernels
 ----------------
